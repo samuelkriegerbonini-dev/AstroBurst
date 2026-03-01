@@ -1,0 +1,1 @@
+tests/sample-data/*.fits filter=lfs diff=lfs merge=lfs -text

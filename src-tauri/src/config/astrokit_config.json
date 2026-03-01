@@ -1,0 +1,9 @@
+{
+  "astrometry_api_key": "{YourKey}",
+  "astrometry_api_url": "https://nova.astrometry.net",
+  "default_output_dir": null,
+  "plate_solve_timeout_secs": 120,
+  "plate_solve_max_stars": 100,
+  "auto_stretch_target_bg": 0.25,
+  "auto_stretch_shadow_k": -2.8
+}

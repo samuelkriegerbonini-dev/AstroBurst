@@ -1,0 +1,259 @@
+{
+    "asn_type": "image3",
+    "asn_rule": "candidate_Asn_Lv3Image",
+    "version_id": "20251207t212432",
+    "code_version": "1.20.2",
+    "degraded_status": "No known degraded exposures in association.",
+    "program": "02739",
+    "constraints": "DMSAttrConstraint({'name': 'program', 'sources': ['program'], 'value': '2739'})\nDMSAttrConstraint({'name': 'instrument', 'sources': ['instrume'], 'value': 'nircam'})\nDMSAttrConstraint({'name': 'opt_elem', 'sources': ['filter'], 'value': 'f444w'})\nDMSAttrConstraint({'name': 'opt_elem2', 'sources': ['pupil'], 'value': 'clear'})\nDMSAttrConstraint({'name': 'fxd_slit2', 'sources': ['fxd_slit'], 'value': ['s200a1|s200a2']})\nDMSAttrConstraint({'name': 'fxd_slit', 'sources': ['fxd_slit'], 'value': None})\nDMSAttrConstraint({'name': 'subarray', 'sources': ['subarray'], 'value': 'full'})\nDMSAttrConstraint({'name': 'acdirect', 'sources': ['asn_candidate'], 'value': \"\\\\[\\\\('c\\\\d{4}', 'direct_image'\\\\)\\\\]\"})\nSimpleConstraint({'name': 'target', 'value': None})\nDMSAttrConstraint({'name': 'target', 'sources': ['targetid'], 'value': '1'})\nConstraint_Image({'name': 'exp_type', 'sources': ['exp_type'], 'value': 'nrc_image'})\nDMSAttrConstraint({'name': 'wfsvisit', 'sources': ['visitype'], 'value': 'prime_targeted_fixed'})\nDMSAttrConstraint({'name': 'bkgdtarg', 'sources': ['bkgdtarg'], 'value': None})\nConstraint_Obsnum({'name': 'obs_num', 'sources': ['obs_num'], 'value': None})\nConstraint_TargetAcq({'name': 'target_acq', 'value': 'target_acquisition'})\nDMSAttrConstraint({'name': 'acq_obsnum', 'sources': ['obs_num'], 'value': <function AsnMixin_Science.__init__.<locals>.<lambda> at 0x1508aa95ade0>})\nDMSAttrConstraint({'name': 'asn_candidate', 'sources': ['asn_candidate'], 'value': \"\\\\('o001',\\\\ 'observation'\\\\)\"})",
+    "asn_id": "o001",
+    "target": "t001",
+    "asn_pool": "jw02739_20251207t212432_pool.csv",
+    "products": [
+        {
+            "name": "jw02739-o001_t001_nircam_clear-f444w",
+            "members": [
+                {
+                    "expname": "jw02739001001_02105_00001_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00001_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00002_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00002_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00003_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00003_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00004_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00004_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00005_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001001_02105_00005_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00001_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00001_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00002_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00002_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00003_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00003_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00004_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00004_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00005_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001002_02105_00005_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00001_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00001_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00002_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00002_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00003_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00003_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00004_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00004_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00005_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001003_02105_00005_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00001_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00001_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00002_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00002_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00003_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00003_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00004_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00004_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00005_nrcalong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                },
+                {
+                    "expname": "jw02739001004_06101_00005_nrcblong_cal.fits",
+                    "exptype": "science",
+                    "exposerr": "null",
+                    "asn_candidate": "[('o001', 'observation')]"
+                }
+            ]
+        }
+    ]
+}
