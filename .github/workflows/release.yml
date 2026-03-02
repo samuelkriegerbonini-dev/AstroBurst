@@ -8,7 +8,20 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: AstroBurst ${{ github.ref_name }}
+          body: See CHANGELOG for details.
+          draft: true
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +60,18 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: AstroBurst ${{ github.ref_name }}
           releaseBody: See CHANGELOG for details.
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           tauriScript: pnpm tauri
           args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || format('--target {0}', matrix.target) }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
