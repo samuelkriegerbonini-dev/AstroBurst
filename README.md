@@ -285,8 +285,6 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 ## Roadmap
 
-See [OVERVIEW_PT.md](docs/OVERVIEW_PT.md) for a detailed roadmap and market analysis (in Portuguese).
-
 **Next milestones:**
 - **v0.3** — Deconvolution, background extraction, noise reduction
 - **v0.4** — Star removal, photometric color calibration (Gaia DR3)
