@@ -54,7 +54,7 @@ You agree to notify the Maintainer of any facts or circumstances of which you be
 
 When you submit your first pull request to AstroBurst, the CLA Assistant bot will ask you to review and accept this agreement. Your acceptance is recorded automatically and applies to all future contributions.
 
-If you have questions about this agreement, contact: **samuel@kriegerb@gmail.com** 
+If you have questions about this agreement, contact: **samuel.kriegerb@gmail.com** 
 
 ---
 
