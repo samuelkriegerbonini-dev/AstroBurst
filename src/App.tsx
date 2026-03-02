@@ -44,6 +44,8 @@ export default function App() {
     selectFile,
     startProcessing,
     reset,
+    isResampling,
+    resampleProgress,
   } = useFileQueue();
 
   const timer = useTimer();
@@ -214,6 +216,14 @@ export default function App() {
                         isComplete={isComplete}
                       />
                       <GlobalProgress progress={progress} isComplete={isComplete} />
+
+                      {isResampling && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-amber-400 animate-pulse">
+                            Resampling… {resampleProgress}%
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex-1 flex gap-6 p-6 overflow-hidden min-h-0">
@@ -266,7 +276,7 @@ export default function App() {
                       AstroBurst
                     </span>
                     <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">
-                      v0.1.0
+                      v0.2.0
                     </span>
                   </div>
                 </div>

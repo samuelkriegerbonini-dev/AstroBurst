@@ -43,9 +43,11 @@ export function useBackend() {
     processBatch: async (paths: string[], outputDir = DEFAULT_OUTPUT_DIR) => {
       const res = await safeInvoke("process_batch", { paths, outputDir });
       if (res.results) {
-        for (const r of res.results) {
-          if (r.png_path) r.previewUrl = await getPreviewUrl(r.png_path);
-        }
+        await Promise.all(
+          res.results.map(async (r: any) => {
+            if (r.png_path) r.previewUrl = await getPreviewUrl(r.png_path);
+          }),
+        );
       }
       return res;
     },
@@ -58,36 +60,41 @@ export function useBackend() {
     },
 
     exportFits: (path: string, outputPath: string, options: Record<string, any> = {}) =>
-        safeInvoke("export_fits", { path, outputPath, ...options }),
+      safeInvoke("export_fits", { path, outputPath, ...options }),
 
     exportFitsRgb: (
-        rPath: string | null,
-        gPath: string | null,
-        bPath: string | null,
-        outputPath: string,
-        options: Record<string, any> = {},
+      rPath: string | null,
+      gPath: string | null,
+      bPath: string | null,
+      outputPath: string,
+      options: Record<string, any> = {},
     ) => safeInvoke("export_fits_rgb", { rPath, gPath, bPath, outputPath, ...options }),
 
     getHeader: (path: string) => safeInvoke("get_header", { path }),
 
     getFullHeader: (path: string) => safeInvoke("get_full_header", { path }),
 
+    getFitsExtensions: (path: string) => safeInvoke("get_fits_extensions", { path }),
+
+    getHeaderByHdu: (path: string, hduIndex: number) =>
+      safeInvoke("get_header_by_hdu", { path, hduIndex }),
+
     detectNarrowbandFilters: (paths: string[]) =>
-        safeInvoke("detect_narrowband_filters", { paths }),
+      safeInvoke("detect_narrowband_filters", { paths }),
 
     computeHistogram: (path: string) => safeInvoke("compute_histogram", { path }),
 
     computeFftSpectrum: (path: string) => safeInvoke("compute_fft_spectrum", { path }),
 
     detectStars: (path: string, sigma = 5.0, maxStars = 200) =>
-        safeInvoke("detect_stars", { path, sigma, maxStars }),
+      safeInvoke("detect_stars", { path, sigma, maxStars }),
 
     applyStfRender: async (
-        path: string,
-        outputDir = DEFAULT_OUTPUT_DIR,
-        shadow: number,
-        midtone: number,
-        highlight: number,
+      path: string,
+      outputDir = DEFAULT_OUTPUT_DIR,
+      shadow: number,
+      midtone: number,
+      highlight: number,
     ) => {
       const res = await safeInvoke("apply_stf_render", {
         path,
@@ -101,10 +108,10 @@ export function useBackend() {
     },
 
     generateTiles: (path: string, outputDir: string, tileSize = 256) =>
-        safeInvoke("generate_tiles", { path, outputDir, tileSize }),
+      safeInvoke("generate_tiles", { path, outputDir, tileSize }),
 
     getTile: (path: string, outputDir: string, level: number, col: number, row: number) =>
-        safeInvoke("get_tile", { path, outputDir, level, col, row }),
+      safeInvoke("get_tile", { path, outputDir, level, col, row }),
 
     processCube: async (path: string, outputDir = DEFAULT_OUTPUT_DIR, frameStep = 5) => {
       const res = await safeInvoke("process_cube_cmd", { path, outputDir, frameStep });
@@ -125,21 +132,21 @@ export function useBackend() {
     getCubeInfo: (path: string) => safeInvoke("get_cube_info", { path }),
 
     getCubeFrame: (path: string, frameIndex: number, outputPath: string) =>
-        safeInvoke("get_cube_frame", { path, frameIndex, outputPath }),
+      safeInvoke("get_cube_frame", { path, frameIndex, outputPath }),
 
     getCubeSpectrum: (path: string, x: number, y: number) =>
-        safeInvoke("get_cube_spectrum", { path, x, y }),
+      safeInvoke("get_cube_spectrum", { path, x, y }),
 
     plateSolve: (path: string, options: Record<string, any> = {}) =>
-        safeInvoke("plate_solve_cmd", { path, ...options }),
+      safeInvoke("plate_solve_cmd", { path, ...options }),
 
     getWcsInfo: (path: string) => safeInvoke("get_wcs_info", { path }),
 
     pixelToWorld: (path: string, x: number, y: number) =>
-        safeInvoke("pixel_to_world", { path, x, y }),
+      safeInvoke("pixel_to_world", { path, x, y }),
 
     worldToPixel: (path: string, ra: number, dec: number) =>
-        safeInvoke("world_to_pixel", { path, ra, dec }),
+      safeInvoke("world_to_pixel", { path, ra, dec }),
 
     calibrate: async (sciencePath: string, outputDir = DEFAULT_OUTPUT_DIR, options: Record<string, any> = {}) => {
       const res = await safeInvoke("calibrate", { sciencePath, outputDir, ...options });
@@ -161,11 +168,11 @@ export function useBackend() {
     },
 
     drizzleRgb: async (
-        rPaths: string[] | null,
-        gPaths: string[] | null,
-        bPaths: string[] | null,
-        outputDir = DEFAULT_OUTPUT_DIR,
-        options: Record<string, any> = {},
+      rPaths: string[] | null,
+      gPaths: string[] | null,
+      bPaths: string[] | null,
+      outputDir = DEFAULT_OUTPUT_DIR,
+      options: Record<string, any> = {},
     ) => {
       const res = await safeInvoke("drizzle_rgb_cmd", {
         rPaths,
@@ -179,13 +186,24 @@ export function useBackend() {
     },
 
     composeRgb: async (
-        rPath: string | null,
-        gPath: string | null,
-        bPath: string | null,
-        outputDir = DEFAULT_OUTPUT_DIR,
-        options: Record<string, any> = {},
+      rPath: string | null,
+      gPath: string | null,
+      bPath: string | null,
+      outputDir = DEFAULT_OUTPUT_DIR,
+      options: Record<string, any> = {},
     ) => {
       const res = await safeInvoke("compose_rgb_cmd", { rPath, gPath, bPath, outputDir, ...options });
+      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
+      return res;
+    },
+
+    resampleFits: async (
+      path: string,
+      targetWidth: number,
+      targetHeight: number,
+      outputDir = DEFAULT_OUTPUT_DIR,
+    ) => {
+      const res = await safeInvoke("resample_fits_cmd", { path, targetWidth, targetHeight, outputDir });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },

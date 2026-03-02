@@ -16,3 +16,4 @@ pub mod stats;
 pub mod stf;
 pub mod wcs;
 pub mod stacking;
+pub mod resample;

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   FileSearch, ChevronDown, ChevronRight, Search, Telescope,
   Camera, Image, Globe, Cpu, MoreHorizontal, Sparkles, Zap,
@@ -6,12 +6,12 @@ import {
 } from "lucide-react";
 
 const CATEGORY_META = {
-  observation: { label: "Observation", icon: Telescope, color: "text-amber-400", bg: "bg-amber-400/10", border: "border-amber-400/20" },
-  instrument: { label: "Instrument", icon: Camera, color: "text-cyan-400", bg: "bg-cyan-400/10", border: "border-cyan-400/20" },
-  image: { label: "Image", icon: Image, color: "text-pink-400", bg: "bg-pink-400/10", border: "border-pink-400/20" },
-  wcs: { label: "WCS / Astrometry", icon: Globe, color: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20" },
-  processing: { label: "Processing", icon: Cpu, color: "text-violet-400", bg: "bg-violet-400/10", border: "border-violet-400/20" },
-  other: { label: "Other", icon: MoreHorizontal, color: "text-zinc-400", bg: "bg-zinc-400/10", border: "border-zinc-400/20" },
+  observation: { label: "Observation", icon: Telescope, color: "text-amber-400" },
+  instrument: { label: "Instrument", icon: Camera, color: "text-cyan-400" },
+  image: { label: "Image", icon: Image, color: "text-pink-400" },
+  wcs: { label: "WCS / Astrometry", icon: Globe, color: "text-emerald-400" },
+  processing: { label: "Processing", icon: Cpu, color: "text-violet-400" },
+  other: { label: "Other", icon: MoreHorizontal, color: "text-zinc-400" },
 };
 
 const CHANNEL_COLORS = {
@@ -27,12 +27,12 @@ const CONFIDENCE_STYLE = {
 };
 
 export default function HeaderExplorerPanel({
-  file = null,
-  onLoadHeader,
-  headerData = null,
-  isLoading = false,
-  onAssignChannel,
-}) {
+                                              file,
+                                              onLoadHeader,
+                                              headerData,
+                                              isLoading = false,
+                                              onAssignChannel,
+                                            }) {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState({
     observation: true,
@@ -43,11 +43,16 @@ export default function HeaderExplorerPanel({
     other: false,
   });
   const [copiedKey, setCopiedKey] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+  const onLoadHeaderRef = useRef(onLoadHeader);
+  onLoadHeaderRef.current = onLoadHeader;
+  const prevPathRef = useRef(null);
 
   useEffect(() => {
-    if (file?.path && onLoadHeader) {
-      onLoadHeader(file.path);
-    }
+    if (!file?.path || file.path === prevPathRef.current) return;
+    prevPathRef.current = file.path;
+    setLoadError(false);
+    onLoadHeaderRef.current?.(file.path)?.catch?.(() => setLoadError(true));
   }, [file?.path]);
 
   const toggleCategory = useCallback((cat) => {
@@ -125,6 +130,18 @@ export default function HeaderExplorerPanel({
         <div className="px-3 py-4 flex items-center justify-center gap-2 text-[11px] text-zinc-400">
           <div className="w-3 h-3 border border-amber-400/40 border-t-amber-400 rounded-full animate-spin" />
           Reading FITS header…
+        </div>
+      )}
+
+      {loadError && !isLoading && !headerData && (
+        <div className="px-3 py-4 flex flex-col items-center gap-2">
+          <p className="text-[11px] text-red-400/70">Failed to read header</p>
+          <button
+            onClick={() => onLoadHeader?.(file.path)}
+            className="text-[10px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 px-3 py-1 rounded transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 

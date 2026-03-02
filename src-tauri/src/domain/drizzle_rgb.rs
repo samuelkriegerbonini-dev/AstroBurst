@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use image::{Rgb, RgbImage};
-use ndarray::Array2;
+use ndarray::{Array2, s};
 
 use crate::domain::drizzle::{self, DrizzleConfig, DrizzleResult};
 use crate::domain::fits_writer::{self, FitsWriteConfig};
@@ -113,15 +113,35 @@ pub fn drizzle_rgb(
         .or(g_result.as_ref())
         .or(b_result.as_ref())
         .unwrap();
-    let (out_rows, out_cols) = ref_result.output_dims;
     let input_dims = ref_result.input_dims;
-    let output_dims = ref_result.output_dims;
     let scale = ref_result.output_scale;
 
+    let dims: Vec<(usize, usize)> = [&r_result, &g_result, &b_result]
+        .iter()
+        .filter_map(|r| r.as_ref().map(|res| res.output_dims))
+        .collect();
+    let min_rows = dims.iter().map(|d| d.0).min().unwrap();
+    let min_cols = dims.iter().map(|d| d.1).min().unwrap();
+    let out_rows = min_rows;
+    let out_cols = min_cols;
+    let output_dims = (out_rows, out_cols);
+
+    let crop = |img: &Array2<f32>| -> Array2<f32> {
+        let (r, c) = img.dim();
+        if r == out_rows && c == out_cols {
+            img.clone()
+        } else {
+            img.slice(s![..out_rows, ..out_cols]).to_owned()
+        }
+    };
+
     let zeros = Array2::<f32>::zeros((out_rows, out_cols));
-    let r_img = r_result.as_ref().map(|r| &r.image).unwrap_or(&zeros);
-    let g_img = g_result.as_ref().map(|r| &r.image).unwrap_or(&zeros);
-    let b_img = b_result.as_ref().map(|r| &r.image).unwrap_or(&zeros);
+    let r_img_owned = r_result.as_ref().map(|r| crop(&r.image)).unwrap_or_else(|| zeros.clone());
+    let g_img_owned = g_result.as_ref().map(|r| crop(&r.image)).unwrap_or_else(|| zeros.clone());
+    let b_img_owned = b_result.as_ref().map(|r| crop(&r.image)).unwrap_or_else(|| zeros.clone());
+    let r_img = &r_img_owned;
+    let g_img = &g_img_owned;
+    let b_img = &b_img_owned;
 
     let frame_count_r = r_result.as_ref().map(|r| r.frame_count).unwrap_or(0);
     let frame_count_g = g_result.as_ref().map(|r| r.frame_count).unwrap_or(0);

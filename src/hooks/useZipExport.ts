@@ -20,6 +20,7 @@ export function useZipExport() {
 
     try {
       const zip = new JSZip();
+      const batchSize = 5;
 
       for (let i = 0; i < doneFiles.length; i++) {
         const file = doneFiles[i];
@@ -35,16 +36,24 @@ export function useZipExport() {
           }
         }
 
-        setProgress(Math.round(((i + 1) / doneFiles.length) * 100));
+        setProgress(Math.round(((i + 1) / doneFiles.length) * 90));
+
+        if ((i + 1) % batchSize === 0) {
+          await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+        }
       }
 
-      const blob = await zip.generateAsync({
-        type: "blob",
-        compression: "DEFLATE",
-        compressionOptions: { level: 6 },
-      });
+      const blob = await zip.generateAsync(
+        {
+          type: "blob",
+          compression: "STORE",
+        },
+        (meta) => {
+          setProgress(90 + Math.round((meta.percent / 100) * 10));
+        },
+      );
 
-      saveAs(blob, `astrokit-export-${Date.now()}.zip`);
+      saveAs(blob, `astroburst-export-${Date.now()}.zip`);
       setDownloaded(true);
       setTimeout(() => setDownloaded(false), 2000);
     } catch (err) {

@@ -22,6 +22,19 @@ impl HduHeader {
         self.index.get(key)?.trim().parse().ok()
     }
 
+    pub fn set(&mut self, key: &str, value: String) {
+        if let Some(existing) = self.cards.iter_mut().find(|(k, _)| k == key) {
+            existing.1 = value.clone();
+        } else {
+            self.cards.push((key.to_string(), value.clone()));
+        }
+        self.index.insert(key.to_string(), value);
+    }
+
+    pub fn set_f64(&mut self, key: &str, value: f64) {
+        self.set(key, format!("{:.14E}", value));
+    }
+
     pub fn data_byte_count(&self) -> usize {
         let naxis = self.get_i64("NAXIS").unwrap_or(0);
         if naxis == 0 {
@@ -49,5 +62,40 @@ impl HduHeader {
 
     pub fn data_offset(&self, header_start: usize) -> usize {
         header_start + self.header_blocks() * BLOCK_SIZE
+    }
+
+    pub fn merge_with(&self, extension: &HduHeader) -> HduHeader {
+        let skip_keys: &[&str] = &[
+            "SIMPLE", "XTENSION", "EXTEND", "PCOUNT", "GCOUNT",
+        ];
+
+        let mut merged_index = self.index.clone();
+        let mut merged_cards: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (k, v) in &extension.cards {
+            let ku = k.to_uppercase();
+            if skip_keys.iter().any(|&sk| ku == sk) {
+                continue;
+            }
+            merged_index.insert(k.clone(), v.clone());
+            merged_cards.push((k.clone(), v.clone()));
+            seen.insert(k.clone());
+        }
+
+        for (k, v) in &self.cards {
+            let ku = k.to_uppercase();
+            if skip_keys.iter().any(|&sk| ku == sk) {
+                continue;
+            }
+            if !seen.contains(k) {
+                merged_cards.push((k.clone(), v.clone()));
+            }
+        }
+
+        HduHeader {
+            cards: merged_cards,
+            index: merged_index,
+        }
     }
 }

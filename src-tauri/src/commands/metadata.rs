@@ -10,7 +10,7 @@ use super::helpers::*;
 #[tauri::command]
 pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        let (header, _, _tmp) = extract_image_resolved(&path)?;
+        let (result, _tmp) = extract_image_full(&path)?;
 
         let keys = [
             "TELESCOP", "INSTRUME", "DETECTOR", "CHANNEL", "FILTER", "TARGNAME", "DATE-OBS",
@@ -20,9 +20,15 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
 
         let mut map = serde_json::Map::new();
         for key in keys {
-            if let Some(val) = header.get(key) {
+            if let Some(val) = result.header.get(key) {
                 map.insert(key.to_string(), serde_json::Value::String(val.to_string()));
             }
+        }
+
+        map.insert("_is_mef".to_string(), serde_json::Value::Bool(result.is_mef));
+        map.insert("_extension_count".to_string(), serde_json::json!(result.extension_count));
+        if let Some(ref ext) = result.selected_extension {
+            map.insert("_selected_extension".to_string(), serde_json::Value::String(ext.clone()));
         }
 
         Ok(serde_json::Value::Object(map))
@@ -35,7 +41,8 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        let (header, _, _tmp) = extract_image_resolved(&path)?;
+        let (result, _tmp) = extract_image_full(&path)?;
+        let header = &result.header;
 
         let cards: Vec<serde_json::Value> = header
             .cards
@@ -43,7 +50,7 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
             .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
             .collect();
 
-        let filter_detection = header_discovery::detect_filter(&header);
+        let filter_detection = header_discovery::detect_filter(header);
 
         let file_name = Path::new(&path)
             .file_name()
@@ -92,7 +99,24 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
             })
             .flatten();
 
-        let categories = categorize_header_cards(&header);
+        let categories = categorize_header_cards(header);
+
+        let extensions_json: Vec<serde_json::Value> = result
+            .extensions
+            .iter()
+            .map(|ext| {
+                serde_json::json!({
+                    "index": ext.index,
+                    "extname": ext.extname,
+                    "extver": ext.extver,
+                    "naxis": ext.naxis,
+                    "naxis1": ext.naxis1,
+                    "naxis2": ext.naxis2,
+                    "bitpix": ext.bitpix,
+                    "has_data": ext.has_data,
+                })
+            })
+            .collect();
 
         Ok(serde_json::json!({
             "file_name": file_name,
@@ -102,6 +126,72 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
             "categories": categories,
             "filter_detection": detection_json,
             "filename_hint": filename_detection,
+            "is_mef": result.is_mef,
+            "extension_count": result.extension_count,
+            "selected_extension": result.selected_extension,
+            "extensions": extensions_json,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {}", e))?
+    .map_err(map_anyhow)
+}
+
+#[tauri::command]
+pub async fn get_fits_extensions(path: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        let (extensions, _tmp) = list_fits_extensions(&path)?;
+
+        let ext_json: Vec<serde_json::Value> = extensions
+            .iter()
+            .map(|ext| {
+                serde_json::json!({
+                    "index": ext.index,
+                    "extname": ext.extname,
+                    "extver": ext.extver,
+                    "naxis": ext.naxis,
+                    "naxis1": ext.naxis1,
+                    "naxis2": ext.naxis2,
+                    "naxis3": ext.naxis3,
+                    "bitpix": ext.bitpix,
+                    "has_data": ext.has_data,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "extension_count": extensions.len(),
+            "extensions": ext_json,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {}", e))?
+    .map_err(map_anyhow)
+}
+
+#[tauri::command]
+pub async fn get_header_by_hdu(
+    path: String,
+    hdu_index: usize,
+) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        let (result, _tmp) = extract_image_by_hdu(&path, hdu_index)?;
+
+        let cards: Vec<serde_json::Value> = result
+            .header
+            .cards
+            .iter()
+            .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+            .collect();
+
+        let categories = categorize_header_cards(&result.header);
+
+        Ok(serde_json::json!({
+            "hdu_index": hdu_index,
+            "selected_extension": result.selected_extension,
+            "total_cards": cards.len(),
+            "cards": cards,
+            "categories": categories,
         }))
     })
     .await
