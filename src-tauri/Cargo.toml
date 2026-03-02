@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 description = "AstroBurst — High-Performance JWST FITS Processing"
 
@@ -40,7 +40,7 @@ tauri-build = { version = "2", features = [] }
 name = "astroburst_lib"
 crate-type = ["lib"]
 
-[profile.release] 
+[profile.release]
 lto = true
 codegen-units = 1
 strip = true
