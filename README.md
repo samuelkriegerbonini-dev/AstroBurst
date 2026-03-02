@@ -320,7 +320,7 @@ Thanks to everyone supporting AstroBurst development:
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for details.
+GPLv3. See [LICENSE](LICENSE) for details.
 
 ---
 
