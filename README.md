@@ -16,6 +16,7 @@
   <img src="https://img.shields.io/badge/tauri-2.0-purple.svg?style=flat-square" alt="Tauri">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/samuelkriegerbonini-dev/AstroBurst?style=flat-square&color=green" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
+  <a href="https://ko-fi.com/astroburst"><img src="https://img.shields.io/badge/Ko--fi-Support-FF5E5B?style=flat-square&logo=ko-fi" alt="Ko-fi"></a>
 </p>
 
 <p align="center">
@@ -24,7 +25,9 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="#usage">Usage</a> ·
   <a href="#architecture">Architecture</a> ·
-  <a href="#contributing">Contributing</a>
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="#contributing">Contributing</a> ·
+  <a href="#support">Support</a>
 </p>
 
 ---
@@ -238,7 +241,7 @@ For 3D FITS cubes (IFU data), click anywhere on the preview image to extract the
                         │ Tauri Commands (37)
 ┌───────────────────────┴─────────────────────────┐
 │                     Backend                      │
-│                Rust + Tauri v2                    │
+│                Rust + Tauri v2                   │
 │                                                  │
 │  I/O:     mmap FITS parser, MEF scanner,         │
 │           FITS writer (mono + RGB)               │
@@ -247,7 +250,7 @@ For 3D FITS cubes (IFU data), click anywhere on the preview image to extract the
 │  Analysis: stars, histogram, fft                 │
 │  Meta:    header_discovery, filter detection     │
 │  Astro:   plate_solve, wcs transforms            │
-│  Cube:    spectrum extraction, frame nav          │
+│  Cube:    spectrum extraction, frame nav         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -271,6 +274,15 @@ Measured on consumer hardware (NVMe SSD, multi-core CPU):
 | Drizzle 2× (2 frames, 14K) | ~1 GB | ~8s | — |
 | STF render (GPU, 14K image) | ~470 MB | <16ms | — |
 
+## Roadmap
+
+| Version | Features |
+|---------|----------|
+| **v0.3** | Deconvolution, background extraction, noise reduction |
+| **v0.4** | Star removal, photometric color calibration (Gaia DR3) |
+| **v0.5** | PixelMath expressions, mosaic stitching |
+| **v1.0** | Full GPU pipeline, plugin system (WASM), Python scripting |
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -283,14 +295,39 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 - Documentation and processing tutorials
 - Platform-specific packaging and testing
 
-## Roadmap
+## Support
 
-**Next milestones:**
-- **v0.3** — Deconvolution, background extraction, noise reduction
-- **v0.4** — Star removal, photometric color calibration (Gaia DR3)
-- **v0.5** — PixelMath expressions, mosaic stitching
-- **v1.0** — Full GPU pipeline, plugin system (WASM), Python scripting
+AstroBurst is free and open source — no subscriptions, no feature locks.
+
+If it saves you time or helps your astrophotography workflow, consider supporting development:
+
+<p align="center">
+  <a href="https://ko-fi.com/astroburst">
+    <img src="https://img.shields.io/badge/Ko--fi-Support%20AstroBurst-FF5E5B?style=for-the-badge&logo=ko-fi" alt="Support on Ko-fi">
+  </a>
+</p>
+
+Your support helps cover:
+- Development time for new features (deconvolution, Gaia DR3 calibration, WASM plugins)
+
+
+**Supporters get:**
+See [membership tiers](https://ko-fi.com/astroburst/tiers) for details.
+
+## Supporters
+
+Thanks to everyone supporting AstroBurst development:
+
+<!-- SUPPORTERS:START -->
+*Be the first to support!*
+<!-- SUPPORTERS:END -->
 
 ## License
 
 MIT. See [LICENSE](LICENSE) for details.
+
+---
+
+<p align="center">
+  <sub>Created by <a href="https://github.com/samuelkriegerbonini-dev">Samuel Krieger</a> · Built with Rust 🦀</sub>
+</p>
