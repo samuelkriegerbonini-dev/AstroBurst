@@ -54,14 +54,15 @@ pnpm tauri dev
 
 ### Submitting Code
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make your changes
-4. Run tests: `cd src-tauri && cargo test --all-features`
-5. Run formatting: `cargo fmt`
-6. Run linter: `cargo clippy --all-features -- -D warnings`
-7. Commit with a descriptive message
-8. Push and open a Pull Request
+1. **Sign the CLA** — On your first pull request, the CLA Assistant bot will ask you to review and accept our [Contributor License Agreement](CLA.md). This is a one-time step.
+2. Fork the repository
+3. Create a feature branch: `git checkout -b feature/my-feature`
+4. Make your changes
+5. Run tests: `cd src-tauri && cargo test --all-features`
+6. Run formatting: `cargo fmt`
+7. Run linter: `cargo clippy --all-features -- -D warnings`
+8. Commit with a descriptive message
+9. Push and open a Pull Request
 
 ### Code Style
 
@@ -101,6 +102,10 @@ src-tauri/src/
 
 **Key principle:** Commands in `commands/` should only parse input, delegate to `domain/`, and format output. All processing logic lives in `domain/`.
 
+## Contributor License Agreement
+
+All contributions require signing our [Contributor License Agreement (CLA)](CLA.md). This grants the maintainer the necessary rights to manage the project's licensing. The CLA Assistant bot will guide you through the process on your first pull request.
+
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+AstroBurst is licensed under the [GNU General Public License v3.0](LICENSE). By contributing, you agree to the terms outlined in the CLA.
