@@ -86,11 +86,7 @@ AstroBurst is a native desktop application for processing astronomical FITS imag
 <p align="center">
   <img src="docs/screenshots/analysis-panels-full.png" alt="Analysis Panels — Star Detection, RGB, Drizzle" width="100%">
 </p>
-<p align="center"><em>Star detection, RGB composition, drizzle stack, and drizzle RGB panels with full configuration</em></p>
 
-<p align="center">
-  <img src="docs/screenshots/hubble-jwst-composite.png" alt="Hubble + JWST Composite" width="100%">
-</p>
 <p align="center"><em>Mixed dataset — 3 Hubble narrowband + 6 JWST NIRCam filters composited as Pillars of Creation</em></p>
 
 <p align="center">
