@@ -1,8 +1,10 @@
-[package]
 name = "astroburst"
 version = "0.2.3"
 edition = "2021"
 description = "AstroBurst — High-Performance JWST FITS Processing"
+license = "GPL-3.0-or-later"
+authors = ["Samuel Krieger Bonini"]
+repository = "https://github.com/samuelkriegerbonini-dev/AstroBurst"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
