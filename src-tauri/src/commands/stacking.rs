@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
 
@@ -7,8 +8,10 @@ use crate::domain::drizzle::{self, DrizzleConfig, DrizzleKernel};
 use crate::domain::drizzle_rgb::{self, DrizzleRgbConfig};
 use crate::domain::normalize::asinh_normalize;
 use crate::domain::pipeline;
+use crate::domain::resample;
 use crate::domain::rgb_compose::{self, RgbComposeConfig, WhiteBalance};
 use crate::domain::scnr::{ScnrConfig, ScnrMethod};
+use crate::utils::mmap::extract_image_mmap;
 use crate::utils::render::render_grayscale;
 
 use super::helpers::*;
@@ -316,6 +319,7 @@ pub async fn compose_rgb_cmd(
     scnr_enabled: Option<bool>,
     scnr_method: Option<String>,
     scnr_amount: Option<f64>,
+    dimension_tolerance: Option<usize>,
 ) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
         let start = Instant::now();
@@ -367,6 +371,7 @@ pub async fn compose_rgb_cmd(
             linked_stf: linked_stf.unwrap_or(false),
             align: align.unwrap_or(true),
             scnr: scnr_cfg,
+            dimension_tolerance: dimension_tolerance.unwrap_or(100),
             ..Default::default()
         };
 
@@ -378,7 +383,7 @@ pub async fn compose_rgb_cmd(
 
         let elapsed = start.elapsed().as_millis() as u64;
 
-        Ok(serde_json::json!({
+        let mut json = serde_json::json!({
             "png_path": result.png_path,
             "width": result.width,
             "height": result.height,
@@ -392,7 +397,13 @@ pub async fn compose_rgb_cmd(
             "offset_b": [result.offset_b.0, result.offset_b.1],
             "scnr_applied": result.scnr_applied,
             "elapsed_ms": elapsed,
-        }))
+        });
+
+        if let Some(ref crop) = result.dimension_crop {
+            json["dimension_crop"] = serde_json::json!(crop);
+        }
+
+        Ok(json)
     })
         .await
         .map_err(|e| format!("Task join failed: {}", e))?
@@ -440,6 +451,79 @@ pub async fn run_pipeline_cmd(
             "failed": pipeline_result.failed,
             "elapsed_ms": pipeline_result.elapsed_ms,
             "results": results_json,
+        }))
+    })
+        .await
+        .map_err(|e| format!("Task join failed: {}", e))?
+        .map_err(map_anyhow)
+}
+
+#[tauri::command]
+pub async fn resample_fits_cmd(
+    path: String,
+    target_width: usize,
+    target_height: usize,
+    output_dir: String,
+) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        let start = Instant::now();
+
+        let file = File::open(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", path, e))?;
+        let mmap_result = extract_image_mmap(&file)?;
+
+        let original_dims = mmap_result.image.dim();
+        let resampled = resample::resample_image(
+            &mmap_result.image,
+            target_height,
+            target_width,
+        )?;
+
+        let wcs_updates = resample::compute_wcs_updates(
+            &mmap_result.header,
+            original_dims,
+            (target_height, target_width),
+        );
+
+        let out = resolve_output_dir(&output_dir)?;
+        let stem = Path::new(&path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let normalized = asinh_normalize(&resampled);
+        let png_path = out.join(format!("{}_resampled.png", stem));
+        render_grayscale(&normalized, png_path.to_str().unwrap())?;
+
+        let fits_path = out.join(format!("{}_resampled.fits", stem));
+        let mut header = mmap_result.header.clone();
+        for (key, value) in &wcs_updates {
+            header.set_f64(key, *value);
+        }
+
+        let fits_config = crate::domain::fits_writer::FitsWriteConfig {
+            software: Some("AstroBurst".into()),
+            copy_wcs: true,
+            copy_obs_metadata: true,
+            ..Default::default()
+        };
+        crate::domain::fits_writer::write_fits_image(
+            &resampled,
+            fits_path.to_str().unwrap(),
+            Some(&header),
+            &fits_config,
+        )?;
+
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        Ok(serde_json::json!({
+            "png_path": png_path.to_string_lossy(),
+            "fits_path": fits_path.to_string_lossy(),
+            "original_dims": [original_dims.1, original_dims.0],
+            "resampled_dims": [target_width, target_height],
+            "wcs_updates": wcs_updates.iter().map(|(k, v)| serde_json::json!({"key": k, "value": v})).collect::<Vec<_>>(),
+            "elapsed_ms": elapsed,
         }))
     })
         .await

@@ -8,9 +8,13 @@ use crate::model::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NarrowbandFilter {
+    #[serde(rename = "Hα (656nm)")]
     Ha,
+    #[serde(rename = "[OIII] (502nm)")]
     Oiii,
+    #[serde(rename = "[SII] (673nm)")]
     Sii,
+    #[serde(rename = "Unknown")]
     Unknown,
 }
 
@@ -27,8 +31,11 @@ impl std::fmt::Display for NarrowbandFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HubbleChannel {
+    #[serde(rename = "R")]
     Red,
+    #[serde(rename = "G")]
     Green,
+    #[serde(rename = "B")]
     Blue,
 }
 

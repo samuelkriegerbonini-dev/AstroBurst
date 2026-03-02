@@ -46,3 +46,4 @@ pnpm-debug.log*
 # Large FITS files (samples tracked via Git LFS)
 *.fits
 !tests/sample-data/*.fits
+/exampleFits/sample-data/heavyTest/

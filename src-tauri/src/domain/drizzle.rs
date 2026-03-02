@@ -386,40 +386,66 @@ pub fn drizzle_stack(
     }
 
     let reference = &images[0];
-    let (in_rows, in_cols) = reference.dim();
 
-    for (i, img) in images.iter().enumerate().skip(1) {
-        if img.dim() != (in_rows, in_cols) {
-            bail!(
-                "Frame {} dimension mismatch: expected ({}, {}), got {:?}",
-                i, in_rows, in_cols, img.dim()
-            );
-        }
+    let min_rows = images.iter().map(|img| img.dim().0).min().unwrap();
+    let min_cols = images.iter().map(|img| img.dim().1).min().unwrap();
+    let max_rows = images.iter().map(|img| img.dim().0).max().unwrap();
+    let max_cols = images.iter().map(|img| img.dim().1).max().unwrap();
+
+    let row_diff = max_rows - min_rows;
+    let col_diff = max_cols - min_cols;
+    let tolerance = (min_rows.max(min_cols) as f64 * 0.05) as usize;
+
+    if row_diff > tolerance || col_diff > tolerance {
+        bail!(
+            "Frame dimensions vary too much (rows: {}px, cols: {}px, tolerance: {}px)",
+            row_diff, col_diff, tolerance
+        );
     }
+
+    let in_rows = min_rows;
+    let in_cols = min_cols;
+
+    let needs_crop = row_diff > 0 || col_diff > 0;
+    let cropped: Vec<Array2<f32>>;
+    let images_ref: Vec<&Array2<f32>> = if needs_crop {
+        cropped = images.iter().map(|img| {
+            let (r, c) = img.dim();
+            if r == in_rows && c == in_cols {
+                img.clone()
+            } else {
+                img.slice(ndarray::s![..in_rows, ..in_cols]).to_owned()
+            }
+        }).collect();
+        cropped.iter().collect()
+    } else {
+        images.iter().collect()
+    };
 
     let scale = config.scale.clamp(1.0, 4.0);
     let pixfrac = config.pixfrac.clamp(0.1, 1.0);
     let out_rows = (in_rows as f64 * scale).ceil() as usize;
     let out_cols = (in_cols as f64 * scale).ceil() as usize;
 
-    let mut offsets: Vec<(f64, f64)> = Vec::with_capacity(images.len());
+    let reference = images_ref[0];
+    let mut offsets: Vec<(f64, f64)> = Vec::with_capacity(images_ref.len());
     offsets.push((0.0, 0.0));
 
     if config.align {
         let search_radius = 50i32;
-        for i in 1..images.len() {
-            let (dx, dy) = compute_subpixel_offset(reference, &images[i], search_radius);
+        for i in 1..images_ref.len() {
+            let (dx, dy) = compute_subpixel_offset(reference, images_ref[i], search_radius);
             offsets.push((dx, dy));
         }
     } else {
-        for _ in 1..images.len() {
+        for _ in 1..images_ref.len() {
             offsets.push((0.0, 0.0));
         }
     }
 
     let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols);
 
-    for (i, img) in images.iter().enumerate() {
+    for (i, img) in images_ref.iter().enumerate() {
         let (dx, dy) = offsets[i];
         accumulator.drizzle_frame(img, -dx, -dy, scale, pixfrac, config.kernel);
     }
@@ -433,7 +459,7 @@ pub fn drizzle_stack(
     Ok(DrizzleResult {
         image,
         weight_map,
-        frame_count: images.len(),
+        frame_count: images_ref.len(),
         output_scale: scale,
         input_dims: (in_rows, in_cols),
         output_dims: (out_rows, out_cols),

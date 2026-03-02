@@ -9,6 +9,7 @@ import SpectroscopyPanel from "./SpectroscopyPanel";
 import GpuRenderer from "./GpuRenderer";
 import PlateSolvePanel from "./PlateSolvePanel";
 import RgbComposePanel from "./RgbComposePanel";
+import DrizzleRgbPanel from "./DrizzleRgbPanel";
 import ExportPanel from "./ExportPanel";
 import HeaderExplorerPanel from "./HeaderExplorerPanel";
 import DrizzlePanel from "./DrizzlePanel";
@@ -41,6 +42,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
     computeFftSpectrum,
     getFullHeader,
     drizzleStack,
+    drizzleRgb,
   } = useBackend();
 
   const [histData, setHistData] = useState<any>(null);
@@ -50,10 +52,8 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
     highlight: 1,
   });
   const [stfPreviewUrl, setStfPreviewUrl] = useState<string | null>(null);
-
   const [useGpu, setUseGpu] = useState(false);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
-
   const [spectrum, setSpectrum] = useState<number[]>([]);
   const [specWavelengths, setSpecWavelengths] = useState<number[] | null>(null);
   const [specCoord, setSpecCoord] = useState<{ x: number; y: number } | null>(null);
@@ -61,27 +61,26 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
   const [specElapsed, setSpecElapsed] = useState(0);
   const [cubeDims, setCubeDims] = useState<any>(null);
   const [isCube, setIsCube] = useState(false);
-
   const prevFileIdRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewImgRef = useRef<HTMLImageElement>(null);
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
-
   const [starResult, setStarResult] = useState<any>(null);
   const [starLoading, setStarLoading] = useState(false);
-
   const [rgbResult, setRgbResult] = useState<any>(null);
   const [rgbLoading, setRgbLoading] = useState(false);
   const [rgbChannels, setRgbChannels] = useState<any>(null);
-
-  const [exportResult, setExportResult] = useState<any>(null);
-  const [exportLoading, setExportLoading] = useState(false);
-
-  const [headerData, setHeaderData] = useState<HeaderData | null>(null);
-  const [headerLoading, setHeaderLoading] = useState(false);
-
   const [drizzleResult, setDrizzleResult] = useState<any>(null);
   const [drizzleLoading, setDrizzleLoading] = useState(false);
+  const [drizzleRgbResult, setDrizzleRgbResult] = useState<any>(null);
+  const [drizzleRgbLoading, setDrizzleRgbLoading] = useState(false);
+  const [drizzleRgbProgress, setDrizzleRgbProgress] = useState(0);
+  const [drizzleRgbStage, setDrizzleRgbStage] = useState("");
+  const [exportResult, setExportResult] = useState<any>(null);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [headerData, setHeaderData] = useState<HeaderData | null>(null);
+  const [headerLoading, setHeaderLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(false);
 
   useEffect(() => {
     if (!file || !file.path || file.id === prevFileIdRef.current) return;
@@ -100,9 +99,11 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
     setStarResult(null);
     setRgbResult(null);
     setRgbChannels(null);
+    setDrizzleResult(null);
+    setDrizzleRgbResult(null);
     setExportResult(null);
     setHeaderData(null);
-    setDrizzleResult(null);
+    setPreviewError(false);
 
     computeHistogram(file.path)
       .then((data: any) => {
@@ -130,6 +131,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
         setHeaderData(data);
       } catch (e) {
         console.error("Header load failed:", e);
+        throw e;
       } finally {
         setHeaderLoading(false);
       }
@@ -141,7 +143,6 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
     (params: StfParams) => {
       setStfParams(params);
       if (useGpu) return;
-
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(async () => {
         if (!file?.path) return;
@@ -153,7 +154,10 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
             params.midtone,
             params.highlight,
           );
-          setStfPreviewUrl(result.previewUrl);
+          if (result.previewUrl) {
+            setStfPreviewUrl(result.previewUrl);
+            setPreviewError(false);
+          }
         } catch (e) {
           console.error("STF render failed:", e);
         }
@@ -182,7 +186,6 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
       setRawPixels(null);
       return;
     }
-
     if (!file?.path) return;
     try {
       const result = await getRawPixels(file.path);
@@ -190,7 +193,6 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
       const f32 = new Float32Array(bytes.buffer);
-
       setRawPixels({
         data: f32,
         width: result.width,
@@ -207,20 +209,16 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
   const handleImageClick = useCallback(
     async (e: React.MouseEvent<HTMLImageElement>) => {
       if (!isCube || !file?.path) return;
-
       const img = e.target as HTMLImageElement;
       const rect = img.getBoundingClientRect();
       const dims = file.result?.dimensions;
       if (!dims) return;
-
       const relX = (e.clientX - rect.left) / rect.width;
       const relY = (e.clientY - rect.top) / rect.height;
       const pixelX = Math.floor(relX * dims[0]);
       const pixelY = Math.floor(relY * dims[1]);
-
       setSpecCoord({ x: pixelX, y: pixelY });
       setSpecLoading(true);
-
       try {
         const result = await getCubeSpectrum(file.path, pixelX, pixelY);
         setSpectrum(result.spectrum || []);
@@ -262,7 +260,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
   );
 
   const handleComposeRgb = useCallback(
-    async (rPath: string, gPath: string, bPath: string, options: any) => {
+    async (rPath: string | null, gPath: string | null, bPath: string | null, options: any) => {
       setRgbLoading(true);
       try {
         const result = await composeRgb(rPath, gPath, bPath, "./output", options);
@@ -275,6 +273,59 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
       }
     },
     [composeRgb],
+  );
+
+  const handleDrizzle = useCallback(
+    async (paths: string[], options: any) => {
+      setDrizzleLoading(true);
+      try {
+        const result = await drizzleStack(paths, "./output", options);
+        setDrizzleResult(result);
+      } catch (e) {
+        console.error("Drizzle stack failed:", e);
+      } finally {
+        setDrizzleLoading(false);
+      }
+    },
+    [drizzleStack],
+  );
+
+  const handleDrizzleRgb = useCallback(
+    async (
+      rPaths: string[] | null,
+      gPaths: string[] | null,
+      bPaths: string[] | null,
+      options: any,
+    ) => {
+      setDrizzleRgbLoading(true);
+      setDrizzleRgbProgress(0);
+      setDrizzleRgbStage("Preparing channels…");
+      try {
+        const channelCount = [rPaths, gPaths, bPaths].filter((p) => p && p.length >= 2).length;
+        let step = 0;
+        const totalSteps = channelCount + 1;
+        const advance = (label: string) => {
+          step++;
+          setDrizzleRgbProgress(Math.round((step / totalSteps) * 100));
+          setDrizzleRgbStage(label);
+        };
+
+        if (rPaths && rPaths.length >= 2) advance(`Drizzling R (${rPaths.length} frames)…`);
+        if (gPaths && gPaths.length >= 2) advance(`Drizzling G (${gPaths.length} frames)…`);
+        if (bPaths && bPaths.length >= 2) advance(`Drizzling B (${bPaths.length} frames)…`);
+
+        const result = await drizzleRgb(rPaths, gPaths, bPaths, "./output", options);
+        setDrizzleRgbResult(result);
+        setDrizzleRgbProgress(100);
+        setDrizzleRgbStage("Done");
+      } catch (e) {
+        console.error("Drizzle RGB failed:", e);
+        setDrizzleRgbStage("Failed");
+      } finally {
+        setDrizzleRgbLoading(false);
+      }
+    },
+    [drizzleRgb],
   );
 
   const handleExportFits = useCallback(
@@ -313,23 +364,36 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
     [exportFitsRgb],
   );
 
-  const handleDrizzle = useCallback(
-    async (paths: string[], options: any) => {
-      setDrizzleLoading(true);
-      try {
-        const result = await drizzleStack(paths, "./output", options);
-        setDrizzleResult(result);
-      } catch (e) {
-        console.error("Drizzle stack failed:", e);
-      } finally {
-        setDrizzleLoading(false);
-      }
+  const handleAssignChannel = useCallback(
+    (channel: string, path: string) => {
+      setRgbChannels((prev: any) => ({
+        ...prev,
+        [channel.toLowerCase()]: path,
+      }));
     },
-    [drizzleStack],
+    [],
   );
 
   const previewUrl = stfPreviewUrl || file?.result?.previewUrl;
   const doneFiles = allFiles?.filter((f) => f.status === "done") || [];
+
+  const handlePreviewError = useCallback(
+    (e: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = e.target as HTMLImageElement;
+      const src = img.src;
+      if (!src.includes("retry=2")) {
+        const retryNum = src.includes("retry=1") ? 2 : 1;
+        setTimeout(() => {
+          const base = src.replace(/[?&]retry=\d+/g, "").replace(/[?&]t=\d+/g, "");
+          const sep = base.includes("?") ? "&" : "?";
+          img.src = `${base}${sep}retry=${retryNum}&t=${Date.now()}`;
+        }, retryNum === 1 ? 300 : 800);
+      } else {
+        setPreviewError(true);
+      }
+    },
+    [],
+  );
 
   return (
     <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
@@ -371,6 +435,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
             </motion.div>
           ) : (
             <motion.div key={file.id} {...fadeIn} className="flex flex-col gap-4">
+
               {useGpu && rawPixels ? (
                 <div className="relative bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800">
                   <GpuRenderer
@@ -385,7 +450,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
                     className="w-full"
                   />
                 </div>
-              ) : previewUrl ? (
+              ) : previewUrl && !previewError ? (
                 <div className="relative bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800">
                   <img
                     ref={previewImgRef}
@@ -395,17 +460,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
                       isCube ? "cursor-crosshair" : ""
                     }`}
                     onClick={handleImageClick}
-                    onError={(e) => {
-                      const img = e.target as HTMLImageElement;
-                      const src = img.src;
-                      if (!src.includes("retry=1")) {
-                        setTimeout(() => {
-                          img.src = src.includes("?")
-                            ? `${src}&retry=1&t=${Date.now()}`
-                            : `${src}?retry=1&t=${Date.now()}`;
-                        }, 500);
-                      }
-                    }}
+                    onError={handlePreviewError}
                   />
                   <canvas
                     ref={starOverlayRef}
@@ -417,6 +472,20 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
                       Click to extract spectrum
                     </div>
                   )}
+                </div>
+              ) : previewError ? (
+                <div className="bg-zinc-950 rounded-lg border border-zinc-800 p-8 flex flex-col items-center gap-2 text-zinc-600">
+                  <Image size={32} strokeWidth={1} />
+                  <p className="text-xs">Preview unavailable — try Auto STF or GPU mode</p>
+                  <button
+                    onClick={() => {
+                      setPreviewError(false);
+                      handleAutoStf();
+                    }}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 mt-1"
+                  >
+                    Retry with Auto STF
+                  </button>
                 </div>
               ) : null}
 
@@ -460,6 +529,7 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
                 onLoadHeader={handleLoadHeader}
                 headerData={headerData}
                 isLoading={headerLoading}
+                onAssignChannel={handleAssignChannel}
               />
 
               <PlateSolvePanel
@@ -490,6 +560,17 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
                   onDrizzle={(paths: string[], opts: any) => handleDrizzle(paths, opts)}
                   result={drizzleResult}
                   isLoading={drizzleLoading}
+                />
+              )}
+
+              {doneFiles.length >= 3 && (
+                <DrizzleRgbPanel
+                  files={doneFiles}
+                  onDrizzleRgb={handleDrizzleRgb}
+                  result={drizzleRgbResult}
+                  isLoading={drizzleRgbLoading}
+                  progress={drizzleRgbProgress}
+                  progressStage={drizzleRgbStage}
                 />
               )}
 

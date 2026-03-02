@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::model::HduHeader;
 use crate::utils::dispatcher;
-use crate::utils::mmap::extract_image_mmap;
+use crate::utils::mmap::{self, extract_image_mmap, MmapImageResult};
 
 pub fn resolve_fits(path: &str) -> Result<(std::path::PathBuf, Option<tempfile::TempDir>)> {
     dispatcher::resolve_single_fits(path)
@@ -20,6 +20,40 @@ pub fn extract_image_resolved(
         File::open(&fits_path).with_context(|| format!("Failed to open {}", fits_str))?;
     let result = extract_image_mmap(&file)?;
     Ok((result.header, result.image, tmp))
+}
+
+pub fn extract_image_full(
+    path: &str,
+) -> Result<(MmapImageResult, Option<tempfile::TempDir>)> {
+    let (fits_path, tmp) = resolve_fits(path)?;
+    let fits_str = fits_path.to_string_lossy().to_string();
+    let file =
+        File::open(&fits_path).with_context(|| format!("Failed to open {}", fits_str))?;
+    let result = extract_image_mmap(&file)?;
+    Ok((result, tmp))
+}
+
+pub fn extract_image_by_hdu(
+    path: &str,
+    hdu_index: usize,
+) -> Result<(MmapImageResult, Option<tempfile::TempDir>)> {
+    let (fits_path, tmp) = resolve_fits(path)?;
+    let fits_str = fits_path.to_string_lossy().to_string();
+    let file =
+        File::open(&fits_path).with_context(|| format!("Failed to open {}", fits_str))?;
+    let result = mmap::extract_image_mmap_by_index(&file, hdu_index)?;
+    Ok((result, tmp))
+}
+
+pub fn list_fits_extensions(
+    path: &str,
+) -> Result<(Vec<mmap::HduInfo>, Option<tempfile::TempDir>)> {
+    let (fits_path, tmp) = resolve_fits(path)?;
+    let fits_str = fits_path.to_string_lossy().to_string();
+    let file =
+        File::open(&fits_path).with_context(|| format!("Failed to open {}", fits_str))?;
+    let extensions = mmap::list_extensions(&file)?;
+    Ok((extensions, tmp))
 }
 
 pub fn resolve_output_dir(output_dir: &str) -> Result<std::path::PathBuf> {

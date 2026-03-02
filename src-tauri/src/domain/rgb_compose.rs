@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use ndarray::Array2;
+use ndarray::{Array2, s};
 use image::{RgbImage, Rgb};
 
 use crate::domain::scnr::{self, ScnrConfig};
@@ -16,6 +16,7 @@ pub struct RgbComposeConfig {
     pub linked_stf: bool,
     pub align: bool,
     pub scnr: Option<ScnrConfig>,
+    pub dimension_tolerance: usize,
 }
 
 impl Default for RgbComposeConfig {
@@ -29,6 +30,7 @@ impl Default for RgbComposeConfig {
             linked_stf: false,
             align: true,
             scnr: None,
+            dimension_tolerance: 100,
         }
     }
 }
@@ -54,6 +56,15 @@ pub struct RgbComposeResult {
     pub width: usize,
     pub height: usize,
     pub scnr_applied: bool,
+    pub dimension_crop: Option<DimensionCrop>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DimensionCrop {
+    pub original_r: Option<[usize; 2]>,
+    pub original_g: Option<[usize; 2]>,
+    pub original_b: Option<[usize; 2]>,
+    pub cropped_to: [usize; 2],
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,6 +73,88 @@ pub struct ChannelStats {
     pub max: f64,
     pub median: f64,
     pub mean: f64,
+}
+
+fn crop_to_size(arr: &Array2<f32>, rows: usize, cols: usize) -> Array2<f32> {
+    arr.slice(s![..rows, ..cols]).to_owned()
+}
+
+fn harmonize_dimensions(
+    r: Option<&Array2<f32>>,
+    g: Option<&Array2<f32>>,
+    b: Option<&Array2<f32>>,
+    tolerance: usize,
+) -> Result<(
+    Option<Array2<f32>>,
+    Option<Array2<f32>>,
+    Option<Array2<f32>>,
+    usize,
+    usize,
+    Option<DimensionCrop>,
+)> {
+    let dims: Vec<(usize, usize)> = [r, g, b]
+        .iter()
+        .filter_map(|ch| ch.map(|a| a.dim()))
+        .collect();
+
+    let min_rows = dims.iter().map(|d| d.0).min().unwrap();
+    let min_cols = dims.iter().map(|d| d.1).min().unwrap();
+    let max_rows = dims.iter().map(|d| d.0).max().unwrap();
+    let max_cols = dims.iter().map(|d| d.1).max().unwrap();
+
+    let row_diff = max_rows - min_rows;
+    let col_diff = max_cols - min_cols;
+
+    if row_diff == 0 && col_diff == 0 {
+        return Ok((
+            r.map(|a| a.clone()),
+            g.map(|a| a.clone()),
+            b.map(|a| a.clone()),
+            min_rows,
+            min_cols,
+            None,
+        ));
+    }
+
+    let pct_threshold = (min_rows.max(min_cols) as f64 * 0.01) as usize;
+    let effective_tolerance = tolerance.max(pct_threshold);
+
+    if row_diff > effective_tolerance || col_diff > effective_tolerance {
+        let mut msg = format!(
+            "Channel dimensions differ by more than {}px (rows: {}px, cols: {}px).",
+            effective_tolerance, row_diff, col_diff
+        );
+        if let Some(ra) = r {
+            msg.push_str(&format!(" R={}×{}", ra.dim().1, ra.dim().0));
+        }
+        if let Some(ga) = g {
+            msg.push_str(&format!(" G={}×{}", ga.dim().1, ga.dim().0));
+        }
+        if let Some(ba) = b {
+            msg.push_str(&format!(" B={}×{}", ba.dim().1, ba.dim().0));
+        }
+        msg.push_str(". Use alignment or manually crop.");
+        bail!("{}", msg);
+    }
+
+    let crop_info = DimensionCrop {
+        original_r: r.map(|a| [a.dim().1, a.dim().0]),
+        original_g: g.map(|a| [a.dim().1, a.dim().0]),
+        original_b: b.map(|a| [a.dim().1, a.dim().0]),
+        cropped_to: [min_cols, min_rows],
+    };
+
+    let r_out = r.map(|a| {
+        if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
+    });
+    let g_out = g.map(|a| {
+        if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
+    });
+    let b_out = b.map(|a| {
+        if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
+    });
+
+    Ok((r_out, g_out, b_out, min_rows, min_cols, Some(crop_info)))
 }
 
 pub fn compose_rgb(
@@ -77,27 +170,19 @@ pub fn compose_rgb(
         bail!("Need at least 2 channels for RGB compose (got {})", count);
     }
 
-    let ref_channel = r_channel.or(g_channel).or(b_channel).unwrap();
-    let (rows, cols) = ref_channel.dim();
+    let (r_harm, g_harm, b_harm, rows, cols, dimension_crop) =
+        harmonize_dimensions(r_channel, g_channel, b_channel, config.dimension_tolerance)?;
 
-    for (ch, name) in [(r_channel, "R"), (g_channel, "G"), (b_channel, "B")] {
-        if let Some(arr) = ch {
-            let (cr, cc) = arr.dim();
-            if cr != rows || cc != cols {
-                bail!(
-                    "Channel {} has dimensions {}×{} but expected {}×{}",
-                    name, cc, cr, cols, rows
-                );
-            }
-        }
-    }
+    let r_ref = r_harm.as_ref();
+    let g_ref = g_harm.as_ref();
+    let b_ref = b_harm.as_ref();
 
     let (r_aligned, g_aligned, b_aligned, off_g, off_b) = if config.align && count >= 2 {
-        align_channels(r_channel, g_channel, b_channel, rows, cols)?
+        align_channels(r_ref, g_ref, b_ref, rows, cols)?
     } else {
-        let r = channel_or_synth(r_channel, g_channel, b_channel, rows, cols);
-        let g = channel_or_synth(g_channel, r_channel, b_channel, rows, cols);
-        let b = channel_or_synth(b_channel, r_channel, g_channel, rows, cols);
+        let r = channel_or_synth(r_ref, g_ref, b_ref, rows, cols);
+        let g = channel_or_synth(g_ref, r_ref, b_ref, rows, cols);
+        let b = channel_or_synth(b_ref, r_ref, g_ref, rows, cols);
         (r, g, b, (0, 0), (0, 0))
     };
 
@@ -191,6 +276,7 @@ pub fn compose_rgb(
         width: cols,
         height: rows,
         scnr_applied: config.scnr.is_some(),
+        dimension_crop,
     })
 }
 
@@ -265,6 +351,9 @@ fn align_channels(
 
 fn downsample_2x(img: &Array2<f32>) -> Array2<f32> {
     let (rows, cols) = img.dim();
+    if rows < 2 || cols < 2 {
+        return img.clone();
+    }
     let nr = rows / 2;
     let nc = cols / 2;
     Array2::from_shape_fn((nr, nc), |(r, c)| {
@@ -410,4 +499,3 @@ fn shift_image(image: &Array2<f32>, dy: i32, dx: i32) -> Array2<f32> {
 
     shifted
 }
-

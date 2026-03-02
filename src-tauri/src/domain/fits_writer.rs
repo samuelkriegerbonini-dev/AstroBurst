@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 
@@ -8,20 +7,15 @@ use ndarray::Array2;
 use crate::model::HduHeader;
 use crate::utils::constants::BLOCK_SIZE;
 
-
-
-
-
-
 #[derive(Debug, Clone, Default)]
 pub struct FitsWriteConfig {
-    
+
     pub extra_headers: HashMap<String, String>,
-    
+
     pub copy_wcs: bool,
-    
+
     pub copy_obs_metadata: bool,
-    
+
     pub software: Option<String>,
 }
 
@@ -34,10 +28,10 @@ pub fn write_fits_image(
 ) -> Result<String> {
     let (rows, cols) = image.dim();
 
-    
+
     let mut cards = Vec::new();
 
-    
+
     cards.push(("SIMPLE".into(), "T".into()));
     cards.push(("BITPIX".into(), "-32".into()));
     cards.push(("NAXIS".into(), "2".into()));
@@ -46,7 +40,7 @@ pub fn write_fits_image(
     cards.push(("BSCALE".into(), "1.0".into()));
     cards.push(("BZERO".into(), "0.0".into()));
 
-    
+
     if let Some(src) = source_header {
         if config.copy_wcs {
             for key in WCS_KEYS {
@@ -64,19 +58,19 @@ pub fn write_fits_image(
         }
     }
 
-    
+
     for (k, v) in &config.extra_headers {
-        
+
         cards.retain(|(ck, _)| ck != k);
         cards.push((k.clone(), v.clone()));
     }
 
-    
+
     if let Some(sw) = &config.software {
         cards.push(("HISTORY".into(), format!("Processed by {}", sw)));
     }
 
-    
+
     let file = std::fs::File::create(output_path)
         .with_context(|| format!("Cannot create {}", output_path))?;
     let mut writer = BufWriter::new(file);
@@ -110,7 +104,7 @@ pub fn write_fits_rgb(
     cards.push(("BSCALE".into(), "1.0".into()));
     cards.push(("BZERO".into(), "0.0".into()));
 
-    
+
     if let Some(src) = source_header {
         if config.copy_wcs {
             for key in WCS_KEYS {
@@ -143,12 +137,12 @@ pub fn write_fits_rgb(
 
     write_header_block(&mut writer, &cards)?;
 
-    
+
     write_f32_data_no_pad(&mut writer, r)?;
     write_f32_data_no_pad(&mut writer, g)?;
     write_f32_data_no_pad(&mut writer, b)?;
 
-    
+
     let total_bytes = 3 * rows * cols * 4;
     let remainder = total_bytes % BLOCK_SIZE;
     if remainder != 0 {
@@ -190,11 +184,11 @@ fn write_header_block(writer: &mut impl Write, cards: &[(String, String)]) -> Re
         block_bytes.extend_from_slice(card.as_bytes());
     }
 
-    
+
     let end_card = format!("{:<80}", "END");
     block_bytes.extend_from_slice(end_card.as_bytes());
 
-    
+
     let remainder = block_bytes.len() % BLOCK_SIZE;
     if remainder != 0 {
         let padding = BLOCK_SIZE - remainder;
@@ -206,14 +200,14 @@ fn write_header_block(writer: &mut impl Write, cards: &[(String, String)]) -> Re
 }
 
 fn format_card(key: &str, value: &str) -> String {
-    
+
     if key == "HISTORY" || key == "COMMENT" {
         return format!("{:<8}{:<72}", key, value);
     }
 
     let keyword = format!("{:<8}", &key[..key.len().min(8)]);
 
-    
+
     let trimmed = value.trim();
     let is_bool = trimmed == "T" || trimmed == "F";
     let is_numeric = trimmed.parse::<f64>().is_ok() || trimmed.parse::<i64>().is_ok();
@@ -223,7 +217,7 @@ fn format_card(key: &str, value: &str) -> String {
     } else if is_numeric {
         format!("{:>20}", trimmed)
     } else {
-        
+
         let s = if trimmed.len() < 8 {
             format!("{:<8}", trimmed)
         } else {
@@ -234,7 +228,7 @@ fn format_card(key: &str, value: &str) -> String {
 
     let card = format!("{}= {}", keyword, formatted_value);
 
-    
+
     format!("{:<80}", &card[..card.len().min(80)])
 }
 
@@ -259,7 +253,7 @@ fn write_f32_data(writer: &mut impl Write, image: &Array2<f32>) -> Result<()> {
 fn write_f32_data_no_pad(writer: &mut impl Write, image: &Array2<f32>) -> Result<()> {
     let (rows, cols) = image.dim();
 
-    
+
     let mut buf = Vec::with_capacity(cols * 4);
     for y in 0..rows {
         buf.clear();
@@ -315,21 +309,21 @@ mod tests {
 
         write_fits_image(&image, path, None, &config).unwrap();
 
-        
+
         let meta = std::fs::metadata(path).unwrap();
         let file_size = meta.len() as usize;
 
-        
+
         let data_size = 64 * 64 * 4;
         let padded_data = ((data_size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
         assert!(file_size >= BLOCK_SIZE + padded_data);
 
-        
+
         let file = std::fs::File::open(path).unwrap();
         let result = crate::utils::mmap::extract_image_mmap(&file).unwrap();
         assert_eq!(result.image.dim(), (64, 64));
 
-        
+
         let diff = (result.image[[0, 1]] - 1.0).abs();
         assert!(diff < 1e-4, "Pixel mismatch: expected 1.0, got {}", result.image[[0, 1]]);
 
