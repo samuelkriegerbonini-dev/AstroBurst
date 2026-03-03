@@ -271,13 +271,12 @@ Measured on consumer hardware (NVMe SSD, multi-core CPU):
 | STF render (GPU, 14K image) | ~470 MB | <16ms | — |
 
 ## Roadmap
-
-| Version | Features |
-|---------|----------|
-| **v0.3** | Deconvolution, background extraction, noise reduction |
-| **v0.4** | Star removal, photometric color calibration (Gaia DR3) |
-| **v0.5** | PixelMath expressions, mosaic stitching |
-| **v1.0** | Full GPU pipeline, plugin system (WASM), Python scripting |
+| Version  | Features                                                  | Estimated Release |
+|:---------|:----------------------------------------------------------|:------------------|
+| **v0.3** | Deconvolution, background extraction, noise reduction     | 15/03~ 22/03      |
+| **v0.4** | Star removal, photometric color calibration (Gaia DR3)    | May               |
+| **v0.5** | PixelMath expressions, mosaic stitching                   | ??                |
+| **v1.0** | Full GPU pipeline, plugin system (WASM), Python scripting | ??                |
 
 ## Contributing
 
