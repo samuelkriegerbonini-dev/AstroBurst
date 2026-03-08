@@ -1,4 +1,3 @@
-
 struct Uniforms {
     ref_width:   u32,
     ref_height:  u32,
@@ -21,15 +20,9 @@ struct ZnccResult {
     _pad:        u32,
 }
 
-
 @group(0) @binding(0) var<storage, read> ref_image: array<f32>;
 @group(0) @binding(1) var<storage, read> tgt_image: array<f32>;
-
-
 @group(1) @binding(0) var<uniform> params: Uniforms;
-
-
-
 @group(2) @binding(0) var<storage, read_write> scores: array<f32>;
 @group(2) @binding(1) var<storage, read_write> result: ZnccResult;
 
@@ -68,10 +61,6 @@ fn isNan(v: f32) -> bool {
 fn isInf(v: f32) -> bool {
     return abs(v) > 3.4e+38;
 }
-
-
-
-
 
 @compute @workgroup_size(256, 1, 1)
 fn zncc_compute(
@@ -112,7 +101,7 @@ fn zncc_compute(
     sh_count[tid] = local_count;
     workgroupBarrier();
 
-    
+
     for (var stride = WG_SIZE / 2u; stride > 0u; stride = stride / 2u) {
         if tid < stride {
             sh_r_sum[tid] += sh_r_sum[tid + stride];
@@ -134,7 +123,7 @@ fn zncc_compute(
     let t_mean = sh_t_sum[0] / f32(total_count);
     workgroupBarrier();
 
-    
+
     var local_num:   f32 = 0.0;
     var local_r_var: f32 = 0.0;
     var local_t_var: f32 = 0.0;

@@ -1,9 +1,4 @@
-export const FILE_STATUS = {
-  QUEUED: "queued",
-  PROCESSING: "processing",
-  DONE: "done",
-  ERROR: "error",
-} as const;
+import { FILE_STATUS } from "./constants";
 
 export type FileStatus = (typeof FILE_STATUS)[keyof typeof FILE_STATUS];
 
@@ -26,12 +21,41 @@ export interface ProcessedFile {
   finishedAt: number | null;
 }
 
+export interface ResampleResult {
+  png_path: string;
+  fits_path: string;
+  previewUrl?: string;
+  dimensions: [number, number];
+  original_dimensions: [number, number];
+  wcs_updates: Record<string, any>;
+  stats: {
+    min: number;
+    max: number;
+    mean: number;
+    sigma: number;
+  };
+}
+
 export interface ProcessResult {
   png_path: string;
   previewUrl: string;
   dimensions: [number, number];
   elapsed_ms: number;
   header?: Record<string, string> | null;
+  histogram?: HistogramData | null;
+  stf?: StfParams | null;
+  stats?: {
+    min: number;
+    max: number;
+    mean: number;
+    sigma: number;
+    median: number;
+    mad?: number;
+  } | null;
+  original_dimensions?: [number, number];
+  wcs_updates?: Record<string, any>;
+  resampled?: ResampleResult | null;
+  resampledPath?: string | null;
 }
 
 export interface HistogramData {
@@ -45,7 +69,8 @@ export interface HistogramData {
   mad: number;
   total_pixels: number;
   auto_stf: StfParams;
-  elapsed_ms: number;
+  elapsed_ms?: number;
+  bin_edges: number[];
 }
 
 export interface StfParams {
@@ -83,6 +108,15 @@ export interface RawPixelData {
   max: number;
 }
 
+export interface FftData {
+  pixels: Uint8Array;
+  width: number;
+  height: number;
+  dc_magnitude: number;
+  max_magnitude: number;
+  elapsed_ms: number;
+}
+
 export interface RgbComposeResult {
   png_path: string;
   previewUrl: string;
@@ -94,29 +128,6 @@ export interface RgbComposeResult {
   elapsed_ms: number;
 }
 
-/**
- * @interface DrizzleRgbResult
- * @description Result from the integrated RGB drizzle pipeline
- *
- * This interface represents the output of the drizzle_rgb_cmd command,
- * which performs drizzle stacking on three color channels and composes
- * them into a single RGB image.
- *
- * @property {string} png_path - Absolute path to the output RGB PNG preview
- * @property {string} previewUrl - Tauri asset protocol URL for webview display
- * @property {string} fits_path - Absolute path to the output RGB FITS file
- * @property {[number, number]} input_dims - Original input dimensions [width, height]
- * @property {[number, number]} output_dims - Drizzled output dimensions [width, height]
- * @property {number} frame_count_r - Number of frames processed for red channel
- * @property {number} frame_count_g - Number of frames processed for green channel
- * @property {number} frame_count_b - Number of frames processed for blue channel
- * @property {number} rejected_pixels - Total number of sigma-rejected pixels
- * @property {number} elapsed_ms - Total processing time in milliseconds
- * @property {number} scale - Applied drizzle scale factor
- * @property {ChannelStats} stats_r - Red channel statistics (median, sigma, etc.)
- * @property {ChannelStats} stats_g - Green channel statistics
- * @property {ChannelStats} stats_b - Blue channel statistics
- */
 export interface DrizzleRgbResult {
   png_path: string;
   previewUrl: string;
@@ -134,10 +145,6 @@ export interface DrizzleRgbResult {
   stats_b: ChannelStats | null;
 }
 
-/**
- * @interface ChannelStats
- * @description Per-channel statistics from drizzle processing
- */
 export interface ChannelStats {
   median: number;
   mean: number;
@@ -146,21 +153,6 @@ export interface ChannelStats {
   max: number;
 }
 
-/**
- * @interface DrizzleRgbOptions
- * @description Configuration options for the RGB drizzle pipeline
- *
- * @property {number} scale - Output scale factor (1.5, 2.0, or 3.0)
- * @property {number} pixfrac - Pixel fraction / drop shrink factor (0.1 to 1.0)
- * @property {string} kernel - Interpolation kernel: 'square' | 'gaussian' | 'lanczos3'
- * @property {number} sigmaLow - Lower sigma clipping threshold
- * @property {number} sigmaHigh - Upper sigma clipping threshold
- * @property {boolean} align - Enable sub-pixel alignment via ZNCC
- * @property {string} wbMode - White balance mode: 'auto' | 'none' | 'manual'
- * @property {boolean} scnrEnabled - Enable SCNR green removal
- * @property {string} scnrMethod - SCNR method: 'average' | 'maximum'
- * @property {number} scnrAmount - SCNR strength (0.0 to 1.0)
- */
 export interface DrizzleRgbOptions {
   scale?: number;
   pixfrac?: number;

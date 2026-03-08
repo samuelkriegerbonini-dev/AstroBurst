@@ -1,12 +1,4 @@
-import { motion } from "framer-motion";
 import { Telescope, Upload, FolderOpen } from "lucide-react";
-
-const scaleIn = {
-  initial: { scale: 0.95, opacity: 0 },
-  animate: { scale: 1, opacity: 1 },
-  exit: { scale: 0.95, opacity: 0 },
-  transition: { duration: 0.3 },
-};
 
 export default function EmptyState({ onBrowseFiles, onSelectFolder }) {
   const handleBrowse = (e) => {
@@ -22,9 +14,8 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }) {
   };
 
   return (
-    <motion.div
-      className="flex flex-col items-center justify-center h-full"
-      {...scaleIn}
+    <div
+      className="flex flex-col items-center justify-center h-full animate-fade-in"
     >
       <div className="relative">
         <div className="relative border-2 border-dashed border-zinc-700 hover:border-blue-500 rounded-2xl px-16 py-12 transition-all duration-300 hover:scale-[1.01] hover:shadow-[0_0_30px_rgba(59,130,246,0.15)] group cursor-default">
@@ -40,7 +31,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }) {
 
             <div className="text-center">
               <h2 className="text-xl font-semibold text-zinc-100 mb-2">
-                Drop your .fits files here to begin
+                Drop your .fits / .asdf files here to begin
               </h2>
               <p className="text-zinc-500 text-sm">
                 or use the buttons below
@@ -80,12 +71,13 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }) {
           Supports{" "}
           <span className="font-mono text-zinc-500">.fits</span>{" "}
           <span className="font-mono text-zinc-500">.fit</span>{" "}
-          <span className="font-mono text-zinc-500">.fts</span>
+          <span className="font-mono text-zinc-500">.fts</span>{" "}
+          <span className="font-mono text-zinc-500">.asdf</span>
         </p>
         <p className="text-zinc-600 text-xs mt-1">
           JWST / HST / Generic
         </p>
       </div>
-    </motion.div>
+    </div>
   );
 }

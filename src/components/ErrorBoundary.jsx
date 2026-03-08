@@ -12,7 +12,7 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error("AstroKit Error:", error, errorInfo);
+    console.error("AstroBurst Error:", error, errorInfo);
   }
 
   render() {
@@ -24,7 +24,7 @@ export default class ErrorBoundary extends Component {
           </div>
           <h1 className="text-2xl font-semibold">Something went wrong</h1>
           <p className="text-zinc-400 text-center max-w-md">
-            AstroKit encountered an unexpected error. This might be a temporary
+            AstroBurst encountered an unexpected error. This might be a temporary
             issue. Try restarting the application.
           </p>
           <code className="text-xs text-zinc-500 font-mono bg-zinc-900 px-4 py-2 rounded-lg max-w-lg overflow-hidden text-ellipsis">

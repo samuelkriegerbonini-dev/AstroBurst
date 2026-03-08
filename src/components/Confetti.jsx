@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useState, useRef, memo } from "react";
 
 const COLORS = ["#3b82f6", "#22c55e", "#a855f7", "#eab308", "#ef4444"];
 const PARTICLE_COUNT = 40;
@@ -12,55 +11,45 @@ function generateParticles() {
     size: Math.random() * 6 + 4,
     delay: Math.random() * 0.5,
     duration: Math.random() * 1.5 + 1.5,
+    isCircle: Math.random() > 0.5,
   }));
 }
 
-export default function Confetti({ show }) {
+function Confetti({ show }) {
   const [particles, setParticles] = useState([]);
+  const timerRef = useRef(null);
 
   useEffect(() => {
     if (show) {
       setParticles(generateParticles());
-      const timer = setTimeout(() => setParticles([]), 3000);
-      return () => clearTimeout(timer);
+      timerRef.current = setTimeout(() => setParticles([]), 3000);
+      return () => clearTimeout(timerRef.current);
     }
     setParticles([]);
   }, [show]);
 
+  if (particles.length === 0) return null;
+
   return (
-    <AnimatePresence>
-      {particles.length > 0 && (
-        <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden">
-          {particles.map((p) => (
-            <motion.div
-              key={p.id}
-              initial={{
-                x: `${p.x}vw`,
-                y: -20,
-                rotate: 0,
-                opacity: 1,
-              }}
-              animate={{
-                y: "110vh",
-                rotate: 720,
-                opacity: 0,
-              }}
-              transition={{
-                duration: p.duration,
-                delay: p.delay,
-                ease: "easeOut",
-              }}
-              style={{
-                position: "absolute",
-                width: p.size,
-                height: p.size,
-                backgroundColor: p.color,
-                borderRadius: Math.random() > 0.5 ? "50%" : "2px",
-              }}
-            />
-          ))}
-        </div>
-      )}
-    </AnimatePresence>
+    <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden">
+      {particles.map((p) => (
+        <div
+          key={p.id}
+          className="confetti-particle absolute"
+          style={{
+            left: `${p.x}vw`,
+            top: -20,
+            width: p.size,
+            height: p.size,
+            backgroundColor: p.color,
+            borderRadius: p.isCircle ? "50%" : "2px",
+            animationDuration: `${p.duration}s`,
+            animationDelay: `${p.delay}s`,
+          }}
+        />
+      ))}
+    </div>
   );
 }
+
+export default memo(Confetti);

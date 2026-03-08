@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Mutex;
 
@@ -7,78 +6,16 @@ use memmap2::Mmap;
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 
-use crate::model::HduHeader;
-use crate::domain::stats;
-use crate::utils::mmap::{create_mmap_random, decode_pixels, decode_single_pixel, parse_header_at};
+use crate::types::HduHeader;
+use crate::math::median::f32_cmp;
+use crate::core::imaging::stats;
+use crate::infra::fits::reader::{create_mmap_random, decode_pixels, decode_single_pixel, parse_header_at};
 
-#[derive(Debug, Clone)]
-pub struct CubeGeometry {
-    pub naxis1: usize,
-    pub naxis2: usize,
-    pub naxis3: usize,
-    pub bitpix: i64,
-    pub bytes_per_pixel: usize,
-    pub bzero: f64,
-    pub bscale: f64,
-    pub data_offset: usize,
-    pub frame_bytes: usize,
-}
-
-struct CacheEntry {
-    frame: Array2<f32>,
-    last_access: u64,
-}
-
-struct LruFrameCache {
-    entries: HashMap<usize, CacheEntry>,
-    max_entries: usize,
-    access_counter: u64,
-}
-
-impl LruFrameCache {
-    fn new(max_entries: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            max_entries,
-            access_counter: 0,
-        }
-    }
-
-    fn get(&mut self, frame_idx: usize) -> Option<Array2<f32>> {
-        if let Some(entry) = self.entries.get_mut(&frame_idx) {
-            self.access_counter += 1;
-            entry.last_access = self.access_counter;
-            Some(entry.frame.clone())
-        } else {
-            None
-        }
-    }
-
-    fn insert(&mut self, frame_idx: usize, frame: Array2<f32>) {
-        if self.entries.len() >= self.max_entries && !self.entries.contains_key(&frame_idx) {
-            if let Some((&evict_key, _)) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_access)
-            {
-                self.entries.remove(&evict_key);
-            }
-        }
-        self.access_counter += 1;
-        self.entries.insert(
-            frame_idx,
-            CacheEntry {
-                frame,
-                last_access: self.access_counter,
-            },
-        );
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.access_counter = 0;
-    }
-}
+pub use crate::core::cube::lazy::{
+    CubeGeometry, LruFrameCache, LazyCubeResult,
+    normalize_frame_with_stats,
+};
+pub use crate::core::cube::eager::GlobalCubeStats;
 
 const DEFAULT_CACHE_SIZE: usize = 64;
 
@@ -160,14 +97,6 @@ impl LazyCube {
         }
 
         bail!("No 3D data block found in FITS file")
-    }
-
-    pub fn depth(&self) -> usize {
-        self.geometry.naxis3
-    }
-
-    pub fn frame_shape(&self) -> (usize, usize) {
-        (self.geometry.naxis2, self.geometry.naxis1)
     }
 
     pub fn get_frame(&self, z: usize) -> Result<Array2<f32>> {
@@ -301,7 +230,7 @@ impl LazyCube {
                 }
                 let mid = vals.len() / 2;
                 vals.select_nth_unstable_by(mid, |a, b| {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    f32_cmp(a, b)
                 });
                 vals[mid]
             })
@@ -344,18 +273,18 @@ impl LazyCube {
         let n = sampled.len();
         let mid = n / 2;
         sampled.select_nth_unstable_by(mid, |a, b| {
-            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            f32_cmp(a, b)
         });
         let median = sampled[mid];
 
         let mut deviations: Vec<f32> = sampled.iter().map(|v| (v - median).abs()).collect();
         let dev_mid = deviations.len() / 2;
         deviations.select_nth_unstable_by(dev_mid, |a, b| {
-            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            f32_cmp(a, b)
         });
         let sigma = (deviations[dev_mid] * 1.4826).max(1e-10);
 
-        sampled.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sampled.sort_unstable_by(|a, b| f32_cmp(a, b));
         let low = sampled[(n as f64 * 0.01) as usize];
         let high = sampled[((n as f64 * 0.999) as usize).min(n - 1)];
 
@@ -366,40 +295,6 @@ impl LazyCube {
             high,
         })
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GlobalCubeStats {
-    pub median: f32,
-    pub sigma: f32,
-    pub low: f32,
-    pub high: f32,
-}
-
-pub fn normalize_frame_with_stats(data: &Array2<f32>, stats: &GlobalCubeStats) -> Array2<f32> {
-    let alpha: f32 = 10.0;
-    let inv_sigma_alpha = alpha / stats.sigma;
-
-    data.mapv(|v| {
-        if !v.is_finite() {
-            return 0.0;
-        }
-        let clamped = v.clamp(stats.low, stats.high);
-        let scaled = inv_sigma_alpha * (clamped - stats.median);
-        scaled.asinh()
-    })
-}
-
-#[derive(Debug, Clone)]
-pub struct LazyCubeResult {
-    pub dimensions: [usize; 3],
-    pub collapsed_path: String,
-    pub collapsed_median_path: String,
-    pub frames_dir: String,
-    pub frame_count: usize,
-    pub total_frames: usize,
-    pub center_spectrum: Vec<f32>,
-    pub wavelengths: Option<Vec<f64>>,
 }
 
 pub fn process_cube_lazy(
@@ -417,16 +312,16 @@ pub fn process_cube_lazy(
         .with_context(|| format!("Failed to create output dir {}", output_dir))?;
 
     let collapsed = lazy.collapse_mean_lazy()?;
-    let collapsed_norm = crate::domain::normalize::asinh_normalize(&collapsed);
+    let collapsed_norm = crate::core::imaging::normalize::asinh_normalize(&collapsed);
     let collapsed_path = format!("{}/collapsed_mean.png", output_dir);
-    crate::utils::render::render_grayscale(&collapsed_norm, &collapsed_path)?;
+    crate::infra::render::render_grayscale(&collapsed_norm, &collapsed_path)?;
 
     lazy.clear_cache();
 
     let collapsed_med = lazy.collapse_median_lazy()?;
-    let collapsed_med_norm = crate::domain::normalize::asinh_normalize(&collapsed_med);
+    let collapsed_med_norm = crate::core::imaging::normalize::asinh_normalize(&collapsed_med);
     let collapsed_med_path = format!("{}/collapsed_median.png", output_dir);
-    crate::utils::render::render_grayscale(&collapsed_med_norm, &collapsed_med_path)?;
+    crate::infra::render::render_grayscale(&collapsed_med_norm, &collapsed_med_path)?;
 
     lazy.clear_cache();
 
@@ -447,7 +342,7 @@ pub fn process_cube_lazy(
         let frame = lazy.get_frame(z)?;
         let normalized = normalize_frame_with_stats(&frame, &stats);
         let path = format!("{}/frame_{:04}.png", frames_dir, frame_count);
-        crate::utils::render::render_grayscale(&normalized, &path)?;
+        crate::infra::render::render_grayscale(&normalized, &path)?;
         frame_count += 1;
     }
 
@@ -461,41 +356,4 @@ pub fn process_cube_lazy(
         center_spectrum: spectrum,
         wavelengths,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_lru_cache() {
-        let mut cache = LruFrameCache::new(2);
-        let frame1 = Array2::<f32>::zeros((3, 3));
-        let frame2 = Array2::<f32>::ones((3, 3));
-        let frame3 = Array2::<f32>::from_elem((3, 3), 2.0);
-
-        cache.insert(0, frame1);
-        cache.insert(1, frame2);
-        cache.insert(2, frame3);
-
-        assert!(cache.get(0).is_none());
-        assert!(cache.get(1).is_some());
-        assert!(cache.get(2).is_some());
-    }
-
-    #[test]
-    fn test_normalize_frame_with_stats() {
-        let frame = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-        let stats = GlobalCubeStats {
-            median: 2.5,
-            sigma: 1.0,
-            low: 1.0,
-            high: 4.0,
-        };
-        let normalized = normalize_frame_with_stats(&frame, &stats);
-        assert_eq!(normalized.dim(), (2, 2));
-        for &v in normalized.iter() {
-            assert!(v.is_finite());
-        }
-    }
 }

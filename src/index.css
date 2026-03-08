@@ -16,6 +16,18 @@
   --font-mono: "JetBrains Mono", monospace;
 }
 
+:root {
+  --ab-blue: #3b82f6;
+  --ab-teal: #14b8a6;
+  --ab-cyan: #22d3ee;
+  --ab-gold: #f59e0b;
+  --ab-green: #10b981;
+  --ab-deep: #050510;
+  --ab-glow-teal: rgba(20, 184, 166, 0.35);
+  --ab-glow-blue: rgba(59, 130, 246, 0.3);
+  --ab-glow-gold: rgba(245, 158, 11, 0.25);
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -26,7 +38,7 @@ body {
   font-family: "Inter", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #09090b;
+  background-color: var(--ab-deep);
   color: #fafafa;
   overflow: hidden;
   user-select: none;
@@ -37,21 +49,25 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #27272a;
-  border-radius: 3px;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #52525b;
+  background: rgba(20, 184, 166, 0.2);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #71717a;
+  background: rgba(20, 184, 166, 0.4);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 @keyframes dash-offset {
@@ -65,16 +81,13 @@ body {
 }
 
 @keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
-  50% { box-shadow: 0 0 20px 4px rgba(59, 130, 246, 0.3); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(20, 184, 166, 0); }
+  50% { box-shadow: 0 0 20px 4px var(--ab-glow-teal); }
 }
 
-.animate-shimmer {
-  animation: shimmer 1.5s infinite;
-}
-
-.animate-pulse-glow {
-  animation: pulse-glow 2s infinite;
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes confetti-fall {
@@ -88,6 +101,57 @@ body {
   }
 }
 
+@keyframes cosmic-border {
+  0%, 100% { border-color: rgba(20, 184, 166, 0.15); }
+  50% { border-color: rgba(20, 184, 166, 0.3); }
+}
+
+@keyframes cosmic-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
 .confetti-particle {
   animation: confetti-fall 2s ease-out forwards;
+}
+
+.cosmic-border-glow {
+  border-image: linear-gradient(90deg, transparent, var(--ab-teal), transparent) 1;
+  animation: cosmic-border 4s ease-in-out infinite;
+}
+
+.cosmic-text {
+  background: linear-gradient(135deg, var(--ab-teal), var(--ab-cyan), var(--ab-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.cosmic-text-gold {
+  background: linear-gradient(135deg, var(--ab-gold), #fbbf24, var(--ab-teal));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.cosmic-progress {
+  background: linear-gradient(90deg, var(--ab-teal), var(--ab-cyan), var(--ab-blue), var(--ab-teal));
+  background-size: 200% 100%;
+  animation: cosmic-shimmer 3s linear infinite;
+}
+
+.cosmic-sidebar-glow {
+  background: linear-gradient(180deg, rgba(20, 184, 166, 0.03) 0%, transparent 50%, rgba(59, 130, 246, 0.03) 100%);
 }

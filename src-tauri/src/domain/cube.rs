@@ -1,129 +1,19 @@
 use std::fs::{self, File};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
-use ndarray::{Array2, Array3};
+use anyhow::{Context, Result};
+use ndarray::Array3;
 use rayon::prelude::*;
 
-use crate::domain::normalize::asinh_normalize;
-use crate::model::HduHeader;
-use crate::utils::mmap::extract_cube_mmap;
-use crate::utils::render::render_grayscale;
-use crate::utils::simd::collapse_mean_simd;
+use crate::core::imaging::normalize::asinh_normalize;
+use crate::infra::fits::reader::extract_cube_mmap;
+use crate::infra::render::render_grayscale;
 
-pub fn collapse_mean(cube: &Array3<f32>) -> Array2<f32> {
-    collapse_mean_simd(cube)
-}
-
-pub fn collapse_median(cube: &Array3<f32>) -> Array2<f32> {
-    let (depth, rows, cols) = cube.dim();
-    let npix = rows * cols;
-
-    let result_data: Vec<f32> = (0..npix)
-        .into_par_iter()
-        .map(|i| {
-            let y = i / cols;
-            let x = i % cols;
-            let mut vals: Vec<f32> = (0..depth)
-                .map(|z| cube[[z, y, x]])
-                .filter(|v| v.is_finite() && *v != 0.0)
-                .collect();
-
-            if vals.is_empty() {
-                return 0.0;
-            }
-
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            vals[mid]
-        })
-        .collect();
-
-    Array2::from_shape_vec((rows, cols), result_data).unwrap()
-}
-
-pub fn extract_spectrum(cube: &Array3<f32>, y: usize, x: usize) -> Vec<f32> {
-    let depth = cube.dim().0;
-    (0..depth).map(|z| cube[[z, y, x]]).collect()
-}
-
-pub fn build_wavelength_axis(header: &HduHeader) -> Option<Vec<f64>> {
-    let crval3 = header.get_f64("CRVAL3")?;
-    let cdelt3 = header.get_f64("CDELT3")?;
-    let crpix3 = header.get_f64("CRPIX3").unwrap_or(1.0);
-    let naxis3 = header.get_i64("NAXIS3")? as usize;
-
-    let axis: Vec<f64> = (0..naxis3)
-        .map(|i| crval3 + (i as f64 - crpix3 + 1.0) * cdelt3)
-        .collect();
-
-    Some(axis)
-}
-
-struct GlobalStats {
-    median: f32,
-    sigma: f32,
-    low: f32,
-    high: f32,
-}
-
-fn compute_global_stats(cube: &Array3<f32>) -> GlobalStats {
-    let mut finite: Vec<f32> = cube
-        .iter()
-        .filter(|v| v.is_finite() && **v != 0.0)
-        .copied()
-        .collect();
-
-    if finite.is_empty() {
-        return GlobalStats {
-            median: 0.0,
-            sigma: 1.0,
-            low: 0.0,
-            high: 1.0,
-        };
-    }
-
-    let n = finite.len();
-    let mid = n / 2;
-    finite.select_nth_unstable_by(mid, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let median = finite[mid];
-
-    let mut deviations: Vec<f32> = finite.iter().map(|v| (v - median).abs()).collect();
-    let dev_mid = deviations.len() / 2;
-    deviations.select_nth_unstable_by(dev_mid, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let sigma = (deviations[dev_mid] * 1.4826).max(1e-10);
-
-    finite.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let low = finite[(n as f64 * 0.01) as usize];
-    let high = finite[((n as f64 * 0.999) as usize).min(n - 1)];
-
-    GlobalStats {
-        median,
-        sigma,
-        low,
-        high,
-    }
-}
-
-fn normalize_with_global(data: &Array2<f32>, g: &GlobalStats) -> Array2<f32> {
-    let alpha: f32 = 10.0;
-    let inv_sigma_alpha = alpha / g.sigma;
-
-    data.mapv(|v| {
-        if !v.is_finite() {
-            return 0.0;
-        }
-        let clamped = v.clamp(g.low, g.high);
-        let scaled = inv_sigma_alpha * (clamped - g.median);
-        scaled.asinh()
-    })
-}
+pub use crate::core::cube::eager::{
+    CubeResult,
+    collapse_mean, collapse_median, extract_spectrum,
+    build_wavelength_axis, compute_global_stats, normalize_with_global,
+};
 
 pub fn export_cube_frames_sampled(
     cube: &Array3<f32>,
@@ -155,10 +45,10 @@ pub fn process_cube(
     frame_step: usize,
 ) -> Result<CubeResult> {
     let (actual_fits_path, _tmp_holder) = if input_path.to_lowercase().ends_with(".zip") {
-        let resolved = crate::utils::dispatcher::resolve_input(std::path::Path::new(input_path))
+        let resolved = crate::infra::fits::dispatcher::resolve_input(std::path::Path::new(input_path))
             .with_context(|| format!("Failed to resolve ZIP input {}", input_path))?;
         match resolved {
-            crate::utils::dispatcher::ResolvedInput::ExtractedFromZip { files, _tmp } => {
+            crate::infra::fits::dispatcher::ResolvedInput::ExtractedFromZip { files, _tmp } => {
                 let first = files
                     .into_iter()
                     .next()
@@ -210,15 +100,4 @@ pub fn process_cube(
         center_spectrum: spectrum,
         wavelengths,
     })
-}
-
-#[derive(Debug, Clone)]
-pub struct CubeResult {
-    pub dimensions: [usize; 3],
-    pub collapsed_path: String,
-    pub collapsed_median_path: String,
-    pub frames_dir: String,
-    pub frame_count: usize,
-    pub center_spectrum: Vec<f32>,
-    pub wavelengths: Option<Vec<f64>>,
 }

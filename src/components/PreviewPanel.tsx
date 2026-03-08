@@ -1,27 +1,75 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Image, Download, Cpu, Zap } from "lucide-react";
+import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense, memo } from "react";
+import {
+  Image,
+  Cpu,
+  Zap,
+  BarChart3,
+  Layers,
+  Sparkles,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  X,
+  Info as InfoIcon,
+  FileText,
+  PackageOpen,
+  Layers2,
+  Settings,
+} from "lucide-react";
 
-import HeaderTable from "./HeaderTable";
-import HistogramPanel from "./HistogramPanel";
-import FFTPanel from "./FFTPanel";
-import SpectroscopyPanel from "./SpectroscopyPanel";
-import GpuRenderer from "./GpuRenderer";
-import PlateSolvePanel from "./PlateSolvePanel";
-import RgbComposePanel from "./RgbComposePanel";
-import DrizzleRgbPanel from "./DrizzleRgbPanel";
-import ExportPanel from "./ExportPanel";
-import HeaderExplorerPanel from "./HeaderExplorerPanel";
-import DrizzlePanel from "./DrizzlePanel";
 import { useBackend } from "../hooks/useBackend";
-import type { ProcessedFile, StfParams, RawPixelData, HeaderData } from "../utils/types";
+import { probeGpu, isGpuAvailable } from "../context/Gpucontext";
+import { PreviewProvider, usePreviewContext } from "../context/PreviewContext";
+import WcsReadout from "./header/WcsReadout";
+import type { ProcessedFile } from "../utils/types";
 
-const fadeIn = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1 },
-  exit: { opacity: 0 },
-  transition: { duration: 0.2 },
-};
+const PreviewTab = lazy(() => import("./preview/PreviewTab"));
+const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
+const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
+const ComposeTab = lazy(() => import("./compose/ComposeTab"));
+const HeadersTab = lazy(() => import("./header/HeadersTab"));
+const ExportTab = lazy(() => import("./export/ExportTab"));
+const StackingTab = lazy(() => import("./stacking/StackingTab"));
+const ConfigTab = lazy(() => import("./preview/ConfigTab"));
+
+type BottomTabId = "info" | "analysis" | "headers" | "export";
+type SideTabId = "processing" | "compose" | "stacking" | "config";
+
+interface TabDef<T> {
+  id: T;
+  label: string;
+  icon: typeof Image;
+}
+
+const BOTTOM_TABS: TabDef<BottomTabId>[] = [
+  { id: "info", label: "Info", icon: InfoIcon },
+  { id: "analysis", label: "Analysis", icon: BarChart3 },
+  { id: "headers", label: "Headers", icon: FileText },
+  { id: "export", label: "Export", icon: PackageOpen },
+];
+
+const SIDE_TABS: TabDef<SideTabId>[] = [
+  { id: "processing", label: "Processing", icon: Sparkles },
+  { id: "compose", label: "Compose", icon: Layers },
+  { id: "stacking", label: "Stacking", icon: Layers2 },
+  { id: "config", label: "Settings", icon: Settings },
+];
+
+const BOTTOM_MIN = 28;
+const BOTTOM_DEFAULT = 220;
+const BOTTOM_MAX = 500;
+const SIDE_PANEL_DEFAULT = 380;
+const SIDE_PANEL_MAX = 600;
+const SIDE_PANEL_MIN_W = 280;
+const EMPTY_SPECTRUM: number[] = [];
+
+function TabSpinner() {
+  return (
+    <div className="flex items-center justify-center py-12">
+      <Loader2 size={20} className="animate-spin" style={{ color: "var(--ab-teal)" }} />
+    </div>
+  );
+}
 
 interface PreviewPanelProps {
   file: ProcessedFile | null;
@@ -29,182 +77,67 @@ interface PreviewPanelProps {
 }
 
 export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
-  const {
-    computeHistogram,
-    applyStfRender,
-    getRawPixels,
-    getCubeSpectrum,
-    getCubeInfo,
-    detectStars,
-    composeRgb,
-    exportFits,
-    exportFitsRgb,
-    computeFftSpectrum,
-    getFullHeader,
-    drizzleStack,
-    drizzleRgb,
-  } = useBackend();
+  return (
+    <PreviewProvider file={file} allFiles={allFiles}>
+      <PreviewPanelInner />
+    </PreviewProvider>
+  );
+}
 
-  const [histData, setHistData] = useState<any>(null);
-  const [stfParams, setStfParams] = useState<StfParams>({
-    shadow: 0,
-    midtone: 0.5,
-    highlight: 1,
-  });
-  const [stfPreviewUrl, setStfPreviewUrl] = useState<string | null>(null);
+function PreviewPanelInner() {
+  const { file, isCube, rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = usePreviewContext();
+  const { getCubeSpectrum } = useBackend();
+
+  const [activeBottomTab, setActiveBottomTab] = useState<BottomTabId>("info");
+  const [activeSideTab, setActiveSideTab] = useState<SideTabId | null>(null);
   const [useGpu, setUseGpu] = useState(false);
-  const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
-  const [spectrum, setSpectrum] = useState<number[]>([]);
+  const [gpuAvailable, setGpuAvailable] = useState<boolean | null>(null);
+  const [bottomOpen, setBottomOpen] = useState(true);
+  const [, forceRender] = useState(0);
+
+  const [spectrum, setSpectrum] = useState<number[]>(EMPTY_SPECTRUM);
   const [specWavelengths, setSpecWavelengths] = useState<number[] | null>(null);
   const [specCoord, setSpecCoord] = useState<{ x: number; y: number } | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
   const [specElapsed, setSpecElapsed] = useState(0);
-  const [cubeDims, setCubeDims] = useState<any>(null);
-  const [isCube, setIsCube] = useState(false);
-  const prevFileIdRef = useRef<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previewImgRef = useRef<HTMLImageElement>(null);
+
+  const [mousePixel, setMousePixel] = useState<{ x: number; y: number } | null>(null);
+
+  const bottomHeightRef = useRef(BOTTOM_DEFAULT);
+  const bottomResizing = useRef(false);
+  const bottomElRef = useRef<HTMLDivElement>(null);
+
+  const sidePanelWidthRef = useRef(SIDE_PANEL_DEFAULT);
+  const sidePanelResizing = useRef(false);
+  const sidePanelElRef = useRef<HTMLDivElement>(null);
+
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
-  const [starResult, setStarResult] = useState<any>(null);
-  const [starLoading, setStarLoading] = useState(false);
-  const [rgbResult, setRgbResult] = useState<any>(null);
-  const [rgbLoading, setRgbLoading] = useState(false);
-  const [rgbChannels, setRgbChannels] = useState<any>(null);
-  const [drizzleResult, setDrizzleResult] = useState<any>(null);
-  const [drizzleLoading, setDrizzleLoading] = useState(false);
-  const [drizzleRgbResult, setDrizzleRgbResult] = useState<any>(null);
-  const [drizzleRgbLoading, setDrizzleRgbLoading] = useState(false);
-  const [drizzleRgbProgress, setDrizzleRgbProgress] = useState(0);
-  const [drizzleRgbStage, setDrizzleRgbStage] = useState("");
-  const [exportResult, setExportResult] = useState<any>(null);
-  const [exportLoading, setExportLoading] = useState(false);
-  const [headerData, setHeaderData] = useState<HeaderData | null>(null);
-  const [headerLoading, setHeaderLoading] = useState(false);
-  const [previewError, setPreviewError] = useState(false);
+  const prevFileIdRef = useRef<string | null>(null);
+  const specAbortRef = useRef(0);
 
   useEffect(() => {
-    if (!file || !file.path || file.id === prevFileIdRef.current) return;
-    prevFileIdRef.current = file.id;
-
-    setHistData(null);
-    setStfPreviewUrl(null);
-    setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
-    setRawPixels(null);
-    setUseGpu(false);
-    setSpectrum([]);
-    setSpecWavelengths(null);
-    setSpecCoord(null);
-    setCubeDims(null);
-    setIsCube(false);
-    setStarResult(null);
-    setRgbResult(null);
-    setRgbChannels(null);
-    setDrizzleResult(null);
-    setDrizzleRgbResult(null);
-    setExportResult(null);
-    setHeaderData(null);
-    setPreviewError(false);
-
-    computeHistogram(file.path)
-      .then((data: any) => {
-        setHistData(data);
-        if (data.auto_stf) {
-          setStfParams(data.auto_stf);
-        }
-      })
-      .catch((err: any) => console.error("Histogram fetch failed:", err));
-
-    const naxis3 = file.result?.header?.NAXIS3;
-    if (naxis3 && parseInt(naxis3, 10) > 1) {
-      setIsCube(true);
-      getCubeInfo(file.path)
-        .then((info: any) => setCubeDims(info))
-        .catch(() => {});
-    }
-  }, [file?.id]);
-
-  const handleLoadHeader = useCallback(
-    async (path: string) => {
-      setHeaderLoading(true);
-      try {
-        const data = await getFullHeader(path);
-        setHeaderData(data);
-      } catch (e) {
-        console.error("Header load failed:", e);
-        throw e;
-      } finally {
-        setHeaderLoading(false);
-      }
-    },
-    [getFullHeader],
-  );
-
-  const handleStfChange = useCallback(
-    (params: StfParams) => {
-      setStfParams(params);
-      if (useGpu) return;
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(async () => {
-        if (!file?.path) return;
-        try {
-          const result = await applyStfRender(
-            file.path,
-            "./output",
-            params.shadow,
-            params.midtone,
-            params.highlight,
-          );
-          if (result.previewUrl) {
-            setStfPreviewUrl(result.previewUrl);
-            setPreviewError(false);
-          }
-        } catch (e) {
-          console.error("STF render failed:", e);
-        }
-      }, 150);
-    },
-    [file?.path, useGpu, applyStfRender],
-  );
-
-  const handleAutoStf = useCallback(() => {
-    if (histData?.auto_stf) {
-      const params = histData.auto_stf;
-      setStfParams(params);
-      handleStfChange(params);
-    }
-  }, [histData, handleStfChange]);
-
-  const handleResetStf = useCallback(() => {
-    const params: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
-    setStfParams(params);
-    setStfPreviewUrl(null);
+    probeGpu().then(() => setGpuAvailable(isGpuAvailable() === true));
   }, []);
 
-  const handleToggleGpu = useCallback(async () => {
+  useEffect(() => {
+    if (!file || file.id === prevFileIdRef.current) return;
+    prevFileIdRef.current = file.id;
+    setUseGpu(false);
+    setSpectrum(EMPTY_SPECTRUM);
+    setSpecWavelengths(null);
+    setSpecCoord(null);
+    specAbortRef.current++;
+  }, [file?.id]);
+
+  const handleToggleGpu = useCallback(() => {
     if (useGpu) {
       setUseGpu(false);
-      setRawPixels(null);
-      return;
-    }
-    if (!file?.path) return;
-    try {
-      const result = await getRawPixels(file.path);
-      const binary = atob(result.data_b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const f32 = new Float32Array(bytes.buffer);
-      setRawPixels({
-        data: f32,
-        width: result.width,
-        height: result.height,
-        min: result.data_min,
-        max: result.data_max,
-      });
+      clearRawPixels();
+    } else {
       setUseGpu(true);
-    } catch (e) {
-      console.error("Failed to load raw pixels:", e);
+      loadRawPixels();
     }
-  }, [useGpu, file?.path, getRawPixels]);
+  }, [useGpu, loadRawPixels, clearRawPixels]);
 
   const handleImageClick = useCallback(
     async (e: React.MouseEvent<HTMLImageElement>) => {
@@ -213,397 +146,378 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
       const rect = img.getBoundingClientRect();
       const dims = file.result?.dimensions;
       if (!dims) return;
-      const relX = (e.clientX - rect.left) / rect.width;
-      const relY = (e.clientY - rect.top) / rect.height;
-      const pixelX = Math.floor(relX * dims[0]);
-      const pixelY = Math.floor(relY * dims[1]);
+      const pixelX = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
+      const pixelY = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
       setSpecCoord({ x: pixelX, y: pixelY });
       setSpecLoading(true);
+      const seq = ++specAbortRef.current;
       try {
         const result = await getCubeSpectrum(file.path, pixelX, pixelY);
-        setSpectrum(result.spectrum || []);
+        if (specAbortRef.current !== seq) return;
+        setSpectrum(result.spectrum || EMPTY_SPECTRUM);
         setSpecWavelengths(result.wavelengths || null);
         setSpecElapsed(result.elapsed_ms || 0);
-      } catch (e) {
-        console.error("Spectrum fetch failed:", e);
-        setSpectrum([]);
-      } finally {
-        setSpecLoading(false);
-      }
+      } catch { if (specAbortRef.current === seq) setSpectrum(EMPTY_SPECTRUM); }
+      finally { if (specAbortRef.current === seq) setSpecLoading(false); }
     },
     [isCube, file?.path, file?.result?.dimensions, getCubeSpectrum],
   );
 
-  const handleDownloadPng = () => {
-    const url = stfPreviewUrl || file?.result?.previewUrl;
-    if (!url) return;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = (file?.name || "image").replace(/\.(fits?|zip)$/i, ".png");
-    a.click();
-  };
-
-  const handleDetectStars = useCallback(
-    async (sigma: number) => {
-      if (!file?.path) return;
-      setStarLoading(true);
-      try {
-        const result = await detectStars(file.path, sigma, 200);
-        setStarResult(result);
-      } catch (e) {
-        console.error("Star detection failed:", e);
-      } finally {
-        setStarLoading(false);
+  const handlePreviewMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      if (!file?.result?.dimensions) return;
+      const target = e.currentTarget.querySelector("img, canvas") as HTMLElement;
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      const dims = file.result.dimensions;
+      const px = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
+      const py = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
+      if (px >= 0 && px < dims[0] && py >= 0 && py < dims[1]) {
+        setMousePixel({ x: px, y: py });
       }
     },
-    [file?.path, detectStars],
+    [file?.result?.dimensions],
   );
 
-  const handleComposeRgb = useCallback(
-    async (rPath: string | null, gPath: string | null, bPath: string | null, options: any) => {
-      setRgbLoading(true);
-      try {
-        const result = await composeRgb(rPath, gPath, bPath, "./output", options);
-        setRgbResult(result);
-        setRgbChannels({ r: rPath, g: gPath, b: bPath });
-      } catch (e) {
-        console.error("RGB compose failed:", e);
-      } finally {
-        setRgbLoading(false);
-      }
-    },
-    [composeRgb],
-  );
+  const handlePreviewMouseLeave = useCallback(() => {
+    setMousePixel(null);
+  }, []);
 
-  const handleDrizzle = useCallback(
-    async (paths: string[], options: any) => {
-      setDrizzleLoading(true);
-      try {
-        const result = await drizzleStack(paths, "./output", options);
-        setDrizzleResult(result);
-      } catch (e) {
-        console.error("Drizzle stack failed:", e);
-      } finally {
-        setDrizzleLoading(false);
-      }
-    },
-    [drizzleStack],
-  );
+  const handleBottomResizeStart = useCallback((e: React.MouseEvent) => {
+    if (!bottomOpen) return;
+    e.preventDefault();
+    bottomResizing.current = true;
+    const startY = e.clientY;
+    const startH = bottomHeightRef.current;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const el = bottomElRef.current;
+    const onMove = (ev: MouseEvent) => {
+      if (!bottomResizing.current) return;
+      const next = Math.max(100, Math.min(BOTTOM_MAX, startH + (startY - ev.clientY)));
+      bottomHeightRef.current = next;
+      if (el) el.style.height = `${next}px`;
+    };
+    const onUp = () => {
+      bottomResizing.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      forceRender((c) => c + 1);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [bottomOpen]);
 
-  const handleDrizzleRgb = useCallback(
-    async (
-      rPaths: string[] | null,
-      gPaths: string[] | null,
-      bPaths: string[] | null,
-      options: any,
-    ) => {
-      setDrizzleRgbLoading(true);
-      setDrizzleRgbProgress(0);
-      setDrizzleRgbStage("Preparing channels…");
-      try {
-        const channelCount = [rPaths, gPaths, bPaths].filter((p) => p && p.length >= 2).length;
-        let step = 0;
-        const totalSteps = channelCount + 1;
-        const advance = (label: string) => {
-          step++;
-          setDrizzleRgbProgress(Math.round((step / totalSteps) * 100));
-          setDrizzleRgbStage(label);
-        };
+  const handleSidePanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (!activeSideTab) return;
+    e.preventDefault();
+    sidePanelResizing.current = true;
+    const startX = e.clientX;
+    const startW = sidePanelWidthRef.current;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const el = sidePanelElRef.current;
+    const onMove = (ev: MouseEvent) => {
+      if (!sidePanelResizing.current) return;
+      const next = Math.max(SIDE_PANEL_MIN_W, Math.min(SIDE_PANEL_MAX, startW + (startX - ev.clientX)));
+      sidePanelWidthRef.current = next;
+      if (el) el.style.width = `${next}px`;
+    };
+    const onUp = () => {
+      sidePanelResizing.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      forceRender((c) => c + 1);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [activeSideTab]);
 
-        if (rPaths && rPaths.length >= 2) advance(`Drizzling R (${rPaths.length} frames)…`);
-        if (gPaths && gPaths.length >= 2) advance(`Drizzling G (${gPaths.length} frames)…`);
-        if (bPaths && bPaths.length >= 2) advance(`Drizzling B (${bPaths.length} frames)…`);
+  const handleSideTabClick = useCallback((tabId: SideTabId) => {
+    setActiveSideTab((prev) => (prev === tabId ? null : tabId));
+  }, []);
 
-        const result = await drizzleRgb(rPaths, gPaths, bPaths, "./output", options);
-        setDrizzleRgbResult(result);
-        setDrizzleRgbProgress(100);
-        setDrizzleRgbStage("Done");
-      } catch (e) {
-        console.error("Drizzle RGB failed:", e);
-        setDrizzleRgbStage("Failed");
-      } finally {
-        setDrizzleRgbLoading(false);
-      }
-    },
-    [drizzleRgb],
-  );
+  const sideContent = useMemo(() => {
+    switch (activeSideTab) {
+      case "processing": return <ProcessingTab />;
+      case "compose": return <ComposeTab />;
+      case "stacking": return <StackingTab />;
+      case "config": return <ConfigTab />;
+      default: return null;
+    }
+  }, [activeSideTab]);
 
-  const handleExportFits = useCallback(
-    async (path: string, outputPath: string, options: any) => {
-      setExportLoading(true);
-      try {
-        const result = await exportFits(path, outputPath, options);
-        setExportResult(result);
-      } catch (e) {
-        console.error("FITS export failed:", e);
-      } finally {
-        setExportLoading(false);
-      }
-    },
-    [exportFits],
-  );
-
-  const handleExportFitsRgb = useCallback(
-    async (
-      rPath: string | null,
-      gPath: string | null,
-      bPath: string | null,
-      outputPath: string,
-      options: any,
-    ) => {
-      setExportLoading(true);
-      try {
-        const result = await exportFitsRgb(rPath, gPath, bPath, outputPath, options);
-        setExportResult(result);
-      } catch (e) {
-        console.error("RGB FITS export failed:", e);
-      } finally {
-        setExportLoading(false);
-      }
-    },
-    [exportFitsRgb],
-  );
-
-  const handleAssignChannel = useCallback(
-    (channel: string, path: string) => {
-      setRgbChannels((prev: any) => ({
-        ...prev,
-        [channel.toLowerCase()]: path,
-      }));
-    },
-    [],
-  );
-
-  const previewUrl = stfPreviewUrl || file?.result?.previewUrl;
-  const doneFiles = allFiles?.filter((f) => f.status === "done") || [];
-
-  const handlePreviewError = useCallback(
-    (e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.target as HTMLImageElement;
-      const src = img.src;
-      if (!src.includes("retry=2")) {
-        const retryNum = src.includes("retry=1") ? 2 : 1;
-        setTimeout(() => {
-          const base = src.replace(/[?&]retry=\d+/g, "").replace(/[?&]t=\d+/g, "");
-          const sep = base.includes("?") ? "&" : "?";
-          img.src = `${base}${sep}retry=${retryNum}&t=${Date.now()}`;
-        }, retryNum === 1 ? 300 : 800);
-      } else {
-        setPreviewError(true);
-      }
-    },
-    [],
-  );
+  const effectiveBottomH = bottomOpen ? bottomHeightRef.current : BOTTOM_MIN;
+  const sidePanelOpen = activeSideTab !== null;
+  const activeTabMeta = SIDE_TABS.find((t) => t.id === activeSideTab);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-        <h3 className="text-sm font-semibold text-zinc-300">Preview</h3>
-        <div className="flex items-center gap-2">
-          {file && (
-            <button
-              onClick={handleToggleGpu}
-              className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors ${
-                useGpu
-                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
-              }`}
-              title={useGpu ? "GPU rendering active" : "Enable GPU (shader) rendering"}
-            >
-              {useGpu ? <Zap size={10} /> : <Cpu size={10} />}
-              {useGpu ? "GPU" : "CPU"}
-            </button>
-          )}
-          {file && (
-            <span className="text-xs font-mono text-zinc-500 truncate max-w-[180px]">
-              {file.name}
-            </span>
-          )}
+    <div className="flex h-full overflow-hidden">
+      {/* CENTER */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        {/* Top bar */}
+        <div
+          className="flex items-center justify-between px-3 py-1.5 shrink-0"
+          style={{
+            background: "linear-gradient(90deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.6) 50%, rgba(59,130,246,0.04) 100%)",
+            borderBottom: "1px solid rgba(20,184,166,0.12)",
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <Image size={12} style={{ color: "var(--ab-teal)" }} />
+            <span className="text-[11px] font-medium text-zinc-300">Preview</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {file && (
+              <button
+                onClick={handleToggleGpu}
+                disabled={gpuAvailable === false && !useGpu}
+                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                style={
+                  useGpu
+                    ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)", boxShadow: "0 0 8px rgba(168,85,247,0.15)" }
+                    : { color: "#71717a", border: "1px solid transparent" }
+                }
+                title={
+                  gpuAvailable === false
+                    ? "WebGPU not available in this webview"
+                    : useGpu
+                      ? "Switch to CPU rendering (PNG)"
+                      : "Switch to GPU/Worker rendering (real-time STF)"
+                }
+              >
+                {rawPixelsLoading ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : useGpu ? (
+                  <Zap size={10} />
+                ) : (
+                  <Cpu size={10} />
+                )}
+                {rawPixelsLoading ? "Loading..." : gpuAvailable === false ? "CPU only" : useGpu ? "GPU" : "CPU"}
+              </button>
+            )}
+            {file && <span className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">{file.name}</span>}
+          </div>
         </div>
-      </div>
 
-      <div className="flex-1 overflow-y-auto p-4">
-        <AnimatePresence mode="wait">
+        {/* Preview image */}
+        <div
+          className="flex-1 overflow-hidden"
+          onMouseMove={handlePreviewMouseMove}
+          onMouseLeave={handlePreviewMouseLeave}
+        >
           {!file ? (
-            <motion.div
-              key="empty"
-              {...fadeIn}
-              className="flex flex-col items-center justify-center h-full gap-3 text-zinc-600"
-            >
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-zinc-600">
               <Image size={48} strokeWidth={1} />
               <p className="text-sm">Select a processed file</p>
-            </motion.div>
+            </div>
           ) : (
-            <motion.div key={file.id} {...fadeIn} className="flex flex-col gap-4">
-
-              {useGpu && rawPixels ? (
-                <div className="relative bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800">
-                  <GpuRenderer
-                    rawData={rawPixels.data}
-                    width={rawPixels.width}
-                    height={rawPixels.height}
-                    dataMin={rawPixels.min}
-                    dataMax={rawPixels.max}
-                    shadow={stfParams.shadow}
-                    midtone={stfParams.midtone}
-                    highlight={stfParams.highlight}
-                    className="w-full"
-                  />
-                </div>
-              ) : previewUrl && !previewError ? (
-                <div className="relative bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800">
-                  <img
-                    ref={previewImgRef}
-                    src={previewUrl}
-                    alt={file.name}
-                    className={`w-full h-auto object-contain max-h-[400px] ${
-                      isCube ? "cursor-crosshair" : ""
-                    }`}
-                    onClick={handleImageClick}
-                    onError={handlePreviewError}
-                  />
-                  <canvas
-                    ref={starOverlayRef}
-                    className="absolute inset-0 w-full h-full pointer-events-none"
-                    style={{ display: "none" }}
-                  />
-                  {isCube && (
-                    <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-sm text-[10px] text-purple-300 px-2 py-1 rounded">
-                      Click to extract spectrum
-                    </div>
-                  )}
-                </div>
-              ) : previewError ? (
-                <div className="bg-zinc-950 rounded-lg border border-zinc-800 p-8 flex flex-col items-center gap-2 text-zinc-600">
-                  <Image size={32} strokeWidth={1} />
-                  <p className="text-xs">Preview unavailable — try Auto STF or GPU mode</p>
-                  <button
-                    onClick={() => {
-                      setPreviewError(false);
-                      handleAutoStf();
-                    }}
-                    className="text-[10px] text-blue-400 hover:text-blue-300 mt-1"
-                  >
-                    Retry with Auto STF
-                  </button>
-                </div>
-              ) : null}
-
-              {histData && (
-                <HistogramPanel
-                  bins={histData.bins}
-                  dataMin={histData.data_min}
-                  dataMax={histData.data_max}
-                  autoStf={histData.auto_stf}
-                  shadow={stfParams.shadow}
-                  midtone={stfParams.midtone}
-                  highlight={stfParams.highlight}
-                  onChange={handleStfChange}
-                  onAutoStf={handleAutoStf}
-                  onReset={handleResetStf}
-                  stats={{
-                    median: histData.median,
-                    mean: histData.mean,
-                    sigma: histData.sigma,
-                  }}
-                />
-              )}
-
-              {file?.path && (
-                <FFTPanel filePath={file.path} computeFftSpectrum={computeFftSpectrum} />
-              )}
-
-              {isCube && (
-                <SpectroscopyPanel
-                  spectrum={spectrum}
-                  wavelengths={specWavelengths}
-                  pixelCoord={specCoord}
-                  isLoading={specLoading}
-                  cubeDims={cubeDims}
-                  elapsed={specElapsed}
-                />
-              )}
-
-              <HeaderExplorerPanel
-                file={file}
-                onLoadHeader={handleLoadHeader}
-                headerData={headerData}
-                isLoading={headerLoading}
-                onAssignChannel={handleAssignChannel}
+            <Suspense fallback={<TabSpinner />}>
+              <PreviewTab
+                useGpu={useGpu}
+                rawPixels={rawPixels}
+                onImageClick={handleImageClick}
+                starOverlayRef={starOverlayRef}
               />
-
-              <PlateSolvePanel
-                stars={starResult?.stars || []}
-                count={starResult?.count || 0}
-                isLoading={starLoading}
-                onDetect={handleDetectStars}
-                backgroundMedian={starResult?.background_median}
-                backgroundSigma={starResult?.background_sigma}
-                imageWidth={starResult?.image_width || file.result?.dimensions?.[0]}
-                imageHeight={starResult?.image_height || file.result?.dimensions?.[1]}
-                elapsed={starResult?.elapsed_ms || 0}
-                overlayCanvasRef={starOverlayRef}
-              />
-
-              {doneFiles.length >= 2 && (
-                <RgbComposePanel
-                  files={doneFiles}
-                  onCompose={handleComposeRgb}
-                  result={rgbResult}
-                  isLoading={rgbLoading}
-                />
-              )}
-
-              {doneFiles.length >= 2 && (
-                <DrizzlePanel
-                  files={doneFiles}
-                  onDrizzle={(paths: string[], opts: any) => handleDrizzle(paths, opts)}
-                  result={drizzleResult}
-                  isLoading={drizzleLoading}
-                />
-              )}
-
-              {doneFiles.length >= 3 && (
-                <DrizzleRgbPanel
-                  files={doneFiles}
-                  onDrizzleRgb={handleDrizzleRgb}
-                  result={drizzleRgbResult}
-                  isLoading={drizzleRgbLoading}
-                  progress={drizzleRgbProgress}
-                  progressStage={drizzleRgbStage}
-                />
-              )}
-
-              <ExportPanel
-                filePath={file?.path}
-                stfParams={stfParams}
-                onExport={handleExportFits}
-                onExportRgb={handleExportFitsRgb}
-                rgbChannels={rgbChannels}
-                isLoading={exportLoading}
-                lastResult={exportResult}
-              />
-
-              {file.result?.header && (
-                <div className="bg-zinc-950/50 rounded-lg p-4 border border-zinc-800/50">
-                  <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">
-                    FITS Header (Summary)
-                  </h4>
-                  <HeaderTable header={file.result.header} />
-                </div>
-              )}
-
-              <button
-                onClick={handleDownloadPng}
-                className="flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg px-4 py-2.5 font-medium transition-colors text-sm w-full"
-              >
-                <Download size={16} />
-                Download PNG
-              </button>
-            </motion.div>
+            </Suspense>
           )}
-        </AnimatePresence>
+        </div>
+
+        {/* Bottom panel with tabs */}
+        {file && (
+          <div
+            ref={bottomElRef}
+            className="shrink-0 flex flex-col overflow-hidden"
+            style={{
+              height: effectiveBottomH,
+              borderTop: "1px solid rgba(20,184,166,0.1)",
+              background: "linear-gradient(180deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.5) 100%)",
+            }}
+          >
+            {bottomOpen && (
+              <div
+                className="h-[3px] shrink-0 cursor-row-resize"
+                style={{ background: "transparent" }}
+                onMouseDown={handleBottomResizeStart}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.3)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              />
+            )}
+            <div className="flex items-center justify-between px-1 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.08)" }}>
+              <div className="flex items-center gap-0">
+                {BOTTOM_TABS.map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = activeBottomTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => { setActiveBottomTab(tab.id); if (!bottomOpen) setBottomOpen(true); }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium transition-colors border-b-2 -mb-px"
+                      style={
+                        isActive
+                          ? { borderColor: "var(--ab-teal)", color: "#e4e4e7", background: "rgba(20,184,166,0.06)" }
+                          : { borderColor: "transparent", color: "#71717a" }
+                      }
+                    >
+                      <Icon size={11} />
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-2 pr-2">
+                {file.result?.dimensions && (
+                  <span className="text-[10px] font-mono text-zinc-600">
+                    {file.result.dimensions[0]}x{file.result.dimensions[1]}
+                    {file.result.header?.BITPIX && <span className="ml-2 text-zinc-700">BITPIX {file.result.header.BITPIX}</span>}
+                    <span className="ml-2 text-zinc-700">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
+                  </span>
+                )}
+                <button
+                  onClick={() => setBottomOpen(!bottomOpen)}
+                  className="p-0.5 rounded hover:bg-zinc-800 text-zinc-600 hover:text-zinc-400 transition-colors"
+                >
+                  {bottomOpen ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
+                </button>
+              </div>
+            </div>
+            {bottomOpen && (
+              <div className="flex-1 overflow-y-auto px-3 py-2">
+                <Suspense fallback={<TabSpinner />}>
+                  {activeBottomTab === "info" && <MemoBottomInfo mousePixel={mousePixel} />}
+                  {activeBottomTab === "analysis" && (
+                    <AnalysisTab
+                      spectrum={spectrum}
+                      specWavelengths={specWavelengths}
+                      specCoord={specCoord}
+                      specLoading={specLoading}
+                      specElapsed={specElapsed}
+                      starOverlayRef={starOverlayRef}
+                    />
+                  )}
+                  {activeBottomTab === "headers" && <HeadersTab />}
+                  {activeBottomTab === "export" && <ExportTab />}
+                </Suspense>
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* RIGHT: Side tool panel */}
+      {file && sidePanelOpen && (
+        <>
+          <div
+            className="w-[3px] shrink-0 cursor-col-resize"
+            style={{ background: "transparent" }}
+            onMouseDown={handleSidePanelResizeStart}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.3)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+          />
+          <div
+            ref={sidePanelElRef}
+            className="shrink-0 flex flex-col overflow-hidden"
+            style={{
+              width: sidePanelWidthRef.current,
+              borderLeft: "1px solid rgba(20,184,166,0.1)",
+              background: "linear-gradient(135deg, rgba(5,5,16,0.7) 0%, rgba(20,184,166,0.02) 100%)",
+            }}
+          >
+            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.1)", background: "rgba(20,184,166,0.03)" }}>
+              <div className="flex items-center gap-2">
+                {activeTabMeta && (
+                  <>
+                    <activeTabMeta.icon size={12} style={{ color: "var(--ab-teal)" }} />
+                    <span className="text-[11px] font-medium text-zinc-300">{activeTabMeta.label}</span>
+                  </>
+                )}
+              </div>
+              <button
+                onClick={() => setActiveSideTab(null)}
+                className="p-1 rounded transition-colors text-zinc-600 hover:text-zinc-300"
+                style={{ background: "transparent" }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.1)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                <X size={12} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              <Suspense fallback={<TabSpinner />}>{sideContent}</Suspense>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* RIGHT ICON BAR */}
+      {file && (
+        <div
+          className="shrink-0 w-[38px] flex flex-col items-center pt-2 gap-0.5"
+          style={{
+            borderLeft: "1px solid rgba(20,184,166,0.08)",
+            background: "linear-gradient(180deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.7) 40%, rgba(59,130,246,0.03) 100%)",
+          }}
+        >
+          {SIDE_TABS.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeSideTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => handleSideTabClick(tab.id)}
+                className="relative w-[32px] h-[32px] flex items-center justify-center rounded-md transition-all duration-200"
+                style={isActive ? { background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", boxShadow: "0 0 10px rgba(20,184,166,0.1)" } : { color: "#52525b" }}
+                title={tab.label}
+              >
+                {isActive && <span className="absolute left-0 top-[6px] bottom-[6px] w-[2px] rounded-r" style={{ background: "var(--ab-teal)" }} />}
+                <Icon size={15} />
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
+
+const MemoBottomInfo = memo(function BottomInfo({ mousePixel }: { mousePixel: { x: number; y: number } | null }) {
+  const { file, histData, stfParams } = usePreviewContext();
+  if (!file) return null;
+  return (
+    <div className="flex flex-col gap-2 text-[10px] font-mono text-zinc-500">
+      {file?.path && file?.result?.dimensions && (
+        <WcsReadout
+          filePath={file.path}
+          imageWidth={file.result.dimensions[0]}
+          imageHeight={file.result.dimensions[1]}
+          mouseX={mousePixel?.x ?? null}
+          mouseY={mousePixel?.y ?? null}
+        />
+      )}
+      {histData && (
+        <div className="flex items-center gap-4 flex-wrap">
+          <span>mean={histData.mean?.toFixed(2)}</span>
+          <span>median={histData.median?.toFixed(2)}</span>
+          <span>sigma={histData.sigma?.toFixed(2)}</span>
+          <span style={{ color: "rgba(20,184,166,0.3)" }}>|</span>
+          <span style={{ color: "rgba(239,68,68,0.6)" }}>S={stfParams.shadow.toFixed(4)}</span>
+          <span style={{ color: "rgba(245,158,11,0.6)" }}>M={stfParams.midtone.toFixed(4)}</span>
+          <span style={{ color: "rgba(16,185,129,0.6)" }}>H={stfParams.highlight.toFixed(4)}</span>
+        </div>
+      )}
+      {file.result?.header && (
+        <div className="flex items-center gap-4 flex-wrap text-zinc-600">
+          {file.result.header.TELESCOP && <span>TELESCOP: {file.result.header.TELESCOP}</span>}
+          {file.result.header.INSTRUME && <span>INSTRUME: {file.result.header.INSTRUME}</span>}
+          {file.result.header.FILTER && <span>FILTER: {file.result.header.FILTER}</span>}
+          {file.result.header.EXPTIME && <span>EXPTIME: {file.result.header.EXPTIME}s</span>}
+          {file.result.header["DATE-OBS"] && <span>DATE: {file.result.header["DATE-OBS"]}</span>}
+        </div>
+      )}
+    </div>
+  );
+});
