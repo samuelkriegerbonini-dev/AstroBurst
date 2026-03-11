@@ -1,6 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { usePsfEstimation } from "../../hooks/usePsfEstimation";
-import type { PsfResult } from "../../hooks/usePsfEstimation";
+import { useBackend } from "../../hooks/useBackend";
+
+interface PsfResult {
+  kernel: number[][];
+  kernel_size: number;
+  average_fwhm: number;
+  average_ellipticity: number;
+  stars_used: { x: number; y: number; fwhm: number; snr: number; ellipticity: number; peak: number; flux: number }[];
+  stars_rejected: number;
+  spread_pixels: number;
+}
 
 interface PsfPanelProps {
   selectedFile: { path: string; result?: any } | null;
@@ -11,7 +20,10 @@ interface PsfPanelProps {
 }
 
 export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
-  const { result, loading, error, estimate } = usePsfEstimation();
+  const { estimatePsf } = useBackend();
+  const [result, setResult] = useState<PsfResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [numStars, setNumStars] = useState(3);
@@ -21,16 +33,26 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
 
   const handleEstimate = useCallback(async () => {
     if (!selectedFile?.path) return;
-    const res = await estimate(selectedFile.path, {
-      numStars,
-      cutoutRadius,
-      maxEllipticity,
-      saturationThreshold: satThreshold,
-    });
-    if (res && onPsfReady) {
-      onPsfReady(res.kernel);
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await estimatePsf(selectedFile.path, {
+        numStars,
+        cutoutRadius,
+        maxEllipticity,
+        saturationThreshold: satThreshold,
+      }) as PsfResult;
+      setResult(res);
+      if (res && onPsfReady) {
+        onPsfReady(res.kernel);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+    } finally {
+      setLoading(false);
     }
-  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, estimate, onPsfReady]);
+  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, estimatePsf, onPsfReady]);
 
   useEffect(() => {
     if (!result || !canvasRef.current) return;

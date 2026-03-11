@@ -56,7 +56,8 @@ pub async fn compute_histogram(path: String) -> Result<serde_json::Value, String
 pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
         let t0 = Instant::now();
-        let spectrum = compute_power_spectrum(load_cached(&path)?.arr())?;
+        let fft_result = compute_power_spectrum(load_cached(&path)?.arr())?;
+        let spectrum = &fft_result.spectrum;
         let (rows, cols) = spectrum.dim();
 
         let slice = spectrum.as_slice().expect("FFT spectrum must be contiguous");
@@ -77,7 +78,7 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         let elapsed_ms = t0.elapsed().as_millis() as u32;
 
         let pixel_count = rows * cols;
-        let header_size = 24;
+        let header_size = 32;
         let mut buf = Vec::with_capacity(header_size + pixel_count);
 
         buf.extend_from_slice(&(cols as u32).to_le_bytes());
@@ -85,6 +86,8 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         buf.extend_from_slice(&dc.to_le_bytes());
         buf.extend_from_slice(&max_val.to_le_bytes());
         buf.extend_from_slice(&elapsed_ms.to_le_bytes());
+        buf.extend_from_slice(&(fft_result.original_size as u32).to_le_bytes());
+        buf.extend_from_slice(&if fft_result.windowed { 1u32 } else { 0u32 }.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
 
         let pixels: Vec<u8> = if slice.len() > PAR_THRESHOLD {

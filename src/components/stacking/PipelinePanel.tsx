@@ -1,14 +1,33 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  useCalibrationPipeline,
-  ChannelFilesInput,
-  ChannelPreview,
-} from "../../hooks/useCalibrationPipeline";
+import { useBackend } from "../../hooks/useBackend";
 
 interface FileGroup {
   label: string;
   paths: string[];
+}
+
+interface ChannelFilesInput {
+  label: string;
+  paths: string[];
+}
+
+interface ChannelPreview {
+  label: string;
+  pixels_b64: string;
+  width: number;
+  height: number;
+}
+
+interface PipelineResponse {
+  stats: {
+    darks_combined: number;
+    flats_combined: number;
+    bias_combined: number;
+    channels: { label: string; lights_input: number; mean: number; stddev: number }[];
+  };
+  channel_previews: ChannelPreview[];
+  rgb_preview: string | null;
 }
 
 const CHANNEL_LABELS = ["R", "G", "B"];
@@ -21,7 +40,11 @@ interface PipelinePanelProps {
 }
 
 export default function PipelinePanel(_props: PipelinePanelProps) {
-  const { result, loading, error, progress, run } = useCalibrationPipeline();
+  const { runCalibrationPipeline } = useBackend();
+  const [result, setResult] = useState<PipelineResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState("");
 
   const [channels, setChannels] = useState<FileGroup[]>(
     CHANNEL_LABELS.map((l) => ({ label: l, paths: [] }))
@@ -89,11 +112,28 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
 
     if (channelInputs.length === 0) return;
 
-    await run(channelInputs, darks, flats, bias, {
-      sigma_low: sigmaLow,
-      sigma_high: sigmaHigh,
-      normalize,
-    });
+    setLoading(true);
+    setError(null);
+    setProgress("Building calibration masters...");
+    try {
+      const res = await runCalibrationPipeline({
+        channels: channelInputs,
+        dark_paths: darks,
+        flat_paths: flats,
+        bias_paths: bias,
+        sigma_low: sigmaLow,
+        sigma_high: sigmaHigh,
+        normalize,
+      }) as PipelineResponse;
+      setResult(res);
+      setProgress("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      setProgress("");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {

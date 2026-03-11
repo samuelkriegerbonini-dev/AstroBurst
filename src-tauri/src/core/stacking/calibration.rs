@@ -1,4 +1,5 @@
 use ndarray::Array2;
+use rayon::prelude::*;
 
 pub struct CalibrationConfig {
     pub master_bias: Option<Array2<f32>>,
@@ -21,18 +22,22 @@ pub fn subtract_dark(
 
 pub fn divide_flat(image: &Array2<f32>, master_flat: &Array2<f32>) -> Array2<f32> {
     let (rows, cols) = image.dim();
-    let mut result = Array2::<f32>::zeros((rows, cols));
-    for y in 0..rows {
-        for x in 0..cols {
-            let flat_val = master_flat[[y, x]];
-            result[[y, x]] = if flat_val.is_finite() && flat_val.abs() > 0.01 {
-                image[[y, x]] / flat_val
+    let img_slice = image.as_slice().expect("contiguous");
+    let flat_slice = master_flat.as_slice().expect("contiguous");
+
+    let result: Vec<f32> = img_slice
+        .par_iter()
+        .zip(flat_slice.par_iter())
+        .map(|(&iv, &fv)| {
+            if fv.is_finite() && fv.abs() > 1e-4 {
+                iv / fv
             } else {
-                image[[y, x]]
-            };
-        }
-    }
-    result
+                iv
+            }
+        })
+        .collect();
+
+    Array2::from_shape_vec((rows, cols), result).unwrap()
 }
 
 pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Array2<f32> {
@@ -48,6 +53,7 @@ pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Array2<
         calibrated = divide_flat(&calibrated, flat);
     }
 
+    calibrated.mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
     calibrated
 }
 

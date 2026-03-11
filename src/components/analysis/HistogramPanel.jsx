@@ -15,9 +15,11 @@ function HistogramPanel({
                           stats,
                         }) {
   const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
   const containerRef = useRef(null);
   const draggingRef = useRef(null);
   const rafRef = useRef(null);
+  const overlayRafRef = useRef(null);
   const stateRef = useRef({ shadow, midtone, highlight });
   stateRef.current = { shadow, midtone, highlight };
   const CANVAS_H = 110;
@@ -43,7 +45,7 @@ function HistogramPanel({
     setManualMode(false);
   }, [draft, onChange]);
 
-  const drawHistogram = useCallback(() => {
+  const drawBars = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       const canvas = canvasRef.current;
@@ -72,6 +74,26 @@ function HistogramPanel({
         const h = (logVal / logMax) * (H - 4);
         ctx.fillRect(i * barW, H - h, Math.max(1, barW - 0.5), h);
       }
+    });
+  }, [bins]);
+
+  const drawOverlay = useCallback(() => {
+    if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+    overlayRafRef.current = requestAnimationFrame(() => {
+      const canvas = overlayRef.current;
+      const barsCanvas = canvasRef.current;
+      if (!canvas || !barsCanvas) return;
+
+      const W = barsCanvas.width;
+      const H = barsCanvas.height;
+
+      if (canvas.width !== W || canvas.height !== H) {
+        canvas.width = W;
+        canvas.height = H;
+      }
+
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, W, H);
 
       const { shadow: s, midtone: m, highlight: hi } = stateRef.current;
 
@@ -115,25 +137,31 @@ function HistogramPanel({
       ctx.fillStyle = "#22c55e";
       ctx.fillText("H", highlightX - 13, 11);
     });
-  }, [bins]);
+  }, []);
 
   useEffect(() => {
-    drawHistogram();
+    drawBars();
+    drawOverlay();
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
     };
-  }, [drawHistogram, shadow, midtone, highlight]);
+  }, [drawBars]);
+
+  useEffect(() => {
+    drawOverlay();
+  }, [shadow, midtone, highlight, drawOverlay]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const ro = new ResizeObserver(() => drawHistogram());
+    const ro = new ResizeObserver(() => { drawBars(); drawOverlay(); });
     ro.observe(container);
     return () => ro.disconnect();
-  }, [drawHistogram]);
+  }, [drawBars, drawOverlay]);
 
   const getMouseNorm = useCallback((e) => {
-    const canvas = canvasRef.current;
+    const canvas = overlayRef.current || canvasRef.current;
     if (!canvas) return 0;
     const rect = canvas.getBoundingClientRect();
     return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -159,8 +187,7 @@ function HistogramPanel({
 
       e.preventDefault();
 
-      const canvas = canvasRef.current;
-      if (canvas) canvas.style.willChange = "transform";
+      const canvas = overlayRef.current;
 
       const onMove = (ev) => {
         if (!draggingRef.current || !onChange) return;
@@ -240,11 +267,17 @@ function HistogramPanel({
         </div>
       </div>
 
-      <div ref={containerRef} className="px-1.5 pt-1.5">
+      <div ref={containerRef} className="px-1.5 pt-1.5 relative" style={{ height: CANVAS_H }}>
         <canvas
           ref={canvasRef}
           height={CANVAS_H}
-          className="w-full rounded cursor-crosshair"
+          className="w-full rounded absolute inset-0"
+          style={{ height: CANVAS_H }}
+        />
+        <canvas
+          ref={overlayRef}
+          height={CANVAS_H}
+          className="w-full rounded absolute inset-0 cursor-crosshair"
           style={{ height: CANVAS_H }}
           onMouseDown={handleMouseDown}
         />

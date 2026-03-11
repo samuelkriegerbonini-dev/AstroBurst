@@ -6,4 +6,5 @@ pub mod resample;
 pub mod scnr;
 pub mod stats;
 pub mod stf;
+pub mod stretch;
 pub mod wavelet;

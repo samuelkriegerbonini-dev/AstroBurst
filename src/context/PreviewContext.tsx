@@ -39,6 +39,8 @@ interface HistContextValue {
 
 interface CubeContextValue {
   isCube: boolean;
+  isSpectralCube: boolean;
+  spectralReason: string | null;
   cubeDims: any;
 }
 
@@ -160,6 +162,8 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
     highlight: 1,
   });
   const [isCube, setIsCube] = useState(false);
+  const [isSpectralCube, setIsSpectralCube] = useState(false);
+  const [spectralReason, setSpectralReason] = useState<string | null>(null);
   const [cubeDims, setCubeDims] = useState<any>(null);
   const [rgbChannels, setRgbChannels] = useState<any>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
@@ -241,6 +245,8 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
     setHistData(null);
     setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
     setIsCube(false);
+    setIsSpectralCube(false);
+    setSpectralReason(null);
     setCubeDims(null);
     setRgbChannels(null);
     setRawPixels(null);
@@ -275,10 +281,15 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
     if (n3 > 1 ) {
       setIsCube(true);
       getCubeInfo(file.path)
-        .then((info) => {
+        .then((info: any) => {
           if (histAbortRef.current !== seq) return;
           setCubeDims(info);
-        });
+          if (info?.spectral_classification) {
+            setIsSpectralCube(info.spectral_classification.is_spectral || false);
+            setSpectralReason(info.spectral_classification.reason || null);
+          }
+        })
+        .catch(() => {});
     }
   }, [file?.id]);
 
@@ -293,8 +304,8 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
   );
 
   const cubeValue = useMemo<CubeContextValue>(
-    () => ({ isCube, cubeDims }),
-    [isCube, cubeDims],
+    () => ({ isCube, isSpectralCube, spectralReason, cubeDims }),
+    [isCube, isSpectralCube, spectralReason, cubeDims],
   );
 
   const rgbValue = useMemo<RgbContextValue>(

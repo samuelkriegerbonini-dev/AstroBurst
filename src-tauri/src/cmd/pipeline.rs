@@ -1,13 +1,12 @@
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::cmd::common::blocking_cmd;
 use crate::core::imaging::calibration_pipeline::{
-    run_batch_pipeline, CalibrationMasters, ChannelInput,
-    BatchPipelineConfig, BatchStackConfig,
+    run_batch_pipeline, BatchPipelineConfig, BatchStackConfig,
+    CalibrationMasters, ChannelInput,
 };
 use crate::domain::calibration::{
-    load_fits_image, create_master_bias, create_master_dark, create_master_flat,
+    create_master_bias, create_master_dark, create_master_flat, load_fits_image,
 };
 
 #[derive(Debug, Deserialize)]

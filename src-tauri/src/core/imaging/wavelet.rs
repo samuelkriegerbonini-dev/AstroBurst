@@ -47,6 +47,11 @@ pub fn wavelet_denoise(
 
     let mut scales: Vec<Array2<f32>> = Vec::with_capacity(num_scales);
     let mut current = image.clone();
+    let (rows, cols) = image.dim();
+    let npix = rows * cols;
+    let mut h_buf = vec![0.0f32; npix];
+    let mut v_buf = vec![0.0f32; npix];
+    let mut t_buf = if num_scales > 0 { vec![0.0f32; npix] } else { Vec::new() };
 
     for scale_idx in 0..num_scales {
         if let Some(p) = progress {
@@ -56,10 +61,22 @@ pub fn wavelet_denoise(
             p.tick_with_stage(&format!("decomposing scale {}/{}", scale_idx + 1, num_scales));
         }
 
-        let smoothed = atrous_smooth(&current, scale_idx);
-        let detail = &current - &smoothed;
-        scales.push(detail);
-        current = smoothed;
+        let step = 1usize << scale_idx;
+        atrous_smooth_into(&current, rows, cols, step, &mut h_buf, &mut v_buf, &mut t_buf);
+
+        let detail_data: Vec<f32> = current
+            .as_slice()
+            .unwrap()
+            .par_iter()
+            .zip(v_buf.par_iter())
+            .map(|(&c, &s)| c - s)
+            .collect();
+        scales.push(Array2::from_shape_vec((rows, cols), detail_data).unwrap());
+
+        current = Array2::from_shape_vec(
+            (rows, cols),
+            std::mem::replace(&mut v_buf, current.into_raw_vec_and_offset().0)
+        )?;
     }
 
     let residual = current;
@@ -117,6 +134,61 @@ pub fn wavelet_denoise(
         noise_estimate: noise_sigma,
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+fn atrous_smooth_into(
+    image: &Array2<f32>,
+    rows: usize,
+    cols: usize,
+    step: usize,
+    h_buf: &mut [f32],
+    v_buf: &mut [f32],
+    t_buf: &mut [f32],
+) {
+    h_buf.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
+        for x in 0..cols {
+            let mut sum = 0.0f32;
+            for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
+                let ox = x as isize + (ki as isize - 2) * step as isize;
+                let cx = ox.clamp(0, cols as isize - 1) as usize;
+                sum += image[[y, cx]] * kv;
+            }
+            row[x] = sum;
+        }
+    });
+
+    if step > 16 && rows > 256 {
+        for y in 0..rows {
+            for x in 0..cols {
+                t_buf[x * rows + y] = h_buf[y * cols + x];
+            }
+        }
+
+        let t_ref: &[f32] = t_buf;
+        v_buf.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
+            for x in 0..cols {
+                let mut sum = 0.0f32;
+                for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
+                    let oy = y as isize + (ki as isize - 2) * step as isize;
+                    let cy = oy.clamp(0, rows as isize - 1) as usize;
+                    sum += t_ref[x * rows + cy] * kv;
+                }
+                row[x] = sum;
+            }
+        });
+    } else {
+        v_buf.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
+            for x in 0..cols {
+                let mut sum = 0.0f32;
+                for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
+                    let oy = y as isize + (ki as isize - 2) * step as isize;
+                    let cy = oy.clamp(0, rows as isize - 1) as usize;
+                    sum += h_buf[cy * cols + x] * kv;
+                }
+                row[x] = sum;
+            }
+        });
+    }
 }
 
 fn atrous_smooth(image: &Array2<f32>, scale: usize) -> Array2<f32> {
@@ -249,14 +321,14 @@ fn hard_threshold(scale: &mut Array2<f32>, threshold: f32) {
         });
 }
 
-fn pseudo_noise(seed: u64) -> f32 {
-    let x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((x >> 33) as f32 / u32::MAX as f32 - 0.5) * 2.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pseudo_noise(seed: u64) -> f32 {
+        let x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((x >> 33) as f32 / u32::MAX as f32 - 0.5) * 2.0
+    }
 
     #[test]
     fn test_b3_kernel_sums_to_one() {

@@ -3,7 +3,7 @@ use std::time::Instant;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, resolve_output_dir};
-use crate::core::imaging::normalize::asinh_normalize;
+use crate::core::imaging::normalize::robust_asinh_preview;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::domain::drizzle::drizzle_from_paths;
 use crate::domain::drizzle_rgb::drizzle_rgb;
@@ -69,7 +69,7 @@ pub async fn drizzle_stack_cmd(
 
         let result = drizzle_from_paths(&paths, &config, None)?;
 
-        let normalized = asinh_normalize(&result.image);
+        let normalized = robust_asinh_preview(&result.image);
         progress_clone.tick_with_stage(STAGE_RENDER);
 
         let png_path = format!("{}/{}", output_dir, FILE_DRIZZLE_RESULT_PNG);

@@ -123,6 +123,7 @@ pub fn run() {
             cmd::astrometry::pixel_to_world,
             cmd::astrometry::world_to_pixel,
             cmd::psf::estimate_psf_cmd,
+            cmd::stretch::apply_arcsinh_stretch_cmd,
             cmd::config::get_config,
             cmd::config::update_config,
             cmd::config::save_api_key,

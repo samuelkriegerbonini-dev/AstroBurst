@@ -3,7 +3,7 @@ use std::fs::File;
 use anyhow::{Context, Result};
 use ndarray::Array2;
 
-use crate::core::imaging::normalize::asinh_normalize;
+use crate::core::imaging::normalize::robust_asinh_preview;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, StfParams};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
@@ -193,7 +193,7 @@ pub fn render_asinh_and_save(
     name: &str,
     write_fits: bool,
 ) -> Result<(String, Option<String>)> {
-    let normalized = asinh_normalize(arr);
+    let normalized = robust_asinh_preview(arr);
     let png_path = format!("{}/{}.png", output_dir, name);
     render_grayscale(&normalized, &png_path)?;
 

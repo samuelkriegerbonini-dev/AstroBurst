@@ -1,7 +1,7 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
-import { usePreviewContext } from "../../context/PreviewContext";
+import { useFileContext, useRgbContext } from "../../context/PreviewContext";
 import type { HeaderData } from "../../utils/types";
 
 const HeaderExplorerPanel = lazy(() => import("./HeaderExplorerPanel"));
@@ -9,7 +9,8 @@ const HeaderTable = lazy(() => import("./HeaderTable"));
 const HduSelectorPanel = lazy(() => import("./HduSelectorPanel"));
 
 function HeadersTabInner() {
-  const { file, setRgbChannels } = usePreviewContext();
+  const { file } = useFileContext();
+  const { setRgbChannels } = useRgbContext();
   const { getFullHeader } = useBackend();
 
   const [headerData, setHeaderData] = useState<HeaderData | null>(null);

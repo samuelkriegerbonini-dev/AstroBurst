@@ -122,7 +122,7 @@ export function useBackend() {
       const raw = await safeInvoke("compute_fft_spectrum", { path });
       const bytes = toUint8Array(raw);
 
-      if (bytes.length < 24) {
+      if (bytes.length < 32) {
         throw new Error(`FFT: response too small (${bytes.length} bytes)`);
       }
 
@@ -132,15 +132,17 @@ export function useBackend() {
       const dc_magnitude = view.getFloat32(8, true);
       const max_magnitude = view.getFloat32(12, true);
       const elapsed_ms = view.getUint32(16, true);
+      const original_size = view.getUint32(20, true);
+      const windowed = view.getUint32(24, true) !== 0;
 
-      const expectedLen = 24 + width * height;
+      const expectedLen = 32 + width * height;
       if (bytes.length < expectedLen) {
         throw new Error(`FFT: expected ${expectedLen} bytes, got ${bytes.length}`);
       }
 
-      const pixels = new Uint8Array(bytes.buffer, bytes.byteOffset + 24, width * height);
+      const pixels = new Uint8Array(bytes.buffer, bytes.byteOffset + 32, width * height);
 
-      return { width, height, dc_magnitude, max_magnitude, elapsed_ms, pixels };
+      return { width, height, dc_magnitude, max_magnitude, elapsed_ms, original_size, windowed, pixels };
     },
 
     detectStars: (path: string, sigma = 5.0, maxStars = 200) =>
@@ -349,6 +351,11 @@ export function useBackend() {
       return res;
     },
 
+    getConfig: () => safeInvoke("get_config"),
+    updateConfig: (field: string, value: any) => safeInvoke("update_config", { field, value }),
+    saveApiKey: (key: string, service?: string) => safeInvoke("save_api_key", { key, service }),
+    getApiKey: () => safeInvoke("get_api_key"),
+
     estimatePsf: async (path: string, options: {
       numStars?: number;
       cutoutRadius?: number;
@@ -372,9 +379,18 @@ export function useBackend() {
       normalize?: boolean;
     }) => safeInvoke("run_pipeline_cmd", { request }),
 
-    getConfig: () => safeInvoke("get_config"),
-    updateConfig: (field: string, value: any) => safeInvoke("update_config", { field, value }),
-    saveApiKey: (key: string, service?: string) => safeInvoke("save_api_key", { key, service }),
-    getApiKey: () => safeInvoke("get_api_key"),
+    applyArcsinhStretch: async (
+      path: string,
+      outputDir = DEFAULT_OUTPUT_DIR,
+      factor = 50.0,
+    ) => {
+      const res = await safeInvoke("apply_arcsinh_stretch_cmd", {
+        path,
+        outputDir,
+        factor,
+      });
+      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
+      return res;
+    },
   }), []);
 }

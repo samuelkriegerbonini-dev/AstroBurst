@@ -1,7 +1,6 @@
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
     pub dark: Option<Array2<f32>>,
@@ -75,22 +74,35 @@ pub fn calibrate_light(
     light: &Array2<f32>,
     masters: &CalibrationMasters,
 ) -> Array2<f32> {
-    let mut calibrated = light.clone();
+    let (rows, cols) = light.dim();
+    let npix = rows * cols;
+    let src = light.as_slice().expect("contiguous");
 
-    if let Some(bias) = &masters.bias {
-        calibrated = &calibrated - bias;
-    }
+    let bias_slice = masters.bias.as_ref().map(|b| b.as_slice().expect("contiguous"));
+    let dark_slice = masters.dark.as_ref().map(|d| d.as_slice().expect("contiguous"));
+    let flat_slice = masters.flat.as_ref().map(|f| f.as_slice().expect("contiguous"));
 
-    if let Some(dark) = &masters.dark {
-        calibrated = &calibrated - dark;
-    }
+    let result: Vec<f32> = (0..npix)
+        .into_par_iter()
+        .map(|i| {
+            let mut v = src[i];
+            if let Some(b) = bias_slice {
+                v -= b[i];
+            }
+            if let Some(d) = dark_slice {
+                v -= d[i];
+            }
+            if let Some(f) = flat_slice {
+                let fv = f[i];
+                if fv.is_finite() && fv.abs() > 1e-4 {
+                    v /= fv;
+                }
+            }
+            if v < 0.0 { 0.0 } else { v }
+        })
+        .collect();
 
-    if let Some(flat) = &masters.flat {
-        calibrated = &calibrated / flat;
-    }
-
-    calibrated.mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
-    calibrated
+    Array2::from_shape_vec((rows, cols), result).unwrap()
 }
 
 pub fn run_batch_pipeline(

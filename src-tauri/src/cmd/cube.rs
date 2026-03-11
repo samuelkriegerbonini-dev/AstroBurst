@@ -1,11 +1,14 @@
 use serde_json::json;
 
 use crate::cmd::common::blocking_cmd;
-use crate::domain::cube::process_cube;
+use crate::core::cube::eager::classify_spectral_cube;
+use crate::domain::cube::{process_cube, build_wavelength_axis};
 use crate::domain::lazy_cube::{process_cube_lazy, LazyCube};
 use crate::types::constants::{
     RES_BITPIX, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT,
     RES_OUTPUT_PATH, RES_SPECTRUM, RES_WIDTH,
+    RES_SPECTRAL_CLASSIFICATION, RES_IS_SPECTRAL, RES_SPECTRAL_REASON,
+    RES_AXIS_TYPE, RES_AXIS_UNIT, RES_CHANNEL_COUNT, RES_WAVELENGTHS,
 };
 
 #[tauri::command]
@@ -37,11 +40,21 @@ pub async fn get_cube_info(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let cube = LazyCube::open(&path)?;
         let geo = &cube.geometry;
+        let classification = classify_spectral_cube(&cube.header, geo.naxis3);
+        let wavelengths = build_wavelength_axis(&cube.header);
         Ok(json!({
             RES_WIDTH: geo.naxis1,
             RES_HEIGHT: geo.naxis2,
             RES_FRAMES: geo.naxis3,
             RES_BITPIX: geo.bitpix,
+            RES_SPECTRAL_CLASSIFICATION: {
+                RES_IS_SPECTRAL: classification.is_spectral,
+                RES_SPECTRAL_REASON: classification.reason,
+                RES_AXIS_TYPE: classification.axis_type,
+                RES_AXIS_UNIT: classification.axis_unit,
+                RES_CHANNEL_COUNT: classification.channel_count,
+            },
+            RES_WAVELENGTHS: wavelengths,
         }))
     })
 }
@@ -80,6 +93,12 @@ pub async fn get_cube_spectrum(
     blocking_cmd!({
         let cube = LazyCube::open(&path)?;
         let spectrum = cube.extract_spectrum_at(x, y)?;
-        Ok(json!({ RES_SPECTRUM: spectrum }))
+        let wavelengths = build_wavelength_axis(&cube.header);
+        let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
+        Ok(json!({
+            RES_SPECTRUM: spectrum,
+            RES_WAVELENGTHS: wavelengths,
+            RES_IS_SPECTRAL: classification.is_spectral,
+        }))
     })
 }

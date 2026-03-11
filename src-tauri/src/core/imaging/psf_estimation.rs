@@ -161,9 +161,10 @@ fn compute_image_stats(image: &Array2<f32>) -> LocalStats {
     let stddev = var.sqrt();
     let max_val = image.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
 
-    let mut sorted: Vec<f32> = image.iter().cloned().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = sorted[sorted.len() / 2] as f64;
+    let mut vals: Vec<f32> = image.iter().cloned().collect();
+    let mid = vals.len() / 2;
+    vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = vals[mid] as f64;
 
     LocalStats { mean, stddev, max_val, median }
 }

@@ -1,12 +1,16 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Download, Loader2, Box, Film } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
-import { usePreviewContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
 function ExportTabInner() {
-  const { file, stfParams, rgbChannels, renderedPreviewUrl, isCube, cubeDims } = usePreviewContext();
+  const { file } = useFileContext();
+  const { stfParams } = useHistContext();
+  const { rgbChannels } = useRgbContext();
+  const { renderedPreviewUrl } = useRenderContext();
+  const { isCube, cubeDims } = useCubeContext();
   const { exportFits, exportFitsRgb, getCubeFrame } = useBackend();
 
   const [exportResult, setExportResult] = useState<any>(null);

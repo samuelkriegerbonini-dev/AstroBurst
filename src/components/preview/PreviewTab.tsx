@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
 import { Image, Loader2 } from "lucide-react";
-import { usePreviewContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
 import type { RawPixelData } from "../../utils/types";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
@@ -36,7 +36,10 @@ const Overlay = memo(function Overlay({
 });
 
 function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: PreviewTabProps) {
-  const { file, stfParams, isCube, renderedPreviewUrl } = usePreviewContext();
+  const { file } = useFileContext();
+  const { stfParams } = useHistContext();
+  const { isCube } = useCubeContext();
+  const { renderedPreviewUrl } = useRenderContext();
 
   const [previewError, setPreviewError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);

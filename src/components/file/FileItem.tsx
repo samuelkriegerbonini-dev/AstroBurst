@@ -91,15 +91,16 @@ function FileItem({ file, isSelected, onSelect, index }: FileItemProps) {
         ${config.bgHover}
         ${isClickable ? "cursor-pointer" : "cursor-default"}
       `}
-      style={
-        isSelected
+      style={{
+        height: 44,
+        ...(isSelected
           ? {
               background: "rgba(20,184,166,0.08)",
               borderColor: "rgba(20,184,166,0.25)",
               boxShadow: "0 0 12px rgba(20,184,166,0.06)",
             }
-          : { borderColor: "transparent" }
-      }
+          : { borderColor: "transparent" }),
+      }}
     >
       {showThumb ? (
         <div

@@ -52,7 +52,10 @@ export default function App() {
   const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
 
+  const [showBg, setShowBg] = useState(false);
+
   useEffect(() => { const t = setTimeout(() => setLoading(false), 600); return () => clearTimeout(t); }, []);
+  useEffect(() => { if (!loading) { const t = setTimeout(() => setShowBg(true), 100); return () => clearTimeout(t); } }, [loading]);
 
   const handleFilesAdded = useCallback((newFiles: AstroFile[]) => {
     if (newFiles.length === 0) return;
@@ -152,7 +155,7 @@ export default function App() {
         <div
           className="fixed inset-0 z-0 opacity-40 pointer-events-none"
           style={{
-            backgroundImage: `url(${nebulaImg})`, backgroundSize: "cover", backgroundPosition: "center",
+            backgroundImage: showBg ? `url(${nebulaImg})` : "none", backgroundSize: "cover", backgroundPosition: "center",
             filter: view !== "empty" ? "blur(8px) brightness(0.3)" : "none", transition: "filter 0.6s ease",
           }}
         />
