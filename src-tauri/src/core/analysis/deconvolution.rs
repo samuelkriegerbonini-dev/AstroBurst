@@ -42,14 +42,12 @@ struct FftConvolver {
     inv_row: Arc<dyn rustfft::Fft<f32>>,
     fwd_col: Arc<dyn rustfft::Fft<f32>>,
     inv_col: Arc<dyn rustfft::Fft<f32>>,
-    norm: f32,
 }
 
 impl FftConvolver {
     fn new(rows: usize, cols: usize, psf: &Array2<f32>) -> Self {
         let fft_rows = (rows + psf.nrows() - 1).next_power_of_two();
         let fft_cols = (cols + psf.ncols() - 1).next_power_of_two();
-        let norm = 1.0 / (fft_rows * fft_cols) as f32;
 
         let mut planner = FftPlanner::<f32>::new();
         let fwd_row = planner.plan_fft_forward(fft_cols);
@@ -71,7 +69,6 @@ impl FftConvolver {
             inv_row,
             fwd_col,
             inv_col,
-            norm,
         }
     }
 
@@ -125,20 +122,24 @@ impl FftConvolver {
             }
         }
 
+        buf.par_chunks_mut(self.fft_cols).for_each(|row| {
+            self.fwd_row.process(row);
+        });
+
+        let mut col_major = vec![Complex::new(0.0f32, 0.0); self.fft_rows * self.fft_cols];
         for r in 0..self.fft_rows {
-            let start = r * self.fft_cols;
-            let row_slice = &mut buf[start..start + self.fft_cols];
-            self.fwd_row.process(row_slice);
+            for c in 0..self.fft_cols {
+                col_major[c * self.fft_rows + r] = buf[r * self.fft_cols + c];
+            }
         }
 
-        let mut col_buf = vec![Complex::new(0.0f32, 0.0); self.fft_rows];
+        col_major.par_chunks_mut(self.fft_rows).for_each(|col| {
+            self.fwd_col.process(col);
+        });
+
         for c in 0..self.fft_cols {
             for r in 0..self.fft_rows {
-                col_buf[r] = buf[r * self.fft_cols + c];
-            }
-            self.fwd_col.process(&mut col_buf);
-            for r in 0..self.fft_rows {
-                buf[r * self.fft_cols + c] = col_buf[r];
+                buf[r * self.fft_cols + c] = col_major[c * self.fft_rows + r];
             }
         }
 
@@ -146,28 +147,35 @@ impl FftConvolver {
     }
 
     fn inverse_2d(&self, buf: &mut [Complex<f32>]) -> Array2<f32> {
-        for r in 0..self.fft_rows {
-            let start = r * self.fft_cols;
-            let row_slice = &mut buf[start..start + self.fft_cols];
-            self.inv_row.process(row_slice);
-        }
+        buf.par_chunks_mut(self.fft_cols).for_each(|row| {
+            self.inv_row.process(row);
+        });
 
-        let mut col_buf = vec![Complex::new(0.0f32, 0.0); self.fft_rows];
-        let inv_norm = 1.0 / (self.fft_rows * self.fft_cols) as f32;
-        for c in 0..self.fft_cols {
-            for r in 0..self.fft_rows {
-                col_buf[r] = buf[r * self.fft_cols + c];
-            }
-            self.inv_col.process(&mut col_buf);
-            for r in 0..self.fft_rows {
-                buf[r * self.fft_cols + c] = col_buf[r];
+        let fft_rows = self.fft_rows;
+        let fft_cols = self.fft_cols;
+
+        let mut col_major = vec![Complex::new(0.0f32, 0.0); fft_rows * fft_cols];
+        for r in 0..fft_rows {
+            for c in 0..fft_cols {
+                col_major[c * fft_rows + r] = buf[r * fft_cols + c];
             }
         }
 
+        col_major.par_chunks_mut(fft_rows).for_each(|col| {
+            self.inv_col.process(col);
+        });
+
+        for c in 0..fft_cols {
+            for r in 0..fft_rows {
+                buf[r * fft_cols + c] = col_major[c * fft_rows + r];
+            }
+        }
+
+        let inv_norm = 1.0 / (fft_rows * fft_cols) as f32;
         let mut result = Array2::<f32>::zeros((self.rows, self.cols));
         for y in 0..self.rows {
             for x in 0..self.cols {
-                result[[y, x]] = buf[y * self.fft_cols + x].re * inv_norm;
+                result[[y, x]] = buf[y * fft_cols + x].re * inv_norm;
             }
         }
 
@@ -233,38 +241,43 @@ pub fn richardson_lucy(
             }
         }
 
-        let prev_estimate = estimate.clone();
-
         let convolved = convolver.convolve_psf(&estimate);
 
-        let ratio = Zip::from(&convolved).and(image).map_collect(|&c, &img| {
-            if c.abs() > 1e-10 {
-                img / c
-            } else {
-                1.0
-            }
-        });
+        let epsilon = 1e-6f32;
+        let lambda = config.regularization as f32;
+
+        let ratio = if lambda > 0.0 {
+            Zip::from(&convolved)
+                .and(image)
+                .and(&estimate)
+                .map_collect(|&c, &img, &est| img / (c + lambda * est + epsilon))
+        } else {
+            Zip::from(&convolved)
+                .and(image)
+                .map_collect(|&c, &img| img / (c + epsilon))
+        };
 
         let correction = convolver.convolve_psf_transpose(&ratio);
 
-        estimate
+        let sum_sq_delta: f64 = estimate
             .as_slice_mut()
             .context("Estimate not contiguous")?
             .par_iter_mut()
             .zip(correction.as_slice().context("Correction not contiguous")?)
-            .for_each(|(est, &cor)| {
-                *est *= cor;
-                if config.regularization > 0.0 {
-                    *est /= 1.0f32 + config.regularization as f32;
-                }
-            });
+            .map(|(est, &cor)| {
+                let old = *est;
+                *est = (old * cor).max(0.0);
+                let d = (*est - old) as f64;
+                d * d
+            })
+            .sum();
 
         if config.deringing {
             apply_deringing(&mut estimate, image, config.deringing_threshold);
         }
 
         iterations_run = iter + 1;
-        last_convergence = compute_l2_delta(&prev_estimate, &estimate);
+        last_convergence = (sum_sq_delta / (rows * cols) as f64).sqrt();
 
         if let Some(p) = progress {
             p.tick_with_stage(&format!(

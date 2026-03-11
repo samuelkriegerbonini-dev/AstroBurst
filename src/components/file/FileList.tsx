@@ -1,7 +1,10 @@
-import { useRef, useEffect, memo } from "react";
+import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
 import { PanelLeftClose, PanelLeftOpen, FolderOpen, Download, Loader2 } from "lucide-react";
 import FileItem from "./FileItem";
 import type { ProcessedFile } from "../../utils/types";
+
+const ITEM_HEIGHT = 44;
+const OVERSCAN = 5;
 
 interface FileListProps {
   files: ProcessedFile[];
@@ -17,6 +20,40 @@ interface FileListProps {
   isComplete?: boolean;
 }
 
+const VirtualizedItems = memo(function VirtualizedItems({
+                                                          files,
+                                                          scrollTop,
+                                                          viewHeight,
+                                                          selected,
+                                                          onSelect,
+                                                        }: {
+  files: ProcessedFile[];
+  scrollTop: number;
+  viewHeight: number;
+  selected: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const startIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN);
+  const endIdx = Math.min(files.length, Math.ceil((scrollTop + viewHeight) / ITEM_HEIGHT) + OVERSCAN);
+  const visible = useMemo(() => files.slice(startIdx, endIdx), [files, startIdx, endIdx]);
+
+  return (
+    <div style={{ height: files.length * ITEM_HEIGHT, position: "relative" }}>
+      <div style={{ position: "absolute", top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>
+        {visible.map((file, i) => (
+          <FileItem
+            key={file.id}
+            file={file}
+            isSelected={file.id === selected}
+            onSelect={onSelect}
+            index={startIdx + i}
+          />
+        ))}
+      </div>
+    </div>
+  );
+});
+
 function FileList({
                     files,
                     selected,
@@ -30,15 +67,43 @@ function FileList({
                     doneCount = 0,
                     isComplete = false,
                   }: FileListProps) {
-  const listRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const prevLenRef = useRef(files.length);
 
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewHeight, setViewHeight] = useState(600);
+  const rafScrollRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (files.length > prevLenRef.current && listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
+    if (files.length > prevLenRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
     prevLenRef.current = files.length;
   }, [files.length]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setViewHeight(entry.contentRect.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    if (rafScrollRef.current) return;
+    rafScrollRef.current = requestAnimationFrame(() => {
+      rafScrollRef.current = null;
+      if (scrollRef.current) setScrollTop(scrollRef.current.scrollTop);
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (rafScrollRef.current) cancelAnimationFrame(rafScrollRef.current);
+    };
+  }, []);
 
   if (collapsed) {
     return (
@@ -76,13 +141,16 @@ function FileList({
         </button>
       </div>
 
-      <div ref={listRef} className="flex-1 overflow-y-auto py-1">
-        {files.map((file, index) => (
-          <FileItem key={file.id} file={file} isSelected={file.id === selected} onSelect={onSelect} index={index} />
-        ))}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto py-1" onScroll={handleScroll}>
+        <VirtualizedItems
+          files={files}
+          scrollTop={scrollTop}
+          viewHeight={viewHeight}
+          selected={selected}
+          onSelect={onSelect}
+        />
       </div>
 
-      {/* Export + Download ZIP fixed at bottom */}
       {doneCount > 0 && (
         <div className="shrink-0 px-2 py-2" style={{ borderTop: "1px solid rgba(20,184,166,0.1)" }}>
           <button

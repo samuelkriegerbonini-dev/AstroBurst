@@ -35,6 +35,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const abortRef = useRef(0);
   const lastRequestRef = useRef<string>("");
   const throttleRef = useRef<number | null>(null);
+  const busyRef = useRef(false);
 
   useEffect(() => {
     if (!filePath) {
@@ -71,14 +72,19 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
 
     throttleRef.current = requestAnimationFrame(() => {
       throttleRef.current = null;
+      if (busyRef.current) return;
+      busyRef.current = true;
       const seq = ++abortRef.current;
-      pixelToWorld(filePath, mouseX, mouseY)
+      const mx = mouseX;
+      const my = mouseY;
+      pixelToWorld(filePath, mx, my)
         .then((result: any) => {
           if (abortRef.current !== seq) return;
           setCoord({ ra: result.ra, dec: result.dec });
         })
-        .catch(() => {
-          if (abortRef.current !== seq) return;
+        .catch(() => {})
+        .finally(() => {
+          busyRef.current = false;
         });
     });
   }, [wcsAvailable, filePath, mouseX, mouseY, pixelToWorld]);

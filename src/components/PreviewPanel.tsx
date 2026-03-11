@@ -19,7 +19,7 @@ import {
 
 import { useBackend } from "../hooks/useBackend";
 import { probeGpu, isGpuAvailable } from "../context/Gpucontext";
-import { PreviewProvider, usePreviewContext } from "../context/PreviewContext";
+import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext } from "../context/PreviewContext";
 import WcsReadout from "./header/WcsReadout";
 import type { ProcessedFile } from "../utils/types";
 
@@ -85,7 +85,9 @@ export default function PreviewPanel({ file, allFiles }: PreviewPanelProps) {
 }
 
 function PreviewPanelInner() {
-  const { file, isCube, rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = usePreviewContext();
+  const { file } = useFileContext();
+  const { isCube } = useCubeContext();
+  const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
   const { getCubeSpectrum } = useBackend();
 
   const [activeBottomTab, setActiveBottomTab] = useState<BottomTabId>("info");
@@ -102,6 +104,9 @@ function PreviewPanelInner() {
   const [specElapsed, setSpecElapsed] = useState(0);
 
   const [mousePixel, setMousePixel] = useState<{ x: number; y: number } | null>(null);
+  const mousePixelRef = useRef<{ x: number; y: number } | null>(null);
+  const mouseRafRef = useRef<number | null>(null);
+  const previewTargetRef = useRef<HTMLElement | null>(null);
 
   const bottomHeightRef = useRef(BOTTOM_DEFAULT);
   const bottomResizing = useRef(false);
@@ -116,18 +121,32 @@ function PreviewPanelInner() {
   const specAbortRef = useRef(0);
 
   useEffect(() => {
-    probeGpu().then(() => setGpuAvailable(isGpuAvailable() === true));
+    probeGpu().then(() => {
+      const available = isGpuAvailable() === true;
+      setGpuAvailable(available);
+      if (available) setUseGpu(true);
+    });
   }, []);
 
   useEffect(() => {
     if (!file || file.id === prevFileIdRef.current) return;
     prevFileIdRef.current = file.id;
-    setUseGpu(false);
     setSpectrum(EMPTY_SPECTRUM);
     setSpecWavelengths(null);
     setSpecCoord(null);
     specAbortRef.current++;
-  }, [file?.id]);
+    mousePixelRef.current = null;
+    previewTargetRef.current = null;
+    if (mouseRafRef.current) {
+      cancelAnimationFrame(mouseRafRef.current);
+      mouseRafRef.current = null;
+    }
+    setMousePixel(null);
+    clearRawPixels();
+    if (gpuAvailable && useGpu) {
+      loadRawPixels();
+    }
+  }, [file?.id, gpuAvailable, useGpu, clearRawPixels, loadRawPixels]);
 
   const handleToggleGpu = useCallback(() => {
     if (useGpu) {
@@ -166,20 +185,35 @@ function PreviewPanelInner() {
   const handlePreviewMouseMove = useCallback(
     (e: React.MouseEvent<HTMLElement>) => {
       if (!file?.result?.dimensions) return;
-      const target = e.currentTarget.querySelector("img, canvas") as HTMLElement;
+      if (!previewTargetRef.current || !e.currentTarget.contains(previewTargetRef.current)) {
+        previewTargetRef.current = e.currentTarget.querySelector("img, canvas") as HTMLElement;
+      }
+      const target = previewTargetRef.current;
       if (!target) return;
       const rect = target.getBoundingClientRect();
       const dims = file.result.dimensions;
       const px = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
       const py = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
-      if (px >= 0 && px < dims[0] && py >= 0 && py < dims[1]) {
-        setMousePixel({ x: px, y: py });
-      }
+      if (px < 0 || px >= dims[0] || py < 0 || py >= dims[1]) return;
+      const prev = mousePixelRef.current;
+      if (prev && prev.x === px && prev.y === py) return;
+      mousePixelRef.current = { x: px, y: py };
+      if (mouseRafRef.current) return;
+      mouseRafRef.current = requestAnimationFrame(() => {
+        mouseRafRef.current = null;
+        setMousePixel(mousePixelRef.current);
+      });
     },
     [file?.result?.dimensions],
   );
 
   const handlePreviewMouseLeave = useCallback(() => {
+    mousePixelRef.current = null;
+    previewTargetRef.current = null;
+    if (mouseRafRef.current) {
+      cancelAnimationFrame(mouseRafRef.current);
+      mouseRafRef.current = null;
+    }
     setMousePixel(null);
   }, []);
 
@@ -388,7 +422,7 @@ function PreviewPanelInner() {
             {bottomOpen && (
               <div className="flex-1 overflow-y-auto px-3 py-2">
                 <Suspense fallback={<TabSpinner />}>
-                  {activeBottomTab === "info" && <MemoBottomInfo mousePixel={mousePixel} />}
+                  {activeBottomTab === "info" && <MemoBottomInfo mouseX={mousePixel?.x ?? null} mouseY={mousePixel?.y ?? null} />}
                   {activeBottomTab === "analysis" && (
                     <AnalysisTab
                       spectrum={spectrum}
@@ -484,8 +518,9 @@ function PreviewPanelInner() {
   );
 }
 
-const MemoBottomInfo = memo(function BottomInfo({ mousePixel }: { mousePixel: { x: number; y: number } | null }) {
-  const { file, histData, stfParams } = usePreviewContext();
+const MemoBottomInfo = memo(function BottomInfo({ mouseX, mouseY }: { mouseX: number | null; mouseY: number | null }) {
+  const { file } = useFileContext();
+  const { histData, stfParams } = useHistContext();
   if (!file) return null;
   return (
     <div className="flex flex-col gap-2 text-[10px] font-mono text-zinc-500">
@@ -494,8 +529,8 @@ const MemoBottomInfo = memo(function BottomInfo({ mousePixel }: { mousePixel: { 
           filePath={file.path}
           imageWidth={file.result.dimensions[0]}
           imageHeight={file.result.dimensions[1]}
-          mouseX={mousePixel?.x ?? null}
-          mouseY={mousePixel?.y ?? null}
+          mouseX={mouseX}
+          mouseY={mouseY}
         />
       )}
       {histData && (

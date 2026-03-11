@@ -8,7 +8,7 @@ use crate::types::ImageStats;
 use crate::types::header::HduHeader;
 
 struct CachedImage {
-    arr: Array2<f32>,
+    arr: Arc<Array2<f32>>,
     stats: ImageStats,
     header: Option<HduHeader>,
 }
@@ -42,16 +42,25 @@ impl Clone for ImageEntry {
 struct LruInner {
     map: HashMap<String, Arc<CachedImage>>,
     order: VecDeque<String>,
-    capacity: usize,
+    max_entries: usize,
+    max_bytes: usize,
+    current_bytes: usize,
 }
 
 impl LruInner {
-    fn new(capacity: usize) -> Self {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
-            map: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity,
+            map: HashMap::with_capacity(max_entries),
+            order: VecDeque::with_capacity(max_entries),
+            max_entries,
+            max_bytes,
+            current_bytes: 0,
         }
+    }
+
+    fn entry_bytes(entry: &Arc<CachedImage>) -> usize {
+        let (rows, cols) = entry.arr.dim();
+        rows * cols * std::mem::size_of::<f32>()
     }
 
     fn get(&mut self, key: &str) -> Option<Arc<CachedImage>> {
@@ -65,13 +74,24 @@ impl LruInner {
     }
 
     fn put(&mut self, key: String, value: Arc<CachedImage>) {
-        if self.map.contains_key(&key) {
+        let new_bytes = Self::entry_bytes(&value);
+
+        if let Some(old) = self.map.get(&key) {
+            self.current_bytes -= Self::entry_bytes(old);
             self.order.retain(|k| k != &key);
-        } else if self.map.len() >= self.capacity {
+        }
+
+        while (self.current_bytes + new_bytes > self.max_bytes || self.map.len() >= self.max_entries)
+            && !self.order.is_empty()
+        {
             if let Some(evicted) = self.order.pop_front() {
-                self.map.remove(&evicted);
+                if let Some(removed) = self.map.remove(&evicted) {
+                    self.current_bytes -= Self::entry_bytes(&removed);
+                }
             }
         }
+
+        self.current_bytes += new_bytes;
         self.order.push_back(key.clone());
         self.map.insert(key, value);
     }
@@ -79,6 +99,7 @@ impl LruInner {
     fn clear(&mut self) {
         self.map.clear();
         self.order.clear();
+        self.current_bytes = 0;
     }
 
     fn len(&self) -> usize {
@@ -86,10 +107,7 @@ impl LruInner {
     }
 
     fn memory_estimate_bytes(&self) -> usize {
-        self.map.values().map(|v| {
-            let (rows, cols) = v.arr.dim();
-            rows * cols * std::mem::size_of::<f32>()
-        }).sum()
+        self.current_bytes
     }
 }
 
@@ -98,9 +116,9 @@ pub struct ImageCache {
 }
 
 impl ImageCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
-            inner: RwLock::new(LruInner::new(capacity)),
+            inner: RwLock::new(LruInner::new(max_entries, max_bytes)),
         }
     }
 
@@ -121,7 +139,7 @@ impl ImageCache {
         }
 
         let (arr, stats) = loader()?;
-        let entry = Arc::new(CachedImage { arr, stats, header: None });
+        let entry = Arc::new(CachedImage { arr: Arc::new(arr), stats, header: None });
 
         {
             let mut cache = self.inner.write().unwrap();
@@ -138,12 +156,14 @@ impl ImageCache {
         {
             let mut cache = self.inner.write().unwrap();
             if let Some(entry) = cache.get(path) {
-                return Ok(ImageEntry { inner: entry });
+                if entry.header.is_some() {
+                    return Ok(ImageEntry { inner: entry });
+                }
             }
         }
 
         let (arr, stats, header) = loader()?;
-        let entry = Arc::new(CachedImage { arr, stats, header: Some(header) });
+        let entry = Arc::new(CachedImage { arr: Arc::new(arr), stats, header: Some(header) });
 
         {
             let mut cache = self.inner.write().unwrap();
@@ -151,6 +171,29 @@ impl ImageCache {
         }
 
         Ok(ImageEntry { inner: entry })
+    }
+
+    pub fn upgrade_header<F>(&self, path: &str, header_loader: F) -> Result<ImageEntry>
+    where
+        F: FnOnce() -> Result<HduHeader>,
+    {
+        {
+            let mut cache = self.inner.write().unwrap();
+            if let Some(entry) = cache.get(path) {
+                if entry.header.is_some() {
+                    return Ok(ImageEntry { inner: entry });
+                }
+                let header = header_loader()?;
+                let upgraded = Arc::new(CachedImage {
+                    arr: Arc::clone(&entry.arr),
+                    stats: entry.stats.clone(),
+                    header: Some(header),
+                });
+                cache.put(path.to_string(), Arc::clone(&upgraded));
+                return Ok(ImageEntry { inner: upgraded });
+            }
+        }
+        Err(anyhow::anyhow!("No cached entry to upgrade for {}", path))
     }
 
     pub fn invalidate(&self, path: &str) {
@@ -175,10 +218,11 @@ impl ImageCache {
     }
 }
 
-const DEFAULT_CACHE_SIZE: usize = 8;
+const DEFAULT_MAX_ENTRIES: usize = 32;
+const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> =
-    LazyLock::new(|| ImageCache::new(DEFAULT_CACHE_SIZE));
+    LazyLock::new(|| ImageCache::new(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_BYTES));
 
 #[cfg(test)]
 mod tests {
@@ -201,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_get_or_load_caches() {
-        let cache = ImageCache::new(4);
+        let cache = ImageCache::new(4, usize::MAX);
         let mut load_count = 0u32;
 
         let entry1 = cache.get_or_load("file1.fits", || {
@@ -221,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_lru_eviction() {
-        let cache = ImageCache::new(2);
+        let cache = ImageCache::new(2, usize::MAX);
 
         cache.get_or_load("a", || Ok(make_test_entry(10, 10))).unwrap();
         cache.get_or_load("b", || Ok(make_test_entry(20, 20))).unwrap();
@@ -236,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_lru_access_refreshes() {
-        let cache = ImageCache::new(2);
+        let cache = ImageCache::new(2, usize::MAX);
 
         cache.get_or_load("a", || Ok(make_test_entry(10, 10))).unwrap();
         cache.get_or_load("b", || Ok(make_test_entry(20, 20))).unwrap();
@@ -250,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_arc_zero_copy() {
-        let cache = ImageCache::new(4);
+        let cache = ImageCache::new(4, usize::MAX);
         cache.get_or_load("x", || Ok(make_test_entry(1000, 1000))).unwrap();
 
         let e1 = cache.get("x").unwrap();
@@ -262,14 +306,14 @@ mod tests {
 
     #[test]
     fn test_memory_estimate() {
-        let cache = ImageCache::new(4);
+        let cache = ImageCache::new(4, usize::MAX);
         cache.get_or_load("a", || Ok(make_test_entry(100, 100))).unwrap();
         assert_eq!(cache.memory_estimate_bytes(), 100 * 100 * 4);
     }
 
     #[test]
     fn test_invalidate() {
-        let cache = ImageCache::new(4);
+        let cache = ImageCache::new(4, usize::MAX);
         cache.get_or_load("a", || Ok(make_test_entry(10, 10))).unwrap();
         assert_eq!(cache.len(), 1);
         cache.invalidate("a");
@@ -279,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_get_or_load_full_with_header() {
-        let cache = ImageCache::new(4);
+        let cache = ImageCache::new(4, usize::MAX);
         let entry = cache.get_or_load_full("h.fits", || {
             let (arr, stats) = make_test_entry(10, 10);
             let header = crate::types::header::HduHeader {

@@ -1,7 +1,10 @@
 pub mod background;
+pub mod calibration_pipeline;
 pub mod normalize;
+pub mod psf_estimation;
 pub mod resample;
 pub mod scnr;
 pub mod stats;
 pub mod stf;
+pub mod stretch;
 pub mod wavelet;

@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
-use crate::core::imaging::normalize::asinh_normalize;
+use crate::core::imaging::normalize::robust_asinh_preview;
 use crate::domain::cube::{self, CubeResult};
 use crate::infra::fits::dispatcher::resolve_input;
 use crate::infra::fits::reader::{extract_cube_mmap, extract_image_mmap};
@@ -79,7 +79,7 @@ fn process_single_file(
     let img_result = extract_image_mmap(&file)?;
     let (rows, cols) = img_result.image.dim();
 
-    let normalized = asinh_normalize(&img_result.image);
+    let normalized = robust_asinh_preview(&img_result.image);
     let png_path = format!("{}/{}.png", sub_dir_str, stem);
     render_grayscale(&normalized, &png_path)?;
 

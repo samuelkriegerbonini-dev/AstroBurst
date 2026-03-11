@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::fs::File;
+use std::sync::{LazyLock, RwLock};
 
 use serde_json::json;
 
@@ -11,11 +13,38 @@ use crate::types::constants::{
     RES_NAXIS1, RES_NAXIS2, RES_PIXEL_SCALE_ARCSEC, RES_RA, RES_X, RES_Y,
 };
 
-fn load_wcs(path: &str) -> anyhow::Result<WcsTransform> {
+struct WcsCache {
+    map: HashMap<String, WcsTransform>,
+}
+
+static WCS_CACHE: LazyLock<RwLock<WcsCache>> = LazyLock::new(|| {
+    RwLock::new(WcsCache {
+        map: HashMap::with_capacity(16),
+    })
+});
+
+fn get_cached_wcs(path: &str) -> anyhow::Result<WcsTransform> {
+    {
+        let cache = WCS_CACHE.read().unwrap();
+        if let Some(wcs) = cache.map.get(path) {
+            return Ok(wcs.clone());
+        }
+    }
+
     let (fits_path, _tmp) = resolve_single_image(path)?;
     let file = File::open(&fits_path)?;
     let result = extract_image_mmap(&file)?;
-    WcsTransform::from_header(&result.header)
+    let wcs = WcsTransform::from_header(&result.header)?;
+
+    {
+        let mut cache = WCS_CACHE.write().unwrap();
+        if cache.map.len() >= 64 {
+            cache.map.clear();
+        }
+        cache.map.insert(path.to_string(), wcs.clone());
+    }
+
+    Ok(wcs)
 }
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
@@ -23,6 +52,15 @@ fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduH
     let file = File::open(&fits_path)?;
     let result = extract_image_mmap(&file)?;
     let wcs = WcsTransform::from_header(&result.header)?;
+
+    {
+        let mut cache = WCS_CACHE.write().unwrap();
+        if cache.map.len() >= 64 {
+            cache.map.clear();
+        }
+        cache.map.insert(path.to_string(), wcs.clone());
+    }
+
     Ok((result.header, wcs))
 }
 
@@ -69,7 +107,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn pixel_to_world(path: String, x: f64, y: f64) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let wcs = load_wcs(&path)?;
+        let wcs = get_cached_wcs(&path)?;
         let coord = wcs.pixel_to_world(x, y);
         Ok(json!({ RES_RA: coord.ra, RES_DEC: coord.dec }))
     })
@@ -78,7 +116,7 @@ pub async fn pixel_to_world(path: String, x: f64, y: f64) -> Result<serde_json::
 #[tauri::command]
 pub async fn world_to_pixel(path: String, ra: f64, dec: f64) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let wcs = load_wcs(&path)?;
+        let wcs = get_cached_wcs(&path)?;
         let (x, y) = wcs.world_to_pixel(ra, dec);
         Ok(json!({ RES_X: x, RES_Y: y }))
     })

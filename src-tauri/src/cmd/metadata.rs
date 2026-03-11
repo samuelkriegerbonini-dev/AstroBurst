@@ -25,6 +25,17 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
             }
         }
 
+        if let Ok(entry) = GLOBAL_IMAGE_CACHE.upgrade_header(&path, || {
+            let (fits_path, _tmp) = resolve_single_image(&path)?;
+            let file = File::open(&fits_path)?;
+            let result = extract_image_mmap(&file)?;
+            Ok(result.header)
+        }) {
+            if let Some(header) = entry.header() {
+                return Ok(serde_json::to_value(&header.index)?);
+            }
+        }
+
         let cached = load_cached_full(&path)?;
         if let Some(header) = cached.header() {
             return Ok(serde_json::to_value(&header.index)?);

@@ -1,0 +1,284 @@
+use ndarray::{Array2, Array3};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone)]
+pub struct CalibrationMasters {
+    pub dark: Option<Array2<f32>>,
+    pub flat: Option<Array2<f32>>,
+    pub bias: Option<Array2<f32>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelInput {
+    pub lights: Vec<Array2<f32>>,
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchStackConfig {
+    pub sigma_low: f32,
+    pub sigma_high: f32,
+    pub max_iterations: usize,
+    pub normalize_before_stack: bool,
+}
+
+impl Default for BatchStackConfig {
+    fn default() -> Self {
+        Self {
+            sigma_low: 2.5,
+            sigma_high: 3.0,
+            max_iterations: 5,
+            normalize_before_stack: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchPipelineConfig {
+    pub stack: BatchStackConfig,
+}
+
+impl Default for BatchPipelineConfig {
+    fn default() -> Self {
+        Self {
+            stack: BatchStackConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BatchPipelineResult {
+    pub master_channels: Vec<(String, Array2<f32>)>,
+    pub rgb: Option<Array3<f32>>,
+    pub stats: BatchPipelineStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchPipelineStats {
+    pub darks_combined: usize,
+    pub flats_combined: usize,
+    pub bias_combined: usize,
+    pub channels: Vec<BatchChannelStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchChannelStats {
+    pub label: String,
+    pub lights_input: usize,
+    pub lights_after_rejection: Vec<usize>,
+    pub mean: f64,
+    pub stddev: f64,
+}
+
+pub fn calibrate_light(
+    light: &Array2<f32>,
+    masters: &CalibrationMasters,
+) -> Array2<f32> {
+    let (rows, cols) = light.dim();
+    let npix = rows * cols;
+    let src = light.as_slice().expect("contiguous");
+
+    let bias_slice = masters.bias.as_ref().map(|b| b.as_slice().expect("contiguous"));
+    let dark_slice = masters.dark.as_ref().map(|d| d.as_slice().expect("contiguous"));
+    let flat_slice = masters.flat.as_ref().map(|f| f.as_slice().expect("contiguous"));
+
+    let result: Vec<f32> = (0..npix)
+        .into_par_iter()
+        .map(|i| {
+            let mut v = src[i];
+            if let Some(b) = bias_slice {
+                v -= b[i];
+            }
+            if let Some(d) = dark_slice {
+                v -= d[i];
+            }
+            if let Some(f) = flat_slice {
+                let fv = f[i];
+                if fv.is_finite() && fv.abs() > 1e-4 {
+                    v /= fv;
+                }
+            }
+            if v < 0.0 { 0.0 } else { v }
+        })
+        .collect();
+
+    Array2::from_shape_vec((rows, cols), result).unwrap()
+}
+
+pub fn run_batch_pipeline(
+    channels: Vec<ChannelInput>,
+    masters: &CalibrationMasters,
+    config: &BatchPipelineConfig,
+) -> Result<BatchPipelineResult, String> {
+    if channels.is_empty() {
+        return Err("No channels provided".into());
+    }
+
+    for ch in &channels {
+        if ch.lights.is_empty() {
+            return Err(format!("Channel '{}' has no lights", ch.label));
+        }
+    }
+
+    let mut pipeline_stats = BatchPipelineStats {
+        darks_combined: if masters.dark.is_some() { 1 } else { 0 },
+        flats_combined: if masters.flat.is_some() { 1 } else { 0 },
+        bias_combined: if masters.bias.is_some() { 1 } else { 0 },
+        channels: Vec::new(),
+    };
+
+    let mut master_channels: Vec<(String, Array2<f32>)> = Vec::new();
+
+    for channel in &channels {
+        let calibrated: Vec<Array2<f32>> = channel
+            .lights
+            .par_iter()
+            .map(|l| calibrate_light(l, masters))
+            .collect();
+
+        let normalized = if config.stack.normalize_before_stack {
+            normalize_frames(&calibrated)
+        } else {
+            calibrated
+        };
+
+        let (stacked, rejection_counts) =
+            sigma_clipped_mean_stack(&normalized, &config.stack);
+
+        let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
+        let var: f64 = stacked
+            .iter()
+            .map(|&v| ((v as f64) - mean_val).powi(2))
+            .sum::<f64>()
+            / stacked.len() as f64;
+
+        pipeline_stats.channels.push(BatchChannelStats {
+            label: channel.label.clone(),
+            lights_input: channel.lights.len(),
+            lights_after_rejection: rejection_counts,
+            mean: mean_val,
+            stddev: var.sqrt(),
+        });
+
+        master_channels.push((channel.label.clone(), stacked));
+    }
+
+    let rgb = compose_rgb_from_masters(&master_channels);
+
+    Ok(BatchPipelineResult {
+        master_channels,
+        rgb,
+        stats: pipeline_stats,
+    })
+}
+
+fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<f32>> {
+    let find = |label: &str| -> Option<&Array2<f32>> {
+        masters.iter().find(|(l, _)| l.eq_ignore_ascii_case(label)).map(|(_, arr)| arr)
+    };
+
+    let r = find("R")?;
+    let g = find("G")?;
+    let b = find("B")?;
+    let (h, w) = r.dim();
+
+    let (r_norm, g_norm, b_norm) = match find("L") {
+        Some(lum) => {
+            let r_n = normalize_channel(r);
+            let g_n = normalize_channel(g);
+            let b_n = normalize_channel(b);
+            let l_n = normalize_channel(lum);
+            (
+                apply_luminance(&r_n, &g_n, &b_n, &l_n, 0),
+                apply_luminance(&r_n, &g_n, &b_n, &l_n, 1),
+                apply_luminance(&r_n, &g_n, &b_n, &l_n, 2),
+            )
+        }
+        None => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
+    };
+
+    let mut rgb = Array3::<f32>::zeros((h, w, 3));
+    for y in 0..h {
+        for x in 0..w {
+            rgb[[y, x, 0]] = r_norm[[y, x]];
+            rgb[[y, x, 1]] = g_norm[[y, x]];
+            rgb[[y, x, 2]] = b_norm[[y, x]];
+        }
+    }
+    Some(rgb)
+}
+
+fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Array2<f32>, ch: usize) -> Array2<f32> {
+    let (h, w) = r.dim();
+    let mut out = Array2::<f32>::zeros((h, w));
+    for y in 0..h {
+        for x in 0..w {
+            let rgb_lum = 0.2126 * r[[y, x]] + 0.7152 * g[[y, x]] + 0.0722 * b[[y, x]];
+            let scale = if rgb_lum > 1e-10 { lum[[y, x]] / rgb_lum } else { 1.0 };
+            let val = match ch { 0 => r[[y, x]], 1 => g[[y, x]], _ => b[[y, x]] };
+            out[[y, x]] = (val * scale).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
+fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
+    let min_val = ch.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_val = ch.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let range = max_val - min_val;
+    if range < 1e-10 { return Array2::zeros(ch.dim()); }
+    ch.mapv(|v| ((v - min_val) / range).clamp(0.0, 1.0))
+}
+
+fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
+    frames.par_iter().map(|frame| {
+        let mean = frame.iter().map(|&v| v as f64).sum::<f64>() / frame.len() as f64;
+        if mean > 0.0 { frame.mapv(|v| v / mean as f32) } else { frame.clone() }
+    }).collect()
+}
+
+fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -> (Array2<f32>, Vec<usize>) {
+    let (h, w) = frames[0].dim();
+    let n = frames.len();
+    let mut result = Array2::<f32>::zeros((h, w));
+    let mut rejection_counts = vec![0usize; n];
+
+    let rows: Vec<usize> = (0..h).collect();
+    let row_data: Vec<(Vec<f32>, Vec<usize>)> = rows.par_iter().map(|&y| {
+        let mut row = vec![0.0f32; w];
+        let mut local_rejected = vec![0usize; n];
+        let mut vals: Vec<(f32, usize)> = Vec::with_capacity(n);
+
+        for x in 0..w {
+            vals.clear();
+            for (i, frame) in frames.iter().enumerate() {
+                vals.push((frame[[y, x]], i));
+            }
+
+            for _ in 0..config.max_iterations {
+                if vals.len() < 3 { break; }
+                let mean: f32 = vals.iter().map(|(v, _)| v).sum::<f32>() / vals.len() as f32;
+                let var: f32 = vals.iter().map(|(v, _)| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32;
+                let sigma = var.sqrt();
+                if sigma < 1e-10 { break; }
+                let before = vals.len();
+                vals.retain(|(v, idx)| {
+                    let z = (v - mean) / sigma;
+                    let keep = z > -config.sigma_low && z < config.sigma_high;
+                    if !keep { local_rejected[*idx] += 1; }
+                    keep
+                });
+                if vals.len() == before { break; }
+            }
+
+            row[x] = if vals.is_empty() { 0.0 } else { vals.iter().map(|(v, _)| v).sum::<f32>() / vals.len() as f32 };
+        }
+        (row, local_rejected)
+    }).collect();
+
+    for (y, (row, local_rej)) in row_data.into_iter().enumerate() {
+        for (x, val) in row.into_iter().enumerate() { result[[y, x]] = val; }
+        for (i, count) in local_rej.into_iter().enumerate() { rejection_counts[i] += count; }
+    }
+    (result, rejection_counts)
+}

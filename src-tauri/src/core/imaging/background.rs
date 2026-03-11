@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ndarray::{Array1, Array2};
+use ndarray::{Array2};
 use rayon::prelude::*;
 
 use crate::infra::progress::ProgressHandle;
@@ -296,6 +296,19 @@ fn apply_correction(
 ) -> Array2<f32> {
     let (rows, cols) = image.dim();
 
+    let mut finite_vals: Vec<f32> = model
+        .as_slice()
+        .unwrap()
+        .iter()
+        .filter(|v| v.is_finite() && **v > 0.0)
+        .copied()
+        .collect();
+    let model_median = if finite_vals.is_empty() {
+        0.0f32
+    } else {
+        median_f32_mut(&mut finite_vals)
+    };
+
     let result: Vec<f32> = image
         .as_slice()
         .unwrap()
@@ -303,12 +316,11 @@ fn apply_correction(
         .zip(model.as_slice().unwrap().par_iter())
         .map(|(&img, &bg)| match mode {
             BackgroundMode::Subtract => {
-                let v = img - bg;
-                v.max(0.0)
+                img - bg + model_median
             }
             BackgroundMode::Divide => {
                 if bg.abs() > 1e-10 {
-                    img / bg
+                    (img / bg) * model_median
                 } else {
                     img
                 }

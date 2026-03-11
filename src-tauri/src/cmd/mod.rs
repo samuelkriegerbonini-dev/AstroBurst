@@ -12,5 +12,7 @@ pub mod metadata;
 pub mod pipeline;
 pub mod resample;
 pub mod stacking;
+pub mod stretch;
 pub mod visualization;
 pub mod wavelet;
+pub mod psf;

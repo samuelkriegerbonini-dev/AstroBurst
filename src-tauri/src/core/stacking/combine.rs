@@ -3,6 +3,8 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 pub use crate::types::stacking::{StackConfig, StackResult};
+use crate::math::median::f32_cmp;
+use crate::types::constants::MAD_TO_SIGMA;
 
 use crate::core::stacking::align;
 
@@ -19,48 +21,78 @@ pub fn sigma_clip_combine(
         return (values[0], 0);
     }
 
+    let n_orig = values.len();
+    let mut len = n_orig;
     let mut rejected = 0u32;
-    let mut active: Vec<f32> = values.clone();
 
-    for _ in 0..max_iter {
-        if active.len() < 2 {
+    for iteration in 0..max_iter {
+        if len < 2 {
             break;
         }
 
-        let n = active.len() as f64;
-        let mean = active.iter().map(|v| *v as f64).sum::<f64>() / n;
+        let (center, sigma) = if iteration == 0 {
+            let mid = len / 2;
+            values[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+            let med = values[mid];
 
-        let variance = active
-            .iter()
-            .map(|v| {
-                let d = *v as f64 - mean;
-                d * d
-            })
-            .sum::<f64>()
-            / (n - 1.0).max(1.0);
-        let sigma = variance.sqrt().max(1e-10) as f32;
-        let mean_f = mean as f32;
+            let mut max_dev = 0.0f32;
+            for i in 0..len {
+                let d = (values[i] - med).abs();
+                if i < len {
+                    let tmp = values[i];
+                    values[i] = d;
+                    if i == 0 || d > max_dev { max_dev = d; }
+                    values[i] = tmp;
+                }
+            }
 
-        let before = active.len();
-        active.retain(|&v| {
-            let dev = v - mean_f;
-            dev >= -sigma_low * sigma && dev <= sigma_high * sigma
-        });
+            let devs_buf: Vec<f32> = values[..len].iter().map(|v| (v - med).abs()).collect();
+            let mut devs = devs_buf;
+            let dmid = devs.len() / 2;
+            devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
+            let mad = devs[dmid];
+            let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
+            (med, sig)
+        } else {
+            let n = len as f64;
+            let mean = values[..len].iter().map(|v| *v as f64).sum::<f64>() / n;
+            let variance = values[..len]
+                .iter()
+                .map(|v| {
+                    let d = *v as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (n - 1.0).max(1.0);
+            (mean as f32, variance.sqrt().max(1e-10) as f32)
+        };
 
-        let removed = before - active.len();
+        let lo = -sigma_low * sigma;
+        let hi = sigma_high * sigma;
+        let mut write = 0;
+        for read in 0..len {
+            let dev = values[read] - center;
+            if dev >= lo && dev <= hi {
+                values[write] = values[read];
+                write += 1;
+            }
+        }
+
+        let removed = len - write;
         rejected += removed as u32;
+        len = write;
 
         if removed == 0 {
             break;
         }
     }
 
-    if active.is_empty() {
+    if len == 0 {
         let sum: f64 = values.iter().map(|v| *v as f64).sum();
-        return ((sum / values.len() as f64) as f32, rejected);
+        return ((sum / n_orig as f64) as f32, rejected);
     }
 
-    let mean = active.iter().map(|v| *v as f64).sum::<f64>() / active.len() as f64;
+    let mean = values[..len].iter().map(|v| *v as f64).sum::<f64>() / len as f64;
     (mean as f32, rejected)
 }
 

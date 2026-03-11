@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use ndarray::Array3;
 use rayon::prelude::*;
 
-use crate::core::imaging::normalize::asinh_normalize;
+use crate::core::imaging::normalize::robust_asinh_preview;
 use crate::infra::fits::reader::extract_cube_mmap;
 use crate::infra::render::render_grayscale;
 
@@ -74,12 +74,12 @@ pub fn process_cube(
         .with_context(|| format!("Failed to create output dir {}", output_dir))?;
 
     let collapsed = collapse_mean(&cube);
-    let collapsed_norm = asinh_normalize(&collapsed);
+    let collapsed_norm = robust_asinh_preview(&collapsed);
     let collapsed_path = format!("{}/collapsed_mean.png", output_dir);
     render_grayscale(&collapsed_norm, &collapsed_path)?;
 
     let collapsed_med = collapse_median(&cube);
-    let collapsed_med_norm = asinh_normalize(&collapsed_med);
+    let collapsed_med_norm = robust_asinh_preview(&collapsed_med);
     let collapsed_med_path = format!("{}/collapsed_median.png", output_dir);
     render_grayscale(&collapsed_med_norm, &collapsed_med_path)?;
 

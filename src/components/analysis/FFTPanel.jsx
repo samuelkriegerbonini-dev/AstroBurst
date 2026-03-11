@@ -137,7 +137,10 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
 
           <div className="flex items-center justify-between px-3 py-2 text-[10px] font-mono text-zinc-500">
             <span>
-              {fftData.width}x{fftData.height} px
+              {fftData.width}x{fftData.height}
+              {fftData.original_size && fftData.original_size !== fftData.width && (
+                <span className="text-zinc-700"> (from {fftData.original_size}x{fftData.original_size})</span>
+              )}
             </span>
             {hoveredCoord && (
               <span className="text-cyan-400">
@@ -150,6 +153,8 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
           <div className="flex items-center gap-3 px-3 pb-2 text-[10px] font-mono text-zinc-500">
             <span>DC={fftData.dc_magnitude?.toExponential(2)}</span>
             <span>max={fftData.max_magnitude?.toExponential(2)}</span>
+            {fftData.windowed && <span className="text-cyan-600">Hann windowed</span>}
+            <span className="text-zinc-700">ln(1+|F|)</span>
           </div>
         </>
       )}

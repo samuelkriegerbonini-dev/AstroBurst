@@ -119,6 +119,9 @@ pub const RES_RMS_RESIDUAL: &str = "rms_residual";
 pub const RES_ITERATIONS_RUN: &str = "iterations_run";
 pub const RES_CONVERGENCE: &str = "convergence";
 
+// Arcsinh stretch
+pub const RES_STRETCH_FACTOR: &str = "stretch_factor";
+
 // Wavelet denoise
 pub const RES_SCALES_PROCESSED: &str = "scales_processed";
 pub const RES_NOISE_ESTIMATE: &str = "noise_estimate";
@@ -150,6 +153,19 @@ pub const RES_FRAMES: &str = "frames";
 pub const RES_BITPIX: &str = "bitpix";
 pub const RES_FRAME_INDEX: &str = "frame_index";
 pub const RES_SPECTRUM: &str = "spectrum";
+pub const RES_SPECTRAL_CLASSIFICATION: &str = "spectral_classification";
+pub const RES_IS_SPECTRAL: &str = "is_spectral";
+pub const RES_SPECTRAL_REASON: &str = "reason";
+pub const RES_AXIS_TYPE: &str = "axis_type";
+pub const RES_AXIS_UNIT: &str = "axis_unit";
+pub const RES_CHANNEL_COUNT: &str = "channel_count";
+pub const RES_WAVELENGTHS: &str = "wavelengths";
+
+// FFT display
+pub const RES_DISPLAY_WIDTH: &str = "display_width";
+pub const RES_DISPLAY_HEIGHT: &str = "display_height";
+pub const RES_ORIGINAL_SIZE: &str = "original_size";
+pub const RES_WINDOWED: &str = "windowed";
 
 // FITS header / metadata
 pub const RES_HEADER: &str = "header";

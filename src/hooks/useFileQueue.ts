@@ -41,10 +41,14 @@ const initialState: State = {
   stats: { total: 0, done: 0, failed: 0, totalBytes: 0 },
 };
 
-function rebuildMap(files: ProcessedFile[]): Map<string, ProcessedFile> {
-  const map = new Map();
-  for (const f of files) map.set(f.id, f);
-  return map;
+function updateFile(state: State, id: string, updater: (f: ProcessedFile) => ProcessedFile): { files: ProcessedFile[]; fileMap: Map<string, ProcessedFile> } {
+  const existing = state.fileMap.get(id);
+  if (!existing) return { files: state.files, fileMap: state.fileMap };
+  const updated = updater(existing);
+  const files = state.files.map((f) => (f.id === id ? updated : f));
+  const fileMap = new Map(state.fileMap);
+  fileMap.set(id, updated);
+  return { files, fileMap };
 }
 
 function reducer(state: State, action: Action): State {
@@ -62,10 +66,12 @@ function reducer(state: State, action: Action): State {
         finishedAt: null,
       }));
       const files = [...state.files, ...newFiles];
+      const fileMap = new Map(state.fileMap);
+      for (const f of newFiles) fileMap.set(f.id, f);
       return {
         ...state,
         files,
-        fileMap: rebuildMap(files),
+        fileMap,
         stats: {
           ...state.stats,
           total: files.length,
@@ -78,54 +84,45 @@ function reducer(state: State, action: Action): State {
       return { ...state, isProcessing: true };
 
     case "FILE_STARTED": {
-      const files = state.files.map((f) =>
-        f.id === action.payload.id
-          ? { ...f, status: FILE_STATUS.PROCESSING as const, startedAt: Date.now() }
-          : f,
-      );
-      return { ...state, files, fileMap: rebuildMap(files) };
+      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
+        ...f,
+        status: FILE_STATUS.PROCESSING as const,
+        startedAt: Date.now(),
+      }));
+      return { ...state, files, fileMap };
     }
 
     case "FILE_DONE": {
-      const files = state.files.map((f) =>
-        f.id === action.payload.id
-          ? {
-            ...f,
-            status: FILE_STATUS.DONE as const,
-            result: action.payload.result,
-            finishedAt: Date.now(),
-          }
-          : f,
-      );
-      const done = files.filter((f) => f.status === FILE_STATUS.DONE).length;
+      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
+        ...f,
+        status: FILE_STATUS.DONE as const,
+        result: action.payload.result,
+        finishedAt: Date.now(),
+      }));
+      const done = state.stats.done + 1;
       const autoSelect =
         state.selected === null && done === 1 ? action.payload.id : state.selected;
       return {
         ...state,
         files,
-        fileMap: rebuildMap(files),
+        fileMap,
         selected: autoSelect,
         stats: { ...state.stats, done },
       };
     }
 
     case "FILE_ERROR": {
-      const files = state.files.map((f) =>
-        f.id === action.payload.id
-          ? {
-            ...f,
-            status: FILE_STATUS.ERROR as const,
-            error: action.payload.error,
-            finishedAt: Date.now(),
-          }
-          : f,
-      );
-      const failed = files.filter((f) => f.status === FILE_STATUS.ERROR).length;
+      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
+        ...f,
+        status: FILE_STATUS.ERROR as const,
+        error: action.payload.error,
+        finishedAt: Date.now(),
+      }));
       return {
         ...state,
         files,
-        fileMap: rebuildMap(files),
-        stats: { ...state.stats, failed },
+        fileMap,
+        stats: { ...state.stats, failed: state.stats.failed + 1 },
       };
     }
 
@@ -136,19 +133,15 @@ function reducer(state: State, action: Action): State {
       return { ...state, selected: action.payload };
 
     case "FILE_RESAMPLED": {
-      const files = state.files.map((f) =>
-        f.id === action.payload.id
-          ? {
-            ...f,
-            result: {
-              ...(f.result ?? {}),
-              resampled: action.payload.resampleResult,
-              resampledPath: action.payload.resampleResult.fits_path,
-            } as ProcessResult,
-          }
-          : f,
-      );
-      return { ...state, files, fileMap: rebuildMap(files) };
+      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
+        ...f,
+        result: {
+          ...(f.result ?? {}),
+          resampled: action.payload.resampleResult,
+          resampledPath: action.payload.resampleResult.fits_path,
+        } as ProcessResult,
+      }));
+      return { ...state, files, fileMap };
     }
 
     case "RESET":

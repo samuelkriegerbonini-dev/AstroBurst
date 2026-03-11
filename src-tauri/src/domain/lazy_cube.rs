@@ -312,14 +312,14 @@ pub fn process_cube_lazy(
         .with_context(|| format!("Failed to create output dir {}", output_dir))?;
 
     let collapsed = lazy.collapse_mean_lazy()?;
-    let collapsed_norm = crate::core::imaging::normalize::asinh_normalize(&collapsed);
+    let collapsed_norm = crate::core::imaging::normalize::robust_asinh_preview(&collapsed);
     let collapsed_path = format!("{}/collapsed_mean.png", output_dir);
     crate::infra::render::render_grayscale(&collapsed_norm, &collapsed_path)?;
 
     lazy.clear_cache();
 
     let collapsed_med = lazy.collapse_median_lazy()?;
-    let collapsed_med_norm = crate::core::imaging::normalize::asinh_normalize(&collapsed_med);
+    let collapsed_med_norm = crate::core::imaging::normalize::robust_asinh_preview(&collapsed_med);
     let collapsed_med_path = format!("{}/collapsed_median.png", output_dir);
     crate::infra::render::render_grayscale(&collapsed_med_norm, &collapsed_med_path)?;
 

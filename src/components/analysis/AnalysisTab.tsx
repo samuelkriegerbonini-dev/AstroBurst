@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "re
 import { Loader2 } from "lucide-react";
 import HistogramPanel from "./HistogramPanel";
 import { useBackend } from "../../hooks/useBackend";
-import { usePreviewContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
 import type { StfParams } from "../../utils/types";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
@@ -37,7 +37,11 @@ function AnalysisTabInner({
                             specElapsed,
                             starOverlayRef,
                           }: AnalysisTabProps) {
-  const { file, histData, stfParams, setStfParams, isCube, cubeDims, setRenderedPreviewUrl, rawPixels } = usePreviewContext();
+  const { file } = useFileContext();
+  const { histData, stfParams, setStfParams } = useHistContext();
+  const { isCube, cubeDims } = useCubeContext();
+  const { setRenderedPreviewUrl } = useRenderContext();
+  const { rawPixels } = useRawPixelsContext();
   const { detectStars, computeFftSpectrum, applyStfRender } = useBackend();
 
   const [starResult, setStarResult] = useState<any>(null);
@@ -61,7 +65,8 @@ function AnalysisTabInner({
         params.highlight,
       );
       if (result.previewUrl) {
-        setRenderedPreviewUrl(result.previewUrl);
+        const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+        setRenderedPreviewUrl(bust);
       }
     } catch (e) {
       console.error("STF render failed:", e);
@@ -168,6 +173,7 @@ function AnalysisTabInner({
           imageHeight={starResult?.image_height || file?.result?.dimensions?.[1]}
           elapsed={starResult?.elapsed_ms || 0}
           overlayCanvasRef={starOverlayRef}
+          filePath={file?.path}
         />
 
         {file?.path && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
