@@ -7,4 +7,3 @@ pub mod pipeline;
 pub mod plate_solve;
 pub mod rgb_compose;
 pub mod stacking;
-pub mod psf_estimation;

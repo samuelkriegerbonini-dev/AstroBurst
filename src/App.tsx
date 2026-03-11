@@ -276,7 +276,7 @@ export default function App() {
                       AstroBurst
                     </span>
                   <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">
-                      v0.3.0
+                      v0.3.1
                     </span>
                 </div>
               </div>
