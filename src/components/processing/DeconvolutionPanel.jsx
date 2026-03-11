@@ -16,7 +16,7 @@ function enforceOdd(value) {
   return v % 2 === 0 ? v + 1 : v;
 }
 
-export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }) {
+export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom, psfKernel }) {
   const { deconvolveRL } = useBackend();
   const progress = useProgress("deconv-progress");
   const [params, setParams] = useState({
@@ -26,6 +26,7 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
     regularization: SLIDER_CONFIGS.regularization.default,
     deringing: true,
     deringThreshold: SLIDER_CONFIGS.deringThreshold.default,
+    useEmpiricalPsf: false,
   });
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -54,6 +55,7 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
         regularization: params.regularization,
         deringing: params.deringing,
         deringThreshold: params.deringThreshold,
+        useEmpiricalPsf: params.useEmpiricalPsf,
       });
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
@@ -120,6 +122,7 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
       <div className="flex flex-col gap-3">
         {Object.entries(SLIDER_CONFIGS).map(([key, cfg]) => {
           if (key === "deringThreshold" && !params.deringing) return null;
+          if ((key === "psfSigma" || key === "psfSize") && params.useEmpiricalPsf) return null;
           return (
             <div key={key} className="flex flex-col gap-1">
               <div className="flex justify-between items-center">
@@ -167,6 +170,34 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
             />
           </button>
         </div>
+
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <label className="text-xs text-zinc-400">Empirical PSF</label>
+            {psfKernel && (
+              <span className="text-[9px] text-emerald-400 bg-emerald-900/30 px-1.5 py-0.5 rounded">ready</span>
+            )}
+          </div>
+          <button
+            onClick={() => updateParam("useEmpiricalPsf", !params.useEmpiricalPsf)}
+            disabled={isRunning}
+            className={`relative w-9 h-5 rounded-full transition-colors duration-200 ${
+              params.useEmpiricalPsf ? "bg-violet-500" : "bg-zinc-600"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                params.useEmpiricalPsf ? "translate-x-4" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        {params.useEmpiricalPsf && !psfKernel && (
+          <div className="text-[10px] text-amber-400/80 bg-amber-900/20 border border-amber-800/20 rounded px-2.5 py-1.5">
+            Go to PSF tab first to estimate the PSF from stars, then come back here.
+          </div>
+        )}
       </div>
 
       <button

@@ -5,25 +5,29 @@ import { usePreviewContext } from "../../context/PreviewContext";
 const DeconvolutionPanel = lazy(() => import("./DeconvolutionPanel"));
 const BackgroundPanel = lazy(() => import("./BackgroundPanel"));
 const WaveletPanel = lazy(() => import("./WaveletPanel"));
+const PsfPanel = lazy(() => import("./PsfPanel"));
 
-type ProcessingSection = "background" | "denoise" | "deconvolution";
+type ProcessingSection = "background" | "denoise" | "psf" | "deconvolution";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "background", label: "Background", color: "emerald" },
   { id: "denoise", label: "Denoise", color: "sky" },
-  { id: "deconvolution", label: "Deconvolution", color: "indigo" },
+  { id: "psf", label: "PSF", color: "violet" },
+  { id: "deconvolution", label: "Deconv", color: "indigo" },
 ];
 
 export interface ProcessingChain {
   backgroundFits: string | null;
   denoiseFits: string | null;
   deconvFits: string | null;
+  psfKernel: number[][] | null;
 }
 
 function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
   const steps: string[] = [originalName];
   if (chain.backgroundFits) steps.push("BG");
   if (chain.denoiseFits) steps.push("Denoise");
+  if (chain.psfKernel) steps.push("PSF");
   if (chain.deconvFits) steps.push("Deconv");
 
   if (steps.length <= 1) return null;
@@ -42,6 +46,13 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
   );
 }
 
+const COLOR_MAP: Record<string, { active: string; dot: string }> = {
+  emerald: { active: "bg-emerald-600/20 text-emerald-400 ring-1 ring-emerald-500/30", dot: "bg-emerald-400" },
+  sky: { active: "bg-sky-600/20 text-sky-400 ring-1 ring-sky-500/30", dot: "bg-sky-400" },
+  violet: { active: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30", dot: "bg-violet-400" },
+  indigo: { active: "bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30", dot: "bg-indigo-400" },
+};
+
 function ProcessingTabInner() {
   const { file, setRenderedPreviewUrl } = usePreviewContext();
   const [active, setActive] = useState<ProcessingSection>("background");
@@ -50,6 +61,7 @@ function ProcessingTabInner() {
     backgroundFits: null,
     denoiseFits: null,
     deconvFits: null,
+    psfKernel: null,
   });
 
   const handlePreviewUpdate = useCallback(
@@ -103,8 +115,12 @@ function ProcessingTabInner() {
     [handlePreviewUpdate],
   );
 
+  const handlePsfReady = useCallback((kernel: number[][]) => {
+    setChain((prev) => ({ ...prev, psfKernel: kernel }));
+  }, []);
+
   const handleResetChain = useCallback(() => {
-    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null });
+    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null });
   }, []);
 
   const backgroundInput = file;
@@ -112,11 +128,7 @@ function ProcessingTabInner() {
   const denoiseInput = useMemo(() => {
     if (!file) return null;
     if (chain.backgroundFits) {
-      return {
-        ...file,
-        path: chain.backgroundFits,
-        result: { ...file.result, previewUrl: file.result?.previewUrl },
-      };
+      return { ...file, path: chain.backgroundFits, result: { ...file.result } };
     }
     return file;
   }, [file, chain.backgroundFits]);
@@ -124,14 +136,10 @@ function ProcessingTabInner() {
   const deconvInput = useMemo(() => {
     if (!file) return null;
     const path = chain.denoiseFits || chain.backgroundFits || file.path;
-    return {
-      ...file,
-      path,
-      result: { ...file.result, previewUrl: file.result?.previewUrl },
-    };
+    return { ...file, path, result: { ...file.result } };
   }, [file, chain.denoiseFits, chain.backgroundFits]);
 
-  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits;
+  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel;
 
   return (
     <div className="flex flex-col h-full">
@@ -142,24 +150,20 @@ function ProcessingTabInner() {
             const hasResult =
               (s.id === "background" && chain.backgroundFits) ||
               (s.id === "denoise" && chain.denoiseFits) ||
+              (s.id === "psf" && chain.psfKernel) ||
               (s.id === "deconvolution" && chain.deconvFits);
+            const colors = COLOR_MAP[s.color];
             return (
               <button
                 key={s.id}
                 onClick={() => setActive(s.id)}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150 relative ${
-                  isActive
-                    ? s.color === "emerald"
-                      ? "bg-emerald-600/20 text-emerald-400 ring-1 ring-emerald-500/30"
-                      : s.color === "sky"
-                        ? "bg-sky-600/20 text-sky-400 ring-1 ring-sky-500/30"
-                        : "bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                  isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 }`}
               >
                 {s.label}
                 {hasResult && (
-                  <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-emerald-400" />
+                  <span className={`absolute -top-1 -right-1 w-2 h-2 rounded-full ${colors.dot}`} />
                 )}
               </button>
             );
@@ -193,7 +197,9 @@ function ProcessingTabInner() {
             <BackgroundPanel
               selectedFile={backgroundInput}
               onPreviewUpdate={handlePreviewUpdate}
-              onProcessingDone={handleBackgroundDone} chainedFrom={undefined}            />
+              onProcessingDone={handleBackgroundDone}
+              chainedFrom={undefined}
+            />
           </div>
           <div style={{ display: active === "denoise" ? "block" : "none" }}>
             <WaveletPanel
@@ -201,6 +207,12 @@ function ProcessingTabInner() {
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleDenoiseDone}
               chainedFrom={chain.backgroundFits ? "background" : undefined}
+            />
+          </div>
+          <div style={{ display: active === "psf" ? "block" : "none" }}>
+            <PsfPanel
+              selectedFile={deconvInput}
+              onPsfReady={handlePsfReady}
             />
           </div>
           <div style={{ display: active === "deconvolution" ? "block" : "none" }}>
@@ -211,6 +223,7 @@ function ProcessingTabInner() {
               chainedFrom={
                 chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
               }
+              psfKernel={chain.psfKernel}
             />
           </div>
         </div>

@@ -275,6 +275,9 @@ export function useBackend() {
         regularization?: number;
         deringing?: boolean;
         deringThreshold?: number;
+        useEmpiricalPsf?: boolean;
+        psfNumStars?: number;
+        psfCutoutRadius?: number;
       } = {},
     ) => {
       const res = await safeInvoke("deconvolve_rl_cmd", {
@@ -286,6 +289,9 @@ export function useBackend() {
         regularization: options.regularization ?? 0.001,
         deringing: options.deringing ?? true,
         deringThreshold: options.deringThreshold ?? 0.1,
+        useEmpiricalPsf: options.useEmpiricalPsf ?? false,
+        psfNumStars: options.psfNumStars ?? 3,
+        psfCutoutRadius: options.psfCutoutRadius ?? 15,
       });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
@@ -342,6 +348,29 @@ export function useBackend() {
       if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
       return res;
     },
+
+    estimatePsf: async (path: string, options: {
+      numStars?: number;
+      cutoutRadius?: number;
+      saturationThreshold?: number;
+      maxEllipticity?: number;
+    } = {}) => safeInvoke("estimate_psf_cmd", {
+      path,
+      numStars: options.numStars ?? 3,
+      cutoutRadius: options.cutoutRadius ?? 15,
+      saturationThreshold: options.saturationThreshold ?? 0.95,
+      maxEllipticity: options.maxEllipticity ?? 0.3,
+    }),
+
+    runCalibrationPipeline: async (request: {
+      channels: { label: string; paths: string[] }[];
+      dark_paths: string[];
+      flat_paths: string[];
+      bias_paths: string[];
+      sigma_low?: number;
+      sigma_high?: number;
+      normalize?: boolean;
+    }) => safeInvoke("run_pipeline_cmd", { request }),
 
     getConfig: () => safeInvoke("get_config"),
     updateConfig: (field: string, value: any) => safeInvoke("update_config", { field, value }),

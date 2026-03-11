@@ -1,275 +1,344 @@
-import { useState, useCallback } from "react";
-import { Loader2, Workflow, Play, CheckCircle2, AlertCircle, ChevronDown, ChevronRight, Settings2 } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
-import type { ProcessedFile } from "../../utils/types";
-import type { CalibrationState, StackConfig } from "../preview/StackingTab";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  useCalibrationPipeline,
+  ChannelFilesInput,
+  ChannelPreview,
+} from "../../hooks/useCalibrationPipeline";
+
+interface FileGroup {
+  label: string;
+  paths: string[];
+}
+
+const CHANNEL_LABELS = ["R", "G", "B"];
 
 interface PipelinePanelProps {
-  files: ProcessedFile[];
+  files?: any[];
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  calibration?: CalibrationState;
-  stackConfig?: StackConfig;
+  calibration?: any;
+  stackConfig?: any;
 }
 
-function ConfigSummary({
-                         calibration,
-                         stackConfig,
-                       }: {
-  calibration?: CalibrationState;
-  stackConfig?: StackConfig;
-}) {
-  const hasCal = calibration && (calibration.hasBias || calibration.hasDark || calibration.hasFlat);
-  const hasConfig = stackConfig !== undefined;
+export default function PipelinePanel(_props: PipelinePanelProps) {
+  const { result, loading, error, progress, run } = useCalibrationPipeline();
 
-  if (!hasCal && !hasConfig) return null;
-
-  return (
-    <div className="bg-zinc-900/60 rounded-lg border border-zinc-800/40 px-3 py-2.5 space-y-2">
-      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
-        <Settings2 size={10} />
-        Workflow Summary
-      </div>
-
-      {hasCal && (
-        <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-violet-400">Calibration:</span>
-          <div className="flex gap-1.5">
-            {calibration!.hasBias && (
-              <span className="px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20">Bias</span>
-            )}
-            {calibration!.hasDark && (
-              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20">Dark</span>
-            )}
-            {calibration!.hasFlat && (
-              <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">Flat</span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {hasConfig && (
-        <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-500 flex-wrap">
-          <span>
-            Sigma <span className="text-amber-400/80">{stackConfig!.sigmaLow.toFixed(1)}</span>/<span className="text-amber-400/80">{stackConfig!.sigmaHigh.toFixed(1)}</span>
-          </span>
-          <span>
-            Iter <span className="text-amber-400/80">{stackConfig!.maxIterations}</span>
-          </span>
-          <span className={stackConfig!.align ? "text-emerald-400/80" : "text-zinc-600"}>
-            Align {stackConfig!.align ? "ON" : "OFF"}
-          </span>
-        </div>
-      )}
-
-      {calibration?.calibratedFitsPath && (
-        <div className="text-[10px] text-emerald-400/60 truncate">
-          Calibrated: {calibration.calibratedFitsPath.split(/[/\\]/).pop()}
-        </div>
-      )}
-    </div>
+  const [channels, setChannels] = useState<FileGroup[]>(
+    CHANNEL_LABELS.map((l) => ({ label: l, paths: [] }))
   );
-}
+  const [darks, setDarks] = useState<string[]>([]);
+  const [flats, setFlats] = useState<string[]>([]);
+  const [bias, setBias] = useState<string[]>([]);
+  const [sigmaLow, setSigmaLow] = useState(2.5);
+  const [sigmaHigh, setSigmaHigh] = useState(3.0);
+  const [normalize, setNormalize] = useState(true);
+  const [activePreview, setActivePreview] = useState<string | null>(null);
 
-function ResultSummary({ data }: { data: any }) {
-  const [expanded, setExpanded] = useState(false);
+  const rgbCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  if (!data) return null;
+  const pickFiles = useCallback(async (title: string): Promise<string[]> => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "FITS", extensions: ["fits", "fit", "fts"] }],
+      title,
+    });
+    if (!selected) return [];
+    if (Array.isArray(selected)) return selected.map(f => typeof f === 'string' ? f : f.path);
+    return [selected];
+  }, []);
 
-  const entries = Object.entries(data);
-  const previewKeys = ["png_path", "collapsed_path", "corrected_png", "fits_path"];
-  const statsKeys = ["elapsed_ms", "dimensions", "frame_count", "rejected_pixels"];
-
-  const stats = entries.filter(([k]) => statsKeys.includes(k));
-  const paths = entries.filter(([k]) => previewKeys.includes(k));
-  const rest = entries.filter(([k]) => !statsKeys.includes(k) && !previewKeys.includes(k));
-
-  return (
-    <div className="bg-zinc-800/40 rounded-lg px-3 py-2 text-[10px] font-mono space-y-1">
-      {stats.map(([k, v]) => (
-        <div key={k} className="flex justify-between">
-          <span className="text-zinc-500">{k}</span>
-          <span className="text-zinc-300">
-            {Array.isArray(v) ? v.join(" x ") : typeof v === "number" && k.includes("ms") ? `${(Number(v) / 1000).toFixed(1)}s` : String(v)}
-          </span>
-        </div>
-      ))}
-      {paths.map(([k, v]) => (
-        <div key={k} className="flex justify-between">
-          <span className="text-zinc-500">{k}</span>
-          <span className="text-emerald-400 truncate ml-2 max-w-[160px]">{String(v).split("/").pop()}</span>
-        </div>
-      ))}
-      {rest.length > 0 && (
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1 text-zinc-500 hover:text-zinc-300 transition-colors mt-1"
-        >
-          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-          {rest.length} more fields
-        </button>
-      )}
-      {expanded && (
-        <pre className="text-[9px] text-zinc-500 whitespace-pre-wrap max-h-[100px] overflow-y-auto mt-1">
-          {JSON.stringify(Object.fromEntries(rest), null, 2)}
-        </pre>
-      )}
-    </div>
+  const addToChannel = useCallback(
+    async (index: number) => {
+      const paths = await pickFiles(`Select ${CHANNEL_LABELS[index]} lights`);
+      if (paths.length === 0) return;
+      setChannels((prev) => {
+        const next = [...prev];
+        next[index] = {
+          ...next[index],
+          paths: [...next[index].paths, ...paths],
+        };
+        return next;
+      });
+    },
+    [pickFiles]
   );
-}
 
-export default function PipelinePanel({ files = [], onPreviewUpdate, calibration, stackConfig }: PipelinePanelProps) {
-  const { runPipeline } = useBackend();
-  const [inputPath, setInputPath] = useState<string | null>(null);
-  const [frameStep, setFrameStep] = useState(5);
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleRun = useCallback(async () => {
-    if (!inputPath) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await runPipeline(inputPath, "./output", frameStep);
-      setResult(res);
-      const url = res?.previewUrl || res?.collapsedPreviewUrl;
-      if (url) {
-        onPreviewUpdate?.(url);
+  const addCalibration = useCallback(
+    async (type: "dark" | "flat" | "bias") => {
+      const paths = await pickFiles(`Select ${type} frames`);
+      if (paths.length === 0) return;
+      switch (type) {
+        case "dark":
+          setDarks((p) => [...p, ...paths]);
+          break;
+        case "flat":
+          setFlats((p) => [...p, ...paths]);
+          break;
+        case "bias":
+          setBias((p) => [...p, ...paths]);
+          break;
       }
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    } finally {
-      setIsRunning(false);
-    }
-  }, [inputPath, frameStep, runPipeline, onPreviewUpdate]);
+    },
+    [pickFiles]
+  );
 
-  const totalResults = result?.results?.length || 0;
-  const failedCount = result?.failed || 0;
-  const successCount = totalResults - failedCount;
+  const handleRun = async () => {
+    const channelInputs: ChannelFilesInput[] = channels
+      .filter((c) => c.paths.length > 0)
+      .map((c) => ({ label: c.label, paths: c.paths }));
+
+    if (channelInputs.length === 0) return;
+
+    await run(channelInputs, darks, flats, bias, {
+      sigma_low: sigmaLow,
+      sigma_high: sigmaHigh,
+      normalize,
+    });
+  };
+
+  useEffect(() => {
+    if (!result?.rgb_preview || !rgbCanvasRef.current) return;
+    const firstCh = result.channel_previews[0];
+    if (!firstCh) return;
+
+    const { width: w, height: h } = firstCh;
+    const canvas = rgbCanvasRef.current;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const raw = atob(result.rgb_preview);
+    const imgData = ctx.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) {
+      imgData.data[i * 4] = raw.charCodeAt(i * 3);
+      imgData.data[i * 4 + 1] = raw.charCodeAt(i * 3 + 1);
+      imgData.data[i * 4 + 2] = raw.charCodeAt(i * 3 + 2);
+      imgData.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, [result]);
+
+  const totalLights = channels.reduce((s, c) => s + c.paths.length, 0);
 
   return (
-    <div className="flex flex-col gap-3">
-      <ConfigSummary calibration={calibration} stackConfig={stackConfig} />
+    <div className="flex flex-col gap-3 p-3 text-xs">
+      <div className="font-semibold uppercase tracking-wide text-neutral-400">
+        Calibration Pipeline
+      </div>
 
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4">
-        <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5 mb-3">
-          <Workflow size={12} />
-          Pipeline Runner
-        </h4>
-        <p className="text-[10px] text-zinc-500 mb-3">
-          Runs the full pipeline: calibrate, stack, and process in one step.
-        </p>
-
-        <div className="space-y-3">
-          <div>
-            <label className="text-[10px] text-zinc-400 block mb-1.5">Input File</label>
-            <select
-              value={inputPath || ""}
-              onChange={(e) => setInputPath(e.target.value || null)}
-              className="w-full bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 outline-none focus:border-cyan-500/50"
-            >
-              <option value="">Select file...</option>
-              {calibration?.calibratedFitsPath && (
-                <option value={calibration.calibratedFitsPath}>
-                  {calibration.calibratedFitsPath.split(/[/\\]/).pop()} (calibrated)
-                </option>
-              )}
-              {files.map((f) => (
-                <option key={f.id} value={f.path}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[10px] text-zinc-400">Frame Step (for cubes)</label>
-              <span className="text-[10px] font-mono text-zinc-500">{frameStep}</span>
+      <div className="flex flex-col gap-2">
+        {channels.map((ch, i) => (
+          <div
+            key={ch.label}
+            className="flex items-center justify-between rounded border border-neutral-700 px-2 py-1.5"
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block h-3 w-3 rounded-full"
+                style={{
+                  backgroundColor:
+                    ch.label === "R"
+                      ? "#ef4444"
+                      : ch.label === "G"
+                      ? "#22c55e"
+                      : "#3b82f6",
+                }}
+              />
+              <span>{ch.label}</span>
+              <span className="text-neutral-500">{ch.paths.length} files</span>
             </div>
-            <input
-              type="range"
-              min={1}
-              max={20}
-              step={1}
-              value={frameStep}
-              onChange={(e) => setFrameStep(parseInt(e.target.value))}
-              className="w-full accent-cyan-500"
-            />
+            <div className="flex gap-1">
+              <button
+                onClick={() => addToChannel(i)}
+                className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
+              >
+                + Add
+              </button>
+              {ch.paths.length > 0 && (
+                <button
+                  onClick={() =>
+                    setChannels((prev) => {
+                      const next = [...prev];
+                      next[i] = { ...next[i], paths: [] };
+                      return next;
+                    })
+                  }
+                  className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border-t border-neutral-800 pt-2 text-neutral-400">
+        Calibration (optional)
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between">
+          <span>Darks: {darks.length}</span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => addCalibration("dark")}
+              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
+            >
+              + Add
+            </button>
+            {darks.length > 0 && (
+              <button
+                onClick={() => setDarks([])}
+                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between">
+          <span>Flats: {flats.length}</span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => addCalibration("flat")}
+              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
+            >
+              + Add
+            </button>
+            {flats.length > 0 && (
+              <button
+                onClick={() => setFlats([])}
+                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between">
+          <span>Bias: {bias.length}</span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => addCalibration("bias")}
+              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
+            >
+              + Add
+            </button>
+            {bias.length > 0 && (
+              <button
+                onClick={() => setBias([])}
+                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
+              >
+                Clear
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      <div className="border-t border-neutral-800 pt-2 text-neutral-400">
+        Stacking
+      </div>
+
+      <label className="flex items-center justify-between">
+        <span>Sigma low</span>
+        <input
+          type="number"
+          min={1}
+          max={5}
+          step={0.1}
+          value={sigmaLow}
+          onChange={(e) => setSigmaLow(Number(e.target.value))}
+          className="w-16 rounded bg-neutral-800 px-2 py-1 text-right"
+        />
+      </label>
+      <label className="flex items-center justify-between">
+        <span>Sigma high</span>
+        <input
+          type="number"
+          min={1}
+          max={5}
+          step={0.1}
+          value={sigmaHigh}
+          onChange={(e) => setSigmaHigh(Number(e.target.value))}
+          className="w-16 rounded bg-neutral-800 px-2 py-1 text-right"
+        />
+      </label>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={normalize}
+          onChange={(e) => setNormalize(e.target.checked)}
+        />
+        <span>Normalize before stack</span>
+      </label>
 
       <button
         onClick={handleRun}
-        disabled={!inputPath || isRunning}
-        className="flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-        style={{
-          background: "rgba(6,182,212,0.15)",
-          color: "#67e8f9",
-          border: "1px solid rgba(6,182,212,0.25)",
-        }}
+        disabled={loading || totalLights === 0}
+        className="rounded bg-blue-600 px-3 py-1.5 font-medium hover:bg-blue-500 disabled:opacity-50"
       >
-        {isRunning ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-        {isRunning ? "Running Pipeline..." : "Run Pipeline"}
+        {loading ? progress || "Processing..." : `Run Pipeline (${totalLights} lights)`}
       </button>
 
-      {error && (
-        <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-300">
-          <AlertCircle size={14} className="shrink-0 mt-0.5" />
-          {error}
-        </div>
-      )}
+      {error && <div className="text-red-400">{error}</div>}
 
       {result && (
-        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5 space-y-2">
-          <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
-            <CheckCircle2 size={12} />
-            Pipeline Complete
+        <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+          <div className="font-semibold text-neutral-400">Results</div>
+
+          <div className="flex gap-1">
+            {result.channel_previews.map((ch) => (
+              <button
+                key={ch.label}
+                onClick={() => setActivePreview(ch.label)}
+                className={`rounded px-2 py-0.5 ${
+                  activePreview === ch.label
+                    ? "bg-blue-600"
+                    : "bg-neutral-800 hover:bg-neutral-700"
+                }`}
+              >
+                {ch.label}
+              </button>
+            ))}
+            {result.rgb_preview && (
+              <button
+                onClick={() => setActivePreview("RGB")}
+                className={`rounded px-2 py-0.5 ${
+                  activePreview === "RGB"
+                    ? "bg-blue-600"
+                    : "bg-neutral-800 hover:bg-neutral-700"
+                }`}
+              >
+                RGB
+              </button>
+            )}
           </div>
 
-          <div className="grid grid-cols-3 gap-2 text-[10px]">
-            <div className="bg-zinc-900/60 rounded px-2 py-1.5 text-center">
-              <div className="text-zinc-500">Time</div>
-              <div className="text-zinc-200 font-mono">
-                {result.elapsed_ms ? `${(result.elapsed_ms / 1000).toFixed(1)}s` : "--"}
-              </div>
-            </div>
-            <div className="bg-zinc-900/60 rounded px-2 py-1.5 text-center">
-              <div className="text-zinc-500">Success</div>
-              <div className="text-emerald-300 font-mono">{successCount}</div>
-            </div>
-            <div className="bg-zinc-900/60 rounded px-2 py-1.5 text-center">
-              <div className="text-zinc-500">Failed</div>
-              <div className={`font-mono ${failedCount > 0 ? "text-red-400" : "text-zinc-500"}`}>
-                {failedCount}
-              </div>
-            </div>
-          </div>
-
-          {result.results && result.results.length > 0 && (
-            <div className="space-y-1.5 mt-1">
-              {result.results.map((item: any, idx: number) => {
-                const isOk = item.Ok !== undefined;
-                const data = isOk ? item.Ok : item.Err;
-                return (
-                  <div key={idx}>
-                    <div className={`text-[10px] font-medium mb-0.5 ${isOk ? "text-zinc-400" : "text-red-400"}`}>
-                      Step {idx + 1} {isOk ? "" : "(failed)"}
-                    </div>
-                    {isOk && typeof data === "object" ? (
-                      <ResultSummary data={data} />
-                    ) : (
-                      <div className="text-[10px] font-mono text-red-300 bg-red-900/20 rounded px-2 py-1">
-                        {typeof data === "string" ? data : JSON.stringify(data)}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+          {activePreview === "RGB" && result.rgb_preview && (
+            <canvas
+              ref={rgbCanvasRef}
+              className="w-full rounded border border-neutral-700"
+              style={{ imageRendering: "auto" }}
+            />
           )}
+
+          <div className="flex flex-col gap-1 text-neutral-500">
+            {result.stats.channels.map((ch) => (
+              <div key={ch.label}>
+                {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)}{" "}
+                std={ch.stddev.toFixed(1)}
+              </div>
+            ))}
+            {result.stats.darks_combined > 0 && (
+              <div>Master dark: {result.stats.darks_combined} frames</div>
+            )}
+            {result.stats.flats_combined > 0 && (
+              <div>Master flat: {result.stats.flats_combined} frames</div>
+            )}
+          </div>
         </div>
       )}
     </div>

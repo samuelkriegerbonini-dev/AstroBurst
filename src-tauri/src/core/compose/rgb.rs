@@ -47,9 +47,14 @@ pub fn harmonize_dimensions(
     Option<DimensionCrop>,
 )> {
     let dims: Vec<(usize, usize)> = [r, g, b]
-        .iter()
-        .filter_map(|ch| ch.map(|a| a.dim()))
+        .into_iter()
+        .flatten()
+        .map(|a| a.dim())
         .collect();
+
+    if dims.is_empty() {
+        return Ok((None, None, None, 0, 0, None));
+    }
 
     let min_rows = dims.iter().map(|d| d.0).min().unwrap();
     let min_cols = dims.iter().map(|d| d.1).min().unwrap();
@@ -78,16 +83,11 @@ pub fn harmonize_dimensions(
             "Channel dimensions differ by more than {}px (rows: {}px, cols: {}px).",
             effective_tolerance, row_diff, col_diff
         );
-        if let Some(ra) = r {
-            msg.push_str(&format!(" R={}×{}", ra.dim().1, ra.dim().0));
-        }
-        if let Some(ga) = g {
-            msg.push_str(&format!(" G={}×{}", ga.dim().1, ga.dim().0));
-        }
-        if let Some(ba) = b {
-            msg.push_str(&format!(" B={}×{}", ba.dim().1, ba.dim().0));
-        }
+        if let Some(ra) = r { msg.push_str(&format!(" R={}×{}", ra.dim().1, ra.dim().0)); }
+        if let Some(ga) = g { msg.push_str(&format!(" G={}×{}", ga.dim().1, ga.dim().0)); }
+        if let Some(ba) = b { msg.push_str(&format!(" B={}×{}", ba.dim().1, ba.dim().0)); }
         msg.push_str(". Use alignment or manually crop.");
+
         bail!("{}", msg);
     }
 
@@ -98,17 +98,25 @@ pub fn harmonize_dimensions(
         cropped_to: [min_cols, min_rows],
     };
 
+    let conform = |channel: Option<&Array2<f32>>, rows, cols| {
+        channel.map(|a| {
+            if a.dim() == (rows, cols) { a.clone() } else { crop_to_size(a, rows, cols) }
+        })
+    };
+
+
+    let r_out = conform(r, min_rows, min_cols);
+    let g_out = conform(g, min_rows, min_cols);
+    let b_out = conform(b, min_rows, min_cols);
+
+    Ok((r_out, g_out, b_out, min_rows, min_cols, Some(crop_info)))
+}
+
+fn conform(r: Option<&Array2<f32>>, min_rows: usize, min_cols: usize) -> Option<Array2<f32>> {
     let r_out = r.map(|a| {
         if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
     });
-    let g_out = g.map(|a| {
-        if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
-    });
-    let b_out = b.map(|a| {
-        if a.dim() == (min_rows, min_cols) { a.clone() } else { crop_to_size(a, min_rows, min_cols) }
-    });
-
-    Ok((r_out, g_out, b_out, min_rows, min_cols, Some(crop_info)))
+    r_out
 }
 
 pub fn channel_stats(arr: &Array2<f32>) -> ChannelStats {
