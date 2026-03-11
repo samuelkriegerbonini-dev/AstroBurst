@@ -208,12 +208,36 @@ pub fn render_asinh_and_save(
     Ok((png_path, fits_path))
 }
 
+fn platform_fallback_dir() -> std::path::PathBuf {
+    if let Some(data) = dirs::data_dir() {
+        return data.join("AstroBurst").join("output");
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".astroburst").join("output");
+    }
+    std::path::PathBuf::from("/tmp/astroburst/output")
+}
+
 pub fn resolve_output_dir(output_dir: &str) -> Result<String> {
     let path = std::path::Path::new(output_dir);
-    if !path.exists() {
-        std::fs::create_dir_all(path).context("Failed to create output directory")?;
+    if path.exists() {
+        return Ok(output_dir.to_string());
     }
-    Ok(output_dir.to_string())
+    match std::fs::create_dir_all(path) {
+        Ok(_) => Ok(output_dir.to_string()),
+        Err(e) if e.raw_os_error() == Some(30) => {
+            let fallback = platform_fallback_dir();
+            std::fs::create_dir_all(&fallback)
+                .context("Failed to create fallback output directory")?;
+            eprintln!(
+                "[AstroBurst] EROFS on '{}', falling back to '{}'",
+                output_dir,
+                fallback.display()
+            );
+            Ok(fallback.to_string_lossy().to_string())
+        }
+        Err(e) => Err(e).context(format!("Failed to create output directory: {}", output_dir)),
+    }
 }
 
 macro_rules! blocking_cmd {
