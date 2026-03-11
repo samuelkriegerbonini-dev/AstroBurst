@@ -17,6 +17,7 @@ import { isValidFitsFile } from "./utils/validation";
 
 import type { AstroFile } from "./utils/types";
 
+// @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
@@ -276,7 +277,7 @@ export default function App() {
                       AstroBurst
                     </span>
                   <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">
-                      v0.3.1
+                      v0.3.14
                     </span>
                 </div>
               </div>

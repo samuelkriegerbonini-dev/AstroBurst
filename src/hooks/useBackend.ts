@@ -3,8 +3,6 @@ let _invoke: ((cmd: string, args?: Record<string, any>) => Promise<any>) | null 
 
 const isTauri = (): boolean => !!window.__TAURI_INTERNALS__;
 
-const DEFAULT_OUTPUT_DIR = "./output";
-
 async function ensureConvertFileSrc(): Promise<(path: string) => string> {
   if (_convertFileSrc) return _convertFileSrc;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
@@ -57,23 +55,32 @@ const safeInvoke = async (command: string, args: Record<string, any> = {}): Prom
 };
 
 import { useMemo } from "react";
+import { getOutputDir, getOutputDirTiles } from "../utils/outputdir";
+
+async function resolveDir(explicit?: string): Promise<string> {
+  if (explicit && explicit !== "./output") return explicit;
+  return getOutputDir();
+}
 
 export function useBackend() {
   return useMemo(() => ({
-    processFits: async (path: string, outputDir = DEFAULT_OUTPUT_DIR) => {
-      const res = await safeInvoke("process_fits", { path, outputDir });
+    processFits: async (path: string, outputDir?: string) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("process_fits", { path, outputDir: dir });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
 
-    processFitsFull: async (path: string, outputDir = DEFAULT_OUTPUT_DIR) => {
-      const res = await safeInvoke("process_fits_full", { path, outputDir });
+    processFitsFull: async (path: string, outputDir?: string) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("process_fits_full", { path, outputDir: dir });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
 
-    processBatch: async (paths: string[], outputDir = DEFAULT_OUTPUT_DIR) => {
-      const res = await safeInvoke("process_batch", { paths, outputDir });
+    processBatch: async (paths: string[], outputDir?: string) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("process_batch", { paths, outputDir: dir });
       if (res.results) {
         await Promise.all(
           res.results.map(async (r: any) => {
@@ -150,14 +157,15 @@ export function useBackend() {
 
     applyStfRender: async (
       path: string,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir: string | undefined,
       shadow: number,
       midtone: number,
       highlight: number,
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("apply_stf_render", {
         path,
-        outputDir,
+        outputDir: dir,
         shadow,
         midtone,
         highlight,
@@ -166,22 +174,26 @@ export function useBackend() {
       return res;
     },
 
-    generateTiles: (path: string, outputDir: string, tileSize = 256) =>
-      safeInvoke("generate_tiles", { path, outputDir, tileSize }),
+    generateTiles: async (path: string, outputDir?: string, tileSize = 256) => {
+      const dir = outputDir ? outputDir : await getOutputDirTiles();
+      return safeInvoke("generate_tiles", { path, outputDir: dir, tileSize });
+    },
 
     getTile: (path: string, outputDir: string, level: number, col: number, row: number) =>
       safeInvoke("get_tile", { path, outputDir, level, col, row }),
 
-    processCube: async (path: string, outputDir = DEFAULT_OUTPUT_DIR, frameStep = 5) => {
-      const res = await safeInvoke("process_cube_cmd", { path, outputDir, frameStep });
+    processCube: async (path: string, outputDir?: string, frameStep = 5) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("process_cube_cmd", { path, outputDir: dir, frameStep });
       if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
       if (res.collapsed_median_path)
         res.collapsedMedianPreviewUrl = await getPreviewUrl(res.collapsed_median_path);
       return res;
     },
 
-    processCubeLazy: async (path: string, outputDir = DEFAULT_OUTPUT_DIR, frameStep = 5) => {
-      const res = await safeInvoke("process_cube_lazy_cmd", { path, outputDir, frameStep });
+    processCubeLazy: async (path: string, outputDir?: string, frameStep = 5) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("process_cube_lazy_cmd", { path, outputDir: dir, frameStep });
       if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
       if (res.collapsed_median_path)
         res.collapsedMedianPreviewUrl = await getPreviewUrl(res.collapsed_median_path);
@@ -207,20 +219,23 @@ export function useBackend() {
     worldToPixel: (path: string, ra: number, dec: number) =>
       safeInvoke("world_to_pixel", { path, ra, dec }),
 
-    calibrate: async (sciencePath: string, outputDir = DEFAULT_OUTPUT_DIR, options: Record<string, any> = {}) => {
-      const res = await safeInvoke("calibrate", { sciencePath, outputDir, ...options });
+    calibrate: async (sciencePath: string, outputDir?: string, options: Record<string, any> = {}) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("calibrate", { sciencePath, outputDir: dir, ...options });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
 
-    stackFrames: async (paths: string[], outputDir = DEFAULT_OUTPUT_DIR, options: Record<string, any> = {}) => {
-      const res = await safeInvoke("stack", { paths, outputDir, ...options });
+    stackFrames: async (paths: string[], outputDir?: string, options: Record<string, any> = {}) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("stack", { paths, outputDir: dir, ...options });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
 
-    drizzleStack: async (paths: string[], outputDir = DEFAULT_OUTPUT_DIR, options: Record<string, any> = {}) => {
-      const res = await safeInvoke("drizzle_stack_cmd", { paths, outputDir, ...options });
+    drizzleStack: async (paths: string[], outputDir?: string, options: Record<string, any> = {}) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("drizzle_stack_cmd", { paths, outputDir: dir, ...options });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       if (res.weight_map_path) res.weightMapUrl = await getPreviewUrl(res.weight_map_path);
       return res;
@@ -230,14 +245,15 @@ export function useBackend() {
       rPaths: string[] | null,
       gPaths: string[] | null,
       bPaths: string[] | null,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       options: Record<string, any> = {},
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("drizzle_rgb_cmd", {
         rPaths,
         gPaths,
         bPaths,
-        outputDir,
+        outputDir: dir,
         ...options,
       });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
@@ -248,10 +264,11 @@ export function useBackend() {
       rPath: string | null,
       gPath: string | null,
       bPath: string | null,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       options: Record<string, any> = {},
     ) => {
-      const res = await safeInvoke("compose_rgb_cmd", { rPath, gPath, bPath, outputDir, ...options });
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("compose_rgb_cmd", { rPath, gPath, bPath, outputDir: dir, ...options });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
@@ -260,16 +277,17 @@ export function useBackend() {
       path: string,
       targetWidth: number,
       targetHeight: number,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
     ) => {
-      const res = await safeInvoke("resample_fits_cmd", { path, targetWidth, targetHeight, outputDir });
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("resample_fits_cmd", { path, targetWidth, targetHeight, outputDir: dir });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
 
     deconvolveRL: async (
       path: string,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       options: {
         iterations?: number;
         psfSigma?: number;
@@ -282,9 +300,10 @@ export function useBackend() {
         psfCutoutRadius?: number;
       } = {},
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("deconvolve_rl_cmd", {
         path,
-        outputDir,
+        outputDir: dir,
         iterations: options.iterations ?? 20,
         psfSigma: options.psfSigma ?? 2.0,
         psfSize: options.psfSize ?? 15,
@@ -301,7 +320,7 @@ export function useBackend() {
 
     extractBackground: async (
       path: string,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       options: {
         gridSize?: number;
         polyDegree?: number;
@@ -310,9 +329,10 @@ export function useBackend() {
         mode?: string;
       } = {},
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("extract_background_cmd", {
         path,
-        outputDir,
+        outputDir: dir,
         gridSize: options.gridSize ?? 8,
         polyDegree: options.polyDegree ?? 3,
         sigmaClip: options.sigmaClip ?? 2.5,
@@ -326,16 +346,17 @@ export function useBackend() {
 
     waveletDenoise: async (
       path: string,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       options: {
         numScales?: number;
         thresholds?: number[];
         linear?: boolean;
       } = {},
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("wavelet_denoise_cmd", {
         path,
-        outputDir,
+        outputDir: dir,
         numScales: options.numScales ?? 5,
         thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
         linear: options.linear ?? true,
@@ -344,8 +365,9 @@ export function useBackend() {
       return res;
     },
 
-    runPipeline: async (inputPath: string, outputDir = DEFAULT_OUTPUT_DIR, frameStep = 5) => {
-      const res = await safeInvoke("run_pipeline_cmd", { inputPath, outputDir, frameStep });
+    runPipeline: async (inputPath: string, outputDir?: string, frameStep = 5) => {
+      const dir = await resolveDir(outputDir);
+      const res = await safeInvoke("run_pipeline_cmd", { inputPath, outputDir: dir, frameStep });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
       return res;
@@ -381,12 +403,13 @@ export function useBackend() {
 
     applyArcsinhStretch: async (
       path: string,
-      outputDir = DEFAULT_OUTPUT_DIR,
+      outputDir?: string,
       factor = 50.0,
     ) => {
+      const dir = await resolveDir(outputDir);
       const res = await safeInvoke("apply_arcsinh_stretch_cmd", {
         path,
-        outputDir,
+        outputDir: dir,
         factor,
       });
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);

@@ -2,9 +2,9 @@ import { useReducer, useCallback, useRef, useState, useMemo } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
 import { useBackend } from "./useBackend";
+import { getOutputDir } from "../utils/outputdir";
 import type {ProcessedFile, QueueStats, AstroFile, ProcessResult} from "../utils/types";
 
-const OUTPUT_DIR = "./output";
 const RESAMPLE_RATIO_THRESHOLD = 1.5;
 
 const CALIB_REF_RE =
@@ -256,14 +256,14 @@ export function useFileQueue() {
     async (file: ProcessedFile) => {
       dispatch({ type: "FILE_STARTED", payload: { id: file.id } });
       try {
-        const result = await processFitsFull(file.path, OUTPUT_DIR);
+        const result = await processFitsFull(file.path);
         dispatch({
           type: "FILE_DONE",
           payload: { id: file.id, result },
         });
       } catch (fullErr: any) {
         try {
-          const result = await processFits(file.path, OUTPUT_DIR);
+          const result = await processFits(file.path);
           let header = null;
           try {
             header = await getHeader(file.path);
@@ -306,7 +306,6 @@ export function useFileQueue() {
           file.path,
           targetGroup.width,
           targetGroup.height,
-          OUTPUT_DIR,
         );
         dispatch({
           type: "FILE_RESAMPLED",
