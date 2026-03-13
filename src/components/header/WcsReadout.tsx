@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { Globe } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
-import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcsTransform";
+import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/WcsTransform";
 
 interface WcsReadoutProps {
   filePath: string | null;
