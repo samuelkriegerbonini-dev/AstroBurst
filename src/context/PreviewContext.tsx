@@ -28,6 +28,9 @@ interface PaletteSuggestion {
 
 interface FileContextValue {
   file: ProcessedFile | null;
+}
+
+interface DoneFilesContextValue {
   doneFiles: ProcessedFile[];
 }
 
@@ -66,6 +69,7 @@ interface NarrowbandContextValue {
 }
 
 const FileCtx = createContext<FileContextValue | null>(null);
+const DoneFilesCtx = createContext<DoneFilesContextValue | null>(null);
 const HistCtx = createContext<HistContextValue | null>(null);
 const CubeCtx = createContext<CubeContextValue | null>(null);
 const RgbCtx = createContext<RgbContextValue | null>(null);
@@ -75,6 +79,7 @@ const NarrowbandCtx = createContext<NarrowbandContextValue | null>(null);
 
 export function usePreviewContext() {
   const fileCtx = useContext(FileCtx);
+  const doneFilesCtx = useContext(DoneFilesCtx);
   const histCtx = useContext(HistCtx);
   const cubeCtx = useContext(CubeCtx);
   const rgbCtx = useContext(RgbCtx);
@@ -84,6 +89,7 @@ export function usePreviewContext() {
   if (!fileCtx) throw new Error("usePreviewContext must be used within PreviewProvider");
   return {
     ...fileCtx!,
+    ...doneFilesCtx!,
     ...histCtx!,
     ...cubeCtx!,
     ...rgbCtx!,
@@ -96,6 +102,12 @@ export function usePreviewContext() {
 export function useFileContext() {
   const ctx = useContext(FileCtx);
   if (!ctx) throw new Error("useFileContext outside PreviewProvider");
+  return ctx;
+}
+
+export function useDoneFilesContext() {
+  const ctx = useContext(DoneFilesCtx);
+  if (!ctx) throw new Error("useDoneFilesContext outside PreviewProvider");
   return ctx;
 }
 
@@ -137,7 +149,7 @@ export function useNarrowbandContext() {
 
 interface Props {
   file: ProcessedFile | null;
-  allFiles: ProcessedFile[];
+  doneFiles: ProcessedFile[];
   children: React.ReactNode;
 }
 
@@ -152,7 +164,7 @@ function setPreviewCache(key: string, value: string) {
   previewUrlCache.set(key, value);
 }
 
-export function PreviewProvider({ file, allFiles, children }: Props) {
+export function PreviewProvider({ file, doneFiles, children }: Props) {
   const { computeHistogram, getCubeInfo, getRawPixelsPreview, detectNarrowbandFilters } = useBackend();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
@@ -174,7 +186,14 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
   const prevFileIdRef = useRef<string | null>(null);
   const histAbortRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
-  const narrowbandDetectedRef = useRef(0);
+  const narrowbandDetectedRef = useRef("");
+
+  const rawPixelsRef = useRef(rawPixels);
+  rawPixelsRef.current = rawPixels;
+  const rawPixelsLoadingRef = useRef(rawPixelsLoading);
+  rawPixelsLoadingRef.current = rawPixelsLoading;
+  const filePathRef = useRef(file?.path);
+  filePathRef.current = file?.path;
 
   const setRenderedPreviewUrl = useCallback(
     (url: string | null) => {
@@ -186,15 +205,10 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
     [file?.id],
   );
 
-  const doneFiles = useMemo(() => {
-    if (!allFiles) return [];
-    return allFiles.filter((f) => f.status === "done");
-  }, [allFiles]);
-
   useEffect(() => {
     if (doneFiles.length < 2) return;
     const paths = doneFiles.map((f) => f.path);
-    const key = paths.length;
+    const key = paths.join("|");
     if (key === narrowbandDetectedRef.current) return;
     narrowbandDetectedRef.current = key;
     detectNarrowbandFilters(paths)
@@ -207,11 +221,12 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
   }, [doneFiles, detectNarrowbandFilters]);
 
   const loadRawPixels = useCallback(() => {
-    if (!file?.path || rawPixels || rawPixelsLoading) return;
+    const path = filePathRef.current;
+    if (!path || rawPixelsRef.current || rawPixelsLoadingRef.current) return;
     setRawPixelsLoading(true);
     const seq = ++rawPixelsAbortRef.current;
     const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
-    getRawPixelsPreview(file.path, maxDim)
+    getRawPixelsPreview(path, maxDim)
       .then((result: any) => {
         if (rawPixelsAbortRef.current !== seq) return;
         setRawPixels({
@@ -230,7 +245,7 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
         if (rawPixelsAbortRef.current !== seq) return;
         setRawPixelsLoading(false);
       });
-  }, [file?.path, rawPixels, rawPixelsLoading, getRawPixelsPreview]);
+  }, [getRawPixelsPreview]);
 
   const clearRawPixels = useCallback(() => {
     rawPixelsAbortRef.current++;
@@ -294,8 +309,13 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
   }, [file?.id]);
 
   const fileValue = useMemo<FileContextValue>(
-    () => ({ file, doneFiles }),
-    [file, doneFiles],
+    () => ({ file }),
+    [file],
+  );
+
+  const doneFilesValue = useMemo<DoneFilesContextValue>(
+    () => ({ doneFiles }),
+    [doneFiles],
   );
 
   const histValue = useMemo<HistContextValue>(
@@ -330,19 +350,21 @@ export function PreviewProvider({ file, allFiles, children }: Props) {
 
   return (
     <FileCtx.Provider value={fileValue}>
-      <HistCtx.Provider value={histValue}>
-        <CubeCtx.Provider value={cubeValue}>
-          <RgbCtx.Provider value={rgbValue}>
-            <RenderCtx.Provider value={renderValue}>
-              <RawPixelsCtx.Provider value={rawPixelsValue}>
-                <NarrowbandCtx.Provider value={narrowbandValue}>
-                  {children}
-                </NarrowbandCtx.Provider>
-              </RawPixelsCtx.Provider>
-            </RenderCtx.Provider>
-          </RgbCtx.Provider>
-        </CubeCtx.Provider>
-      </HistCtx.Provider>
+      <DoneFilesCtx.Provider value={doneFilesValue}>
+        <HistCtx.Provider value={histValue}>
+          <CubeCtx.Provider value={cubeValue}>
+            <RgbCtx.Provider value={rgbValue}>
+              <RenderCtx.Provider value={renderValue}>
+                <RawPixelsCtx.Provider value={rawPixelsValue}>
+                  <NarrowbandCtx.Provider value={narrowbandValue}>
+                    {children}
+                  </NarrowbandCtx.Provider>
+                </RawPixelsCtx.Provider>
+              </RenderCtx.Provider>
+            </RgbCtx.Provider>
+          </CubeCtx.Provider>
+        </HistCtx.Provider>
+      </DoneFilesCtx.Provider>
     </FileCtx.Provider>
   );
 }

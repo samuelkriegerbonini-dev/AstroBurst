@@ -9,9 +9,11 @@ use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, StfParams};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_image_mmap;
-use crate::infra::render::grayscale::{render_grayscale, save_stf_png};
+use crate::infra::render::grayscale::{render_grayscale, save_stf_png_owned};
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
+
+pub const MAX_PREVIEW_DIM: usize = 4096;
 
 pub struct ResolvedImage {
     pub arr: Array2<f32>,
@@ -134,6 +136,69 @@ pub fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
     }
 }
 
+pub fn downsample_u8(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
+    if width <= max_dim && height <= max_dim {
+        return (pixels.to_vec(), width, height);
+    }
+
+    let scale = max_dim as f64 / (width.max(height) as f64);
+    let dst_w = ((width as f64) * scale).round().max(1.0) as usize;
+    let dst_h = ((height as f64) * scale).round().max(1.0) as usize;
+
+    let y_ratio = height as f64 / dst_h as f64;
+    let x_ratio = width as f64 / dst_w as f64;
+
+    let mut out = vec![0u8; dst_w * dst_h];
+
+    for dy in 0..dst_h {
+        let sy = ((dy as f64) * y_ratio).min((height - 1) as f64) as usize;
+        let src_row = sy * width;
+        let dst_row = dy * dst_w;
+        for dx in 0..dst_w {
+            let sx = ((dx as f64) * x_ratio).min((width - 1) as f64) as usize;
+            out[dst_row + dx] = pixels[src_row + sx];
+        }
+    }
+
+    (out, dst_w, dst_h)
+}
+
+pub fn downsample_u8_rgb(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
+    if width <= max_dim && height <= max_dim {
+        return (pixels.to_vec(), width, height);
+    }
+
+    let scale = max_dim as f64 / (width.max(height) as f64);
+    let dst_w = ((width as f64) * scale).round().max(1.0) as usize;
+    let dst_h = ((height as f64) * scale).round().max(1.0) as usize;
+
+    let y_ratio = height as f64 / dst_h as f64;
+    let x_ratio = width as f64 / dst_w as f64;
+
+    let mut out = vec![0u8; dst_w * dst_h * 3];
+
+    for dy in 0..dst_h {
+        let sy = ((dy as f64) * y_ratio).min((height - 1) as f64) as usize;
+        let src_row = sy * width;
+        let dst_row = dy * dst_w;
+        for dx in 0..dst_w {
+            let sx = ((dx as f64) * x_ratio).min((width - 1) as f64) as usize;
+            let si = (src_row + sx) * 3;
+            let di = (dst_row + dx) * 3;
+            out[di] = pixels[si];
+            out[di + 1] = pixels[si + 1];
+            out[di + 2] = pixels[si + 2];
+        }
+    }
+
+    (out, dst_w, dst_h)
+}
+
+pub fn save_preview_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
+    let (preview, pw, ph) = downsample_u8(&pixels, width, height, MAX_PREVIEW_DIM);
+    save_stf_png_owned(preview, pw, ph, path)
+}
+
 fn make_filename(stem: &str, suffix: &str, ext: &str) -> String {
     if suffix.is_empty() {
         format!("{}.{}", stem, ext)
@@ -168,7 +233,7 @@ pub fn render_and_save(
 
     let png_path = format!("{}/{}", output_dir, make_filename(stem, suffix, "png"));
     let (rows, cols) = arr.dim();
-    save_stf_png(&rendered, cols, rows, &png_path)?;
+    save_preview_png(rendered, cols, rows, &png_path)?;
 
     let fits_path = if write_fits {
         let fp = format!("{}/{}", output_dir, make_filename(stem, suffix, "fits"));

@@ -87,7 +87,6 @@ pub fn run() {
             cmd::image::process_fits,
             cmd::image::process_fits_full,
             cmd::image::process_batch,
-            cmd::image::get_raw_pixels,
             cmd::image::get_raw_pixels_binary,
             cmd::image::get_raw_pixels_preview,
             cmd::image::export_fits,

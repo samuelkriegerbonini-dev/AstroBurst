@@ -16,8 +16,9 @@ pub fn apply_scnr_inplace(
     b: &Array2<f32>,
     config: &ScnrConfig,
 ) {
-    assert_eq!(r.dim(), g.dim());
-    assert_eq!(g.dim(), b.dim());
+    if r.dim() != g.dim() || g.dim() != b.dim() {
+        return;
+    }
 
     let amount = config.amount.clamp(0.0, 1.0);
     if amount < 1e-7 {

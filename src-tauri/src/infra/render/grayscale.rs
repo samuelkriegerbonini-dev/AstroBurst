@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use image::GrayImage;
+use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageEncoder};
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -24,15 +25,27 @@ pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
         })
         .collect();
 
-    let img = GrayImage::from_raw(cols as u32, rows as u32, pixels)
-        .context("Failed to create grayscale image from raw pixels")?;
-    img.save(path).context("Failed to save grayscale PNG")?;
-    Ok(())
+    write_png_l8(&pixels, cols, rows, path)
 }
 
 pub fn save_stf_png(pixels: &[u8], width: usize, height: usize, path: &str) -> Result<()> {
-    let img = GrayImage::from_raw(width as u32, height as u32, pixels.to_vec())
-        .context("Failed to create grayscale image from STF pixels")?;
-    img.save(path).context("Failed to save STF PNG")?;
+    write_png_l8(pixels, width, height, path)
+}
+
+pub fn save_stf_png_owned(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
+    write_png_l8(&pixels, width, height, path)
+}
+
+fn write_png_l8(pixels: &[u8], width: usize, height: usize, path: &str) -> Result<()> {
+    let file = std::fs::File::create(path).context("Failed to create output file")?;
+    let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let encoder = PngEncoder::new_with_quality(
+        buf_writer,
+        image::codecs::png::CompressionType::Default,
+        image::codecs::png::FilterType::Sub,
+    );
+    encoder
+        .write_image(pixels, width as u32, height as u32, ColorType::L8.into())
+        .context("Failed to write PNG")?;
     Ok(())
 }

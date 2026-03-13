@@ -18,6 +18,7 @@ pub use crate::core::cube::lazy::{
 pub use crate::core::cube::eager::GlobalCubeStats;
 
 const DEFAULT_CACHE_SIZE: usize = 64;
+const BATCH_SIZE: usize = 32;
 
 pub struct LazyCube {
     _file: File,
@@ -132,6 +133,14 @@ impl LazyCube {
         Ok(frame)
     }
 
+    fn decode_frame_nocache(&self, z: usize) -> Vec<f32> {
+        let g = &self.geometry;
+        let start = g.data_offset + z * g.frame_bytes;
+        let end = start + g.frame_bytes;
+        let raw = &self.mmap[start..end];
+        decode_pixels(raw, g.bitpix, g.bscale, g.bzero)
+    }
+
     pub fn get_frame_range(&self, start_z: usize, end_z: usize) -> Result<Array3<f32>> {
         let end_z = end_z.min(self.geometry.naxis3);
         if start_z >= end_z {
@@ -178,26 +187,36 @@ impl LazyCube {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
         let npix = rows * cols;
+        let depth = g.naxis3;
 
         let mut sum = vec![0.0f64; npix];
         let mut count = vec![0u32; npix];
 
-        for z in 0..g.naxis3 {
-            let frame = self.get_frame(z)?;
-            let slice = frame.as_slice().expect("contiguous");
-            for i in 0..npix {
-                let v = slice[i];
-                if stats::is_valid_pixel(v) {
-                    sum[i] += v as f64;
-                    count[i] += 1;
+        for batch_start in (0..depth).step_by(BATCH_SIZE) {
+            let batch_end = (batch_start + BATCH_SIZE).min(depth);
+            let batch_count = batch_end - batch_start;
+
+            let frames: Vec<Vec<f32>> = (batch_start..batch_end)
+                .into_par_iter()
+                .map(|z| self.decode_frame_nocache(z))
+                .collect();
+
+            for frame_idx in 0..batch_count {
+                let pixels = &frames[frame_idx];
+                for i in 0..npix {
+                    let v = pixels[i];
+                    if stats::is_valid_pixel(v) {
+                        sum[i] += v as f64;
+                        count[i] += 1;
+                    }
                 }
             }
         }
 
         let result_data: Vec<f32> = sum
-            .iter()
-            .zip(count.iter())
-            .map(|(&s, &c)| if c > 0 { (s / c as f64) as f32 } else { 0.0 })
+            .into_par_iter()
+            .zip(count.into_par_iter())
+            .map(|(s, c)| if c > 0 { (s / c as f64) as f32 } else { 0.0 })
             .collect();
 
         Ok(Array2::from_shape_vec((rows, cols), result_data)
@@ -208,16 +227,27 @@ impl LazyCube {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
         let npix = rows * cols;
+        let depth = g.naxis3;
 
-        let mut pixel_vals: Vec<Vec<f32>> = vec![Vec::with_capacity(g.naxis3); npix];
+        let mut pixel_vals: Vec<Vec<f32>> = Vec::with_capacity(npix);
+        for _ in 0..npix {
+            pixel_vals.push(Vec::with_capacity(depth));
+        }
 
-        for z in 0..g.naxis3 {
-            let frame = self.get_frame(z)?;
-            let slice = frame.as_slice().expect("contiguous");
-            for i in 0..npix {
-                let v = slice[i];
-                if stats::is_valid_pixel(v) {
-                    pixel_vals[i].push(v);
+        for batch_start in (0..depth).step_by(BATCH_SIZE) {
+            let batch_end = (batch_start + BATCH_SIZE).min(depth);
+
+            let frames: Vec<Vec<f32>> = (batch_start..batch_end)
+                .into_par_iter()
+                .map(|z| self.decode_frame_nocache(z))
+                .collect();
+
+            for pixels in &frames {
+                for i in 0..npix {
+                    let v = pixels[i];
+                    if stats::is_valid_pixel(v) {
+                        pixel_vals[i].push(v);
+                    }
                 }
             }
         }
@@ -229,9 +259,7 @@ impl LazyCube {
                     return 0.0;
                 }
                 let mid = vals.len() / 2;
-                vals.select_nth_unstable_by(mid, |a, b| {
-                    f32_cmp(a, b)
-                });
+                vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
                 vals[mid]
             })
             .collect();
@@ -250,15 +278,18 @@ impl LazyCube {
             1
         };
 
+        let indices: Vec<usize> = (0..g.naxis3).step_by(step).collect();
+        let frame_samples: Vec<Vec<f32>> = indices
+            .par_iter()
+            .map(|&z| {
+                let pixels = self.decode_frame_nocache(z);
+                pixels.into_iter().filter(|v| stats::is_valid_pixel(*v)).collect()
+            })
+            .collect();
+
         let mut sampled: Vec<f32> = Vec::new();
-        for z in (0..g.naxis3).step_by(step) {
-            let frame = self.get_frame(z)?;
-            let slice = frame.as_slice().expect("contiguous");
-            for &v in slice {
-                if stats::is_valid_pixel(v) {
-                    sampled.push(v);
-                }
-            }
+        for chunk in frame_samples {
+            sampled.extend(chunk);
         }
 
         if sampled.is_empty() {
@@ -272,16 +303,12 @@ impl LazyCube {
 
         let n = sampled.len();
         let mid = n / 2;
-        sampled.select_nth_unstable_by(mid, |a, b| {
-            f32_cmp(a, b)
-        });
+        sampled.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
         let median = sampled[mid];
 
         let mut deviations: Vec<f32> = sampled.iter().map(|v| (v - median).abs()).collect();
         let dev_mid = deviations.len() / 2;
-        deviations.select_nth_unstable_by(dev_mid, |a, b| {
-            f32_cmp(a, b)
-        });
+        deviations.select_nth_unstable_by(dev_mid, |a, b| f32_cmp(a, b));
         let sigma = (deviations[dev_mid] * 1.4826).max(1e-10);
 
         sampled.sort_unstable_by(|a, b| f32_cmp(a, b));

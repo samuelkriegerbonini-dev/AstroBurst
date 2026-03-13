@@ -1,7 +1,10 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::Emitter;
+
+const MIN_EMIT_INTERVAL_MS: u128 = 50;
 
 #[derive(Clone)]
 pub struct ProgressHandle {
@@ -10,6 +13,7 @@ pub struct ProgressHandle {
     cancelled: Arc<AtomicBool>,
     app_handle: tauri::AppHandle,
     event_name: String,
+    last_emit: Arc<Mutex<Instant>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -28,6 +32,7 @@ impl ProgressHandle {
             cancelled: Arc::new(AtomicBool::new(false)),
             app_handle: app.clone(),
             event_name: event.to_string(),
+            last_emit: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -38,6 +43,17 @@ impl ProgressHandle {
     pub fn tick_with_stage(&self, stage: &str) {
         let cur = self.current.fetch_add(1, Ordering::Relaxed) + 1;
         let tot = self.total.load(Ordering::Relaxed);
+
+        let is_last = cur >= tot;
+        if !is_last {
+            let mut last = self.last_emit.lock().unwrap();
+            let now = Instant::now();
+            if now.duration_since(*last).as_millis() < MIN_EMIT_INTERVAL_MS {
+                return;
+            }
+            *last = now;
+        }
+
         let percent = if tot > 0 {
             (cur as f64 / tot as f64 * 100.0) as u32
         } else {

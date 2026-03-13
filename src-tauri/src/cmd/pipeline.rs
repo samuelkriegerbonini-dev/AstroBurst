@@ -97,6 +97,19 @@ pub async fn run_pipeline_cmd(
             .iter()
             .map(|ch| {
                 let lights = load_batch(&ch.paths).map_err(|e| format!("{:#}", e))?;
+
+                if lights.len() > 1 {
+                    let ref_dim = lights[0].dim();
+                    for (i, l) in lights.iter().enumerate().skip(1) {
+                        if l.dim() != ref_dim {
+                            return Err(format!(
+                                "Channel '{}': frame {} has shape {:?} but frame 0 has {:?}. All frames must match.",
+                                ch.label, i, l.dim(), ref_dim
+                            ));
+                        }
+                    }
+                }
+
                 Ok(ChannelInput {
                     lights,
                     label: ch.label.clone(),
@@ -137,6 +150,6 @@ pub async fn run_pipeline_cmd(
             "rgb_preview": rgb_preview,
         }))
     })
-    .await
-    .map_err(|e| format!("Task panic: {e}"))?
+        .await
+        .map_err(|e| format!("Task panic: {e}"))?
 }

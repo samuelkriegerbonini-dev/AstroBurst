@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef, useEffect, memo } from "react";
-import { Globe, Loader2 } from "lucide-react";
+import { useState, useEffect, useMemo, memo } from "react";
+import { Globe } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
+import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcsTransform";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -28,66 +29,39 @@ function formatDec(dec: number): string {
 }
 
 function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
-  const { pixelToWorld, getWcsInfo } = useBackend();
+  const { getWcsInfo } = useBackend();
   const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
   const [wcsInfo, setWcsInfo] = useState<any>(null);
-  const [coord, setCoord] = useState<{ ra: number; dec: number } | null>(null);
-  const abortRef = useRef(0);
-  const lastRequestRef = useRef<string>("");
-  const throttleRef = useRef<number | null>(null);
-  const busyRef = useRef(false);
+  const [wcsParams, setWcsParams] = useState<WcsParams | null>(null);
 
   useEffect(() => {
     if (!filePath) {
       setWcsAvailable(null);
       setWcsInfo(null);
+      setWcsParams(null);
       return;
     }
-    const seq = ++abortRef.current;
+    let cancelled = false;
     getWcsInfo(filePath)
       .then((info: any) => {
-        if (abortRef.current !== seq) return;
+        if (cancelled) return;
         setWcsAvailable(true);
         setWcsInfo(info);
+        if (info.wcs_params) {
+          setWcsParams(info.wcs_params as WcsParams);
+        }
       })
       .catch(() => {
-        if (abortRef.current !== seq) return;
+        if (cancelled) return;
         setWcsAvailable(false);
       });
+    return () => { cancelled = true; };
   }, [filePath, getWcsInfo]);
 
-  useEffect(() => {
-    if (!wcsAvailable || !filePath || mouseX === null || mouseY === null) {
-      setCoord(null);
-      return;
-    }
-
-    const key = `${mouseX},${mouseY}`;
-    if (key === lastRequestRef.current) return;
-    lastRequestRef.current = key;
-
-    if (throttleRef.current) {
-      cancelAnimationFrame(throttleRef.current);
-    }
-
-    throttleRef.current = requestAnimationFrame(() => {
-      throttleRef.current = null;
-      if (busyRef.current) return;
-      busyRef.current = true;
-      const seq = ++abortRef.current;
-      const mx = mouseX;
-      const my = mouseY;
-      pixelToWorld(filePath, mx, my)
-        .then((result: any) => {
-          if (abortRef.current !== seq) return;
-          setCoord({ ra: result.ra, dec: result.dec });
-        })
-        .catch(() => {})
-        .finally(() => {
-          busyRef.current = false;
-        });
-    });
-  }, [wcsAvailable, filePath, mouseX, mouseY, pixelToWorld]);
+  const coord: CelestialCoord | null = useMemo(() => {
+    if (!wcsParams || mouseX === null || mouseY === null) return null;
+    return pixelToWorld(wcsParams, mouseX, mouseY);
+  }, [wcsParams, mouseX, mouseY]);
 
   if (!wcsAvailable || !wcsInfo) return null;
 

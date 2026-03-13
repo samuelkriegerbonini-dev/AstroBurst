@@ -5,14 +5,17 @@ export function useTimer() {
   const [elapsed, setElapsed] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number | null>(null);
+  const elapsedRef = useRef(0);
+
+  elapsedRef.current = elapsed;
 
   const start = useCallback(() => {
     if (intervalRef.current) return;
-    startTimeRef.current = Date.now() - elapsed;
+    startTimeRef.current = Date.now() - elapsedRef.current;
     intervalRef.current = setInterval(() => {
       setElapsed(Date.now() - (startTimeRef.current || 0));
     }, 100);
-  }, [elapsed]);
+  }, []);
 
   const stop = useCallback(() => {
     if (intervalRef.current) {
@@ -24,6 +27,7 @@ export function useTimer() {
   const reset = useCallback(() => {
     stop();
     setElapsed(0);
+    elapsedRef.current = 0;
     startTimeRef.current = null;
   }, [stop]);
 

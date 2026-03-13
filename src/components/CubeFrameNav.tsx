@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, memo } from "react";
+import { useState, useCallback, useRef, memo, useEffect } from "react";
 import { Loader2, Film, SkipBack, SkipForward, Play, Pause } from "lucide-react";
 import { useBackend } from "../hooks/useBackend";
 
@@ -13,12 +13,23 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
   const [currentFrame, setCurrentFrame] = useState(0);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playingRef = useRef(false);
   const abortRef = useRef(0);
+  const loadingRef = useRef(false);
+  const sliderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      playingRef.current = false;
+      if (sliderTimerRef.current) clearTimeout(sliderTimerRef.current);
+    };
+  }, []);
 
   const loadFrame = useCallback(
     async (idx: number) => {
       if (idx < 0 || idx >= totalFrames) return;
+      if (loadingRef.current) return;
+      loadingRef.current = true;
       setCurrentFrame(idx);
       setLoading(true);
       const seq = ++abortRef.current;
@@ -31,6 +42,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         console.error("Frame load failed:", e);
       } finally {
         if (abortRef.current === seq) setLoading(false);
+        loadingRef.current = false;
       }
     },
     [filePath, totalFrames, getCubeFrame, onFrameChange],
@@ -39,7 +51,12 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
   const handleSlider = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const idx = parseInt(e.target.value);
-      loadFrame(idx);
+      setCurrentFrame(idx);
+      if (sliderTimerRef.current) clearTimeout(sliderTimerRef.current);
+      sliderTimerRef.current = setTimeout(() => {
+        sliderTimerRef.current = null;
+        loadFrame(idx);
+      }, 80);
     },
     [loadFrame],
   );
@@ -54,23 +71,47 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
 
   const togglePlay = useCallback(() => {
     if (playing) {
-      if (playIntervalRef.current) clearInterval(playIntervalRef.current);
-      playIntervalRef.current = null;
+      playingRef.current = false;
       setPlaying(false);
-    } else {
-      setPlaying(true);
-      let frame = currentFrame;
-      playIntervalRef.current = setInterval(() => {
-        frame = (frame + 1) % totalFrames;
-        loadFrame(frame);
-        if (frame === totalFrames - 1) {
-          if (playIntervalRef.current) clearInterval(playIntervalRef.current);
-          playIntervalRef.current = null;
-          setPlaying(false);
-        }
-      }, 200);
+      return;
     }
-  }, [playing, currentFrame, totalFrames, loadFrame]);
+
+    playingRef.current = true;
+    setPlaying(true);
+
+    let frame = currentFrame;
+
+    const playNext = async () => {
+      if (!playingRef.current) return;
+      frame = (frame + 1) % totalFrames;
+
+      setCurrentFrame(frame);
+      setLoading(true);
+      const seq = ++abortRef.current;
+      try {
+        const outputPath = `./output/cube_frame_${frame}.png`;
+        const result = await getCubeFrame(filePath, frame, outputPath);
+        if (abortRef.current === seq) {
+          onFrameChange?.(result.output_path, frame);
+          setLoading(false);
+        }
+      } catch {
+        setLoading(false);
+      }
+
+      if (frame === totalFrames - 1) {
+        playingRef.current = false;
+        setPlaying(false);
+        return;
+      }
+
+      if (playingRef.current) {
+        setTimeout(playNext, 50);
+      }
+    };
+
+    playNext();
+  }, [playing, currentFrame, totalFrames, getCubeFrame, filePath, onFrameChange]);
 
   if (totalFrames <= 1) return null;
 
@@ -106,7 +147,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         </button>
         <button
           onClick={togglePlay}
-          disabled={loading}
+          disabled={loading && !playing}
           className="p-1.5 rounded-md transition-colors hover:bg-zinc-800"
           style={{ color: playing ? "#c084fc" : "#71717a" }}
         >

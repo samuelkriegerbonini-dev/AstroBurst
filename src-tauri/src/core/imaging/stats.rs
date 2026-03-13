@@ -1,4 +1,4 @@
-use crate::math::median::{exact_median_mut, exact_median_f64};
+use crate::math::median::{exact_median_mut, exact_mad_mut};
 use crate::types::image::{Histogram, ImageStats};
 use crate::types::constants::{PADDING_THRESHOLD, MAD_TO_SIGMA, HISTOGRAM_BINS};
 use ndarray::Array2;
@@ -11,70 +11,71 @@ pub fn is_valid_pixel(v: f32) -> bool {
     v.is_finite() && v > PADDING_THRESHOLD
 }
 
+struct ChunkAccum {
+    pixels: Vec<f32>,
+    min: f64,
+    max: f64,
+    sum: f64,
+}
+
 pub fn compute_image_stats(data: &Array2<f32>) -> ImageStats {
     let slice = data.as_slice().expect("Array2 must be contiguous");
 
-    let mut valid: Vec<f32> = slice
-        .par_iter()
-        .copied()
-        .filter(|&v| is_valid_pixel(v))
-        .collect();
+    let merged = slice
+        .par_chunks(CHUNK_SIZE)
+        .map(|chunk| {
+            let mut acc = ChunkAccum {
+                pixels: Vec::with_capacity(chunk.len()),
+                min: f64::MAX,
+                max: f64::MIN,
+                sum: 0.0,
+            };
+            for &v in chunk {
+                if is_valid_pixel(v) {
+                    let vf = v as f64;
+                    if vf < acc.min {
+                        acc.min = vf;
+                    }
+                    if vf > acc.max {
+                        acc.max = vf;
+                    }
+                    acc.sum += vf;
+                    acc.pixels.push(v);
+                }
+            }
+            acc
+        })
+        .reduce(
+            || ChunkAccum {
+                pixels: Vec::new(),
+                min: f64::MAX,
+                max: f64::MIN,
+                sum: 0.0,
+            },
+            |mut a, b| {
+                a.pixels.extend_from_slice(&b.pixels);
+                a.min = a.min.min(b.min);
+                a.max = a.max.max(b.max);
+                a.sum += b.sum;
+                a
+            },
+        );
 
+    let mut valid = merged.pixels;
     let n = valid.len() as u64;
     if n == 0 {
         return ImageStats::default();
     }
 
+    let mean = merged.sum / n as f64;
     let median = exact_median_mut(&mut valid);
-
-    let deviations: Vec<f64> = valid
-        .par_iter()
-        .map(|&v| (v as f64 - median).abs())
-        .collect();
-    let mad = exact_median_f64(&deviations);
-
+    let mad_f32 = exact_mad_mut(&mut valid, median as f32);
+    let mad = mad_f32 as f64;
     let sigma = (mad * MAD_TO_SIGMA).max(1e-30);
 
-    struct Accum {
-        min: f64,
-        max: f64,
-        sum: f64,
-    }
-
-    let acc = valid
-        .par_iter()
-        .fold(
-            || Accum {
-                min: f64::MAX,
-                max: f64::MIN,
-                sum: 0.0,
-            },
-            |mut a, &v| {
-                let vf = v as f64;
-                if vf < a.min { a.min = vf; }
-                if vf > a.max { a.max = vf; }
-                a.sum += vf;
-                a
-            },
-        )
-        .reduce(
-            || Accum {
-                min: f64::MAX,
-                max: f64::MIN,
-                sum: 0.0,
-            },
-            |a, b| Accum {
-                min: a.min.min(b.min),
-                max: a.max.max(b.max),
-                sum: a.sum + b.sum,
-            },
-        );
-
-    let mean = acc.sum / n as f64;
-
     ImageStats {
-        min: acc.min,
-        max: acc.max,
+        min: merged.min,
+        max: merged.max,
         mean,
         sigma,
         median,

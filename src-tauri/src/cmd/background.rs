@@ -1,11 +1,10 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, save_preview_png};
 use crate::core::imaging::background::{extract_background, BackgroundConfig, BackgroundMode};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
 use crate::infra::progress::ProgressHandle;
-use crate::infra::render::grayscale::save_stf_png;
 use crate::types::constants::{
     MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS, DEFAULT_STEM,
     MIN_GRID_SIZE, MAX_GRID_SIZE, MIN_POLY_DEGREE, MAX_POLY_DEGREE, MIN_ITERATIONS, MAX_ITERATIONS,
@@ -65,8 +64,8 @@ pub async fn extract_background_cmd(
         let corrected_fits = format!("{}/{}_bg_corrected.fits", output_dir, stem);
 
         let (rows, cols) = bg_result.corrected.dim();
-        save_stf_png(&rendered, cols, rows, &corrected_png)?;
-        save_stf_png(&model_rendered, cols, rows, &model_png)?;
+        save_preview_png(rendered, cols, rows, &corrected_png)?;
+        save_preview_png(model_rendered, cols, rows, &model_png)?;
         crate::infra::fits::writer::write_fits_mono(&corrected_fits, &bg_result.corrected, None)?;
 
         Ok(json!({

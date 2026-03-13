@@ -75,6 +75,16 @@ impl WcsTransform {
         })
     }
 
+    pub fn raw_params(&self) -> (f64, f64, f64, f64, [[f64; 2]; 2], &str) {
+        let proj_str = match self.projection {
+            Projection::Tan => "TAN",
+            Projection::Sin => "SIN",
+            Projection::Arc => "ARC",
+            Projection::Car => "CAR",
+        };
+        (self.crpix1, self.crpix2, self.crval1, self.crval2, self.cd, proj_str)
+    }
+
     fn read_cd_matrix(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
         if let (Some(cd11), Some(cd12), Some(cd21), Some(cd22)) = (
             header.get_f64("CD1_1"),
@@ -176,7 +186,7 @@ impl WcsTransform {
                     let dec = (c.cos() * dec0.sin() + (eta / rho) * c.sin() * dec0.cos()).asin();
                     let ra = ra0
                         + (xi * c.sin())
-                            .atan2(rho * dec0.cos() * c.cos() - eta * dec0.sin() * c.sin());
+                        .atan2(rho * dec0.cos() * c.cos() - eta * dec0.sin() * c.sin());
                     (ra, dec)
                 }
             }
@@ -371,5 +381,29 @@ mod tests {
         let s = format!("{}", c);
         assert!(s.contains("h"));
         assert!(s.contains("°"));
+    }
+
+    #[test]
+    fn test_raw_params() {
+        let h = make_header(&[
+            ("CRPIX1", "100"),
+            ("CRPIX2", "200"),
+            ("CRVAL1", "83.633"),
+            ("CRVAL2", "22.014"),
+            ("CD1_1", "-7.27778E-05"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "7.27778E-05"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ]);
+
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        let (crpix1, crpix2, crval1, crval2, cd, proj) = wcs.raw_params();
+        assert!((crpix1 - 100.0).abs() < 1e-10);
+        assert!((crpix2 - 200.0).abs() < 1e-10);
+        assert!((crval1 - 83.633).abs() < 1e-10);
+        assert_eq!(proj, "TAN");
+        assert!((cd[0][0] - (-7.27778e-05)).abs() < 1e-12);
     }
 }

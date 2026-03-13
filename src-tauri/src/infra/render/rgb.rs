@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use image::RgbImage;
+use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageEncoder};
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -14,18 +15,33 @@ pub fn render_rgb(
     let g_slice = g.as_slice().context("G channel not contiguous")?;
     let b_slice = b.as_slice().context("B channel not contiguous")?;
 
-    let pixels: Vec<u8> = (0..rows * cols)
-        .into_par_iter()
-        .flat_map_iter(|i| {
-            let rv = (r_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-            let gv = (g_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-            let bv = (b_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-            [rv, gv, bv]
-        })
-        .collect();
+    let npix = rows * cols;
+    let mut pixels = vec![0u8; npix * 3];
 
-    let img = RgbImage::from_raw(cols as u32, rows as u32, pixels)
-        .context("Failed to create RGB image from raw pixels")?;
-    img.save(path).context("Failed to save RGB PNG")?;
+    pixels
+        .par_chunks_mut(cols * 3)
+        .enumerate()
+        .for_each(|(y, row_buf)| {
+            let base = y * cols;
+            for x in 0..cols {
+                let i = base + x;
+                let o = x * 3;
+                row_buf[o] = (r_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 1] = (g_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 2] = (b_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+            }
+        });
+
+    let file = std::fs::File::create(path).context("Failed to create output file")?;
+    let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let encoder = PngEncoder::new_with_quality(
+        buf_writer,
+        image::codecs::png::CompressionType::Default,
+        image::codecs::png::FilterType::Sub,
+    );
+    encoder
+        .write_image(&pixels, cols as u32, rows as u32, ColorType::Rgb8.into())
+        .context("Failed to write RGB PNG")?;
+
     Ok(())
 }

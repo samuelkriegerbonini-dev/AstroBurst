@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { Save, FileDown, Loader2, Check } from "lucide-react";
+import { getOutputDir } from "../../utils/outputdir";
 
 
 export default function ExportPanel({
@@ -41,7 +42,8 @@ export default function ExportPanel({
 
   const handleExportRgb = useCallback(async () => {
     if (!rgbChannels || !onExportRgb) return;
-    const outputPath = "./output/rgb_composite.fits";
+    const dir = await getOutputDir();
+    const outputPath = `${dir}/rgb_composite.fits`;
     try {
       await onExportRgb(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
         copyWcs,

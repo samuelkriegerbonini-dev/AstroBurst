@@ -215,7 +215,6 @@ fn fit_polynomial_surface(
 ) -> Result<Vec<f64>> {
     let degree = config.poly_degree;
     let n_terms = (degree + 1) * (degree + 2) / 2;
-    let _ = samples.len();
 
     let row_scale = rows as f64;
     let col_scale = cols as f64;

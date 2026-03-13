@@ -78,19 +78,6 @@ export function useBackend() {
       return res;
     },
 
-    processBatch: async (paths: string[], outputDir?: string) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("process_batch", { paths, outputDir: dir });
-      if (res.results) {
-        await Promise.all(
-          res.results.map(async (r: any) => {
-            if (r.png_path) r.previewUrl = await getPreviewUrl(r.png_path);
-          }),
-        );
-      }
-      return res;
-    },
-
     getRawPixelsBinary: async (path: string) => {
       const buffer = await safeInvoke("get_raw_pixels_binary", { path });
       return parseRawPixelBuffer(buffer);
@@ -202,8 +189,16 @@ export function useBackend() {
 
     getCubeInfo: (path: string) => safeInvoke("get_cube_info", { path }),
 
-    getCubeFrame: (path: string, frameIndex: number, outputPath: string, outputFits?: string) =>
-      safeInvoke("get_cube_frame", { path, frameIndex, outputPath, outputFits }),
+    getCubeFrame: async (path: string, frameIndex: number, outputPath: string, outputFits?: string) => {
+      const dir = await getOutputDir();
+      const resolvedOutput = outputPath.startsWith("./output")
+        ? outputPath.replace("./output", dir)
+        : outputPath;
+      const resolvedFits = outputFits?.startsWith("./output")
+        ? outputFits.replace("./output", dir)
+        : outputFits;
+      return safeInvoke("get_cube_frame", { path, frameIndex, outputPath: resolvedOutput, outputFits: resolvedFits });
+    },
 
     getCubeSpectrum: (path: string, x: number, y: number) =>
       safeInvoke("get_cube_spectrum", { path, x, y }),
@@ -215,9 +210,6 @@ export function useBackend() {
 
     pixelToWorld: (path: string, x: number, y: number) =>
       safeInvoke("pixel_to_world", { path, x, y }),
-
-    worldToPixel: (path: string, ra: number, dec: number) =>
-      safeInvoke("world_to_pixel", { path, ra, dec }),
 
     calibrate: async (sciencePath: string, outputDir?: string, options: Record<string, any> = {}) => {
       const dir = await resolveDir(outputDir);
@@ -365,14 +357,6 @@ export function useBackend() {
       return res;
     },
 
-    runPipeline: async (inputPath: string, outputDir?: string, frameStep = 5) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("run_pipeline_cmd", { inputPath, outputDir: dir, frameStep });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
-      return res;
-    },
-
     getConfig: () => safeInvoke("get_config"),
     updateConfig: (field: string, value: any) => safeInvoke("update_config", { field, value }),
     saveApiKey: (key: string, service?: string) => safeInvoke("save_api_key", { key, service }),
@@ -415,5 +399,7 @@ export function useBackend() {
       if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
       return res;
     },
+
+    resolveOutputDir: getOutputDir,
   }), []);
 }

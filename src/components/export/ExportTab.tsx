@@ -2,6 +2,7 @@ import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Download, Loader2, Box, Film } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
 import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
+import { getOutputDir } from "../../utils/outputdir";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
@@ -75,13 +76,14 @@ function ExportTabInner() {
     setCubeExportResult(null);
 
     const stem = (file.name || "cube").replace(/\.(fits?|asdf|zip)$/i, "");
+    const dir = await getOutputDir();
     let exported = 0;
 
     try {
       for (let i = 0; i < totalFrames; i++) {
         const pad = String(i).padStart(4, "0");
-        const outputPath = `./output/${stem}_frame_${pad}.png`;
-        const fitsPath = cubeExportFits ? `./output/${stem}_frame_${pad}.fits` : undefined;
+        const outputPath = `${dir}/${stem}_frame_${pad}.png`;
+        const fitsPath = cubeExportFits ? `${dir}/${stem}_frame_${pad}.fits` : undefined;
         await getCubeFrame(file.path, i, outputPath, fitsPath);
         exported++;
         setCubeExportProgress(Math.round((exported / totalFrames) * 100));

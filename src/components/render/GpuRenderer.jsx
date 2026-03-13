@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
-import { renderStfInWorker, cancelPendingRenders } from "../../utils/stfWorker";
+import { renderStfInWorker, cancelPendingRenders, setWorkerPixels } from "../../utils/stfWorker.ts";
 import { getGpuSingleton, getGpuState } from "../../context/Gpucontext";
 
 const MAX_DISPLAY_DIM = 4096;
@@ -90,6 +90,23 @@ export default function GpuRenderer({
     };
   }, [destroyGPUResources]);
 
+  const workerPixelsReadyRef = useRef(false);
+  const pixelsGenRef = useRef(0);
+
+  useEffect(() => {
+    if (!rawData || !width || !height) {
+      workerPixelsReadyRef.current = false;
+      return;
+    }
+    workerPixelsReadyRef.current = false;
+    const gen = ++pixelsGenRef.current;
+    setWorkerPixels(rawData, width, height).then(() => {
+      if (pixelsGenRef.current === gen) {
+        workerPixelsReadyRef.current = true;
+      }
+    });
+  }, [rawData, width, height]);
+
   const renderGPU = useCallback(() => {
     const gpu = getGpuState();
     if (!gpu || !displayData || !canvasRef.current) return;
@@ -177,10 +194,11 @@ export default function GpuRenderer({
     const seq = ++renderSeqRef.current;
 
     const needsDownsample = display.scale < 1;
+    const sendPixels = !workerPixelsReadyRef.current;
     const result = await renderStfInWorker({
-      pixels: rawData,
-      width,
-      height,
+      pixels: sendPixels ? rawData : undefined,
+      width: sendPixels ? width : undefined,
+      height: sendPixels ? height : undefined,
       dstWidth: needsDownsample ? display.width : undefined,
       dstHeight: needsDownsample ? display.height : undefined,
       dataMin,

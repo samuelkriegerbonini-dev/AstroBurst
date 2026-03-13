@@ -11,6 +11,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
+import { useFileStats } from "./hooks/useFileStore";
 import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
@@ -26,6 +27,8 @@ const isTauri = (): boolean => !!(window as any).__TAURI_INTERNALS__;
 
 type ViewState = "empty" | "processing" | "complete";
 
+const APP_VERSION = "v0.3.2";
+
 const MemoizedFileList = memo(FileList);
 const MemoizedPreviewPanel = memo(PreviewPanel);
 
@@ -40,20 +43,21 @@ export default function App() {
   const prevCompleteRef = useRef(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT);
   const sidebarResizing = useRef(false);
   const sidebarStartX = useRef(0);
   const sidebarStartW = useRef(0);
+  const sidebarElRef = useRef<HTMLDivElement>(null);
+  const [, forceSidebarRender] = useState(0);
 
-  const {
-    files, selected, selectedFile, isProcessing, stats, progress, isComplete,
-    addFiles, selectFile, startProcessing, reset, isResampling, resampleProgress,
-  } = useFileQueue();
+  const { addFiles, startProcessing, reset } = useFileQueue();
+  const { stats, isProcessing, isComplete, progress } = useFileStats();
 
   const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
 
   const [showBg, setShowBg] = useState(false);
+  const fileCountRef = useRef(0);
 
   useEffect(() => { const t = setTimeout(() => setLoading(false), 600); return () => clearTimeout(t); }, []);
   useEffect(() => { if (!loading) { const t = setTimeout(() => setShowBg(true), 100); return () => clearTimeout(t); } }, [loading]);
@@ -61,15 +65,17 @@ export default function App() {
   const handleFilesAdded = useCallback((newFiles: AstroFile[]) => {
     if (newFiles.length === 0) return;
     addFiles(newFiles);
-    if (view === "empty" || view === "complete") setView("processing");
-  }, [addFiles, view]);
+    setView((v) => (v === "empty" || v === "complete") ? "processing" : v);
+  }, [addFiles]);
 
   useEffect(() => {
-    if (view === "processing" && files.length > 0 && !isProcessing && !isComplete) {
-      const queued = files.filter((f: any) => f.status === "queued");
-      if (queued.length > 0) startProcessing(() => timer.start(), () => timer.stop());
+    if (view === "processing" && stats.total > 0 && !isProcessing && !isComplete) {
+      if (stats.total > fileCountRef.current) {
+        fileCountRef.current = stats.total;
+        startProcessing(() => timer.start(), () => timer.stop());
+      }
     }
-  }, [view, files.length, isProcessing, isComplete]);
+  }, [view, stats.total, isProcessing, isComplete, startProcessing, timer]);
 
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
@@ -122,19 +128,28 @@ export default function App() {
     } catch (err) { console.error("[AstroBurst] Folder dialog error:", err); }
   }, [handleFilesAdded, handleBrowseFiles]);
 
-  const handleNewBatch = useCallback(() => { reset(); timer.reset(); setView("empty"); setShowConfetti(false); }, [reset, timer]);
+  const handleNewBatch = useCallback(() => {
+    reset();
+    timer.reset();
+    fileCountRef.current = 0;
+    setView("empty");
+    setShowConfetti(false);
+  }, [reset, timer]);
 
   const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
     if (!sidebarOpen) return;
     e.preventDefault();
     sidebarResizing.current = true;
     sidebarStartX.current = e.clientX;
-    sidebarStartW.current = sidebarWidth;
+    sidebarStartW.current = sidebarWidthRef.current;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
+    const el = sidebarElRef.current;
     const onMove = (ev: MouseEvent) => {
       if (!sidebarResizing.current) return;
-      setSidebarWidth(Math.max(180, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current))));
+      const next = Math.max(180, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
+      sidebarWidthRef.current = next;
+      if (el) el.style.width = `${next}px`;
     };
     const onUp = () => {
       sidebarResizing.current = false;
@@ -142,17 +157,18 @@ export default function App() {
       document.body.style.userSelect = "";
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      forceSidebarRender((c) => c + 1);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [sidebarOpen, sidebarWidth]);
+  }, [sidebarOpen]);
 
-  const effectiveSidebarW = sidebarOpen ? sidebarWidth : SIDEBAR_MIN;
+  const effectiveSidebarW = sidebarOpen ? sidebarWidthRef.current : SIDEBAR_MIN;
 
   return (
     <ErrorBoundary>
       <div className="relative h-screen w-full text-zinc-100 overflow-hidden" style={{ background: "var(--ab-deep)" }}>
-        <Confetti show={showConfetti} />
+        {showConfetti && <Confetti show />}
         <div
           className="fixed inset-0 z-0 opacity-40 pointer-events-none"
           style={{
@@ -174,7 +190,6 @@ export default function App() {
                 </div>
               ) : (
                 <div className="flex flex-col h-full">
-                  {/* Top bar: stats + progress */}
                   <div
                     className="px-4 py-2 shrink-0 space-y-1.5"
                     style={{
@@ -184,17 +199,11 @@ export default function App() {
                   >
                     <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
                     <GlobalProgress progress={progress} isComplete={isComplete} />
-                    {isResampling && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] animate-pulse" style={{ color: "var(--ab-gold)" }}>Resampling... {resampleProgress}%</span>
-                      </div>
-                    )}
                   </div>
 
-                  {/* Main area */}
                   <div className="flex-1 flex overflow-hidden min-h-0">
-                    {/* Left sidebar: files + export */}
                     <div
+                      ref={sidebarElRef}
                       className="shrink-0 flex flex-col overflow-hidden"
                       style={{
                         width: effectiveSidebarW,
@@ -204,17 +213,12 @@ export default function App() {
                       }}
                     >
                       <MemoizedFileList
-                        files={files}
-                        selected={selected}
-                        onSelect={selectFile}
                         collapsed={!sidebarOpen}
                         onToggle={() => setSidebarOpen((p) => !p)}
                         onExportZip={exportZip}
                         isExporting={isExporting}
                         zipProgress={zipProgress}
                         downloaded={downloaded}
-                        doneCount={stats.done}
-                        isComplete={isComplete}
                       />
                     </div>
 
@@ -228,25 +232,20 @@ export default function App() {
                       />
                     )}
 
-                    {/* Center + right sidebar */}
                     <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                      <MemoizedPreviewPanel file={selectedFile} allFiles={files} />
+                      <MemoizedPreviewPanel />
                     </div>
                   </div>
 
-                  {/* Footer: minimal */}
                   <div
                     className="px-4 py-1.5 flex items-center justify-between shrink-0"
-                    style={{
-                      borderTop: "1px solid rgba(20,184,166,0.06)",
-                      background: "rgba(5,5,16,0.6)",
-                    }}
+                    style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
                   >
                     <div className="flex items-center gap-3">
                       <div className="flex items-center gap-2 pointer-events-auto select-none">
                         <AstroLogo size={16} showText={false} className="opacity-30" />
                         <span className="text-[8px] font-bold tracking-widest uppercase cosmic-text" style={{ opacity: 0.5 }}>AstroBurst</span>
-                        <span className="text-[7px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.2)" }}>v0.3.0</span>
+                        <span className="text-[7px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.2)" }}>{APP_VERSION}</span>
                       </div>
                       <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
                       {isComplete ? (
@@ -273,12 +272,8 @@ export default function App() {
               <div className="absolute bottom-6 left-8 pointer-events-none flex items-center gap-3 select-none z-20">
                 <AstroLogo size={32} showText={false} className="opacity-40" />
                 <div className="flex flex-col border-l border-white/10 pl-3">
-                    <span className="text-[10px] font-bold tracking-widest text-zinc-500 uppercase">
-                      AstroBurst
-                    </span>
-                  <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">
-                      v0.3.14
-                    </span>
+                  <span className="text-[10px] font-bold tracking-widest text-zinc-500 uppercase">AstroBurst</span>
+                  <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">{APP_VERSION}</span>
                 </div>
               </div>
             </DropZone>

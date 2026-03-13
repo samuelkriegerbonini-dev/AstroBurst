@@ -1,10 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Upload } from "lucide-react";
-import { isValidFitsFile } from "../../utils/validation";
+import { isValidFitsFile, isCalibRefAsdf } from "../../utils/validation";
 import { AnimatePresence, motion } from "framer-motion";
-
-const CALIB_REF_RE = /^jwst_[a-z]+_(distortion|filteroffset|sirskernel|photom|flat|dark|bias|readnoise|gain|linearity|saturation|superbias|ipc|area|specwcs|regions|wavelengthrange|trappars|mask|drizpars|throughput|psfmask)_\d+\.asdf$/i;
-const isCalibRefAsdf = (name) => CALIB_REF_RE.test(name);
 
 const isTauri = () => !!window.__TAURI_INTERNALS__;
 

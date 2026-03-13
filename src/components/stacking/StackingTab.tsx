@@ -1,6 +1,6 @@
 import { lazy, Suspense, memo, useState, useCallback } from "react";
 import { Loader2 } from "lucide-react";
-import { useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
 
 const CalibrationPanel = lazy(() => import("./CalibrationPanel"));
 const StackingPanel = lazy(() => import("./StackingPanel"));
@@ -37,7 +37,7 @@ const DEFAULT_STACK_CONFIG: StackConfig = {
 };
 
 function StackingTabInner() {
-  const { doneFiles } = useFileContext();
+  const { doneFiles } = useDoneFilesContext();
   const { setRenderedPreviewUrl } = useRenderContext();
   const [active, setActive] = useState<StackSection>("calibrate");
 

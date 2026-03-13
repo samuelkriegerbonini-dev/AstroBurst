@@ -82,20 +82,30 @@ pub fn calibrate_light(
     let dark_slice = masters.dark.as_ref().map(|d| d.as_slice().expect("contiguous"));
     let flat_slice = masters.flat.as_ref().map(|f| f.as_slice().expect("contiguous"));
 
+    let bias_ok = bias_slice.map_or(true, |s| s.len() == npix);
+    let dark_ok = dark_slice.map_or(true, |s| s.len() == npix);
+    let flat_ok = flat_slice.map_or(true, |s| s.len() == npix);
+
     let result: Vec<f32> = (0..npix)
         .into_par_iter()
         .map(|i| {
             let mut v = src[i];
-            if let Some(b) = bias_slice {
-                v -= b[i];
+            if bias_ok {
+                if let Some(b) = bias_slice {
+                    v -= b[i];
+                }
             }
-            if let Some(d) = dark_slice {
-                v -= d[i];
+            if dark_ok {
+                if let Some(d) = dark_slice {
+                    v -= d[i];
+                }
             }
-            if let Some(f) = flat_slice {
-                let fv = f[i];
-                if fv.is_finite() && fv.abs() > 1e-4 {
-                    v /= fv;
+            if flat_ok {
+                if let Some(f) = flat_slice {
+                    let fv = f[i];
+                    if fv.is_finite() && fv.abs() > 1e-4 {
+                        v /= fv;
+                    }
                 }
             }
             if v < 0.0 { 0.0 } else { v }
@@ -117,6 +127,15 @@ pub fn run_batch_pipeline(
     for ch in &channels {
         if ch.lights.is_empty() {
             return Err(format!("Channel '{}' has no lights", ch.label));
+        }
+        let ref_dim = ch.lights[0].dim();
+        for (i, l) in ch.lights.iter().enumerate().skip(1) {
+            if l.dim() != ref_dim {
+                return Err(format!(
+                    "Channel '{}': frame {} has shape {:?} but frame 0 has {:?}. All frames must match.",
+                    ch.label, i, l.dim(), ref_dim
+                ));
+            }
         }
     }
 
@@ -182,8 +201,25 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
     let b = find("B")?;
     let (h, w) = r.dim();
 
+    if g.dim() != (h, w) || b.dim() != (h, w) {
+        let min_h = h.min(g.dim().0).min(b.dim().0);
+        let min_w = w.min(g.dim().1).min(b.dim().1);
+        let r_n = normalize_channel(&r.slice(ndarray::s![..min_h, ..min_w]).to_owned());
+        let g_n = normalize_channel(&g.slice(ndarray::s![..min_h, ..min_w]).to_owned());
+        let b_n = normalize_channel(&b.slice(ndarray::s![..min_h, ..min_w]).to_owned());
+        let mut rgb = Array3::<f32>::zeros((min_h, min_w, 3));
+        for y in 0..min_h {
+            for x in 0..min_w {
+                rgb[[y, x, 0]] = r_n[[y, x]];
+                rgb[[y, x, 1]] = g_n[[y, x]];
+                rgb[[y, x, 2]] = b_n[[y, x]];
+            }
+        }
+        return Some(rgb);
+    }
+
     let (r_norm, g_norm, b_norm) = match find("L") {
-        Some(lum) => {
+        Some(lum) if lum.dim() == (h, w) => {
             let r_n = normalize_channel(r);
             let g_n = normalize_channel(g);
             let b_n = normalize_channel(b);
@@ -194,7 +230,7 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
                 apply_luminance(&r_n, &g_n, &b_n, &l_n, 2),
             )
         }
-        None => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
+        _ => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
     };
 
     let mut rgb = Array3::<f32>::zeros((h, w, 3));
@@ -243,16 +279,23 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
     let mut result = Array2::<f32>::zeros((h, w));
     let mut rejection_counts = vec![0usize; n];
 
+    let frame_slices: Vec<&[f32]> = frames.iter()
+        .map(|f| f.as_slice().expect("contiguous"))
+        .collect();
+
     let rows: Vec<usize> = (0..h).collect();
     let row_data: Vec<(Vec<f32>, Vec<usize>)> = rows.par_iter().map(|&y| {
         let mut row = vec![0.0f32; w];
         let mut local_rejected = vec![0usize; n];
         let mut vals: Vec<(f32, usize)> = Vec::with_capacity(n);
 
+        let base = y * w;
+
         for x in 0..w {
             vals.clear();
-            for (i, frame) in frames.iter().enumerate() {
-                vals.push((frame[[y, x]], i));
+            let idx = base + x;
+            for (i, slice) in frame_slices.iter().enumerate() {
+                vals.push((slice[idx], i));
             }
 
             for _ in 0..config.max_iterations {

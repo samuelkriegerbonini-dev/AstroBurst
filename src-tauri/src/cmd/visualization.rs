@@ -1,8 +1,7 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, save_preview_png};
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig, StfParams};
-use crate::infra::render::grayscale::save_stf_png;
 use crate::infra::render::tiles;
 use crate::types::constants::{RES_HIGHLIGHT, RES_MIDTONE, RES_PNG_PATH, RES_SHADOW, RES_TILE_PATH};
 
@@ -33,7 +32,7 @@ pub async fn apply_stf_render(
             .unwrap_or("stf");
         let png_path = format!("{}/{}_stf.png", output_dir, stem);
         let (rows, cols) = cached.arr().dim();
-        save_stf_png(&rendered, cols, rows, &png_path)?;
+        save_preview_png(rendered, cols, rows, &png_path)?;
 
         Ok(json!({
             RES_PNG_PATH: png_path,

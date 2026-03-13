@@ -4,6 +4,7 @@ use std::fs::File;
 use anyhow::{bail, Context, Result};
 use memmap2::{Mmap, MmapOptions};
 use ndarray::{Array2, Array3};
+use rayon::prelude::*;
 
 use crate::types::HduHeader;
 use crate::types::constants::BLOCK_SIZE;
@@ -34,34 +35,37 @@ fn scaling(header: &HduHeader) -> (f64, f64) {
 }
 
 pub fn decode_pixels(data: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> Vec<f32> {
+    let scale_f32 = bscale as f32;
+    let zero_f32 = bzero as f32;
+
     match bitpix {
         8 => data
-            .iter()
-            .map(|&b| (b as f64 * bscale + bzero) as f32)
+            .par_iter()
+            .map(|&b| b as f32 * scale_f32 + zero_f32)
             .collect(),
         16 => data
-            .chunks_exact(2)
+            .par_chunks_exact(2)
             .map(|c| {
                 let v = i16::from_be_bytes([c[0], c[1]]);
-                (v as f64 * bscale + bzero) as f32
+                v as f32 * scale_f32 + zero_f32
             })
             .collect(),
         32 => data
-            .chunks_exact(4)
+            .par_chunks_exact(4)
             .map(|c| {
                 let v = i32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                (v as f64 * bscale + bzero) as f32
+                v as f32 * scale_f32 + zero_f32
             })
             .collect(),
         -32 => data
-            .chunks_exact(4)
+            .par_chunks_exact(4)
             .map(|c| {
                 let v = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                (v as f64 * bscale + bzero) as f32
+                v * scale_f32 + zero_f32
             })
             .collect(),
         -64 => data
-            .chunks_exact(8)
+            .par_chunks_exact(8)
             .map(|c| {
                 let v = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
                 (v * bscale + bzero) as f32

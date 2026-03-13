@@ -19,6 +19,39 @@ pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
     Ok(result.image)
 }
 
+fn median_combine_row_major(
+    frames: Vec<Array2<f32>>,
+    rows: usize,
+    cols: usize,
+) -> Vec<f32> {
+    let n = frames.len();
+    let npix = rows * cols;
+
+    let slices: Vec<&[f32]> = frames
+        .iter()
+        .map(|f| f.as_slice().expect("contiguous"))
+        .collect();
+
+    (0..npix)
+        .into_par_iter()
+        .map(|i| {
+            let mut vals = Vec::with_capacity(n);
+            for s in &slices {
+                let v = s[i];
+                if v.is_finite() {
+                    vals.push(v);
+                }
+            }
+            if vals.is_empty() {
+                return 0.0;
+            }
+            let mid = vals.len() / 2;
+            vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+            vals[mid]
+        })
+        .collect()
+}
+
 pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
     if bias_paths.is_empty() {
         bail!("No bias frames provided");
@@ -26,41 +59,22 @@ pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
 
     let first = load_fits_image(&bias_paths[0])?;
     let (rows, cols) = first.dim();
-    let npix = rows * cols;
-    let n = bias_paths.len();
 
-    let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); npix];
-    for path in bias_paths {
+    let mut frames = Vec::with_capacity(bias_paths.len());
+    frames.push(first);
+
+    for path in &bias_paths[1..] {
         let frame = load_fits_image(path)?;
         if frame.dim() != (rows, cols) {
             bail!(
                 "Dimension mismatch: expected ({}, {}), got {:?}",
-                rows,
-                cols,
-                frame.dim()
+                rows, cols, frame.dim()
             );
         }
-        let slice = frame.as_slice().expect("contiguous");
-        for i in 0..npix {
-            if slice[i].is_finite() {
-                columns[i].push(slice[i]);
-            }
-        }
+        frames.push(frame);
     }
 
-    let result: Vec<f32> = columns
-        .into_par_iter()
-        .map(|mut vals| {
-            if vals.is_empty() {
-                return 0.0;
-            }
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| {
-                f32_cmp(a, b)
-            });
-            vals[mid]
-        })
-        .collect();
+    let result = median_combine_row_major(frames, rows, cols);
 
     Ok(Array2::from_shape_vec((rows, cols), result)
         .context("Failed to reshape master bias")?)
@@ -76,44 +90,30 @@ pub fn create_master_dark(
 
     let first = load_fits_image(&dark_paths[0])?;
     let (rows, cols) = first.dim();
-    let npix = rows * cols;
-    let n = dark_paths.len();
 
-    let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); npix];
-    for path in dark_paths {
+    let first = match master_bias {
+        Some(bias) => subtract_bias(&first, bias),
+        None => first,
+    };
+
+    let mut frames = Vec::with_capacity(dark_paths.len());
+    frames.push(first);
+
+    for path in &dark_paths[1..] {
         let mut frame = load_fits_image(path)?;
         if frame.dim() != (rows, cols) {
             bail!(
                 "Dimension mismatch: expected ({}, {}), got {:?}",
-                rows,
-                cols,
-                frame.dim()
+                rows, cols, frame.dim()
             );
         }
         if let Some(bias) = master_bias {
             frame = subtract_bias(&frame, bias);
         }
-        let slice = frame.as_slice().expect("contiguous");
-        for i in 0..npix {
-            if slice[i].is_finite() {
-                columns[i].push(slice[i]);
-            }
-        }
+        frames.push(frame);
     }
 
-    let result: Vec<f32> = columns
-        .into_par_iter()
-        .map(|mut vals| {
-            if vals.is_empty() {
-                return 0.0;
-            }
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| {
-                f32_cmp(a, b)
-            });
-            vals[mid]
-        })
-        .collect();
+    let result = median_combine_row_major(frames, rows, cols);
 
     Ok(Array2::from_shape_vec((rows, cols), result)
         .context("Failed to reshape master dark")?)
@@ -130,71 +130,52 @@ pub fn create_master_flat(
 
     let first = load_fits_image(&flat_paths[0])?;
     let (rows, cols) = first.dim();
-    let npix = rows * cols;
-    let n = flat_paths.len();
 
-    let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); npix];
-    for path in flat_paths {
-        let mut frame = load_fits_image(path)?;
-        if frame.dim() != (rows, cols) {
-            bail!(
-                "Dimension mismatch: expected ({}, {}), got {:?}",
-                rows,
-                cols,
-                frame.dim()
-            );
-        }
+    let preprocess = |mut frame: Array2<f32>| -> Array2<f32> {
         if let Some(bias) = master_bias {
             frame = subtract_bias(&frame, bias);
         }
         if let Some(dark) = master_dark {
             frame = subtract_dark(&frame, dark, 1.0);
         }
-        let slice = frame.as_slice().expect("contiguous");
-        for i in 0..npix {
-            if slice[i].is_finite() {
-                columns[i].push(slice[i]);
-            }
-        }
-    }
-
-    let mut result: Vec<f32> = columns
-        .into_par_iter()
-        .map(|mut vals| {
-            if vals.is_empty() {
-                return 0.0;
-            }
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| {
-                f32_cmp(a, b)
-            });
-            vals[mid]
-        })
-        .collect();
-
-    let finite_vals: Vec<f32> = result
-        .iter()
-        .filter(|v| v.is_finite() && **v > 0.0)
-        .copied()
-        .collect();
-    if finite_vals.is_empty() {
-        return Ok(Array2::from_shape_vec((rows, cols), result)
-            .context("Failed to reshape master flat")?);
-    }
-
-    let mean = finite_vals.iter().map(|v| *v as f64).sum::<f64>() / finite_vals.len() as f64;
-    let inv_mean = if mean.abs() > 1e-10 {
-        1.0 / mean as f32
-    } else {
-        1.0
+        frame
     };
 
-    for v in &mut result {
-        if v.is_finite() && *v > 0.0 {
-            *v *= inv_mean;
-        } else {
-            *v = 1.0;
+    let mut frames = Vec::with_capacity(flat_paths.len());
+    frames.push(preprocess(first));
+
+    for path in &flat_paths[1..] {
+        let frame = load_fits_image(path)?;
+        if frame.dim() != (rows, cols) {
+            bail!(
+                "Dimension mismatch: expected ({}, {}), got {:?}",
+                rows, cols, frame.dim()
+            );
         }
+        frames.push(preprocess(frame));
+    }
+
+    let mut result = median_combine_row_major(frames, rows, cols);
+
+    let sum: f64 = result.iter()
+        .filter(|v| v.is_finite() && **v > 0.0)
+        .map(|v| *v as f64)
+        .sum();
+    let count = result.iter()
+        .filter(|v| v.is_finite() && **v > 0.0)
+        .count();
+
+    if count > 0 {
+        let mean = sum / count as f64;
+        let inv_mean = if mean.abs() > 1e-10 { 1.0 / mean as f32 } else { 1.0 };
+
+        result.par_iter_mut().for_each(|v| {
+            if v.is_finite() && *v > 0.0 {
+                *v *= inv_mean;
+            } else {
+                *v = 1.0;
+            }
+        });
     }
 
     Ok(Array2::from_shape_vec((rows, cols), result)

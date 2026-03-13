@@ -91,6 +91,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
         let pixel_scale = wcs.pixel_scale_arcsec();
         let (fov_w, fov_h) = wcs.field_of_view(naxis1, naxis2);
         let center = wcs.pixel_to_world(naxis1 as f64 / 2.0, naxis2 as f64 / 2.0);
+        let params = wcs.raw_params();
 
         Ok(json!({
             RES_CENTER_RA: center.ra,
@@ -100,6 +101,14 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_FOV_H_ARCMIN: fov_h,
             RES_NAXIS1: naxis1,
             RES_NAXIS2: naxis2,
+            "wcs_params": {
+                "crpix1": params.0,
+                "crpix2": params.1,
+                "crval1": params.2,
+                "crval2": params.3,
+                "cd": params.4,
+                "projection": params.5,
+            },
         }))
     })
 }

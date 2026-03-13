@@ -4,10 +4,9 @@ use rayon::prelude::*;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir, save_preview_png, MAX_PREVIEW_DIM};
 use crate::core::imaging::stats::{downsample_histogram, compute_histogram_with_stats};
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
-use crate::infra::render::grayscale::save_stf_png;
 use crate::infra::ipc::{encode_with_header, encode_with_header_downsampled};
 use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY,
@@ -36,7 +35,7 @@ pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json
             .unwrap_or("output");
         let png_path = format!("{}/{}.png", output_dir, stem);
         let (rows, cols) = arr.dim();
-        save_stf_png(&rendered, cols, rows, &png_path)?;
+        save_preview_png(rendered, cols, rows, &png_path)?;
 
         let elapsed = t0.elapsed().as_millis() as u64;
 
@@ -80,7 +79,7 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
             .unwrap_or("output");
         let png_path = format!("{}/{}.png", output_dir, stem);
         let (rows, cols) = arr.dim();
-        save_stf_png(&rendered, cols, rows, &png_path)?;
+        save_preview_png(rendered, cols, rows, &png_path)?;
 
         let hist = compute_histogram_with_stats(arr, stats);
         let display_bins = downsample_histogram(&hist, HISTOGRAM_BINS_DISPLAY);
@@ -171,24 +170,14 @@ pub async fn process_batch(paths: Vec<String>, output_dir: String) -> Result<ser
 }
 
 #[tauri::command]
-pub async fn get_raw_pixels(path: String) -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        encode_with_header(&extract_image_resolved(&path)?.arr)
-    })
-    .await
-    .map_err(|e| format!("Task join failed: {}", e))?
-    .map_err(|e| format!("{:#}", e))
-}
-
-#[tauri::command]
 pub async fn get_raw_pixels_binary(path: String) -> Result<Response, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
         let data = encode_with_header(&extract_image_resolved(&path)?.arr)?;
         Ok(Response::new(data))
     })
-    .await
-    .map_err(|e| format!("{}", e))?
-    .map_err(|e| format!("{:#}", e))
+        .await
+        .map_err(|e| format!("{}", e))?
+        .map_err(|e| format!("{:#}", e))
 }
 
 #[tauri::command]
@@ -198,9 +187,9 @@ pub async fn get_raw_pixels_preview(path: String, max_dim: Option<u32>) -> Resul
         let data = encode_with_header_downsampled(&extract_image_resolved(&path)?.arr, dim)?;
         Ok(Response::new(data))
     })
-    .await
-    .map_err(|e| format!("{}", e))?
-    .map_err(|e| format!("{:#}", e))
+        .await
+        .map_err(|e| format!("{}", e))?
+        .map_err(|e| format!("{:#}", e))
 }
 
 #[tauri::command]

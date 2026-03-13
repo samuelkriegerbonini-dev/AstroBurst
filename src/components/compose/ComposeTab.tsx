@@ -1,14 +1,14 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Layers, Loader2 } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
-import { useFileContext, useRgbContext, useRenderContext, useNarrowbandContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useRgbContext, useRenderContext, useNarrowbandContext } from "../../context/PreviewContext";
 
 const RgbComposePanel = lazy(() => import("./RgbComposePanel"));
 const DrizzlePanel = lazy(() => import("./DrizzlePanel"));
 const DrizzleRgbPanel = lazy(() => import("./DrizzleRgbPanel"));
 
 function ComposeTabInner() {
-  const { doneFiles } = useFileContext();
+  const { doneFiles } = useDoneFilesContext();
   const { setRgbChannels } = useRgbContext();
   const { setRenderedPreviewUrl } = useRenderContext();
   const { narrowbandPalette } = useNarrowbandContext();

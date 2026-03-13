@@ -1,158 +1,17 @@
-import { useReducer, useCallback, useRef, useState, useMemo } from "react";
+import { useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
-import { generateId } from "../utils/format";
 import { useBackend } from "./useBackend";
-import { getOutputDir } from "../utils/outputdir";
-import type {ProcessedFile, QueueStats, AstroFile, ProcessResult} from "../utils/types";
+import {
+  fileStore,
+  useFileStats,
+  useSelectedFile,
+  useAllFiles,
+} from "./useFileStore";
+import type { ProcessedFile, AstroFile } from "../utils/types";
 
 const RESAMPLE_RATIO_THRESHOLD = 1.5;
-
-const CALIB_REF_RE =
-  /^jwst_[a-z]+_(distortion|filteroffset|sirskernel|photom|flat|dark|bias|readnoise|gain|linearity|saturation|superbias|ipc|area|specwcs|regions|wavelengthrange|trappars|mask|drizpars|throughput|psfmask)_\d+\.asdf$/i;
-
-function isCalibRefAsdf(name: string): boolean {
-  return CALIB_REF_RE.test(name);
-}
-
-interface State {
-  files: ProcessedFile[];
-  fileMap: Map<string, ProcessedFile>;
-  selected: string | null;
-  isProcessing: boolean;
-  stats: QueueStats;
-}
-
-type Action =
-  | { type: "ADD_FILES"; payload: AstroFile[] }
-  | { type: "START_PROCESSING" }
-  | { type: "FILE_STARTED"; payload: { id: string } }
-  | { type: "FILE_DONE"; payload: { id: string; result: any } }
-  | { type: "FILE_ERROR"; payload: { id: string; error: string } }
-  | { type: "PROCESSING_COMPLETE" }
-  | { type: "SELECT_FILE"; payload: string }
-  | { type: "FILE_RESAMPLED"; payload: { id: string; resampleResult: any } }
-  | { type: "RESET" };
-
-const initialState: State = {
-  files: [],
-  fileMap: new Map(),
-  selected: null,
-  isProcessing: false,
-  stats: { total: 0, done: 0, failed: 0, totalBytes: 0 },
-};
-
-function updateFile(state: State, id: string, updater: (f: ProcessedFile) => ProcessedFile): { files: ProcessedFile[]; fileMap: Map<string, ProcessedFile> } {
-  const existing = state.fileMap.get(id);
-  if (!existing) return { files: state.files, fileMap: state.fileMap };
-  const updated = updater(existing);
-  const files = state.files.map((f) => (f.id === id ? updated : f));
-  const fileMap = new Map(state.fileMap);
-  fileMap.set(id, updated);
-  return { files, fileMap };
-}
-
-function reducer(state: State, action: Action): State {
-  switch (action.type) {
-    case "ADD_FILES": {
-      const newFiles: ProcessedFile[] = action.payload.map((f) => ({
-        id: generateId(),
-        name: f.name,
-        path: f.path,
-        size: f.size,
-        status: FILE_STATUS.QUEUED,
-        result: null,
-        error: null,
-        startedAt: null,
-        finishedAt: null,
-      }));
-      const files = [...state.files, ...newFiles];
-      const fileMap = new Map(state.fileMap);
-      for (const f of newFiles) fileMap.set(f.id, f);
-      return {
-        ...state,
-        files,
-        fileMap,
-        stats: {
-          ...state.stats,
-          total: files.length,
-          totalBytes: files.reduce((a, f) => a + (f.size || 0), 0),
-        },
-      };
-    }
-
-    case "START_PROCESSING":
-      return { ...state, isProcessing: true };
-
-    case "FILE_STARTED": {
-      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
-        ...f,
-        status: FILE_STATUS.PROCESSING as const,
-        startedAt: Date.now(),
-      }));
-      return { ...state, files, fileMap };
-    }
-
-    case "FILE_DONE": {
-      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
-        ...f,
-        status: FILE_STATUS.DONE as const,
-        result: action.payload.result,
-        finishedAt: Date.now(),
-      }));
-      const done = state.stats.done + 1;
-      const autoSelect =
-        state.selected === null && done === 1 ? action.payload.id : state.selected;
-      return {
-        ...state,
-        files,
-        fileMap,
-        selected: autoSelect,
-        stats: { ...state.stats, done },
-      };
-    }
-
-    case "FILE_ERROR": {
-      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
-        ...f,
-        status: FILE_STATUS.ERROR as const,
-        error: action.payload.error,
-        finishedAt: Date.now(),
-      }));
-      return {
-        ...state,
-        files,
-        fileMap,
-        stats: { ...state.stats, failed: state.stats.failed + 1 },
-      };
-    }
-
-    case "PROCESSING_COMPLETE":
-      return { ...state, isProcessing: false };
-
-    case "SELECT_FILE":
-      return { ...state, selected: action.payload };
-
-    case "FILE_RESAMPLED": {
-      const { files, fileMap } = updateFile(state, action.payload.id, (f) => ({
-        ...f,
-        result: {
-          ...(f.result ?? {}),
-          resampled: action.payload.resampleResult,
-          resampledPath: action.payload.resampleResult.fits_path,
-        } as ProcessResult,
-      }));
-      return { ...state, files, fileMap };
-    }
-
-    case "RESET":
-      return { ...initialState, fileMap: new Map() };
-
-    default:
-      return state;
-  }
-}
-
 const CONCURRENCY = 3;
+const YIELD_INTERVAL = 4;
 
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => {
@@ -172,7 +31,6 @@ interface ResolutionGroup {
 
 function detectResolutionGroups(files: ProcessedFile[]): ResolutionGroup[] {
   const groups: ResolutionGroup[] = [];
-
   for (const file of files) {
     if (file.status !== FILE_STATUS.DONE || !file.result?.dimensions) continue;
     const [w, h] = file.result.dimensions;
@@ -185,116 +43,73 @@ function detectResolutionGroups(files: ProcessedFile[]): ResolutionGroup[] {
       groups.push({ width: w, height: h, files: [file] });
     }
   }
-
   return groups;
 }
-function shouldResample(groups: ResolutionGroup[]): {
-  needed: boolean;
-  targetGroup: ResolutionGroup | null;
-  resampleGroups: ResolutionGroup[];
-} {
-  if (groups.length < 2) {
-    return { needed: false, targetGroup: null, resampleGroups: [] };
-  }
 
-  const sorted = [...groups].sort(
-    (a, b) => a.width * a.height - b.width * b.height,
-  );
+function shouldResample(groups: ResolutionGroup[]) {
+  if (groups.length < 2) return { needed: false, targetGroup: null, resampleGroups: [] as ResolutionGroup[] };
+  const sorted = [...groups].sort((a, b) => a.width * a.height - b.width * b.height);
   const smallest = sorted[0];
   const largest = sorted[sorted.length - 1];
-
   const ratio = (largest.width * largest.height) / (smallest.width * smallest.height);
-
-  if (ratio < RESAMPLE_RATIO_THRESHOLD) {
-    return { needed: false, targetGroup: null, resampleGroups: [] };
-  }
-
-  const resampleGroups = sorted.slice(1);
-
-  return { needed: true, targetGroup: smallest, resampleGroups };
+  if (ratio < RESAMPLE_RATIO_THRESHOLD) return { needed: false, targetGroup: null, resampleGroups: [] as ResolutionGroup[] };
+  return { needed: true, targetGroup: smallest, resampleGroups: sorted.slice(1) };
 }
 
 export function useFileQueue() {
-  const [state, dispatch] = useReducer(reducer, initialState);
   const { processFitsFull, processFits, getHeader, resampleFits } = useBackend();
   const processingRef = useRef(false);
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  const resamplingRef = useRef(false);
+  const resampleProgressRef = useRef(0);
 
-  const [isResampling, setIsResampling] = useState(false);
-  const [resampleProgress, setResampleProgress] = useState(0);
+  const { stats, isProcessing, isComplete, progress } = useFileStats();
+  const selectedFile = useSelectedFile();
+  const files = useAllFiles();
 
   const addFiles = useCallback((fileList: AstroFile[]) => {
-    const valid: AstroFile[] = [];
-    const skipped: string[] = [];
-
-    for (const f of fileList) {
-      if (isCalibRefAsdf(f.name)) {
-        skipped.push(f.name);
-      } else {
-        valid.push(f);
-      }
-    }
-
-    if (skipped.length > 0) {
-      console.warn(
-        `[AstroBurst] Skipped ${skipped.length} calibration reference file(s):`,
-        skipped,
-      );
-    }
-
-    if (valid.length > 0) {
-      dispatch({ type: "ADD_FILES", payload: valid });
-    }
+    fileStore.addFiles(fileList);
   }, []);
 
   const selectFile = useCallback((id: string) => {
-    dispatch({ type: "SELECT_FILE", payload: id });
+    fileStore.selectFile(id);
   }, []);
 
   const processOneFile = useCallback(
     async (file: ProcessedFile) => {
-      dispatch({ type: "FILE_STARTED", payload: { id: file.id } });
+      fileStore.fileStarted(file.id);
       try {
         const result = await processFitsFull(file.path);
-        dispatch({
-          type: "FILE_DONE",
-          payload: { id: file.id, result },
-        });
-      } catch (fullErr: any) {
-        try {
-          const result = await processFits(file.path);
-          let header = null;
+        fileStore.fileDone(file.id, result);
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        const isRetriable = !msg.includes("Calibration reference file")
+          && !msg.includes("No such file")
+          && !msg.includes("not found")
+          && !msg.includes("Permission denied");
+
+        if (isRetriable) {
           try {
-            header = await getHeader(file.path);
-          } catch (e) {
-            console.warn("[AstroBurst] Header fetch failed:", e);
-          }
-          dispatch({
-            type: "FILE_DONE",
-            payload: { id: file.id, result: { ...result, header } },
-          });
-        } catch (err: any) {
-          console.error("[AstroBurst] Process failed:", file.name, err);
-          dispatch({
-            type: "FILE_ERROR",
-            payload: { id: file.id, error: err.message || String(err) },
-          });
+            const result = await processFits(file.path);
+            let header = null;
+            try { header = await getHeader(file.path); } catch {}
+            fileStore.fileDone(file.id, { ...result, header });
+            return;
+          } catch {}
         }
+        fileStore.fileError(file.id, msg);
       }
     },
     [processFitsFull, processFits, getHeader],
   );
 
   const runAutoResample = useCallback(async () => {
-    const currentFiles = stateRef.current.files;
+    const currentFiles = fileStore.getFiles();
     const groups = detectResolutionGroups(currentFiles);
     const { needed, targetGroup, resampleGroups } = shouldResample(groups);
-
     if (!needed || !targetGroup) return;
 
-    setIsResampling(true);
-    setResampleProgress(0);
+    resamplingRef.current = true;
+    resampleProgressRef.current = 0;
     await yieldToUI();
 
     const filesToResample = resampleGroups.flatMap((g) => g.files);
@@ -302,49 +117,40 @@ export function useFileQueue() {
 
     for (const file of filesToResample) {
       try {
-        const result = await resampleFits(
-          file.path,
-          targetGroup.width,
-          targetGroup.height,
-        );
-        dispatch({
-          type: "FILE_RESAMPLED",
-          payload: { id: file.id, resampleResult: result },
-        });
-      } catch (err: any) {
-        console.error("[AstroBurst] Resample failed:", file.name, err);
-      }
+        const result = await resampleFits(file.path, targetGroup.width, targetGroup.height);
+        fileStore.fileResampled(file.id, result);
+      } catch {}
       completed++;
-      setResampleProgress(Math.round((completed / filesToResample.length) * 100));
+      resampleProgressRef.current = Math.round((completed / filesToResample.length) * 100);
       await yieldToUI();
     }
 
-    setIsResampling(false);
+    resamplingRef.current = false;
   }, [resampleFits]);
 
   const startProcessing = useCallback(
     async (onStart?: () => void, onComplete?: () => void) => {
       if (processingRef.current) return;
       processingRef.current = true;
-      dispatch({ type: "START_PROCESSING" });
+      fileStore.setProcessing(true);
       if (onStart) onStart();
 
       await yieldToUI();
 
-      const currentFiles = stateRef.current.files;
-      const queue = currentFiles.filter((f) => f.status === FILE_STATUS.QUEUED);
-
+      const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
       let idx = 0;
-      const getNext = (): ProcessedFile | null => {
-        if (idx >= queue.length) return null;
-        return queue[idx++];
-      };
+      let processedSinceYield = 0;
+      const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
 
       const runNext = async (): Promise<void> => {
         let file: ProcessedFile | null;
         while ((file = getNext()) !== null) {
           await processOneFile(file);
-          await yieldToUI();
+          processedSinceYield++;
+          if (processedSinceYield >= YIELD_INTERVAL) {
+            processedSinceYield = 0;
+            await yieldToUI();
+          }
         }
       };
 
@@ -354,7 +160,7 @@ export function useFileQueue() {
       );
       await Promise.all(workers);
 
-      dispatch({ type: "PROCESSING_COMPLETE" });
+      fileStore.setProcessing(false);
       await runAutoResample();
 
       processingRef.current = false;
@@ -365,46 +171,24 @@ export function useFileQueue() {
 
   const reset = useCallback(() => {
     processingRef.current = false;
-    setIsResampling(false);
-    setResampleProgress(0);
-    dispatch({ type: "RESET" });
+    resamplingRef.current = false;
+    resampleProgressRef.current = 0;
+    fileStore.reset();
   }, []);
 
-  const selectedFile = useMemo(
-    () => (state.selected ? state.fileMap.get(state.selected) ?? null : null),
-    [state.fileMap, state.selected],
-  );
-
-  const progress = useMemo(
-    () =>
-      state.stats.total > 0
-        ? Math.round(((state.stats.done + state.stats.failed) / state.stats.total) * 100)
-        : 0,
-    [state.stats],
-  );
-
-  const isComplete = useMemo(
-    () =>
-      state.stats.total > 0 &&
-      state.stats.done + state.stats.failed === state.stats.total &&
-      !state.isProcessing &&
-      !isResampling,
-    [state.stats, state.isProcessing, isResampling],
-  );
-
   return {
-    files: state.files,
-    selected: state.selected,
+    files,
+    selected: fileStore.getSelected(),
     selectedFile,
-    isProcessing: state.isProcessing,
-    stats: state.stats,
+    isProcessing,
+    stats,
     progress,
     isComplete,
     addFiles,
     selectFile,
     startProcessing,
     reset,
-    isResampling,
-    resampleProgress,
+    isResampling: resamplingRef.current,
+    resampleProgress: resampleProgressRef.current,
   };
 }
