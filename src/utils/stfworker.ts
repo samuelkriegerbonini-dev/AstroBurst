@@ -29,7 +29,7 @@ let _pendingPixelsPromise: Promise<void> | null = null;
 function getStfWorker(): Worker {
   if (_worker) return _worker;
   _worker = new Worker(
-    new URL("./stfWorker.worker.ts", import.meta.url),
+    new URL("./stfworker.worker.ts", import.meta.url),
     { type: "module" },
   );
   _worker.onmessage = (e: MessageEvent) => {
