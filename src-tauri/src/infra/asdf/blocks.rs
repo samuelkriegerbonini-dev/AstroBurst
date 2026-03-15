@@ -44,7 +44,7 @@ impl BlockHeader {
         }
 
         let h = &buf[6..total_header];
-        if h.len() < 46 {
+        if h.len() < 48 {
             return Err(AsdfError::InvalidBlockHeader);
         }
 
@@ -80,31 +80,34 @@ impl BlockHeader {
     }
 
     fn parse_compression(bytes: &[u8]) -> Result<Compression, AsdfError> {
-        let s: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
-
-        if s.is_empty() {
-            return Ok(Compression::None);
-        }
-
-        match s.as_slice() {
-            b"zlib" => Ok(Compression::Zlib),
-            b"bzp2" => Ok(Compression::Bzip2),
-            b"lz4\x00" | b"lz4" => Ok(Compression::Lz4),
-            b"\x00\x00\x00\x00" => Ok(Compression::None),
-            other => {
-                let name = String::from_utf8_lossy(other).to_string();
-                Err(AsdfError::UnsupportedCompression(name))
+        match bytes {
+            [0, 0, 0, 0] => Ok(Compression::None),
+            _ => {
+                let s: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
+                if s.is_empty() {
+                    return Ok(Compression::None);
+                }
+                match s.as_slice() {
+                    b"zlib" => Ok(Compression::Zlib),
+                    b"bzp2" => Ok(Compression::Bzip2),
+                    b"lz4" => Ok(Compression::Lz4),
+                    other => {
+                        let name = String::from_utf8_lossy(other).to_string();
+                        Err(AsdfError::UnsupportedCompression(name))
+                    }
+                }
             }
         }
     }
 
     pub fn decompress(&self, raw: &[u8]) -> Result<Vec<u8>, AsdfError> {
+        let expected = self.data_size as usize;
         match self.compression {
             Compression::None => Ok(raw.to_vec()),
 
             Compression::Zlib => {
                 let mut decoder = flate2::read::ZlibDecoder::new(raw);
-                let mut out = Vec::with_capacity(self.data_size as usize);
+                let mut out = Vec::with_capacity(expected);
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
@@ -114,7 +117,7 @@ impl BlockHeader {
             #[cfg(feature = "asdf-full")]
             Compression::Bzip2 => {
                 let mut decoder = bzip2::read::BzDecoder::new(raw);
-                let mut out = Vec::with_capacity(self.data_size as usize);
+                let mut out = Vec::with_capacity(expected);
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
@@ -130,7 +133,7 @@ impl BlockHeader {
 
             #[cfg(feature = "asdf-full")]
             Compression::Lz4 => {
-                let decompressed = lz4_flex::decompress(raw, self.data_size as usize)
+                let decompressed = lz4_flex::decompress(raw, expected)
                     .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
                 Ok(decompressed)
             }

@@ -21,7 +21,7 @@ async function getPreviewUrl(path: string): Promise<string> {
   if (!path) return "";
   if (isTauri()) {
     const convert = await ensureConvertFileSrc();
-    let cleanPath = path.startsWith("\\\\?\\") ? path.slice(4) : path;
+    const cleanPath = path.startsWith("\\\\?\\") ? path.slice(4) : path;
     return convert(cleanPath);
   }
   return path;
@@ -62,21 +62,88 @@ async function resolveDir(explicit?: string): Promise<string> {
   return getOutputDir();
 }
 
+async function resolvePreview(res: any, key = "png_path", urlKey = "previewUrl"): Promise<any> {
+  if (res[key]) res[urlKey] = await getPreviewUrl(res[key]);
+  return res;
+}
+
+async function withDirInvoke(
+  cmd: string,
+  outputDir: string | undefined,
+  args: Record<string, any> = {},
+): Promise<any> {
+  const dir = await resolveDir(outputDir);
+  return safeInvoke(cmd, { outputDir: dir, ...args });
+}
+
+async function withPreview(
+  cmd: string,
+  outputDir: string | undefined,
+  args: Record<string, any> = {},
+  previews: [string, string][] = [["png_path", "previewUrl"]],
+): Promise<any> {
+  const res = await withDirInvoke(cmd, outputDir, args);
+  for (const [key, urlKey] of previews) {
+    await resolvePreview(res, key, urlKey);
+  }
+  return res;
+}
+
+const FFT_HEADER_SIZE = 32;
+
+function parseFftBuffer(bytes: Uint8Array) {
+  if (bytes.length < FFT_HEADER_SIZE) {
+    throw new Error(`FFT: response too small (${bytes.length} bytes)`);
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(0, true);
+  const height = view.getUint32(4, true);
+
+  const expectedLen = FFT_HEADER_SIZE + width * height;
+  if (bytes.length < expectedLen) {
+    throw new Error(`FFT: expected ${expectedLen} bytes, got ${bytes.length}`);
+  }
+
+  return {
+    width,
+    height,
+    dc_magnitude: view.getFloat32(8, true),
+    max_magnitude: view.getFloat32(12, true),
+    elapsed_ms: view.getUint32(16, true),
+    original_size: view.getUint32(20, true),
+    windowed: view.getUint32(24, true) !== 0,
+    pixels: new Uint8Array(bytes.buffer, bytes.byteOffset + FFT_HEADER_SIZE, width * height),
+  };
+}
+
+const CUBE_PREVIEWS: [string, string][] = [
+  ["collapsed_path", "collapsedPreviewUrl"],
+  ["collapsed_median_path", "collapsedMedianPreviewUrl"],
+];
+
+export interface ExportFitsOptions {
+  applyStfStretch?: boolean;
+  shadow?: number;
+  midtone?: number;
+  highlight?: number;
+  copyWcs?: boolean;
+  copyMetadata?: boolean;
+  bitpix?: number;
+}
+
+export interface ExportFitsRgbOptions {
+  copyWcs?: boolean;
+  copyMetadata?: boolean;
+}
+
 export function useBackend() {
   return useMemo(() => ({
-    processFits: async (path: string, outputDir?: string) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("process_fits", { path, outputDir: dir });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    processFits: (path: string, outputDir?: string) =>
+      withPreview("process_fits", outputDir, { path }),
 
-    processFitsFull: async (path: string, outputDir?: string) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("process_fits_full", { path, outputDir: dir });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    processFitsFull: (path: string, outputDir?: string) =>
+      withPreview("process_fits_full", outputDir, { path }),
 
     getRawPixelsBinary: async (path: string) => {
       const buffer = await safeInvoke("get_raw_pixels_binary", { path });
@@ -88,20 +155,36 @@ export function useBackend() {
       return parseRawPixelBuffer(buffer);
     },
 
-    exportFits: (path: string, outputPath: string, options: Record<string, any> = {}) =>
-      safeInvoke("export_fits", { path, outputPath, ...options }),
+    exportFits: (path: string, outputPath: string, options: ExportFitsOptions = {}) =>
+      safeInvoke("export_fits", {
+        path,
+        outputPath,
+        applyStfStretch: options.applyStfStretch ?? false,
+        shadow: options.shadow,
+        midtone: options.midtone,
+        highlight: options.highlight,
+        copyWcs: options.copyWcs ?? true,
+        copyMetadata: options.copyMetadata ?? true,
+        bitpix: options.bitpix,
+      }),
 
     exportFitsRgb: (
       rPath: string | null,
       gPath: string | null,
       bPath: string | null,
       outputPath: string,
-    ) => safeInvoke("export_fits_rgb", { rPath, gPath, bPath, outputPath }),
+      options: ExportFitsRgbOptions = {},
+    ) => safeInvoke("export_fits_rgb", {
+      rPath,
+      gPath,
+      bPath,
+      outputPath,
+      copyWcs: options.copyWcs ?? true,
+      copyMetadata: options.copyMetadata ?? true,
+    }),
 
     getHeader: (path: string) => safeInvoke("get_header", { path }),
-
     getFullHeader: (path: string) => safeInvoke("get_full_header", { path }),
-
     getFitsExtensions: (path: string) => safeInvoke("get_fits_extensions", { path }),
 
     getHeaderByHdu: (path: string, hduIndex: number) =>
@@ -114,90 +197,45 @@ export function useBackend() {
 
     computeFftSpectrum: async (path: string) => {
       const raw = await safeInvoke("compute_fft_spectrum", { path });
-      const bytes = toUint8Array(raw);
-
-      if (bytes.length < 32) {
-        throw new Error(`FFT: response too small (${bytes.length} bytes)`);
-      }
-
-      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      const width = view.getUint32(0, true);
-      const height = view.getUint32(4, true);
-      const dc_magnitude = view.getFloat32(8, true);
-      const max_magnitude = view.getFloat32(12, true);
-      const elapsed_ms = view.getUint32(16, true);
-      const original_size = view.getUint32(20, true);
-      const windowed = view.getUint32(24, true) !== 0;
-
-      const expectedLen = 32 + width * height;
-      if (bytes.length < expectedLen) {
-        throw new Error(`FFT: expected ${expectedLen} bytes, got ${bytes.length}`);
-      }
-
-      const pixels = new Uint8Array(bytes.buffer, bytes.byteOffset + 32, width * height);
-
-      return { width, height, dc_magnitude, max_magnitude, elapsed_ms, original_size, windowed, pixels };
+      return parseFftBuffer(toUint8Array(raw));
     },
 
     detectStars: (path: string, sigma = 5.0, maxStars = 200) =>
       safeInvoke("detect_stars", { path, sigma, maxStars }),
 
-    applyStfRender: async (
+    applyStfRender: (
       path: string,
       outputDir: string | undefined,
       shadow: number,
       midtone: number,
       highlight: number,
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("apply_stf_render", {
-        path,
-        outputDir: dir,
-        shadow,
-        midtone,
-        highlight,
-      });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("apply_stf_render", outputDir, { path, shadow, midtone, highlight }),
 
     generateTiles: async (path: string, outputDir?: string, tileSize = 256) => {
-      const dir = outputDir ? outputDir : await getOutputDirTiles();
+      const dir = outputDir || await getOutputDirTiles();
       return safeInvoke("generate_tiles", { path, outputDir: dir, tileSize });
     },
 
     getTile: (path: string, outputDir: string, level: number, col: number, row: number) =>
       safeInvoke("get_tile", { path, outputDir, level, col, row }),
 
-    processCube: async (path: string, outputDir?: string, frameStep = 5) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("process_cube_cmd", { path, outputDir: dir, frameStep });
-      if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
-      if (res.collapsed_median_path)
-        res.collapsedMedianPreviewUrl = await getPreviewUrl(res.collapsed_median_path);
-      return res;
-    },
+    processCube: (path: string, outputDir?: string, frameStep = 5) =>
+      withPreview("process_cube_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS),
 
-    processCubeLazy: async (path: string, outputDir?: string, frameStep = 5) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("process_cube_lazy_cmd", { path, outputDir: dir, frameStep });
-      if (res.collapsed_path) res.collapsedPreviewUrl = await getPreviewUrl(res.collapsed_path);
-      if (res.collapsed_median_path)
-        res.collapsedMedianPreviewUrl = await getPreviewUrl(res.collapsed_median_path);
-      return res;
-    },
+    processCubeLazy: (path: string, outputDir?: string, frameStep = 5) =>
+      withPreview("process_cube_lazy_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS),
 
     getCubeInfo: (path: string) => safeInvoke("get_cube_info", { path }),
 
     getCubeFrame: async (path: string, frameIndex: number, outputPath: string, outputFits?: string) => {
       const dir = await getOutputDir();
-      const resolvedOutput = outputPath.startsWith("./output")
-        ? outputPath.replace("./output", dir)
-        : outputPath;
-      const resolvedFits = outputFits?.startsWith("./output")
-        ? outputFits.replace("./output", dir)
-        : outputFits;
-      return safeInvoke("get_cube_frame", { path, frameIndex, outputPath: resolvedOutput, outputFits: resolvedFits });
+      const resolve = (p: string) => p.startsWith("./output") ? p.replace("./output", dir) : p;
+      return safeInvoke("get_cube_frame", {
+        path,
+        frameIndex,
+        outputPath: resolve(outputPath),
+        outputFits: outputFits ? resolve(outputFits) : undefined,
+      });
     },
 
     getCubeSpectrum: (path: string, x: number, y: number) =>
@@ -211,73 +249,42 @@ export function useBackend() {
     pixelToWorld: (path: string, x: number, y: number) =>
       safeInvoke("pixel_to_world", { path, x, y }),
 
-    calibrate: async (sciencePath: string, outputDir?: string, options: Record<string, any> = {}) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("calibrate", { sciencePath, outputDir: dir, ...options });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    calibrate: (sciencePath: string, outputDir?: string, options: Record<string, any> = {}) =>
+      withPreview("calibrate", outputDir, { sciencePath, ...options }),
 
-    stackFrames: async (paths: string[], outputDir?: string, options: Record<string, any> = {}) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("stack", { paths, outputDir: dir, ...options });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    stackFrames: (paths: string[], outputDir?: string, options: Record<string, any> = {}) =>
+      withPreview("stack", outputDir, { paths, ...options }),
 
-    drizzleStack: async (paths: string[], outputDir?: string, options: Record<string, any> = {}) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("drizzle_stack_cmd", { paths, outputDir: dir, ...options });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      if (res.weight_map_path) res.weightMapUrl = await getPreviewUrl(res.weight_map_path);
-      return res;
-    },
+    drizzleStack: (paths: string[], outputDir?: string, options: Record<string, any> = {}) =>
+      withPreview("drizzle_stack_cmd", outputDir, { paths, ...options }, [
+        ["png_path", "previewUrl"],
+        ["weight_map_path", "weightMapUrl"],
+      ]),
 
-    drizzleRgb: async (
+    drizzleRgb: (
       rPaths: string[] | null,
       gPaths: string[] | null,
       bPaths: string[] | null,
       outputDir?: string,
       options: Record<string, any> = {},
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("drizzle_rgb_cmd", {
-        rPaths,
-        gPaths,
-        bPaths,
-        outputDir: dir,
-        ...options,
-      });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("drizzle_rgb_cmd", outputDir, { rPaths, gPaths, bPaths, ...options }),
 
-    composeRgb: async (
+    composeRgb: (
       rPath: string | null,
       gPath: string | null,
       bPath: string | null,
       outputDir?: string,
       options: Record<string, any> = {},
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("compose_rgb_cmd", { rPath, gPath, bPath, outputDir: dir, ...options });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("compose_rgb_cmd", outputDir, { rPath, gPath, bPath, ...options }),
 
-    resampleFits: async (
+    resampleFits: (
       path: string,
       targetWidth: number,
       targetHeight: number,
       outputDir?: string,
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("resample_fits_cmd", { path, targetWidth, targetHeight, outputDir: dir });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("resample_fits_cmd", outputDir, { path, targetWidth, targetHeight }),
 
-    deconvolveRL: async (
+    deconvolveRL: (
       path: string,
       outputDir?: string,
       options: {
@@ -291,26 +298,20 @@ export function useBackend() {
         psfNumStars?: number;
         psfCutoutRadius?: number;
       } = {},
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("deconvolve_rl_cmd", {
-        path,
-        outputDir: dir,
-        iterations: options.iterations ?? 20,
-        psfSigma: options.psfSigma ?? 2.0,
-        psfSize: options.psfSize ?? 15,
-        regularization: options.regularization ?? 0.001,
-        deringing: options.deringing ?? true,
-        deringThreshold: options.deringThreshold ?? 0.1,
-        useEmpiricalPsf: options.useEmpiricalPsf ?? false,
-        psfNumStars: options.psfNumStars ?? 3,
-        psfCutoutRadius: options.psfCutoutRadius ?? 15,
-      });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("deconvolve_rl_cmd", outputDir, {
+      path,
+      iterations: options.iterations ?? 20,
+      psfSigma: options.psfSigma ?? 2.0,
+      psfSize: options.psfSize ?? 15,
+      regularization: options.regularization ?? 0.001,
+      deringing: options.deringing ?? true,
+      deringThreshold: options.deringThreshold ?? 0.1,
+      useEmpiricalPsf: options.useEmpiricalPsf ?? false,
+      psfNumStars: options.psfNumStars ?? 3,
+      psfCutoutRadius: options.psfCutoutRadius ?? 15,
+    }),
 
-    extractBackground: async (
+    extractBackground: (
       path: string,
       outputDir?: string,
       options: {
@@ -320,23 +321,19 @@ export function useBackend() {
         iterations?: number;
         mode?: string;
       } = {},
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("extract_background_cmd", {
-        path,
-        outputDir: dir,
-        gridSize: options.gridSize ?? 8,
-        polyDegree: options.polyDegree ?? 3,
-        sigmaClip: options.sigmaClip ?? 2.5,
-        iterations: options.iterations ?? 3,
-        mode: options.mode ?? "subtract",
-      });
-      if (res.corrected_png) res.previewUrl = await getPreviewUrl(res.corrected_png);
-      if (res.model_png) res.modelUrl = await getPreviewUrl(res.model_png);
-      return res;
-    },
+    ) => withPreview("extract_background_cmd", outputDir, {
+      path,
+      gridSize: options.gridSize ?? 8,
+      polyDegree: options.polyDegree ?? 3,
+      sigmaClip: options.sigmaClip ?? 2.5,
+      iterations: options.iterations ?? 3,
+      mode: options.mode ?? "subtract",
+    }, [
+      ["corrected_png", "previewUrl"],
+      ["model_png", "modelUrl"],
+    ]),
 
-    waveletDenoise: async (
+    waveletDenoise: (
       path: string,
       outputDir?: string,
       options: {
@@ -344,25 +341,19 @@ export function useBackend() {
         thresholds?: number[];
         linear?: boolean;
       } = {},
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("wavelet_denoise_cmd", {
-        path,
-        outputDir: dir,
-        numScales: options.numScales ?? 5,
-        thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
-        linear: options.linear ?? true,
-      });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    ) => withPreview("wavelet_denoise_cmd", outputDir, {
+      path,
+      numScales: options.numScales ?? 5,
+      thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
+      linear: options.linear ?? true,
+    }),
 
     getConfig: () => safeInvoke("get_config"),
     updateConfig: (field: string, value: any) => safeInvoke("update_config", { field, value }),
     saveApiKey: (key: string, service?: string) => safeInvoke("save_api_key", { key, service }),
     getApiKey: () => safeInvoke("get_api_key"),
 
-    estimatePsf: async (path: string, options: {
+    estimatePsf: (path: string, options: {
       numStars?: number;
       cutoutRadius?: number;
       saturationThreshold?: number;
@@ -375,7 +366,7 @@ export function useBackend() {
       maxEllipticity: options.maxEllipticity ?? 0.3,
     }),
 
-    runCalibrationPipeline: async (request: {
+    runCalibrationPipeline: (request: {
       channels: { label: string; paths: string[] }[];
       dark_paths: string[];
       flat_paths: string[];
@@ -385,20 +376,8 @@ export function useBackend() {
       normalize?: boolean;
     }) => safeInvoke("run_pipeline_cmd", { request }),
 
-    applyArcsinhStretch: async (
-      path: string,
-      outputDir?: string,
-      factor = 50.0,
-    ) => {
-      const dir = await resolveDir(outputDir);
-      const res = await safeInvoke("apply_arcsinh_stretch_cmd", {
-        path,
-        outputDir: dir,
-        factor,
-      });
-      if (res.png_path) res.previewUrl = await getPreviewUrl(res.png_path);
-      return res;
-    },
+    applyArcsinhStretch: (path: string, outputDir?: string, factor = 50.0) =>
+      withPreview("apply_arcsinh_stretch_cmd", outputDir, { path, factor }),
 
     resolveOutputDir: getOutputDir,
   }), []);

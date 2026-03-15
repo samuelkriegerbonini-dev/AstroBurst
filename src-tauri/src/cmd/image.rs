@@ -4,9 +4,12 @@ use rayon::prelude::*;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir, save_preview_png, MAX_PREVIEW_DIM};
-use crate::core::imaging::stats::{downsample_histogram, compute_histogram_with_stats};
-use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir, save_preview_png};
+use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
+use crate::core::imaging::stf::StfParams;
+use crate::core::imaging::stf::{apply_stf, auto_stf, AutoStfConfig};
+use crate::infra::cache::ImageEntry;
+use crate::infra::fits::writer::{filter_header, write_fits_mono, write_fits_rgb};
 use crate::infra::ipc::{encode_with_header, encode_with_header_downsampled};
 use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY,
@@ -16,6 +19,84 @@ use crate::types::constants::{
     RES_OUTPUT_PATH, RES_PATH, RES_PNG_PATH, RES_RESULTS, RES_SHADOW, RES_SIGMA,
     RES_STATS, RES_STF, RES_TOTAL_PIXELS,
 };
+use crate::types::image::ImageStats;
+
+fn png_path_for(path: &str, output_dir: &str) -> String {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    format!("{}/{}.png", output_dir, stem)
+}
+
+fn render_to_png(cached: &ImageEntry, png_path: &str) -> anyhow::Result<(StfParams, usize, usize)> {
+    let arr = cached.arr();
+    let stats = cached.stats();
+    let stf_params = auto_stf(stats, &AutoStfConfig::default());
+    let rendered = apply_stf(arr, &stf_params, stats);
+    let (rows, cols) = arr.dim();
+    save_preview_png(rendered, cols, rows, png_path)?;
+    Ok((stf_params, rows, cols))
+}
+
+fn stats_json(stats: &ImageStats) -> serde_json::Value {
+    json!({
+        RES_MIN: stats.min,
+        RES_MAX: stats.max,
+        RES_MEAN: stats.mean,
+        RES_SIGMA: stats.sigma,
+        RES_MEDIAN: stats.median,
+    })
+}
+
+fn stats_json_full(stats: &ImageStats) -> serde_json::Value {
+    json!({
+        RES_MIN: stats.min,
+        RES_MAX: stats.max,
+        RES_MEAN: stats.mean,
+        RES_SIGMA: stats.sigma,
+        RES_MEDIAN: stats.median,
+        RES_MAD: stats.mad,
+    })
+}
+
+fn stf_json(stf: &StfParams) -> serde_json::Value {
+    json!({
+        RES_SHADOW: stf.shadow,
+        RES_MIDTONE: stf.midtone,
+        RES_HIGHLIGHT: stf.highlight,
+    })
+}
+
+#[inline]
+fn mtf(m: f32, x: f32) -> f32 {
+    if x <= 0.0 { return 0.0; }
+    if x >= 1.0 { return 1.0; }
+    if (m - 0.5).abs() < 1e-6 { return x; }
+    (m - 1.0) * x / ((2.0 * m - 1.0) * x - m)
+}
+
+fn apply_stf_to_array(
+    arr: &ndarray::Array2<f32>,
+    stf: &StfParams,
+    stats: &ImageStats,
+) -> ndarray::Array2<f32> {
+    let range = stats.max - stats.min;
+    let inv_range = if range.abs() > 1e-8 { 1.0 / range } else { 0.0 };
+    let stf_range = stf.highlight - stf.shadow;
+    let inv_stf = if stf_range.abs() > 1e-8 { 1.0 / stf_range } else { 0.0 };
+    let s_min = stats.min as f32;
+    let s_shadow = stf.shadow as f32;
+    let s_mid = stf.midtone as f32;
+    let inv_range_f32 = inv_range as f32;
+    let inv_stf_f32 = inv_stf as f32;
+
+    arr.mapv(|val| {
+        let norm = (val - s_min) * inv_range_f32;
+        let x = ((norm - s_shadow) * inv_stf_f32).clamp(0.0, 1.0);
+        mtf(s_mid, x)
+    })
+}
 
 #[tauri::command]
 pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json::Value, String> {
@@ -24,37 +105,15 @@ pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json
         resolve_output_dir(&output_dir)?;
 
         let cached = load_cached(&path)?;
-        let arr = cached.arr();
-        let stats = cached.stats();
-        let stf_params = auto_stf(stats, &AutoStfConfig::default());
-        let rendered = apply_stf(arr, &stf_params, stats);
-
-        let stem = std::path::Path::new(&path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
-        let png_path = format!("{}/{}.png", output_dir, stem);
-        let (rows, cols) = arr.dim();
-        save_preview_png(rendered, cols, rows, &png_path)?;
-
-        let elapsed = t0.elapsed().as_millis() as u64;
+        let png_path = png_path_for(&path, &output_dir);
+        let (stf_params, rows, cols) = render_to_png(&cached, &png_path)?;
 
         Ok(json!({
             RES_PNG_PATH: png_path,
             RES_DIMENSIONS: [cols, rows],
-            RES_ELAPSED_MS: elapsed,
-            RES_STATS: {
-                RES_MIN: stats.min,
-                RES_MAX: stats.max,
-                RES_MEAN: stats.mean,
-                RES_SIGMA: stats.sigma,
-                RES_MEDIAN: stats.median,
-            },
-            RES_STF: {
-                RES_SHADOW: stf_params.shadow,
-                RES_MIDTONE: stf_params.midtone,
-                RES_HIGHLIGHT: stf_params.highlight,
-            },
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            RES_STATS: stats_json(cached.stats()),
+            RES_STF: stf_json(&stf_params),
         }))
     })
 }
@@ -66,48 +125,24 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
         resolve_output_dir(&output_dir)?;
 
         let cached = load_cached_full(&path)?;
-        let arr = cached.arr();
+        let png_path = png_path_for(&path, &output_dir);
+        let (stf_params, rows, cols) = render_to_png(&cached, &png_path)?;
+
         let stats = cached.stats();
-        let header = cached.header();
-
-        let stf_params = auto_stf(stats, &AutoStfConfig::default());
-        let rendered = apply_stf(arr, &stf_params, stats);
-
-        let stem = std::path::Path::new(&path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
-        let png_path = format!("{}/{}.png", output_dir, stem);
-        let (rows, cols) = arr.dim();
-        save_preview_png(rendered, cols, rows, &png_path)?;
-
-        let hist = compute_histogram_with_stats(arr, stats);
+        let hist = compute_histogram_with_stats(cached.arr(), stats);
         let display_bins = downsample_histogram(&hist, HISTOGRAM_BINS_DISPLAY);
 
-        let header_json = match header {
+        let header_json = match cached.header() {
             Some(h) => serde_json::to_value(&h.index)?,
             None => json!(null),
         };
 
-        let elapsed = t0.elapsed().as_millis() as u64;
-
         Ok(json!({
             RES_PNG_PATH: png_path,
             RES_DIMENSIONS: [cols, rows],
-            RES_ELAPSED_MS: elapsed,
-            RES_STATS: {
-                RES_MIN: stats.min,
-                RES_MAX: stats.max,
-                RES_MEAN: stats.mean,
-                RES_SIGMA: stats.sigma,
-                RES_MEDIAN: stats.median,
-                RES_MAD: stats.mad,
-            },
-            RES_STF: {
-                RES_SHADOW: stf_params.shadow,
-                RES_MIDTONE: stf_params.midtone,
-                RES_HIGHLIGHT: stf_params.highlight,
-            },
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            RES_STATS: stats_json_full(stats),
+            RES_STF: stf_json(&stf_params),
             RES_HEADER: header_json,
             RES_HISTOGRAM: {
                 RES_BINS: display_bins,
@@ -119,11 +154,7 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
                 RES_SIGMA: stats.sigma,
                 RES_MAD: stats.mad,
                 RES_TOTAL_PIXELS: stats.valid_count,
-                RES_AUTO_STF: {
-                    RES_SHADOW: stf_params.shadow,
-                    RES_MIDTONE: stf_params.midtone,
-                    RES_HIGHLIGHT: stf_params.highlight,
-                },
+                RES_AUTO_STF: stf_json(&stf_params),
             },
         }))
     })
@@ -136,7 +167,6 @@ pub async fn process_batch(paths: Vec<String>, output_dir: String) -> Result<ser
 
         let results: Vec<serde_json::Value> = paths.par_iter().map(|path| {
             match (|| -> anyhow::Result<serde_json::Value> {
-
                 let ro = render_and_save(
                     load_cached(path)?.arr(),
                     path,
@@ -149,12 +179,7 @@ pub async fn process_batch(paths: Vec<String>, output_dir: String) -> Result<ser
                     RES_PATH: path,
                     RES_PNG_PATH: ro.png_path,
                     RES_DIMENSIONS: [cols, rows],
-                    RES_STATS: {
-                        RES_MIN: ro.stats.min,
-                        RES_MAX: ro.stats.max,
-                        RES_MEAN: ro.stats.mean,
-                        RES_SIGMA: ro.stats.sigma,
-                    },
+                    RES_STATS: stats_json(&ro.stats),
                 }))
             })() {
                 Ok(r) => r,
@@ -196,13 +221,48 @@ pub async fn get_raw_pixels_preview(path: String, max_dim: Option<u32>) -> Resul
 pub async fn export_fits(
     path: String,
     output_path: String,
+    apply_stf_stretch: Option<bool>,
+    shadow: Option<f64>,
+    midtone: Option<f64>,
+    highlight: Option<f64>,
+    copy_wcs: Option<bool>,
+    copy_metadata: Option<bool>,
     bitpix: Option<i32>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        crate::infra::fits::writer::write_fits_mono(&output_path, &extract_image_resolved(&path)?.arr, None)?;
+        let t0 = Instant::now();
+        let resolved = extract_image_resolved(&path)?;
+        let do_stf = apply_stf_stretch.unwrap_or(false);
+        let do_wcs = copy_wcs.unwrap_or(true);
+        let do_meta = copy_metadata.unwrap_or(true);
+
+        let export_arr = if do_stf {
+            let stf = StfParams {
+                shadow: shadow.unwrap_or(0.0),
+                midtone: midtone.unwrap_or(0.5),
+                highlight: highlight.unwrap_or(1.0),
+            };
+            let stats = compute_image_stats(&resolved.arr);
+            apply_stf_to_array(&resolved.arr, &stf, &stats)
+        } else {
+            resolved.arr
+        };
+
+        let filtered = filter_header(&resolved.header, do_wcs, do_meta);
+        write_fits_mono(&output_path, &export_arr, filtered.as_ref())?;
+
+        let file_size = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         Ok(json!({
             RES_OUTPUT_PATH: output_path,
             RES_BITPIX: bitpix.unwrap_or(-32),
+            "apply_stf": do_stf,
+            "copy_wcs": do_wcs,
+            "copy_metadata": do_meta,
+            "file_size_bytes": file_size,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
 }
@@ -213,20 +273,37 @@ pub async fn export_fits_rgb(
     g_path: Option<String>,
     b_path: Option<String>,
     output_path: String,
+    copy_wcs: Option<bool>,
+    copy_metadata: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let load_channel = |p: &Option<String>| -> anyhow::Result<ndarray::Array2<f32>> {
-            match p {
-                Some(path) => load_fits_array(path),
-                None => anyhow::bail!("Channel path is required"),
-            }
-        };
+        let t0 = Instant::now();
+        let do_wcs = copy_wcs.unwrap_or(true);
+        let do_meta = copy_metadata.unwrap_or(true);
 
-        let r = load_channel(&r_path)?;
-        let g = load_channel(&g_path)?;
-        let b = load_channel(&b_path)?;
+        let r_resolved = extract_image_resolved(
+            r_path.as_deref().ok_or_else(|| anyhow::anyhow!("R channel path required"))?
+        )?;
+        let g_arr = load_fits_array(
+            g_path.as_deref().ok_or_else(|| anyhow::anyhow!("G channel path required"))?
+        )?;
+        let b_arr = load_fits_array(
+            b_path.as_deref().ok_or_else(|| anyhow::anyhow!("B channel path required"))?
+        )?;
 
-        crate::infra::fits::writer::write_fits_rgb(&output_path, &r, &g, &b, None)?;
-        Ok(json!({ RES_OUTPUT_PATH: output_path }))
+        let filtered = filter_header(&r_resolved.header, do_wcs, do_meta);
+        write_fits_rgb(&output_path, &r_resolved.arr, &g_arr, &b_arr, filtered.as_ref())?;
+
+        let file_size = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        Ok(json!({
+            RES_OUTPUT_PATH: output_path,
+            "copy_wcs": do_wcs,
+            "copy_metadata": do_meta,
+            "file_size_bytes": file_size,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
     })
 }

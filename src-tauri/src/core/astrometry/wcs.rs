@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 
 use crate::types::header::HduHeader;
 
@@ -10,6 +11,9 @@ pub struct WcsTransform {
     crval2: f64,
     cd: [[f64; 2]; 2],
     projection: Projection,
+    sin_dec0: f64,
+    cos_dec0: f64,
+    ra0_rad: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,21 +53,15 @@ impl std::fmt::Display for CelestialCoord {
 
 impl WcsTransform {
     pub fn from_header(header: &HduHeader) -> Result<Self> {
-        let crpix1 = header
-            .get_f64("CRPIX1")
-            .context("Missing CRPIX1")?;
-        let crpix2 = header
-            .get_f64("CRPIX2")
-            .context("Missing CRPIX2")?;
-        let crval1 = header
-            .get_f64("CRVAL1")
-            .context("Missing CRVAL1")?;
-        let crval2 = header
-            .get_f64("CRVAL2")
-            .context("Missing CRVAL2")?;
+        let crpix1 = header.get_f64("CRPIX1").context("Missing CRPIX1")?;
+        let crpix2 = header.get_f64("CRPIX2").context("Missing CRPIX2")?;
+        let crval1 = header.get_f64("CRVAL1").context("Missing CRVAL1")?;
+        let crval2 = header.get_f64("CRVAL2").context("Missing CRVAL2")?;
 
         let cd = Self::read_cd_matrix(header)?;
         let projection = Self::detect_projection(header);
+
+        let dec0_rad = crval2.to_radians();
 
         Ok(WcsTransform {
             crpix1,
@@ -72,6 +70,9 @@ impl WcsTransform {
             crval2,
             cd,
             projection,
+            sin_dec0: dec0_rad.sin(),
+            cos_dec0: dec0_rad.cos(),
+            ra0_rad: crval1.to_radians(),
         })
     }
 
@@ -95,12 +96,8 @@ impl WcsTransform {
             return Ok([[cd11, cd12], [cd21, cd22]]);
         }
 
-        let cdelt1 = header
-            .get_f64("CDELT1")
-            .context("Missing CD matrix and CDELT1")?;
-        let cdelt2 = header
-            .get_f64("CDELT2")
-            .context("Missing CD matrix and CDELT2")?;
+        let cdelt1 = header.get_f64("CDELT1").context("Missing CD matrix and CDELT1")?;
+        let cdelt2 = header.get_f64("CDELT2").context("Missing CD matrix and CDELT2")?;
         let crota2 = header.get_f64("CROTA2").unwrap_or(0.0);
 
         let theta = crota2.to_radians();
@@ -115,13 +112,10 @@ impl WcsTransform {
 
     fn detect_projection(header: &HduHeader) -> Projection {
         let ctype1 = header.get("CTYPE1").unwrap_or("");
-        let suffix = if ctype1.len() >= 8 {
-            &ctype1[5..8]
-        } else if ctype1.len() > 4 {
-            &ctype1[ctype1.len() - 3..]
-        } else {
-            "TAN"
-        };
+        let suffix = ctype1
+            .rsplit('-')
+            .next()
+            .unwrap_or("TAN");
 
         match suffix {
             "TAN" => Projection::Tan,
@@ -160,39 +154,37 @@ impl WcsTransform {
     fn deproject(&self, xi_deg: f64, eta_deg: f64) -> CelestialCoord {
         let xi = xi_deg.to_radians();
         let eta = eta_deg.to_radians();
-        let ra0 = self.crval1.to_radians();
-        let dec0 = self.crval2.to_radians();
 
         let (ra, dec) = match self.projection {
             Projection::Tan => {
-                let denom = dec0.cos() - eta * dec0.sin();
-                let ra = ra0 + xi.atan2(denom);
-                let dec = (dec0.sin() + eta * dec0.cos())
+                let denom = self.cos_dec0 - eta * self.sin_dec0;
+                let ra = self.ra0_rad + xi.atan2(denom);
+                let dec = (self.sin_dec0 + eta * self.cos_dec0)
                     .atan2((xi * xi + denom * denom).sqrt());
                 (ra, dec)
             }
             Projection::Sin => {
                 let cos_c = (1.0 - xi * xi - eta * eta).max(0.0).sqrt();
-                let dec = (cos_c * dec0.sin() + eta * dec0.cos()).asin();
-                let ra = ra0 + (xi).atan2(cos_c * dec0.cos() - eta * dec0.sin());
+                let dec = (cos_c * self.sin_dec0 + eta * self.cos_dec0).asin();
+                let ra = self.ra0_rad + xi.atan2(cos_c * self.cos_dec0 - eta * self.sin_dec0);
                 (ra, dec)
             }
             Projection::Arc => {
                 let rho = (xi * xi + eta * eta).sqrt();
                 if rho < 1e-15 {
-                    (ra0, dec0)
+                    (self.ra0_rad, self.crval2.to_radians())
                 } else {
                     let c = rho;
-                    let dec = (c.cos() * dec0.sin() + (eta / rho) * c.sin() * dec0.cos()).asin();
-                    let ra = ra0
+                    let dec = (c.cos() * self.sin_dec0 + (eta / rho) * c.sin() * self.cos_dec0).asin();
+                    let ra = self.ra0_rad
                         + (xi * c.sin())
-                        .atan2(rho * dec0.cos() * c.cos() - eta * dec0.sin() * c.sin());
+                        .atan2(rho * self.cos_dec0 * c.cos() - eta * self.sin_dec0 * c.sin());
                     (ra, dec)
                 }
             }
             Projection::Car => {
-                let ra = ra0 + xi / dec0.cos();
-                let dec = dec0 + eta;
+                let ra = self.ra0_rad + xi / self.cos_dec0;
+                let dec = self.crval2.to_radians() + eta;
                 (ra, dec)
             }
         };
@@ -200,8 +192,7 @@ impl WcsTransform {
         let mut ra_deg = ra.to_degrees();
         if ra_deg < 0.0 {
             ra_deg += 360.0;
-        }
-        if ra_deg >= 360.0 {
+        } else if ra_deg >= 360.0 {
             ra_deg -= 360.0;
         }
 
@@ -214,45 +205,42 @@ impl WcsTransform {
     fn project(&self, ra: f64, dec: f64) -> (f64, f64) {
         let ra_r = ra.to_radians();
         let dec_r = dec.to_radians();
-        let ra0 = self.crval1.to_radians();
-        let dec0 = self.crval2.to_radians();
+        let delta_ra = ra_r - self.ra0_rad;
 
-        let delta_ra = ra_r - ra0;
+        let sin_dec = dec_r.sin();
+        let cos_dec = dec_r.cos();
+        let cos_dra = delta_ra.cos();
+        let sin_dra = delta_ra.sin();
 
         match self.projection {
             Projection::Tan => {
-                let denom =
-                    dec_r.sin() * dec0.sin() + dec_r.cos() * dec0.cos() * delta_ra.cos();
+                let denom = sin_dec * self.sin_dec0 + cos_dec * self.cos_dec0 * cos_dra;
                 if denom.abs() < 1e-15 {
                     return (f64::NAN, f64::NAN);
                 }
-                let xi = (dec_r.cos() * delta_ra.sin()) / denom;
-                let eta =
-                    (dec_r.sin() * dec0.cos() - dec_r.cos() * dec0.sin() * delta_ra.cos()) / denom;
+                let xi = (cos_dec * sin_dra) / denom;
+                let eta = (sin_dec * self.cos_dec0 - cos_dec * self.sin_dec0 * cos_dra) / denom;
                 (xi.to_degrees(), eta.to_degrees())
             }
             Projection::Sin => {
-                let xi = dec_r.cos() * delta_ra.sin();
-                let eta =
-                    dec_r.sin() * dec0.cos() - dec_r.cos() * dec0.sin() * delta_ra.cos();
+                let xi = cos_dec * sin_dra;
+                let eta = sin_dec * self.cos_dec0 - cos_dec * self.sin_dec0 * cos_dra;
                 (xi.to_degrees(), eta.to_degrees())
             }
             Projection::Arc => {
-                let cos_c =
-                    dec_r.sin() * dec0.sin() + dec_r.cos() * dec0.cos() * delta_ra.cos();
+                let cos_c = sin_dec * self.sin_dec0 + cos_dec * self.cos_dec0 * cos_dra;
                 let c = cos_c.clamp(-1.0, 1.0).acos();
                 if c.abs() < 1e-15 {
                     return (0.0, 0.0);
                 }
                 let k = c / c.sin();
-                let xi = k * dec_r.cos() * delta_ra.sin();
-                let eta = k
-                    * (dec_r.sin() * dec0.cos() - dec_r.cos() * dec0.sin() * delta_ra.cos());
+                let xi = k * cos_dec * sin_dra;
+                let eta = k * (sin_dec * self.cos_dec0 - cos_dec * self.sin_dec0 * cos_dra);
                 (xi.to_degrees(), eta.to_degrees())
             }
             Projection::Car => {
-                let xi = delta_ra * dec0.cos();
-                let eta = dec_r - dec0;
+                let xi = delta_ra * self.cos_dec0;
+                let eta = dec_r - self.crval2.to_radians();
                 (xi.to_degrees(), eta.to_degrees())
             }
         }
@@ -271,10 +259,17 @@ impl WcsTransform {
     }
 
     pub fn pixel_to_world_batch(&self, coords: &[(f64, f64)]) -> Vec<CelestialCoord> {
-        coords
-            .iter()
-            .map(|&(x, y)| self.pixel_to_world(x, y))
-            .collect()
+        if coords.len() > 1024 {
+            coords
+                .par_iter()
+                .map(|&(x, y)| self.pixel_to_world(x, y))
+                .collect()
+        } else {
+            coords
+                .iter()
+                .map(|&(x, y)| self.pixel_to_world(x, y))
+                .collect()
+        }
     }
 }
 
@@ -374,10 +369,7 @@ mod tests {
 
     #[test]
     fn test_celestial_display() {
-        let c = CelestialCoord {
-            ra: 83.633,
-            dec: 22.014,
-        };
+        let c = CelestialCoord { ra: 83.633, dec: 22.014 };
         let s = format!("{}", c);
         assert!(s.contains("h"));
         assert!(s.contains("°"));
@@ -399,11 +391,25 @@ mod tests {
         ]);
 
         let wcs = WcsTransform::from_header(&h).unwrap();
-        let (crpix1, crpix2, crval1, crval2, cd, proj) = wcs.raw_params();
+        let (crpix1, crpix2, crval1, _, cd, proj) = wcs.raw_params();
         assert!((crpix1 - 100.0).abs() < 1e-10);
         assert!((crpix2 - 200.0).abs() < 1e-10);
         assert!((crval1 - 83.633).abs() < 1e-10);
         assert_eq!(proj, "TAN");
         assert!((cd[0][0] - (-7.27778e-05)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_projection_detection_variants() {
+        for (ctype, expected) in [
+            ("RA---TAN", Projection::Tan),
+            ("RA---SIN", Projection::Sin),
+            ("RA---ARC", Projection::Arc),
+            ("RA---CAR", Projection::Car),
+            ("GLON-TAN", Projection::Tan),
+        ] {
+            let h = make_header(&[("CTYPE1", ctype)]);
+            assert_eq!(WcsTransform::detect_projection(&h), expected, "Failed for {ctype}");
+        }
     }
 }

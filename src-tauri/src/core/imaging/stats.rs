@@ -21,7 +21,7 @@ struct ChunkAccum {
 pub fn compute_image_stats(data: &Array2<f32>) -> ImageStats {
     let slice = data.as_slice().expect("Array2 must be contiguous");
 
-    let merged = slice
+    let chunks: Vec<ChunkAccum> = slice
         .par_chunks(CHUNK_SIZE)
         .map(|chunk| {
             let mut acc = ChunkAccum {
@@ -33,49 +33,43 @@ pub fn compute_image_stats(data: &Array2<f32>) -> ImageStats {
             for &v in chunk {
                 if is_valid_pixel(v) {
                     let vf = v as f64;
-                    if vf < acc.min {
-                        acc.min = vf;
-                    }
-                    if vf > acc.max {
-                        acc.max = vf;
-                    }
+                    if vf < acc.min { acc.min = vf; }
+                    if vf > acc.max { acc.max = vf; }
                     acc.sum += vf;
                     acc.pixels.push(v);
                 }
             }
             acc
         })
-        .reduce(
-            || ChunkAccum {
-                pixels: Vec::new(),
-                min: f64::MAX,
-                max: f64::MIN,
-                sum: 0.0,
-            },
-            |mut a, b| {
-                a.pixels.extend_from_slice(&b.pixels);
-                a.min = a.min.min(b.min);
-                a.max = a.max.max(b.max);
-                a.sum += b.sum;
-                a
-            },
-        );
+        .collect();
 
-    let mut valid = merged.pixels;
-    let n = valid.len() as u64;
-    if n == 0 {
+    let total_valid: usize = chunks.iter().map(|c| c.pixels.len()).sum();
+    if total_valid == 0 {
         return ImageStats::default();
     }
 
-    let mean = merged.sum / n as f64;
+    let mut valid = Vec::with_capacity(total_valid);
+    let mut global_min = f64::MAX;
+    let mut global_max = f64::MIN;
+    let mut global_sum = 0.0;
+
+    for chunk in chunks {
+        valid.extend_from_slice(&chunk.pixels);
+        global_min = global_min.min(chunk.min);
+        global_max = global_max.max(chunk.max);
+        global_sum += chunk.sum;
+    }
+
+    let n = valid.len() as u64;
+    let mean = global_sum / n as f64;
     let median = exact_median_mut(&mut valid);
     let mad_f32 = exact_mad_mut(&mut valid, median as f32);
     let mad = mad_f32 as f64;
     let sigma = (mad * MAD_TO_SIGMA).max(1e-30);
 
     ImageStats {
-        min: merged.min,
-        max: merged.max,
+        min: global_min,
+        max: global_max,
         mean,
         sigma,
         median,
@@ -118,16 +112,17 @@ fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogra
         };
     }
 
-    let inv_range = (bins as f64 - 1.0) / range;
+    let inv_bin_width = bins as f64 / range;
 
     let initial = vec![0u32; bins];
+    let last = bins - 1;
     let histogram = slice
         .par_chunks(CHUNK_SIZE)
         .fold_with(initial.clone(), |mut local_bins, chunk| {
             for &v in chunk {
                 if is_valid_pixel(v) {
-                    let idx = ((v as f64 - dmin) * inv_range) as usize;
-                    local_bins[idx.min(bins - 1)] += 1;
+                    let idx = ((v as f64 - dmin) * inv_bin_width) as usize;
+                    local_bins[idx.min(last)] += 1;
                 }
             }
             local_bins

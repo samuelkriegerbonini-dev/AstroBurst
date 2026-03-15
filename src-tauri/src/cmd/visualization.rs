@@ -17,6 +17,7 @@ pub async fn apply_stf_render(
         resolve_output_dir(&output_dir)?;
 
         let cached = load_cached(&path)?;
+        let (rows, cols) = cached.arr().dim();
 
         let stf_params = StfParams {
             shadow,
@@ -31,7 +32,6 @@ pub async fn apply_stf_render(
             .and_then(|s| s.to_str())
             .unwrap_or("stf");
         let png_path = format!("{}/{}_stf.png", output_dir, stem);
-        let (rows, cols) = cached.arr().dim();
         save_preview_png(rendered, cols, rows, &png_path)?;
 
         Ok(json!({

@@ -10,64 +10,67 @@ pub struct RawPixelBuffer {
     pub data_max: f32,
 }
 
+struct ScanResult {
+    min: f32,
+    max: f32,
+    has_non_finite: bool,
+}
+
+impl ScanResult {
+    fn identity() -> Self {
+        Self {
+            min: f32::MAX,
+            max: f32::MIN,
+            has_non_finite: false,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+            has_non_finite: self.has_non_finite || other.has_non_finite,
+        }
+    }
+}
+
 pub fn encode_f32_buffer(arr: &Array2<f32>) -> Result<RawPixelBuffer> {
     let (rows, cols) = arr.dim();
     let slice = arr.as_slice().context("Array2 must be contiguous")?;
 
-    struct MinMax {
-        min: f32,
-        max: f32,
-    }
-
-    let mm = slice
+    let scan = slice
         .par_chunks(65536)
         .map(|chunk| {
-            let mut local = MinMax {
-                min: f32::MAX,
-                max: f32::MIN,
-            };
+            let mut local = ScanResult::identity();
             for &v in chunk {
                 if v.is_finite() {
-                    if v < local.min {
-                        local.min = v;
-                    }
-                    if v > local.max {
-                        local.max = v;
-                    }
+                    if v < local.min { local.min = v; }
+                    if v > local.max { local.max = v; }
+                } else {
+                    local.has_non_finite = true;
                 }
             }
             local
         })
-        .reduce(
-            || MinMax {
-                min: f32::MAX,
-                max: f32::MIN,
-            },
-            |a, b| MinMax {
-                min: a.min.min(b.min),
-                max: a.max.max(b.max),
-            },
-        );
+        .reduce(ScanResult::identity, ScanResult::merge);
 
-    let data_min = if mm.min > mm.max { 0.0 } else { mm.min };
-    let data_max = if mm.min > mm.max { 1.0 } else { mm.max };
+    let data_min = if scan.min > scan.max { 0.0 } else { scan.min };
+    let data_max = if scan.min > scan.max { 1.0 } else { scan.max };
 
     let npix = slice.len();
-    let mut bytes = Vec::with_capacity(npix * 4);
+    let byte_len = npix * 4;
 
-    let has_non_finite = slice.par_iter().any(|v| !v.is_finite());
-
-    if has_non_finite {
-        bytes.reserve_exact(npix * 4);
+    let bytes = if scan.has_non_finite {
+        let mut buf = Vec::with_capacity(byte_len);
         for &v in slice {
             let clean = if v.is_finite() { v } else { 0.0f32 };
-            bytes.extend_from_slice(&clean.to_le_bytes());
+            buf.extend_from_slice(&clean.to_le_bytes());
         }
+        buf
     } else {
         let byte_ptr = slice.as_ptr() as *const u8;
-        let byte_len = npix * 4;
-        bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(byte_ptr, byte_len) });
-    }
+        unsafe { std::slice::from_raw_parts(byte_ptr, byte_len) }.to_vec()
+    };
 
     Ok(RawPixelBuffer {
         bytes,
@@ -113,14 +116,10 @@ pub fn encode_with_header_downsampled(arr: &Array2<f32>, max_dim: usize) -> Resu
     let y_ratio = rows as f64 / dst_rows as f64;
     let x_ratio = cols as f64 / dst_cols as f64;
 
-    struct MinMax {
-        min: f32,
-        max: f32,
-    }
-
     let npix = dst_rows * dst_cols;
     let mut pixel_bytes = Vec::with_capacity(npix * 4);
-    let mut mm = MinMax { min: f32::MAX, max: f32::MIN };
+    let mut mm_min = f32::MAX;
+    let mut mm_max = f32::MIN;
 
     for dy in 0..dst_rows {
         let sy = ((dy as f64) * y_ratio).min((rows - 1) as f64) as usize;
@@ -129,16 +128,14 @@ pub fn encode_with_header_downsampled(arr: &Array2<f32>, max_dim: usize) -> Resu
             let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
             let v = slice[src_row + sx];
             let clean = if v.is_finite() { v } else { 0.0f32 };
-            if clean.is_finite() {
-                if clean < mm.min { mm.min = clean; }
-                if clean > mm.max { mm.max = clean; }
-            }
+            if clean < mm_min { mm_min = clean; }
+            if clean > mm_max { mm_max = clean; }
             pixel_bytes.extend_from_slice(&clean.to_le_bytes());
         }
     }
 
-    let data_min = if mm.min > mm.max { 0.0 } else { mm.min };
-    let data_max = if mm.min > mm.max { 1.0 } else { mm.max };
+    let data_min = if mm_min > mm_max { 0.0 } else { mm_min };
+    let data_max = if mm_min > mm_max { 1.0 } else { mm_max };
 
     let mut output = Vec::with_capacity(16 + pixel_bytes.len());
     output.extend_from_slice(&(dst_cols as u32).to_le_bytes());

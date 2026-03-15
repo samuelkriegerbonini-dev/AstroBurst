@@ -36,6 +36,7 @@ export default function DrizzleRgbPanel({
   const [sigmaLow, setSigmaLow] = useState(3.0);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [align, setAlign] = useState(true);
+  const [alignmentMethod, setAlignmentMethod] = useState("fft");
   const [wbMode, setWbMode] = useState("auto");
   const [scnrEnabled, setScnrEnabled] = useState(false);
   const [scnrMethod, setScnrMethod] = useState("average");
@@ -144,6 +145,7 @@ export default function DrizzleRgbPanel({
         sigmaLow,
         sigmaHigh,
         align,
+        alignmentMethod,
         wbMode,
         scnrEnabled,
         scnrMethod,
@@ -153,7 +155,7 @@ export default function DrizzleRgbPanel({
     );
   }, [
     canDrizzle, onDrizzleRgb, rPaths, gPaths, bPaths,
-    scale, pixfrac, kernel, sigmaLow, sigmaHigh, align,
+    scale, pixfrac, kernel, sigmaLow, sigmaHigh, align, alignmentMethod,
     wbMode, scnrEnabled, scnrMethod, scnrAmount, saveFits,
   ]);
 
@@ -346,8 +348,22 @@ export default function DrizzleRgbPanel({
               onChange={(e) => setAlign(e.target.checked)}
               className="w-3 h-3 accent-indigo-500"
             />
-            Sub-pixel alignment (ZNCC)
+            Sub-pixel alignment
           </label>
+
+          {align && (
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-zinc-500 w-14">Method</label>
+              <select
+                value={alignmentMethod}
+                onChange={(e) => setAlignmentMethod(e.target.value)}
+                className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-[10px] text-zinc-300 outline-none"
+              >
+                <option value="fft">Phase Correlation (FFT)</option>
+                <option value="zncc">ZNCC (Spatial)</option>
+              </select>
+            </div>
+          )}
         </div>
 
         <div className="border-t border-zinc-800/50 pt-2 space-y-1.5">

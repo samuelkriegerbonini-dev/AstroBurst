@@ -92,14 +92,17 @@ impl NdArrayMeta {
         Ok((dtype, order))
     }
 
-    pub fn expected_byte_size(&self) -> usize {
-        let elem_size = match self.dtype {
-            DType::Float64 => 8,
-            DType::Float32 | DType::Int32 | DType::Complex64 => 4,
+    pub fn byte_size_per_element(&self) -> usize {
+        match self.dtype {
+            DType::Float64 | DType::Complex64 => 8,
+            DType::Float32 | DType::Int32 => 4,
             DType::Int16 | DType::UInt16 => 2,
             DType::UInt8 => 1,
-        };
-        self.shape.iter().product::<usize>() * elem_size
+        }
+    }
+
+    pub fn expected_byte_size(&self) -> usize {
+        self.shape.iter().product::<usize>() * self.byte_size_per_element()
     }
 }
 
@@ -237,5 +240,46 @@ impl WcsInfo {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_complex64_byte_size() {
+        let meta = NdArrayMeta {
+            source: 0,
+            shape: vec![100, 100],
+            dtype: DType::Complex64,
+            byteorder: ByteOrder::Little,
+        };
+        assert_eq!(meta.byte_size_per_element(), 8);
+        assert_eq!(meta.expected_byte_size(), 100 * 100 * 8);
+    }
+
+    #[test]
+    fn test_float32_byte_size() {
+        let meta = NdArrayMeta {
+            source: 0,
+            shape: vec![50, 50],
+            dtype: DType::Float32,
+            byteorder: ByteOrder::Big,
+        };
+        assert_eq!(meta.byte_size_per_element(), 4);
+        assert_eq!(meta.expected_byte_size(), 50 * 50 * 4);
+    }
+
+    #[test]
+    fn test_float64_byte_size() {
+        let meta = NdArrayMeta {
+            source: 0,
+            shape: vec![10, 20],
+            dtype: DType::Float64,
+            byteorder: ByteOrder::Little,
+        };
+        assert_eq!(meta.byte_size_per_element(), 8);
+        assert_eq!(meta.expected_byte_size(), 10 * 20 * 8);
     }
 }

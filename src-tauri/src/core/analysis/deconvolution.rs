@@ -307,17 +307,23 @@ pub fn richardson_lucy(
 
 fn apply_deringing(estimate: &mut Array2<f32>, original: &Array2<f32>, threshold: f32) {
     let cols = estimate.ncols();
+    let orig_slice = original.as_slice().unwrap();
     estimate
         .as_slice_mut()
         .unwrap()
         .par_chunks_mut(cols)
         .enumerate()
         .for_each(|(y, row)| {
+            let orig_row = &orig_slice[y * cols..(y + 1) * cols];
             for x in 0..cols {
-                let orig = original[[y, x]];
+                let orig = orig_row[x];
                 let est = row[x];
-                if est > orig * (1.0 + threshold) {
-                    row[x] = orig * (1.0 + threshold);
+                let upper = orig * (1.0 + threshold);
+                let lower = orig * (1.0 - threshold).max(0.0);
+                if est > upper {
+                    row[x] = upper;
+                } else if est < lower {
+                    row[x] = lower;
                 }
             }
         });
@@ -388,6 +394,21 @@ mod tests {
         assert!(result.convergence.is_finite());
         assert!(result.elapsed_ms > 0);
         assert_eq!(result.image.dim(), (size, size));
+    }
+
+    #[test]
+    fn test_deringing_bidirectional() {
+        let size = 16;
+        let original = Array2::from_elem((size, size), 100.0f32);
+        let mut estimate = original.clone();
+        estimate[[5, 5]] = 200.0;
+        estimate[[8, 8]] = 10.0;
+
+        apply_deringing(&mut estimate, &original, 0.1);
+
+        assert!((estimate[[5, 5]] - 110.0).abs() < 1e-4);
+        assert!((estimate[[8, 8]] - 90.0).abs() < 1e-4);
+        assert!((estimate[[0, 0]] - 100.0).abs() < 1e-4);
     }
 
     #[test]

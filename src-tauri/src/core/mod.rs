@@ -1,3 +1,4 @@
+pub mod alignment;
 pub mod imaging;
 pub mod stacking;
 pub mod compose;

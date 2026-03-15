@@ -57,7 +57,7 @@ pub struct FilterDetection {
     pub matched_value: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Confidence {
     High,
     Medium,
@@ -103,11 +103,61 @@ fn re_sii() -> &'static Regex {
     })
 }
 
+const FILTER_MATCHERS: [(NarrowbandFilter, fn(&str) -> bool); 3] = [
+    (NarrowbandFilter::Ha, |v| re_ha().is_match(v)),
+    (NarrowbandFilter::Oiii, |v| re_oiii().is_match(v)),
+    (NarrowbandFilter::Sii, |v| re_sii().is_match(v)),
+];
+
 const DISCOVERY_KEYWORDS: &[&str] = &[
     "FILTER", "FILTER1", "FILTER2", "FILTER3",
     "INSTRUME", "OBJECT", "IMAGETYP",
     "FILT_ID", "FILTNAM", "FILTNAME",
 ];
+
+const FILENAME_PATTERNS: &[(NarrowbandFilter, &[&str])] = &[
+    (NarrowbandFilter::Ha, &["_HA", "_HALPHA", "-HA", "_H_ALPHA", "656"]),
+    (NarrowbandFilter::Oiii, &["_OIII", "-OIII", "_O3", "-O3", "502"]),
+    (NarrowbandFilter::Sii, &["_SII", "-SII", "_S2", "-S2", "673"]),
+];
+
+fn filter_to_hubble_channel(filter: NarrowbandFilter) -> HubbleChannel {
+    match filter {
+        NarrowbandFilter::Sii => HubbleChannel::Red,
+        NarrowbandFilter::Ha => HubbleChannel::Green,
+        NarrowbandFilter::Oiii => HubbleChannel::Blue,
+        NarrowbandFilter::Unknown => HubbleChannel::Green,
+    }
+}
+
+fn keyword_confidence(keyword: &str) -> Confidence {
+    match keyword.to_uppercase().as_str() {
+        "FILTER" | "FILTER1" | "FILTER2" | "FILTER3"
+        | "FILT_ID" | "FILTNAM" | "FILTNAME" => Confidence::High,
+        "INSTRUME" => Confidence::Medium,
+        _ => Confidence::Low,
+    }
+}
+
+fn make_detection(filter: NarrowbandFilter, confidence: Confidence, keyword: &str, value: &str) -> FilterDetection {
+    FilterDetection {
+        filter,
+        hubble_channel: filter_to_hubble_channel(filter),
+        confidence,
+        matched_keyword: keyword.to_string(),
+        matched_value: value.to_string(),
+    }
+}
+
+fn match_filter_value(value: &str, keyword: &str) -> Option<FilterDetection> {
+    let confidence = keyword_confidence(keyword);
+    for &(filter, matcher) in &FILTER_MATCHERS {
+        if matcher(value) {
+            return Some(make_detection(filter, confidence, keyword, value));
+        }
+    }
+    None
+}
 
 pub fn detect_filter(header: &HduHeader) -> Option<FilterDetection> {
     for &keyword in DISCOVERY_KEYWORDS {
@@ -115,7 +165,6 @@ pub fn detect_filter(header: &HduHeader) -> Option<FilterDetection> {
             Some(v) => v.to_string(),
             None => continue,
         };
-
         if let Some(det) = match_filter_value(&value, keyword) {
             return Some(det);
         }
@@ -130,53 +179,12 @@ pub fn detect_filter(header: &HduHeader) -> Option<FilterDetection> {
         }
     }
 
-    if let Some(wavelength) = header.get_f64("WAVELEN")
+    let wavelength = header.get_f64("WAVELEN")
         .or_else(|| header.get_f64("CRVAL3"))
-        .or_else(|| header.get_f64("WAVELENG"))
-    {
-        if let Some(filter) = classify_wavelength_nm(wavelength) {
-            let channel = filter_to_hubble_channel(filter);
-            return Some(FilterDetection {
-                filter,
-                hubble_channel: channel,
-                confidence: Confidence::Medium,
-                matched_keyword: "WAVELEN".into(),
-                matched_value: format!("{:.1}nm", wavelength),
-            });
-        }
-    }
+        .or_else(|| header.get_f64("WAVELENG"))?;
 
-    None
-}
-
-fn match_filter_value(value: &str, keyword: &str) -> Option<FilterDetection> {
-    let confidence = match keyword.to_uppercase().as_str() {
-        "FILTER" | "FILTER1" | "FILTER2" | "FILTER3" => Confidence::High,
-        "FILT_ID" | "FILTNAM" | "FILTNAME" => Confidence::High,
-        "INSTRUME" => Confidence::Medium,
-        _ => Confidence::Low,
-    };
-
-    let checks: &[(NarrowbandFilter, &dyn Fn(&str) -> bool)] = &[
-        (NarrowbandFilter::Ha, &|v| re_ha().is_match(v)),
-        (NarrowbandFilter::Oiii, &|v| re_oiii().is_match(v)),
-        (NarrowbandFilter::Sii, &|v| re_sii().is_match(v)),
-    ];
-
-    for &(filter, matcher) in checks {
-        if matcher(value) {
-            let channel = filter_to_hubble_channel(filter);
-            return Some(FilterDetection {
-                filter,
-                hubble_channel: channel,
-                confidence,
-                matched_keyword: keyword.to_string(),
-                matched_value: value.to_string(),
-            });
-        }
-    }
-
-    None
+    let filter = classify_wavelength_nm(wavelength)?;
+    Some(make_detection(filter, Confidence::Medium, "WAVELEN", &format!("{:.1}nm", wavelength)))
 }
 
 fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
@@ -193,62 +201,69 @@ fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
     }
 }
 
-fn filter_to_hubble_channel(filter: NarrowbandFilter) -> HubbleChannel {
-    match filter {
-        NarrowbandFilter::Sii => HubbleChannel::Red,
-        NarrowbandFilter::Ha => HubbleChannel::Green,
-        NarrowbandFilter::Oiii => HubbleChannel::Blue,
-        NarrowbandFilter::Unknown => HubbleChannel::Green,
-    }
-}
-
 pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
-    let mut suggestions: Vec<ChannelSuggestion> = files
-        .iter()
-        .map(|(path, header)| {
-            let file_name = Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
-
-            let detection = detect_filter(header)
-                .or_else(|| detect_from_filename(&file_name));
-
-            ChannelSuggestion {
-                file_path: path.clone(),
-                file_name,
-                detection,
-            }
-        })
-        .collect();
-
-    let mut r_file: Option<ChannelSuggestion> = None;
-    let mut g_file: Option<ChannelSuggestion> = None;
-    let mut b_file: Option<ChannelSuggestion> = None;
+    let mut r_file: Option<(Confidence, ChannelSuggestion)> = None;
+    let mut g_file: Option<(Confidence, ChannelSuggestion)> = None;
+    let mut b_file: Option<(Confidence, ChannelSuggestion)> = None;
     let mut unmapped: Vec<ChannelSuggestion> = Vec::new();
 
-    suggestions.sort_by(|a, b| {
-        let ca = a.detection.as_ref().map(|d| d.confidence as u8).unwrap_or(255);
-        let cb = b.detection.as_ref().map(|d| d.confidence as u8).unwrap_or(255);
-        ca.cmp(&cb)
-    });
+    for (path, header) in files {
+        let file_name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
 
-    for suggestion in suggestions {
-        let channel = suggestion.detection.as_ref().map(|d| d.hubble_channel);
+        let detection = detect_filter(header)
+            .or_else(|| detect_from_filename(&file_name));
+
+        let suggestion = ChannelSuggestion {
+            file_path: path.clone(),
+            file_name,
+            detection: detection.clone(),
+        };
+
+        let channel = detection.as_ref().map(|d| (d.hubble_channel, d.confidence));
         match channel {
-            Some(HubbleChannel::Red) if r_file.is_none() => r_file = Some(suggestion),
-            Some(HubbleChannel::Green) if g_file.is_none() => g_file = Some(suggestion),
-            Some(HubbleChannel::Blue) if b_file.is_none() => b_file = Some(suggestion),
-            _ => unmapped.push(suggestion),
+            Some((HubbleChannel::Red, conf)) => {
+                if r_file.as_ref().map_or(true, |(c, _)| conf < *c) {
+                    if let Some((_, prev)) = r_file.replace((conf, suggestion)) {
+                        unmapped.push(prev);
+                    }
+                } else {
+                    unmapped.push(suggestion);
+                }
+            }
+            Some((HubbleChannel::Green, conf)) => {
+                if g_file.as_ref().map_or(true, |(c, _)| conf < *c) {
+                    if let Some((_, prev)) = g_file.replace((conf, suggestion)) {
+                        unmapped.push(prev);
+                    }
+                } else {
+                    unmapped.push(suggestion);
+                }
+            }
+            Some((HubbleChannel::Blue, conf)) => {
+                if b_file.as_ref().map_or(true, |(c, _)| conf < *c) {
+                    if let Some((_, prev)) = b_file.replace((conf, suggestion)) {
+                        unmapped.push(prev);
+                    }
+                } else {
+                    unmapped.push(suggestion);
+                }
+            }
+            None => unmapped.push(suggestion),
         }
     }
 
-    let is_complete = r_file.is_some() && g_file.is_some() && b_file.is_some();
+    let r = r_file.map(|(_, s)| s);
+    let g = g_file.map(|(_, s)| s);
+    let b = b_file.map(|(_, s)| s);
+    let is_complete = r.is_some() && g.is_some() && b.is_some();
 
     PaletteSuggestion {
-        r_file,
-        g_file,
-        b_file,
+        r_file: r,
+        g_file: g,
+        b_file: b,
         unmapped,
         is_complete,
         palette_name: "SHO (Hubble Palette)".into(),
@@ -258,23 +273,10 @@ pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
 fn detect_from_filename(name: &str) -> Option<FilterDetection> {
     let upper = name.to_uppercase();
 
-    let checks: &[(NarrowbandFilter, &[&str])] = &[
-        (NarrowbandFilter::Ha, &["_HA", "_HALPHA", "-HA", "_H_ALPHA", "656"]),
-        (NarrowbandFilter::Oiii, &["_OIII", "-OIII", "_O3", "-O3", "502"]),
-        (NarrowbandFilter::Sii, &["_SII", "-SII", "_S2", "-S2", "673"]),
-    ];
-
-    for &(filter, patterns) in checks {
+    for &(filter, patterns) in FILENAME_PATTERNS {
         for &pat in patterns {
             if upper.contains(pat) {
-                let channel = filter_to_hubble_channel(filter);
-                return Some(FilterDetection {
-                    filter,
-                    hubble_channel: channel,
-                    confidence: Confidence::Low,
-                    matched_keyword: "filename".into(),
-                    matched_value: name.to_string(),
-                });
+                return Some(make_detection(filter, Confidence::Low, "filename", name));
             }
         }
     }
@@ -405,6 +407,21 @@ mod tests {
         let palette = suggest_palette(&files);
         assert!(!palette.is_complete);
         assert!(palette.g_file.is_some());
+        assert_eq!(palette.unmapped.len(), 1);
+    }
+
+    #[test]
+    fn test_suggest_palette_prefers_higher_confidence() {
+        let files = vec![
+            ("file1.fits".into(), header_with(&[("FILTER", "H-alpha")])),
+            ("file2_Ha.fits".into(), header_with(&[("OBJECT", "M42")])),
+        ];
+
+        let palette = suggest_palette(&files);
+        assert_eq!(
+            palette.g_file.as_ref().unwrap().file_path,
+            "file1.fits",
+        );
         assert_eq!(palette.unmapped.len(), 1);
     }
 

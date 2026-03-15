@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
 import { PanelLeftClose, PanelLeftOpen, FolderOpen, Download, Loader2 } from "lucide-react";
 import FileItem from "./FileItem";
-import { useFileIds, useSelectedId, useFileStats, useAllFiles, fileStore } from "../../hooks/useFileStore";
+import { useFileIds, useSelectedId, useFileStats, fileStore } from "../../hooks/useFileStore";
 import type { ProcessedFile } from "../../utils/types";
 
 const ITEM_HEIGHT = 44;
@@ -17,12 +17,12 @@ interface FileListProps {
 }
 
 const VirtualizedItems = memo(function VirtualizedItems({
-  fileIds,
-  scrollTop,
-  viewHeight,
-  selectedId,
-  onSelect,
-}: {
+                                                          fileIds,
+                                                          scrollTop,
+                                                          viewHeight,
+                                                          selectedId,
+                                                          onSelect,
+                                                        }: {
   fileIds: string[];
   scrollTop: number;
   viewHeight: number;
@@ -50,17 +50,16 @@ const VirtualizedItems = memo(function VirtualizedItems({
 });
 
 function FileList({
-  collapsed = false,
-  onToggle,
-  onExportZip,
-  isExporting = false,
-  zipProgress = 0,
-  downloaded = false,
-}: FileListProps) {
+                    collapsed = false,
+                    onToggle,
+                    onExportZip,
+                    isExporting = false,
+                    zipProgress = 0,
+                    downloaded = false,
+                  }: FileListProps) {
   const fileIds = useFileIds();
   const selectedId = useSelectedId();
   const { stats, isComplete } = useFileStats();
-  const allFiles = useAllFiles();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevLenRef = useRef(fileIds.length);
@@ -71,6 +70,10 @@ function FileList({
   const onSelect = useCallback((id: string) => {
     fileStore.selectFile(id);
   }, []);
+
+  const handleExport = useCallback(() => {
+    onExportZip?.(fileStore.getFiles());
+  }, [onExportZip]);
 
   useEffect(() => {
     if (fileIds.length > prevLenRef.current && scrollRef.current) {
@@ -144,7 +147,7 @@ function FileList({
       {stats.done > 0 && (
         <div className="shrink-0 px-2 py-2" style={{ borderTop: "1px solid rgba(20,184,166,0.1)" }}>
           <button
-            onClick={() => onExportZip?.(allFiles)}
+            onClick={handleExport}
             disabled={stats.done === 0 || isExporting}
             className="w-full flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-all duration-150 text-xs"
             style={

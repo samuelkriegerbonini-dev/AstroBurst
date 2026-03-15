@@ -59,12 +59,11 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         let fft_result = compute_power_spectrum(load_cached(&path)?.arr())?;
         let spectrum = &fft_result.spectrum;
         let (rows, cols) = spectrum.dim();
+        let pixel_count = rows * cols;
 
         let slice = spectrum.as_slice().expect("FFT spectrum must be contiguous");
 
-        let dc = spectrum[[rows / 2, cols / 2]];
-
-        let (min_val, max_val) = if slice.len() > PAR_THRESHOLD {
+        let (min_val, max_val) = if pixel_count > PAR_THRESHOLD {
             (
                 slice.par_iter().cloned().reduce(|| f32::INFINITY, f32::min),
                 slice.par_iter().cloned().reduce(|| f32::NEG_INFINITY, f32::max),
@@ -74,10 +73,10 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         };
 
         let range = (max_val - min_val).max(1e-10);
-
+        let inv_range = 255.0 / range;
+        let dc = spectrum[[rows / 2, cols / 2]];
         let elapsed_ms = t0.elapsed().as_millis() as u32;
 
-        let pixel_count = rows * cols;
         let header_size = 32;
         let mut buf = Vec::with_capacity(header_size + pixel_count);
 
@@ -90,10 +89,10 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         buf.extend_from_slice(&if fft_result.windowed { 1u32 } else { 0u32 }.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
 
-        let pixels: Vec<u8> = if slice.len() > PAR_THRESHOLD {
-            slice.par_iter().map(|&v| (((v - min_val) / range) * 255.0) as u8).collect()
+        let pixels: Vec<u8> = if pixel_count > PAR_THRESHOLD {
+            slice.par_iter().map(|&v| ((v - min_val) * inv_range) as u8).collect()
         } else {
-            slice.iter().map(|&v| (((v - min_val) / range) * 255.0) as u8).collect()
+            slice.iter().map(|&v| ((v - min_val) * inv_range) as u8).collect()
         };
         buf.extend(pixels);
 

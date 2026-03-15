@@ -207,15 +207,23 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
         let r_n = normalize_channel(&r.slice(ndarray::s![..min_h, ..min_w]).to_owned());
         let g_n = normalize_channel(&g.slice(ndarray::s![..min_h, ..min_w]).to_owned());
         let b_n = normalize_channel(&b.slice(ndarray::s![..min_h, ..min_w]).to_owned());
-        let mut rgb = Array3::<f32>::zeros((min_h, min_w, 3));
-        for y in 0..min_h {
-            for x in 0..min_w {
-                rgb[[y, x, 0]] = r_n[[y, x]];
-                rgb[[y, x, 1]] = g_n[[y, x]];
-                rgb[[y, x, 2]] = b_n[[y, x]];
-            }
-        }
-        return Some(rgb);
+
+        let rs = r_n.as_slice().unwrap();
+        let gs = g_n.as_slice().unwrap();
+        let bs = b_n.as_slice().unwrap();
+
+        let pixels: Vec<f32> = (0..min_h)
+            .into_par_iter()
+            .flat_map(|y| {
+                let base = y * min_w;
+                (0..min_w).flat_map(move |x| {
+                    let i = base + x;
+                    [rs[i], gs[i], bs[i]]
+                }).collect::<Vec<f32>>()
+            })
+            .collect();
+
+        return Some(Array3::from_shape_vec((min_h, min_w, 3), pixels).unwrap());
     }
 
     let (r_norm, g_norm, b_norm) = match find("L") {
@@ -233,43 +241,74 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
         _ => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
     };
 
-    let mut rgb = Array3::<f32>::zeros((h, w, 3));
-    for y in 0..h {
-        for x in 0..w {
-            rgb[[y, x, 0]] = r_norm[[y, x]];
-            rgb[[y, x, 1]] = g_norm[[y, x]];
-            rgb[[y, x, 2]] = b_norm[[y, x]];
-        }
-    }
-    Some(rgb)
+    let rs = r_norm.as_slice().unwrap();
+    let gs = g_norm.as_slice().unwrap();
+    let bs = b_norm.as_slice().unwrap();
+
+    let pixels: Vec<f32> = (0..h)
+        .into_par_iter()
+        .flat_map(|y| {
+            let base = y * w;
+            (0..w).flat_map(move |x| {
+                let i = base + x;
+                [rs[i], gs[i], bs[i]]
+            }).collect::<Vec<f32>>()
+        })
+        .collect();
+
+    Some(Array3::from_shape_vec((h, w, 3), pixels).unwrap())
 }
 
 fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Array2<f32>, ch: usize) -> Array2<f32> {
     let (h, w) = r.dim();
-    let mut out = Array2::<f32>::zeros((h, w));
-    for y in 0..h {
-        for x in 0..w {
-            let rgb_lum = 0.2126 * r[[y, x]] + 0.7152 * g[[y, x]] + 0.0722 * b[[y, x]];
-            let scale = if rgb_lum > 1e-10 { lum[[y, x]] / rgb_lum } else { 1.0 };
-            let val = match ch { 0 => r[[y, x]], 1 => g[[y, x]], _ => b[[y, x]] };
-            out[[y, x]] = (val * scale).clamp(0.0, 1.0);
-        }
-    }
-    out
+    let npix = h * w;
+
+    let r_s = r.as_slice().unwrap();
+    let g_s = g.as_slice().unwrap();
+    let b_s = b.as_slice().unwrap();
+    let l_s = lum.as_slice().unwrap();
+
+    let result: Vec<f32> = (0..npix)
+        .into_par_iter()
+        .map(|i| {
+            let rgb_lum = 0.2126 * r_s[i] + 0.7152 * g_s[i] + 0.0722 * b_s[i];
+            let scale = if rgb_lum > 1e-10 { l_s[i] / rgb_lum } else { 1.0 };
+            let val = match ch { 0 => r_s[i], 1 => g_s[i], _ => b_s[i] };
+            (val * scale).clamp(0.0, 1.0)
+        })
+        .collect();
+
+    Array2::from_shape_vec((h, w), result).unwrap()
 }
 
 fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
-    let min_val = ch.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_val = ch.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let slice = ch.as_slice().unwrap();
+    let mut min_val = f32::INFINITY;
+    let mut max_val = f32::NEG_INFINITY;
+
+    for &v in slice {
+        if v < min_val { min_val = v; }
+        if v > max_val { max_val = v; }
+    }
+
     let range = max_val - min_val;
-    if range < 1e-10 { return Array2::zeros(ch.dim()); }
-    ch.mapv(|v| ((v - min_val) / range).clamp(0.0, 1.0))
+    if range < 1e-10 {
+        return Array2::zeros(ch.dim());
+    }
+
+    let inv_range = 1.0 / range;
+    ch.mapv(|v| ((v - min_val) * inv_range).clamp(0.0, 1.0))
 }
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     frames.par_iter().map(|frame| {
         let mean = frame.iter().map(|&v| v as f64).sum::<f64>() / frame.len() as f64;
-        if mean > 0.0 { frame.mapv(|v| v / mean as f32) } else { frame.clone() }
+        if mean > 0.0 {
+            let inv_mean = 1.0 / mean as f32;
+            frame.mapv(|v| v * inv_mean)
+        } else {
+            frame.clone()
+        }
     }).collect()
 }
 

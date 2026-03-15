@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ndarray::{s, Array2, Axis, Zip};
+use ndarray::{Array2, Axis, Zip};
 use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 
@@ -38,8 +38,7 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
             .collect();
 
         Zip::indexed(data).for_each(|(y, x), &v| {
-            let w = hann_row[y] * hann_col[x];
-            let val = if v.is_finite() { v * w } else { 0.0 };
+            let val = if v.is_finite() { v * hann_row[y] * hann_col[x] } else { 0.0 };
             padded[[y, x]] = Complex::new(val, 0.0);
         });
     } else {
@@ -49,38 +48,48 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
     }
 
     let mut planner = FftPlanner::<f32>::new();
+    let zero = Complex::new(0.0f32, 0.0);
 
-    let fft_row = planner.plan_fft_forward(size);
-    padded.axis_iter_mut(Axis(0)).into_par_iter().for_each(|mut row| {
-        let mut buf: Vec<Complex<f32>> = row.to_vec();
-        fft_row.process(&mut buf);
-        for (dst, src) in row.iter_mut().zip(buf.iter()) {
-            *dst = *src;
-        }
-    });
+    let fft_fwd = planner.plan_fft_forward(size);
+
+    padded.axis_iter_mut(Axis(0)).into_par_iter().for_each_init(
+        || vec![zero; size],
+        |buf, mut row| {
+            buf.iter_mut().zip(row.iter()).for_each(|(b, &r)| *b = r);
+            fft_fwd.process(buf);
+            row.iter_mut().zip(buf.iter()).for_each(|(d, &s)| *d = s);
+        },
+    );
 
     let fft_col = planner.plan_fft_forward(size);
     let mut transposed = padded.t().to_owned();
-    transposed.axis_iter_mut(Axis(0)).into_par_iter().for_each(|mut row| {
-        let mut buf: Vec<Complex<f32>> = row.to_vec();
-        fft_col.process(&mut buf);
-        for (dst, src) in row.iter_mut().zip(buf.iter()) {
-            *dst = *src;
-        }
-    });
+    transposed.axis_iter_mut(Axis(0)).into_par_iter().for_each_init(
+        || vec![zero; size],
+        |buf, mut row| {
+            buf.iter_mut().zip(row.iter()).for_each(|(b, &r)| *b = r);
+            fft_col.process(buf);
+            row.iter_mut().zip(buf.iter()).for_each(|(d, &s)| *d = s);
+        },
+    );
     padded = transposed.t().to_owned();
 
-    let mut spectrum = Array2::<f32>::zeros((size, size));
-    Zip::from(&mut spectrum).and(&padded).par_for_each(|s, c| {
-        *s = (1.0 + c.norm()).ln();
-    });
-
-    let shifted = fft_shift(&spectrum);
+    let half = size / 2;
+    let shifted_log: Vec<f32> = (0..size * size)
+        .into_par_iter()
+        .map(|idx| {
+            let r = idx / size;
+            let c = idx % size;
+            let sr = (r + half) % size;
+            let sc = (c + half) % size;
+            (1.0 + padded[[sr, sc]].norm()).ln()
+        })
+        .collect();
+    let spectrum = Array2::from_shape_vec((size, size), shifted_log).unwrap();
 
     let display = if size > MAX_DISPLAY_SIZE {
-        downsample_area_average(&shifted, MAX_DISPLAY_SIZE, MAX_DISPLAY_SIZE)
+        downsample_area_average(&spectrum, MAX_DISPLAY_SIZE, MAX_DISPLAY_SIZE)
     } else {
-        shifted
+        spectrum
     };
 
     let (dh, dw) = display.dim();
@@ -115,34 +124,10 @@ fn downsample_area_average(src: &Array2<f32>, target_h: usize, target_w: usize) 
                 return 0.0;
             }
 
-            let mut sum = 0.0f32;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    sum += src[[y, x]];
-                }
-            }
-            sum / count
+            let block = src.slice(ndarray::s![y0..y1, x0..x1]);
+            block.sum() / count
         })
         .collect();
 
     Array2::from_shape_vec((target_h, target_w), result_data).unwrap()
-}
-
-fn fft_shift(data: &Array2<f32>) -> Array2<f32> {
-    let (rows, cols) = data.dim();
-    let hr = rows / 2;
-    let hc = cols / 2;
-    let mut shifted = Array2::<f32>::zeros((rows, cols));
-
-    let q2 = data.slice(s![..hr, ..hc]);
-    let q1 = data.slice(s![..hr, hc..]);
-    let q4 = data.slice(s![hr.., ..hc]);
-    let q3 = data.slice(s![hr.., hc..]);
-
-    shifted.slice_mut(s![hr.., hc..]).assign(&q2);
-    shifted.slice_mut(s![hr.., ..hc]).assign(&q1);
-    shifted.slice_mut(s![..hr, hc..]).assign(&q4);
-    shifted.slice_mut(s![..hr, ..hc]).assign(&q3);
-
-    shifted
 }

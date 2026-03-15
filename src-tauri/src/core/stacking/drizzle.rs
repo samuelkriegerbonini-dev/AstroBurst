@@ -2,8 +2,9 @@ use anyhow::{bail, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-pub use crate::types::stacking::{DrizzleConfig, DrizzleKernel, DrizzleResult};
+pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, DrizzleResult};
 
+use crate::core::alignment::phase_correlation;
 use crate::core::stacking::align;
 
 struct DrizzleAccumulator {
@@ -236,10 +237,33 @@ pub fn drizzle_stack(
     offsets.push((0.0, 0.0));
 
     if config.align {
-        let search_radius = 50i32;
-        for i in 1..images_ref.len() {
-            let (dx, dy) = align::compute_subpixel_offset(reference, images_ref[i], search_radius);
-            offsets.push((dx, dy));
+        match config.alignment_method {
+            AlignmentMethod::PhaseCorrelation => {
+                let computed: Vec<(f64, f64)> = images_ref[1..]
+                    .par_iter()
+                    .map(|target| {
+                        let result = phase_correlation::phase_correlate(reference, target);
+                        if phase_correlation::is_low_confidence(result.confidence) {
+                            let (dx, dy) = align::compute_subpixel_offset(reference, target, 50);
+                            (dx, dy)
+                        } else {
+                            (result.dx, result.dy)
+                        }
+                    })
+                    .collect();
+                offsets.extend(computed);
+            }
+            AlignmentMethod::Zncc => {
+                let search_radius = 50i32;
+                for i in 1..images_ref.len() {
+                    let (dx, dy) = align::compute_subpixel_offset(
+                        reference,
+                        images_ref[i],
+                        search_radius,
+                    );
+                    offsets.push((dx, dy));
+                }
+            }
         }
     } else {
         for _ in 1..images_ref.len() {

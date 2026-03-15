@@ -21,43 +21,55 @@ pub struct ResolvedImage {
     pub _tmp: Option<tempfile::TempDir>,
 }
 
+const CALIB_PATTERNS: &[&str] = &[
+    "distortion", "filteroffset", "sirskernel", "photom",
+    "flat", "dark", "bias", "readnoise", "gain", "linearity",
+    "saturation", "superbias", "ipc", "area", "specwcs",
+    "regions", "wavelengthrange", "trappars", "mask",
+    "drizpars", "throughput", "psfmask",
+];
+
 fn is_calib_ref_asdf(path: &std::path::Path) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    if !name.starts_with("jwst_") || !name.ends_with(".asdf") {
-        return false;
+    name.starts_with("jwst_")
+        && name.ends_with(".asdf")
+        && CALIB_PATTERNS.iter().any(|p| name.contains(p))
+}
+
+fn bail_if_calib(path: &std::path::Path) -> Result<()> {
+    if is_calib_ref_asdf(path) {
+        anyhow::bail!(
+            "Calibration reference file (no image data): {}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        );
     }
-    const PATTERNS: &[&str] = &[
-        "distortion", "filteroffset", "sirskernel", "photom",
-        "flat", "dark", "bias", "readnoise", "gain", "linearity",
-        "saturation", "superbias", "ipc", "area", "specwcs",
-        "regions", "wavelengthrange", "trappars", "mask",
-        "drizpars", "throughput", "psfmask",
-    ];
-    PATTERNS.iter().any(|p| name.contains(p))
+    Ok(())
+}
+
+fn try_asdf_image(p: &std::path::Path) -> Result<ResolvedImage> {
+    bail_if_calib(p)?;
+    match crate::infra::asdf_bridge::extract_image_from_asdf(p) {
+        Ok(result) => Ok(ResolvedImage { arr: result.image, header: result.header, _tmp: None }),
+        Err(e) if e.to_string().contains("Missing field: data array") => {
+            let fits_path = p.with_extension("fits");
+            if fits_path.exists() {
+                let file = File::open(&fits_path)?;
+                let result = extract_image_mmap(&file)?;
+                return Ok(ResolvedImage { arr: result.image, header: result.header, _tmp: None });
+            }
+            anyhow::bail!("ASDF has no image data and no companion .fits found");
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
     let p = std::path::Path::new(path);
     if crate::infra::asdf::converter::is_asdf_file(p) {
-        if is_calib_ref_asdf(p) {
-            anyhow::bail!("Calibration reference file (no image data): ...");
-        }
-        match crate::infra::asdf_bridge::extract_image_from_asdf(p) {
-            Ok(result) => return Ok(ResolvedImage { arr: result.image, header: result.header, _tmp: None }),
-            Err(e) if e.to_string().contains("Missing field: data array") => {
-                let fits_path = p.with_extension("fits");
-                if fits_path.exists() {
-                    let file = File::open(&fits_path)?;
-                    let result = extract_image_mmap(&file)?;
-                    return Ok(ResolvedImage { arr: result.image, header: result.header, _tmp: None });
-                }
-                anyhow::bail!("ASDF has no image data and no companion .fits found");
-            }
-            Err(e) => return Err(e.into()),
-        }
+        return try_asdf_image(p);
     }
 
     let (fits_path, tmp) = resolve_single_image(path)?;
@@ -79,119 +91,95 @@ pub fn load_fits_array(path: &str) -> Result<Array2<f32>> {
     Ok(result.image)
 }
 
-pub fn load_cached(path: &str) -> Result<ImageEntry> {
-    GLOBAL_IMAGE_CACHE.get_or_load(path, || {
-        let p = std::path::Path::new(path);
-        if crate::infra::asdf::converter::is_asdf_file(p) {
-            if is_calib_ref_asdf(p) {
-                anyhow::bail!(
-                    "Calibration reference file (no image data): {}",
-                    p.file_name().and_then(|n| n.to_str()).unwrap_or(path)
-                );
-            }
-            let result = crate::infra::asdf_bridge::extract_image_from_asdf(p)?;
-            let stats = compute_image_stats(&result.image);
-            return Ok((result.image, stats));
-        }
-
-        let (fits_path, _tmp) = resolve_single_image(path)?;
-        let file = File::open(&fits_path)?;
-        let result = extract_image_mmap(&file)?;
+fn load_image_and_stats(path: &str) -> Result<(Array2<f32>, ImageStats)> {
+    let p = std::path::Path::new(path);
+    if crate::infra::asdf::converter::is_asdf_file(p) {
+        bail_if_calib(p)?;
+        let result = crate::infra::asdf_bridge::extract_image_from_asdf(p)?;
         let stats = compute_image_stats(&result.image);
-        Ok((result.image, stats))
-    })
+        return Ok((result.image, stats));
+    }
+
+    let (fits_path, _tmp) = resolve_single_image(path)?;
+    let file = File::open(&fits_path)?;
+    let result = extract_image_mmap(&file)?;
+    let stats = compute_image_stats(&result.image);
+    Ok((result.image, stats))
+}
+
+fn load_image_stats_header(path: &str) -> Result<(Array2<f32>, ImageStats, HduHeader)> {
+    let p = std::path::Path::new(path);
+    if crate::infra::asdf::converter::is_asdf_file(p) {
+        bail_if_calib(p)?;
+        let result = crate::infra::asdf_bridge::extract_image_from_asdf(p)?;
+        let stats = compute_image_stats(&result.image);
+        return Ok((result.image, stats, result.header));
+    }
+
+    let (fits_path, _tmp) = resolve_single_image(path)?;
+    let file = File::open(&fits_path)?;
+    let result = extract_image_mmap(&file)?;
+    let stats = compute_image_stats(&result.image);
+    Ok((result.image, stats, result.header))
+}
+
+pub fn load_cached(path: &str) -> Result<ImageEntry> {
+    GLOBAL_IMAGE_CACHE.get_or_load(path, || load_image_and_stats(path))
 }
 
 pub fn load_cached_full(path: &str) -> Result<ImageEntry> {
-    GLOBAL_IMAGE_CACHE.get_or_load_full(path, || {
-        let p = std::path::Path::new(path);
-        if crate::infra::asdf::converter::is_asdf_file(p) {
-            if is_calib_ref_asdf(p) {
-                anyhow::bail!(
-                    "Calibration reference file (no image data): {}",
-                    p.file_name().and_then(|n| n.to_str()).unwrap_or(path)
-                );
-            }
-            let result = crate::infra::asdf_bridge::extract_image_from_asdf(p)?;
-            let stats = compute_image_stats(&result.image);
-            return Ok((result.image, stats, result.header));
-        }
-
-        let (fits_path, _tmp) = resolve_single_image(path)?;
-        let file = File::open(&fits_path)?;
-        let result = extract_image_mmap(&file)?;
-        let stats = compute_image_stats(&result.image);
-        Ok((result.image, stats, result.header))
-    })
+    GLOBAL_IMAGE_CACHE.get_or_load_full(path, || load_image_stats_header(path))
 }
 
 pub fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
-    let cache_result = GLOBAL_IMAGE_CACHE.get(path);
-    if let Some(entry) = cache_result {
-        Ok(entry)
-    } else {
-        let resolved = extract_image_resolved(path)?;
-        let stats = compute_image_stats(&resolved.arr);
-        GLOBAL_IMAGE_CACHE.get_or_load(path, || Ok((resolved.arr, stats)))
+    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
+        return Ok(entry);
     }
+    let resolved = extract_image_resolved(path)?;
+    let stats = compute_image_stats(&resolved.arr);
+    GLOBAL_IMAGE_CACHE.get_or_load(path, || Ok((resolved.arr, stats)))
+}
+
+fn downsample_nn<const BPP: usize>(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    max_dim: usize,
+) -> (Vec<u8>, usize, usize) {
+    if width <= max_dim && height <= max_dim {
+        return (pixels.to_vec(), width, height);
+    }
+
+    let scale = max_dim as f64 / (width.max(height) as f64);
+    let dst_w = ((width as f64) * scale).round().max(1.0) as usize;
+    let dst_h = ((height as f64) * scale).round().max(1.0) as usize;
+
+    let y_ratio = height as f64 / dst_h as f64;
+    let x_ratio = width as f64 / dst_w as f64;
+
+    let mut out = vec![0u8; dst_w * dst_h * BPP];
+
+    for dy in 0..dst_h {
+        let sy = ((dy as f64) * y_ratio).min((height - 1) as f64) as usize;
+        let src_row = sy * width;
+        let dst_row = dy * dst_w;
+        for dx in 0..dst_w {
+            let sx = ((dx as f64) * x_ratio).min((width - 1) as f64) as usize;
+            let si = (src_row + sx) * BPP;
+            let di = (dst_row + dx) * BPP;
+            out[di..di + BPP].copy_from_slice(&pixels[si..si + BPP]);
+        }
+    }
+
+    (out, dst_w, dst_h)
 }
 
 pub fn downsample_u8(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
-    if width <= max_dim && height <= max_dim {
-        return (pixels.to_vec(), width, height);
-    }
-
-    let scale = max_dim as f64 / (width.max(height) as f64);
-    let dst_w = ((width as f64) * scale).round().max(1.0) as usize;
-    let dst_h = ((height as f64) * scale).round().max(1.0) as usize;
-
-    let y_ratio = height as f64 / dst_h as f64;
-    let x_ratio = width as f64 / dst_w as f64;
-
-    let mut out = vec![0u8; dst_w * dst_h];
-
-    for dy in 0..dst_h {
-        let sy = ((dy as f64) * y_ratio).min((height - 1) as f64) as usize;
-        let src_row = sy * width;
-        let dst_row = dy * dst_w;
-        for dx in 0..dst_w {
-            let sx = ((dx as f64) * x_ratio).min((width - 1) as f64) as usize;
-            out[dst_row + dx] = pixels[src_row + sx];
-        }
-    }
-
-    (out, dst_w, dst_h)
+    downsample_nn::<1>(pixels, width, height, max_dim)
 }
 
 pub fn downsample_u8_rgb(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
-    if width <= max_dim && height <= max_dim {
-        return (pixels.to_vec(), width, height);
-    }
-
-    let scale = max_dim as f64 / (width.max(height) as f64);
-    let dst_w = ((width as f64) * scale).round().max(1.0) as usize;
-    let dst_h = ((height as f64) * scale).round().max(1.0) as usize;
-
-    let y_ratio = height as f64 / dst_h as f64;
-    let x_ratio = width as f64 / dst_w as f64;
-
-    let mut out = vec![0u8; dst_w * dst_h * 3];
-
-    for dy in 0..dst_h {
-        let sy = ((dy as f64) * y_ratio).min((height - 1) as f64) as usize;
-        let src_row = sy * width;
-        let dst_row = dy * dst_w;
-        for dx in 0..dst_w {
-            let sx = ((dx as f64) * x_ratio).min((width - 1) as f64) as usize;
-            let si = (src_row + sx) * 3;
-            let di = (dst_row + dx) * 3;
-            out[di] = pixels[si];
-            out[di + 1] = pixels[si + 1];
-            out[di + 2] = pixels[si + 2];
-        }
-    }
-
-    (out, dst_w, dst_h)
+    downsample_nn::<3>(pixels, width, height, max_dim)
 }
 
 pub fn save_preview_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {

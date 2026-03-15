@@ -165,25 +165,32 @@ class FileStore {
     const valid = fileList.filter((f) => !isCalibRefAsdf(f.name));
     if (valid.length === 0) return;
 
-    const newFiles: ProcessedFile[] = valid.map((f) => ({
-      id: generateId(),
-      name: f.name,
-      path: f.path,
-      size: f.size,
-      status: FILE_STATUS.QUEUED,
-      result: null,
-      error: null,
-      startedAt: null,
-      finishedAt: null,
-    }));
+    let addedBytes = 0;
+    const newFiles: ProcessedFile[] = valid.map((f) => {
+      addedBytes += f.size || 0;
+      return {
+        id: generateId(),
+        name: f.name,
+        path: f.path,
+        size: f.size,
+        status: FILE_STATUS.QUEUED,
+        result: null,
+        error: null,
+        startedAt: null,
+        finishedAt: null,
+      };
+    });
 
     for (const f of newFiles) {
       this.state.fileIds.push(f.id);
       this.state.fileMap.set(f.id, f);
     }
 
-    const totalBytes = Array.from(this.state.fileMap.values()).reduce((a, f) => a + (f.size || 0), 0);
-    this.state.stats = { ...this.state.stats, total: this.state.fileIds.length, totalBytes };
+    this.state.stats = {
+      ...this.state.stats,
+      total: this.state.fileIds.length,
+      totalBytes: this.state.stats.totalBytes + addedBytes,
+    };
     this.state.statsVersion++;
     this.bumpVersion();
 
@@ -204,12 +211,13 @@ class FileStore {
 
     const updated: ProcessedFile = {
       ...existing,
-      status: FILE_STATUS.PROCESSING as const,
+      status: FILE_STATUS.PROCESSING,
       startedAt: Date.now(),
     };
     this.state.fileMap.set(id, updated);
     this.bumpVersion();
     this.notifyFile(id);
+    this.scheduleFlush();
   }
 
   fileDone(id: string, result: any) {
@@ -218,7 +226,7 @@ class FileStore {
 
     const updated: ProcessedFile = {
       ...existing,
-      status: FILE_STATUS.DONE as const,
+      status: FILE_STATUS.DONE,
       result,
       finishedAt: Date.now(),
     };
@@ -247,7 +255,7 @@ class FileStore {
 
     const updated: ProcessedFile = {
       ...existing,
-      status: FILE_STATUS.ERROR as const,
+      status: FILE_STATUS.ERROR,
       error,
       finishedAt: Date.now(),
     };

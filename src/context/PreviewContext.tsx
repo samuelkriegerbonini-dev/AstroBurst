@@ -55,6 +55,8 @@ interface RgbContextValue {
 interface RenderContextValue {
   renderedPreviewUrl: string | null;
   setRenderedPreviewUrl: (url: string | null) => void;
+  activeImagePath: string | null;
+  setActiveImagePath: (path: string | null) => void;
 }
 
 interface RawPixelsContextValue {
@@ -77,74 +79,32 @@ const RenderCtx = createContext<RenderContextValue | null>(null);
 const RawPixelsCtx = createContext<RawPixelsContextValue | null>(null);
 const NarrowbandCtx = createContext<NarrowbandContextValue | null>(null);
 
+function useCtx<T>(ctx: React.Context<T | null>, name: string): T {
+  const val = useContext(ctx);
+  if (!val) throw new Error(`${name} must be used within PreviewProvider`);
+  return val;
+}
+
+export const useFileContext = () => useCtx(FileCtx, "useFileContext");
+export const useDoneFilesContext = () => useCtx(DoneFilesCtx, "useDoneFilesContext");
+export const useHistContext = () => useCtx(HistCtx, "useHistContext");
+export const useCubeContext = () => useCtx(CubeCtx, "useCubeContext");
+export const useRgbContext = () => useCtx(RgbCtx, "useRgbContext");
+export const useRenderContext = () => useCtx(RenderCtx, "useRenderContext");
+export const useRawPixelsContext = () => useCtx(RawPixelsCtx, "useRawPixelsContext");
+export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandContext");
+
 export function usePreviewContext() {
-  const fileCtx = useContext(FileCtx);
-  const doneFilesCtx = useContext(DoneFilesCtx);
-  const histCtx = useContext(HistCtx);
-  const cubeCtx = useContext(CubeCtx);
-  const rgbCtx = useContext(RgbCtx);
-  const renderCtx = useContext(RenderCtx);
-  const rawPixelsCtx = useContext(RawPixelsCtx);
-  const narrowbandCtx = useContext(NarrowbandCtx);
-  if (!fileCtx) throw new Error("usePreviewContext must be used within PreviewProvider");
   return {
-    ...fileCtx!,
-    ...doneFilesCtx!,
-    ...histCtx!,
-    ...cubeCtx!,
-    ...rgbCtx!,
-    ...renderCtx!,
-    ...rawPixelsCtx!,
-    ...narrowbandCtx!,
+    ...useFileContext(),
+    ...useDoneFilesContext(),
+    ...useHistContext(),
+    ...useCubeContext(),
+    ...useRgbContext(),
+    ...useRenderContext(),
+    ...useRawPixelsContext(),
+    ...useNarrowbandContext(),
   };
-}
-
-export function useFileContext() {
-  const ctx = useContext(FileCtx);
-  if (!ctx) throw new Error("useFileContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useDoneFilesContext() {
-  const ctx = useContext(DoneFilesCtx);
-  if (!ctx) throw new Error("useDoneFilesContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useHistContext() {
-  const ctx = useContext(HistCtx);
-  if (!ctx) throw new Error("useHistContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useCubeContext() {
-  const ctx = useContext(CubeCtx);
-  if (!ctx) throw new Error("useCubeContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useRgbContext() {
-  const ctx = useContext(RgbCtx);
-  if (!ctx) throw new Error("useRgbContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useRenderContext() {
-  const ctx = useContext(RenderCtx);
-  if (!ctx) throw new Error("useRenderContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useRawPixelsContext() {
-  const ctx = useContext(RawPixelsCtx);
-  if (!ctx) throw new Error("useRawPixelsContext outside PreviewProvider");
-  return ctx;
-}
-
-export function useNarrowbandContext() {
-  const ctx = useContext(NarrowbandCtx);
-  if (!ctx) throw new Error("useNarrowbandContext outside PreviewProvider");
-  return ctx;
 }
 
 interface Props {
@@ -164,29 +124,28 @@ function setPreviewCache(key: string, value: string) {
   previewUrlCache.set(key, value);
 }
 
+const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
+
 export function PreviewProvider({ file, doneFiles, children }: Props) {
   const { computeHistogram, getCubeInfo, getRawPixelsPreview, detectNarrowbandFilters } = useBackend();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
-  const [stfParams, setStfParams] = useState<StfParams>({
-    shadow: 0,
-    midtone: 0.5,
-    highlight: 1,
-  });
+  const [stfParams, setStfParams] = useState<StfParams>(DEFAULT_STF);
   const [isCube, setIsCube] = useState(false);
   const [isSpectralCube, setIsSpectralCube] = useState(false);
   const [spectralReason, setSpectralReason] = useState<string | null>(null);
   const [cubeDims, setCubeDims] = useState<any>(null);
   const [rgbChannels, setRgbChannels] = useState<any>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
+  const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
 
   const prevFileIdRef = useRef<string | null>(null);
-  const histAbortRef = useRef(0);
+  const seqRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
-  const narrowbandDetectedRef = useRef("");
+  const narrowbandKeyRef = useRef("");
 
   const rawPixelsRef = useRef(rawPixels);
   rawPixelsRef.current = rawPixels;
@@ -198,24 +157,27 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const setRenderedPreviewUrl = useCallback(
     (url: string | null) => {
       setRenderedPreviewUrlRaw(url);
-      if (url && file?.id) {
-        setPreviewCache(file.id, url);
-      }
+      if (url && file?.id) setPreviewCache(file.id, url);
     },
     [file?.id],
+  );
+
+  const setActiveImagePath = useCallback(
+    (path: string | null) => {
+      setActiveImagePathRaw(path);
+    },
+    [],
   );
 
   useEffect(() => {
     if (doneFiles.length < 2) return;
     const paths = doneFiles.map((f) => f.path);
     const key = paths.join("|");
-    if (key === narrowbandDetectedRef.current) return;
-    narrowbandDetectedRef.current = key;
+    if (key === narrowbandKeyRef.current) return;
+    narrowbandKeyRef.current = key;
     detectNarrowbandFilters(paths)
       .then((result: any) => {
-        if (result?.palette) {
-          setNarrowbandPalette(result.palette);
-        }
+        if (result?.palette) setNarrowbandPalette(result.palette);
       })
       .catch(() => {});
   }, [doneFiles, detectNarrowbandFilters]);
@@ -254,11 +216,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!file || !file.path || file.id === prevFileIdRef.current) return;
+    if (!file?.path || file.id === prevFileIdRef.current) return;
     prevFileIdRef.current = file.id;
 
     setHistData(null);
-    setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
+    setStfParams(DEFAULT_STF);
     setIsCube(false);
     setIsSpectralCube(false);
     setSpectralReason(null);
@@ -267,37 +229,37 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRawPixels(null);
     setRawPixelsLoading(false);
     setNarrowbandPalette(null);
+    setActiveImagePathRaw(null);
     rawPixelsAbortRef.current++;
 
-    const cachedUrl = previewUrlCache.get(file.id);
-    setRenderedPreviewUrlRaw(cachedUrl || null);
+    setRenderedPreviewUrlRaw(previewUrlCache.get(file.id) ?? null);
 
-    const seq = ++histAbortRef.current;
+    const seq = ++seqRef.current;
+    const stale = () => seqRef.current !== seq;
 
     const precomputedHist = file.result?.histogram;
-    if (precomputedHist && precomputedHist.bins) {
+    if (precomputedHist?.bins) {
       setHistData(precomputedHist);
       if (precomputedHist.auto_stf) setStfParams(precomputedHist.auto_stf);
     } else {
       computeHistogram(file.path)
         .then((data: any) => {
-          if (histAbortRef.current !== seq) return;
+          if (stale()) return;
           setHistData(data);
           if (data.auto_stf) setStfParams(data.auto_stf);
         })
         .catch((err: any) => {
-          if (histAbortRef.current !== seq) return;
-          console.error("Histogram fetch failed:", err);
+          if (!stale()) console.error("Histogram fetch failed:", err);
         });
     }
 
     const naxis3 = file.result?.header?.NAXIS3;
     const n3 = naxis3 ? parseInt(naxis3, 10) : 0;
-    if (n3 > 1 ) {
+    if (n3 > 1) {
       setIsCube(true);
       getCubeInfo(file.path)
         .then((info: any) => {
-          if (histAbortRef.current !== seq) return;
+          if (stale()) return;
           setCubeDims(info);
           if (info?.spectral_classification) {
             setIsSpectralCube(info.spectral_classification.is_spectral || false);
@@ -334,8 +296,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const renderValue = useMemo<RenderContextValue>(
-    () => ({ renderedPreviewUrl, setRenderedPreviewUrl }),
-    [renderedPreviewUrl, setRenderedPreviewUrl],
+    () => ({ renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath }),
+    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(

@@ -178,7 +178,7 @@ impl AsdfImage {
                 .map(|c| {
                     let re = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
                     let im = f32::from_be_bytes([c[4], c[5], c[6], c[7]]);
-                    (re * re + im * im).sqrt()
+                    re.hypot(im)
                 })
                 .collect(),
 
@@ -187,7 +187,7 @@ impl AsdfImage {
                 .map(|c| {
                     let re = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                     let im = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);
-                    (re * re + im * im).sqrt()
+                    re.hypot(im)
                 })
                 .collect(),
         }
@@ -210,20 +210,16 @@ impl AsdfImage {
     fn extract_metadata(tree: &Value, data_key: &str) -> HashMap<String, String> {
         let mut map = HashMap::new();
 
-        if let Some(meta) = tree.get("meta").and_then(|v| v.as_mapping()) {
-            Self::flatten_yaml(&Value::Mapping(meta.clone()), "meta", &mut map);
+        if let Some(meta) = tree.get("meta") {
+            Self::flatten_yaml(meta, "meta", &mut map);
         }
 
-        if let Some(header) = tree.get("header").and_then(|v| v.as_mapping()) {
-            Self::flatten_yaml(&Value::Mapping(header.clone()), "header", &mut map);
+        if let Some(header) = tree.get("header") {
+            Self::flatten_yaml(header, "header", &mut map);
         }
 
-        if let Some(roman_meta) = tree
-            .get("roman")
-            .and_then(|r| r.get("meta"))
-            .and_then(|v| v.as_mapping())
-        {
-            Self::flatten_yaml(&Value::Mapping(roman_meta.clone()), "roman.meta", &mut map);
+        if let Some(roman_meta) = tree.get("roman").and_then(|r| r.get("meta")) {
+            Self::flatten_yaml(roman_meta, "roman.meta", &mut map);
         }
 
         map.insert("ASDF_DATA_KEY".into(), data_key.to_string());

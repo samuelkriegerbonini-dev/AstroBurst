@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { Activity, Loader2 } from "lucide-react";
 
-export default function FFTPanel({ filePath, computeFftSpectrum }) {
-  const containerRef = useRef(null);
+function FFTPanel({ filePath, computeFftSpectrum }) {
   const canvasRef = useRef(null);
   const [fftData, setFftData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -14,27 +13,7 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
     setLoading(true);
     setError(null);
     try {
-      const result = await computeFftSpectrum(filePath);
-      const px = result.pixels;
-      let nonZero = 0;
-      let maxVal = 0;
-      for (let i = 0; i < px.length; i++) {
-        if (px[i] > 0) nonZero++;
-        if (px[i] > maxVal) maxVal = px[i];
-      }
-      const centerIdx = Math.floor(result.height / 2) * result.width + Math.floor(result.width / 2);
-      console.log("FFT diag:", {
-        w: result.width,
-        h: result.height,
-        pixLen: px.length,
-        nonZero,
-        maxVal,
-        center: px[centerIdx],
-        dc: result.dc_magnitude,
-        maxMag: result.max_magnitude,
-        elapsed: result.elapsed_ms,
-      });
-      setFftData(result);
+      setFftData(await computeFftSpectrum(filePath));
     } catch (e) {
       console.error("FFT computation failed:", e);
       setError(String(e));
@@ -60,16 +39,12 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
     if (!ctx) return;
 
     const imageData = ctx.createImageData(width, height);
-    const rgba = imageData.data;
+    const u32 = new Uint32Array(imageData.data.buffer);
     const len = width * height;
 
     for (let i = 0; i < len; i++) {
       const v = pixels[i];
-      const off = i << 2;
-      rgba[off] = v;
-      rgba[off | 1] = v;
-      rgba[off | 2] = v;
-      rgba[off | 3] = 255;
+      u32[i] = (255 << 24) | (v << 16) | (v << 8) | v;
     }
 
     ctx.putImageData(imageData, 0, 0);
@@ -85,7 +60,7 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
       const fy = (y - fftData.height / 2) / fftData.height;
       setHoveredCoord({ fx: fx.toFixed(3), fy: fy.toFixed(3) });
     },
-    [fftData]
+    [fftData],
   );
 
   const handleMouseLeave = useCallback(() => setHoveredCoord(null), []);
@@ -117,15 +92,14 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
         <div className="px-3 py-4 text-center text-xs text-zinc-600">
           <p>Compute 2D FFT to diagnose noise patterns and image quality.</p>
           <p className="mt-1 text-zinc-700">
-            Bright center = DC component | Geometric lines = electronic noise | Spread = fine
-            detail
+            Bright center = DC component | Geometric lines = electronic noise | Spread = fine detail
           </p>
         </div>
       )}
 
       {fftData && hasPixels && (
         <>
-          <div ref={containerRef} className="px-2 pt-2 flex justify-center">
+          <div className="px-2 pt-2 flex justify-center">
             <canvas
               ref={canvasRef}
               className="rounded border border-zinc-800/50 cursor-crosshair"
@@ -161,3 +135,5 @@ export default function FFTPanel({ filePath, computeFftSpectrum }) {
     </div>
   );
 }
+
+export default memo(FFTPanel);

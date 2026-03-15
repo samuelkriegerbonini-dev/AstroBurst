@@ -13,47 +13,43 @@ pub struct ResampleResult {
 
 #[inline]
 fn catmull_rom(t: f64) -> f64 {
-    let a = -0.5;
     let abs_t = t.abs();
     if abs_t <= 1.0 {
-        (a + 2.0) * abs_t * abs_t * abs_t - (a + 3.0) * abs_t * abs_t + 1.0
+        abs_t * abs_t * (1.5 * abs_t - 2.5) + 1.0
     } else if abs_t <= 2.0 {
-        a * abs_t * abs_t * abs_t - 5.0 * a * abs_t * abs_t + 8.0 * a * abs_t - 4.0 * a
+        abs_t * (abs_t * (2.5 - 0.5 * abs_t) - 4.0) + 2.0
     } else {
         0.0
     }
 }
 
 #[inline]
-fn sample_clamped(image: &Array2<f32>, row: i64, col: i64) -> f32 {
-    let (rows, cols) = image.dim();
-    let r = row.clamp(0, rows as i64 - 1) as usize;
-    let c = col.clamp(0, cols as i64 - 1) as usize;
-    image[[r, c]]
-}
-
-fn bicubic_sample(image: &Array2<f32>, y: f64, x: f64) -> f32 {
+fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
     let ix = x.floor() as i64;
     let iy = y.floor() as i64;
     let fx = x - ix as f64;
     let fy = y - iy as f64;
 
-    let mut wx = [0.0f64; 4];
-    let mut wy = [0.0f64; 4];
-    for i in 0..4 {
-        wx[i] = catmull_rom(fx - (i as f64 - 1.0));
-        wy[i] = catmull_rom(fy - (i as f64 - 1.0));
-    }
+    let max_row = rows as i64 - 1;
+    let max_col = cols as i64 - 1;
+
+    let wx = [
+        catmull_rom(fx + 1.0),
+        catmull_rom(fx),
+        catmull_rom(fx - 1.0),
+        catmull_rom(fx - 2.0),
+    ];
 
     let mut val = 0.0f64;
-    for j in 0..4 {
-        let row = iy + j as i64 - 1;
+    for j in 0..4i64 {
+        let r = (iy + j - 1).clamp(0, max_row) as usize;
+        let row_off = r * cols;
         let mut row_val = 0.0f64;
-        for i in 0..4 {
-            let col = ix + i as i64 - 1;
-            row_val += sample_clamped(image, row, col) as f64 * wx[i];
+        for i in 0..4i64 {
+            let c = (ix + i - 1).clamp(0, max_col) as usize;
+            row_val += unsafe { *slice.get_unchecked(row_off + c) } as f64 * wx[i as usize];
         }
-        val += row_val * wy[j];
+        val += row_val * catmull_rom(fy - (j - 1) as f64);
     }
 
     val as f32
@@ -76,25 +72,25 @@ pub fn resample_image(
 
     let scale_y = src_rows as f64 / target_rows as f64;
     let scale_x = src_cols as f64 / target_cols as f64;
+    let half_shift_y = (scale_y - 1.0) * 0.5;
+    let half_shift_x = (scale_x - 1.0) * 0.5;
 
-    let rows: Vec<Vec<f32>> = (0..target_rows)
-        .into_par_iter()
-        .map(|ty| {
-            let sy = ty as f64 * scale_y + (scale_y - 1.0) * 0.5;
-            let mut row = Vec::with_capacity(target_cols);
-            for tx in 0..target_cols {
-                let sx = tx as f64 * scale_x + (scale_x - 1.0) * 0.5;
-                row.push(bicubic_sample(image, sy, sx));
+    let slice = image.as_slice().expect("contiguous");
+    let total = target_rows * target_cols;
+    let mut buf = vec![0.0f32; total];
+
+    buf.par_chunks_mut(target_cols)
+        .enumerate()
+        .for_each(|(ty, row)| {
+            let sy = ty as f64 * scale_y + half_shift_y;
+            for (tx, pixel) in row.iter_mut().enumerate() {
+                let sx = tx as f64 * scale_x + half_shift_x;
+                *pixel = bicubic_sample(slice, src_rows, src_cols, sy, sx);
             }
-            row
-        })
-        .collect();
+        });
 
-    let flat: Vec<f32> = rows.into_iter().flatten().collect();
-    let result = Array2::from_shape_vec((target_rows, target_cols), flat)
-        .map_err(|e| anyhow::anyhow!("Reshape failed: {}", e))?;
-
-    Ok(result)
+    Array2::from_shape_vec((target_rows, target_cols), buf)
+        .map_err(|e| anyhow::anyhow!("Reshape failed: {}", e))
 }
 
 pub fn compute_wcs_updates(
@@ -108,7 +104,7 @@ pub fn compute_wcs_updates(
     let scale_x = orig_cols as f64 / tgt_cols as f64;
     let scale_y = orig_rows as f64 / tgt_rows as f64;
 
-    let mut updates = Vec::new();
+    let mut updates = Vec::with_capacity(8);
 
     if let Some(crpix1) = header.get_f64("CRPIX1") {
         updates.push(("CRPIX1".to_string(), (crpix1 - 0.5) / scale_x + 0.5));
@@ -186,6 +182,15 @@ mod tests {
     #[test]
     fn test_catmull_rom_symmetry() {
         assert!((catmull_rom(0.5) - catmull_rom(-0.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_catmull_rom_partition_of_unity() {
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let sum = catmull_rom(t + 1.0) + catmull_rom(t) + catmull_rom(t - 1.0) + catmull_rom(t - 2.0);
+            assert!((sum - 1.0).abs() < 1e-10, "partition of unity failed at t={}: sum={}", t, sum);
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { Activity, Crosshair, Loader2, Layers, ChevronDown } from "lucide-react";
+import { Activity, Crosshair, Loader2, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import { useBackend } from "../../hooks/useBackend";
 
@@ -14,6 +14,23 @@ interface SpectroscopyPanelProps {
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
   onCollapsePreview?: (previewUrl: string) => void;
 }
+
+function arrayMinMax(arr: number[]): [number, number] {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  return [min === Infinity ? 0 : min, max === -Infinity ? 1 : max];
+}
+
+const CANVAS_H = 180;
+const PAD = { top: 10, bottom: 24, left: 50, right: 12 } as const;
+const N_GRID_Y = 4;
 
 export default function SpectroscopyPanel({
                                             spectrum = [],
@@ -35,29 +52,31 @@ export default function SpectroscopyPanel({
 
   const { processCube, processCubeLazy } = useBackend();
 
-  const CANVAS_H = 180;
-
-  const { xMin, xMax, yMin, yMax, xLabel } = useMemo(() => {
+  const plotParams = useMemo(() => {
     if (!spectrum || spectrum.length === 0)
-      return { xMin: 0, xMax: 1, yMin: 0, yMax: 1, xLabel: "Channel" };
+      return { xMin: 0, xMax: 1, yMin: 0, yMax: 1, xLabel: "Channel", hasWl: false };
 
     const n = spectrum.length;
-    const hasWl = wavelengths && wavelengths.length === n;
+    const hasWl = !!(wavelengths && wavelengths.length === n);
 
-    const xs = hasWl ? wavelengths : Array.from({ length: n }, (_, i) => i);
-    const xMin = Math.min(...xs);
-    const xMax = Math.max(...xs);
+    let xMin: number, xMax: number;
+    if (hasWl) {
+      [xMin, xMax] = arrayMinMax(wavelengths!);
+    } else {
+      xMin = 0;
+      xMax = n - 1;
+    }
 
-    const finite = spectrum.filter((v) => Number.isFinite(v));
-    const yMin = finite.length ? Math.min(...finite) : 0;
-    const yMax = finite.length ? Math.max(...finite) : 1;
+    const [rawYMin, rawYMax] = arrayMinMax(spectrum);
+    const yPad = (rawYMax - rawYMin) * 0.05;
 
     return {
       xMin,
       xMax,
-      yMin: yMin - (yMax - yMin) * 0.05,
-      yMax: yMax + (yMax - yMin) * 0.05,
+      yMin: rawYMin - yPad,
+      yMax: rawYMax + yPad,
       xLabel: hasWl ? "Wavelength (\u03bcm)" : "Channel",
+      hasWl,
     };
   }, [spectrum, wavelengths]);
 
@@ -74,70 +93,63 @@ export default function SpectroscopyPanel({
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.clearRect(0, 0, W, H);
 
     ctx.fillStyle = "#0a0a0f";
     ctx.fillRect(0, 0, W, H);
 
-    const pad = { top: 10, bottom: 24, left: 50, right: 12 };
-    const plotW = W - pad.left - pad.right;
-    const plotH = H - pad.top - pad.bottom;
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top - PAD.bottom;
+    const { xMin, xMax, yMin, yMax, xLabel, hasWl } = plotParams;
+    const xRange = Math.max(xMax - xMin, 1e-10);
+    const yRange = Math.max(yMax - yMin, 1e-10);
+
+    const toX = (xi: number) => PAD.left + ((xi - xMin) / xRange) * plotW;
+    const toY = (yi: number) => PAD.top + plotH - ((yi - yMin) / yRange) * plotH;
 
     ctx.strokeStyle = "#1f1f28";
     ctx.lineWidth = 0.5;
-    const nGridY = 4;
-    for (let i = 0; i <= nGridY; i++) {
-      const y = pad.top + (i / nGridY) * plotH;
+    for (let i = 0; i <= N_GRID_Y; i++) {
+      const y = PAD.top + (i / N_GRID_Y) * plotH;
       ctx.beginPath();
-      ctx.moveTo(pad.left, y);
-      ctx.lineTo(W - pad.right, y);
+      ctx.moveTo(PAD.left, y);
+      ctx.lineTo(W - PAD.right, y);
       ctx.stroke();
     }
 
     const n = spectrum.length;
-    const hasWl = wavelengths && wavelengths.length === n;
-    const xRange = Math.max(xMax - xMin, 1e-10);
-    const yRange = Math.max(yMax - yMin, 1e-10);
-
-    const toCanvasX = (xi: number) => pad.left + ((xi - xMin) / xRange) * plotW;
-    const toCanvasY = (yi: number) => pad.top + plotH - ((yi - yMin) / yRange) * plotH;
 
     ctx.strokeStyle = "#a855f7";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     let started = false;
     for (let i = 0; i < n; i++) {
-      const x = hasWl ? wavelengths[i] : i;
+      const x = hasWl ? wavelengths![i] : i;
       const y = spectrum[i];
       if (!Number.isFinite(y)) continue;
-      const cx = toCanvasX(x);
-      const cy = toCanvasY(y);
-      if (!started) {
-        ctx.moveTo(cx, cy);
-        started = true;
-      } else {
-        ctx.lineTo(cx, cy);
-      }
+      const cx = toX(x);
+      const cy = toY(y);
+      if (!started) { ctx.moveTo(cx, cy); started = true; }
+      else ctx.lineTo(cx, cy);
     }
     ctx.stroke();
 
     if (hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < n) {
-      const x = hasWl ? wavelengths[hoveredIdx] : hoveredIdx;
+      const x = hasWl ? wavelengths![hoveredIdx] : hoveredIdx;
       const y = spectrum[hoveredIdx];
       if (Number.isFinite(y)) {
-        const cx = toCanvasX(x);
-        const cy = toCanvasY(y);
+        const cx = toX(x);
+        const cy = toY(y);
 
         ctx.strokeStyle = "rgba(255,255,255,0.3)";
         ctx.lineWidth = 0.5;
         ctx.setLineDash([3, 3]);
         ctx.beginPath();
-        ctx.moveTo(cx, pad.top);
-        ctx.lineTo(cx, H - pad.bottom);
+        ctx.moveTo(cx, PAD.top);
+        ctx.lineTo(cx, H - PAD.bottom);
         ctx.stroke();
         ctx.beginPath();
-        ctx.moveTo(pad.left, cy);
-        ctx.lineTo(W - pad.right, cy);
+        ctx.moveTo(PAD.left, cy);
+        ctx.lineTo(W - PAD.right, cy);
         ctx.stroke();
         ctx.setLineDash([]);
 
@@ -147,7 +159,6 @@ export default function SpectroscopyPanel({
         ctx.fill();
 
         ctx.font = "10px 'JetBrains Mono', monospace";
-        ctx.fillStyle = "#fafafa";
         const label = hasWl
           ? `${x.toFixed(4)} \u03bcm \u2192 ${y.toFixed(2)}`
           : `ch ${x} \u2192 ${y.toFixed(2)}`;
@@ -164,20 +175,18 @@ export default function SpectroscopyPanel({
     ctx.font = "9px 'JetBrains Mono', monospace";
     ctx.fillStyle = "#71717a";
     ctx.textAlign = "right";
-    for (let i = 0; i <= nGridY; i++) {
-      const val = yMax - (i / nGridY) * yRange;
-      const y = pad.top + (i / nGridY) * plotH;
-      ctx.fillText(val.toFixed(1), pad.left - 4, y + 3);
+    for (let i = 0; i <= N_GRID_Y; i++) {
+      const val = yMax - (i / N_GRID_Y) * yRange;
+      const y = PAD.top + (i / N_GRID_Y) * plotH;
+      ctx.fillText(val.toFixed(1), PAD.left - 4, y + 3);
     }
 
     ctx.textAlign = "center";
     ctx.fillStyle = "#52525b";
     ctx.fillText(xLabel, W / 2, H - 4);
-  }, [spectrum, wavelengths, xMin, xMax, yMin, yMax, xLabel, hoveredIdx]);
+  }, [spectrum, wavelengths, plotParams, hoveredIdx]);
 
-  useEffect(() => {
-    draw();
-  }, [draw]);
+  useEffect(() => { draw(); }, [draw]);
 
   useEffect(() => {
     const c = containerRef.current;
@@ -192,14 +201,13 @@ export default function SpectroscopyPanel({
       const canvas = canvasRef.current;
       if (!canvas || spectrum.length === 0) return;
       const rect = canvas.getBoundingClientRect();
-      const pad = { left: 50, right: 12 };
-      const plotW = rect.width - pad.left - pad.right;
-      const relX = e.clientX - rect.left - pad.left;
+      const plotW = rect.width - PAD.left - PAD.right;
+      const relX = e.clientX - rect.left - PAD.left;
       const frac = relX / plotW;
       const idx = Math.round(frac * (spectrum.length - 1));
       setHoveredIdx(Math.max(0, Math.min(spectrum.length - 1, idx)));
     },
-    [spectrum],
+    [spectrum.length],
   );
 
   const handleMouseLeave = useCallback(() => setHoveredIdx(null), []);
@@ -215,9 +223,7 @@ export default function SpectroscopyPanel({
         : await processCubeLazy(filePath, "./output", 1);
       setCollapseResult(result);
       const url = result.collapsedPreviewUrl || result.collapsedMedianPreviewUrl;
-      if (url && onCollapsePreview) {
-        onCollapsePreview(url);
-      }
+      if (url && onCollapsePreview) onCollapsePreview(url);
     } catch (e) {
       console.error("Cube collapse failed:", e);
     } finally {
@@ -237,9 +243,7 @@ export default function SpectroscopyPanel({
   const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
 
   return (
-    <div
-      className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden animate-fade-in"
-    >
+    <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden animate-fade-in">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
         <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
           <Activity size={12} />

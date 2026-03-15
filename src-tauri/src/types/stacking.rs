@@ -27,6 +27,18 @@ pub struct StackResult {
     pub offsets: Vec<(i32, i32)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AlignmentMethod {
+    PhaseCorrelation,
+    Zncc,
+}
+
+impl Default for AlignmentMethod {
+    fn default() -> Self {
+        Self::PhaseCorrelation
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DrizzleConfig {
     pub scale: f64,
@@ -36,6 +48,7 @@ pub struct DrizzleConfig {
     pub sigma_high: f32,
     pub sigma_iterations: usize,
     pub align: bool,
+    pub alignment_method: AlignmentMethod,
 }
 
 impl Default for DrizzleConfig {
@@ -48,6 +61,7 @@ impl Default for DrizzleConfig {
             sigma_high: 3.0,
             sigma_iterations: 5,
             align: true,
+            alignment_method: AlignmentMethod::default(),
         }
     }
 }

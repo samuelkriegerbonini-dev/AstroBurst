@@ -23,6 +23,7 @@ export default function DrizzlePanel({
   const [sigmaLow, setSigmaLow] = useState(3.0);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [align, setAlign] = useState(true);
+  const [alignmentMethod, setAlignmentMethod] = useState("fft");
   const [elapsed, setElapsed] = useState("0");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -75,8 +76,9 @@ export default function DrizzlePanel({
       sigmaLow,
       sigmaHigh,
       align,
+      alignmentMethod,
     });
-  }, [canDrizzle, onDrizzle, selectedPaths, scale, pixfrac, kernel, sigmaLow, sigmaHigh, align]);
+  }, [canDrizzle, onDrizzle, selectedPaths, scale, pixfrac, kernel, sigmaLow, sigmaHigh, align, alignmentMethod]);
 
   return (
     <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
@@ -203,8 +205,22 @@ export default function DrizzlePanel({
               onChange={(e) => setAlign(e.target.checked)}
               className="w-3 h-3 accent-cyan-500"
             />
-            Sub-pixel alignment (ZNCC)
+            Sub-pixel alignment
           </label>
+
+          {align && (
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-zinc-500 w-14">Method</label>
+              <select
+                value={alignmentMethod}
+                onChange={(e) => setAlignmentMethod(e.target.value)}
+                className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-[10px] text-zinc-300 outline-none"
+              >
+                <option value="fft">Phase Correlation (FFT)</option>
+                <option value="zncc">ZNCC (Spatial)</option>
+              </select>
+            </div>
+          )}
         </div>
 
         {estimatedOutputRes && (

@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use image::{GrayImage, Luma};
 use ndarray::Array2;
+use rayon::prelude::*;
 
 use crate::math::simd::find_minmax_simd;
 
@@ -18,10 +19,8 @@ impl Default for TileParams {
     }
 }
 
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TileLevel {
-
     pub level: usize,
     pub width: usize,
     pub height: usize,
@@ -29,7 +28,6 @@ pub struct TileLevel {
     pub rows: usize,
     pub scale_factor: f64,
 }
-
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TilePyramid {
@@ -48,38 +46,38 @@ fn downsample(data: &Array2<f32>, factor: usize) -> Array2<f32> {
     let (rows, cols) = data.dim();
     let new_rows = (rows + factor - 1) / factor;
     let new_cols = (cols + factor - 1) / factor;
+    let src = data.as_slice().expect("contiguous");
 
-    let mut result = Array2::<f32>::zeros((new_rows, new_cols));
-
-    for ny in 0..new_rows {
-        for nx in 0..new_cols {
+    let pixels: Vec<f32> = (0..new_rows)
+        .into_par_iter()
+        .flat_map_iter(move |ny| {
             let y_start = ny * factor;
-            let x_start = nx * factor;
             let y_end = (y_start + factor).min(rows);
-            let x_end = (x_start + factor).min(cols);
-
-            let mut sum = 0.0f64;
-            let mut count = 0u32;
-
-            for y in y_start..y_end {
-                for x in x_start..x_end {
-                    let v = data[[y, x]];
-                    if v.is_finite() {
-                        sum += v as f64;
-                        count += 1;
+            (0..new_cols).map(move |nx| {
+                let x_start = nx * factor;
+                let x_end = (x_start + factor).min(cols);
+                let mut sum = 0.0f64;
+                let mut count = 0u32;
+                for y in y_start..y_end {
+                    let row_off = y * cols;
+                    for x in x_start..x_end {
+                        let v = src[row_off + x];
+                        if v.is_finite() {
+                            sum += v as f64;
+                            count += 1;
+                        }
                     }
                 }
-            }
+                if count > 0 {
+                    (sum / count as f64) as f32
+                } else {
+                    0.0
+                }
+            })
+        })
+        .collect();
 
-            result[[ny, nx]] = if count > 0 {
-                (sum / count as f64) as f32
-            } else {
-                0.0
-            };
-        }
-    }
-
-    result
+    Array2::from_shape_vec((new_rows, new_cols), pixels).unwrap()
 }
 
 fn render_tile(
@@ -92,6 +90,7 @@ fn render_tile(
     output_path: &str,
 ) -> Result<()> {
     let (rows, cols) = data.dim();
+    let src = data.as_slice().expect("contiguous");
 
     let x_start = tile_x * tile_size;
     let y_start = tile_y * tile_size;
@@ -108,28 +107,28 @@ fn render_tile(
     let range = (global_max - global_min).max(1e-10);
     let inv_range = 255.0 / range;
 
-
-
-    let mut img = GrayImage::new(tile_size as u32, tile_size as u32);
+    let mut buf = vec![0u8; tile_size * tile_size];
 
     for dy in 0..tile_h {
+        let src_row = (y_start + dy) * cols;
+        let dst_row = dy * tile_size;
         for dx in 0..tile_w {
-            let v = data[[y_start + dy, x_start + dx]];
-            let byte = if v.is_finite() {
+            let v = src[src_row + x_start + dx];
+            buf[dst_row + dx] = if v.is_finite() {
                 ((v - global_min) * inv_range).clamp(0.0, 255.0) as u8
             } else {
                 0
             };
-            img.put_pixel(dx as u32, dy as u32, Luma([byte]));
         }
     }
-
 
     if let Some(parent) = Path::new(output_path).parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create tile dir {:?}", parent))?;
     }
 
+    let img = GrayImage::from_raw(tile_size as u32, tile_size as u32, buf)
+        .context("Failed to create tile image")?;
     img.save(output_path)
         .with_context(|| format!("Failed to save tile {}", output_path))?;
     Ok(())
@@ -148,16 +147,32 @@ fn compute_num_levels(width: usize, height: usize, tile_size: usize) -> usize {
 }
 
 fn percentile_bounds(slice: &[f32], low_pct: f64, high_pct: f64) -> (f32, f32) {
-    let mut valid: Vec<f32> = slice.iter().copied().filter(|v| v.is_finite() && *v > 1e-7).collect();
+    let mut valid: Vec<f32> = slice
+        .par_iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 1e-7)
+        .collect();
+
     if valid.is_empty() {
         let (gmin, gmax) = find_minmax_simd(slice);
         return (gmin, gmax);
     }
-    valid.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     let n = valid.len();
     let lo_idx = ((n as f64 * low_pct) as usize).min(n - 1);
     let hi_idx = ((n as f64 * high_pct) as usize).min(n - 1);
-    (valid[lo_idx], valid[hi_idx])
+
+    let (_, lo_val, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let lo = *lo_val;
+
+    let (_, hi_val, _) = valid.select_nth_unstable_by(hi_idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let hi = *hi_val;
+
+    (lo, hi)
 }
 
 pub fn generate_tile_pyramid(
@@ -177,12 +192,9 @@ pub fn generate_tile_pyramid(
         .with_context(|| format!("Failed to create tile output dir {}", output_dir))?;
 
     let mut levels = Vec::with_capacity(num_levels);
-
     let max_level = num_levels - 1;
 
     for level in 0..num_levels {
-
-
         let reduction_power = max_level - level;
         let factor = 1usize << reduction_power;
 
@@ -245,7 +257,6 @@ pub fn generate_single_tile(
     tile_size: usize,
     total_levels: usize,
 ) -> Result<String> {
-    let (_orig_rows, _orig_cols) = normalized.dim();
     let max_level = total_levels.saturating_sub(1);
     let reduction_power = max_level.saturating_sub(level);
     let factor = 1usize << reduction_power;
@@ -273,26 +284,15 @@ pub fn generate_single_tile(
     Ok(tile_path)
 }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_compute_num_levels() {
-
         assert_eq!(compute_num_levels(256, 256, 256), 1);
-
-
         assert_eq!(compute_num_levels(512, 512, 256), 2);
-
-
         assert_eq!(compute_num_levels(1024, 1024, 256), 3);
-
-
         let levels = compute_num_levels(14000, 14000, 256);
         assert!(levels >= 6 && levels <= 8);
     }
@@ -316,16 +316,12 @@ mod tests {
             .unwrap();
         let result = downsample(&data, 2);
         assert_eq!(result.dim(), (2, 2));
-
-
         assert!((result[[0, 0]] - 3.5).abs() < 1e-4);
-
         assert!((result[[1, 1]] - 13.5).abs() < 1e-4);
     }
 
     #[test]
     fn test_downsample_non_divisible() {
-
         let data = Array2::<f32>::ones((5, 5));
         let result = downsample(&data, 2);
         assert_eq!(result.dim(), (3, 3));
@@ -348,15 +344,10 @@ mod tests {
         assert_eq!(pyramid.original_width, 512);
         assert_eq!(pyramid.original_height, 512);
         assert_eq!(pyramid.levels.len(), 2);
-
-
         assert_eq!(pyramid.levels[0].cols, 1);
         assert_eq!(pyramid.levels[0].rows, 1);
-
-
         assert_eq!(pyramid.levels[1].cols, 2);
         assert_eq!(pyramid.levels[1].rows, 2);
-
 
         assert!(Path::new(&format!("{}/0/0_0.png", dir)).exists());
         assert!(Path::new(&format!("{}/1/0_0.png", dir)).exists());

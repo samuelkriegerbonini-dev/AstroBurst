@@ -15,14 +15,16 @@ pub fn stack_from_paths(
         bail!("No image paths provided");
     }
 
-    let mut images: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
-    for path in paths {
-        let mut img = load_fits_image(path)?;
-        if let Some(cal) = calibration {
-            img = crate::domain::calibration::calibrate_image(&img, cal);
-        }
-        images.push(img);
-    }
+    let images: Vec<Array2<f32>> = paths
+        .iter()
+        .map(|path| {
+            let img = load_fits_image(path)?;
+            match calibration {
+                Some(cal) => Ok(crate::domain::calibration::calibrate_image(&img, cal)),
+                None => Ok(img),
+            }
+        })
+        .collect::<Result<_>>()?;
 
     stack_images(&images, config)
 }

@@ -26,7 +26,7 @@ use crate::types::constants::{
     RES_WEIGHT_MAP_PATH,
 };
 use crate::types::image::{ScnrConfig, ScnrMethod};
-use crate::types::stacking::{DrizzleConfig, DrizzleKernel};
+use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel};
 
 #[tauri::command]
 pub async fn drizzle_stack_cmd(
@@ -39,6 +39,7 @@ pub async fn drizzle_stack_cmd(
     sigma_low: Option<f32>,
     sigma_high: Option<f32>,
     align: Option<bool>,
+    alignment_method: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let progress_clone =
         ProgressHandle::new(&app, EVENT_DRIZZLE_PROGRESS,
@@ -57,6 +58,11 @@ pub async fn drizzle_stack_cmd(
             _ => DrizzleKernel::Square,
         };
 
+        let am = match alignment_method.as_deref() {
+            Some("zncc") => AlignmentMethod::Zncc,
+            _ => AlignmentMethod::PhaseCorrelation,
+        };
+
         let config = DrizzleConfig {
             scale: scale_val,
             pixfrac: pixfrac.unwrap_or(DEFAULT_DRIZZLE_PIXFRAC),
@@ -65,6 +71,7 @@ pub async fn drizzle_stack_cmd(
             sigma_high: sigma_high.unwrap_or(DEFAULT_DRIZZLE_SIGMA),
             sigma_iterations: DEFAULT_DRIZZLE_SIGMA_ITERS,
             align: align.unwrap_or(true),
+            alignment_method: am,
         };
 
         let result = drizzle_from_paths(&paths, &config, None)?;
@@ -130,6 +137,7 @@ pub async fn drizzle_rgb_cmd(
     sigma_low: Option<f32>,
     sigma_high: Option<f32>,
     align: Option<bool>,
+    alignment_method: Option<String>,
     wb_mode: Option<String>,
     wb_r: Option<f64>,
     wb_g: Option<f64>,
@@ -156,6 +164,11 @@ pub async fn drizzle_rgb_cmd(
             _ => DrizzleKernel::Square,
         };
 
+        let am = match alignment_method.as_deref() {
+            Some("zncc") => AlignmentMethod::Zncc,
+            _ => AlignmentMethod::PhaseCorrelation,
+        };
+
         let drizzle_cfg = DrizzleConfig {
             scale: scale_val,
             pixfrac: pixfrac.unwrap_or(DEFAULT_DRIZZLE_PIXFRAC),
@@ -164,6 +177,7 @@ pub async fn drizzle_rgb_cmd(
             sigma_high: sigma_high.unwrap_or(DEFAULT_DRIZZLE_SIGMA),
             sigma_iterations: DEFAULT_DRIZZLE_SIGMA_ITERS,
             align: align.unwrap_or(true),
+            alignment_method: am,
         };
 
         let wb = match wb_mode.as_deref() {

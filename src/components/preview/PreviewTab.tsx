@@ -12,6 +12,9 @@ interface PreviewTabProps {
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
+const MAX_RETRIES = 2;
+const RETRY_DELAYS = [300, 800] as const;
+
 const Overlay = memo(function Overlay({
                                         starOverlayRef,
                                         isCube,
@@ -43,32 +46,31 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
 
   const [previewError, setPreviewError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
-  const previewImgRef = useRef<HTMLImageElement>(null);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryCountRef = useRef(0);
+  const retryRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; count: number }>({
+    timer: null,
+    count: 0,
+  });
 
   useEffect(() => {
     setPreviewError(false);
     setRetryKey(0);
-    retryCountRef.current = 0;
+    retryRef.current.count = 0;
   }, [file?.id, renderedPreviewUrl]);
 
   useEffect(() => {
     return () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
+      if (retryRef.current.timer) clearTimeout(retryRef.current.timer);
     };
   }, []);
 
   const handlePreviewError = useCallback(() => {
-    if (retryTimerRef.current) return;
-    if (retryCountRef.current < 2) {
-      const delay = retryCountRef.current === 0 ? 300 : 800;
-      retryTimerRef.current = setTimeout(() => {
-        retryTimerRef.current = null;
-        retryCountRef.current += 1;
+    const r = retryRef.current;
+    if (r.timer) return;
+    if (r.count < MAX_RETRIES) {
+      const delay = RETRY_DELAYS[r.count];
+      r.timer = setTimeout(() => {
+        r.timer = null;
+        r.count += 1;
         setRetryKey((k) => k + 1);
       }, delay);
     } else {
@@ -112,7 +114,6 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
       <div className="flex flex-col h-full">
         <div className="relative flex-1 min-h-0 flex items-center justify-center">
           <img
-            ref={previewImgRef}
             src={previewUrl}
             alt={file?.name}
             className={`max-w-full max-h-full object-contain ${isCube ? "cursor-crosshair" : ""}`}
@@ -135,7 +136,7 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
           <p className="text-xs">Preview unavailable</p>
           <button
             onClick={() => {
-              retryCountRef.current = 0;
+              retryRef.current.count = 0;
               setPreviewError(false);
               setRetryKey((k) => k + 1);
             }}

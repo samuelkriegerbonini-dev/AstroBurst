@@ -299,7 +299,10 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
                     src={originalUrl}
                     alt="Original"
                     className="absolute inset-0 w-full h-full object-contain"
-                    style={{ width: `${(100 / comparePosition) * 100}%`, maxWidth: "none" }}
+                    style={{
+                      width: compareRef.current ? `${compareRef.current.offsetWidth}px` : "100%",
+                      maxWidth: "none",
+                    }}
                     draggable={false}
                   />
                 </div>

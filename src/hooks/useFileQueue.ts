@@ -5,7 +5,7 @@ import {
   fileStore,
   useFileStats,
   useSelectedFile,
-  useAllFiles,
+  useSelectedId,
 } from "./useFileStore";
 import type { ProcessedFile, AstroFile } from "../utils/types";
 
@@ -64,7 +64,7 @@ export function useFileQueue() {
 
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const selectedFile = useSelectedFile();
-  const files = useAllFiles();
+  const selected = useSelectedId();
 
   const addFiles = useCallback((fileList: AstroFile[]) => {
     fileStore.addFiles(fileList);
@@ -177,8 +177,8 @@ export function useFileQueue() {
   }, []);
 
   return {
-    files,
-    selected: fileStore.getSelected(),
+    files: fileStore.getFiles(),
+    selected,
     selectedFile,
     isProcessing,
     stats,

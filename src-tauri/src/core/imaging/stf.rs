@@ -43,8 +43,7 @@ fn mtf_balance(m: f64, t: f64) -> f64 {
     if denom.abs() < 1e-15 {
         return 0.5;
     }
-    let b = (m * (t - 1.0)) / denom;
-    b.clamp(0.0001, 0.9999)
+    (m * (t - 1.0) / denom).clamp(0.0001, 0.9999)
 }
 
 #[inline(always)]
@@ -58,17 +57,38 @@ fn mtf(x: f64, m: f64) -> f64 {
     (m - 1.0) * x / ((2.0 * m - 1.0) * x - m)
 }
 
+struct StfTransform {
+    inv_range: f64,
+    dmin: f64,
+    shadow: f64,
+    inv_clip: f64,
+    midtone: f64,
+}
+
+impl StfTransform {
+    fn new(params: &StfParams, stats: &ImageStats) -> Self {
+        let range = (stats.max - stats.min).max(1e-30);
+        let clip_range = (params.highlight - params.shadow).max(1e-15);
+        Self {
+            inv_range: 1.0 / range,
+            dmin: stats.min,
+            shadow: params.shadow,
+            inv_clip: 1.0 / clip_range,
+            midtone: params.midtone,
+        }
+    }
+
+    #[inline(always)]
+    fn apply(&self, v: f64) -> f64 {
+        let norm = (v - self.dmin) * self.inv_range;
+        let clipped = ((norm - self.shadow) * self.inv_clip).clamp(0.0, 1.0);
+        mtf(clipped, self.midtone)
+    }
+}
+
 pub fn apply_stf(data: &Array2<f32>, params: &StfParams, stats: &ImageStats) -> Vec<u8> {
     let slice = data.as_slice().expect("contiguous");
-
-    let range = (stats.max - stats.min).max(1e-30);
-    let inv_range = 1.0 / range;
-    let dmin = stats.min;
-
-    let shadow = params.shadow;
-    let highlight = params.highlight;
-    let clip_range = (highlight - shadow).max(1e-15);
-    let m = params.midtone;
+    let tx = StfTransform::new(params, stats);
 
     slice
         .par_iter()
@@ -76,10 +96,7 @@ pub fn apply_stf(data: &Array2<f32>, params: &StfParams, stats: &ImageStats) -> 
             if !is_valid_pixel(v) {
                 return 0u8;
             }
-            let norm = (v as f64 - dmin) * inv_range;
-            let clipped = ((norm - shadow) / clip_range).clamp(0.0, 1.0);
-            let stretched = mtf(clipped, m);
-            (stretched * 255.0).round().clamp(0.0, 255.0) as u8
+            (tx.apply(v as f64) * 255.0).round().clamp(0.0, 255.0) as u8
         })
         .collect()
 }
@@ -87,15 +104,7 @@ pub fn apply_stf(data: &Array2<f32>, params: &StfParams, stats: &ImageStats) -> 
 pub fn apply_stf_f32(data: &Array2<f32>, params: &StfParams, stats: &ImageStats) -> Array2<f32> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().expect("contiguous");
-
-    let range = (stats.max - stats.min).max(1e-30);
-    let inv_range = 1.0 / range;
-    let dmin = stats.min;
-
-    let shadow = params.shadow;
-    let highlight = params.highlight;
-    let clip_range = (highlight - shadow).max(1e-15);
-    let m = params.midtone;
+    let tx = StfTransform::new(params, stats);
 
     let pixels: Vec<f32> = slice
         .par_iter()
@@ -103,9 +112,7 @@ pub fn apply_stf_f32(data: &Array2<f32>, params: &StfParams, stats: &ImageStats)
             if !is_valid_pixel(v) {
                 return 0.0f32;
             }
-            let norm = (v as f64 - dmin) * inv_range;
-            let clipped = ((norm - shadow) / clip_range).clamp(0.0, 1.0);
-            mtf(clipped, m) as f32
+            tx.apply(v as f64) as f32
         })
         .collect();
 

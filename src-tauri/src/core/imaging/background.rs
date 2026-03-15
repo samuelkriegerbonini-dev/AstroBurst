@@ -6,6 +6,8 @@ use crate::infra::progress::ProgressHandle;
 use crate::math::median::{median_f32_mut};
 use crate::types::error::AppError;
 
+const MAX_POLY_TERMS: usize = 21;
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct BackgroundConfig {
     pub grid_size: usize,
@@ -207,6 +209,45 @@ fn min_samples_for_degree(degree: usize) -> usize {
     n_terms + 2
 }
 
+#[inline]
+fn poly_basis_into(y: f64, x: f64, degree: usize, out: &mut [f64; MAX_POLY_TERMS]) -> usize {
+    let mut idx = 0;
+    let mut y_pow = 1.0f64;
+    for total_deg in 0..=degree {
+        let mut xy = y_pow;
+        for _y_p in (0..=total_deg).rev() {
+            out[idx] = xy;
+            idx += 1;
+            if _y_p > 0 {
+                xy = xy / y.max(1e-300) * x;
+            }
+        }
+        y_pow *= y;
+    }
+    idx
+}
+
+#[inline]
+fn eval_poly_inline(
+    ny: f64,
+    nx: f64,
+    degree: usize,
+    coeffs: &[f64],
+    y_pows: &[f64; 7],
+    x_pows: &[f64; 7],
+) -> f64 {
+    let mut val = 0.0f64;
+    let mut idx = 0;
+    for total_deg in 0..=degree {
+        for y_pow in (0..=total_deg).rev() {
+            let x_pow = total_deg - y_pow;
+            val += coeffs[idx] * y_pows[y_pow] * x_pows[x_pow];
+            idx += 1;
+        }
+    }
+    val
+}
+
 fn fit_polynomial_surface(
     samples: &[SamplePoint],
     rows: usize,
@@ -221,18 +262,19 @@ fn fit_polynomial_surface(
 
     let mut ata = vec![0.0f64; n_terms * n_terms];
     let mut atb = vec![0.0f64; n_terms];
+    let mut basis_buf = [0.0f64; MAX_POLY_TERMS];
 
     for sample in samples {
         let ny = sample.y as f64 / row_scale;
         let nx = sample.x as f64 / col_scale;
         let val = sample.value as f64;
 
-        let basis = poly_basis(ny, nx, degree);
+        let count = poly_basis_into(ny, nx, degree, &mut basis_buf);
 
-        for i in 0..n_terms {
-            atb[i] += basis[i] * val;
-            for j in 0..n_terms {
-                ata[i * n_terms + j] += basis[i] * basis[j];
+        for i in 0..count {
+            atb[i] += basis_buf[i] * val;
+            for j in 0..count {
+                ata[i * n_terms + j] += basis_buf[i] * basis_buf[j];
             }
         }
     }
@@ -274,12 +316,21 @@ fn evaluate_polynomial_surface(
         .into_par_iter()
         .flat_map(|y| {
             let ny = y as f64 / row_scale;
+            let mut y_pows = [0.0f64; 7];
+            y_pows[0] = 1.0;
+            for i in 1..=degree.min(6) {
+                y_pows[i] = y_pows[i - 1] * ny;
+            }
+
             (0..cols)
                 .map(|x| {
                     let nx = x as f64 / col_scale;
-                    let basis = poly_basis(ny, nx, degree);
-                    let val: f64 = coeffs.iter().zip(basis.iter()).map(|(c, b)| c * b).sum();
-                    val as f32
+                    let mut x_pows = [0.0f64; 7];
+                    x_pows[0] = 1.0;
+                    for i in 1..=degree.min(6) {
+                        x_pows[i] = x_pows[i - 1] * nx;
+                    }
+                    eval_poly_inline(ny, nx, degree, coeffs, &y_pows, &x_pows) as f32
                 })
                 .collect::<Vec<f32>>()
         })
@@ -345,8 +396,15 @@ fn compute_rms_residual(
         .map(|s| {
             let ny = s.y as f64 / row_scale;
             let nx = s.x as f64 / col_scale;
-            let basis = poly_basis(ny, nx, degree);
-            let predicted: f64 = coeffs.iter().zip(basis.iter()).map(|(c, b)| c * b).sum();
+            let mut y_pows = [0.0f64; 7];
+            let mut x_pows = [0.0f64; 7];
+            y_pows[0] = 1.0;
+            x_pows[0] = 1.0;
+            for i in 1..=degree.min(6) {
+                y_pows[i] = y_pows[i - 1] * ny;
+                x_pows[i] = x_pows[i - 1] * nx;
+            }
+            let predicted = eval_poly_inline(ny, nx, degree, coeffs, &y_pows, &x_pows);
             let diff = s.value as f64 - predicted;
             diff * diff
         })
@@ -411,6 +469,28 @@ mod tests {
         assert!((b[0] - 1.0).abs() < 1e-10);
         assert!((b[1] - 0.5).abs() < 1e-10);
         assert!((b[2] - 0.3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_poly_basis_into_matches_alloc() {
+        let y = 0.5;
+        let x = 0.3;
+        for degree in 1..=5 {
+            let alloc = poly_basis(y, x, degree);
+            let mut buf = [0.0f64; MAX_POLY_TERMS];
+            let mut y_pows = [0.0f64; 7];
+            let mut x_pows = [0.0f64; 7];
+            y_pows[0] = 1.0;
+            x_pows[0] = 1.0;
+            for i in 1..=degree {
+                y_pows[i] = y_pows[i - 1] * y;
+                x_pows[i] = x_pows[i - 1] * x;
+            }
+            let val_alloc: f64 = alloc.iter().enumerate().map(|(i, &b)| b * (i as f64 + 1.0)).sum();
+            let coeffs: Vec<f64> = (0..alloc.len()).map(|i| (i as f64 + 1.0)).collect();
+            let val_inline = eval_poly_inline(y, x, degree, &coeffs, &y_pows, &x_pows);
+            assert!((val_alloc - val_inline).abs() < 1e-10, "Mismatch at degree {}", degree);
+        }
     }
 
     #[test]

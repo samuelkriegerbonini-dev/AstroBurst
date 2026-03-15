@@ -1,6 +1,11 @@
 import { useEffect, useRef, useCallback, useMemo, memo, useState } from "react";
 import { Wand2, RotateCcw, SlidersHorizontal } from "lucide-react";
 
+const CANVAS_H = 110;
+const DRAG_THRESHOLD = 0.03;
+const BAR_COLOR = "#3b82f6";
+const BG_COLOR = "#0a0a0f";
+
 function HistogramPanel({
                           bins = [],
                           dataMin = 0,
@@ -22,10 +27,18 @@ function HistogramPanel({
   const overlayRafRef = useRef(null);
   const stateRef = useRef({ shadow, midtone, highlight });
   stateRef.current = { shadow, midtone, highlight };
-  const CANVAS_H = 110;
 
   const [manualMode, setManualMode] = useState(false);
   const [draft, setDraft] = useState({ shadow: "", midtone: "", highlight: "" });
+
+  const logMax = useMemo(() => {
+    if (bins.length === 0) return 1;
+    let max = 1;
+    for (let i = 0; i < bins.length; i++) {
+      if (bins[i] > max) max = bins[i];
+    }
+    return Math.log10(max + 1);
+  }, [bins]);
 
   const openManual = useCallback(() => {
     setDraft({
@@ -61,21 +74,17 @@ function HistogramPanel({
       }
 
       const ctx = canvas.getContext("2d", { alpha: false });
-      ctx.fillStyle = "#0a0a0f";
+      ctx.fillStyle = BG_COLOR;
       ctx.fillRect(0, 0, W, H);
 
-      const maxBin = bins.reduce((a, b) => (a > b ? a : b), 1);
-      const logMax = Math.log10(maxBin + 1);
-
       const barW = W / bins.length;
-      ctx.fillStyle = "#3b82f6";
+      ctx.fillStyle = BAR_COLOR;
       for (let i = 0; i < bins.length; i++) {
-        const logVal = Math.log10(bins[i] + 1);
-        const h = (logVal / logMax) * (H - 4);
+        const h = (Math.log10(bins[i] + 1) / logMax) * (H - 4);
         ctx.fillRect(i * barW, H - h, Math.max(1, barW - 0.5), h);
       }
     });
-  }, [bins]);
+  }, [bins, logMax]);
 
   const drawOverlay = useCallback(() => {
     if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
@@ -96,32 +105,29 @@ function HistogramPanel({
       ctx.clearRect(0, 0, W, H);
 
       const { shadow: s, midtone: m, highlight: hi } = stateRef.current;
-
       const shadowX = s * W;
+      const highlightX = hi * W;
+      const midX = shadowX + m * (highlightX - shadowX);
+
       ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
       ctx.fillRect(0, 0, shadowX, H);
-
-      const highlightX = hi * W;
-      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
       ctx.fillRect(highlightX, 0, W - highlightX, H);
 
-      ctx.strokeStyle = "#ef4444";
       ctx.lineWidth = 1.5;
+
+      ctx.strokeStyle = "#ef4444";
       ctx.beginPath();
       ctx.moveTo(shadowX, 0);
       ctx.lineTo(shadowX, H);
       ctx.stroke();
 
       ctx.strokeStyle = "#22c55e";
-      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(highlightX, 0);
       ctx.lineTo(highlightX, H);
       ctx.stroke();
 
-      const midX = shadowX + m * (highlightX - shadowX);
       ctx.strokeStyle = "#eab308";
-      ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 3]);
       ctx.beginPath();
       ctx.moveTo(midX, 0);
@@ -148,9 +154,7 @@ function HistogramPanel({
     };
   }, [drawBars]);
 
-  useEffect(() => {
-    drawOverlay();
-  }, [shadow, midtone, highlight, drawOverlay]);
+  useEffect(() => { drawOverlay(); }, [shadow, midtone, highlight, drawOverlay]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -176,18 +180,13 @@ function HistogramPanel({
       const distS = Math.abs(norm - s);
       const distM = Math.abs(norm - midX);
       const distH = Math.abs(norm - hi);
-
-      const threshold = 0.03;
       const minDist = Math.min(distS, distM, distH);
-      if (minDist > threshold) return;
 
-      if (minDist === distS) draggingRef.current = "shadow";
-      else if (minDist === distH) draggingRef.current = "highlight";
-      else draggingRef.current = "midtone";
+      if (minDist > DRAG_THRESHOLD) return;
 
+      draggingRef.current =
+        minDist === distS ? "shadow" : minDist === distH ? "highlight" : "midtone";
       e.preventDefault();
-
-      const canvas = overlayRef.current;
 
       const onMove = (ev) => {
         if (!draggingRef.current || !onChange) return;
@@ -195,23 +194,19 @@ function HistogramPanel({
         const { shadow: cs, midtone: cm, highlight: ch } = stateRef.current;
 
         if (draggingRef.current === "shadow") {
-          const ns = Math.max(0, Math.min(n, ch - 0.01));
-          onChange({ shadow: ns, midtone: cm, highlight: ch });
+          onChange({ shadow: Math.max(0, Math.min(n, ch - 0.01)), midtone: cm, highlight: ch });
         } else if (draggingRef.current === "highlight") {
-          const nh = Math.min(1, Math.max(n, cs + 0.01));
-          onChange({ shadow: cs, midtone: cm, highlight: nh });
-        } else if (draggingRef.current === "midtone") {
+          onChange({ shadow: cs, midtone: cm, highlight: Math.min(1, Math.max(n, cs + 0.01)) });
+        } else {
           const range = ch - cs;
           if (range > 0) {
-            const nm = Math.max(0.001, Math.min(0.999, (n - cs) / range));
-            onChange({ shadow: cs, midtone: nm, highlight: ch });
+            onChange({ shadow: cs, midtone: Math.max(0.001, Math.min(0.999, (n - cs) / range)), highlight: ch });
           }
         }
       };
 
       const onUp = () => {
         draggingRef.current = null;
-        if (canvas) canvas.style.willChange = "";
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
       };

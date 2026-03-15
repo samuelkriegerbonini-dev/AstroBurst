@@ -7,22 +7,21 @@ pub fn arcsinh_stretch(data: &Array2<f32>, factor: f32) -> Array2<f32> {
     }
 
     let inv_denom = 1.0 / factor.asinh();
-    let (rows, cols) = data.dim();
+    let mut out = data.clone();
 
-    let pixels: Vec<f32> = data
-        .as_slice()
+    out.as_slice_mut()
         .expect("contiguous")
-        .par_iter()
-        .map(|&v| {
-            if !v.is_finite() || v <= 0.0 {
-                return 0.0;
+        .par_iter_mut()
+        .for_each(|v| {
+            let val = *v;
+            if !val.is_finite() || val <= 0.0 {
+                *v = 0.0;
+            } else {
+                *v = (val.clamp(0.0, 1.0) * factor).asinh() * inv_denom;
             }
-            let clamped = v.clamp(0.0, 1.0);
-            (clamped * factor).asinh() * inv_denom
-        })
-        .collect();
+        });
 
-    Array2::from_shape_vec((rows, cols), pixels).unwrap()
+    out
 }
 
 pub fn arcsinh_stretch_rgb(
@@ -31,11 +30,16 @@ pub fn arcsinh_stretch_rgb(
     b: &Array2<f32>,
     factor: f32,
 ) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
-    (
-        arcsinh_stretch(r, factor),
-        arcsinh_stretch(g, factor),
-        arcsinh_stretch(b, factor),
-    )
+    let (ro, (go, bo)) = rayon::join(
+        || arcsinh_stretch(r, factor),
+        || {
+            rayon::join(
+                || arcsinh_stretch(g, factor),
+                || arcsinh_stretch(b, factor),
+            )
+        },
+    );
+    (ro, go, bo)
 }
 
 #[cfg(test)]
@@ -82,5 +86,15 @@ mod tests {
         assert_eq!(result[[0, 0]], 0.0);
         assert_eq!(result[[0, 1]], 0.0);
         assert!(result[[0, 2]] > 0.0);
+    }
+
+    #[test]
+    fn test_arcsinh_stretch_rgb_consistency() {
+        let ch = Array2::from_shape_fn((10, 10), |(r, c)| (r + c) as f32 / 20.0);
+        let single = arcsinh_stretch(&ch, 20.0);
+        let (ro, go, bo) = arcsinh_stretch_rgb(&ch, &ch, &ch, 20.0);
+        assert_eq!(single, ro);
+        assert_eq!(single, go);
+        assert_eq!(single, bo);
     }
 }

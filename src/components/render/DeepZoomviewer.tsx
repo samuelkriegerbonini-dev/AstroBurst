@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
 import { useBackend } from "../../hooks/useBackend";
+import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 
 interface DeepZoomViewerProps {
-  filePath: string;
+  filePath?: string;
   imageWidth: number;
   imageHeight: number;
   tileSize?: number;
@@ -30,14 +31,21 @@ function computeMaxLevel(w: number, h: number, ts: number): number {
   return level;
 }
 
+type ViewerMode = "tiles" | "image";
+
 function DeepZoomViewer({
-                          filePath,
+                          filePath: filePathProp,
                           imageWidth,
                           imageHeight,
                           tileSize = 256,
                           outputDir = "./output/tiles",
                           className = "",
                         }: DeepZoomViewerProps) {
+  const { file } = useFileContext();
+  const { activeImagePath, renderedPreviewUrl } = useRenderContext();
+
+  const rawPath = activeImagePath || filePathProp || file?.path || "";
+
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const convertRef = useRef<((path: string) => string) | null>(null);
@@ -46,10 +54,23 @@ function DeepZoomViewer({
   const [error, setError] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
   const generatedPathRef = useRef<string | null>(null);
+  const renderedUrlRef = useRef<string | null>(null);
+  const modeRef = useRef<ViewerMode>("tiles");
   const { generateTiles } = useBackend();
 
+  const hasRendered = !!renderedPreviewUrl;
+  const effectiveKey = hasRendered ? `rendered:${renderedPreviewUrl}` : `tiles:${rawPath}`;
+
+  const destroyViewer = useCallback(() => {
+    if (viewerRef.current) {
+      viewerRef.current.destroy();
+      viewerRef.current = null;
+    }
+    setViewerReady(false);
+  }, []);
+
   const runGenerate = useCallback(async () => {
-    if (!filePath || generatedPathRef.current === filePath) return;
+    if (!rawPath || generatedPathRef.current === rawPath) return;
     setGenerating(true);
     setError(null);
     setReady(false);
@@ -58,24 +79,48 @@ function DeepZoomViewer({
     try {
       const convert = await ensureConvertFileSrc();
       convertRef.current = convert;
-      await generateTiles(filePath, outputDir, tileSize);
-      generatedPathRef.current = filePath;
+      await generateTiles(rawPath, outputDir, tileSize);
+      generatedPathRef.current = rawPath;
+      modeRef.current = "tiles";
       setReady(true);
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
       setGenerating(false);
     }
-  }, [filePath, outputDir, tileSize, generateTiles]);
+  }, [rawPath, outputDir, tileSize, generateTiles]);
+
+  const setupRenderedImage = useCallback(async () => {
+    if (!renderedPreviewUrl || renderedUrlRef.current === renderedPreviewUrl) return;
+    setGenerating(false);
+    setError(null);
+    setReady(false);
+    setViewerReady(false);
+
+    try {
+      const convert = await ensureConvertFileSrc();
+      convertRef.current = convert;
+      renderedUrlRef.current = renderedPreviewUrl;
+      modeRef.current = "image";
+      setReady(true);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  }, [renderedPreviewUrl]);
 
   useEffect(() => {
-    if (filePath && filePath !== generatedPathRef.current) {
+    if (hasRendered) {
+      if (renderedUrlRef.current !== renderedPreviewUrl) {
+        setupRenderedImage();
+      }
+    } else if (rawPath && rawPath !== generatedPathRef.current) {
+      renderedUrlRef.current = null;
       runGenerate();
     }
-  }, [filePath, runGenerate]);
+  }, [hasRendered, renderedPreviewUrl, rawPath, setupRenderedImage, runGenerate]);
 
   useEffect(() => {
-    if (!ready || !containerRef.current || !convertRef.current) return;
+    if (!ready || !containerRef.current) return;
     if (!imageWidth || !imageHeight || imageWidth <= 0 || imageHeight <= 0) return;
 
     let destroyed = false;
@@ -90,19 +135,22 @@ function DeepZoomViewer({
       }
       if (destroyed) return;
 
-      const convert = convertRef.current!;
-      const ts = tileSize;
-      const maxLevel = computeMaxLevel(imageWidth, imageHeight, ts);
+      destroyViewer();
 
-      if (viewerRef.current) {
-        viewerRef.current.destroy();
-        viewerRef.current = null;
-      }
+      let tileSources: any;
 
-      const viewer = OSD({
-        element: containerRef.current,
-        prefixUrl: "",
-        tileSources: {
+      if (modeRef.current === "image" && renderedPreviewUrl) {
+        tileSources = {
+          type: "image",
+          url: renderedPreviewUrl,
+          buildPyramid: true,
+        };
+      } else {
+        const convert = convertRef.current!;
+        const ts = tileSize;
+        const maxLevel = computeMaxLevel(imageWidth, imageHeight, ts);
+
+        tileSources = {
           width: imageWidth,
           height: imageHeight,
           tileSize: ts,
@@ -113,7 +161,13 @@ function DeepZoomViewer({
             const localPath = `${outputDir}/${level}/${x}_${y}.png`;
             return convert(localPath);
           },
-        },
+        };
+      }
+
+      const viewer = OSD({
+        element: containerRef.current,
+        prefixUrl: "",
+        tileSources,
         showNavigationControl: false,
         showNavigator: false,
         showZoomControl: false,
@@ -151,23 +205,17 @@ function DeepZoomViewer({
 
     return () => {
       destroyed = true;
-      if (viewerRef.current) {
-        viewerRef.current.destroy();
-        viewerRef.current = null;
-      }
-      setViewerReady(false);
+      destroyViewer();
     };
-  }, [ready, imageWidth, imageHeight, tileSize, outputDir]);
+  }, [ready, imageWidth, imageHeight, tileSize, outputDir, renderedPreviewUrl, destroyViewer]);
 
   useEffect(() => {
     return () => {
-      if (viewerRef.current) {
-        viewerRef.current.destroy();
-        viewerRef.current = null;
-      }
+      destroyViewer();
       generatedPathRef.current = null;
+      renderedUrlRef.current = null;
     };
-  }, []);
+  }, [destroyViewer]);
 
   const handleZoomIn = useCallback(() => {
     viewerRef.current?.viewport?.zoomBy(1.5);
@@ -193,7 +241,12 @@ function DeepZoomViewer({
         <AlertCircle size={24} className="text-red-400/60" />
         <p className="text-xs text-red-300/80 max-w-[300px] text-center">{error}</p>
         <button
-          onClick={() => { generatedPathRef.current = null; runGenerate(); }}
+          onClick={() => {
+            generatedPathRef.current = null;
+            renderedUrlRef.current = null;
+            if (hasRendered) setupRenderedImage();
+            else runGenerate();
+          }}
           className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
         >
           Retry
@@ -218,6 +271,8 @@ function DeepZoomViewer({
       </div>
     );
   }
+
+  const modeLabel = modeRef.current === "image" ? "rendered" : "tiled";
 
   return (
     <div className={`relative bg-zinc-950 ${className}`}>
@@ -252,7 +307,9 @@ function DeepZoomViewer({
           bg-zinc-950/70 backdrop-blur-sm rounded px-2 py-1
           border border-zinc-800/30 select-none pointer-events-none"
         >
-          {imageWidth}x{imageHeight} | {tileSize}px tiles | {computeMaxLevel(imageWidth, imageHeight, tileSize) + 1} levels
+          {imageWidth}x{imageHeight}
+          {modeRef.current === "tiles" && <> | {tileSize}px tiles | {computeMaxLevel(imageWidth, imageHeight, tileSize) + 1} levels</>}
+          {modeRef.current === "image" && <> | {modeLabel}</>}
         </div>
       )}
 

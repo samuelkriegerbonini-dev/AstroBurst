@@ -42,11 +42,14 @@ function ExportTabInner() {
       gPath: string | null,
       bPath: string | null,
       outputPath: string,
-      _options: any,
+      options: any,
     ) => {
       setExportLoading(true);
       try {
-        const result = await exportFitsRgb(rPath, gPath, bPath, outputPath);
+        const result = await exportFitsRgb(rPath, gPath, bPath, outputPath, {
+          copyWcs: options?.copyWcs ?? true,
+          copyMetadata: options?.copyMetadata ?? true,
+        });
         setExportResult(result);
       } catch (e) {
         console.error("RGB FITS export failed:", e);
