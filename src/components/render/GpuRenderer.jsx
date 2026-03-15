@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
-import { renderStfInWorker, cancelPendingRenders, setWorkerPixels } from "../../utils/stfWorker.ts";
+import { renderStfInWorker, cancelPendingRenders, setWorkerPixels } from "../../utils/stfworker.ts";
 import { getGpuSingleton, getGpuState } from "../../context/Gpucontext";
 
 const MAX_DISPLAY_DIM = 4096;
