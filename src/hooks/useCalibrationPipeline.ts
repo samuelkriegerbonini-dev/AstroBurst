@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { runCalibrationPipeline } from "../services/stacking.service";
 
 interface ChannelStats {
   label: string;
@@ -39,12 +40,6 @@ interface PipelineConfig {
   normalize?: boolean;
 }
 
-const safeInvoke = async (cmd: string, args: Record<string, any> = {}) => {
-  if (!(window as any).__TAURI_INTERNALS__) throw new Error("Requires Tauri");
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke(cmd, args);
-};
-
 export function useCalibrationPipeline() {
   const [result, setResult] = useState<PipelineResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -63,16 +58,14 @@ export function useCalibrationPipeline() {
       setError(null);
       setProgress("Building calibration masters...");
       try {
-        const res = await safeInvoke("run_pipeline_cmd", {
-          request: {
-            channels,
-            dark_paths: darkPaths,
-            flat_paths: flatPaths,
-            bias_paths: biasPaths,
-            sigma_low: config?.sigma_low,
-            sigma_high: config?.sigma_high,
-            normalize: config?.normalize,
-          },
+        const res = await runCalibrationPipeline({
+          channels,
+          dark_paths: darkPaths,
+          flat_paths: flatPaths,
+          bias_paths: biasPaths,
+          sigma_low: config?.sigma_low,
+          sigma_high: config?.sigma_high,
+          normalize: config?.normalize,
         }) as PipelineResponse;
         setResult(res);
         setProgress("");

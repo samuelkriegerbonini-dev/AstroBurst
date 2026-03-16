@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
-import { Loader2, Sun, Moon, Aperture, Play, CheckCircle2, AlertCircle } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
-import type { ProcessedFile } from "../../utils/types";
+import { Sun, Moon, Aperture, CheckCircle2 } from "lucide-react";
+import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import { calibrate } from "../../services/stacking.service";
+import type { ProcessedFile } from "../../shared/types";
 
 interface CalibrationPanelProps {
   files: ProcessedFile[];
@@ -23,8 +24,9 @@ const FRAME_META: Record<FrameType, { label: string; icon: typeof Sun; color: st
   flat: { label: "Flat", icon: Sun, color: "#fbbf24", desc: "Uniform light frames" },
 };
 
+const HEADER_ICON = <Aperture size={14} className="text-violet-400" />;
+
 export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibrationDone }: CalibrationPanelProps) {
-  const { calibrate } = useBackend();
   const [sciencePath, setSciencePath] = useState<string | null>(null);
   const [frames, setFrames] = useState<FrameSelection>({ bias: [], dark: [], flat: [] });
   const [darkExposureRatio, setDarkExposureRatio] = useState(1.0);
@@ -60,26 +62,24 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
     } finally {
       setIsCalibrating(false);
     }
-  }, [sciencePath, frames, darkExposureRatio, calibrate, onPreviewUpdate, onCalibrationDone]);
+  }, [sciencePath, frames, darkExposureRatio, onPreviewUpdate, onCalibrationDone]);
 
   const hasFrames = frames.bias.length > 0 || frames.dark.length > 0 || frames.flat.length > 0;
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4">
-        <h4 className="text-xs font-semibold text-violet-400 uppercase tracking-wider mb-3">
-          Science Frame
-        </h4>
+    <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
+      <SectionHeader icon={HEADER_ICON} title="Calibration" />
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">Science Frame</span>
         <select
           value={sciencePath || ""}
           onChange={(e) => setSciencePath(e.target.value || null)}
-          className="w-full bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 outline-none focus:border-violet-500/50"
+          className="ab-select w-full"
         >
           <option value="">Select science frame...</option>
           {files.map((f) => (
-            <option key={f.id} value={f.path}>
-              {f.name}
-            </option>
+            <option key={f.id} value={f.path}>{f.name}</option>
           ))}
         </select>
       </div>
@@ -89,15 +89,15 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
         const Icon = meta.icon;
         const selected = frames[type];
         return (
-          <div key={type} className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5" style={{ color: meta.color }}>
+          <div key={type} className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5" style={{ color: meta.color }}>
                 <Icon size={12} />
                 {meta.label} Frames
                 {selected.length > 0 && (
                   <span className="ml-1 text-zinc-500">({selected.length})</span>
                 )}
-              </h4>
+              </span>
               <span className="text-[10px] text-zinc-600">{meta.desc}</span>
             </div>
             <div className="flex flex-col gap-1 max-h-[120px] overflow-y-auto">
@@ -127,9 +127,7 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
                 );
               })}
               {files.length === 0 && (
-                <span className="text-[10px] text-zinc-600 py-2 text-center">
-                  No processed files available
-                </span>
+                <span className="text-[10px] text-zinc-600 py-2 text-center">No processed files available</span>
               )}
             </div>
           </div>
@@ -137,59 +135,41 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
       })}
 
       {frames.dark.length > 0 && (
-        <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4">
-          <label className="text-[10px] text-zinc-400 font-medium block mb-1.5">
-            Dark Exposure Ratio
-          </label>
-          <input
-            type="range"
-            min={0.1}
-            max={3.0}
-            step={0.1}
-            value={darkExposureRatio}
-            onChange={(e) => setDarkExposureRatio(parseFloat(e.target.value))}
-            className="w-full accent-blue-500"
-          />
-          <div className="text-[10px] font-mono text-zinc-500 mt-1">{darkExposureRatio.toFixed(1)}x</div>
-        </div>
+        <Slider
+          label="Dark Exposure Ratio"
+          value={darkExposureRatio}
+          min={0.1}
+          max={3.0}
+          step={0.1}
+          accent="sky"
+          format={(v) => `${v.toFixed(1)}×`}
+          onChange={setDarkExposureRatio}
+        />
       )}
 
-      <button
+      <RunButton
+        label="Calibrate"
+        runningLabel="Calibrating..."
+        running={isCalibrating}
+        disabled={!sciencePath || !hasFrames}
+        accent="violet"
         onClick={handleCalibrate}
-        disabled={!sciencePath || !hasFrames || isCalibrating}
-        className="flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-        style={{
-          background: isCalibrating ? "rgba(168,85,247,0.1)" : "rgba(168,85,247,0.15)",
-          color: "#c4b5fd",
-          border: "1px solid rgba(168,85,247,0.25)",
-        }}
-      >
-        {isCalibrating ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-        {isCalibrating ? "Calibrating..." : "Calibrate"}
-      </button>
-
-      {error && (
-        <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-300">
-          <AlertCircle size={14} className="shrink-0 mt-0.5" />
-          {error}
-        </div>
-      )}
+      />
+      <ErrorAlert message={error} />
 
       {result && (
-        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
-          <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium mb-1.5">
+        <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
+          <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
             <CheckCircle2 size={12} />
             Calibration Complete
           </div>
           <div className="text-[10px] font-mono text-zinc-400 space-y-0.5">
-            <div>{result.dimensions?.[0]}x{result.dimensions?.[1]}</div>
+            <div>{result.dimensions?.[0]}×{result.dimensions?.[1]}</div>
             {result.has_bias && <div>Bias subtracted</div>}
             {result.has_dark && <div>Dark subtracted</div>}
             {result.has_flat && <div>Flat divided</div>}
             {result.fits_path && (
-              <div className="text-emerald-400/70 mt-1">
-                Output auto-injected into Stack tab
-              </div>
+              <div className="text-emerald-400/70 mt-1">Output auto-injected into Stack tab</div>
             )}
           </div>
         </div>

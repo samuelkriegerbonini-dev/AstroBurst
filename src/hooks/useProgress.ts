@@ -1,6 +1,5 @@
 import {useCallback, useEffect, useRef, useState} from "react";
-
-const isTauri = (): boolean => !!window.__TAURI_INTERNALS__;
+import { isTauri } from "../infrastructure/tauri";
 
 interface ProgressPayload {
   current: number;

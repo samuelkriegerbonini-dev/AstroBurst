@@ -1,9 +1,9 @@
 import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import HistogramPanel from "./HistogramPanel";
-import { useBackend } from "../../hooks/useBackend";
+import { detectStars, computeFftSpectrum, applyStfRender } from "../../services/analysis.service";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
-import type { StfParams } from "../../utils/types";
+import type { StfParams } from "../../shared/types";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
@@ -15,7 +15,10 @@ const EMPTY_STARS: any[] = [];
 function TabSpinner() {
   return (
     <div className="flex items-center justify-center py-12">
-      <Loader2 size={20} className="animate-spin" style={{ color: "var(--ab-teal)" }} />
+      <div
+        className="w-5 h-5 rounded-full animate-spin"
+        style={{ border: "2px solid transparent", borderTopColor: "var(--ab-teal)", borderRightColor: "rgba(20,184,166,0.3)" }}
+      />
     </div>
   );
 }
@@ -42,7 +45,6 @@ function AnalysisTabInner({
   const { isCube, cubeDims } = useCubeContext();
   const { setRenderedPreviewUrl } = useRenderContext();
   const { rawPixels } = useRawPixelsContext();
-  const { detectStars, computeFftSpectrum, applyStfRender } = useBackend();
 
   const [starResult, setStarResult] = useState<any>(null);
   const [starLoading, setStarLoading] = useState(false);
@@ -72,20 +74,14 @@ function AnalysisTabInner({
       console.error("STF render failed:", e);
     } finally {
       ipcBusyRef.current = false;
-      if (pendingStfRef.current) {
-        flushStfIpc();
-      }
+      if (pendingStfRef.current) flushStfIpc();
     }
-  }, [file?.path, applyStfRender, setRenderedPreviewUrl]);
+  }, [file?.path, setRenderedPreviewUrl]);
 
   const handleStfChange = useCallback(
     (params: StfParams) => {
       setStfParams(params);
-
-      if (rawPixels) {
-        return;
-      }
-
+      if (rawPixels) return;
       pendingStfRef.current = params;
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = requestAnimationFrame(() => {
@@ -121,7 +117,7 @@ function AnalysisTabInner({
         setStarLoading(false);
       }
     },
-    [file?.path, detectStars],
+    [file?.path],
   );
 
   const handleCollapsePreview = useCallback(
@@ -145,7 +141,7 @@ function AnalysisTabInner({
 
   return (
     <Suspense fallback={<TabSpinner />}>
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
         {histData && histStats && (
           <HistogramPanel
             bins={histData.bins as any}

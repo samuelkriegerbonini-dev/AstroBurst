@@ -1,13 +1,14 @@
 import { useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
-import { useBackend } from "./useBackend";
+import { processFitsFull, processFits, resampleFits } from "../services/fits.service";
+import { getHeader } from "../services/header.service";
 import {
   fileStore,
   useFileStats,
   useSelectedFile,
   useSelectedId,
 } from "./useFileStore";
-import type { ProcessedFile, AstroFile } from "../utils/types";
+import type { ProcessedFile, AstroFile } from "../shared/types";
 
 const RESAMPLE_RATIO_THRESHOLD = 1.5;
 const CONCURRENCY = 3;
@@ -57,7 +58,6 @@ function shouldResample(groups: ResolutionGroup[]) {
 }
 
 export function useFileQueue() {
-  const { processFitsFull, processFits, getHeader, resampleFits } = useBackend();
   const processingRef = useRef(false);
   const resamplingRef = useRef(false);
   const resampleProgressRef = useRef(0);

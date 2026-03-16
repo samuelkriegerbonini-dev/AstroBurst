@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
 import { PanelLeftClose, PanelLeftOpen, FolderOpen, Download, Loader2 } from "lucide-react";
 import FileItem from "./FileItem";
 import { useFileIds, useSelectedId, useFileStats, fileStore } from "../../hooks/useFileStore";
-import type { ProcessedFile } from "../../utils/types";
+import type { ProcessedFile } from "../../shared/types";
 
 const ITEM_HEIGHT = 44;
 const OVERSCAN = 5;

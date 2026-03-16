@@ -238,3 +238,4 @@ pub const FILE_COLLAPSED_MEAN: &str = "collapsed_mean.png";
 pub const FILE_COLLAPSED_MEDIAN: &str = "collapsed_median.png";
 
 pub const RESAMPLED: &str = "resampled";
+pub const LRGB_APPLIED: &str = "lrgb_applied";

@@ -8,8 +8,11 @@ import {
   useMemo,
   useCallback,
 } from "react";
-import { useBackend } from "../hooks/useBackend";
-import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../utils/types";
+import { computeHistogram } from "../services/analysis.service";
+import { getCubeInfo } from "../services/cube.service";
+import { getRawPixelsPreview } from "../services/fits.service";
+import { detectNarrowbandFilters } from "../services/header.service";
+import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../shared/types";
 
 interface ChannelSuggestion {
   file_path: string;
@@ -127,7 +130,6 @@ function setPreviewCache(key: string, value: string) {
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 export function PreviewProvider({ file, doneFiles, children }: Props) {
-  const { computeHistogram, getCubeInfo, getRawPixelsPreview, detectNarrowbandFilters } = useBackend();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
   const [stfParams, setStfParams] = useState<StfParams>(DEFAULT_STF);

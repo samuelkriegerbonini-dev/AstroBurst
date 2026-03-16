@@ -5,10 +5,11 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, downsample_u8_rgb, MAX_PREVIEW_DIM};
 use crate::core::compose::rgb::process_rgb;
+use crate::core::compose::lrgb::apply_lrgb;
 use crate::core::imaging::resample::resample_image;
 use crate::infra::render::rgb::render_rgb;
 use crate::types::compose::{RgbComposeConfig, RgbComposeResult, WhiteBalance};
-use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RESAMPLED};
+use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, LRGB_APPLIED, RESAMPLED};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
 fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
@@ -19,17 +20,18 @@ fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
 }
 
 fn harmonize_dimensions(
+    l: Option<Array2<f32>>,
     r: Option<Array2<f32>>,
     g: Option<Array2<f32>>,
     b: Option<Array2<f32>>,
-) -> anyhow::Result<(Option<Array2<f32>>, Option<Array2<f32>>, Option<Array2<f32>>, bool)> {
-    let dims: Vec<(usize, usize)> = [r.as_ref(), g.as_ref(), b.as_ref()]
+) -> anyhow::Result<(Option<Array2<f32>>, Option<Array2<f32>>, Option<Array2<f32>>, Option<Array2<f32>>, bool)> {
+    let dims: Vec<(usize, usize)> = [l.as_ref(), r.as_ref(), g.as_ref(), b.as_ref()]
         .iter()
         .filter_map(|ch| ch.map(|a| a.dim()))
         .collect();
 
     if dims.len() < 2 {
-        return Ok((r, g, b, false));
+        return Ok((l, r, g, b, false));
     }
 
     let max_rows = dims.iter().map(|d| d.0).max().unwrap();
@@ -41,7 +43,7 @@ fn harmonize_dimensions(
     let ratio_cols = max_cols as f64 / min_cols as f64;
 
     if ratio_rows < 1.1 && ratio_cols < 1.1 {
-        return Ok((r, g, b, false));
+        return Ok((l, r, g, b, false));
     }
 
     log::info!(
@@ -64,6 +66,7 @@ fn harmonize_dimensions(
     };
 
     Ok((
+        resample_if_needed(l)?,
         resample_if_needed(r)?,
         resample_if_needed(g)?,
         resample_if_needed(b)?,
@@ -128,6 +131,7 @@ fn render_rgb_preview(
 
 #[tauri::command]
 pub async fn compose_rgb_cmd(
+    l_path: Option<String>,
     r_path: Option<String>,
     g_path: Option<String>,
     b_path: Option<String>,
@@ -143,16 +147,20 @@ pub async fn compose_rgb_cmd(
     scnr_method: Option<String>,
     scnr_amount: Option<f64>,
     dimension_tolerance: Option<usize>,
+    lrgb_lightness: Option<f64>,
+    lrgb_chrominance: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
+        let l_arr = load_channel(&l_path)?;
         let r_arr = load_channel(&r_path)?;
         let g_arr = load_channel(&g_path)?;
         let b_arr = load_channel(&b_path)?;
 
-        let (r_arr, g_arr, b_arr, resampled) = harmonize_dimensions(r_arr, g_arr, b_arr)?;
+        let (l_arr, r_arr, g_arr, b_arr, resampled) =
+            harmonize_dimensions(l_arr, r_arr, g_arr, b_arr)?;
 
         let wb = match wb_mode.as_deref() {
             Some(WB_MODE_MANUAL) => WhiteBalance::Manual(
@@ -188,12 +196,39 @@ pub async fn compose_rgb_cmd(
             ..RgbComposeConfig::default()
         };
 
-        let processed = process_rgb(
+        let mut processed = process_rgb(
             r_arr.as_ref(),
             g_arr.as_ref(),
             b_arr.as_ref(),
             &config,
         )?;
+
+        let lrgb_applied = if let Some(l_data) = l_arr.as_ref() {
+            let lightness = lrgb_lightness.unwrap_or(1.0) as f32;
+            let chrominance = lrgb_chrominance.unwrap_or(1.0) as f32;
+
+            let l_stretched = if config.auto_stretch {
+                use crate::core::imaging::stf::{auto_stf, apply_stf_f32, analyze};
+                use crate::types::image::AutoStfConfig;
+                let (stats, _) = analyze(l_data);
+                let stf = auto_stf(&stats, &AutoStfConfig::default());
+                apply_stf_f32(l_data, &stf, &stats)
+            } else {
+                l_data.clone()
+            };
+
+            apply_lrgb(
+                &l_stretched,
+                &mut processed.r,
+                &mut processed.g,
+                &mut processed.b,
+                lightness,
+                chrominance,
+            )?;
+            true
+        } else {
+            false
+        };
 
         let png_path = format!("{}/{}", output_dir, DEFAULT_RGB_COMPOSITE_FILENAME);
 
@@ -231,6 +266,7 @@ pub async fn compose_rgb_cmd(
             RES_OFFSET_B: [result.offset_b.0, result.offset_b.1],
             RES_DIMENSION_CROP: result.dimension_crop,
             RESAMPLED: resampled,
+            LRGB_APPLIED: lrgb_applied,
             RES_STATS_R: { RES_MEDIAN: result.stats_r.median, RES_MEAN: result.stats_r.mean, RES_MIN: result.stats_r.min, RES_MAX: result.stats_r.max },
             RES_STATS_G: { RES_MEDIAN: result.stats_g.median, RES_MEAN: result.stats_g.mean, RES_MIN: result.stats_g.min, RES_MAX: result.stats_g.max },
             RES_STATS_B: { RES_MEDIAN: result.stats_b.median, RES_MEAN: result.stats_b.mean, RES_MIN: result.stats_b.min, RES_MAX: result.stats_b.max },

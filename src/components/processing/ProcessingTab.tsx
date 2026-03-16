@@ -148,7 +148,7 @@ function ProcessingTabInner() {
   const denoiseInput = useMemo(() => {
     if (!file) return null;
     if (chain.backgroundFits) {
-      return { ...file, path: chain.backgroundFits, result: { ...file.result } };
+      return { ...file, path: chain.backgroundFits };
     }
     return file;
   }, [file, chain.backgroundFits]);
@@ -156,13 +156,13 @@ function ProcessingTabInner() {
   const deconvInput = useMemo(() => {
     if (!file) return null;
     const path = chain.denoiseFits || chain.backgroundFits || file.path;
-    return { ...file, path, result: { ...file.result } };
+    return { ...file, path };
   }, [file, chain.denoiseFits, chain.backgroundFits]);
 
   const stretchInput = useMemo(() => {
     if (!file) return null;
     const path = chain.deconvFits || chain.denoiseFits || chain.backgroundFits || file.path;
-    return { ...file, path, result: { ...file.result } };
+    return { ...file, path };
   }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
 
   const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits;

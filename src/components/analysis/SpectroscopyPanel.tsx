@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { Activity, Crosshair, Loader2, Layers } from "lucide-react";
+import { Activity, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
-import { useBackend } from "../../hooks/useBackend";
+import { processCube, processCubeLazy } from "../../services/cube.service";
 
 interface SpectroscopyPanelProps {
   spectrum?: number[];
@@ -49,8 +49,6 @@ export default function SpectroscopyPanel({
   const [collapseLoading, setCollapseLoading] = useState(false);
   const [collapseResult, setCollapseResult] = useState<any>(null);
   const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
-
-  const { processCube, processCubeLazy } = useBackend();
 
   const plotParams = useMemo(() => {
     if (!spectrum || spectrum.length === 0)
@@ -229,13 +227,18 @@ export default function SpectroscopyPanel({
     } finally {
       setCollapseLoading(false);
     }
-  }, [filePath, processCube, processCubeLazy, onCollapsePreview]);
+  }, [filePath, onCollapsePreview]);
 
   if (spectrum.length === 0 && !isLoading) {
     return (
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4 flex flex-col items-center gap-2 text-zinc-600">
-        <Activity size={24} strokeWidth={1.5} />
-        <p className="text-xs">Click on the preview image to extract a spectrum</p>
+      <div className="ab-panel p-6 flex flex-col items-center gap-3">
+        <div
+          className="w-10 h-10 rounded-xl flex items-center justify-center"
+          style={{ background: "rgba(168,85,247,0.06)", border: "1px solid rgba(168,85,247,0.1)" }}
+        >
+          <Activity size={18} style={{ color: "var(--ab-violet)", opacity: 0.5 }} />
+        </div>
+        <p className="text-[11px] text-zinc-500">Click on the preview image to extract a spectrum</p>
       </div>
     );
   }
@@ -243,14 +246,21 @@ export default function SpectroscopyPanel({
   const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
 
   return (
-    <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden animate-fade-in">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
-        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
-          <Activity size={12} />
-          Spectroscopy
-        </h4>
+    <div className="ab-panel overflow-hidden animate-fade-in">
+      <div className="ab-panel-header">
+        <div className="flex items-center gap-1.5">
+          <Activity size={12} style={{ color: "var(--ab-violet)" }} />
+          <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+            Spectroscopy
+          </span>
+        </div>
         <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500">
-          {isLoading && <Loader2 size={12} className="animate-spin text-purple-400" />}
+          {isLoading && (
+            <div
+              className="w-3 h-3 rounded-full animate-spin"
+              style={{ border: "1.5px solid transparent", borderTopColor: "var(--ab-violet)" }}
+            />
+          )}
           {pixelCoord && (
             <span className="flex items-center gap-1">
               <Crosshair size={10} />
@@ -261,19 +271,22 @@ export default function SpectroscopyPanel({
         </div>
       </div>
 
-      <div ref={containerRef} className="px-2 pt-2 pb-2">
+      <div ref={containerRef} className="p-2">
         {isLoading ? (
           <div
-            className="flex items-center justify-center bg-zinc-950 rounded"
-            style={{ height: CANVAS_H }}
+            className="flex items-center justify-center rounded-md"
+            style={{ height: CANVAS_H, background: "rgba(9,9,11,0.8)" }}
           >
-            <Loader2 size={24} className="animate-spin text-purple-400" />
+            <div
+              className="w-5 h-5 rounded-full animate-spin"
+              style={{ border: "2px solid transparent", borderTopColor: "var(--ab-violet)" }}
+            />
           </div>
         ) : (
           <canvas
             ref={canvasRef}
             height={CANVAS_H}
-            className="w-full rounded cursor-crosshair"
+            className="w-full rounded-md cursor-crosshair"
             style={{ height: CANVAS_H }}
             onMouseMove={handleMouseMove}
             onMouseLeave={handleMouseLeave}
@@ -282,37 +295,28 @@ export default function SpectroscopyPanel({
       </div>
 
       {cubeDims && (
-        <div className="px-3 pb-2 text-[10px] font-mono text-zinc-600">
-          Cube: {cubeDims.naxis1 ?? cubeDims.width}x{cubeDims.naxis2 ?? cubeDims.height}x{cubeDims.naxis3 ?? cubeDims.frames} {spectrum.length > 0 ? `\u2014 ${spectrum.length} channels` : ""}
+        <div className="px-3 pb-1 text-[10px] font-mono text-zinc-600">
+          Cube: {cubeDims.naxis1 ?? cubeDims.width} \u00d7 {cubeDims.naxis2 ?? cubeDims.height} \u00d7 {cubeDims.naxis3 ?? cubeDims.frames}
+          {spectrum.length > 0 ? ` \u2014 ${spectrum.length} channels` : ""}
         </div>
       )}
 
       {filePath && cubeDims && totalFrames > 1 && (
-        <div className="px-3 pb-2 flex items-center gap-2">
-          <button
+        <div className="px-3 pb-2 flex items-center gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
+          <CollapseBtn
+            label="Collapse Sum"
+            loading={collapseLoading && collapseMode === "sum"}
+            disabled={collapseLoading}
+            color="var(--ab-violet)"
             onClick={() => handleCollapse("sum")}
+          />
+          <CollapseBtn
+            label="Collapse Median"
+            loading={collapseLoading && collapseMode === "median"}
             disabled={collapseLoading}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-[10px] font-medium transition-all disabled:opacity-40 bg-purple-600/15 hover:bg-purple-600/25 text-purple-300 border border-purple-600/25"
-          >
-            {collapseLoading && collapseMode === "sum" ? (
-              <Loader2 size={10} className="animate-spin" />
-            ) : (
-              <Layers size={10} />
-            )}
-            Collapse Sum
-          </button>
-          <button
+            color="var(--ab-amber)"
             onClick={() => handleCollapse("median")}
-            disabled={collapseLoading}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-[10px] font-medium transition-all disabled:opacity-40 bg-amber-600/15 hover:bg-amber-600/25 text-amber-300 border border-amber-600/25"
-          >
-            {collapseLoading && collapseMode === "median" ? (
-              <Loader2 size={10} className="animate-spin" />
-            ) : (
-              <Layers size={10} />
-            )}
-            Collapse Median
-          </button>
+          />
           {collapseResult && !collapseLoading && (
             <span className="text-[10px] font-mono text-zinc-500 ml-auto">
               {collapseResult.elapsed_ms ?? collapseResult.elapsed}ms
@@ -331,5 +335,42 @@ export default function SpectroscopyPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function CollapseBtn({
+                       label,
+                       loading,
+                       disabled,
+                       color,
+                       onClick,
+                     }: {
+  label: string;
+  loading: boolean;
+  disabled: boolean;
+  color: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-medium transition-all disabled:opacity-40"
+      style={{
+        background: `color-mix(in srgb, ${color} 8%, transparent)`,
+        border: `1px solid color-mix(in srgb, ${color} 20%, transparent)`,
+        color,
+      }}
+    >
+      {loading ? (
+        <div
+          className="w-2.5 h-2.5 rounded-full animate-spin"
+          style={{ border: "1.5px solid transparent", borderTopColor: color }}
+        />
+      ) : (
+        <Layers size={10} />
+      )}
+      {label}
+    </button>
   );
 }

@@ -1,4 +1,6 @@
+// @ts-ignore
 import logoImg from "../assets/logo.png";
+import { APP_VERSION } from "../utils/constants";
 
 interface AstroLogoProps {
     size?: number;
@@ -25,7 +27,7 @@ export function AstroLogo({ size = 32, showText = true, className = "" }: AstroL
             AstroBurst
           </span>
                     <span className="text-[10px] text-blue-400/60 font-mono tracking-tighter">
-            v0.2.0
+            {APP_VERSION}
           </span>
                 </div>
             )}

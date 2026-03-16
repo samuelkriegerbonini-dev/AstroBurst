@@ -1,11 +1,13 @@
 import { useState, useCallback } from "react";
-import { Palette, Loader2, RefreshCw, Link2, Sparkles } from "lucide-react";
-import type { ProcessedFile } from "../../utils/types";
+import { Palette, RefreshCw, Sparkles, Sun } from "lucide-react";
+import { Slider, Toggle, RunButton, ResultGrid, SectionHeader } from "../ui";
+import type { ProcessedFile } from "../../shared/types";
 import type { PaletteSuggestion } from "../../context/PreviewContext";
 
 interface RgbComposePanelProps {
   files?: ProcessedFile[];
   onCompose?: (
+    lPath: string | null,
     rPath: string | null,
     gPath: string | null,
     bPath: string | null,
@@ -25,13 +27,16 @@ function PaletteBadge({ paletteName }: { paletteName: string }) {
   );
 }
 
+const ICON = <Palette size={14} className="text-pink-400" />;
+
 export default function RgbComposePanel({
-                                          files = [],
-                                          onCompose,
-                                          result = null,
-                                          isLoading = false,
-                                          narrowbandPalette,
-                                        }: RgbComposePanelProps) {
+  files = [],
+  onCompose,
+  result = null,
+  isLoading = false,
+  narrowbandPalette,
+}: RgbComposePanelProps) {
+  const [lFile, setLFile] = useState("");
   const [rFile, setRFile] = useState("");
   const [gFile, setGFile] = useState("");
   const [bFile, setBFile] = useState("");
@@ -42,13 +47,16 @@ export default function RgbComposePanel({
   const [scnrEnabled, setScnrEnabled] = useState(false);
   const [scnrMethod, setScnrMethod] = useState("average");
   const [scnrAmount, setScnrAmount] = useState(0.5);
+  const [lrgbLightness, setLrgbLightness] = useState(1.0);
+  const [lrgbChrominance, setLrgbChrominance] = useState(1.0);
 
   const assignedCount = [rFile, gFile, bFile].filter(Boolean).length;
+  const hasL = lFile !== "";
   const canCompose = assignedCount >= 2;
 
   const handleCompose = useCallback(() => {
     if (!canCompose || !onCompose) return;
-    onCompose(rFile || null, gFile || null, bFile || null, {
+    onCompose(lFile || null, rFile || null, gFile || null, bFile || null, {
       autoStretch,
       linkedStf,
       align,
@@ -56,8 +64,10 @@ export default function RgbComposePanel({
       scnrEnabled,
       scnrMethod,
       scnrAmount,
+      lrgbLightness: hasL ? lrgbLightness : undefined,
+      lrgbChrominance: hasL ? lrgbChrominance : undefined,
     });
-  }, [rFile, gFile, bFile, autoStretch, linkedStf, align, wbMode, scnrEnabled, scnrMethod, scnrAmount, onCompose, canCompose]);
+  }, [lFile, rFile, gFile, bFile, autoStretch, linkedStf, align, wbMode, scnrEnabled, scnrMethod, scnrAmount, lrgbLightness, lrgbChrominance, hasL, onCompose, canCompose]);
 
   const handleAutoAssign = useCallback(() => {
     if (
@@ -75,15 +85,17 @@ export default function RgbComposePanel({
 
     const remaining = [...files];
     const patterns: Record<string, RegExp[]> = {
+      l: [/[_-]l[._-]/i, /luminance|lum|clear/i, /[_-]L\./],
       r: [/[_-]r[._-]/i, /ha|h.?alpha|red/i, /[_-]R\./],
       g: [/[_-]g[._-]/i, /oiii|o3|green/i, /[_-]G\./],
       b: [/[_-]b[._-]/i, /sii|s2|blue/i, /[_-]B\./],
     };
 
-    let rMatch = "", gMatch = "", bMatch = "";
+    let lMatch = "", rMatch = "", gMatch = "", bMatch = "";
     for (const f of remaining) {
       const name = f.name || f.path || "";
-      if (!rMatch && patterns.r.some((p) => p.test(name))) rMatch = f.path;
+      if (!lMatch && patterns.l.some((p) => p.test(name))) lMatch = f.path;
+      else if (!rMatch && patterns.r.some((p) => p.test(name))) rMatch = f.path;
       else if (!gMatch && patterns.g.some((p) => p.test(name))) gMatch = f.path;
       else if (!bMatch && patterns.b.some((p) => p.test(name))) bMatch = f.path;
     }
@@ -94,206 +106,127 @@ export default function RgbComposePanel({
       bMatch = remaining[2]?.path || "";
     }
 
+    if (lMatch) setLFile(lMatch);
     if (rMatch) setRFile(rMatch);
     if (gMatch) setGFile(gMatch);
     if (bMatch) setBFile(bMatch);
   }, [files, narrowbandPalette]);
 
-  const ChannelSelect = ({ label, color, value, onChange }: {
+  const ChannelSelect = ({ label, color, value, onChange, icon }: {
     label: string;
     color: string;
     value: string;
     onChange: (v: string) => void;
+    icon?: React.ReactNode;
   }) => (
     <div className="flex items-center gap-2">
-      <div
-        className="w-3 h-3 rounded-full border"
-        style={{
-          backgroundColor: color + "33",
-          borderColor: color,
-        }}
-      />
+      {icon || (
+        <div className="w-3 h-3 rounded-full border" style={{ backgroundColor: color + "33", borderColor: color }} />
+      )}
       <span className="text-[10px] text-zinc-400 w-3 font-bold">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[11px] text-zinc-300 outline-none focus:border-zinc-500"
-      >
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="flex-1 ab-select">
         <option value="">— none —</option>
         {files.map((f) => (
-          <option key={f.path || f.id} value={f.path}>
-            {f.name || f.path}
-          </option>
+          <option key={f.path || f.id} value={f.path}>{f.name || f.path}</option>
         ))}
       </select>
     </div>
   );
 
+  const composeLabel = hasL
+    ? `Compose LRGB (${assignedCount}/3 + L)`
+    : `Compose RGB (${assignedCount}/3 channels)`;
+
   return (
-    <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
+    <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Palette size={12} className="text-pink-400" />
-          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
-            RGB Compose
-          </span>
+          <SectionHeader icon={ICON} title="RGB Compose" />
           {narrowbandPalette?.is_complete && narrowbandPalette.palette_name && (
             <PaletteBadge paletteName={narrowbandPalette.palette_name} />
           )}
         </div>
         {files.length >= 2 && (
-          <button
-            onClick={handleAutoAssign}
-            className="text-[10px] text-zinc-500 hover:text-zinc-300 flex items-center gap-1"
-            title="Auto-assign channels by filename"
-          >
+          <button onClick={handleAutoAssign} className="text-[10px] text-zinc-500 hover:text-zinc-300 flex items-center gap-1" title="Auto-assign channels by filename">
             <RefreshCw size={10} />
             Auto
           </button>
         )}
       </div>
 
-      <div className="px-3 py-2 space-y-2">
+      <div className="flex flex-col gap-2">
+        <ChannelSelect label="L" color="#f5f5f5" value={lFile} onChange={setLFile} icon={<Sun size={12} className="text-zinc-400" />} />
+
+        {hasL && (
+          <div className="pl-5 pb-1 space-y-2 border-l border-zinc-800 ml-1.5">
+            <Slider label="Lightness" value={lrgbLightness} min={0} max={1} step={0.05} accent="violet" format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbLightness} />
+            <Slider label="Chrominance" value={lrgbChrominance} min={0} max={1} step={0.05} accent="violet" format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbChrominance} />
+          </div>
+        )}
+
         <ChannelSelect label="R" color="#ef4444" value={rFile} onChange={setRFile} />
         <ChannelSelect label="G" color="#22c55e" value={gFile} onChange={setGFile} />
         <ChannelSelect label="B" color="#3b82f6" value={bFile} onChange={setBFile} />
+      </div>
 
-        <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1">
-          <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoStretch}
-              onChange={(e) => setAutoStretch(e.target.checked)}
-              className="w-3 h-3 accent-pink-500"
-            />
-            Auto STF
-          </label>
-          <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={linkedStf}
-              onChange={(e) => setLinkedStf(e.target.checked)}
-              className="w-3 h-3 accent-pink-500"
-            />
-            <Link2 size={9} />
-            Linked
-          </label>
-          <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={align}
-              onChange={(e) => setAlign(e.target.checked)}
-              className="w-3 h-3 accent-pink-500"
-            />
-            Align
-          </label>
-        </div>
+      <div className="flex flex-col gap-1.5 border-t border-zinc-800/50 pt-3">
+        <Toggle label="Auto STF" checked={autoStretch} accent="violet" onChange={setAutoStretch} />
+        <Toggle label="Linked STF" checked={linkedStf} accent="violet" onChange={setLinkedStf} />
+        <Toggle label="Align" checked={align} accent="violet" onChange={setAlign} />
 
-        <div className="flex items-center gap-2">
-          <label className="text-[10px] text-zinc-500">WB</label>
-          <select
-            value={wbMode}
-            onChange={(e) => setWbMode(e.target.value)}
-            className="bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-[10px] text-zinc-300 outline-none"
-          >
+        <div className="flex items-center justify-between pt-1">
+          <label className="text-xs text-zinc-400">White Balance</label>
+          <select value={wbMode} onChange={(e) => setWbMode(e.target.value)} className="ab-select">
             <option value="auto">Auto (Median)</option>
             <option value="none">None</option>
             <option value="manual">Manual</option>
           </select>
         </div>
 
-        <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={scnrEnabled}
-            onChange={(e) => setScnrEnabled(e.target.checked)}
-            className="w-3 h-3 accent-pink-500"
-          />
-          SCNR (Green Removal)
-        </label>
+        <Toggle label="SCNR (Green Removal)" checked={scnrEnabled} accent="violet" onChange={setScnrEnabled} />
 
         {scnrEnabled && (
-          <div className="pl-4 space-y-1">
-            <div className="flex items-center gap-2">
-              <select
-                value={scnrMethod}
-                onChange={(e) => setScnrMethod(e.target.value)}
-                className="bg-zinc-900 border border-zinc-700 rounded px-2 py-0.5 text-[10px] text-zinc-300 outline-none"
-              >
+          <div className="pl-4 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs text-zinc-400">Method</label>
+              <select value={scnrMethod} onChange={(e) => setScnrMethod(e.target.value)} className="ab-select">
                 <option value="average">Average Neutral</option>
                 <option value="maximum">Maximum Neutral</option>
               </select>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.1"
-                value={scnrAmount}
-                onChange={(e) => setScnrAmount(parseFloat(e.target.value))}
-                className="flex-1 h-1 accent-pink-500"
-              />
-              <span className="text-[10px] text-zinc-300 font-mono w-6">
-                {(scnrAmount * 100).toFixed(0)}%
-              </span>
             </div>
-          </div>
-        )}
-
-        <button
-          onClick={handleCompose}
-          disabled={!canCompose || isLoading}
-          className="w-full flex items-center justify-center gap-2 bg-pink-600/20 hover:bg-pink-600/30 text-pink-300 border border-pink-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-        >
-          {isLoading ? (
-            <>
-              <Loader2 size={12} className="animate-spin" />
-              Composing...
-            </>
-          ) : (
-            <>
-              <Palette size={12} />
-              Compose RGB ({assignedCount}/3 channels)
-            </>
-          )}
-        </button>
-
-        {result && (
-          <div className="space-y-1.5">
-            {result.previewUrl && (
-              <img
-                src={result.previewUrl}
-                alt="RGB composite"
-                className="w-full rounded border border-zinc-700"
-              />
-            )}
-            <div className="grid grid-cols-3 gap-1 text-[10px]">
-              <div className="bg-zinc-900/80 rounded px-2 py-1">
-                <div className="text-red-400">R median</div>
-                <div className="text-zinc-300 font-mono">{result.stats_r?.median?.toFixed(0)}</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1">
-                <div className="text-green-400">G median</div>
-                <div className="text-zinc-300 font-mono">{result.stats_g?.median?.toFixed(0)}</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1">
-                <div className="text-blue-400">B median</div>
-                <div className="text-zinc-300 font-mono">{result.stats_b?.median?.toFixed(0)}</div>
-              </div>
-            </div>
-            {(result.offset_g || result.offset_b) && (
-              <div className="text-[10px] text-zinc-500">
-                Offsets — G: [{result.offset_g?.[0]}, {result.offset_g?.[1]}] B: [{result.offset_b?.[0]}, {result.offset_b?.[1]}]
-              </div>
-            )}
-            {result.resampled && (
-              <div className="text-[10px] text-amber-400/80">
-                ⚡ Auto-resampled (mixed SW/LW resolution)
-              </div>
-            )}
-            <div className="text-[10px] text-zinc-500">{result.elapsed_ms} ms</div>
+            <Slider label="Amount" value={scnrAmount} min={0} max={1} step={0.1} accent="violet" format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setScnrAmount} />
           </div>
         )}
       </div>
+
+      <RunButton label={composeLabel} runningLabel="Composing..." running={isLoading} disabled={!canCompose} accent="violet" onClick={handleCompose} />
+
+      {result && (
+        <div className="flex flex-col gap-3 animate-fade-in">
+          {result.previewUrl && (
+            <img src={result.previewUrl} alt="RGB composite" className="w-full rounded border border-zinc-700" />
+          )}
+          <ResultGrid columns={3} items={[
+            { label: "R median", value: result.stats_r?.median?.toFixed(0) },
+            { label: "G median", value: result.stats_g?.median?.toFixed(0) },
+            { label: "B median", value: result.stats_b?.median?.toFixed(0) },
+          ]} />
+          {(result.offset_g || result.offset_b) && (
+            <div className="text-[10px] text-zinc-500">
+              Offsets — G: [{result.offset_g?.[0]}, {result.offset_g?.[1]}] B: [{result.offset_b?.[0]}, {result.offset_b?.[1]}]
+            </div>
+          )}
+          {result.resampled && (
+            <div className="text-[10px] text-amber-400/80">⚡ Auto-resampled (mixed SW/LW resolution)</div>
+          )}
+          {result.lrgb_applied && (
+            <div className="text-[10px] text-zinc-400">
+              ☀ LRGB applied (L: {(lrgbLightness * 100).toFixed(0)}%, C: {(lrgbChrominance * 100).toFixed(0)}%)
+            </div>
+          )}
+          <div className="text-[10px] text-zinc-500">{result.elapsed_ms} ms</div>
+        </div>
+      )}
     </div>
   );
 }

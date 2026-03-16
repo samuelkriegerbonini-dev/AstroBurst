@@ -2,7 +2,7 @@ import { useState, useEffect, memo, useCallback, useRef } from "react";
 import { CheckCircle2, XCircle, Clock, Loader2, ImageOff } from "lucide-react";
 import { FILE_STATUS } from "../../utils/constants";
 import { useFileEntry } from "../../hooks/useFileStore";
-import type { ProcessedFile } from "../../utils/types";
+import type { ProcessedFile } from "../../shared/types";
 
 const statusConfig = {
   [FILE_STATUS.QUEUED]: { icon: Clock, color: "text-zinc-500", bgHover: "hover:bg-zinc-800/40", inlineColor: "" },

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { Globe } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
+import { getWcsInfo } from "../../services/astrometry.service";
 import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcstransform";
 
 interface WcsReadoutProps {
@@ -29,7 +29,6 @@ function formatDec(dec: number): string {
 }
 
 function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
-  const { getWcsInfo } = useBackend();
   const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
   const [wcsInfo, setWcsInfo] = useState<any>(null);
   const [wcsParams, setWcsParams] = useState<WcsParams | null>(null);

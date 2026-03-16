@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useBackend } from "../../hooks/useBackend";
+import { estimatePsf } from "../../services/processing.service";
+import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
 
 interface PsfResult {
   kernel: number[][];
@@ -19,8 +20,15 @@ interface PsfPanelProps {
   chainedFrom?: string;
 }
 
+const ICON = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-violet-400">
+    <circle cx="12" cy="12" r="3" />
+    <circle cx="12" cy="12" r="8" opacity="0.3" />
+    <circle cx="12" cy="12" r="11" opacity="0.1" />
+  </svg>
+);
+
 export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
-  const { estimatePsf } = useBackend();
   const [result, setResult] = useState<PsfResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,12 +55,11 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
         onPsfReady(res.kernel);
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, estimatePsf, onPsfReady]);
+  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, onPsfReady]);
 
   useEffect(() => {
     if (!result || !canvasRef.current) return;
@@ -84,121 +91,25 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      <div className="flex items-center gap-2 mb-1">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-violet-400">
-          <circle cx="12" cy="12" r="3" />
-          <circle cx="12" cy="12" r="8" opacity="0.3" />
-          <circle cx="12" cy="12" r="11" opacity="0.1" />
-        </svg>
-        <span className="text-sm font-semibold text-zinc-200 tracking-wide">
-          PSF Estimation
-        </span>
-        <span className="text-[10px] text-zinc-500 ml-auto">Empirical</span>
-      </div>
+      <SectionHeader icon={ICON} title="PSF Estimation" subtitle="Empirical" />
 
       {!selectedFile && (
-        <div className="text-xs text-zinc-500 italic px-1">
-          Select a FITS file to estimate PSF.
-        </div>
+        <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to estimate PSF.</div>
       )}
 
       <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <div className="flex justify-between items-center">
-            <label className="text-xs text-zinc-400">Stars to sample</label>
-            <span className="text-xs font-mono text-zinc-300 bg-zinc-800 px-1.5 py-0.5 rounded">{numStars}</span>
-          </div>
-          <input
-            type="range" min={1} max={10} step={1} value={numStars}
-            onChange={(e) => setNumStars(Number(e.target.value))}
-            disabled={loading}
-            className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-violet-500
-              [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-              [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-400
-              [&::-webkit-slider-thumb]:appearance-none"
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <div className="flex justify-between items-center">
-            <label className="text-xs text-zinc-400">Cutout radius</label>
-            <span className="text-xs font-mono text-zinc-300 bg-zinc-800 px-1.5 py-0.5 rounded">{cutoutRadius}px</span>
-          </div>
-          <input
-            type="range" min={5} max={50} step={1} value={cutoutRadius}
-            onChange={(e) => setCutoutRadius(Number(e.target.value))}
-            disabled={loading}
-            className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-violet-500
-              [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-              [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-400
-              [&::-webkit-slider-thumb]:appearance-none"
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <div className="flex justify-between items-center">
-            <label className="text-xs text-zinc-400">Max ellipticity</label>
-            <span className="text-xs font-mono text-zinc-300 bg-zinc-800 px-1.5 py-0.5 rounded">{maxEllipticity.toFixed(2)}</span>
-          </div>
-          <input
-            type="range" min={0.05} max={1.0} step={0.05} value={maxEllipticity}
-            onChange={(e) => setMaxEllipticity(Number(e.target.value))}
-            disabled={loading}
-            className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-violet-500
-              [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-              [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-400
-              [&::-webkit-slider-thumb]:appearance-none"
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <div className="flex justify-between items-center">
-            <label className="text-xs text-zinc-400">Saturation threshold</label>
-            <span className="text-xs font-mono text-zinc-300 bg-zinc-800 px-1.5 py-0.5 rounded">{satThreshold.toFixed(2)}</span>
-          </div>
-          <input
-            type="range" min={0.5} max={1.0} step={0.05} value={satThreshold}
-            onChange={(e) => setSatThreshold(Number(e.target.value))}
-            disabled={loading}
-            className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-violet-500
-              [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-              [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-400
-              [&::-webkit-slider-thumb]:appearance-none"
-          />
-        </div>
+        <Slider label="Stars to sample" value={numStars} min={1} max={10} step={1} disabled={loading} accent="violet" onChange={setNumStars} />
+        <Slider label="Cutout radius" value={cutoutRadius} min={5} max={50} step={1} disabled={loading} accent="violet" format={(v) => `${v}px`} onChange={setCutoutRadius} />
+        <Slider label="Max ellipticity" value={maxEllipticity} min={0.05} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setMaxEllipticity} />
+        <Slider label="Saturation threshold" value={satThreshold} min={0.5} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setSatThreshold} />
       </div>
 
-      <button
-        onClick={handleEstimate}
-        disabled={loading || !selectedFile}
-        className={`w-full py-2 rounded-lg text-sm font-medium transition-all duration-200
-          ${loading
-            ? "bg-zinc-700 text-zinc-400 cursor-wait"
-            : selectedFile
-              ? "bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/30 active:scale-[0.98]"
-              : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
-          }`}
-      >
-        {loading ? (
-          <span className="flex items-center justify-center gap-2">
-            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-            Estimating...
-          </span>
-        ) : "Estimate PSF"}
-      </button>
-
-      {error && (
-        <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">
-          {error}
-        </div>
-      )}
+      <RunButton label="Estimate PSF" runningLabel="Estimating..." running={loading} disabled={!selectedFile} accent="violet" onClick={handleEstimate} />
+      <ErrorAlert message={error} />
 
       {result && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3 bg-zinc-800/40 rounded-lg p-3">
+        <div className="flex flex-col gap-3 animate-fade-in">
+          <div className="flex items-center gap-3 ab-metric-card p-3">
             <canvas
               ref={canvasRef}
               className="rounded border border-zinc-700 flex-shrink-0"

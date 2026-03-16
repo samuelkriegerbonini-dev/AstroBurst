@@ -1,6 +1,6 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Layers, Loader2 } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
+import { composeRgb, drizzleStack, drizzleRgb } from "../../services/compose.service";
 import { useDoneFilesContext, useRgbContext, useRenderContext, useNarrowbandContext } from "../../context/PreviewContext";
 
 const RgbComposePanel = lazy(() => import("./RgbComposePanel"));
@@ -12,7 +12,6 @@ function ComposeTabInner() {
   const { setRgbChannels } = useRgbContext();
   const { setRenderedPreviewUrl } = useRenderContext();
   const { narrowbandPalette } = useNarrowbandContext();
-  const { composeRgb, drizzleStack, drizzleRgb } = useBackend();
 
   const [rgbResult, setRgbResult] = useState<any>(null);
   const [rgbLoading, setRgbLoading] = useState(false);
@@ -26,10 +25,10 @@ function ComposeTabInner() {
   const [drizzleRgbStage, setDrizzleRgbStage] = useState("");
 
   const handleComposeRgb = useCallback(
-    async (rPath: string | null, gPath: string | null, bPath: string | null, options: any) => {
+    async (lPath: string | null, rPath: string | null, gPath: string | null, bPath: string | null, options: any) => {
       setRgbLoading(true);
       try {
-        const result = await composeRgb(rPath, gPath, bPath, "./output", options);
+        const result = await composeRgb(lPath, rPath, gPath, bPath, "./output", options);
         setRgbResult(result);
         setRgbChannels({ r: rPath, g: gPath, b: bPath });
         if (result.previewUrl) {

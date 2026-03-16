@@ -5,13 +5,13 @@ import {
   PackageOpen, Layers2, Settings,
 } from "lucide-react";
 
-import { useBackend } from "../hooks/useBackend";
-import { probeGpu, isGpuAvailable } from "../context/Gpucontext";
+import { getCubeSpectrum } from "../services/cube.service";
+import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
 import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext } from "../context/PreviewContext";
 import { useMousePixel, useMousePixelActions } from "../hooks/useMousePixelStore";
 import { useSelectedFile, useDoneFiles } from "../hooks/useFileStore";
 import WcsReadout from "./header/WcsReadout";
-import type { ProcessedFile } from "../utils/types";
+import type { ProcessedFile } from "../shared/types";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
 const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
@@ -68,7 +68,6 @@ function PreviewPanelInner() {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
-  const { getCubeSpectrum } = useBackend();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
   const [activeBottomTab, setActiveBottomTab] = useState<BottomTabId>("info");
@@ -226,13 +225,12 @@ function PreviewPanelInner() {
 
         {file && (
           <div ref={bottomElRef} className="shrink-0 flex flex-col overflow-hidden" style={{ height: effectiveBottomH, borderTop: "1px solid rgba(20,184,166,0.1)", background: "linear-gradient(180deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.5) 100%)" }}>
-            {bottomOpen && <div className="h-[3px] shrink-0 cursor-row-resize" style={{ background: "transparent" }} onMouseDown={handleBottomResizeStart} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.3)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")} />}
+            {bottomOpen && <div className="ab-resize-handle-h shrink-0" onMouseDown={handleBottomResizeStart} />}
             <div className="flex items-center justify-between px-1 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.08)" }}>
               <div className="flex items-center gap-0">
-                {BOTTOM_TABS.map((tab) => { const Icon = tab.icon; const isActive = activeBottomTab === tab.id; return (
+                {BOTTOM_TABS.map((tab) => { const Icon = tab.icon; return (
                   <button key={tab.id} onClick={() => { setActiveBottomTab(tab.id); if (!bottomOpen) setBottomOpen(true); }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium transition-colors border-b-2 -mb-px"
-                    style={isActive ? { borderColor: "var(--ab-teal)", color: "#e4e4e7", background: "rgba(20,184,166,0.06)" } : { borderColor: "transparent", color: "#71717a" }}>
+                    className="ab-tab" data-active={activeBottomTab === tab.id}>
                     <Icon size={11} />{tab.label}
                   </button>
                 ); })}
@@ -266,7 +264,7 @@ function PreviewPanelInner() {
 
       {file && sidePanelOpen && (
         <>
-          <div className="w-[3px] shrink-0 cursor-col-resize" style={{ background: "transparent" }} onMouseDown={handleSidePanelResizeStart} onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.3)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")} />
+          <div className="ab-resize-handle" onMouseDown={handleSidePanelResizeStart} />
           <div ref={sidePanelElRef} className="shrink-0 flex flex-col overflow-hidden" style={{ width: sidePanelWidthRef.current, borderLeft: "1px solid rgba(20,184,166,0.1)", background: "linear-gradient(135deg, rgba(5,5,16,0.7) 0%, rgba(20,184,166,0.02) 100%)" }}>
             <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.1)", background: "rgba(20,184,166,0.03)" }}>
               <div className="flex items-center gap-2">

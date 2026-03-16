@@ -1,7 +1,8 @@
 import { useSyncExternalStore, useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
-import type { ProcessedFile, QueueStats, AstroFile, ProcessResult } from "../utils/types";
+import { isCalibRefAsdf } from "../utils/validation";
+import type { ProcessedFile, QueueStats, AstroFile, ProcessResult } from "../shared/types";
 
 type Listener = () => void;
 
@@ -14,13 +15,6 @@ interface StoreState {
   version: number;
   selectedVersion: number;
   statsVersion: number;
-}
-
-const CALIB_REF_RE =
-  /^jwst_[a-z]+_(distortion|filteroffset|sirskernel|photom|flat|dark|bias|readnoise|gain|linearity|saturation|superbias|ipc|area|specwcs|regions|wavelengthrange|trappars|mask|drizpars|throughput|psfmask)_\d+\.asdf$/i;
-
-function isCalibRefAsdf(name: string): boolean {
-  return CALIB_REF_RE.test(name);
 }
 
 class FileStore {

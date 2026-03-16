@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useBackend } from "../../hooks/useBackend";
+import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import { runCalibrationPipeline } from "../../services/stacking.service";
 
 interface FileGroup {
   label: string;
@@ -31,6 +32,14 @@ interface PipelineResponse {
 }
 
 const CHANNEL_LABELS = ["R", "G", "B"];
+const CHANNEL_COLORS: Record<string, string> = { R: "#ef4444", G: "#22c55e", B: "#3b82f6" };
+
+const ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-400">
+    <path d="M4 4h16v16H4z" />
+    <path d="M4 12h16M12 4v16" opacity="0.3" />
+  </svg>
+);
 
 interface PipelinePanelProps {
   files?: any[];
@@ -40,7 +49,6 @@ interface PipelinePanelProps {
 }
 
 export default function PipelinePanel(_props: PipelinePanelProps) {
-  const { runCalibrationPipeline } = useBackend();
   const [result, setResult] = useState<PipelineResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,10 +84,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       if (paths.length === 0) return;
       setChannels((prev) => {
         const next = [...prev];
-        next[index] = {
-          ...next[index],
-          paths: [...next[index].paths, ...paths],
-        };
+        next[index] = { ...next[index], paths: [...next[index].paths, ...paths] };
         return next;
       });
     },
@@ -91,15 +96,9 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       const paths = await pickFiles(`Select ${type} frames`);
       if (paths.length === 0) return;
       switch (type) {
-        case "dark":
-          setDarks((p) => [...p, ...paths]);
-          break;
-        case "flat":
-          setFlats((p) => [...p, ...paths]);
-          break;
-        case "bias":
-          setBias((p) => [...p, ...paths]);
-          break;
+        case "dark": setDarks((p) => [...p, ...paths]); break;
+        case "flat": setFlats((p) => [...p, ...paths]); break;
+        case "bias": setBias((p) => [...p, ...paths]); break;
       }
     },
     [pickFiles]
@@ -161,184 +160,76 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
 
   const totalLights = channels.reduce((s, c) => s + c.paths.length, 0);
 
-  return (
-    <div className="flex flex-col gap-3 p-3 text-xs">
-      <div className="font-semibold uppercase tracking-wide text-neutral-400">
-        Calibration Pipeline
+  const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: number; onAdd: () => void; onClear: () => void }) => (
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-zinc-400">{label}: {count}</span>
+      <div className="flex gap-1">
+        <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
+        {count > 0 && <button onClick={onClear} className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded">Clear</button>}
       </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
+      <SectionHeader icon={ICON} title="Calibration Pipeline" />
 
       <div className="flex flex-col gap-2">
         {channels.map((ch, i) => (
-          <div
-            key={ch.label}
-            className="flex items-center justify-between rounded border border-neutral-700 px-2 py-1.5"
-          >
+          <div key={ch.label} className="flex items-center justify-between rounded border border-zinc-800/50 px-2 py-1.5">
             <div className="flex items-center gap-2">
-              <span
-                className="inline-block h-3 w-3 rounded-full"
-                style={{
-                  backgroundColor:
-                    ch.label === "R"
-                      ? "#ef4444"
-                      : ch.label === "G"
-                      ? "#22c55e"
-                      : "#3b82f6",
-                }}
-              />
-              <span>{ch.label}</span>
-              <span className="text-neutral-500">{ch.paths.length} files</span>
+              <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: CHANNEL_COLORS[ch.label] }} />
+              <span className="text-xs text-zinc-300">{ch.label}</span>
+              <span className="text-[10px] text-zinc-500">{ch.paths.length} files</span>
             </div>
             <div className="flex gap-1">
-              <button
-                onClick={() => addToChannel(i)}
-                className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
-              >
-                + Add
-              </button>
+              <button onClick={() => addToChannel(i)} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
               {ch.paths.length > 0 && (
                 <button
-                  onClick={() =>
-                    setChannels((prev) => {
-                      const next = [...prev];
-                      next[i] = { ...next[i], paths: [] };
-                      return next;
-                    })
-                  }
-                  className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
-                >
-                  Clear
-                </button>
+                  onClick={() => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; })}
+                  className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded"
+                >Clear</button>
               )}
             </div>
           </div>
         ))}
       </div>
 
-      <div className="border-t border-neutral-800 pt-2 text-neutral-400">
-        Calibration (optional)
+      <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+        <span className="text-xs text-zinc-500 uppercase tracking-wider">Calibration (optional)</span>
+        <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} onClear={() => setDarks([])} />
+        <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} onClear={() => setFlats([])} />
+        <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} onClear={() => setBias([])} />
       </div>
 
-      <div className="flex flex-col gap-1">
-        <div className="flex items-center justify-between">
-          <span>Darks: {darks.length}</span>
-          <div className="flex gap-1">
-            <button
-              onClick={() => addCalibration("dark")}
-              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
-            >
-              + Add
-            </button>
-            {darks.length > 0 && (
-              <button
-                onClick={() => setDarks([])}
-                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center justify-between">
-          <span>Flats: {flats.length}</span>
-          <div className="flex gap-1">
-            <button
-              onClick={() => addCalibration("flat")}
-              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
-            >
-              + Add
-            </button>
-            {flats.length > 0 && (
-              <button
-                onClick={() => setFlats([])}
-                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center justify-between">
-          <span>Bias: {bias.length}</span>
-          <div className="flex gap-1">
-            <button
-              onClick={() => addCalibration("bias")}
-              className="rounded bg-neutral-800 px-2 py-0.5 hover:bg-neutral-700"
-            >
-              + Add
-            </button>
-            {bias.length > 0 && (
-              <button
-                onClick={() => setBias([])}
-                className="rounded bg-neutral-800 px-2 py-0.5 text-red-400 hover:bg-neutral-700"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        </div>
+      <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
+        <span className="text-xs text-zinc-500 uppercase tracking-wider">Stacking</span>
+        <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
+        <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
+        <Toggle label="Normalize before stack" checked={normalize} accent="sky" onChange={setNormalize} />
       </div>
 
-      <div className="border-t border-neutral-800 pt-2 text-neutral-400">
-        Stacking
-      </div>
-
-      <label className="flex items-center justify-between">
-        <span>Sigma low</span>
-        <input
-          type="number"
-          min={1}
-          max={5}
-          step={0.1}
-          value={sigmaLow}
-          onChange={(e) => setSigmaLow(Number(e.target.value))}
-          className="w-16 rounded bg-neutral-800 px-2 py-1 text-right"
-        />
-      </label>
-      <label className="flex items-center justify-between">
-        <span>Sigma high</span>
-        <input
-          type="number"
-          min={1}
-          max={5}
-          step={0.1}
-          value={sigmaHigh}
-          onChange={(e) => setSigmaHigh(Number(e.target.value))}
-          className="w-16 rounded bg-neutral-800 px-2 py-1 text-right"
-        />
-      </label>
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={normalize}
-          onChange={(e) => setNormalize(e.target.checked)}
-        />
-        <span>Normalize before stack</span>
-      </label>
-
-      <button
+      <RunButton
+        label={`Run Pipeline (${totalLights} lights)`}
+        runningLabel={progress || "Processing..."}
+        running={loading}
+        disabled={totalLights === 0}
+        accent="sky"
         onClick={handleRun}
-        disabled={loading || totalLights === 0}
-        className="rounded bg-blue-600 px-3 py-1.5 font-medium hover:bg-blue-500 disabled:opacity-50"
-      >
-        {loading ? progress || "Processing..." : `Run Pipeline (${totalLights} lights)`}
-      </button>
-
-      {error && <div className="text-red-400">{error}</div>}
+      />
+      <ErrorAlert message={error} />
 
       {result && (
-        <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
-          <div className="font-semibold text-neutral-400">Results</div>
+        <div className="flex flex-col gap-3 animate-fade-in border-t border-zinc-800/50 pt-3">
+          <span className="text-xs font-semibold text-zinc-400">Results</span>
 
           <div className="flex gap-1">
             {result.channel_previews.map((ch) => (
               <button
                 key={ch.label}
                 onClick={() => setActivePreview(ch.label)}
-                className={`rounded px-2 py-0.5 ${
-                  activePreview === ch.label
-                    ? "bg-blue-600"
-                    : "bg-neutral-800 hover:bg-neutral-700"
-                }`}
+                className={`ab-pill ${activePreview === ch.label ? "data-active" : ""}`}
+                data-active={activePreview === ch.label || undefined}
               >
                 {ch.label}
               </button>
@@ -346,11 +237,8 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
             {result.rgb_preview && (
               <button
                 onClick={() => setActivePreview("RGB")}
-                className={`rounded px-2 py-0.5 ${
-                  activePreview === "RGB"
-                    ? "bg-blue-600"
-                    : "bg-neutral-800 hover:bg-neutral-700"
-                }`}
+                className={`ab-pill ${activePreview === "RGB" ? "data-active" : ""}`}
+                data-active={activePreview === "RGB" || undefined}
               >
                 RGB
               </button>
@@ -358,26 +246,17 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
           </div>
 
           {activePreview === "RGB" && result.rgb_preview && (
-            <canvas
-              ref={rgbCanvasRef}
-              className="w-full rounded border border-neutral-700"
-              style={{ imageRendering: "auto" }}
-            />
+            <canvas ref={rgbCanvasRef} className="w-full rounded border border-zinc-700" style={{ imageRendering: "auto" }} />
           )}
 
-          <div className="flex flex-col gap-1 text-neutral-500">
+          <div className="flex flex-col gap-1 text-[10px] text-zinc-500">
             {result.stats.channels.map((ch) => (
               <div key={ch.label}>
-                {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)}{" "}
-                std={ch.stddev.toFixed(1)}
+                {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
               </div>
             ))}
-            {result.stats.darks_combined > 0 && (
-              <div>Master dark: {result.stats.darks_combined} frames</div>
-            )}
-            {result.stats.flats_combined > 0 && (
-              <div>Master flat: {result.stats.flats_combined} frames</div>
-            )}
+            {result.stats.darks_combined > 0 && <div>Master dark: {result.stats.darks_combined} frames</div>}
+            {result.stats.flats_combined > 0 && <div>Master flat: {result.stats.flats_combined} frames</div>}
           </div>
         </div>
       )}

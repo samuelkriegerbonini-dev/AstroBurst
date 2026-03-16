@@ -1,9 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
-import { useBackend } from "../hooks/useBackend";
+import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config.service";
 
 export default function ConfigPanel() {
-  const { getConfig, updateConfig, saveApiKey, getApiKey } = useBackend();
 
   const [config, setConfig] = useState<any>(null);
   const [apiKey, setApiKey] = useState("");

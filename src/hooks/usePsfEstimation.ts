@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { estimatePsf } from "../services/processing.service";
 
 interface StarCandidate {
   x: number;
@@ -27,12 +28,6 @@ interface PsfConfig {
   maxEllipticity?: number;
 }
 
-const safeInvoke = async (cmd: string, args: Record<string, any> = {}) => {
-  if (!(window as any).__TAURI_INTERNALS__) throw new Error("Requires Tauri");
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke(cmd, args);
-};
-
 export function usePsfEstimation() {
   const [result, setResult] = useState<PsfResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -42,13 +37,7 @@ export function usePsfEstimation() {
     setLoading(true);
     setError(null);
     try {
-      const res = await safeInvoke("estimate_psf_cmd", {
-        path,
-        numStars: config?.numStars ?? 3,
-        cutoutRadius: config?.cutoutRadius ?? 15,
-        saturationThreshold: config?.saturationThreshold ?? 0.95,
-        maxEllipticity: config?.maxEllipticity ?? 0.3,
-      }) as PsfResult;
+      const res = await estimatePsf(path, config) as PsfResult;
       setResult(res);
       return res;
     } catch (e) {

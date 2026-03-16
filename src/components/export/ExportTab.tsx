@@ -1,8 +1,9 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Download, Loader2, Box, Film } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
+import { exportFits, exportFitsRgb } from "../../services/export.service";
+import { getCubeFrame } from "../../services/cube.service";
 import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
-import { getOutputDir } from "../../utils/outputdir";
+import { getOutputDir } from "../../infrastructure/tauri";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
@@ -12,7 +13,6 @@ function ExportTabInner() {
   const { rgbChannels } = useRgbContext();
   const { renderedPreviewUrl } = useRenderContext();
   const { isCube, cubeDims } = useCubeContext();
-  const { exportFits, exportFitsRgb, getCubeFrame } = useBackend();
 
   const [exportResult, setExportResult] = useState<any>(null);
   const [exportLoading, setExportLoading] = useState(false);

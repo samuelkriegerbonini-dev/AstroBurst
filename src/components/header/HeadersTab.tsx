@@ -1,17 +1,15 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
+import { getFullHeader } from "../../services/header.service";
 import { useFileContext, useRgbContext } from "../../context/PreviewContext";
-import type { HeaderData } from "../../utils/types";
+import type { HeaderData } from "../../shared/types";
 
 const HeaderExplorerPanel = lazy(() => import("./HeaderExplorerPanel"));
-const HeaderTable = lazy(() => import("./HeaderTable"));
 const HduSelectorPanel = lazy(() => import("./HduSelectorPanel"));
 
 function HeadersTabInner() {
   const { file } = useFileContext();
   const { setRgbChannels } = useRgbContext();
-  const { getFullHeader } = useBackend();
 
   const [headerData, setHeaderData] = useState<HeaderData | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
@@ -29,7 +27,7 @@ function HeadersTabInner() {
         setHeaderLoading(false);
       }
     },
-    [getFullHeader],
+    [],
   );
 
   const handleAssignChannel = useCallback(
@@ -47,10 +45,8 @@ function HeadersTabInner() {
         </div>
       }
     >
-      <div className="flex flex-col gap-4">
-        {file?.path && (
-          <HduSelectorPanel filePath={file.path} />
-        )}
+      <div className="flex flex-col gap-3">
+        {file?.path && <HduSelectorPanel filePath={file.path} />}
 
         {file && (
           <HeaderExplorerPanel
@@ -60,15 +56,6 @@ function HeadersTabInner() {
             isLoading={headerLoading}
             onAssignChannel={handleAssignChannel}
           />
-        )}
-
-        {file?.result?.header && (
-          <div className="bg-zinc-950/50 rounded-lg p-4 border border-zinc-800/50">
-            <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">
-              FITS Header (Summary)
-            </h4>
-            <HeaderTable header={file.result.header} />
-          </div>
         )}
       </div>
     </Suspense>

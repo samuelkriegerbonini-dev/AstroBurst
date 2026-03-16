@@ -16,18 +16,16 @@ import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
 
-import type { AstroFile } from "./utils/types";
+import type { AstroFile } from "./shared/types";
+import { APP_VERSION } from "./utils/constants";
 
 // @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
-
-const isTauri = (): boolean => !!(window as any).__TAURI_INTERNALS__;
+import { isTauri } from "./infrastructure/tauri";
 
 type ViewState = "empty" | "processing" | "complete";
-
-const APP_VERSION = "v0.3.4";
 
 const MemoizedFileList = memo(FileList);
 const MemoizedPreviewPanel = memo(PreviewPanel);
@@ -223,13 +221,7 @@ export default function App() {
                     </div>
 
                     {sidebarOpen && (
-                      <div
-                        className="w-[3px] shrink-0 cursor-col-resize"
-                        style={{ background: "transparent" }}
-                        onMouseDown={handleSidebarResizeStart}
-                        onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(20,184,166,0.3)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                      />
+                      <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
                     )}
 
                     <div className="flex-1 min-w-0 flex flex-col overflow-hidden">

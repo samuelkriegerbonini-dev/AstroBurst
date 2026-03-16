@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
-import { useBackend } from "../../hooks/useBackend";
+import { generateTiles } from "../../services/tiles.service";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 
 interface DeepZoomViewerProps {
@@ -56,7 +56,6 @@ function DeepZoomViewer({
   const generatedPathRef = useRef<string | null>(null);
   const renderedUrlRef = useRef<string | null>(null);
   const modeRef = useRef<ViewerMode>("tiles");
-  const { generateTiles } = useBackend();
 
   const hasRendered = !!renderedPreviewUrl;
   const effectiveKey = hasRendered ? `rendered:${renderedPreviewUrl}` : `tiles:${rawPath}`;

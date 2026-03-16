@@ -2,7 +2,7 @@ import { useState, useCallback } from "react";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { FILE_STATUS } from "../utils/constants";
-import type { ProcessedFile } from "../utils/types";
+import type { ProcessedFile } from "../shared/types";
 
 export function useZipExport() {
   const [progress, setProgress] = useState(0);

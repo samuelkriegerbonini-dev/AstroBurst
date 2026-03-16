@@ -1,0 +1,38 @@
+import { safeInvoke, withPreview, getOutputDir } from "../infrastructure/tauri";
+
+const CUBE_PREVIEWS: [string, string][] = [
+  ["collapsed_path", "collapsedPreviewUrl"],
+  ["collapsed_median_path", "collapsedMedianPreviewUrl"],
+];
+
+export function processCube(path: string, outputDir?: string, frameStep = 5) {
+  return withPreview("process_cube_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS);
+}
+
+export function processCubeLazy(path: string, outputDir?: string, frameStep = 5) {
+  return withPreview("process_cube_lazy_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS);
+}
+
+export function getCubeInfo(path: string) {
+  return safeInvoke("get_cube_info", { path });
+}
+
+export async function getCubeFrame(
+  path: string,
+  frameIndex: number,
+  outputPath: string,
+  outputFits?: string,
+) {
+  const dir = await getOutputDir();
+  const resolve = (p: string) => p.startsWith("./output") ? p.replace("./output", dir) : p;
+  return safeInvoke("get_cube_frame", {
+    path,
+    frameIndex,
+    outputPath: resolve(outputPath),
+    outputFits: outputFits ? resolve(outputFits) : undefined,
+  });
+}
+
+export function getCubeSpectrum(path: string, x: number, y: number) {
+  return safeInvoke("get_cube_spectrum", { path, x, y });
+}

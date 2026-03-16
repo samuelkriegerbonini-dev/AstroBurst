@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, memo, useEffect } from "react";
 import { Loader2, Film, SkipBack, SkipForward, Play, Pause } from "lucide-react";
-import { useBackend } from "../hooks/useBackend";
+import { getCubeFrame } from "../services/cube.service";
 
 interface CubeFrameNavProps {
   filePath: string;
@@ -9,7 +9,6 @@ interface CubeFrameNavProps {
 }
 
 function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNavProps) {
-  const { getCubeFrame } = useBackend();
   const [currentFrame, setCurrentFrame] = useState(0);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);

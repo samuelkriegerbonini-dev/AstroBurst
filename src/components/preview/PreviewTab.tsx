@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
 import { Image, Loader2 } from "lucide-react";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
-import type { RawPixelData } from "../../utils/types";
+import type { RawPixelData } from "../../shared/types";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
 
