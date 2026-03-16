@@ -5,15 +5,10 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, downsample_u8_rgb, MAX_PREVIEW_DIM};
 use crate::core::compose::rgb::process_rgb;
+use crate::core::imaging::resample::resample_image;
 use crate::infra::render::rgb::render_rgb;
 use crate::types::compose::{RgbComposeConfig, RgbComposeResult, WhiteBalance};
-use crate::types::constants::{
-    DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT,
-    DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE,
-    RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN,
-    RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED,
-    RES_STATS_B, RES_STATS_G, RES_STATS_R,
-};
+use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RESAMPLED};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
 fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
@@ -21,6 +16,59 @@ fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
         Some(p) => Ok(Some(load_cached(p)?.arr().to_owned())),
         None => Ok(None),
     }
+}
+
+fn harmonize_dimensions(
+    r: Option<Array2<f32>>,
+    g: Option<Array2<f32>>,
+    b: Option<Array2<f32>>,
+) -> anyhow::Result<(Option<Array2<f32>>, Option<Array2<f32>>, Option<Array2<f32>>, bool)> {
+    let dims: Vec<(usize, usize)> = [r.as_ref(), g.as_ref(), b.as_ref()]
+        .iter()
+        .filter_map(|ch| ch.map(|a| a.dim()))
+        .collect();
+
+    if dims.len() < 2 {
+        return Ok((r, g, b, false));
+    }
+
+    let max_rows = dims.iter().map(|d| d.0).max().unwrap();
+    let max_cols = dims.iter().map(|d| d.1).max().unwrap();
+    let min_rows = dims.iter().map(|d| d.0).min().unwrap();
+    let min_cols = dims.iter().map(|d| d.1).min().unwrap();
+
+    let ratio_rows = max_rows as f64 / min_rows as f64;
+    let ratio_cols = max_cols as f64 / min_cols as f64;
+
+    if ratio_rows < 1.1 && ratio_cols < 1.1 {
+        return Ok((r, g, b, false));
+    }
+
+    log::info!(
+        "Auto-resample: harmonizing channels to {}x{} (ratio {:.1}x{:.1})",
+        max_cols, max_rows, ratio_cols, ratio_rows
+    );
+
+    let resample_if_needed = |ch: Option<Array2<f32>>| -> anyhow::Result<Option<Array2<f32>>> {
+        match ch {
+            Some(arr) => {
+                let (rows, cols) = arr.dim();
+                if rows == max_rows && cols == max_cols {
+                    Ok(Some(arr))
+                } else {
+                    Ok(Some(resample_image(&arr, max_rows, max_cols)?))
+                }
+            }
+            None => Ok(None),
+        }
+    };
+
+    Ok((
+        resample_if_needed(r)?,
+        resample_if_needed(g)?,
+        resample_if_needed(b)?,
+        true,
+    ))
 }
 
 fn render_rgb_preview(
@@ -104,6 +152,8 @@ pub async fn compose_rgb_cmd(
         let g_arr = load_channel(&g_path)?;
         let b_arr = load_channel(&b_path)?;
 
+        let (r_arr, g_arr, b_arr, resampled) = harmonize_dimensions(r_arr, g_arr, b_arr)?;
+
         let wb = match wb_mode.as_deref() {
             Some(WB_MODE_MANUAL) => WhiteBalance::Manual(
                 wb_r.unwrap_or(DEFAULT_WB_VALUE),
@@ -180,6 +230,7 @@ pub async fn compose_rgb_cmd(
             RES_OFFSET_G: [result.offset_g.0, result.offset_g.1],
             RES_OFFSET_B: [result.offset_b.0, result.offset_b.1],
             RES_DIMENSION_CROP: result.dimension_crop,
+            RESAMPLED: resampled,
             RES_STATS_R: { RES_MEDIAN: result.stats_r.median, RES_MEAN: result.stats_r.mean, RES_MIN: result.stats_r.min, RES_MAX: result.stats_r.max },
             RES_STATS_G: { RES_MEDIAN: result.stats_g.median, RES_MEAN: result.stats_g.mean, RES_MIN: result.stats_g.min, RES_MAX: result.stats_g.max },
             RES_STATS_B: { RES_MEDIAN: result.stats_b.median, RES_MEAN: result.stats_b.mean, RES_MIN: result.stats_b.min, RES_MAX: result.stats_b.max },

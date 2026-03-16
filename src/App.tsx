@@ -27,7 +27,7 @@ const isTauri = (): boolean => !!(window as any).__TAURI_INTERNALS__;
 
 type ViewState = "empty" | "processing" | "complete";
 
-const APP_VERSION = "v0.3.3";
+const APP_VERSION = "v0.3.4";
 
 const MemoizedFileList = memo(FileList);
 const MemoizedPreviewPanel = memo(PreviewPanel);

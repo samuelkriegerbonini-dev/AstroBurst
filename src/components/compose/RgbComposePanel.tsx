@@ -285,6 +285,11 @@ export default function RgbComposePanel({
                 Offsets — G: [{result.offset_g?.[0]}, {result.offset_g?.[1]}] B: [{result.offset_b?.[0]}, {result.offset_b?.[1]}]
               </div>
             )}
+            {result.resampled && (
+              <div className="text-[10px] text-amber-400/80">
+                ⚡ Auto-resampled (mixed SW/LW resolution)
+              </div>
+            )}
             <div className="text-[10px] text-zinc-500">{result.elapsed_ms} ms</div>
           </div>
         )}

@@ -5,5 +5,4 @@ pub mod drizzle_rgb;
 pub mod lazy_cube;
 pub mod pipeline;
 pub mod plate_solve;
-pub mod rgb_compose;
 pub mod stacking;

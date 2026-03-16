@@ -236,3 +236,5 @@ pub const EXT_ZIP: &str = ".zip";
 pub const DIR_FRAMES: &str = "frames";
 pub const FILE_COLLAPSED_MEAN: &str = "collapsed_mean.png";
 pub const FILE_COLLAPSED_MEDIAN: &str = "collapsed_median.png";
+
+pub const RESAMPLED: &str = "resampled";
