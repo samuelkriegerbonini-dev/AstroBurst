@@ -12,7 +12,7 @@ pub struct ResampleResult {
 }
 
 #[inline]
-fn catmull_rom(t: f64) -> f64 {
+pub fn catmull_rom(t: f64) -> f64 {
     let abs_t = t.abs();
     if abs_t <= 1.0 {
         abs_t * abs_t * (1.5 * abs_t - 2.5) + 1.0
@@ -24,7 +24,7 @@ fn catmull_rom(t: f64) -> f64 {
 }
 
 #[inline]
-fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
+pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
     let ix = x.floor() as i64;
     let iy = y.floor() as i64;
     let fx = x - ix as f64;

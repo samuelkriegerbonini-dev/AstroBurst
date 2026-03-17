@@ -214,20 +214,22 @@ pub fn generate_tile_pyramid(
         fs::create_dir_all(&level_dir)
             .with_context(|| format!("Failed to create level dir {}", level_dir))?;
 
-        for ty in 0..tile_rows {
-            for tx in 0..tile_cols {
-                let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
-                render_tile(
-                    &level_data,
-                    tx,
-                    ty,
-                    tile_size,
-                    global_min,
-                    global_max,
-                    &tile_path,
-                )?;
-            }
-        }
+        let tile_coords: Vec<(usize, usize)> = (0..tile_rows)
+            .flat_map(|ty| (0..tile_cols).map(move |tx| (tx, ty)))
+            .collect();
+
+        tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
+            let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
+            render_tile(
+                &level_data,
+                tx,
+                ty,
+                tile_size,
+                global_min,
+                global_max,
+                &tile_path,
+            )
+        })?;
 
         levels.push(TileLevel {
             level,

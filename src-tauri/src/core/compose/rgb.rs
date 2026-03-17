@@ -2,6 +2,8 @@ use anyhow::{bail, Result};
 use ndarray::{Array2, s};
 use rayon::prelude::*;
 
+use crate::core::alignment::phase_correlation;
+use crate::core::imaging::resample::bicubic_sample;
 use crate::core::imaging::scnr;
 use crate::core::imaging::stats;
 use crate::core::imaging::stf::{self, AutoStfConfig, StfParams};
@@ -24,8 +26,8 @@ pub struct ProcessedRgb {
     pub stats_r: ChannelStats,
     pub stats_g: ChannelStats,
     pub stats_b: ChannelStats,
-    pub offset_g: (i32, i32),
-    pub offset_b: (i32, i32),
+    pub offset_g: (f64, f64),
+    pub offset_b: (f64, f64),
     pub scnr_applied: bool,
     pub dimension_crop: Option<DimensionCrop>,
 }
@@ -141,118 +143,21 @@ fn merge_for_stf(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f3
     Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
-fn downsample_2x(img: &Array2<f32>) -> Array2<f32> {
-    let (rows, cols) = img.dim();
-    if rows < 2 || cols < 2 { return img.clone(); }
-    let src = img.as_slice().expect("contiguous");
-    let nr = rows / 2;
-    let nc = cols / 2;
-    let mut out = vec![0.0f32; nr * nc];
-    out.par_chunks_mut(nc).enumerate().for_each(|(r, row)| {
-        let r2 = r * 2;
-        let b0 = r2 * cols;
-        let b1 = (r2 + 1) * cols;
-        for c in 0..nc {
-            let c2 = c * 2;
-            row[c] = (src[b0 + c2] + src[b0 + c2 + 1] + src[b1 + c2] + src[b1 + c2 + 1]) * 0.25;
-        }
-    });
-    Array2::from_shape_vec((nr, nc), out).unwrap()
-}
-
-fn find_offset_parallel(
-    reference: &Array2<f32>, target: &Array2<f32>,
-    max_shift: i32, center_dy: i32, center_dx: i32,
-) -> (i32, i32) {
-    let (rows, cols) = reference.dim();
-    let ref_s = reference.as_slice().expect("contiguous");
-    let tgt_s = target.as_slice().expect("contiguous");
-    let cy = rows / 2;
-    let cx = cols / 2;
-    let region = (rows.min(cols) / 4).max(1);
-    let y_start = cy.saturating_sub(region);
-    let y_end = (cy + region).min(rows);
-    let x_start = cx.saturating_sub(region);
-    let x_end = (cx + region).min(cols);
-    let rows_i = rows as i32;
-    let cols_i = cols as i32;
-
-    let shifts: Vec<(i32, i32)> = (-max_shift..=max_shift)
-        .flat_map(|dy| (-max_shift..=max_shift).map(move |dx| (center_dy + dy, center_dx + dx)))
-        .collect();
-
-    let best = shifts.par_iter().map(|&(dy, dx)| {
-        let mut r_sum = 0.0f64;
-        let mut t_sum = 0.0f64;
-        let mut count = 0u32;
-        for y in y_start..y_end {
-            let ty = y as i32 + dy;
-            if ty < 0 || ty >= rows_i { continue; }
-            let rr = y * cols;
-            let tr = ty as usize * cols;
-            for x in x_start..x_end {
-                let tx = x as i32 + dx;
-                if tx < 0 || tx >= cols_i { continue; }
-                let rv = ref_s[rr + x] as f64;
-                let tv = tgt_s[tr + tx as usize] as f64;
-                if rv.is_finite() && rv.abs() > 1e-7 && tv.is_finite() && tv.abs() > 1e-7 {
-                    r_sum += rv; t_sum += tv; count += 1;
-                }
-            }
-        }
-        if count < 10 { return (dy, dx, f64::NEG_INFINITY); }
-        let r_mean = r_sum / count as f64;
-        let t_mean = t_sum / count as f64;
-        let mut num = 0.0f64;
-        let mut r_var = 0.0f64;
-        let mut t_var = 0.0f64;
-        for y in y_start..y_end {
-            let ty = y as i32 + dy;
-            if ty < 0 || ty >= rows_i { continue; }
-            let rr = y * cols;
-            let tr = ty as usize * cols;
-            for x in x_start..x_end {
-                let tx = x as i32 + dx;
-                if tx < 0 || tx >= cols_i { continue; }
-                let rv = ref_s[rr + x] as f64;
-                let tv = tgt_s[tr + tx as usize] as f64;
-                if rv.is_finite() && rv.abs() > 1e-7 && tv.is_finite() && tv.abs() > 1e-7 {
-                    let rd = rv - r_mean;
-                    let td = tv - t_mean;
-                    num += rd * td;
-                    r_var += rd * rd;
-                    t_var += td * td;
-                }
-            }
-        }
-        if r_var > 0.0 && t_var > 0.0 { (dy, dx, num / (r_var * t_var).sqrt()) }
-        else { (dy, dx, f64::NEG_INFINITY) }
-    }).reduce(|| (0i32, 0i32, f64::NEG_INFINITY), |a, b| if b.2 > a.2 { b } else { a });
-    (best.0, best.1)
-}
-
-fn find_offset_pyramid(reference: &Array2<f32>, target: &Array2<f32>) -> (i32, i32) {
-    let ref_2x = downsample_2x(reference);
-    let tgt_2x = downsample_2x(target);
-    let ref_4x = downsample_2x(&ref_2x);
-    let tgt_4x = downsample_2x(&tgt_2x);
-    let coarse = find_offset_parallel(&ref_4x, &tgt_4x, 64, 0, 0);
-    let mid = find_offset_parallel(&ref_2x, &tgt_2x, 4, coarse.0 * 2, coarse.1 * 2);
-    find_offset_parallel(reference, target, 2, mid.0 * 2, mid.1 * 2)
-}
-
-fn shift_image(image: &Array2<f32>, dy: i32, dx: i32) -> Array2<f32> {
-    if dy == 0 && dx == 0 { return image.clone(); }
+fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
+    if dy.abs() < 1e-12 && dx.abs() < 1e-12 { return image.clone(); }
     let (rows, cols) = image.dim();
     let src = image.as_slice().expect("contiguous");
-    let mut out = vec![0.0f32; rows * cols];
+    let mut out = vec![f32::NAN; rows * cols];
     out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-        let sy = y as i32 - dy;
-        if sy < 0 || sy >= rows as i32 { return; }
-        let sr = sy as usize * cols;
         for x in 0..cols {
-            let sx = x as i32 - dx;
-            if sx >= 0 && sx < cols as i32 { row[x] = src[sr + sx as usize]; }
+            let sy = y as f64 - dy;
+            let sx = x as f64 - dx;
+            if sy < -0.5 || sy > (rows as f64 - 0.5)
+                || sx < -0.5 || sx > (cols as f64 - 0.5)
+            {
+                continue;
+            }
+            row[x] = bicubic_sample(src, rows, cols, sy, sx);
         }
     });
     Array2::from_shape_vec((rows, cols), out).unwrap()
@@ -261,15 +166,28 @@ fn shift_image(image: &Array2<f32>, dy: i32, dx: i32) -> Array2<f32> {
 fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
     rows: usize, cols: usize,
-) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (i32, i32), (i32, i32))> {
+) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (f64, f64), (f64, f64))> {
     let ref_ch = r.or(g).or(b).unwrap();
     let r_img = channel_or_synth(r, g, b, rows, cols);
     let g_img = channel_or_synth(g, r, b, rows, cols);
     let b_img = channel_or_synth(b, r, g, rows, cols);
-    let off_g = if g.is_some() { find_offset_pyramid(ref_ch, &g_img) } else { (0, 0) };
-    let off_b = if b.is_some() { find_offset_pyramid(ref_ch, &b_img) } else { (0, 0) };
-    let g_shifted = shift_image(&g_img, off_g.0, off_g.1);
-    let b_shifted = shift_image(&b_img, off_b.0, off_b.1);
+
+    let off_g = if g.is_some() {
+        let pc = phase_correlation::phase_correlate(ref_ch, &g_img);
+        (pc.dy, pc.dx)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let off_b = if b.is_some() {
+        let pc = phase_correlation::phase_correlate(ref_ch, &b_img);
+        (pc.dy, pc.dx)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let g_shifted = shift_image_subpixel(&g_img, off_g.0, off_g.1);
+    let b_shifted = shift_image_subpixel(&b_img, off_b.0, off_b.1);
     Ok((r_img, g_shifted, b_shifted, off_g, off_b))
 }
 
@@ -314,7 +232,7 @@ pub fn process_rgb(
             let r = channel_or_synth(r_ref, g_ref, b_ref, rows, cols);
             let g = channel_or_synth(g_ref, r_ref, b_ref, rows, cols);
             let b = channel_or_synth(b_ref, r_ref, g_ref, rows, cols);
-            (r, g, b, (0, 0), (0, 0))
+            (r, g, b, (0.0, 0.0), (0.0, 0.0))
         }
     };
 

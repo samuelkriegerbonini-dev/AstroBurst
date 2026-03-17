@@ -7,7 +7,7 @@ use tauri::ipc::Response;
 use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir, save_preview_png};
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::StfParams;
-use crate::core::imaging::stf::{apply_stf, auto_stf, AutoStfConfig};
+use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
 use crate::infra::cache::ImageEntry;
 use crate::infra::fits::writer::{filter_header, write_fits_mono, write_fits_rgb};
 use crate::infra::ipc::{encode_with_header, encode_with_header_downsampled};
@@ -65,36 +65,6 @@ fn stf_json(stf: &StfParams) -> serde_json::Value {
         RES_SHADOW: stf.shadow,
         RES_MIDTONE: stf.midtone,
         RES_HIGHLIGHT: stf.highlight,
-    })
-}
-
-#[inline]
-fn mtf(m: f32, x: f32) -> f32 {
-    if x <= 0.0 { return 0.0; }
-    if x >= 1.0 { return 1.0; }
-    if (m - 0.5).abs() < 1e-6 { return x; }
-    (m - 1.0) * x / ((2.0 * m - 1.0) * x - m)
-}
-
-fn apply_stf_to_array(
-    arr: &ndarray::Array2<f32>,
-    stf: &StfParams,
-    stats: &ImageStats,
-) -> ndarray::Array2<f32> {
-    let range = stats.max - stats.min;
-    let inv_range = if range.abs() > 1e-8 { 1.0 / range } else { 0.0 };
-    let stf_range = stf.highlight - stf.shadow;
-    let inv_stf = if stf_range.abs() > 1e-8 { 1.0 / stf_range } else { 0.0 };
-    let s_min = stats.min as f32;
-    let s_shadow = stf.shadow as f32;
-    let s_mid = stf.midtone as f32;
-    let inv_range_f32 = inv_range as f32;
-    let inv_stf_f32 = inv_stf as f32;
-
-    arr.mapv(|val| {
-        let norm = (val - s_min) * inv_range_f32;
-        let x = ((norm - s_shadow) * inv_stf_f32).clamp(0.0, 1.0);
-        mtf(s_mid, x)
     })
 }
 
@@ -243,7 +213,7 @@ pub async fn export_fits(
                 highlight: highlight.unwrap_or(1.0),
             };
             let stats = compute_image_stats(&resolved.arr);
-            apply_stf_to_array(&resolved.arr, &stf, &stats)
+            apply_stf_f32(&resolved.arr, &stf, &stats)
         } else {
             resolved.arr
         };

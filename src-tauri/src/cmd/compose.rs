@@ -19,7 +19,7 @@ fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
     }
 }
 
-fn harmonize_dimensions(
+fn resample_to_largest(
     l: Option<Array2<f32>>,
     r: Option<Array2<f32>>,
     g: Option<Array2<f32>>,
@@ -160,7 +160,7 @@ pub async fn compose_rgb_cmd(
         let b_arr = load_channel(&b_path)?;
 
         let (l_arr, r_arr, g_arr, b_arr, resampled) =
-            harmonize_dimensions(l_arr, r_arr, g_arr, b_arr)?;
+            resample_to_largest(l_arr, r_arr, g_arr, b_arr)?;
 
         let wb = match wb_mode.as_deref() {
             Some(WB_MODE_MANUAL) => WhiteBalance::Manual(

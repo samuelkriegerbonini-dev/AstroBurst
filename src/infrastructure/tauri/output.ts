@@ -1,6 +1,8 @@
 let _outputDir: string | null = null;
 let _outputDirTiles: string | null = null;
+let _exportDir: string | null = null;
 let _resolving: Promise<string> | null = null;
+let _resolvingExport: Promise<string> | null = null;
 
 const FALLBACK = "./output";
 
@@ -14,6 +16,15 @@ async function resolveTauriOutputDir(): Promise<string> {
   }
 }
 
+async function resolveTauriExportDir(): Promise<string> {
+  try {
+    const { downloadDir } = await import("@tauri-apps/api/path");
+    return await downloadDir();
+  } catch {
+    return resolveTauriOutputDir();
+  }
+}
+
 export async function getOutputDir(): Promise<string> {
   if (_outputDir) return _outputDir;
   if (!_resolving) {
@@ -24,6 +35,18 @@ export async function getOutputDir(): Promise<string> {
     });
   }
   return _resolving;
+}
+
+export async function getExportDir(): Promise<string> {
+  if (_exportDir) return _exportDir;
+  if (!_resolvingExport) {
+    _resolvingExport = resolveTauriExportDir().then((dir) => {
+      _exportDir = dir;
+      _resolvingExport = null;
+      return dir;
+    });
+  }
+  return _resolvingExport;
 }
 
 export async function getOutputDirTiles(): Promise<string> {

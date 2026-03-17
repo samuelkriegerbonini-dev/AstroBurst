@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
-import { Save, FileDown, Check } from "lucide-react";
+import { Save, FileDown, FolderOpen } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader } from "../ui";
-import { getOutputDir } from "../../infrastructure/tauri";
+import { getExportDir } from "../../infrastructure/tauri";
 import type { StfParams } from "../../shared/types";
 
 interface BitpixOption {
@@ -54,25 +54,41 @@ interface ExportPanelProps {
 
 const ICON = <Save size={14} className="text-amber-400" />;
 
+async function revealInExplorer(path: string) {
+  try {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    await revealItemInDir(path);
+  } catch {
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      const dir = path.replace(/[/\\][^/\\]+$/, "");
+      await open(dir);
+    } catch {
+      /* noop */
+    }
+  }
+}
+
 export default function ExportPanel({
-  filePath,
-  stfParams,
-  onExport,
-  onExportRgb,
-  rgbChannels,
-  isLoading = false,
-  lastResult = null,
-}: ExportPanelProps) {
+                                      filePath,
+                                      stfParams,
+                                      onExport,
+                                      onExportRgb,
+                                      rgbChannels,
+                                      isLoading = false,
+                                      lastResult = null,
+                                    }: ExportPanelProps) {
   const [applyStf, setApplyStf] = useState(false);
   const [copyWcs, setCopyWcs] = useState(true);
   const [copyMetadata, setCopyMetadata] = useState(true);
   const [bitpix, setBitpix] = useState(-32);
   const [exportDone, setExportDone] = useState(false);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
 
   const handleExport = useCallback(async () => {
     if (!filePath || !onExport) return;
 
-    const dir = await getOutputDir();
+    const dir = await getExportDir();
     const stem = filePath
       .split(/[/\\]/)
       .pop()
@@ -91,7 +107,11 @@ export default function ExportPanel({
         bitpix,
       });
       setExportDone(true);
-      setTimeout(() => setExportDone(false), 3000);
+      setSavedPath(outputPath);
+      setTimeout(() => {
+        setExportDone(false);
+        setSavedPath(null);
+      }, 8000);
     } catch (e) {
       console.error("Export failed:", e);
     }
@@ -99,7 +119,7 @@ export default function ExportPanel({
 
   const handleExportRgb = useCallback(async () => {
     if (!rgbChannels || !onExportRgb) return;
-    const dir = await getOutputDir();
+    const dir = await getExportDir();
     const outputPath = `${dir}/rgb_composite.fits`;
     try {
       await onExportRgb(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
@@ -107,7 +127,11 @@ export default function ExportPanel({
         copyMetadata,
       });
       setExportDone(true);
-      setTimeout(() => setExportDone(false), 3000);
+      setSavedPath(outputPath);
+      setTimeout(() => {
+        setExportDone(false);
+        setSavedPath(null);
+      }, 8000);
     } catch (e) {
       console.error("RGB FITS export failed:", e);
     }
@@ -156,7 +180,22 @@ export default function ExportPanel({
         </button>
       )}
 
-      {lastResult && (
+      {savedPath && (
+        <button
+          onClick={() => revealInExplorer(savedPath)}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded bg-emerald-900/25 border border-emerald-600/20 text-left transition-colors hover:bg-emerald-900/40 group"
+        >
+          <FolderOpen size={12} className="text-emerald-400 shrink-0" />
+          <div className="flex flex-col min-w-0">
+            <span className="text-[10px] font-semibold text-emerald-300">Saved to Downloads</span>
+            <span className="text-[9px] text-emerald-400/70 truncate group-hover:text-emerald-300/90">
+              {savedPath}
+            </span>
+          </div>
+        </button>
+      )}
+
+      {lastResult && !savedPath && (
         <ResultGrid columns={3} items={[
           { label: "Output", value: lastResult.output_path?.split(/[/\\]/).pop() },
           { label: "Size", value: lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--" },

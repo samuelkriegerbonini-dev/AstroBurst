@@ -3,7 +3,7 @@ import { Download, Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export.service";
 import { getCubeFrame } from "../../services/cube.service";
 import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
-import { getOutputDir } from "../../infrastructure/tauri";
+import { getExportDir } from "../../infrastructure/tauri";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
@@ -79,7 +79,7 @@ function ExportTabInner() {
     setCubeExportResult(null);
 
     const stem = (file.name || "cube").replace(/\.(fits?|asdf|zip)$/i, "");
-    const dir = await getOutputDir();
+    const dir = await getExportDir();
     let exported = 0;
 
     try {
@@ -91,7 +91,7 @@ function ExportTabInner() {
         exported++;
         setCubeExportProgress(Math.round((exported / totalFrames) * 100));
       }
-      setCubeExportResult({ exported, total: totalFrames, fits: cubeExportFits });
+      setCubeExportResult({ exported, total: totalFrames, fits: cubeExportFits, dir });
     } catch (e) {
       console.error("Cube frame export failed:", e);
       setCubeExportResult({ exported, total: totalFrames, error: String(e) });
@@ -179,6 +179,11 @@ function ExportTabInner() {
                 }`}>
                   {cubeExportResult.exported}/{cubeExportResult.total} frames exported
                   {cubeExportResult.fits && " (PNG + FITS)"}
+                  {cubeExportResult.dir && !cubeExportResult.error && (
+                    <span className="block text-emerald-400/60 mt-0.5 truncate">
+                      {cubeExportResult.dir}
+                    </span>
+                  )}
                   {cubeExportResult.error && ` (stopped: ${cubeExportResult.error})`}
                 </div>
               )}

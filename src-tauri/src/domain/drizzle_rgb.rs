@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
-use image::{Rgb, RgbImage};
+use image::RgbImage;
 use rayon;
+use rayon::prelude::*;
 
 use crate::domain::drizzle::{self, DrizzleConfig, DrizzleResult};
 use crate::infra::fits::writer as fits_writer;
@@ -92,15 +93,26 @@ pub fn drizzle_rgb(
     let processed = process_drizzle_rgb(&channels, config);
     let (out_rows, out_cols) = processed.output_dims;
 
-    let mut img = RgbImage::new(out_cols as u32, out_rows as u32);
-    for y in 0..out_rows {
-        for x in 0..out_cols {
-            let r = (processed.r_stretched[[y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-            let g = (processed.g_stretched[[y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-            let b = (processed.b_stretched[[y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
-        }
-    }
+    let mut pixels = vec![0u8; out_rows * out_cols * 3];
+    pixels
+        .par_chunks_mut(out_cols * 3)
+        .enumerate()
+        .for_each(|(y, row_buf)| {
+            let r_slice = processed.r_stretched.as_slice().unwrap();
+            let g_slice = processed.g_stretched.as_slice().unwrap();
+            let b_slice = processed.b_stretched.as_slice().unwrap();
+            let base = y * out_cols;
+            for x in 0..out_cols {
+                let i = base + x;
+                let o = x * 3;
+                row_buf[o] = (r_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 1] = (g_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 2] = (b_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+            }
+        });
+
+    let img = RgbImage::from_raw(out_cols as u32, out_rows as u32, pixels)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create RGB image buffer"))?;
     img.save(output_png)
         .map_err(|e| anyhow::anyhow!("Failed to save RGB PNG: {}", e))?;
 

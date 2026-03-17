@@ -35,19 +35,7 @@ pub fn sigma_clip_combine(
             values[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
             let med = values[mid];
 
-            let mut max_dev = 0.0f32;
-            for i in 0..len {
-                let d = (values[i] - med).abs();
-                if i < len {
-                    let tmp = values[i];
-                    values[i] = d;
-                    if i == 0 || d > max_dev { max_dev = d; }
-                    values[i] = tmp;
-                }
-            }
-
-            let devs_buf: Vec<f32> = values[..len].iter().map(|v| (v - med).abs()).collect();
-            let mut devs = devs_buf;
+            let mut devs: Vec<f32> = values[..len].iter().map(|v| (v - med).abs()).collect();
             let dmid = devs.len() / 2;
             devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
             let mad = devs[dmid];

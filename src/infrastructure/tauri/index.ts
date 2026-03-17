@@ -2,7 +2,7 @@ import { safeInvoke, getPreviewUrl } from "./client";
 import { getOutputDir } from "./output";
 
 export { safeInvoke, getPreviewUrl, isTauri } from "./client";
-export { getOutputDir, getOutputDirTiles } from "./output";
+export { getOutputDir, getOutputDirTiles, getExportDir } from "./output";
 export { parseRawPixelBuffer, toUint8Array, parseFftBuffer } from "./parsers";
 
 async function resolveDir(explicit?: string): Promise<string> {

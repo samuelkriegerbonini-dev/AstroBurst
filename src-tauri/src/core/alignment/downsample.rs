@@ -1,4 +1,5 @@
 use ndarray::Array2;
+use rayon::prelude::*;
 
 pub fn area_downsample(img: &Array2<f32>, out_rows: usize, out_cols: usize) -> Array2<f32> {
     let (in_rows, in_cols) = img.dim();
@@ -9,32 +10,35 @@ pub fn area_downsample(img: &Array2<f32>, out_rows: usize, out_cols: usize) -> A
 
     let scale_y = in_rows as f64 / out_rows as f64;
     let scale_x = in_cols as f64 / out_cols as f64;
+    let src = img.as_slice().expect("contiguous");
 
-    Array2::from_shape_fn((out_rows, out_cols), |(oy, ox)| {
+    let mut buf = vec![0.0f32; out_rows * out_cols];
+    buf.par_chunks_mut(out_cols).enumerate().for_each(|(oy, row)| {
         let y0 = (oy as f64 * scale_y).floor() as usize;
         let y1 = (((oy + 1) as f64 * scale_y).ceil() as usize).min(in_rows);
-        let x0 = (ox as f64 * scale_x).floor() as usize;
-        let x1 = (((ox + 1) as f64 * scale_x).ceil() as usize).min(in_cols);
+        for ox in 0..out_cols {
+            let x0 = (ox as f64 * scale_x).floor() as usize;
+            let x1 = (((ox + 1) as f64 * scale_x).ceil() as usize).min(in_cols);
 
-        let mut sum = 0.0f64;
-        let mut count = 0u32;
+            let mut sum = 0.0f64;
+            let mut count = 0u32;
 
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let v = img[[y, x]];
-                if v.is_finite() {
-                    sum += v as f64;
-                    count += 1;
+            for y in y0..y1 {
+                let base = y * in_cols;
+                for x in x0..x1 {
+                    let v = src[base + x];
+                    if v.is_finite() {
+                        sum += v as f64;
+                        count += 1;
+                    }
                 }
             }
-        }
 
-        if count > 0 {
-            (sum / count as f64) as f32
-        } else {
-            0.0
+            row[ox] = if count > 0 { (sum / count as f64) as f32 } else { 0.0 };
         }
-    })
+    });
+
+    Array2::from_shape_vec((out_rows, out_cols), buf).unwrap()
 }
 
 #[cfg(test)]

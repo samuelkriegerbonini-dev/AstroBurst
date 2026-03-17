@@ -22,6 +22,9 @@
     "fs:allow-desktop-write-recursive",
     "fs:allow-appdata-read-recursive",
     "fs:allow-appdata-write-recursive",
+    "fs:allow-download-read-recursive",
+    "fs:allow-download-write-recursive",
+    "opener:default",
     "shell:allow-execute",
     "shell:allow-spawn",
     {

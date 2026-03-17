@@ -107,8 +107,10 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
     let hann_y = hann_window(rows);
     let hann_x = hann_window(cols);
 
-    let fa = fft2d(a, &hann_y, &hann_x, fft_rows, fft_cols);
-    let fb = fft2d(b, &hann_y, &hann_x, fft_rows, fft_cols);
+    let mut planner = FftPlanner::<f64>::new();
+
+    let fa = fft2d(a, &hann_y, &hann_x, fft_rows, fft_cols, &mut planner);
+    let fb = fft2d(b, &hann_y, &hann_x, fft_rows, fft_cols, &mut planner);
 
     let mut cross: Vec<Complex<f64>> = fa
         .iter()
@@ -124,7 +126,7 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
         })
         .collect();
 
-    ifft2d(&mut cross, fft_rows, fft_cols);
+    ifft2d(&mut cross, fft_rows, fft_cols, &mut planner);
 
     let correlation = build_real_surface(&cross, fft_rows, fft_cols);
 
@@ -155,12 +157,23 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
     }
 }
 
+fn transpose(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<Complex<f64>> {
+    let mut out = vec![Complex::new(0.0, 0.0); rows * cols];
+    out.par_chunks_mut(rows).enumerate().for_each(|(x, col_buf)| {
+        for y in 0..rows {
+            col_buf[y] = data[y * cols + x];
+        }
+    });
+    out
+}
+
 fn fft2d(
     img: &Array2<f32>,
     hann_y: &[f64],
     hann_x: &[f64],
     fft_rows: usize,
     fft_cols: usize,
+    planner: &mut FftPlanner<f64>,
 ) -> Vec<Complex<f64>> {
     let (rows, cols) = img.dim();
     let mut data = vec![Complex::new(0.0, 0.0); fft_rows * fft_cols];
@@ -175,47 +188,44 @@ fn fft2d(
         }
     }
 
-    let mut planner = FftPlanner::<f64>::new();
-
     let fft_row = planner.plan_fft_forward(fft_cols);
     data.par_chunks_mut(fft_cols).for_each(|row| {
         fft_row.process(row);
     });
 
+    let mut transposed = transpose(&data, fft_rows, fft_cols);
     let fft_col = planner.plan_fft_forward(fft_rows);
-    let mut col_buf = vec![Complex::new(0.0, 0.0); fft_rows];
-    for x in 0..fft_cols {
-        for y in 0..fft_rows {
-            col_buf[y] = data[y * fft_cols + x];
-        }
-        fft_col.process(&mut col_buf);
-        for y in 0..fft_rows {
-            data[y * fft_cols + x] = col_buf[y];
-        }
-    }
+    transposed.par_chunks_mut(fft_rows).for_each(|col| {
+        fft_col.process(col);
+    });
 
-    data
+    let mut result = vec![Complex::new(0.0, 0.0); fft_rows * fft_cols];
+    result.par_chunks_mut(fft_cols).enumerate().for_each(|(y, row_buf)| {
+        for x in 0..fft_cols {
+            row_buf[x] = transposed[x * fft_rows + y];
+        }
+    });
+
+    result
 }
 
-fn ifft2d(data: &mut [Complex<f64>], fft_rows: usize, fft_cols: usize) {
-    let mut planner = FftPlanner::<f64>::new();
-
+fn ifft2d(data: &mut [Complex<f64>], fft_rows: usize, fft_cols: usize, planner: &mut FftPlanner<f64>) {
     let ifft_row = planner.plan_fft_inverse(fft_cols);
     data.par_chunks_mut(fft_cols).for_each(|row| {
         ifft_row.process(row);
     });
 
+    let mut transposed = transpose(data, fft_rows, fft_cols);
     let ifft_col = planner.plan_fft_inverse(fft_rows);
-    let mut col_buf = vec![Complex::new(0.0, 0.0); fft_rows];
-    for x in 0..fft_cols {
-        for y in 0..fft_rows {
-            col_buf[y] = data[y * fft_cols + x];
+    transposed.par_chunks_mut(fft_rows).for_each(|col| {
+        ifft_col.process(col);
+    });
+
+    data.par_chunks_mut(fft_cols).enumerate().for_each(|(y, row_buf)| {
+        for x in 0..fft_cols {
+            row_buf[x] = transposed[x * fft_rows + y];
         }
-        ifft_col.process(&mut col_buf);
-        for y in 0..fft_rows {
-            data[y * fft_cols + x] = col_buf[y];
-        }
-    }
+    });
 
     let norm = 1.0 / (fft_rows * fft_cols) as f64;
     data.iter_mut().for_each(|c| *c *= norm);
