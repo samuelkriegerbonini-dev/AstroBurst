@@ -10,7 +10,7 @@ use crate::types::stacking::{RLConfig, RLResult};
 
 pub fn generate_gaussian_psf(size: usize, sigma: f32) -> Array2<f32> {
     let mut psf = Array2::<f32>::zeros((size, size));
-    let center = size as f32 / 2.0;
+    let center = (size - 1) as f32 / 2.0;
     let sigma2 = 2.0 * sigma * sigma;
     let mut sum = 0.0f32;
 
@@ -29,6 +29,24 @@ pub fn generate_gaussian_psf(size: usize, sigma: f32) -> Array2<f32> {
     }
 
     psf
+}
+
+fn transpose_c32(data: &[Complex<f32>], rows: usize, cols: usize) -> Vec<Complex<f32>> {
+    let mut out = vec![Complex::new(0.0f32, 0.0); rows * cols];
+    out.par_chunks_mut(rows).enumerate().for_each(|(x, col_buf)| {
+        for y in 0..rows {
+            col_buf[y] = data[y * cols + x];
+        }
+    });
+    out
+}
+
+fn transpose_c32_into(src: &[Complex<f32>], dst: &mut [Complex<f32>], rows: usize, cols: usize) {
+    dst.par_chunks_mut(cols).enumerate().for_each(|(y, row_buf)| {
+        for x in 0..cols {
+            row_buf[x] = src[x * rows + y];
+        }
+    });
 }
 
 struct FftConvolver {
@@ -126,22 +144,13 @@ impl FftConvolver {
             self.fwd_row.process(row);
         });
 
-        let mut col_major = vec![Complex::new(0.0f32, 0.0); self.fft_rows * self.fft_cols];
-        for r in 0..self.fft_rows {
-            for c in 0..self.fft_cols {
-                col_major[c * self.fft_rows + r] = buf[r * self.fft_cols + c];
-            }
-        }
+        let mut col_major = transpose_c32(&buf, self.fft_rows, self.fft_cols);
 
         col_major.par_chunks_mut(self.fft_rows).for_each(|col| {
             self.fwd_col.process(col);
         });
 
-        for c in 0..self.fft_cols {
-            for r in 0..self.fft_rows {
-                buf[r * self.fft_cols + c] = col_major[c * self.fft_rows + r];
-            }
-        }
+        transpose_c32_into(&col_major, &mut buf, self.fft_cols, self.fft_rows);
 
         buf
     }
@@ -154,22 +163,13 @@ impl FftConvolver {
         let fft_rows = self.fft_rows;
         let fft_cols = self.fft_cols;
 
-        let mut col_major = vec![Complex::new(0.0f32, 0.0); fft_rows * fft_cols];
-        for r in 0..fft_rows {
-            for c in 0..fft_cols {
-                col_major[c * fft_rows + r] = buf[r * fft_cols + c];
-            }
-        }
+        let mut col_major = transpose_c32(buf, fft_rows, fft_cols);
 
         col_major.par_chunks_mut(fft_rows).for_each(|col| {
             self.inv_col.process(col);
         });
 
-        for c in 0..fft_cols {
-            for r in 0..fft_rows {
-                buf[r * fft_cols + c] = col_major[c * fft_rows + r];
-            }
-        }
+        transpose_c32_into(&col_major, buf, fft_cols, fft_rows);
 
         let inv_norm = 1.0 / (fft_rows * fft_cols) as f32;
         let mut result = Array2::<f32>::zeros((self.rows, self.cols));
@@ -246,18 +246,13 @@ pub fn richardson_lucy(
         let epsilon = 1e-6f32;
         let lambda = config.regularization as f32;
 
-        let ratio = if lambda > 0.0 {
-            Zip::from(&convolved)
-                .and(image)
-                .and(&estimate)
-                .map_collect(|&c, &img, &est| img / (c + lambda * est + epsilon))
-        } else {
-            Zip::from(&convolved)
-                .and(image)
-                .map_collect(|&c, &img| img / (c + epsilon))
-        };
+        let ratio = Zip::from(&convolved)
+            .and(image)
+            .map_collect(|&c, &img| img / (c + epsilon));
 
         let correction = convolver.convolve_psf_transpose(&ratio);
+
+        let inv_reg = if lambda > 0.0 { 1.0 / (1.0 + lambda) } else { 1.0 };
 
         let sum_sq_delta: f64 = estimate
             .as_slice_mut()
@@ -266,7 +261,7 @@ pub fn richardson_lucy(
             .zip(correction.as_slice().context("Correction not contiguous")?)
             .map(|(est, &cor)| {
                 let old = *est;
-                *est = (old * cor).max(0.0);
+                *est = (old * cor * inv_reg).max(0.0);
                 let d = (*est - old) as f64;
                 d * d
             })
@@ -319,7 +314,7 @@ fn apply_deringing(estimate: &mut Array2<f32>, original: &Array2<f32>, threshold
                 let orig = orig_row[x];
                 let est = row[x];
                 let upper = orig * (1.0 + threshold);
-                let lower = orig * (1.0 - threshold).max(0.0);
+                let lower = (orig * (1.0 - threshold)).max(0.0);
                 if est > upper {
                     row[x] = upper;
                 } else if est < lower {

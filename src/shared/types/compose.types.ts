@@ -1,21 +1,32 @@
-import type { StfParams } from "./fits.types";
-
 export interface ChannelStats {
   median: number;
   mean: number;
-  sigma: number;
   min: number;
   max: number;
 }
 
+export interface DimensionCrop {
+  original_r: [number, number] | null;
+  original_g: [number, number] | null;
+  original_b: [number, number] | null;
+  cropped_to: [number, number];
+}
+
+export type AlignMethod = "phase_correlation" | "affine";
+
 export interface RgbComposeResult {
   png_path: string;
   previewUrl: string;
-  width: number;
-  height: number;
-  stf_r: StfParams;
-  stf_g: StfParams;
-  stf_b: StfParams;
+  dimensions: [number, number];
+  stats_r: ChannelStats;
+  stats_g: ChannelStats;
+  stats_b: ChannelStats;
+  offset_g: [number, number];
+  offset_b: [number, number];
+  scnr_applied: boolean;
+  dimension_crop: DimensionCrop | null;
+  resampled: boolean;
+  lrgb_applied: boolean;
   elapsed_ms: number;
 }
 
@@ -23,6 +34,7 @@ export interface DrizzleRgbResult {
   png_path: string;
   previewUrl: string;
   fits_path: string;
+  dimensions: [number, number];
   input_dims: [number, number];
   output_dims: [number, number];
   frame_count_r: number;
@@ -31,9 +43,6 @@ export interface DrizzleRgbResult {
   rejected_pixels: number;
   elapsed_ms: number;
   scale: number;
-  stats_r: ChannelStats | null;
-  stats_g: ChannelStats | null;
-  stats_b: ChannelStats | null;
 }
 
 export interface DrizzleRgbOptions {

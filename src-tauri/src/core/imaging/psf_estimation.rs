@@ -87,7 +87,7 @@ pub fn estimate_psf(
         return Err("No stars passed quality filters".into());
     }
 
-    candidates.sort_by(|a, b| score_star(b).partial_cmp(&score_star(a)).unwrap());
+    candidates.sort_by(|a, b| score_star(b).partial_cmp(&score_star(a)).unwrap_or(std::cmp::Ordering::Equal));
 
     let selected: Vec<&StarCandidate> = candidates.iter().take(config.num_stars).collect();
 

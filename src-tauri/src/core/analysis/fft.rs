@@ -26,13 +26,13 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
     if apply_window {
         let hann_row: Vec<f32> = (0..rows)
             .map(|i| {
-                let t = std::f32::consts::PI * i as f32 / (rows as f32 - 1.0).max(1.0);
+                let t = 2.0 * std::f32::consts::PI * i as f32 / (rows as f32 - 1.0).max(1.0);
                 0.5 * (1.0 - t.cos())
             })
             .collect();
         let hann_col: Vec<f32> = (0..cols)
             .map(|j| {
-                let t = std::f32::consts::PI * j as f32 / (cols as f32 - 1.0).max(1.0);
+                let t = 2.0 * std::f32::consts::PI * j as f32 / (cols as f32 - 1.0).max(1.0);
                 0.5 * (1.0 - t.cos())
             })
             .collect();

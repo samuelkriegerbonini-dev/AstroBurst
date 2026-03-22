@@ -1,10 +1,9 @@
 use std::time::Instant;
 
-use rayon::prelude::*;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, render_and_save, resolve_output_dir, save_preview_png};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, load_fits_array, resolve_output_dir, save_preview_png};
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::StfParams;
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
@@ -14,9 +13,9 @@ use crate::infra::ipc::{encode_with_header, encode_with_header_downsampled};
 use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY,
     RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_BITPIX, RES_DATA_MAX, RES_DATA_MIN,
-    RES_DIMENSIONS, RES_ELAPSED_MS, RES_ERROR, RES_HEADER, RES_HIGHLIGHT,
+    RES_DIMENSIONS, RES_ELAPSED_MS, RES_HEADER, RES_HIGHLIGHT,
     RES_HISTOGRAM, RES_MAD, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIDTONE, RES_MIN,
-    RES_OUTPUT_PATH, RES_PATH, RES_PNG_PATH, RES_RESULTS, RES_SHADOW, RES_SIGMA,
+    RES_OUTPUT_PATH, RES_PNG_PATH, RES_SHADOW, RES_SIGMA,
     RES_STATS, RES_STF, RES_TOTAL_PIXELS,
 };
 use crate::types::image::ImageStats;
@@ -127,40 +126,6 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
                 RES_AUTO_STF: stf_json(&stf_params),
             },
         }))
-    })
-}
-
-#[tauri::command]
-pub async fn process_batch(paths: Vec<String>, output_dir: String) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
-
-        let results: Vec<serde_json::Value> = paths.par_iter().map(|path| {
-            match (|| -> anyhow::Result<serde_json::Value> {
-                let ro = render_and_save(
-                    load_cached(path)?.arr(),
-                    path,
-                    &output_dir,
-                    "",
-                    false,
-                )?;
-                let (rows, cols) = ro.dims;
-                Ok(json!({
-                    RES_PATH: path,
-                    RES_PNG_PATH: ro.png_path,
-                    RES_DIMENSIONS: [cols, rows],
-                    RES_STATS: stats_json(&ro.stats),
-                }))
-            })() {
-                Ok(r) => r,
-                Err(e) => json!({
-                    RES_PATH: path,
-                    RES_ERROR: format!("{:#}", e),
-                }),
-            }
-        }).collect();
-
-        Ok(json!({ RES_RESULTS: results }))
     })
 }
 

@@ -119,6 +119,16 @@ pub fn apply_stf_f32(data: &Array2<f32>, params: &StfParams, stats: &ImageStats)
     Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
+pub fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, stats: &ImageStats) {
+    let tx = StfTransform::new(params, stats);
+    data.par_mapv_inplace(|v| {
+        if !is_valid_pixel(v) {
+            return 0.0;
+        }
+        tx.apply(v as f64) as f32
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

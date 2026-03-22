@@ -2,12 +2,26 @@ use std::cmp::Ordering;
 
 #[inline]
 pub fn f32_cmp(a: &f32, b: &f32) -> Ordering {
-    a.partial_cmp(b).unwrap_or(Ordering::Equal)
+    a.partial_cmp(b).unwrap_or_else(|| {
+        match (a.is_nan(), b.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            _ => unreachable!(),
+        }
+    })
 }
 
 #[inline]
 pub fn f64_cmp(a: &f64, b: &f64) -> Ordering {
-    a.partial_cmp(b).unwrap_or(Ordering::Equal)
+    a.partial_cmp(b).unwrap_or_else(|| {
+        match (a.is_nan(), b.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            _ => unreachable!(),
+        }
+    })
 }
 
 pub fn exact_median_mut(data: &mut [f32]) -> f64 {
@@ -22,7 +36,7 @@ pub fn exact_median_mut(data: &mut [f32]) -> f64 {
         let left = data[..mid]
             .iter()
             .copied()
-            .fold(f32::MIN, f32::max) as f64;
+            .fold(f32::MIN, |a, b| if b > a { b } else { a }) as f64;
         (left + right) / 2.0
     } else {
         data[mid] as f64
@@ -41,7 +55,7 @@ pub fn median_f32_mut(data: &mut [f32]) -> f32 {
         let left = data[..mid]
             .iter()
             .copied()
-            .fold(f32::MIN, f32::max);
+            .fold(f32::MIN, |a, b| if b > a { b } else { a });
         (left + right) / 2.0
     } else {
         data[mid]
@@ -71,7 +85,7 @@ pub fn exact_median_f64(data: &[f64]) -> f64 {
         let left = buf[..mid]
             .iter()
             .copied()
-            .fold(f64::MIN, f64::max);
+            .fold(f64::MIN, |a, b| if b > a { b } else { a });
         (left + right) / 2.0
     } else {
         buf[mid]
@@ -125,6 +139,8 @@ mod tests {
 
     #[test]
     fn test_f32_cmp_nan() {
-        assert_eq!(f32_cmp(&f32::NAN, &1.0), Ordering::Equal);
+        assert_eq!(f32_cmp(&f32::NAN, &1.0), Ordering::Greater);
+        assert_eq!(f32_cmp(&1.0, &f32::NAN), Ordering::Less);
+        assert_eq!(f32_cmp(&f32::NAN, &f32::NAN), Ordering::Equal);
     }
 }

@@ -1,8 +1,16 @@
 import { useState, useCallback, useEffect } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass } from "lucide-react";
 import { plateSolve, getWcsInfo } from "../../services/astrometry.service";
+import type { WcsInfo } from "../../services/astrometry.service";
 import { getApiKey } from "../../services/config.service";
-import type { Star, WcsInfo } from "../../shared/types";
+
+export interface Star {
+  x: number;
+  y: number;
+  flux: number;
+  fwhm: number;
+  snr: number;
+}
 
 function formatRA(ra: number): string {
   const h = ra / 15;
@@ -46,18 +54,18 @@ interface PlateSolvePanelProps {
 }
 
 export default function PlateSolvePanel({
-  stars = [],
-  count = 0,
-  isLoading = false,
-  onDetect,
-  backgroundMedian,
-  backgroundSigma,
-  imageWidth,
-  imageHeight,
-  elapsed = 0,
-  overlayCanvasRef,
-  filePath,
-}: PlateSolvePanelProps) {
+                                          stars = [],
+                                          count = 0,
+                                          isLoading = false,
+                                          onDetect,
+                                          backgroundMedian,
+                                          backgroundSigma,
+                                          imageWidth,
+                                          imageHeight,
+                                          elapsed = 0,
+                                          overlayCanvasRef,
+                                          filePath,
+                                        }: PlateSolvePanelProps) {
 
   const [sigma, setSigma] = useState(5.0);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -72,8 +80,8 @@ export default function PlateSolvePanel({
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
 
   useEffect(() => {
-    getApiKey()
-      .then((r: any) => setHasApiKey(!!r?.key || !!r?.apiKey))
+    getApiKey("astrometry")
+      .then((r) => setHasApiKey(!!r?.key))
       .catch(() => setHasApiKey(false));
   }, []);
 
@@ -84,7 +92,7 @@ export default function PlateSolvePanel({
       return;
     }
     getWcsInfo(filePath)
-      .then((info: WcsInfo) => setWcsInfo(info))
+      .then((info) => setWcsInfo(info))
       .catch(() => setWcsInfo(null));
   }, [filePath]);
 
@@ -182,7 +190,7 @@ export default function PlateSolvePanel({
       setSolveResult(result);
       if (result.success) {
         getWcsInfo(filePath)
-          .then((info: WcsInfo) => setWcsInfo(info))
+          .then((info) => setWcsInfo(info))
           .catch(() => {});
       }
     } catch (e: unknown) {
@@ -277,32 +285,32 @@ export default function PlateSolvePanel({
               <div className="max-h-[120px] overflow-y-auto">
                 <table className="w-full text-[10px]">
                   <thead>
-                    <tr className="text-zinc-500 border-b border-zinc-800/50">
-                      <th className="text-left px-1 py-0.5">#</th>
-                      <th className="text-right px-1">X</th>
-                      <th className="text-right px-1">Y</th>
-                      <th className="text-right px-1">Flux</th>
-                      <th className="text-right px-1">FWHM</th>
-                      <th className="text-right px-1">SNR</th>
-                    </tr>
+                  <tr className="text-zinc-500 border-b border-zinc-800/50">
+                    <th className="text-left px-1 py-0.5">#</th>
+                    <th className="text-right px-1">X</th>
+                    <th className="text-right px-1">Y</th>
+                    <th className="text-right px-1">Flux</th>
+                    <th className="text-right px-1">FWHM</th>
+                    <th className="text-right px-1">SNR</th>
+                  </tr>
                   </thead>
                   <tbody>
-                    {stars.slice(0, 20).map((s, i) => (
-                      <tr
-                        key={i}
-                        className={`cursor-pointer hover:bg-zinc-800/50 transition-colors ${
-                          selectedStar === i ? "bg-cyan-900/20" : ""
-                        }`}
-                        onClick={() => setSelectedStar(selectedStar === i ? null : i)}
-                      >
-                        <td className="text-zinc-500 px-1 py-0.5">{i + 1}</td>
-                        <td className="text-zinc-300 text-right px-1 font-mono">{s.x.toFixed(1)}</td>
-                        <td className="text-zinc-300 text-right px-1 font-mono">{s.y.toFixed(1)}</td>
-                        <td className="text-zinc-300 text-right px-1 font-mono">{s.flux.toFixed(0)}</td>
-                        <td className="text-zinc-300 text-right px-1 font-mono">{s.fwhm.toFixed(1)}</td>
-                        <td className="text-zinc-300 text-right px-1 font-mono">{s.snr.toFixed(0)}</td>
-                      </tr>
-                    ))}
+                  {stars.slice(0, 20).map((s, i) => (
+                    <tr
+                      key={i}
+                      className={`cursor-pointer hover:bg-zinc-800/50 transition-colors ${
+                        selectedStar === i ? "bg-cyan-900/20" : ""
+                      }`}
+                      onClick={() => setSelectedStar(selectedStar === i ? null : i)}
+                    >
+                      <td className="text-zinc-500 px-1 py-0.5">{i + 1}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{s.x.toFixed(1)}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{s.y.toFixed(1)}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{s.flux.toFixed(0)}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{s.fwhm.toFixed(1)}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{s.snr.toFixed(0)}</td>
+                    </tr>
+                  ))}
                   </tbody>
                 </table>
               </div>
@@ -413,35 +421,32 @@ export default function PlateSolvePanel({
             </div>
           )}
 
-          {!solveResult && activeWcs && (activeWcs as WcsInfo).center_ra !== undefined && (() => {
-            const wcs = activeWcs as WcsInfo;
-            return (
-              <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                  <div className="text-zinc-500">Center RA</div>
-                  <div className="text-zinc-300 font-mono">{formatRA(wcs.center_ra)}</div>
-                </div>
-                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                  <div className="text-zinc-500">Center Dec</div>
-                  <div className="text-zinc-300 font-mono">{formatDec(wcs.center_dec)}</div>
-                </div>
-                {wcs.pixel_scale_arcsec && (
-                  <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                    <div className="text-zinc-500">Pixel Scale</div>
-                    <div className="text-zinc-300 font-mono">{wcs.pixel_scale_arcsec.toFixed(3)}"/px</div>
-                  </div>
-                )}
-                {wcs.fov_arcmin && (
-                  <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                    <div className="text-zinc-500">FOV</div>
-                    <div className="text-zinc-300 font-mono">
-                      {wcs.fov_arcmin[0].toFixed(1)}' x {wcs.fov_arcmin[1].toFixed(1)}'
-                    </div>
-                  </div>
-                )}
+          {!solveResult && wcsInfo && wcsInfo.center_ra !== undefined && (
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
+                <div className="text-zinc-500">Center RA</div>
+                <div className="text-zinc-300 font-mono">{formatRA(wcsInfo.center_ra)}</div>
               </div>
-            );
-          })()}
+              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
+                <div className="text-zinc-500">Center Dec</div>
+                <div className="text-zinc-300 font-mono">{formatDec(wcsInfo.center_dec)}</div>
+              </div>
+              {wcsInfo.pixel_scale_arcsec != null && (
+                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
+                  <div className="text-zinc-500">Pixel Scale</div>
+                  <div className="text-zinc-300 font-mono">{wcsInfo.pixel_scale_arcsec.toFixed(3)}"/px</div>
+                </div>
+              )}
+              {wcsInfo.fov_arcmin && (
+                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
+                  <div className="text-zinc-500">FOV</div>
+                  <div className="text-zinc-300 font-mono">
+                    {wcsInfo.fov_arcmin[0].toFixed(1)}' x {wcsInfo.fov_arcmin[1].toFixed(1)}'
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

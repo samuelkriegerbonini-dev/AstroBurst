@@ -257,7 +257,7 @@ export default function DrizzleRgbPanel({
         <div className="flex items-center justify-between">
           <label className="text-xs text-zinc-400">White Balance</label>
           <select value={wbMode} onChange={(e) => setWbMode(e.target.value)} className="ab-select">
-            <option value="auto">Auto (Median)</option>
+            <option value="auto">Auto (Stability)</option>
             <option value="none">None</option>
           </select>
         </div>

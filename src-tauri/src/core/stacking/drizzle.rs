@@ -8,21 +8,36 @@ use crate::core::alignment::phase_correlation;
 use crate::core::stacking::align;
 
 struct DrizzleAccumulator {
-    data: Vec<Vec<f32>>,
+    storage: Vec<f32>,
+    counts: Vec<u16>,
     weights: Vec<f64>,
+    max_per_pixel: usize,
     out_rows: usize,
     out_cols: usize,
 }
 
 impl DrizzleAccumulator {
-    fn new(out_rows: usize, out_cols: usize) -> Self {
+    fn new(out_rows: usize, out_cols: usize, n_frames: usize) -> Self {
         let n = out_rows * out_cols;
+        let max_per_pixel = (n_frames * 2).max(4);
         Self {
-            data: vec![Vec::new(); n],
+            storage: vec![0.0f32; n * max_per_pixel],
+            counts: vec![0u16; n],
             weights: vec![0.0; n],
+            max_per_pixel,
             out_rows,
             out_cols,
         }
+    }
+
+    #[inline]
+    fn push(&mut self, idx: usize, val: f32, w: f64) {
+        let count = self.counts[idx] as usize;
+        if count < self.max_per_pixel {
+            self.storage[idx * self.max_per_pixel + count] = val;
+            self.counts[idx] += 1;
+        }
+        self.weights[idx] += w;
     }
 
     fn drizzle_frame(
@@ -76,8 +91,7 @@ impl DrizzleAccumulator {
 
                         if w > 1e-12 {
                             let idx = oy * self.out_cols + ox;
-                            self.data[idx].push(val);
-                            self.weights[idx] += w;
+                            self.push(idx, val, w);
                         }
                     }
                 }
@@ -92,19 +106,21 @@ impl DrizzleAccumulator {
         sigma_iterations: usize,
     ) -> (Array2<f32>, Array2<f32>, u64) {
         let n = self.out_rows * self.out_cols;
+        let mpp = self.max_per_pixel;
 
         let results: Vec<(f32, f32, u64)> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let vals = &self.data[i];
-                if vals.is_empty() {
+                let count = self.counts[i] as usize;
+                if count == 0 {
                     return (0.0, 0.0, 0);
                 }
-                if vals.len() == 1 {
-                    return (vals[0], self.weights[i] as f32, 0);
+                if count == 1 {
+                    return (self.storage[i * mpp], self.weights[i] as f32, 0);
                 }
 
-                let mut active: Vec<f32> = vals.clone();
+                let base = i * mpp;
+                let mut active: Vec<f32> = self.storage[base..base + count].to_vec();
                 let mut rejected = 0u64;
 
                 for _ in 0..sigma_iterations {
@@ -133,8 +149,11 @@ impl DrizzleAccumulator {
                 }
 
                 if active.is_empty() {
-                    let mean = vals.iter().map(|v| *v as f64).sum::<f64>() / vals.len() as f64;
-                    return (mean as f32, self.weights[i] as f32, rejected);
+                    let sum: f64 = self.storage[base..base + count]
+                        .iter()
+                        .map(|v| *v as f64)
+                        .sum();
+                    return ((sum / count as f64) as f32, self.weights[i] as f32, rejected);
                 }
 
                 let mean = active.iter().map(|v| *v as f64).sum::<f64>() / active.len() as f64;
@@ -244,7 +263,7 @@ pub fn drizzle_stack(
                     .map(|target| {
                         let result = phase_correlation::phase_correlate(reference, target);
                         if phase_correlation::is_low_confidence(result.confidence) {
-                            let (dx, dy) = align::compute_subpixel_offset(reference, target, 50);
+                            let (dy, dx) = align::compute_subpixel_offset(reference, target, 50);
                             (dx, dy)
                         } else {
                             (result.dx, result.dy)
@@ -256,7 +275,7 @@ pub fn drizzle_stack(
             AlignmentMethod::Zncc => {
                 let search_radius = 50i32;
                 for i in 1..images_ref.len() {
-                    let (dx, dy) = align::compute_subpixel_offset(
+                    let (dy, dx) = align::compute_subpixel_offset(
                         reference,
                         images_ref[i],
                         search_radius,
@@ -271,7 +290,7 @@ pub fn drizzle_stack(
         }
     }
 
-    let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols);
+    let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols, images_ref.len());
 
     for (i, img) in images_ref.iter().enumerate() {
         let (dx, dy) = offsets[i];

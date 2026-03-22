@@ -1,4 +1,4 @@
-const VALID_EXTENSIONS = [".fits", ".fit", ".fts", ".asdf"];
+const VALID_EXTENSIONS = [".fits", ".fit", ".fts", ".asdf", ".zip"];
 
 export function isValidFitsFile(nameOrPath: string): boolean {
   const lower = nameOrPath.toLowerCase();

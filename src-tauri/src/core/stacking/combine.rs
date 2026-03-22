@@ -24,6 +24,8 @@ pub fn sigma_clip_combine(
     let n_orig = values.len();
     let mut len = n_orig;
     let mut rejected = 0u32;
+    let mut devs = Vec::with_capacity(n_orig);
+    let mut last_center: f32 = 0.0;
 
     for iteration in 0..max_iter {
         if len < 2 {
@@ -35,7 +37,8 @@ pub fn sigma_clip_combine(
             values[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
             let med = values[mid];
 
-            let mut devs: Vec<f32> = values[..len].iter().map(|v| (v - med).abs()).collect();
+            devs.clear();
+            devs.extend(values[..len].iter().map(|v| (v - med).abs()));
             let dmid = devs.len() / 2;
             devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
             let mad = devs[dmid];
@@ -54,6 +57,8 @@ pub fn sigma_clip_combine(
                 / (n - 1.0).max(1.0);
             (mean as f32, variance.sqrt().max(1e-10) as f32)
         };
+
+        last_center = center;
 
         let lo = -sigma_low * sigma;
         let hi = sigma_high * sigma;
@@ -76,8 +81,7 @@ pub fn sigma_clip_combine(
     }
 
     if len == 0 {
-        let sum: f64 = values.iter().map(|v| *v as f64).sum();
-        return ((sum / n_orig as f64) as f32, rejected);
+        return (last_center, rejected);
     }
 
     let mean = values[..len].iter().map(|v| *v as f64).sum::<f64>() / len as f64;

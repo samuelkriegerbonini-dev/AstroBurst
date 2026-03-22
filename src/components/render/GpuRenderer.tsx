@@ -20,20 +20,46 @@ function clampDimensions(w: number, h: number, maxDim: number): DisplayDims {
   };
 }
 
-function downsampleF32(src: Float32Array, srcW: number, srcH: number, dstW: number, dstH: number): Float32Array {
-  const dst = new Float32Array(dstW * dstH);
-  const xRatio = srcW / dstW;
-  const yRatio = srcH / dstH;
-  for (let y = 0; y < dstH; y++) {
-    const srcY = Math.min(Math.floor(y * yRatio), srcH - 1);
-    const srcRowOff = srcY * srcW;
-    const dstRowOff = y * dstW;
-    for (let x = 0; x < dstW; x++) {
-      const srcX = Math.min(Math.floor(x * xRatio), srcW - 1);
-      dst[dstRowOff + x] = src[srcRowOff + srcX];
-    }
-  }
-  return dst;
+let _dsWorker: Worker | null = null;
+let _dsWorkerUrl: string | null = null;
+function getDownsampleWorker(): Worker {
+  if (_dsWorker) return _dsWorker;
+  const code = `
+    self.onmessage = (e) => {
+      const { src, srcW, srcH, dstW, dstH, seq } = e.data;
+      const dst = new Float32Array(dstW * dstH);
+      const xR = srcW / dstW;
+      const yR = srcH / dstH;
+      for (let y = 0; y < dstH; y++) {
+        const sY = Math.min(Math.floor(y * yR), srcH - 1);
+        const sOff = sY * srcW;
+        const dOff = y * dstW;
+        for (let x = 0; x < dstW; x++) {
+          dst[dOff + x] = src[sOff + Math.min(Math.floor(x * xR), srcW - 1)];
+        }
+      }
+      self.postMessage({ dst, dstW, dstH, seq }, [dst.buffer]);
+    };
+  `;
+  _dsWorkerUrl = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+  _dsWorker = new Worker(_dsWorkerUrl);
+  return _dsWorker;
+}
+
+function downsampleF32Async(
+  src: Float32Array, srcW: number, srcH: number,
+  dstW: number, dstH: number, seq: number,
+): Promise<{ dst: Float32Array; seq: number }> {
+  return new Promise((resolve) => {
+    const w = getDownsampleWorker();
+    const handler = (e: MessageEvent) => {
+      if (e.data.seq !== seq) return;
+      w.removeEventListener("message", handler);
+      resolve({ dst: e.data.dst, seq: e.data.seq });
+    };
+    w.addEventListener("message", handler);
+    w.postMessage({ src, srcW, srcH, dstW, dstH, seq });
+  });
 }
 
 interface GpuResources {
@@ -80,10 +106,23 @@ export default function GpuRenderer({
     [width, height],
   );
 
-  const displayData = useMemo(() => {
-    if (!rawData || !width || !height) return null;
-    if (display.scale === 1) return rawData;
-    return downsampleF32(rawData, width, height, display.width, display.height);
+  const [displayData, setDisplayData] = useState<Float32Array | null>(null);
+  const dsSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (!rawData || !width || !height) {
+      setDisplayData(null);
+      return;
+    }
+    if (display.scale === 1) {
+      setDisplayData(rawData);
+      return;
+    }
+    const seq = ++dsSeqRef.current;
+    downsampleF32Async(rawData, width, height, display.width, display.height, seq)
+      .then(({ dst, seq: rSeq }) => {
+        if (rSeq === dsSeqRef.current) setDisplayData(dst);
+      });
   }, [rawData, width, height, display]);
 
   useEffect(() => {

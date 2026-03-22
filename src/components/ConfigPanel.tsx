@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect } from "react";
 import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config.service";
+import type { AppConfig } from "../services/config.service";
 
 export default function ConfigPanel() {
 
-  const [config, setConfig] = useState<any>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [apiKeyMasked, setApiKeyMasked] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,12 +24,12 @@ export default function ConfigPanel() {
       } else {
         setApiKeyMasked(null);
       }
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [getConfig, getApiKey]);
+  }, []);
 
   useEffect(() => {
     loadConfig();
@@ -44,24 +45,24 @@ export default function ConfigPanel() {
       setApiKey("");
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
-    } catch (e: any) {
+    } catch (e: unknown) {
       setSaveStatus("error");
-      setError(e?.message || String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
-  }, [apiKey, saveApiKey]);
+  }, [apiKey]);
 
   const handleUpdateField = useCallback(
-    async (field: string, value: any) => {
+    async (field: string, value: unknown) => {
       try {
         const updated = await updateConfig(field, value);
         setConfig(updated);
-      } catch (e: any) {
-        setError(e?.message || String(e));
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [updateConfig],
+    [],
   );
 
   if (loading) {

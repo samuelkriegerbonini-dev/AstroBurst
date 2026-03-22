@@ -1,9 +1,10 @@
-import { useState, useCallback, useEffect, useRef, memo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
 import { Plus, RotateCcw } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
-import FileList from "./components/file/FileList";
+import MetadataFileList from "./components/file/MetadataFileList";
+import type { MetadataFile } from "./components/file/MetadataFileList";
 import PreviewPanel from "./components/PreviewPanel";
 
 import Confetti from "./components/Confetti";
@@ -11,13 +12,13 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
-import { useFileStats } from "./hooks/useFileStore";
+import { useFileStats, useFileIds, useSelectedId, fileStore } from "./hooks/useFileStore";
 import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
 
-import type { AstroFile } from "./shared/types";
-import { APP_VERSION } from "./utils/constants";
+import type { AstroFile, ProcessedFile } from "./shared/types";
+import { APP_VERSION, FILE_STATUS } from "./utils/constants";
 
 // @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
@@ -27,12 +28,40 @@ import { isTauri } from "./infrastructure/tauri";
 
 type ViewState = "empty" | "processing" | "complete";
 
-const MemoizedFileList = memo(FileList);
 const MemoizedPreviewPanel = memo(PreviewPanel);
 
 const SIDEBAR_MIN = 42;
 const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MAX = 480;
+
+function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
+  return fileIds.map((id) => {
+    const f = getFile(id);
+    if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" as const };
+    const header = f.result?.header;
+    return {
+      id: f.id,
+      name: f.name,
+      path: f.path,
+      size: f.size ?? 0,
+      status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
+      error: f.error,
+      metadata: header
+        ? {
+            filter: header.FILTER ?? undefined,
+            exptime: header.EXPTIME != null ? Number(header.EXPTIME) : undefined,
+            instrument: header.INSTRUME ?? undefined,
+            detector: header.DETECTOR ?? undefined,
+            bitpix: header.BITPIX != null ? Number(header.BITPIX) : undefined,
+            dateObs: header["DATE-OBS"] ?? undefined,
+          }
+        : undefined,
+      previewUrl: f.result?.previewUrl,
+      dimensions: f.result?.dimensions,
+      elapsed_ms: f.result?.elapsed_ms,
+    };
+  });
+}
 
 export default function App() {
   const [loading, setLoading] = useState(true);
@@ -50,6 +79,8 @@ export default function App() {
 
   const { addFiles, startProcessing, reset } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
+  const fileIds = useFileIds();
+  const selectedId = useSelectedId();
 
   const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
@@ -134,6 +165,20 @@ export default function App() {
     setShowConfetti(false);
   }, [reset, timer]);
 
+  const handleSelectFile = useCallback((id: string) => {
+    fileStore.selectFile(id);
+  }, []);
+
+  const handleExportZip = useCallback(() => {
+    exportZip(fileStore.getFiles());
+  }, [exportZip]);
+
+  const storeVersion = useSyncExternalStore(fileStore.subscribe, fileStore.getVersion);
+  const metadataFiles = useMemo(
+    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id)),
+    [fileIds, storeVersion],
+  );
+
   const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
     if (!sidebarOpen) return;
     e.preventDefault();
@@ -210,10 +255,13 @@ export default function App() {
                         background: "rgba(5,5,16,0.55)",
                       }}
                     >
-                      <MemoizedFileList
+                      <MetadataFileList
+                        files={metadataFiles}
+                        selectedId={selectedId}
+                        onSelect={handleSelectFile}
+                        onExportZip={handleExportZip}
                         collapsed={!sidebarOpen}
                         onToggle={() => setSidebarOpen((p) => !p)}
-                        onExportZip={exportZip}
                         isExporting={isExporting}
                         zipProgress={zipProgress}
                         downloaded={downloaded}
@@ -261,13 +309,7 @@ export default function App() {
                   </div>
                 </div>
               )}
-              <div className="absolute bottom-6 left-8 pointer-events-none flex items-center gap-3 select-none z-20">
-                <AstroLogo size={32} showText={false} className="opacity-40" />
-                <div className="flex flex-col border-l border-white/10 pl-3">
-                  <span className="text-[10px] font-bold tracking-widest text-zinc-500 uppercase">AstroBurst</span>
-                  <span className="text-[9px] font-mono text-blue-500/40 uppercase leading-none">{APP_VERSION}</span>
-                </div>
-              </div>
+
             </DropZone>
           </div>
         )}

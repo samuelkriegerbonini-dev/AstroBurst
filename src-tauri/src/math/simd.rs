@@ -11,15 +11,9 @@ fn fast_asinh_scalar(x: f32) -> f32 {
     if abs_x < 0.5 {
         let x2 = x * x;
         x * (1.0 - x2 * (1.0 / 6.0 - x2 * 3.0 / 40.0))
-    } else if abs_x < 4.0 {
-        let x2 = abs_x * abs_x;
-        let num = abs_x * (1.0 + x2 * 0.1667);
-        let den = 1.0 + x2 * 0.2058;
-        let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-        sign * (num / den + (x2 + 1.0).sqrt().ln())
     } else {
         let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-        sign * (2.0 * abs_x).ln()
+        sign * (abs_x + (abs_x * abs_x + 1.0).sqrt()).ln()
     }
 }
 
@@ -132,62 +126,6 @@ unsafe fn normalize_chunk_avx2(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sum_finite_avx2(data: &[f32]) -> (f64, u32) {
-    let chunks = data.len() / 8;
-    let remainder = data.len() % 8;
-
-    let mut v_sum_lo = _mm256_setzero_ps();
-    let mut v_sum_hi = _mm256_setzero_ps();
-    let mut v_count = _mm256_set1_epi32(0);
-    let v_zero = _mm256_setzero_ps();
-
-    for i in 0..chunks {
-        let offset = i * 8;
-        let data_v = _mm256_loadu_ps(data.as_ptr().add(offset));
-        let is_finite = _mm256_cmp_ps(data_v, data_v, _CMP_EQ_OQ);
-        let is_nonzero = _mm256_cmp_ps(data_v, v_zero, _CMP_NEQ_OQ);
-        let mask = _mm256_and_ps(is_finite, is_nonzero);
-        let mask_i = _mm256_castps_si256(mask);
-        let masked = _mm256_and_ps(data_v, mask);
-
-        if i % 2 == 0 {
-            v_sum_lo = _mm256_add_ps(v_sum_lo, masked);
-        } else {
-            v_sum_hi = _mm256_add_ps(v_sum_hi, masked);
-        }
-
-        let ones = _mm256_and_si256(mask_i, _mm256_set1_epi32(1));
-        v_count = _mm256_add_epi32(v_count, ones);
-    }
-
-    let v_sum = _mm256_add_ps(v_sum_lo, v_sum_hi);
-
-    let mut sum_arr = [0.0f32; 8];
-    let mut count_arr = [0i32; 8];
-    _mm256_storeu_ps(sum_arr.as_mut_ptr(), v_sum);
-    _mm256_storeu_si256(count_arr.as_mut_ptr() as *mut __m256i, v_count);
-
-    let mut total_sum = 0.0f64;
-    let mut total_count = 0u32;
-    for i in 0..8 {
-        total_sum += sum_arr[i] as f64;
-        total_count += count_arr[i] as u32;
-    }
-
-    let base = chunks * 8;
-    for i in 0..remainder {
-        let v = data[base + i];
-        if v.is_finite() && v != 0.0 {
-            total_sum += v as f64;
-            total_count += 1;
-        }
-    }
-
-    (total_sum, total_count)
-}
-
 pub fn asinh_normalize_simd(data: &Array2<f32>) -> Array2<f32> {
     use super::median::{f32_cmp, median_f32_mut};
 
@@ -246,52 +184,44 @@ pub fn asinh_normalize_simd(data: &Array2<f32>) -> Array2<f32> {
 
 pub fn collapse_mean_simd(cube: &ndarray::Array3<f32>) -> Array2<f32> {
     let (depth, rows, cols) = cube.dim();
-    let mut result = Array2::<f32>::zeros((rows, cols));
+    let npix = rows * cols;
+    let mut sum_buf = vec![0.0f64; npix];
+    let mut count_buf = vec![0u32; npix];
 
-    #[cfg(target_arch = "x86_64")]
-    let use_avx2 = is_x86_feature_detected!("avx2");
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx2 = false;
-
-    for y in 0..rows {
-        for x in 0..cols {
-            let mut col = Vec::with_capacity(depth);
-            for z in 0..depth {
-                col.push(cube[[z, y, x]]);
-            }
-
-            let (sum, count) = if use_avx2 {
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    sum_finite_avx2(&col)
+    for z in 0..depth {
+        let slice = cube.slice(ndarray::s![z, .., ..]);
+        let raw = slice.as_slice().unwrap_or_else(|| {
+            &[]
+        });
+        if raw.len() == npix {
+            for i in 0..npix {
+                let v = raw[i];
+                if v.is_finite() && v != 0.0 {
+                    sum_buf[i] += v as f64;
+                    count_buf[i] += 1;
                 }
-                #[cfg(not(target_arch = "x86_64"))]
-                sum_finite_scalar(&col)
-            } else {
-                sum_finite_scalar(&col)
-            };
-
-            result[[y, x]] = if count > 0 {
-                (sum / count as f64) as f32
-            } else {
-                0.0
-            };
+            }
+        } else {
+            for y in 0..rows {
+                for x in 0..cols {
+                    let v = slice[[y, x]];
+                    if v.is_finite() && v != 0.0 {
+                        let i = y * cols + x;
+                        sum_buf[i] += v as f64;
+                        count_buf[i] += 1;
+                    }
+                }
+            }
         }
     }
 
-    result
-}
+    let pixels: Vec<f32> = sum_buf
+        .into_iter()
+        .zip(count_buf.into_iter())
+        .map(|(s, c)| if c > 0 { (s / c as f64) as f32 } else { 0.0 })
+        .collect();
 
-fn sum_finite_scalar(data: &[f32]) -> (f64, u32) {
-    let mut sum = 0.0f64;
-    let mut count = 0u32;
-    for &v in data {
-        if v.is_finite() && v != 0.0 {
-            sum += v as f64;
-            count += 1;
-        }
-    }
-    (sum, count)
+    Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
 pub fn find_minmax_simd(data: &[f32]) -> (f32, f32) {

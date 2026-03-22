@@ -3,20 +3,39 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, downsample_u8_rgb, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::core::compose::rgb::process_rgb;
 use crate::core::compose::lrgb::apply_lrgb;
 use crate::core::imaging::resample::resample_image;
 use crate::infra::render::rgb::render_rgb;
-use crate::types::compose::{RgbComposeConfig, RgbComposeResult, WhiteBalance};
+use crate::types::compose::{AlignMethod, RgbComposeConfig, RgbComposeResult, WhiteBalance};
 use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, LRGB_APPLIED, RESAMPLED};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
-fn load_channel(path: &Option<String>) -> anyhow::Result<Option<Array2<f32>>> {
+use crate::infra::cache::ImageEntry;
+
+fn load_entry(path: &Option<String>) -> anyhow::Result<Option<ImageEntry>> {
     match path {
-        Some(p) => Ok(Some(load_cached(p)?.arr().to_owned())),
+        Some(p) => Ok(Some(load_cached(p)?)),
         None => Ok(None),
     }
+}
+
+fn needs_resample(entries: &[Option<&ImageEntry>]) -> bool {
+    let dims: Vec<(usize, usize)> = entries
+        .iter()
+        .filter_map(|e| e.map(|entry| entry.arr().dim()))
+        .collect();
+    if dims.len() < 2 {
+        return false;
+    }
+    let max_rows = dims.iter().map(|d| d.0).max().unwrap();
+    let max_cols = dims.iter().map(|d| d.1).max().unwrap();
+    let min_rows = dims.iter().map(|d| d.0).min().unwrap();
+    let min_cols = dims.iter().map(|d| d.1).min().unwrap();
+    let ratio_rows = max_rows as f64 / min_rows as f64;
+    let ratio_cols = max_cols as f64 / min_cols as f64;
+    ratio_rows >= 1.1 || ratio_cols >= 1.1
 }
 
 fn resample_to_largest(
@@ -94,25 +113,30 @@ fn render_rgb_preview(
     let g_slice = g.as_slice().context("G not contiguous")?;
     let b_slice = b.as_slice().context("B not contiguous")?;
 
-    let npix = rows * cols;
-    let mut pixels = vec![0u8; npix * 3];
+    let scale = max_dim as f64 / (rows.max(cols) as f64);
+    let pw = ((cols as f64) * scale).round().max(1.0) as usize;
+    let ph = ((rows as f64) * scale).round().max(1.0) as usize;
 
-    pixels
-        .par_chunks_mut(cols * 3)
+    let y_ratio = rows as f64 / ph as f64;
+    let x_ratio = cols as f64 / pw as f64;
+
+    let mut preview = vec![0u8; pw * ph * 3];
+
+    preview
+        .par_chunks_mut(pw * 3)
         .enumerate()
-        .for_each(|(y, row_buf)| {
-            let base = y * cols;
-            for x in 0..cols {
-                let i = base + x;
-                let o = x * 3;
-                row_buf[o] = (r_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 1] = (g_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 2] = (b_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+        .for_each(|(dy, row_buf)| {
+            let sy = ((dy as f64) * y_ratio).min((rows - 1) as f64) as usize;
+            let src_base = sy * cols;
+            for dx in 0..pw {
+                let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
+                let si = src_base + sx;
+                let o = dx * 3;
+                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
             }
         });
-
-    let (preview, pw, ph) = downsample_u8_rgb(&pixels, cols, rows, max_dim);
-    drop(pixels);
 
     let file = std::fs::File::create(path).context("Failed to create output file")?;
     let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
@@ -139,6 +163,7 @@ pub async fn compose_rgb_cmd(
     auto_stretch: Option<bool>,
     linked_stf: Option<bool>,
     align: Option<bool>,
+    align_method: Option<String>,
     wb_mode: Option<String>,
     wb_r: Option<f64>,
     wb_g: Option<f64>,
@@ -154,13 +179,38 @@ pub async fn compose_rgb_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let l_arr = load_channel(&l_path)?;
-        let r_arr = load_channel(&r_path)?;
-        let g_arr = load_channel(&g_path)?;
-        let b_arr = load_channel(&b_path)?;
+        let l_entry = load_entry(&l_path)?;
+        let r_entry = load_entry(&r_path)?;
+        let g_entry = load_entry(&g_path)?;
+        let b_entry = load_entry(&b_path)?;
 
-        let (l_arr, r_arr, g_arr, b_arr, resampled) =
-            resample_to_largest(l_arr, r_arr, g_arr, b_arr)?;
+        let refs = [l_entry.as_ref(), r_entry.as_ref(), g_entry.as_ref(), b_entry.as_ref()];
+        let do_resample = needs_resample(&refs);
+
+        let (l_owned, r_owned, g_owned, b_owned, resampled);
+        if do_resample {
+            let to_owned = |e: &Option<ImageEntry>| -> Option<Array2<f32>> {
+                e.as_ref().map(|entry| entry.arr().to_owned())
+            };
+            let (l_rs, r_rs, g_rs, b_rs, rs) =
+                resample_to_largest(to_owned(&l_entry), to_owned(&r_entry), to_owned(&g_entry), to_owned(&b_entry))?;
+            l_owned = l_rs;
+            r_owned = r_rs;
+            g_owned = g_rs;
+            b_owned = b_rs;
+            resampled = rs;
+        } else {
+            l_owned = None;
+            r_owned = None;
+            g_owned = None;
+            b_owned = None;
+            resampled = false;
+        }
+
+        let l_ref = l_owned.as_ref().or_else(|| l_entry.as_ref().map(|e| e.arr()));
+        let r_ref = r_owned.as_ref().or_else(|| r_entry.as_ref().map(|e| e.arr()));
+        let g_ref = g_owned.as_ref().or_else(|| g_entry.as_ref().map(|e| e.arr()));
+        let b_ref = b_owned.as_ref().or_else(|| b_entry.as_ref().map(|e| e.arr()));
 
         let wb = match wb_mode.as_deref() {
             Some(WB_MODE_MANUAL) => WhiteBalance::Manual(
@@ -186,24 +236,30 @@ pub async fn compose_rgb_cmd(
             None
         };
 
+        let align_m = match align_method.as_deref() {
+            Some("affine") => AlignMethod::Affine,
+            _ => AlignMethod::PhaseCorrelation,
+        };
+
         let config = RgbComposeConfig {
             white_balance: wb,
             auto_stretch: auto_stretch.unwrap_or(true),
             linked_stf: linked_stf.unwrap_or(false),
             align: align.unwrap_or(true),
+            align_method: align_m,
             scnr: scnr_cfg,
             dimension_tolerance: dimension_tolerance.unwrap_or(DEFAULT_DIMENSION_TOLERANCE),
             ..RgbComposeConfig::default()
         };
 
         let mut processed = process_rgb(
-            r_arr.as_ref(),
-            g_arr.as_ref(),
-            b_arr.as_ref(),
+            r_ref,
+            g_ref,
+            b_ref,
             &config,
         )?;
 
-        let lrgb_applied = if let Some(l_data) = l_arr.as_ref() {
+        let lrgb_applied = if let Some(l_data) = l_ref {
             let lightness = lrgb_lightness.unwrap_or(1.0) as f32;
             let chrominance = lrgb_chrominance.unwrap_or(1.0) as f32;
 

@@ -130,7 +130,7 @@ pub fn compute_subpixel_offset(
                     if tx < 0 || tx >= cols as i32 { continue; }
                     let rv = reference[[y, x]] as f64;
                     let tv = target[[ty as usize, tx as usize]] as f64;
-                    if rv.is_finite() && tv.is_finite() && rv.abs() > 1e-7 && tv.abs() > 1e-7 {
+                    if rv.is_finite() && tv.is_finite() {
                         r_sum += rv;
                         t_sum += tv;
                         count += 1;
@@ -156,7 +156,7 @@ pub fn compute_subpixel_offset(
                     if tx < 0 || tx >= cols as i32 { continue; }
                     let rv = reference[[y, x]] as f64;
                     let tv = target[[ty as usize, tx as usize]] as f64;
-                    if rv.is_finite() && tv.is_finite() && rv.abs() > 1e-7 && tv.abs() > 1e-7 {
+                    if rv.is_finite() && tv.is_finite() {
                         let rd = rv - r_mean;
                         let td = tv - t_mean;
                         num += rd * td;
@@ -189,9 +189,9 @@ pub fn compute_subpixel_offset(
         let sub_dx = quadratic_peak(
             &scores, by, bx, false, search_radius,
         ).unwrap_or(bx as f64);
-        (sub_dx, sub_dy)
+        (sub_dy, sub_dx)
     } else {
-        (bx as f64, by as f64)
+        (by as f64, bx as f64)
     }
 }
 

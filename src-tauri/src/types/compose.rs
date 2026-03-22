@@ -1,4 +1,4 @@
-use super::image::{ScnrConfig, StfParams};
+use super::image::{ImageStats, ScnrConfig, StfParams};
 use super::stacking::DrizzleConfig;
 
 #[derive(Debug, Clone)]
@@ -8,12 +8,30 @@ pub enum WhiteBalance {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMethod {
+    PhaseCorrelation,
+    Affine,
+}
+
+impl Default for AlignMethod {
+    fn default() -> Self {
+        Self::PhaseCorrelation
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChannelStats {
     pub min: f64,
     pub max: f64,
     pub median: f64,
     pub mean: f64,
+}
+
+impl From<&ImageStats> for ChannelStats {
+    fn from(st: &ImageStats) -> Self {
+        Self { min: st.min, max: st.max, median: st.median, mean: st.mean }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,6 +51,7 @@ pub struct RgbComposeConfig {
     pub stf_b: Option<StfParams>,
     pub linked_stf: bool,
     pub align: bool,
+    pub align_method: AlignMethod,
     pub scnr: Option<ScnrConfig>,
     pub dimension_tolerance: usize,
 }
@@ -47,6 +66,7 @@ impl Default for RgbComposeConfig {
             stf_b: None,
             linked_stf: false,
             align: true,
+            align_method: AlignMethod::PhaseCorrelation,
             scnr: None,
             dimension_tolerance: 100,
         }

@@ -65,11 +65,7 @@ export function setWorkerPixels(
     const id = _nextId++;
     _hasPixels = false;
     _pendingCallbacks.set(id, () => {
-      if (_pixelsGeneration === gen) {
-        resolve();
-      } else {
-        resolve();
-      }
+      resolve();
     });
     const copy = new Float32Array(pixels);
     worker.postMessage(

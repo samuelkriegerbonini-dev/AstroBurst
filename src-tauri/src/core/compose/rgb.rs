@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use ndarray::{Array2, s};
 use rayon::prelude::*;
 
+use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
 use crate::core::imaging::resample::bicubic_sample;
 use crate::core::imaging::scnr;
@@ -10,7 +11,7 @@ use crate::core::imaging::stf::{self, AutoStfConfig, StfParams};
 use crate::types::image::ImageStats;
 
 pub use crate::types::compose::{
-    WhiteBalance, ChannelStats, DimensionCrop,
+    AlignMethod, WhiteBalance, ChannelStats, DimensionCrop,
     RgbComposeConfig, RgbComposeResult,
 };
 
@@ -109,10 +110,6 @@ pub fn harmonize_dimensions(
     Ok((conform(r, min_rows, min_cols), conform(g, min_rows, min_cols), conform(b, min_rows, min_cols), min_rows, min_cols, Some(crop_info)))
 }
 
-fn to_channel_stats(st: &ImageStats) -> ChannelStats {
-    ChannelStats { min: st.min, max: st.max, median: st.median, mean: st.mean }
-}
-
 fn apply_multiplier_inplace(arr: &mut Array2<f32>, mult: f32) {
     if (mult - 1.0).abs() < 1e-7 { return; }
     arr.par_mapv_inplace(|v| v * mult);
@@ -163,32 +160,80 @@ fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
     Array2::from_shape_vec((rows, cols), out).unwrap()
 }
 
+fn align_single_phase_correlation(
+    ref_ch: &Array2<f32>,
+    target: &Array2<f32>,
+    has_data: bool,
+) -> (Array2<f32>, (f64, f64)) {
+    if !has_data {
+        return (target.clone(), (0.0, 0.0));
+    }
+    let pc = phase_correlation::phase_correlate(ref_ch, target);
+    let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
+    (shifted, (pc.dy, pc.dx))
+}
+
+fn align_single_affine(
+    ref_ch: &Array2<f32>,
+    target: &Array2<f32>,
+    has_data: bool,
+    rows: usize,
+    cols: usize,
+    label: &str,
+) -> (Array2<f32>, (f64, f64)) {
+    if !has_data {
+        return (target.clone(), (0.0, 0.0));
+    }
+    let result = affine::align_channel_affine(ref_ch, target);
+    log::info!(
+        "{} alignment: method={}, stars={}, inliers={}, residual={:.3}px, rot={:.4}deg, tx={:.2}, ty={:.2}",
+        label, result.method, result.matched_stars, result.inliers,
+        result.residual_px, result.transform.rotation_deg(),
+        result.transform.tx, result.transform.ty
+    );
+    let warped = affine::warp_image(target, &result.transform, rows, cols);
+    (warped, (result.transform.ty, result.transform.tx))
+}
+
 fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
-    rows: usize, cols: usize,
+    rows: usize, cols: usize, method: AlignMethod,
 ) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (f64, f64), (f64, f64))> {
     let ref_ch = r.or(g).or(b).unwrap();
     let r_img = channel_or_synth(r, g, b, rows, cols);
     let g_img = channel_or_synth(g, r, b, rows, cols);
     let b_img = channel_or_synth(b, r, g, rows, cols);
 
-    let off_g = if g.is_some() {
-        let pc = phase_correlation::phase_correlate(ref_ch, &g_img);
-        (pc.dy, pc.dx)
-    } else {
-        (0.0, 0.0)
+    let (g_aligned, off_g) = match method {
+        AlignMethod::PhaseCorrelation => align_single_phase_correlation(ref_ch, &g_img, g.is_some()),
+        AlignMethod::Affine => align_single_affine(ref_ch, &g_img, g.is_some(), rows, cols, "G"),
     };
 
-    let off_b = if b.is_some() {
-        let pc = phase_correlation::phase_correlate(ref_ch, &b_img);
-        (pc.dy, pc.dx)
-    } else {
-        (0.0, 0.0)
+    let (b_aligned, off_b) = match method {
+        AlignMethod::PhaseCorrelation => align_single_phase_correlation(ref_ch, &b_img, b.is_some()),
+        AlignMethod::Affine => align_single_affine(ref_ch, &b_img, b.is_some(), rows, cols, "B"),
     };
 
-    let g_shifted = shift_image_subpixel(&g_img, off_g.0, off_g.1);
-    let b_shifted = shift_image_subpixel(&b_img, off_b.0, off_b.1);
-    Ok((r_img, g_shifted, b_shifted, off_g, off_b))
+    Ok((r_img, g_aligned, b_aligned, off_g, off_b))
+}
+
+fn select_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> (f64, f64, f64) {
+    let stability = |s: &ImageStats| -> f64 {
+        if s.median > 1e-10 { s.mad / s.median } else { f64::MAX }
+    };
+    let stab_r = stability(sr);
+    let stab_g = stability(sg);
+    let stab_b = stability(sb);
+    if stab_r <= stab_g && stab_r <= stab_b {
+        let m = sr.median.max(1e-10);
+        (1.0, m / sg.median.max(1e-10), m / sb.median.max(1e-10))
+    } else if stab_b <= stab_g {
+        let m = sb.median.max(1e-10);
+        (m / sr.median.max(1e-10), m / sg.median.max(1e-10), 1.0)
+    } else {
+        let m = sg.median.max(1e-10);
+        (m / sr.median.max(1e-10), 1.0, m / sb.median.max(1e-10))
+    }
 }
 
 fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, st: &ImageStats) {
@@ -227,7 +272,7 @@ pub fn process_rgb(
         let g_ref = g_harm.as_ref().or(g_channel);
         let b_ref = b_harm.as_ref().or(b_channel);
         if config.align && count >= 2 {
-            align_channels(r_ref, g_ref, b_ref, rows, cols)?
+            align_channels(r_ref, g_ref, b_ref, rows, cols, config.align_method)?
         } else {
             let r = channel_or_synth(r_ref, g_ref, b_ref, rows, cols);
             let g = channel_or_synth(g_ref, r_ref, b_ref, rows, cols);
@@ -242,15 +287,12 @@ pub fn process_rgb(
     let sg_full = stats::compute_image_stats(&g_img);
     let sb_full = stats::compute_image_stats(&b_img);
 
-    let stats_r = to_channel_stats(&sr_full);
-    let stats_g = to_channel_stats(&sg_full);
-    let stats_b = to_channel_stats(&sb_full);
+    let stats_r = ChannelStats::from(&sr_full);
+    let stats_g = ChannelStats::from(&sg_full);
+    let stats_b = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => {
-            let ref_med = stats_g.median.max(1e-10);
-            (ref_med / stats_r.median.max(1e-10), 1.0_f64, ref_med / stats_b.median.max(1e-10))
-        }
+        WhiteBalance::Auto => select_wb_reference(&sr_full, &sg_full, &sb_full),
         WhiteBalance::Manual(r, g, b) => (*r, *g, *b),
         WhiteBalance::None => (1.0, 1.0, 1.0),
     };
@@ -299,7 +341,7 @@ pub fn process_rgb(
 
     let scnr_applied = if let Some(ref scnr_cfg) = config.scnr {
         if r_img.dim() == g_img.dim() && g_img.dim() == b_img.dim() {
-            scnr::apply_scnr_inplace(&r_img, &mut g_img, &b_img, scnr_cfg);
+            scnr::apply_scnr_inplace(&mut r_img, &mut g_img, &mut b_img, scnr_cfg);
             true
         } else { false }
     } else { false };

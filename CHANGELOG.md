@@ -13,6 +13,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sample HST narrowband FITS files for testing
 - Open-source community files (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
 
+## [0.4.0] -- 2026-03-20
+
+### Added
+
+#### Star-Based Affine Alignment
+- Triangle asterism matching (`core/alignment/affine.rs`, 741 lines) with configurable star limit (80), minimum triangle side (20px), tolerance-based ratio matching, and angular vertex sorting for consistent pairing
+- RANSAC robust estimation (500 iterations) supporting full affine (6-DOF) and rigid (4-DOF) transform fitting with automatic fallback: affine -> rigid -> phase correlation -> identity
+- Sanity checks on computed transforms: max 25% offset, max 5 degrees rotation, scale range 0.85-1.15, max 3px residual, min 30% inlier ratio
+- `warp_image` function using bicubic Catmull-Rom interpolation (imported from `resample` module, eliminating code duplication) with parallel row processing via Rayon
+- Dual alignment mode in RGB compose: `AlignMethod::PhaseCorrelation` (default, sub-pixel bicubic) and `AlignMethod::Affine` (star-based, handles rotation)
+- `align_method` parameter in `compose_rgb_cmd` Tauri command ("phase_correlation" or "affine")
+- Alignment method selector in RgbComposePanel frontend: "Phase Correlation (sub-pixel)" and "Star-based Affine (rotation)"
+
+#### Improved White Balance
+- Stability-based auto white balance replacing fixed G-channel reference: selects the channel with lowest MAD/median ratio (coefficient of variation) as reference, preventing noise amplification in narrowband data where G is not always the most stable channel
+- Applied consistently in both `core/compose/rgb.rs` and `core/compose/drizzle_rgb.rs`
+- Frontend WB label updated from "Auto (Median)" to "Auto (Stability)"
+
+#### Improved SCNR (Green Noise Removal)
+- Luminance redistribution to R and B channels when `preserve_luminance` is enabled: lost luminance from green reduction is redistributed proportionally to R and B using ITU-R BT.709 weights, replacing the previous circular adjustment that only modified G
+- Pre-computed BT.709 constants (`LUM_R`, `LUM_G`, `LUM_B`, `INV_RB_WEIGHT`) for zero per-pixel division overhead
+- Signature changed to `(&mut r, &mut g, &mut b)` for in-place modification of all three channels
+- `amount` blending applied before luminance redistribution for correct ordering
+
+#### Plate Solving
+- Auto-downsample for large images in `cmd/astrometry.rs`: images >2048px are area-downsampled to a temporary FITS before upload, preventing HTTP 413 errors on JWST-sized files (200+ MB)
+- Robust JSON parsing in `domain/plate_solve.rs`: replaced `reqwest::Response::json()` with `.text()` + `serde_json::from_str()` to handle astrometry.net's non-standard `text/plain` content-type responses
+- API key validation: early bail with clear error message when no key is configured
+- Per-stage logging: session creation, file upload size, job polling progress, and solve result (RA/Dec/scale/orientation)
+- Star detection on full-resolution image before downsample for maximum astrometric precision
+
+#### Frontend Refactoring (Phases 1-8)
+- `useBackend.ts` (monolithic 41-command hook) split into 11 domain-specific services: `compose.service.ts`, `fits.service.ts`, `analysis.service.ts`, `header.service.ts`, `cube.service.ts`, `stretch.service.ts`, `visualization.service.ts`, `stacking.service.ts`, `config.service.ts`, `astrometry.service.ts`, `export.service.ts`
+- Shared `infrastructure/tauri/` IPC layer providing `safeInvoke`, `withPreview`, and `isTauri` helpers
+- 18 JSX files converted to TSX with full type annotations
+- Monolithic `types.ts` split into domain-specific type files (`compose.types.ts`, `fits.types.ts`, `stacking.types.ts`, etc.)
+- `GpuContext.js` migrated to TypeScript
+- 8 shared UI primitives built: Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader
+- 7 remaining panels refactored to use shared primitives, ~1,370 lines removed total
+- Backward-compatibility shims removed after migration verified
+
+### Fixed
+
+#### Numerical Correctness
+- NaN ordering in median and MAD computation (`math/median.rs`): NaN values are now sorted to the end (Greater), preventing corrupted median/MAD/sigma-clipping across all operations that depend on sorted data
+- Hann window missing 2pi factor (`core/analysis/fft.rs`): window function was `sin(pi*i/N)` instead of correct `0.5*(1-cos(2pi*i/N))`, producing a triangular window instead of Hann; affected FFT power spectrum display and phase correlation accuracy
+- Polynomial background basis function (`core/imaging/background.rs`): replaced iterative division-based power computation with correct `y.powi(y_pow) * x.powi(x_pow)`, fixing numerical drift at higher polynomial degrees (3+) that caused visible artifacts in background model
+- Richardson-Lucy deconvolution Tikhonov regularization (`core/analysis/deconvolution.rs`): moved regularization from ratio computation to update step as multiplicative damping `inv_reg = 1/(1+lambda)`, which is numerically stable and matches the standard RL formulation; fixed operator precedence in threshold clamp `(orig * (1-t)).max(0)` vs `orig * (1-t).max(0)`
+- Phase correlation confidence metric: replaced `peak/mean` with proper z-score `(peak-mean)/sigma`, providing a statistically meaningful signal-to-noise measure; added `n < 2` guard to prevent division by zero in variance computation
+
+#### Performance
+- FFT planner hoisted out of `correlate_single` in phase correlation: single `FftPlanner` instance is created once in `phase_correlate` and passed through the coarse-refine pipeline, eliminating redundant twiddle factor computation on each call
+- Peak finding parallelized in phase correlation surface: `par_iter().reduce_with()` replaces sequential double loop, significant for large FFT surfaces (512x512+)
+- Confidence computation parallelized: `par_iter().sum()` for mean and variance
+- RANSAC mask allocation hoisted out of loop (`core/alignment/affine.rs`): single `Vec<bool>` reused via `fill(false)` + `copy_from_slice` instead of allocating 500 vectors per RANSAC run
+- Drizzle accumulator flat storage (`core/stacking/drizzle.rs`): replaced `Vec<Vec<f32>>` (one heap allocation per pixel) with flat `Vec<f32>` + `Vec<u16>` count array, eliminating millions of small allocations for typical 4K+ output images
+- Sigma-clipped combine deviation buffer reuse (`core/stacking/combine.rs`): `devs` vector allocated once and reused via `clear()`+`extend()` per pixel instead of allocating per iteration
+- Cube mean computation z-order traversal (`math/simd.rs`): replaced per-pixel column extraction (cache-hostile) with per-slice iteration (cache-friendly), plus contiguous slice fast-path
+
+#### Alignment Correctness
+- Sub-pixel offset return order in `compute_subpixel_offset` (`core/stacking/align.rs`): was returning `(sub_dx, sub_dy)`, now correctly returns `(sub_dy, sub_dx)` matching the (row, col) convention used by ndarray; callers in `stacking/drizzle.rs` updated to destructure as `(dy, dx)`
+- Removed artificial `abs() > 1e-7` threshold in ZNCC alignment correlation that rejected valid near-zero astronomical background pixels
+
+#### Calibration
+- Flat field normalization (`core/stacking/calibration.rs`): flat frame is now normalized by its own median before division, preventing scale-dependent artifacts when flat values are far from 1.0
+
+#### Plate Solving
+- `cmd/astrometry.rs` import path: `crate::domain::config` (non-existent module) replaced with `crate::infra::config` where `load_api_key` and `load_config` actually live
+- `detect_stars` call signature: was `detect_stars(&result.pixels, naxis1, naxis2, None)`, corrected to `detect_stars(&result.image, 5.0)` matching actual API (`&Array2<f32>, f64 -> DetectionResult`)
+- `solve_astrometry_net` missing feature gate: call now wrapped in `#[cfg(feature = "astrometry-net")]` with fallback to `solve_offline_placeholder` when feature is disabled
+- Astrometry.net API response parsing: `.json().await?` fails on responses with `Content-Type: text/plain`; replaced with `.text().await?` + `serde_json::from_str()` across all 6 API calls (login, upload, submission status, job status, calibration, job info)
+- HTTP 413 Payload Too Large on JWST images: added automatic area-downsample to 2048px max before upload, reducing typical payload from 200+ MB to ~16 MB
+
+### Changed
+- `ChannelStats::from(&ImageStats)` trait impl replaces standalone conversion functions in compose modules
+- Offsets in `ProcessedRgb` and `RgbComposeResult` are `(f64, f64)` preserving sub-pixel precision (were `(i32, i32)` in the feature branch)
+- `RgbComposeConfig` gains `align_method: AlignMethod` field (default: `PhaseCorrelation`)
+- `types/constants.rs` gains `DEFAULT_API_KEY_SERVICE` and `DEFAULT_ASTROMETRY_API_URL`
+- `cmd/astrometry.rs` uses `crate::infra::config` (correct module path) with constants instead of hardcoded strings
+- `AffineAlignMethod` enum (internal to `affine.rs`) disambiguated from config-level `AlignMethod` to prevent naming conflicts
+- Frontend `compose.types.ts` gains `DimensionCrop`, `AlignMethod`, full `RgbComposeResult` fields
+- Frontend offset display uses `.toFixed(2)` for sub-pixel precision
+- `useBackend.ts` replaced by 11 domain-specific services in `services/` with shared `infrastructure/tauri/` layer
+- Removed dead `domain/pipeline.rs` (142 lines, zero callers after `cmd/pipeline.rs` was rewritten to use `core::imaging::calibration_pipeline` directly)
+
 ## [0.3.0] -- 2026-03-08
 
 ### Added
@@ -150,7 +235,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - FITS export with WCS/metadata preservation
 - Cross-correlation auto-alignment
 
-[Unreleased]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/tag/v0.1.0

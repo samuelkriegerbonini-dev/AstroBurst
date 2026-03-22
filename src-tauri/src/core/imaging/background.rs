@@ -212,17 +212,12 @@ fn min_samples_for_degree(degree: usize) -> usize {
 #[inline]
 fn poly_basis_into(y: f64, x: f64, degree: usize, out: &mut [f64; MAX_POLY_TERMS]) -> usize {
     let mut idx = 0;
-    let mut y_pow = 1.0f64;
     for total_deg in 0..=degree {
-        let mut xy = y_pow;
-        for _y_p in (0..=total_deg).rev() {
-            out[idx] = xy;
+        for y_pow in (0..=total_deg).rev() {
+            let x_pow = total_deg - y_pow;
+            out[idx] = y.powi(y_pow as i32) * x.powi(x_pow as i32);
             idx += 1;
-            if _y_p > 0 {
-                xy = xy / y.max(1e-300) * x;
-            }
         }
-        y_pow *= y;
     }
     idx
 }

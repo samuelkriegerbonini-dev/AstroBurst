@@ -182,7 +182,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (result?.palette) setNarrowbandPalette(result.palette);
       })
       .catch(() => {});
-  }, [doneFiles, detectNarrowbandFilters]);
+  }, [doneFiles]);
 
   const loadRawPixels = useCallback(() => {
     const path = filePathRef.current;
@@ -209,7 +209,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (rawPixelsAbortRef.current !== seq) return;
         setRawPixelsLoading(false);
       });
-  }, [getRawPixelsPreview]);
+  }, []);
 
   const clearRawPixels = useCallback(() => {
     rawPixelsAbortRef.current++;

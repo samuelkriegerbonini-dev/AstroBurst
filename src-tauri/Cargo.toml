@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "GPL-3.0-or-later"
@@ -39,6 +39,7 @@ lz4_flex = { version = "0.11", optional = true }
 reqwest = { version = "0.12", features = ["json", "multipart"], optional = true }
 base64 = "0.22.1"
 log = "0.4.29"
+config = "0.15.22"
 
 [features]
 default = ["astrometry-net"]

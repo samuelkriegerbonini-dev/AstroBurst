@@ -107,9 +107,17 @@ pub const RES_CENTER_DEC: &str = "center_dec";
 pub const RES_PIXEL_SCALE_ARCSEC: &str = "pixel_scale_arcsec";
 pub const RES_FOV_W_ARCMIN: &str = "field_of_view_w_arcmin";
 pub const RES_FOV_H_ARCMIN: &str = "field_of_view_h_arcmin";
+pub const RES_FOV_ARCMIN: &str = "fov_arcmin";
 pub const RES_RA: &str = "ra";
 pub const RES_DEC: &str = "dec";
 pub const RES_WCS_UPDATES: &str = "wcs_updates";
+pub const RES_WCS_PARAMS: &str = "wcs_params";
+pub const RES_WCS_CRPIX1: &str = "crpix1";
+pub const RES_WCS_CRPIX2: &str = "crpix2";
+pub const RES_WCS_CRVAL1: &str = "crval1";
+pub const RES_WCS_CRVAL2: &str = "crval2";
+pub const RES_WCS_CD: &str = "cd";
+pub const RES_WCS_PROJECTION: &str = "projection";
 
 // Background extraction
 pub const RES_SAMPLE_COUNT: &str = "sample_count";
@@ -198,6 +206,8 @@ pub const RES_ERROR: &str = "error";
 // Config / API key storage
 pub const RES_SAVED: &str = "saved";
 pub const RES_SERVICE: &str = "service";
+pub const DEFAULT_API_KEY_SERVICE: &str = "astrometry";
+pub const DEFAULT_ASTROMETRY_API_URL: &str = "https://nova.astrometry.net";
 
 // RGB compose defaults
 pub const DEFAULT_WB_VALUE: f64 = 1.0;

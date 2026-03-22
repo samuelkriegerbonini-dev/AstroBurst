@@ -152,7 +152,7 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
                 Drop anywhere
               </p>
               <p className="text-zinc-500 text-sm">
-                Release to add .fits / .asdf files
+                Release to add .fits / .asdf / .zip files
               </p>
             </motion.div>
           </motion.div>

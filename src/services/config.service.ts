@@ -1,17 +1,20 @@
 import { safeInvoke } from "../infrastructure/tauri";
+import type { AppConfig, ApiKeyResult } from "../shared/types/config.types";
 
-export function getConfig() {
+export type { AppConfig, ApiKeyResult } from "../shared/types/config.types";
+
+export async function getConfig(): Promise<AppConfig> {
   return safeInvoke("get_config");
 }
 
-export function updateConfig(field: string, value: any) {
+export async function updateConfig(field: string, value: unknown): Promise<AppConfig> {
   return safeInvoke("update_config", { field, value });
 }
 
-export function saveApiKey(key: string, service?: string) {
+export async function saveApiKey(key: string, service: string = "astrometry"): Promise<{ saved: boolean; service: string }> {
   return safeInvoke("save_api_key", { key, service });
 }
 
-export function getApiKey() {
-  return safeInvoke("get_api_key");
+export async function getApiKey(service: string = "astrometry"): Promise<ApiKeyResult> {
+  return safeInvoke("get_api_key", { service });
 }

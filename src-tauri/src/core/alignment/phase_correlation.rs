@@ -43,8 +43,10 @@ pub fn phase_correlate(
         };
     }
 
+    let mut planner = FftPlanner::<f64>::new();
+
     if rows <= COARSE_MAX_DIM && cols <= COARSE_MAX_DIM {
-        return correlate_single(&ref_cropped, &tgt_cropped);
+        return correlate_single(&ref_cropped, &tgt_cropped, &mut planner);
     }
 
     let scale_y = rows as f64 / COARSE_MAX_DIM as f64;
@@ -55,7 +57,7 @@ pub fn phase_correlate(
     let ref_ds = area_downsample(&ref_cropped, ds_rows, ds_cols);
     let tgt_ds = area_downsample(&tgt_cropped, ds_rows, ds_cols);
 
-    let coarse = correlate_single(&ref_ds, &tgt_ds);
+    let coarse = correlate_single(&ref_ds, &tgt_ds, &mut planner);
     let coarse_dx = coarse.dx * scale_x;
     let coarse_dy = coarse.dy * scale_y;
 
@@ -76,7 +78,7 @@ pub fn phase_correlate(
         };
     }
 
-    let refine = correlate_single(&ref_crop, &tgt_crop);
+    let refine = correlate_single(&ref_crop, &tgt_crop, &mut planner);
     PhaseCorrelationResult {
         dx: coarse_dx + refine.dx,
         dy: coarse_dy + refine.dy,
@@ -99,7 +101,7 @@ fn extract_crop(
     img.slice(ndarray::s![y0..y1, x0..x1]).to_owned()
 }
 
-fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult {
+fn correlate_single(a: &Array2<f32>, b: &Array2<f32>, planner: &mut FftPlanner<f64>) -> PhaseCorrelationResult {
     let (rows, cols) = a.dim();
     let fft_rows = next_power_of_2(rows);
     let fft_cols = next_power_of_2(cols);
@@ -107,10 +109,8 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
     let hann_y = hann_window(rows);
     let hann_x = hann_window(cols);
 
-    let mut planner = FftPlanner::<f64>::new();
-
-    let fa = fft2d(a, &hann_y, &hann_x, fft_rows, fft_cols, &mut planner);
-    let fb = fft2d(b, &hann_y, &hann_x, fft_rows, fft_cols, &mut planner);
+    let fa = fft2d(a, &hann_y, &hann_x, fft_rows, fft_cols, planner);
+    let fb = fft2d(b, &hann_y, &hann_x, fft_rows, fft_cols, planner);
 
     let mut cross: Vec<Complex<f64>> = fa
         .iter()
@@ -126,7 +126,7 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
         })
         .collect();
 
-    ifft2d(&mut cross, fft_rows, fft_cols, &mut planner);
+    ifft2d(&mut cross, fft_rows, fft_cols, planner);
 
     let correlation = build_real_surface(&cross, fft_rows, fft_cols);
 
@@ -236,35 +236,29 @@ fn build_real_surface(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<f6
 }
 
 fn find_peak(surface: &[f64], rows: usize, cols: usize) -> (usize, usize, f64) {
-    let mut best_y = 0;
-    let mut best_x = 0;
-    let mut best_val = f64::NEG_INFINITY;
-
-    for y in 0..rows {
-        for x in 0..cols {
-            let v = surface[y * cols + x];
-            if v > best_val {
-                best_val = v;
-                best_y = y;
-                best_x = x;
-            }
-        }
-    }
-
-    (best_y, best_x, best_val)
+    let (best_idx, best_val) = surface.par_iter()
+        .enumerate()
+        .reduce_with(|a, b| if b.1 > a.1 { b } else { a })
+        .unwrap_or((0, &f64::NEG_INFINITY));
+    (best_idx / cols, best_idx % cols, *best_val)
 }
 
 fn compute_confidence(surface: &[f64], rows: usize, cols: usize, peak_val: f64) -> f64 {
     let n = rows * cols;
-    if n == 0 {
+    if n < 2 {
         return 0.0;
     }
-    let sum: f64 = surface.iter().sum();
+    let sum: f64 = surface.par_iter().sum();
     let mean = sum / n as f64;
-    if mean.abs() < 1e-15 {
+    let var: f64 = surface.par_iter().map(|&v| {
+        let d = v - mean;
+        d * d
+    }).sum::<f64>() / (n - 1) as f64;
+    let sigma = var.sqrt();
+    if sigma < 1e-15 {
         return 0.0;
     }
-    peak_val / mean
+    (peak_val - mean) / sigma
 }
 
 fn subpixel_refine_1d(

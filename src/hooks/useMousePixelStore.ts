@@ -38,6 +38,11 @@ class MousePixelStore {
 
 const store = new MousePixelStore();
 
+export function setMousePixel(coord: PixelCoord | null) {
+  if (coord) store.set(coord);
+  else store.clear();
+}
+
 export function useMousePixel(): PixelCoord | null {
   return useSyncExternalStore(store.subscribe, store.getSnapshot);
 }

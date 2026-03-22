@@ -10,10 +10,15 @@ fn green_limit(r: f32, b: f32, method: ScnrMethod) -> f32 {
     }
 }
 
+const LUM_R: f32 = 0.2126;
+const LUM_G: f32 = 0.7152;
+const LUM_B: f32 = 0.0722;
+const INV_RB_WEIGHT: f32 = 1.0 / (LUM_R + LUM_B);
+
 pub fn apply_scnr_inplace(
-    r: &Array2<f32>,
+    r: &mut Array2<f32>,
     g: &mut Array2<f32>,
-    b: &Array2<f32>,
+    b: &mut Array2<f32>,
     config: &ScnrConfig,
 ) {
     if r.dim() != g.dim() || g.dim() != b.dim() {
@@ -28,19 +33,20 @@ pub fn apply_scnr_inplace(
     let method = config.method;
     let preserve = config.preserve_luminance;
 
-    Zip::from(r).and(g).and(b).par_for_each(|&rv, gv, &bv| {
-        let limit = green_limit(rv, bv, method);
+    Zip::from(r).and(g).and(b).par_for_each(|rv, gv, bv| {
+        let limit = green_limit(*rv, *bv, method);
         let g_corrected = (*gv).min(limit);
+        let g_new = *gv + amount * (g_corrected - *gv);
 
-        let g_new = if preserve {
-            let lum_before = 0.2126 * rv + 0.7152 * (*gv) + 0.0722 * bv;
-            let lum_after = 0.2126 * rv + 0.7152 * g_corrected + 0.0722 * bv;
-            let lum_diff = lum_before - lum_after;
-            (g_corrected + lum_diff / 0.7152).max(0.0)
-        } else {
-            g_corrected
-        };
+        if preserve {
+            let lum_lost = LUM_G * (*gv - g_new);
+            if lum_lost > 1e-10 {
+                let boost = lum_lost * INV_RB_WEIGHT;
+                *rv = (*rv + boost).min(1.0);
+                *bv = (*bv + boost).min(1.0);
+            }
+        }
 
-        *gv = *gv + amount * (g_new - *gv);
+        *gv = g_new;
     });
 }

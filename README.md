@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>High-Performance Astronomical Image Processor</strong><br>
-  <em>The first FITS + ASDF processor built on the Rust / Tauri / WebGPU stack</em>
+  <em>Rust + Tauri + WebGPU. Process JWST, Hubble, and Roman Space Telescope data at native speed.</em>
 </p>
 
 <p align="center">
@@ -20,164 +20,153 @@
 </p>
 
 <p align="center">
-  <a href="#installation">Install</a> /
-  <a href="#features">Features</a> /
-  <a href="#quick-start">Quick Start</a> /
-  <a href="#usage">Usage</a> /
-  <a href="#architecture">Architecture</a> /
-  <a href="#roadmap">Roadmap</a> /
-  <a href="#contributing">Contributing</a> /
-  <a href="#support">Support</a>
+  <a href="#installation">Install</a> &middot;
+  <a href="#features">Features</a> &middot;
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#getting-data">Data</a> &middot;
+  <a href="#usage">Usage</a> &middot;
+  <a href="#architecture">Architecture</a> &middot;
+  <a href="#roadmap">Roadmap</a> &middot;
+  <a href="#contributing">Contributing</a>
 </p>
 
 ---
 
-AstroBurst is a native desktop application for processing astronomical FITS and ASDF images. It combines a high-performance Rust backend with a modern React frontend, delivering GPU-accelerated rendering with a fraction of the memory footprint of legacy tools, targeting both professional astronomers and advanced astrophotographers.
+AstroBurst is an open-source desktop app for processing astronomical images. Drop in your FITS or ASDF files, compose RGB from narrowband channels, stack with drizzle, and export. Everything runs locally on your machine with no cloud dependencies.
 
-**v0.3.0** brings Richardson-Lucy deconvolution (FFT-based), polynomial background extraction, wavelet denoise (a trous), full ASDF format support (the first non-Python implementation, Roman Space Telescope ready), a smart pipeline that auto-detects 2D/3D data, dimension-tolerant stacking with crop-to-intersection, auto-resample for mixed SW/LW NIRCam data, and an IntelliJ-style panel layout. See the [changelog](CHANGELOG.md) for details.
+It's built on Rust for the heavy lifting, React for the interface, and WebGPU for real-time preview. The result is a tool that opens a 2 GB IFU datacube in 300 ms, processes 10 frames at 1.4 GB/s, and renders STF adjustments in 8 ms on GPU.
+
+> **What's new in v0.4.0**: Star-based affine alignment for rotational misalignment between channels, stability-based auto white balance that picks the cleanest channel as reference instead of always using G, SCNR luminance redistribution to R/B, arcsinh stretch with configurable factor, and a full numerical correctness audit across the math pipeline. The frontend was also refactored into 11 domain services with shared UI primitives. See the [changelog](CHANGELOG.md).
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/m51-rgb-compose-auto-resample.png" alt="M51 Whirlpool Galaxy RGB Compose" width="100%">
+  <img src="docs/screenshots/pillars-of-creation-rgb-affine-export.png" alt="Pillars of Creation RGB Compose" width="100%">
 </p>
-<p align="center"><em>JWST M51 (Whirlpool Galaxy) RGB composition with auto-resample for mixed SW/LW channels. R: F444W (4.44um, LW), G: F200W (2.0um, SW), B: F115W (1.15um, SW). SCNR Average Neutral 40%, Auto STF, WB Auto Median. The F444W channel was automatically upsampled from 5655x2206 to 11473x4599 via bicubic Catmull-Rom interpolation (PHANGS-JWST Program 01783)</em></p>
+<p align="center"><em>JWST Pillars of Creation (M16) composed from F444W / F200W / F090W with star-based affine alignment handling rotation between channels. Luminance layer from F187N. Export panel with FITS and PNG output options. Auto-resampled mixed SW/LW resolution.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/jwst-carina-pillars-rgb.png" alt="JWST Carina Nebula Pillars of Creation" width="100%">
+  <img src="docs/screenshots/cassiopeia-a-rgb-drizzle-scnr.png" alt="Cassiopeia A RGB Drizzle" width="100%">
 </p>
-<p align="center"><em>JWST Pillars of Creation (Carina Nebula) RGB composition. R: F444W, G: F200W, B: F090W with auto-resample, SCNR 50%, showing towering gas pillars with embedded young stars and JWST diffraction spikes (ERO Program 02739)</em></p>
+<p align="center"><em>Cassiopeia A at 6763x6102 with star-based affine alignment, SCNR Maximum Neutral at 98%, manual white balance, and drizzle stacking. Drizzle RGB section allows per-channel frame selection for sub-pixel reconstruction.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/cassiopeia-a-deep-zoom.png" alt="Cassiopeia A Supernova Remnant Deep Zoom" width="100%">
+  <img src="docs/screenshots/ngc628-lrgb-affine-drizzle-headers.png" alt="NGC 628 LRGB Compose" width="100%">
 </p>
-<p align="center"><em>Cassiopeia A supernova remnant in Deep Zoom mode at full 6765x6102 resolution. R: F444W, G: F356W, B: F162M composition showing filamentary ejecta structure, forward and reverse shocks, and surrounding field stars with JWST diffraction spikes (Program 01947)</em></p>
+<p align="center"><em>NGC 628 (M74) LRGB composition from 16 JWST NIRCam files. F115W as luminance, F444W / F200W / F115W as RGB with star-based affine alignment, stability white balance, and SCNR Average Neutral at 40%. Drizzle stack panel and header explorer with categorized keyword browser visible below.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/m51-deep-zoom-detail.png" alt="M51 Deep Zoom Detail" width="100%">
+  <img src="docs/screenshots/eagle-nebula-sho-hubble-palette.png" alt="Eagle Nebula SHO Palette" width="100%">
 </p>
-<p align="center"><em>M51 Deep Zoom detail showing individual HII regions, star clusters, and dust lanes in the spiral arms. Scroll to zoom, double-click to zoom in, drag to pan. RGB composite at 5655x2206 resolution</em></p>
+<p align="center"><em>HST Eagle Nebula (M16) narrowband SHO palette auto-detected from FITS headers. [SII] 673nm mapped to R, H-alpha 656nm to G, [OIII] 502nm to B. One-click Hubble Palette assignment with Auto-Map.</em></p>
+
+<details>
+<summary><strong>More screenshots</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/m51-analysis-fft-spectrum.png" alt="M51 Analysis with FFT Power Spectrum" width="100%">
+  <img src="docs/screenshots/ngc628-lrgb-compose-headers.png" alt="NGC 628 LRGB Manual WB" width="100%">
 </p>
-<p align="center"><em>Full interface with Analysis tab showing FFT Power Spectrum (1024x1024 from 8192x8192, Hann windowed, ln(1+|F|) scale). 16 JWST NIRCam files loaded across 8 filters (F115W through F444W) with per-file dimensions and load times</em></p>
+<p align="center"><em>NGC 628 LRGB with manual white balance (R: 1.24, G: 1.00, B: 0.77) and phase correlation alignment. F150W as luminance. Header explorer showing 10 MEF extensions and 278 keywords for the F187N filter. LRGB applied (L: 100%, C: 65%).</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/hubble-sho-auto-detected.png" alt="Hubble SHO Palette Auto-Detected" width="100%">
+  <img src="docs/screenshots/ngc628-16files-info-panel.png" alt="NGC 628 File Browser" width="100%">
 </p>
-<p align="center"><em>Hubble WFPC2 narrowband SHO palette (auto-detected from FITS headers). R: [SII] 673nm, G: H-alpha 656nm, B: [OIII] 502nm with SCNR 50% and FFT power spectrum. Filter detection uses keyword matching, wavelength values, and filename patterns with confidence scoring</em></p>
+<p align="center"><em>16 JWST NIRCam files loaded across 8 filters (F405N through F115W). Info panel showing pixel scale (0.063"/px), WCS coordinates (RA/Dec), image statistics (mean, median, sigma), and instrument metadata.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/cassiopeia-a-headers-stacking.png" alt="Cassiopeia A Headers and Stacking" width="100%">
+  <img src="docs/screenshots/ngc628-fft-power-spectrum.png" alt="NGC 628 FFT Power Spectrum" width="100%">
 </p>
-<p align="center"><em>Cassiopeia A with FITS Extensions browser (3 HDUs), Header Explorer showing 245 cards with categorized sections (Image, Observation, WCS/Astrometry), and Stacking panel with sigma-clipped stacking controls and auto-align (Program 01947, FILTER: F356W)</em></p>
+<p align="center"><em>FFT power spectrum analysis of NGC 628. The frequency-domain view reveals the galaxy's spiral arm structure as directional patterns radiating from the center.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/m51-background-extraction-fft.png" alt="M51 Background Extraction with FFT" width="100%">
+  <img src="docs/screenshots/background-extraction-129files.png" alt="Background Extraction" width="100%">
 </p>
-<p align="center"><em>M51 RGB composite with Processing panel showing Background Extraction (polynomial surface fitting, grid 8, degree 3, sigma clip 2.5, subtract mode) and FFT Power Spectrum analysis below</em></p>
+<p align="center"><em>Background extraction on 129 JWST NIRCam frames. Polynomial surface fitting (degree 3) with sigma-clipped grid sampling. Split view showing original vs corrected, with the fitted background model. 68 samples, RMS 1.16e-1, completed in 0.1s.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/wavelet-noise-reduction-comparison.png" alt="Wavelet Noise Reduction" width="100%">
+</p>
+<p align="center"><em>Wavelet a-trous noise reduction with 2 scales and per-scale sigma thresholds (fine detail: 0.1, small structures: 2.5). Side-by-side comparison showing noise suppression while preserving faint nebular structure. Histogram and STF controls below.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/richardson-lucy-deconv-star-detection.png" alt="Richardson-Lucy Deconvolution" width="100%">
+</p>
+<p align="center"><em>Richardson-Lucy deconvolution (FFT-accelerated) with 20 iterations, Tikhonov regularization (0.001), and deringing. Processing chain: Background Extraction > Denoise > PSF > Deconv. Star detection table showing X/Y coordinates, flux, FWHM, and SNR for detected sources.</em></p>
 
 ### Processing Panels
 
 <p align="center">
-  <img src="docs/screenshots/panel-background-extraction.png" alt="Background Extraction" width="280">
-  <img src="docs/screenshots/panel-wavelet-denoise.png" alt="Wavelet Denoise" width="280">
-  <img src="docs/screenshots/panel-psf-estimation.png" alt="PSF Estimation" width="280">
-</p>
-<p align="center"><em>Processing tools: Background Extraction with configurable grid/degree/sigma, Wavelet Noise Reduction with per-scale thresholds (a trous, 5 scales), and PSF Estimation with star sampling and ellipticity constraints</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/panel-richardson-lucy-deconv.png" alt="Richardson-Lucy Deconvolution" width="280">
+  <img src="docs/screenshots/panel-psf-estimation-empirical.png" alt="PSF Estimation" width="280">
   <img src="docs/screenshots/panel-arcsinh-stretch.png" alt="Arcsinh Stretch" width="280">
 </p>
-<p align="center"><em>Richardson-Lucy Deconvolution (FFT-accelerated, 20 iterations, Gaussian PSF, Tikhonov regularization, deringing) and Arcsinh Stretch with configurable factor (1.0 linear to 500 strong)</em></p>
+<p align="center"><em>Left: Empirical PSF estimation sampling the 3 best stars (low ellipticity, high SNR) with median-combined cutout. FWHM 2.68 px, ellipticity 0.032. Right: Arcsinh stretch with configurable factor (S=115.6) and original/stretched comparison.</em></p>
 
 ### Stacking Panels
 
 <p align="center">
-  <img src="docs/screenshots/panel-calibration-frames.png" alt="Calibration Frames" width="280">
+  <img src="docs/screenshots/panel-calibration-mapper.png" alt="Calibration Mapper" width="280">
   <img src="docs/screenshots/panel-sigma-clipped-stacking.png" alt="Sigma-Clipped Stacking" width="280">
   <img src="docs/screenshots/panel-calibration-pipeline.png" alt="Calibration Pipeline" width="280">
 </p>
-<p align="center"><em>Stacking workflow: Calibration frame assignment (Bias, Dark, Flat), Sigma-clipped stacking with configurable thresholds and auto-align, and Calibration Pipeline for one-click multi-channel processing</em></p>
+<p align="center"><em>Left: Calibration mapper with science, bias, dark, and flat frame slots. Center: Sigma-clipped stacking with configurable low/high thresholds, max iterations, and auto-align. Right: Full calibration pipeline with per-channel file assignment, calibration frames, and sigma-clipped stacking.</em></p>
+
+</details>
 
 ## Features
 
-### Processing Pipeline
-- **FITS I/O**: Memory-mapped extraction with ZIP transparency and Multi-Extension FITS (MEF) support with automatic SCI extension selection
-- **ASDF format**: First non-Python ASDF implementation: parser with zlib/bzip2/lz4 decompression, Roman Space Telescope data model traversal, gWCS extraction, and transparent AsdfImage-to-Array2 bridge. `.asdf` files are auto-dispatched alongside `.fits` in all commands
-- **Smart pipeline**: Unified pipeline runner that auto-detects 2D images vs 3D cubes and routes accordingly; processes FITS, ASDF, ZIP, and directories
-- **Batch processing**: Concurrent file processing (3 workers) with Rayon thread pool, ~118 MB/s sustained throughput
-- **Bicubic resampling**: Catmull-Rom interpolation with Rayon row-parallelism for mixing JWST NIRCam short-wave (~14K) and long-wave (~7K) data; auto-resample detects resolution groups and upsamples to the largest channel with WCS header update
-- **STF rendering**: Screen Transfer Function with shadow/midtone/highlight controls, auto-STF from image statistics
-- **Drizzle stacking**: Sub-pixel reconstruction with Square, Gaussian, Lanczos3, and Turbo kernels, configurable scale (1-4x) and pixel fraction
-- **RGB composition**: Multi-channel combine with per-channel STF, auto white balance, pyramid alignment, dimension harmonization (5% tolerance crop), auto-resample for mixed resolutions, and SCNR green noise removal
-- **Drizzle RGB**: Combined drizzle + RGB with per-channel dimension harmonization and progress tracking
-- **Calibration**: Bias, dark, flat-field correction pipeline
-- **Sigma-clipped stacking**: Configurable sigma thresholds for outlier rejection with automatic crop-to-intersection for frames with differing dimensions
-- **FITS export**: Single-channel and RGB FITS writer with WCS/observation metadata preservation
+### Core Pipeline
+- **FITS + ASDF**: Memory-mapped I/O. MEF with auto SCI selection. First non-Python ASDF reader (zlib/bzip2/lz4, Roman Space Telescope gWCS). ZIP transparency.
+- **RGB Composition**: Per-channel STF, dual alignment (FFT phase correlation or star-based affine), stability-based white balance, SCNR with luminance redistribution, auto-resample for mixed resolutions.
+- **Drizzle**: Sub-pixel reconstruction (Square / Gaussian / Lanczos3), 1-4x scale, sigma-clipped rejection with flat-storage accumulator.
+- **Calibration**: Bias, dark, flat correction with median-normalized flats. Crop-to-intersection for mismatched dimensions.
+- **Smart Pipeline**: Auto-detects 2D images vs 3D cubes per file and routes accordingly.
 
-### Image Enhancement
-- **Richardson-Lucy deconvolution**: FFT-based iterative deconvolution with Gaussian PSF, configurable iterations, regularization, and deringing threshold
-- **Background extraction**: Polynomial surface fitting (configurable grid size, degree, sigma clipping) with subtract and divide modes for gradient removal
-- **Wavelet denoise**: A trous wavelet transform with per-scale sigma thresholds, linear/nonlinear modes, and MAD noise estimation
+### Enhancement
+- **Deconvolution**: Richardson-Lucy (FFT-based, Tikhonov regularization, deringing)
+- **Background**: Polynomial surface fitting with sigma-clipped grid sampling
+- **Wavelet**: A trous multi-scale denoise with per-scale thresholds (up to 8 scales)
+- **Stretch**: Arcsinh stretch with configurable factor for non-linear tone mapping
 
 ### Analysis
-- **Histogram**: 16384-bin histogram with median, mean, sigma, MAD statistics and auto-STF derivation
-- **FFT spectrum**: 2D Fourier power spectrum with Hann window, log-magnitude colormap, and downsampled preview for noise pattern identification
-- **Star detection**: PSF-based detection with flux, FWHM, and SNR measurements
-- **Header Explorer**: Categorized FITS header browser (Observation, Instrument, Image, WCS, Processing) with keyword search, value copy, and filter detection badge
-- **Filter detection**: Automatic narrowband filter identification (H-alpha, [OIII], [SII]) from FITS headers, keywords, wavelength values, and filenames with Hubble Palette (SHO) channel suggestion and confidence scoring
-
-### Spectroscopy & Data Cubes
-- 3D FITS cube support (NAXIS3 > 1) with eager and lazy processing modes
-- Click-to-extract spectrum at any pixel coordinate
-- Wavelength calibration from WCS headers
-- Frame navigation and collapsed views (mean/median)
-
-### Astrometry
-- Plate solving via astrometry.net API
-- WCS coordinate readout (RA/Dec from pixel position)
-- Pixel to world coordinate conversion
+- 16K-bin histogram with auto-STF
+- FFT power spectrum with Hann window
+- Star detection (flux, FWHM, SNR)
+- Empirical PSF estimation from detected stars
+- Narrowband filter auto-detection (H-alpha, [OIII], [SII]) with SHO palette suggestion
+- Full header explorer with categorized keyword browser
 
 ### Rendering
-- **WebGPU** compute shader pipeline for real-time STF preview
-- **Binary IPC**: Zero-copy pixel transfer (no base64 encoding)
-- **Deep zoom**: Tile pyramid generation with percentile-based stretch for large images (scroll to zoom, double-click, drag to pan)
-- Canvas 2D fallback for systems without WebGPU
+- WebGPU compute shader for real-time STF preview (8 ms at 4K)
+- Binary IPC with zero base64 overhead
+- Deep zoom tile pyramid with percentile-based stretch
+- Canvas 2D fallback
 
-### Export
-- Single-channel and RGB FITS export with WCS/metadata preservation
-- Batch PNG export with ZIP packaging (STORE compression for speed)
+### Astrometry
+- Plate solving via astrometry.net (auto-downsample for large images)
+- WCS coordinate readout and pixel/world conversion
 
 ## Installation
 
-### Download (Recommended)
+### Download
 
-Download the latest release for your platform:
+| Platform | Download |
+|----------|----------|
+| **macOS** (Apple Silicon) | [`.dmg`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
+| **macOS** (Intel) | [`.dmg`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
+| **Linux** | [`.deb`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.AppImage`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.rpm`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
+| **Windows** | [`.msi`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.exe`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
 
-| Platform | Architecture | Download |
-|----------|-------------|----------|
-| **macOS** | Apple Silicon (M1+) | [`.dmg` (aarch64)](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
-| **macOS** | Intel | [`.dmg` (x86_64)](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
-| **Linux** | x86_64 | [`.deb`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.rpm`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.AppImage`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
-| **Linux** | ARM64 | [`.deb`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.AppImage`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
-| **Windows** | x86_64 | [`.msi`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) / [`.exe`](https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/latest) |
+### One-liner
 
-### One-Line Install
-
-**macOS:**
 ```bash
+# macOS
 curl -fsSL https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/scripts/install-macos.sh | bash
-```
 
-**Linux (Debian/Ubuntu):**
-```bash
+# Linux (Debian/Ubuntu)
 curl -fsSL https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/scripts/install-linux.sh | bash
 ```
 
-### Build from Source
+### Build from source
 
 ```bash
 git clone https://github.com/samuelkriegerbonini-dev/AstroBurst.git
@@ -185,134 +174,139 @@ cd AstroBurst
 cargo tauri dev
 ```
 
-**Requirements:** Rust 1.75+, Node.js 18+, Tauri CLI v2. WebGPU requires a compatible GPU driver (Vulkan/Metal/DX12).
+Requires Rust 1.75+, Node.js 18+, Tauri CLI v2. WebGPU needs Vulkan/Metal/DX12.
 
 ## Quick Start
 
-1. **Open files**: Drag and drop `.fits` / `.fit` / `.asdf` files or use the file picker. ZIP-compressed FITS are extracted transparently.
-2. **Process**: Files are automatically processed: mmap read, asinh normalize, statistics, PNG render. Progress is shown per-file.
-3. **Explore**: Select a processed file to see the preview, histogram, and header data. Adjust STF sliders or click "Auto STF".
-4. **GPU mode**: Toggle the CPU/GPU button for real-time WebGPU rendering with instant STF feedback.
-5. **RGB Compose**: Assign channels manually or use "Auto" to detect filters from filenames/headers. Mixed SW/LW resolutions are auto-resampled. At least 2 channels required.
-6. **Drizzle**: Select multiple frames of the same target for sub-pixel reconstruction. Drizzle RGB combines stacking + composition.
-7. **Export**: Download PNG previews or export processed FITS with preserved metadata.
+1. **Drop files** into the window (`.fits`, `.fit`, `.asdf`, or `.zip`). They're processed automatically.
+2. **Explore**: Click a file to see its preview, histogram, and headers. Tweak STF sliders or hit Auto STF.
+3. **Compose RGB**: Assign channels manually or click Auto to detect filters from headers. Pick Phase Correlation (default, sub-pixel) or Affine (handles rotation) for alignment.
+4. **Drizzle**: Select 2+ frames of the same target for sub-pixel reconstruction. Drizzle RGB combines stacking with composition.
+5. **Export**: PNG previews or FITS with preserved WCS metadata.
+
+## Getting Data
+
+AstroBurst works with publicly available data from NASA and ESA archives. No account required for most downloads.
+
+### MAST (JWST, Hubble, Roman)
+
+The [MAST Portal](https://mast.stsci.edu/search/ui/#/jwst) is the primary source for JWST and Hubble data. To find calibrated images ready for processing:
+
+1. Go to **[MAST Search](https://mast.stsci.edu/search/ui/#/jwst)**
+2. Search by target name (e.g., "M51", "Carina Nebula", "Cassiopeia A")
+3. Filter by **Instrument**: NIRCam or MIRI
+4. Filter by **Product Level**: Level 2b/2c (calibrated single exposures) or Level 3 (combined mosaics)
+5. Download the `_cal.fits` or `_i2d.fits` files
+
+**Quick links to popular targets:**
+
+| Target | Filters | Link |
+|--------|---------|------|
+| Pillars of Creation | NIRCam F090W/F187N/F200W/F335M/F444W | [MAST](https://mast.stsci.edu/search/ui/#/jwst/results?resolve=true&target=M16) |
+| Carina Nebula | NIRCam F090W/F200W/F444W | [MAST](https://mast.stsci.edu/search/ui/#/jwst/results?resolve=true&target=Carina%20Nebula) |
+| Cassiopeia A | NIRCam F162M/F356W/F444W | [MAST](https://mast.stsci.edu/search/ui/#/jwst/results?resolve=true&target=Cassiopeia%20A) |
+| M51 Whirlpool | NIRCam F115W/F200W/F335M/F444W | [MAST](https://mast.stsci.edu/search/ui/#/jwst/results?resolve=true&target=M51) |
+| Jupiter | NIRCam F164N/F212N/F360M | [MAST](https://mast.stsci.edu/search/ui/#/jwst/results?resolve=true&target=Jupiter) |
+
+For Roman Space Telescope simulated data (`.asdf` files), filter by instrument **WFI** on the MAST portal.
+
+### ESA Hubble Archive
+
+The [ESA Hubble Science Archive](https://hst.esac.esa.int/ehst/) provides an alternative interface for HST data. Useful for narrowband imaging (H-alpha, [OIII], [SII]) that works well with the automatic SHO palette detection.
+
+### Sample Data
+
+The repository includes three HST/WFPC2 narrowband FITS files in `tests/sample-data/` for quick testing: [OIII] 502nm, H-alpha 656nm, and [SII] 673nm of the Eagle Nebula (M16). Public domain (NASA/ESA).
 
 ## Usage
 
-### Processing JWST Data
+### JWST NIRCam
 
-JWST NIRCam files from MAST typically come as Multi-Extension FITS with SCI, ERR, and DQ extensions. AstroBurst automatically selects the SCI extension and merges the primary header for complete metadata.
+NIRCam has two detector resolutions: short-wave (~0.031"/px, ~14K) and long-wave (~0.063"/px, ~7K). When you compose RGB with mixed SW+LW filters, AstroBurst detects the mismatch and auto-resamples the smaller channels via bicubic interpolation. WCS headers are updated so astrometry stays valid.
 
-### Processing Roman Space Telescope Data
+**Recommended combinations:**
 
-AstroBurst is the first non-Python tool with native ASDF support. Roman Space Telescope simulated data (`.asdf` files) are loaded transparently: the ASDF parser handles zlib/bzip2/lz4 block decompression, Roman data model traversal, and gWCS extraction. ASDF files work in all commands (preview, stacking, RGB compose, pipeline) with zero configuration.
+| Type | R | G | B |
+|------|---|---|---|
+| Full range (auto-resampled) | F444W | F200W | F115W |
+| LW only (same resolution) | F444W | F335M | F300M |
+| SW only (highest res) | F200W | F150W | F115W |
 
-### NIRCam Resolution Mixing
+### Hubble Narrowband
 
-NIRCam data comes in two detector resolutions:
-- **Short-wave (SW):** F090W, F115W, F150W, F187N, F200W at ~0.031"/px (~14Kx8K)
-- **Long-wave (LW):** F300M, F335M, F356W, F444W, F470N at ~0.063"/px (~7Kx4K)
+HST narrowband filters are auto-detected from FITS headers and assigned to the SHO palette: [SII] 673nm to R, H-alpha 656nm to G, [OIII] 502nm to B. The Header Explorer shows the detected filter with confidence level and an Assign button.
 
-When composing RGB with mixed SW + LW filters, AstroBurst automatically detects the dimension mismatch (>10% ratio) and upsamples the smaller channels to match the largest using bicubic Catmull-Rom interpolation. The compose result shows "Auto-resampled (mixed SW/LW resolution)" when this occurs. WCS headers are updated so astrometry remains valid. Original files are preserved.
+### Roman Space Telescope (ASDF)
 
-Recommended NIRCam RGB combinations:
+AstroBurst is the first non-Python tool with native ASDF support. Roman `.asdf` files are loaded transparently through the same pipeline as FITS, including zlib/bzip2/lz4 decompression and gWCS extraction.
 
-**Full range (mixed SW/LW, auto-resampled):**
-- R: F444W (4.44um) / G: F200W (2.0um) / B: F115W (1.15um)
+### 3D Cubes
 
-**LW only (same resolution, no resample):**
-- R: F444W (4.44um) / G: F335M (3.35um) / B: F300M (3.0um)
-
-**SW only (highest resolution):**
-- R: F200W (2.0um) / G: F150W (1.5um) / B: F115W (1.15um)
-
-### Processing Hubble Data
-
-HST narrowband filters are automatically detected from FITS headers:
-- **H-alpha (656nm)** to G channel (SHO palette)
-- **[OIII] (502nm)** to B channel
-- **[SII] (673nm)** to R channel
-
-The Header Explorer shows the detected filter with confidence level (High/Medium/Low based on keyword source) and an "Assign" button for direct channel mapping.
-
-### Spectroscopy
-
-For 3D FITS cubes (IFU data), click anywhere on the preview image to extract the spectrum at that pixel coordinate. Wavelength calibration is read from WCS headers when available.
+For IFU data (NAXIS3 > 1), click anywhere on the preview to extract the spectrum at that pixel. Wavelength calibration is read from WCS headers when available.
 
 ## Architecture
 
 ```
-+--------------------------------------------------+
-|                     Frontend                      |
-|           React + TypeScript + Tailwind           |
-|                                                   |
-|  Layout: IntelliJ-style panels                    |
-|    Center: persistent preview                     |
-|    Bottom: Info | Analysis | Headers | Export     |
-|    Right:  Processing | Compose | Stacking | Cfg  |
-|                                                   |
-|  Context: 6 split PreviewContexts                 |
-|  Hooks: useBackend / useFileQueue / useTimer      |
-|                      |                            |
-|              useBackend.ts (IPC)                   |
-+----------------------+----------------------------+
-                       | Tauri Commands (42)
-+----------------------+----------------------------+
-|                      Backend                      |
-|                 Rust + Tauri v2                    |
-|                                                   |
-|  I/O:      mmap FITS parser, MEF scanner,         |
-|            ASDF parser (zlib/bzip2/lz4),          |
-|            FITS writer (mono + RGB)               |
-|  Imaging:  deconvolution (RL), background,        |
-|            wavelet denoise, stf, resample, scnr   |
-|  Compose:  rgb (auto-resample), drizzle_rgb       |
-|  Stack:    sigma-clip, drizzle, align, calibrate  |
-|  Analysis: stars, histogram, fft                  |
-|  Meta:     header_discovery, filter detection     |
-|  Astro:    plate_solve, wcs transforms            |
-|  Cube:     eager + lazy, spectrum, frame nav      |
-+--------------------------------------------------+
+Frontend (React + TypeScript + Tailwind)
+├── 11 domain services (compose, fits, analysis, header, ...)
+├── 8 shared UI primitives (Slider, Toggle, RunButton, ...)
+├── 7 split PreviewContexts for minimal re-renders
+├── infrastructure/tauri/ IPC layer
+└── Lazy-loaded panels via React.lazy + Suspense
+         │
+         │ Tauri Commands (42)
+         ▼
+Backend (Rust + Tauri v2)
+├── cmd/     42 command handlers
+├── core/    alignment (phase correlation + affine), analysis,
+│            astrometry, compose, cube, imaging, metadata, stacking
+├── domain/  orchestration (calibration, drizzle, cube, plate solve)
+├── infra/   FITS mmap, ASDF reader, cache, config, render, progress
+├── types/   shared types (AlignMethod, WhiteBalance, StfParams, ...)
+└── math/    NaN-safe median/MAD, sigma clipping, SIMD utilities
 ```
 
-**Key design decisions:**
-- All image data stays in f32/f64 with no integer quantization at any stage
-- Binary IPC for GPU pixel transfer with zero base64 overhead
-- Concurrent file processing with `requestAnimationFrame` yields so UI stays responsive during batch operations
-- Dimension harmonization with 5% tolerance: channels with slight size differences are auto-cropped instead of rejected
-- Auto-resample for large dimension mismatches (>10% ratio): bicubic Catmull-Rom upsample to largest channel dimensions
-- Crop-to-intersection stacking: frames with different dimensions are cropped to their common overlap region
-- Narrowband filter detection via regex matching on header keywords, wavelength values, and filename patterns
-- ASDF auto-dispatch: `.asdf` files are transparently routed through the same command layer as `.fits`
+The frontend went through a multi-phase refactoring in v0.4.0: the monolithic `useBackend.ts` hook was split into 11 domain-specific services with a shared `infrastructure/tauri/` IPC layer, 18 JSX files were converted to TSX, types were split by domain, and 8 shared UI primitives replaced ~1,370 lines of duplicated code across processing panels.
+
+**Design principles:**
+- All pixel data stays in f32/f64. No integer quantization at any stage.
+- Dual alignment: FFT phase correlation (sub-pixel, O(n log n)) as default, star-based affine (triangle asterism + RANSAC) for rotation. Automatic fallback chain.
+- White balance picks the channel with lowest noise (MAD/median) as reference, not always G.
+- SCNR redistributes lost luminance to R/B via BT.709 weights instead of adding it back to G.
+- Drizzle uses flat contiguous storage instead of per-pixel heap allocations.
+- NaN values sort to end everywhere: median, MAD, sigma clipping, auto-STF.
+- Plate solve auto-downsamples images >2048px before upload.
+- Binary IPC for GPU pixels: 16-byte header + raw f32 array, zero JSON/base64.
 
 ## Roadmap
-| Version  | Features                                                  | Status            |
-|:---------|:----------------------------------------------------------|:------------------|
-| **v0.3** | Deconvolution, background extraction, wavelet denoise, ASDF format, smart pipeline, auto-resample | Released          |
-| **v0.4** | Multi-extension FITS ERR/DQ/VAR propagation, MAST API integration, star removal | Next              |
-| **v0.5** | Photometric color calibration (Gaia DR3), PixelMath expressions | Planned           |
-| **v1.0** | Full GPU pipeline, plugin system (WASM), Python scripting | Planned           |
+
+| Version | What | Status |
+|:--------|:-----|:-------|
+| **v0.4** | Affine alignment, stability WB, SCNR redistribution, arcsinh stretch, numerical audit, frontend refactoring | **Released** |
+| **v0.5** | FITS ERR/DQ/VAR propagation, MAST API, log-polar phase correlation | Next |
+| **v0.6** | Star removal, Gaia DR3 photometric calibration, PixelMath | Planned |
+| **v0.7** | Mosaic stitching, gradient-aware background, local normalization | Planned |
+| **v1.0** | Full WebGPU pipeline, WASM plugins, Python scripting | Planned |
 
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-**Areas welcoming contributions:**
-- Multi-extension FITS ERR/DQ/VAR error propagation
-- MAST API integration for direct JWST/HST data download
+Some areas where help would be especially valuable:
+- FITS ERR/DQ/VAR error propagation through the processing chain
+- MAST API integration for direct JWST/HST data access
 - Star removal algorithms
-- Photometric calibration (Gaia DR3 cross-match)
-- WebGPU compute shader pipeline expansion
-- Test data curation (public FITS from MAST, ESA archives)
-- ASDF format testing with real Roman Space Telescope simulated data
-- Documentation and processing tutorials
-- Platform-specific packaging and testing
+- Gaia DR3 cross-match for photometric calibration
+- Log-polar phase correlation for rotational misalignment
+- WebGPU compute shaders for stacking and alignment
+- Test data curation from public archives (MAST, ESA)
+- ASDF testing with real Roman Space Telescope simulated data
 
 ## Support
 
-AstroBurst is free and open source with no subscriptions and no feature locks.
+AstroBurst is free, open-source, with no subscriptions and no feature locks.
 
-If it saves you time or helps your astrophotography workflow, consider supporting development:
+If it helps your work, consider supporting development:
 
 <p align="center">
   <a href="https://ko-fi.com/astroburst">
@@ -320,14 +314,9 @@ If it saves you time or helps your astrophotography workflow, consider supportin
   </a>
 </p>
 
-Your support helps cover development time for new features (Gaia DR3 calibration, MAST integration, WASM plugins).
-
-**Supporters get:**
 See [membership tiers](https://ko-fi.com/astroburst/tiers) for details.
 
 ## Supporters
-
-Thanks to everyone supporting AstroBurst development:
 
 <!-- SUPPORTERS:START -->
 *Be the first to support!*
@@ -335,10 +324,10 @@ Thanks to everyone supporting AstroBurst development:
 
 ## License
 
-GPLv3. See [LICENSE](LICENSE) for details.
+GPLv3. See [LICENSE](LICENSE).
 
 ---
 
 <p align="center">
-  <sub>Created by <a href="https://github.com/samuelkriegerbonini-dev">Samuel Krieger</a> / Built with Rust</sub>
+  <sub>Created by <a href="https://github.com/samuelkriegerbonini-dev">Samuel Krieger</a></sub>
 </p>

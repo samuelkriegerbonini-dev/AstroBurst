@@ -1,4 +1,4 @@
-use super::median::{exact_median_mut, f32_cmp};
+use super::median::{exact_median_mut, median_f32_mut, f32_cmp};
 use crate::types::constants::MAD_TO_SIGMA;
 
 pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize) -> (f64, f64) {
@@ -10,9 +10,7 @@ pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize)
         let median = exact_median_mut(values);
 
         let mut devs: Vec<f32> = values.iter().map(|&v| (v as f64 - median).abs() as f32).collect();
-        let dev_mid = devs.len() / 2;
-        devs.select_nth_unstable_by(dev_mid, f32_cmp);
-        let mad = devs[dev_mid] as f64;
+        let mad = median_f32_mut(&mut devs) as f64;
         let sig = (mad * MAD_TO_SIGMA).max(1e-30);
 
         let lo = (median - kappa as f64 * sig) as f32;
@@ -26,9 +24,7 @@ pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize)
 
     let median = exact_median_mut(values);
     let mut devs: Vec<f32> = values.iter().map(|&v| (v as f64 - median).abs() as f32).collect();
-    let dev_mid = devs.len() / 2;
-    devs.select_nth_unstable_by(dev_mid, f32_cmp);
-    let sigma = (devs[dev_mid] as f64 * MAD_TO_SIGMA).max(1e-30);
+    let sigma = (median_f32_mut(&mut devs) as f64 * MAD_TO_SIGMA).max(1e-30);
 
     (median, sigma)
 }

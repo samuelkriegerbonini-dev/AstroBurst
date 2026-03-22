@@ -2,7 +2,7 @@ use ndarray::{Array2, s};
 
 use crate::core::imaging::scnr;
 use crate::core::imaging::stats;
-use crate::types::image::{StfParams, AutoStfConfig};
+use crate::types::image::{ImageStats, StfParams, AutoStfConfig};
 use crate::core::imaging::stf;
 pub use crate::types::compose::{
     WhiteBalance, ChannelStats, DrizzleRgbConfig, DrizzleRgbResult,
@@ -37,21 +37,22 @@ pub struct ProcessedDrizzleRgb {
     pub scnr_applied: bool,
 }
 
-fn compute_channel_stats(arr: &Array2<f32>) -> ChannelStats {
-    let st = stats::compute_image_stats(arr);
-    if st.valid_count == 0 {
-        return ChannelStats {
-            min: 0.0,
-            max: 0.0,
-            median: 0.0,
-            mean: 0.0,
-        };
-    }
-    ChannelStats {
-        min: st.min,
-        max: st.max,
-        median: st.median,
-        mean: st.mean,
+fn select_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> (f32, f32, f32) {
+    let stability = |s: &ImageStats| -> f64 {
+        if s.median > 1e-10 { s.mad / s.median } else { f64::MAX }
+    };
+    let stab_r = stability(sr);
+    let stab_g = stability(sg);
+    let stab_b = stability(sb);
+    if stab_r <= stab_g && stab_r <= stab_b {
+        let m = sr.median.max(1e-10);
+        (1.0f32, (m / sg.median.max(1e-10)) as f32, (m / sb.median.max(1e-10)) as f32)
+    } else if stab_b <= stab_g {
+        let m = sb.median.max(1e-10);
+        ((m / sr.median.max(1e-10)) as f32, (m / sg.median.max(1e-10)) as f32, 1.0f32)
+    } else {
+        let m = sg.median.max(1e-10);
+        ((m / sr.median.max(1e-10)) as f32, 1.0f32, (m / sb.median.max(1e-10)) as f32)
     }
 }
 
@@ -82,19 +83,16 @@ pub fn process_drizzle_rgb(
     let g_img = channels.g.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
     let b_img = channels.b.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
 
-    let stats_r_raw = compute_channel_stats(&r_img);
-    let stats_g_raw = compute_channel_stats(&g_img);
-    let stats_b_raw = compute_channel_stats(&b_img);
+    let sr_full = stats::compute_image_stats(&r_img);
+    let sg_full = stats::compute_image_stats(&g_img);
+    let sb_full = stats::compute_image_stats(&b_img);
+
+    let stats_r_raw = ChannelStats::from(&sr_full);
+    let stats_g_raw = ChannelStats::from(&sg_full);
+    let stats_b_raw = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => {
-            let ref_med = stats_g_raw.median.max(1e-10);
-            (
-                (ref_med / stats_r_raw.median.max(1e-10)) as f32,
-                1.0f32,
-                (ref_med / stats_b_raw.median.max(1e-10)) as f32,
-            )
-        }
+        WhiteBalance::Auto => select_wb_reference(&sr_full, &sg_full, &sb_full),
         WhiteBalance::Manual(r, g, b) => (*r as f32, *g as f32, *b as f32),
         WhiteBalance::None => (1.0, 1.0, 1.0),
     };
@@ -135,12 +133,12 @@ pub fn process_drizzle_rgb(
         (default_stf, default_stf, default_stf, sr, sg, sb)
     };
 
-    let r_stretched = stf::apply_stf_f32(&r_wb, &stf_r, &st_r);
+    let mut r_stretched = stf::apply_stf_f32(&r_wb, &stf_r, &st_r);
     let mut g_stretched = stf::apply_stf_f32(&g_wb, &stf_g, &st_g);
-    let b_stretched = stf::apply_stf_f32(&b_wb, &stf_b, &st_b);
+    let mut b_stretched = stf::apply_stf_f32(&b_wb, &stf_b, &st_b);
 
     let scnr_applied = if let Some(ref scnr_cfg) = config.scnr {
-        scnr::apply_scnr_inplace(&r_stretched, &mut g_stretched, &b_stretched, scnr_cfg);
+        scnr::apply_scnr_inplace(&mut r_stretched, &mut g_stretched, &mut b_stretched, scnr_cfg);
         true
     } else {
         false

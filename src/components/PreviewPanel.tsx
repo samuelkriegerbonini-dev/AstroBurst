@@ -7,10 +7,11 @@ import {
 
 import { getCubeSpectrum } from "../services/cube.service";
 import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
-import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext } from "../context/PreviewContext";
-import { useMousePixel, useMousePixelActions } from "../hooks/useMousePixelStore";
+import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
+import { useMousePixel, useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
 import { useSelectedFile, useDoneFiles } from "../hooks/useFileStore";
 import WcsReadout from "./header/WcsReadout";
+import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import type { ProcessedFile } from "../shared/types";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
@@ -68,7 +69,9 @@ function PreviewPanelInner() {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
+  const { renderedPreviewUrl } = useRenderContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
+  const mousePixel = useMousePixel();
 
   const [activeBottomTab, setActiveBottomTab] = useState<BottomTabId>("info");
   const [activeSideTab, setActiveSideTab] = useState<SideTabId | null>(null);
@@ -139,11 +142,15 @@ function PreviewPanelInner() {
       setSpecElapsed(result.elapsed_ms || 0);
     } catch { if (specAbortRef.current === seq) setSpectrum(EMPTY_SPECTRUM); }
     finally { if (specAbortRef.current === seq) setSpecLoading(false); }
-  }, [isCube, file?.path, file?.result?.dimensions, getCubeSpectrum]);
+  }, [isCube, file?.path, file?.result?.dimensions]);
 
   const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => {
     handleMove(e, fileDimsRef.current);
   }, [handleMove]);
+
+  const handleViewerMousePixel = useCallback((x: number, y: number) => {
+    setMousePixel({ x, y });
+  }, []);
 
   const handleBottomResizeStart = useCallback((e: React.MouseEvent) => {
     if (!bottomOpen) return;
@@ -187,6 +194,33 @@ function PreviewPanelInner() {
     }
   }, [activeSideTab]);
 
+  const originalImage = useMemo(() => {
+    if (!file?.result?.previewUrl) return null;
+    return {
+      url: file.result.previewUrl,
+      label: "Original",
+      width: file.result.dimensions?.[0],
+      height: file.result.dimensions?.[1],
+    };
+  }, [file?.result?.previewUrl, file?.result?.dimensions]);
+
+  const processedImage = useMemo(() => {
+    if (!renderedPreviewUrl || renderedPreviewUrl === file?.result?.previewUrl) return null;
+    return {
+      url: renderedPreviewUrl,
+      label: "Processed",
+      width: file?.result?.dimensions?.[0],
+      height: file?.result?.dimensions?.[1],
+    };
+  }, [renderedPreviewUrl, file?.result?.previewUrl, file?.result?.dimensions]);
+
+  const pixelValueForViewer = useMemo(() => {
+    if (!mousePixel) return null;
+    return { x: mousePixel.x, y: mousePixel.y, value: 0 };
+  }, [mousePixel]);
+
+  const useAdvancedViewer = !useGpu || !rawPixels;
+
   const effectiveBottomH = bottomOpen ? bottomHeightRef.current : BOTTOM_MIN;
   const sidePanelOpen = activeSideTab !== null;
   const activeTabMeta = SIDE_TABS.find((t) => t.id === activeSideTab);
@@ -213,13 +247,27 @@ function PreviewPanelInner() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-hidden" onMouseMove={handlePreviewMouseMove} onMouseLeave={handleLeave}>
+        <div className="flex-1 overflow-hidden">
           {!file ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-zinc-600"><Image size={48} strokeWidth={1} /><p className="text-sm">Select a processed file</p></div>
+            <AdvancedImageViewer
+              original={null}
+              processed={null}
+            />
+          ) : useAdvancedViewer ? (
+            <AdvancedImageViewer
+              original={originalImage}
+              processed={processedImage}
+              pixelValue={pixelValueForViewer}
+              onMousePixel={handleViewerMousePixel}
+              onMouseLeave={handleLeave}
+              overlayCanvasRef={starOverlayRef}
+            />
           ) : (
-            <Suspense fallback={<TabSpinner />}>
-              <PreviewTab useGpu={useGpu} rawPixels={rawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} />
-            </Suspense>
+            <div className="h-full" onMouseMove={handlePreviewMouseMove} onMouseLeave={handleLeave}>
+              <Suspense fallback={<TabSpinner />}>
+                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} />
+              </Suspense>
+            </div>
           )}
         </div>
 
