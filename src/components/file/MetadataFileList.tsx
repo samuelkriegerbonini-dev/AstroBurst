@@ -22,6 +22,9 @@ import {
   Aperture,
   ChevronRight,
   Search,
+  SlidersHorizontal,
+  Pin,
+  X,
 } from "lucide-react";
 
 export interface FileMetadata {
@@ -47,8 +50,11 @@ export interface MetadataFile {
   elapsed_ms?: number;
 }
 
+import type { FilterMode } from "../../hooks/useProductFilter";
+
 interface MetadataFileListProps {
   files: MetadataFile[];
+  totalFiles?: number;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onExportZip?: () => void;
@@ -58,6 +64,15 @@ interface MetadataFileListProps {
   zipProgress?: number;
   downloaded?: boolean;
   groupByInstrument?: boolean;
+  productTypes?: string[];
+  customChips?: string[];
+  activeFilters?: string[];
+  filterMode?: FilterMode;
+  onToggleFilter?: (filter: string) => void;
+  onToggleMode?: () => void;
+  onClearFilters?: () => void;
+  onAddCustomChip?: (text: string) => void;
+  onRemoveCustomChip?: (text: string) => void;
 }
 
 const STATUS_CONFIG = {
@@ -247,17 +262,27 @@ const ITEM_HEIGHT = 58;
 const OVERSCAN = 4;
 
 function MetadataFileList({
-  files,
-  selectedId,
-  onSelect,
-  onExportZip,
-  collapsed = false,
-  onToggle,
-  isExporting = false,
-  zipProgress = 0,
-  downloaded = false,
-  groupByInstrument = false,
-}: MetadataFileListProps) {
+                            files,
+                            totalFiles,
+                            selectedId,
+                            onSelect,
+                            onExportZip,
+                            collapsed = false,
+                            onToggle,
+                            isExporting = false,
+                            zipProgress = 0,
+                            downloaded = false,
+                            groupByInstrument = false,
+                            productTypes = [],
+                            customChips = [],
+                            activeFilters = [],
+                            filterMode = "or",
+                            onToggleFilter,
+                            onToggleMode,
+                            onClearFilters,
+                            onAddCustomChip,
+                            onRemoveCustomChip,
+                          }: MetadataFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewHeight, setViewHeight] = useState(600);
@@ -314,6 +339,23 @@ function MetadataFileList({
     [filteredFiles, startIdx, endIdx],
   );
 
+  const isFiltered = activeFilters.length > 0;
+  const total = totalFiles ?? files.length;
+
+  const handlePinSearch = useCallback(() => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    onAddCustomChip?.(q);
+    setSearchQuery("");
+  }, [searchQuery, onAddCustomChip]);
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handlePinSearch();
+    }
+  }, [handlePinSearch]);
+
   if (collapsed) {
     return (
       <div className="flex flex-col items-center h-full py-2 gap-2">
@@ -348,7 +390,7 @@ function MetadataFileList({
             className="text-[10px] font-mono px-1.5 py-0.5 rounded"
             style={{ color: "var(--ab-teal)", background: "rgba(20,184,166,0.08)" }}
           >
-            {files.length}
+            {isFiltered ? `${files.length}/${total}` : files.length}
           </span>
         </div>
         <button
@@ -359,18 +401,87 @@ function MetadataFileList({
         </button>
       </div>
 
-      {files.length > 5 && (
+      {(productTypes.length > 1 || customChips.length > 0) && (
+        <div className="ab-mfl-product-filter">
+          <SlidersHorizontal size={10} className="text-zinc-600 shrink-0" />
+          {productTypes.map((pt) => (
+            <button
+              key={pt}
+              onClick={() => onToggleFilter?.(pt)}
+              className={`ab-mfl-product-chip ${activeFilters.includes(pt) ? "ab-mfl-product-chip-active" : ""}`}
+            >
+              {pt}
+            </button>
+          ))}
+          {customChips.map((chip) => (
+            <span key={chip} className="ab-mfl-custom-chip-wrapper">
+              <button
+                onClick={() => onToggleFilter?.(chip)}
+                className={`ab-mfl-product-chip ab-mfl-product-chip-custom ${activeFilters.includes(chip) ? "ab-mfl-product-chip-active" : ""}`}
+              >
+                {chip}
+              </button>
+              <button
+                onClick={() => onRemoveCustomChip?.(chip)}
+                className="ab-mfl-chip-remove"
+                title={`Remove "${chip}" filter`}
+              >
+                <X size={8} />
+              </button>
+            </span>
+          ))}
+          {activeFilters.length >= 2 && (
+            <button
+              onClick={onToggleMode}
+              className="ab-mfl-mode-toggle"
+              title={filterMode === "or" ? "OR: show files matching ANY filter. Click to switch to AND." : "AND: show files matching ALL filters. Click to switch to OR."}
+            >
+              <span className={`ab-mfl-mode-opt ${filterMode === "and" ? "ab-mfl-mode-opt-active" : ""}`}>AND</span>
+              <span className={`ab-mfl-mode-opt ${filterMode === "or" ? "ab-mfl-mode-opt-active" : ""}`}>OR</span>
+            </button>
+          )}
+          {activeFilters.length > 0 && (
+            <button
+              onClick={() => onClearFilters?.()}
+              className="ab-mfl-product-chip ab-mfl-product-chip-clear"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="ab-mfl-search-row">
         <div className="ab-mfl-search">
           <Search size={12} className="ab-mfl-search-icon" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter by name, filter, instrument..."
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search files..."
             className="ab-mfl-search-input"
           />
+          {searchQuery.trim() && (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="ab-mfl-search-clear"
+              title="Clear search"
+            >
+              <X size={10} />
+            </button>
+          )}
         </div>
-      )}
+        {searchQuery.trim() && (
+          <button
+            onClick={handlePinSearch}
+            className="ab-mfl-pin-btn"
+            title={`Pin "${searchQuery.trim()}" as global filter (Enter)`}
+          >
+            <Pin size={10} />
+          </button>
+        )}
+      </div>
 
       <div
         ref={scrollRef}

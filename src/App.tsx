@@ -16,6 +16,7 @@ import { useFileStats, useFileIds, useSelectedId, fileStore } from "./hooks/useF
 import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
+import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters } from "./hooks/useProductFilter";
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { APP_VERSION, FILE_STATUS } from "./utils/constants";
@@ -48,13 +49,13 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       error: f.error,
       metadata: header
         ? {
-            filter: header.FILTER ?? undefined,
-            exptime: header.EXPTIME != null ? Number(header.EXPTIME) : undefined,
-            instrument: header.INSTRUME ?? undefined,
-            detector: header.DETECTOR ?? undefined,
-            bitpix: header.BITPIX != null ? Number(header.BITPIX) : undefined,
-            dateObs: header["DATE-OBS"] ?? undefined,
-          }
+          filter: header.FILTER ?? undefined,
+          exptime: header.EXPTIME != null ? Number(header.EXPTIME) : undefined,
+          instrument: header.INSTRUME ?? undefined,
+          detector: header.DETECTOR ?? undefined,
+          bitpix: header.BITPIX != null ? Number(header.BITPIX) : undefined,
+          dateObs: header["DATE-OBS"] ?? undefined,
+        }
         : undefined,
       previewUrl: f.result?.previewUrl,
       dimensions: f.result?.dimensions,
@@ -84,6 +85,11 @@ export default function App() {
 
   const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
+
+  const activeFilters = useActiveFilters();
+  const filterMode = useFilterMode();
+  const filterState = useProductFilterState();
+  const { toggleFilter, toggleMode, clearAll, addCustomChip, removeCustomChip, reset: resetProductFilter } = useProductFilterActions();
 
   const [showBg, setShowBg] = useState(false);
   const fileCountRef = useRef(0);
@@ -161,9 +167,10 @@ export default function App() {
     reset();
     timer.reset();
     fileCountRef.current = 0;
+    resetProductFilter();
     setView("empty");
     setShowConfetti(false);
-  }, [reset, timer]);
+  }, [reset, timer, resetProductFilter]);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -178,6 +185,31 @@ export default function App() {
     () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id)),
     [fileIds, storeVersion],
   );
+
+  const productTypes = useMemo(
+    () => detectProductTypes(metadataFiles.map((f) => f.name)),
+    [metadataFiles],
+  );
+
+  const filteredMetadataFiles = useMemo(() => {
+    if (activeFilters.length === 0) return metadataFiles;
+    return metadataFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
+  }, [metadataFiles, activeFilters, filterMode]);
+
+  const filteredSelectedId = useMemo(() => {
+    if (!selectedId) return null;
+    if (activeFilters.length === 0) return selectedId;
+    const exists = filteredMetadataFiles.some((f) => f.id === selectedId);
+    if (exists) return selectedId;
+    const firstDone = filteredMetadataFiles.find((f) => f.status === "done");
+    return firstDone?.id ?? null;
+  }, [selectedId, activeFilters, filteredMetadataFiles]);
+
+  useEffect(() => {
+    if (filteredSelectedId !== null && filteredSelectedId !== selectedId) {
+      fileStore.selectFile(filteredSelectedId);
+    }
+  }, [filteredSelectedId, selectedId]);
 
   const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
     if (!sidebarOpen) return;
@@ -256,7 +288,8 @@ export default function App() {
                       }}
                     >
                       <MetadataFileList
-                        files={metadataFiles}
+                        files={filteredMetadataFiles}
+                        totalFiles={metadataFiles.length}
                         selectedId={selectedId}
                         onSelect={handleSelectFile}
                         onExportZip={handleExportZip}
@@ -265,6 +298,15 @@ export default function App() {
                         isExporting={isExporting}
                         zipProgress={zipProgress}
                         downloaded={downloaded}
+                        productTypes={productTypes}
+                        customChips={filterState.customChips}
+                        activeFilters={activeFilters}
+                        filterMode={filterMode}
+                        onToggleFilter={toggleFilter}
+                        onToggleMode={toggleMode}
+                        onClearFilters={clearAll}
+                        onAddCustomChip={addCustomChip}
+                        onRemoveCustomChip={removeCustomChip}
                       />
                     </div>
 

@@ -501,7 +501,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 6px 8px;
+  flex: 1;
+  min-width: 0;
   padding: 5px 8px;
   border-radius: var(--ab-radius-sm);
   background: rgba(24, 24, 32, 0.6);
@@ -529,6 +530,100 @@
 
 .ab-mfl-search-input::placeholder {
   color: #3f3f46;
+}
+
+.ab-mfl-search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 8px;
+}
+
+.ab-mfl-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--ab-radius-sm);
+  background: transparent;
+  color: #52525b;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color var(--ab-transition);
+}
+
+.ab-mfl-search-clear:hover {
+  color: #a1a1aa;
+}
+
+.ab-mfl-pin-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--ab-radius-sm);
+  background: rgba(168, 85, 247, 0.12);
+  color: #a78bfa;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--ab-transition);
+}
+
+.ab-mfl-pin-btn:hover {
+  background: rgba(168, 85, 247, 0.25);
+  color: #c4b5fd;
+  border-color: rgba(168, 85, 247, 0.5);
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.2);
+}
+
+.ab-mfl-custom-chip-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  position: relative;
+}
+
+.ab-mfl-product-chip-custom {
+  border-color: rgba(168, 85, 247, 0.25);
+  color: #a78bfa;
+  background: rgba(168, 85, 247, 0.08);
+  padding-right: 6px;
+}
+
+.ab-mfl-product-chip-custom:hover {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(168, 85, 247, 0.35);
+}
+
+.ab-mfl-product-chip-custom.ab-mfl-product-chip-active {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c4b5fd;
+  border-color: rgba(168, 85, 247, 0.45);
+  box-shadow: 0 0 6px rgba(168, 85, 247, 0.15);
+}
+
+.ab-mfl-chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border: none;
+  cursor: pointer;
+  margin-left: -2px;
+  transition: all var(--ab-transition);
+}
+
+.ab-mfl-chip-remove:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
 }
 
 .ab-mfl-scroll {
@@ -718,6 +813,96 @@
   height: 20px;
   border-radius: 1px;
   background: var(--ab-teal);
+}
+
+.ab-mfl-product-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 2px;
+  flex-wrap: wrap;
+}
+
+.ab-mfl-product-chip {
+  padding: 1px 8px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--ab-font-mono, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all var(--ab-transition);
+  background: rgba(20, 184, 166, 0.06);
+  color: #71717a;
+  border: 1px solid rgba(63, 63, 70, 0.3);
+}
+
+.ab-mfl-product-chip:hover {
+  background: rgba(20, 184, 166, 0.12);
+  color: #a1a1aa;
+  border-color: rgba(20, 184, 166, 0.25);
+}
+
+.ab-mfl-product-chip-active {
+  background: rgba(20, 184, 166, 0.18);
+  color: var(--ab-teal);
+  border-color: rgba(20, 184, 166, 0.4);
+  box-shadow: 0 0 6px rgba(20, 184, 166, 0.12);
+}
+
+.ab-mfl-product-chip-active:hover {
+  background: rgba(20, 184, 166, 0.25);
+}
+
+.ab-mfl-product-chip-clear {
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.2);
+  font-size: 9px;
+  padding: 1px 6px;
+}
+
+.ab-mfl-product-chip-clear:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.ab-mfl-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  overflow: hidden;
+  background: rgba(24, 24, 32, 0.7);
+  border: 1px solid rgba(63, 63, 70, 0.35);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: border-color var(--ab-transition);
+}
+
+.ab-mfl-mode-toggle:hover {
+  border-color: rgba(20, 184, 166, 0.3);
+}
+
+.ab-mfl-mode-opt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--ab-font-mono, monospace);
+  letter-spacing: 0.05em;
+  color: #3f3f46;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.ab-mfl-mode-opt-active {
+  color: var(--ab-teal);
+  background: rgba(20, 184, 166, 0.15);
+  text-shadow: 0 0 8px rgba(20, 184, 166, 0.3);
 }
 
 .ab-mfl-footer {

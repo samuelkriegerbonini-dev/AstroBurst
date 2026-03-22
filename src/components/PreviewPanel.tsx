@@ -10,6 +10,7 @@ import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
 import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
 import { useMousePixel, useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
 import { useSelectedFile, useDoneFiles } from "../hooks/useFileStore";
+import { useActiveFilters, useFilterMode, matchesActiveFilters } from "../hooks/useProductFilter";
 import WcsReadout from "./header/WcsReadout";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import type { ProcessedFile } from "../shared/types";
@@ -57,9 +58,16 @@ function TabSpinner() {
 export default function PreviewPanel() {
   const file = useSelectedFile();
   const doneFiles = useDoneFiles();
+  const activeFilters = useActiveFilters();
+  const filterMode = useFilterMode();
+
+  const filteredDoneFiles = useMemo(() => {
+    if (activeFilters.length === 0) return doneFiles;
+    return doneFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
+  }, [doneFiles, activeFilters, filterMode]);
 
   return (
-    <PreviewProvider file={file} doneFiles={doneFiles}>
+    <PreviewProvider file={file} doneFiles={filteredDoneFiles}>
       <PreviewPanelInner />
     </PreviewProvider>
   );
@@ -236,9 +244,9 @@ function PreviewPanelInner() {
           <div className="flex items-center gap-2">
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuAvailable === false && !useGpu}
-                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-                style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)", boxShadow: "0 0 8px rgba(168,85,247,0.15)" } : { color: "#71717a", border: "1px solid transparent" }}
-                title={gpuAvailable === false ? "WebGPU not available" : useGpu ? "Switch to CPU rendering" : "Switch to GPU rendering"}>
+                      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                      style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)", boxShadow: "0 0 8px rgba(168,85,247,0.15)" } : { color: "#71717a", border: "1px solid transparent" }}
+                      title={gpuAvailable === false ? "WebGPU not available" : useGpu ? "Switch to CPU rendering" : "Switch to GPU rendering"}>
                 {rawPixelsLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
                 {rawPixelsLoading ? "Loading..." : gpuAvailable === false ? "CPU only" : useGpu ? "GPU" : "CPU"}
               </button>
@@ -278,7 +286,7 @@ function PreviewPanelInner() {
               <div className="flex items-center gap-0">
                 {BOTTOM_TABS.map((tab) => { const Icon = tab.icon; return (
                   <button key={tab.id} onClick={() => { setActiveBottomTab(tab.id); if (!bottomOpen) setBottomOpen(true); }}
-                    className="ab-tab" data-active={activeBottomTab === tab.id}>
+                          className="ab-tab" data-active={activeBottomTab === tab.id}>
                     <Icon size={11} />{tab.label}
                   </button>
                 ); })}
@@ -331,9 +339,9 @@ function PreviewPanelInner() {
         <div className="shrink-0 w-[38px] flex flex-col items-center pt-2 gap-0.5" style={{ borderLeft: "1px solid rgba(20,184,166,0.08)", background: "linear-gradient(180deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.7) 40%, rgba(59,130,246,0.03) 100%)" }}>
           {SIDE_TABS.map((tab) => { const Icon = tab.icon; const isActive = activeSideTab === tab.id; return (
             <button key={tab.id} onClick={() => handleSideTabClick(tab.id)}
-              className="relative w-[32px] h-[32px] flex items-center justify-center rounded-md transition-all duration-200"
-              style={isActive ? { background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", boxShadow: "0 0 10px rgba(20,184,166,0.1)" } : { color: "#52525b" }}
-              title={tab.label}>
+                    className="relative w-[32px] h-[32px] flex items-center justify-center rounded-md transition-all duration-200"
+                    style={isActive ? { background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", boxShadow: "0 0 10px rgba(20,184,166,0.1)" } : { color: "#52525b" }}
+                    title={tab.label}>
               {isActive && <span className="absolute left-0 top-[6px] bottom-[6px] w-[2px] rounded-r" style={{ background: "var(--ab-teal)" }} />}
               <Icon size={15} />
             </button>

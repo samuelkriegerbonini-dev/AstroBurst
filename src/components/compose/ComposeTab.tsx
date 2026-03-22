@@ -93,11 +93,15 @@ function ComposeTabInner() {
       setRgbLoading(true);
       try {
         const result = await composeRgb(lPath, rPath, gPath, bPath, "./output", options);
-        setRgbResult(result);
+        const ts = Date.now();
+        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
+        const bustedResult = result.previewUrl
+          ? { ...result, previewUrl: bustUrl(result.previewUrl) }
+          : result;
+        setRgbResult(bustedResult);
         setRgbChannels({ r: rPath, g: gPath, b: bPath });
         if (result.previewUrl) {
-          const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-          setRenderedPreviewUrl(bust);
+          setRenderedPreviewUrl(bustUrl(result.previewUrl));
         }
       } catch (e) {
         console.error("RGB compose failed:", e);
@@ -120,12 +124,13 @@ function ComposeTabInner() {
       setDrizzleStage(`Drizzling ${paths.length} frames...`);
       try {
         const result = await drizzleStack(paths, "./output", options);
-        setDrizzleResult(result);
+        const ts = Date.now();
+        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
+        setDrizzleResult(result.previewUrl ? { ...result, previewUrl: bustUrl(result.previewUrl) } : result);
         setDrizzleProgress(100);
         setDrizzleStage("Done");
         if (result.previewUrl) {
-          const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-          setRenderedPreviewUrl(bust);
+          setRenderedPreviewUrl(bustUrl(result.previewUrl));
         }
       } catch {
         setDrizzleStage("Failed");
@@ -155,12 +160,13 @@ function ComposeTabInner() {
       setDrizzleRgbStage(`Drizzling ${channels}...`);
       try {
         const result = await drizzleRgb(rPaths, gPaths, bPaths, "./output", options);
-        setDrizzleRgbResult(result);
+        const ts = Date.now();
+        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
+        setDrizzleRgbResult(result.previewUrl ? { ...result, previewUrl: bustUrl(result.previewUrl) } : result);
         setDrizzleRgbProgress(100);
         setDrizzleRgbStage("Done");
         if (result.previewUrl) {
-          const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-          setRenderedPreviewUrl(bust);
+          setRenderedPreviewUrl(bustUrl(result.previewUrl));
         }
       } catch {
         setDrizzleRgbStage("Failed");
