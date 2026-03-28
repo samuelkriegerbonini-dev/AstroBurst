@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, resolve_output_dir, save_preview_png};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, save_rgb_preview_png, MAX_PREVIEW_DIM};
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::StfParams;
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
@@ -62,11 +63,83 @@ fn stf_json(stf: &StfParams) -> serde_json::Value {
     })
 }
 
+fn process_rgb_fits(
+    path: &str,
+    output_dir: &str,
+    t0: Instant,
+    full: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let rgb = match try_extract_rgb_resolved(path)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let stats_r = compute_image_stats(&rgb.r);
+    let stats_g = compute_image_stats(&rgb.g);
+    let stats_b = compute_image_stats(&rgb.b);
+
+    let stf_r = auto_stf(&stats_r, &AutoStfConfig::default());
+    let stf_g = auto_stf(&stats_g, &AutoStfConfig::default());
+    let stf_b = auto_stf(&stats_b, &AutoStfConfig::default());
+
+    let r_stretched = apply_stf_f32(&rgb.r, &stf_r, &stats_r);
+    let g_stretched = apply_stf_f32(&rgb.g, &stf_g, &stats_g);
+    let b_stretched = apply_stf_f32(&rgb.b, &stf_b, &stats_b);
+
+    let (rows, cols) = rgb.r.dim();
+    let png_path = png_path_for(path, output_dir);
+    save_rgb_preview_png(&r_stretched, &g_stretched, &b_stretched, &png_path)?;
+
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(rgb.r.clone()), stats_r.clone());
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(rgb.g.clone()), stats_g.clone());
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(rgb.b.clone()), stats_b.clone());
+
+    let mut result = json!({
+        RES_PNG_PATH: png_path,
+        RES_DIMENSIONS: [cols, rows],
+        RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        RES_STATS: stats_json_full(&stats_r),
+        RES_STF: stf_json(&stf_r),
+        "is_rgb": true,
+        "stf_r": stf_json(&stf_r),
+        "stf_g": stf_json(&stf_g),
+        "stf_b": stf_json(&stf_b),
+    });
+
+    if full {
+        let hist = compute_histogram_with_stats(&rgb.r, &stats_r);
+        let display_bins = downsample_histogram(&hist, HISTOGRAM_BINS_DISPLAY);
+        let header_json = serde_json::to_value(&rgb.header.index)?;
+
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert(RES_HEADER.to_string(), header_json);
+            obj.insert(RES_HISTOGRAM.to_string(), json!({
+                RES_BINS: display_bins,
+                RES_BIN_COUNT: display_bins.len(),
+                RES_DATA_MIN: stats_r.min,
+                RES_DATA_MAX: stats_r.max,
+                RES_MEDIAN: stats_r.median,
+                RES_MEAN: stats_r.mean,
+                RES_SIGMA: stats_r.sigma,
+                RES_MAD: stats_r.mad,
+                RES_TOTAL_PIXELS: stats_r.valid_count,
+                RES_AUTO_STF: stf_json(&stf_r),
+            }));
+        }
+    }
+
+    Ok(Some(result))
+}
+
 #[tauri::command]
 pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
+
+        if let Some(result) = process_rgb_fits(&path, &output_dir, t0, false)? {
+            return Ok(result);
+        }
 
         let cached = load_cached(&path)?;
         let png_path = png_path_for(&path, &output_dir);
@@ -87,6 +160,10 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
     blocking_cmd!({
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
+
+        if let Some(result) = process_rgb_fits(&path, &output_dir, t0, true)? {
+            return Ok(result);
+        }
 
         let cached = load_cached_full(&path)?;
         let png_path = png_path_for(&path, &output_dir);
@@ -283,6 +360,52 @@ pub async fn export_png(
         let depth = bit_depth.unwrap_or(16);
         let do_stf = apply_stf_stretch.unwrap_or(false);
 
+        if let Some(rgb) = try_extract_rgb_resolved(&path)? {
+            let sr = compute_image_stats(&rgb.r);
+            let sg = compute_image_stats(&rgb.g);
+            let sb = compute_image_stats(&rgb.b);
+
+            let (r_out, g_out, b_out) = if do_stf {
+                let stf = StfParams {
+                    shadow: shadow.unwrap_or(0.0),
+                    midtone: midtone.unwrap_or(0.5),
+                    highlight: highlight.unwrap_or(1.0),
+                };
+                (
+                    apply_stf_f32(&rgb.r, &stf, &sr),
+                    apply_stf_f32(&rgb.g, &stf, &sg),
+                    apply_stf_f32(&rgb.b, &stf, &sb),
+                )
+            } else {
+                let ar = auto_stf(&sr, &AutoStfConfig::default());
+                let ag = auto_stf(&sg, &AutoStfConfig::default());
+                let ab = auto_stf(&sb, &AutoStfConfig::default());
+                (
+                    apply_stf_f32(&rgb.r, &ar, &sr),
+                    apply_stf_f32(&rgb.g, &ag, &sg),
+                    apply_stf_f32(&rgb.b, &ab, &sb),
+                )
+            };
+
+            if depth == 16 {
+                render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
+            } else {
+                render_rgb(&r_out, &g_out, &b_out, &output_path)?;
+            }
+
+            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+            let (rows, cols) = rgb.r.dim();
+
+            return Ok(json!({
+                RES_OUTPUT_PATH: output_path,
+                RES_BIT_DEPTH: depth,
+                RES_APPLY_STF: true,
+                RES_FILE_SIZE_BYTES: file_size,
+                RES_DIMENSIONS: [cols, rows],
+                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            }));
+        }
+
         let resolved = extract_image_resolved(&path)?;
 
         if do_stf {
@@ -370,9 +493,12 @@ pub async fn export_rgb_png(
                 g_out = apply_stf_f32(cg.arr(), &stf_g, cg.stats());
                 b_out = apply_stf_f32(cb.arr(), &stf_b, cb.stats());
             } else {
-                r_out = cr.arr().to_owned();
-                g_out = cg.arr().to_owned();
-                b_out = cb.arr().to_owned();
+                let auto_r = auto_stf(cr.stats(), &AutoStfConfig::default());
+                let auto_g = auto_stf(cg.stats(), &AutoStfConfig::default());
+                let auto_b = auto_stf(cb.stats(), &AutoStfConfig::default());
+                r_out = apply_stf_f32(cr.arr(), &auto_r, cr.stats());
+                g_out = apply_stf_f32(cg.arr(), &auto_g, cg.stats());
+                b_out = apply_stf_f32(cb.arr(), &auto_b, cb.stats());
             }
             if depth == 16 {
                 render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
@@ -384,7 +510,7 @@ pub async fn export_rgb_png(
             return Ok(json!({
                 RES_OUTPUT_PATH: output_path,
                 RES_BIT_DEPTH: depth,
-                RES_APPLY_STF: do_stf,
+                RES_APPLY_STF: true,
                 RES_FILE_SIZE_BYTES: file_size,
                 RES_DIMENSIONS: [cols, rows],
                 RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
@@ -405,6 +531,47 @@ pub async fn export_rgb_png(
         let ga = g_entry.arr();
         let ba = b_entry.arr();
 
+        let has_explicit_stf = shadow_r.is_some() || shadow_g.is_some() || shadow_b.is_some();
+
+        let stretch_and_render = |r: &ndarray::Array2<f32>, g: &ndarray::Array2<f32>, b: &ndarray::Array2<f32>| -> anyhow::Result<serde_json::Value> {
+            if do_stf {
+                let sr = compute_image_stats(r);
+                let sg = compute_image_stats(g);
+                let sb = compute_image_stats(b);
+                let (stf_r, stf_g, stf_b) = if has_explicit_stf {
+                    (
+                        StfParams { shadow: shadow_r.unwrap_or(0.0), midtone: midtone_r.unwrap_or(0.5), highlight: highlight_r.unwrap_or(1.0) },
+                        StfParams { shadow: shadow_g.unwrap_or(0.0), midtone: midtone_g.unwrap_or(0.5), highlight: highlight_g.unwrap_or(1.0) },
+                        StfParams { shadow: shadow_b.unwrap_or(0.0), midtone: midtone_b.unwrap_or(0.5), highlight: highlight_b.unwrap_or(1.0) },
+                    )
+                } else {
+                    (
+                        auto_stf(&sr, &AutoStfConfig::default()),
+                        auto_stf(&sg, &AutoStfConfig::default()),
+                        auto_stf(&sb, &AutoStfConfig::default()),
+                    )
+                };
+                let ro = apply_stf_f32(r, &stf_r, &sr);
+                let go = apply_stf_f32(g, &stf_g, &sg);
+                let bo = apply_stf_f32(b, &stf_b, &sb);
+                if depth == 16 { render_rgb_16bit(&ro, &go, &bo, &output_path)?; }
+                else { render_rgb(&ro, &go, &bo, &output_path)?; }
+            } else {
+                if depth == 16 { render_rgb_16bit(r, g, b, &output_path)?; }
+                else { render_rgb(r, g, b, &output_path)?; }
+            }
+            let (rows, cols) = r.dim();
+            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+            Ok(json!({
+                RES_OUTPUT_PATH: output_path,
+                RES_BIT_DEPTH: depth,
+                RES_APPLY_STF: do_stf,
+                RES_FILE_SIZE_BYTES: file_size,
+                RES_DIMENSIONS: [cols, rows],
+                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            }))
+        };
+
         if ra.dim() != ga.dim() || ra.dim() != ba.dim() {
             let max_rows = ra.dim().0.max(ga.dim().0).max(ba.dim().0);
             let max_cols = ra.dim().1.max(ga.dim().1).max(ba.dim().1);
@@ -415,37 +582,9 @@ pub async fn export_rgb_png(
             let ro = resample_if(ra)?;
             let go = resample_if(ga)?;
             let bo = resample_if(ba)?;
-            if depth == 16 {
-                render_rgb_16bit(&ro, &go, &bo, &output_path)?;
-            } else {
-                render_rgb(&ro, &go, &bo, &output_path)?;
-            }
-            let (rows, cols) = ro.dim();
-            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-            return Ok(json!({
-                RES_OUTPUT_PATH: output_path,
-                RES_BIT_DEPTH: depth,
-                RES_FILE_SIZE_BYTES: file_size,
-                RES_DIMENSIONS: [cols, rows],
-                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            }));
+            return stretch_and_render(&ro, &go, &bo);
         }
 
-        if depth == 16 {
-            render_rgb_16bit(ra, ga, ba, &output_path)?;
-        } else {
-            render_rgb(ra, ga, ba, &output_path)?;
-        }
-
-        let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-        let (rows, cols) = ra.dim();
-
-        Ok(json!({
-            RES_OUTPUT_PATH: output_path,
-            RES_BIT_DEPTH: depth,
-            RES_FILE_SIZE_BYTES: file_size,
-            RES_DIMENSIONS: [cols, rows],
-            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-        }))
+        stretch_and_render(ra, ga, ba)
     })
 }

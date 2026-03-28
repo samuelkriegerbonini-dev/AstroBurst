@@ -49,6 +49,10 @@ export interface ProcessResult {
   wcs_updates?: Record<string, any>;
   resampled?: ResampleResult | null;
   resampledPath?: string | null;
+  is_rgb?: boolean;
+  stf_r?: StfParams | null;
+  stf_g?: StfParams | null;
+  stf_b?: StfParams | null;
 }
 
 export interface ProcessedFile {

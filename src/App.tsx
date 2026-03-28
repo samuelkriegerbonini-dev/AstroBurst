@@ -38,7 +38,7 @@ const SIDEBAR_MAX = 480;
 function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
   return fileIds.map((id) => {
     const f = getFile(id);
-    if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" } as MetadataFile;
+    if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" as const };
     const header = f.result?.header;
     return {
       id: f.id,
@@ -46,7 +46,7 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       path: f.path,
       size: f.size ?? 0,
       status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
-      error: f.error ?? undefined,
+      error: f.error,
       metadata: header
         ? {
           filter: header.FILTER ?? undefined,
@@ -78,7 +78,7 @@ export default function App() {
   const sidebarElRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
-  const { addFiles, startProcessing, reset } = useFileQueue();
+  const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const fileIds = useFileIds();
   const selectedId = useSelectedId();
@@ -92,7 +92,6 @@ export default function App() {
   const { toggleFilter, toggleMode, clearAll, addCustomChip, removeCustomChip, reset: resetProductFilter } = useProductFilterActions();
 
   const [showBg, setShowBg] = useState(false);
-  const fileCountRef = useRef(0);
 
   useEffect(() => { const t = setTimeout(() => setLoading(false), 600); return () => clearTimeout(t); }, []);
   useEffect(() => { if (!loading) { const t = setTimeout(() => setShowBg(true), 100); return () => clearTimeout(t); } }, [loading]);
@@ -101,14 +100,12 @@ export default function App() {
     if (newFiles.length === 0) return;
     addFiles(newFiles);
     setView((v) => (v === "empty" || v === "complete") ? "processing" : v);
-  }, [addFiles]);
+    scheduleProcessing();
+  }, [addFiles, scheduleProcessing]);
 
   useEffect(() => {
     if (view === "processing" && stats.total > 0 && !isProcessing && !isComplete) {
-      if (stats.total > fileCountRef.current) {
-        fileCountRef.current = stats.total;
-        startProcessing(() => timer.start(), () => timer.stop());
-      }
+      startProcessing(() => timer.start(), () => timer.stop());
     }
   }, [view, stats.total, isProcessing, isComplete, startProcessing, timer]);
 
@@ -166,7 +163,6 @@ export default function App() {
   const handleNewBatch = useCallback(() => {
     reset();
     timer.reset();
-    fileCountRef.current = 0;
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);

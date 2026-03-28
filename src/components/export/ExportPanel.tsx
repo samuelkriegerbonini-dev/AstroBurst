@@ -218,20 +218,22 @@ export default function ExportPanel({
     setPngExporting(true);
     try {
       const dir = await getExportDir();
-      const suffix = pngApplyStf ? "_stf" : "";
+      const hasComposite = !!compositeStf;
+      const effectiveStf = hasComposite || pngApplyStf;
+      const suffix = effectiveStf ? "_stf" : "";
       const outputPath = `${dir}/rgb_composite${suffix}_${pngBitDepth}bit.png`;
       await exportRgbPng(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
         bitDepth: pngBitDepth,
-        applyStfStretch: pngApplyStf,
-        shadowR: compositeStf?.r.shadow,
-        midtoneR: compositeStf?.r.midtone,
-        highlightR: compositeStf?.r.highlight,
-        shadowG: compositeStf?.g.shadow,
-        midtoneG: compositeStf?.g.midtone,
-        highlightG: compositeStf?.g.highlight,
-        shadowB: compositeStf?.b.shadow,
-        midtoneB: compositeStf?.b.midtone,
-        highlightB: compositeStf?.b.highlight,
+        applyStfStretch: effectiveStf,
+        shadowR: hasComposite ? compositeStf!.r.shadow : undefined,
+        midtoneR: hasComposite ? compositeStf!.r.midtone : undefined,
+        highlightR: hasComposite ? compositeStf!.r.highlight : undefined,
+        shadowG: hasComposite ? compositeStf!.g.shadow : undefined,
+        midtoneG: hasComposite ? compositeStf!.g.midtone : undefined,
+        highlightG: hasComposite ? compositeStf!.g.highlight : undefined,
+        shadowB: hasComposite ? compositeStf!.b.shadow : undefined,
+        midtoneB: hasComposite ? compositeStf!.b.midtone : undefined,
+        highlightB: hasComposite ? compositeStf!.b.highlight : undefined,
       });
       setPngExported(true);
       setSavedPath(outputPath);
@@ -308,14 +310,21 @@ export default function ExportPanel({
           onClick={handleExportPng}
         />
         {hasRgb && (
-          <button
-            onClick={handleExportRgbPng}
-            disabled={pngExporting}
-            className="w-full flex items-center justify-center gap-2 bg-sky-600/15 hover:bg-sky-600/25 text-sky-300 border border-sky-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-          >
-            {pngExporting ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />}
-            Export RGB as PNG ({pngBitDepth}-bit)
-          </button>
+          <>
+            <button
+              onClick={handleExportRgbPng}
+              disabled={pngExporting}
+              className="w-full flex items-center justify-center gap-2 bg-sky-600/15 hover:bg-sky-600/25 text-sky-300 border border-sky-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+            >
+              {pngExporting ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />}
+              Export RGB as PNG ({pngBitDepth}-bit)
+            </button>
+            {compositeStf && (
+              <p className="text-[10px] text-sky-400/60 px-1">
+                STF stretch auto-applied from composite preview
+              </p>
+            )}
+          </>
         )}
       </div>
 

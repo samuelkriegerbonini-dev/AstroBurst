@@ -60,3 +60,7 @@ export function restretchComposite(
 export function clearCompositeCache(): Promise<void> {
   return safeInvoke("clear_composite_cache_cmd", {});
 }
+
+export function updateCompositeChannel(channel: string, path: string) {
+  return safeInvoke("update_composite_channel_cmd", { channel, path });
+}

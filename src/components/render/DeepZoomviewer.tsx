@@ -68,6 +68,8 @@ function DeepZoomViewer({
     setViewerReady(false);
   }, []);
 
+  const isSmallImage = imageWidth > 0 && imageHeight > 0 && Math.max(imageWidth, imageHeight) <= tileSize * 2;
+
   const runGenerate = useCallback(async () => {
     if (!rawPath || generatedPathRef.current === rawPath) return;
     setGenerating(true);
@@ -78,16 +80,22 @@ function DeepZoomViewer({
     try {
       const convert = await ensureConvertFileSrc();
       convertRef.current = convert;
-      await generateTiles(rawPath, outputDir, tileSize);
-      generatedPathRef.current = rawPath;
-      modeRef.current = "tiles";
-      setReady(true);
+      if (isSmallImage) {
+        generatedPathRef.current = rawPath;
+        modeRef.current = "image";
+        setReady(true);
+      } else {
+        await generateTiles(rawPath, outputDir, tileSize);
+        generatedPathRef.current = rawPath;
+        modeRef.current = "tiles";
+        setReady(true);
+      }
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
       setGenerating(false);
     }
-  }, [rawPath, outputDir, tileSize, generateTiles]);
+  }, [rawPath, outputDir, tileSize, generateTiles, isSmallImage]);
 
   const setupRenderedImage = useCallback(async () => {
     if (!renderedPreviewUrl || renderedUrlRef.current === renderedPreviewUrl) return;
@@ -138,10 +146,19 @@ function DeepZoomViewer({
 
       let tileSources: any;
 
-      if (modeRef.current === "image" && renderedPreviewUrl) {
+      const imageUrl = renderedPreviewUrl || (file?.result?.previewUrl ?? null);
+
+      if (modeRef.current === "image" && imageUrl) {
         tileSources = {
           type: "image",
-          url: renderedPreviewUrl,
+          url: imageUrl,
+          buildPyramid: true,
+        };
+      } else if (modeRef.current === "image" && rawPath && convertRef.current) {
+        const previewPath = rawPath.replace(/\.(fits?|asdf|zip)$/i, ".png");
+        tileSources = {
+          type: "image",
+          url: convertRef.current(previewPath),
           buildPyramid: true,
         };
       } else {

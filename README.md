@@ -43,6 +43,11 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 ## Screenshots
 
 <p align="center">
+  <img src="docs/screenshots/ngc628-drizzle-rgb-compose.png" alt="NGC 628 Drizzle RGB Compose" width="100%">
+</p>
+<p align="center"><em>NGC 628 (M74) with 16 JWST NIRCam files across 8 filters. Drizzle RGB panel with 2x scale, Square kernel, pixfrac 0.70, sigma-clipped rejection, phase correlation alignment, and stability white balance. Info tab showing pixel scale (0.06"/px), WCS coordinates, and image statistics. Full compose and drizzle pipeline in a single view.</em></p>
+
+<p align="center">
   <img src="docs/screenshots/pillars-of-creation-rgb-affine-export.png" alt="Pillars of Creation RGB Compose" width="100%">
 </p>
 <p align="center"><em>JWST Pillars of Creation (M16) composed from F444W / F200W / F090W with star-based affine alignment handling rotation between channels. Luminance layer from F187N. Export panel with FITS and PNG output options. Auto-resampled mixed SW/LW resolution.</em></p>
@@ -53,11 +58,6 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 <p align="center"><em>Cassiopeia A LRGB with per-channel STF stretch sliders (R/G/B shadow, midtone, highlight). Manual white balance (R: 1.38, G: 1.00, B: 0.76), SCNR Maximum Neutral at 88%, phase correlation alignment. F150W2 as luminance. 13759x12451 auto-resampled mixed SW/LW resolution.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-lrgb-affine-drizzle-headers.png" alt="NGC 628 LRGB Compose" width="100%">
-</p>
-<p align="center"><em>NGC 628 (M74) LRGB composition from 16 JWST NIRCam files. F115W as luminance, F444W / F200W / F115W as RGB with star-based affine alignment, stability white balance, and SCNR Average Neutral at 40%. Drizzle stack panel and header explorer with categorized keyword browser visible below.</em></p>
-
-<p align="center">
   <img src="docs/screenshots/eagle-nebula-sho-hubble-palette.png" alt="Eagle Nebula SHO Palette" width="100%">
 </p>
 <p align="center"><em>HST Eagle Nebula (M16) narrowband SHO palette auto-detected from FITS headers. [SII] 673nm mapped to R, H-alpha 656nm to G, [OIII] 502nm to B. One-click Hubble Palette assignment with Auto-Map.</em></p>
@@ -66,14 +66,14 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 <summary><strong>More screenshots</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-lrgb-perchannel-stf-custom.png" alt="NGC 628 Per-Channel STF Custom Palette" width="100%">
+  <img src="docs/screenshots/ngc628-lrgb-affine-drizzle-headers.png" alt="NGC 628 LRGB Compose" width="100%">
 </p>
-<p align="center"><em>NGC 628 LRGB with per-channel STF sliders and Custom palette selected. F335M as luminance, F444W / F200W / F187N as RGB. Phase correlation alignment, SCNR Maximum Neutral at 38%. Palette selector showing SHO, HOO, HOS, Natural Color, and Custom presets.</em></p>
+<p align="center"><em>NGC 628 (M74) LRGB composition from 16 JWST NIRCam files. F115W as luminance, F444W / F200W / F115W as RGB with star-based affine alignment, stability white balance, and SCNR Average Neutral at 40%. Drizzle stack panel and header explorer with categorized keyword browser visible below.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-lrgb-sho-palette-compose.png" alt="NGC 628 SHO Palette Compose" width="100%">
+  <img src="docs/screenshots/ngc6744-rgb-export-fits.png" alt="NGC 6744 RGB Export FITS" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) LRGB with SHO (Hubble) palette selected. F150W as luminance, F444W / F200W / F115W as RGB with star-based affine alignment, stability white balance, and SCNR Average Neutral. Analysis tab showing histogram, star detection, and plate solve results below. Palette selector chips visible in compose panel.</em></p>
+<p align="center"><em>NGC 6744 RGB composite from ground-based FLI ProLine PL9000 data (2048x2048). Export FITS panel with STF stretch toggle, WCS and observation metadata copy, and multi-BITPIX selector (Float32). Demonstrates support for non-space-telescope FITS data.</em></p>
 
 <p align="center">
   <img src="docs/screenshots/ngc628-16files-info-panel.png" alt="NGC 628 File Browser" width="100%">

@@ -119,6 +119,7 @@ pub fn run() {
             cmd::compose::restretch_composite_cmd,
             cmd::compose::clear_composite_cache_cmd,
             cmd::compose::export_aligned_channels_cmd,
+            cmd::compose::update_composite_channel_cmd,
             cmd::resample::resample_fits_cmd,
             cmd::deconvolution::deconvolve_rl_cmd,
             cmd::background::extract_background_cmd,

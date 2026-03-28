@@ -321,6 +321,17 @@ pub struct MmapCubeResult {
     pub cube: Array3<f32>,
 }
 
+pub struct MmapRgbResult {
+    pub header: HduHeader,
+    pub r: Array2<f32>,
+    pub g: Array2<f32>,
+    pub b: Array2<f32>,
+    pub is_mef: bool,
+    pub selected_extension: Option<String>,
+    pub extension_count: usize,
+    pub extensions: Vec<HduInfo>,
+}
+
 pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
     let mmap = create_mmap(file)?;
     let hdus = scan_all_hdus(&mmap)?;
@@ -391,6 +402,78 @@ pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<Mmap
         extension_count,
         extensions,
     })
+}
+
+pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
+    let mmap = create_mmap(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+
+    if hdus.is_empty() {
+        bail!("No HDUs found in FITS file");
+    }
+
+    let selected_idx = match select_best_image_hdu(&hdus) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+
+    let hdu = &hdus[selected_idx];
+    let h = &hdu.header;
+    let naxis = h.get_i64("NAXIS").unwrap_or(0);
+    let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
+
+    if naxis != 3 || naxis3 < 3 || naxis3 > 4 {
+        return Ok(None);
+    }
+
+    let naxis1 = h.get_i64("NAXIS1").unwrap_or(0) as usize;
+    let naxis2 = h.get_i64("NAXIS2").unwrap_or(0) as usize;
+    let bitpix = h.get_i64("BITPIX").context("Missing BITPIX in RGB HDU")?;
+    let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
+    let plane_size = naxis1 * naxis2 * bytes_per_pixel;
+    let total_size = plane_size * naxis3 as usize;
+    let (bzero, bscale) = scaling(h);
+
+    let data_end = hdu.info.data_start + total_size;
+    if data_end > mmap.len() {
+        bail!("RGB data exceeds file size");
+    }
+
+    let base = hdu.info.data_start;
+    let r_pixels = decode_pixels(&mmap[base..base + plane_size], bitpix, bscale, bzero);
+    let g_pixels = decode_pixels(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero);
+    let b_pixels = decode_pixels(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero);
+
+    let r = Array2::from_shape_vec((naxis2, naxis1), r_pixels)
+        .context("Failed to reshape R channel")?;
+    let g = Array2::from_shape_vec((naxis2, naxis1), g_pixels)
+        .context("Failed to reshape G channel")?;
+    let b = Array2::from_shape_vec((naxis2, naxis1), b_pixels)
+        .context("Failed to reshape B channel")?;
+
+    let header = build_merged_header(&hdus, selected_idx);
+    let is_mef = hdus.len() > 1;
+
+    let selected_extension = if selected_idx > 0 {
+        hdus[selected_idx].info.extname.clone()
+            .or_else(|| Some(format!("HDU {}", selected_idx)))
+    } else {
+        None
+    };
+
+    let extensions: Vec<HduInfo> = hdus.iter().map(|h| h.info.clone()).collect();
+    let extension_count = hdus.len();
+
+    Ok(Some(MmapRgbResult {
+        header,
+        r,
+        g,
+        b,
+        is_mef,
+        selected_extension,
+        extension_count,
+        extensions,
+    }))
 }
 
 pub fn list_extensions(file: &File) -> Result<Vec<HduInfo>> {

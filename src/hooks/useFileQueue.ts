@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { processFitsFull, processFits, resampleFits } from "../services/fits.service";
 import { getHeader } from "../services/header.service";
@@ -59,8 +59,8 @@ function shouldResample(groups: ResolutionGroup[]) {
 
 export function useFileQueue() {
   const processingRef = useRef(false);
-  const resamplingRef = useRef(false);
-  const resampleProgressRef = useRef(0);
+  const [isResamplingState, setIsResampling] = useState(false);
+  const [resampleProgressState, setResampleProgress] = useState(0);
 
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const selectedFile = useSelectedFile();
@@ -99,7 +99,7 @@ export function useFileQueue() {
         fileStore.fileError(file.id, msg);
       }
     },
-    [processFitsFull, processFits, getHeader],
+    [],
   );
 
   const runAutoResample = useCallback(async () => {
@@ -108,8 +108,8 @@ export function useFileQueue() {
     const { needed, targetGroup, resampleGroups } = shouldResample(groups);
     if (!needed || !targetGroup) return;
 
-    resamplingRef.current = true;
-    resampleProgressRef.current = 0;
+    setIsResampling(true);
+    setResampleProgress(0);
     await yieldToUI();
 
     const filesToResample = resampleGroups.flatMap((g) => g.files);
@@ -121,58 +121,89 @@ export function useFileQueue() {
         fileStore.fileResampled(file.id, result);
       } catch {}
       completed++;
-      resampleProgressRef.current = Math.round((completed / filesToResample.length) * 100);
+      setResampleProgress(Math.round((completed / filesToResample.length) * 100));
       await yieldToUI();
     }
 
-    resamplingRef.current = false;
-  }, [resampleFits]);
+    setIsResampling(false);
+  }, []);
+
+  const pendingKickRef = useRef(false);
 
   const startProcessing = useCallback(
     async (onStart?: () => void, onComplete?: () => void) => {
-      if (processingRef.current) return;
+      if (processingRef.current) {
+        pendingKickRef.current = true;
+        return;
+      }
+
+      const initialQueue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+      if (initialQueue.length === 0) return;
+
       processingRef.current = true;
+      pendingKickRef.current = false;
       fileStore.setProcessing(true);
       if (onStart) onStart();
 
       await yieldToUI();
 
-      const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
-      let idx = 0;
-      let processedSinceYield = 0;
-      const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
-
-      const runNext = async (): Promise<void> => {
-        let file: ProcessedFile | null;
-        while ((file = getNext()) !== null) {
-          await processOneFile(file);
-          processedSinceYield++;
-          if (processedSinceYield >= YIELD_INTERVAL) {
-            processedSinceYield = 0;
-            await yieldToUI();
-          }
+      let hasWork = true;
+      while (hasWork) {
+        pendingKickRef.current = false;
+        const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+        if (queue.length === 0) {
+          if (pendingKickRef.current) continue;
+          break;
         }
-      };
 
-      const workers = Array.from(
-        { length: Math.min(CONCURRENCY, queue.length) },
-        () => runNext(),
-      );
-      await Promise.all(workers);
+        let idx = 0;
+        let processedSinceYield = 0;
+        const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
 
+        const runNext = async (): Promise<void> => {
+          let file: ProcessedFile | null;
+          while ((file = getNext()) !== null) {
+            await processOneFile(file);
+            processedSinceYield++;
+            if (processedSinceYield >= YIELD_INTERVAL) {
+              processedSinceYield = 0;
+              await yieldToUI();
+            }
+          }
+        };
+
+        const workers = Array.from(
+          { length: Math.min(CONCURRENCY, queue.length) },
+          () => runNext(),
+        );
+        await Promise.all(workers);
+
+        const remaining = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+        hasWork = remaining.length > 0 || pendingKickRef.current;
+      }
+
+      processingRef.current = false;
       fileStore.setProcessing(false);
       await runAutoResample();
 
-      processingRef.current = false;
       if (onComplete) onComplete();
     },
     [processOneFile, runAutoResample],
   );
 
+  const scheduleProcessing = useCallback(() => {
+    if (processingRef.current) {
+      pendingKickRef.current = true;
+      return;
+    }
+    startProcessing();
+  }, [startProcessing]);
+
   const reset = useCallback(() => {
     processingRef.current = false;
-    resamplingRef.current = false;
-    resampleProgressRef.current = 0;
+    pendingKickRef.current = false;
+    setIsResampling(false);
+    setResampleProgress(0);
     fileStore.reset();
   }, []);
 
@@ -187,8 +218,9 @@ export function useFileQueue() {
     addFiles,
     selectFile,
     startProcessing,
+    scheduleProcessing,
     reset,
-    isResampling: resamplingRef.current,
-    resampleProgress: resampleProgressRef.current,
+    isResampling: isResamplingState,
+    resampleProgress: resampleProgressState,
   };
 }

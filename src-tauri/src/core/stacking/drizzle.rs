@@ -6,6 +6,7 @@ pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, 
 
 use crate::core::alignment::phase_correlation;
 use crate::core::stacking::align;
+use crate::math::median::median_f32_mut;
 use crate::types::constants::MAD_TO_SIGMA;
 
 struct DrizzleAccumulator {
@@ -144,14 +145,10 @@ impl DrizzleAccumulator {
                         break;
                     }
 
-                    let mid = active.len() / 2;
-                    active.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let median = active[mid];
-
+                    let median = median_f32_mut(&mut active);
                     let mut devs: Vec<f32> = active.iter().map(|v| (v - median).abs()).collect();
-                    let dmid = devs.len() / 2;
-                    devs.select_nth_unstable_by(dmid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let sigma = (devs[dmid] as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
+                    let mad = median_f32_mut(&mut devs);
+                    let sigma = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
 
                     let before = active.len();
                     active.retain(|&v| {

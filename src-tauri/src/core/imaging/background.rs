@@ -260,8 +260,8 @@ fn fit_polynomial_surface(
     let mut basis_buf = [0.0f64; MAX_POLY_TERMS];
 
     for sample in samples {
-        let ny = sample.y as f64 / row_scale;
-        let nx = sample.x as f64 / col_scale;
+        let ny = sample.y as f64 / row_scale - 0.5;
+        let nx = sample.x as f64 / col_scale - 0.5;
         let val = sample.value as f64;
 
         let count = poly_basis_into(ny, nx, degree, &mut basis_buf);
@@ -310,7 +310,7 @@ fn evaluate_polynomial_surface(
     let result: Vec<f32> = (0..rows)
         .into_par_iter()
         .flat_map(|y| {
-            let ny = y as f64 / row_scale;
+            let ny = y as f64 / row_scale - 0.5;
             let mut y_pows = [0.0f64; 7];
             y_pows[0] = 1.0;
             for i in 1..=degree.min(6) {
@@ -319,7 +319,7 @@ fn evaluate_polynomial_surface(
 
             (0..cols)
                 .map(|x| {
-                    let nx = x as f64 / col_scale;
+                    let nx = x as f64 / col_scale - 0.5;
                     let mut x_pows = [0.0f64; 7];
                     x_pows[0] = 1.0;
                     for i in 1..=degree.min(6) {
@@ -389,8 +389,8 @@ fn compute_rms_residual(
     let sum_sq: f64 = samples
         .iter()
         .map(|s| {
-            let ny = s.y as f64 / row_scale;
-            let nx = s.x as f64 / col_scale;
+            let ny = s.y as f64 / row_scale - 0.5;
+            let nx = s.x as f64 / col_scale - 0.5;
             let mut y_pows = [0.0f64; 7];
             let mut x_pows = [0.0f64; 7];
             y_pows[0] = 1.0;

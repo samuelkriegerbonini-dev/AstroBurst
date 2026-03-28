@@ -4,7 +4,7 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
 use crate::core::compose::rgb::{process_rgb, harmonize_dimensions, align_channels};
 use crate::core::compose::lrgb::apply_lrgb;
 use crate::core::imaging::resample::resample_image;
@@ -13,11 +13,28 @@ use crate::core::imaging::stf::{StfParams, apply_stf_f32};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::render::rgb::render_rgb;
 use crate::types::compose::{AlignMethod, RgbComposeConfig, RgbComposeResult, WhiteBalance};
-use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_RGB_COMPOSITE_FILENAME, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B};
+use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
 use crate::infra::cache::ImageEntry;
 use crate::infra::fits::writer::{write_fits_mono, filter_header};
+
+fn composite_png_path(output_dir: &str) -> String {
+    if let Ok(entries) = std::fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("rgb_composite") && name_str.ends_with(".png") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{}/rgb_composite_{}.png", output_dir, ts)
+}
 
 fn load_entry(path: &Option<String>) -> anyhow::Result<Option<ImageEntry>> {
     match path {
@@ -334,7 +351,7 @@ pub async fn compose_rgb_cmd(
             false
         };
 
-        let png_path = format!("{}/{}", output_dir, DEFAULT_RGB_COMPOSITE_FILENAME);
+        let png_path = composite_png_path(&output_dir);
 
         render_rgb_preview(
             &processed.r,
@@ -434,7 +451,7 @@ pub async fn restretch_composite_cmd(
             apply_scnr_to_channels(&r_stretched, &mut g_stretched, &b_stretched, &cfg);
         }
 
-        let png_path = format!("{}/{}", output_dir, DEFAULT_RGB_COMPOSITE_FILENAME);
+        let png_path = composite_png_path(&output_dir);
 
         render_rgb_preview(
             &r_stretched,
@@ -572,5 +589,46 @@ pub async fn export_aligned_channels_cmd(
             DIMENSIONS: [cols, rows],
             RES_ELAPSED_MS: elapsed,
         }))
+    })
+}
+
+#[tauri::command]
+pub async fn update_composite_channel_cmd(
+    channel: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let key = match channel.to_lowercase().as_str() {
+            "r" => COMPOSITE_KEY_R,
+            "g" => COMPOSITE_KEY_G,
+            "b" => COMPOSITE_KEY_B,
+            _ => anyhow::bail!("Invalid channel: {}. Must be r, g, or b.", channel),
+        };
+
+        let has_composite = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R).is_some()
+            && GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G).is_some()
+            && GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B).is_some();
+
+        if !has_composite {
+            anyhow::bail!("No active composite. Compose RGB first.");
+        }
+
+        let target_dim = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R)
+            .map(|e| e.arr().dim())
+            .ok_or_else(|| anyhow::anyhow!("Reference channel not found in cache"))?;
+
+        let entry = load_from_cache_or_disk(&path)?;
+        let (arr_arc, stats) = if entry.arr().dim() != target_dim {
+            let resampled = crate::core::imaging::resample::resample_image(entry.arr(), target_dim.0, target_dim.1)?;
+            let s = compute_image_stats(&resampled);
+            (Arc::new(resampled), s)
+        } else {
+            let s = entry.stats().clone();
+            (entry.data_arc(), s)
+        };
+
+        GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
+
+        Ok(json!({ "channel": channel, "updated": true }))
     })
 }

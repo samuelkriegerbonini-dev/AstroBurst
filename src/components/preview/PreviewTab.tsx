@@ -6,6 +6,8 @@ import { getPreviewUrl } from "../../infrastructure/tauri/client";
 import { Slider } from "../ui";
 import type { RawPixelData, StfParams } from "../../shared/types";
 
+import ZoomPanView from "../ui/ZoomPanView";
+
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
 
 interface PreviewTabProps {
@@ -48,6 +50,7 @@ function CompositeStfPanel() {
     compositeStfLinked, setCompositeStfLinked,
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
     setCompositePreviewUrl,
+    compositeScnr,
   } = useRenderContext();
 
   const [expanded, setExpanded] = useState(true);
@@ -55,18 +58,21 @@ function CompositeStfPanel() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seqRef = useRef(0);
 
+  const scnrRef = useRef(compositeScnr);
+  scnrRef.current = compositeScnr;
+
   const scheduleRestretch = useCallback((r: StfParams, g: StfParams, b: StfParams) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       const seq = ++seqRef.current;
       setRestretching(true);
-      restretchComposite("./output", r, g, b)
+      const scnr = scnrRef.current;
+      restretchComposite("./output", r, g, b, scnr?.enabled ? scnr : undefined)
         .then(async (result: any) => {
           if (seqRef.current !== seq) return;
           if (result?.png_path) {
-            const base = await getPreviewUrl(result.png_path);
-            const sep = base.includes("?") ? "&" : "?";
-            setCompositePreviewUrl(`${base}${sep}t=${Date.now()}`);
+            const url = await getPreviewUrl(result.png_path);
+            setCompositePreviewUrl(url);
           }
         })
         .catch((err: any) => {
@@ -302,9 +308,11 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
           </button>
         </div>
         <CompositeStfPanel />
-        <div className="relative flex-1 min-h-0 flex items-center justify-center">
-          <img src={compositePreviewUrl} alt="RGB composite" className="max-w-full max-h-full object-contain" />
-        </div>
+        <ZoomPanView
+          src={compositePreviewUrl}
+          alt="RGB composite"
+          className="flex-1 min-h-0"
+        />
       </div>
     );
   }

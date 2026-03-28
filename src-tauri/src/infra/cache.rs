@@ -27,6 +27,10 @@ impl ImageEntry {
         &self.inner.stats
     }
 
+    pub fn data_arc(&self) -> Arc<Array2<f32>> {
+        Arc::clone(&self.inner.arr)
+    }
+
     pub fn header(&self) -> Option<&HduHeader> {
         self.inner.header.as_ref()
     }

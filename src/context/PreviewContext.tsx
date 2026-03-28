@@ -34,6 +34,12 @@ interface FileContextValue {
   file: ProcessedFile | null;
 }
 
+interface ScnrState {
+  enabled: boolean;
+  method: string;
+  amount: number;
+}
+
 interface DoneFilesContextValue {
   doneFiles: ProcessedFile[];
 }
@@ -66,7 +72,7 @@ interface RenderContextValue {
   compositePreviewUrl: string | null;
   setCompositePreviewUrl: (url: string | null) => void;
   isShowingComposite: boolean;
-  clearComposite: () => void;
+  clearComposite: () => Promise<void>;
   compositeStfR: StfParams;
   compositeStfG: StfParams;
   compositeStfB: StfParams;
@@ -77,6 +83,8 @@ interface RenderContextValue {
   compositeAutoStfG: StfParams | null;
   compositeAutoStfB: StfParams | null;
   setCompositeAutoStf: (r: StfParams, g: StfParams, b: StfParams) => void;
+  compositeScnr: ScnrState | null;
+  setCompositeScnr: (scnr: ScnrState | null) => void;
 }
 
 interface RawPixelsContextValue {
@@ -173,6 +181,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [compositeAutoStfR, setCompositeAutoStfR] = useState<StfParams | null>(null);
   const [compositeAutoStfG, setCompositeAutoStfG] = useState<StfParams | null>(null);
   const [compositeAutoStfB, setCompositeAutoStfB] = useState<StfParams | null>(null);
+  const [compositeScnr, setCompositeScnrRaw] = useState<ScnrState | null>(null);
 
   const prevFileIdRef = useRef<string | null>(null);
   const seqRef = useRef(0);
@@ -208,7 +217,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [],
   );
 
-  const clearComposite = useCallback(() => {
+  const clearComposite = useCallback(async () => {
     setCompositePreviewUrlRaw(null);
     setCompositeStfR(DEFAULT_STF);
     setCompositeStfG(DEFAULT_STF);
@@ -216,7 +225,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setCompositeAutoStfR(null);
     setCompositeAutoStfG(null);
     setCompositeAutoStfB(null);
-    clearCompositeCache().catch(() => {});
+    setCompositeScnrRaw(null);
+    await clearCompositeCache().catch(() => {});
   }, []);
 
   const isShowingComposite = compositePreviewUrl !== null;
@@ -231,6 +241,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setCompositeAutoStfR(r);
     setCompositeAutoStfG(g);
     setCompositeAutoStfB(b);
+  }, []);
+
+  const setCompositeScnr = useCallback((scnr: ScnrState | null) => {
+    setCompositeScnrRaw(scnr);
   }, []);
 
   const setSelectedPalette = useCallback((p: string) => {
@@ -307,14 +321,34 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setCompositeAutoStfR(null);
     setCompositeAutoStfG(null);
     setCompositeAutoStfB(null);
+    setCompositeScnrRaw(null);
     rawPixelsAbortRef.current++;
 
-    clearCompositeCache().catch(() => {});
+    if (!file.result?.is_rgb) {
+      clearCompositeCache().catch(() => {});
+    }
 
     setRenderedPreviewUrlRaw(previewUrlCache.get(file.id) ?? null);
 
     const seq = ++seqRef.current;
     const stale = () => seqRef.current !== seq;
+
+    const isRgbFits = file.result?.is_rgb === true;
+
+    if (isRgbFits) {
+      if (file.result?.previewUrl) {
+        setCompositePreviewUrlRaw(file.result.previewUrl);
+      }
+      if (file.result?.stf_r && file.result?.stf_g && file.result?.stf_b) {
+        const toStf = (s: any) => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
+        setCompositeAutoStfR(toStf(file.result.stf_r));
+        setCompositeAutoStfG(toStf(file.result.stf_g));
+        setCompositeAutoStfB(toStf(file.result.stf_b));
+        setCompositeStfR(toStf(file.result.stf_r));
+        setCompositeStfG(toStf(file.result.stf_g));
+        setCompositeStfB(toStf(file.result.stf_b));
+      }
+    }
 
     const precomputedHist = file.result?.histogram;
     if (precomputedHist?.bins) {
@@ -334,7 +368,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
     const naxis3 = file.result?.header?.NAXIS3;
     const n3 = naxis3 ? parseInt(naxis3, 10) : 0;
-    if (n3 > 1) {
+    if (n3 > 1 && !isRgbFits) {
       setIsCube(true);
       getCubeInfo(file.path)
         .then((info: any) => {
@@ -381,12 +415,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
       compositeStfLinked, setCompositeStfLinked,
       compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeAutoStf,
+      compositeScnr, setCompositeScnr,
     }),
     [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath,
      compositePreviewUrl, setCompositePreviewUrl, isShowingComposite, clearComposite,
      compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
      compositeStfLinked, setCompositeStfLinked,
-     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeAutoStf],
+     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeAutoStf,
+     compositeScnr, setCompositeScnr],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
@@ -420,4 +456,4 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 }
 
-export type { PaletteSuggestion, ChannelSuggestion };
+export type { PaletteSuggestion, ChannelSuggestion, ScnrState };

@@ -11,7 +11,7 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels, compositeStfR, compositeStfG, compositeStfB } = useRgbContext();
-  const { renderedPreviewUrl } = useRenderContext();
+  const { renderedPreviewUrl, isShowingComposite } = useRenderContext();
   const { isCube, cubeDims } = useCubeContext();
 
   const [exportResult, setExportResult] = useState<any>(null);
@@ -103,9 +103,9 @@ function ExportTabInner() {
   const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
 
   const compositeStf = useMemo(() => {
-    if (!rgbChannels) return null;
+    if (!rgbChannels || !isShowingComposite) return null;
     return { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-  }, [rgbChannels, compositeStfR, compositeStfG, compositeStfB]);
+  }, [rgbChannels, isShowingComposite, compositeStfR, compositeStfG, compositeStfB]);
 
   return (
     <Suspense

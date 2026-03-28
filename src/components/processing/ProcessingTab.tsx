@@ -1,6 +1,9 @@
-import { lazy, Suspense, memo, useState, useCallback, useMemo } from "react";
+import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
-import { useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
+import { updateCompositeChannel, restretchComposite } from "../../services/compose.service";
+import { getPreviewUrl } from "../../infrastructure/tauri/client";
+import { getOutputDir } from "../../infrastructure/tauri";
 
 const DeconvolutionPanel = lazy(() => import("./DeconvolutionPanel"));
 const BackgroundPanel = lazy(() => import("./BackgroundPanel"));
@@ -60,7 +63,9 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 
 function ProcessingTabInner() {
   const { file } = useFileContext();
-  const { setRenderedPreviewUrl } = useRenderContext();
+  const { setRenderedPreviewUrl, compositePreviewUrl, setCompositePreviewUrl,
+    compositeStfR, compositeStfG, compositeStfB, compositeScnr } = useRenderContext();
+  const { rgbChannels } = useRgbContext();
   const [active, setActive] = useState<ProcessingSection>("background");
 
   const [chain, setChain] = useState<ProcessingChain>({
@@ -70,6 +75,42 @@ function ProcessingTabInner() {
     psfKernel: null,
     stretchFits: null,
   });
+
+  const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB });
+  useEffect(() => {
+    compositeStfRef.current = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
+  }, [compositeStfR, compositeStfG, compositeStfB]);
+
+  const compositeScnrRef = useRef(compositeScnr);
+  useEffect(() => {
+    compositeScnrRef.current = compositeScnr;
+  }, [compositeScnr]);
+
+  const findChannel = useCallback((filePath: string | undefined | null): string | null => {
+    if (!filePath || !rgbChannels || !compositePreviewUrl) return null;
+    const norm = (p: string) => p.replace(/\\/g, "/");
+    const fp = norm(filePath);
+    if (rgbChannels.r && norm(rgbChannels.r) === fp) return "r";
+    if (rgbChannels.g && norm(rgbChannels.g) === fp) return "g";
+    if (rgbChannels.b && norm(rgbChannels.b) === fp) return "b";
+    return null;
+  }, [rgbChannels, compositePreviewUrl]);
+
+  const syncComposite = useCallback(async (fitsPath: string, channel: string) => {
+    try {
+      await updateCompositeChannel(channel, fitsPath);
+      const stf = compositeStfRef.current;
+      const scnr = compositeScnrRef.current;
+      const dir = await getOutputDir();
+      const result = await restretchComposite(dir, stf.r, stf.g, stf.b, scnr?.enabled ? scnr : undefined);
+      if (result?.png_path) {
+        const url = await getPreviewUrl(result.png_path);
+        setCompositePreviewUrl(url);
+      }
+    } catch (e) {
+      console.error("[AstroBurst] Composite channel sync failed:", e);
+    }
+  }, [setCompositePreviewUrl]);
 
   const handlePreviewUpdate = useCallback(
     (url: string | null | undefined) => {
@@ -90,9 +131,11 @@ function ProcessingTabInner() {
           denoiseFits: null,
           deconvFits: null,
         }));
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(result.corrected_fits, ch);
       }
     },
-    [handlePreviewUpdate],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDenoiseDone = useCallback(
@@ -104,9 +147,11 @@ function ProcessingTabInner() {
           denoiseFits: result.fits_path,
           deconvFits: null,
         }));
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(result.fits_path, ch);
       }
     },
-    [handlePreviewUpdate],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDeconvDone = useCallback(
@@ -117,9 +162,11 @@ function ProcessingTabInner() {
           ...prev,
           deconvFits: result.fits_path,
         }));
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(result.fits_path, ch);
       }
     },
-    [handlePreviewUpdate],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handlePsfReady = useCallback((kernel: number[][]) => {
@@ -134,9 +181,11 @@ function ProcessingTabInner() {
           ...prev,
           stretchFits: result.fits_path,
         }));
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(result.fits_path, ch);
       }
     },
-    [handlePreviewUpdate],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleResetChain = useCallback(() => {

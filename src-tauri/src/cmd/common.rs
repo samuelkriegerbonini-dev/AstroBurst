@@ -128,6 +128,17 @@ pub fn load_cached(path: &str) -> Result<ImageEntry> {
 }
 
 pub fn load_cached_full(path: &str) -> Result<ImageEntry> {
+    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
+        if entry.header().is_some() {
+            return Ok(entry);
+        }
+        if let Ok(upgraded) = GLOBAL_IMAGE_CACHE.upgrade_header(path, || {
+            let resolved = extract_image_resolved(path)?;
+            Ok(resolved.header)
+        }) {
+            return Ok(upgraded);
+        }
+    }
     GLOBAL_IMAGE_CACHE.get_or_load_full(path, || load_image_stats_header(path))
 }
 
@@ -291,6 +302,74 @@ pub fn resolve_output_dir(output_dir: &str) -> Result<String> {
         }
         Err(e) => Err(e).context(format!("Failed to create output directory: {}", output_dir)),
     }
+}
+
+pub struct ResolvedRgbImage {
+    pub r: Array2<f32>,
+    pub g: Array2<f32>,
+    pub b: Array2<f32>,
+    pub header: HduHeader,
+    pub _tmp: Option<tempfile::TempDir>,
+}
+
+pub fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbImage>> {
+    let p = std::path::Path::new(path);
+    if crate::infra::asdf::converter::is_asdf_file(p) {
+        return Ok(None);
+    }
+
+    let (fits_path, tmp) = resolve_single_image(path)?;
+    let file = File::open(&fits_path)
+        .with_context(|| format!("Failed to open {}", fits_path.display()))?;
+
+    match crate::infra::fits::reader::try_extract_rgb_mmap(&file)? {
+        Some(result) => Ok(Some(ResolvedRgbImage {
+            r: result.r,
+            g: result.g,
+            b: result.b,
+            header: result.header,
+            _tmp: tmp,
+        })),
+        None => Ok(None),
+    }
+}
+
+pub fn save_rgb_preview_png(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    path: &str,
+) -> Result<()> {
+    use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder};
+
+    let (rows, cols) = r.dim();
+    let r_s = r.as_slice().context("R not contiguous")?;
+    let g_s = g.as_slice().context("G not contiguous")?;
+    let b_s = b.as_slice().context("B not contiguous")?;
+
+    let mut pixels = vec![0u8; rows * cols * 3];
+    for i in 0..rows * cols {
+        let o = i * 3;
+        pixels[o] = (r_s[i].clamp(0.0, 1.0) * 255.0) as u8;
+        pixels[o + 1] = (g_s[i].clamp(0.0, 1.0) * 255.0) as u8;
+        pixels[o + 2] = (b_s[i].clamp(0.0, 1.0) * 255.0) as u8;
+    }
+
+    let (preview, pw, ph) = downsample_u8_rgb(&pixels, cols, rows, MAX_PREVIEW_DIM);
+
+    let file = std::fs::File::create(path).context("Failed to create RGB preview")?;
+    let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let encoder = PngEncoder::new_with_quality(
+        buf_writer,
+        image::codecs::png::CompressionType::Default,
+        image::codecs::png::FilterType::Sub,
+    );
+    encoder
+        .write_image(&preview, pw as u32, ph as u32, ColorType::Rgb8.into())
+        .context("Failed to write RGB preview PNG")?;
+
+    Ok(())
 }
 
 macro_rules! blocking_cmd {

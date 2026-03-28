@@ -19,7 +19,7 @@ pub fn auto_stf(stats: &ImageStats, config: &AutoStfConfig) -> StfParams {
     let median_norm = (stats.median - stats.min) / range;
     let sigma_norm = stats.sigma / range;
 
-    let shadow_norm = (median_norm + config.shadow_k * sigma_norm).max(0.0);
+    let shadow_norm = (median_norm + config.shadow_k * sigma_norm).clamp(0.0, 0.98);
     let highlight_norm = 1.0f64;
 
     let clip_range = (highlight_norm - shadow_norm).max(1e-15);

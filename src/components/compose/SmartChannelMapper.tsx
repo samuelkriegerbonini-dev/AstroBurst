@@ -438,7 +438,6 @@ function SmartChannelMapper({
   const handlePaletteChange = useCallback((paletteId: string) => {
     if (onPaletteChange) onPaletteChange(paletteId);
     if (paletteId === "Custom") {
-      setChannels({ L: null, R: null, G: null, B: null });
       setAutoMapSource(null);
     }
   }, [onPaletteChange]);
@@ -513,7 +512,7 @@ function SmartChannelMapper({
 
       <div className="ab-mapper-hint">
         <GripVertical size={11} className="text-zinc-600 shrink-0" />
-        <span>Drag files from the list into channel slots, or click to browse</span>
+        <span>Click a slot to pick a file, or drag from the file list on the left</span>
       </div>
 
       {mode === "rgb" ? (

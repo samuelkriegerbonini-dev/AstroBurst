@@ -1,7 +1,7 @@
 import { useState, useCallback, lazy, Suspense, memo, useMemo, useRef } from "react";
 import { Layers, Loader2, Eye } from "lucide-react";
 import { composeRgb, drizzleStack, drizzleRgb, clearCompositeCache } from "../../services/compose.service";
-import { useDoneFilesContext, useRgbContext, useRenderContext, useNarrowbandContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useRgbContext, useRenderContext, useRawPixelsContext, useNarrowbandContext } from "../../context/PreviewContext";
 import { Slider, Toggle, RunButton, ResultGrid } from "../ui";
 import SmartChannelMapper from "./SmartChannelMapper";
 import type { ChannelFile, ChannelAssignment } from "./SmartChannelMapper";
@@ -24,7 +24,7 @@ function toChannelFiles(doneFiles: any[]): ChannelFile[] {
 function ComposeTabInner() {
   const { doneFiles } = useDoneFilesContext();
   const { setRgbChannels, setLastAlignMethod } = useRgbContext();
-  const { setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf } = useRenderContext();
+  const { setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setCompositeScnr } = useRenderContext();
   const { narrowbandPalette, selectedPalette, setSelectedPalette } = useNarrowbandContext();
 
   const [rgbLoading, setRgbLoading] = useState(false);
@@ -95,16 +95,11 @@ function ComposeTabInner() {
         await clearCompositeCache().catch(() => {});
 
         const result = await composeRgb(lPath, rPath, gPath, bPath, "./output", options);
-        const ts = Date.now();
-        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
-        const bustedResult = result.previewUrl
-          ? { ...result, previewUrl: bustUrl(result.previewUrl) }
-          : result;
-        setRgbResult(bustedResult);
+        setRgbResult(result);
         setRgbChannels({ r: rPath, g: gPath, b: bPath });
         setLastAlignMethod(options.align ? (options.alignMethod ?? "phase_correlation") : null);
         if (result.previewUrl) {
-          setCompositePreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(result.previewUrl);
         }
 
         if (result.stf_r && result.stf_g && result.stf_b) {
@@ -114,13 +109,19 @@ function ComposeTabInner() {
           setCompositeAutoStf(stfR, stfG, stfB);
           setCompositeStf(stfR, stfG, stfB);
         }
+
+        setCompositeScnr(
+          options.scnrEnabled
+            ? { enabled: true, method: options.scnrMethod ?? "average", amount: options.scnrAmount ?? 0.5 }
+            : null,
+        );
       } catch (e) {
         console.error("RGB compose failed:", e);
       } finally {
         setRgbLoading(false);
       }
     },
-    [setRgbChannels, setLastAlignMethod, setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf],
+    [setRgbChannels, setLastAlignMethod, setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setCompositeScnr],
   );
 
   const handleComposeClick = useCallback(() => {
@@ -135,13 +136,11 @@ function ComposeTabInner() {
       setDrizzleStage(`Drizzling ${paths.length} frames...`);
       try {
         const result = await drizzleStack(paths, "./output", options);
-        const ts = Date.now();
-        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
-        setDrizzleResult(result.previewUrl ? { ...result, previewUrl: bustUrl(result.previewUrl) } : result);
+        setDrizzleResult(result);
         setDrizzleProgress(100);
         setDrizzleStage("Done");
         if (result.previewUrl) {
-          setCompositePreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(result.previewUrl);
         }
       } catch {
         setDrizzleStage("Failed");
@@ -171,13 +170,11 @@ function ComposeTabInner() {
       setDrizzleRgbStage(`Drizzling ${channels}...`);
       try {
         const result = await drizzleRgb(rPaths, gPaths, bPaths, "./output", options);
-        const ts = Date.now();
-        const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
-        setDrizzleRgbResult(result.previewUrl ? { ...result, previewUrl: bustUrl(result.previewUrl) } : result);
+        setDrizzleRgbResult(result);
         setDrizzleRgbProgress(100);
         setDrizzleRgbStage("Done");
         if (result.previewUrl) {
-          setCompositePreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(result.previewUrl);
         }
       } catch {
         setDrizzleRgbStage("Failed");
