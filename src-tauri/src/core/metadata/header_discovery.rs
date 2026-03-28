@@ -121,6 +121,73 @@ const FILENAME_PATTERNS: &[(NarrowbandFilter, &[&str])] = &[
     (NarrowbandFilter::Sii, &["_SII", "-SII", "_S2", "-S2", "673"]),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PaletteType {
+    #[serde(rename = "SHO")]
+    Sho,
+    #[serde(rename = "HOO")]
+    Hoo,
+    #[serde(rename = "HOS")]
+    Hos,
+    #[serde(rename = "NaturalColor")]
+    NaturalColor,
+    #[serde(rename = "Custom")]
+    Custom,
+}
+
+impl PaletteType {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Sho => "SHO (Hubble Palette)",
+            Self::Hoo => "HOO",
+            Self::Hos => "HOS",
+            Self::NaturalColor => "Natural Color",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_uppercase().as_str() {
+            "SHO" | "HUBBLE" => Self::Sho,
+            "HOO" => Self::Hoo,
+            "HOS" => Self::Hos,
+            "NATURAL" | "NATURALCOLOR" | "NATURAL_COLOR" => Self::NaturalColor,
+            "CUSTOM" => Self::Custom,
+            _ => Self::Sho,
+        }
+    }
+}
+
+impl Default for PaletteType {
+    fn default() -> Self {
+        Self::Sho
+    }
+}
+
+fn palette_channels(palette: &PaletteType, filter: NarrowbandFilter) -> Vec<HubbleChannel> {
+    match palette {
+        PaletteType::Sho => match filter {
+            NarrowbandFilter::Sii => vec![HubbleChannel::Red],
+            NarrowbandFilter::Ha => vec![HubbleChannel::Green],
+            NarrowbandFilter::Oiii => vec![HubbleChannel::Blue],
+            NarrowbandFilter::Unknown => vec![],
+        },
+        PaletteType::Hoo | PaletteType::NaturalColor => match filter {
+            NarrowbandFilter::Ha => vec![HubbleChannel::Red],
+            NarrowbandFilter::Oiii => vec![HubbleChannel::Green, HubbleChannel::Blue],
+            NarrowbandFilter::Sii => vec![],
+            NarrowbandFilter::Unknown => vec![],
+        },
+        PaletteType::Hos => match filter {
+            NarrowbandFilter::Ha => vec![HubbleChannel::Red],
+            NarrowbandFilter::Oiii => vec![HubbleChannel::Green],
+            NarrowbandFilter::Sii => vec![HubbleChannel::Blue],
+            NarrowbandFilter::Unknown => vec![],
+        },
+        PaletteType::Custom => vec![],
+    }
+}
+
 fn filter_to_hubble_channel(filter: NarrowbandFilter) -> HubbleChannel {
     match filter {
         NarrowbandFilter::Sii => HubbleChannel::Red,
@@ -202,10 +269,53 @@ fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
 }
 
 pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
+    suggest_palette_with_type(files, &PaletteType::default())
+}
+
+pub fn suggest_palette_with_type(files: &[(String, HduHeader)], palette: &PaletteType) -> PaletteSuggestion {
+    if *palette == PaletteType::Custom {
+        let suggestions: Vec<ChannelSuggestion> = files
+            .iter()
+            .map(|(path, header)| {
+                let file_name = Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                let detection = detect_filter(header)
+                    .or_else(|| detect_from_filename(&file_name));
+                ChannelSuggestion { file_path: path.clone(), file_name, detection }
+            })
+            .collect();
+        return PaletteSuggestion {
+            r_file: None,
+            g_file: None,
+            b_file: None,
+            unmapped: suggestions,
+            is_complete: false,
+            palette_name: palette.display_name().into(),
+        };
+    }
+
     let mut r_file: Option<(Confidence, ChannelSuggestion)> = None;
     let mut g_file: Option<(Confidence, ChannelSuggestion)> = None;
     let mut b_file: Option<(Confidence, ChannelSuggestion)> = None;
     let mut unmapped: Vec<ChannelSuggestion> = Vec::new();
+
+    fn try_assign(
+        slot: &mut Option<(Confidence, ChannelSuggestion)>,
+        conf: Confidence,
+        suggestion: ChannelSuggestion,
+        unmapped: &mut Vec<ChannelSuggestion>,
+    ) -> bool {
+        if slot.as_ref().map_or(true, |(c, _)| conf < *c) {
+            if let Some((_, prev)) = slot.replace((conf, suggestion)) {
+                unmapped.push(prev);
+            }
+            true
+        } else {
+            false
+        }
+    }
 
     for (path, header) in files {
         let file_name = Path::new(path)
@@ -222,36 +332,42 @@ pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
             detection: detection.clone(),
         };
 
-        let channel = detection.as_ref().map(|d| (d.hubble_channel, d.confidence));
-        match channel {
-            Some((HubbleChannel::Red, conf)) => {
-                if r_file.as_ref().map_or(true, |(c, _)| conf < *c) {
-                    if let Some((_, prev)) = r_file.replace((conf, suggestion)) {
-                        unmapped.push(prev);
+        if let Some(det) = &detection {
+            let channels = palette_channels(palette, det.filter);
+            if channels.is_empty() {
+                unmapped.push(suggestion);
+                continue;
+            }
+
+            let conf = det.confidence;
+            let mut assigned = false;
+
+            for ch in &channels {
+                let sug = suggestion.clone();
+                match ch {
+                    HubbleChannel::Red => {
+                        if try_assign(&mut r_file, conf, sug, &mut unmapped) {
+                            assigned = true;
+                        }
                     }
-                } else {
-                    unmapped.push(suggestion);
+                    HubbleChannel::Green => {
+                        if try_assign(&mut g_file, conf, sug, &mut unmapped) {
+                            assigned = true;
+                        }
+                    }
+                    HubbleChannel::Blue => {
+                        if try_assign(&mut b_file, conf, sug, &mut unmapped) {
+                            assigned = true;
+                        }
+                    }
                 }
             }
-            Some((HubbleChannel::Green, conf)) => {
-                if g_file.as_ref().map_or(true, |(c, _)| conf < *c) {
-                    if let Some((_, prev)) = g_file.replace((conf, suggestion)) {
-                        unmapped.push(prev);
-                    }
-                } else {
-                    unmapped.push(suggestion);
-                }
+
+            if !assigned {
+                unmapped.push(suggestion);
             }
-            Some((HubbleChannel::Blue, conf)) => {
-                if b_file.as_ref().map_or(true, |(c, _)| conf < *c) {
-                    if let Some((_, prev)) = b_file.replace((conf, suggestion)) {
-                        unmapped.push(prev);
-                    }
-                } else {
-                    unmapped.push(suggestion);
-                }
-            }
-            None => unmapped.push(suggestion),
+        } else {
+            unmapped.push(suggestion);
         }
     }
 
@@ -266,7 +382,7 @@ pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
         b_file: b,
         unmapped,
         is_complete,
-        palette_name: "SHO (Hubble Palette)".into(),
+        palette_name: palette.display_name().into(),
     }
 }
 
@@ -453,5 +569,63 @@ mod tests {
     fn test_wavelength_angstrom_normalization() {
         let filter = classify_wavelength_nm(6563.0);
         assert_eq!(filter, Some(NarrowbandFilter::Ha));
+    }
+
+    #[test]
+    fn test_suggest_palette_hoo() {
+        let files = vec![
+            ("eagle_ha.fits".into(), header_with(&[("FILTER", "H-alpha")])),
+            ("eagle_oiii.fits".into(), header_with(&[("FILTER", "OIII")])),
+            ("eagle_sii.fits".into(), header_with(&[("FILTER", "SII")])),
+        ];
+
+        let p = suggest_palette_with_type(&files, &PaletteType::Hoo);
+        assert!(p.is_complete);
+        assert_eq!(p.r_file.as_ref().unwrap().file_path, "eagle_ha.fits");
+        assert_eq!(p.g_file.as_ref().unwrap().file_path, "eagle_oiii.fits");
+        assert_eq!(p.b_file.as_ref().unwrap().file_path, "eagle_oiii.fits");
+        assert_eq!(p.unmapped.len(), 1);
+        assert_eq!(p.unmapped[0].file_path, "eagle_sii.fits");
+    }
+
+    #[test]
+    fn test_suggest_palette_hos() {
+        let files = vec![
+            ("eagle_ha.fits".into(), header_with(&[("FILTER", "H-alpha")])),
+            ("eagle_oiii.fits".into(), header_with(&[("FILTER", "OIII")])),
+            ("eagle_sii.fits".into(), header_with(&[("FILTER", "SII")])),
+        ];
+
+        let p = suggest_palette_with_type(&files, &PaletteType::Hos);
+        assert!(p.is_complete);
+        assert_eq!(p.r_file.as_ref().unwrap().file_path, "eagle_ha.fits");
+        assert_eq!(p.g_file.as_ref().unwrap().file_path, "eagle_oiii.fits");
+        assert_eq!(p.b_file.as_ref().unwrap().file_path, "eagle_sii.fits");
+        assert!(p.unmapped.is_empty());
+    }
+
+    #[test]
+    fn test_suggest_palette_custom_all_unmapped() {
+        let files = vec![
+            ("eagle_ha.fits".into(), header_with(&[("FILTER", "H-alpha")])),
+            ("eagle_oiii.fits".into(), header_with(&[("FILTER", "OIII")])),
+        ];
+
+        let p = suggest_palette_with_type(&files, &PaletteType::Custom);
+        assert!(!p.is_complete);
+        assert!(p.r_file.is_none());
+        assert!(p.g_file.is_none());
+        assert!(p.b_file.is_none());
+        assert_eq!(p.unmapped.len(), 2);
+    }
+
+    #[test]
+    fn test_palette_type_from_str() {
+        assert_eq!(PaletteType::from_str_loose("SHO"), PaletteType::Sho);
+        assert_eq!(PaletteType::from_str_loose("hoo"), PaletteType::Hoo);
+        assert_eq!(PaletteType::from_str_loose("HOS"), PaletteType::Hos);
+        assert_eq!(PaletteType::from_str_loose("natural"), PaletteType::NaturalColor);
+        assert_eq!(PaletteType::from_str_loose("custom"), PaletteType::Custom);
+        assert_eq!(PaletteType::from_str_loose("unknown"), PaletteType::Sho);
     }
 }

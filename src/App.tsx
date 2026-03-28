@@ -38,7 +38,7 @@ const SIDEBAR_MAX = 480;
 function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
   return fileIds.map((id) => {
     const f = getFile(id);
-    if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" as const };
+    if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" } as MetadataFile;
     const header = f.result?.header;
     return {
       id: f.id,
@@ -46,7 +46,7 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       path: f.path,
       size: f.size ?? 0,
       status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
-      error: f.error,
+      error: f.error ?? undefined,
       metadata: header
         ? {
           filter: header.FILTER ?? undefined,

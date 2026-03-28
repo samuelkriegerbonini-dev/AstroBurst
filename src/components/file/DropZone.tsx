@@ -70,6 +70,8 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
     if (isTauri()) return;
     e.preventDefault();
     e.stopPropagation();
+    const types = Array.from(e.dataTransfer?.types || []);
+    if (!types.includes("Files") && !types.includes("application/x-tauri-file")) return;
     dragCounterRef.current++;
     if (dragCounterRef.current === 1) setIsDragOver(true);
   }, []);

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::fs::File;
-use std::sync::{LazyLock, RwLock};
 
 use serde_json::json;
 
@@ -11,63 +9,19 @@ use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_image_mmap;
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, DEFAULT_ASTROMETRY_API_URL, HEADER_NAXIS1,
-    HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_DEC, RES_FOV_ARCMIN,
+    HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_FOV_ARCMIN,
     RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_NAXIS1, RES_NAXIS2,
-    RES_PIXEL_SCALE_ARCSEC, RES_RA, RES_WCS_CD, RES_WCS_CRPIX1, RES_WCS_CRPIX2,
-    RES_WCS_CRVAL1, RES_WCS_CRVAL2, RES_WCS_PARAMS, RES_WCS_PROJECTION, RES_X,
-    RES_Y,
+    RES_PIXEL_SCALE_ARCSEC, RES_WCS_CD, RES_WCS_CRPIX1, RES_WCS_CRPIX2,
+    RES_WCS_CRVAL1, RES_WCS_CRVAL2, RES_WCS_PARAMS, RES_WCS_PROJECTION,
 };
 
 const MAX_UPLOAD_DIM: usize = 2048;
-
-struct WcsCache {
-    map: HashMap<String, WcsTransform>,
-}
-
-static WCS_CACHE: LazyLock<RwLock<WcsCache>> = LazyLock::new(|| {
-    RwLock::new(WcsCache {
-        map: HashMap::with_capacity(16),
-    })
-});
-
-fn get_cached_wcs(path: &str) -> anyhow::Result<WcsTransform> {
-    {
-        let cache = WCS_CACHE.read().unwrap();
-        if let Some(wcs) = cache.map.get(path) {
-            return Ok(wcs.clone());
-        }
-    }
-
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)?;
-    let result = extract_image_mmap(&file)?;
-    let wcs = WcsTransform::from_header(&result.header)?;
-
-    {
-        let mut cache = WCS_CACHE.write().unwrap();
-        if cache.map.len() >= 64 {
-            cache.map.clear();
-        }
-        cache.map.insert(path.to_string(), wcs.clone());
-    }
-
-    Ok(wcs)
-}
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let (fits_path, _tmp) = resolve_single_image(path)?;
     let file = File::open(&fits_path)?;
     let result = extract_image_mmap(&file)?;
     let wcs = WcsTransform::from_header(&result.header)?;
-
-    {
-        let mut cache = WCS_CACHE.write().unwrap();
-        if cache.map.len() >= 64 {
-            cache.map.clear();
-        }
-        cache.map.insert(path.to_string(), wcs.clone());
-    }
-
     Ok((result.header, wcs))
 }
 
@@ -210,23 +164,5 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
                 RES_WCS_PROJECTION: params.5,
             },
         }))
-    })
-}
-
-#[tauri::command]
-pub async fn pixel_to_world(path: String, x: f64, y: f64) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let wcs = get_cached_wcs(&path)?;
-        let coord = wcs.pixel_to_world(x, y);
-        Ok(json!({ RES_RA: coord.ra, RES_DEC: coord.dec }))
-    })
-}
-
-#[tauri::command]
-pub async fn world_to_pixel(path: String, ra: f64, dec: f64) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let wcs = get_cached_wcs(&path)?;
-        let (x, y) = wcs.world_to_pixel(ra, dec);
-        Ok(json!({ RES_X: x, RES_Y: y }))
     })
 }

@@ -403,51 +403,59 @@ function MetadataFileList({
 
       {(productTypes.length > 1 || customChips.length > 0) && (
         <div className="ab-mfl-product-filter">
-          <SlidersHorizontal size={10} className="text-zinc-600 shrink-0" />
-          {productTypes.map((pt) => (
-            <button
-              key={pt}
-              onClick={() => onToggleFilter?.(pt)}
-              className={`ab-mfl-product-chip ${activeFilters.includes(pt) ? "ab-mfl-product-chip-active" : ""}`}
-            >
-              {pt}
-            </button>
-          ))}
-          {customChips.map((chip) => (
-            <span key={chip} className="ab-mfl-custom-chip-wrapper">
+          <div className="ab-mfl-filter-label">
+            <SlidersHorizontal size={10} />
+            <span>Filter</span>
+          </div>
+          <div className="ab-mfl-filter-chips">
+            {productTypes.map((pt) => (
               <button
-                onClick={() => onToggleFilter?.(chip)}
-                className={`ab-mfl-product-chip ab-mfl-product-chip-custom ${activeFilters.includes(chip) ? "ab-mfl-product-chip-active" : ""}`}
+                key={pt}
+                onClick={() => onToggleFilter?.(pt)}
+                className={`ab-mfl-product-chip ${activeFilters.includes(pt) ? "ab-mfl-product-chip-active" : ""}`}
+                title={`Filter by ${pt} product type`}
               >
-                {chip}
+                {pt}
               </button>
+            ))}
+            {customChips.map((chip) => (
+              <span key={chip} className="ab-mfl-custom-chip-wrapper">
+                <button
+                  onClick={() => onToggleFilter?.(chip)}
+                  className={`ab-mfl-product-chip ab-mfl-product-chip-custom ${activeFilters.includes(chip) ? "ab-mfl-product-chip-active" : ""}`}
+                  title={`Filter by "${chip}"`}
+                >
+                  {chip}
+                </button>
+                <button
+                  onClick={() => onRemoveCustomChip?.(chip)}
+                  className="ab-mfl-chip-remove"
+                  title={`Remove "${chip}" filter`}
+                >
+                  <X size={8} />
+                </button>
+              </span>
+            ))}
+            {activeFilters.length >= 2 && (
               <button
-                onClick={() => onRemoveCustomChip?.(chip)}
-                className="ab-mfl-chip-remove"
-                title={`Remove "${chip}" filter`}
+                onClick={onToggleMode}
+                className="ab-mfl-mode-toggle"
+                title={filterMode === "or" ? "OR mode: matches ANY selected filter. Click for AND." : "AND mode: matches ALL selected filters. Click for OR."}
               >
-                <X size={8} />
+                <span className={`ab-mfl-mode-opt ${filterMode === "and" ? "ab-mfl-mode-opt-active" : ""}`}>AND</span>
+                <span className={`ab-mfl-mode-opt ${filterMode === "or" ? "ab-mfl-mode-opt-active" : ""}`}>OR</span>
               </button>
-            </span>
-          ))}
-          {activeFilters.length >= 2 && (
-            <button
-              onClick={onToggleMode}
-              className="ab-mfl-mode-toggle"
-              title={filterMode === "or" ? "OR: show files matching ANY filter. Click to switch to AND." : "AND: show files matching ALL filters. Click to switch to OR."}
-            >
-              <span className={`ab-mfl-mode-opt ${filterMode === "and" ? "ab-mfl-mode-opt-active" : ""}`}>AND</span>
-              <span className={`ab-mfl-mode-opt ${filterMode === "or" ? "ab-mfl-mode-opt-active" : ""}`}>OR</span>
-            </button>
-          )}
-          {activeFilters.length > 0 && (
-            <button
-              onClick={() => onClearFilters?.()}
-              className="ab-mfl-product-chip ab-mfl-product-chip-clear"
-            >
-              ✕
-            </button>
-          )}
+            )}
+            {activeFilters.length > 0 && (
+              <button
+                onClick={() => onClearFilters?.()}
+                className="ab-mfl-product-chip ab-mfl-product-chip-clear"
+                title="Clear all filters"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -459,7 +467,7 @@ function MetadataFileList({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleSearchKeyDown}
-            placeholder="Search files..."
+            placeholder="Search files, filters, instruments..."
             className="ab-mfl-search-input"
           />
           {searchQuery.trim() && (
@@ -476,7 +484,7 @@ function MetadataFileList({
           <button
             onClick={handlePinSearch}
             className="ab-mfl-pin-btn"
-            title={`Pin "${searchQuery.trim()}" as global filter (Enter)`}
+            title={`Pin "${searchQuery.trim()}" as persistent filter (Enter)`}
           >
             <Pin size={10} />
           </button>

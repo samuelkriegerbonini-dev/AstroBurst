@@ -216,35 +216,40 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
         return Vec::new();
     }
     let limit = n.min(50);
-    let mut tris = Vec::with_capacity(limit * (limit - 1) * (limit - 2) / 6);
 
-    for i in 0..limit {
-        for j in (i + 1)..limit {
-            for k in (j + 1)..limit {
-                let mut sides = [
-                    dist(stars[i], stars[j]),
-                    dist(stars[j], stars[k]),
-                    dist(stars[i], stars[k]),
-                ];
-                sides.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let tris: Vec<TriangleDesc> = (0..limit)
+        .into_par_iter()
+        .flat_map(|i| {
+            let mut local = Vec::new();
+            for j in (i + 1)..limit {
+                for k in (j + 1)..limit {
+                    let mut sides = [
+                        dist(stars[i], stars[j]),
+                        dist(stars[j], stars[k]),
+                        dist(stars[i], stars[k]),
+                    ];
+                    sides.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-                if sides[0] < MIN_TRIANGLE_SIDE {
-                    continue;
+                    if sides[0] < MIN_TRIANGLE_SIDE {
+                        continue;
+                    }
+
+                    let ratio_mid = sides[1] / sides[0];
+                    let ratio_long = sides[2] / sides[0];
+                    let perimeter = sides[0] + sides[1] + sides[2];
+
+                    local.push(TriangleDesc {
+                        star_indices: [i, j, k],
+                        ratio_mid,
+                        ratio_long,
+                        perimeter,
+                    });
                 }
-
-                let ratio_mid = sides[1] / sides[0];
-                let ratio_long = sides[2] / sides[0];
-                let perimeter = sides[0] + sides[1] + sides[2];
-
-                tris.push(TriangleDesc {
-                    star_indices: [i, j, k],
-                    ratio_mid,
-                    ratio_long,
-                    perimeter,
-                });
             }
-        }
-    }
+            local
+        })
+        .collect();
+
     tris
 }
 
@@ -254,26 +259,36 @@ fn match_triangles(
     ref_tris: &[TriangleDesc],
     tgt_tris: &[TriangleDesc],
 ) -> Vec<(f64, f64, f64, f64)> {
+    let local_votes: Vec<std::collections::HashMap<(usize, usize), u32>> = ref_tris
+        .par_iter()
+        .map(|rt| {
+            let mut votes = std::collections::HashMap::new();
+            for tt in tgt_tris {
+                let d_mid = (rt.ratio_mid - tt.ratio_mid).abs();
+                let d_long = (rt.ratio_long - tt.ratio_long).abs();
+
+                if d_mid > TRIANGLE_TOLERANCE || d_long > TRIANGLE_TOLERANCE {
+                    continue;
+                }
+
+                let ref_sorted = sort_triangle_vertices(ref_stars, &rt.star_indices);
+                let tgt_sorted = sort_triangle_vertices(tgt_stars, &tt.star_indices);
+
+                for p in 0..3 {
+                    let ri = ref_sorted[p];
+                    let ti = tgt_sorted[p];
+                    *votes.entry((ri, ti)).or_insert(0) += 1;
+                }
+            }
+            votes
+        })
+        .collect();
+
     let mut vote_map: std::collections::HashMap<(usize, usize), u32> =
         std::collections::HashMap::new();
-
-    for rt in ref_tris {
-        for tt in tgt_tris {
-            let d_mid = (rt.ratio_mid - tt.ratio_mid).abs();
-            let d_long = (rt.ratio_long - tt.ratio_long).abs();
-
-            if d_mid > TRIANGLE_TOLERANCE || d_long > TRIANGLE_TOLERANCE {
-                continue;
-            }
-
-            let ref_sorted = sort_triangle_vertices(ref_stars, &rt.star_indices);
-            let tgt_sorted = sort_triangle_vertices(tgt_stars, &tt.star_indices);
-
-            for p in 0..3 {
-                let ri = ref_sorted[p];
-                let ti = tgt_sorted[p];
-                *vote_map.entry((ri, ti)).or_insert(0) += 1;
-            }
+    for local in local_votes {
+        for (k, v) in local {
+            *vote_map.entry(k).or_insert(0) += v;
         }
     }
 
@@ -330,63 +345,75 @@ fn ransac_affine(
         return None;
     }
 
-    let mut best_inliers = 0;
-    let mut best_transform = AffineTransform::identity();
-    let mut best_inlier_mask = vec![false; n];
+    let num_threads = rayon::current_num_threads().max(1);
+    let chunk_size = (RANSAC_ITERATIONS + num_threads - 1) / num_threads;
 
-    let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABE;
-    let inline_rand = |state: &mut u64| -> usize {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        (*state as usize) % n
-    };
+    let best = (0..num_threads)
+        .into_par_iter()
+        .map(|thread_id| {
+            let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64.wrapping_add(thread_id as u64 * 0x9E3779B97F4A7C15u64);
+            let inline_rand = |state: &mut u64| -> usize {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                (*state as usize) % n
+            };
 
-    let mut mask = vec![false; n];
+            let mut local_best_inliers = 0usize;
+            let mut local_best_transform = AffineTransform::identity();
+            let mut local_best_mask = vec![false; n];
+            let mut mask = vec![false; n];
 
-    for _ in 0..RANSAC_ITERATIONS {
-        let mut sample = Vec::with_capacity(min_sample);
-        let mut attempts = 0;
-        while sample.len() < min_sample && attempts < 20 {
-            let idx = inline_rand(&mut rng_state);
-            if !sample.contains(&idx) {
-                sample.push(idx);
+            for _ in 0..chunk_size {
+                let mut sample = Vec::with_capacity(min_sample);
+                let mut attempts = 0;
+                while sample.len() < min_sample && attempts < 20 {
+                    let idx = inline_rand(&mut rng_state);
+                    if !sample.contains(&idx) {
+                        sample.push(idx);
+                    }
+                    attempts += 1;
+                }
+                if sample.len() < min_sample {
+                    continue;
+                }
+
+                let sample_matches: Vec<(f64, f64, f64, f64)> =
+                    sample.iter().map(|&i| matches[i]).collect();
+
+                let transform = match method {
+                    AffineAlignMethod::Affine => fit_affine(&sample_matches),
+                    _ => fit_rigid(&sample_matches),
+                };
+                let transform = match transform {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                mask.fill(false);
+                let mut inlier_count = 0;
+                for (i, &(rx, ry, tx, ty)) in matches.iter().enumerate() {
+                    let (px, py) = transform.map(rx, ry);
+                    let err = ((px - tx).powi(2) + (py - ty).powi(2)).sqrt();
+                    if err < RANSAC_INLIER_PX {
+                        inlier_count += 1;
+                        mask[i] = true;
+                    }
+                }
+
+                if inlier_count > local_best_inliers {
+                    local_best_inliers = inlier_count;
+                    local_best_transform = transform;
+                    local_best_mask.copy_from_slice(&mask);
+                }
             }
-            attempts += 1;
-        }
-        if sample.len() < min_sample {
-            continue;
-        }
 
-        let sample_matches: Vec<(f64, f64, f64, f64)> =
-            sample.iter().map(|&i| matches[i]).collect();
+            (local_best_inliers, local_best_transform, local_best_mask)
+        })
+        .reduce_with(|a, b| if b.0 > a.0 { b } else { a })
+        .unwrap_or((0, AffineTransform::identity(), vec![false; n]));
 
-        let transform = match method {
-            AffineAlignMethod::Affine => fit_affine(&sample_matches),
-            _ => fit_rigid(&sample_matches),
-        };
-        let transform = match transform {
-            Some(t) => t,
-            None => continue,
-        };
-
-        mask.fill(false);
-        let mut inlier_count = 0;
-        for (i, &(rx, ry, tx, ty)) in matches.iter().enumerate() {
-            let (px, py) = transform.map(rx, ry);
-            let err = ((px - tx).powi(2) + (py - ty).powi(2)).sqrt();
-            if err < RANSAC_INLIER_PX {
-                inlier_count += 1;
-                mask[i] = true;
-            }
-        }
-
-        if inlier_count > best_inliers {
-            best_inliers = inlier_count;
-            best_transform = transform;
-            best_inlier_mask.copy_from_slice(&mask);
-        }
-    }
+    let (best_inliers, _best_transform, best_inlier_mask) = best;
 
     if best_inliers < MIN_MATCHES_RIGID {
         return None;
@@ -408,7 +435,7 @@ fn ransac_affine(
         AffineAlignMethod::Affine => fit_affine(&inlier_matches),
         _ => fit_rigid(&inlier_matches),
     }
-    .unwrap_or(best_transform);
+    .unwrap_or(_best_transform);
 
     let residual = compute_residual(&inlier_matches, &refined);
     if residual > MAX_RESIDUAL_PX {

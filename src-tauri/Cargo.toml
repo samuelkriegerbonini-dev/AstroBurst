@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "GPL-3.0-or-later"
@@ -23,6 +23,7 @@ thiserror = "2.0"
 
 ndarray = { version = "0.16", features = ["rayon", "serde"] }
 rayon = "1.10"
+rand = "0.8"
 image = "0.25"
 rustfft = "6.2"
 num-complex = "0.4"

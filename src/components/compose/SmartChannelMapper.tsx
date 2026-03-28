@@ -8,7 +8,6 @@ import {
 } from "react";
 import {
   Palette,
-  RefreshCw,
   Sparkles,
   Sun,
   ArrowLeftRight,
@@ -62,10 +61,12 @@ interface SmartChannelMapperProps {
   paletteSuggestion?: {
     palette_name: string;
     is_complete: boolean;
-    r_file?: { file_path: string };
-    g_file?: { file_path: string };
-    b_file?: { file_path: string };
+    r_file?: { file_path: string } | null;
+    g_file?: { file_path: string } | null;
+    b_file?: { file_path: string } | null;
   } | null;
+  selectedPalette?: string;
+  onPaletteChange?: (palette: string) => void;
 }
 
 const CHANNEL_META: Record<ChannelSlot, { color: string; label: string; bg: string; border: string }> = {
@@ -91,11 +92,13 @@ const JWST_FILTER_WAVELENGTH: Record<string, number> = {
   F460M: 4600, F466N: 4660, F470N: 4700, F480M: 4800,
 };
 
-const NARROWBAND_SHO: Record<string, ChannelSlot> = {
-  F657N: "R", F658N: "R",
-  F502N: "G", F501N: "G",
-  F673N: "B", F672N: "B",
-};
+const PALETTE_PRESETS = [
+  { id: "SHO", label: "SHO (Hubble)", desc: "SII\u2192R  Ha\u2192G  OIII\u2192B", icon: "\u2728" },
+  { id: "HOO", label: "HOO", desc: "Ha\u2192R  OIII\u2192G+B", icon: "\ud83c\udf11" },
+  { id: "HOS", label: "HOS", desc: "Ha\u2192R  OIII\u2192G  SII\u2192B", icon: "\ud83c\udf0c" },
+  { id: "NaturalColor", label: "Natural Color", desc: "Ha\u2192R  OIII\u2192G+B (natural)", icon: "\ud83c\udf0d" },
+  { id: "Custom", label: "Custom", desc: "Manual assignment", icon: "\ud83c\udfa8" },
+] as const;
 
 function getFilterWavelength(filter?: string): number | null {
   if (!filter) return null;
@@ -110,16 +113,6 @@ function autoMapByMetadata(files: ChannelFile[]): Partial<ChannelAssignment> {
     .sort((a, b) => a.wl - b.wl);
 
   if (withWavelength.length === 0) return {};
-
-  const nbMatches: Partial<Record<ChannelSlot, ChannelFile>> = {};
-  for (const { file } of withWavelength) {
-    const key = file.filter?.toUpperCase().trim() ?? "";
-    const slot = NARROWBAND_SHO[key];
-    if (slot && !nbMatches[slot]) nbMatches[slot] = file;
-  }
-  if (nbMatches.R && nbMatches.G && nbMatches.B) {
-    return { R: nbMatches.R, G: nbMatches.G, B: nbMatches.B };
-  }
 
   if (withWavelength.length >= 3) {
     const sorted = [...withWavelength].sort((a, b) => b.wl - a.wl);
@@ -327,6 +320,8 @@ function SmartChannelMapper({
   hideButton = false,
   onAssignmentChange,
   paletteSuggestion,
+  selectedPalette = "SHO",
+  onPaletteChange,
 }: SmartChannelMapperProps) {
   const [channels, setChannels] = useState<ChannelAssignment>({
     L: null, R: null, G: null, B: null,
@@ -423,6 +418,31 @@ function SmartChannelMapper({
     }
   }, [files, paletteSuggestion]);
 
+  const prevPaletteSuggestionRef = useRef(paletteSuggestion);
+  useEffect(() => {
+    if (paletteSuggestion === prevPaletteSuggestionRef.current) return;
+    prevPaletteSuggestionRef.current = paletteSuggestion;
+    if (selectedPalette === "Custom") return;
+    if (paletteSuggestion?.is_complete && paletteSuggestion.r_file && paletteSuggestion.g_file && paletteSuggestion.b_file) {
+      const find = (path: string) => files.find((f) => f.path === path) ?? null;
+      setChannels((prev) => ({
+        ...prev,
+        R: find(paletteSuggestion.r_file!.file_path),
+        G: find(paletteSuggestion.g_file!.file_path),
+        B: find(paletteSuggestion.b_file!.file_path),
+      }));
+      setAutoMapSource("palette");
+    }
+  }, [paletteSuggestion, files, selectedPalette]);
+
+  const handlePaletteChange = useCallback((paletteId: string) => {
+    if (onPaletteChange) onPaletteChange(paletteId);
+    if (paletteId === "Custom") {
+      setChannels({ L: null, R: null, G: null, B: null });
+      setAutoMapSource(null);
+    }
+  }, [onPaletteChange]);
+
   const assignedRgbCount = useMemo(
     () => [channels.R, channels.G, channels.B].filter(Boolean).length,
     [channels],
@@ -474,6 +494,22 @@ function SmartChannelMapper({
           </div>
         )}
       </div>
+
+      {mode === "rgb" && (
+        <div className="ab-palette-selector">
+          {PALETTE_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              className={`ab-palette-chip ${selectedPalette === p.id ? "ab-palette-chip-active" : ""}`}
+              onClick={() => handlePaletteChange(p.id)}
+              title={p.desc}
+            >
+              <span className="ab-palette-chip-icon">{p.icon}</span>
+              <span>{p.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="ab-mapper-hint">
         <GripVertical size={11} className="text-zinc-600 shrink-0" />

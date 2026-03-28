@@ -169,8 +169,8 @@ function ProcessingTabInner() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1 px-4 pt-3 pb-1">
-        <div className="flex gap-1 flex-1">
+      <div className="flex items-center gap-1.5 px-3 pt-3 pb-1.5">
+        <div className="flex gap-1 flex-1 flex-wrap">
           {SECTIONS.map((s) => {
             const isActive = active === s.id;
             const hasResult =
@@ -184,13 +184,12 @@ function ProcessingTabInner() {
               <button
                 key={s.id}
                 onClick={() => setActive(s.id)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150 relative ${
-                  isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-                }`}
+                className={`ab-processing-pill ${isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}
+                title={`${s.label} processing step`}
               >
                 {s.label}
                 {hasResult && (
-                  <span className={`absolute -top-1 -right-1 w-2 h-2 rounded-full ${colors.dot}`} />
+                  <span className={`ab-processing-pill-dot ${colors.dot}`} />
                 )}
               </button>
             );
@@ -199,10 +198,10 @@ function ProcessingTabInner() {
         {hasChain && (
           <button
             onClick={handleResetChain}
-            className="p-1 rounded text-zinc-600 hover:text-zinc-400 transition-colors"
+            className="p-1.5 rounded-md text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800/40 transition-all"
             title="Reset processing chain"
           >
-            <RotateCcw size={12} />
+            <RotateCcw size={13} />
           </button>
         )}
       </div>

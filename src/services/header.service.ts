@@ -16,6 +16,6 @@ export function getHeaderByHdu(path: string, hduIndex: number) {
   return safeInvoke("get_header_by_hdu", { path, hduIndex });
 }
 
-export function detectNarrowbandFilters(paths: string[]) {
-  return safeInvoke("detect_narrowband_filters", { paths });
+export function detectNarrowbandFilters(paths: string[], palette?: string) {
+  return safeInvoke("detect_narrowband_filters", { paths, palette: palette ?? null });
 }

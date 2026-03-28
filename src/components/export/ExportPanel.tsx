@@ -1,7 +1,8 @@
-import { useState, useCallback } from "react";
-import { Save, FileDown, FolderOpen } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
+import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export.service";
 import type { StfParams } from "../../shared/types";
 
 interface BitpixOption {
@@ -42,12 +43,20 @@ interface RgbChannels {
   b: string | null;
 }
 
+interface CompositeStf {
+  r: StfParams;
+  g: StfParams;
+  b: StfParams;
+}
+
 interface ExportPanelProps {
   filePath: string | null;
   stfParams: StfParams | null;
   onExport: (filePath: string, outputPath: string, options: ExportOptions) => Promise<void>;
   onExportRgb?: (r: string | null, g: string | null, b: string | null, outputPath: string, options: RgbExportOptions) => Promise<void>;
   rgbChannels?: RgbChannels | null;
+  compositeStf?: CompositeStf | null;
+  alignMethod?: string;
   isLoading?: boolean;
   lastResult?: ExportResult | null;
 }
@@ -75,6 +84,8 @@ export default function ExportPanel({
                                       onExport,
                                       onExportRgb,
                                       rgbChannels,
+                                      compositeStf,
+                                      alignMethod,
                                       isLoading = false,
                                       lastResult = null,
                                     }: ExportPanelProps) {
@@ -84,6 +95,17 @@ export default function ExportPanel({
   const [bitpix, setBitpix] = useState(-32);
   const [exportDone, setExportDone] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [alignedExporting, setAlignedExporting] = useState(false);
+  const [alignedResult, setAlignedResult] = useState<any>(null);
+  const [alignedMethod, setAlignedMethod] = useState(alignMethod ?? "phase_correlation");
+  const [pngBitDepth, setPngBitDepth] = useState(16);
+  const [pngApplyStf, setPngApplyStf] = useState(false);
+  const [pngExporting, setPngExporting] = useState(false);
+  const [pngExported, setPngExported] = useState(false);
+
+  useEffect(() => {
+    if (alignMethod) setAlignedMethod(alignMethod);
+  }, [alignMethod]);
 
   const handleExport = useCallback(async () => {
     if (!filePath || !onExport) return;
@@ -137,6 +159,93 @@ export default function ExportPanel({
     }
   }, [rgbChannels, copyWcs, copyMetadata, onExportRgb]);
 
+  const handleExportAligned = useCallback(async () => {
+    if (!rgbChannels) return;
+    setAlignedExporting(true);
+    setAlignedResult(null);
+    try {
+      const dir = await getExportDir();
+      const result = await exportAlignedChannels(
+        rgbChannels.r, rgbChannels.g, rgbChannels.b, dir,
+        { alignMethod: alignedMethod, copyWcs, copyMetadata },
+      );
+      setAlignedResult(result);
+      const firstPath = result?.channels?.[0]?.path;
+      if (firstPath) {
+        setSavedPath(firstPath.replace(/[/\\][^/\\]+$/, ""));
+        setTimeout(() => setSavedPath(null), 8000);
+      }
+    } catch (e) {
+      console.error("Aligned export failed:", e);
+    } finally {
+      setAlignedExporting(false);
+    }
+  }, [rgbChannels, alignedMethod, copyWcs, copyMetadata]);
+
+  const handleExportPng = useCallback(async () => {
+    if (!filePath) return;
+    setPngExporting(true);
+    try {
+      const dir = await getExportDir();
+      const stem = filePath
+        .split(/[/\\]/)
+        .pop()
+        ?.replace(/\.(fits?|zip)$/i, "") || "output";
+      const suffix = pngApplyStf ? "_stf" : "";
+      const outputPath = `${dir}/${stem}${suffix}.png`;
+      await exportPng(filePath, outputPath, {
+        bitDepth: pngBitDepth,
+        applyStfStretch: pngApplyStf,
+        shadow: stfParams?.shadow,
+        midtone: stfParams?.midtone,
+        highlight: stfParams?.highlight,
+      });
+      setPngExported(true);
+      setSavedPath(outputPath);
+      setTimeout(() => {
+        setPngExported(false);
+        setSavedPath(null);
+      }, 8000);
+    } catch (e) {
+      console.error("PNG export failed:", e);
+    } finally {
+      setPngExporting(false);
+    }
+  }, [filePath, pngBitDepth, pngApplyStf, stfParams]);
+
+  const handleExportRgbPng = useCallback(async () => {
+    if (!rgbChannels) return;
+    setPngExporting(true);
+    try {
+      const dir = await getExportDir();
+      const suffix = pngApplyStf ? "_stf" : "";
+      const outputPath = `${dir}/rgb_composite${suffix}_${pngBitDepth}bit.png`;
+      await exportRgbPng(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
+        bitDepth: pngBitDepth,
+        applyStfStretch: pngApplyStf,
+        shadowR: compositeStf?.r.shadow,
+        midtoneR: compositeStf?.r.midtone,
+        highlightR: compositeStf?.r.highlight,
+        shadowG: compositeStf?.g.shadow,
+        midtoneG: compositeStf?.g.midtone,
+        highlightG: compositeStf?.g.highlight,
+        shadowB: compositeStf?.b.shadow,
+        midtoneB: compositeStf?.b.midtone,
+        highlightB: compositeStf?.b.highlight,
+      });
+      setPngExported(true);
+      setSavedPath(outputPath);
+      setTimeout(() => {
+        setPngExported(false);
+        setSavedPath(null);
+      }, 8000);
+    } catch (e) {
+      console.error("RGB PNG export failed:", e);
+    } finally {
+      setPngExporting(false);
+    }
+  }, [rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
+
   const hasRgb = rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b);
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
@@ -178,6 +287,74 @@ export default function ExportPanel({
           <FileDown size={12} />
           Export RGB as FITS cube
         </button>
+      )}
+
+      <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+        <SectionHeader icon={<ImageIcon size={14} className="text-sky-400" />} title="Export PNG" />
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Bit Depth</label>
+          <select value={pngBitDepth} onChange={(e) => setPngBitDepth(Number(e.target.value))} className="ab-select">
+            <option value={16}>16-bit</option>
+            <option value={8}>8-bit</option>
+          </select>
+        </div>
+        <Toggle label="Apply current STF stretch" checked={pngApplyStf} accent="sky" onChange={setPngApplyStf} />
+        <RunButton
+          label={pngExported ? "Saved!" : "Export as PNG"}
+          runningLabel="Exporting..."
+          running={pngExporting}
+          disabled={!filePath || pngExported}
+          accent="sky"
+          onClick={handleExportPng}
+        />
+        {hasRgb && (
+          <button
+            onClick={handleExportRgbPng}
+            disabled={pngExporting}
+            className="w-full flex items-center justify-center gap-2 bg-sky-600/15 hover:bg-sky-600/25 text-sky-300 border border-sky-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            {pngExporting ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />}
+            Export RGB as PNG ({pngBitDepth}-bit)
+          </button>
+        )}
+      </div>
+
+      {hasRgb && (
+        <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-zinc-400">Align Method</label>
+            <select
+              value={alignedMethod}
+              onChange={(e) => setAlignedMethod(e.target.value)}
+              className="ab-select"
+              disabled={alignedExporting}
+            >
+              <option value="phase_correlation">Phase Correlation</option>
+              <option value="affine">Star-based Affine</option>
+            </select>
+          </div>
+          <button
+            onClick={handleExportAligned}
+            disabled={alignedExporting}
+            className="w-full flex items-center justify-center gap-2 bg-teal-600/15 hover:bg-teal-600/25 text-teal-300 border border-teal-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            {alignedExporting ? <Loader2 size={12} className="animate-spin" /> : <Crosshair size={12} />}
+            {alignedExporting ? "Aligning..." : "Export Aligned Channels (FITS)"}
+          </button>
+        </div>
+      )}
+
+      {alignedResult?.channels && (
+        <div className="flex flex-col gap-1 px-1">
+          {alignedResult.channels.map((ch: any) => (
+            <div key={ch.channel} className="flex items-center justify-between text-[10px] text-zinc-400">
+              <span className="text-teal-300">{ch.channel}</span>
+              <span className="truncate ml-2">{ch.path?.split(/[/\\]/).pop()}</span>
+              <span className="ml-auto pl-2 text-zinc-600">{ch.file_size_bytes ? `${(ch.file_size_bytes / 1024).toFixed(0)} KB` : ""}</span>
+            </div>
+          ))}
+          <div className="text-[10px] text-zinc-600">{alignedResult.elapsed_ms} ms</div>
+        </div>
       )}
 
       {savedPath && (

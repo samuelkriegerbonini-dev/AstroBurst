@@ -1,4 +1,5 @@
-import { withPreview } from "../infrastructure/tauri";
+import { withPreview, safeInvoke } from "../infrastructure/tauri";
+import type { StfParams } from "../shared/types";
 
 export function composeRgb(
   lPath: string | null,
@@ -30,4 +31,32 @@ export function drizzleRgb(
   options: Record<string, any> = {},
 ) {
   return withPreview("drizzle_rgb_cmd", outputDir, { rPaths, gPaths, bPaths, ...options });
+}
+
+export function restretchComposite(
+  outputDir: string,
+  stfR: StfParams,
+  stfG: StfParams,
+  stfB: StfParams,
+  scnr?: { enabled: boolean; method?: string; amount?: number },
+) {
+  return safeInvoke("restretch_composite_cmd", {
+    outputDir,
+    shadowR: stfR.shadow,
+    midtoneR: stfR.midtone,
+    highlightR: stfR.highlight,
+    shadowG: stfG.shadow,
+    midtoneG: stfG.midtone,
+    highlightG: stfG.highlight,
+    shadowB: stfB.shadow,
+    midtoneB: stfB.midtone,
+    highlightB: stfB.highlight,
+    scnrEnabled: scnr?.enabled ?? false,
+    scnrMethod: scnr?.method,
+    scnrAmount: scnr?.amount,
+  });
+}
+
+export function clearCompositeCache(): Promise<void> {
+  return safeInvoke("clear_composite_cache_cmd", {});
 }

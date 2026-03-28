@@ -8,6 +8,10 @@ use crate::core::imaging::calibration_pipeline::{
 use crate::domain::calibration::{
     create_master_bias, create_master_dark, create_master_flat, load_fits_image,
 };
+use crate::types::constants::{
+    RES_LABEL, RES_PIXELS_B64, RES_WIDTH, RES_HEIGHT,
+    RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ChannelFilesInput {
@@ -134,10 +138,10 @@ pub async fn run_pipeline_cmd(
             .map(|(label, arr)| {
                 let (h, w) = arr.dim();
                 json!({
-                    "label": label,
-                    "pixels_b64": array2_to_b64_u16(arr),
-                    "width": w,
-                    "height": h,
+                    RES_LABEL: label,
+                    RES_PIXELS_B64: array2_to_b64_u16(arr),
+                    RES_WIDTH: w,
+                    RES_HEIGHT: h,
                 })
             })
             .collect();
@@ -145,9 +149,9 @@ pub async fn run_pipeline_cmd(
         let rgb_preview = result.rgb.as_ref().map(|rgb| rgb_to_b64_u8(rgb));
 
         Ok(json!({
-            "stats": result.stats,
-            "channel_previews": channel_previews,
-            "rgb_preview": rgb_preview,
+            RES_STATS: result.stats,
+            RES_CHANNEL_PREVIEWS: channel_previews,
+            RES_RGB_PREVIEW: rgb_preview,
         }))
     })
         .await

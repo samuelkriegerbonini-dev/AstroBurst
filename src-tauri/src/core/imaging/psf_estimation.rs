@@ -245,10 +245,11 @@ fn detect_stars_for_psf(
             }
 
             let (sub_x, sub_y) = centroid_subpixel(image, x, y, 3);
-            let (fwhm_x, fwhm_y) = measure_fwhm(image, sub_x, sub_y);
-            let fwhm = (fwhm_x + fwhm_y) / 2.0;
-            let ellipticity = if fwhm_x.max(fwhm_y) > 1e-10 {
-                1.0 - fwhm_x.min(fwhm_y) / fwhm_x.max(fwhm_y)
+            let sub_peak = subpixel_peak(image, x, y);
+            let (fwhm_major, fwhm_minor) = measure_fwhm(image, sub_x, sub_y);
+            let fwhm = (fwhm_major + fwhm_minor) / 2.0;
+            let ellipticity = if fwhm_major.max(fwhm_minor) > 1e-10 {
+                1.0 - fwhm_minor.min(fwhm_major) / fwhm_major.max(fwhm_minor)
             } else {
                 0.0
             };
@@ -263,7 +264,7 @@ fn detect_stars_for_psf(
                 stars.push(StarCandidate {
                     x: sub_x,
                     y: sub_y,
-                    peak: val,
+                    peak: sub_peak,
                     flux,
                     fwhm,
                     ellipticity,
@@ -313,63 +314,131 @@ fn measure_fwhm(image: &Array2<f32>, x: f64, y: f64) -> (f64, f64) {
         return (4.0, 4.0);
     }
 
-    let peak = image[[iy, ix]] as f64;
-    let half = peak / 2.0;
+    let peak = subpixel_peak(image, ix, iy);
+    let bg = estimate_local_bg(image, ix, iy, 10);
+    let net_peak = peak - bg;
+    if net_peak <= 0.0 {
+        return (4.0, 4.0);
+    }
 
-    let fwhm_x = measure_fwhm_1d(image, ix, iy, true, half);
-    let fwhm_y = measure_fwhm_1d(image, ix, iy, false, half);
+    let threshold = bg + net_peak * 0.5;
+    let radius = 12i64;
 
-    (fwhm_x, fwhm_y)
+    let mut m_xx = 0.0f64;
+    let mut m_yy = 0.0f64;
+    let mut m_xy = 0.0f64;
+    let mut sum_w = 0.0f64;
+
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let py = iy as i64 + dy;
+            let px = ix as i64 + dx;
+            if py < 0 || py >= h as i64 || px < 0 || px >= w as i64 {
+                continue;
+            }
+            let val = image[[py as usize, px as usize]] as f64;
+            if val < threshold {
+                continue;
+            }
+            let weight = val - bg;
+            let fx = px as f64 - x;
+            let fy = py as f64 - y;
+            m_xx += fx * fx * weight;
+            m_yy += fy * fy * weight;
+            m_xy += fx * fy * weight;
+            sum_w += weight;
+        }
+    }
+
+    if sum_w <= 0.0 {
+        return (4.0, 4.0);
+    }
+
+    let sigma_xx = m_xx / sum_w;
+    let sigma_yy = m_yy / sum_w;
+    let sigma_xy = m_xy / sum_w;
+
+    let trace = sigma_xx + sigma_yy;
+    let det = sigma_xx * sigma_yy - sigma_xy * sigma_xy;
+    let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+    let lambda1 = ((trace + disc) / 2.0).max(0.0);
+    let lambda2 = ((trace - disc) / 2.0).max(0.0);
+
+    let fwhm_factor = 2.0 * (2.0_f64.ln() * 2.0).sqrt();
+    let fwhm_major = fwhm_factor * lambda1.sqrt();
+    let fwhm_minor = fwhm_factor * lambda2.sqrt();
+
+    let fwhm_major = fwhm_major.clamp(1.0, 30.0);
+    let fwhm_minor = fwhm_minor.clamp(1.0, 30.0);
+
+    (fwhm_major, fwhm_minor)
 }
 
-fn measure_fwhm_1d(
-    image: &Array2<f32>,
-    cx: usize,
-    cy: usize,
-    horizontal: bool,
-    half_max: f64,
-) -> f64 {
+fn subpixel_peak(image: &Array2<f32>, ix: usize, iy: usize) -> f64 {
     let (h, w) = image.dim();
-    let limit = if horizontal { w } else { h };
-    let center = if horizontal { cx } else { cy };
+    if ix < 1 || iy < 1 || ix + 1 >= w || iy + 1 >= h {
+        return image[[iy, ix]] as f64;
+    }
 
-    let get_val = |i: usize| -> f64 {
-        if horizontal {
-            if i < w { image[[cy, i]] as f64 } else { 0.0 }
-        } else {
-            if i < h { image[[i, cx]] as f64 } else { 0.0 }
-        }
+    let v = |dy: i64, dx: i64| -> f64 {
+        image[[(iy as i64 + dy) as usize, (ix as i64 + dx) as usize]] as f64
     };
 
-    let mut left = center as f64;
-    for i in (0..center).rev() {
-        if get_val(i) < half_max {
-            let v1 = get_val(i);
-            let v2 = get_val(i + 1);
-            if (v2 - v1).abs() > 1e-10 {
-                left = i as f64 + (half_max - v1) / (v2 - v1);
-            } else {
-                left = i as f64;
+    let c = v(0, 0);
+    let dx_val = (v(0, 1) - v(0, -1)) * 0.5;
+    let dy_val = (v(1, 0) - v(-1, 0)) * 0.5;
+    let dxx = v(0, 1) + v(0, -1) - 2.0 * c;
+    let dyy = v(1, 0) + v(-1, 0) - 2.0 * c;
+    let dxy = (v(1, 1) + v(-1, -1) - v(1, -1) - v(-1, 1)) * 0.25;
+
+    let det = dxx * dyy - dxy * dxy;
+    if det.abs() < 1e-12 || det < 0.0 {
+        return c;
+    }
+
+    let sx = -(dyy * dx_val - dxy * dy_val) / det;
+    let sy = -(dxx * dy_val - dxy * dx_val) / det;
+
+    if sx.abs() > 1.0 || sy.abs() > 1.0 {
+        return c;
+    }
+
+    c + 0.5 * (dx_val * sx + dy_val * sy)
+}
+
+fn estimate_local_bg(image: &Array2<f32>, ix: usize, iy: usize, radius: usize) -> f64 {
+    let (h, w) = image.dim();
+    let inner_r2 = (radius as f64 * 0.6) * (radius as f64 * 0.6);
+    let outer_r2 = (radius as f64) * (radius as f64);
+    let mut vals = Vec::new();
+
+    let r = radius as i64;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let py = iy as i64 + dy;
+            let px = ix as i64 + dx;
+            if py < 0 || py >= h as i64 || px < 0 || px >= w as i64 {
+                continue;
             }
-            break;
+            let d2 = (dx * dx + dy * dy) as f64;
+            if d2 >= inner_r2 && d2 <= outer_r2 {
+                vals.push(image[[py as usize, px as usize]] as f64);
+            }
         }
     }
 
-    let mut right = center as f64;
-    for i in (center + 1)..limit {
-        if get_val(i) < half_max {
-            let v1 = get_val(i - 1);
-            let v2 = get_val(i);
-            if (v1 - v2).abs() > 1e-10 {
-                right = (i - 1) as f64 + (v1 - half_max) / (v1 - v2);
-            } else {
-                right = i as f64;
-            }
-            break;
-        }
+    if vals.is_empty() {
+        return 0.0;
     }
 
-    right - left
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lo = vals.len() / 4;
+    let hi = (3 * vals.len() / 4).max(lo + 1).min(vals.len());
+    let clipped = &vals[lo..hi];
+    if clipped.is_empty() {
+        return 0.0;
+    }
+    clipped.iter().sum::<f64>() / clipped.len() as f64
 }
 
 fn aperture_flux(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {

@@ -1,6 +1,8 @@
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::math::median::f32_cmp;
+use crate::types::constants::MAD_TO_SIGMA;
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
     pub dark: Option<Array2<f32>>,
@@ -327,6 +329,7 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
         let mut row = vec![0.0f32; w];
         let mut local_rejected = vec![0usize; n];
         let mut vals: Vec<(f32, usize)> = Vec::with_capacity(n);
+        let mut scratch: Vec<f32> = Vec::with_capacity(n);
 
         let base = y * w;
 
@@ -339,15 +342,24 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
 
             for _ in 0..config.max_iterations {
                 if vals.len() < 3 { break; }
-                let mean: f32 = vals.iter().map(|(v, _)| v).sum::<f32>() / vals.len() as f32;
-                let var: f32 = vals.iter().map(|(v, _)| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32;
-                let sigma = var.sqrt();
+
+                scratch.clear();
+                scratch.extend(vals.iter().map(|(v, _)| *v));
+                let mid = scratch.len() / 2;
+                scratch.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+                let median = scratch[mid];
+
+                scratch.iter_mut().for_each(|v| *v = (*v - median).abs());
+                let mad_mid = scratch.len() / 2;
+                scratch.select_nth_unstable_by(mad_mid, |a, b| f32_cmp(a, b));
+                let sigma = (scratch[mad_mid] as f64 * MAD_TO_SIGMA) as f32;
+
                 if sigma < 1e-10 { break; }
                 let before = vals.len();
-                vals.retain(|(v, idx)| {
-                    let z = (v - mean) / sigma;
+                vals.retain(|(v, frame_idx)| {
+                    let z = (v - median) / sigma;
                     let keep = z > -config.sigma_low && z < config.sigma_high;
-                    if !keep { local_rejected[*idx] += 1; }
+                    if !keep { local_rejected[*frame_idx] += 1; }
                     keep
                 });
                 if vals.len() == before { break; }

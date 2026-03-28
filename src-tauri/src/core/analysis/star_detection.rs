@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use ndarray::Array2;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::math::{sigma_clipped_stats, f64_cmp};
@@ -28,40 +29,48 @@ pub struct DetectionResult {
 
 pub fn estimate_background(image: &Array2<f32>, tile_size: usize) -> (f64, f64) {
     let (rows, cols) = image.dim();
-    let mut medians = Vec::new();
-    let mut sigmas = Vec::new();
-
     let step = tile_size.max(16);
+
+    let mut tile_coords = Vec::new();
     let mut y = 0;
     while y < rows {
         let mut x = 0;
         while x < cols {
-            let ye = (y + step).min(rows);
-            let xe = (x + step).min(cols);
+            tile_coords.push((y, x));
+            x += step;
+        }
+        y += step;
+    }
 
-            let mut vals: Vec<f32> = Vec::with_capacity((ye - y) * (xe - x));
-            for r in y..ye {
-                for c in x..xe {
+    let results: Vec<(f64, f64)> = tile_coords
+        .par_iter()
+        .filter_map(|&(ty, tx)| {
+            let ye = (ty + step).min(rows);
+            let xe = (tx + step).min(cols);
+            let mut vals: Vec<f32> = Vec::with_capacity((ye - ty) * (xe - tx));
+            for r in ty..ye {
+                for c in tx..xe {
                     let v = image[[r, c]];
                     if v.is_finite() {
                         vals.push(v);
                     }
                 }
             }
-
             if vals.len() >= 8 {
                 let (med, sig) = sigma_clipped_stats(&mut vals, 3.0, 2);
-                medians.push(med);
-                sigmas.push(sig);
+                Some((med, sig))
+            } else {
+                None
             }
-            x += step;
-        }
-        y += step;
-    }
+        })
+        .collect();
 
-    if medians.is_empty() {
+    if results.is_empty() {
         return (0.0, 1.0);
     }
+
+    let mut medians: Vec<f64> = results.iter().map(|r| r.0).collect();
+    let mut sigmas: Vec<f64> = results.iter().map(|r| r.1).collect();
 
     medians.sort_unstable_by(f64_cmp);
     sigmas.sort_unstable_by(f64_cmp);

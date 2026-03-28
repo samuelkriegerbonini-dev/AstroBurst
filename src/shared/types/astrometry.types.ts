@@ -27,13 +27,3 @@ export interface PlateSolveOptions {
   centerDec?: number;
   radius?: number;
 }
-
-export interface WorldCoord {
-  ra: number;
-  dec: number;
-}
-
-export interface PixelCoord {
-  x: number;
-  y: number;
-}

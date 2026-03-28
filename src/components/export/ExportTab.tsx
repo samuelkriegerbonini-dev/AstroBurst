@@ -1,4 +1,4 @@
-import { useState, useCallback, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
 import { Download, Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export.service";
 import { getCubeFrame } from "../../services/cube.service";
@@ -10,7 +10,7 @@ const ExportPanel = lazy(() => import("./ExportPanel"));
 function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
-  const { rgbChannels } = useRgbContext();
+  const { rgbChannels, compositeStfR, compositeStfG, compositeStfB } = useRgbContext();
   const { renderedPreviewUrl } = useRenderContext();
   const { isCube, cubeDims } = useCubeContext();
 
@@ -102,6 +102,11 @@ function ExportTabInner() {
 
   const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
 
+  const compositeStf = useMemo(() => {
+    if (!rgbChannels) return null;
+    return { r: compositeStfR, g: compositeStfG, b: compositeStfB };
+  }, [rgbChannels, compositeStfR, compositeStfG, compositeStfB]);
+
   return (
     <Suspense
       fallback={
@@ -117,6 +122,7 @@ function ExportTabInner() {
           onExport={handleExportFits}
           onExportRgb={handleExportFitsRgb}
           rgbChannels={rgbChannels}
+          compositeStf={compositeStf}
           isLoading={exportLoading}
           lastResult={exportResult}
         />

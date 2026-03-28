@@ -195,7 +195,18 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
     let mut idx: usize = 0;
 
     while offset < mmap.len() {
-        let parsed = parse_header_at(mmap, offset)?;
+        if offset + BLOCK_SIZE > mmap.len() {
+            if hdus.is_empty() {
+                bail!("FITS file too small to contain a valid header");
+            }
+            break;
+        }
+
+        let parsed = match parse_header_at(mmap, offset) {
+            Ok(p) => p,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
         let h = &parsed.header;
 
         let naxis = h.get_i64("NAXIS").unwrap_or(0);
@@ -392,7 +403,7 @@ pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
     let mmap = create_mmap(file)?;
     let mut offset: usize = 0;
 
-    while offset < mmap.len() {
+    while offset + BLOCK_SIZE <= mmap.len() {
         let parsed = parse_header_at(&mmap, offset)?;
         let header = &parsed.header;
 

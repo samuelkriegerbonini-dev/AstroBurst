@@ -1,7 +1,7 @@
 import { safeInvoke } from "../infrastructure/tauri";
-import type { WcsInfo, PlateSolveOptions, WorldCoord, PixelCoord } from "../shared/types/astrometry.types";
+import type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry.types";
 
-export type { WcsInfo, PlateSolveOptions, WorldCoord, PixelCoord } from "../shared/types/astrometry.types";
+export type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry.types";
 
 export async function plateSolve(path: string, opts: PlateSolveOptions = {}) {
   return safeInvoke("plate_solve_cmd", {
@@ -19,12 +19,4 @@ export async function plateSolve(path: string, opts: PlateSolveOptions = {}) {
 
 export async function getWcsInfo(path: string): Promise<WcsInfo> {
   return safeInvoke("get_wcs_info", { path });
-}
-
-export async function pixelToWorld(path: string, x: number, y: number): Promise<WorldCoord> {
-  return safeInvoke("pixel_to_world", { path, x, y });
-}
-
-export async function worldToPixel(path: string, ra: number, dec: number): Promise<PixelCoord> {
-  return safeInvoke("world_to_pixel", { path, ra, dec });
 }

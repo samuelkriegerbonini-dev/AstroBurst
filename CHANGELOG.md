@@ -5,13 +5,189 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
+## [0.4.2] - 2026-03-28
 ### Added
-- macOS and Linux installer scripts
-- GitHub Actions CI/CD pipeline
-- Sample HST narrowband FITS files for testing
-- Open-source community files (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
+
+#### Synthetic FITS Generation
+- `core/synth/` module (645 lines): star field generation with configurable count and flux distribution, Gaussian/Moffat PSF modeling, Poisson/Gaussian/readout noise injection, and pipeline orchestration
+- `cmd/synth.rs` with `generate_synth_cmd` and `generate_synth_stack_cmd` Tauri commands
+- `SynthPanel.tsx` (227 lines) frontend with star count, PSF sigma, noise level controls, and preview
+- `synth.service.ts` service layer
+- Synth tab in PreviewPanel side panel alongside Processing, Compose, Stacking, Config
+
+#### Narrowband Palette System
+- `PaletteType` enum in `core/metadata/header_discovery.rs`: SHO (Hubble Palette), HOO, HOS, NaturalColor, Custom with `from_str_loose()` parser
+- `palette_channels()` routing function mapping narrowband filter to RGB channels per palette type
+- `suggest_palette_with_type()` with per-palette channel assignment logic, replacing the SHO-only `suggest_palette()`
+- Custom palette mode returns all files as unmapped for fully manual assignment
+- `SmartChannelMapper.tsx` gains palette preset selector dropdown (`PALETTE_PRESETS`)
+- `detect_narrowband_filters` command accepts optional `palette` parameter
+- `header.service.ts` passes palette selection through to backend
+
+#### Live Composite STF Re-stretch
+- `restretch_composite_cmd` in `cmd/compose.rs`: reads pre-stretch data from composite cache, applies per-channel STF with optional SCNR, renders preview PNG without re-running the full compose pipeline
+- `clear_composite_cache_cmd` for explicit cache invalidation
+- `CompositeStfPanel` in `PreviewTab.tsx` with per-channel shadow/midtone/highlight sliders, linked/unlinked mode toggle, reset-to-auto button, and debounced re-stretch (300ms)
+- `PreviewContext.tsx` expanded with composite STF state (`compositeStfR/G/B`), linked flag, auto-STF reference values, `compositePreviewUrl`, `isShowingComposite`, `clearComposite`
+- `compose.service.ts` gains `restretchComposite()` and `clearCompositeCache()` functions
+
+#### Export Aligned Channels
+- `export_aligned_channels_cmd` in `cmd/compose.rs`: loads, harmonizes, and aligns R/G/B channels, then exports each as individual FITS with WCS headers updated for the applied offset (`CRPIX1/2` adjusted by dx/dy)
+- `exportAlignedChannels()` service function with `ExportAlignedOptions` (align method, copy WCS, copy metadata)
+- `ExportPanel.tsx` gains Aligned Channels export section
+
+#### PNG Export Pipeline
+- `export_png` command: single-channel PNG export with optional STF stretch, 8-bit or 16-bit output
+- `export_rgb_png` command: composite RGB PNG export with per-channel STF parameters, reading from composite cache with STF application
+- `ExportPngOptions` and `ExportRgbPngOptions` interfaces in `export.service.ts`
+- `ExportPanel.tsx` gains PNG export controls with bit depth selector and STF toggle
+- Frontend passes `compositeStf` from `RgbContext` through `ExportTab` to `ExportPanel` to `exportRgbPng` service
+
+#### 16-bit Rendering
+- `render_grayscale_16bit()` in `infra/render/grayscale.rs`: linear stretch to 16-bit PNG with `write_png_l16()` helper
+- `render_stretched_8bit()` and `render_stretched_16bit()`: pre-stretched [0,1] data to 8/16-bit PNG
+- `render_rgb_16bit()` in `infra/render/rgb.rs`: 16-bit per-channel RGB PNG with parallel row processing
+
+#### Multi-BITPIX FITS Export
+- `write_fits_mono_bitpix()` in `infra/fits/writer.rs`: supports BITPIX 16 (with auto BZERO/BSCALE), -32 (float32), -64 (float64)
+- `compute_bzero_bscale()` for optimal 16-bit quantization from data range
+- `write_i16_slice_as_be()` and `write_f64_slice_as_be()` chunked big-endian writers
+- `export_fits` command now honors `bitpix` parameter (was hardcoded to -32)
+
+#### Cache Enhancements
+- `insert_synthetic()` on `GLOBAL_IMAGE_CACHE`: stores pre-computed channel data (from compose pipeline) as synthetic cache entries with associated stats, enabling re-stretch without recompose
+- `remove()` method with proper byte accounting for targeted cache eviction
+- Composite keys (`COMPOSITE_KEY_R/G/B`) shared from `types/constants.rs` across compose and image commands
+
+#### UI Improvements
+- `Slider.tsx` click-to-edit: clicking the value display opens an inline text input for direct numeric entry; commits on Enter/blur, cancels on Escape; optional `hint` prop
+- `AdvancedImageViewer.tsx` retry with backoff: up to 3 retries with 200/600/1500ms delays on image load failure; cache-busting query params on retry; manual retry button on persistent failure; loading spinner overlay
+- `DropZone.tsx` drag type guard: ignores non-file drag events (e.g. dragging channel chips) by checking for `Files` or `application/x-tauri-file` in `dataTransfer.types`
+- `MetadataFileList.tsx` filter section gains labeled header (`SlidersHorizontal` icon + "Filter" text) and improved chip layout
+- `ProcessingTab.tsx` pill styling extracted to CSS classes (`ab-processing-pill`, `ab-processing-pill-dot`), flex-wrap for narrow panels
+- Asset protocol in `lib.rs`: retries file read once after 100ms on failure, adds `Cache-Control: no-store, must-revalidate` to prevent stale cached previews; 404 responses also get `Cache-Control: no-store`
+
+### Fixed
+
+#### Composite Cache Empty Without Auto-Stretch
+- `core/compose/rgb.rs` `process_rgb()` only saved pre-stretch channel data when `auto_stretch=true`, and `cmd/compose.rs` gated cache insertion on `auto_stretch`
+- Result: `export_fits_rgb` fell back to raw disk files, losing alignment, white balance, SCNR, and dimension harmonization
+- Fixed by always saving pre-stretch data (`pre_stretch_r/g/b`, `stats_wb_r/g/b` fields added to `ProcessedRgb`) and always populating the composite cache
+
+#### ASDF Fallback Path in RGB Export
+- `cmd/image.rs` `export_fits_rgb` fallback: G/B channels used `load_fits_array()` (FITS-only) while R used `extract_image_resolved()` (ASDF+FITS)
+- All three channels now use `extract_image_resolved()` for consistent ASDF/FITS dispatch
+
+#### PSF Subpixel Peak Determinant Guard Inverted
+- `core/imaging/psf_estimation.rs` `subpixel_peak()` determinant guard was `det > 0.0`, which rejects valid peaks (positive definite Hessian) and accepts saddle points
+- Changed to `det < 0.0`
+
+#### Dark PNG Export from Composite
+- `cmd/image.rs` `export_rgb_png` rendered linear cache data without STF stretch, producing near-black PNGs
+- Added per-channel STF stretch support with `apply_stf_stretch` flag and per-channel shadow/midtone/highlight parameters
+
+#### PSF FWHM Measurement Rewritten
+- Previous implementation used 1D line scans along X and Y axes for half-maximum crossings, inaccurate for non-axis-aligned PSFs and noisy data
+- Replaced with moment-based measurement: second-order weighted intensity moments within a 12px radius, eigenvalue decomposition via trace/determinant for major/minor axes, FWHM from `2*sqrt(2*ln(2)) * sqrt(lambda)`
+- Subpixel peak estimation via quadratic interpolation of the 3x3 Hessian neighborhood
+- Local background estimation (annular median at 10px radius) subtracted before threshold calculation
+
+#### SIMD Log Approximation Precision
+- `math/simd.rs` `fast_log_avx2` used a degree-3 polynomial for `log2(m)` on [1, 2), giving ~4 bits of mantissa precision (~16 ULP)
+- Replaced with Cephes `logf` approach: mantissa in [0.5, 1.0), range reduction to [sqrt(0.5), sqrt(2)], degree-8 minimax polynomial computing `ln(1+f) = f - 0.5*f^2 + f^3*P(f)`
+- Peak error: ~1.4e-8 (< 1 ULP for f32, ~24 bits). SIMD and scalar paths now converge to the same precision
+
+#### Drizzle Sigma Clipping Constant Drift
+- `core/stacking/drizzle.rs` `DrizzleAccumulator::finalize` used hardcoded `1.4826` instead of `MAD_TO_SIGMA` constant
+- Now imports and uses `MAD_TO_SIGMA` from `types::constants`
+
+#### Composite Cache Keys Duplicated as String Literals
+- `cmd/image.rs` used inline `"__composite_r/g/b"` strings in 6 locations while `cmd/compose.rs` defined them as file-local `const`
+- Constants moved to `types/constants.rs` and shared across both modules
+
+#### TypeScript Type Widening in File List
+- `App.tsx` `toMetadataFiles` fallback `status: "queued" as const` widened to `string` in `.map()` union context, causing TS2322 against `MetadataFile[]`
+- Cast fallback `as MetadataFile`; added `f.error ?? undefined` for `null`-to-`undefined` conversion
+
+### Changed
+
+#### Performance
+- `core/alignment/affine.rs` triangle descriptor generation parallelized: `into_par_iter().flat_map()` replaces triple nested sequential loop for top-50 stars
+- `core/analysis/star_detection.rs` tile-based background estimation parallelized: tile coordinates collected first, then `par_iter().filter_map()` for sigma-clipped stats per tile
+- `core/imaging/stats.rs` `compute_image_stats` rewritten: per-chunk `Vec<f32>` accumulation replaced with `par_chunks().map().reduce()` for min/max/sum/count, eliminating intermediate pixel storage and concatenation
+- `core/compose/rgb.rs` `channel_or_synth` rewritten: two alt channel clones + heap allocation for average replaced with `Zip::par_for_each` writing directly to pre-allocated output
+
+#### Code Quality
+- 7 new Tauri commands: `restretch_composite_cmd`, `clear_composite_cache_cmd`, `export_aligned_channels_cmd`, `export_png`, `export_rgb_png`, `generate_synth_cmd`, `generate_synth_stack_cmd`
+- 4 removed commands: `get_raw_pixels_binary`, `get_tile`, `pixel_to_world`, `world_to_pixel`
+- Net command count: 42 to 45
+- WCS cache in `cmd/astrometry.rs` removed (34 lines of `LazyLock<RwLock<WcsCache>>` with manual capacity management), relying on `GLOBAL_IMAGE_CACHE` instead
+- `cmd/compose.rs` STF JSON keys replaced with `RES_SHADOW`/`RES_MIDTONE`/`RES_HIGHLIGHT` constants; per-channel STF returned as `stf_r`/`stf_g`/`stf_b` objects
+- `cmd/image.rs` hardcoded string keys (`"apply_stf"`, `"copy_wcs"`, `"copy_metadata"`, `"file_size_bytes"`) replaced with shared constants
+- `cmd/psf.rs` and `cmd/pipeline.rs` migrated to shared constants for all JSON keys
+- `cmd/visualization.rs` dead `get_tile` command removed (19 lines)
+- `infrastructure/tauri/index.ts` `withDirInvoke` narrowed to non-exported; `getPreviewUrl` export removed from barrel
+- `shared/types/index.ts` cleaned: removed unused re-exports (`ResampleResult`, `StarDetectionResult`, `Star`, `RgbComposeResult`, `DrizzleRgbResult`, `DrizzleRgbOptions`, `CubeInfo`, `WorldCoord`, `PixelCoord`, `FileStatus`, `AppConfig`, `ApiKeyResult`)
+- `shared/types/astrometry.types.ts` removed `WorldCoord` and `PixelCoord` interfaces (corresponding commands removed)
+- Dead type files removed: `compose.types.ts`, `cube.types.ts`
+- 20+ new constants in `types/constants.rs` for JSON keys, composite keys, and PSF result fields
+- Backend grew from ~16,200 to ~17,900 lines; frontend from ~12,650 to ~13,700 lines
+- `APP_VERSION` updated to `v0.4.2`
+
+## [0.4.1] -- 2026-03-25
+
+### Fixed
+
+#### Constants Swap
+- `types/constants.rs` `DIMENSIONS` had value `"align_method"` and vice-versa, causing inverted JSON keys in compose and export responses
+- `export_aligned_channels_cmd` in `cmd/compose.rs` also used the constants in reversed positions (DIMENSIONS for method, ALIGN_METHOD for dims)
+
+#### Double Flat Normalization
+- `core/stacking/calibration.rs` `divide_flat` re-normalized by median after `create_master_flat` (domain) had already normalized by mean
+- Effective division was `pixel / (flat * inv_mean * inv_median)` instead of `pixel / flat_normalized`
+- Removed re-normalization from `divide_flat`, trusting `create_master_flat`
+
+#### Export Dimension Mismatch with Mixed SW/LW JWST Data
+- `cmd/image.rs` `export_fits_rgb` and `export_rgb_png` loaded original paths without harmonizing dimensions
+- With mixed SW/LW (e.g. F444W 5657x2207 + F200W 11471x5993), header declared R dims but data contained 3 arrays of different sizes, causing "Unexpected end of file" errors
+- Now uses composite cache (`__composite_r/g/b`) first (already aligned), with `resample_image` fallback to largest dimension
+- `infra/fits/writer.rs` validates R/G/B dimensions match before writing
+
+#### FITS Reader Crash on Truncated Trailing HDU
+- `infra/fits/reader.rs` `scan_all_hdus` bailed unconditionally if remaining bytes < BLOCK_SIZE
+- Now checks `offset + BLOCK_SIZE > mmap.len()` before parse; if parse fails and HDUs already exist, breaks gracefully
+- Same guard applied to `extract_cube_mmap`
+
+#### Composite Preview Not Showing in Main View
+- `PreviewPanel.tsx` `useAdvancedViewer` condition `!useGpu || !rawPixels` was always true when GPU off, forcing `AdvancedImageViewer` which ignores `compositePreviewUrl`
+- Fixed to `!compositePreviewUrl && (!useGpu || !rawPixels)`
+
+#### GPU Button Starts Purple (Appears Active When Not)
+- `PreviewPanel.tsx` `probeGpu` auto-enabled GPU: `if (available) setUseGpu(true)`, showing purple button without user interaction
+- Removed auto-enable; GPU starts off (gray), user opts in explicitly
+
+#### Custom Palette Does Nothing Visible
+- `SmartChannelMapper.tsx` selecting "Custom" only cleared `autoMapSource` but kept auto-mapped channels in slots
+- Now clears all channel assignments (`L/R/G/B = null`) when Custom is selected, giving empty slots for manual assignment
+
+### Changed
+
+#### Math / Astrophysics
+- Sigma clipping in `calibration_pipeline.rs` `sigma_clipped_mean_stack` and `drizzle.rs` `DrizzleAccumulator::finalize` replaced mean/stddev with median/MAD (Stetson 1987, HST DrizzlePac standard) using `select_nth_unstable_by` for in-place selection
+
+#### Performance
+- `core/stacking/drizzle.rs` `drizzle_frame` parallelized: rows computed via `into_par_iter`, contributions collected in parallel, push sequential; eliminates the dominant sequential bottleneck for 130+ frame stacks at 2048x2048 scale=2x
+- `core/imaging/wavelet.rs` buffer reallocation eliminated: `mem::take` + `vec![0.0; npix]` replaced with `mem::swap` + `par_iter_mut` zero in-place; zero heap allocations in decompose loop
+- `domain/calibration.rs` `median_combine_row_major` micro-allocations eliminated: 16.7M `Vec::with_capacity(n)` + free for 4096x4096 with 20 frames replaced with `par_chunks_mut(cols)` per row, buffer reused via `vals.clear()`
+- `core/imaging/stats.rs` `compute_image_stats` double pixel storage eliminated: per-chunk Vecs + concatenation replaced with `par_chunks` reduce for min/max/sum (no pixel storage), then single pass to collect valid pixels
+- `core/compose/rgb.rs` `channel_or_synth` unnecessary clones eliminated: two alt channel clones + third allocation for average replaced with `Zip::par_for_each` writing directly to output
+- `infra/fits/writer.rs` BufWriter increased from 256KB to 2MB, reducing syscall count for large JWST files (500MB+)
+
+#### Code Quality
+- 24 new constants added to `types/constants.rs` for JSON response keys
+- 4 cmd files cleaned (`compose.rs`, `image.rs`, `psf.rs`, `pipeline.rs`): zero remaining hardcoded string keys in `json!()` macros
+- Removed dead constants: `COPY_WS` (typo of `COPY_WCS`), `COPY_CRPIX`, `COPY_CRVAL`, `COPY_CD`
+- Fixed `COPY_WS` usage in `export_fits_rgb` (was emitting `"copy_ws"` instead of `"copy_wcs"`)
 
 ## [0.4.0] -- 2026-03-20
 
@@ -235,7 +411,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - FITS export with WCS/metadata preservation
 - Cross-correlation auto-alignment
 
-[Unreleased]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.1.0...v0.2.0

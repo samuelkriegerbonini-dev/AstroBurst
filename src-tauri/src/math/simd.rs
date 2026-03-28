@@ -26,30 +26,61 @@ fn is_valid(v: f32) -> bool {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn fast_log_avx2(x: __m256) -> __m256 {
+    let one = _mm256_set1_ps(1.0);
+    let half = _mm256_set1_ps(0.5);
     let ln2 = _mm256_set1_ps(std::f32::consts::LN_2);
-    let magic = _mm256_set1_epi32(0x3F800000u32 as i32);
-    let exp_mask = _mm256_set1_epi32(0x7F800000u32 as i32);
+    let sqrt_half = _mm256_set1_ps(std::f32::consts::FRAC_1_SQRT_2);
+
+    let exp_mask = _mm256_set1_epi32(0x7F800000_u32 as i32);
+    let mant_mask = _mm256_set1_epi32(0x007FFFFF_u32 as i32);
+    let half_bits = _mm256_set1_epi32(0x3F000000_u32 as i32);
 
     let xi = _mm256_castps_si256(x);
 
-    let exp_bits = _mm256_and_si256(xi, exp_mask);
-    let exp_shifted = _mm256_srli_epi32(exp_bits, 23);
-    let exp_f = _mm256_cvtepi32_ps(_mm256_sub_epi32(exp_shifted, _mm256_set1_epi32(127)));
+    let m = _mm256_castsi256_ps(
+        _mm256_or_si256(_mm256_and_si256(xi, mant_mask), half_bits),
+    );
 
-    let mantissa_bits = _mm256_or_si256(_mm256_andnot_si256(exp_mask, xi), magic);
-    let m = _mm256_castsi256_ps(mantissa_bits);
+    let e_int = _mm256_sub_epi32(
+        _mm256_srli_epi32(_mm256_and_si256(xi, exp_mask), 23),
+        _mm256_set1_epi32(0x7E),
+    );
+    let mut e = _mm256_cvtepi32_ps(e_int);
 
-    let c0 = _mm256_set1_ps(-1.7417939);
-    let c1 = _mm256_set1_ps(2.8212026);
-    let c2 = _mm256_set1_ps(-1.4699568);
-    let c3 = _mm256_set1_ps(0.44717955);
+    let cmp = _mm256_cmp_ps(m, sqrt_half, _CMP_LT_OQ);
+    let m = _mm256_blendv_ps(m, _mm256_add_ps(m, m), cmp);
+    e = _mm256_sub_ps(e, _mm256_and_ps(one, cmp));
 
-    let mut p = _mm256_add_ps(_mm256_mul_ps(c3, m), c2);
-    p = _mm256_add_ps(_mm256_mul_ps(p, m), c1);
-    p = _mm256_add_ps(_mm256_mul_ps(p, m), c0);
+    let f = _mm256_sub_ps(m, one);
+    let f2 = _mm256_mul_ps(f, f);
+    let f3 = _mm256_mul_ps(f2, f);
 
-    let log2_x = _mm256_add_ps(exp_f, p);
-    _mm256_mul_ps(log2_x, ln2)
+    let p0 = _mm256_set1_ps(3.3333331174e-1);
+    let p1 = _mm256_set1_ps(-2.4999993993e-1);
+    let p2 = _mm256_set1_ps(2.0000714765e-1);
+    let p3 = _mm256_set1_ps(-1.6668057665e-1);
+    let p4 = _mm256_set1_ps(1.4249322787e-1);
+    let p5 = _mm256_set1_ps(-1.2420140846e-1);
+    let p6 = _mm256_set1_ps(1.1676998740e-1);
+    let p7 = _mm256_set1_ps(-1.1514610310e-1);
+    let p8 = _mm256_set1_ps(7.0376836292e-2);
+
+    let mut r = p8;
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p7);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p6);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p5);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p4);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p3);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p2);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p1);
+    r = _mm256_add_ps(_mm256_mul_ps(r, f), p0);
+
+    let log1pf = _mm256_add_ps(
+        _mm256_sub_ps(f, _mm256_mul_ps(half, f2)),
+        _mm256_mul_ps(f3, r),
+    );
+
+    _mm256_add_ps(_mm256_mul_ps(e, ln2), log1pf)
 }
 
 #[cfg(target_arch = "x86_64")]

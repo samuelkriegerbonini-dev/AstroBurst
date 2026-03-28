@@ -47,8 +47,14 @@ pub fn run() {
             };
 
             std::thread::spawn(move || {
-                match std::fs::read(&path) {
-                    Ok(data) => {
+                let mut data = std::fs::read(&path);
+                if data.is_err() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    data = std::fs::read(&path);
+                }
+
+                match data {
+                    Ok(bytes) => {
                         let mime = if path.ends_with(".png") {
                             "image/png"
                         } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
@@ -63,13 +69,15 @@ pub fn run() {
                             .status(200)
                             .header("Content-Type", mime)
                             .header("Access-Control-Allow-Origin", "*")
-                            .body(data)
+                            .header("Cache-Control", "no-store, must-revalidate")
+                            .body(bytes)
                             .unwrap();
                         responder.respond(response);
                     }
                     Err(_) => {
                         let response = tauri::http::Response::builder()
                             .status(404)
+                            .header("Cache-Control", "no-store")
                             .body(Vec::new())
                             .unwrap();
                         responder.respond(response);
@@ -88,10 +96,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::image::process_fits,
             cmd::image::process_fits_full,
-            cmd::image::get_raw_pixels_binary,
             cmd::image::get_raw_pixels_preview,
             cmd::image::export_fits,
             cmd::image::export_fits_rgb,
+            cmd::image::export_png,
+            cmd::image::export_rgb_png,
             cmd::metadata::get_header,
             cmd::metadata::get_full_header,
             cmd::metadata::get_fits_extensions,
@@ -102,12 +111,14 @@ pub fn run() {
             cmd::analysis::detect_stars,
             cmd::visualization::apply_stf_render,
             cmd::visualization::generate_tiles,
-            cmd::visualization::get_tile,
             cmd::stacking::calibrate,
             cmd::stacking::stack,
             cmd::drizzle::drizzle_stack_cmd,
             cmd::drizzle::drizzle_rgb_cmd,
             cmd::compose::compose_rgb_cmd,
+            cmd::compose::restretch_composite_cmd,
+            cmd::compose::clear_composite_cache_cmd,
+            cmd::compose::export_aligned_channels_cmd,
             cmd::resample::resample_fits_cmd,
             cmd::deconvolution::deconvolve_rl_cmd,
             cmd::background::extract_background_cmd,
@@ -120,14 +131,14 @@ pub fn run() {
             cmd::cube::get_cube_spectrum,
             cmd::astrometry::plate_solve_cmd,
             cmd::astrometry::get_wcs_info,
-            cmd::astrometry::pixel_to_world,
-            cmd::astrometry::world_to_pixel,
             cmd::psf::estimate_psf_cmd,
             cmd::stretch::apply_arcsinh_stretch_cmd,
             cmd::config::get_config,
             cmd::config::update_config,
             cmd::config::save_api_key,
             cmd::config::get_api_key,
+            cmd::synth::generate_synth_cmd,
+            cmd::synth::generate_synth_stack_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

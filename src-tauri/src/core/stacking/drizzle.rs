@@ -6,6 +6,7 @@ pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, 
 
 use crate::core::alignment::phase_correlation;
 use crate::core::stacking::align;
+use crate::types::constants::MAD_TO_SIGMA;
 
 struct DrizzleAccumulator {
     storage: Vec<f32>,
@@ -50,51 +51,66 @@ impl DrizzleAccumulator {
         kernel: DrizzleKernel,
     ) {
         let (in_rows, in_cols) = frame.dim();
+        let src = frame.as_slice().expect("contiguous");
+        let out_rows = self.out_rows;
+        let out_cols = self.out_cols;
 
-        for iy in 0..in_rows {
-            for ix in 0..in_cols {
-                let val = frame[[iy, ix]];
-                if !val.is_finite() {
-                    continue;
-                }
+        let row_contribs: Vec<Vec<(usize, f32, f64)>> = (0..in_rows)
+            .into_par_iter()
+            .map(|iy| {
+                let mut contribs = Vec::new();
+                let row_base = iy * in_cols;
+                for ix in 0..in_cols {
+                    let val = src[row_base + ix];
+                    if !val.is_finite() {
+                        continue;
+                    }
 
-                let cx = (ix as f64 + dx) * scale;
-                let cy = (iy as f64 + dy) * scale;
+                    let cx = (ix as f64 + dx) * scale;
+                    let cy = (iy as f64 + dy) * scale;
 
-                let half = pixfrac * scale * 0.5;
-                let ox_min = ((cx - half).floor() as i64).max(0) as usize;
-                let ox_max = ((cx + half).ceil() as i64).min(self.out_cols as i64 - 1) as usize;
-                let oy_min = ((cy - half).floor() as i64).max(0) as usize;
-                let oy_max = ((cy + half).ceil() as i64).min(self.out_rows as i64 - 1) as usize;
+                    let half = pixfrac * scale * 0.5;
+                    let ox_min = ((cx - half).floor() as i64).max(0) as usize;
+                    let ox_max = ((cx + half).ceil() as i64).min(out_cols as i64 - 1) as usize;
+                    let oy_min = ((cy - half).floor() as i64).max(0) as usize;
+                    let oy_max = ((cy + half).ceil() as i64).min(out_rows as i64 - 1) as usize;
 
-                for oy in oy_min..=oy_max {
-                    for ox in ox_min..=ox_max {
-                        let w = match kernel {
-                            DrizzleKernel::Square => {
-                                overlap_area(
-                                    cx - half, cy - half, cx + half, cy + half,
-                                    ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
-                                )
+                    for oy in oy_min..=oy_max {
+                        for ox in ox_min..=ox_max {
+                            let w = match kernel {
+                                DrizzleKernel::Square => {
+                                    overlap_area(
+                                        cx - half, cy - half, cx + half, cy + half,
+                                        ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
+                                    )
+                                }
+                                DrizzleKernel::Gaussian => {
+                                    let dist2 = (ox as f64 + 0.5 - cx).powi(2)
+                                        + (oy as f64 + 0.5 - cy).powi(2);
+                                    let sigma = half.max(0.5);
+                                    (-dist2 / (2.0 * sigma * sigma)).exp()
+                                }
+                                DrizzleKernel::Lanczos3 => {
+                                    let ddx = (ox as f64 + 0.5 - cx).abs();
+                                    let ddy = (oy as f64 + 0.5 - cy).abs();
+                                    lanczos3(ddx) * lanczos3(ddy)
+                                }
+                            };
+
+                            if w > 1e-12 {
+                                let idx = oy * out_cols + ox;
+                                contribs.push((idx, val, w));
                             }
-                            DrizzleKernel::Gaussian => {
-                                let dist2 = (ox as f64 + 0.5 - cx).powi(2)
-                                    + (oy as f64 + 0.5 - cy).powi(2);
-                                let sigma = half.max(0.5);
-                                (-dist2 / (2.0 * sigma * sigma)).exp()
-                            }
-                            DrizzleKernel::Lanczos3 => {
-                                let ddx = (ox as f64 + 0.5 - cx).abs();
-                                let ddy = (oy as f64 + 0.5 - cy).abs();
-                                lanczos3(ddx) * lanczos3(ddy)
-                            }
-                        };
-
-                        if w > 1e-12 {
-                            let idx = oy * self.out_cols + ox;
-                            self.push(idx, val, w);
                         }
                     }
                 }
+                contribs
+            })
+            .collect();
+
+        for contribs in row_contribs {
+            for (idx, val, w) in contribs {
+                self.push(idx, val, w);
             }
         }
     }
@@ -124,21 +140,22 @@ impl DrizzleAccumulator {
                 let mut rejected = 0u64;
 
                 for _ in 0..sigma_iterations {
-                    if active.len() < 2 {
+                    if active.len() < 3 {
                         break;
                     }
-                    let n_f = active.len() as f64;
-                    let mean = active.iter().map(|v| *v as f64).sum::<f64>() / n_f;
-                    let var = active.iter().map(|v| {
-                        let d = *v as f64 - mean;
-                        d * d
-                    }).sum::<f64>() / (n_f - 1.0).max(1.0);
-                    let sigma = (var.sqrt().max(1e-10)) as f32;
-                    let mean_f = mean as f32;
+
+                    let mid = active.len() / 2;
+                    active.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let median = active[mid];
+
+                    let mut devs: Vec<f32> = active.iter().map(|v| (v - median).abs()).collect();
+                    let dmid = devs.len() / 2;
+                    devs.select_nth_unstable_by(dmid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let sigma = (devs[dmid] as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
 
                     let before = active.len();
                     active.retain(|&v| {
-                        let dev = v - mean_f;
+                        let dev = v - median;
                         dev >= -sigma_low * sigma && dev <= sigma_high * sigma
                     });
                     let removed = before - active.len();

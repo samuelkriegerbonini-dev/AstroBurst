@@ -17,6 +17,9 @@ import {
   Crosshair,
   Eye,
   EyeOff,
+  Loader2,
+  ImageOff,
+  RefreshCw,
 } from "lucide-react";
 
 interface ViewerImage {
@@ -46,6 +49,8 @@ const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 32;
 const ZOOM_STEP = 1.15;
 const ZOOM_PRESETS = [0.25, 0.5, 1, 2, 4, 8];
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [200, 600, 1500] as const;
 
 function clampTransform(t: Transform): Transform {
   return { scale: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, t.scale)), x: t.x, y: t.y };
@@ -74,6 +79,11 @@ function AdvancedImageViewer({
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const compareDragging = useRef(false);
 
+  const [imgLoading, setImgLoading] = useState(false);
+  const [imgError, setImgError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const activeImage = processed ?? original;
   const hasComparison = !!original && !!processed;
 
@@ -82,6 +92,46 @@ function AdvancedImageViewer({
   const hasRenderDims = renderW > 0 && renderH > 0;
 
   const fitToWindowRef = useRef<() => void>(() => {});
+
+  const imgSrc = useMemo(() => {
+    if (!activeImage?.url) return null;
+    if (retryCount === 0) return activeImage.url;
+    const sep = activeImage.url.includes("?") ? "&" : "?";
+    return `${activeImage.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
+  }, [activeImage?.url, retryCount]);
+
+  const origSrc = useMemo(() => {
+    if (!original?.url) return null;
+    if (retryCount === 0) return original.url;
+    const sep = original.url.includes("?") ? "&" : "?";
+    return `${original.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
+  }, [original?.url, retryCount]);
+
+  const procSrc = useMemo(() => {
+    if (!processed?.url) return null;
+    if (retryCount === 0) return processed.url;
+    const sep = processed.url.includes("?") ? "&" : "?";
+    return `${processed.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
+  }, [processed?.url, retryCount]);
+
+  useEffect(() => {
+    if (activeImage?.url) {
+      setImgNatural(null);
+      setImgLoading(true);
+      setImgError(false);
+      setRetryCount(0);
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    }
+  }, [activeImage?.url]);
+
+  useEffect(() => {
+    return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    };
+  }, []);
 
   const fitToWindow = useCallback(() => {
     const container = containerRef.current;
@@ -208,14 +258,31 @@ function AdvancedImageViewer({
     const nh = img.naturalHeight;
     if (nw > 0 && nh > 0) {
       setImgNatural({ w: nw, h: nh });
+      setImgLoading(false);
+      setImgError(false);
     }
   }, []);
 
-  useEffect(() => {
-    if (activeImage?.url) {
-      setImgNatural(null);
+  const handleImageError = useCallback(() => {
+    if (retryTimerRef.current) return;
+    if (retryCount < MAX_RETRIES) {
+      const delay = RETRY_DELAYS[retryCount] ?? 1500;
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        setRetryCount((c) => c + 1);
+      }, delay);
+    } else {
+      setImgLoading(false);
+      setImgError(true);
     }
-  }, [activeImage?.url]);
+  }, [retryCount]);
+
+  const handleRetryClick = useCallback(() => {
+    setRetryCount(0);
+    setImgError(false);
+    setImgLoading(true);
+    requestAnimationFrame(() => setRetryCount(1));
+  }, []);
 
   useEffect(() => {
     if (hasRenderDims) {
@@ -261,18 +328,10 @@ function AdvancedImageViewer({
     <div className={`ab-viewer-root ${className}`}>
       <div className="ab-viewer-toolbar">
         <div className="ab-viewer-toolbar-group">
-          <button
-            onClick={() => zoomTo(transform.scale * ZOOM_STEP)}
-            className="ab-viewer-btn"
-            title="Zoom In (+)"
-          >
+          <button onClick={() => zoomTo(transform.scale * ZOOM_STEP)} className="ab-viewer-btn" title="Zoom In">
             <ZoomIn size={14} />
           </button>
-          <button
-            onClick={() => zoomTo(transform.scale / ZOOM_STEP)}
-            className="ab-viewer-btn"
-            title="Zoom Out (-)"
-          >
+          <button onClick={() => zoomTo(transform.scale / ZOOM_STEP)} className="ab-viewer-btn" title="Zoom Out">
             <ZoomOut size={14} />
           </button>
           <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window">
@@ -292,7 +351,7 @@ function AdvancedImageViewer({
           <button
             onClick={() => setCursorMode((m) => (m === "pan" ? "crosshair" : "pan"))}
             className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
-            title="Toggle Crosshair / Pan"
+            title={cursorMode === "crosshair" ? "Switch to Pan (drag to move)" : "Switch to Crosshair (inspect pixels)"}
           >
             {cursorMode === "crosshair" ? <Crosshair size={14} /> : <Move size={14} />}
           </button>
@@ -300,7 +359,7 @@ function AdvancedImageViewer({
             <button
               onClick={() => setCompareMode((v) => !v)}
               className={`ab-viewer-btn ${compareMode ? "ab-viewer-btn-active" : ""}`}
-              title="Before / After"
+              title="Before / After comparison"
             >
               <SplitSquareHorizontal size={14} />
             </button>
@@ -308,7 +367,7 @@ function AdvancedImageViewer({
           <button
             onClick={() => setShowOverlay((v) => !v)}
             className={`ab-viewer-btn ${showOverlay ? "ab-viewer-btn-active" : ""}`}
-            title="Toggle Overlay Info"
+            title="Toggle status bar"
           >
             {showOverlay ? <Eye size={14} /> : <EyeOff size={14} />}
           </button>
@@ -340,14 +399,32 @@ function AdvancedImageViewer({
         }}
         style={{ cursor: isPanning ? "grabbing" : cursorMode === "pan" ? "grab" : "crosshair" }}
       >
-        {compareMode && original && processed ? (
+        {imgLoading && !hasRenderDims && !imgError && (
+          <div className="ab-viewer-loading-overlay">
+            <Loader2 size={24} className="animate-spin" style={{ color: "var(--ab-teal)", opacity: 0.5 }} />
+          </div>
+        )}
+
+        {imgError && (
+          <div className="ab-viewer-error-overlay">
+            <ImageOff size={28} strokeWidth={1.5} className="text-zinc-600" />
+            <span className="text-xs text-zinc-500 mt-2">Preview failed to load</span>
+            <button onClick={handleRetryClick} className="ab-viewer-retry-btn">
+              <RefreshCw size={12} />
+              Retry
+            </button>
+          </div>
+        )}
+
+        {!imgError && compareMode && original && processed ? (
           <>
             <div style={{ ...imgStyle, zIndex: 1 }}>
               <img
-                src={processed.url}
+                src={procSrc ?? ""}
                 alt={processed.label}
                 draggable={false}
                 onLoad={handleImageLoad}
+                onError={handleImageError}
                 style={{ display: "block" }}
               />
               {overlayCanvasRef && (
@@ -370,7 +447,7 @@ function AdvancedImageViewer({
             >
               <div style={imgStyle}>
                 <img
-                  src={original.url}
+                  src={origSrc ?? ""}
                   alt={original.label}
                   draggable={false}
                   style={{ display: "block" }}
@@ -387,13 +464,14 @@ function AdvancedImageViewer({
             <div className="ab-viewer-compare-label-left" style={{ zIndex: 4 }}>{original.label}</div>
             <div className="ab-viewer-compare-label-right" style={{ zIndex: 4 }}>{processed.label}</div>
           </>
-        ) : (
+        ) : !imgError ? (
           <div style={imgStyle}>
             <img
-              src={activeImage.url}
+              src={imgSrc ?? ""}
               alt={activeImage.label}
               draggable={false}
               onLoad={handleImageLoad}
+              onError={handleImageError}
               style={{ display: "block" }}
             />
             {overlayCanvasRef && (
@@ -403,7 +481,7 @@ function AdvancedImageViewer({
               />
             )}
           </div>
-        )}
+        ) : null}
       </div>
 
       {showOverlay && (

@@ -244,6 +244,23 @@ impl ImageCache {
         Err(anyhow::anyhow!("No cached entry to upgrade for {}", path))
     }
 
+    pub fn insert_synthetic(&self, key: &str, arr: Arc<Array2<f32>>, stats: ImageStats) {
+        let entry = Arc::new(CachedImage {
+            arr,
+            stats,
+            header: None,
+        });
+        let mut cache = self.inner.write().unwrap();
+        cache.put(key.to_string(), entry);
+    }
+
+    pub fn remove(&self, key: &str) {
+        let mut cache = self.inner.write().unwrap();
+        if let Some(removed) = cache.map.remove(key) {
+            cache.current_bytes -= removed.byte_size;
+        }
+    }
+
     pub fn invalidate(&self, path: &str) {
         let mut cache = self.inner.write().unwrap();
         if let Some(removed) = cache.map.remove(path) {

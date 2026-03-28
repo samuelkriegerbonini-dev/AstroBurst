@@ -54,7 +54,7 @@ pub fn wavelet_denoise(
     let mut scales: Vec<Vec<f32>> = Vec::with_capacity(num_scales);
     let mut current = image.as_slice().unwrap().to_vec();
     let mut h_buf = vec![0.0f32; npix];
-    let mut smooth_buf = vec![0.0f32; npix];
+    let mut buf_a = vec![0.0f32; npix];
     let mut t_buf = vec![0.0f32; npix];
 
     for scale_idx in 0..num_scales {
@@ -66,15 +66,17 @@ pub fn wavelet_denoise(
         }
 
         let step = 1usize << scale_idx;
-        atrous_smooth_buffers(&current, rows, cols, step, &mut h_buf, &mut smooth_buf, &mut t_buf);
+        atrous_smooth_buffers(&current, rows, cols, step, &mut h_buf, &mut buf_a, &mut t_buf);
 
-        current
-            .par_iter_mut()
-            .zip(smooth_buf.par_iter())
-            .for_each(|(c, &s)| *c -= s);
+        let detail: Vec<f32> = current
+            .par_iter()
+            .zip(buf_a.par_iter())
+            .map(|(&c, &s)| c - s)
+            .collect();
+        scales.push(detail);
 
-        scales.push(std::mem::replace(&mut current, std::mem::take(&mut smooth_buf)));
-        smooth_buf = vec![0.0f32; npix];
+        std::mem::swap(&mut current, &mut buf_a);
+        buf_a.par_iter_mut().for_each(|v| *v = 0.0);
     }
 
     let noise_sigma = estimate_noise_sigma(&scales[0]);

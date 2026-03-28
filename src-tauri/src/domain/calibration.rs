@@ -32,24 +32,34 @@ fn median_combine_row_major(
         .map(|f| f.as_slice().expect("contiguous"))
         .collect();
 
-    (0..npix)
-        .into_par_iter()
-        .map(|i| {
+    let mut result = vec![0.0f32; npix];
+
+    result
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(y, row_buf)| {
             let mut vals = Vec::with_capacity(n);
-            for s in &slices {
-                let v = s[i];
-                if v.is_finite() {
-                    vals.push(v);
+            let base = y * cols;
+            for x in 0..cols {
+                vals.clear();
+                let idx = base + x;
+                for s in &slices {
+                    let v = s[idx];
+                    if v.is_finite() {
+                        vals.push(v);
+                    }
+                }
+                if vals.is_empty() {
+                    row_buf[x] = 0.0;
+                } else {
+                    let mid = vals.len() / 2;
+                    vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+                    row_buf[x] = vals[mid];
                 }
             }
-            if vals.is_empty() {
-                return 0.0;
-            }
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
-            vals[mid]
-        })
-        .collect()
+        });
+
+    result
 }
 
 pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {

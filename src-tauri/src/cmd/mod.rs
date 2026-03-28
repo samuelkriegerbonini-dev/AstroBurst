@@ -16,3 +16,4 @@ pub mod stretch;
 pub mod visualization;
 pub mod wavelet;
 pub mod psf;
+pub mod synth;

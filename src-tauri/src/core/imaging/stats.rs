@@ -11,53 +11,43 @@ pub fn is_valid_pixel(v: f32) -> bool {
     v.is_finite() && v > PADDING_THRESHOLD
 }
 
-struct ChunkAccum {
-    pixels: Vec<f32>,
-    min: f64,
-    max: f64,
-    sum: f64,
-}
-
 pub fn compute_image_stats(data: &Array2<f32>) -> ImageStats {
     let slice = data.as_slice().expect("Array2 must be contiguous");
 
-    let chunks: Vec<ChunkAccum> = slice
+    let (global_min, global_max, global_sum, total_valid) = slice
         .par_chunks(CHUNK_SIZE)
         .map(|chunk| {
-            let mut acc = ChunkAccum {
-                pixels: Vec::with_capacity(chunk.len()),
-                min: f64::MAX,
-                max: f64::MIN,
-                sum: 0.0,
-            };
+            let mut mn = f64::MAX;
+            let mut mx = f64::MIN;
+            let mut s = 0.0f64;
+            let mut cnt = 0usize;
             for &v in chunk {
                 if is_valid_pixel(v) {
                     let vf = v as f64;
-                    if vf < acc.min { acc.min = vf; }
-                    if vf > acc.max { acc.max = vf; }
-                    acc.sum += vf;
-                    acc.pixels.push(v);
+                    if vf < mn { mn = vf; }
+                    if vf > mx { mx = vf; }
+                    s += vf;
+                    cnt += 1;
                 }
             }
-            acc
+            (mn, mx, s, cnt)
         })
-        .collect();
+        .reduce(
+            || (f64::MAX, f64::MIN, 0.0, 0usize),
+            |(mn1, mx1, s1, c1), (mn2, mx2, s2, c2)| {
+                (mn1.min(mn2), mx1.max(mx2), s1 + s2, c1 + c2)
+            },
+        );
 
-    let total_valid: usize = chunks.iter().map(|c| c.pixels.len()).sum();
     if total_valid == 0 {
         return ImageStats::default();
     }
 
     let mut valid = Vec::with_capacity(total_valid);
-    let mut global_min = f64::MAX;
-    let mut global_max = f64::MIN;
-    let mut global_sum = 0.0;
-
-    for chunk in chunks {
-        valid.extend_from_slice(&chunk.pixels);
-        global_min = global_min.min(chunk.min);
-        global_max = global_max.max(chunk.max);
-        global_sum += chunk.sum;
+    for &v in slice {
+        if is_valid_pixel(v) {
+            valid.push(v);
+        }
     }
 
     let n = valid.len() as u64;

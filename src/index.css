@@ -200,6 +200,41 @@ body {
   padding: 1px 8px;
   border-radius: var(--ab-radius-sm);
   border: 1px solid rgba(63, 63, 70, 0.4);
+  cursor: pointer;
+  transition: border-color var(--ab-transition), background var(--ab-transition);
+}
+
+.ab-slider-value:hover {
+  border-color: rgba(20, 184, 166, 0.3);
+  background: rgba(39, 39, 42, 0.8);
+}
+
+.ab-slider-value-edit {
+  font-size: 11px;
+  font-family: "JetBrains Mono", monospace;
+  color: #f4f4f5;
+  background: rgba(24, 24, 32, 0.9);
+  padding: 1px 8px;
+  border-radius: var(--ab-radius-sm);
+  border: 1px solid var(--ab-teal);
+  outline: none;
+  width: 80px;
+  text-align: right;
+  box-shadow: 0 0 8px rgba(20, 184, 166, 0.15);
+}
+
+.ab-slider-label {
+  font-size: 12px;
+  color: #a1a1aa;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ab-slider-hint {
+  font-size: 9px;
+  color: #52525b;
+  font-weight: 400;
 }
 
 .ab-slider {
@@ -256,6 +291,9 @@ body {
 .ab-slider[data-accent="indigo"] { --slider-fill: var(--ab-indigo); }
 .ab-slider[data-accent="amber"] { --slider-fill: var(--ab-amber); }
 .ab-slider[data-accent="teal"] { --slider-fill: var(--ab-teal); }
+.ab-slider[data-accent="red"] { --slider-fill: #ef4444; }
+.ab-slider[data-accent="green"] { --slider-fill: #22c55e; }
+.ab-slider[data-accent="blue"] { --slider-fill: #3b82f6; }
 
 /* ─── Shared UI: Toggle ─── */
 
@@ -476,7 +514,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 7px 12px;
   font-size: 10px;
   font-weight: 500;
   border-bottom: 2px solid transparent;
@@ -492,12 +530,37 @@ body {
 
 .ab-tab:hover {
   color: #a1a1aa;
+  background: rgba(20, 184, 166, 0.03);
 }
 
 .ab-tab[data-active="true"] {
   border-bottom-color: var(--ab-teal);
   color: #e4e4e7;
   background: rgba(20, 184, 166, 0.06);
+}
+
+/* ─── Processing pills ─── */
+
+.ab-processing-pill {
+  padding: 5px 10px;
+  border-radius: var(--ab-radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 150ms ease;
+  position: relative;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+.ab-processing-pill-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ab-deep);
 }
 
 /* ─── Side pill tabs ─── */

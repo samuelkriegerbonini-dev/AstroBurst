@@ -1,7 +1,7 @@
 import { safeInvoke, getPreviewUrl } from "./client";
 import { getOutputDir } from "./output";
 
-export { safeInvoke, getPreviewUrl, isTauri } from "./client";
+export { safeInvoke, isTauri } from "./client";
 export { getOutputDir, getOutputDirTiles, getExportDir } from "./output";
 export { parseRawPixelBuffer, toUint8Array, parseFftBuffer } from "./parsers";
 
@@ -15,7 +15,7 @@ async function resolvePreview(res: any, key = "png_path", urlKey = "previewUrl")
   return res;
 }
 
-export async function withDirInvoke(
+async function withDirInvoke(
   cmd: string,
   outputDir: string | undefined,
   args: Record<string, any> = {},

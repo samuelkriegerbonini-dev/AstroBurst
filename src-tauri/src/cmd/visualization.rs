@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir, save_preview_png};
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig, StfParams};
 use crate::infra::render::tiles;
-use crate::types::constants::{RES_HIGHLIGHT, RES_MIDTONE, RES_PNG_PATH, RES_SHADOW, RES_TILE_PATH};
+use crate::types::constants::{RES_HIGHLIGHT, RES_MIDTONE, RES_PNG_PATH, RES_SHADOW};
 
 #[tauri::command]
 pub async fn apply_stf_render(
@@ -63,22 +63,5 @@ pub async fn generate_tiles(
 
         let result = tiles::generate_tile_pyramid(&normalized, &output_dir, &params)?;
         Ok(serde_json::to_value(&result).unwrap_or(json!({})))
-    })
-}
-
-#[tauri::command]
-pub async fn get_tile(
-    _path: String,
-    output_dir: String,
-    level: u32,
-    col: u32,
-    row: u32,
-) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let tile_path = format!(
-            "{}/{}/{}_{}.png",
-            output_dir, level, col, row
-        );
-        Ok(json!({ RES_TILE_PATH: tile_path }))
     })
 }

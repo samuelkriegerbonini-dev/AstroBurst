@@ -84,9 +84,9 @@ pub async fn drizzle_stack_cmd(
         let weight_path = format!("{}/{}", output_dir, FILE_DRIZZLE_WEIGHTS_PNG);
 
         render_grayscale(&normalized, &png_path)?;
-        
+
         crate::infra::fits::writer::write_fits_mono(&fits_path, &result.image, None)?;
-        
+
         render_grayscale(&{
             let max_w = result.weight_map.iter().cloned().fold(0.0f32, f32::max);
             if max_w > 0.0 {

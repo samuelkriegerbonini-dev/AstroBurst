@@ -1,6 +1,6 @@
 import { useState, useCallback, lazy, Suspense, memo, useMemo, useRef } from "react";
-import { Layers, Loader2 } from "lucide-react";
-import { composeRgb, drizzleStack, drizzleRgb } from "../../services/compose.service";
+import { Layers, Loader2, Eye } from "lucide-react";
+import { composeRgb, drizzleStack, drizzleRgb, clearCompositeCache } from "../../services/compose.service";
 import { useDoneFilesContext, useRgbContext, useRenderContext, useNarrowbandContext } from "../../context/PreviewContext";
 import { Slider, Toggle, RunButton, ResultGrid } from "../ui";
 import SmartChannelMapper from "./SmartChannelMapper";
@@ -23,9 +23,9 @@ function toChannelFiles(doneFiles: any[]): ChannelFile[] {
 
 function ComposeTabInner() {
   const { doneFiles } = useDoneFilesContext();
-  const { setRgbChannels } = useRgbContext();
-  const { setRenderedPreviewUrl } = useRenderContext();
-  const { narrowbandPalette } = useNarrowbandContext();
+  const { setRgbChannels, setLastAlignMethod } = useRgbContext();
+  const { setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf } = useRenderContext();
+  const { narrowbandPalette, selectedPalette, setSelectedPalette } = useNarrowbandContext();
 
   const [rgbLoading, setRgbLoading] = useState(false);
   const [rgbResult, setRgbResult] = useState<any>(null);
@@ -92,6 +92,8 @@ function ComposeTabInner() {
       const bPath = assignments.B?.path ?? null;
       setRgbLoading(true);
       try {
+        await clearCompositeCache().catch(() => {});
+
         const result = await composeRgb(lPath, rPath, gPath, bPath, "./output", options);
         const ts = Date.now();
         const bustUrl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${ts}`;
@@ -100,8 +102,17 @@ function ComposeTabInner() {
           : result;
         setRgbResult(bustedResult);
         setRgbChannels({ r: rPath, g: gPath, b: bPath });
+        setLastAlignMethod(options.align ? (options.alignMethod ?? "phase_correlation") : null);
         if (result.previewUrl) {
-          setRenderedPreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(bustUrl(result.previewUrl));
+        }
+
+        if (result.stf_r && result.stf_g && result.stf_b) {
+          const stfR = { shadow: result.stf_r.shadow, midtone: result.stf_r.midtone, highlight: result.stf_r.highlight };
+          const stfG = { shadow: result.stf_g.shadow, midtone: result.stf_g.midtone, highlight: result.stf_g.highlight };
+          const stfB = { shadow: result.stf_b.shadow, midtone: result.stf_b.midtone, highlight: result.stf_b.highlight };
+          setCompositeAutoStf(stfR, stfG, stfB);
+          setCompositeStf(stfR, stfG, stfB);
         }
       } catch (e) {
         console.error("RGB compose failed:", e);
@@ -109,7 +120,7 @@ function ComposeTabInner() {
         setRgbLoading(false);
       }
     },
-    [setRgbChannels, setRenderedPreviewUrl],
+    [setRgbChannels, setLastAlignMethod, setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf],
   );
 
   const handleComposeClick = useCallback(() => {
@@ -130,7 +141,7 @@ function ComposeTabInner() {
         setDrizzleProgress(100);
         setDrizzleStage("Done");
         if (result.previewUrl) {
-          setRenderedPreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(bustUrl(result.previewUrl));
         }
       } catch {
         setDrizzleStage("Failed");
@@ -138,7 +149,7 @@ function ComposeTabInner() {
         setDrizzleLoading(false);
       }
     },
-    [setRenderedPreviewUrl],
+    [setCompositePreviewUrl],
   );
 
   const handleDrizzleRgb = useCallback(
@@ -166,7 +177,7 @@ function ComposeTabInner() {
         setDrizzleRgbProgress(100);
         setDrizzleRgbStage("Done");
         if (result.previewUrl) {
-          setRenderedPreviewUrl(bustUrl(result.previewUrl));
+          setCompositePreviewUrl(bustUrl(result.previewUrl));
         }
       } catch {
         setDrizzleRgbStage("Failed");
@@ -174,7 +185,7 @@ function ComposeTabInner() {
         setDrizzleRgbLoading(false);
       }
     },
-    [setRenderedPreviewUrl],
+    [setCompositePreviewUrl],
   );
 
   if (doneFiles.length < 2) {
@@ -211,6 +222,8 @@ function ComposeTabInner() {
           hideButton
           onAssignmentChange={handleAssignmentChange}
           paletteSuggestion={narrowbandPalette}
+          selectedPalette={selectedPalette}
+          onPaletteChange={setSelectedPalette}
         />
 
         {hasL && (
@@ -234,7 +247,16 @@ function ComposeTabInner() {
         {rgbResult && (
           <div className="flex flex-col gap-3 px-4 animate-fade-in">
             {rgbResult.previewUrl && (
-              <img src={rgbResult.previewUrl} alt="RGB composite" className="w-full rounded border border-zinc-700" />
+              <div className="flex flex-col gap-1.5">
+                <img src={rgbResult.previewUrl} alt="RGB composite" className="w-full rounded border border-zinc-700" />
+                <button
+                  onClick={() => setCompositePreviewUrl(rgbResult.previewUrl)}
+                  className="flex items-center gap-1.5 text-[10px] text-violet-400 hover:text-violet-300 transition-colors self-start"
+                >
+                  <Eye size={12} />
+                  View in Preview
+                </button>
+              </div>
             )}
             <ResultGrid columns={3} items={[
               { label: "R median", value: rgbResult.stats_r?.median?.toFixed(0) },

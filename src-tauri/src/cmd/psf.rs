@@ -4,6 +4,11 @@ use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk};
 use crate::core::imaging::psf_estimation::{
     estimate_psf, PsfEstimationConfig,
 };
+use crate::types::constants::{
+    RES_X, RES_Y, RES_PEAK, RES_FLUX, RES_FWHM, RES_ELLIPTICITY, RES_SNR,
+    RES_KERNEL_SIZE, RES_AVERAGE_FWHM, RES_AVERAGE_ELLIPTICITY,
+    RES_SPREAD_PIXELS, RES_STARS_USED, RES_STARS_REJECTED, RES_KERNEL,
+};
 
 #[tauri::command]
 pub async fn estimate_psf_cmd(
@@ -31,24 +36,24 @@ pub async fn estimate_psf_cmd(
 
         let stars_json: Vec<serde_json::Value> = result.stars_used.iter().map(|s| {
             json!({
-                "x": s.x,
-                "y": s.y,
-                "peak": s.peak,
-                "flux": s.flux,
-                "fwhm": s.fwhm,
-                "ellipticity": s.ellipticity,
-                "snr": s.snr,
+                RES_X: s.x,
+                RES_Y: s.y,
+                RES_PEAK: s.peak,
+                RES_FLUX: s.flux,
+                RES_FWHM: s.fwhm,
+                RES_ELLIPTICITY: s.ellipticity,
+                RES_SNR: s.snr,
             })
         }).collect();
 
         Ok(json!({
-            "kernel_size": result.kernel_size,
-            "average_fwhm": result.average_fwhm,
-            "average_ellipticity": result.average_ellipticity,
-            "spread_pixels": result.spread_pixels,
-            "stars_used": stars_json,
-            "stars_rejected": result.stars_rejected,
-            "kernel": result.kernel,
+            RES_KERNEL_SIZE: result.kernel_size,
+            RES_AVERAGE_FWHM: result.average_fwhm,
+            RES_AVERAGE_ELLIPTICITY: result.average_ellipticity,
+            RES_SPREAD_PIXELS: result.spread_pixels,
+            RES_STARS_USED: stars_json,
+            RES_STARS_REJECTED: result.stars_rejected,
+            RES_KERNEL: result.kernel,
         }))
     })
 }

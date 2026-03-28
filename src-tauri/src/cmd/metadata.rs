@@ -3,7 +3,7 @@ use std::fs::File;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached_full};
-use crate::core::metadata::header_discovery::{detect_filter, suggest_palette};
+use crate::core::metadata::header_discovery::{detect_filter, suggest_palette, suggest_palette_with_type, PaletteType};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::{extract_image_mmap, list_extensions, extract_image_mmap_by_index};
@@ -192,8 +192,13 @@ pub async fn get_header_by_hdu(path: String, hdu_index: usize) -> Result<serde_j
 }
 
 #[tauri::command]
-pub async fn detect_narrowband_filters(paths: Vec<String>) -> Result<serde_json::Value, String> {
+pub async fn detect_narrowband_filters(paths: Vec<String>, palette: Option<String>) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let palette_type = palette
+            .as_deref()
+            .map(PaletteType::from_str_loose)
+            .unwrap_or_default();
+
         let mut file_headers: Vec<(String, crate::types::header::HduHeader)> = Vec::new();
 
         for p in &paths {
@@ -222,11 +227,11 @@ pub async fn detect_narrowband_filters(paths: Vec<String>) -> Result<serde_json:
             }
         }
 
-        let palette = suggest_palette(&file_headers);
+        let suggestion = suggest_palette_with_type(&file_headers, &palette_type);
 
         Ok(json!({
             RES_FILTERS: filters,
-            RES_PALETTE: serde_json::to_value(&palette).unwrap_or(json!(null)),
+            RES_PALETTE: serde_json::to_value(&suggestion).unwrap_or(json!(null)),
         }))
     })
 }

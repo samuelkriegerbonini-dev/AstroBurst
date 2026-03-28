@@ -245,6 +245,45 @@
   border: 1px dashed rgba(63, 63, 70, 0.3);
 }
 
+.ab-palette-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.ab-palette-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: #a1a1aa;
+  background: rgba(24, 24, 32, 0.5);
+  border: 1px solid rgba(63, 63, 70, 0.3);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.ab-palette-chip:hover {
+  color: #d4d4d8;
+  border-color: rgba(139, 92, 246, 0.3);
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.ab-palette-chip-active {
+  color: #c4b5fd;
+  border-color: rgba(139, 92, 246, 0.5);
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.ab-palette-chip-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
 .ab-mapper-slots {
   display: flex;
   flex-direction: column;
@@ -817,10 +856,10 @@
 
 .ab-mfl-product-filter {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px 2px;
-  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px 4px;
+  flex-wrap: nowrap;
 }
 
 .ab-mfl-product-chip {
@@ -941,4 +980,138 @@
 .ab-mfl-export-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ─── AdvancedImageViewer: Loading / Error overlays ─── */
+
+.ab-viewer-loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.ab-viewer-error-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  z-index: 5;
+  background: rgba(5, 5, 16, 0.6);
+}
+
+.ab-viewer-retry-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 14px;
+  border-radius: var(--ab-radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ab-teal);
+  background: rgba(20, 184, 166, 0.1);
+  border: 1px solid rgba(20, 184, 166, 0.2);
+  cursor: pointer;
+  transition: all var(--ab-transition);
+}
+
+.ab-viewer-retry-btn:hover {
+  background: rgba(20, 184, 166, 0.2);
+  border-color: rgba(20, 184, 166, 0.35);
+  box-shadow: 0 0 12px rgba(20, 184, 166, 0.1);
+}
+
+/* ─── Side tab strip (right rail) ─── */
+
+.ab-side-tab {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ab-radius-sm);
+  border: none;
+  background: transparent;
+  color: #52525b;
+  cursor: pointer;
+  transition: all var(--ab-transition);
+}
+
+.ab-side-tab:hover {
+  color: #a1a1aa;
+  background: rgba(63, 63, 70, 0.3);
+}
+
+.ab-side-tab[data-active="true"] {
+  background: rgba(20, 184, 166, 0.12);
+  color: var(--ab-teal);
+  box-shadow: 0 0 10px rgba(20, 184, 166, 0.08);
+}
+
+.ab-side-tab[data-active="true"]:hover {
+  background: rgba(20, 184, 166, 0.18);
+}
+
+.ab-side-tab-indicator {
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--ab-teal);
+  box-shadow: 0 0 6px rgba(20, 184, 166, 0.3);
+}
+
+/* ─── Side panel close button ─── */
+
+.ab-side-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--ab-radius-sm);
+  border: none;
+  background: transparent;
+  color: #52525b;
+  cursor: pointer;
+  transition: all var(--ab-transition);
+}
+
+.ab-side-panel-close:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+}
+
+/* ─── MetadataFileList: filter panel improvements ─── */
+
+.ab-mfl-filter-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #52525b;
+  flex-shrink: 0;
+  padding-right: 4px;
+}
+
+.ab-mfl-filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }

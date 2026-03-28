@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use ndarray::{Array2, s};
+use ndarray::{Array2, Zip, s};
 use rayon::prelude::*;
 
 use crate::core::alignment::affine;
@@ -31,6 +31,12 @@ pub struct ProcessedRgb {
     pub offset_b: (f64, f64),
     pub scnr_applied: bool,
     pub dimension_crop: Option<DimensionCrop>,
+    pub pre_stretch_r: Option<Array2<f32>>,
+    pub pre_stretch_g: Option<Array2<f32>>,
+    pub pre_stretch_b: Option<Array2<f32>>,
+    pub stats_wb_r: Option<ImageStats>,
+    pub stats_wb_g: Option<ImageStats>,
+    pub stats_wb_b: Option<ImageStats>,
 }
 
 fn crop_to_size(arr: &Array2<f32>, rows: usize, cols: usize) -> Array2<f32> {
@@ -123,9 +129,17 @@ fn channel_or_synth(
     cols: usize,
 ) -> Array2<f32> {
     if let Some(ch) = primary { return ch.clone(); }
-    let a = alt1.map(|a| a.clone()).unwrap_or_else(|| Array2::zeros((rows, cols)));
-    let b = alt2.map(|b| b.clone()).unwrap_or_else(|| Array2::zeros((rows, cols)));
-    (&a + &b) / 2.0
+    match (alt1, alt2) {
+        (Some(a), Some(b)) => {
+            let mut out = Array2::zeros((rows, cols));
+            Zip::from(&mut out).and(a).and(b)
+                .par_for_each(|o, &av, &bv| *o = (av + bv) * 0.5);
+            out
+        }
+        (Some(a), None) => a.clone(),
+        (None, Some(b)) => b.clone(),
+        (None, None) => Array2::zeros((rows, cols)),
+    }
 }
 
 fn merge_for_stf(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
@@ -195,7 +209,7 @@ fn align_single_affine(
     (warped, (result.transform.ty, result.transform.tx))
 }
 
-fn align_channels(
+pub(crate) fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
     rows: usize, cols: usize, method: AlignMethod,
 ) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (f64, f64), (f64, f64))> {
@@ -335,6 +349,13 @@ pub fn process_rgb(
             )
         };
 
+    let pre_r = Some(r_img.clone());
+    let pre_g = Some(g_img.clone());
+    let pre_b = Some(b_img.clone());
+    let pre_sr = Some(stats_wb_r.clone());
+    let pre_sg = Some(stats_wb_g.clone());
+    let pre_sb = Some(stats_wb_b.clone());
+
     apply_stf_inplace(&mut r_img, &stf_r_params, &stats_wb_r);
     apply_stf_inplace(&mut g_img, &stf_g_params, &stats_wb_g);
     apply_stf_inplace(&mut b_img, &stf_b_params, &stats_wb_b);
@@ -351,5 +372,11 @@ pub fn process_rgb(
         stf_r: stf_r_params, stf_g: stf_g_params, stf_b: stf_b_params,
         stats_r, stats_g, stats_b,
         offset_g: off_g, offset_b: off_b, scnr_applied, dimension_crop,
+        pre_stretch_r: pre_r,
+        pre_stretch_g: pre_g,
+        pre_stretch_b: pre_b,
+        stats_wb_r: pre_sr,
+        stats_wb_g: pre_sg,
+        stats_wb_b: pre_sb,
     })
 }
