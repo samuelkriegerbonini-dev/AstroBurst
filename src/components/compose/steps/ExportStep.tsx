@@ -95,15 +95,8 @@ export default function ExportStep({ state }: ExportStepProps) {
           const restretchRes = await restretchComposite(dir, compositeStfR, compositeStfG, compositeStfB);
 
           if (restretchRes?.png_path) {
-            try {
-              const { copyFile } = await import("@tauri-apps/plugin-fs");
-              await copyFile(restretchRes.png_path, outputPath);
-              setResult({ output_path: outputPath, elapsed_ms: restretchRes.elapsed_ms });
-              setSavedPath(outputPath);
-            } catch {
-              setResult({ output_path: restretchRes.png_path, elapsed_ms: restretchRes.elapsed_ms });
-              setSavedPath(restretchRes.png_path);
-            }
+            setResult({ output_path: restretchRes.png_path, elapsed_ms: restretchRes.elapsed_ms });
+            setSavedPath(restretchRes.png_path);
           } else {
             const { r, g, b } = resolveRgbPaths(state);
             const res = await exportRgbPng(r, g, b, outputPath, { bitDepth });
@@ -183,17 +176,10 @@ export default function ExportStep({ state }: ExportStepProps) {
       }
 
       if (state.compositeReady) {
-        const compositePath = `${dir}/composite_${ts}.png`;
         try {
           const res = await restretchComposite(dir, compositeStfR, compositeStfG, compositeStfB);
           if (res?.png_path) {
-            try {
-              const { copyFile } = await import("@tauri-apps/plugin-fs");
-              await copyFile(res.png_path, compositePath);
-              filesToZip.push({ name: "composite_rgb.png", path: compositePath });
-            } catch {
-              filesToZip.push({ name: "composite_rgb.png", path: res.png_path });
-            }
+            filesToZip.push({ name: "composite_rgb.png", path: res.png_path });
           }
         } catch {}
       }

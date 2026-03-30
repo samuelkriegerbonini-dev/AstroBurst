@@ -35,7 +35,7 @@ interface AdvancedImageViewerProps {
   pixelValue?: { x: number; y: number; value: number } | null;
   onMousePixel?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
-  overlayCanvasRef?: React.RefObject<HTMLCanvasElement>;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   className?: string;
 }
 

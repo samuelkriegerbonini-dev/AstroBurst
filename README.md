@@ -13,7 +13,7 @@
   <a href="https://github.com/samuelkriegerbonini-dev/AstroBurst/releases"><img src="https://img.shields.io/github/v/release/samuelkriegerbonini-dev/AstroBurst?style=flat-square&color=blue" alt="Release"></a>
   <a href="https://github.com/samuelkriegerbonini-dev/AstroBurst/actions"><img src="https://img.shields.io/github/actions/workflow/status/samuelkriegerbonini-dev/AstroBurst/build.yml?style=flat-square" alt="Build"></a>
   <img src="https://img.shields.io/badge/rust-1.75+-orange.svg?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tauri-2.0-purple.svg?style=flat-square" alt="Tauri">
+  <img src="https://img.shields.io/badge/tauri-2.10-purple.svg?style=flat-square" alt="Tauri">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/samuelkriegerbonini-dev/AstroBurst?style=flat-square&color=green" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
   <a href="https://ko-fi.com/astroburst"><img src="https://img.shields.io/badge/Ko--fi-Support-FF5E5B?style=flat-square&logo=ko-fi" alt="Ko-fi"></a>
@@ -32,126 +32,101 @@
 
 ---
 
-AstroBurst is an open-source desktop app for processing astronomical images. Drop in your FITS or ASDF files, compose RGB from narrowband channels, stack with drizzle, and export. Everything runs locally on your machine with no cloud dependencies.
+AstroBurst is an open-source desktop app for processing astronomical images. Drop in your FITS or ASDF files, compose RGB from narrowband channels, stack with sigma clipping, and export. Everything runs locally on your machine with no cloud dependencies.
 
 It's built on Rust for the heavy lifting, React for the interface, and WebGPU for real-time preview. The result is a tool that opens a 2 GB IFU datacube in 300 ms, processes 10 frames at 1.4 GB/s, and renders STF adjustments in 8 ms on GPU.
 
-> **What's new in v0.4.2**: Live composite STF re-stretch without recomposing, narrowband palette system (SHO/HOO/HOS/NaturalColor/Custom), synthetic FITS generation for testing, PNG/FITS export pipeline with 16-bit and multi-BITPIX support, per-channel STF in RGB PNG export, aligned channel FITS export with WCS offset correction, Cephes-precision SIMD log (< 1 ULP), moment-based PSF FWHM measurement, and parallel triangle matching for affine alignment. See the [changelog](CHANGELOG.md).
+> **What's new in v0.4.5**: Non-destructive composite pipeline (ORIG/KEY dual cache, idempotent WB and SCNR), STF rendering consistency across GPU/CPU/Rust, spectral wavelength resolver for blend presets, wavelength unit conversion in spectroscopy, Windows output path fix, star overlay and detection fixes. See the [changelog](CHANGELOG.md).
 >
-> **v0.4.x highlights**: Star-based affine alignment for rotational misalignment, stability-based auto white balance, SCNR luminance redistribution to R/B, arcsinh stretch, live composite STF re-stretch, parallel drizzle, median/MAD sigma clipping (Stetson 1987), full-precision SIMD log, synthetic FITS generator, and a full numerical correctness audit across the math pipeline. The frontend was refactored into 11 domain services with shared UI primitives.
+> **v0.4.x highlights**: 10-step ComposeWizard pipeline, masked stretch with star protection, SPCC color calibration, star-based affine alignment, stability white balance, SCNR luminance redistribution, blend presets (SHO/HOO/Foraxx/Dynamic HOO/Hubble Legacy), live composite STF re-stretch, synthetic FITS generation, and a full numerical correctness audit. The frontend was refactored into 12 domain services with shared UI primitives.
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-drizzle-rgb-compose.png" alt="NGC 628 Drizzle RGB Compose" width="100%">
+  <img src="docs/screenshots/pillars-sho-blend-presets.png" alt="Pillars of Creation SHO Blend" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) with 16 JWST NIRCam files across 8 filters. Drizzle RGB panel with 2x scale, Square kernel, pixfrac 0.70, sigma-clipped rejection, phase correlation alignment, and stability white balance. Info tab showing pixel scale (0.06"/px), WCS coordinates, and image statistics. Full compose and drizzle pipeline in a single view.</em></p>
+<p align="center"><em>JWST Pillars of Creation (M16) composed from 6 NIRCam filters with SHO (Hubble) blend preset. ComposeWizard BlendStep showing preset buttons: RGB, SHO, Hubble Legacy, HOO, Dynamic HOO, Foraxx. 14340x8583 with auto stretch and linked STF. Spectral wavelength resolver maps presets to any bin configuration.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/pillars-of-creation-rgb-affine-export.png" alt="Pillars of Creation RGB Compose" width="100%">
+  <img src="docs/screenshots/eagle-nebula-sho-compose-wizard.png" alt="Eagle Nebula SHO ComposeWizard" width="100%">
 </p>
-<p align="center"><em>JWST Pillars of Creation (M16) composed from F444W / F200W / F090W with star-based affine alignment handling rotation between channels. Luminance layer from F187N. Export panel with FITS and PNG output options. Auto-resampled mixed SW/LW resolution.</em></p>
+<p align="center"><em>HST Eagle Nebula (M16) RGB composite via 10-step ComposeWizard. Three WFPC2 narrowband files ([OIII] 502nm, H-alpha 656nm, [SII] 673nm) auto-mapped to R/G/B channels. BlendStep with per-channel weight matrix, auto stretch, and "composite ready" status. 1600x1600 float32.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/cassiopeia-a-lrgb-perchannel-stf-scnr.png" alt="Cassiopeia A LRGB Per-Channel STF" width="100%">
+  <img src="docs/screenshots/ngc628-masked-stretch.png" alt="NGC 628 Masked Stretch" width="100%">
 </p>
-<p align="center"><em>Cassiopeia A LRGB with per-channel STF stretch sliders (R/G/B shadow, midtone, highlight). Manual white balance (R: 1.38, G: 1.00, B: 0.76), SCNR Maximum Neutral at 88%, phase correlation alignment. F150W2 as luminance. 13759x12451 auto-resampled mixed SW/LW resolution.</em></p>
+<p align="center"><em>NGC 628 (M74) RGB composite with masked stretch. Processing tab showing star-protected MTF: 10 iterations, 15% target background, 85% star protection, 2.5x FWHM mask growth, 4.0px softness, luminance protection. Result: 42,391 stars masked, 69.3% coverage, converged in 4 iterations (0.7s).</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/eagle-nebula-sho-hubble-palette.png" alt="Eagle Nebula SHO Palette" width="100%">
+  <img src="docs/screenshots/pillars-jwst-analysis-channels.png" alt="Pillars of Creation Analysis" width="100%">
 </p>
-<p align="center"><em>HST Eagle Nebula (M16) narrowband SHO palette auto-detected from FITS headers. [SII] 673nm mapped to R, H-alpha 656nm to G, [OIII] 502nm to B. One-click Hubble Palette assignment with Auto-Map.</em></p>
+<p align="center"><em>JWST Pillars of Creation single-channel analysis. 14341x8583 F187N at GPU render. Histogram with auto-STF, star detection (sigma 5.0), plate solve (RA 18h 18m 55.15s, Dec -13 51' 6.2", 0.031"/px, 7.5' x 4.5' FOV), FFT power spectrum, and deep zoom. ChannelStep below with 6 unassigned JWST files ready for mapping.</em></p>
 
 <details>
 <summary><strong>More screenshots</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-lrgb-affine-drizzle-headers.png" alt="NGC 628 LRGB Compose" width="100%">
+  <img src="docs/screenshots/ngc628-deconvolution-processing.png" alt="NGC 628 Deconvolution" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) LRGB composition from 16 JWST NIRCam files. F115W as luminance, F444W / F200W / F115W as RGB with star-based affine alignment, stability white balance, and SCNR Average Neutral at 40%. Drizzle stack panel and header explorer with categorized keyword browser visible below.</em></p>
+<p align="center"><em>JWST NGC 628 (M74) Richardson-Lucy deconvolution. 16 NIRCam files with I2D/SEGM filter chips. Processing chain: BG > Denoise > PSF. RL with 20 iterations, PSF sigma 2.0, Tikhonov regularization (0.001), deringing threshold 0.10. AdvancedImageViewer with zoom presets (25%-8x). Deconvolving in progress (iteration 1/20, delta 6.60e2).</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/ngc6744-rgb-export-fits.png" alt="NGC 6744 RGB Export FITS" width="100%">
+  <img src="docs/screenshots/ngc628-export-fits-zip.png" alt="NGC 628 Export" width="100%">
 </p>
-<p align="center"><em>NGC 6744 RGB composite from ground-based FLI ProLine PL9000 data (2048x2048). Export FITS panel with STF stretch toggle, WCS and observation metadata copy, and multi-BITPIX selector (Float32). Demonstrates support for non-space-telescope FITS data.</em></p>
+<p align="center"><em>NGC 628 (M74) RGB composite export. 18 JWST NIRCam files. ExportStep (step 10) with FITS RGB format, export complete (618 MB, 617ms), file reveal button, and ZIP bundle creation in progress. ComposeWizard bar showing Channels and Blend completed.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/ngc628-16files-info-panel.png" alt="NGC 628 File Browser" width="100%">
+  <img src="docs/screenshots/synth-generator-28files.png" alt="Synthetic Generator" width="100%">
 </p>
-<p align="center"><em>16 JWST NIRCam files loaded across 8 filters (F405N through F115W). Info panel showing pixel scale (0.063"/px), WCS coordinates (RA/Dec), image statistics (mean, median, sigma), and instrument metadata.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/ngc628-fft-power-spectrum.png" alt="NGC 628 FFT Power Spectrum" width="100%">
-</p>
-<p align="center"><em>FFT power spectrum analysis of NGC 628. The frequency-domain view reveals the galaxy's spiral arm structure as directional patterns radiating from the center.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/background-extraction-headers-processing.png" alt="Background Extraction with Headers" width="100%">
-</p>
-<p align="center"><em>Background extraction on 13 JWST NIRCam frames. Polynomial surface fitting (degree 3) with sigma-clipped grid sampling. Processing panel with corrected/model preview. Header explorer showing 9 HDUs and 272 keywords with categorized browser (Observation, Instrument, Image, WCS, Processing).</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/wavelet-noise-reduction-comparison.png" alt="Wavelet Noise Reduction" width="100%">
-</p>
-<p align="center"><em>Wavelet a-trous noise reduction with 2 scales and per-scale sigma thresholds (fine detail: 0.1, small structures: 2.5). Side-by-side comparison showing noise suppression while preserving faint nebular structure. Histogram and STF controls below.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/richardson-lucy-deconv-star-detection.png" alt="Richardson-Lucy Deconvolution" width="100%">
-</p>
-<p align="center"><em>Richardson-Lucy deconvolution (FFT-accelerated) with 20 iterations, Tikhonov regularization (0.001), and deringing. Processing chain: Background Extraction > Denoise > PSF > Deconv. Star detection table showing X/Y coordinates, flux, FWHM, and SNR for detected sources.</em></p>
-
-### Processing Panels
-
-<p align="center">
-  <img src="docs/screenshots/panel-psf-estimation-empirical.png" alt="PSF Estimation" width="280">
-  <img src="docs/screenshots/panel-arcsinh-stretch.png" alt="Arcsinh Stretch" width="280">
-</p>
-<p align="center"><em>Left: Empirical PSF estimation with moment-based FWHM measurement. FWHM 1.76 px, ellipticity 0.192, 3/5 stars used. Processing chain visible (BG > Denoise > PSF). Right: Arcsinh stretch (S=50) on Cassiopeia A 6763x6102 with original/stretched comparison and click-to-edit value display.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/panel-wavelet-noise-reduction.png" alt="Wavelet Noise Reduction" width="280">
-  <img src="docs/screenshots/panel-deconvolution-richardson-lucy.png" alt="Richardson-Lucy Deconvolution" width="280">
-</p>
-<p align="center"><em>Left: Wavelet a-trous noise reduction with 5 scales and per-scale sigma thresholds (click-to-edit sliders). Soft threshold (linear) toggle. Right: Richardson-Lucy deconvolution (FFT-accelerated), 20 iterations, PSF sigma 2.0, Tikhonov regularization (0.001), deringing with threshold control.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/cassiopeia-a-analysis-star-detection.png" alt="Cassiopeia A Analysis" width="100%">
-</p>
-<p align="center"><em>Cassiopeia A single-channel analysis. 6763x6102 at 56% zoom. Histogram with auto-STF, star detection table (8 stars with flux, FWHM, SNR columns), and plate solve section. Filter chips (I2D, SEGM) and search bar in file list.</em></p>
+<p align="center"><em>Synthetic FITS generator with 28 JWST NIRCam files loaded. Configurable star field: 2048x2048, 500 stars, uniform distribution, Gaussian PSF (3.0px FWHM). CCD noise model: gain 1.5 e-/ADU, read noise 8.0 e-, sky background 200 ADU, 300s exposure. Vignetting toggle and star catalog CSV export.</em></p>
 
 ### Stacking Panels
 
 <p align="center">
-  <img src="docs/screenshots/panel-calibration-mapper.png" alt="Calibration Mapper" width="280">
-  <img src="docs/screenshots/panel-sigma-clipped-stacking.png" alt="Sigma-Clipped Stacking" width="280">
-  <img src="docs/screenshots/panel-calibration-pipeline.png" alt="Calibration Pipeline" width="280">
+  <img src="docs/screenshots/panel-calibration-mapper.png" alt="Calibration Mapper" width="32%">
+  <img src="docs/screenshots/panel-sigma-clipped-stacking.png" alt="Sigma-Clipped Stacking" width="32%">
+  <img src="docs/screenshots/panel-calibration-pipeline.png" alt="Calibration Pipeline" width="32%">
 </p>
-<p align="center"><em>Left: Calibration mapper with science, bias, dark, and flat frame slots. Center: Sigma-clipped stacking with configurable low/high thresholds, max iterations, and auto-align. Right: Full calibration pipeline with per-channel file assignment, calibration frames, and sigma-clipped stacking.</em></p>
+<p align="center"><em>Left: Calibration mapper with science, bias, dark, and flat frame slots. Center: Sigma-clipped stacking with configurable low/high thresholds (3.0), max iterations (5), auto-align, and JWST file list. Right: Calibration pipeline with per-channel R/G/B file assignment, calibration frames (darks/flats/bias), sigma clipping, and normalize toggle.</em></p>
 
 </details>
 
 ## Features
 
+### ComposeWizard (10-Step Pipeline)
+1. **Channels**: Auto-detect narrowband filters from headers, drag-and-drop assignment, JWST wavelength mapping, custom bins
+2. **Stack**: Per-channel sigma-clipped stacking with configurable thresholds and auto-align
+3. **Background**: Polynomial surface extraction with sigma-clipped grid sampling (subtract/divide)
+4. **Align**: Phase correlation (sub-pixel) or star-based affine (rotation/scale), automatic fallback
+5. **Blend**: Preset palettes (SHO, HOO, Foraxx, Dynamic HOO, Hubble Legacy, RGB) with spectral wavelength resolver for any bin configuration
+6. **Calibrate**: Stability-based auto white balance or manual per-channel sliders, non-destructive (reads from immutable ORIG cache)
+7. **Mask**: Star mask with growth/protection controls for masked stretch
+8. **Stretch**: Per-channel STF, masked stretch with star protection, or arcsinh
+9. **Color**: SCNR green removal (average/maximum neutral) with BT.709 luminance redistribution
+10. **Export**: PNG (8/16-bit), FITS RGB, ZIP bundle with all channels + composite
+
 ### Core Pipeline
 - **FITS + ASDF**: Memory-mapped I/O. MEF with auto SCI selection. First non-Python ASDF reader (zlib/bzip2/lz4, Roman Space Telescope gWCS). ZIP transparency. Multi-BITPIX export (16/float32/float64).
-- **RGB Composition**: Per-channel STF with live re-stretch, dual alignment (FFT phase correlation or star-based affine), stability-based white balance, SCNR with luminance redistribution, auto-resample for mixed resolutions. Composite cache enables instant STF adjustments without recomposing.
-- **Drizzle**: Sub-pixel reconstruction (Square / Gaussian / Lanczos3), 1-4x scale, sigma-clipped rejection with flat-storage accumulator.
-- **Calibration**: Bias, dark, flat correction with median-normalized flats. Crop-to-intersection for mismatched dimensions.
+- **Non-destructive composite**: ORIG/KEY dual-layer cache. WB and SCNR reconstruct from immutable originals every time. Reset to blend with one click.
+- **Dual alignment**: FFT phase correlation (sub-pixel, O(n log n)) as default, star-based affine (triangle asterism + RANSAC, 500 iterations) for rotation. Automatic fallback chain: affine > rigid > phase correlation > identity.
+- **STF consistency**: GPU shader, CPU worker, and Rust backend produce pixel-identical output via symmetric denominator protection and unified padding threshold.
+- **Calibration**: Bias, dark, flat correction with median-combined masters. Crop-to-intersection for mismatched dimensions.
 - **Smart Pipeline**: Auto-detects 2D images vs 3D cubes per file and routes accordingly.
-- **Export**: FITS (mono, RGB, aligned channels with WCS offset correction), PNG (8/16-bit, with optional STF stretch), ZIP batch.
 
 ### Enhancement
 - **Deconvolution**: Richardson-Lucy (FFT-based, Tikhonov regularization, deringing)
 - **Background**: Polynomial surface fitting with sigma-clipped grid sampling
 - **Wavelet**: A trous multi-scale denoise with per-scale thresholds (up to 8 scales)
-- **Stretch**: Arcsinh stretch with configurable factor for non-linear tone mapping
+- **Stretch**: Arcsinh stretch, masked stretch with star protection, per-channel STF
+- **SPCC**: Spectrophotometric color calibration with optional Gaia DR3 TAP (vizier feature)
 
 ### Analysis
 - 16K-bin histogram with auto-STF
 - FFT power spectrum with Hann window
-- Star detection (flux, FWHM, SNR)
+- Star detection (flux, median FWHM, SNR) with overlay circles
 - Empirical PSF estimation with moment-based FWHM (eigenvalue decomposition, subpixel peak interpolation)
 - Narrowband filter auto-detection (H-alpha, [OIII], [SII]) with multi-palette support (SHO, HOO, HOS, NaturalColor, Custom)
+- Spectroscopy with automatic wavelength unit conversion (M, NM, ANGSTROM, HZ)
 - Full header explorer with categorized keyword browser
 
 ### Synthetic Data
@@ -199,15 +174,15 @@ cd AstroBurst
 cargo tauri dev
 ```
 
-Requires Rust 1.75+, Node.js 18+, Tauri CLI v2. WebGPU needs Vulkan/Metal/DX12.
+Requires Rust 1.75+, Node.js 18+, Tauri CLI v2.10. WebGPU needs Vulkan/Metal/DX12.
 
 ## Quick Start
 
 1. **Drop files** into the window (`.fits`, `.fit`, `.asdf`, or `.zip`). They're processed automatically.
 2. **Explore**: Click a file to see its preview, histogram, and headers. Tweak STF sliders or hit Auto STF.
-3. **Compose RGB**: Assign channels manually or click Auto to detect filters from headers. Pick Phase Correlation (default, sub-pixel) or Affine (handles rotation) for alignment.
-4. **Drizzle**: Select 2+ frames of the same target for sub-pixel reconstruction. Drizzle RGB combines stacking with composition.
-5. **Export**: PNG previews or FITS with preserved WCS metadata.
+3. **ComposeWizard**: Open the Compose tab and follow the 10 steps. Auto-Map detects filters, blend presets resolve by wavelength, WB and SCNR are non-destructive.
+4. **Processing**: Background extraction, wavelet denoise, deconvolution, and stretch are available as standalone tools in the Processing tab.
+5. **Export**: PNG (8/16-bit) or FITS with preserved WCS metadata. ZIP bundle for all channels + composite.
 
 ## Getting Data
 
@@ -259,7 +234,7 @@ NIRCam has two detector resolutions: short-wave (~0.031"/px, ~14K) and long-wave
 
 ### Hubble Narrowband
 
-HST narrowband filters are auto-detected from FITS headers. Five palette presets are available: SHO (Hubble Palette, default), HOO, HOS, NaturalColor, and Custom. The palette selector in Smart Channel Mapper lets you switch between them. SHO maps [SII] 673nm to R, H-alpha 656nm to G, [OIII] 502nm to B. HOO maps Ha to R and OIII to both G and B. Custom mode clears all assignments for fully manual mapping.
+HST narrowband filters are auto-detected from FITS headers. Six blend presets are available: SHO (Hubble Palette), HOO, Dynamic HOO, Foraxx, Hubble Legacy, and RGB. The spectral wavelength resolver maps presets to any bin configuration by sorting both preset weights and filled bins by wavelength. SHO maps [SII] 673nm to R, H-alpha 656nm to G, [OIII] 502nm to B. Custom bins with wavelength metadata (e.g., JWST filters) are resolved automatically.
 
 ### Roman Space Telescope (ASDF)
 
@@ -267,51 +242,55 @@ AstroBurst is the first non-Python tool with native ASDF support. Roman `.asdf` 
 
 ### 3D Cubes
 
-For IFU data (NAXIS3 > 1), click anywhere on the preview to extract the spectrum at that pixel. Wavelength calibration is read from WCS headers when available.
+For IFU data (NAXIS3 > 1), click anywhere on the preview to extract the spectrum at that pixel. Wavelength calibration is read from WCS headers when available, with automatic unit conversion (meters, nanometers, Angstroms, Hz, etc.).
 
 ## Architecture
 
 ```
-Frontend (React + TypeScript + Tailwind)
-+-- 11 domain services (compose, fits, analysis, header, synth, ...)
+Frontend (React 19 + TypeScript 5.7 + Tailwind v4)
++-- 12 domain services (compose, fits, analysis, header, synth, ...)
 +-- 8 shared UI primitives (Slider, Toggle, RunButton, ...)
-+-- 7 split PreviewContexts for minimal re-renders
-+-- infrastructure/tauri/ IPC layer
++-- 8 split PreviewContexts for minimal re-renders
++-- 10-step ComposeWizard with useReducer state machine
++-- infrastructure/tauri/ IPC layer (safeInvoke, withPreview, getOutputDir)
 +-- Lazy-loaded panels via React.lazy + Suspense
          |
-         | Tauri Commands (45)
+         | Tauri Commands (47)
          v
-Backend (Rust + Tauri v2)
-+-- cmd/     45 command handlers
+Backend (Rust + Tauri v2.10)
++-- cmd/     47 command handlers across 12 modules
 +-- core/    alignment (phase correlation + affine), analysis,
-|            astrometry, compose, cube, imaging, metadata, stacking, synth
+|            astrometry (WCS, plate solve, SPCC), compose (RGB, blend, SCNR),
+|            cube, imaging (STF, deconv, wavelet, background, masked stretch,
+|            star mask, PSF), metadata, stacking, synth
 +-- domain/  orchestration (calibration, drizzle, cube, plate solve)
-+-- infra/   FITS mmap, ASDF reader, cache, config, render, progress
-+-- types/   shared types (AlignMethod, WhiteBalance, StfParams, ...)
++-- infra/   FITS mmap, ASDF reader, ORIG/KEY dual cache, config, render, progress
++-- types/   shared types + 310 constants
 +-- math/    NaN-safe median/MAD, sigma clipping, SIMD (Cephes-precision log)
 ```
 
-The frontend went through a multi-phase refactoring in v0.4.0: the monolithic `useBackend.ts` hook was split into 11 domain-specific services (plus `synth.ts` added in v0.4.2) with a shared `infrastructure/tauri/` IPC layer, 18 JSX files were converted to TSX, types were split by domain, and 8 shared UI primitives replaced ~1,370 lines of duplicated code across processing panels.
-
 **Design principles:**
 - All pixel data stays in f32/f64. No integer quantization at any stage.
-- Dual alignment: FFT phase correlation (sub-pixel, O(n log n)) as default, star-based affine (triangle asterism + RANSAC) for rotation. Automatic fallback chain.
+- Non-destructive composite: immutable ORIG cache, all WB/SCNR reconstruct from originals.
+- Dual alignment: FFT phase correlation (sub-pixel) as default, star-based affine (triangle asterism + RANSAC) for rotation. Automatic fallback chain.
 - White balance picks the channel with lowest noise (MAD/median) as reference, not always G.
 - SCNR redistributes lost luminance to R/B via BT.709 weights instead of adding it back to G.
-- Drizzle uses flat contiguous storage instead of per-pixel heap allocations. Parallel row computation.
-- Sigma clipping uses median/MAD (Stetson 1987, HST DrizzlePac standard) instead of mean/stddev.
+- STF rendering is pixel-identical across GPU (WGSL), CPU worker (JS), and Rust backend.
+- Blend presets resolve by spectral wavelength, not positional index.
+- Drizzle uses flat contiguous storage instead of per-pixel heap allocations.
+- Sigma clipping uses median/MAD (Stetson 1987) on first iteration, mean/stddev on subsequent.
 - NaN values sort to end everywhere: median, MAD, sigma clipping, auto-STF.
-- Plate solve auto-downsamples images >2048px before upload.
 - Binary IPC for GPU pixels: 16-byte header + raw f32 array, zero JSON/base64.
 - SIMD log uses Cephes degree-8 minimax polynomial with range reduction (< 1 ULP for f32).
-- All JSON response keys use shared constants from `types/constants.rs`. Zero hardcoded string keys in `cmd/`.
+- All JSON response keys use shared constants from `types/constants.rs`. Zero hardcoded string keys.
+- Output paths resolve via `appDataDir()` on all platforms (no `./output` relative paths).
 
 ## Roadmap
 
 | Version | What | Status |
 |:--------|:-----|:-------|
-| **v0.4** | Affine alignment, stability WB, SCNR redistribution, arcsinh stretch, numerical audit, frontend refactoring | **Released** |
-| **v0.5** | FITS ERR/DQ/VAR propagation, MAST API, log-polar phase correlation | Next |
+| **v0.4** | ComposeWizard, non-destructive pipeline, masked stretch, SPCC, affine alignment, stability WB, SCNR redistribution, blend presets, STF consistency, numerical audit | **Released** |
+| **v0.5** | FITS ERR/DQ/VAR propagation, MAST API, tone curves / levels | Next |
 | **v0.6** | Star removal, Gaia DR3 photometric calibration, PixelMath | Planned |
 | **v0.7** | Mosaic stitching, gradient-aware background, local normalization | Planned |
 | **v1.0** | Full WebGPU pipeline, WASM plugins, Python scripting | Planned |
@@ -323,12 +302,12 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 Some areas where help would be especially valuable:
 - FITS ERR/DQ/VAR error propagation through the processing chain
 - MAST API integration for direct JWST/HST data access
+- Tone curves and levels for selective contrast/saturation
 - Star removal algorithms
 - Gaia DR3 cross-match for photometric calibration
-- Log-polar phase correlation for rotational misalignment
+- Mosaic stitching with WCS-aware reprojection
 - WebGPU compute shaders for stacking and alignment
 - Test data curation from public archives (MAST, ESA)
-- ASDF testing with real Roman Space Telescope simulated data
 
 ## Support
 

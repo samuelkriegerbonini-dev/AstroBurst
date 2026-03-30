@@ -11,7 +11,7 @@ interface PreviewTabProps {
   useGpu: boolean;
   rawPixels: RawPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLImageElement>) => void;
-  starOverlayRef: React.RefObject<HTMLCanvasElement>;
+  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
 const MAX_RETRIES = 2;
@@ -21,7 +21,7 @@ const Overlay = memo(function Overlay({
                                         starOverlayRef,
                                         isCube,
                                       }: {
-  starOverlayRef: React.RefObject<HTMLCanvasElement>;
+  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
   isCube: boolean;
 }) {
   return (
