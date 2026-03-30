@@ -5,7 +5,7 @@ use ndarray::Array2;
 
 use crate::core::imaging::normalize::robust_asinh_preview;
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, StfParams};
+use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_image_mmap;
@@ -81,14 +81,6 @@ pub fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
         header: result.header,
         _tmp: tmp,
     })
-}
-
-pub fn load_fits_array(path: &str) -> Result<Array2<f32>> {
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)
-        .with_context(|| format!("Failed to open {}", fits_path.display()))?;
-    let result = extract_image_mmap(&file)?;
-    Ok(result.image)
 }
 
 fn load_image_and_stats(path: &str) -> Result<(Array2<f32>, ImageStats)> {
@@ -209,8 +201,6 @@ fn make_filename(stem: &str, suffix: &str, ext: &str) -> String {
 pub struct RenderOutput {
     pub png_path: String,
     pub fits_path: Option<String>,
-    pub stats: ImageStats,
-    pub stf: StfParams,
     pub dims: (usize, usize),
 }
 
@@ -245,8 +235,6 @@ pub fn render_and_save(
     Ok(RenderOutput {
         png_path,
         fits_path,
-        stats,
-        stf: stf_params,
         dims: (rows, cols),
     })
 }

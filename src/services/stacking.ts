@@ -13,7 +13,8 @@ export function stackFrames(
   outputDir?: string,
   options: Record<string, any> = {},
 ) {
-  return withPreview("stack", outputDir, { paths, ...options });
+  const { name, ...rest } = options;
+  return withPreview("stack", outputDir, { paths, name, ...rest });
 }
 
 export function runCalibrationPipeline(request: {

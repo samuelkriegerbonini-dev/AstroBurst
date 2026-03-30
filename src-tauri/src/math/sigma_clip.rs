@@ -1,4 +1,4 @@
-use super::median::{exact_median_mut, median_f32_mut, f32_cmp};
+use super::median::{exact_median_mut, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
 
 pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize) -> (f64, f64) {

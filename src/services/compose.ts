@@ -64,3 +64,64 @@ export function clearCompositeCache(): Promise<void> {
 export function updateCompositeChannel(channel: string, path: string) {
   return safeInvoke("update_composite_channel_cmd", { channel, path });
 }
+
+export function blendChannels(
+  channelPaths: string[],
+  weights: { channelIdx: number; r: number; g: number; b: number }[],
+  outputDir?: string,
+  options: { preset?: string; autoStretch?: boolean; linkedStf?: boolean } = {},
+) {
+  return withPreview("blend_channels_cmd", outputDir, {
+    channelPaths,
+    weights,
+    preset: options.preset ?? "",
+    autoStretch: options.autoStretch ?? true,
+    linkedStf: options.linkedStf ?? false,
+  });
+}
+
+export function alignChannels(
+  paths: string[],
+  outputDir?: string,
+  alignMethod = "phase_correlation",
+) {
+  return safeInvoke("align_channels_cmd", {
+    paths,
+    outputDir: outputDir ?? "./output",
+    alignMethod,
+  });
+}
+
+export function applyScnr(
+  outputDir?: string,
+  options: { method?: string; amount?: number; preserveLuminance?: boolean } = {},
+) {
+  return withPreview("apply_scnr_cmd", outputDir, {
+    method: options.method ?? "average",
+    amount: options.amount ?? 0.5,
+    preserveLuminance: options.preserveLuminance ?? false,
+  });
+}
+
+export function calibrateComposite(
+  outputDir: string,
+  rFactor: number,
+  gFactor: number,
+  bFactor: number,
+) {
+  return safeInvoke("calibrate_composite_cmd", {
+    outputDir,
+    rFactor,
+    gFactor,
+    bFactor,
+  });
+}
+
+export function computeAutoWb(): Promise<{
+  r_factor: number;
+  g_factor: number;
+  b_factor: number;
+  ref_channel: string;
+}> {
+  return safeInvoke("compute_auto_wb_cmd", {});
+}

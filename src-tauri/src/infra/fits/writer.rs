@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use ndarray::Array2;
-use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 

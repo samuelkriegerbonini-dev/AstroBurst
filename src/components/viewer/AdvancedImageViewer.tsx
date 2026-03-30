@@ -11,7 +11,7 @@ import {
   ZoomOut,
   Maximize,
   Square,
-  SplitSquareHorizontal,
+  SquareSplitHorizontal,
   Move,
   RotateCcw,
   Crosshair,
@@ -35,7 +35,7 @@ interface AdvancedImageViewerProps {
   pixelValue?: { x: number; y: number; value: number } | null;
   onMousePixel?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
-  overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement>;
   className?: string;
 }
 
@@ -361,7 +361,7 @@ function AdvancedImageViewer({
               className={`ab-viewer-btn ${compareMode ? "ab-viewer-btn-active" : ""}`}
               title="Before / After comparison"
             >
-              <SplitSquareHorizontal size={14} />
+              <SquareSplitHorizontal size={14} />
             </button>
           )}
           <button

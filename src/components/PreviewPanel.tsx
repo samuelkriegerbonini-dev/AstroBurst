@@ -1,127 +1,103 @@
-import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
-  Image, Cpu, Zap, BarChart3, Layers, Sparkles, Loader2,
-  Maximize2, Minimize2, X, Info as InfoIcon, FileText,
-  PackageOpen, Layers2, Settings, FlaskConical,
+  Image, Cpu, Zap, Layers, Sparkles, Loader2,
+  Layers2, FlaskConical,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube.service";
 import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
-import { PreviewProvider, useFileContext, useHistContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
-import { useMousePixel, useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
-import { useSelectedFile, useDoneFiles } from "../hooks/useFileStore";
-import { useActiveFilters, useFilterMode, matchesActiveFilters } from "../hooks/useProductFilter";
-import WcsReadout from "./header/WcsReadout";
+import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
+import { useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
-import type { ProcessedFile } from "../shared/types";
+import { useProgress } from "../hooks/useProgress";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
-const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
 const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
-const ComposeTab = lazy(() => import("./compose/ComposeTab"));
-const HeadersTab = lazy(() => import("./header/HeadersTab"));
-const ExportTab = lazy(() => import("./export/ExportTab"));
+const ComposeWizard = lazy(() => import("./compose/ComposeWizard"));
 const StackingTab = lazy(() => import("./stacking/StackingTab"));
 const ConfigTab = lazy(() => import("./preview/ConfigTab"));
 const SynthPanel = lazy(() => import("./synth/SynthPanel"));
 
-type BottomTabId = "info" | "analysis" | "headers" | "export";
-type SideTabId = "processing" | "compose" | "stacking" | "config" | "synth";
+type ToolId = "processing" | "compose" | "stacking" | "config" | "synth";
 
-interface TabDef<T> { id: T; label: string; icon: typeof Image; }
-
-const BOTTOM_TABS: TabDef<BottomTabId>[] = [
-  { id: "info", label: "Info", icon: InfoIcon },
-  { id: "analysis", label: "Analysis", icon: BarChart3 },
-  { id: "headers", label: "Headers", icon: FileText },
-  { id: "export", label: "Export", icon: PackageOpen },
-];
-
-const SIDE_TABS: TabDef<SideTabId>[] = [
-  { id: "processing", label: "Processing", icon: Sparkles },
-  { id: "compose", label: "Compose", icon: Layers },
-  { id: "stacking", label: "Stacking", icon: Layers2 },
-  { id: "config", label: "Settings", icon: Settings },
-  { id: "synth", label: "Synth", icon: FlaskConical },
-];
-
-const BOTTOM_MIN = 28;
-const BOTTOM_DEFAULT = 220;
-const BOTTOM_MAX = 500;
-const SIDE_PANEL_DEFAULT = 380;
-const SIDE_PANEL_MAX = 600;
-const SIDE_PANEL_MIN_W = 280;
-const EMPTY_SPECTRUM: number[] = [];
-
-function TabSpinner() {
-  return <div className="flex items-center justify-center py-12"><Loader2 size={20} className="animate-spin" style={{ color: "var(--ab-teal)" }} /></div>;
+interface ToolDef {
+  id: ToolId;
+  label: string;
+  shortLabel: string;
+  icon: typeof Image;
+  accent: string;
 }
 
-export default function PreviewPanel() {
-  const file = useSelectedFile();
-  const doneFiles = useDoneFiles();
-  const activeFilters = useActiveFilters();
-  const filterMode = useFilterMode();
+const TOP_TOOLS: ToolDef[] = [
+  { id: "compose", label: "Compose", shortLabel: "Comp", icon: Layers, accent: "var(--ab-teal)" },
+  { id: "processing", label: "Processing", shortLabel: "Proc", icon: Sparkles, accent: "var(--ab-amber)" },
+  { id: "stacking", label: "Stacking", shortLabel: "Stack", icon: Layers2, accent: "var(--ab-blue)" },
+];
 
-  const filteredDoneFiles = useMemo(() => {
-    if (activeFilters.length === 0) return doneFiles;
-    return doneFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
-  }, [doneFiles, activeFilters, filterMode]);
+const BOTTOM_STRIP_TOOLS: ToolDef[] = [
+  { id: "synth", label: "Synth", shortLabel: "Synth", icon: FlaskConical, accent: "var(--ab-rose)" },
+];
 
+const BOTTOM_MIN = 140;
+const BOTTOM_MAX = 600;
+const BOTTOM_DEFAULT = 280;
+
+function TabSpinner() {
+  return <div className="flex items-center justify-center py-8"><Loader2 size={16} className="animate-spin" style={{ color: "var(--ab-teal)" }} /></div>;
+}
+
+function ToolContent({ toolId }: { toolId: ToolId }) {
+  switch (toolId) {
+    case "processing": return <ProcessingTab />;
+    case "compose": return <ComposeWizard />;
+    case "stacking": return <StackingTab />;
+    case "config": return <ConfigTab />;
+    case "synth": return <SynthPanel />;
+    default: return null;
+  }
+}
+
+function ProgressBarInner() {
+  const progress = useProgress("compose-progress");
+  if (!progress.active) return null;
   return (
-    <PreviewProvider file={file} doneFiles={filteredDoneFiles}>
-      <PreviewPanelInner />
-    </PreviewProvider>
+    <div className="ab-compose-progress shrink-0">
+      <div className="ab-compose-progress-bar" style={{ width: `${progress.percent}%` }} />
+      <span className="ab-compose-progress-label">{progress.stage} {progress.percent > 0 ? `${progress.percent}%` : ""}</span>
+    </div>
   );
 }
 
-function PreviewPanelInner() {
+export default function PreviewPanel() {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
   const { renderedPreviewUrl, compositePreviewUrl } = useRenderContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
-  const mousePixel = useMousePixel();
 
-  const [activeBottomTab, setActiveBottomTab] = useState<BottomTabId>("info");
-  const [activeSideTab, setActiveSideTab] = useState<SideTabId | null>(null);
+  const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
   const [useGpu, setUseGpu] = useState(false);
   const [gpuAvailable, setGpuAvailable] = useState<boolean | null>(null);
   const [gpuProbing, setGpuProbing] = useState(true);
-  const [bottomOpen, setBottomOpen] = useState(true);
   const [, forceRender] = useState(0);
 
-  const [spectrum, setSpectrum] = useState<number[]>(EMPTY_SPECTRUM);
-  const [specWavelengths, setSpecWavelengths] = useState<number[] | null>(null);
-  const [specCoord, setSpecCoord] = useState<{ x: number; y: number } | null>(null);
-  const [specLoading, setSpecLoading] = useState(false);
-  const [specElapsed, setSpecElapsed] = useState(0);
-
-  const bottomHeightRef = useRef(BOTTOM_DEFAULT);
-  const bottomResizing = useRef(false);
-  const bottomElRef = useRef<HTMLDivElement>(null);
-  const sidePanelWidthRef = useRef(SIDE_PANEL_DEFAULT);
-  const sidePanelResizing = useRef(false);
-  const sidePanelElRef = useRef<HTMLDivElement>(null);
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
   const prevFileIdRef = useRef<string | null>(null);
   const specAbortRef = useRef(0);
   const fileDimsRef = useRef<[number, number] | undefined>(undefined);
   fileDimsRef.current = file?.result?.dimensions;
 
-  useEffect(() => {
-    probeGpu().then(() => {
-      setGpuAvailable(isGpuAvailable() === true);
-      setGpuProbing(false);
-    });
-  }, []);
+  const bottomHeightRef = useRef(BOTTOM_DEFAULT);
+  const bottomElRef = useRef<HTMLDivElement>(null);
+  const bResizing = useRef(false);
+  const bStartY = useRef(0);
+  const bStartH = useRef(0);
+
+  useEffect(() => { probeGpu().then(() => { setGpuAvailable(isGpuAvailable() === true); setGpuProbing(false); }); }, []);
 
   useEffect(() => {
     if (!file || file.id === prevFileIdRef.current) return;
     prevFileIdRef.current = file.id;
-    setSpectrum(EMPTY_SPECTRUM);
-    setSpecWavelengths(null);
-    setSpecCoord(null);
     specAbortRef.current++;
     resetMouse();
     clearRawPixels();
@@ -129,8 +105,7 @@ function PreviewPanelInner() {
   }, [file?.id, gpuAvailable, useGpu, clearRawPixels, loadRawPixels, resetMouse]);
 
   const handleToggleGpu = useCallback(() => {
-    if (useGpu) { setUseGpu(false); clearRawPixels(); }
-    else { setUseGpu(true); loadRawPixels(); }
+    if (useGpu) { setUseGpu(false); clearRawPixels(); } else { setUseGpu(true); loadRawPixels(); }
   }, [useGpu, loadRawPixels, clearRawPixels]);
 
   const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
@@ -141,109 +116,62 @@ function PreviewPanelInner() {
     if (!dims) return;
     const pixelX = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
     const pixelY = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
-    setSpecCoord({ x: pixelX, y: pixelY });
-    setSpecLoading(true);
     const seq = ++specAbortRef.current;
-    try {
-      const result = await getCubeSpectrum(file.path, pixelX, pixelY);
-      if (specAbortRef.current !== seq) return;
-      setSpectrum(result.spectrum || EMPTY_SPECTRUM);
-      setSpecWavelengths(result.wavelengths || null);
-      setSpecElapsed(result.elapsed_ms || 0);
-    } catch { if (specAbortRef.current === seq) setSpectrum(EMPTY_SPECTRUM); }
-    finally { if (specAbortRef.current === seq) setSpecLoading(false); }
+    try { await getCubeSpectrum(file.path, pixelX, pixelY); } catch {}
   }, [isCube, file?.path, file?.result?.dimensions]);
 
-  const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    handleMove(e, fileDimsRef.current);
-  }, [handleMove]);
+  const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => { handleMove(e, fileDimsRef.current); }, [handleMove]);
+  const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
 
-  const handleViewerMousePixel = useCallback((x: number, y: number) => {
-    setMousePixel({ x, y });
+  const handleToggleTool = useCallback((toolId: ToolId) => {
+    setActiveTool((prev) => prev === toolId ? null : toolId);
   }, []);
 
-  const handleBottomResizeStart = useCallback((e: React.MouseEvent) => {
-    if (!bottomOpen) return;
+  const handleBottomResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    bottomResizing.current = true;
-    const startY = e.clientY;
-    const startH = bottomHeightRef.current;
+    bResizing.current = true;
+    bStartY.current = e.clientY;
+    bStartH.current = bottomHeightRef.current;
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
     const el = bottomElRef.current;
-    const onMove = (ev: MouseEvent) => { if (!bottomResizing.current) return; const next = Math.max(100, Math.min(BOTTOM_MAX, startH + (startY - ev.clientY))); bottomHeightRef.current = next; if (el) el.style.height = `${next}px`; };
-    const onUp = () => { bottomResizing.current = false; document.body.style.cursor = ""; document.body.style.userSelect = ""; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); forceRender((c) => c + 1); };
+    const onMove = (ev: MouseEvent) => {
+      if (!bResizing.current) return;
+      const next = Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, bStartH.current - (ev.clientY - bStartY.current)));
+      bottomHeightRef.current = next;
+      if (el) el.style.height = `${next}px`;
+    };
+    const onUp = () => {
+      bResizing.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      forceRender((c) => c + 1);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [bottomOpen]);
-
-  const handleSidePanelResizeStart = useCallback((e: React.MouseEvent) => {
-    if (!activeSideTab) return;
-    e.preventDefault();
-    sidePanelResizing.current = true;
-    const startX = e.clientX;
-    const startW = sidePanelWidthRef.current;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const el = sidePanelElRef.current;
-    const onMove = (ev: MouseEvent) => { if (!sidePanelResizing.current) return; const next = Math.max(SIDE_PANEL_MIN_W, Math.min(SIDE_PANEL_MAX, startW + (startX - ev.clientX))); sidePanelWidthRef.current = next; if (el) el.style.width = `${next}px`; };
-    const onUp = () => { sidePanelResizing.current = false; document.body.style.cursor = ""; document.body.style.userSelect = ""; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); forceRender((c) => c + 1); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [activeSideTab]);
-
-  const handleSideTabClick = useCallback((tabId: SideTabId) => { setActiveSideTab((prev) => (prev === tabId ? null : tabId)); }, []);
-
-  const sideContent = useMemo(() => {
-    switch (activeSideTab) {
-      case "processing": return <ProcessingTab />;
-      case "compose": return <ComposeTab />;
-      case "stacking": return <StackingTab />;
-      case "config": return <ConfigTab />;
-      case "synth": return <SynthPanel />;
-      default: return null;
-    }
-  }, [activeSideTab]);
+  }, []);
 
   const originalImage = useMemo(() => {
     if (!file?.result?.previewUrl) return null;
     const base = file.result.previewUrl;
     const sep = base.includes("?") ? "&" : "?";
-    const url = `${base}${sep}_v=${file.id}`;
-    return {
-      url,
-      label: "Original",
-      width: file.result.dimensions?.[0],
-      height: file.result.dimensions?.[1],
-    };
+    return { url: `${base}${sep}_v=${file.id}`, label: "Original", width: file.result.dimensions?.[0], height: file.result.dimensions?.[1] };
   }, [file?.result?.previewUrl, file?.result?.dimensions, file?.id]);
 
   const processedImage = useMemo(() => {
     if (!renderedPreviewUrl || renderedPreviewUrl === file?.result?.previewUrl) return null;
-    const base = renderedPreviewUrl;
-    return {
-      url: base,
-      label: "Processed",
-      width: file?.result?.dimensions?.[0],
-      height: file?.result?.dimensions?.[1],
-    };
+    return { url: renderedPreviewUrl, label: "Processed", width: file?.result?.dimensions?.[0], height: file?.result?.dimensions?.[1] };
   }, [renderedPreviewUrl, file?.result?.previewUrl, file?.result?.dimensions]);
 
-  const pixelValueForViewer = useMemo(() => {
-    if (!mousePixel) return null;
-    return { x: mousePixel.x, y: mousePixel.y, value: 0 };
-  }, [mousePixel]);
-
   const useAdvancedViewer = !compositePreviewUrl && !useGpu;
-
-  const effectiveBottomH = bottomOpen ? bottomHeightRef.current : BOTTOM_MIN;
-  const sidePanelOpen = activeSideTab !== null;
-  const activeTabMeta = SIDE_TABS.find((t) => t.id === activeSideTab);
 
   return (
     <div className="flex h-full overflow-hidden">
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ background: "linear-gradient(90deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.6) 50%, rgba(59,130,246,0.04) 100%)", borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
+
+        <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "linear-gradient(90deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.6) 50%, rgba(59,130,246,0.04) 100%)", borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
           <div className="flex items-center gap-2">
             <Image size={12} style={{ color: "var(--ab-teal)" }} />
             <span className="text-[11px] font-medium text-zinc-300">Preview</span>
@@ -251,28 +179,32 @@ function PreviewPanelInner() {
           <div className="flex items-center gap-2">
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu)}
-                      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-                      style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)", boxShadow: "0 0 8px rgba(168,85,247,0.15)" } : { color: "#71717a", border: "1px solid transparent" }}
-                      title={gpuProbing ? "Detecting GPU..." : gpuAvailable === false ? "WebGPU not available" : useGpu ? "Switch to CPU rendering" : "Switch to GPU rendering"}>
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
                 {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : rawPixelsLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
-                {gpuProbing ? "Detecting..." : rawPixelsLoading ? "Loading..." : gpuAvailable === false ? "CPU only" : useGpu ? "GPU" : "CPU"}
+                {gpuProbing ? "..." : rawPixelsLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
               </button>
             )}
             {file && <span className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">{file.name}</span>}
+            {file?.result?.dimensions && (
+              <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5">
+                <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
+                {file.result.header?.BITPIX && <span className="text-zinc-600">BITPIX {file.result.header.BITPIX}</span>}
+                <span className="text-zinc-600">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
+              </span>
+            )}
           </div>
         </div>
 
-        <div className="flex-1 overflow-hidden">
+        <ProgressBarInner />
+
+        <div className="flex-1 overflow-hidden min-h-0">
           {!file ? (
-            <AdvancedImageViewer
-              original={null}
-              processed={null}
-            />
+            <AdvancedImageViewer original={null} processed={null} />
           ) : useAdvancedViewer ? (
             <AdvancedImageViewer
               original={originalImage}
               processed={processedImage}
-              pixelValue={pixelValueForViewer}
               onMousePixel={handleViewerMousePixel}
               onMouseLeave={handleLeave}
               overlayCanvasRef={starOverlayRef}
@@ -286,112 +218,59 @@ function PreviewPanelInner() {
           )}
         </div>
 
-        {file && (
-          <div ref={bottomElRef} className="shrink-0 flex flex-col overflow-hidden" style={{ height: effectiveBottomH, borderTop: "1px solid rgba(20,184,166,0.1)", background: "linear-gradient(180deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.5) 100%)" }}>
-            {bottomOpen && <div className="ab-resize-handle-h shrink-0" onMouseDown={handleBottomResizeStart} />}
-            <div className="flex items-center justify-between px-1 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.08)" }}>
-              <div className="flex items-center gap-0">
-                {BOTTOM_TABS.map((tab) => { const Icon = tab.icon; return (
-                  <button key={tab.id} onClick={() => { setActiveBottomTab(tab.id); if (!bottomOpen) setBottomOpen(true); }}
-                          className="ab-tab" data-active={activeBottomTab === tab.id}
-                          title={`${tab.label} panel`}>
-                    <Icon size={11} />{tab.label}
-                  </button>
-                ); })}
-              </div>
-              <div className="flex items-center gap-3 pr-2">
-                {file.result?.dimensions && (
-                  <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-2">
-                    <span className="text-zinc-400">{file.result.dimensions[0]}×{file.result.dimensions[1]}</span>
-                    {file.result.header?.BITPIX && <span className="text-zinc-600">BITPIX {file.result.header.BITPIX}</span>}
-                    <span className="text-zinc-600">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
-                  </span>
-                )}
-                <button onClick={() => setBottomOpen(!bottomOpen)}
-                        className="p-1 rounded transition-colors text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-                        title={bottomOpen ? "Collapse panel" : "Expand panel"}>
-                  {bottomOpen ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
-                </button>
-              </div>
+        {file && activeTool && (
+          <>
+            <div className="ab-resize-handle-h" onMouseDown={handleBottomResize} />
+            <div
+              ref={bottomElRef}
+              className="ab-bottom-panel"
+              style={{ height: bottomHeightRef.current }}
+            >
+              <Suspense fallback={<TabSpinner />}>
+                <ToolContent toolId={activeTool} />
+              </Suspense>
             </div>
-            {bottomOpen && (
-              <div className="flex-1 overflow-y-auto px-3 py-2">
-                <Suspense fallback={<TabSpinner />}>
-                  {activeBottomTab === "info" && <MemoBottomInfo />}
-                  {activeBottomTab === "analysis" && <AnalysisTab spectrum={spectrum} specWavelengths={specWavelengths} specCoord={specCoord} specLoading={specLoading} specElapsed={specElapsed} starOverlayRef={starOverlayRef} />}
-                  {activeBottomTab === "headers" && <HeadersTab />}
-                  {activeBottomTab === "export" && <ExportTab />}
-                </Suspense>
-              </div>
-            )}
-          </div>
+          </>
         )}
       </div>
 
-      {file && sidePanelOpen && (
-        <>
-          <div className="ab-resize-handle" onMouseDown={handleSidePanelResizeStart} />
-          <div ref={sidePanelElRef} className="shrink-0 flex flex-col overflow-hidden" style={{ width: sidePanelWidthRef.current, borderLeft: "1px solid rgba(20,184,166,0.1)", background: "linear-gradient(135deg, rgba(5,5,16,0.7) 0%, rgba(20,184,166,0.02) 100%)" }}>
-            <div className="flex items-center justify-between px-3 py-2 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.1)", background: "rgba(20,184,166,0.03)" }}>
-              <div className="flex items-center gap-2">
-                {activeTabMeta && <><activeTabMeta.icon size={13} style={{ color: "var(--ab-teal)" }} /><span className="text-[11px] font-semibold text-zinc-300 tracking-wide">{activeTabMeta.label}</span></>}
-              </div>
-              <button onClick={() => setActiveSideTab(null)}
-                      className="ab-side-panel-close"
-                      title="Close panel">
-                <X size={12} />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3"><Suspense fallback={<TabSpinner />}>{sideContent}</Suspense></div>
-          </div>
-        </>
-      )}
-
       {file && (
-        <div className="shrink-0 w-[40px] flex flex-col items-center pt-2 gap-1" style={{ borderLeft: "1px solid rgba(20,184,166,0.08)", background: "linear-gradient(180deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.7) 40%, rgba(59,130,246,0.03) 100%)" }}>
-          {SIDE_TABS.map((tab) => { const Icon = tab.icon; const isActive = activeSideTab === tab.id; return (
-            <button key={tab.id} onClick={() => handleSideTabClick(tab.id)}
-                    className="ab-side-tab"
-                    data-active={isActive}
-                    title={tab.label}>
-              {isActive && <span className="ab-side-tab-indicator" />}
-              <Icon size={15} />
-            </button>
-          ); })}
+        <div className="ab-tool-strip">
+          {TOP_TOOLS.map((def) => {
+            const Icon = def.icon;
+            const isActive = activeTool === def.id;
+            return (
+              <button
+                key={def.id}
+                onClick={() => handleToggleTool(def.id)}
+                className={`ab-tool-strip-btn ${isActive ? "ab-tool-strip-btn-active" : ""}`}
+                style={isActive ? { "--strip-accent": def.accent } as React.CSSProperties : undefined}
+                title={def.label}
+              >
+                <Icon size={14} />
+                <span>{def.shortLabel}</span>
+              </button>
+            );
+          })}
+          <div className="flex-1" />
+          {BOTTOM_STRIP_TOOLS.map((def) => {
+            const Icon = def.icon;
+            const isActive = activeTool === def.id;
+            return (
+              <button
+                key={def.id}
+                onClick={() => handleToggleTool(def.id)}
+                className={`ab-tool-strip-btn ${isActive ? "ab-tool-strip-btn-active" : ""}`}
+                style={isActive ? { "--strip-accent": def.accent } as React.CSSProperties : undefined}
+                title={def.label}
+              >
+                <Icon size={14} />
+                <span>{def.shortLabel}</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
-
-const MemoBottomInfo = memo(function BottomInfo() {
-  const { file } = useFileContext();
-  const { histData, stfParams } = useHistContext();
-  const mousePixel = useMousePixel();
-  if (!file) return null;
-  return (
-    <div className="flex flex-col gap-2 text-[10px] font-mono text-zinc-500">
-      {file?.path && file?.result?.dimensions && (
-        <WcsReadout filePath={file.path} imageWidth={file.result.dimensions[0]} imageHeight={file.result.dimensions[1]} mouseX={mousePixel?.x ?? null} mouseY={mousePixel?.y ?? null} />
-      )}
-      {histData && (
-        <div className="flex items-center gap-4 flex-wrap">
-          <span>mean={histData.mean?.toFixed(2)}</span><span>median={histData.median?.toFixed(2)}</span><span>sigma={histData.sigma?.toFixed(2)}</span>
-          <span style={{ color: "rgba(20,184,166,0.3)" }}>|</span>
-          <span style={{ color: "rgba(239,68,68,0.6)" }}>S={stfParams.shadow.toFixed(4)}</span>
-          <span style={{ color: "rgba(245,158,11,0.6)" }}>M={stfParams.midtone.toFixed(4)}</span>
-          <span style={{ color: "rgba(16,185,129,0.6)" }}>H={stfParams.highlight.toFixed(4)}</span>
-        </div>
-      )}
-      {file.result?.header && (
-        <div className="flex items-center gap-4 flex-wrap text-zinc-600">
-          {file.result.header.TELESCOP && <span>TELESCOP: {file.result.header.TELESCOP}</span>}
-          {file.result.header.INSTRUME && <span>INSTRUME: {file.result.header.INSTRUME}</span>}
-          {file.result.header.FILTER && <span>FILTER: {file.result.header.FILTER}</span>}
-          {file.result.header.EXPTIME && <span>EXPTIME: {file.result.header.EXPTIME}s</span>}
-          {file.result.header["DATE-OBS"] && <span>DATE: {file.result.header["DATE-OBS"]}</span>}
-        </div>
-      )}
-    </div>
-  );
-});

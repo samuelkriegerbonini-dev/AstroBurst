@@ -5,15 +5,18 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
+use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::rgb::{process_rgb, harmonize_dimensions, align_channels};
 use crate::core::compose::lrgb::apply_lrgb;
+use crate::core::compose::channel_blend::{blend_channels, BlendWeight};
 use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{StfParams, apply_stf_f32};
+use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::render::rgb::render_rgb;
 use crate::types::compose::{AlignMethod, RgbComposeConfig, RgbComposeResult, WhiteBalance};
-use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B};
+use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
 use crate::infra::cache::ImageEntry;
@@ -630,5 +633,331 @@ pub async fn update_composite_channel_cmd(
         GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
 
         Ok(json!({ "channel": channel, "updated": true }))
+    })
+}
+
+#[tauri::command]
+pub async fn blend_channels_cmd(
+    channel_paths: Vec<String>,
+    weights: Vec<serde_json::Value>,
+    output_dir: String,
+    preset: Option<String>,
+    auto_stretch: Option<bool>,
+    linked_stf: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        if channel_paths.is_empty() {
+            anyhow::bail!("No channel paths provided");
+        }
+
+        let entries: Vec<_> = channel_paths
+            .iter()
+            .map(|p| load_from_cache_or_disk(p))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut arrays: Vec<Array2<f32>> = entries.iter().map(|e| e.arr().to_owned()).collect();
+
+        let dims: Vec<(usize, usize)> = arrays.iter().map(|a| a.dim()).collect();
+        let max_rows = dims.iter().map(|d| d.0).max().unwrap();
+        let max_cols = dims.iter().map(|d| d.1).max().unwrap();
+
+        for arr in arrays.iter_mut() {
+            let (r, c) = arr.dim();
+            if r != max_rows || c != max_cols {
+                *arr = resample_image(arr, max_rows, max_cols)?;
+            }
+        }
+
+        let refs: Vec<&Array2<f32>> = arrays.iter().collect();
+
+        let blend_weights: Vec<BlendWeight> = weights
+            .iter()
+            .filter_map(|w| {
+                Some(BlendWeight {
+                    channel_idx: w.get("channelIdx")?.as_u64()? as usize,
+                    r_weight: w.get("r")?.as_f64()?,
+                    g_weight: w.get("g")?.as_f64()?,
+                    b_weight: w.get("b")?.as_f64()?,
+                })
+            })
+            .collect();
+
+        let (r, g, b) = blend_channels(&refs, &blend_weights, max_rows, max_cols);
+
+        let stats_r = compute_image_stats(&r);
+        let stats_g = compute_image_stats(&g);
+        let stats_b = compute_image_stats(&b);
+
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r.clone()), stats_r.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g.clone()), stats_g.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b.clone()), stats_b.clone());
+
+        let do_stretch = auto_stretch.unwrap_or(true);
+        let linked = linked_stf.unwrap_or(false);
+
+        let (r_out, g_out, b_out, stf_r, stf_g, stf_b);
+
+        if do_stretch {
+            use crate::core::imaging::stf::{auto_stf, analyze, AutoStfConfig};
+            let cfg = AutoStfConfig::default();
+
+            let (sr, _) = analyze(&r);
+            let (sg, _) = analyze(&g);
+            let (sb, _) = analyze(&b);
+
+            if linked {
+                let avg_median = (sr.median + sg.median + sb.median) / 3.0;
+                let avg_mad = (sr.sigma + sg.sigma + sb.sigma) / 3.0;
+                let avg_stats = crate::types::image::ImageStats {
+                    min: sr.min.min(sg.min).min(sb.min),
+                    max: sr.max.max(sg.max).max(sb.max),
+                    mean: avg_median,
+                    median: avg_median,
+                    sigma: avg_mad,
+                    mad: avg_mad,
+                    total_pixels: sr.total_pixels,
+                };
+                let stf = auto_stf(&avg_stats, &cfg);
+                stf_r = stf.clone();
+                stf_g = stf.clone();
+                stf_b = stf;
+            } else {
+                stf_r = auto_stf(&sr, &cfg);
+                stf_g = auto_stf(&sg, &cfg);
+                stf_b = auto_stf(&sb, &cfg);
+            }
+
+            r_out = apply_stf_f32(&r, &stf_r, &stats_r);
+            g_out = apply_stf_f32(&g, &stf_g, &stats_g);
+            b_out = apply_stf_f32(&b, &stf_b, &stats_b);
+        } else {
+            stf_r = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
+            stf_g = stf_r.clone();
+            stf_b = stf_r.clone();
+            r_out = r;
+            g_out = g;
+            b_out = b;
+        }
+
+        let png_path = composite_png_path(&output_dir);
+        render_rgb_preview(&r_out, &g_out, &b_out, &png_path, MAX_PREVIEW_DIM)?;
+
+        let elapsed = t0.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            RES_DIMENSIONS: [max_cols, max_rows],
+            RES_CHANNEL_COUNT: channel_paths.len(),
+            RES_BLEND_PRESET: preset.unwrap_or_default(),
+            STF_R: { RES_SHADOW: stf_r.shadow, RES_MIDTONE: stf_r.midtone, RES_HIGHLIGHT: stf_r.highlight },
+            STF_G: { RES_SHADOW: stf_g.shadow, RES_MIDTONE: stf_g.midtone, RES_HIGHLIGHT: stf_g.highlight },
+            STF_B: { RES_SHADOW: stf_b.shadow, RES_MIDTONE: stf_b.midtone, RES_HIGHLIGHT: stf_b.highlight },
+            RES_STATS_R: { RES_MEDIAN: stats_r.median, RES_MEAN: stats_r.mean, RES_MIN: stats_r.min, RES_MAX: stats_r.max },
+            RES_STATS_G: { RES_MEDIAN: stats_g.median, RES_MEAN: stats_g.mean, RES_MIN: stats_g.min, RES_MAX: stats_g.max },
+            RES_STATS_B: { RES_MEDIAN: stats_b.median, RES_MEAN: stats_b.mean, RES_MIN: stats_b.min, RES_MAX: stats_b.max },
+            RES_ELAPSED_MS: elapsed,
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn align_channels_cmd(
+    paths: Vec<String>,
+    output_dir: String,
+    align_method: Option<String>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        if paths.len() < 2 {
+            anyhow::bail!("Need at least 2 channels to align");
+        }
+
+        let entries: Vec<_> = paths
+            .iter()
+            .map(|p| load_from_cache_or_disk(p))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let ref_arr = entries[0].arr();
+        let (rows, cols) = ref_arr.dim();
+
+        let method = match align_method.as_deref() {
+            Some("affine") => AlignMethod::Affine,
+            _ => AlignMethod::PhaseCorrelation,
+        };
+
+        let mut aligned_paths = Vec::new();
+
+        let stem0 = std::path::Path::new(&paths[0])
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ch0");
+        let out0 = format!("{}/{}_aligned.fits", output_dir, stem0);
+        crate::infra::fits::writer::write_fits_mono(&out0, ref_arr, None)?;
+        aligned_paths.push(json!({ RES_PATH: out0, RES_OFFSET: [0.0, 0.0] }));
+
+        for (i, entry) in entries.iter().enumerate().skip(1) {
+            let target = entry.arr();
+            let (tr, tc) = target.dim();
+
+            let target_resized = if tr != rows || tc != cols {
+                resample_image(target, rows, cols)?
+            } else {
+                target.to_owned()
+            };
+
+            let label = std::path::Path::new(&paths[i])
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("ch");
+
+            let result = align_pair_with_label(
+                ref_arr,
+                &target_resized,
+                method,
+                rows,
+                cols,
+                label,
+            )?;
+
+            let out_path = format!("{}/{}_aligned.fits", output_dir, label);
+            crate::infra::fits::writer::write_fits_mono(&out_path, &result.aligned, None)?;
+
+            aligned_paths.push(json!({
+                RES_PATH: out_path,
+                RES_OFFSET: [result.offset.0, result.offset.1],
+                "confidence": result.confidence,
+                "method_used": result.method_used,
+                "matched_stars": result.matched_stars,
+                "inliers": result.inliers,
+                "residual_px": result.residual_px,
+            }));
+        }
+
+        let elapsed = t0.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            CHANNELS: aligned_paths,
+            ALIGN_METHOD: match method {
+                AlignMethod::Affine => "affine",
+                AlignMethod::PhaseCorrelation => "phase_correlation",
+            },
+            DIMENSIONS: [cols, rows],
+            RES_ELAPSED_MS: elapsed,
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn apply_scnr_cmd(
+    output_dir: String,
+    method: Option<String>,
+    amount: Option<f64>,
+    preserve_luminance: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        let entry_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R)
+            .ok_or_else(|| anyhow::anyhow!("Composite R not in cache"))?;
+        let entry_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G)
+            .ok_or_else(|| anyhow::anyhow!("Composite G not in cache"))?;
+        let entry_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B)
+            .ok_or_else(|| anyhow::anyhow!("Composite B not in cache"))?;
+
+        let mut r = entry_r.arr().to_owned();
+        let mut g = entry_g.arr().to_owned();
+        let mut b = entry_b.arr().to_owned();
+
+        let scnr_method = match method.as_deref() {
+            Some(SCNR_METHOD_MAXIMUM) => ScnrMethod::MaximumNeutral,
+            _ => ScnrMethod::AverageNeutral,
+        };
+
+        let cfg = ScnrConfig {
+            method: scnr_method,
+            amount: amount.unwrap_or(DEFAULT_SCNR_AMOUNT as f64) as f32,
+            preserve_luminance: preserve_luminance.unwrap_or(false),
+        };
+
+        apply_scnr_inplace(&mut r, &mut g, &mut b, &cfg);
+
+        let stats_r = compute_image_stats(&r);
+        let stats_g = compute_image_stats(&g);
+        let stats_b = compute_image_stats(&b);
+
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r.clone()), stats_r.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g.clone()), stats_g.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b.clone()), stats_b.clone());
+
+        let png_path = composite_png_path(&output_dir);
+        render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+
+        let elapsed = t0.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            RES_SCNR_APPLIED: true,
+            RES_ELAPSED_MS: elapsed,
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn calibrate_composite_cmd(
+    output_dir: String,
+    r_factor: f64,
+    g_factor: f64,
+    b_factor: f64,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        let entry_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R)
+            .ok_or_else(|| anyhow::anyhow!("Composite R not in cache"))?;
+        let entry_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G)
+            .ok_or_else(|| anyhow::anyhow!("Composite G not in cache"))?;
+        let entry_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B)
+            .ok_or_else(|| anyhow::anyhow!("Composite B not in cache"))?;
+
+        let rf = r_factor as f32;
+        let gf = g_factor as f32;
+        let bf = b_factor as f32;
+
+        let mut r = entry_r.arr().to_owned();
+        let mut g = entry_g.arr().to_owned();
+        let mut b = entry_b.arr().to_owned();
+
+        r.mapv_inplace(|v| (v * rf).min(1.0));
+        g.mapv_inplace(|v| (v * gf).min(1.0));
+        b.mapv_inplace(|v| (v * bf).min(1.0));
+
+        let stats_r = compute_image_stats(&r);
+        let stats_g = compute_image_stats(&g);
+        let stats_b = compute_image_stats(&b);
+
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r.clone()), stats_r.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g.clone()), stats_g.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b.clone()), stats_b.clone());
+
+        let png_path = composite_png_path(&output_dir);
+        render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+
+        let elapsed = t0.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            RES_WB_APPLIED: true,
+            RES_R_FACTOR: r_factor,
+            RES_G_FACTOR: g_factor,
+            RES_B_FACTOR: b_factor,
+            RES_ELAPSED_MS: elapsed,
+        }))
     })
 }

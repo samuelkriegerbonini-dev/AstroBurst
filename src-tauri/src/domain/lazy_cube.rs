@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
-use ndarray::{Array2, Array3};
+use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::types::HduHeader;
@@ -139,24 +139,6 @@ impl LazyCube {
         let end = start + g.frame_bytes;
         let raw = &self.mmap[start..end];
         decode_pixels(raw, g.bitpix, g.bscale, g.bzero)
-    }
-
-    pub fn get_frame_range(&self, start_z: usize, end_z: usize) -> Result<Array3<f32>> {
-        let end_z = end_z.min(self.geometry.naxis3);
-        if start_z >= end_z {
-            bail!("Invalid frame range");
-        }
-
-        let count = end_z - start_z;
-        let g = &self.geometry;
-        let byte_start = g.data_offset + start_z * g.frame_bytes;
-        let byte_end = byte_start + count * g.frame_bytes;
-        let raw = &self.mmap[byte_start..byte_end];
-
-        let pixels = decode_pixels(raw, g.bitpix, g.bscale, g.bzero);
-        let cube = Array3::from_shape_vec((count, g.naxis2, g.naxis1), pixels)
-            .context("Failed to reshape frame range")?;
-        Ok(cube)
     }
 
     pub fn extract_spectrum_at(&self, y: usize, x: usize) -> Result<Vec<f32>> {

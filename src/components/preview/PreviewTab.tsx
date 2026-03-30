@@ -1,10 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
-import { Image, Loader2, X, Link, Unlink, RotateCcw, ChevronDown, ChevronUp } from "lucide-react";
+import { Image, Loader2, X } from "lucide-react";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
-import { restretchComposite } from "../../services/compose.service";
-import { getPreviewUrl } from "../../infrastructure/tauri/client";
-import { Slider } from "../ui";
-import type { RawPixelData, StfParams } from "../../shared/types";
+import type { RawPixelData } from "../../shared/types";
 
 import ZoomPanView from "../ui/ZoomPanView";
 
@@ -14,18 +11,17 @@ interface PreviewTabProps {
   useGpu: boolean;
   rawPixels: RawPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLImageElement>) => void;
-  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  starOverlayRef: React.RefObject<HTMLCanvasElement>;
 }
 
 const MAX_RETRIES = 2;
 const RETRY_DELAYS = [300, 800] as const;
-const DEBOUNCE_MS = 300;
 
 const Overlay = memo(function Overlay({
                                         starOverlayRef,
                                         isCube,
                                       }: {
-  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  starOverlayRef: React.RefObject<HTMLCanvasElement>;
   isCube: boolean;
 }) {
   return (
@@ -43,208 +39,6 @@ const Overlay = memo(function Overlay({
     </>
   );
 });
-
-function CompositeStfPanel() {
-  const {
-    compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
-    compositeStfLinked, setCompositeStfLinked,
-    compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
-    setCompositePreviewUrl,
-    compositeScnr,
-  } = useRenderContext();
-
-  const [expanded, setExpanded] = useState(true);
-  const [restretching, setRestretching] = useState(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const seqRef = useRef(0);
-
-  const scnrRef = useRef(compositeScnr);
-  scnrRef.current = compositeScnr;
-
-  const scheduleRestretch = useCallback((r: StfParams, g: StfParams, b: StfParams) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      const seq = ++seqRef.current;
-      setRestretching(true);
-      const scnr = scnrRef.current;
-      restretchComposite("./output", r, g, b, scnr?.enabled ? scnr : undefined)
-        .then(async (result: any) => {
-          if (seqRef.current !== seq) return;
-          if (result?.png_path) {
-            const url = await getPreviewUrl(result.png_path);
-            setCompositePreviewUrl(url);
-          }
-        })
-        .catch((err: any) => {
-          if (seqRef.current !== seq) return;
-          console.error("[AstroBurst] Restretch failed:", err);
-        })
-        .finally(() => {
-          if (seqRef.current !== seq) return;
-          setRestretching(false);
-        });
-    }, DEBOUNCE_MS);
-  }, [setCompositePreviewUrl]);
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
-
-  const handleShadowR = useCallback((v: number) => {
-    const r = { ...compositeStfR, shadow: v };
-    if (compositeStfLinked) {
-      const g = { ...compositeStfG, shadow: v };
-      const b = { ...compositeStfB, shadow: v };
-      setCompositeStf(r, g, b);
-      scheduleRestretch(r, g, b);
-    } else {
-      setCompositeStf(r, compositeStfG, compositeStfB);
-      scheduleRestretch(r, compositeStfG, compositeStfB);
-    }
-  }, [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositeStf, scheduleRestretch]);
-
-  const handleMidtoneR = useCallback((v: number) => {
-    const r = { ...compositeStfR, midtone: v };
-    if (compositeStfLinked) {
-      const g = { ...compositeStfG, midtone: v };
-      const b = { ...compositeStfB, midtone: v };
-      setCompositeStf(r, g, b);
-      scheduleRestretch(r, g, b);
-    } else {
-      setCompositeStf(r, compositeStfG, compositeStfB);
-      scheduleRestretch(r, compositeStfG, compositeStfB);
-    }
-  }, [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositeStf, scheduleRestretch]);
-
-  const handleHighlightR = useCallback((v: number) => {
-    const r = { ...compositeStfR, highlight: v };
-    if (compositeStfLinked) {
-      const g = { ...compositeStfG, highlight: v };
-      const b = { ...compositeStfB, highlight: v };
-      setCompositeStf(r, g, b);
-      scheduleRestretch(r, g, b);
-    } else {
-      setCompositeStf(r, compositeStfG, compositeStfB);
-      scheduleRestretch(r, compositeStfG, compositeStfB);
-    }
-  }, [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositeStf, scheduleRestretch]);
-
-  const handleShadowG = useCallback((v: number) => {
-    const g = { ...compositeStfG, shadow: v };
-    setCompositeStf(compositeStfR, g, compositeStfB);
-    scheduleRestretch(compositeStfR, g, compositeStfB);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleMidtoneG = useCallback((v: number) => {
-    const g = { ...compositeStfG, midtone: v };
-    setCompositeStf(compositeStfR, g, compositeStfB);
-    scheduleRestretch(compositeStfR, g, compositeStfB);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleHighlightG = useCallback((v: number) => {
-    const g = { ...compositeStfG, highlight: v };
-    setCompositeStf(compositeStfR, g, compositeStfB);
-    scheduleRestretch(compositeStfR, g, compositeStfB);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleShadowB = useCallback((v: number) => {
-    const b = { ...compositeStfB, shadow: v };
-    setCompositeStf(compositeStfR, compositeStfG, b);
-    scheduleRestretch(compositeStfR, compositeStfG, b);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleMidtoneB = useCallback((v: number) => {
-    const b = { ...compositeStfB, midtone: v };
-    setCompositeStf(compositeStfR, compositeStfG, b);
-    scheduleRestretch(compositeStfR, compositeStfG, b);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleHighlightB = useCallback((v: number) => {
-    const b = { ...compositeStfB, highlight: v };
-    setCompositeStf(compositeStfR, compositeStfG, b);
-    scheduleRestretch(compositeStfR, compositeStfG, b);
-  }, [compositeStfR, compositeStfG, compositeStfB, setCompositeStf, scheduleRestretch]);
-
-  const handleResetAuto = useCallback(() => {
-    if (compositeAutoStfR && compositeAutoStfG && compositeAutoStfB) {
-      setCompositeStf(compositeAutoStfR, compositeAutoStfG, compositeAutoStfB);
-      scheduleRestretch(compositeAutoStfR, compositeAutoStfG, compositeAutoStfB);
-    }
-  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeStf, scheduleRestretch]);
-
-  const hasAutoStf = compositeAutoStfR !== null;
-  const fmtStf = (v: number) => v.toFixed(4);
-
-  return (
-    <div className="border-b border-zinc-800/50 bg-zinc-900/40">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
-      >
-        {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-        <span>STF Stretch</span>
-        {restretching && <Loader2 size={10} className="animate-spin text-violet-400 ml-auto" />}
-      </button>
-
-      {expanded && (
-        <div className="px-3 pb-2 flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setCompositeStfLinked(!compositeStfLinked)}
-              className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                compositeStfLinked ? "text-violet-300 bg-violet-900/30" : "text-zinc-500 hover:text-zinc-300"
-              }`}
-              title={compositeStfLinked ? "Linked: same STF for all channels" : "Per-channel STF"}
-            >
-              {compositeStfLinked ? <Link size={10} /> : <Unlink size={10} />}
-              {compositeStfLinked ? "Linked" : "Per-channel"}
-            </button>
-            {hasAutoStf && (
-              <button
-                onClick={handleResetAuto}
-                className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors ml-auto"
-              >
-                <RotateCcw size={10} />
-                Reset
-              </button>
-            )}
-          </div>
-
-          {compositeStfLinked ? (
-            <div className="flex flex-col gap-1.5">
-              <Slider label="Shadow" value={compositeStfR.shadow} min={0} max={1} step={0.0001} accent="violet" format={fmtStf} onChange={handleShadowR} />
-              <Slider label="Midtone" value={compositeStfR.midtone} min={0} max={1} step={0.0001} accent="violet" format={fmtStf} onChange={handleMidtoneR} />
-              <Slider label="Highlight" value={compositeStfR.highlight} min={0} max={1} step={0.0001} accent="violet" format={fmtStf} onChange={handleHighlightR} />
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] text-red-400 font-medium uppercase tracking-wider">Red</span>
-                <Slider label="S" value={compositeStfR.shadow} min={0} max={1} step={0.0001} accent="red" format={fmtStf} onChange={handleShadowR} />
-                <Slider label="M" value={compositeStfR.midtone} min={0} max={1} step={0.0001} accent="red" format={fmtStf} onChange={handleMidtoneR} />
-                <Slider label="H" value={compositeStfR.highlight} min={0} max={1} step={0.0001} accent="red" format={fmtStf} onChange={handleHighlightR} />
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] text-green-400 font-medium uppercase tracking-wider">Green</span>
-                <Slider label="S" value={compositeStfG.shadow} min={0} max={1} step={0.0001} accent="green" format={fmtStf} onChange={handleShadowG} />
-                <Slider label="M" value={compositeStfG.midtone} min={0} max={1} step={0.0001} accent="green" format={fmtStf} onChange={handleMidtoneG} />
-                <Slider label="H" value={compositeStfG.highlight} min={0} max={1} step={0.0001} accent="green" format={fmtStf} onChange={handleHighlightG} />
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] text-blue-400 font-medium uppercase tracking-wider">Blue</span>
-                <Slider label="S" value={compositeStfB.shadow} min={0} max={1} step={0.0001} accent="blue" format={fmtStf} onChange={handleShadowB} />
-                <Slider label="M" value={compositeStfB.midtone} min={0} max={1} step={0.0001} accent="blue" format={fmtStf} onChange={handleMidtoneB} />
-                <Slider label="H" value={compositeStfB.highlight} min={0} max={1} step={0.0001} accent="blue" format={fmtStf} onChange={handleHighlightB} />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: PreviewTabProps) {
   const { file } = useFileContext();
@@ -307,7 +101,6 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
             <X size={10} />
           </button>
         </div>
-        <CompositeStfPanel />
         <ZoomPanView
           src={compositePreviewUrl}
           alt="RGB composite"

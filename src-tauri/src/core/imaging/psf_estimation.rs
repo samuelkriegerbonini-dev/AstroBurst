@@ -27,7 +27,7 @@ pub struct PsfEstimationConfig {
 impl Default for PsfEstimationConfig {
     fn default() -> Self {
         Self {
-            num_stars: 3,
+            num_stars: 30,
             cutout_radius: 15,
             saturation_threshold: 0.95,
             min_peak_fraction: 0.10,
@@ -149,7 +149,7 @@ pub fn psf_to_kernel(psf: &PsfResult) -> Array2<f32> {
 }
 
 struct LocalStats {
-    mean: f64,
+    _mean: f64,
     stddev: f64,
     max_val: f64,
     median: f64,
@@ -159,7 +159,7 @@ fn compute_image_stats(image: &Array2<f32>) -> LocalStats {
     let slice = image.as_slice().unwrap_or(&[]);
     let n = slice.len() as f64;
     if n == 0.0 {
-        return LocalStats { mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
+        return LocalStats { _mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
     }
 
     let mut sum = 0.0f64;
@@ -184,7 +184,7 @@ fn compute_image_stats(image: &Array2<f32>) -> LocalStats {
     vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = vals[mid] as f64;
 
-    LocalStats { mean, stddev, max_val: max_val as f64, median }
+    LocalStats { _mean: mean, stddev, max_val: max_val as f64, median }
 }
 
 fn detect_stars_for_psf(

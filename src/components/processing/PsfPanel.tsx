@@ -34,7 +34,7 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [numStars, setNumStars] = useState(3);
+  const [numStars, setNumStars] = useState(30);
   const [cutoutRadius, setCutoutRadius] = useState(15);
   const [maxEllipticity, setMaxEllipticity] = useState(0.3);
   const [satThreshold, setSatThreshold] = useState(0.95);
@@ -98,7 +98,7 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
       )}
 
       <div className="flex flex-col gap-3">
-        <Slider label="Stars to sample" value={numStars} min={1} max={10} step={1} disabled={loading} accent="violet" onChange={setNumStars} />
+        <Slider label="Stars to sample" value={numStars} min={1} max={50} step={1} disabled={loading} accent="violet" onChange={setNumStars} />
         <Slider label="Cutout radius" value={cutoutRadius} min={5} max={50} step={1} disabled={loading} accent="violet" format={(v) => `${v}px`} onChange={setCutoutRadius} />
         <Slider label="Max ellipticity" value={maxEllipticity} min={0.05} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setMaxEllipticity} />
         <Slider label="Saturation threshold" value={satThreshold} min={0.5} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setSatThreshold} />

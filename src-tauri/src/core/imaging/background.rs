@@ -224,8 +224,8 @@ fn poly_basis_into(y: f64, x: f64, degree: usize, out: &mut [f64; MAX_POLY_TERMS
 
 #[inline]
 fn eval_poly_inline(
-    ny: f64,
-    nx: f64,
+    _ny: f64,
+    _nx: f64,
     degree: usize,
     coeffs: &[f64],
     y_pows: &[f64; 7],
@@ -284,6 +284,7 @@ fn fit_polynomial_surface(
     Ok(atb)
 }
 
+#[cfg(test)]
 fn poly_basis(y: f64, x: f64, degree: usize) -> Vec<f64> {
     let n_terms = (degree + 1) * (degree + 2) / 2;
     let mut basis = Vec::with_capacity(n_terms);

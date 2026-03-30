@@ -1,10 +1,12 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw } from "lucide-react";
+import { Plus, RotateCcw, Info as InfoIcon, BarChart3, FileText, PackageOpen, FolderOpen } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
+import SidebarPanels from "./components/file/SidebarPanels";
+import type { LeftTabId } from "./components/file/SidebarPanels";
 import PreviewPanel from "./components/PreviewPanel";
 
 import Confetti from "./components/Confetti";
@@ -12,7 +14,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
-import { useFileStats, useFileIds, useSelectedId, fileStore } from "./hooks/useFileStore";
+import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
@@ -20,6 +22,7 @@ import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFil
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { APP_VERSION, FILE_STATUS } from "./utils/constants";
+import { PreviewProvider } from "./context/PreviewContext";
 
 // @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
@@ -35,6 +38,14 @@ const SIDEBAR_MIN = 42;
 const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MAX = 480;
 
+const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
+  { id: "files", label: "Files", icon: FolderOpen },
+  { id: "info", label: "Info", icon: InfoIcon },
+  { id: "analysis", label: "Analysis", icon: BarChart3 },
+  { id: "headers", label: "Headers", icon: FileText },
+  { id: "export", label: "Export", icon: PackageOpen },
+];
+
 function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
   return fileIds.map((id) => {
     const f = getFile(id);
@@ -46,7 +57,7 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       path: f.path,
       size: f.size ?? 0,
       status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
-      error: f.error,
+      error: f.error ?? undefined,
       metadata: header
         ? {
           filter: header.FILTER ?? undefined,
@@ -78,10 +89,14 @@ export default function App() {
   const sidebarElRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
+  const [leftTab, setLeftTab] = useState<LeftTabId>("files");
+
   const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const fileIds = useFileIds();
   const selectedId = useSelectedId();
+  const selectedFile = useSelectedFile();
+  const allDoneFiles = useDoneFiles();
 
   const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
@@ -92,6 +107,11 @@ export default function App() {
   const { toggleFilter, toggleMode, clearAll, addCustomChip, removeCustomChip, reset: resetProductFilter } = useProductFilterActions();
 
   const [showBg, setShowBg] = useState(false);
+
+  const filteredDoneFiles = useMemo(() => {
+    if (activeFilters.length === 0) return allDoneFiles;
+    return allDoneFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
+  }, [allDoneFiles, activeFilters, filterMode]);
 
   useEffect(() => { const t = setTimeout(() => setLoading(false), 600); return () => clearTimeout(t); }, []);
   useEffect(() => { if (!loading) { const t = setTimeout(() => setShowBg(true), 100); return () => clearTimeout(t); } }, [loading]);
@@ -166,6 +186,7 @@ export default function App() {
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);
+    setLeftTab("files");
   }, [reset, timer, resetProductFilter]);
 
   const handleSelectFile = useCallback((id: string) => {
@@ -260,94 +281,119 @@ export default function App() {
                   <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} />
                 </div>
               ) : (
-                <div className="flex flex-col h-full">
-                  <div
-                    className="px-4 py-2 shrink-0 space-y-1.5"
-                    style={{
-                      background: "linear-gradient(90deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.65) 50%, rgba(59,130,246,0.03) 100%)",
-                      borderBottom: "1px solid rgba(20,184,166,0.1)",
-                    }}
-                  >
-                    <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
-                    <GlobalProgress progress={progress} isComplete={isComplete} />
-                  </div>
-
-                  <div className="flex-1 flex overflow-hidden min-h-0">
+                <PreviewProvider file={selectedFile} doneFiles={filteredDoneFiles}>
+                  <div className="flex flex-col h-full">
                     <div
-                      ref={sidebarElRef}
-                      className="shrink-0 flex flex-col overflow-hidden"
+                      className="px-4 py-2 shrink-0 space-y-1.5"
                       style={{
-                        width: effectiveSidebarW,
-                        transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
-                        borderRight: "1px solid rgba(20,184,166,0.08)",
-                        background: "rgba(5,5,16,0.55)",
+                        background: "linear-gradient(90deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.65) 50%, rgba(59,130,246,0.03) 100%)",
+                        borderBottom: "1px solid rgba(20,184,166,0.1)",
                       }}
                     >
-                      <MetadataFileList
-                        files={filteredMetadataFiles}
-                        totalFiles={metadataFiles.length}
-                        selectedId={selectedId}
-                        onSelect={handleSelectFile}
-                        onExportZip={handleExportZip}
-                        collapsed={!sidebarOpen}
-                        onToggle={() => setSidebarOpen((p) => !p)}
-                        isExporting={isExporting}
-                        zipProgress={zipProgress}
-                        downloaded={downloaded}
-                        productTypes={productTypes}
-                        customChips={filterState.customChips}
-                        activeFilters={activeFilters}
-                        filterMode={filterMode}
-                        onToggleFilter={toggleFilter}
-                        onToggleMode={toggleMode}
-                        onClearFilters={clearAll}
-                        onAddCustomChip={addCustomChip}
-                        onRemoveCustomChip={removeCustomChip}
-                      />
+                      <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
+                      <GlobalProgress progress={progress} isComplete={isComplete} />
                     </div>
 
-                    {sidebarOpen && (
-                      <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
-                    )}
+                    <div className="flex-1 flex overflow-hidden min-h-0">
+                      <div
+                        ref={sidebarElRef}
+                        className="shrink-0 flex flex-col overflow-hidden"
+                        style={{
+                          width: effectiveSidebarW,
+                          transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
+                          borderRight: "1px solid rgba(20,184,166,0.08)",
+                          background: "rgba(5,5,16,0.55)",
+                        }}
+                      >
+                        {sidebarOpen && (
+                          <div className="flex items-center shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.08)" }}>
+                            {LEFT_TABS.map((tab) => {
+                              const Icon = tab.icon;
+                              const isActive = leftTab === tab.id;
+                              return (
+                                <button
+                                  key={tab.id}
+                                  onClick={() => setLeftTab(tab.id)}
+                                  className="ab-tab"
+                                  data-active={isActive}
+                                  title={tab.label}
+                                >
+                                  <Icon size={11} />{tab.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
 
-                    <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                      <MemoizedPreviewPanel />
-                    </div>
-                  </div>
-
-                  <div
-                    className="px-4 py-1.5 flex items-center justify-between shrink-0"
-                    style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-2 pointer-events-auto select-none">
-                        <AstroLogo size={16} showText={false} className="opacity-30" />
-                        <span className="text-[8px] font-bold tracking-widest uppercase cosmic-text" style={{ opacity: 0.5 }}>AstroBurst</span>
-                        <span className="text-[7px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.2)" }}>{APP_VERSION}</span>
+                        {leftTab === "files" || !sidebarOpen ? (
+                          <MetadataFileList
+                            files={filteredMetadataFiles}
+                            totalFiles={metadataFiles.length}
+                            selectedId={selectedId}
+                            onSelect={handleSelectFile}
+                            onExportZip={handleExportZip}
+                            collapsed={!sidebarOpen}
+                            onToggle={() => setSidebarOpen((p) => !p)}
+                            isExporting={isExporting}
+                            zipProgress={zipProgress}
+                            downloaded={downloaded}
+                            productTypes={productTypes}
+                            customChips={filterState.customChips}
+                            activeFilters={activeFilters}
+                            filterMode={filterMode}
+                            onToggleFilter={toggleFilter}
+                            onToggleMode={toggleMode}
+                            onClearFilters={clearAll}
+                            onAddCustomChip={addCustomChip}
+                            onRemoveCustomChip={removeCustomChip}
+                          />
+                        ) : (
+                          <SidebarPanels activeTab={leftTab} />
+                        )}
                       </div>
-                      <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
-                      {isComplete ? (
-                        <button
-                          onClick={handleNewBatch}
-                          className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                          style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
-                        >
-                          <RotateCcw size={10} /> New Batch
-                        </button>
-                      ) : (
-                        <button
-                          onClick={handleBrowseFiles}
-                          className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                          style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.1)", color: "#a1a1aa" }}
-                        >
-                          <Plus size={11} /> Add FITS
-                        </button>
+
+                      {sidebarOpen && (
+                        <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
                       )}
+
+                      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+                        <MemoizedPreviewPanel />
+                      </div>
+                    </div>
+
+                    <div
+                      className="px-4 py-1.5 flex items-center justify-between shrink-0"
+                      style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2.5 pointer-events-auto select-none">
+                          <AstroLogo size={22} showText={false} className="opacity-40" />
+                          <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
+                          <span className="text-[8px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.25)" }}>{APP_VERSION}</span>
+                        </div>
+                        <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
+                        {isComplete ? (
+                          <button
+                            onClick={handleNewBatch}
+                            className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                            style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
+                          >
+                            <RotateCcw size={10} /> New Batch
+                          </button>
+                        ) : (
+                          <button
+                            onClick={handleBrowseFiles}
+                            className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                            style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.1)", color: "#a1a1aa" }}
+                          >
+                            <Plus size={11} /> Add FITS
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
+                </PreviewProvider>
               )}
-
             </DropZone>
           </div>
         )}

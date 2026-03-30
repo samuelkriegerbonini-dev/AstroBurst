@@ -203,6 +203,7 @@ impl FftConvolver {
     }
 }
 
+#[cfg(test)]
 fn compute_l2_delta(prev: &Array2<f32>, curr: &Array2<f32>) -> f64 {
     let n = prev.len() as f64;
     let sum_sq: f64 = prev

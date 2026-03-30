@@ -11,6 +11,7 @@ pub mod image;
 pub mod metadata;
 pub mod pipeline;
 pub mod resample;
+pub mod spcc;
 pub mod stacking;
 pub mod stretch;
 pub mod visualization;

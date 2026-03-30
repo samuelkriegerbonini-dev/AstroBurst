@@ -2,9 +2,7 @@ use anyhow::{bail, Result};
 use ndarray::{Array2, Zip, s};
 use rayon::prelude::*;
 
-use crate::core::alignment::affine;
-use crate::core::alignment::phase_correlation;
-use crate::core::imaging::resample::bicubic_sample;
+use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::imaging::scnr;
 use crate::core::imaging::stats;
 use crate::core::imaging::stf::{self, AutoStfConfig, StfParams};
@@ -154,61 +152,6 @@ fn merge_for_stf(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f3
     Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
-fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
-    if dy.abs() < 1e-12 && dx.abs() < 1e-12 { return image.clone(); }
-    let (rows, cols) = image.dim();
-    let src = image.as_slice().expect("contiguous");
-    let mut out = vec![f32::NAN; rows * cols];
-    out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-        for x in 0..cols {
-            let sy = y as f64 - dy;
-            let sx = x as f64 - dx;
-            if sy < -0.5 || sy > (rows as f64 - 0.5)
-                || sx < -0.5 || sx > (cols as f64 - 0.5)
-            {
-                continue;
-            }
-            row[x] = bicubic_sample(src, rows, cols, sy, sx);
-        }
-    });
-    Array2::from_shape_vec((rows, cols), out).unwrap()
-}
-
-fn align_single_phase_correlation(
-    ref_ch: &Array2<f32>,
-    target: &Array2<f32>,
-    has_data: bool,
-) -> (Array2<f32>, (f64, f64)) {
-    if !has_data {
-        return (target.clone(), (0.0, 0.0));
-    }
-    let pc = phase_correlation::phase_correlate(ref_ch, target);
-    let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
-    (shifted, (pc.dy, pc.dx))
-}
-
-fn align_single_affine(
-    ref_ch: &Array2<f32>,
-    target: &Array2<f32>,
-    has_data: bool,
-    rows: usize,
-    cols: usize,
-    label: &str,
-) -> (Array2<f32>, (f64, f64)) {
-    if !has_data {
-        return (target.clone(), (0.0, 0.0));
-    }
-    let result = affine::align_channel_affine(ref_ch, target);
-    log::info!(
-        "{} alignment: method={}, stars={}, inliers={}, residual={:.3}px, rot={:.4}deg, tx={:.2}, ty={:.2}",
-        label, result.method, result.matched_stars, result.inliers,
-        result.residual_px, result.transform.rotation_deg(),
-        result.transform.tx, result.transform.ty
-    );
-    let warped = affine::warp_image(target, &result.transform, rows, cols);
-    (warped, (result.transform.ty, result.transform.tx))
-}
-
 pub(crate) fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
     rows: usize, cols: usize, method: AlignMethod,
@@ -218,14 +161,18 @@ pub(crate) fn align_channels(
     let g_img = channel_or_synth(g, r, b, rows, cols);
     let b_img = channel_or_synth(b, r, g, rows, cols);
 
-    let (g_aligned, off_g) = match method {
-        AlignMethod::PhaseCorrelation => align_single_phase_correlation(ref_ch, &g_img, g.is_some()),
-        AlignMethod::Affine => align_single_affine(ref_ch, &g_img, g.is_some(), rows, cols, "G"),
+    let (g_aligned, off_g) = if g.is_some() {
+        let res = align_pair_with_label(ref_ch, &g_img, method, rows, cols, "G")?;
+        (res.aligned, res.offset)
+    } else {
+        (g_img, (0.0, 0.0))
     };
 
-    let (b_aligned, off_b) = match method {
-        AlignMethod::PhaseCorrelation => align_single_phase_correlation(ref_ch, &b_img, b.is_some()),
-        AlignMethod::Affine => align_single_affine(ref_ch, &b_img, b.is_some(), rows, cols, "B"),
+    let (b_aligned, off_b) = if b.is_some() {
+        let res = align_pair_with_label(ref_ch, &b_img, method, rows, cols, "B")?;
+        (res.aligned, res.offset)
+    } else {
+        (b_img, (0.0, 0.0))
     };
 
     Ok((r_img, g_aligned, b_aligned, off_g, off_b))

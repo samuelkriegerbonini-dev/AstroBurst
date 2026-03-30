@@ -93,7 +93,6 @@ struct TriangleDesc {
     star_indices: [usize; 3],
     ratio_mid: f64,
     ratio_long: f64,
-    perimeter: f64,
 }
 
 pub fn align_channel_affine(
@@ -236,13 +235,11 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
 
                     let ratio_mid = sides[1] / sides[0];
                     let ratio_long = sides[2] / sides[0];
-                    let perimeter = sides[0] + sides[1] + sides[2];
 
                     local.push(TriangleDesc {
                         star_indices: [i, j, k],
                         ratio_mid,
                         ratio_long,
-                        perimeter,
                     });
                 }
             }

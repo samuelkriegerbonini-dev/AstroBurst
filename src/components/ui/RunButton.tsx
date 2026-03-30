@@ -1,4 +1,4 @@
-import { memo } from "react";
+import React, { memo } from "react";
 
 interface RunButtonProps {
   label: string;
@@ -6,6 +6,8 @@ interface RunButtonProps {
   running: boolean;
   disabled?: boolean;
   accent?: string;
+  icon?: React.ReactNode;
+  small?: boolean;
   onClick: () => void;
 }
 
@@ -15,13 +17,15 @@ function RunButton({
   running,
   disabled = false,
   accent = "teal",
+  icon,
+  small = false,
   onClick,
 }: RunButtonProps) {
   return (
     <button
       onClick={onClick}
       disabled={running || disabled}
-      className="ab-run-btn"
+      className={`ab-run-btn ${small ? "ab-run-btn-sm" : ""}`}
       data-accent={accent}
       data-running={running}
       data-disabled={disabled}
@@ -35,7 +39,10 @@ function RunButton({
           {runningLabel || label}
         </span>
       ) : (
-        label
+        <span className="flex items-center justify-center gap-2">
+          {icon}
+          {label}
+        </span>
       )}
     </button>
   );

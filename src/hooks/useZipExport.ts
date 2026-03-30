@@ -48,7 +48,7 @@ export function useZipExport() {
           type: "blob",
           compression: "STORE",
         },
-        (meta) => {
+        (meta: { percent: number }) => {
           setProgress(90 + Math.round((meta.percent / 100) * 10));
         },
       );

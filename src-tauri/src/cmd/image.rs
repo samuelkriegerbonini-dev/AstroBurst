@@ -4,12 +4,12 @@ use std::time::Instant;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, save_rgb_preview_png, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, save_rgb_preview_png};
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::StfParams;
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
-use crate::infra::fits::writer::{filter_header, write_fits_mono, write_fits_mono_bitpix, write_fits_rgb};
+use crate::infra::fits::writer::{filter_header, write_fits_mono_bitpix, write_fits_rgb};
 use crate::infra::ipc::encode_with_header_downsampled;
 use crate::infra::render::grayscale::{render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::{GrayImage, Luma};
+use image::GrayImage;
 use ndarray::Array2;
 use rayon::prelude::*;
 

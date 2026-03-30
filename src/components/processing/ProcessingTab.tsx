@@ -10,8 +10,9 @@ const BackgroundPanel = lazy(() => import("./BackgroundPanel"));
 const WaveletPanel = lazy(() => import("./WaveletPanel"));
 const PsfPanel = lazy(() => import("./PsfPanel"));
 const ArcsinhStretchPanel = lazy(() => import("./ArcsinhStretchPanel"));
+const MaskedStretchPanel = lazy(() => import("./MaskedStretchPanel"));
 
-type ProcessingSection = "background" | "denoise" | "psf" | "deconvolution" | "stretch";
+type ProcessingSection = "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "background", label: "Background", color: "emerald" },
@@ -19,6 +20,7 @@ const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "psf", label: "PSF", color: "violet" },
   { id: "deconvolution", label: "Deconv", color: "indigo" },
   { id: "stretch", label: "Stretch", color: "amber" },
+  { id: "masked_stretch", label: "Masked", color: "rose" },
 ];
 
 export interface ProcessingChain {
@@ -27,6 +29,7 @@ export interface ProcessingChain {
   deconvFits: string | null;
   psfKernel: number[][] | null;
   stretchFits: string | null;
+  maskedStretchFits: string | null;
 }
 
 function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
@@ -36,6 +39,7 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
   if (chain.psfKernel) steps.push("PSF");
   if (chain.deconvFits) steps.push("Deconv");
   if (chain.stretchFits) steps.push("Stretch");
+  if (chain.maskedStretchFits) steps.push("Masked");
 
   if (steps.length <= 1) return null;
 
@@ -59,6 +63,7 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
   violet: { active: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30", dot: "bg-violet-400" },
   indigo: { active: "bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30", dot: "bg-indigo-400" },
   amber: { active: "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30", dot: "bg-amber-400" },
+  rose: { active: "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30", dot: "bg-rose-400" },
 };
 
 function ProcessingTabInner() {
@@ -74,6 +79,7 @@ function ProcessingTabInner() {
     deconvFits: null,
     psfKernel: null,
     stretchFits: null,
+    maskedStretchFits: null,
   });
 
   const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB });
@@ -188,8 +194,23 @@ function ProcessingTabInner() {
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
+  const handleMaskedStretchDone = useCallback(
+    (result: any) => {
+      handlePreviewUpdate(result?.previewUrl);
+      if (result?.fits_path) {
+        setChain((prev) => ({
+          ...prev,
+          maskedStretchFits: result.fits_path,
+        }));
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(result.fits_path, ch);
+      }
+    },
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+  );
+
   const handleResetChain = useCallback(() => {
-    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null });
+    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null });
   }, []);
 
   const backgroundInput = file;
@@ -214,7 +235,13 @@ function ProcessingTabInner() {
     return { ...file, path };
   }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
 
-  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits;
+  const maskedStretchInput = useMemo(() => {
+    if (!file) return null;
+    const path = chain.deconvFits || chain.denoiseFits || chain.backgroundFits || file.path;
+    return { ...file, path };
+  }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
+
+  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits || chain.maskedStretchFits;
 
   return (
     <div className="flex flex-col h-full">
@@ -227,7 +254,8 @@ function ProcessingTabInner() {
               (s.id === "denoise" && chain.denoiseFits) ||
               (s.id === "psf" && chain.psfKernel) ||
               (s.id === "deconvolution" && chain.deconvFits) ||
-              (s.id === "stretch" && chain.stretchFits);
+              (s.id === "stretch" && chain.stretchFits) ||
+              (s.id === "masked_stretch" && chain.maskedStretchFits);
             const colors = COLOR_MAP[s.color];
             return (
               <button
@@ -306,6 +334,16 @@ function ProcessingTabInner() {
               selectedFile={stretchInput}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleStretchDone}
+              chainedFrom={
+                chain.deconvFits ? "deconv" : chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
+              }
+            />
+          </div>
+          <div style={{ display: active === "masked_stretch" ? "block" : "none" }}>
+            <MaskedStretchPanel
+              selectedFile={maskedStretchInput}
+              onPreviewUpdate={handlePreviewUpdate}
+              onProcessingDone={handleMaskedStretchDone}
               chainedFrom={
                 chain.deconvFits ? "deconv" : chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
               }

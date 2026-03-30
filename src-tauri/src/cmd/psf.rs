@@ -22,7 +22,7 @@ pub async fn estimate_psf_cmd(
         let entry = load_from_cache_or_disk(&path)?;
 
         let config = PsfEstimationConfig {
-            num_stars: num_stars.unwrap_or(3),
+            num_stars: num_stars.unwrap_or(30),
             cutout_radius: cutout_radius.unwrap_or(15),
             saturation_threshold: saturation_threshold.unwrap_or(0.95),
             min_peak_fraction: 0.10,

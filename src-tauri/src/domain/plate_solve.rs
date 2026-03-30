@@ -1,7 +1,9 @@
 pub use crate::core::analysis::star_detection::DetectedStar;
 pub use crate::core::astrometry::plate_solve::{
-    SolveResult, SolveConfig, solve_offline_placeholder,
+    SolveResult, SolveConfig,
 };
+#[cfg(not(feature = "astrometry-net"))]
+pub use crate::core::astrometry::plate_solve::solve_offline_placeholder;
 
 #[cfg(feature = "astrometry-net")]
 pub use self::astrometry_net_impl::solve_astrometry_net;

@@ -235,7 +235,7 @@ fn build_real_surface(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<f6
     data.iter().take(rows * cols).map(|c| c.re).collect()
 }
 
-fn find_peak(surface: &[f64], rows: usize, cols: usize) -> (usize, usize, f64) {
+fn find_peak(surface: &[f64], _rows: usize, cols: usize) -> (usize, usize, f64) {
     let (best_idx, best_val) = surface.par_iter()
         .enumerate()
         .reduce_with(|a, b| if b.1 > a.1 { b } else { a })

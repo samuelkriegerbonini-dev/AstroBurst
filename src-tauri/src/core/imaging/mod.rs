@@ -1,9 +1,11 @@
 pub mod background;
 pub mod calibration_pipeline;
+pub mod masked_stretch;
 pub mod normalize;
 pub mod psf_estimation;
 pub mod resample;
 pub mod scnr;
+pub mod star_mask;
 pub mod stats;
 pub mod stf;
 pub mod stretch;

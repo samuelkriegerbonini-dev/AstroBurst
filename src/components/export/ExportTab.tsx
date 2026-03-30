@@ -10,8 +10,8 @@ const ExportPanel = lazy(() => import("./ExportPanel"));
 function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
-  const { rgbChannels, compositeStfR, compositeStfG, compositeStfB } = useRgbContext();
-  const { renderedPreviewUrl, isShowingComposite } = useRenderContext();
+  const { rgbChannels } = useRgbContext();
+  const { renderedPreviewUrl, isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useRenderContext();
   const { isCube, cubeDims } = useCubeContext();
 
   const [exportResult, setExportResult] = useState<any>(null);
@@ -117,7 +117,7 @@ function ExportTabInner() {
     >
       <div className="flex flex-col gap-4">
         <ExportPanel
-          filePath={file?.path}
+          filePath={file?.path ?? null}
           stfParams={stfParams}
           onExport={handleExportFits}
           onExportRgb={handleExportFitsRgb}

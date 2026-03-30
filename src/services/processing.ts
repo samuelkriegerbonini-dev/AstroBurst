@@ -24,7 +24,7 @@ export function deconvolveRL(
     deringing: options.deringing ?? true,
     deringThreshold: options.deringThreshold ?? 0.1,
     useEmpiricalPsf: options.useEmpiricalPsf ?? false,
-    psfNumStars: options.psfNumStars ?? 3,
+    psfNumStars: options.psfNumStars ?? 30,
     psfCutoutRadius: options.psfCutoutRadius ?? 15,
   });
 }
@@ -81,7 +81,7 @@ export function estimatePsf(
 ) {
   return safeInvoke("estimate_psf_cmd", {
     path,
-    numStars: options.numStars ?? 3,
+    numStars: options.numStars ?? 30,
     cutoutRadius: options.cutoutRadius ?? 15,
     saturationThreshold: options.saturationThreshold ?? 0.95,
     maxEllipticity: options.maxEllipticity ?? 0.3,
@@ -90,4 +90,49 @@ export function estimatePsf(
 
 export function applyArcsinhStretch(path: string, outputDir?: string, factor = 50.0) {
   return withPreview("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
+}
+
+export function maskedStretch(
+  path: string,
+  outputDir?: string,
+  options: {
+    iterations?: number;
+    targetBackground?: number;
+    maskGrowth?: number;
+    maskSoftness?: number;
+    protectionAmount?: number;
+    luminanceProtect?: boolean;
+  } = {},
+) {
+  return withPreview("masked_stretch_cmd", outputDir, {
+    path,
+    iterations: options.iterations ?? 10,
+    targetBackground: options.targetBackground ?? 0.25,
+    maskGrowth: options.maskGrowth ?? 2.5,
+    maskSoftness: options.maskSoftness ?? 4.0,
+    protectionAmount: options.protectionAmount ?? 0.85,
+    luminanceProtect: options.luminanceProtect ?? true,
+  });
+}
+
+export function spccCalibrate(
+  rPath: string,
+  gPath: string,
+  bPath: string,
+  options: {
+    wcsPath?: string;
+    whiteReference?: string;
+    minSnr?: number;
+    maxStars?: number;
+  } = {},
+) {
+  return safeInvoke("spcc_calibrate_cmd", {
+    rPath,
+    gPath,
+    bPath,
+    wcsPath: options.wcsPath ?? null,
+    whiteReference: options.whiteReference ?? "average_spiral",
+    minSnr: options.minSnr ?? 20.0,
+    maxStars: options.maxStars ?? 200,
+  });
 }

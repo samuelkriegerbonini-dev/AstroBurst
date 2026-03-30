@@ -49,7 +49,7 @@ interface PlateSolvePanelProps {
   imageWidth?: number;
   imageHeight?: number;
   elapsed?: number;
-  overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement>;
   filePath?: string | null;
 }
 

@@ -36,7 +36,7 @@ pub async fn deconvolve_rl_cmd(
 
         let psf_kernel = if use_empirical_psf.unwrap_or(false) {
             let psf_config = PsfEstimationConfig {
-                num_stars: psf_num_stars.unwrap_or(3),
+                num_stars: psf_num_stars.unwrap_or(30),
                 cutout_radius: psf_cutout_radius.unwrap_or(15),
                 ..PsfEstimationConfig::default()
             };

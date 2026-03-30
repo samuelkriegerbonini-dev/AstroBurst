@@ -29,7 +29,7 @@ interface AnalysisTabProps {
   specCoord: { x: number; y: number } | null;
   specLoading: boolean;
   specElapsed: number;
-  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  starOverlayRef: React.RefObject<HTMLCanvasElement>;
 }
 
 function AnalysisTabInner({

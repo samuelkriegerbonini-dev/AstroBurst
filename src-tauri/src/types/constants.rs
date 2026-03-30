@@ -285,3 +285,26 @@ pub const RES_SPREAD_PIXELS: &str = "spread_pixels";
 pub const RES_STARS_USED: &str = "stars_used";
 pub const RES_STARS_REJECTED: &str = "stars_rejected";
 pub const RES_KERNEL: &str = "kernel";
+
+pub const RES_STARS_MASKED: &str = "stars_masked";
+pub const RES_MASK_COVERAGE: &str = "mask_coverage";
+pub const RES_FINAL_BACKGROUND: &str = "final_background";
+pub const RES_CONVERGED: &str = "converged";
+pub const RES_PROTECTION_AMOUNT: &str = "protection_amount";
+pub const RES_R_FACTOR: &str = "r_factor";
+pub const RES_G_FACTOR: &str = "g_factor";
+pub const RES_B_FACTOR: &str = "b_factor";
+pub const RES_STARS_MATCHED: &str = "stars_matched";
+pub const RES_STARS_TOTAL: &str = "stars_total";
+pub const RES_AVG_COLOR_INDEX: &str = "avg_color_index";
+pub const RES_WHITE_REF: &str = "white_reference";
+pub const RES_CATALOG_NAME: &str = "catalog_name";
+
+pub const EVENT_MASKED_STRETCH_PROGRESS: &str = "masked-stretch-progress";
+pub const SUFFIX_MASKED_STRETCH: &str = "masked_stretch";
+
+pub const RES_BLEND_PRESET: &str = "blend_preset";
+pub const RES_SCNR_METHOD: &str = "scnr_method";
+pub const RES_SCNR_AMOUNT: &str = "scnr_amount";
+
+pub const RES_WB_APPLIED: &str = "wb_applied";
