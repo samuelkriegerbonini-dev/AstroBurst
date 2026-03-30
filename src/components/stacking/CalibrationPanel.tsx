@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { Slider, ErrorAlert } from "../ui";
-import { calibrate } from "../../services/stacking.service";
+import { calibrate } from "../../services/stacking";
+import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
 import type { ProcessedFile } from "../../shared/types";
@@ -40,7 +41,7 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
     setError(null);
     setResult(null);
     try {
-      const res = await calibrate(assignments.science.path, "./output", {
+      const res = await calibrate(assignments.science.path, await getOutputDir(), {
         biasPaths: assignments.bias.length > 0 ? assignments.bias.map((f) => f.path) : undefined,
         darkPaths: assignments.dark.length > 0 ? assignments.dark.map((f) => f.path) : undefined,
         flatPaths: assignments.flat.length > 0 ? assignments.flat.map((f) => f.path) : undefined,

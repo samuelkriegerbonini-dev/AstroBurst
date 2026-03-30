@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.4.3"
+version = "0.4.5"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "GPL-3.0-or-later"
@@ -8,11 +8,11 @@ authors = ["Samuel Krieger Bonini"]
 repository = "https://github.com/samuelkriegerbonini-dev/AstroBurst"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-shell = "2.3.5"
-tauri-plugin-opener = "2"
+tauri = { version = "2.10", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.4"
+tauri-plugin-fs = "2.2"
+tauri-plugin-shell = "2.3"
+tauri-plugin-opener = "2.3"
 tokio = { version = "1", features = ["full"] }
 
 serde = { version = "1", features = ["derive"] }
@@ -37,18 +37,19 @@ regex = "1.10"
 
 bzip2 = { version = "0.5", optional = true }
 lz4_flex = { version = "0.11", optional = true }
-reqwest = { version = "0.12", features = ["json", "multipart"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"], optional = true}
 base64 = "0.22.1"
 log = "0.4.29"
 config = "0.15.22"
 
 [features]
-default = ["astrometry-net"]
+default = ["astrometry-net", "asdf-full"]
 astrometry-net = ["dep:reqwest"]
+vizier = ["reqwest/blocking"]
 asdf-full = ["dep:bzip2", "dep:lz4_flex"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.5", features = [] }
 
 [lib]
 name = "astroburst_lib"

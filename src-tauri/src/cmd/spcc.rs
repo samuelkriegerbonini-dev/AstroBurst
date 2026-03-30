@@ -70,6 +70,7 @@ pub async fn spcc_calibrate_cmd(
             RES_AVG_COLOR_INDEX: result.avg_color_index,
             RES_WHITE_REF: result.white_ref_name,
             RES_CATALOG_NAME: result.catalog_name,
+            "is_synthetic_catalog": result.is_synthetic_catalog,
             RES_ELAPSED_MS: elapsed_ms,
         }))
     })

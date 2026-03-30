@@ -249,6 +249,10 @@ pub const COMPOSITE_KEY_R: &str = "__composite_r";
 pub const COMPOSITE_KEY_G: &str = "__composite_g";
 pub const COMPOSITE_KEY_B: &str = "__composite_b";
 
+pub const COMPOSITE_ORIG_R: &str = "__composite_orig_r";
+pub const COMPOSITE_ORIG_G: &str = "__composite_orig_g";
+pub const COMPOSITE_ORIG_B: &str = "__composite_orig_b";
+
 pub const STF_R: &str = "stf_r";
 pub const STF_G: &str = "stf_g";
 pub const STF_B: &str = "stf_b";

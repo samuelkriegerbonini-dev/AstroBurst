@@ -181,22 +181,36 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
 
     stars.sort_by(|a, b| b.flux.partial_cmp(&a.flux).unwrap_or(std::cmp::Ordering::Equal));
 
+    let dedup_radius = 3.0f64;
+    let dedup_r2 = dedup_radius * dedup_radius;
+    let cell_size = dedup_radius;
+    let mut grid: std::collections::HashMap<(usize, usize), Vec<usize>> =
+        std::collections::HashMap::with_capacity(stars.len());
     let mut deduped = Vec::with_capacity(stars.len());
-    let mut used = vec![false; stars.len()];
-    for i in 0..stars.len() {
-        if used[i] {
-            continue;
+
+    for (i, star) in stars.iter().enumerate() {
+        let gx = (star.x / cell_size) as usize;
+        let gy = (star.y / cell_size) as usize;
+
+        let mut too_close = false;
+        'outer: for ny in gy.saturating_sub(1)..=gy + 1 {
+            for nx in gx.saturating_sub(1)..=gx + 1 {
+                if let Some(cell) = grid.get(&(ny, nx)) {
+                    for &j in cell {
+                        let dx = star.x - stars[j].x;
+                        let dy = star.y - stars[j].y;
+                        if dx * dx + dy * dy < dedup_r2 {
+                            too_close = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
         }
-        deduped.push(stars[i].clone());
-        for j in i + 1..stars.len() {
-            if used[j] {
-                continue;
-            }
-            let dx = stars[i].x - stars[j].x;
-            let dy = stars[i].y - stars[j].y;
-            if dx * dx + dy * dy < 9.0 {
-                used[j] = true;
-            }
+
+        if !too_close {
+            grid.entry((gy, gx)).or_default().push(i);
+            deduped.push(star.clone());
         }
     }
 

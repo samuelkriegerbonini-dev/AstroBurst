@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { Database, ChevronRight, FileText, Search, X, Copy, Check } from "lucide-react";
-import { getFitsExtensions, getHeaderByHdu } from "../../services/header.service";
+import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
 
 interface HduSelectorPanelProps {
   filePath: string;

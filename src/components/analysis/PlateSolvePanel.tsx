@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass } from "lucide-react";
-import { plateSolve, getWcsInfo } from "../../services/astrometry.service";
-import type { WcsInfo } from "../../services/astrometry.service";
-import { getApiKey } from "../../services/config.service";
+import { plateSolve, getWcsInfo } from "../../services/astrometry";
+import type { WcsInfo } from "../../services/astrometry";
+import { getApiKey } from "../../services/config";
 
 export interface Star {
   x: number;
@@ -41,7 +41,6 @@ interface SolveResult {
 
 interface PlateSolvePanelProps {
   stars?: Star[];
-  count?: number;
   isLoading?: boolean;
   onDetect?: (sigma: number) => void;
   backgroundMedian?: number | null;
@@ -55,7 +54,6 @@ interface PlateSolvePanelProps {
 
 export default function PlateSolvePanel({
                                           stars = [],
-                                          count = 0,
                                           isLoading = false,
                                           onDetect,
                                           backgroundMedian,
@@ -98,13 +96,23 @@ export default function PlateSolvePanel({
 
   useEffect(() => {
     const canvas = overlayCanvasRef?.current;
-    if (!canvas || stars.length === 0) return;
+    if (!canvas) return;
+
+    if (!showOverlay || stars.length === 0) {
+      canvas.style.display = "none";
+      return;
+    }
+
+    canvas.style.display = "block";
 
     const parent = canvas.parentElement;
     if (!parent) return;
 
-    const W = parent.clientWidth;
-    const H = parent.clientHeight;
+    const rect = parent.getBoundingClientRect();
+    const W = Math.floor(rect.width);
+    const H = Math.floor(rect.height);
+    if (W === 0 || H === 0) return;
+
     canvas.width = W;
     canvas.height = H;
 
@@ -112,12 +120,10 @@ export default function PlateSolvePanel({
     if (!ctx) return;
     ctx.clearRect(0, 0, W, H);
 
-    if (!showOverlay) return;
-
     const scaleX = W / (imageWidth || 1);
     const scaleY = H / (imageHeight || 1);
 
-    const maxFlux = stars.length > 0 ? stars[0].flux : 1;
+    const maxFlux = stars[0].flux || 1;
 
     stars.forEach((star, i) => {
       const sx = star.x * scaleX;
@@ -166,12 +172,6 @@ export default function PlateSolvePanel({
     }
   }, [stars, showOverlay, selectedStar, imageWidth, imageHeight, overlayCanvasRef]);
 
-  useEffect(() => {
-    const canvas = overlayCanvasRef?.current;
-    if (!canvas) return;
-    canvas.style.display = showOverlay && stars.length > 0 ? "block" : "none";
-  }, [showOverlay, stars.length, overlayCanvasRef]);
-
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
   }, [onDetect, sigma]);
@@ -201,7 +201,11 @@ export default function PlateSolvePanel({
   }, [filePath, scaleLow, scaleHigh]);
 
   const medianFwhm = stars.length > 0
-    ? (stars.reduce((s, st) => s + st.fwhm, 0) / stars.length).toFixed(2)
+    ? (() => {
+      const sorted = [...stars].map((s) => s.fwhm).sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
+    })()
     : null;
 
   const activeWcs = solveResult?.success ? solveResult : wcsInfo;
@@ -263,7 +267,7 @@ export default function PlateSolvePanel({
               <div className="grid grid-cols-3 gap-1 text-[10px]">
                 <div className="bg-zinc-900/80 rounded px-2 py-1">
                   <div className="text-zinc-500">Stars</div>
-                  <div className="text-cyan-300 font-mono">{count}</div>
+                  <div className="text-cyan-300 font-mono">{stars.length}</div>
                 </div>
                 <div className="bg-zinc-900/80 rounded px-2 py-1">
                   <div className="text-zinc-500">FWHM</div>

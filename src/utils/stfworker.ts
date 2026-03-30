@@ -78,11 +78,12 @@ export function setWorkerPixels(
 }
 
 export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const worker = getStfWorker();
     const id = _nextId++;
     _pendingCallbacks.set(id, (result) => {
       if (result) resolve(result);
+      else reject(new Error("STF render returned no result"));
     });
 
     const {

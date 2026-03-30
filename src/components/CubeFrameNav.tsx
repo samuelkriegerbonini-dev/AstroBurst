@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, memo, useEffect } from "react";
 import { Loader2, Film, SkipBack, SkipForward, Play, Pause } from "lucide-react";
-import { getCubeFrame } from "../services/cube.service";
+import { getCubeFrame } from "../services/cube";
 
 interface CubeFrameNavProps {
   filePath: string;
@@ -24,6 +24,12 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
     };
   }, []);
 
+  useEffect(() => {
+    setCurrentFrame(0);
+    setPlaying(false);
+    playingRef.current = false;
+  }, [filePath]);
+
   const loadFrame = useCallback(
     async (idx: number) => {
       if (idx < 0 || idx >= totalFrames) return;
@@ -44,7 +50,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         loadingRef.current = false;
       }
     },
-    [filePath, totalFrames, getCubeFrame, onFrameChange],
+    [filePath, totalFrames, onFrameChange],
   );
 
   const handleSlider = useCallback(
@@ -110,7 +116,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
     };
 
     playNext();
-  }, [playing, currentFrame, totalFrames, getCubeFrame, filePath, onFrameChange]);
+  }, [playing, currentFrame, totalFrames, filePath, onFrameChange]);
 
   if (totalFrames <= 1) return null;
 

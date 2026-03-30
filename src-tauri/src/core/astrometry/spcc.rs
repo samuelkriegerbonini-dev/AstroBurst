@@ -52,6 +52,7 @@ pub struct SpccResult {
     pub avg_color_index: f64,
     pub white_ref_name: String,
     pub catalog_name: String,
+    pub is_synthetic_catalog: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,8 +64,6 @@ struct CatalogStar {
 
 #[derive(Debug, Clone)]
 struct MatchedStar {
-    pixel_x: f64,
-    pixel_y: f64,
     bp_rp: f64,
     measured_r: f64,
     measured_g: f64,
@@ -119,13 +118,15 @@ pub fn spcc_calibrate_rgb(
     let center = wcs.pixel_to_world(w as f64 / 2.0, h as f64 / 2.0);
     let search_radius = (fov_w.max(fov_h) / 60.0) * 0.75;
 
-    let catalog_stars = match config.catalog {
+    let (catalog_stars, is_synthetic) = match config.catalog {
         SpccCatalog::BuiltinBpRp => {
-            generate_synthetic_catalog(&world_coords, &good_stars)
+            (generate_synthetic_catalog(&world_coords, &good_stars), true)
         }
         SpccCatalog::GaiaDr3Tap => {
-            query_gaia_vizier(center.ra, center.dec, search_radius)
-                .unwrap_or_else(|_| generate_synthetic_catalog(&world_coords, &good_stars))
+            match query_gaia_vizier(center.ra, center.dec, search_radius) {
+                Ok(stars) => (stars, false),
+                Err(_) => (generate_synthetic_catalog(&world_coords, &good_stars), true),
+            }
         }
     };
 
@@ -136,7 +137,6 @@ pub fn spcc_calibrate_rgb(
         r_image,
         g_image,
         b_image,
-        &wcs,
         wcs.pixel_scale_arcsec(),
     );
 
@@ -172,6 +172,7 @@ pub fn spcc_calibrate_rgb(
         avg_color_index: avg_ci,
         white_ref_name,
         catalog_name,
+        is_synthetic_catalog: is_synthetic,
     })
 }
 
@@ -236,7 +237,7 @@ fn planck_rgb(teff: f64) -> (f64, f64, f64) {
 fn planck_intensity(teff: f64, wavelength_nm: f64) -> f64 {
     let lambda = wavelength_nm * 1e-9;
     let h = 6.626e-34;
-    let c = 3e8;
+    let c = 2.998e8;
     let k = 1.381e-23;
 
     let exponent = h * c / (lambda * k * teff);
@@ -285,6 +286,7 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
 }
 
 fn query_gaia_vizier(_ra_center: f64, _dec_center: f64, _radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
+    #[allow(unexpected_cfgs)]
     #[cfg(feature = "vizier")]
     {
         let url = format!(
@@ -316,7 +318,6 @@ fn parse_votable_bprp(xml: &str) -> Result<Vec<CatalogStar>, String> {
 
     let mut in_tabledata = false;
     let mut in_tr = false;
-    let mut in_td = false;
     let mut col_idx = 0;
     let mut current_ra = 0.0f64;
     let mut current_dec = 0.0f64;
@@ -406,7 +407,6 @@ fn cross_match_stars(
     r_image: &Array2<f32>,
     g_image: &Array2<f32>,
     b_image: &Array2<f32>,
-    wcs: &WcsTransform,
     pixel_scale: f64,
 ) -> Vec<MatchedStar> {
     let match_radius = (pixel_scale * 3.0) / 3600.0;
@@ -437,8 +437,6 @@ fn cross_match_stars(
 
             if r_flux > 0.0 && g_flux > 0.0 && b_flux > 0.0 {
                 matched.push(MatchedStar {
-                    pixel_x: star.x,
-                    pixel_y: star.y,
                     bp_rp: cat.bp_rp,
                     measured_r: r_flux,
                     measured_g: g_flux,
@@ -454,24 +452,41 @@ fn cross_match_stars(
 fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
     let (h, w) = image.dim();
     let r2 = radius * radius;
+    let inner_annulus = radius * 1.2;
+    let outer_annulus = radius * 1.8;
+    let inner_r2 = inner_annulus * inner_annulus;
+    let outer_r2 = outer_annulus * outer_annulus;
     let mut flux = 0.0f64;
+    let mut bg_sum = 0.0f64;
+    let mut bg_count = 0u32;
 
-    let y_min = (y - radius).floor().max(0.0) as usize;
-    let y_max = ((y + radius).ceil() as usize).min(h.saturating_sub(1));
-    let x_min = (x - radius).floor().max(0.0) as usize;
-    let x_max = ((x + radius).ceil() as usize).min(w.saturating_sub(1));
+    let y_min = (y - outer_annulus).floor().max(0.0) as usize;
+    let y_max = ((y + outer_annulus).ceil() as usize).min(h.saturating_sub(1));
+    let x_min = (x - outer_annulus).floor().max(0.0) as usize;
+    let x_max = ((x + outer_annulus).ceil() as usize).min(w.saturating_sub(1));
 
     for py in y_min..=y_max {
         for px in x_min..=x_max {
             let dx = px as f64 - x;
             let dy = py as f64 - y;
-            if dx * dx + dy * dy <= r2 {
-                flux += image[[py, px]] as f64;
+            let d2 = dx * dx + dy * dy;
+            let v = image[[py, px]] as f64;
+            if d2 <= r2 {
+                flux += v;
+            } else if d2 >= inner_r2 && d2 <= outer_r2 {
+                bg_sum += v;
+                bg_count += 1;
             }
         }
     }
 
-    flux
+    if bg_count > 0 {
+        let bg_per_pixel = bg_sum / bg_count as f64;
+        let aperture_area = std::f64::consts::PI * r2;
+        flux -= bg_per_pixel * aperture_area;
+    }
+
+    flux.max(0.0)
 }
 
 fn compute_correction_factors(

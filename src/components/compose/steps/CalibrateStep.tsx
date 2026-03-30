@@ -1,9 +1,10 @@
-import { useState, useCallback, useMemo, lazy, Suspense } from "react";
+import { useState, useCallback, useMemo, useEffect, lazy, Suspense } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard.types";
 import { Slider, RunButton } from "../../ui";
-import { calibrateComposite } from "../../../services/compose.service";
+import { calibrateComposite, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
+import { getOutputDir } from "../../../infrastructure/tauri";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -27,6 +28,8 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
   const [localG, setLocalG] = useState(state.wbG);
   const [localB, setLocalB] = useState(state.wbB);
   const [loading, setLoading] = useState(false);
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [refChannel, setRefChannel] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number | null>(null);
 
@@ -40,6 +43,27 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
   const rPath = resolveChannelPath(state, rgbBins.r?.id ?? "");
   const gPath = resolveChannelPath(state, rgbBins.g?.id ?? "");
   const bPath = resolveChannelPath(state, rgbBins.b?.id ?? "");
+
+  useEffect(() => {
+    if (state.wbMode !== "auto" || !state.compositeReady) return;
+    let cancelled = false;
+    setAutoLoading(true);
+    computeAutoWb()
+      .then((res) => {
+        if (cancelled) return;
+        const r = Math.round(res.r_factor * 100) / 100;
+        const g = Math.round(res.g_factor * 100) / 100;
+        const b = Math.round(res.b_factor * 100) / 100;
+        setLocalR(r);
+        setLocalG(g);
+        setLocalB(b);
+        setRefChannel(res.ref_channel ?? null);
+        onWbChange("auto", r, g, b);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setAutoLoading(false); });
+    return () => { cancelled = true; };
+  }, [state.wbMode, state.compositeReady]);
 
   const handleModeChange = useCallback((mode: WizardState["wbMode"]) => {
     onWbChange(mode, localR, localG, localB);
@@ -67,7 +91,8 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
     setError("");
     setElapsed(null);
     try {
-      const res = await calibrateComposite("./output", localR, localG, localB);
+      const dir = await getOutputDir();
+      const res = await calibrateComposite(dir, localR, localG, localB);
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
         onResult(url);
@@ -79,6 +104,26 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
       setLoading(false);
     }
   }, [localR, localG, localB, onResult]);
+
+  const handleResetWb = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await resetWb(await getOutputDir());
+      setLocalR(1.0);
+      setLocalG(1.0);
+      setLocalB(1.0);
+      onWbChange("manual", 1.0, 1.0, 1.0);
+      if (res?.png_path) {
+        const url = await getPreviewUrl(res.png_path);
+        onResult(url);
+      }
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [onResult, onWbChange]);
 
   const isFactorsNeutral = localR === 1.0 && localG === 1.0 && localB === 1.0;
 
@@ -102,11 +147,22 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
 
       {(state.wbMode === "manual" || state.wbMode === "auto") && (
         <div className="flex flex-col gap-2 pl-2">
-          <Slider label="R" value={localR} min={0.5} max={2.0} step={0.01} accent="red"
+          {state.wbMode === "auto" && autoLoading && (
+            <div className="flex items-center gap-2 text-[10px] text-cyan-400/60">
+              <Loader2 size={10} className="animate-spin" />
+              Computing stability-based WB...
+            </div>
+          )}
+          {state.wbMode === "auto" && !autoLoading && refChannel && (
+            <div className="text-[9px] text-zinc-500">
+              Reference channel: {refChannel} (lowest MAD/median)
+            </div>
+          )}
+          <Slider label="R" value={localR} min={0.5} max={1.5} step={0.01} accent="red"
             format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("r", v)} />
-          <Slider label="G" value={localG} min={0.5} max={2.0} step={0.01} accent="green"
+          <Slider label="G" value={localG} min={0.5} max={1.5} step={0.01} accent="green"
             format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("g", v)} />
-          <Slider label="B" value={localB} min={0.5} max={2.0} step={0.01} accent="blue"
+          <Slider label="B" value={localB} min={0.5} max={1.5} step={0.01} accent="blue"
             format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("b", v)} />
         </div>
       )}
@@ -135,13 +191,26 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
       )}
 
       {state.compositeReady && state.wbMode !== "none" && (
-        <RunButton
-          label={isFactorsNeutral ? "Apply WB (neutral)" : `Apply WB (${localR.toFixed(2)} / ${localG.toFixed(2)} / ${localB.toFixed(2)})`}
-          runningLabel="Calibrating..."
-          running={loading}
-          accent="cyan"
-          onClick={handleRunCalibrate}
-        />
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <RunButton
+              label={isFactorsNeutral ? "Apply WB (neutral)" : `Apply WB (R=${localR.toFixed(2)} G=${localG.toFixed(2)} B=${localB.toFixed(2)})`}
+              runningLabel="Calibrating..."
+              running={loading}
+              accent="cyan"
+              onClick={handleRunCalibrate}
+            />
+          </div>
+          {!isFactorsNeutral && (
+            <button
+              onClick={handleResetWb}
+              disabled={loading}
+              className="px-2.5 py-1.5 rounded-md text-[10px] font-medium bg-zinc-800/60 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 transition-all disabled:opacity-40"
+            >
+              Reset WB
+            </button>
+          )}
+        </div>
       )}
 
       {elapsed !== null && (

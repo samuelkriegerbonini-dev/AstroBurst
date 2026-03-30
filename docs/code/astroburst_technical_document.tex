@@ -82,18 +82,6 @@
     morekeywords={const,let,async,await,interface,type,export,import,from,as,extends},
 }
 
-\lstdefinestyle{bashcode}{
-    language=bash,
-    backgroundcolor=\color{codebg},
-    frame=single,
-    rulecolor=\color{codeframe},
-    basicstyle=\ttfamily\small,
-    keywordstyle=\color{astropurple}\bfseries,
-    numbers=none,
-    breaklines=true,
-    showstringspaces=false,
-}
-
 \newtcolorbox{notebox}[1][]{
     colback=notebg,
     colframe=noteframe,
@@ -101,10 +89,7 @@
     title={#1},
     arc=2pt,
     boxrule=0.5pt,
-    left=6pt,
-    right=6pt,
-    top=4pt,
-    bottom=4pt,
+    left=6pt,right=6pt,top=4pt,bottom=4pt,
 }
 
 \newtcolorbox{infobox}[1][]{
@@ -115,15 +100,12 @@
     title={#1},
     arc=2pt,
     boxrule=0.5pt,
-    left=6pt,
-    right=6pt,
-    top=4pt,
-    bottom=4pt,
+    left=6pt,right=6pt,top=4pt,bottom=4pt,
 }
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.4.0}}
+\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.4.5}}
 \fancyhead[R]{\small\textcolor{gray}{\thepage}}
 \fancyfoot[C]{\small\textcolor{gray}{GPL-3.0 License \textbullet\ \the\year}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -141,7 +123,7 @@
     \vspace{-1cm}
     {\Huge\bfseries\textcolor{astropurple}{AstroBurst}}\\[0.3cm]
     {\Large High-Performance Astronomical Image Processor}\\[0.2cm]
-    {\large Technical Document --- Release v0.4.0}
+    {\large Technical Document --- Release v0.4.5}
 }
 \author{Samuel Krieger Bonini}
 \date{March 2026}
@@ -158,11 +140,11 @@
             \toprule
             \textbf{Field} & \textbf{Value} \\
             \midrule
-            Document Version & 0.4.0 \\
-            Release & v0.4.0 \\
+            Document Version & 0.4.5 \\
+            Release & v0.4.5 \\
             Date & March 2026 \\
             Author & Samuel Krieger Bonini \\
-            Stack & Rust 1.75+ $\cdot$ Tauri v2 $\cdot$ React $\cdot$ TypeScript \\
+            Stack & Rust 1.75+ $\cdot$ Tauri v2.10 $\cdot$ React 19 $\cdot$ TypeScript 5.7 \\
             Platforms & Windows $\cdot$ macOS $\cdot$ Linux \\
             License & GPL-3.0-or-later \\
             Repository & \url{https://github.com/samuelkriegerbonini-dev/AstroBurst} \\
@@ -186,26 +168,34 @@
     \item Advanced astrophotographers processing deep-sky narrowband and broadband imaging data
     \end{itemize}
 
-    Version 0.4.0 delivers a complete processing pipeline from raw FITS/ASDF ingestion through deconvolution, noise reduction, color composition, and export, with \textbf{42 backend commands} exposed through a typed TypeScript API layer.
+    Version 0.4.5 delivers a complete processing pipeline from raw FITS/ASDF ingestion through calibration, stacking, alignment, color composition, and export, with \textbf{47 backend commands} exposed through a typed TypeScript API layer and a 10-step ComposeWizard pipeline.
+
+    \subsection{What's New in v0.4.5}
+    \begin{itemize}[nosep]
+    \item \textbf{Non-destructive composite pipeline} --- Immutable ORIG cache with idempotent WB and SCNR; \code{reset\_wb\_cmd} for one-click undo
+    \item \textbf{STF rendering consistency} --- GPU shader, CPU worker, and Rust backend produce pixel-identical output via symmetric denominator protection and unified padding threshold
+    \item \textbf{Blend preset positional fallback} --- SHO/HOO/Foraxx presets work with any bin configuration via positional weight mapping
+    \item \textbf{Spectroscopy wavelength unit conversion} --- Automatic CUNIT3 detection (M, NM, ANGSTROM, HZ) with display conversion
+    \item \textbf{Export pipeline fix} --- Exports use user STF params instead of identity, matching preview
+    \end{itemize}
+
+    \subsection{What's New in v0.4.2}
+    \begin{itemize}[nosep]
+    \item \textbf{ComposeWizard} --- 10-step pipeline (Channels, Stack, BG, Align, Blend, Color, Mask, Stretch, Adjust, Export)
+    \item \textbf{Synthetic FITS generation} --- Star field, PSF, and noise injection for testing
+    \item \textbf{Narrowband palette system} --- SHO, HOO, HOS, NaturalColor, Custom with auto-detection
+    \item \textbf{Live composite STF re-stretch} --- Per-channel shadow/midtone/highlight without re-composing
+    \item \textbf{SPCC} --- Spectrophotometric color calibration with optional Gaia DR3 TAP (vizier feature)
+    \item \textbf{Masked stretch} --- Iterative MTF with star mask protection
+    \item \textbf{PSF enhancement} --- Moment-based FWHM with subpixel peak estimation
+    \end{itemize}
 
     \subsection{What's New in v0.4.0}
     \begin{itemize}[nosep]
-    \item \textbf{Star-based affine alignment} --- Triangle asterism matching with RANSAC robust estimation, supporting full affine (6-DOF) and rigid (4-DOF) transforms with automatic fallback to FFT phase correlation
-    \item \textbf{Stability-based auto white balance} --- Selects the channel with lowest MAD/median coefficient of variation as reference, replacing fixed G-channel normalization
-    \item \textbf{SCNR luminance redistribution} --- Green noise reduction energy is redistributed to R and B channels proportionally via ITU-R BT.709 weights
-    \item \textbf{Numerical correctness audit} --- Fixed NaN ordering in median/MAD, Hann window 2$\pi$ factor, polynomial background basis, RL Tikhonov regularization, and phase correlation confidence z-score
-    \item \textbf{Performance optimizations} --- Drizzle flat-storage accumulator, FFT planner hoisting, parallelized peak finding, RANSAC mask reuse, sigma-clip deviation buffer reuse
-    \end{itemize}
-
-    \subsection{What's New in v0.3.0}
-    \begin{itemize}[nosep]
-    \item \textbf{Richardson-Lucy deconvolution} --- FFT-based iterative deconvolution with Gaussian PSF, regularization, and deringing
-    \item \textbf{Background extraction} --- Polynomial surface modeling with sigma-clipped grid sampling (subtract or divide modes)
-    \item \textbf{Wavelet denoising} --- Multi-scale wavelet decomposition with per-scale sigma thresholds (up to 8 scales)
-    \item \textbf{ASDF format support} --- First Rust implementation of the Advanced Scientific Data Format reader with zlib/bzip2/lz4 decompression, Roman Space Telescope data model traversal, and gWCS extraction
-    \item \textbf{Redesigned tab UI} --- Bottom tabs (Info, Analysis, Headers, Export) + side panels (Processing, Compose) with resizable drag handles
-    \item \textbf{Split preview contexts} --- 6 independent React contexts for minimal re-renders
-    \item \textbf{Lazy-loaded panels} --- React.lazy + Suspense for fast initial load
+    \item \textbf{Star-based affine alignment} --- Triangle asterism matching with RANSAC, automatic fallback to FFT phase correlation
+    \item \textbf{Stability-based auto white balance} --- Lowest MAD/median channel as reference
+    \item \textbf{SCNR luminance redistribution} --- ITU-R BT.709 weighted redistribution to R and B
+    \item \textbf{Numerical correctness audit} --- NaN ordering, Hann window, polynomial basis, RL regularization, phase correlation confidence
     \end{itemize}
 
 
@@ -226,8 +216,8 @@
 
 \node[layer, fill=tscolor!10, draw=tscolor] (frontend) at (0, 4.5) {};
 \node[label] at (-5.5, 4.9) {Frontend};
-\node[sublayer, fill=tscolor!5] at (-4.2, 4.5) {React};
-\node[sublayer, fill=tscolor!5] at (-2, 4.5) {TypeScript};
+\node[sublayer, fill=tscolor!5] at (-4.2, 4.5) {React 19};
+\node[sublayer, fill=tscolor!5] at (-2, 4.5) {TypeScript 5.7};
 \node[sublayer, fill=tscolor!5] at (0.3, 4.5) {Tailwind v4};
 \node[sublayer, fill=tscolor!5] at (2.7, 4.5) {WebGPU};
 \node[sublayer, fill=tscolor!5] at (4.8, 4.5) {Canvas 2D};
@@ -250,12 +240,12 @@
 \node[font=\scriptsize, text=gray] at (-4.2, 0.1) {stacking, compose};
 
 \node[font=\scriptsize, text=gray] at (0, 0.9) {FITS mmap, ASDF reader};
-\node[font=\scriptsize, text=gray] at (0, 0.5) {cache, IPC, render};
-\node[font=\scriptsize, text=gray] at (0, 0.1) {config, progress};
+\node[font=\scriptsize, text=gray] at (0, 0.5) {cache (ORIG+KEY), IPC};
+\node[font=\scriptsize, text=gray] at (0, 0.1) {config, progress, render};
 
 \node[font=\scriptsize, text=gray] at (4.2, 0.9) {STF, drizzle, FFT};
-\node[font=\scriptsize, text=gray] at (4.2, 0.5) {deconv, wavelet};
-\node[font=\scriptsize, text=gray] at (4.2, 0.1) {WCS, SCNR};
+\node[font=\scriptsize, text=gray] at (4.2, 0.5) {deconv, wavelet, SPCC};
+\node[font=\scriptsize, text=gray] at (4.2, 0.1) {WCS, SCNR, masked stretch};
 
 \draw[arrow] (frontend) -- (ipc);
 \draw[arrow] (ipc) -- (backend);
@@ -270,35 +260,48 @@
     The Rust backend is organized into six layers:
 
     \begin{description}[style=nextline, leftmargin=2cm]
-    \item[\texttt{cmd/}] Tauri command handlers organized by domain (42 registered commands). Each module receives deserialized JSON arguments, delegates to core/domain logic, and returns JSON or binary responses.
-    \item[\texttt{core/}] Pure computational modules: alignment (phase correlation, affine with triangle asterism matching), analysis (histogram, FFT, stars), astrometry (plate solve, WCS), compose (RGB, SCNR, white balance), cube (spectrum, frames), imaging (STF, deconvolution, wavelet, background), metadata (header discovery, filter detection), stacking (sigma-clip, drizzle).
-    \item[\texttt{domain/}] Orchestration layer coordinating core modules for complex multi-step operations (calibration masters, drizzle-from-paths, cube processing).
-    \item[\texttt{infra/}] Infrastructure: Arc-based zero-copy cache, config management, FITS I/O (mmap parser, MEF scanner, FITS writer), ASDF reader (YAML tree parser, binary block extractor, zlib/bzip2/lz4 decompressor, Roman data model converter, gWCS bridge), binary IPC encoding, progress tracking, PNG rendering.
-    \item[\texttt{types/}] Shared type definitions: image stats, STF params, stacking/drizzle/RL configs, compose types (AlignMethod, WhiteBalance, ChannelStats), SCNR, error types, FITS header abstraction, constants.
-    \item[\texttt{math/}] Mathematical primitives: NaN-safe median/MAD, sigma clipping, SIMD utilities.
+    \item[\texttt{cmd/}] Tauri command handlers organized by domain (47 registered commands). Each module receives deserialized JSON arguments, delegates to core/domain logic, and returns JSON or binary responses.
+    \item[\texttt{core/}] Pure computational modules: alignment (phase correlation, affine with triangle asterism matching), analysis (histogram, FFT, stars), astrometry (plate solve, WCS, SPCC), compose (RGB, channel blend, SCNR, white balance, LRGB), cube (spectrum, frames), imaging (STF, deconvolution, wavelet, background, masked stretch, PSF estimation, star mask), metadata (header discovery, filter detection), stacking (sigma-clip, drizzle), synth (star field, PSF, noise).
+    \item[\texttt{domain/}] Orchestration layer coordinating core modules for complex multi-step operations (calibration masters, drizzle-from-paths, cube processing, plate solve).
+    \item[\texttt{infra/}] Infrastructure: Arc-based zero-copy cache with ORIG/KEY dual-layer for non-destructive composite editing, config management, FITS I/O (mmap parser, MEF scanner, FITS writer with multi-BITPIX), ASDF reader (YAML tree parser, binary block extractor, zlib/bzip2/lz4 decompressor, Roman data model converter, gWCS bridge), binary IPC encoding, progress tracking, PNG rendering (8/16-bit grayscale and RGB).
+    \item[\texttt{types/}] Shared type definitions: image stats, STF params, stacking/drizzle/RL configs, compose types (AlignMethod, WhiteBalance, BlendWeight), SCNR, error types, FITS header abstraction, 310+ constants.
+    \item[\texttt{math/}] Mathematical primitives: NaN-safe median/MAD, sigma clipping, SIMD log approximation (Cephes degree-8 minimax, $<1$\,ULP precision).
     \end{description}
 
-    All heavy computation is offloaded via \code{tokio::task::spawn\_blocking}, preventing UI freezes. Batch operations use Rayon for data-parallel execution across all available CPU cores.
+    \subsection{Non-Destructive Composite Pipeline (v0.4.5)}
+    \label{sec:nondestructive}
+
+    The composite cache uses a dual-layer architecture:
+
+    \begin{infobox}[ORIG/KEY Cache Architecture]
+        \begin{center}
+            \begin{tabular}{lll}
+                \toprule
+                \textbf{Layer} & \textbf{Keys} & \textbf{Semantics} \\
+                \midrule
+                ORIG (immutable) & \code{\_\_composite\_orig\_r/g/b} & Written once by blend/compose/RGB-FITS load \\
+                KEY (working) & \code{\_\_composite\_r/g/b} & Reconstructed: ORIG $\times$ WB $\to$ KEY, or ORIG $\times$ WB $\to$ SCNR $\to$ KEY \\
+                \bottomrule
+            \end{tabular}
+        \end{center}
+        Every downstream operation (\code{calibrate\_composite\_cmd}, \code{apply\_scnr\_cmd}) reads from ORIG, applies the full transform chain, and writes to KEY. This makes WB and SCNR idempotent: applying the same factors twice produces identical results. \code{reset\_wb\_cmd} copies ORIG $\to$ KEY.
+    \end{infobox}
 
     \subsection{Frontend (React + TypeScript)}
 
-    The frontend is a single-page React application with a tab-based layout:
+    The frontend is organized around the ComposeWizard (10-step pipeline) and split preview contexts:
 
     \begin{description}[style=nextline, leftmargin=2cm]
-    \item[\texttt{App.tsx}] Root component managing view state (empty/processing/complete), file dialog integration, drag-and-drop, resizable sidebar, and folder scanning.
-    \item[\texttt{useFileQueue}] Central state machine (\code{useReducer}) tracking file status, concurrent processing queue (3 workers), resolution group detection, and auto-resampling.
-    \item[\texttt{services/}] Domain-specific service modules (compose.service, fits.service, analysis.service, etc.) wrapping Tauri IPC calls with typed interfaces.
-    \item[Tab System] Bottom tabs: Info (stats/header summary), Analysis (histogram, FFT, stars, spectroscopy), Headers (full header explorer), Export (FITS/PNG). Side tabs: Processing (background extraction, wavelet denoise, deconvolution), Compose (RGB with alignment method selector, drizzle, drizzle RGB).
-    \item[Preview Contexts] 6 split React contexts (FileCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RawPixelsCtx) providing scoped state to avoid cascading re-renders.
-    \item[Lazy Loading] All panel components loaded via \code{React.lazy} + \code{Suspense} with spinner fallbacks.
+    \item[\texttt{services/}] 12 domain-specific service modules wrapping Tauri IPC: compose, fits, analysis, header, cube, stacking, processing, config, astrometry, export, synth, tiles.
+    \item[\texttt{ComposeWizard}] 10-step pipeline: Channels $\to$ Stack $\to$ BG $\to$ Align $\to$ Blend $\to$ Color $\to$ Mask $\to$ Stretch $\to$ Adjust $\to$ Export. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic.
+    \item[Preview Contexts] 8 split React contexts (FileCtx, DoneFilesCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RawPixelsCtx, NarrowbandCtx) for granular re-render control.
+    \item[GPU Rendering] WebGPU singleton with WGSL fragment shader for real-time STF. CPU worker fallback with identical MTF implementation. Both use symmetric denominator protection and padding threshold matching the Rust backend.
     \end{description}
 
     \subsection{IPC Strategy}
 
-    Two IPC channels are used:
-
     \begin{infobox}[Binary IPC Protocol]
-        The \cmd{get\_raw\_pixels\_preview} and \cmd{get\_raw\_pixels\_binary} commands encode a \textbf{16-byte header} followed by raw pixel data:
+        The \cmd{get\_raw\_pixels\_preview} command encodes a \textbf{16-byte header} followed by raw pixel data:
         \begin{center}
             \begin{tabular}{cccl}
                 \toprule
@@ -312,7 +315,6 @@
                 \bottomrule
             \end{tabular}
         \end{center}
-        The frontend receives an \code{ArrayBuffer} directly with zero JSON/base64 overhead.
     \end{infobox}
 
 
@@ -338,26 +340,29 @@
     \item $\text{MTF}(0, m) = 0$ and $\text{MTF}(1, m) = 1$ for all $m$
     \item $\text{MTF}(m, m) = 0.5$ --- the midtone maps to 50\% brightness
     \item $m < 0.5$ brightens the image; $m > 0.5$ darkens it
+    \item When $m = 0.5$: $\text{MTF}(x, 0.5) = x$ (identity)
     \end{itemize}
 
-    The \textbf{auto-stretch} algorithm computes the stretch parameters from image statistics. Given the pixel distribution, let $\tilde{x}$ be the median and $\text{MAD}$ the Median Absolute Deviation:
-
-    \begin{align}
-        \text{MAD} &= \text{median}\left(|x_i - \tilde{x}|\right) \label{eq:mad} \\[6pt]
-        \text{shadow} &= \max\left(0,\; \tilde{x} - k \cdot \text{MAD}\right) \label{eq:shadow} \\[6pt]
-        \text{midtone} &= \text{MTF}^{-1}\left(t_{\text{bg}},\; \frac{\tilde{x} - \text{shadow}}{1 - \text{shadow}}\right) \label{eq:midtone} \\[6pt]
-        \text{highlight} &= 1.0 \label{eq:highlight}
-    \end{align}
-
-    where $k = 2.8$ (calibrated for deep-sky data) and $t_{\text{bg}} = 0.25$ is the target background level.
-
-    \begin{notebox}[NaN-Safe Sorting (v0.4.0)]
-        All median and MAD computations use NaN-safe comparison: NaN values are sorted to the end of the array (treated as greater than any finite value), preventing corrupted statistics that propagate through sigma clipping, auto-STF, and white balance.
+    \begin{notebox}[Denominator Protection (v0.4.5)]
+        The denominator $D = (2m - 1)x - m$ changes sign across the valid domain. The correct guard is:
+        \[
+            \text{if } |D| < \varepsilon \text{ then return } x; \quad \text{if } |m - 0.5| < \varepsilon \text{ then return } x
+        \]
+        The v0.4.2 GPU shader incorrectly used $\max(D, \varepsilon)$ which forces $D > 0$, inverting the transfer function for $m < 0.5$. v0.4.5 uses symmetric $|D|$ protection across GPU (WGSL), CPU worker (JS), and Rust backend, achieving pixel-identical output.
     \end{notebox}
 
-    \subsection{Asinh Stretch}
+    \textbf{Padding pixels} ($v \leq 10^{-7}$) are rendered as black across all three rendering paths, matching the Rust \code{is\_valid\_pixel} threshold.
 
-    The \textbf{arcsinh transfer function} provides astronomically-correct normalization that preserves flux ratios between stars of different magnitudes:
+    The \textbf{auto-stretch} computes parameters from image statistics:
+
+    \begin{align}
+        \text{shadow} &= \max\left(0,\; \tilde{x}_{\text{norm}} + k \cdot \sigma_{\text{norm}}\right), \quad k = -2.8 \label{eq:shadow} \\[6pt]
+        \text{midtone} &= \text{MTF}_{\text{balance}}^{-1}\left(\frac{\tilde{x}_{\text{norm}} - \text{shadow}}{1 - \text{shadow}},\; t_{\text{bg}}\right), \quad t_{\text{bg}} = 0.25 \label{eq:midtone}
+    \end{align}
+
+    where $\tilde{x}_{\text{norm}}$ and $\sigma_{\text{norm}}$ are the normalized median and sigma (MAD $\times$ 1.4826).
+
+    \subsection{Asinh Stretch}
 
     \begin{equation}
         \boxed{
@@ -366,292 +371,162 @@
         \label{eq:asinh}
     \end{equation}
 
-    where $\alpha$ controls the stretch aggressiveness. This function maps $[0, 1] \to [0, 1]$ and is approximately linear for small $x$ (preserving faint detail) while compressing bright values logarithmically.
+    Maps $[0, 1] \to [0, 1]$, approximately linear for small $x$ (preserving faint detail), logarithmic compression for bright values. $\alpha \in [1, 500]$ controls aggressiveness.
+
+    \subsection{Masked Stretch (v0.4.2)}
+    \label{sec:masked_stretch}
+
+    Iterative MTF stretch with star mask protection. At each iteration $k$:
+
+    \begin{align}
+        M^{(k)} &= \text{StarMask}(I^{(k)},\; \text{growth},\; \text{softness}) \\
+        I^{(k+1)} &= (1 - \alpha \cdot M^{(k)}) \cdot \text{MTF}(I^{(k)}) + \alpha \cdot M^{(k)} \cdot I^{(k)}
+    \end{align}
+
+    where $\alpha$ is the protection amount (default 0.85) and growth controls the mask dilation radius. Convergence when background level reaches target (default 0.25). JWST-optimized defaults: growth 0.8, protection 96\%.
 
     \subsection{Cross-Correlation Alignment (Phase Correlation)}
     \label{sec:alignment_phase}
-
-    Frame registration uses \textbf{phase correlation} in the frequency domain. Given reference frame $R$ and target frame $T$:
 
     \begin{equation}
         \text{shift} = \arg\max_{(\Delta x, \Delta y)} \mathcal{F}^{-1}\!\left\{\frac{\hat{R} \cdot \hat{T}^*}{|\hat{R} \cdot \hat{T}^*|}\right\}
         \label{eq:phase_corr}
     \end{equation}
 
-    where $\hat{R} = \mathcal{F}\{R\}$ denotes the 2D DFT applied with a \textbf{Hann window} $w(n) = 0.5(1 - \cos(2\pi n / N))$. The normalized cross-power spectrum produces a sharp peak at the integer translation offset. Sub-pixel refinement is achieved via parabolic interpolation on the correlation surface, followed by bicubic Catmull-Rom resampling for the actual shift.
-
-    Confidence is measured as the z-score of the peak:
-    \begin{equation}
-        \text{confidence} = \frac{P_{\text{peak}} - \mu_P}{\sigma_P}
-        \label{eq:confidence}
-    \end{equation}
-
-    where $\mu_P$ and $\sigma_P$ are the mean and standard deviation of the correlation surface. A coarse-to-fine strategy downsamples to 512$\times$512 for initial offset estimation, then refines on a 512$\times$512 crop centered on the coarse estimate.
-
-    \textbf{Corrects:} pure translation (sub-pixel). \textbf{Does not correct:} rotation, scale.
+    Hann window: $w(n) = 0.5(1 - \cos(2\pi n / N))$. Confidence: $z = (P_{\text{peak}} - \mu_P) / \sigma_P$. Coarse-to-fine: downsample to $512 \times 512$, refine on centered crop.
 
     \subsection{Star-Based Affine Alignment (v0.4.0)}
     \label{sec:alignment_affine}
 
-    For images with rotational misalignment, AstroBurst provides a star-based alignment pipeline using triangle asterism matching and RANSAC robust estimation.
-
-    \subsubsection{Star Detection and Triangle Construction}
-
-    Stars are detected via sigma-clipped background estimation and connected-component analysis (see Section~\ref{sec:star_detection}). The top 80 stars by flux are selected from each image. For every triplet of stars $(s_i, s_j, s_k)$ with minimum side length $> 20$\,px, a triangle descriptor is computed:
-
+    Triangle descriptor (scale-invariant):
     \begin{equation}
-        T = \left(\frac{d_{\text{mid}}}{d_{\text{short}}},\; \frac{d_{\text{long}}}{d_{\text{short}}}\right)
-        \label{eq:triangle_desc}
+        T = \left(\frac{d_{\text{mid}}}{d_{\text{short}}},\; \frac{d_{\text{long}}}{d_{\text{short}}}\right), \quad \text{match if } |T_r - T_t| < 0.005
     \end{equation}
 
-    where $d_{\text{short}} \leq d_{\text{mid}} \leq d_{\text{long}}$ are the sorted side lengths. These ratios are \textbf{invariant} under translation, rotation, and uniform scaling.
-
-    \subsubsection{Triangle Matching}
-
-    For each pair of reference triangle $T_r$ and target triangle $T_t$, a match is declared if:
-
-    \begin{equation}
-        \left|\frac{d_{\text{mid}}^r}{d_{\text{short}}^r} - \frac{d_{\text{mid}}^t}{d_{\text{short}}^t}\right| < \epsilon
-        \quad \text{and} \quad
-        \left|\frac{d_{\text{long}}^r}{d_{\text{short}}^r} - \frac{d_{\text{long}}^t}{d_{\text{short}}^t}\right| < \epsilon
-        \label{eq:triangle_match}
-    \end{equation}
-
-    with $\epsilon = 0.005$. Matching triangles vote for star correspondences; pairs with $\geq 3$ votes are accepted.
-
-    \subsubsection{RANSAC Transform Estimation}
-
-    Given $n$ star correspondences $\{(\mathbf{p}_i^r, \mathbf{p}_i^t)\}_{i=1}^n$, the affine transform is estimated via RANSAC (500 iterations):
-
+    RANSAC (500 iterations) fits 6-DOF affine or 4-DOF rigid:
     \begin{equation}
         \begin{pmatrix} x_t \\ y_t \end{pmatrix} =
         \begin{pmatrix} a & b \\ c & d \end{pmatrix}
         \begin{pmatrix} x_r \\ y_r \end{pmatrix} +
         \begin{pmatrix} t_x \\ t_y \end{pmatrix}
-        \label{eq:affine}
     \end{equation}
 
-    The 6 parameters $(a, b, c, d, t_x, t_y)$ are solved via least squares on a 3-point sample (affine) or 2-point sample (rigid, where $a = \cos\theta$, $b = -\sin\theta$, $c = \sin\theta$, $d = \cos\theta$). Inliers are points with reprojection error $< 2$\,px.
-
-    \textbf{Sanity checks} reject transforms with: offset $> 25\%$ of image dimension, rotation $> 5^\circ$, scale outside $[0.85, 1.15]$, residual $> 3$\,px, or inlier ratio $< 30\%$.
-
-    \textbf{Fallback chain:} affine (8+ matches) $\to$ rigid (5+ matches) $\to$ phase correlation $\to$ identity.
-
-    \subsubsection{Image Warping}
-
-    The aligned image is produced by inverse-mapping each output pixel through the affine transform and sampling the source image via bicubic Catmull-Rom interpolation:
-
-    \begin{equation}
-        I_{\text{out}}(x, y) = \text{bicubic}\!\left(I_{\text{in}},\; \mat{A}^{-1} \begin{pmatrix} x \\ y \end{pmatrix}\right)
-    \end{equation}
-
-    Pixels mapping outside the source bounds are set to NaN. Warping is parallelized across rows via Rayon.
+    Sanity: offset $< 25\%$, rotation $< 5^{\circ}$, scale $\in [0.85, 1.15]$, residual $< 3$\,px, inlier ratio $> 30\%$. Fallback: affine $\to$ rigid $\to$ phase correlation $\to$ identity. Warp via bicubic Catmull-Rom, parallelized per row.
 
     \subsection{Sigma-Clipped Stacking}
     \label{sec:sigma_stack}
 
     \begin{algorithm}[H]
 \SetAlgoLined
-\SetKwInOut{Input}{Input}
-\SetKwInOut{Output}{Output}
-\Input{Aligned frames $\{F_1, F_2, \ldots, F_N\}$, thresholds $\sigma_{\text{low}}, \sigma_{\text{high}}$, max iterations $K$}
+\Input{Frames $\{F_1, \ldots, F_N\}$, $\sigma_{\text{low}}, \sigma_{\text{high}}$, max iters $K$}
 \Output{Stacked image $S$}
-\ForEach{pixel position $(i, j)$}{
-    $V \leftarrow \{F_1(i,j), F_2(i,j), \ldots, F_N(i,j)\}$\;
-    \For{$k = 1$ \KwTo $K$}{
-        $\mu \leftarrow \text{mean}(V)$\;
-        $\sigma \leftarrow \text{std}(V)$\;
-        $V' \leftarrow \{v \in V : \mu - \sigma_{\text{low}} \cdot \sigma \leq v \leq \mu + \sigma_{\text{high}} \cdot \sigma\}$\;
-        \If{$|V'| = |V|$ \textbf{or} $|V'| < 3$}{
-            \textbf{break}\;
-        }
-        $V \leftarrow V'$\;
-    }
+\ForEach{pixel $(i, j)$}{
+    $V \leftarrow \{F_k(i,j)\}$, iter 0: $\mu = \text{median}(V)$, $\sigma = \text{MAD}(V) \times 1.4826$\;
+    iters $1{+}$: $\mu = \text{mean}(V)$, $\sigma = \text{std}(V)$\;
+    reject $v \notin [\mu - \sigma_{\text{low}} \cdot \sigma,\; \mu + \sigma_{\text{high}} \cdot \sigma]$\;
     $S(i,j) \leftarrow \text{mean}(V)$\;
 }
-\caption{Iterative Sigma-Clipped Stacking}
-\label{alg:sigma_clip}
+\caption{Sigma-Clipped Stacking (median+MAD first iter, mean+std subsequent)}
     \end{algorithm}
 
-    Default parameters: $\sigma_{\text{low}} = \sigma_{\text{high}} = 3.0$, $K = 5$. The deviation buffer is allocated once and reused per pixel to avoid heap allocation overhead.
+    \subsection{Channel Blending (v0.4.2)}
+    \label{sec:blend}
+
+    Given $N$ input channels $C_k$ and weight matrix $W$:
+
+    \begin{equation}
+        \text{Out}_c = \sum_{k=1}^{N} W_{k,c} \cdot C_k, \quad c \in \{R, G, B\}
+    \end{equation}
+
+    Preset weights (e.g., SHO: $\text{SII} \to R$, $\text{H}\alpha \to G$, $\text{OIII} \to B$) use named channelId matching with \textbf{positional fallback} (v0.4.5): when preset channelIds don't match filled bins, weights map positionally to the first $N$ filled bins.
+
+    \subsection{White Balance (v0.4.0, non-destructive v0.4.5)}
+    \label{sec:white_balance}
+
+    Reference channel selection by minimum coefficient of variation:
+
+    \begin{equation}
+        k^* = \arg\min_{k \in \{R, G, B\}} \frac{\text{MAD}_k}{\tilde{C}_k}; \qquad
+        w_j = \frac{\tilde{C}_{k^*}}{\tilde{C}_j},\; j \neq k^*; \quad w_{k^*} = 1
+    \end{equation}
+
+    In v0.4.5, WB is applied from ORIG cache: $\text{KEY}_c = \text{ORIG}_c \times w_c$. Idempotent.
+
+    \subsection{SCNR (v0.4.0, non-destructive v0.4.5)}
+    \label{sec:scnr}
+
+    Two limit methods and optional luminance preservation:
+
+    \begin{align}
+        G' &= \min\!\left(G,\; \tfrac{R + B}{2}\right) \quad\text{or}\quad \min(G,\; \max(R, B)) \\[4pt]
+        G_{\text{new}} &= G + \alpha (G' - G), \quad \alpha \in [0, 1]
+    \end{align}
+
+    When luminance preservation is enabled (BT.709):
+    \begin{equation}
+        \Delta = \frac{0.7152 \cdot (G - G_{\text{new}})}{0.2126 + 0.0722}; \quad R' = \min(R + \Delta, 1); \quad B' = \min(B + \Delta, 1)
+    \end{equation}
+
+    In v0.4.5, SCNR is applied from ORIG cache with WB pre-applied: $\text{ORIG} \times \text{WB} \to \text{SCNR} \to \text{KEY}$. Idempotent.
 
     \subsection{Drizzle Integration}
     \label{sec:drizzle}
 
-    Drizzle (Variable-Pixel Linear Reconstruction) maps input pixels onto a higher-resolution output grid:
-
     \begin{equation}
         O(i, j) = \frac{\sum_p w_p \cdot K(i - x_f^p,\; j - y_f^p) \cdot I_p}{\sum_p w_p \cdot K(i - x_f^p,\; j - y_f^p)}
-        \label{eq:drizzle}
     \end{equation}
 
-    Three kernel options:
-
-    \begin{align}
-        K_{\text{square}}(\Delta x, \Delta y) &=
-        \begin{cases}
-            1 & \text{if } |\Delta x| \leq \frac{d}{2} \text{ and } |\Delta y| \leq \frac{d}{2} \\
-            0 & \text{otherwise}
-        \end{cases}
-        \label{eq:kernel_square} \\[6pt]
-        K_{\text{gaussian}}(\Delta x, \Delta y) &= \exp\!\left(-\frac{\Delta x^2 + \Delta y^2}{2\sigma_K^2}\right)
-        \label{eq:kernel_gaussian} \\[6pt]
-        K_{\text{lanczos3}}(\Delta x, \Delta y) &= L_3(\Delta x) \cdot L_3(\Delta y)
-        \label{eq:kernel_lanczos}
-    \end{align}
-
-    \begin{notebox}[Drizzle Accumulator (v0.4.0)]
-        The drizzle accumulator uses a flat \code{Vec<f32>} + \code{Vec<u16>} count array instead of \code{Vec<Vec<f32>>}, eliminating millions of heap allocations for typical 4K+ output images. Per-pixel storage is pre-allocated as $2 \times N_{\text{frames}}$ slots with contiguous memory layout.
-    \end{notebox}
-
-    \subsection{White Balance (v0.4.0)}
-    \label{sec:white_balance}
-
-    Auto white balance selects the most stable channel as reference using the coefficient of variation (MAD/median ratio):
-
-    \begin{equation}
-        k^* = \arg\min_{k \in \{R, G, B\}} \frac{\text{MAD}_k}{\tilde{C}_k}
-        \label{eq:wb_stability}
-    \end{equation}
-
-    The reference channel $k^*$ receives weight 1.0; other channels are scaled by the ratio of medians:
-
-    \begin{equation}
-        w_j = \frac{\tilde{C}_{k^*}}{\tilde{C}_j}, \quad j \neq k^*; \qquad w_{k^*} = 1
-        \label{eq:wb_weights}
-    \end{equation}
-
-    This replaces the v0.3 fixed G-channel reference, which could amplify noise in narrowband data where the G channel (typically OIII) may have the highest noise.
-
-    \subsection{SCNR (Subtractive Chromatic Noise Reduction) (v0.4.0)}
-    \label{sec:scnr}
-
-    SCNR removes green channel excess with optional luminance preservation. Two limit methods:
-
-    \begin{align}
-        G'_{\text{average}} &= \min\!\left(G,\; \frac{R + B}{2}\right) \label{eq:scnr_avg} \\[4pt]
-        G'_{\text{max}} &= \min\!\left(G,\; \max(R, B)\right) \label{eq:scnr_max}
-    \end{align}
-
-    The corrected green value incorporates the amount parameter:
-
-    \begin{equation}
-        G_{\text{new}} = G + \alpha \cdot (G' - G), \quad \alpha \in [0, 1]
-    \end{equation}
-
-    When luminance preservation is enabled, the luminance lost from green reduction is redistributed to R and B using ITU-R BT.709 weights:
-
-    \begin{align}
-        L_{\text{lost}} &= 0.7152 \cdot (G - G_{\text{new}}) \\[4pt]
-        \Delta &= \frac{L_{\text{lost}}}{0.2126 + 0.0722} \\[4pt]
-        R' &= \min(R + \Delta,\; 1.0) \\[4pt]
-        B' &= \min(B + \Delta,\; 1.0)
-    \end{align}
-
-    This replaces the v0.3 approach which attempted to add lost luminance back into G itself (circular adjustment).
+    Three kernels: square (top-hat), Gaussian, Lanczos-3. Flat-storage accumulator (v0.4.0): \code{Vec<f32>} + \code{Vec<u16>} replacing \code{Vec<Vec<f32>>}. Finalize uses median/MAD sigma clipping (Stetson 1987).
 
     \subsection{Richardson-Lucy Deconvolution}
     \label{sec:rl_deconv}
 
-    The Richardson-Lucy algorithm iteratively estimates the true image $f$ given observed image $g$ and point spread function $h$:
-
     \begin{equation}
-        f^{(k+1)} = f^{(k)} \cdot \left( \frac{g}{f^{(k)} * h} * \hat{h} \right)
-        \label{eq:rl}
+        f^{(k+1)} = f^{(k)} \cdot \left( \frac{g}{f^{(k)} * h} * \hat{h} \right) \cdot \frac{1}{1 + \lambda}
     \end{equation}
 
-    Convolutions are computed in the frequency domain via FFT. Tikhonov regularization is applied as multiplicative damping in the update step (v0.4.0 fix):
-
-    \begin{equation}
-        f^{(k+1)}_{\text{reg}} = f^{(k+1)} \cdot \frac{1}{1 + \lambda}
-    \end{equation}
-
-    where $\lambda$ is the regularization parameter (default 0.001). This is numerically stable and matches the standard RL formulation, replacing the v0.3 approach of dividing by $1 + \lambda \nabla^2 f$.
+    Tikhonov regularization as multiplicative damping ($\lambda = 0.001$ default). FFT-based convolution.
 
     \subsection{Background Extraction}
-    \label{sec:background}
-
-    Background is modeled as a polynomial surface fitted to sigma-clipped grid samples:
 
     \begin{equation}
         B(x, y) = \sum_{i=0}^{d} \sum_{j=0}^{d-i} a_{ij} \, x^i \, y^j
-        \label{eq:background}
     \end{equation}
 
-    The polynomial basis functions use explicit \code{powi} exponentiation (v0.4.0 fix), replacing the iterative division approach that accumulated numerical drift at degree $\geq 3$.
+    Polynomial degree 1--5, grid 3--32, sigma-clipped sampling with \code{powi} exponentiation.
 
     \subsection{Wavelet Denoising}
-    \label{sec:wavelet}
 
-    Multi-scale wavelet denoising uses the \`{a} trous algorithm. The image is decomposed into $N$ wavelet scales $W_k$ and a residual $c_N$:
-
-    \begin{equation}
-        I = \sum_{k=1}^{N} W_k + c_N
-    \end{equation}
-
-    Denoising applies a hard threshold to each scale:
-
-    \begin{equation}
-        W'_k(x, y) = \begin{cases}
-                         W_k(x, y) & \text{if } |W_k(x, y)| > \sigma_k \cdot t_k \\
-                         0 & \text{otherwise}
-        \end{cases}
-    \end{equation}
-
-    Up to 8 decomposition scales are supported.
+    A trous wavelet decomposition: $I = \sum_{k=1}^{N} W_k + c_N$. Hard threshold: $W'_k = W_k$ if $|W_k| > \sigma_k t_k$, else 0. Up to 8 scales.
 
     \subsection{Calibration Pipeline}
-    \label{sec:calibration}
 
     \begin{equation}
         \boxed{
-            I_{\text{calibrated}} = \frac{I_{\text{raw}} - M_{\text{bias}} - r \cdot M_{\text{dark}}}{M_{\text{flat}} / \tilde{M}_{\text{flat}}}
+            I_{\text{cal}} = \frac{I_{\text{raw}} - M_{\text{bias}} - r \cdot M_{\text{dark}}}{M_{\text{flat}} / \bar{M}_{\text{flat}}}
         }
-        \label{eq:calibration}
     \end{equation}
 
-    where $\tilde{M}_{\text{flat}}$ is the \textbf{median} of the flat field (v0.4.0 fix, replacing mean), preventing scale-dependent artifacts when flat values are far from 1.0.
+    Masters via median combine. Flat normalized by mean. Negative pixels clamped to zero.
 
-    \subsection{World Coordinate System (WCS)}
-    \label{sec:wcs}
-
-    WCS transforms use the \textbf{CD matrix formulation} with TAN (gnomonic) projection:
-
-    \begin{equation}
-        \begin{pmatrix} u \\ v \end{pmatrix} =
-        \begin{pmatrix} \text{CD}_{1,1} & \text{CD}_{1,2} \\ \text{CD}_{2,1} & \text{CD}_{2,2} \end{pmatrix}
-        \begin{pmatrix} x - \text{CRPIX}_1 \\ y - \text{CRPIX}_2 \end{pmatrix}
-        \label{eq:wcs_forward}
-    \end{equation}
-
-    \subsection{FFT Power Spectrum}
-    \label{sec:fft}
-
-    \begin{equation}
-        P(u, v) = \log_{10}\!\left(1 + |\hat{I}(u, v)|^2\right)
-        \label{eq:power_spectrum}
-    \end{equation}
-
-    The Hann window is correctly applied as $w(n) = 0.5(1 - \cos(2\pi n / N))$ (v0.4.0 fix; v0.3 used $\sin(\pi n / N)$ which produces a triangular window).
-
-    \subsection{Star Detection (PSF Centroid)}
+    \subsection{Star Detection}
     \label{sec:star_detection}
 
-    Background is estimated via iterative sigma-clipped median. For each connected component $C$:
+    Tile-based background (parallelized). Connected-component analysis with flux-weighted centroid:
 
-    \begin{align}
-        \bar{x}_C &= \frac{\sum_{(i,j) \in C} i \cdot (I_{ij} - b)}{\sum_{(i,j) \in C} (I_{ij} - b)}
-        & \bar{y}_C &= \frac{\sum_{(i,j) \in C} j \cdot (I_{ij} - b)}{\sum_{(i,j) \in C} (I_{ij} - b)} \label{eq:centroid} \\[6pt]
-        F_C &= \sum_{(i,j) \in C} (I_{ij} - b)
-        & \text{SNR}_C &= \frac{F_C}{\sqrt{|C| \cdot \sigma_b^2}} \label{eq:flux_snr}
-    \end{align}
+    \begin{equation}
+        \bar{x}_C = \frac{\sum_{(i,j) \in C} i \cdot (I_{ij} - b)}{\sum_{(i,j) \in C} (I_{ij} - b)}
+    \end{equation}
 
-    FWHM from second intensity moments:
+    FWHM from second intensity moments (true \textbf{median} across detected stars, v0.4.5):
 
     \begin{equation}
         \text{FWHM} = 2\sqrt{2\ln 2} \cdot \sqrt{\frac{\sigma_x^2 + \sigma_y^2}{2}}
-        \label{eq:fwhm}
     \end{equation}
+
+    \subsection{SPCC (Spectrophotometric Color Calibration, v0.4.2)}
+
+    Color correction factors derived from stellar Bp-Rp color indices matched against a white reference spectrum. Optional Gaia DR3 TAP query (\code{vizier} feature flag) for real catalog data; built-in Bp-Rp estimation fallback.
 
 
 %% ============================================================================
@@ -659,89 +534,56 @@
     \label{sec:commands}
 %% ============================================================================
 
-    The backend exposes \textbf{42 Tauri commands} across 9 modules. Commands marked with $\star$ are actively wired to UI components; $\circ$ are backend-ready awaiting UI integration.
+    The backend exposes \textbf{47 Tauri commands} across 12 modules.
 
-    \subsection{Stacking \& Compose Module (\texttt{cmd/compose.rs, cmd/stacking.rs, cmd/drizzle.rs})}
-
-    \begin{table}[H]
-        \centering
-        \small
-        \begin{tabularx}{\textwidth}{clXX}
-    \toprule
-    & \textbf{Command} & \textbf{Parameters} & \textbf{Returns} \\
-    \midrule
-    $\star$ & \cmd{compose\_rgb\_cmd} & r/g/b\_path, output\_dir, stretch/wb/scnr, \textbf{align\_method} & png\_path, per-channel STF, offsets (f64) \\
-    $\star$ & \cmd{drizzle\_stack\_cmd} & paths[], output\_dir, scale, pixfrac, kernel & png, weight\_map, dims, offsets \\
-    $\star$ & \cmd{drizzle\_rgb\_cmd} & r/g/b groups, output\_dir, drizzle params & png\_path, per-channel info \\
-    $\circ$ & \cmd{calibrate} & science, output\_dir, bias/dark/flat?, ratio? & png\_path, dims, applied flags \\
-    $\circ$ & \cmd{stack} & paths[], output\_dir, $\sigma$ params, align? & png\_path, count, rejected, offsets \\
-    $\circ$ & \cmd{run\_pipeline\_cmd} & input, output\_dir, frame\_step? & total, succeeded, failed, results \\
-    \bottomrule
-        \end{tabularx}
-        \caption{Stacking and compose commands. The \cmd{compose\_rgb\_cmd} accepts \code{align\_method}: \code{"phase\_correlation"} (default, sub-pixel) or \code{"affine"} (star-based, rotation-capable).}
-    \end{table}
-
-    \subsection{Image Module (\texttt{cmd/image.rs})}
+    \subsection{Compose Module (\texttt{cmd/compose.rs})}
 
     \begin{table}[H]
         \centering
         \small
-        \begin{tabularx}{\textwidth}{clXX}
+        \begin{tabularx}{\textwidth}{lXX}
     \toprule
-    & \textbf{Command} & \textbf{Parameters} & \textbf{Returns} \\
+    \textbf{Command} & \textbf{Parameters} & \textbf{Returns} \\
     \midrule
-    $\star$ & \cmd{process\_fits} & path, output\_dir & png\_path, dimensions, elapsed\_ms \\
-    $\star$ & \cmd{process\_fits\_full} & path, output\_dir & png\_path, dims, header, histogram, stf \\
-    $\circ$ & \cmd{process\_batch} & paths[], output\_dir & processed, failed, results[] \\
-    $\circ$ & \cmd{get\_raw\_pixels\_binary} & path & ArrayBuffer (16B header + f32[]) \\
-    $\star$ & \cmd{get\_raw\_pixels\_preview} & path, max\_dim & ArrayBuffer (downsampled) \\
-    $\star$ & \cmd{export\_fits} & path, output\_path, stf opts & output\_path, dims, file\_size \\
-    $\star$ & \cmd{export\_fits\_rgb} & r/g/b\_path, output\_path & output\_path, dimensions \\
-    $\star$ & \cmd{resample\_fits\_cmd} & path, target\_w, target\_h & png\_path, fits\_path, dims \\
+    \cmd{compose\_rgb\_cmd} & r/g/b\_path, stretch/wb/scnr, align\_method & png, STF, offsets \\
+    \cmd{blend\_channels\_cmd} & channel\_paths[], weights[], preset & png, STF, lum FITS \\
+    \cmd{align\_channels\_cmd} & paths[], align\_method & per-channel aligned FITS \\
+    \cmd{restretch\_composite\_cmd} & per-channel STF, SCNR opts & png \\
+    \cmd{calibrate\_composite\_cmd} & r/g/b\_factor & png (ORIG $\times$ WB) \\
+    \cmd{apply\_scnr\_cmd} & method, amount, r/g/b\_factor & png (ORIG $\times$ WB $\times$ SCNR) \\
+    \cmd{compute\_auto\_wb\_cmd} & --- & r/g/b factors, ref channel \\
+    \cmd{reset\_wb\_cmd} & output\_dir & png (ORIG $\to$ KEY) \\
+    \cmd{clear\_composite\_cache\_cmd} & --- & --- \\
+    \cmd{update\_composite\_channel\_cmd} & channel, path & updated flag \\
+    \cmd{export\_aligned\_channels\_cmd} & r/g/b\_path, align, WCS opts & per-channel FITS \\
     \bottomrule
         \end{tabularx}
-        \caption{Image module commands}
+        \caption{Compose module (11 commands). All WB/SCNR commands read from ORIG cache.}
     \end{table}
 
-    \subsection{Analysis, Metadata, Visualization, Cube, Astrometry, Config, Processing}
+    \subsection{Image, Analysis, Processing, Stacking, Cube, Astrometry, Config}
 
-    These modules remain unchanged from v0.3.0 (see previous document version for full tables). Key additions in v0.4.0:
+    Remaining 36 commands cover: \cmd{process\_fits}, \cmd{process\_fits\_full}, \cmd{get\_raw\_pixels\_preview}, \cmd{export\_fits}, \cmd{export\_fits\_rgb}, \cmd{export\_png}, \cmd{export\_rgb\_png}, \cmd{resample\_fits\_cmd}, \cmd{compute\_histogram}, \cmd{compute\_fft\_spectrum}, \cmd{detect\_stars}, \cmd{apply\_stf\_render}, \cmd{generate\_tiles}, \cmd{deconvolve\_rl\_cmd}, \cmd{extract\_background\_cmd}, \cmd{wavelet\_denoise\_cmd}, \cmd{masked\_stretch\_cmd}, \cmd{apply\_arcsinh\_stretch\_cmd}, \cmd{estimate\_psf\_cmd}, \cmd{spcc\_calibrate\_cmd}, \cmd{calibrate}, \cmd{stack}, \cmd{drizzle\_stack\_cmd}, \cmd{drizzle\_rgb\_cmd}, \cmd{run\_pipeline\_cmd}, \cmd{process\_cube\_cmd}, \cmd{process\_cube\_lazy\_cmd}, \cmd{get\_cube\_info}, \cmd{get\_cube\_frame}, \cmd{get\_cube\_spectrum}, \cmd{plate\_solve\_cmd}, \cmd{get\_wcs\_info}, \cmd{detect\_narrowband\_filters}, \cmd{get\_config}, \cmd{update\_config}, \cmd{save\_api\_key}, \cmd{get\_api\_key}, \cmd{generate\_synth\_cmd}, \cmd{generate\_synth\_stack\_cmd}.
 
-    \begin{itemize}[nosep]
-    \item \cmd{compose\_rgb\_cmd} gains \code{align\_method} parameter
-    \item \cmd{cmd/astrometry.rs} uses \code{crate::infra::config} with \code{DEFAULT\_API\_KEY\_SERVICE} and \code{DEFAULT\_ASTROMETRY\_API\_URL} constants
-    \item Processing commands (\cmd{deconvolve\_rl\_cmd}, \cmd{extract\_background\_cmd}, \cmd{wavelet\_denoise\_cmd}) unchanged
-    \end{itemize}
 
 %% ============================================================================
-    \section{FITS I/O Implementation}
-    \label{sec:fits_io}
+    \section{FITS and ASDF I/O}
 %% ============================================================================
 
-    FITS files are opened via \crate{memmap2}, avoiding loading entire files into memory. For integer data (BITPIX $> 0$), the BSCALE/BZERO transform is applied:
+    FITS via \crate{memmap2} with BSCALE/BZERO: $v_{\text{phys}} = \text{BSCALE} \times v_{\text{stored}} + \text{BZERO}$. Multi-BITPIX export: 16 (auto BZERO/BSCALE), $-32$ (float32), $-64$ (float64).
 
-    \begin{equation}
-        \text{value}_{\text{physical}} = \text{BSCALE} \times \text{value}_{\text{stored}} + \text{BZERO}
-        \label{eq:bscale}
-    \end{equation}
+    ASDF: first Rust implementation. YAML tree $\to$ NdArrayMeta $\to$ binary block (zlib/bzip2/lz4) $\to$ Array2. Roman data model traversal. Auto-dispatch by extension.
 
-%% ============================================================================
-    \section{ASDF I/O Implementation}
-    \label{sec:asdf_io}
-%% ============================================================================
-
-    AstroBurst includes the first Rust implementation of the \textbf{Advanced Scientific Data Format} (ASDF) reader, targeting NASA's Roman Space Telescope data products. Binary blocks may be compressed with zlib (\crate{flate2}), bzip2 (\crate{bzip2}), or lz4 (\crate{lz4\_flex}). Auto-dispatch routes \code{.asdf} files transparently through the same command layer as \code{.fits}.
 
 %% ============================================================================
     \section{WebGPU Compute Pipeline}
-    \label{sec:webgpu}
 %% ============================================================================
 
-    The STF stretch is implemented as a WebGPU compute shader (WGSL) for real-time rendering with workgroup size 256. Falls back to Canvas 2D \code{putImageData} when WebGPU is unavailable.
+    WGSL fragment shader implementing MTF with symmetric denominator guard. \code{r32float} texture, 6-vertex fullscreen quad. Uniform buffer: $[\text{dataMin}, \text{dataMax}, \text{shadow}, \text{midtone}, \text{highlight}, W, H, \text{pad}]$ (32 bytes). CPU worker fallback with identical \code{stfTransfer} function.
+
 
 %% ============================================================================
     \section{Performance Benchmarks}
-    \label{sec:performance}
 %% ============================================================================
 
     \begin{table}[H]
@@ -750,32 +592,26 @@
             \toprule
             \textbf{Operation} & \textbf{Input Size} & \textbf{Time} & \textbf{Notes} \\
             \midrule
-            Single FITS processing & 4096$\times$4096 (64\,MB) & 120\,ms & 533\,MB/s throughput \\
-            Batch (10 frames) & 10$\times$64\,MB & 450\,ms & 1.4\,GB/s (Rayon parallel) \\
-            Histogram + auto-STF & 4096$\times$4096 & 35\,ms & NaN-safe sorting \\
+            Single FITS processing & 4096$\times$4096 & 120\,ms & 533\,MB/s \\
+            Batch (10 frames) & 10$\times$64\,MB & 450\,ms & 1.4\,GB/s (Rayon) \\
+            Histogram + auto-STF & 4096$\times$4096 & 35\,ms & NaN-safe \\
             Star detection ($\sigma{=}5$) & 4096$\times$4096 & 80\,ms & $\sim$3000 stars \\
-            Sigma-clip stack & 10$\times$64\,MB & 2.1\,s & 5 iterations, reused devs buffer \\
-            Drizzle 2$\times$ & 10$\times$64\,MB & 4.2\,s & Flat-storage accumulator \\
-            FFT phase correlation & 4096$\times$4096 & 95\,ms & Planner hoisted, parallel peak \\
-            Affine alignment & 4096$\times$4096 & 0.8\,s & 80 stars, 500 RANSAC iters \\
-            RGB compose + align & 3 channels & 1.8\,s & Phase correlation (default) \\
-            RGB compose + affine & 3 channels & 3.2\,s & Star-based, with warp \\
+            Sigma-clip stack & 10$\times$64\,MB & 2.1\,s & 5 iters \\
+            Drizzle 2$\times$ & 10$\times$64\,MB & 4.2\,s & Flat accumulator \\
+            Channel blend (3ch) & 4096$\times$4096 $\times$ 3 & 0.4\,s & + auto STF + lum FITS \\
+            Affine alignment & 4096$\times$4096 & 0.8\,s & 80 stars, RANSAC \\
+            Masked stretch (10 iter) & 4096$\times$4096 & 1.2\,s & Star mask + MTF \\
             WebGPU STF render & 4096$\times$4096 & 8\,ms & GPU compute \\
-            Drizzle RGB 2$\times$ & 3$\times$10$\times$64\,MB & 6.1\,s & Flat accumulator \\
+            WB (non-destructive) & 4096$\times$4096 $\times$ 3 & 45\,ms & ORIG read + factor \\
             \bottomrule
         \end{tabular}
-        \caption{Performance benchmarks (AMD Ryzen 9 7950X, 64\,GB DDR5, NVMe)}
-        \label{tab:benchmarks}
+        \caption{Benchmarks (AMD Ryzen 9 7950X, 64\,GB DDR5, NVMe). Binary: $\sim$15\,MB.}
     \end{table}
 
-    Binary size: $\sim$15\,MB.
 
 %% ============================================================================
     \section{Dependencies}
-    \label{sec:deps}
 %% ============================================================================
-
-    \subsection{Rust Crates}
 
     \begin{table}[H]
         \centering
@@ -784,57 +620,39 @@
     \toprule
     \textbf{Crate} & \textbf{Version} & \textbf{Purpose} \\
     \midrule
-    \crate{tauri} & 2.x & Application framework, IPC, window management \\
+    \crate{tauri} & 2.10 & Application framework, IPC, asset protocol \\
     \crate{ndarray} & 0.16 & N-dimensional arrays, Rayon parallel iterators \\
     \crate{rayon} & 1.10 & Data-parallel batch processing \\
-    \crate{memmap2} & 0.9 & Memory-mapped file I/O for FITS \\
-    \crate{rustfft} & 6.2 & FFT for deconvolution, phase correlation, and power spectrum \\
-    \crate{num-complex} & 0.4 & Complex number support for FFT \\
-    \crate{image} & 0.25 & PNG encoding/decoding \\
+    \crate{memmap2} & 0.9 & Memory-mapped FITS I/O \\
+    \crate{rustfft} & 6.4 & FFT for deconvolution, phase correlation, power spectrum \\
+    \crate{image} & 0.25 & PNG encoding (8/16-bit) \\
     \crate{serde\_yaml} & 0.9 & ASDF YAML tree parsing \\
     \crate{flate2} & 1.0 & zlib decompression (ASDF blocks) \\
-    \crate{bzip2} & 0.4 & bzip2 decompression (ASDF blocks) \\
-    \crate{lz4\_flex} & 0.11 & lz4 decompression (ASDF blocks) \\
-    \crate{log} & 0.4 & Structured logging (affine alignment diagnostics) \\
-    \crate{base64} & 0.22 & Binary-to-text encoding for JSON IPC \\
-    \crate{regex} & 1.10 & Filter detection pattern matching \\
-    \crate{dirs} & 5.0 & OS-native directory resolution \\
+    \crate{bzip2} & 0.5 & bzip2 decompression (ASDF, default feature) \\
+    \crate{lz4\_flex} & 0.11 & lz4 decompression (ASDF, default feature) \\
+    \crate{reqwest} & 0.12 & Astrometry.net API, Vizier TAP (optional) \\
     \bottomrule
         \end{tabularx}
-        \caption{Rust dependencies}
     \end{table}
 
-%% ============================================================================
-    \section{Security Considerations}
-    \label{sec:security}
-%% ============================================================================
-
-    \begin{itemize}[nosep]
-    \item API keys stored in OS-native app data directory, never transmitted beyond the configured API endpoint.
-    \item File system access constrained by Tauri capabilities. Permissions scoped to home, desktop, and appdata directories.
-    \item No telemetry, analytics, or network calls except for explicit plate solving requests.
-    \item FITS and ASDF files processed locally; no data leaves the machine unless plate solving is triggered.
-    \end{itemize}
 
 %% ============================================================================
     \section{Known Limitations}
-    \label{sec:limitations}
 %% ============================================================================
 
     \begin{enumerate}[nosep]
-    \item \textbf{Unwired commands} --- Plate solving, calibration, sigma-clip stacking, tile deep zoom, WCS overlay, narrowband auto-detection, and config UI panels are backend-ready but lack full frontend integration
-    \item \textbf{Affine alignment limits} --- Requires detectable point sources; fails gracefully (falls back to phase correlation) on pure nebula fields without stars
-    \item \textbf{No non-linear distortion correction} --- Affine model handles translation, rotation, and scale but not barrel/pincushion or field-variable distortion
-    \item \textbf{Online plate solving only} --- Local index-based solving is planned
-    \item \textbf{WebGPU requirement} --- Chromium 113+ needed; Canvas 2D fallback available
-    \item \textbf{No session persistence} --- Reopening the app starts a fresh workspace
-    \item \textbf{ASDF read-only} --- Writer not yet implemented
-    \item \textbf{No MAST API integration} --- JWST/Roman data must be downloaded manually
+    \item No non-linear distortion correction (barrel/pincushion)
+    \item Online plate solving only (local index planned)
+    \item WebGPU Chromium 113+ required; Canvas 2D fallback available
+    \item No session persistence
+    \item ASDF read-only (writer not implemented)
+    \item No MAST API integration (manual download required)
+    \item Cube ``Collapse Sum'' is actually collapse mean (labeled correctly in v0.4.5)
     \end{enumerate}
+
 
 %% ============================================================================
     \section{Roadmap}
-    \label{sec:roadmap}
 %% ============================================================================
 
     \begin{table}[H]
@@ -843,54 +661,30 @@
             \toprule
             \textbf{Feature} & \textbf{Priority} & \textbf{Status} \\
             \midrule
-            Multi-Extension FITS (MEF) & High & \textcolor{ForestGreen}{Done (v0.2)} \\
-            Bicubic resampling & High & \textcolor{ForestGreen}{Done (v0.2)} \\
-            Richardson-Lucy deconvolution & High & \textcolor{ForestGreen}{Done (v0.3)} \\
-            Background extraction & High & \textcolor{ForestGreen}{Done (v0.3)} \\
-            Wavelet noise reduction & High & \textcolor{ForestGreen}{Done (v0.3)} \\
-            ASDF format support & High & \textcolor{ForestGreen}{Done (v0.3)} \\
-            Star-based affine alignment & High & \textcolor{ForestGreen}{Done (v0.4)} \\
-            Stability-based auto WB & High & \textcolor{ForestGreen}{Done (v0.4)} \\
-            SCNR luminance redistribution & High & \textcolor{ForestGreen}{Done (v0.4)} \\
-            Numerical correctness audit & High & \textcolor{ForestGreen}{Done (v0.4)} \\
+            Star-based affine alignment & High & \textcolor{ForestGreen}{Done (v0.4.0)} \\
+            Non-destructive WB/SCNR & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
+            ComposeWizard pipeline & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
+            Masked stretch & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
+            SPCC calibration & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
+            STF GPU/CPU consistency & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
             \midrule
-            FITS ERR/DQ/VAR propagation & High & Planned (v0.5) \\
+            Multi-extension FITS (ERR/DQ/VAR) & High & Planned (v0.5) \\
             MAST API integration & High & Planned (v0.5) \\
-            Log-polar phase correlation & Medium & Planned (v0.5) \\
+            WCS overlay on preview & Medium & Planned (v0.5) \\
+            Batch pipeline & Medium & Planned (v0.5) \\
             Star removal & Medium & Planned (v0.6) \\
             Photometric calibration (Gaia DR3) & Medium & Planned (v0.6) \\
-            PixelMath expressions & Medium & Planned (v0.6) \\
-            Mosaic stitching & Medium & Planned (v0.7) \\
             Full GPU pipeline (WebGPU compute) & Medium & Planned (v1.0) \\
-            Plugin architecture (WASM) & Medium & Planned (v1.0) \\
-            Python scripting bridge & Low & Planned (v1.0) \\
             \bottomrule
         \end{tabular}
-        \caption{Development roadmap}
     \end{table}
+
 
 %% ============================================================================
     \appendix
     \section{Sample Test Data}
-    \label{app:test_data}
 %% ============================================================================
 
-    The repository includes HST/WFPC2 narrowband FITS images in \code{tests/sample-data/}:
-
-    \begin{table}[H]
-        \centering
-        \begin{tabular}{lllll}
-            \toprule
-            \textbf{File} & \textbf{Filter} & \textbf{$\lambda$} & \textbf{Hubble Palette} & \textbf{Description} \\
-            \midrule
-            \code{502nmos.fits} & {[OIII]} & 502\,nm & Blue channel & Oxygen III emission \\
-            \code{656nmos.fits} & H$\alpha$ & 656\,nm & Green channel & Hydrogen alpha emission \\
-            \code{673nmos.fits} & {[SII]} & 673\,nm & Red channel & Sulfur II emission \\
-            \bottomrule
-        \end{tabular}
-        \caption{Sample FITS files --- Eagle Nebula (M16) region, 1600$\times$1600 float32}
-    \end{table}
-
-    All images: BITPIX $= -32$, WCS TAN projection, origin STScI-STSDAS. Public domain (NASA/ESA).
+    HST/WFPC2 narrowband FITS in \code{tests/sample-data/}: 502nmos.fits ([OIII] 502\,nm, Blue), 656nmos.fits (H$\alpha$ 656\,nm, Green), 673nmos.fits ([SII] 673\,nm, Red). 1600$\times$1600 float32, WCS TAN. Public domain (NASA/ESA).
 
 \end{document}

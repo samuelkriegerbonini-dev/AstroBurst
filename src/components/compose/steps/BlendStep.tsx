@@ -1,13 +1,55 @@
 import { useState, useCallback, useMemo } from "react";
-import type { WizardState, BlendWeight } from "../wizard.types";
+import type { WizardState, BlendWeight, FrequencyBin } from "../wizard.types";
 import { BLEND_PRESETS } from "../wizard.types";
-import { blendChannels } from "../../../services/compose.service";
+import { blendChannels } from "../../../services/compose";
+import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Toggle } from "../../ui";
+
+const CANONICAL_WAVELENGTH: Record<string, number> = {
+  sii: 673, ha: 656, nii: 658, oiii: 502,
+  r: 620, g: 530, b: 470, l: 550,
+};
+
+function binWavelength(bin: FrequencyBin): number {
+  if (bin.wavelength) return bin.wavelength;
+  return CANONICAL_WAVELENGTH[bin.id] ?? 550;
+}
+
+function resolvePresetWeights(
+  preset: { weights: BlendWeight[] },
+  filledBins: FrequencyBin[],
+): BlendWeight[] | null {
+  const exact = preset.weights.filter((w) =>
+    filledBins.some((b) => b.id === w.channelId)
+  );
+  if (exact.length > 0) return exact;
+
+  if (filledBins.length < 2) return null;
+
+  const presetWithWl = preset.weights.map((w) => ({
+    ...w,
+    wl: CANONICAL_WAVELENGTH[w.channelId] ?? 550,
+  }));
+  const sortedPreset = [...presetWithWl].sort((a, b) => b.wl - a.wl);
+
+  const sortedBins = [...filledBins].sort((a, b) => binWavelength(b) - binWavelength(a));
+
+  const resolved: BlendWeight[] = sortedPreset
+    .slice(0, sortedBins.length)
+    .map((pw, i) => ({
+      channelId: sortedBins[i].id,
+      r: pw.r,
+      g: pw.g,
+      b: pw.b,
+    }));
+
+  return resolved.length >= 2 ? resolved : null;
+}
 
 interface BlendStepProps {
   state: WizardState;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
-  onCompositeReady: (previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any) => void;
+  onCompositeReady: (previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => void;
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
@@ -31,10 +73,8 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   const handlePreset = useCallback((presetId: string) => {
     const preset = BLEND_PRESETS[presetId];
     if (!preset) return;
-    const weights = preset.weights.filter((w) =>
-      filledBins.some((b) => b.id === w.channelId)
-    );
-    onWeightsChange(weights, presetId);
+    const resolved = resolvePresetWeights(preset, filledBins);
+    if (resolved) onWeightsChange(resolved, presetId);
   }, [filledBins, onWeightsChange]);
 
   const handleWeightChange = useCallback((channelId: string, axis: "r" | "g" | "b", value: number) => {
@@ -86,7 +126,8 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         throw new Error("No weights assigned. Adjust the weight matrix.");
       }
 
-      const res = await blendChannels(paths, backendWeights, "./output", {
+      const dir = await getOutputDir();
+      const res = await blendChannels(paths, backendWeights, dir, {
         preset: state.blendPreset,
         autoStretch,
         linkedStf,
@@ -98,8 +139,9 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       const stfG = res.stf_g ?? null;
       const stfB = res.stf_b ?? null;
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
+      const lumFitsPath = res.lum_fits_path ?? null;
 
-      onCompositeReady(previewUrl, stfR, stfG, stfB);
+      onCompositeReady(previewUrl, stfR, stfG, stfB, lumFitsPath);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {

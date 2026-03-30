@@ -1,6 +1,6 @@
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
-
+use rayon::prelude::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlendWeight {
     pub channel_idx: usize,
@@ -93,13 +93,14 @@ pub fn blend_channels(
         let rw = w.r_weight as f32;
         let gw = w.g_weight as f32;
         let bw = w.b_weight as f32;
+        let len = npix.min(src.len());
 
-        for i in 0..npix.min(src.len()) {
-            let v = src[i];
-            if rw != 0.0 { r_out[i] += v * rw; }
-            if gw != 0.0 { g_out[i] += v * gw; }
-            if bw != 0.0 { b_out[i] += v * bw; }
-        }
+        r_out[..len].par_iter_mut().zip(g_out[..len].par_iter_mut()).zip(b_out[..len].par_iter_mut()).zip(src[..len].par_iter())
+            .for_each(|(((r, g), b), &v)| {
+                if rw != 0.0 { *r += v * rw; }
+                if gw != 0.0 { *g += v * gw; }
+                if bw != 0.0 { *b += v * bw; }
+            });
     }
 
     let r = Array2::from_shape_vec((rows, cols), r_out).unwrap();

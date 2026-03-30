@@ -1,7 +1,7 @@
 import { safeInvoke } from "../infrastructure/tauri";
-import type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry.types";
+import type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
 
-export type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry.types";
+export type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
 
 export async function plateSolve(path: string, opts: PlateSolveOptions = {}) {
   return safeInvoke("plate_solve_cmd", {

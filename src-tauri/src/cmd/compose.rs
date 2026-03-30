@@ -16,7 +16,7 @@ use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::render::rgb::render_rgb;
 use crate::types::compose::{AlignMethod, RgbComposeConfig, RgbComposeResult, WhiteBalance};
-use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR};
+use crate::types::constants::{DEFAULT_DIMENSION_TOLERANCE, DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE, SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE, RES_DIMENSIONS, RES_DIMENSION_CROP, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR};
 use crate::types::image::{ScnrConfig, ScnrMethod};
 
 use crate::infra::cache::ImageEntry;
@@ -322,9 +322,13 @@ pub async fn compose_rgb_cmd(
             let stats_g = processed.stats_wb_g.clone().unwrap_or_else(|| compute_image_stats(&pre_g));
             let stats_b = processed.stats_wb_b.clone().unwrap_or_else(|| compute_image_stats(&pre_b));
 
-            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(pre_r), stats_r);
-            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(pre_g), stats_g);
-            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(pre_b), stats_b);
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(pre_r.clone()), stats_r.clone());
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(pre_g.clone()), stats_g.clone());
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(pre_b.clone()), stats_b.clone());
+
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_R, Arc::new(pre_r), stats_r);
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_G, Arc::new(pre_g), stats_g);
+            GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_B, Arc::new(pre_b), stats_b);
         }
 
         let lrgb_applied = if let Some(l_data) = l_ref {
@@ -478,7 +482,53 @@ pub async fn clear_composite_cache_cmd() -> Result<(), String> {
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_R);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_G);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_B);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_R);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_G);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_B);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_wb_cmd(
+    output_dir: String,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        let orig_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_R)
+            .ok_or_else(|| anyhow::anyhow!("No original composite R. Run Blend first."))?;
+        let orig_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_G)
+            .ok_or_else(|| anyhow::anyhow!("No original composite G. Run Blend first."))?;
+        let orig_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_B)
+            .ok_or_else(|| anyhow::anyhow!("No original composite B. Run Blend first."))?;
+
+        let r = orig_r.arr().to_owned();
+        let g = orig_g.arr().to_owned();
+        let b = orig_b.arr().to_owned();
+
+        let stats_r = orig_r.stats().clone();
+        let stats_g = orig_g.stats().clone();
+        let stats_b = orig_b.stats().clone();
+
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r.clone()), stats_r);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g.clone()), stats_g);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b.clone()), stats_b);
+
+        let png_path = composite_png_path(&output_dir);
+        render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+
+        let elapsed = t0.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            "reset": true,
+            RES_R_FACTOR: 1.0,
+            RES_G_FACTOR: 1.0,
+            RES_B_FACTOR: 1.0,
+            RES_ELAPSED_MS: elapsed,
+        }))
+    })
 }
 
 fn update_wcs_for_offset(header: &mut crate::types::header::HduHeader, dy: f64, dx: f64) {
@@ -695,8 +745,25 @@ pub async fn blend_channels_cmd(
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g.clone()), stats_g.clone());
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b.clone()), stats_b.clone());
 
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_R, Arc::new(r.clone()), stats_r.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_G, Arc::new(g.clone()), stats_g.clone());
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_B, Arc::new(b.clone()), stats_b.clone());
+
         let do_stretch = auto_stretch.unwrap_or(true);
         let linked = linked_stf.unwrap_or(false);
+
+        let lum_fits_path = format!("{}/rgb_composite_lum.fits", output_dir);
+        {
+            let r_sl = r.as_slice().unwrap();
+            let g_sl = g.as_slice().unwrap();
+            let b_sl = b.as_slice().unwrap();
+            let lum_data: Vec<f32> = r_sl.iter().zip(g_sl.iter()).zip(b_sl.iter())
+                .map(|((&rv, &gv), &bv)| rv * 0.2126 + gv * 0.7152 + bv * 0.0722)
+                .collect();
+            let lum = Array2::from_shape_vec((max_rows, max_cols), lum_data)
+                .map_err(|e| anyhow::anyhow!("lum reshape: {}", e))?;
+            write_fits_mono(&lum_fits_path, &lum, None)?;
+        }
 
         let (r_out, g_out, b_out, stf_r, stf_g, stf_b);
 
@@ -718,7 +785,7 @@ pub async fn blend_channels_cmd(
                     median: avg_median,
                     sigma: avg_mad,
                     mad: avg_mad,
-                    total_pixels: sr.total_pixels,
+                    valid_count: sr.valid_count,
                 };
                 let stf = auto_stf(&avg_stats, &cfg);
                 stf_r = stf.clone();
@@ -749,6 +816,7 @@ pub async fn blend_channels_cmd(
 
         Ok(json!({
             RES_PNG_PATH: png_path,
+            "lum_fits_path": lum_fits_path,
             RES_DIMENSIONS: [max_cols, max_rows],
             RES_CHANNEL_COUNT: channel_paths.len(),
             RES_BLEND_PRESET: preset.unwrap_or_default(),
@@ -919,24 +987,23 @@ pub async fn calibrate_composite_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let entry_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R)
+        let orig_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_R)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R))
             .ok_or_else(|| anyhow::anyhow!("Composite R not in cache"))?;
-        let entry_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G)
+        let orig_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_G)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G))
             .ok_or_else(|| anyhow::anyhow!("Composite G not in cache"))?;
-        let entry_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B)
+        let orig_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_B)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B))
             .ok_or_else(|| anyhow::anyhow!("Composite B not in cache"))?;
 
         let rf = r_factor as f32;
         let gf = g_factor as f32;
         let bf = b_factor as f32;
 
-        let mut r = entry_r.arr().to_owned();
-        let mut g = entry_g.arr().to_owned();
-        let mut b = entry_b.arr().to_owned();
-
-        r.mapv_inplace(|v| (v * rf).min(1.0));
-        g.mapv_inplace(|v| (v * gf).min(1.0));
-        b.mapv_inplace(|v| (v * bf).min(1.0));
+        let r = orig_r.arr().mapv(|v| (v * rf).min(1.0));
+        let g = orig_g.arr().mapv(|v| (v * gf).min(1.0));
+        let b = orig_b.arr().mapv(|v| (v * bf).min(1.0));
 
         let stats_r = compute_image_stats(&r);
         let stats_g = compute_image_stats(&g);
@@ -958,6 +1025,53 @@ pub async fn calibrate_composite_cmd(
             RES_G_FACTOR: g_factor,
             RES_B_FACTOR: b_factor,
             RES_ELAPSED_MS: elapsed,
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn compute_auto_wb_cmd() -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let entry_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_R)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R))
+            .ok_or_else(|| anyhow::anyhow!("Composite R not in cache"))?;
+        let entry_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_G)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G))
+            .ok_or_else(|| anyhow::anyhow!("Composite G not in cache"))?;
+        let entry_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_B)
+            .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B))
+            .ok_or_else(|| anyhow::anyhow!("Composite B not in cache"))?;
+
+        let sr = compute_image_stats(entry_r.arr());
+        let sg = compute_image_stats(entry_g.arr());
+        let sb = compute_image_stats(entry_b.arr());
+
+        let stability = |med: f64, mad: f64| -> f64 {
+            if med > 1e-10 { mad / med } else { f64::MAX }
+        };
+        let stab_r = stability(sr.median, sr.mad);
+        let stab_g = stability(sg.median, sg.mad);
+        let stab_b = stability(sb.median, sb.mad);
+
+        let (wb_r, wb_g, wb_b) = if stab_r <= stab_g && stab_r <= stab_b {
+            let m = sr.median.max(1e-10);
+            (1.0, m / sg.median.max(1e-10), m / sb.median.max(1e-10))
+        } else if stab_b <= stab_g {
+            let m = sb.median.max(1e-10);
+            (m / sr.median.max(1e-10), m / sg.median.max(1e-10), 1.0)
+        } else {
+            let m = sg.median.max(1e-10);
+            (m / sr.median.max(1e-10), 1.0, m / sb.median.max(1e-10))
+        };
+
+        Ok(json!({
+            RES_R_FACTOR: wb_r,
+            RES_G_FACTOR: wb_g,
+            RES_B_FACTOR: wb_b,
+            "stab_r": stab_r,
+            "stab_g": stab_g,
+            "stab_b": stab_b,
+            "ref_channel": if stab_r <= stab_g && stab_r <= stab_b { "R" } else if stab_b <= stab_g { "B" } else { "G" },
         }))
     })
 }

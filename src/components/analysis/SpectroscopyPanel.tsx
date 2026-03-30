@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Activity, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
-import { processCube, processCubeLazy } from "../../services/cube.service";
+import { processCube, processCubeLazy } from "../../services/cube";
+import { getOutputDir } from "../../infrastructure/tauri";
 
 interface SpectroscopyPanelProps {
   spectrum?: number[];
@@ -50,6 +51,28 @@ export default function SpectroscopyPanel({
   const [collapseResult, setCollapseResult] = useState<any>(null);
   const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
 
+  const wlUnit = useMemo(() => {
+    const raw = (cubeDims as any)?.spectral_classification?.axis_unit as string | null;
+    if (!raw) return null;
+    return raw.trim().toUpperCase();
+  }, [cubeDims]);
+
+  const wlConversion = useMemo<{ factor: number; label: string }>(() => {
+    if (!wlUnit) return { factor: 1, label: "Channel" };
+    if (wlUnit === "M") return { factor: 1e6, label: "\u03bcm" };
+    if (wlUnit === "CM") return { factor: 1e4, label: "\u03bcm" };
+    if (wlUnit === "MM") return { factor: 1e3, label: "\u03bcm" };
+    if (wlUnit === "UM") return { factor: 1, label: "\u03bcm" };
+    if (wlUnit === "NM") return { factor: 1, label: "nm" };
+    if (wlUnit === "ANGSTROM" || wlUnit === "A") return { factor: 0.1, label: "nm" };
+    if (wlUnit === "HZ") return { factor: 1e-9, label: "GHz" };
+    if (wlUnit === "KHZ") return { factor: 1e-6, label: "GHz" };
+    if (wlUnit === "MHZ") return { factor: 1e-3, label: "GHz" };
+    if (wlUnit === "GHZ") return { factor: 1, label: "GHz" };
+    if (wlUnit === "M/S" || wlUnit === "KM/S") return { factor: 1, label: wlUnit.toLowerCase() };
+    return { factor: 1, label: wlUnit.toLowerCase() };
+  }, [wlUnit]);
+
   const plotParams = useMemo(() => {
     if (!spectrum || spectrum.length === 0)
       return { xMin: 0, xMax: 1, yMin: 0, yMax: 1, xLabel: "Channel", hasWl: false };
@@ -59,7 +82,8 @@ export default function SpectroscopyPanel({
 
     let xMin: number, xMax: number;
     if (hasWl) {
-      [xMin, xMax] = arrayMinMax(wavelengths!);
+      const converted = wavelengths!.map((w) => w * wlConversion.factor);
+      [xMin, xMax] = arrayMinMax(converted);
     } else {
       xMin = 0;
       xMax = n - 1;
@@ -73,10 +97,10 @@ export default function SpectroscopyPanel({
       xMax,
       yMin: rawYMin - yPad,
       yMax: rawYMax + yPad,
-      xLabel: hasWl ? "Wavelength (\u03bcm)" : "Channel",
+      xLabel: hasWl ? `Wavelength (${wlConversion.label})` : "Channel",
       hasWl,
     };
-  }, [spectrum, wavelengths]);
+  }, [spectrum, wavelengths, wlConversion]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -115,13 +139,14 @@ export default function SpectroscopyPanel({
     }
 
     const n = spectrum.length;
+    const cf = wlConversion.factor;
 
     ctx.strokeStyle = "#a855f7";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     let started = false;
     for (let i = 0; i < n; i++) {
-      const x = hasWl ? wavelengths![i] : i;
+      const x = hasWl ? wavelengths![i] * cf : i;
       const y = spectrum[i];
       if (!Number.isFinite(y)) continue;
       const cx = toX(x);
@@ -132,7 +157,7 @@ export default function SpectroscopyPanel({
     ctx.stroke();
 
     if (hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < n) {
-      const x = hasWl ? wavelengths![hoveredIdx] : hoveredIdx;
+      const x = hasWl ? wavelengths![hoveredIdx] * cf : hoveredIdx;
       const y = spectrum[hoveredIdx];
       if (Number.isFinite(y)) {
         const cx = toX(x);
@@ -158,7 +183,7 @@ export default function SpectroscopyPanel({
 
         ctx.font = "10px 'JetBrains Mono', monospace";
         const label = hasWl
-          ? `${x.toFixed(4)} \u03bcm \u2192 ${y.toFixed(2)}`
+          ? `${x.toFixed(4)} ${wlConversion.label} \u2192 ${y.toFixed(2)}`
           : `ch ${x} \u2192 ${y.toFixed(2)}`;
         const tw = ctx.measureText(label).width;
         const tx = Math.min(cx + 8, W - tw - 8);
@@ -182,7 +207,7 @@ export default function SpectroscopyPanel({
     ctx.textAlign = "center";
     ctx.fillStyle = "#52525b";
     ctx.fillText(xLabel, W / 2, H - 4);
-  }, [spectrum, wavelengths, plotParams, hoveredIdx]);
+  }, [spectrum, wavelengths, plotParams, hoveredIdx, wlConversion]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -216,9 +241,10 @@ export default function SpectroscopyPanel({
     setCollapseMode(mode);
     setCollapseResult(null);
     try {
+      const dir = await getOutputDir();
       const result = mode === "sum"
-        ? await processCube(filePath, "./output", 1)
-        : await processCubeLazy(filePath, "./output", 1);
+        ? await processCube(filePath, dir, 1)
+        : await processCubeLazy(filePath, dir, 1);
       setCollapseResult(result);
       const url = result.collapsedPreviewUrl || result.collapsedMedianPreviewUrl;
       if (url && onCollapsePreview) onCollapsePreview(url);
@@ -304,7 +330,7 @@ export default function SpectroscopyPanel({
       {filePath && cubeDims && totalFrames > 1 && (
         <div className="px-3 pb-2 flex items-center gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
           <CollapseBtn
-            label="Collapse Sum"
+            label="Collapse Mean"
             loading={collapseLoading && collapseMode === "sum"}
             disabled={collapseLoading}
             color="var(--ab-violet)"

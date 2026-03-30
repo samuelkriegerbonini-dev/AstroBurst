@@ -82,6 +82,7 @@ pub async fn stack(
     sigma_high: Option<f32>,
     max_iterations: Option<usize>,
     align: Option<bool>,
+    name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let frame_count = paths.len() as u64;
     let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
@@ -101,10 +102,12 @@ pub async fn stack(
 
         progress_clone.tick_with_stage(STAGE_RENDER);
 
+        let stem = name.as_deref().unwrap_or("stacked");
+
         let (png_path, fits_path) = render_asinh_and_save(
             &result.image,
             &output_dir,
-            "stacked",
+            stem,
             true,
         )?;
 

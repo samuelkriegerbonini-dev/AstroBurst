@@ -6,7 +6,7 @@ import {
   type SynthConfig,
   type FieldType,
   type PsfType,
-} from "../../services/synth.service";
+} from "../../services/synth";
 import { Slider, RunButton, ErrorAlert, SectionHeader, Toggle } from "../ui";
 
 const ICON = (

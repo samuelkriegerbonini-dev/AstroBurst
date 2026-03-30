@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { applyArcsinhStretch } from "../../services/processing.service";
+import { applyArcsinhStretch } from "../../services/processing";
 import { Slider, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 
 interface ArcsinhStretchPanelProps {

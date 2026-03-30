@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import type { WizardState } from "../wizard.types";
-import { applyScnr } from "../../../services/compose.service";
+import { applyScnr } from "../../../services/compose";
+import { getOutputDir } from "../../../infrastructure/tauri";
 import { Slider, Toggle, RunButton } from "../../ui";
 
 interface ColorStepProps {
@@ -28,10 +29,13 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
     setLoading(true);
     setError("");
     try {
-      const res = await applyScnr("./output", {
+      const res = await applyScnr(await getOutputDir(), {
         method,
         amount: state.scnrAmount,
         preserveLuminance: preserveLum,
+        rFactor: state.wbR,
+        gFactor: state.wbG,
+        bFactor: state.wbB,
       });
       setResult(res);
       if (res?.previewUrl || res?.png_path) {
@@ -42,7 +46,7 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
     } finally {
       setLoading(false);
     }
-  }, [method, state.scnrAmount, preserveLum, onResult]);
+  }, [method, state.scnrAmount, state.wbR, state.wbG, state.wbB, preserveLum, onResult]);
 
   return (
     <div className="flex flex-col gap-3 p-3">

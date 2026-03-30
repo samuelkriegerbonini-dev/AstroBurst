@@ -11,7 +11,7 @@ import {
   ZoomOut,
   Maximize,
   Square,
-  SquareSplitHorizontal,
+  Columns2,
   Move,
   RotateCcw,
   Crosshair,
@@ -165,8 +165,8 @@ function AdvancedImageViewer({
     });
   }, []);
 
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
+  const handleWheelNative = useCallback(
+    (e: WheelEvent) => {
       e.preventDefault();
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -183,6 +183,13 @@ function AdvancedImageViewer({
     },
     [],
   );
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", handleWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheelNative);
+  }, [handleWheelNative]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -361,7 +368,7 @@ function AdvancedImageViewer({
               className={`ab-viewer-btn ${compareMode ? "ab-viewer-btn-active" : ""}`}
               title="Before / After comparison"
             >
-              <SquareSplitHorizontal size={14} />
+              <Columns2 size={14} />
             </button>
           )}
           <button
@@ -389,7 +396,6 @@ function AdvancedImageViewer({
       <div
         ref={containerRef}
         className="ab-viewer-canvas"
-        onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}

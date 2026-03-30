@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { estimatePsf } from "../../services/processing.service";
+import { estimatePsf } from "../../services/processing";
 import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
 
 interface PsfResult {

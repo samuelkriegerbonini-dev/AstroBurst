@@ -47,10 +47,16 @@ pub fn run() {
             };
 
             std::thread::spawn(move || {
+                const RETRY_DELAYS: &[u64] = &[100, 300, 800];
                 let mut data = std::fs::read(&path);
                 if data.is_err() {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    data = std::fs::read(&path);
+                    for &delay in RETRY_DELAYS {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        data = std::fs::read(&path);
+                        if data.is_ok() {
+                            break;
+                        }
+                    }
                 }
 
                 match data {
@@ -124,6 +130,8 @@ pub fn run() {
             cmd::compose::align_channels_cmd,
             cmd::compose::apply_scnr_cmd,
             cmd::compose::calibrate_composite_cmd,
+            cmd::compose::compute_auto_wb_cmd,
+            cmd::compose::reset_wb_cmd,
             cmd::resample::resample_fits_cmd,
             cmd::deconvolution::deconvolve_rl_cmd,
             cmd::background::extract_background_cmd,

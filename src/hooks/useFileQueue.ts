@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { FILE_STATUS } from "../utils/constants";
-import { processFitsFull, processFits, resampleFits } from "../services/fits.service";
-import { getHeader } from "../services/header.service";
+import { processFitsFull, processFits, resampleFits } from "../services/fits";
+import { getHeader } from "../services/header";
 import {
   fileStore,
   useFileStats,

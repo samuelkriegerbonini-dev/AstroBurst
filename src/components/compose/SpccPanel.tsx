@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { spccCalibrate } from "../../services/processing.service";
+import { spccCalibrate } from "../../services/processing";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 
 interface SpccResult {

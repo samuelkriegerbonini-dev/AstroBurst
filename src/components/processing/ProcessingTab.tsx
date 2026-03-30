@@ -1,7 +1,7 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
 import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
-import { updateCompositeChannel, restretchComposite } from "../../services/compose.service";
+import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri/client";
 import { getOutputDir } from "../../infrastructure/tauri";
 
@@ -81,6 +81,9 @@ function ProcessingTabInner() {
     stretchFits: null,
     maskedStretchFits: null,
   });
+
+  const [resolvedDir, setResolvedDir] = useState("./output");
+  useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
   const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB });
   useEffect(() => {
@@ -299,6 +302,7 @@ function ProcessingTabInner() {
           <div style={{ display: active === "background" ? "block" : "none" }}>
             <BackgroundPanel
               selectedFile={backgroundInput}
+              outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleBackgroundDone}
               chainedFrom={undefined}
@@ -307,6 +311,7 @@ function ProcessingTabInner() {
           <div style={{ display: active === "denoise" ? "block" : "none" }}>
             <WaveletPanel
               selectedFile={denoiseInput}
+              outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleDenoiseDone}
               chainedFrom={chain.backgroundFits ? "background" : undefined}
@@ -321,6 +326,7 @@ function ProcessingTabInner() {
           <div style={{ display: active === "deconvolution" ? "block" : "none" }}>
             <DeconvolutionPanel
               selectedFile={deconvInput}
+              outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleDeconvDone}
               chainedFrom={
@@ -332,6 +338,7 @@ function ProcessingTabInner() {
           <div style={{ display: active === "stretch" ? "block" : "none" }}>
             <ArcsinhStretchPanel
               selectedFile={stretchInput}
+              outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleStretchDone}
               chainedFrom={
@@ -342,6 +349,7 @@ function ProcessingTabInner() {
           <div style={{ display: active === "masked_stretch" ? "block" : "none" }}>
             <MaskedStretchPanel
               selectedFile={maskedStretchInput}
+              outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleMaskedStretchDone}
               chainedFrom={

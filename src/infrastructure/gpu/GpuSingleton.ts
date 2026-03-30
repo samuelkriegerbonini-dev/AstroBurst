@@ -38,10 +38,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn mtf(m: f32, x: f32) -> f32 {
     if (x <= 0.0) { return 0.0; }
     if (x >= 1.0) { return 1.0; }
-    if (m == 0.5) { return x; }
+    if (abs(m - 0.5) < 1e-6) { return x; }
     let a = (m - 1.0) * x;
     let b = (2.0 * m - 1.0) * x - m;
-    return a / max(b, 1e-8);
+    if (abs(b) < 1e-8) { return x; }
+    return a / b;
 }
 
 @fragment

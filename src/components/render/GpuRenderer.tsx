@@ -58,7 +58,8 @@ function downsampleF32Async(
       resolve({ dst: e.data.dst, seq: e.data.seq });
     };
     w.addEventListener("message", handler);
-    w.postMessage({ src, srcW, srcH, dstW, dstH, seq });
+    const copy = new Float32Array(src);
+    w.postMessage({ src: copy, srcW, srcH, dstW, dstH, seq }, [copy.buffer]);
   });
 }
 
@@ -223,7 +224,7 @@ export default function GpuRenderer({
     if (uploadedDataRef.current !== displayData) {
       device.queue.writeTexture(
         { texture: res.texture },
-        displayData,
+        displayData as Float32Array<ArrayBuffer>,
         { bytesPerRow: w * 4 },
         [w, h, 1]
       );
@@ -231,7 +232,7 @@ export default function GpuRenderer({
     }
 
     const uniforms = new Float32Array([dataMin, dataMax, shadow, midtone, highlight, w, h, 0]);
-    device.queue.writeBuffer(res.uniformBuffer, 0, uniforms);
+    device.queue.writeBuffer(res.uniformBuffer, 0, uniforms as Float32Array<ArrayBuffer>);
 
     const commandEncoder = device.createCommandEncoder();
     const renderPassDescriptor: GPURenderPassDescriptor = {

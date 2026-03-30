@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
 import { Download, Loader2, Box, Film } from "lucide-react";
-import { exportFits, exportFitsRgb } from "../../services/export.service";
-import { getCubeFrame } from "../../services/cube.service";
+import { exportFits, exportFitsRgb } from "../../services/export";
+import { getCubeFrame } from "../../services/cube";
 import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
 import { getExportDir } from "../../infrastructure/tauri";
 

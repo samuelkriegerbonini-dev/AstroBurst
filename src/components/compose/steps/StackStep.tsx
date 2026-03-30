@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard.types";
-import { stackFrames } from "../../../services/stacking.service";
+import { stackFrames } from "../../../services/stacking";
+import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
 
 interface StackStepProps {
@@ -32,10 +33,11 @@ export default function StackStep({ state, onStacked }: StackStepProps) {
     setLoading((prev) => ({ ...prev, [binId]: true }));
     setErrors((prev) => ({ ...prev, [binId]: "" }));
     try {
-      const result = await stackFrames(paths, "./output", {
+      const result = await stackFrames(paths, await getOutputDir(), {
         sigmaLow: 3.0,
         sigmaHigh: 3.0,
         align: true,
+        name: `stacked_${binId}`,
       });
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {

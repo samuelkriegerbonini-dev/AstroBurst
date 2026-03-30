@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import HistogramPanel from "./HistogramPanel";
-import { detectStars, computeFftSpectrum, applyStfRender } from "../../services/analysis.service";
+import { detectStars, computeFftSpectrum, applyStfRender } from "../../services/analysis";
+import { getOutputDir } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
 import type { StfParams } from "../../shared/types";
 
@@ -43,40 +44,50 @@ function AnalysisTabInner({
   const { file } = useFileContext();
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
-  const { setRenderedPreviewUrl } = useRenderContext();
+  const { setRenderedPreviewUrl, activeImagePath, isShowingComposite } = useRenderContext();
   const { rawPixels } = useRawPixelsContext();
 
   const [starResult, setStarResult] = useState<any>(null);
   const [starLoading, setStarLoading] = useState(false);
 
+  const effectivePath = (isShowingComposite && activeImagePath) ? activeImagePath : file?.path;
+
   const rafIdRef = useRef<number | null>(null);
   const pendingStfRef = useRef<StfParams | null>(null);
   const ipcBusyRef = useRef(false);
+  const ipcFailCountRef = useRef(0);
 
   const flushStfIpc = useCallback(async () => {
-    if (ipcBusyRef.current || !pendingStfRef.current || !file?.path) return;
+    if (ipcBusyRef.current || !pendingStfRef.current || !effectivePath) return;
+    if (ipcFailCountRef.current >= 3) {
+      pendingStfRef.current = null;
+      ipcFailCountRef.current = 0;
+      return;
+    }
     const params = pendingStfRef.current;
     pendingStfRef.current = null;
     ipcBusyRef.current = true;
     try {
       const result = await applyStfRender(
-        file.path,
-        "./output",
+        effectivePath,
+        await getOutputDir(),
         params.shadow,
         params.midtone,
         params.highlight,
       );
+      ipcFailCountRef.current = 0;
       if (result.previewUrl) {
         const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
         setRenderedPreviewUrl(bust);
       }
     } catch (e) {
+      ipcFailCountRef.current++;
       console.error("STF render failed:", e);
     } finally {
       ipcBusyRef.current = false;
-      if (pendingStfRef.current) flushStfIpc();
+      if (pendingStfRef.current) queueMicrotask(() => flushStfIpc());
     }
-  }, [file?.path, setRenderedPreviewUrl]);
+  }, [effectivePath, setRenderedPreviewUrl]);
 
   const handleStfChange = useCallback(
     (params: StfParams) => {
@@ -106,10 +117,10 @@ function AnalysisTabInner({
 
   const handleDetectStars = useCallback(
     async (sigma: number) => {
-      if (!file?.path) return;
+      if (!effectivePath) return;
       setStarLoading(true);
       try {
-        const result = await detectStars(file.path, sigma, 200);
+        const result = await detectStars(effectivePath, sigma, 200);
         setStarResult(result);
       } catch (e) {
         console.error("Star detection failed:", e);
@@ -117,7 +128,7 @@ function AnalysisTabInner({
         setStarLoading(false);
       }
     },
-    [file?.path],
+    [effectivePath],
   );
 
   const handleCollapsePreview = useCallback(
@@ -137,7 +148,6 @@ function AnalysisTabInner({
   );
 
   const stars = starResult?.stars || EMPTY_STARS;
-  const starCount = starResult?.count || 0;
 
   return (
     <Suspense fallback={<TabSpinner />}>
@@ -160,7 +170,6 @@ function AnalysisTabInner({
 
         <PlateSolvePanel
           stars={stars}
-          count={starCount}
           isLoading={starLoading}
           onDetect={handleDetectStars}
           backgroundMedian={starResult?.background_median}
@@ -169,11 +178,11 @@ function AnalysisTabInner({
           imageHeight={starResult?.image_height || file?.result?.dimensions?.[1]}
           elapsed={starResult?.elapsed_ms || 0}
           overlayCanvasRef={starOverlayRef}
-          filePath={file?.path}
+          filePath={effectivePath ?? null}
         />
 
-        {file?.path && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
-          <FFTPanel filePath={file.path} computeFftSpectrum={computeFftSpectrum} />
+        {effectivePath && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
+          <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />
         )}
 
         {isCube && (
@@ -184,13 +193,13 @@ function AnalysisTabInner({
             isLoading={specLoading}
             cubeDims={cubeDims}
             elapsed={specElapsed}
-            filePath={file?.path}
+            filePath={effectivePath}
             onCollapsePreview={handleCollapsePreview}
           />
         )}
 
         <TileViewerPanel
-          filePath={file?.path || null}
+          filePath={effectivePath || null}
           imageWidth={file?.result?.dimensions?.[0]}
           imageHeight={file?.result?.dimensions?.[1]}
         />

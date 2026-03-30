@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard.types";
-import { extractBackground } from "../../../services/processing.service";
+import { extractBackground } from "../../../services/processing";
+import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
 
 interface BackgroundStepProps {
@@ -39,7 +40,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     setLoading((prev) => ({ ...prev, [binId]: true }));
     setErrors((prev) => ({ ...prev, [binId]: "" }));
     try {
-      const result = await extractBackground(path, "./output", {
+      const result = await extractBackground(path, await getOutputDir(), {
         gridSize,
         polyDegree,
         sigmaClip,

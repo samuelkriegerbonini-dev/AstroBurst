@@ -1,9 +1,10 @@
 import { useState, useCallback } from "react";
 import { Download, Archive, Loader2, Check, FolderOpen } from "lucide-react";
 import type { WizardState } from "../wizard.types";
-import { exportRgbPng, exportFitsRgb } from "../../../services/export.service";
-import { restretchComposite } from "../../../services/compose.service";
-import { getExportDir } from "../../../infrastructure/tauri";
+import { exportRgbPng, exportFitsRgb } from "../../../services/export";
+import { restretchComposite } from "../../../services/compose";
+import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
+import { useRenderContext } from "../../../context/PreviewContext";
 import { RunButton } from "../../ui";
 
 interface ExportStepProps {
@@ -62,6 +63,7 @@ async function revealInExplorer(path: string) {
 }
 
 export default function ExportStep({ state }: ExportStepProps) {
+  const { compositeStfR, compositeStfG, compositeStfB } = useRenderContext();
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
   const [loading, setLoading] = useState(false);
@@ -83,15 +85,14 @@ export default function ExportStep({ state }: ExportStepProps) {
       try {
         dir = await getExportDir();
       } catch {
-        dir = "./output";
+        dir = await getOutputDir();
       }
 
       if (state.compositeReady) {
         const outputPath = `${dir}/astroburst_composite_${ts}.${format === "png" ? "png" : "fits"}`;
 
         if (format === "png") {
-          const stfDefault = { shadow: 0, midtone: 0.5, highlight: 1 };
-          const restretchRes = await restretchComposite(dir, stfDefault, stfDefault, stfDefault);
+          const restretchRes = await restretchComposite(dir, compositeStfR, compositeStfG, compositeStfB);
 
           if (restretchRes?.png_path) {
             try {
@@ -152,7 +153,7 @@ export default function ExportStep({ state }: ExportStepProps) {
       try {
         dir = await getExportDir();
       } catch {
-        dir = "./output";
+        dir = await getOutputDir();
       }
 
       const filesToZip: { name: string; path: string }[] = [];
@@ -184,8 +185,7 @@ export default function ExportStep({ state }: ExportStepProps) {
       if (state.compositeReady) {
         const compositePath = `${dir}/composite_${ts}.png`;
         try {
-          const stfDefault = { shadow: 0, midtone: 0.5, highlight: 1 };
-          const res = await restretchComposite(dir, stfDefault, stfDefault, stfDefault);
+          const res = await restretchComposite(dir, compositeStfR, compositeStfG, compositeStfB);
           if (res?.png_path) {
             try {
               const { copyFile } = await import("@tauri-apps/plugin-fs");

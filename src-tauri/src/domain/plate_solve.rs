@@ -1,6 +1,6 @@
 pub use crate::core::analysis::star_detection::DetectedStar;
 pub use crate::core::astrometry::plate_solve::{
-    SolveResult, SolveConfig,
+    FieldAnnotation, SolveConfig, SolveResult,
 };
 #[cfg(not(feature = "astrometry-net"))]
 pub use crate::core::astrometry::plate_solve::solve_offline_placeholder;
@@ -12,7 +12,79 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 mod astrometry_net_impl {
     use std::collections::HashMap;
     use anyhow::{bail, Context, Result};
-    use super::{DetectedStar, SolveResult, SolveConfig};
+    use super::{DetectedStar, FieldAnnotation, SolveResult, SolveConfig};
+
+    const REFERER: &str = "https://nova.astrometry.net/api/login";
+
+    const WCS_KEYS: &[&str] = &[
+        "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+        "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+        "CDELT1", "CDELT2", "CROTA2",
+        "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
+        "IMAGEW", "IMAGEH",
+        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
+    ];
+
+    fn is_wcs_key(key: &str) -> bool {
+        if WCS_KEYS.contains(&key) {
+            return true;
+        }
+        let prefixes = ["A_", "B_", "AP_", "BP_"];
+        for p in prefixes {
+            if key.starts_with(p) {
+                let rest = &key[p.len()..];
+                if rest.chars().all(|c| c.is_ascii_digit() || c == '_') && !rest.is_empty() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn extract_wcs_headers(fits_bytes: &[u8]) -> Result<HashMap<String, String>> {
+        let parsed = crate::infra::fits::reader::parse_header_at(fits_bytes, 0)
+            .context("Failed to parse WCS FITS header")?;
+
+        let mut headers = HashMap::new();
+        for (key, value) in &parsed.header.cards {
+            if is_wcs_key(key) {
+                headers.insert(key.clone(), value.clone());
+            }
+        }
+        Ok(headers)
+    }
+
+    fn parse_annotations(json: &serde_json::Value) -> Vec<FieldAnnotation> {
+        let mut result = Vec::new();
+        let annotations = match json["annotations"].as_array() {
+            Some(a) => a,
+            None => return result,
+        };
+        for ann in annotations {
+            let kind = ann["type"].as_str().unwrap_or("").to_string();
+            let names: Vec<String> = ann["names"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let pixelx = ann["pixelx"].as_f64().unwrap_or(0.0);
+            let pixely = ann["pixely"].as_f64().unwrap_or(0.0);
+            let radius = ann["radius"].as_f64();
+            if !kind.is_empty() {
+                result.push(FieldAnnotation {
+                    kind,
+                    names,
+                    pixelx,
+                    pixely,
+                    radius,
+                });
+            }
+        }
+        result
+    }
 
     async fn parse_json_response(resp: reqwest::Response, label: &str) -> Result<serde_json::Value> {
         let status = resp.status();
@@ -83,7 +155,7 @@ mod astrometry_net_impl {
         if let (Some(lo), Some(hi)) = (config.scale_low, config.scale_high) {
             upload_json["scale_lower"] = serde_json::json!(lo);
             upload_json["scale_upper"] = serde_json::json!(hi);
-            upload_json["scale_type"] = serde_json::json!("arcsecperpix");
+            upload_json["scale_type"] = serde_json::json!("ul");
             upload_json["scale_units"] = serde_json::json!("arcsecperpix");
         }
 
@@ -194,44 +266,70 @@ mod astrometry_net_impl {
         let dec_center = cal["dec"].as_f64().unwrap_or(0.0);
         let orientation = cal["orientation"].as_f64().unwrap_or(0.0);
         let pixel_scale = cal["pixscale"].as_f64().unwrap_or(0.0);
-        let field_w = cal["radius"].as_f64().unwrap_or(0.0) * 2.0 * 60.0;
+        let field_w = pixel_scale * image_width as f64 / 60.0;
+        let field_h = pixel_scale * image_height as f64 / 60.0;
 
         log::info!(
-            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:.1}deg",
-            ra_center, dec_center, pixel_scale, orientation
+            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:.1}deg FOV={:.1}'x{:.1}'",
+            ra_center, dec_center, pixel_scale, orientation, field_w, field_h
         );
 
-        let mut wcs_headers = HashMap::new();
-        wcs_headers.insert("CRVAL1".into(), format!("{:.8}", ra_center));
-        wcs_headers.insert("CRVAL2".into(), format!("{:.8}", dec_center));
-        wcs_headers.insert("CRPIX1".into(), format!("{:.1}", image_width as f64 / 2.0));
-        wcs_headers.insert("CRPIX2".into(), format!("{:.1}", image_height as f64 / 2.0));
-
-        let theta = orientation.to_radians();
-        let scale_deg = pixel_scale / 3600.0;
-        wcs_headers.insert("CD1_1".into(), format!("{:.12E}", -scale_deg * theta.cos()));
-        wcs_headers.insert("CD1_2".into(), format!("{:.12E}", scale_deg * theta.sin()));
-        wcs_headers.insert("CD2_1".into(), format!("{:.12E}", scale_deg * theta.sin()));
-        wcs_headers.insert("CD2_2".into(), format!("{:.12E}", scale_deg * theta.cos()));
-        wcs_headers.insert("CTYPE1".into(), "RA---TAN".into());
-        wcs_headers.insert("CTYPE2".into(), "DEC--TAN".into());
-
-        let info_resp = client
-            .get(format!("{}/api/jobs/{}/info", base_url, jid))
+        let wcs_url = format!(
+            "{}/wcs_file/{}",
+            base_url.trim_end_matches('/'),
+            jid
+        );
+        let wcs_headers = match client
+            .get(&wcs_url)
+            .header("Referer", REFERER)
             .send()
-            .await?;
-        let wcs_info = parse_json_response(info_resp, "Job info").await?;
-
-        if let Some(tags) = wcs_info["tags"].as_array() {
-            for tag in tags {
-                if let Some(t) = tag.as_str() {
-                    if t.starts_with("index-") || t.contains("field") {
-                        wcs_headers.insert("COMMENT".into(), format!("Solved: {}", t));
-                        break;
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        log::info!("Downloaded WCS file ({} bytes)", bytes.len());
+                        extract_wcs_headers(&bytes).unwrap_or_else(|e| {
+                            log::warn!("Failed to parse WCS FITS: {}", e);
+                            fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
+                        })
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read WCS response body: {}", e);
+                        fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
                     }
                 }
             }
-        }
+            Ok(resp) => {
+                log::warn!("WCS file download returned HTTP {}", resp.status());
+                fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
+            }
+            Err(e) => {
+                log::warn!("WCS file download failed: {}", e);
+                fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
+            }
+        };
+
+        let annotations = match client
+            .get(format!("{}/api/jobs/{}/annotations", base_url, jid))
+            .header("Referer", REFERER)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                match parse_json_response(resp, "Annotations").await {
+                    Ok(json) => parse_annotations(&json),
+                    Err(e) => {
+                        log::warn!("Failed to parse annotations: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Annotations request failed: {}", e);
+                Vec::new()
+            }
+        };
 
         Ok(SolveResult {
             success: true,
@@ -240,10 +338,36 @@ mod astrometry_net_impl {
             orientation,
             pixel_scale,
             field_w_arcmin: field_w,
-            field_h_arcmin: field_w * image_height as f64 / image_width as f64,
+            field_h_arcmin: field_h,
             index_name: "astrometry.net".into(),
             stars_used: stars.len().min(config.max_stars.unwrap_or(100)),
             wcs_headers,
+            annotations,
         })
+    }
+
+    fn fallback_wcs_headers(
+        ra: f64,
+        dec: f64,
+        pixel_scale: f64,
+        orientation: f64,
+        width: usize,
+        height: usize,
+    ) -> HashMap<String, String> {
+        let mut h = HashMap::new();
+        h.insert("CRVAL1".into(), format!("{:.8}", ra));
+        h.insert("CRVAL2".into(), format!("{:.8}", dec));
+        h.insert("CRPIX1".into(), format!("{:.1}", width as f64 / 2.0));
+        h.insert("CRPIX2".into(), format!("{:.1}", height as f64 / 2.0));
+
+        let theta = orientation.to_radians();
+        let scale_deg = pixel_scale / 3600.0;
+        h.insert("CD1_1".into(), format!("{:.12E}", -scale_deg * theta.cos()));
+        h.insert("CD1_2".into(), format!("{:.12E}", scale_deg * theta.sin()));
+        h.insert("CD2_1".into(), format!("{:.12E}", -scale_deg * theta.sin()));
+        h.insert("CD2_2".into(), format!("{:.12E}", scale_deg * theta.cos()));
+        h.insert("CTYPE1".into(), "RA---TAN".into());
+        h.insert("CTYPE2".into(), "DEC--TAN".into());
+        h
     }
 }

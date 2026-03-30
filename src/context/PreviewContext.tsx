@@ -8,11 +8,11 @@ import {
   useMemo,
   useCallback,
 } from "react";
-import { computeHistogram } from "../services/analysis.service";
-import { getCubeInfo } from "../services/cube.service";
-import { getRawPixelsPreview } from "../services/fits.service";
-import { detectNarrowbandFilters } from "../services/header.service";
-import { clearCompositeCache } from "../services/compose.service";
+import { computeHistogram } from "../services/analysis";
+import { getCubeInfo } from "../services/cube";
+import { getRawPixelsPreview } from "../services/fits";
+import { detectNarrowbandFilters } from "../services/header";
+import { clearCompositeCache } from "../services/compose";
 import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../shared/types";
 
 interface ChannelSuggestion {

@@ -69,7 +69,7 @@ pub async fn masked_stretch_cmd(
         };
 
         let t0 = std::time::Instant::now();
-        let result = masked_stretch(image, &config)?;
+        let result = masked_stretch(image, &config).map_err(|e| anyhow::anyhow!(e))?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
         let ro = render_and_save(&result.image, &path, &output_dir, SUFFIX_MASKED_STRETCH, true)?;

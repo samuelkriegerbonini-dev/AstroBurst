@@ -1,5 +1,5 @@
-import type { FileStatus } from "./queue.types";
-import type { HistogramData } from "./analysis.types";
+import type { FileStatus } from "./queue";
+import type { HistogramData } from "./analysis";
 
 export interface StfParams {
   shadow: number;

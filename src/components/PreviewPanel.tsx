@@ -1,10 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Image, Cpu, Zap, Layers, Sparkles, Loader2,
-  Layers2, FlaskConical,
+  Layers2, FlaskConical, Info, Settings,
 } from "lucide-react";
 
-import { getCubeSpectrum } from "../services/cube.service";
+import { getCubeSpectrum } from "../services/cube";
 import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
 import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
 import { useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
@@ -17,8 +17,9 @@ const ComposeWizard = lazy(() => import("./compose/ComposeWizard"));
 const StackingTab = lazy(() => import("./stacking/StackingTab"));
 const ConfigTab = lazy(() => import("./preview/ConfigTab"));
 const SynthPanel = lazy(() => import("./synth/SynthPanel"));
+const InfoPanel = lazy(() => import("./file/SidebarPanels").then((m) => ({ default: m.InfoPanel })));
 
-type ToolId = "processing" | "compose" | "stacking" | "config" | "synth";
+type ToolId = "processing" | "compose" | "stacking" | "info" | "synth" | "config";
 
 interface ToolDef {
   id: ToolId;
@@ -35,7 +36,9 @@ const TOP_TOOLS: ToolDef[] = [
 ];
 
 const BOTTOM_STRIP_TOOLS: ToolDef[] = [
+  { id: "info", label: "Info", shortLabel: "Info", icon: Info, accent: "var(--ab-teal)" },
   { id: "synth", label: "Synth", shortLabel: "Synth", icon: FlaskConical, accent: "var(--ab-rose)" },
+  { id: "config", label: "Settings", shortLabel: "Config", icon: Settings, accent: "#a1a1aa" },
 ];
 
 const BOTTOM_MIN = 140;
@@ -51,6 +54,7 @@ function ToolContent({ toolId }: { toolId: ToolId }) {
     case "processing": return <ProcessingTab />;
     case "compose": return <ComposeWizard />;
     case "stacking": return <StackingTab />;
+    case "info": return <InfoPanel />;
     case "config": return <ConfigTab />;
     case "synth": return <SynthPanel />;
     default: return null;
@@ -172,11 +176,21 @@ export default function PreviewPanel() {
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
         <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "linear-gradient(90deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.6) 50%, rgba(59,130,246,0.04) 100%)", borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <Image size={12} style={{ color: "var(--ab-teal)" }} />
             <span className="text-[11px] font-medium text-zinc-300">Preview</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 justify-center flex-1 min-w-0">
+            {file && <span className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">{file.name}</span>}
+            {file?.result?.dimensions && (
+              <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 shrink-0">
+                <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
+                {file.result.header?.BITPIX && <span className="text-zinc-600">BITPIX {file.result.header.BITPIX}</span>}
+                <span className="text-zinc-600">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu)}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
@@ -184,14 +198,6 @@ export default function PreviewPanel() {
                 {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : rawPixelsLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
                 {gpuProbing ? "..." : rawPixelsLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
               </button>
-            )}
-            {file && <span className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">{file.name}</span>}
-            {file?.result?.dimensions && (
-              <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5">
-                <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
-                {file.result.header?.BITPIX && <span className="text-zinc-600">BITPIX {file.result.header.BITPIX}</span>}
-                <span className="text-zinc-600">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
-              </span>
             )}
           </div>
         </div>

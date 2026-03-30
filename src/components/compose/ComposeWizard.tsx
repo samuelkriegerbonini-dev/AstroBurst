@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useReducer, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
-import { detectNarrowbandFilters } from "../../services/header.service";
+import { detectNarrowbandFilters } from "../../services/header";
 import { STEPS, INITIAL_STATE, STEP_ORDER, nextEnabledStep } from "./wizard.types";
 import type { WizardState, FrequencyBin, BlendWeight } from "./wizard.types";
 
@@ -162,6 +162,7 @@ export default function ComposeWizard() {
     setCompositePreviewUrl,
     setCompositeAutoStf,
     setCompositeStf,
+    setActiveImagePath,
   } = useRenderContext();
 
   const { narrowbandPalette } = useNarrowbandContext();
@@ -210,7 +211,7 @@ export default function ComposeWizard() {
     setSuggestedStep(null);
   }, []);
 
-  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any) => {
+  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -218,15 +219,21 @@ export default function ComposeWizard() {
       setCompositeAutoStf(stfR, stfG, stfB);
       setCompositeStf(stfR, stfG, stfB);
     }
+    if (lumFitsPath) {
+      setActiveImagePath(lumFitsPath);
+    }
     dispatch({ type: "SET_COMPOSITE_READY", ready: true });
     completeStep("blend");
-  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, completeStep]);
+  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep]);
 
-  const handleRestretchPreview = useCallback((previewUrl: string | null) => {
+  const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: any; g: any; b: any }) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
-  }, [setCompositePreviewUrl]);
+    if (stf) {
+      setCompositeStf(stf.r, stf.g, stf.b);
+    }
+  }, [setCompositePreviewUrl, setCompositeStf]);
 
   const stepContent = useMemo(() => {
     switch (activeStep) {
@@ -304,8 +311,8 @@ export default function ComposeWizard() {
           <StretchStep
             state={state}
             onStretchChange={(mode, factor, target) => dispatch({ type: "SET_STRETCH", mode, factor, target })}
-            onResult={(url) => {
-              handleRestretchPreview(url);
+            onResult={(url, stf) => {
+              handleRestretchPreview(url, stf);
               completeStep("stretch");
             }}
           />

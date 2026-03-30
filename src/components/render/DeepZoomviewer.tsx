@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
-import { generateTiles } from "../../services/tiles.service";
+import { generateTiles } from "../../services/tiles";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 
 interface DeepZoomViewerProps {
@@ -95,7 +95,7 @@ function DeepZoomViewer({
     } finally {
       setGenerating(false);
     }
-  }, [rawPath, outputDir, tileSize, generateTiles, isSmallImage]);
+  }, [rawPath, outputDir, tileSize, isSmallImage]);
 
   const setupRenderedImage = useCallback(async () => {
     if (!renderedPreviewUrl || renderedUrlRef.current === renderedPreviewUrl) return;

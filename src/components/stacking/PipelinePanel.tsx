@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
-import { runCalibrationPipeline } from "../../services/stacking.service";
+import { runCalibrationPipeline } from "../../services/stacking";
 
 interface FileGroup {
   label: string;

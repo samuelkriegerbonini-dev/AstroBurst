@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
-import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export.service";
+import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export";
 import type { StfParams } from "../../shared/types";
 
 interface BitpixOption {

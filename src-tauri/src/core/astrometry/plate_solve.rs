@@ -15,6 +15,18 @@ pub struct SolveResult {
     pub index_name: String,
     pub stars_used: usize,
     pub wcs_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub annotations: Vec<FieldAnnotation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldAnnotation {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub names: Vec<String>,
+    pub pixelx: f64,
+    pub pixely: f64,
+    pub radius: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

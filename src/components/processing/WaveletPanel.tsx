@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { waveletDenoise } from "../../services/processing.service";
+import { waveletDenoise } from "../../services/processing";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 

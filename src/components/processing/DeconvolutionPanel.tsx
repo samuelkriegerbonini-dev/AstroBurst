@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { deconvolveRL } from "../../services/processing.service";
+import { deconvolveRL } from "../../services/processing";
 import { useProgress } from "../../hooks/useProgress";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";

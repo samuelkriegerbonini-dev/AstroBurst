@@ -83,7 +83,6 @@ pub fn masked_stretch_with_mask(
 
         let unmasked = apply_mtf(&working, midtone as f32);
 
-        let (h, w) = working.dim();
         let work_slice = working.as_slice_mut().unwrap();
         let unmask_slice = unmasked.as_slice().unwrap();
         let mask_slice = mask.as_slice().unwrap();
@@ -182,7 +181,11 @@ fn apply_mtf(data: &Array2<f32>, m: f32) -> Array2<f32> {
         if x >= 1.0 {
             return 1.0;
         }
-        (m - 1.0) * x / ((2.0 * m - 1.0) * x - m)
+        let denom = (2.0 * m - 1.0) * x - m;
+        if denom.abs() < 1e-10 {
+            return x;
+        }
+        ((m - 1.0) * x / denom).clamp(0.0, 1.0)
     });
     out
 }

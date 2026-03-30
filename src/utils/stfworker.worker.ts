@@ -11,12 +11,15 @@ function stfTransfer(
   clipRange: number,
   midtone: number,
 ): number {
-  if (raw !== raw) return 0;
+  if (raw !== raw || raw <= 1e-7) return 0;
   const norm = Math.max(0, Math.min(1, (raw - dataMin) * invRange));
   const clipped = Math.max(0, Math.min(1, (norm - shadow) / clipRange));
   if (clipped <= 0) return 0;
   if (clipped >= 1) return 1;
-  return ((midtone - 1) * clipped) / ((2 * midtone - 1) * clipped - midtone);
+  if (Math.abs(midtone - 0.5) < 1e-6) return clipped;
+  const b = (2 * midtone - 1) * clipped - midtone;
+  if (Math.abs(b) < 1e-8) return clipped;
+  return ((midtone - 1) * clipped) / b;
 }
 
 function ensureRgba(len: number): Uint8ClampedArray {

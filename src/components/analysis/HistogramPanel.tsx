@@ -184,7 +184,11 @@ function HistogramPanel({
     if (!container) return;
     const ro = new ResizeObserver(() => { drawBars(); drawOverlay(); });
     ro.observe(container);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+    };
   }, [drawBars, drawOverlay]);
 
   const getMouseNorm = useCallback((e: MouseEvent) => {

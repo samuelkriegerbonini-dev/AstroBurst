@@ -1,14 +1,15 @@
 import { useState, useCallback } from "react";
 import type { WizardState } from "../wizard.types";
 import { Slider, RunButton, Toggle } from "../../ui";
-import { restretchComposite } from "../../../services/compose.service";
-import { maskedStretch, applyArcsinhStretch } from "../../../services/processing.service";
+import { restretchComposite, resetWb } from "../../../services/compose";
+import { maskedStretch, applyArcsinhStretch } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
+import { getOutputDir } from "../../../infrastructure/tauri";
 
 interface StretchStepProps {
   state: WizardState;
   onStretchChange: (mode: WizardState["stretchMode"], factor?: number, target?: number) => void;
-  onResult: (png: string | null) => void;
+  onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
 }
 
 interface ChannelStf {
@@ -77,37 +78,40 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
     setError("");
     try {
       let res: any;
+      const dir = await getOutputDir();
+
+      const stfBundle = { r: stfR, g: stfG, b: stfB };
 
       if (state.compositeReady) {
-        res = await restretchComposite("./output", stfR, stfG, stfB);
+        res = await restretchComposite(dir, stfR, stfG, stfB);
         if (res?.png_path) {
           const url = await getPreviewUrl(res.png_path);
-          onResult(url);
+          onResult(url, stfBundle);
         }
       } else if (state.stretchMode === "masked") {
         const path = resolveAnyChannelPath(state);
         if (!path) throw new Error("No channel path found");
-        res = await maskedStretch(path, "./output", {
+        res = await maskedStretch(path, dir, {
           iterations: 10,
           targetBackground: state.targetBackground,
           maskGrowth: state.maskGrowth,
           protectionAmount: state.maskProtection,
         });
         if (res?.previewUrl || res?.png_path) {
-          onResult(res.previewUrl ?? res.png_path);
+          onResult(res.previewUrl ?? res.png_path, stfBundle);
         }
       } else if (state.stretchMode === "arcsinh") {
         const path = resolveAnyChannelPath(state);
         if (!path) throw new Error("No channel path found");
-        res = await applyArcsinhStretch(path, "./output", state.stretchFactor);
+        res = await applyArcsinhStretch(path, dir, state.stretchFactor);
         if (res?.previewUrl || res?.png_path) {
-          onResult(res.previewUrl ?? res.png_path);
+          onResult(res.previewUrl ?? res.png_path, stfBundle);
         }
       } else {
-        res = await restretchComposite("./output", stfR, stfG, stfB);
+        res = await restretchComposite(dir, stfR, stfG, stfB);
         if (res?.png_path) {
           const url = await getPreviewUrl(res.png_path);
-          onResult(url);
+          onResult(url, stfBundle);
         }
       }
 
@@ -119,6 +123,28 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
     }
   }, [state, stfR, stfG, stfB, onResult]);
 
+  const handleResetToBlend = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await resetWb(await getOutputDir());
+      if (res?.png_path) {
+        const url = await getPreviewUrl(res.png_path);
+        onResult(url, { r: DEFAULT_STF, g: DEFAULT_STF, b: DEFAULT_STF });
+      }
+      setStfR({ ...DEFAULT_STF });
+      setStfG({ ...DEFAULT_STF });
+      setStfB({ ...DEFAULT_STF });
+      setResult(null);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [onResult]);
+
+  const isSaturated = state.compositeReady && (state.wbR > 1.3 || state.wbG > 1.3 || state.wbB > 1.3);
+
   return (
     <div className="flex flex-col gap-3 p-3">
       {state.compositeReady ? (
@@ -126,6 +152,12 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
           <div className="text-[10px] text-emerald-400/70 bg-emerald-500/5 border border-emerald-500/10 rounded-md px-2 py-1.5">
             Operating on blended composite (R/G/B cached). Adjust STF params to re-stretch.
           </div>
+
+          {isSaturated && (
+            <div className="text-[10px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md px-2 py-1.5">
+              WB factors &gt; 1.3 detected (R={state.wbR.toFixed(2)} G={state.wbG.toFixed(2)} B={state.wbB.toFixed(2)}). Composite may be clipped/saturated. Consider resetting WB or reducing factors in the Calibrate step.
+            </div>
+          )}
 
           <Toggle label="Link channels" checked={linked} accent="amber" onChange={handleLinkedChange} />
 
@@ -204,13 +236,26 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
         </>
       )}
 
-      <RunButton
-        label={state.compositeReady ? "Re-stretch Composite" : `Apply ${state.stretchMode === "masked" ? "Masked" : state.stretchMode === "arcsinh" ? "Arcsinh" : "Auto STF"} Stretch`}
-        runningLabel="Stretching..."
-        running={loading}
-        accent="amber"
-        onClick={handleRun}
-      />
+      <div className="flex items-center gap-2">
+        <div className="flex-1">
+          <RunButton
+            label={state.compositeReady ? "Re-stretch Composite" : `Apply ${state.stretchMode === "masked" ? "Masked" : state.stretchMode === "arcsinh" ? "Arcsinh" : "Auto STF"} Stretch`}
+            runningLabel="Stretching..."
+            running={loading}
+            accent="amber"
+            onClick={handleRun}
+          />
+        </div>
+        {state.compositeReady && (
+          <button
+            onClick={handleResetToBlend}
+            disabled={loading}
+            className="px-2.5 py-1.5 rounded-md text-[10px] font-medium bg-zinc-800/60 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 transition-all disabled:opacity-40"
+          >
+            Reset to Blend
+          </button>
+        )}
+      </div>
 
       {result && (
         <div className="text-[9px] text-zinc-500">

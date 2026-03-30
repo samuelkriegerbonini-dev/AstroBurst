@@ -40,7 +40,6 @@ const SIDEBAR_MAX = 480;
 
 const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
-  { id: "info", label: "Info", icon: InfoIcon },
   { id: "analysis", label: "Analysis", icon: BarChart3 },
   { id: "headers", label: "Headers", icon: FileText },
   { id: "export", label: "Export", icon: PackageOpen },
@@ -255,8 +254,6 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   }, [sidebarOpen]);
 
-  const effectiveSidebarW = sidebarOpen ? sidebarWidthRef.current : SIDEBAR_MIN;
-
   return (
     <ErrorBoundary>
       <div className="relative h-screen w-full text-zinc-100 overflow-hidden" style={{ background: "var(--ab-deep)" }}>
@@ -295,62 +292,70 @@ export default function App() {
                     </div>
 
                     <div className="flex-1 flex overflow-hidden min-h-0">
-                      <div
-                        ref={sidebarElRef}
-                        className="shrink-0 flex flex-col overflow-hidden"
-                        style={{
-                          width: effectiveSidebarW,
-                          transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
-                          borderRight: "1px solid rgba(20,184,166,0.08)",
-                          background: "rgba(5,5,16,0.55)",
-                        }}
-                      >
-                        {sidebarOpen && (
-                          <div className="flex items-center shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.08)" }}>
-                            {LEFT_TABS.map((tab) => {
-                              const Icon = tab.icon;
-                              const isActive = leftTab === tab.id;
-                              return (
-                                <button
-                                  key={tab.id}
-                                  onClick={() => setLeftTab(tab.id)}
-                                  className="ab-tab"
-                                  data-active={isActive}
-                                  title={tab.label}
-                                >
-                                  <Icon size={11} />{tab.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        {leftTab === "files" || !sidebarOpen ? (
-                          <MetadataFileList
-                            files={filteredMetadataFiles}
-                            totalFiles={metadataFiles.length}
-                            selectedId={selectedId}
-                            onSelect={handleSelectFile}
-                            onExportZip={handleExportZip}
-                            collapsed={!sidebarOpen}
-                            onToggle={() => setSidebarOpen((p) => !p)}
-                            isExporting={isExporting}
-                            zipProgress={zipProgress}
-                            downloaded={downloaded}
-                            productTypes={productTypes}
-                            customChips={filterState.customChips}
-                            activeFilters={activeFilters}
-                            filterMode={filterMode}
-                            onToggleFilter={toggleFilter}
-                            onToggleMode={toggleMode}
-                            onClearFilters={clearAll}
-                            onAddCustomChip={addCustomChip}
-                            onRemoveCustomChip={removeCustomChip}
-                          />
-                        ) : (
-                          <SidebarPanels activeTab={leftTab} />
-                        )}
+                      <div className="ab-left-strip shrink-0">
+                        {LEFT_TABS.map((tab) => {
+                          const Icon = tab.icon;
+                          const isActive = leftTab === tab.id;
+                          return (
+                            <button
+                              key={tab.id}
+                              onClick={() => {
+                                if (tab.id === "files") {
+                                  if (leftTab === "files") setSidebarOpen((p) => !p);
+                                  else { setLeftTab("files"); setSidebarOpen(true); }
+                                } else {
+                                  if (leftTab === tab.id && sidebarOpen) setSidebarOpen(false);
+                                  else { setLeftTab(tab.id); setSidebarOpen(true); }
+                                }
+                              }}
+                              className={`ab-left-strip-btn ${isActive && sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
+                              title={tab.label}
+                            >
+                              <Icon size={14} />
+                              <span>{tab.label}</span>
+                            </button>
+                          );
+                        })}
                       </div>
+
+                      {sidebarOpen && (
+                        <div
+                          ref={sidebarElRef}
+                          className="shrink-0 flex flex-col overflow-hidden"
+                          style={{
+                            width: sidebarWidthRef.current,
+                            transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
+                            borderRight: "1px solid rgba(20,184,166,0.08)",
+                            background: "rgba(5,5,16,0.55)",
+                          }}
+                        >
+                          {leftTab === "files" ? (
+                            <MetadataFileList
+                              files={filteredMetadataFiles}
+                              totalFiles={metadataFiles.length}
+                              selectedId={selectedId}
+                              onSelect={handleSelectFile}
+                              onExportZip={handleExportZip}
+                              collapsed={false}
+                              onToggle={() => setSidebarOpen((p) => !p)}
+                              isExporting={isExporting}
+                              zipProgress={zipProgress}
+                              downloaded={downloaded}
+                              productTypes={productTypes}
+                              customChips={filterState.customChips}
+                              activeFilters={activeFilters}
+                              filterMode={filterMode}
+                              onToggleFilter={toggleFilter}
+                              onToggleMode={toggleMode}
+                              onClearFilters={clearAll}
+                              onAddCustomChip={addCustomChip}
+                              onRemoveCustomChip={removeCustomChip}
+                            />
+                          ) : (
+                            <SidebarPanels activeTab={leftTab} />
+                          )}
+                        </div>
+                      )}
 
                       {sidebarOpen && (
                         <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />

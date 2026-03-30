@@ -291,7 +291,7 @@ Backend (Rust + Tauri v2)
 +-- math/    NaN-safe median/MAD, sigma clipping, SIMD (Cephes-precision log)
 ```
 
-The frontend went through a multi-phase refactoring in v0.4.0: the monolithic `useBackend.ts` hook was split into 11 domain-specific services (plus `synth.service.ts` added in v0.4.2) with a shared `infrastructure/tauri/` IPC layer, 18 JSX files were converted to TSX, types were split by domain, and 8 shared UI primitives replaced ~1,370 lines of duplicated code across processing panels.
+The frontend went through a multi-phase refactoring in v0.4.0: the monolithic `useBackend.ts` hook was split into 11 domain-specific services (plus `synth.ts` added in v0.4.2) with a shared `infrastructure/tauri/` IPC layer, 18 JSX files were converted to TSX, types were split by domain, and 8 shared UI primitives replaced ~1,370 lines of duplicated code across processing panels.
 
 **Design principles:**
 - All pixel data stays in f32/f64. No integer quantization at any stage.

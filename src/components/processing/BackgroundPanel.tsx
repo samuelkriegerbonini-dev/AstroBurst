@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { extractBackground } from "../../services/processing.service";
+import { extractBackground } from "../../services/processing";
 import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 

@@ -38,8 +38,8 @@ impl DrizzleAccumulator {
         if count < self.max_per_pixel {
             self.storage[idx * self.max_per_pixel + count] = val;
             self.counts[idx] += 1;
+            self.weights[idx] += w;
         }
-        self.weights[idx] += w;
     }
 
     fn drizzle_frame(

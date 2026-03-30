@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { Globe } from "lucide-react";
-import { getWcsInfo } from "../../services/astrometry.service";
+import { getWcsInfo } from "../../services/astrometry";
 import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcstransform";
 
 interface WcsReadoutProps {

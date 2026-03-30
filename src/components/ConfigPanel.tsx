@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
-import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config.service";
-import type { AppConfig } from "../services/config.service";
+import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config";
+import type { AppConfig } from "../services/config";
 
 export default function ConfigPanel() {
 

@@ -1,50 +1,53 @@
 # Sample FITS Data
 
-This directory contains narrowband FITS images from the **Hubble Space Telescope** (WFPC2 instrument) for testing AstroBurst's processing pipelines.
+Narrowband FITS images from the **Hubble Space Telescope** (WFPC2) for testing AstroBurst's processing pipelines.
 
 ## Files
 
-| File | Filter | λ (nm) | Description |
-|------|--------|--------|-------------|
-| `502nmos.fits` | [OIII] | 502 | Oxygen III emission line |
-| `656nmos.fits` | Hα | 656 | Hydrogen alpha emission line |
-| `673nmos.fits` | [SII] | 673 | Sulfur II emission line |
+| File | Filter | Wavelength | Hubble Palette | Description |
+|------|--------|-----------|----------------|-------------|
+| `502nmos.fits` | [OIII] | 502 nm | Blue | Oxygen III emission |
+| `656nmos.fits` | Hα | 656 nm | Green | Hydrogen alpha emission |
+| `673nmos.fits` | [SII] | 673 nm | Red | Sulfur II emission |
 
 ## Specifications
 
-- **Instrument:** HST/WFPC2 (Detector 4)
-- **Dimensions:** 1600 × 1600 pixels
-- **BITPIX:** -32 (IEEE 754 single-precision float)
-- **File size:** ~9.8 MB each
-- **WCS:** TAN projection with CD matrix
-- **Origin:** STScI-STSDAS
-- **Target region:** RA ≈ 274.71°, Dec ≈ -13.82° (Eagle Nebula / M16 region)
+| Property | Value |
+|----------|-------|
+| Instrument | HST/WFPC2 (Detector 4) |
+| Dimensions | 1600 x 1600 px |
+| BITPIX | -32 (float32) |
+| File size | ~9.8 MB each |
+| Projection | TAN with CD matrix |
+| Origin | STScI-STSDAS |
+| Target | Eagle Nebula / M16 (RA 274.71, Dec -13.82) |
 
-## Test Scenarios
+## Test Coverage
 
-These files are ideal for testing:
+These files exercise the following AstroBurst features:
 
-1. **FITS I/O** — Standard single-HDU float32 images
-2. **Hubble Palette** — Classic SHO mapping ([SII]→R, Hα→G, [OIII]→B)
-3. **RGB Composition** — Three-channel narrowband combination
-4. **Auto-alignment** — Slight WCS offsets between frames
-5. **STF Stretch** — Low dynamic range astronomical data
-6. **Header Explorer** — Rich FITS headers with WCS keywords
-7. **Star Detection** — Point sources in nebular background
-8. **Histogram Analysis** — Typical astronomical pixel distributions
+- **FITS I/O**: single-HDU float32, BSCALE/BZERO identity
+- **Narrowband detection**: FILTER keyword matching for [OIII], Hα, [SII]
+- **Hubble Palette (SHO)**: [SII] to R, Hα to G, [OIII] to B
+- **Channel blending**: 3-channel narrowband with preset weights
+- **Phase correlation alignment**: slight WCS offsets between frames
+- **Star detection**: point sources against nebular background
+- **Auto-STF**: low dynamic range typical of narrowband data
+- **Background extraction**: gradient from mosaic edges
+- **SCNR**: green excess from dominant Hα signal
+- **Header explorer**: rich WCS + observation keywords
 
-## Usage
+## Quick Start
 
-```bash
-# Load all three for Hubble palette composition
-# In AstroBurst: File → Open → select all three files
-# Then: RGB Compose → Auto-detect narrowband filters
+Open all three files in AstroBurst, then use the ComposeWizard:
 
-# Or via CLI for testing
-cargo test --all-features
-```
+1. **Channels**: Auto Map detects filters and assigns SHO bins
+2. **Align**: Phase correlation or affine (slight offsets present)
+3. **Blend**: Select SHO preset (or HOO, Foraxx, etc.)
+4. **Calibrate**: Auto WB normalizes channel medians
+5. **Stretch**: Masked stretch with star protection
+6. **Export**: PNG 16-bit or RGB FITS
 
-## Source
+## License
 
-Data from the Hubble Legacy Archive (HLA) / Space Telescope Science Institute (STScI).
-These images are in the public domain as works of the U.S. government (NASA/ESA).
+Public domain. NASA/ESA Hubble Legacy Archive, Space Telescope Science Institute (STScI).

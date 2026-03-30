@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
-import { stackFrames } from "../../services/stacking.service";
+import { stackFrames } from "../../services/stacking";
+import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { StackConfig } from "./StackingTab";
 
@@ -69,7 +70,7 @@ export default function StackingPanel({
     setError(null);
     setResult(null);
     try {
-      const res = await stackFrames(selectedPaths, "./output", {
+      const res = await stackFrames(selectedPaths, await getOutputDir(), {
         sigmaLow,
         sigmaHigh,
         maxIterations,

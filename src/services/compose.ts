@@ -94,12 +94,22 @@ export function alignChannels(
 
 export function applyScnr(
   outputDir?: string,
-  options: { method?: string; amount?: number; preserveLuminance?: boolean } = {},
+  options: {
+    method?: string;
+    amount?: number;
+    preserveLuminance?: boolean;
+    rFactor?: number;
+    gFactor?: number;
+    bFactor?: number;
+  } = {},
 ) {
   return withPreview("apply_scnr_cmd", outputDir, {
     method: options.method ?? "average",
     amount: options.amount ?? 0.5,
     preserveLuminance: options.preserveLuminance ?? false,
+    rFactor: options.rFactor ?? 1.0,
+    gFactor: options.gFactor ?? 1.0,
+    bFactor: options.bFactor ?? 1.0,
   });
 }
 
@@ -124,4 +134,8 @@ export function computeAutoWb(): Promise<{
   ref_channel: string;
 }> {
   return safeInvoke("compute_auto_wb_cmd", {});
+}
+
+export function resetWb(outputDir = "./output") {
+  return safeInvoke("reset_wb_cmd", { outputDir });
 }

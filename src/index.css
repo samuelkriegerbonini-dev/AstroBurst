@@ -1067,3 +1067,47 @@ body {
   border-top: 1px solid rgba(20, 184, 166, 0.1);
   background: linear-gradient(180deg, rgba(5, 5, 16, 0.85) 0%, rgba(5, 5, 16, 0.95) 100%);
 }
+
+/* ─── Left icon strip ─── */
+
+.ab-left-strip {
+  width: 42px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 0;
+  border-right: 1px solid rgba(20, 184, 166, 0.08);
+  background: rgba(5, 5, 16, 0.6);
+}
+
+.ab-left-strip-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 6px 2px;
+  border-radius: var(--ab-radius-sm);
+  font-size: 8px;
+  color: #52525b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  background: transparent;
+  width: 38px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+.ab-left-strip-btn:hover {
+  color: #a1a1aa;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ab-left-strip-btn-active {
+  color: var(--ab-teal);
+  background: rgba(20, 184, 166, 0.08);
+  border-color: rgba(20, 184, 166, 0.2);
+}

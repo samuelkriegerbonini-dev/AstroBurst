@@ -1,7 +1,7 @@
 import { safeInvoke } from "../infrastructure/tauri";
-import type { AppConfig, ApiKeyResult } from "../shared/types/config.types";
+import type { AppConfig, ApiKeyResult } from "../shared/types/config";
 
-export type { AppConfig, ApiKeyResult } from "../shared/types/config.types";
+export type { AppConfig, ApiKeyResult } from "../shared/types/config";
 
 export async function getConfig(): Promise<AppConfig> {
   return safeInvoke("get_config");

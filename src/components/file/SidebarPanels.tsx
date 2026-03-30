@@ -18,7 +18,7 @@ function Spinner() {
   );
 }
 
-const InfoPanel = memo(function InfoPanel() {
+export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
   const { histData, stfParams } = useHistContext();
   const mousePixel = useMousePixel();

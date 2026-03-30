@@ -1,6 +1,6 @@
 import { useState, useCallback, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
-import { getFullHeader } from "../../services/header.service";
+import { getFullHeader } from "../../services/header";
 import { useFileContext, useRgbContext } from "../../context/PreviewContext";
 import type { HeaderData } from "../../shared/types";
 

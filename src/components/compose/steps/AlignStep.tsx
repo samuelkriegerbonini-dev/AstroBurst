@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from "react";
 import type { WizardState } from "../wizard.types";
-import { alignChannels } from "../../../services/compose.service";
+import { alignChannels } from "../../../services/compose";
+import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
 
 interface AlignStepProps {
@@ -42,7 +43,8 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
     setError("");
     try {
       const paths = channelPaths.map((c) => c.path);
-      const res = await alignChannels(paths, "./output", method);
+      const dir = await getOutputDir();
+      const res = await alignChannels(paths, dir, method);
       setResult(res);
       if (res.channels) {
         const aligned: Record<string, string> = {};

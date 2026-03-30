@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { maskedStretch } from "../../services/processing.service";
+import { maskedStretch } from "../../services/processing";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 

@@ -13,7 +13,7 @@ use crate::infra::fits::writer::{filter_header, write_fits_mono_bitpix, write_fi
 use crate::infra::ipc::encode_with_header_downsampled;
 use crate::infra::render::grayscale::{render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, HISTOGRAM_BINS_DISPLAY, RES_APPLY_STF, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_BIT_DEPTH, RES_BITPIX, RES_COPY_METADATA, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_HEADER, RES_HIGHLIGHT, RES_HISTOGRAM, RES_MAD, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIDTONE, RES_MIN, RES_OUTPUT_PATH, RES_PNG_PATH, RES_SHADOW, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, HISTOGRAM_BINS_DISPLAY, RES_APPLY_STF, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_BIT_DEPTH, RES_BITPIX, RES_COPY_METADATA, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_HEADER, RES_HIGHLIGHT, RES_HISTOGRAM, RES_MAD, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIDTONE, RES_MIN, RES_OUTPUT_PATH, RES_PNG_PATH, RES_SHADOW, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS};
 use crate::types::image::ImageStats;
 
 fn png_path_for(path: &str, output_dir: &str) -> String {
@@ -93,6 +93,10 @@ fn process_rgb_fits(
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(rgb.r.clone()), stats_r.clone());
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(rgb.g.clone()), stats_g.clone());
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(rgb.b.clone()), stats_b.clone());
+
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_R, Arc::new(rgb.r.clone()), stats_r.clone());
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_G, Arc::new(rgb.g.clone()), stats_g.clone());
+    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_B, Arc::new(rgb.b.clone()), stats_b.clone());
 
     let mut result = json!({
         RES_PNG_PATH: png_path,
