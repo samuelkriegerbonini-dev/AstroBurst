@@ -153,18 +153,22 @@ fn auto_sample_grid(
             let x0 = gx * cell_w + margin_w;
 
             let mut cell_pixels = Vec::with_capacity(inner_h * inner_w);
+            let mut zero_count = 0usize;
+            let total_cell = inner_h * inner_w;
             for y in y0..y0 + inner_h {
                 for x in x0..x0 + inner_w {
                     if y < rows && x < cols {
                         let v = image[[y, x]];
-                        if v.is_finite() {
+                        if v.is_finite() && v > 1e-7 {
                             cell_pixels.push(v);
+                        } else {
+                            zero_count += 1;
                         }
                     }
                 }
             }
 
-            if cell_pixels.is_empty() {
+            if cell_pixels.is_empty() || zero_count as f64 / total_cell as f64 > 0.3 {
                 continue;
             }
 

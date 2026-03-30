@@ -277,12 +277,14 @@ pub fn resolve_output_dir(output_dir: &str) -> Result<String> {
     }
     match std::fs::create_dir_all(path) {
         Ok(_) => Ok(output_dir.to_string()),
-        Err(e) if e.raw_os_error() == Some(30) => {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+            || e.raw_os_error() == Some(5)
+            || e.raw_os_error() == Some(30) => {
             let fallback = platform_fallback_dir();
             std::fs::create_dir_all(&fallback)
                 .context("Failed to create fallback output directory")?;
             eprintln!(
-                "[AstroBurst] EROFS on '{}', falling back to '{}'",
+                "[AstroBurst] Permission denied on '{}', falling back to '{}'",
                 output_dir,
                 fallback.display()
             );

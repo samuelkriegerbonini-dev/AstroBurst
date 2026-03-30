@@ -96,8 +96,23 @@ pub fn run() {
                 if !data_dir.exists() {
                     let _ = std::fs::create_dir_all(&data_dir);
                 }
+                let output_dir = data_dir.join("output");
+                if !output_dir.exists() {
+                    let _ = std::fs::create_dir_all(&output_dir);
+                }
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Ok(data_dir) = window.app_handle().path().app_data_dir() {
+                    let output_dir = data_dir.join("output");
+                    if output_dir.exists() {
+                        let _ = std::fs::remove_dir_all(&output_dir);
+                        let _ = std::fs::create_dir_all(&output_dir);
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             cmd::image::process_fits,
