@@ -43,6 +43,11 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 ## Screenshots
 
 <p align="center">
+  <img src="docs/screenshots/ngc628-rgb-composite-gpu.png" alt="NGC 628 RGB Composite" width="100%">
+</p>
+<p align="center"><em>NGC 628 (M74) RGB composite from 17 JWST NIRCam files across 8 filters (F444W through F115W). GPU-rendered preview at 11473x4599. ComposeWizard with blend presets, auto-STF, and per-channel weight matrix. File list with I2D/SEGM filter chips and instrument badges.</em></p>
+
+<p align="center">
   <img src="docs/screenshots/pillars-sho-blend-presets.png" alt="Pillars of Creation SHO Blend" width="100%">
 </p>
 <p align="center"><em>JWST Pillars of Creation (M16) composed from 6 NIRCam filters with SHO (Hubble) blend preset. ComposeWizard BlendStep showing preset buttons: RGB, SHO, Hubble Legacy, HOO, Dynamic HOO, Foraxx. 14340x8583 with auto stretch and linked STF. Spectral wavelength resolver maps presets to any bin configuration.</em></p>
