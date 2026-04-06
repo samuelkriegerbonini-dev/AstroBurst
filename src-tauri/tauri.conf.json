@@ -1,6 +1,6 @@
 {
   "productName": "AstroBurst",
-  "version": "0.4.5.2",
+  "version": "0.4.5",
   "identifier": "com.astroburst.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",

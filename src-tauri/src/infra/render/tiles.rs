@@ -290,12 +290,59 @@ fn render_tile_rgb(
         }
     }
 
+    save_tile_rgb(&buf, tile_size, output_path)
+}
+
+fn render_tile_rgb_stf(
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    cols: usize,
+    tile_x: usize,
+    tile_y: usize,
+    tile_size: usize,
+    rows: usize,
+    fn_r: &(dyn Fn(f32) -> u8 + Send + Sync),
+    fn_g: &(dyn Fn(f32) -> u8 + Send + Sync),
+    fn_b: &(dyn Fn(f32) -> u8 + Send + Sync),
+    output_path: &str,
+) -> Result<()> {
+    let x_start = tile_x * tile_size;
+    let y_start = tile_y * tile_size;
+    let x_end = (x_start + tile_size).min(cols);
+    let y_end = (y_start + tile_size).min(rows);
+
+    let tile_w = x_end - x_start;
+    let tile_h = y_end - y_start;
+
+    if tile_w == 0 || tile_h == 0 {
+        return Ok(());
+    }
+
+    let mut buf = vec![0u8; tile_size * tile_size * 3];
+
+    for dy in 0..tile_h {
+        let src_row = (y_start + dy) * cols;
+        let dst_row = dy * tile_size;
+        for dx in 0..tile_w {
+            let si = src_row + x_start + dx;
+            let di = (dst_row + dx) * 3;
+            buf[di] = fn_r(r[si]);
+            buf[di + 1] = fn_g(g[si]);
+            buf[di + 2] = fn_b(b[si]);
+        }
+    }
+
+    save_tile_rgb(&buf, tile_size, output_path)
+}
+
+fn save_tile_rgb(buf: &[u8], tile_size: usize, output_path: &str) -> Result<()> {
     if let Some(parent) = Path::new(output_path).parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create tile dir {:?}", parent))?;
     }
 
-    let img = image::RgbImage::from_raw(tile_size as u32, tile_size as u32, buf)
+    let img = image::RgbImage::from_raw(tile_size as u32, tile_size as u32, buf.to_vec())
         .context("Failed to create RGB tile image")?;
     img.save(output_path)
         .with_context(|| format!("Failed to save RGB tile {}", output_path))?;
@@ -308,6 +355,32 @@ pub fn generate_tile_pyramid_rgb(
     b: &Array2<f32>,
     output_dir: &str,
     params: &TileParams,
+) -> Result<TilePyramid> {
+    generate_tile_pyramid_rgb_inner(r, g, b, output_dir, params, None, None, None)
+}
+
+pub fn generate_tile_pyramid_rgb_stf(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    output_dir: &str,
+    params: &TileParams,
+    fn_r: impl Fn(f32) -> u8 + Send + Sync,
+    fn_g: impl Fn(f32) -> u8 + Send + Sync,
+    fn_b: impl Fn(f32) -> u8 + Send + Sync,
+) -> Result<TilePyramid> {
+    generate_tile_pyramid_rgb_inner(r, g, b, output_dir, params, Some(&fn_r), Some(&fn_g), Some(&fn_b))
+}
+
+fn generate_tile_pyramid_rgb_inner(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    output_dir: &str,
+    params: &TileParams,
+    fn_r: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
+    fn_g: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
+    fn_b: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
 ) -> Result<TilePyramid> {
     let (orig_rows, orig_cols) = r.dim();
     let tile_size = params.tile_size;
@@ -342,10 +415,25 @@ pub fn generate_tile_pyramid_rgb(
             .flat_map(|ty| (0..tile_cols).map(move |tx| (tx, ty)))
             .collect();
 
-        tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
-            let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
-            render_tile_rgb(&lr, &lg, &lb, tx, ty, tile_size, &tile_path)
-        })?;
+        if let (Some(fr), Some(fg), Some(fb)) = (fn_r, fn_g, fn_b) {
+            let r_sl = lr.as_slice().expect("contiguous");
+            let g_sl = lg.as_slice().expect("contiguous");
+            let b_sl = lb.as_slice().expect("contiguous");
+            tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
+                let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
+                render_tile_rgb_stf(
+                    r_sl, g_sl, b_sl, level_cols,
+                    tx, ty, tile_size, level_rows,
+                    fr, fg, fb,
+                    &tile_path,
+                )
+            })?;
+        } else {
+            tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
+                let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
+                render_tile_rgb(&lr, &lg, &lb, tx, ty, tile_size, &tile_path)
+            })?;
+        }
 
         levels.push(TileLevel {
             level,
