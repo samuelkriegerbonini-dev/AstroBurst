@@ -2,7 +2,6 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::GrayImage;
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -127,10 +126,17 @@ fn render_tile(
             .with_context(|| format!("Failed to create tile dir {:?}", parent))?;
     }
 
-    let img = GrayImage::from_raw(tile_size as u32, tile_size as u32, buf)
-        .context("Failed to create tile image")?;
-    img.save(output_path)
-        .with_context(|| format!("Failed to save tile {}", output_path))?;
+    let file = fs::File::create(output_path)
+        .with_context(|| format!("Failed to create tile {}", output_path))?;
+    let bw = std::io::BufWriter::new(file);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        bw,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    );
+    use image::ImageEncoder;
+    encoder.write_image(&buf, tile_size as u32, tile_size as u32, image::ExtendedColorType::L8)
+        .with_context(|| format!("Failed to encode tile {}", output_path))?;
     Ok(())
 }
 
@@ -198,10 +204,10 @@ pub fn generate_tile_pyramid(
         let reduction_power = max_level - level;
         let factor = 1usize << reduction_power;
 
-        let level_data = if factor > 1 {
-            downsample(normalized, factor)
+        let level_data: std::borrow::Cow<Array2<f32>> = if factor > 1 {
+            std::borrow::Cow::Owned(downsample(normalized, factor))
         } else {
-            normalized.clone()
+            std::borrow::Cow::Borrowed(normalized)
         };
 
         let (level_rows, level_cols) = level_data.dim();
@@ -221,7 +227,7 @@ pub fn generate_tile_pyramid(
         tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
             let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
             render_tile(
-                &level_data,
+                &*level_data,
                 tx,
                 ty,
                 tile_size,
@@ -342,10 +348,17 @@ fn save_tile_rgb(buf: &[u8], tile_size: usize, output_path: &str) -> Result<()> 
             .with_context(|| format!("Failed to create tile dir {:?}", parent))?;
     }
 
-    let img = image::RgbImage::from_raw(tile_size as u32, tile_size as u32, buf.to_vec())
-        .context("Failed to create RGB tile image")?;
-    img.save(output_path)
-        .with_context(|| format!("Failed to save RGB tile {}", output_path))?;
+    let file = fs::File::create(output_path)
+        .with_context(|| format!("Failed to create tile {}", output_path))?;
+    let bw = std::io::BufWriter::new(file);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        bw,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    );
+    use image::ImageEncoder;
+    encoder.write_image(buf, tile_size as u32, tile_size as u32, image::ExtendedColorType::Rgb8)
+        .with_context(|| format!("Failed to encode tile {}", output_path))?;
     Ok(())
 }
 
@@ -396,10 +409,14 @@ fn generate_tile_pyramid_rgb_inner(
         let reduction_power = max_level - level;
         let factor = 1usize << reduction_power;
 
-        let (lr, lg, lb) = if factor > 1 {
-            (downsample(r, factor), downsample(g, factor), downsample(b, factor))
+        let (lr, lg, lb): (std::borrow::Cow<Array2<f32>>, std::borrow::Cow<Array2<f32>>, std::borrow::Cow<Array2<f32>>) = if factor > 1 {
+            (std::borrow::Cow::Owned(downsample(r, factor)),
+             std::borrow::Cow::Owned(downsample(g, factor)),
+             std::borrow::Cow::Owned(downsample(b, factor)))
         } else {
-            (r.clone(), g.clone(), b.clone())
+            (std::borrow::Cow::Borrowed(r),
+             std::borrow::Cow::Borrowed(g),
+             std::borrow::Cow::Borrowed(b))
         };
 
         let (level_rows, level_cols) = lr.dim();
@@ -431,7 +448,7 @@ fn generate_tile_pyramid_rgb_inner(
         } else {
             tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
                 let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
-                render_tile_rgb(&lr, &lg, &lb, tx, ty, tile_size, &tile_path)
+                render_tile_rgb(&*lr, &*lg, &*lb, tx, ty, tile_size, &tile_path)
             })?;
         }
 
