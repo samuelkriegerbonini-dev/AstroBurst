@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2 } from "lucide-react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
 import { stackFrames } from "../../../services/stacking";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";

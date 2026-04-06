@@ -1,4 +1,4 @@
-import { safeInvoke } from "../infrastructure/tauri";
+import { typedInvoke } from "../infrastructure/tauri";
 
 export interface ExportFitsOptions {
   applyStfStretch?: boolean;
@@ -43,12 +43,18 @@ export interface ExportRgbPngOptions {
   highlightB?: number;
 }
 
+export interface ExportResult {
+  output_path: string;
+  format: string;
+  elapsed_ms: number;
+}
+
 export function exportPng(
   path: string,
   outputPath: string,
   options: ExportPngOptions = {},
-) {
-  return safeInvoke("export_png", {
+): Promise<ExportResult> {
+  return typedInvoke<ExportResult>("export_png", {
     path,
     outputPath,
     bitDepth: options.bitDepth ?? 16,
@@ -65,8 +71,8 @@ export function exportRgbPng(
   bPath: string | null,
   outputPath: string,
   options: ExportRgbPngOptions = {},
-) {
-  return safeInvoke("export_rgb_png", {
+): Promise<ExportResult> {
+  return typedInvoke<ExportResult>("export_rgb_png", {
     rPath,
     gPath,
     bPath,
@@ -91,8 +97,8 @@ export function exportAlignedChannels(
   bPath: string | null,
   outputDir: string,
   options: ExportAlignedOptions = {},
-) {
-  return safeInvoke("export_aligned_channels_cmd", {
+): Promise<ExportResult> {
+  return typedInvoke<ExportResult>("export_aligned_channels_cmd", {
     rPath,
     gPath,
     bPath,
@@ -103,8 +109,8 @@ export function exportAlignedChannels(
   });
 }
 
-export function exportFits(path: string, outputPath: string, options: ExportFitsOptions = {}) {
-  return safeInvoke("export_fits", {
+export function exportFits(path: string, outputPath: string, options: ExportFitsOptions = {}): Promise<ExportResult> {
+  return typedInvoke<ExportResult>("export_fits", {
     path,
     outputPath,
     applyStfStretch: options.applyStfStretch ?? false,
@@ -123,8 +129,8 @@ export function exportFitsRgb(
   bPath: string | null,
   outputPath: string,
   options: ExportFitsRgbOptions = {},
-) {
-  return safeInvoke("export_fits_rgb", {
+): Promise<ExportResult> {
+  return typedInvoke<ExportResult>("export_fits_rgb", {
     rPath,
     gPath,
     bPath,

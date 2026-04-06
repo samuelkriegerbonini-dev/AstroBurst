@@ -47,3 +47,4 @@ pnpm-debug.log*
 *.fits
 !tests/sample-data/*.fits
 /exampleFits/sample-data/heavyTest/
+COMMIT_MESSAGE.md

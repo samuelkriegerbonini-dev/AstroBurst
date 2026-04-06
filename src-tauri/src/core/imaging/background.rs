@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::{median_f32_mut};
+use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::error::AppError;
 
 const MAX_POLY_TERMS: usize = 21;
@@ -143,7 +144,7 @@ fn auto_sample_grid(
     let global_median = median_f32_mut(&mut all_pixels);
     let mut devs: Vec<f32> = all_pixels.iter().map(|v| (v - global_median).abs()).collect();
     let global_mad = median_f32_mut(&mut devs);
-    let sigma = global_mad * 1.4826;
+    let sigma = global_mad * MAD_TO_SIGMA as f32;
 
     let mut samples = Vec::with_capacity(grid * grid);
 
@@ -198,7 +199,7 @@ fn auto_sample_grid(
         let med = median_f32_mut(&mut values);
         let mut devs: Vec<f32> = values.iter().map(|v| (v - med).abs()).collect();
         let mad = median_f32_mut(&mut devs);
-        let sig = mad * 1.4826;
+        let sig = mad * MAD_TO_SIGMA as f32;
         let lo = med - config.sigma_clip * sig;
         let hi = med + config.sigma_clip * sig;
 
@@ -456,7 +457,6 @@ fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Result<()> {
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

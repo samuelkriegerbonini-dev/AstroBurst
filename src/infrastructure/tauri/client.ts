@@ -1,5 +1,7 @@
+import { normalizeTauriError, type TauriCommandError } from "../../shared/types/errors";
+
 let _convertFileSrc: ((path: string) => string) | null = null;
-let _invoke: ((cmd: string, args?: Record<string, any>) => Promise<any>) | null = null;
+let _invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 
 export const isTauri = (): boolean => !!(window as any).__TAURI_INTERNALS__;
 
@@ -10,7 +12,7 @@ async function ensureConvertFileSrc(): Promise<(path: string) => string> {
   return convertFileSrc;
 }
 
-async function ensureInvoke(): Promise<(cmd: string, args?: Record<string, any>) => Promise<any>> {
+async function ensureInvoke(): Promise<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>> {
   if (_invoke) return _invoke;
   const { invoke } = await import("@tauri-apps/api/core");
   _invoke = invoke;
@@ -27,10 +29,14 @@ export async function getPreviewUrl(path: string): Promise<string> {
   return path;
 }
 
-export const safeInvoke = async (command: string, args: Record<string, any> = {}): Promise<any> => {
-  if (isTauri()) {
-    const invoke = await ensureInvoke();
-    return invoke(command, args);
+export async function typedInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (!isTauri()) {
+    throw normalizeTauriError(command, `Command "${command}" requires Tauri desktop environment.`);
   }
-  throw new Error(`Command "${command}" requires Tauri desktop environment.`);
-};
+  const invoke = await ensureInvoke();
+  try {
+    return (await invoke(command, args)) as T;
+  } catch (err: unknown) {
+    throw normalizeTauriError(command, err);
+  }
+}

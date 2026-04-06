@@ -2,8 +2,8 @@ use serde_json::json;
 
 use crate::cmd::common::blocking_cmd;
 use crate::core::cube::eager::classify_spectral_cube;
-use crate::domain::cube::{process_cube, build_wavelength_axis};
-use crate::domain::lazy_cube::{process_cube_lazy, LazyCube};
+use crate::core::cube::eager::{process_cube, build_wavelength_axis};
+use crate::core::cube::lazy::{process_cube_lazy, LazyCube};
 use crate::types::constants::{
     RES_BITPIX, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT,
     RES_OUTPUT_PATH, RES_SPECTRUM, RES_WIDTH,

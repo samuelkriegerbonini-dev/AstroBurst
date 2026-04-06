@@ -4,7 +4,6 @@ pub mod infra;
 pub mod core;
 
 mod cmd;
-mod domain;
 
 use tauri::Manager;
 
@@ -115,13 +114,13 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::image::process_fits,
-            cmd::image::process_fits_full,
-            cmd::image::get_raw_pixels_preview,
-            cmd::image::export_fits,
-            cmd::image::export_fits_rgb,
-            cmd::image::export_png,
-            cmd::image::export_rgb_png,
+            cmd::io::process_fits,
+            cmd::io::process_fits_full,
+            cmd::io::get_raw_pixels_preview,
+            cmd::export::export_fits,
+            cmd::export::export_fits_rgb,
+            cmd::export::export_png,
+            cmd::export::export_rgb_png,
             cmd::metadata::get_header,
             cmd::metadata::get_full_header,
             cmd::metadata::get_fits_extensions,
@@ -130,28 +129,29 @@ pub fn run() {
             cmd::analysis::compute_histogram,
             cmd::analysis::compute_fft_spectrum,
             cmd::analysis::detect_stars,
+            cmd::analysis::detect_stars_composite,
             cmd::visualization::apply_stf_render,
             cmd::visualization::generate_tiles,
+            cmd::visualization::generate_tiles_rgb,
             cmd::stacking::calibrate,
             cmd::stacking::stack,
-            cmd::drizzle::drizzle_stack_cmd,
-            cmd::drizzle::drizzle_rgb_cmd,
-            cmd::compose::compose_rgb_cmd,
+            cmd::stacking::run_pipeline_cmd,
             cmd::compose::restretch_composite_cmd,
             cmd::compose::clear_composite_cache_cmd,
             cmd::compose::export_aligned_channels_cmd,
             cmd::compose::update_composite_channel_cmd,
             cmd::compose::blend_channels_cmd,
             cmd::compose::align_channels_cmd,
-            cmd::compose::apply_scnr_cmd,
             cmd::compose::calibrate_composite_cmd,
             cmd::compose::compute_auto_wb_cmd,
             cmd::compose::reset_wb_cmd,
-            cmd::resample::resample_fits_cmd,
-            cmd::deconvolution::deconvolve_rl_cmd,
-            cmd::background::extract_background_cmd,
-            cmd::wavelet::wavelet_denoise_cmd,
-            cmd::pipeline::run_pipeline_cmd,
+            cmd::processing::resample_fits_cmd,
+            cmd::processing::deconvolve_rl_cmd,
+            cmd::processing::extract_background_cmd,
+            cmd::processing::wavelet_denoise_cmd,
+            cmd::processing::apply_arcsinh_stretch_cmd,
+            cmd::processing::masked_stretch_cmd,
+            cmd::processing::apply_tone_composite_cmd,
             cmd::cube::process_cube_cmd,
             cmd::cube::process_cube_lazy_cmd,
             cmd::cube::get_cube_info,
@@ -160,8 +160,6 @@ pub fn run() {
             cmd::astrometry::plate_solve_cmd,
             cmd::astrometry::get_wcs_info,
             cmd::psf::estimate_psf_cmd,
-            cmd::stretch::apply_arcsinh_stretch_cmd,
-            cmd::stretch::masked_stretch_cmd,
             cmd::spcc::spcc_calibrate_cmd,
             cmd::config::get_config,
             cmd::config::update_config,
@@ -169,6 +167,8 @@ pub fn run() {
             cmd::config::get_api_key,
             cmd::synth::generate_synth_cmd,
             cmd::synth::generate_synth_stack_cmd,
+            cmd::output::get_output_dir_info,
+            cmd::output::cleanup_output_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::median_f32_mut;
+use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::error::AppError;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -211,7 +212,7 @@ fn estimate_noise_sigma(finest_scale: &[f32]) -> f64 {
     }
 
     let median = median_f32_mut(&mut abs_vals);
-    (median as f64) / 0.6745
+    (median as f64) * MAD_TO_SIGMA
 }
 
 fn atrous_noise_scaling(scale: usize) -> f64 {

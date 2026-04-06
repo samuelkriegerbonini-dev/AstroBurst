@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
 import { alignChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";

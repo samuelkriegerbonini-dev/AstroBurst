@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, lazy, Suspense } from "react";
 import { Loader2 } from "lucide-react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
+import { resolveChannelPath } from "../../../utils/wizard";
 import { Slider, RunButton } from "../../ui";
 import { calibrateComposite, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
@@ -12,15 +13,6 @@ interface CalibrateStepProps {
   state: WizardState;
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
   onResult: (png: string | null) => void;
-}
-
-function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
 }
 
 export default function CalibrateStep({ state, onWbChange, onResult }: CalibrateStepProps) {
@@ -63,7 +55,7 @@ export default function CalibrateStep({ state, onWbChange, onResult }: Calibrate
       .catch(() => {})
       .finally(() => { if (!cancelled) setAutoLoading(false); });
     return () => { cancelled = true; };
-  }, [state.wbMode, state.compositeReady]);
+  }, [state.wbMode, state.compositeReady, onWbChange]);
 
   const handleModeChange = useCallback((mode: WizardState["wbMode"]) => {
     onWbChange(mode, localR, localG, localB);

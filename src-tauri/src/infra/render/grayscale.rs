@@ -4,13 +4,13 @@ use image::{ColorType, ImageEncoder};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::math::simd::find_minmax_valid;
+use crate::math::simd::find_minmax_simd;
 use crate::types::constants::PADDING_THRESHOLD;
 
 pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
-    let (min, max) = find_minmax_valid(slice);
+    let (min, max) = find_minmax_simd(slice);
     let range = (max - min).max(1e-10);
     let inv_range = 255.0 / range;
 
@@ -31,7 +31,7 @@ pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
 pub fn render_grayscale_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
-    let (min, max) = find_minmax_valid(slice);
+    let (min, max) = find_minmax_simd(slice);
     let range = (max - min).max(1e-10);
     let inv_range = 65535.0 / range;
 
@@ -73,11 +73,7 @@ pub fn render_stretched_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
     write_png_l16(&pixels, cols, rows, path)
 }
 
-pub fn save_stf_png(pixels: &[u8], width: usize, height: usize, path: &str) -> Result<()> {
-    write_png_l8(pixels, width, height, path)
-}
-
-pub fn save_stf_png_owned(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
+pub fn save_stf_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
     write_png_l8(&pixels, width, height, path)
 }
 

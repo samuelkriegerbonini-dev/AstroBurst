@@ -9,13 +9,19 @@ use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_image_mmap;
-use crate::infra::render::grayscale::{render_grayscale, save_stf_png_owned};
+use crate::infra::render::grayscale::{render_grayscale, save_stf_png};
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
 
-pub const MAX_PREVIEW_DIM: usize = 4096;
+pub(crate) const MAX_PREVIEW_DIM: usize = 4096;
 
-pub struct ResolvedImage {
+pub(crate) fn auto_stretch_preview(arr: &Array2<f32>) -> Vec<u8> {
+    let stats = compute_image_stats(arr);
+    let stf = auto_stf(&stats, &AutoStfConfig::default());
+    apply_stf(arr, &stf, &stats)
+}
+
+pub(crate) struct ResolvedImage {
     pub arr: Array2<f32>,
     pub header: HduHeader,
     pub _tmp: Option<tempfile::TempDir>,
@@ -66,7 +72,7 @@ fn try_asdf_image(p: &std::path::Path) -> Result<ResolvedImage> {
     }
 }
 
-pub fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
+pub(crate) fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
     let p = std::path::Path::new(path);
     if crate::infra::asdf::converter::is_asdf_file(p) {
         return try_asdf_image(p);
@@ -115,11 +121,11 @@ fn load_image_stats_header(path: &str) -> Result<(Array2<f32>, ImageStats, HduHe
     Ok((result.image, stats, result.header))
 }
 
-pub fn load_cached(path: &str) -> Result<ImageEntry> {
+pub(crate) fn load_cached(path: &str) -> Result<ImageEntry> {
     GLOBAL_IMAGE_CACHE.get_or_load(path, || load_image_and_stats(path))
 }
 
-pub fn load_cached_full(path: &str) -> Result<ImageEntry> {
+pub(crate) fn load_cached_full(path: &str) -> Result<ImageEntry> {
     if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
         if entry.header().is_some() {
             return Ok(entry);
@@ -134,7 +140,7 @@ pub fn load_cached_full(path: &str) -> Result<ImageEntry> {
     GLOBAL_IMAGE_CACHE.get_or_load_full(path, || load_image_stats_header(path))
 }
 
-pub fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
+pub(crate) fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
     if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
         return Ok(entry);
     }
@@ -177,17 +183,13 @@ fn downsample_nn<const BPP: usize>(
     (out, dst_w, dst_h)
 }
 
-pub fn downsample_u8(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
+pub(crate) fn downsample_u8(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
     downsample_nn::<1>(pixels, width, height, max_dim)
 }
 
-pub fn downsample_u8_rgb(pixels: &[u8], width: usize, height: usize, max_dim: usize) -> (Vec<u8>, usize, usize) {
-    downsample_nn::<3>(pixels, width, height, max_dim)
-}
-
-pub fn save_preview_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
+pub(crate) fn save_preview_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
     let (preview, pw, ph) = downsample_u8(&pixels, width, height, MAX_PREVIEW_DIM);
-    save_stf_png_owned(preview, pw, ph, path)
+    save_stf_png(preview, pw, ph, path)
 }
 
 fn make_filename(stem: &str, suffix: &str, ext: &str) -> String {
@@ -198,22 +200,20 @@ fn make_filename(stem: &str, suffix: &str, ext: &str) -> String {
     }
 }
 
-pub struct RenderOutput {
+pub(crate) struct RenderOutput {
     pub png_path: String,
     pub fits_path: Option<String>,
     pub dims: (usize, usize),
 }
 
-pub fn render_and_save(
+pub(crate) fn render_and_save(
     arr: &Array2<f32>,
     path: &str,
     output_dir: &str,
     suffix: &str,
     write_fits: bool,
 ) -> Result<RenderOutput> {
-    let stats = compute_image_stats(arr);
-    let stf_params = auto_stf(&stats, &AutoStfConfig::default());
-    let rendered = apply_stf(arr, &stf_params, &stats);
+    let rendered = auto_stretch_preview(arr);
 
     let stem = std::path::Path::new(path)
         .file_stem()
@@ -239,7 +239,7 @@ pub fn render_and_save(
     })
 }
 
-pub fn render_asinh_and_save(
+pub(crate) fn render_asinh_and_save(
     arr: &Array2<f32>,
     output_dir: &str,
     name: &str,
@@ -270,9 +270,10 @@ fn platform_fallback_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp/astroburst/output")
 }
 
-pub fn resolve_output_dir(output_dir: &str) -> Result<String> {
+pub(crate) fn resolve_output_dir(output_dir: &str) -> Result<String> {
     let path = std::path::Path::new(output_dir);
     if path.exists() {
+        maybe_enforce_lru(output_dir);
         return Ok(output_dir.to_string());
     }
     match std::fs::create_dir_all(path) {
@@ -288,13 +289,30 @@ pub fn resolve_output_dir(output_dir: &str) -> Result<String> {
                 output_dir,
                 fallback.display()
             );
-            Ok(fallback.to_string_lossy().to_string())
+            let resolved = fallback.to_string_lossy().to_string();
+            maybe_enforce_lru(&resolved);
+            Ok(resolved)
         }
         Err(e) => Err(e).context(format!("Failed to create output directory: {}", output_dir)),
     }
 }
 
-pub struct ResolvedRgbImage {
+fn maybe_enforce_lru(dir: &str) {
+    use crate::types::constants::DEFAULT_OUTPUT_MAX_BYTES;
+    static MAX_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+    let threshold = *MAX_BYTES.get_or_init(|| {
+        crate::infra::config::load_config()
+            .ok()
+            .and_then(|cfg| cfg.output_max_size_mb)
+            .map(|mb| mb * 1_048_576)
+            .unwrap_or(DEFAULT_OUTPUT_MAX_BYTES)
+    });
+
+    let _ = crate::cmd::output::enforce_output_lru(std::path::Path::new(dir), threshold);
+}
+
+pub(crate) struct ResolvedRgbImage {
     pub r: Array2<f32>,
     pub g: Array2<f32>,
     pub b: Array2<f32>,
@@ -302,7 +320,7 @@ pub struct ResolvedRgbImage {
     pub _tmp: Option<tempfile::TempDir>,
 }
 
-pub fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbImage>> {
+pub(crate) fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbImage>> {
     let p = std::path::Path::new(path);
     if crate::infra::asdf::converter::is_asdf_file(p) {
         return Ok(None);
@@ -322,44 +340,6 @@ pub fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbImage>> 
         })),
         None => Ok(None),
     }
-}
-
-pub fn save_rgb_preview_png(
-    r: &Array2<f32>,
-    g: &Array2<f32>,
-    b: &Array2<f32>,
-    path: &str,
-) -> Result<()> {
-    use image::codecs::png::PngEncoder;
-    use image::{ColorType, ImageEncoder};
-
-    let (rows, cols) = r.dim();
-    let r_s = r.as_slice().context("R not contiguous")?;
-    let g_s = g.as_slice().context("G not contiguous")?;
-    let b_s = b.as_slice().context("B not contiguous")?;
-
-    let mut pixels = vec![0u8; rows * cols * 3];
-    for i in 0..rows * cols {
-        let o = i * 3;
-        pixels[o] = (r_s[i].clamp(0.0, 1.0) * 255.0) as u8;
-        pixels[o + 1] = (g_s[i].clamp(0.0, 1.0) * 255.0) as u8;
-        pixels[o + 2] = (b_s[i].clamp(0.0, 1.0) * 255.0) as u8;
-    }
-
-    let (preview, pw, ph) = downsample_u8_rgb(&pixels, cols, rows, MAX_PREVIEW_DIM);
-
-    let file = std::fs::File::create(path).context("Failed to create RGB preview")?;
-    let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let encoder = PngEncoder::new_with_quality(
-        buf_writer,
-        image::codecs::png::CompressionType::Default,
-        image::codecs::png::FilterType::Sub,
-    );
-    encoder
-        .write_image(&preview, pw as u32, ph as u32, ColorType::Rgb8.into())
-        .context("Failed to write RGB preview PNG")?;
-
-    Ok(())
 }
 
 macro_rules! blocking_cmd {

@@ -142,11 +142,6 @@ impl AsdfFile {
         Ok(blocks)
     }
 
-    pub fn get_data_array(&self, key: &str) -> Option<&BlockData> {
-        let node = self.tree.get(key)?;
-        let source = node.get("source")?.as_u64()? as usize;
-        self.blocks.get(source)
-    }
 }
 
 fn skip_padding(buf: &[u8], mut offset: usize) -> usize {

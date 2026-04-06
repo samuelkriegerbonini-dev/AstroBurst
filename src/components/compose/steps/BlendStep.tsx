@@ -1,9 +1,9 @@
 import { useState, useCallback, useMemo } from "react";
-import type { WizardState, BlendWeight, FrequencyBin } from "../wizard.types";
-import { BLEND_PRESETS } from "../wizard.types";
+
 import { blendChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Toggle } from "../../ui";
+import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
   sii: 673, ha: 656, nii: 658, oiii: 502,

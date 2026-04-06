@@ -23,12 +23,6 @@ impl ResolvedInput {
         }
     }
 
-    pub fn first_image(&self) -> Result<&Path> {
-        self.image_paths()
-            .first()
-            .map(|p| p.as_path())
-            .context("No supported image files found in input")
-    }
 }
 
 pub fn resolve_input(path: &Path) -> Result<ResolvedInput> {

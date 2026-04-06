@@ -35,11 +35,12 @@ impl From<&ImageStats> for ChannelStats {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DimensionCrop {
+pub struct DimensionHarmonize {
     pub original_r: Option<[usize; 2]>,
     pub original_g: Option<[usize; 2]>,
     pub original_b: Option<[usize; 2]>,
-    pub cropped_to: [usize; 2],
+    pub target: [usize; 2],
+    pub resampled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +88,7 @@ pub struct RgbComposeResult {
     pub width: usize,
     pub height: usize,
     pub scnr_applied: bool,
-    pub dimension_crop: Option<DimensionCrop>,
+    pub dimension_info: Option<DimensionHarmonize>,
 }
 
 #[derive(Debug, Clone)]

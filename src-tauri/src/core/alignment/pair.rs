@@ -4,7 +4,7 @@ use rayon::prelude::*;
 
 use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
-use crate::core::imaging::resample::bicubic_sample;
+use crate::core::imaging::sampling::bicubic_sample;
 use crate::types::compose::AlignMethod;
 
 #[derive(Debug, Clone)]

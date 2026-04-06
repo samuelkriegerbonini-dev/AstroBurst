@@ -12,16 +12,18 @@ import { computeHistogram } from "../services/analysis";
 import { getCubeInfo } from "../services/cube";
 import { getRawPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
+import { useCompositeContext } from "./CompositeContext";
 import { clearCompositeCache } from "../services/compose";
 import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../shared/types";
+import type { CubeDims } from "../shared/types/cube";
 
-interface ChannelSuggestion {
+export interface ChannelSuggestion {
   file_path: string;
   file_name: string;
   detection: { filter_name: string; method: string; confidence: number } | null;
 }
 
-interface PaletteSuggestion {
+export interface PaletteSuggestion {
   r_file: ChannelSuggestion | null;
   g_file: ChannelSuggestion | null;
   b_file: ChannelSuggestion | null;
@@ -30,14 +32,14 @@ interface PaletteSuggestion {
   palette_name: string;
 }
 
-interface FileContextValue {
-  file: ProcessedFile | null;
+export interface RgbChannelMap {
+  r: string | null;
+  g: string | null;
+  b: string | null;
 }
 
-interface ScnrState {
-  enabled: boolean;
-  method: string;
-  amount: number;
+interface FileContextValue {
+  file: ProcessedFile | null;
 }
 
 interface DoneFilesContextValue {
@@ -54,12 +56,12 @@ interface CubeContextValue {
   isCube: boolean;
   isSpectralCube: boolean;
   spectralReason: string | null;
-  cubeDims: any;
+  cubeDims: CubeDims | null;
 }
 
 interface RgbContextValue {
-  rgbChannels: { r: string | null; g: string | null; b: string | null } | null;
-  setRgbChannels: React.Dispatch<React.SetStateAction<any>>;
+  rgbChannels: RgbChannelMap | null;
+  setRgbChannels: React.Dispatch<React.SetStateAction<RgbChannelMap | null>>;
   lastAlignMethod: string | null;
   setLastAlignMethod: (method: string | null) => void;
 }
@@ -69,22 +71,10 @@ interface RenderContextValue {
   setRenderedPreviewUrl: (url: string | null) => void;
   activeImagePath: string | null;
   setActiveImagePath: (path: string | null) => void;
-  compositePreviewUrl: string | null;
-  setCompositePreviewUrl: (url: string | null) => void;
-  isShowingComposite: boolean;
-  clearComposite: () => Promise<void>;
-  compositeStfR: StfParams;
-  compositeStfG: StfParams;
-  compositeStfB: StfParams;
-  setCompositeStf: (r: StfParams, g: StfParams, b: StfParams) => void;
-  compositeStfLinked: boolean;
-  setCompositeStfLinked: (linked: boolean) => void;
-  compositeAutoStfR: StfParams | null;
-  compositeAutoStfG: StfParams | null;
-  compositeAutoStfB: StfParams | null;
-  setCompositeAutoStf: (r: StfParams, g: StfParams, b: StfParams) => void;
-  compositeScnr: ScnrState | null;
-  setCompositeScnr: (scnr: ScnrState | null) => void;
+}
+
+interface StarOverlayContextValue {
+  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
 interface RawPixelsContextValue {
@@ -106,6 +96,7 @@ const HistCtx = createContext<HistContextValue | null>(null);
 const CubeCtx = createContext<CubeContextValue | null>(null);
 const RgbCtx = createContext<RgbContextValue | null>(null);
 const RenderCtx = createContext<RenderContextValue | null>(null);
+const StarOverlayCtx = createContext<StarOverlayContextValue | null>(null);
 const RawPixelsCtx = createContext<RawPixelsContextValue | null>(null);
 const NarrowbandCtx = createContext<NarrowbandContextValue | null>(null);
 
@@ -121,21 +112,9 @@ export const useHistContext = () => useCtx(HistCtx, "useHistContext");
 export const useCubeContext = () => useCtx(CubeCtx, "useCubeContext");
 export const useRgbContext = () => useCtx(RgbCtx, "useRgbContext");
 export const useRenderContext = () => useCtx(RenderCtx, "useRenderContext");
+export const useStarOverlayContext = () => useCtx(StarOverlayCtx, "useStarOverlayContext");
 export const useRawPixelsContext = () => useCtx(RawPixelsCtx, "useRawPixelsContext");
 export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandContext");
-
-export function usePreviewContext() {
-  return {
-    ...useFileContext(),
-    ...useDoneFilesContext(),
-    ...useHistContext(),
-    ...useCubeContext(),
-    ...useRgbContext(),
-    ...useRenderContext(),
-    ...useRawPixelsContext(),
-    ...useNarrowbandContext(),
-  };
-}
 
 interface Props {
   file: ProcessedFile | null;
@@ -157,36 +136,28 @@ function setPreviewCache(key: string, value: string) {
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 export function PreviewProvider({ file, doneFiles, children }: Props) {
+  const composite = useCompositeContext();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
   const [stfParams, setStfParams] = useState<StfParams>(DEFAULT_STF);
   const [isCube, setIsCube] = useState(false);
   const [isSpectralCube, setIsSpectralCube] = useState(false);
   const [spectralReason, setSpectralReason] = useState<string | null>(null);
-  const [cubeDims, setCubeDims] = useState<any>(null);
-  const [rgbChannels, setRgbChannels] = useState<any>(null);
+  const [cubeDims, setCubeDims] = useState<CubeDims | null>(null);
+  const [rgbChannels, setRgbChannels] = useState<RgbChannelMap | null>(null);
   const [lastAlignMethod, setLastAlignMethod] = useState<string | null>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
   const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
-  const [compositePreviewUrl, setCompositePreviewUrlRaw] = useState<string | null>(null);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
 
-  const [compositeStfR, setCompositeStfR] = useState<StfParams>(DEFAULT_STF);
-  const [compositeStfG, setCompositeStfG] = useState<StfParams>(DEFAULT_STF);
-  const [compositeStfB, setCompositeStfB] = useState<StfParams>(DEFAULT_STF);
-  const [compositeStfLinked, setCompositeStfLinked] = useState(true);
-  const [compositeAutoStfR, setCompositeAutoStfR] = useState<StfParams | null>(null);
-  const [compositeAutoStfG, setCompositeAutoStfG] = useState<StfParams | null>(null);
-  const [compositeAutoStfB, setCompositeAutoStfB] = useState<StfParams | null>(null);
-  const [compositeScnr, setCompositeScnrRaw] = useState<ScnrState | null>(null);
-
   const prevFileIdRef = useRef<string | null>(null);
   const seqRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
   const narrowbandKeyRef = useRef("");
+  const starOverlayRef = useRef<HTMLCanvasElement>(null);
 
   const rawPixelsRef = useRef(rawPixels);
   rawPixelsRef.current = rawPixels;
@@ -203,48 +174,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [file?.id],
   );
 
-  const setActiveImagePath = useCallback(
-    (path: string | null) => {
-      setActiveImagePathRaw(path);
-    },
-    [],
-  );
-
-  const setCompositePreviewUrl = useCallback(
-    (url: string | null) => {
-      setCompositePreviewUrlRaw(url);
-    },
-    [],
-  );
-
-  const clearComposite = useCallback(async () => {
-    setCompositePreviewUrlRaw(null);
-    setCompositeStfR(DEFAULT_STF);
-    setCompositeStfG(DEFAULT_STF);
-    setCompositeStfB(DEFAULT_STF);
-    setCompositeAutoStfR(null);
-    setCompositeAutoStfG(null);
-    setCompositeAutoStfB(null);
-    setCompositeScnrRaw(null);
-    await clearCompositeCache().catch(() => {});
-  }, []);
-
-  const isShowingComposite = compositePreviewUrl !== null;
-
-  const setCompositeStf = useCallback((r: StfParams, g: StfParams, b: StfParams) => {
-    setCompositeStfR(r);
-    setCompositeStfG(g);
-    setCompositeStfB(b);
-  }, []);
-
-  const setCompositeAutoStf = useCallback((r: StfParams, g: StfParams, b: StfParams) => {
-    setCompositeAutoStfR(r);
-    setCompositeAutoStfG(g);
-    setCompositeAutoStfB(b);
-  }, []);
-
-  const setCompositeScnr = useCallback((scnr: ScnrState | null) => {
-    setCompositeScnrRaw(scnr);
+  const setActiveImagePath = useCallback((path: string | null) => {
+    setActiveImagePathRaw(path);
   }, []);
 
   const setSelectedPalette = useCallback((p: string) => {
@@ -259,7 +190,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (key === narrowbandKeyRef.current) return;
     narrowbandKeyRef.current = key;
     detectNarrowbandFilters(paths, selectedPalette)
-      .then((result: any) => {
+      .then((result) => {
         if (result?.palette) setNarrowbandPalette(result.palette);
       })
       .catch(() => {});
@@ -272,7 +203,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const seq = ++rawPixelsAbortRef.current;
     const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
     getRawPixelsPreview(path, maxDim)
-      .then((result: any) => {
+      .then((result) => {
         if (rawPixelsAbortRef.current !== seq) return;
         setRawPixels({
           data: result.pixels,
@@ -282,7 +213,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
           max: result.dataMax,
         });
       })
-      .catch((err: any) => {
+      .catch((err) => {
         if (rawPixelsAbortRef.current !== seq) return;
         console.error("[AstroBurst] Raw pixels load failed:", err);
       })
@@ -314,15 +245,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRawPixelsLoading(false);
     setNarrowbandPalette(null);
     setActiveImagePathRaw(null);
-    setCompositePreviewUrlRaw(null);
-    setCompositeStfR(DEFAULT_STF);
-    setCompositeStfG(DEFAULT_STF);
-    setCompositeStfB(DEFAULT_STF);
-    setCompositeAutoStfR(null);
-    setCompositeAutoStfG(null);
-    setCompositeAutoStfB(null);
-    setCompositeScnrRaw(null);
     rawPixelsAbortRef.current++;
+
+    composite.resetComposite();
 
     if (!file.result?.is_rgb) {
       clearCompositeCache().catch(() => {});
@@ -336,17 +261,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const isRgbFits = file.result?.is_rgb === true;
 
     if (isRgbFits) {
-      if (file.result?.previewUrl) {
-        setCompositePreviewUrlRaw(file.result.previewUrl);
-      }
+      const toStf = (s: any): StfParams => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
       if (file.result?.stf_r && file.result?.stf_g && file.result?.stf_b) {
-        const toStf = (s: any) => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
-        setCompositeAutoStfR(toStf(file.result.stf_r));
-        setCompositeAutoStfG(toStf(file.result.stf_g));
-        setCompositeAutoStfB(toStf(file.result.stf_b));
-        setCompositeStfR(toStf(file.result.stf_r));
-        setCompositeStfG(toStf(file.result.stf_g));
-        setCompositeStfB(toStf(file.result.stf_b));
+        composite.initRgb(
+          file.result.previewUrl ?? null,
+          toStf(file.result.stf_r),
+          toStf(file.result.stf_g),
+          toStf(file.result.stf_b),
+        );
+      } else if (file.result?.previewUrl) {
+        composite.setCompositePreviewUrl(file.result.previewUrl);
       }
     }
 
@@ -356,12 +280,12 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       if (precomputedHist.auto_stf) setStfParams(precomputedHist.auto_stf);
     } else {
       computeHistogram(file.path)
-        .then((data: any) => {
+        .then((data) => {
           if (stale()) return;
           setHistData(data);
           if (data.auto_stf) setStfParams(data.auto_stf);
         })
-        .catch((err: any) => {
+        .catch((err) => {
           if (!stale()) console.error("Histogram fetch failed:", err);
         });
     }
@@ -371,7 +295,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (n3 > 1 && !isRgbFits) {
       setIsCube(true);
       getCubeInfo(file.path)
-        .then((info: any) => {
+        .then((info) => {
           if (stale()) return;
           setCubeDims(info);
           if (info?.spectral_classification) {
@@ -410,19 +334,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const renderValue = useMemo<RenderContextValue>(
     () => ({
-      renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath,
-      compositePreviewUrl, setCompositePreviewUrl, isShowingComposite, clearComposite,
-      compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
-      compositeStfLinked, setCompositeStfLinked,
-      compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeAutoStf,
-      compositeScnr, setCompositeScnr,
+      renderedPreviewUrl, setRenderedPreviewUrl,
+      activeImagePath, setActiveImagePath,
     }),
-    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath,
-     compositePreviewUrl, setCompositePreviewUrl, isShowingComposite, clearComposite,
-     compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
-     compositeStfLinked, setCompositeStfLinked,
-     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeAutoStf,
-     compositeScnr, setCompositeScnr],
+    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
@@ -435,6 +350,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [narrowbandPalette, selectedPalette, setSelectedPalette],
   );
 
+  const starOverlayValue = useMemo<StarOverlayContextValue>(
+    () => ({ starOverlayRef }),
+    [],
+  );
+
   return (
     <FileCtx.Provider value={fileValue}>
       <DoneFilesCtx.Provider value={doneFilesValue}>
@@ -444,7 +364,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
               <RenderCtx.Provider value={renderValue}>
                 <RawPixelsCtx.Provider value={rawPixelsValue}>
                   <NarrowbandCtx.Provider value={narrowbandValue}>
-                    {children}
+                    <StarOverlayCtx.Provider value={starOverlayValue}>
+                      {children}
+                    </StarOverlayCtx.Provider>
                   </NarrowbandCtx.Provider>
                 </RawPixelsCtx.Provider>
               </RenderCtx.Provider>
@@ -456,4 +378,4 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 }
 
-export type { PaletteSuggestion, ChannelSuggestion, ScnrState };
+export type { PaletteSuggestion, ChannelSuggestion, RgbChannelMap };

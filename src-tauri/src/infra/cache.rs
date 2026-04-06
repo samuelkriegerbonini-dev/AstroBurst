@@ -87,6 +87,10 @@ impl LruInner {
         }
     }
 
+    fn is_pinned(key: &str) -> bool {
+        key.starts_with("__composite")
+    }
+
     fn evict_lru(&mut self) {
         if self.map.is_empty() {
             return;
@@ -94,6 +98,7 @@ impl LruInner {
         let victim = self
             .map
             .iter()
+            .filter(|(k, _)| !Self::is_pinned(k))
             .min_by_key(|(_, e)| e.gen.load(Ordering::Relaxed))
             .map(|(k, _)| k.clone());
         if let Some(key) = victim {
@@ -127,6 +132,12 @@ impl LruInner {
                 byte_size: new_bytes,
             },
         );
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(removed) = self.map.remove(key) {
+            self.current_bytes -= removed.byte_size;
+        }
     }
 
     fn clear(&mut self) {
@@ -258,18 +269,13 @@ impl ImageCache {
         cache.put(key.to_string(), entry);
     }
 
-    pub fn remove(&self, key: &str) {
-        let mut cache = self.inner.write().unwrap();
-        if let Some(removed) = cache.map.remove(key) {
-            cache.current_bytes -= removed.byte_size;
-        }
-    }
-
     pub fn invalidate(&self, path: &str) {
         let mut cache = self.inner.write().unwrap();
-        if let Some(removed) = cache.map.remove(path) {
-            cache.current_bytes -= removed.byte_size;
-        }
+        cache.remove(path);
+    }
+
+    pub fn remove(&self, key: &str) {
+        self.invalidate(key);
     }
 
     pub fn clear(&self) {

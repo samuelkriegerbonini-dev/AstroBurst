@@ -1,4 +1,13 @@
-import { safeInvoke, withPreview } from "../infrastructure/tauri";
+import { typedInvoke, withPreview } from "../infrastructure/tauri";
+import type {
+  DeconvolveResult,
+  BackgroundResult,
+  WaveletResult,
+  PsfEstimate,
+  ArcsinhResult,
+  MaskedStretchResult,
+  SpccResult,
+} from "../shared/types/processing";
 
 export function deconvolveRL(
   path: string,
@@ -14,8 +23,8 @@ export function deconvolveRL(
     psfNumStars?: number;
     psfCutoutRadius?: number;
   } = {},
-) {
-  return withPreview("deconvolve_rl_cmd", outputDir, {
+): Promise<DeconvolveResult> {
+  return withPreview<DeconvolveResult>("deconvolve_rl_cmd", outputDir, {
     path,
     iterations: options.iterations ?? 20,
     psfSigma: options.psfSigma ?? 2.0,
@@ -39,8 +48,8 @@ export function extractBackground(
     iterations?: number;
     mode?: string;
   } = {},
-) {
-  return withPreview("extract_background_cmd", outputDir, {
+): Promise<BackgroundResult> {
+  return withPreview<BackgroundResult>("extract_background_cmd", outputDir, {
     path,
     gridSize: options.gridSize ?? 8,
     polyDegree: options.polyDegree ?? 3,
@@ -61,8 +70,8 @@ export function waveletDenoise(
     thresholds?: number[];
     linear?: boolean;
   } = {},
-) {
-  return withPreview("wavelet_denoise_cmd", outputDir, {
+): Promise<WaveletResult> {
+  return withPreview<WaveletResult>("wavelet_denoise_cmd", outputDir, {
     path,
     numScales: options.numScales ?? 5,
     thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
@@ -78,8 +87,8 @@ export function estimatePsf(
     saturationThreshold?: number;
     maxEllipticity?: number;
   } = {},
-) {
-  return safeInvoke("estimate_psf_cmd", {
+): Promise<PsfEstimate> {
+  return typedInvoke<PsfEstimate>("estimate_psf_cmd", {
     path,
     numStars: options.numStars ?? 30,
     cutoutRadius: options.cutoutRadius ?? 15,
@@ -88,8 +97,8 @@ export function estimatePsf(
   });
 }
 
-export function applyArcsinhStretch(path: string, outputDir?: string, factor = 50.0) {
-  return withPreview("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
+export function applyArcsinhStretch(path: string, outputDir?: string, factor = 50.0): Promise<ArcsinhResult> {
+  return withPreview<ArcsinhResult>("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
 }
 
 export function maskedStretch(
@@ -103,8 +112,8 @@ export function maskedStretch(
     protectionAmount?: number;
     luminanceProtect?: boolean;
   } = {},
-) {
-  return withPreview("masked_stretch_cmd", outputDir, {
+): Promise<MaskedStretchResult> {
+  return withPreview<MaskedStretchResult>("masked_stretch_cmd", outputDir, {
     path,
     iterations: options.iterations ?? 10,
     targetBackground: options.targetBackground ?? 0.25,
@@ -125,8 +134,8 @@ export function spccCalibrate(
     minSnr?: number;
     maxStars?: number;
   } = {},
-) {
-  return safeInvoke("spcc_calibrate_cmd", {
+): Promise<SpccResult> {
+  return typedInvoke<SpccResult>("spcc_calibrate_cmd", {
     rPath,
     gPath,
     bPath,

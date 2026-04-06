@@ -119,6 +119,31 @@ pub fn apply_stf_f32(data: &Array2<f32>, params: &StfParams, stats: &ImageStats)
     Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
+pub(crate) fn make_stf_u8_fn(params: &StfParams, stats: &ImageStats) -> impl Fn(f32) -> u8 + Send + Sync {
+    let tx_inv_range = {
+        let range = (stats.max - stats.min).max(1e-30);
+        1.0 / range
+    };
+    let tx_dmin = stats.min;
+    let tx_shadow = params.shadow;
+    let tx_inv_clip = {
+        let clip_range = (params.highlight - params.shadow).max(1e-15);
+        1.0 / clip_range
+    };
+    let tx_midtone = params.midtone;
+
+    move |v: f32| {
+        if !is_valid_pixel(v) {
+            return 0u8;
+        }
+        let vd = v as f64;
+        let norm = (vd - tx_dmin) * tx_inv_range;
+        let clipped = ((norm - tx_shadow) * tx_inv_clip).clamp(0.0, 1.0);
+        let stretched = mtf(clipped, tx_midtone);
+        (stretched * 255.0) as u8
+    }
+}
+
 pub fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, stats: &ImageStats) {
     let tx = StfTransform::new(params, stats);
     data.par_mapv_inplace(|v| {

@@ -1,12 +1,16 @@
 use ndarray::Array2;
-use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
 
 use super::downsample::area_downsample;
+use crate::math::complex;
+use crate::math::fft::{self, FftEngine2D};
+use crate::math::normalization;
+use crate::math::subpixel;
+use crate::math::window;
 
 const COARSE_MAX_DIM: usize = 512;
 const REFINE_CROP_SIZE: usize = 512;
 const CONFIDENCE_THRESHOLD: f64 = 2.0;
+const EPSILON: f64 = 1e-15;
 
 #[derive(Debug, Clone)]
 pub struct PhaseCorrelationResult {
@@ -43,10 +47,8 @@ pub fn phase_correlate(
         };
     }
 
-    let mut planner = FftPlanner::<f64>::new();
-
     if rows <= COARSE_MAX_DIM && cols <= COARSE_MAX_DIM {
-        return correlate_single(&ref_cropped, &tgt_cropped, &mut planner);
+        return correlate_single(&ref_cropped, &tgt_cropped);
     }
 
     let scale_y = rows as f64 / COARSE_MAX_DIM as f64;
@@ -57,7 +59,7 @@ pub fn phase_correlate(
     let ref_ds = area_downsample(&ref_cropped, ds_rows, ds_cols);
     let tgt_ds = area_downsample(&tgt_cropped, ds_rows, ds_cols);
 
-    let coarse = correlate_single(&ref_ds, &tgt_ds, &mut planner);
+    let coarse = correlate_single(&ref_ds, &tgt_ds);
     let coarse_dx = coarse.dx * scale_x;
     let coarse_dy = coarse.dy * scale_y;
 
@@ -78,7 +80,7 @@ pub fn phase_correlate(
         };
     }
 
-    let refine = correlate_single(&ref_crop, &tgt_crop, &mut planner);
+    let refine = correlate_single(&ref_crop, &tgt_crop);
     PhaseCorrelationResult {
         dx: coarse_dx + refine.dx,
         dy: coarse_dy + refine.dy,
@@ -101,214 +103,41 @@ fn extract_crop(
     img.slice(ndarray::s![y0..y1, x0..x1]).to_owned()
 }
 
-fn correlate_single(a: &Array2<f32>, b: &Array2<f32>, planner: &mut FftPlanner<f64>) -> PhaseCorrelationResult {
+fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult {
     let (rows, cols) = a.dim();
-    let fft_rows = next_power_of_2(rows);
-    let fft_cols = next_power_of_2(cols);
+    let fft_rows = fft::next_power_of_two(rows);
+    let fft_cols = fft::next_power_of_two(cols);
 
-    let hann_y = hann_window(rows);
-    let hann_x = hann_window(cols);
+    let engine = FftEngine2D::<f64>::new(fft_rows, fft_cols);
 
-    let fa = fft2d(a, &hann_y, &hann_x, fft_rows, fft_cols, planner);
-    let fb = fft2d(b, &hann_y, &hann_x, fft_rows, fft_cols, planner);
+    let hann_y = window::hann_periodic::<f64>(rows);
+    let hann_x = window::hann_periodic::<f64>(cols);
 
-    let mut cross: Vec<Complex<f64>> = fa
-        .iter()
-        .zip(fb.iter())
-        .map(|(&f1, &f2)| {
-            let product = f1 * f2.conj();
-            let mag = product.norm();
-            if mag > 1e-15 {
-                product / mag
-            } else {
-                Complex::new(0.0, 0.0)
-            }
-        })
-        .collect();
+    let mut fa = fft::prepare_windowed_buffer(a, &hann_y, &hann_x, fft_rows, fft_cols);
+    let mut fb = fft::prepare_windowed_buffer(b, &hann_y, &hann_x, fft_rows, fft_cols);
 
-    ifft2d(&mut cross, fft_rows, fft_cols, planner);
+    engine.forward_2d(&mut fa);
+    engine.forward_2d(&mut fb);
 
-    let correlation = build_real_surface(&cross, fft_rows, fft_cols);
+    let mut cross = complex::cross_power_spectrum(&fa, &fb, EPSILON);
 
-    let (peak_y, peak_x, peak_val) = find_peak(&correlation, fft_rows, fft_cols);
-    let confidence = compute_confidence(&correlation, fft_rows, fft_cols, peak_val);
+    engine.inverse_2d(&mut cross);
 
-    let raw_dy = if peak_y > fft_rows / 2 {
-        peak_y as f64 - fft_rows as f64
-    } else {
-        peak_y as f64
-    };
-    let raw_dx = if peak_x > fft_cols / 2 {
-        peak_x as f64 - fft_cols as f64
-    } else {
-        peak_x as f64
-    };
+    let correlation = fft::extract_real(&cross, fft_rows, fft_cols);
 
-    let sub_dy = subpixel_refine_1d(&correlation, fft_rows, fft_cols, peak_y, peak_x, true);
-    let sub_dx = subpixel_refine_1d(&correlation, fft_rows, fft_cols, peak_y, peak_x, false);
+    let (peak_y, peak_x, peak_val) = fft::find_peak(&correlation, fft_cols);
+    let (mean, sigma) = normalization::compute_mean_sigma(&correlation);
+    let confidence = normalization::compute_snr(peak_val, mean, sigma);
 
-    let dy = raw_dy + sub_dy;
-    let dx = raw_dx + sub_dx;
+    let shift = subpixel::unwrap_and_refine(
+        &correlation, fft_rows, fft_cols, peak_y, peak_x,
+    );
 
     PhaseCorrelationResult {
-        dx,
-        dy,
+        dx: shift.dx,
+        dy: shift.dy,
         confidence,
     }
-}
-
-fn transpose(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<Complex<f64>> {
-    let mut out = vec![Complex::new(0.0, 0.0); rows * cols];
-    out.par_chunks_mut(rows).enumerate().for_each(|(x, col_buf)| {
-        for y in 0..rows {
-            col_buf[y] = data[y * cols + x];
-        }
-    });
-    out
-}
-
-fn fft2d(
-    img: &Array2<f32>,
-    hann_y: &[f64],
-    hann_x: &[f64],
-    fft_rows: usize,
-    fft_cols: usize,
-    planner: &mut FftPlanner<f64>,
-) -> Vec<Complex<f64>> {
-    let (rows, cols) = img.dim();
-    let mut data = vec![Complex::new(0.0, 0.0); fft_rows * fft_cols];
-
-    for y in 0..rows {
-        for x in 0..cols {
-            let mut v = img[[y, x]] as f64;
-            if !v.is_finite() {
-                v = 0.0;
-            }
-            data[y * fft_cols + x] = Complex::new(v * hann_y[y] * hann_x[x], 0.0);
-        }
-    }
-
-    let fft_row = planner.plan_fft_forward(fft_cols);
-    data.par_chunks_mut(fft_cols).for_each(|row| {
-        fft_row.process(row);
-    });
-
-    let mut transposed = transpose(&data, fft_rows, fft_cols);
-    let fft_col = planner.plan_fft_forward(fft_rows);
-    transposed.par_chunks_mut(fft_rows).for_each(|col| {
-        fft_col.process(col);
-    });
-
-    let mut result = vec![Complex::new(0.0, 0.0); fft_rows * fft_cols];
-    result.par_chunks_mut(fft_cols).enumerate().for_each(|(y, row_buf)| {
-        for x in 0..fft_cols {
-            row_buf[x] = transposed[x * fft_rows + y];
-        }
-    });
-
-    result
-}
-
-fn ifft2d(data: &mut [Complex<f64>], fft_rows: usize, fft_cols: usize, planner: &mut FftPlanner<f64>) {
-    let ifft_row = planner.plan_fft_inverse(fft_cols);
-    data.par_chunks_mut(fft_cols).for_each(|row| {
-        ifft_row.process(row);
-    });
-
-    let mut transposed = transpose(data, fft_rows, fft_cols);
-    let ifft_col = planner.plan_fft_inverse(fft_rows);
-    transposed.par_chunks_mut(fft_rows).for_each(|col| {
-        ifft_col.process(col);
-    });
-
-    data.par_chunks_mut(fft_cols).enumerate().for_each(|(y, row_buf)| {
-        for x in 0..fft_cols {
-            row_buf[x] = transposed[x * fft_rows + y];
-        }
-    });
-
-    let norm = 1.0 / (fft_rows * fft_cols) as f64;
-    data.iter_mut().for_each(|c| *c *= norm);
-}
-
-fn build_real_surface(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<f64> {
-    data.iter().take(rows * cols).map(|c| c.re).collect()
-}
-
-fn find_peak(surface: &[f64], _rows: usize, cols: usize) -> (usize, usize, f64) {
-    let (best_idx, best_val) = surface.par_iter()
-        .enumerate()
-        .reduce_with(|a, b| if b.1 > a.1 { b } else { a })
-        .unwrap_or((0, &f64::NEG_INFINITY));
-    (best_idx / cols, best_idx % cols, *best_val)
-}
-
-fn compute_confidence(surface: &[f64], rows: usize, cols: usize, peak_val: f64) -> f64 {
-    let n = rows * cols;
-    if n < 2 {
-        return 0.0;
-    }
-    let sum: f64 = surface.par_iter().sum();
-    let mean = sum / n as f64;
-    let var: f64 = surface.par_iter().map(|&v| {
-        let d = v - mean;
-        d * d
-    }).sum::<f64>() / (n - 1) as f64;
-    let sigma = var.sqrt();
-    if sigma < 1e-15 {
-        return 0.0;
-    }
-    (peak_val - mean) / sigma
-}
-
-fn subpixel_refine_1d(
-    surface: &[f64],
-    rows: usize,
-    cols: usize,
-    peak_y: usize,
-    peak_x: usize,
-    axis_y: bool,
-) -> f64 {
-    let (center, prev, next) = if axis_y {
-        let py = if peak_y == 0 { rows - 1 } else { peak_y - 1 };
-        let ny = if peak_y == rows - 1 { 0 } else { peak_y + 1 };
-        (
-            surface[peak_y * cols + peak_x],
-            surface[py * cols + peak_x],
-            surface[ny * cols + peak_x],
-        )
-    } else {
-        let px = if peak_x == 0 { cols - 1 } else { peak_x - 1 };
-        let nx = if peak_x == cols - 1 { 0 } else { peak_x + 1 };
-        (
-            surface[peak_y * cols + peak_x],
-            surface[peak_y * cols + px],
-            surface[peak_y * cols + nx],
-        )
-    };
-
-    let denom = 2.0 * (2.0 * center - prev - next);
-    if denom.abs() < 1e-15 {
-        return 0.0;
-    }
-    ((prev - next) / denom).clamp(-0.5, 0.5)
-}
-
-fn hann_window(n: usize) -> Vec<f64> {
-    (0..n)
-        .map(|i| {
-            let t = std::f64::consts::PI * 2.0 * i as f64 / n as f64;
-            0.5 * (1.0 - t.cos())
-        })
-        .collect()
-}
-
-fn next_power_of_2(n: usize) -> usize {
-    let mut p = 1;
-    while p < n {
-        p <<= 1;
-    }
-    p
 }
 
 fn is_constant_or_zero(img: &Array2<f32>) -> bool {

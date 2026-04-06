@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::sampling;
 use crate::types::header::HduHeader;
 
 pub struct ResampleResult {
@@ -13,46 +14,12 @@ pub struct ResampleResult {
 
 #[inline]
 pub fn catmull_rom(t: f64) -> f64 {
-    let abs_t = t.abs();
-    if abs_t <= 1.0 {
-        abs_t * abs_t * (1.5 * abs_t - 2.5) + 1.0
-    } else if abs_t <= 2.0 {
-        abs_t * (abs_t * (2.5 - 0.5 * abs_t) - 4.0) + 2.0
-    } else {
-        0.0
-    }
+    sampling::catmull_rom(t)
 }
 
 #[inline]
 pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
-    let ix = x.floor() as i64;
-    let iy = y.floor() as i64;
-    let fx = x - ix as f64;
-    let fy = y - iy as f64;
-
-    let max_row = rows as i64 - 1;
-    let max_col = cols as i64 - 1;
-
-    let wx = [
-        catmull_rom(fx + 1.0),
-        catmull_rom(fx),
-        catmull_rom(fx - 1.0),
-        catmull_rom(fx - 2.0),
-    ];
-
-    let mut val = 0.0f64;
-    for j in 0..4i64 {
-        let r = (iy + j - 1).clamp(0, max_row) as usize;
-        let row_off = r * cols;
-        let mut row_val = 0.0f64;
-        for i in 0..4i64 {
-            let c = (ix + i - 1).clamp(0, max_col) as usize;
-            row_val += unsafe { *slice.get_unchecked(row_off + c) } as f64 * wx[i as usize];
-        }
-        val += row_val * catmull_rom(fy - (j - 1) as f64);
-    }
-
-    val as f32
+    sampling::bicubic_sample(slice, rows, cols, y, x)
 }
 
 pub fn resample_image(
@@ -85,7 +52,7 @@ pub fn resample_image(
             let sy = ty as f64 * scale_y + half_shift_y;
             for (tx, pixel) in row.iter_mut().enumerate() {
                 let sx = tx as f64 * scale_x + half_shift_x;
-                *pixel = bicubic_sample(slice, src_rows, src_cols, sy, sx);
+                *pixel = sampling::bicubic_sample(slice, src_rows, src_cols, sy, sx);
             }
         });
 

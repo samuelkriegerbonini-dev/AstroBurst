@@ -2,6 +2,8 @@ use super::median::{exact_median_mut, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
 
 pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize) -> (f64, f64) {
+    let mut devs: Vec<f32> = Vec::with_capacity(values.len());
+
     for _ in 0..iterations {
         if values.len() < 3 {
             break;
@@ -9,7 +11,8 @@ pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize)
 
         let median = exact_median_mut(values);
 
-        let mut devs: Vec<f32> = values.iter().map(|&v| (v as f64 - median).abs() as f32).collect();
+        devs.clear();
+        devs.extend(values.iter().map(|&v| (v as f64 - median).abs() as f32));
         let mad = median_f32_mut(&mut devs) as f64;
         let sig = (mad * MAD_TO_SIGMA).max(1e-30);
 
@@ -23,7 +26,8 @@ pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize)
     }
 
     let median = exact_median_mut(values);
-    let mut devs: Vec<f32> = values.iter().map(|&v| (v as f64 - median).abs() as f32).collect();
+    devs.clear();
+    devs.extend(values.iter().map(|&v| (v as f64 - median).abs() as f32));
     let sigma = (median_f32_mut(&mut devs) as f64 * MAD_TO_SIGMA).max(1e-30);
 
     (median, sigma)

@@ -1,15 +1,17 @@
 use anyhow::{bail, Result};
-use ndarray::{Array2, Zip, s};
+use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 
 use crate::core::alignment::pair::align_pair_with_label;
+use crate::core::compose::white_balance;
+use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::scnr;
 use crate::core::imaging::stats;
 use crate::core::imaging::stf::{self, AutoStfConfig, StfParams};
 use crate::types::image::ImageStats;
 
 pub use crate::types::compose::{
-    AlignMethod, WhiteBalance, ChannelStats, DimensionCrop,
+    AlignMethod, WhiteBalance, ChannelStats, DimensionHarmonize,
     RgbComposeConfig, RgbComposeResult,
 };
 
@@ -28,7 +30,7 @@ pub struct ProcessedRgb {
     pub offset_g: (f64, f64),
     pub offset_b: (f64, f64),
     pub scnr_applied: bool,
-    pub dimension_crop: Option<DimensionCrop>,
+    pub dimension_info: Option<DimensionHarmonize>,
     pub pre_stretch_r: Option<Array2<f32>>,
     pub pre_stretch_g: Option<Array2<f32>>,
     pub pre_stretch_b: Option<Array2<f32>>,
@@ -37,22 +39,18 @@ pub struct ProcessedRgb {
     pub stats_wb_b: Option<ImageStats>,
 }
 
-fn crop_to_size(arr: &Array2<f32>, rows: usize, cols: usize) -> Array2<f32> {
-    arr.slice(s![..rows, ..cols]).to_owned()
-}
-
 pub fn harmonize_dimensions(
     r: Option<&Array2<f32>>,
     g: Option<&Array2<f32>>,
     b: Option<&Array2<f32>>,
-    tolerance: usize,
+    max_ratio: f64,
 ) -> Result<(
     Option<Array2<f32>>,
     Option<Array2<f32>>,
     Option<Array2<f32>>,
     usize,
     usize,
-    Option<DimensionCrop>,
+    Option<DimensionHarmonize>,
 )> {
     let dims: Vec<(usize, usize)> = [r, g, b]
         .into_iter()
@@ -69,49 +67,61 @@ pub fn harmonize_dimensions(
     let max_rows = dims.iter().map(|d| d.0).max().unwrap();
     let max_cols = dims.iter().map(|d| d.1).max().unwrap();
 
-    let row_diff = max_rows - min_rows;
-    let col_diff = max_cols - min_cols;
-
-    if row_diff == 0 && col_diff == 0 {
-        return Ok((
-            r.map(|a| a.clone()),
-            g.map(|a| a.clone()),
-            b.map(|a| a.clone()),
-            min_rows,
-            min_cols,
-            None,
-        ));
+    if max_rows == min_rows && max_cols == min_cols {
+        return Ok((None, None, None, max_rows, max_cols, None));
     }
 
-    let pct_threshold = (min_rows.max(min_cols) as f64 * 0.01) as usize;
-    let effective_tolerance = tolerance.max(pct_threshold);
+    let ratio_rows = max_rows as f64 / min_rows.max(1) as f64;
+    let ratio_cols = max_cols as f64 / min_cols.max(1) as f64;
+    let ratio = ratio_rows.max(ratio_cols);
 
-    if row_diff > effective_tolerance || col_diff > effective_tolerance {
+    if ratio > max_ratio {
         let mut msg = format!(
-            "Channel dimensions differ by more than {}px (rows: {}px, cols: {}px).",
-            effective_tolerance, row_diff, col_diff
+            "Channel dimension ratio {:.1}x exceeds {:.0}x limit.",
+            ratio, max_ratio
         );
         if let Some(ra) = r { msg.push_str(&format!(" R={}x{}", ra.dim().1, ra.dim().0)); }
         if let Some(ga) = g { msg.push_str(&format!(" G={}x{}", ga.dim().1, ga.dim().0)); }
         if let Some(ba) = b { msg.push_str(&format!(" B={}x{}", ba.dim().1, ba.dim().0)); }
-        msg.push_str(". Use alignment or manually crop.");
+        msg.push_str(". Check channel assignments.");
         bail!("{}", msg);
     }
 
-    let crop_info = DimensionCrop {
+    log::info!(
+        "harmonize_dimensions: resampling channels to {}x{} (ratio {:.2}x)",
+        max_cols, max_rows, ratio
+    );
+
+    let info = DimensionHarmonize {
         original_r: r.map(|a| [a.dim().1, a.dim().0]),
         original_g: g.map(|a| [a.dim().1, a.dim().0]),
         original_b: b.map(|a| [a.dim().1, a.dim().0]),
-        cropped_to: [min_cols, min_rows],
+        target: [max_cols, max_rows],
+        resampled: true,
     };
 
-    let conform = |channel: Option<&Array2<f32>>, rows, cols| {
-        channel.map(|a| {
-            if a.dim() == (rows, cols) { a.clone() } else { crop_to_size(a, rows, cols) }
-        })
+    let resample_ch = |channel: Option<&Array2<f32>>| -> Result<Option<Array2<f32>>> {
+        match channel {
+            Some(a) => {
+                let (rows, cols) = a.dim();
+                if rows == max_rows && cols == max_cols {
+                    Ok(Some(a.clone()))
+                } else {
+                    Ok(Some(resample_image(a, max_rows, max_cols)?))
+                }
+            }
+            None => Ok(None),
+        }
     };
 
-    Ok((conform(r, min_rows, min_cols), conform(g, min_rows, min_cols), conform(b, min_rows, min_cols), min_rows, min_cols, Some(crop_info)))
+    Ok((
+        resample_ch(r)?,
+        resample_ch(g)?,
+        resample_ch(b)?,
+        max_rows,
+        max_cols,
+        Some(info),
+    ))
 }
 
 fn apply_multiplier_inplace(arr: &mut Array2<f32>, mult: f32) {
@@ -142,14 +152,14 @@ fn channel_or_synth(
 
 fn merge_for_stf(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
     let (rows, cols) = r.dim();
-    let r_s = r.as_slice().expect("contiguous");
-    let g_s = g.as_slice().expect("contiguous");
-    let b_s = b.as_slice().expect("contiguous");
-    let pixels: Vec<f32> = (0..rows * cols)
-        .into_par_iter()
-        .map(|i| (r_s[i] + g_s[i] + b_s[i]) * (1.0 / 3.0))
-        .collect();
-    Array2::from_shape_vec((rows, cols), pixels).unwrap()
+    let mut out = Array2::zeros((rows, cols));
+
+    Zip::from(&mut out).and(r).and(g).and(b)
+        .par_for_each(|o, &rv, &gv, &bv| {
+            *o = (rv + gv + bv) * (1.0 / 3.0);
+        });
+
+    out
 }
 
 pub(crate) fn align_channels(
@@ -176,25 +186,6 @@ pub(crate) fn align_channels(
     };
 
     Ok((r_img, g_aligned, b_aligned, off_g, off_b))
-}
-
-fn select_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> (f64, f64, f64) {
-    let stability = |s: &ImageStats| -> f64 {
-        if s.median > 1e-10 { s.mad / s.median } else { f64::MAX }
-    };
-    let stab_r = stability(sr);
-    let stab_g = stability(sg);
-    let stab_b = stability(sb);
-    if stab_r <= stab_g && stab_r <= stab_b {
-        let m = sr.median.max(1e-10);
-        (1.0, m / sg.median.max(1e-10), m / sb.median.max(1e-10))
-    } else if stab_b <= stab_g {
-        let m = sb.median.max(1e-10);
-        (m / sr.median.max(1e-10), m / sg.median.max(1e-10), 1.0)
-    } else {
-        let m = sg.median.max(1e-10);
-        (m / sr.median.max(1e-10), 1.0, m / sb.median.max(1e-10))
-    }
 }
 
 fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, st: &ImageStats) {
@@ -225,19 +216,22 @@ pub fn process_rgb(
     let count = present.iter().filter(|&&b| b).count();
     if count < 2 { bail!("Need at least 2 channels for RGB compose (got {})", count); }
 
-    let (r_harm, g_harm, b_harm, rows, cols, dimension_crop) =
-        harmonize_dimensions(r_channel, g_channel, b_channel, config.dimension_tolerance)?;
+    let max_ratio = crate::types::constants::MAX_DIMENSION_RATIO;
+
+    let (r_harm, g_harm, b_harm, rows, cols, dimension_info) =
+        harmonize_dimensions(r_channel, g_channel, b_channel, max_ratio)?;
+
+    let r_eff = r_harm.as_ref().or(r_channel);
+    let g_eff = g_harm.as_ref().or(g_channel);
+    let b_eff = b_harm.as_ref().or(b_channel);
 
     let (mut r_img, mut g_img, mut b_img, off_g, off_b) = {
-        let r_ref = r_harm.as_ref().or(r_channel);
-        let g_ref = g_harm.as_ref().or(g_channel);
-        let b_ref = b_harm.as_ref().or(b_channel);
         if config.align && count >= 2 {
-            align_channels(r_ref, g_ref, b_ref, rows, cols, config.align_method)?
+            align_channels(r_eff, g_eff, b_eff, rows, cols, config.align_method)?
         } else {
-            let r = channel_or_synth(r_ref, g_ref, b_ref, rows, cols);
-            let g = channel_or_synth(g_ref, r_ref, b_ref, rows, cols);
-            let b = channel_or_synth(b_ref, r_ref, g_ref, rows, cols);
+            let r = channel_or_synth(r_eff, g_eff, b_eff, rows, cols);
+            let g = channel_or_synth(g_eff, r_eff, b_eff, rows, cols);
+            let b = channel_or_synth(b_eff, r_eff, g_eff, rows, cols);
             (r, g, b, (0.0, 0.0), (0.0, 0.0))
         }
     };
@@ -253,7 +247,7 @@ pub fn process_rgb(
     let stats_b = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => select_wb_reference(&sr_full, &sg_full, &sb_full),
+        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full),
         WhiteBalance::Manual(r, g, b) => (*r, *g, *b),
         WhiteBalance::None => (1.0, 1.0, 1.0),
     };
@@ -318,7 +312,7 @@ pub fn process_rgb(
         r: r_img, g: g_img, b: b_img, rows, cols,
         stf_r: stf_r_params, stf_g: stf_g_params, stf_b: stf_b_params,
         stats_r, stats_g, stats_b,
-        offset_g: off_g, offset_b: off_b, scnr_applied, dimension_crop,
+        offset_g: off_g, offset_b: off_b, scnr_applied, dimension_info,
         pre_stretch_r: pre_r,
         pre_stretch_g: pre_g,
         pre_stretch_b: pre_b,

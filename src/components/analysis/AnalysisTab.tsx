@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import HistogramPanel from "./HistogramPanel";
-import { detectStars, computeFftSpectrum, applyStfRender } from "../../services/analysis";
+import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
@@ -44,7 +45,8 @@ function AnalysisTabInner({
   const { file } = useFileContext();
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
-  const { setRenderedPreviewUrl, activeImagePath, isShowingComposite } = useRenderContext();
+  const { setRenderedPreviewUrl, activeImagePath } = useRenderContext();
+  const { isShowingComposite } = useCompositeContext();
   const { rawPixels } = useRawPixelsContext();
 
   const [starResult, setStarResult] = useState<any>(null);
@@ -117,10 +119,13 @@ function AnalysisTabInner({
 
   const handleDetectStars = useCallback(
     async (sigma: number) => {
-      if (!effectivePath) return;
       setStarLoading(true);
       try {
-        const result = await detectStars(effectivePath, sigma, 200);
+        const result = isShowingComposite
+          ? await detectStarsComposite(sigma, 200)
+          : effectivePath
+            ? await detectStars(effectivePath, sigma, 200)
+            : null;
         setStarResult(result);
       } catch (e) {
         console.error("Star detection failed:", e);
@@ -128,7 +133,7 @@ function AnalysisTabInner({
         setStarLoading(false);
       }
     },
-    [effectivePath],
+    [effectivePath, isShowingComposite],
   );
 
   const handleCollapsePreview = useCallback(

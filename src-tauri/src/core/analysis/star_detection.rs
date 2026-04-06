@@ -4,6 +4,7 @@ use ndarray::Array2;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::analysis::confidence;
 use crate::math::{sigma_clipped_stats, f64_cmp};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,7 +166,7 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
                 continue;
             }
 
-            let snr = peak_val / bg_sigma;
+            let snr = confidence::compute_detection_snr(peak_val, bg_sigma);
 
             stars.push(DetectedStar {
                 x: cx,

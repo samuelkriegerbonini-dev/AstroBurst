@@ -253,28 +253,6 @@ impl AsdfImage {
         }
     }
 
-    pub fn channel_data(&self, ch: usize) -> Option<&[f32]> {
-        if ch >= self.channels {
-            return None;
-        }
-        let plane_size = self.width * self.height;
-        let start = ch * plane_size;
-        let end = start + plane_size;
-        if end <= self.data.len() {
-            Some(&self.data[start..end])
-        } else {
-            None
-        }
-    }
-
-    pub fn pixel(&self, x: usize, y: usize, ch: usize) -> Option<f32> {
-        if x >= self.width || y >= self.height || ch >= self.channels {
-            return None;
-        }
-        let plane_size = self.width * self.height;
-        let idx = ch * plane_size + y * self.width + x;
-        self.data.get(idx).copied()
-    }
 }
 
 pub fn is_asdf_file<P: AsRef<Path>>(path: P) -> bool {

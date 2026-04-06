@@ -176,21 +176,6 @@ pub fn spcc_calibrate_rgb(
     })
 }
 
-pub fn apply_spcc_factors(
-    r: &mut Array2<f32>,
-    g: &mut Array2<f32>,
-    b: &mut Array2<f32>,
-    result: &SpccResult,
-) {
-    let rf = result.r_factor as f32;
-    let gf = result.g_factor as f32;
-    let bf = result.b_factor as f32;
-
-    r.mapv_inplace(|v| (v * rf).clamp(0.0, 1.0));
-    g.mapv_inplace(|v| (v * gf).clamp(0.0, 1.0));
-    b.mapv_inplace(|v| (v * bf).clamp(0.0, 1.0));
-}
-
 fn synthesize_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
     let (h, w) = r.dim();
     let mut lum = Array2::<f32>::zeros((h, w));
@@ -286,118 +271,7 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
 }
 
 fn query_gaia_vizier(_ra_center: f64, _dec_center: f64, _radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
-    #[allow(unexpected_cfgs)]
-    #[cfg(feature = "vizier")]
-    {
-        let url = format!(
-            "https://vizier.cds.unistra.fr/viz-bin/votable/-A?-source=I/355/gaiadr3&-c={:.6}%20{:+.6}&-c.rd={:.4}&-out=RA_ICRS,DE_ICRS,BP-RP&-out.max=500&BP-RP=!null&-sort=Gmag",
-            _ra_center, _dec_center, _radius_deg,
-        );
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| format!("HTTP client error: {}", e))?;
-        let resp = client.get(&url).send()
-            .map_err(|e| format!("VizieR request failed: {}", e))?;
-        let body = resp.text()
-            .map_err(|e| format!("Failed to read VizieR response: {}", e))?;
-        return parse_votable_bprp(&body);
-    }
-
-    #[allow(unreachable_code)]
     Err("Gaia DR3 TAP requires 'vizier' feature. Using built-in Bp-Rp estimation.".into())
-}
-
-#[allow(dead_code)]
-fn parse_votable_bprp(xml: &str) -> Result<Vec<CatalogStar>, String> {
-    let mut stars = Vec::new();
-
-    let mut ra_col: Option<usize> = None;
-    let mut dec_col: Option<usize> = None;
-    let mut bprp_col: Option<usize> = None;
-
-    let mut in_tabledata = false;
-    let mut in_tr = false;
-    let mut col_idx = 0;
-    let mut current_ra = 0.0f64;
-    let mut current_dec = 0.0f64;
-    let mut current_bprp = 0.0f64;
-    let mut field_idx = 0;
-
-    for line in xml.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.contains("<FIELD") {
-            if trimmed.contains("RA_ICRS") || trimmed.contains("ra") {
-                ra_col = Some(field_idx);
-            } else if trimmed.contains("DE_ICRS") || trimmed.contains("dec") {
-                dec_col = Some(field_idx);
-            } else if trimmed.contains("BP-RP") || trimmed.contains("bp_rp") {
-                bprp_col = Some(field_idx);
-            }
-            field_idx += 1;
-        }
-
-        if trimmed.contains("<TABLEDATA") {
-            in_tabledata = true;
-            continue;
-        }
-        if trimmed.contains("</TABLEDATA") {
-            in_tabledata = false;
-        }
-
-        if !in_tabledata {
-            continue;
-        }
-
-        if trimmed.contains("<TR") {
-            in_tr = true;
-            col_idx = 0;
-            current_ra = f64::NAN;
-            current_dec = f64::NAN;
-            current_bprp = f64::NAN;
-            continue;
-        }
-
-        if trimmed.contains("</TR") {
-            if in_tr && current_ra.is_finite() && current_dec.is_finite() && current_bprp.is_finite() {
-                stars.push(CatalogStar {
-                    ra: current_ra,
-                    dec: current_dec,
-                    bp_rp: current_bprp,
-                });
-            }
-            in_tr = false;
-            continue;
-        }
-
-        if trimmed.starts_with("<TD") {
-            let val = extract_td_value(trimmed);
-            if let Ok(v) = val.parse::<f64>() {
-                if ra_col == Some(col_idx) {
-                    current_ra = v;
-                } else if dec_col == Some(col_idx) {
-                    current_dec = v;
-                } else if bprp_col == Some(col_idx) {
-                    current_bprp = v;
-                }
-            }
-            col_idx += 1;
-        }
-    }
-
-    if stars.is_empty() {
-        return Err("No stars parsed from VizieR response".into());
-    }
-
-    Ok(stars)
-}
-
-#[allow(dead_code)]
-fn extract_td_value(line: &str) -> &str {
-    let start = line.find('>').map(|i| i + 1).unwrap_or(0);
-    let end = line.rfind("</TD").unwrap_or(line.len());
-    &line[start..end]
 }
 
 fn cross_match_stars(

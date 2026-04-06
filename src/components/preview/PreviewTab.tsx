@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
 import { Image, Loader2, X } from "lucide-react";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 import type { RawPixelData } from "../../shared/types";
 
 import ZoomPanView from "../ui/ZoomPanView";
@@ -44,7 +45,8 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { isCube } = useCubeContext();
-  const { renderedPreviewUrl, compositePreviewUrl, clearComposite } = useRenderContext();
+  const { renderedPreviewUrl } = useRenderContext();
+  const { compositePreviewUrl, clearComposite } = useCompositeContext();
 
   const [previewError, setPreviewError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);

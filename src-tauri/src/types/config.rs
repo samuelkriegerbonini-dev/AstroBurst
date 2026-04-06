@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub plate_solve_max_stars: usize,
     pub auto_stretch_target_bg: f64,
     pub auto_stretch_shadow_k: f64,
+    #[serde(default)]
+    pub output_max_size_mb: Option<u64>,
 }
 
 impl Default for AppConfig {
@@ -21,6 +23,7 @@ impl Default for AppConfig {
             plate_solve_max_stars: 100,
             auto_stretch_target_bg: 0.25,
             auto_stretch_shadow_k: -2.8,
+            output_max_size_mb: None,
         }
     }
 }
