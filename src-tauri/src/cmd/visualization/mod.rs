@@ -80,14 +80,21 @@ pub async fn generate_tiles_rgb(
         let (entry_r, entry_g, entry_b) = helpers::load_composite_rgb()
             .map_err(|_| anyhow::anyhow!("RGB composite not available. Run Compose RGB first."))?;
 
+        let cfg = AutoStfConfig::default();
+        let stf = helpers::compute_linked_stf(entry_r.stats(), entry_g.stats(), entry_b.stats(), &cfg);
+
+        let stretched_r = apply_stf_f32(entry_r.arr(), &stf, entry_r.stats());
+        let stretched_g = apply_stf_f32(entry_g.arr(), &stf, entry_g.stats());
+        let stretched_b = apply_stf_f32(entry_b.arr(), &stf, entry_b.stats());
+
         let params = tiles::TileParams {
             tile_size: tile_size as usize,
         };
 
         let result = tiles::generate_tile_pyramid_rgb(
-            entry_r.arr(),
-            entry_g.arr(),
-            entry_b.arr(),
+            &stretched_r,
+            &stretched_g,
+            &stretched_b,
             &output_dir,
             &params,
         )?;

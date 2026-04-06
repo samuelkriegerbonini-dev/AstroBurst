@@ -65,7 +65,9 @@ impl Default for AutoStfConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ScnrMethod {
+    #[serde(alias = "average")]
     AverageNeutral,
+    #[serde(alias = "maximum")]
     MaximumNeutral,
 }
 
@@ -76,6 +78,7 @@ impl Default for ScnrMethod {
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScnrConfig {
     pub method: ScnrMethod,
     pub amount: f32,
