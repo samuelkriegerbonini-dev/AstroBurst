@@ -117,28 +117,3 @@ pub fn exponential_disk(
         })
         .collect()
 }
-
-pub fn from_particles(
-    positions: &[(f64, f64, f64)],
-    masses: &[f64],
-    image_width: u32,
-    image_height: u32,
-    fov_scale: f64,
-) -> Vec<Star> {
-    let cx = image_width as f64 * 0.5;
-    let cy = image_height as f64 * 0.5;
-    positions
-        .iter()
-        .zip(masses.iter())
-        .map(|(&(px, py, pz), &mass)| {
-            let luminosity = mass.abs().powf(3.5);
-            Star {
-                x: cx + px * fov_scale,
-                y: cy + py * fov_scale,
-                z: pz,
-                flux: (luminosity * fov_scale).max(1.0),
-                temperature: (5778.0 * mass.abs().powf(0.505)).clamp(2000.0, 50000.0),
-            }
-        })
-        .collect()
-}

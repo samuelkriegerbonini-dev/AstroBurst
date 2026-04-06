@@ -1,9 +1,18 @@
 import { useState, useCallback, useMemo, useReducer, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 import { detectNarrowbandFilters } from "../../services/header";
-import { STEPS, INITIAL_STATE, STEP_ORDER, nextEnabledStep } from "./wizard.types";
-import type { WizardState, FrequencyBin, BlendWeight } from "./wizard.types";
+import {
+  BlendWeight,
+  FrequencyBin,
+  INITIAL_STATE,
+  nextEnabledStep,
+  STEP_ORDER,
+  STEPS,
+  WizardState
+} from "../../utils/wizard";
+
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
 const StackStep = lazy(() => import("./steps/StackStep"));
@@ -38,7 +47,7 @@ function reducer(state: WizardState, action: Action): WizardState {
   switch (action.type) {
     case "SET_BINS": {
       const hasFiles = action.bins.some((b) => b.files.length > 0);
-      const completed = hasFiles
+      const completed: Record<string, boolean> = hasFiles
         ? { channels: true }
         : {};
       return { ...state, bins: action.bins, completedSteps: completed };
@@ -162,6 +171,8 @@ export default function ComposeWizard() {
     setCompositePreviewUrl,
     setCompositeAutoStf,
     setCompositeStf,
+  } = useCompositeContext();
+  const {
     setActiveImagePath,
   } = useRenderContext();
 

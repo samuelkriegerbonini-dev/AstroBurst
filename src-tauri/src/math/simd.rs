@@ -221,10 +221,7 @@ pub fn collapse_mean_simd(cube: &ndarray::Array3<f32>) -> Array2<f32> {
 
     for z in 0..depth {
         let slice = cube.slice(ndarray::s![z, .., ..]);
-        let raw = slice.as_slice().unwrap_or_else(|| {
-            &[]
-        });
-        if raw.len() == npix {
+        if let Some(raw) = slice.as_slice() {
             for i in 0..npix {
                 let v = raw[i];
                 if v.is_finite() && v != 0.0 {
@@ -267,18 +264,6 @@ pub fn find_minmax_simd(data: &[f32]) -> (f32, f32) {
     let mut max = f32::MIN;
     for &v in data {
         if v.is_finite() {
-            min = min.min(v);
-            max = max.max(v);
-        }
-    }
-    (min, max)
-}
-
-pub fn find_minmax_valid(data: &[f32]) -> (f32, f32) {
-    let mut min = f32::MAX;
-    let mut max = f32::MIN;
-    for &v in data {
-        if is_valid(v) {
             min = min.min(v);
             max = max.max(v);
         }

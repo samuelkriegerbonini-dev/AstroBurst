@@ -1,52 +1,15 @@
 import { useState, useCallback } from "react";
 import { Download, Archive, Loader2, Check, FolderOpen } from "lucide-react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
+import { resolveRgbPaths } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgb } from "../../../services/export";
 import { restretchComposite } from "../../../services/compose";
 import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
-import { useRenderContext } from "../../../context/PreviewContext";
+import { useCompositeContext } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
 
 interface ExportStepProps {
   state: WizardState;
-}
-
-function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
-}
-
-function resolveRgbPaths(state: WizardState): { r: string | null; g: string | null; b: string | null } {
-  const activeBins = state.bins.filter((b) => b.files.length > 0);
-
-  const rCandidates = ["r", "sii", "ha"];
-  const gCandidates = ["g", "ha", "oiii"];
-  const bCandidates = ["b", "oiii", "sii"];
-
-  const usedIds = new Set<string>();
-
-  const findBest = (candidates: string[], allowReuse = false): string | null => {
-    for (const cid of candidates) {
-      if (!allowReuse && usedIds.has(cid)) continue;
-      const bin = activeBins.find((b) => b.id === cid);
-      if (bin) {
-        usedIds.add(cid);
-        return resolveChannelPath(state, cid);
-      }
-    }
-    return null;
-  };
-
-  const r = findBest(rCandidates);
-  const g = findBest(gCandidates);
-  let b = findBest(bCandidates);
-  if (!b) b = findBest(bCandidates, true);
-
-  return { r, g, b };
 }
 
 async function revealInExplorer(path: string) {
@@ -63,7 +26,7 @@ async function revealInExplorer(path: string) {
 }
 
 export default function ExportStep({ state }: ExportStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB } = useRenderContext();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
   const [loading, setLoading] = useState(false);
@@ -134,7 +97,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [state, format, bitDepth]);
+  }, [state, format, bitDepth, compositeStfR, compositeStfG, compositeStfB]);
 
   const handleZipExport = useCallback(async () => {
     setZipLoading(true);
@@ -150,7 +113,6 @@ export default function ExportStep({ state }: ExportStepProps) {
       }
 
       const filesToZip: { name: string; path: string }[] = [];
-
       const { r, g, b } = resolveRgbPaths(state);
 
       if (r) {
@@ -211,7 +173,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setZipLoading(false);
     }
-  }, [state]);
+  }, [state, compositeStfR, compositeStfG, compositeStfB]);
 
   const activeBins = state.bins.filter((b) => b.files.length > 0);
 

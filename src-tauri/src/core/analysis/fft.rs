@@ -1,7 +1,10 @@
 use anyhow::Result;
-use ndarray::{Array2, Axis, Zip};
+use ndarray::Array2;
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
+
+use crate::math::complex;
+use crate::math::fft::{self, FftEngine2D};
+use crate::math::window;
 
 const MAX_DISPLAY_SIZE: usize = 1024;
 
@@ -21,57 +24,17 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
     let (rows, cols) = data.dim();
     let size = rows.max(cols).next_power_of_two();
 
-    let mut padded = Array2::<Complex<f32>>::zeros((size, size));
+    let engine = FftEngine2D::<f32>::new(size, size);
 
-    if apply_window {
-        let hann_row: Vec<f32> = (0..rows)
-            .map(|i| {
-                let t = 2.0 * std::f32::consts::PI * i as f32 / (rows as f32 - 1.0).max(1.0);
-                0.5 * (1.0 - t.cos())
-            })
-            .collect();
-        let hann_col: Vec<f32> = (0..cols)
-            .map(|j| {
-                let t = 2.0 * std::f32::consts::PI * j as f32 / (cols as f32 - 1.0).max(1.0);
-                0.5 * (1.0 - t.cos())
-            })
-            .collect();
-
-        Zip::indexed(data).for_each(|(y, x), &v| {
-            let val = if v.is_finite() { v * hann_row[y] * hann_col[x] } else { 0.0 };
-            padded[[y, x]] = Complex::new(val, 0.0);
-        });
+    let mut buf = if apply_window {
+        let hann_row = window::hann_symmetric::<f32>(rows);
+        let hann_col = window::hann_symmetric::<f32>(cols);
+        fft::prepare_windowed_buffer(data, &hann_row, &hann_col, size, size)
     } else {
-        Zip::indexed(data).for_each(|(y, x), &v| {
-            padded[[y, x]] = Complex::new(if v.is_finite() { v } else { 0.0 }, 0.0);
-        });
-    }
+        fft::prepare_buffer_no_window(data, size, size)
+    };
 
-    let mut planner = FftPlanner::<f32>::new();
-    let zero = Complex::new(0.0f32, 0.0);
-
-    let fft_fwd = planner.plan_fft_forward(size);
-
-    padded.axis_iter_mut(Axis(0)).into_par_iter().for_each_init(
-        || vec![zero; size],
-        |buf, mut row| {
-            buf.iter_mut().zip(row.iter()).for_each(|(b, &r)| *b = r);
-            fft_fwd.process(buf);
-            row.iter_mut().zip(buf.iter()).for_each(|(d, &s)| *d = s);
-        },
-    );
-
-    let fft_col = planner.plan_fft_forward(size);
-    let mut transposed = padded.t().to_owned();
-    transposed.axis_iter_mut(Axis(0)).into_par_iter().for_each_init(
-        || vec![zero; size],
-        |buf, mut row| {
-            buf.iter_mut().zip(row.iter()).for_each(|(b, &r)| *b = r);
-            fft_col.process(buf);
-            row.iter_mut().zip(buf.iter()).for_each(|(d, &s)| *d = s);
-        },
-    );
-    padded = transposed.t().to_owned();
+    engine.forward_2d(&mut buf);
 
     let half = size / 2;
     let shifted_log: Vec<f32> = (0..size * size)
@@ -81,7 +44,8 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
             let c = idx % size;
             let sr = (r + half) % size;
             let sc = (c + half) % size;
-            (1.0 + padded[[sr, sc]].norm()).ln()
+            let mag = complex::norm(buf[sr * size + sc]);
+            (1.0 + mag).ln()
         })
         .collect();
     let spectrum = Array2::from_shape_vec((size, size), shifted_log).unwrap();

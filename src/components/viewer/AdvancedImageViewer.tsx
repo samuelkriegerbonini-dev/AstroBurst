@@ -2,8 +2,6 @@ import {
   useState,
   useCallback,
   useRef,
-  useEffect,
-  useMemo,
   memo,
 } from "react";
 import {
@@ -21,6 +19,9 @@ import {
   ImageOff,
   RefreshCw,
 } from "lucide-react";
+import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
+import { useImageRetry } from "../../hooks/useImageRetry";
+import { screenToImagePixel } from "../../utils/pixelMapping";
 
 interface ViewerImage {
   url: string;
@@ -39,23 +40,6 @@ interface AdvancedImageViewerProps {
   className?: string;
 }
 
-interface Transform {
-  scale: number;
-  x: number;
-  y: number;
-}
-
-const ZOOM_MIN = 0.1;
-const ZOOM_MAX = 32;
-const ZOOM_STEP = 1.15;
-const ZOOM_PRESETS = [0.25, 0.5, 1, 2, 4, 8];
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [200, 600, 1500] as const;
-
-function clampTransform(t: Transform): Transform {
-  return { scale: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, t.scale)), x: t.x, y: t.y };
-}
-
 function AdvancedImageViewer({
   original,
   processed,
@@ -66,130 +50,30 @@ function AdvancedImageViewer({
   className = "",
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [transform, setTransform] = useState<Transform>({ scale: 1, x: 0, y: 0 });
-  const transformRef = useRef(transform);
-  transformRef.current = transform;
+  const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
   const [showOverlay, setShowOverlay] = useState(true);
   const [cursorMode, setCursorMode] = useState<"pan" | "crosshair">("pan");
   const [isPanning, setIsPanning] = useState(false);
   const isPanningRef = useRef(false);
-  const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const compareDragging = useRef(false);
 
-  const [imgLoading, setImgLoading] = useState(false);
-  const [imgError, setImgError] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const activeImage = processed ?? original;
   const hasComparison = !!original && !!processed;
-
   const renderW = imgNatural?.w ?? 0;
   const renderH = imgNatural?.h ?? 0;
-  const hasRenderDims = renderW > 0 && renderH > 0;
 
-  const fitToWindowRef = useRef<() => void>(() => {});
+  const {
+    transform, transformRef, setTransform,
+    fitToWindow, zoomTo, zoomIn, zoomOut, setOneToOne,
+    hasRenderDims, zoomPct,
+  } = useViewerTransform({ containerRef, renderW, renderH });
 
-  const imgSrc = useMemo(() => {
-    if (!activeImage?.url) return null;
-    if (retryCount === 0) return activeImage.url;
-    const sep = activeImage.url.includes("?") ? "&" : "?";
-    return `${activeImage.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
-  }, [activeImage?.url, retryCount]);
-
-  const origSrc = useMemo(() => {
-    if (!original?.url) return null;
-    if (retryCount === 0) return original.url;
-    const sep = original.url.includes("?") ? "&" : "?";
-    return `${original.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
-  }, [original?.url, retryCount]);
-
-  const procSrc = useMemo(() => {
-    if (!processed?.url) return null;
-    if (retryCount === 0) return processed.url;
-    const sep = processed.url.includes("?") ? "&" : "?";
-    return `${processed.url}${sep}_retry=${retryCount}&t=${Date.now()}`;
-  }, [processed?.url, retryCount]);
-
-  useEffect(() => {
-    if (activeImage?.url) {
-      setImgNatural(null);
-      setImgLoading(true);
-      setImgError(false);
-      setRetryCount(0);
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-    }
-  }, [activeImage?.url]);
-
-  useEffect(() => {
-    return () => {
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-    };
-  }, []);
-
-  const fitToWindow = useCallback(() => {
-    const container = containerRef.current;
-    if (!container || !hasRenderDims) return;
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    if (cw === 0 || ch === 0) return;
-    const scale = Math.min(cw / renderW, ch / renderH, 1);
-    setTransform({
-      scale,
-      x: (cw - renderW * scale) / 2,
-      y: (ch - renderH * scale) / 2,
-    });
-  }, [renderW, renderH, hasRenderDims]);
-
-  fitToWindowRef.current = fitToWindow;
-
-  const zoomTo = useCallback((newScale: number, centerX?: number, centerY?: number) => {
-    setTransform((prev) => {
-      const container = containerRef.current;
-      if (!container) return { ...prev, scale: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newScale)) };
-      const rect = container.getBoundingClientRect();
-      const cx = centerX ?? rect.width / 2;
-      const cy = centerY ?? rect.height / 2;
-      const ratio = newScale / prev.scale;
-      return clampTransform({
-        scale: newScale,
-        x: cx - (cx - prev.x) * ratio,
-        y: cy - (cy - prev.y) * ratio,
-      });
-    });
-  }, []);
-
-  const handleWheelNative = useCallback(
-    (e: WheelEvent) => {
-      e.preventDefault();
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      setTransform((prev) => {
-        const newScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev.scale * factor));
-        const ratio = newScale / prev.scale;
-        return clampTransform(
-          { scale: newScale, x: cx - (cx - prev.x) * ratio, y: cy - (cy - prev.y) * ratio },
-        );
-      });
-    },
-    [],
-  );
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener("wheel", handleWheelNative, { passive: false });
-    return () => el.removeEventListener("wheel", handleWheelNative);
-  }, [handleWheelNative]);
+  const mainRetry = useImageRetry(activeImage?.url);
+  const origRetry = useImageRetry(original?.url);
+  const procRetry = useImageRetry(processed?.url);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -205,7 +89,7 @@ function AdvancedImageViewer({
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
       }
     },
-    [compareMode, comparePos, cursorMode],
+    [compareMode, comparePos, cursorMode, transformRef],
   );
 
   const handlePointerMove = useCallback(
@@ -224,19 +108,16 @@ function AdvancedImageViewer({
       if (cursorMode === "crosshair" && onMousePixel && hasRenderDims) {
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const t = transformRef.current;
-        const imgX = (e.clientX - rect.left - t.x) / t.scale;
-        const imgY = (e.clientY - rect.top - t.y) / t.scale;
-        if (imgX >= 0 && imgX < renderW && imgY >= 0 && imgY < renderH) {
-          const fitsW = activeImage?.width ?? renderW;
-          const fitsH = activeImage?.height ?? renderH;
-          const fx = Math.floor((imgX / renderW) * fitsW);
-          const fy = Math.floor((imgY / renderH) * fitsH);
-          onMousePixel(fx, fy);
-        }
+        const fitsW = activeImage?.width ?? renderW;
+        const fitsH = activeImage?.height ?? renderH;
+        const coord = screenToImagePixel(
+          e.clientX, e.clientY, rect, transformRef.current,
+          renderW, renderH, fitsW, fitsH,
+        );
+        if (coord) onMousePixel(coord.x, coord.y);
       }
     },
-    [cursorMode, onMousePixel, activeImage, renderW, renderH, hasRenderDims],
+    [cursorMode, onMousePixel, activeImage, renderW, renderH, hasRenderDims, setTransform, transformRef],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -245,67 +126,15 @@ function AdvancedImageViewer({
     compareDragging.current = false;
   }, []);
 
-  const resetView = useCallback(() => {
-    fitToWindow();
-  }, [fitToWindow]);
-
-  const setOneToOne = useCallback(() => {
-    const container = containerRef.current;
-    if (!container || !hasRenderDims) return;
-    setTransform({
-      scale: 1,
-      x: (container.clientWidth - renderW) / 2,
-      y: (container.clientHeight - renderH) / 2,
-    });
-  }, [renderW, renderH, hasRenderDims]);
-
   const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
     if (nw > 0 && nh > 0) {
       setImgNatural({ w: nw, h: nh });
-      setImgLoading(false);
-      setImgError(false);
+      mainRetry.onLoad();
     }
-  }, []);
-
-  const handleImageError = useCallback(() => {
-    if (retryTimerRef.current) return;
-    if (retryCount < MAX_RETRIES) {
-      const delay = RETRY_DELAYS[retryCount] ?? 1500;
-      retryTimerRef.current = setTimeout(() => {
-        retryTimerRef.current = null;
-        setRetryCount((c) => c + 1);
-      }, delay);
-    } else {
-      setImgLoading(false);
-      setImgError(true);
-    }
-  }, [retryCount]);
-
-  const handleRetryClick = useCallback(() => {
-    setRetryCount(0);
-    setImgError(false);
-    setImgLoading(true);
-    requestAnimationFrame(() => setRetryCount(1));
-  }, []);
-
-  useEffect(() => {
-    if (hasRenderDims) {
-      requestAnimationFrame(() => fitToWindowRef.current());
-    }
-  }, [hasRenderDims, renderW, renderH]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => fitToWindowRef.current());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const zoomPct = useMemo(() => `${Math.round(transform.scale * 100)}%`, [transform.scale]);
+  }, [mainRetry.onLoad]);
 
   const imgStyle: React.CSSProperties = {
     transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
@@ -335,21 +164,11 @@ function AdvancedImageViewer({
     <div className={`ab-viewer-root ${className}`}>
       <div className="ab-viewer-toolbar">
         <div className="ab-viewer-toolbar-group">
-          <button onClick={() => zoomTo(transform.scale * ZOOM_STEP)} className="ab-viewer-btn" title="Zoom In">
-            <ZoomIn size={14} />
-          </button>
-          <button onClick={() => zoomTo(transform.scale / ZOOM_STEP)} className="ab-viewer-btn" title="Zoom Out">
-            <ZoomOut size={14} />
-          </button>
-          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window">
-            <Maximize size={14} />
-          </button>
-          <button onClick={setOneToOne} className="ab-viewer-btn" title="1:1 Pixel">
-            <Square size={13} />
-          </button>
-          <button onClick={resetView} className="ab-viewer-btn" title="Reset View">
-            <RotateCcw size={13} />
-          </button>
+          <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom In"><ZoomIn size={14} /></button>
+          <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom Out"><ZoomOut size={14} /></button>
+          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window"><Maximize size={14} /></button>
+          <button onClick={setOneToOne} className="ab-viewer-btn" title="1:1 Pixel"><Square size={13} /></button>
+          <button onClick={fitToWindow} className="ab-viewer-btn" title="Reset View"><RotateCcw size={13} /></button>
         </div>
 
         <div className="ab-viewer-toolbar-divider" />
@@ -358,7 +177,7 @@ function AdvancedImageViewer({
           <button
             onClick={() => setCursorMode((m) => (m === "pan" ? "crosshair" : "pan"))}
             className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
-            title={cursorMode === "crosshair" ? "Switch to Pan (drag to move)" : "Switch to Crosshair (inspect pixels)"}
+            title={cursorMode === "crosshair" ? "Switch to Pan" : "Switch to Crosshair"}
           >
             {cursorMode === "crosshair" ? <Crosshair size={14} /> : <Move size={14} />}
           </button>
@@ -399,65 +218,38 @@ function AdvancedImageViewer({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={() => {
-          handlePointerUp();
-          onMouseLeave?.();
-        }}
+        onPointerLeave={() => { handlePointerUp(); onMouseLeave?.(); }}
         style={{ cursor: isPanning ? "grabbing" : cursorMode === "pan" ? "grab" : "crosshair" }}
       >
-        {imgLoading && !hasRenderDims && !imgError && (
+        {mainRetry.loading && !hasRenderDims && !mainRetry.error && (
           <div className="ab-viewer-loading-overlay">
             <Loader2 size={24} className="animate-spin" style={{ color: "var(--ab-teal)", opacity: 0.5 }} />
           </div>
         )}
 
-        {imgError && (
+        {mainRetry.error && (
           <div className="ab-viewer-error-overlay">
             <ImageOff size={28} strokeWidth={1.5} className="text-zinc-600" />
             <span className="text-xs text-zinc-500 mt-2">Preview failed to load</span>
-            <button onClick={handleRetryClick} className="ab-viewer-retry-btn">
-              <RefreshCw size={12} />
-              Retry
+            <button onClick={mainRetry.retry} className="ab-viewer-retry-btn">
+              <RefreshCw size={12} /> Retry
             </button>
           </div>
         )}
 
-        {!imgError && compareMode && original && processed ? (
+        {!mainRetry.error && compareMode && original && processed ? (
           <>
             <div style={{ ...imgStyle, zIndex: 1 }}>
-              <img
-                src={procSrc ?? ""}
-                alt={processed.label}
-                draggable={false}
-                onLoad={handleImageLoad}
-                onError={handleImageError}
-                style={{ display: "block" }}
-              />
+              <img src={procRetry.src ?? ""} alt={processed.label} draggable={false}
+                onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />
               {overlayCanvasRef && (
-                <canvas
-                  ref={overlayCanvasRef}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
-                />
+                <canvas ref={overlayCanvasRef}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
               )}
             </div>
-            <div
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: `${comparePos}%`,
-                height: "100%",
-                overflow: "hidden",
-                zIndex: 2,
-              }}
-            >
+            <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
-                <img
-                  src={origSrc ?? ""}
-                  alt={original.label}
-                  draggable={false}
-                  style={{ display: "block" }}
-                />
+                <img src={origRetry.src ?? ""} alt={original.label} draggable={false} style={{ display: "block" }} />
               </div>
             </div>
             <div className="ab-viewer-compare-line" style={{ left: `${comparePos}%`, zIndex: 3 }}>
@@ -470,21 +262,13 @@ function AdvancedImageViewer({
             <div className="ab-viewer-compare-label-left" style={{ zIndex: 4 }}>{original.label}</div>
             <div className="ab-viewer-compare-label-right" style={{ zIndex: 4 }}>{processed.label}</div>
           </>
-        ) : !imgError ? (
+        ) : !mainRetry.error ? (
           <div style={imgStyle}>
-            <img
-              src={imgSrc ?? ""}
-              alt={activeImage.label}
-              draggable={false}
-              onLoad={handleImageLoad}
-              onError={handleImageError}
-              style={{ display: "block" }}
-            />
+            <img src={mainRetry.src ?? ""} alt={activeImage.label} draggable={false}
+              onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />
             {overlayCanvasRef && (
-              <canvas
-                ref={overlayCanvasRef}
-                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
-              />
+              <canvas ref={overlayCanvasRef}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
             )}
           </div>
         ) : null}
@@ -494,9 +278,7 @@ function AdvancedImageViewer({
         <div className="ab-viewer-statusbar">
           <span className="ab-viewer-status-item">{zoomPct}</span>
           {activeImage.width && activeImage.height && (
-            <span className="ab-viewer-status-item">
-              {activeImage.width} x {activeImage.height}
-            </span>
+            <span className="ab-viewer-status-item">{activeImage.width} x {activeImage.height}</span>
           )}
           {pixelValue && (
             <span className="ab-viewer-status-item">

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
-import { generateTiles } from "../../services/tiles";
+import { generateTiles, generateTilesRgb } from "../../services/tiles";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 
 interface DeepZoomViewerProps {
   filePath?: string;
@@ -43,6 +44,7 @@ function DeepZoomViewer({
                         }: DeepZoomViewerProps) {
   const { file } = useFileContext();
   const { activeImagePath, renderedPreviewUrl } = useRenderContext();
+  const { isShowingComposite } = useCompositeContext();
 
   const rawPath = activeImagePath || filePathProp || file?.path || "";
 
@@ -71,7 +73,8 @@ function DeepZoomViewer({
   const isSmallImage = imageWidth > 0 && imageHeight > 0 && Math.max(imageWidth, imageHeight) <= tileSize * 2;
 
   const runGenerate = useCallback(async () => {
-    if (!rawPath || generatedPathRef.current === rawPath) return;
+    const genKey = isShowingComposite ? `composite:${rawPath}` : rawPath;
+    if (!rawPath || generatedPathRef.current === genKey) return;
     setGenerating(true);
     setError(null);
     setReady(false);
@@ -80,13 +83,18 @@ function DeepZoomViewer({
     try {
       const convert = await ensureConvertFileSrc();
       convertRef.current = convert;
-      if (isSmallImage) {
-        generatedPathRef.current = rawPath;
+      if (isSmallImage && !isShowingComposite) {
+        generatedPathRef.current = genKey;
         modeRef.current = "image";
+        setReady(true);
+      } else if (isShowingComposite) {
+        await generateTilesRgb(outputDir, tileSize);
+        generatedPathRef.current = genKey;
+        modeRef.current = "tiles";
         setReady(true);
       } else {
         await generateTiles(rawPath, outputDir, tileSize);
-        generatedPathRef.current = rawPath;
+        generatedPathRef.current = genKey;
         modeRef.current = "tiles";
         setReady(true);
       }
@@ -95,7 +103,7 @@ function DeepZoomViewer({
     } finally {
       setGenerating(false);
     }
-  }, [rawPath, outputDir, tileSize, isSmallImage]);
+  }, [rawPath, outputDir, tileSize, isSmallImage, isShowingComposite]);
 
   const setupRenderedImage = useCallback(async () => {
     if (!renderedPreviewUrl || renderedUrlRef.current === renderedPreviewUrl) return;
@@ -116,15 +124,16 @@ function DeepZoomViewer({
   }, [renderedPreviewUrl]);
 
   useEffect(() => {
-    if (hasRendered) {
+    const genKey = isShowingComposite ? `composite:${rawPath}` : rawPath;
+    if (hasRendered && !isShowingComposite) {
       if (renderedUrlRef.current !== renderedPreviewUrl) {
         setupRenderedImage();
       }
-    } else if (rawPath && rawPath !== generatedPathRef.current) {
+    } else if (rawPath && generatedPathRef.current !== genKey) {
       renderedUrlRef.current = null;
       runGenerate();
     }
-  }, [hasRendered, renderedPreviewUrl, rawPath, setupRenderedImage, runGenerate]);
+  }, [hasRendered, renderedPreviewUrl, rawPath, isShowingComposite, setupRenderedImage, runGenerate]);
 
   useEffect(() => {
     if (!ready || !containerRef.current) return;

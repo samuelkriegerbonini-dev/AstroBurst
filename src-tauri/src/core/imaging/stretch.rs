@@ -7,21 +7,21 @@ pub fn arcsinh_stretch(data: &Array2<f32>, factor: f32) -> Array2<f32> {
     }
 
     let inv_denom = 1.0 / factor.asinh();
-    let mut out = data.clone();
+    let (rows, cols) = data.dim();
+    let src = data.as_slice().expect("contiguous");
 
-    out.as_slice_mut()
-        .expect("contiguous")
-        .par_iter_mut()
-        .for_each(|v| {
-            let val = *v;
+    let pixels: Vec<f32> = src
+        .par_iter()
+        .map(|&val| {
             if !val.is_finite() || val <= 0.0 {
-                *v = 0.0;
+                0.0
             } else {
-                *v = (val.clamp(0.0, 1.0) * factor).asinh() * inv_denom;
+                (val.clamp(0.0, 1.0) * factor).asinh() * inv_denom
             }
-        });
+        })
+        .collect();
 
-    out
+    Array2::from_shape_vec((rows, cols), pixels).unwrap()
 }
 
 pub fn arcsinh_stretch_rgb(

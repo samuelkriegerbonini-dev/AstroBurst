@@ -3,23 +3,23 @@ use rayon::prelude::*;
 
 use crate::core::alignment::phase_correlation;
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
-use crate::core::imaging::resample::bicubic_sample;
+use crate::core::imaging::sampling::bicubic_sample;
 
 const MAX_STARS: usize = 80;
-const TRIANGLE_TOLERANCE: f64 = 0.005;
-const MIN_MATCHES_AFFINE: usize = 8;
-const MIN_MATCHES_RIGID: usize = 5;
-const RANSAC_ITERATIONS: usize = 500;
-const RANSAC_INLIER_PX: f64 = 2.0;
+const TRIANGLE_TOLERANCE: f64 = 0.008;
+const MIN_MATCHES_AFFINE: usize = 6;
+const MIN_MATCHES_RIGID: usize = 4;
+const RANSAC_ITERATIONS: usize = 1000;
+const RANSAC_INLIER_PX: f64 = 3.0;
 const DETECTION_SIGMA: f64 = 5.0;
-const MIN_TRIANGLE_SIDE: f64 = 20.0;
-const MIN_VOTES: u32 = 3;
-const MIN_INLIER_RATIO: f64 = 0.3;
-const MAX_RESIDUAL_PX: f64 = 3.0;
-const MAX_OFFSET_FRACTION: f64 = 0.25;
-const MAX_ROTATION_DEG: f64 = 5.0;
-const MIN_SCALE: f64 = 0.85;
-const MAX_SCALE: f64 = 1.15;
+const MIN_TRIANGLE_SIDE: f64 = 15.0;
+const MIN_VOTES: u32 = 2;
+const MIN_INLIER_RATIO: f64 = 0.20;
+const MAX_RESIDUAL_PX: f64 = 5.0;
+const MAX_OFFSET_FRACTION: f64 = 0.40;
+const MAX_ROTATION_DEG: f64 = 10.0;
+const MIN_SCALE: f64 = 0.70;
+const MAX_SCALE: f64 = 1.40;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AffineTransform {
@@ -107,6 +107,10 @@ pub fn align_channel_affine(
     let tgt_stars = top_n_stars(&tgt_det.stars, MAX_STARS);
 
     if ref_stars.len() < MIN_MATCHES_RIGID || tgt_stars.len() < MIN_MATCHES_RIGID {
+        log::info!(
+            "Affine: insufficient stars (ref={}, tgt={}), fallback to phase correlation",
+            ref_stars.len(), tgt_stars.len()
+        );
         return fallback_phase_correlation(reference, target, rows, cols);
     }
 
@@ -114,63 +118,81 @@ pub fn align_channel_affine(
     let tgt_tris = build_triangles(&tgt_stars);
 
     if ref_tris.is_empty() || tgt_tris.is_empty() {
+        log::info!(
+            "Affine: no triangles (ref={}, tgt={}), fallback to phase correlation",
+            ref_tris.len(), tgt_tris.len()
+        );
         return fallback_phase_correlation(reference, target, rows, cols);
     }
 
     let matches = match_triangles(&ref_stars, &tgt_stars, &ref_tris, &tgt_tris);
 
     if matches.len() < MIN_MATCHES_RIGID {
+        log::info!(
+            "Affine: too few triangle matches ({}), fallback to phase correlation",
+            matches.len()
+        );
         return fallback_phase_correlation(reference, target, rows, cols);
     }
 
     if matches.len() >= MIN_MATCHES_AFFINE {
         if let Some(result) = ransac_affine(&matches, AffineAlignMethod::Affine) {
-            if is_sane_transform(&result, rows, cols) {
-                return result;
+            match check_transform_sanity(&result, rows, cols) {
+                Ok(()) => return result,
+                Err(reason) => log::warn!(
+                    "Affine transform rejected: {}. stars={}, inliers={}, residual={:.2}px. Trying rigid.",
+                    reason, result.matched_stars, result.inliers, result.residual_px
+                ),
             }
+        } else {
+            log::info!("Affine RANSAC returned no result with {} matches, trying rigid", matches.len());
         }
     }
 
     if matches.len() >= MIN_MATCHES_RIGID {
         if let Some(result) = ransac_affine(&matches, AffineAlignMethod::Rigid) {
-            if is_sane_transform(&result, rows, cols) {
-                return result;
+            match check_transform_sanity(&result, rows, cols) {
+                Ok(()) => return result,
+                Err(reason) => log::warn!(
+                    "Rigid transform rejected: {}. stars={}, inliers={}, residual={:.2}px. Fallback to PC.",
+                    reason, result.matched_stars, result.inliers, result.residual_px
+                ),
             }
+        } else {
+            log::info!("Rigid RANSAC returned no result with {} matches, fallback to PC", matches.len());
         }
     }
 
     fallback_phase_correlation(reference, target, rows, cols)
 }
 
-fn is_sane_transform(result: &AffineAlignResult, rows: usize, cols: usize) -> bool {
+fn check_transform_sanity(result: &AffineAlignResult, rows: usize, cols: usize) -> Result<(), String> {
     let t = &result.transform;
 
     let max_tx = cols as f64 * MAX_OFFSET_FRACTION;
     let max_ty = rows as f64 * MAX_OFFSET_FRACTION;
     if t.tx.abs() > max_tx || t.ty.abs() > max_ty {
-        return false;
+        return Err(format!(
+            "translation ({:.1}, {:.1}) exceeds limit ({:.0}, {:.0})",
+            t.tx, t.ty, max_tx, max_ty
+        ));
     }
 
-    if t.rotation_deg().abs() > MAX_ROTATION_DEG {
-        return false;
+    let rot = t.rotation_deg().abs();
+    if rot > MAX_ROTATION_DEG {
+        return Err(format!("rotation {:.2} deg exceeds {:.0} deg limit", rot, MAX_ROTATION_DEG));
     }
 
     let sx = t.scale_x();
     let sy = t.scale_y();
     if sx < MIN_SCALE || sx > MAX_SCALE || sy < MIN_SCALE || sy > MAX_SCALE {
-        return false;
+        return Err(format!(
+            "scale ({:.3}, {:.3}) outside [{:.2}, {:.2}] range",
+            sx, sy, MIN_SCALE, MAX_SCALE
+        ));
     }
 
-    if result.residual_px > MAX_RESIDUAL_PX {
-        return false;
-    }
-
-    let ratio = result.inliers as f64 / result.matched_stars.max(1) as f64;
-    if ratio < MIN_INLIER_RATIO {
-        return false;
-    }
-
-    true
+    Ok(())
 }
 
 fn fallback_phase_correlation(
@@ -413,11 +435,13 @@ fn ransac_affine(
     let (best_inliers, _best_transform, best_inlier_mask) = best;
 
     if best_inliers < MIN_MATCHES_RIGID {
+        log::debug!("RANSAC: best_inliers {} < MIN_MATCHES_RIGID {}", best_inliers, MIN_MATCHES_RIGID);
         return None;
     }
 
     let inlier_ratio = best_inliers as f64 / n as f64;
     if inlier_ratio < MIN_INLIER_RATIO {
+        log::debug!("RANSAC: inlier_ratio {:.3} < MIN_INLIER_RATIO {:.2}", inlier_ratio, MIN_INLIER_RATIO);
         return None;
     }
 
@@ -436,6 +460,7 @@ fn ransac_affine(
 
     let residual = compute_residual(&inlier_matches, &refined);
     if residual > MAX_RESIDUAL_PX {
+        log::debug!("RANSAC: refined residual {:.3}px > MAX_RESIDUAL_PX {:.1}", residual, MAX_RESIDUAL_PX);
         return None;
     }
 

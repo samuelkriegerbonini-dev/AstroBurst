@@ -6,7 +6,8 @@ import {
 
 import { getCubeSpectrum } from "../services/cube";
 import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
-import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext } from "../context/PreviewContext";
+import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
+import { useCompositeContext } from "../context/CompositeContext";
 import { useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { useProgress } from "../hooks/useProgress";
@@ -76,7 +77,9 @@ export default function PreviewPanel() {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
-  const { renderedPreviewUrl, compositePreviewUrl } = useRenderContext();
+  const { renderedPreviewUrl } = useRenderContext();
+  const { compositePreviewUrl } = useCompositeContext();
+  const { starOverlayRef } = useStarOverlayContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
   const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
@@ -85,7 +88,6 @@ export default function PreviewPanel() {
   const [gpuProbing, setGpuProbing] = useState(true);
   const [, forceRender] = useState(0);
 
-  const starOverlayRef = useRef<HTMLCanvasElement>(null);
   const prevFileIdRef = useRef<string | null>(null);
   const specAbortRef = useRef(0);
   const fileDimsRef = useRef<[number, number] | undefined>(undefined);
@@ -120,7 +122,7 @@ export default function PreviewPanel() {
     if (!dims) return;
     const pixelX = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
     const pixelY = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
-    const seq = ++specAbortRef.current;
+    ++specAbortRef.current;
     try { await getCubeSpectrum(file.path, pixelX, pixelY); } catch {}
   }, [isCube, file?.path, file?.result?.dimensions]);
 

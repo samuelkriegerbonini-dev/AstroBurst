@@ -250,40 +250,120 @@ pub fn generate_tile_pyramid(
     })
 }
 
-pub fn generate_single_tile(
-    normalized: &Array2<f32>,
-    output_dir: &str,
-    level: usize,
-    col: usize,
-    row: usize,
+fn render_tile_rgb(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    tile_x: usize,
+    tile_y: usize,
     tile_size: usize,
-    total_levels: usize,
-) -> Result<String> {
-    let max_level = total_levels.saturating_sub(1);
-    let reduction_power = max_level.saturating_sub(level);
-    let factor = 1usize << reduction_power;
+    output_path: &str,
+) -> Result<()> {
+    let (rows, cols) = r.dim();
+    let r_src = r.as_slice().expect("contiguous");
+    let g_src = g.as_slice().expect("contiguous");
+    let b_src = b.as_slice().expect("contiguous");
 
-    let level_data = if factor > 1 {
-        downsample(normalized, factor)
-    } else {
-        normalized.clone()
-    };
+    let x_start = tile_x * tile_size;
+    let y_start = tile_y * tile_size;
+    let x_end = (x_start + tile_size).min(cols);
+    let y_end = (y_start + tile_size).min(rows);
 
-    let slice = normalized.as_slice().expect("Array2 must be contiguous");
-    let (global_min, global_max) = percentile_bounds(slice, 0.001, 0.999);
+    let tile_w = x_end - x_start;
+    let tile_h = y_end - y_start;
 
-    let tile_path = format!("{}/{}/{}_{}.png", output_dir, level, col, row);
-    render_tile(
-        &level_data,
-        col,
-        row,
+    if tile_w == 0 || tile_h == 0 {
+        return Ok(());
+    }
+
+    let mut buf = vec![0u8; tile_size * tile_size * 3];
+
+    for dy in 0..tile_h {
+        let src_row = (y_start + dy) * cols;
+        let dst_row = dy * tile_size;
+        for dx in 0..tile_w {
+            let si = src_row + x_start + dx;
+            let di = (dst_row + dx) * 3;
+            buf[di] = (r_src[si].clamp(0.0, 1.0) * 255.0) as u8;
+            buf[di + 1] = (g_src[si].clamp(0.0, 1.0) * 255.0) as u8;
+            buf[di + 2] = (b_src[si].clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    }
+
+    if let Some(parent) = Path::new(output_path).parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create tile dir {:?}", parent))?;
+    }
+
+    let img = image::RgbImage::from_raw(tile_size as u32, tile_size as u32, buf)
+        .context("Failed to create RGB tile image")?;
+    img.save(output_path)
+        .with_context(|| format!("Failed to save RGB tile {}", output_path))?;
+    Ok(())
+}
+
+pub fn generate_tile_pyramid_rgb(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    output_dir: &str,
+    params: &TileParams,
+) -> Result<TilePyramid> {
+    let (orig_rows, orig_cols) = r.dim();
+    let tile_size = params.tile_size;
+    let num_levels = compute_num_levels(orig_cols, orig_rows, tile_size);
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create tile output dir {}", output_dir))?;
+
+    let mut levels = Vec::with_capacity(num_levels);
+    let max_level = num_levels - 1;
+
+    for level in 0..num_levels {
+        let reduction_power = max_level - level;
+        let factor = 1usize << reduction_power;
+
+        let (lr, lg, lb) = if factor > 1 {
+            (downsample(r, factor), downsample(g, factor), downsample(b, factor))
+        } else {
+            (r.clone(), g.clone(), b.clone())
+        };
+
+        let (level_rows, level_cols) = lr.dim();
+        let tile_cols = (level_cols + tile_size - 1) / tile_size;
+        let tile_rows = (level_rows + tile_size - 1) / tile_size;
+        let scale_factor = 1.0 / factor as f64;
+
+        let level_dir = format!("{}/{}", output_dir, level);
+        fs::create_dir_all(&level_dir)
+            .with_context(|| format!("Failed to create level dir {}", level_dir))?;
+
+        let tile_coords: Vec<(usize, usize)> = (0..tile_rows)
+            .flat_map(|ty| (0..tile_cols).map(move |tx| (tx, ty)))
+            .collect();
+
+        tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
+            let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
+            render_tile_rgb(&lr, &lg, &lb, tx, ty, tile_size, &tile_path)
+        })?;
+
+        levels.push(TileLevel {
+            level,
+            width: level_cols,
+            height: level_rows,
+            cols: tile_cols,
+            rows: tile_rows,
+            scale_factor,
+        });
+    }
+
+    Ok(TilePyramid {
         tile_size,
-        global_min,
-        global_max,
-        &tile_path,
-    )?;
-
-    Ok(tile_path)
+        original_width: orig_cols,
+        original_height: orig_rows,
+        levels,
+        base_dir: output_dir.to_string(),
+    })
 }
 
 #[cfg(test)]

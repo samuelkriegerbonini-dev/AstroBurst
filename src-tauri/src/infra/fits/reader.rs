@@ -528,6 +528,14 @@ pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
     bail!("No 3D data block found")
 }
 
+pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open {}", path))?;
+    let result = extract_image_mmap(&file)
+        .with_context(|| format!("Failed to load {}", path))?;
+    Ok(result.image)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

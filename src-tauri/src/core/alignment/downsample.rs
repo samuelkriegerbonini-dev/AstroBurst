@@ -1,6 +1,8 @@
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::boundary::clamp_index;
+
 pub fn area_downsample(img: &Array2<f32>, out_rows: usize, out_cols: usize) -> Array2<f32> {
     let (in_rows, in_cols) = img.dim();
 
@@ -14,11 +16,13 @@ pub fn area_downsample(img: &Array2<f32>, out_rows: usize, out_cols: usize) -> A
 
     let mut buf = vec![0.0f32; out_rows * out_cols];
     buf.par_chunks_mut(out_cols).enumerate().for_each(|(oy, row)| {
-        let y0 = (oy as f64 * scale_y).floor() as usize;
-        let y1 = (((oy + 1) as f64 * scale_y).ceil() as usize).min(in_rows);
+        let y0 = clamp_index((oy as f64 * scale_y).floor() as i64, in_rows);
+        let y1_raw = ((oy + 1) as f64 * scale_y).ceil() as i64;
+        let y1 = if y1_raw <= 0 { 0 } else { (y1_raw as usize).min(in_rows) };
         for ox in 0..out_cols {
-            let x0 = (ox as f64 * scale_x).floor() as usize;
-            let x1 = (((ox + 1) as f64 * scale_x).ceil() as usize).min(in_cols);
+            let x0 = clamp_index((ox as f64 * scale_x).floor() as i64, in_cols);
+            let x1_raw = ((ox + 1) as f64 * scale_x).ceil() as i64;
+            let x1 = if x1_raw <= 0 { 0 } else { (x1_raw as usize).min(in_cols) };
 
             let mut sum = 0.0f64;
             let mut count = 0u32;

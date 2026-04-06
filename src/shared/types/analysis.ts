@@ -15,27 +15,6 @@ export interface HistogramData {
   bin_edges: number[];
 }
 
-export interface StarDetectionResult {
-  stars: Star[];
-  count: number;
-  background_median: number;
-  background_sigma: number;
-  threshold_sigma: number;
-  image_width: number;
-  image_height: number;
-  elapsed_ms: number;
-}
-
-export interface Star {
-  x: number;
-  y: number;
-  flux: number;
-  fwhm: number;
-  peak: number;
-  npix: number;
-  snr: number;
-}
-
 export interface RawPixelData {
   data: Float32Array;
   width: number;

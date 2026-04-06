@@ -1,6 +1,7 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
 import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri/client";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -68,8 +69,9 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 
 function ProcessingTabInner() {
   const { file } = useFileContext();
-  const { setRenderedPreviewUrl, compositePreviewUrl, setCompositePreviewUrl,
-    compositeStfR, compositeStfG, compositeStfB, compositeScnr } = useRenderContext();
+  const { setRenderedPreviewUrl } = useRenderContext();
+  const { compositePreviewUrl, setCompositePreviewUrl,
+    compositeStfR, compositeStfG, compositeStfB, compositeScnr } = useCompositeContext();
   const { rgbChannels } = useRgbContext();
   const [active, setActive] = useState<ProcessingSection>("background");
 

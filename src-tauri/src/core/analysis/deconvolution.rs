@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use ndarray::{Array2, Zip};
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
-use std::sync::Arc;
+use rustfft::num_complex::Complex;
 
 use crate::infra::progress::ProgressHandle;
+use crate::math::complex;
+use crate::math::fft::FftEngine2D;
 use crate::types::error::AppError;
 use crate::types::stacking::{RLConfig, RLResult};
 
@@ -31,77 +32,40 @@ pub fn generate_gaussian_psf(size: usize, sigma: f32) -> Array2<f32> {
     psf
 }
 
-fn transpose_c32(data: &[Complex<f32>], rows: usize, cols: usize) -> Vec<Complex<f32>> {
-    let mut out = vec![Complex::new(0.0f32, 0.0); rows * cols];
-    out.par_chunks_mut(rows).enumerate().for_each(|(x, col_buf)| {
-        for y in 0..rows {
-            col_buf[y] = data[y * cols + x];
-        }
-    });
-    out
-}
-
-fn transpose_c32_into(src: &[Complex<f32>], dst: &mut [Complex<f32>], rows: usize, cols: usize) {
-    dst.par_chunks_mut(cols).enumerate().for_each(|(y, row_buf)| {
-        for x in 0..cols {
-            row_buf[x] = src[x * rows + y];
-        }
-    });
-}
-
 struct FftConvolver {
     rows: usize,
     cols: usize,
-    fft_rows: usize,
-    fft_cols: usize,
+    engine: FftEngine2D<f32>,
     psf_freq: Vec<Complex<f32>>,
     psf_conj_freq: Vec<Complex<f32>>,
-    fwd_row: Arc<dyn rustfft::Fft<f32>>,
-    inv_row: Arc<dyn rustfft::Fft<f32>>,
-    fwd_col: Arc<dyn rustfft::Fft<f32>>,
-    inv_col: Arc<dyn rustfft::Fft<f32>>,
 }
 
 impl FftConvolver {
     fn new(rows: usize, cols: usize, psf: &Array2<f32>) -> Self {
-        let fft_rows = (rows + psf.nrows() - 1).next_power_of_two();
-        let fft_cols = (cols + psf.ncols() - 1).next_power_of_two();
+        let engine = FftEngine2D::<f32>::from_padded_dims(
+            rows, cols, psf.nrows() - 1, psf.ncols() - 1,
+        );
 
-        let mut planner = FftPlanner::<f32>::new();
-        let fwd_row = planner.plan_fft_forward(fft_cols);
-        let inv_row = planner.plan_fft_inverse(fft_cols);
-        let fwd_col = planner.plan_fft_forward(fft_rows);
-        let inv_col = planner.plan_fft_inverse(fft_rows);
-
-        let psf_freq = Self::compute_psf_freq(psf, fft_rows, fft_cols, &fwd_row, &fwd_col);
-        let psf_conj_freq: Vec<Complex<f32>> = psf_freq.iter().map(|c| c.conj()).collect();
+        let psf_freq = Self::compute_psf_freq(psf, &engine);
+        let psf_conj_freq = complex::conjugate_slice(&psf_freq);
 
         Self {
             rows,
             cols,
-            fft_rows,
-            fft_cols,
+            engine,
             psf_freq,
             psf_conj_freq,
-            fwd_row,
-            inv_row,
-            fwd_col,
-            inv_col,
         }
     }
 
-    fn compute_psf_freq(
-        psf: &Array2<f32>,
-        fft_rows: usize,
-        fft_cols: usize,
-        fwd_row: &Arc<dyn rustfft::Fft<f32>>,
-        fwd_col: &Arc<dyn rustfft::Fft<f32>>,
-    ) -> Vec<Complex<f32>> {
+    fn compute_psf_freq(psf: &Array2<f32>, engine: &FftEngine2D<f32>) -> Vec<Complex<f32>> {
         let (pr, pc) = psf.dim();
         let cy = pr / 2;
         let cx = pc / 2;
+        let fft_rows = engine.fft_rows;
+        let fft_cols = engine.fft_cols;
 
-        let mut buf = vec![Complex::new(0.0f32, 0.0); fft_rows * fft_cols];
+        let mut buf = engine.alloc_buffer();
 
         for y in 0..pr {
             for x in 0..pc {
@@ -111,71 +75,32 @@ impl FftConvolver {
             }
         }
 
-        for r in 0..fft_rows {
-            let start = r * fft_cols;
-            let row_slice = &mut buf[start..start + fft_cols];
-            fwd_row.process(row_slice);
-        }
-
-        let mut col_buf = vec![Complex::new(0.0f32, 0.0); fft_rows];
-        for c in 0..fft_cols {
-            for r in 0..fft_rows {
-                col_buf[r] = buf[r * fft_cols + c];
-            }
-            fwd_col.process(&mut col_buf);
-            for r in 0..fft_rows {
-                buf[r * fft_cols + c] = col_buf[r];
-            }
-        }
-
+        engine.forward_2d(&mut buf);
         buf
     }
 
     fn forward_2d(&self, image: &Array2<f32>) -> Vec<Complex<f32>> {
-        let mut buf = vec![Complex::new(0.0f32, 0.0); self.fft_rows * self.fft_cols];
+        let fft_cols = self.engine.fft_cols;
+        let mut buf = self.engine.alloc_buffer();
 
         for y in 0..self.rows {
             for x in 0..self.cols {
-                buf[y * self.fft_cols + x] = Complex::new(image[[y, x]], 0.0);
+                buf[y * fft_cols + x] = Complex::new(image[[y, x]], 0.0);
             }
         }
 
-        buf.par_chunks_mut(self.fft_cols).for_each(|row| {
-            self.fwd_row.process(row);
-        });
-
-        let mut col_major = transpose_c32(&buf, self.fft_rows, self.fft_cols);
-
-        col_major.par_chunks_mut(self.fft_rows).for_each(|col| {
-            self.fwd_col.process(col);
-        });
-
-        transpose_c32_into(&col_major, &mut buf, self.fft_cols, self.fft_rows);
-
+        self.engine.forward_2d(&mut buf);
         buf
     }
 
     fn inverse_2d(&self, buf: &mut [Complex<f32>]) -> Array2<f32> {
-        buf.par_chunks_mut(self.fft_cols).for_each(|row| {
-            self.inv_row.process(row);
-        });
+        self.engine.inverse_2d(buf);
 
-        let fft_rows = self.fft_rows;
-        let fft_cols = self.fft_cols;
-
-        let mut col_major = transpose_c32(buf, fft_rows, fft_cols);
-
-        col_major.par_chunks_mut(fft_rows).for_each(|col| {
-            self.inv_col.process(col);
-        });
-
-        transpose_c32_into(&col_major, buf, fft_cols, fft_rows);
-
-        let inv_norm = 1.0 / (fft_rows * fft_cols) as f32;
+        let fft_cols = self.engine.fft_cols;
         let mut result = Array2::<f32>::zeros((self.rows, self.cols));
         for y in 0..self.rows {
             for x in 0..self.cols {
-                result[[y, x]] = buf[y * fft_cols + x].re * inv_norm;
+                result[[y, x]] = buf[y * fft_cols + x].re;
             }
         }
 
@@ -184,13 +109,7 @@ impl FftConvolver {
 
     fn convolve_with_freq(&self, image: &Array2<f32>, freq: &[Complex<f32>]) -> Array2<f32> {
         let mut buf = self.forward_2d(image);
-
-        buf.par_iter_mut()
-            .zip(freq.par_iter())
-            .for_each(|(b, f)| {
-                *b = *b * *f;
-            });
-
+        complex::pointwise_multiply_into(&mut buf, freq);
         self.inverse_2d(&mut buf)
     }
 

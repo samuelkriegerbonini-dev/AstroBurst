@@ -1,6 +1,8 @@
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::math::subpixel::quadratic_3pt;
+
 pub fn compute_offset(
     reference: &Array2<f32>,
     target: &Array2<f32>,
@@ -111,11 +113,13 @@ pub fn compute_subpixel_offset(
     let x_start = cx.saturating_sub(region);
     let x_end = (cx + region).min(cols);
 
+    let diameter = (2 * search_radius + 1) as usize;
+
     let shifts: Vec<(i32, i32)> = (-search_radius..=search_radius)
         .flat_map(|dy| (-search_radius..=search_radius).map(move |dx| (dy, dx)))
         .collect();
 
-    let scores: Vec<(i32, i32, f64)> = shifts
+    let scores_flat: Vec<f64> = shifts
         .par_iter()
         .map(|&(dy, dx)| {
             let mut r_sum = 0.0f64;
@@ -139,7 +143,7 @@ pub fn compute_subpixel_offset(
             }
 
             if count < 10 {
-                return (dy, dx, f64::NEG_INFINITY);
+                return f64::NEG_INFINITY;
             }
 
             let r_mean = r_sum / count as f64;
@@ -166,71 +170,79 @@ pub fn compute_subpixel_offset(
                 }
             }
 
-            let score = if r_var > 0.0 && t_var > 0.0 {
+            if r_var > 0.0 && t_var > 0.0 {
                 num / (r_var * t_var).sqrt()
             } else {
                 f64::NEG_INFINITY
-            };
-            (dy, dx, score)
+            }
         })
         .collect();
 
-    let best = scores.iter().copied().fold(
-        (0i32, 0i32, f64::NEG_INFINITY),
-        |a, b| if b.2 > a.2 { b } else { a },
-    );
+    let grid_idx = |dy: i32, dx: i32| -> usize {
+        (dy + search_radius) as usize * diameter + (dx + search_radius) as usize
+    };
 
-    let (by, bx, _) = best;
-
-    if scores.len() >= 3 && best.2 > f64::NEG_INFINITY {
-        let sub_dy = quadratic_peak(
-            &scores, by, bx, true, search_radius,
-        ).unwrap_or(by as f64);
-        let sub_dx = quadratic_peak(
-            &scores, by, bx, false, search_radius,
-        ).unwrap_or(bx as f64);
-        (sub_dy, sub_dx)
-    } else {
-        (by as f64, bx as f64)
+    let mut best_score = f64::NEG_INFINITY;
+    let mut by = 0i32;
+    let mut bx = 0i32;
+    for &(dy, dx) in &shifts {
+        let s = scores_flat[grid_idx(dy, dx)];
+        if s > best_score {
+            best_score = s;
+            by = dy;
+            bx = dx;
+        }
     }
+
+    if best_score <= f64::NEG_INFINITY {
+        return (by as f64, bx as f64);
+    }
+
+    let sub_dy = quadratic_peak_grid(
+        &scores_flat, diameter, by, bx, search_radius, true,
+    ).unwrap_or(by as f64);
+    let sub_dx = quadratic_peak_grid(
+        &scores_flat, diameter, by, bx, search_radius, false,
+    ).unwrap_or(bx as f64);
+
+    (sub_dy, sub_dx)
 }
 
-fn quadratic_peak(
-    scores: &[(i32, i32, f64)],
+fn quadratic_peak_grid(
+    grid: &[f64],
+    diameter: usize,
     cy: i32,
     cx: i32,
-    axis_y: bool,
     search_radius: i32,
+    axis_y: bool,
 ) -> Option<f64> {
-    let find = |dy: i32, dx: i32| -> Option<f64> {
-        scores.iter().find(|s| s.0 == dy && s.1 == dx).map(|s| s.2)
+    let idx = |dy: i32, dx: i32| -> usize {
+        (dy + search_radius) as usize * diameter + (dx + search_radius) as usize
     };
 
-    let c_score = find(cy, cx)?;
+    let c_score = grid[idx(cy, cx)];
+    if c_score.is_infinite() {
+        return Some(if axis_y { cy as f64 } else { cx as f64 });
+    }
 
     let (prev_score, next_score, center) = if axis_y {
-        if cy <= -search_radius || cy >= search_radius { return Some(cy as f64); }
-        let p = find(cy - 1, cx)?;
-        let n = find(cy + 1, cx)?;
-        (p, n, cy as f64)
+        if cy <= -search_radius || cy >= search_radius {
+            return Some(cy as f64);
+        }
+        (grid[idx(cy - 1, cx)], grid[idx(cy + 1, cx)], cy as f64)
     } else {
-        if cx <= -search_radius || cx >= search_radius { return Some(cx as f64); }
-        let p = find(cy, cx - 1)?;
-        let n = find(cy, cx + 1)?;
-        (p, n, cx as f64)
+        if cx <= -search_radius || cx >= search_radius {
+            return Some(cx as f64);
+        }
+        (grid[idx(cy, cx - 1)], grid[idx(cy, cx + 1)], cx as f64)
     };
 
-    if prev_score.is_infinite() || next_score.is_infinite() || c_score.is_infinite() {
+    if prev_score.is_infinite() || next_score.is_infinite() {
         return Some(center);
     }
 
-    let denom = 2.0 * (2.0 * c_score - prev_score - next_score);
-    if denom.abs() < 1e-15 {
-        return Some(center);
-    }
-
-    let offset = (prev_score - next_score) / denom;
-    Some(center + offset.clamp(-0.5, 0.5))
+    let offset = quadratic_3pt(prev_score, c_score, next_score);
+    Some(center + offset)
 }
 
 #[cfg(test)]

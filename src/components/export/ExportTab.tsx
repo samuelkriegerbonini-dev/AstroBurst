@@ -3,6 +3,7 @@ import { Download, Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
 import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
+import { useCompositeContext } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
@@ -11,7 +12,8 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels } = useRgbContext();
-  const { renderedPreviewUrl, isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useRenderContext();
+  const { renderedPreviewUrl } = useRenderContext();
+  const { isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
   const { isCube, cubeDims } = useCubeContext();
 
   const [exportResult, setExportResult] = useState<any>(null);

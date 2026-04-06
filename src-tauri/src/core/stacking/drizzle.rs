@@ -5,6 +5,7 @@ use rayon::prelude::*;
 pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, DrizzleResult};
 
 use crate::core::alignment::phase_correlation;
+use crate::core::imaging::boundary::clamp_index;
 use crate::core::stacking::align;
 use crate::math::median::median_f32_mut;
 use crate::types::constants::MAD_TO_SIGMA;
@@ -71,10 +72,10 @@ impl DrizzleAccumulator {
                     let cy = (iy as f64 + dy) * scale;
 
                     let half = pixfrac * scale * 0.5;
-                    let ox_min = ((cx - half).floor() as i64).max(0) as usize;
-                    let ox_max = ((cx + half).ceil() as i64).min(out_cols as i64 - 1) as usize;
-                    let oy_min = ((cy - half).floor() as i64).max(0) as usize;
-                    let oy_max = ((cy + half).ceil() as i64).min(out_rows as i64 - 1) as usize;
+                    let ox_min = clamp_index((cx - half).floor() as i64, out_cols);
+                    let ox_max = clamp_index((cx + half).ceil() as i64, out_cols);
+                    let oy_min = clamp_index((cy - half).floor() as i64, out_rows);
+                    let oy_max = clamp_index((cy + half).ceil() as i64, out_rows);
 
                     for oy in oy_min..=oy_max {
                         for ox in ox_min..=ox_max {

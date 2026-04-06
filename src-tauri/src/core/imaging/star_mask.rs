@@ -1,4 +1,5 @@
 use ndarray::Array2;
+use rayon::prelude::*;
 
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar, DetectionResult};
 
@@ -39,7 +40,6 @@ pub fn generate_star_mask(
     config: &StarMaskConfig,
 ) -> Result<StarMaskResult, String> {
     let detection = detect_stars(image, config.detection_sigma);
-
     generate_star_mask_from_detection(image, &detection, config)
 }
 
@@ -49,7 +49,6 @@ pub fn generate_star_mask_from_detection(
     config: &StarMaskConfig,
 ) -> Result<StarMaskResult, String> {
     let (h, w) = image.dim();
-    let mut mask = Array2::<f32>::zeros((h, w));
 
     let valid_stars: Vec<&DetectedStar> = detection
         .stars
@@ -59,39 +58,51 @@ pub fn generate_star_mask_from_detection(
 
     let star_count = valid_stars.len();
 
-    for star in &valid_stars {
-        let radius = star.fwhm * config.growth_factor;
-        let soft_radius = radius + config.softness;
+    let star_layers: Vec<Vec<(usize, usize, f32)>> = valid_stars
+        .par_iter()
+        .map(|star| {
+            let radius = star.fwhm * config.growth_factor;
+            let soft_radius = radius + config.softness;
 
-        let y_min = (star.y - soft_radius).floor().max(0.0) as usize;
-        let y_max = ((star.y + soft_radius).ceil() as usize).min(h.saturating_sub(1));
-        let x_min = (star.x - soft_radius).floor().max(0.0) as usize;
-        let x_max = ((star.x + soft_radius).ceil() as usize).min(w.saturating_sub(1));
+            let y_min = (star.y - soft_radius).floor().max(0.0) as usize;
+            let y_max = ((star.y + soft_radius).ceil() as usize).min(h.saturating_sub(1));
+            let x_min = (star.x - soft_radius).floor().max(0.0) as usize;
+            let x_max = ((star.x + soft_radius).ceil() as usize).min(w.saturating_sub(1));
 
-        let r2_inner = radius * radius;
-        let r2_outer = soft_radius * soft_radius;
-        let fade_range = (r2_outer - r2_inner).max(1e-10);
+            let r2_inner = radius * radius;
+            let r2_outer = soft_radius * soft_radius;
+            let fade_range = (r2_outer - r2_inner).max(1e-10);
 
-        for py in y_min..=y_max {
-            for px in x_min..=x_max {
-                let dx = px as f64 - star.x;
-                let dy = py as f64 - star.y;
-                let d2 = dx * dx + dy * dy;
+            let mut pixels = Vec::new();
+            for py in y_min..=y_max {
+                for px in x_min..=x_max {
+                    let dx = px as f64 - star.x;
+                    let dy = py as f64 - star.y;
+                    let d2 = dx * dx + dy * dy;
 
-                let val = if d2 <= r2_inner {
-                    1.0f32
-                } else if d2 <= r2_outer {
-                    let t = ((d2 - r2_inner) / fade_range) as f32;
-                    let smooth = t * t * (3.0 - 2.0 * t);
-                    1.0 - smooth
-                } else {
-                    continue;
-                };
+                    let val = if d2 <= r2_inner {
+                        1.0f32
+                    } else if d2 <= r2_outer {
+                        let t = ((d2 - r2_inner) / fade_range) as f32;
+                        let smooth = t * t * (3.0 - 2.0 * t);
+                        1.0 - smooth
+                    } else {
+                        continue;
+                    };
 
-                let current = mask[[py, px]];
-                if val > current {
-                    mask[[py, px]] = val;
+                    pixels.push((py, px, val));
                 }
+            }
+            pixels
+        })
+        .collect();
+
+    let mut mask = Array2::<f32>::zeros((h, w));
+    for layer in &star_layers {
+        for &(py, px, val) in layer {
+            let current = mask[[py, px]];
+            if val > current {
+                mask[[py, px]] = val;
             }
         }
     }
@@ -99,31 +110,29 @@ pub fn generate_star_mask_from_detection(
     if config.luminance_protect {
         let ceiling = config.luminance_ceiling as f32;
         let inv_range = if ceiling < 1.0 { 1.0 / (1.0 - ceiling) } else { 1.0 };
-        let (h, w) = image.dim();
-        for py in 0..h {
-            for px in 0..w {
-                let pixel = image[[py, px]];
-                if pixel > ceiling && mask[[py, px]] < 1.0 {
+        let img_slice = image.as_slice().unwrap();
+        let mask_slice = mask.as_slice_mut().unwrap();
+
+        mask_slice
+            .par_iter_mut()
+            .zip(img_slice.par_iter())
+            .for_each(|(m, &pixel)| {
+                if pixel > ceiling && *m < 1.0 {
                     let excess = ((pixel - ceiling) * inv_range).clamp(0.0, 1.0);
                     let smooth = excess * excess * (3.0 - 2.0 * excess);
-                    mask[[py, px]] = mask[[py, px]].max(smooth);
+                    if smooth > *m {
+                        *m = smooth;
+                    }
                 }
-            }
-        }
+            });
     }
 
     let total = (h * w) as f64;
-    let coverage = mask.iter().filter(|&&v| v > 0.01).count() as f64 / total;
+    let coverage = mask.as_slice().unwrap().par_iter().filter(|&&v| v > 0.01).count() as f64 / total;
 
     Ok(StarMaskResult {
         mask,
         stars_masked: star_count,
         coverage_fraction: coverage,
     })
-}
-
-pub fn invert_mask(mask: &Array2<f32>) -> Array2<f32> {
-    let mut inv = mask.clone();
-    inv.par_mapv_inplace(|v| 1.0 - v);
-    inv
 }

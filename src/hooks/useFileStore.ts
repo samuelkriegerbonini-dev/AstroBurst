@@ -6,6 +6,13 @@ import type { ProcessedFile, QueueStats, AstroFile, ProcessResult } from "../sha
 
 type Listener = () => void;
 
+const enum NotifyChannel {
+  All = 1,
+  Stats = 2,
+  Selected = 4,
+  List = 8,
+}
+
 interface StoreState {
   fileIds: string[];
   fileMap: Map<string, ProcessedFile>;
@@ -34,7 +41,10 @@ class FileStore {
   private statsListeners = new Set<Listener>();
   private selectedListeners = new Set<Listener>();
   private listListeners = new Set<Listener>();
-  private pendingNotify = false;
+
+  private pendingFlush = false;
+  private pendingChannels = 0;
+  private pendingFileIds = new Set<string>();
 
   private _doneFilesCache: ProcessedFile[] = [];
   private _doneFilesCacheVersion = -1;
@@ -121,33 +131,28 @@ class FileStore {
     return s.total > 0 ? Math.round(((s.done + s.failed) / s.total) * 100) : 0;
   };
 
-  private notifyFile(id: string) {
-    const set = this.fileListeners.get(id);
-    if (set) set.forEach((l) => l());
-  }
+  private scheduleFlush(channels: number, fileId?: string) {
+    this.pendingChannels |= channels;
+    if (fileId) this.pendingFileIds.add(fileId);
 
-  private notifyStats() {
-    this.statsListeners.forEach((l) => l());
-  }
+    if (this.pendingFlush) return;
+    this.pendingFlush = true;
 
-  private notifySelected() {
-    this.selectedListeners.forEach((l) => l());
-  }
-
-  private notifyList() {
-    this.listListeners.forEach((l) => l());
-  }
-
-  private notifyAll() {
-    this.listeners.forEach((l) => l());
-  }
-
-  private scheduleFlush() {
-    if (this.pendingNotify) return;
-    this.pendingNotify = true;
     queueMicrotask(() => {
-      this.pendingNotify = false;
-      this.notifyAll();
+      const ch = this.pendingChannels;
+      const fileIds = this.pendingFileIds;
+      this.pendingFlush = false;
+      this.pendingChannels = 0;
+      this.pendingFileIds = new Set();
+
+      for (const fid of fileIds) {
+        const set = this.fileListeners.get(fid);
+        if (set) set.forEach((l) => l());
+      }
+      if (ch & NotifyChannel.Stats) this.statsListeners.forEach((l) => l());
+      if (ch & NotifyChannel.Selected) this.selectedListeners.forEach((l) => l());
+      if (ch & NotifyChannel.List) this.listListeners.forEach((l) => l());
+      if (ch & NotifyChannel.All) this.listeners.forEach((l) => l());
     });
   }
 
@@ -188,15 +193,12 @@ class FileStore {
     this.state.statsVersion++;
     this.bumpVersion();
 
-    this.notifyList();
-    this.notifyStats();
-    this.scheduleFlush();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.List);
   }
 
   setProcessing(value: boolean) {
     this.state.isProcessing = value;
-    this.notifyStats();
-    this.scheduleFlush();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
   }
 
   fileStarted(id: string) {
@@ -210,11 +212,10 @@ class FileStore {
     };
     this.state.fileMap.set(id, updated);
     this.bumpVersion();
-    this.notifyFile(id);
-    this.scheduleFlush();
+    this.scheduleFlush(NotifyChannel.All, id);
   }
 
-  fileDone(id: string, result: any) {
+  fileDone(id: string, result: ProcessResult | null) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
 
@@ -237,10 +238,9 @@ class FileStore {
     if (selectedChanged) this.state.selectedVersion++;
     this.bumpVersion();
 
-    this.notifyFile(id);
-    this.notifyStats();
-    if (selectedChanged) this.notifySelected();
-    this.scheduleFlush();
+    let channels = NotifyChannel.All | NotifyChannel.Stats;
+    if (selectedChanged) channels |= NotifyChannel.Selected;
+    this.scheduleFlush(channels, id);
   }
 
   fileError(id: string, error: string) {
@@ -259,9 +259,7 @@ class FileStore {
     this.state.statsVersion++;
     this.bumpVersion();
 
-    this.notifyFile(id);
-    this.notifyStats();
-    this.scheduleFlush();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
   }
 
   fileResampled(id: string, resampleResult: any) {
@@ -278,15 +276,14 @@ class FileStore {
     };
     this.state.fileMap.set(id, updated);
     this.bumpVersion();
-    this.notifyFile(id);
+    this.scheduleFlush(NotifyChannel.All, id);
   }
 
   selectFile(id: string) {
     if (this.state.selected === id) return;
     this.state.selected = id;
     this.state.selectedVersion++;
-    this.notifySelected();
-    this.scheduleFlush();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Selected);
   }
 
   reset() {
@@ -305,10 +302,9 @@ class FileStore {
     this._allFilesCache = [];
     this._allFilesCacheVersion = -1;
     this.fileListeners.clear();
-    this.notifyList();
-    this.notifyStats();
-    this.notifySelected();
-    this.scheduleFlush();
+    this.pendingFileIds.clear();
+    this.pendingChannels = 0;
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);
   }
 }
 

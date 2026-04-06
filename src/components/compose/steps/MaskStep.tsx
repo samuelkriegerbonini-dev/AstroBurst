@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
 import { Slider, RunButton } from "../../ui";
 
 interface MaskStepProps {

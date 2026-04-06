@@ -1,8 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Wand2, FolderOpen, ChevronDown, X, Sparkles } from "lucide-react";
-import type { WizardState, FrequencyBin } from "../wizard.types";
-import { DEFAULT_BINS } from "../wizard.types";
 import type { ProcessedFile } from "../../../shared/types";
+import {BLEND_PRESETS, BlendWeight, DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
 
 interface NarrowbandPalette {
   palette_name: string;

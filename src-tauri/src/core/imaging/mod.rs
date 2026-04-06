@@ -1,9 +1,12 @@
 pub mod background;
+pub mod boundary;
 pub mod calibration_pipeline;
+pub mod curves;
 pub mod masked_stretch;
 pub mod normalize;
 pub mod psf_estimation;
 pub mod resample;
+pub mod sampling;
 pub mod scnr;
 pub mod star_mask;
 pub mod stats;

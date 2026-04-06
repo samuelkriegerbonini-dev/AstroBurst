@@ -1,6 +1,6 @@
 import { lazy, Suspense, memo, useRef } from "react";
 import { Loader2 } from "lucide-react";
-import { useFileContext, useHistContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useStarOverlayContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import WcsReadout from "../header/WcsReadout";
 
@@ -70,7 +70,7 @@ export const InfoPanel = memo(function InfoPanel() {
 });
 
 function AnalysisWrapper() {
-  const overlayRef = useRef<HTMLCanvasElement>(null);
+  const { starOverlayRef } = useStarOverlayContext();
   return (
     <AnalysisTab
       spectrum={EMPTY_SPECTRUM}
@@ -78,7 +78,7 @@ function AnalysisWrapper() {
       specCoord={null}
       specLoading={false}
       specElapsed={0}
-      starOverlayRef={overlayRef}
+      starOverlayRef={starOverlayRef}
     />
   );
 }

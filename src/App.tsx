@@ -22,6 +22,7 @@ import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFil
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { APP_VERSION, FILE_STATUS } from "./utils/constants";
+import { CompositeProvider } from "./context/CompositeContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
 // @ts-ignore
@@ -278,126 +279,128 @@ export default function App() {
                   <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} />
                 </div>
               ) : (
-                <PreviewProvider file={selectedFile} doneFiles={filteredDoneFiles}>
-                  <div className="flex flex-col h-full">
-                    <div
-                      className="px-4 py-2 shrink-0 space-y-1.5"
-                      style={{
-                        background: "linear-gradient(90deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.65) 50%, rgba(59,130,246,0.03) 100%)",
-                        borderBottom: "1px solid rgba(20,184,166,0.1)",
-                      }}
-                    >
-                      <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
-                      <GlobalProgress progress={progress} isComplete={isComplete} />
-                    </div>
-
-                    <div className="flex-1 flex overflow-hidden min-h-0">
-                      <div className="ab-left-strip shrink-0">
-                        {LEFT_TABS.map((tab) => {
-                          const Icon = tab.icon;
-                          const isActive = leftTab === tab.id;
-                          return (
-                            <button
-                              key={tab.id}
-                              onClick={() => {
-                                if (tab.id === "files") {
-                                  if (leftTab === "files") setSidebarOpen((p) => !p);
-                                  else { setLeftTab("files"); setSidebarOpen(true); }
-                                } else {
-                                  if (leftTab === tab.id && sidebarOpen) setSidebarOpen(false);
-                                  else { setLeftTab(tab.id); setSidebarOpen(true); }
-                                }
-                              }}
-                              className={`ab-left-strip-btn ${isActive && sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
-                              title={tab.label}
-                            >
-                              <Icon size={14} />
-                              <span>{tab.label}</span>
-                            </button>
-                          );
-                        })}
+                <CompositeProvider>
+                  <PreviewProvider file={selectedFile} doneFiles={filteredDoneFiles}>
+                    <div className="flex flex-col h-full">
+                      <div
+                        className="px-4 py-2 shrink-0 space-y-1.5"
+                        style={{
+                          background: "linear-gradient(90deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.65) 50%, rgba(59,130,246,0.03) 100%)",
+                          borderBottom: "1px solid rgba(20,184,166,0.1)",
+                        }}
+                      >
+                        <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
+                        <GlobalProgress progress={progress} isComplete={isComplete} />
                       </div>
 
-                      {sidebarOpen && (
-                        <div
-                          ref={sidebarElRef}
-                          className="shrink-0 flex flex-col overflow-hidden"
-                          style={{
-                            width: sidebarWidthRef.current,
-                            transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
-                            borderRight: "1px solid rgba(20,184,166,0.08)",
-                            background: "rgba(5,5,16,0.55)",
-                          }}
-                        >
-                          {leftTab === "files" ? (
-                            <MetadataFileList
-                              files={filteredMetadataFiles}
-                              totalFiles={metadataFiles.length}
-                              selectedId={selectedId}
-                              onSelect={handleSelectFile}
-                              onExportZip={handleExportZip}
-                              collapsed={false}
-                              onToggle={() => setSidebarOpen((p) => !p)}
-                              isExporting={isExporting}
-                              zipProgress={zipProgress}
-                              downloaded={downloaded}
-                              productTypes={productTypes}
-                              customChips={filterState.customChips}
-                              activeFilters={activeFilters}
-                              filterMode={filterMode}
-                              onToggleFilter={toggleFilter}
-                              onToggleMode={toggleMode}
-                              onClearFilters={clearAll}
-                              onAddCustomChip={addCustomChip}
-                              onRemoveCustomChip={removeCustomChip}
-                            />
+                      <div className="flex-1 flex overflow-hidden min-h-0">
+                        <div className="ab-left-strip shrink-0">
+                          {LEFT_TABS.map((tab) => {
+                            const Icon = tab.icon;
+                            const isActive = leftTab === tab.id;
+                            return (
+                              <button
+                                key={tab.id}
+                                onClick={() => {
+                                  if (tab.id === "files") {
+                                    if (leftTab === "files") setSidebarOpen((p) => !p);
+                                    else { setLeftTab("files"); setSidebarOpen(true); }
+                                  } else {
+                                    if (leftTab === tab.id && sidebarOpen) setSidebarOpen(false);
+                                    else { setLeftTab(tab.id); setSidebarOpen(true); }
+                                  }
+                                }}
+                                className={`ab-left-strip-btn ${isActive && sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
+                                title={tab.label}
+                              >
+                                <Icon size={14} />
+                                <span>{tab.label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {sidebarOpen && (
+                          <div
+                            ref={sidebarElRef}
+                            className="shrink-0 flex flex-col overflow-hidden"
+                            style={{
+                              width: sidebarWidthRef.current,
+                              transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
+                              borderRight: "1px solid rgba(20,184,166,0.08)",
+                              background: "rgba(5,5,16,0.55)",
+                            }}
+                          >
+                            {leftTab === "files" ? (
+                              <MetadataFileList
+                                files={filteredMetadataFiles}
+                                totalFiles={metadataFiles.length}
+                                selectedId={selectedId}
+                                onSelect={handleSelectFile}
+                                onExportZip={handleExportZip}
+                                collapsed={false}
+                                onToggle={() => setSidebarOpen((p) => !p)}
+                                isExporting={isExporting}
+                                zipProgress={zipProgress}
+                                downloaded={downloaded}
+                                productTypes={productTypes}
+                                customChips={filterState.customChips}
+                                activeFilters={activeFilters}
+                                filterMode={filterMode}
+                                onToggleFilter={toggleFilter}
+                                onToggleMode={toggleMode}
+                                onClearFilters={clearAll}
+                                onAddCustomChip={addCustomChip}
+                                onRemoveCustomChip={removeCustomChip}
+                              />
+                            ) : (
+                              <SidebarPanels activeTab={leftTab} />
+                            )}
+                          </div>
+                        )}
+
+                        {sidebarOpen && (
+                          <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
+                        )}
+
+                        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+                          <MemoizedPreviewPanel />
+                        </div>
+                      </div>
+
+                      <div
+                        className="px-4 py-1.5 flex items-center justify-between shrink-0"
+                        style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2.5 pointer-events-auto select-none">
+                            <AstroLogo size={22} showText={false} className="opacity-40" />
+                            <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
+                            <span className="text-[8px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.25)" }}>{APP_VERSION}</span>
+                          </div>
+                          <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
+                          {isComplete ? (
+                            <button
+                              onClick={handleNewBatch}
+                              className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                              style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
+                            >
+                              <RotateCcw size={10} /> New Batch
+                            </button>
                           ) : (
-                            <SidebarPanels activeTab={leftTab} />
+                            <button
+                              onClick={handleBrowseFiles}
+                              className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                              style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.1)", color: "#a1a1aa" }}
+                            >
+                              <Plus size={11} /> Add FITS
+                            </button>
                           )}
                         </div>
-                      )}
-
-                      {sidebarOpen && (
-                        <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
-                      )}
-
-                      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                        <MemoizedPreviewPanel />
                       </div>
                     </div>
-
-                    <div
-                      className="px-4 py-1.5 flex items-center justify-between shrink-0"
-                      style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2.5 pointer-events-auto select-none">
-                          <AstroLogo size={22} showText={false} className="opacity-40" />
-                          <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
-                          <span className="text-[8px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.25)" }}>{APP_VERSION}</span>
-                        </div>
-                        <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
-                        {isComplete ? (
-                          <button
-                            onClick={handleNewBatch}
-                            className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                            style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
-                          >
-                            <RotateCcw size={10} /> New Batch
-                          </button>
-                        ) : (
-                          <button
-                            onClick={handleBrowseFiles}
-                            className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                            style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.1)", color: "#a1a1aa" }}
-                          >
-                            <Plus size={11} /> Add FITS
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </PreviewProvider>
+                  </PreviewProvider>
+                </CompositeProvider>
               )}
             </DropZone>
           </div>

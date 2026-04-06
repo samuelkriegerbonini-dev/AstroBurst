@@ -1,46 +1,22 @@
-import { withPreview, safeInvoke } from "../infrastructure/tauri";
+import { withPreview, typedInvoke, getOutputDir } from "../infrastructure/tauri";
 import type { StfParams } from "../shared/types";
-
-export function composeRgb(
-  lPath: string | null,
-  rPath: string | null,
-  gPath: string | null,
-  bPath: string | null,
-  outputDir?: string,
-  options: Record<string, any> = {},
-) {
-  return withPreview("compose_rgb_cmd", outputDir, { lPath, rPath, gPath, bPath, ...options });
-}
-
-export function drizzleStack(
-  paths: string[],
-  outputDir?: string,
-  options: Record<string, any> = {},
-) {
-  return withPreview("drizzle_stack_cmd", outputDir, { paths, ...options }, [
-    ["png_path", "previewUrl"],
-    ["weight_map_path", "weightMapUrl"],
-  ]);
-}
-
-export function drizzleRgb(
-  rPaths: string[] | null,
-  gPaths: string[] | null,
-  bPaths: string[] | null,
-  outputDir?: string,
-  options: Record<string, any> = {},
-) {
-  return withPreview("drizzle_rgb_cmd", outputDir, { rPaths, gPaths, bPaths, ...options });
-}
+import type {
+  BlendResult,
+  AlignResult,
+  RestretchResult,
+  AutoWbResult,
+  CalibrateCompositeResult,
+  ScnrOptions,
+} from "../shared/types/compose";
 
 export function restretchComposite(
   outputDir: string,
   stfR: StfParams,
   stfG: StfParams,
   stfB: StfParams,
-  scnr?: { enabled: boolean; method?: string; amount?: number },
-) {
-  return safeInvoke("restretch_composite_cmd", {
+  scnr?: ScnrOptions,
+): Promise<RestretchResult> {
+  return typedInvoke<RestretchResult>("restretch_composite_cmd", {
     outputDir,
     shadowR: stfR.shadow,
     midtoneR: stfR.midtone,
@@ -58,11 +34,11 @@ export function restretchComposite(
 }
 
 export function clearCompositeCache(): Promise<void> {
-  return safeInvoke("clear_composite_cache_cmd", {});
+  return typedInvoke<void>("clear_composite_cache_cmd", {});
 }
 
-export function updateCompositeChannel(channel: string, path: string) {
-  return safeInvoke("update_composite_channel_cmd", { channel, path });
+export function updateCompositeChannel(channel: string, path: string): Promise<void> {
+  return typedInvoke<void>("update_composite_channel_cmd", { channel, path });
 }
 
 export function blendChannels(
@@ -70,8 +46,8 @@ export function blendChannels(
   weights: { channelIdx: number; r: number; g: number; b: number }[],
   outputDir?: string,
   options: { preset?: string; autoStretch?: boolean; linkedStf?: boolean } = {},
-) {
-  return withPreview("blend_channels_cmd", outputDir, {
+): Promise<BlendResult> {
+  return withPreview<BlendResult>("blend_channels_cmd", outputDir, {
     channelPaths,
     weights,
     preset: options.preset ?? "",
@@ -80,36 +56,16 @@ export function blendChannels(
   });
 }
 
-export function alignChannels(
+export async function alignChannels(
   paths: string[],
   outputDir?: string,
   alignMethod = "phase_correlation",
-) {
-  return safeInvoke("align_channels_cmd", {
+): Promise<AlignResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<AlignResult>("align_channels_cmd", {
     paths,
-    outputDir: outputDir ?? "./output",
+    outputDir: dir,
     alignMethod,
-  });
-}
-
-export function applyScnr(
-  outputDir?: string,
-  options: {
-    method?: string;
-    amount?: number;
-    preserveLuminance?: boolean;
-    rFactor?: number;
-    gFactor?: number;
-    bFactor?: number;
-  } = {},
-) {
-  return withPreview("apply_scnr_cmd", outputDir, {
-    method: options.method ?? "average",
-    amount: options.amount ?? 0.5,
-    preserveLuminance: options.preserveLuminance ?? false,
-    rFactor: options.rFactor ?? 1.0,
-    gFactor: options.gFactor ?? 1.0,
-    bFactor: options.bFactor ?? 1.0,
   });
 }
 
@@ -118,8 +74,8 @@ export function calibrateComposite(
   rFactor: number,
   gFactor: number,
   bFactor: number,
-) {
-  return safeInvoke("calibrate_composite_cmd", {
+): Promise<CalibrateCompositeResult> {
+  return typedInvoke<CalibrateCompositeResult>("calibrate_composite_cmd", {
     outputDir,
     rFactor,
     gFactor,
@@ -127,15 +83,10 @@ export function calibrateComposite(
   });
 }
 
-export function computeAutoWb(): Promise<{
-  r_factor: number;
-  g_factor: number;
-  b_factor: number;
-  ref_channel: string;
-}> {
-  return safeInvoke("compute_auto_wb_cmd", {});
+export function computeAutoWb(): Promise<AutoWbResult> {
+  return typedInvoke<AutoWbResult>("compute_auto_wb_cmd", {});
 }
 
-export function resetWb(outputDir = "./output") {
-  return safeInvoke("reset_wb_cmd", { outputDir });
+export function resetWb(outputDir = "./output"): Promise<void> {
+  return typedInvoke<void>("reset_wb_cmd", { outputDir });
 }

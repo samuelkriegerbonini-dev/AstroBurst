@@ -1,4 +1,4 @@
-import { safeInvoke } from "../infrastructure/tauri";
+import { typedInvoke } from "../infrastructure/tauri";
 
 export interface SynthFieldConfig {
   width: number;
@@ -54,7 +54,7 @@ export function generateSynth(
   saveGroundTruth = false,
   groundTruthPath?: string,
 ): Promise<SynthResult> {
-  return safeInvoke("generate_synth_cmd", {
+  return typedInvoke<SynthResult>("generate_synth_cmd", {
     args: {
       config,
       output_path: outputPath,
@@ -71,7 +71,7 @@ export function generateSynthStack(
   outputDir: string,
   prefix = "synth",
 ): Promise<SynthResult> {
-  return safeInvoke("generate_synth_stack_cmd", {
+  return typedInvoke<SynthResult>("generate_synth_stack_cmd", {
     args: { config, output_dir: outputDir, prefix },
   });
 }

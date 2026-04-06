@@ -36,10 +36,6 @@ impl ProgressHandle {
         }
     }
 
-    pub fn tick(&self) {
-        self.tick_with_stage("");
-    }
-
     pub fn tick_with_stage(&self, stage: &str) {
         let cur = self.current.fetch_add(1, Ordering::Relaxed) + 1;
         let tot = self.total.load(Ordering::Relaxed);
@@ -74,31 +70,8 @@ impl ProgressHandle {
         self.total.store(total, Ordering::Relaxed);
     }
 
-    pub fn set_current(&self, current: u64) {
-        self.current.store(current, Ordering::Relaxed);
-        let tot = self.total.load(Ordering::Relaxed);
-        let percent = if tot > 0 {
-            (current as f64 / tot as f64 * 100.0) as u32
-        } else {
-            0
-        };
-        let _ = self.app_handle.emit(
-            &self.event_name,
-            ProgressPayload {
-                current,
-                total: tot,
-                percent,
-                stage: String::new(),
-            },
-        );
-    }
-
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
     }
 
     pub fn emit_complete(&self) {

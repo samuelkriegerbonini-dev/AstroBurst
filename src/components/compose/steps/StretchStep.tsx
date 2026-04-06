@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import type { WizardState } from "../wizard.types";
+import type { WizardState } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { restretchComposite, resetWb } from "../../../services/compose";
 import { maskedStretch, applyArcsinhStretch } from "../../../services/processing";

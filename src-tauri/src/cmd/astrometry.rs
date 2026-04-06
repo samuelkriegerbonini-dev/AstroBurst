@@ -92,7 +92,7 @@ pub async fn plate_solve_cmd(
                 (resolved_path.to_string_lossy().to_string(), None)
             };
 
-            let cfg = crate::domain::plate_solve::SolveConfig {
+            let cfg = crate::infra::astrometry::plate_solve::SolveConfig {
                 api_url: config::load_config()
                     .map(|c| c.astrometry_api_url)
                     .unwrap_or_else(|_| DEFAULT_ASTROMETRY_API_URL.into()),
@@ -116,7 +116,7 @@ pub async fn plate_solve_cmd(
 
     #[cfg(feature = "astrometry-net")]
     {
-        let solve_result = crate::domain::plate_solve::solve_astrometry_net(
+        let solve_result = crate::infra::astrometry::plate_solve::solve_astrometry_net(
             &upload_path, &stars, width, height, &cfg,
         )
             .await
@@ -129,7 +129,7 @@ pub async fn plate_solve_cmd(
     #[cfg(not(feature = "astrometry-net"))]
     {
         drop((_tmp, _tmp_ds, upload_path, stars, width, height, cfg));
-        let result = crate::domain::plate_solve::solve_offline_placeholder()
+        let result = crate::infra::astrometry::plate_solve::solve_offline_placeholder()
             .map_err(|e| e.to_string())?;
         serde_json::to_value(&result).map_err(|e| e.to_string())
     }
