@@ -5,4 +5,4 @@ export const FILE_STATUS = {
   ERROR: "error",
 } as const;
 
-export const APP_VERSION = "v0.4.5.3";
+export const APP_VERSION = "v0.4.6";

@@ -1,3 +1,72 @@
+## [0.4.6] - 2025-04-06
+
+### Added
+
+#### Tone Curves (AdjustStep)
+- Spline-based curve editor with per-channel (R/G/B) and linked RGB modes
+- Double-click to add control points, right-click to remove
+- Non-destructive: reads linear data from COMPOSITE_KEY, applies STF + curves for preview only
+- Curves state carried from StretchStep via CompositeContext
+
+#### Auto-STF Preview for Linear Data
+- All linear-domain commands (blend, calibrate, WB, SCNR, reset) render preview with linked auto-STF
+- Uses existing `make_stf_u8_fn` + `render_rgb_preview_with_stf`
+- Eliminates washed-out/near-black previews after blend and color balance
+
+#### Narrowband Detection via Blend Preset
+- `isNarrowbandWorkflow` checks blend preset (SHO, HOO, Foraxx) as fallback when bin IDs are r/g/b
+- SCNR warning badge correctly shows NARROWBAND for SHO data in RGB bins
+
+#### Auto-STF Propagation
+- `blend_channels_cmd`, `calibrate_and_scnr_cmd`, `calibrate_composite_cmd`, `reset_wb_cmd` return `auto_stf` in response
+- StretchStep sliders initialize from auto-STF instead of identity
+- ColorBalanceStep propagates post-WB auto-STF to CompositeContext
+- StretchStep re-initializes on re-blend via ref-based comparison
+
+#### Cache-Only Intermediate Processing
+- `align_channels_cmd`, `stack`, `calibrate`, `extract_background_cmd` store results in GLOBAL_IMAGE_CACHE
+- Only PNG previews written to disk; FITS output only on explicit export
+
+### Changed
+
+#### Linear Pipeline Preservation
+- `apply_tone_composite_cmd` no longer writes to COMPOSITE_KEY cache
+- STF + curves are preview-only; linear calibrated data preserved
+
+#### Safe StretchStep Reset
+- Reset restores STF sliders to auto-computed values without touching cache
+- No longer calls `resetWb` (which destroyed WB+SCNR data)
+
+#### AdjustStep STF Passthrough
+- Reads compositeStf from CompositeContext instead of using auto-STF
+- Custom stretch from StretchStep preserved in curves preview
+
+#### ExportStep
+- PNG export errors on cache miss instead of silent fallback to raw files
+- FITS export passes header source path only (data from cache)
+
+#### Asset Protocol
+- Path safety with canonicalize + starts_with against app_data_dir
+- Windows URL decode compatibility
+- Async runtime, NotFound-only retry, selective cleanup, CORS restored
+
+### Fixed
+- ColorBalanceStep auto-WB infinite loop (removed onWbChange from useEffect deps)
+- CubeFrameNav service return type: `output_path` (was `png_path`)
+- CubeDims type: `width/height/frames` matching backend constants
+- SpectroscopyPanel, ExportTab cubeDims usage aligned with backend
+- PipelineResult type matches BatchPipelineStats from Rust
+- StackOptions: added `align`, `maxIterations`; CalibrateOptions: added plural paths, `darkExposureRatio`
+- BackgroundResult: added `corrected_fits`; ExportResult: added `channels`
+- PlateSolveResult: added `success`; resetWb return type fixed
+- PreviewContext duplicate export removed
+- 22 missing lucide-react declarations added
+- ComposeWizard useMemo deps corrected
+- 39 TypeScript strict errors resolved (0 remaining)
+
+[0.4.6]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.5...v0.4.6
+
+
 ## [0.4.5] - 2026-03-29
 
 ### Added
@@ -18,8 +87,8 @@
 
 #### Spectroscopy Wavelength Unit Conversion
 - Automatic unit detection from `CUNIT3` header (M, CM, NM, ANGSTROM, HZ, GHz, KM/S, etc.)
-- Display conversion: JWST NIRSpec meters shown as μm, HST STIS Angstroms as nm, radio Hz as GHz
-- Axis labels and hover tooltips reflect actual converted units instead of hardcoded "μm"
+- Display conversion: JWST NIRSpec meters shown as um, HST STIS Angstroms as nm, radio Hz as GHz
+- Axis labels and hover tooltips reflect actual converted units instead of hardcoded "um"
 
 #### Vizier Feature Flag
 - `vizier` Cargo feature enabling Gaia DR3 TAP queries for real SPCC calibration via reqwest
@@ -44,8 +113,8 @@
 - "Collapse Sum" button relabeled to "Collapse Mean" to match actual backend operation (`collapse_mean`)
 
 #### Dependency Updates
-- `tauri` 2 → 2.10, `tauri-build` 2 → 2.5, `rustfft` 6.2 → 6.4
-- `@tauri-apps/api` ^2.1 → ^2.10, `@tauri-apps/cli` ^2.1 → ^2.10, `@tauri-apps/plugin-dialog` ^2.1 → ^2.6
+- `tauri` 2 > 2.10, `tauri-build` 2 > 2.5, `rustfft` 6.2 > 6.4
+- `@tauri-apps/api` ^2.1 > ^2.10, `@tauri-apps/cli` ^2.1 > ^2.10, `@tauri-apps/plugin-dialog` ^2.1 > ^2.6
 - `asdf-full` (bzip2 + lz4_flex) promoted to default features
 - Removed unused `config` crate dependency (~150 transitive crates eliminated)
 

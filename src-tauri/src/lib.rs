@@ -143,6 +143,7 @@ pub fn run() {
             cmd::compose::blend_channels_cmd,
             cmd::compose::align_channels_cmd,
             cmd::compose::calibrate_composite_cmd,
+            cmd::compose::calibrate_and_scnr_cmd,
             cmd::compose::compute_auto_wb_cmd,
             cmd::compose::reset_wb_cmd,
             cmd::processing::resample_fits_cmd,

@@ -4,9 +4,22 @@ import type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
 export type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
 
 export interface PlateSolveResult {
-  wcs: WcsInfo;
-  job_id?: number;
-  elapsed_ms: number;
+  center_ra: number;
+  center_dec: number;
+  pixel_scale_arcsec: number;
+  field_of_view_w_arcmin: number;
+  field_of_view_h_arcmin: number;
+  fov_arcmin: [number, number];
+  naxis1: number;
+  naxis2: number;
+  wcs_params?: {
+    crpix1: number;
+    crpix2: number;
+    crval1: number;
+    crval2: number;
+    cd: number[][];
+    projection: string;
+  };
 }
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {

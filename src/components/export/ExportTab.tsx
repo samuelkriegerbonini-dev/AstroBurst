@@ -73,7 +73,7 @@ function ExportTabInner() {
 
   const handleExportCubeFrames = useCallback(async () => {
     if (!file?.path || !cubeDims) return;
-    const totalFrames = cubeDims.naxis3 ?? cubeDims.frames ?? 0;
+    const totalFrames = cubeDims.frames ?? 0;
     if (totalFrames <= 0) return;
 
     setCubeExporting(true);
@@ -102,7 +102,7 @@ function ExportTabInner() {
     }
   }, [file?.path, file?.name, cubeDims, getCubeFrame, cubeExportFits]);
 
-  const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
+  const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
 
   const compositeStf = useMemo(() => {
     if (!rgbChannels || !isShowingComposite) return null;

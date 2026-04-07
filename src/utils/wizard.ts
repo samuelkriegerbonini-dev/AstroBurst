@@ -35,6 +35,8 @@ export interface WizardState {
   targetBackground: number;
   scnrEnabled: boolean;
   scnrAmount: number;
+  scnrMethod: "average" | "maximum";
+  scnrPreserveLuminance: boolean;
   linkedStf: boolean;
   resultPng: string | null;
   resultFits: string | null;
@@ -127,6 +129,8 @@ export const INITIAL_STATE: WizardState = {
   targetBackground: 0.25,
   scnrEnabled: false,
   scnrAmount: 0.5,
+  scnrMethod: "average",
+  scnrPreserveLuminance: false,
   linkedStf: true,
   resultPng: null,
   resultFits: null,
@@ -148,6 +152,16 @@ function filledCount(s: WizardState): number {
 
 function totalFilesCount(s: WizardState): number {
   return s.bins.reduce((acc, b) => acc + b.files.length, 0);
+}
+
+const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
+
+const NB_PRESETS = new Set(["sho", "hoo", "dynamic_hoo", "foraxx", "hubble_legacy"]);
+
+export function isNarrowbandWorkflow(bins: FrequencyBin[], blendPreset?: string): boolean {
+  const filled = bins.filter((b) => b.files.length > 0);
+  if (filled.some((b) => NARROWBAND_IDS.has(b.id))) return true;
+  return !!blendPreset && NB_PRESETS.has(blendPreset);
 }
 
 export const STEPS: StepDef[] = [
@@ -200,8 +214,8 @@ export const STEPS: StepDef[] = [
     badge: (s) => s.compositeReady ? "✓" : null,
   },
   {
-    id: "calibrate",
-    label: "Color Calibration",
+    id: "colorbalance",
+    label: "Color Balance",
     shortLabel: "Color",
     color: "cyan",
     enabled: (s) => s.compositeReady || filledCount(s) >= 2,
@@ -221,8 +235,8 @@ export const STEPS: StepDef[] = [
     enabled: (s) => s.compositeReady || totalFilesCount(s) > 0,
   },
   {
-    id: "color",
-    label: "Color Adjust",
+    id: "adjust",
+    label: "Adjust",
     shortLabel: "Adjust",
     color: "purple",
     enabled: (s) => s.compositeReady,
@@ -262,7 +276,6 @@ export function nextEnabledStep(
   }
   return null;
 }
-
 
 export function resolveChannelPath(state: WizardState, binId: string): string | null {
   if (state.alignedPaths[binId]) return state.alignedPaths[binId];

@@ -7,6 +7,7 @@ export interface CalibrateResult {
 
 export interface StackResult {
   png_path: string;
+  fits_path?: string;
   previewUrl?: string;
   dimensions: [number, number];
   elapsed_ms: number;
@@ -28,19 +29,43 @@ export interface PipelineRequest {
   normalize?: boolean;
 }
 
+export interface PipelineChannelStats {
+  label: string;
+  lights_input: number;
+  lights_after_rejection?: number[];
+  mean: number;
+  stddev: number;
+}
+
+export interface PipelineStats {
+  darks_combined: number;
+  flats_combined: number;
+  bias_combined: number;
+  channels: PipelineChannelStats[];
+}
+
+export interface PipelineChannelPreview {
+  label: string;
+  pixels_b64: string;
+  width: number;
+  height: number;
+}
+
 export interface PipelineResult {
-  channels: Array<{
-    label: string;
-    output_path: string;
-    frames_calibrated: number;
-  }>;
-  elapsed_ms: number;
+  stats: PipelineStats;
+  channel_previews: PipelineChannelPreview[];
+  rgb_preview?: string;
+  elapsed_ms?: number;
 }
 
 export interface CalibrateOptions {
   darkPath?: string;
   flatPath?: string;
   biasPath?: string;
+  darkPaths?: string[];
+  flatPaths?: string[];
+  biasPaths?: string[];
+  darkExposureRatio?: number;
   normalize?: boolean;
 }
 
@@ -49,6 +74,8 @@ export interface StackOptions {
   method?: string;
   sigmaLow?: number;
   sigmaHigh?: number;
+  maxIterations?: number;
+  align?: boolean;
   drizzleScale?: number;
   weightMode?: string;
 }

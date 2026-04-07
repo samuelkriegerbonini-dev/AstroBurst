@@ -1,20 +1,18 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
+use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::cmd::helpers;
 use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::rgb::{harmonize_dimensions, align_channels};
 use crate::core::compose::channel_blend::{blend_channels, BlendWeight};
 use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::StfParams;
-use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::{write_fits_mono, filter_header};
-use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, STF_G, STF_R, STF_B, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, RES_BLEND_PRESET, RES_CHANNEL_COUNT};
+use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT};
 
 use super::rgb::{composite_png_path, load_entry};
 
@@ -132,8 +130,6 @@ pub async fn blend_channels_cmd(
     weights: Vec<serde_json::Value>,
     output_dir: String,
     preset: Option<String>,
-    auto_stretch: Option<bool>,
-    linked_stf: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -187,94 +183,39 @@ pub async fn blend_channels_cmd(
 
         let (r, g, b) = blend_channels(&refs, &blend_weights, max_rows, max_cols);
 
-        let stats_r = compute_image_stats(&r);
-        let stats_g = compute_image_stats(&g);
-        let stats_b = compute_image_stats(&b);
+        let (stats_r, (stats_g, stats_b)) = rayon::join(
+            || compute_image_stats(&r),
+            || rayon::join(
+                || compute_image_stats(&g),
+                || compute_image_stats(&b),
+            ),
+        );
 
-        let arc_r = Arc::new(r);
-        let arc_g = Arc::new(g);
-        let arc_b = Arc::new(b);
-
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::clone(&arc_r), stats_r.clone());
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::clone(&arc_g), stats_g.clone());
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::clone(&arc_b), stats_b.clone());
-
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_R, Arc::clone(&arc_r), stats_r.clone());
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_G, Arc::clone(&arc_g), stats_g.clone());
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_B, Arc::clone(&arc_b), stats_b.clone());
-
-        let lum_fits_path = format!("{}/rgb_composite_lum.fits", output_dir);
-        {
-            let lum_r = Arc::clone(&arc_r);
-            let lum_g = Arc::clone(&arc_g);
-            let lum_b = Arc::clone(&arc_b);
-            let lum_path = lum_fits_path.clone();
-            let lum_rows = max_rows;
-            let lum_cols = max_cols;
-            std::thread::spawn(move || {
-                let r_sl = lum_r.as_slice().unwrap();
-                let g_sl = lum_g.as_slice().unwrap();
-                let b_sl = lum_b.as_slice().unwrap();
-                let lum_data: Vec<f32> = r_sl.iter().zip(g_sl.iter()).zip(b_sl.iter())
-                    .map(|((&rv, &gv), &bv)| rv * 0.2126 + gv * 0.7152 + bv * 0.0722)
-                    .collect();
-                if let Ok(lum) = Array2::from_shape_vec((lum_rows, lum_cols), lum_data) {
-                    let _ = write_fits_mono(&lum_path, &lum, None);
-                }
-            });
-        }
-
-        let do_stretch = auto_stretch.unwrap_or(true);
-        let linked = linked_stf.unwrap_or(false);
+        helpers::insert_composite_and_orig(r, g, b, stats_r.clone(), stats_g.clone(), stats_b.clone());
 
         let png_path = composite_png_path(&output_dir);
+        let (er, eg, eb) = helpers::load_composite_rgb()?;
 
-        let (stf_r, stf_g, stf_b);
+        let stf_config = AutoStfConfig::default();
+        let linked_stf = helpers::compute_linked_stf(er.stats(), eg.stats(), eb.stats(), &stf_config);
+        let fn_r = make_stf_u8_fn(&linked_stf, er.stats());
+        let fn_g = make_stf_u8_fn(&linked_stf, eg.stats());
+        let fn_b = make_stf_u8_fn(&linked_stf, eb.stats());
+        helpers::render_rgb_preview_with_stf(er.arr(), eg.arr(), eb.arr(), fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
-        if do_stretch {
-            use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn, AutoStfConfig};
-            let cfg = AutoStfConfig::default();
-
-            if linked {
-                let stf = helpers::compute_linked_stf(&stats_r, &stats_g, &stats_b, &cfg);
-                stf_r = stf.clone();
-                stf_g = stf.clone();
-                stf_b = stf;
-            } else {
-                stf_r = auto_stf(&stats_r, &cfg);
-                stf_g = auto_stf(&stats_g, &cfg);
-                stf_b = auto_stf(&stats_b, &cfg);
-            }
-
-            let fn_r = make_stf_u8_fn(&stf_r, &stats_r);
-            let fn_g = make_stf_u8_fn(&stf_g, &stats_g);
-            let fn_b = make_stf_u8_fn(&stf_b, &stats_b);
-            helpers::render_rgb_preview_with_stf(
-                &*arc_r, &*arc_g, &*arc_b,
-                fn_r, fn_g, fn_b,
-                &png_path, MAX_PREVIEW_DIM,
-            )?;
-        } else {
-            stf_r = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
-            stf_g = stf_r.clone();
-            stf_b = stf_r.clone();
-            helpers::render_rgb_preview(&*arc_r, &*arc_g, &*arc_b, &png_path, MAX_PREVIEW_DIM)?;
-        }
+        let stf_json = helpers::stf_json(&linked_stf);
 
         let elapsed = t0.elapsed().as_millis() as u64;
 
         Ok(json!({
             RES_PNG_PATH: png_path,
-            "lum_fits_path": lum_fits_path,
             RES_DIMENSIONS: [max_cols, max_rows],
             RES_CHANNEL_COUNT: channel_paths.len(),
             RES_BLEND_PRESET: preset.unwrap_or_default(),
-            STF_R: { RES_SHADOW: stf_r.shadow, RES_MIDTONE: stf_r.midtone, RES_HIGHLIGHT: stf_r.highlight },
-            STF_G: { RES_SHADOW: stf_g.shadow, RES_MIDTONE: stf_g.midtone, RES_HIGHLIGHT: stf_g.highlight },
-            STF_B: { RES_SHADOW: stf_b.shadow, RES_MIDTONE: stf_b.midtone, RES_HIGHLIGHT: stf_b.highlight },
             RES_STATS_R: { RES_MEDIAN: stats_r.median, RES_MEAN: stats_r.mean, RES_MIN: stats_r.min, RES_MAX: stats_r.max },
             RES_STATS_G: { RES_MEDIAN: stats_g.median, RES_MEAN: stats_g.mean, RES_MIN: stats_g.min, RES_MAX: stats_g.max },
             RES_STATS_B: { RES_MEDIAN: stats_b.median, RES_MEAN: stats_b.mean, RES_MIN: stats_b.min, RES_MAX: stats_b.max },
+            "auto_stf": stf_json,
             RES_ELAPSED_MS: elapsed,
         }))
     })

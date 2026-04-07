@@ -18,6 +18,7 @@ export interface BlendResult {
   stf_r?: StfParams;
   stf_g?: StfParams;
   stf_b?: StfParams;
+  auto_stf?: StfParams;
 }
 
 export interface AlignedChannel {
@@ -53,6 +54,28 @@ export interface AutoWbResult {
 export interface CalibrateCompositeResult {
   png_path: string;
   previewUrl?: string;
+  auto_stf?: StfParams;
+  elapsed_ms: number;
+}
+
+export interface CalibrateAndScnrResult {
+  png_path: string;
+  wb_applied: boolean;
+  r_factor: number;
+  g_factor: number;
+  b_factor: number;
+  scnr_applied: boolean;
+  auto_stf?: StfParams;
+  elapsed_ms: number;
+}
+
+export interface ResetWbResult {
+  png_path: string;
+  reset: boolean;
+  r_factor: number;
+  g_factor: number;
+  b_factor: number;
+  auto_stf?: StfParams;
   elapsed_ms: number;
 }
 

@@ -74,7 +74,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       title,
     });
     if (!selected) return [];
-    if (Array.isArray(selected)) return selected.map(f => typeof f === 'string' ? f : f.path);
+    if (Array.isArray(selected)) return selected;
     return [selected];
   }, []);
 

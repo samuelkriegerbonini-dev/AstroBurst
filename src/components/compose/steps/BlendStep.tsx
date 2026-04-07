@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo } from "react";
 
 import { blendChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton, Toggle } from "../../ui";
+import { RunButton } from "../../ui";
 import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
@@ -49,7 +49,7 @@ function resolvePresetWeights(
 interface BlendStepProps {
   state: WizardState;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
-  onCompositeReady: (previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => void;
+  onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
@@ -65,8 +65,6 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
-  const [autoStretch, setAutoStretch] = useState(true);
-  const [linkedStf, setLinkedStf] = useState(state.linkedStf);
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
 
@@ -129,25 +127,19 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       const dir = await getOutputDir();
       const res = await blendChannels(paths, backendWeights, dir, {
         preset: state.blendPreset,
-        autoStretch,
-        linkedStf,
       });
 
       setResult(res);
 
-      const stfR = res.stf_r ?? null;
-      const stfG = res.stf_g ?? null;
-      const stfB = res.stf_b ?? null;
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
-      const lumFitsPath = res.lum_fits_path ?? null;
-
-      onCompositeReady(previewUrl, stfR, stfG, stfB, lumFitsPath);
+      const autoStf = res.auto_stf ?? undefined;
+      onCompositeReady(previewUrl, autoStf);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
-  }, [filledBins, state, activeWeights, autoStretch, linkedStf, onCompositeReady]);
+  }, [filledBins, state, activeWeights, onCompositeReady]);
 
   if (filledBins.length < 2) {
     return (
@@ -164,11 +156,11 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
           const isActive = state.blendPreset === id;
           return (
             <button key={id} onClick={() => handlePreset(id)}
-              className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
-                isActive
-                  ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
-                  : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
-              }`}>
+                    className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                      isActive
+                        ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
+                        : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                    }`}>
               <div className="font-semibold">{preset.label}</div>
               <div className="text-[8px] opacity-60">{preset.desc}</div>
             </button>
@@ -217,11 +209,8 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         })}
       </div>
 
-      <div className="flex items-center gap-4 pt-1">
-        <Toggle label="Auto Stretch" checked={autoStretch} accent="amber" onChange={setAutoStretch} />
-        {autoStretch && (
-          <Toggle label="Linked STF" checked={linkedStf} accent="amber" onChange={setLinkedStf} />
-        )}
+      <div className="text-[9px] text-zinc-600 bg-zinc-900/50 rounded px-2 py-1.5">
+        Blend produces a linear composite. Preview uses auto-STF for visualization.
       </div>
 
       <RunButton

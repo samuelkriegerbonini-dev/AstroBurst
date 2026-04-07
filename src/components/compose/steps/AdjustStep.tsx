@@ -3,12 +3,12 @@ import type { WizardState } from "../wizard";
 import { applyToneComposite, type CurvePoint } from "../../../services/tone";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
-import { Slider, Toggle, RunButton } from "../../ui";
+import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
+import { useCompositeContext } from "../../../context/CompositeContext";
 
-interface ColorStepProps {
+interface AdjustStepProps {
   state: WizardState;
-  onScnrChange: (enabled: boolean, amount?: number) => void;
   onResult: (png: string | null) => void;
 }
 
@@ -36,9 +36,8 @@ function isIdentity(pts: CurvePoint[]): boolean {
   );
 }
 
-export default function ColorStep({ state, onScnrChange, onResult }: ColorStepProps) {
-  const [method, setMethod] = useState("average");
-  const [preserveLum, setPreserveLum] = useState(false);
+export default function AdjustStep({ state, onResult }: AdjustStepProps) {
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeContext();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
@@ -55,14 +54,6 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
     if (isLinked) return !isIdentity(curveLinked);
     return !isIdentity(curveR) || !isIdentity(curveG) || !isIdentity(curveB);
   }, [isLinked, curveLinked, curveR, curveG, curveB]);
-
-  const handleToggleScnr = useCallback((val: boolean) => {
-    onScnrChange(val, state.scnrAmount);
-  }, [state.scnrAmount, onScnrChange]);
-
-  const handleAmountChange = useCallback((val: number) => {
-    onScnrChange(state.scnrEnabled, val);
-  }, [state.scnrEnabled, onScnrChange]);
 
   const handleResetCurves = useCallback(() => {
     const fresh = () => DEFAULT_CURVE.map((p) => ({ ...p }));
@@ -82,16 +73,16 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
       const cG = isLinked ? curveLinked : curveG;
       const cB = isLinked ? curveLinked : curveB;
 
-      const scnr = state.scnrEnabled
-        ? { method, amount: state.scnrAmount, preserveLuminance: preserveLum }
-        : null;
-
       const res = await applyToneComposite({
         outputDir: dir,
+        stfR: compositeStfR,
+        stfG: compositeStfG,
+        stfB: compositeStfB,
+        linkedStf: compositeStfLinked,
         curvesR: cR,
         curvesG: cG,
         curvesB: cB,
-        scnr,
+        scnr: null,
       });
 
       setResult(res);
@@ -107,13 +98,13 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
     } finally {
       setLoading(false);
     }
-  }, [isLinked, curveLinked, curveR, curveG, curveB, state.scnrEnabled, state.scnrAmount, method, preserveLum, onResult]);
+  }, [isLinked, curveLinked, curveR, curveG, curveB, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onResult]);
 
   return (
     <div className="flex flex-col gap-3 p-3">
       {!state.compositeReady && (
         <div className="text-[10px] text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5">
-          Run Blend first to create a composite before applying color adjustments.
+          Run Blend first to create a composite before applying adjustments.
         </div>
       )}
 
@@ -190,28 +181,11 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
         </div>
       </div>
 
-      <Toggle label="SCNR (Green Removal)" checked={state.scnrEnabled} accent="purple" onChange={handleToggleScnr} />
-
-      {state.scnrEnabled && (
-        <div className="flex flex-col gap-2 pl-2">
-          <div className="flex items-center justify-between">
-            <label className="text-xs text-zinc-400">Method</label>
-            <select value={method} onChange={(e) => setMethod(e.target.value)} className="ab-select">
-              <option value="average">Average Neutral</option>
-              <option value="maximum">Maximum Neutral</option>
-            </select>
-          </div>
-          <Slider label="Amount" value={state.scnrAmount} min={0} max={1} step={0.05} accent="purple"
-            format={(v) => `${(v * 100).toFixed(0)}%`} onChange={handleAmountChange} />
-          <Toggle label="Preserve Luminance" checked={preserveLum} accent="purple" onChange={setPreserveLum} />
-        </div>
-      )}
-
       <RunButton
-        label={curvesActive || state.scnrEnabled ? "Apply Curves" + (state.scnrEnabled ? " + SCNR" : "") : "Apply"}
+        label={curvesActive ? "Apply Curves" : "Apply"}
         runningLabel="Applying..."
         running={loading}
-        disabled={!state.compositeReady || (!curvesActive && !state.scnrEnabled)}
+        disabled={!state.compositeReady || !curvesActive}
         accent="purple"
         onClick={handleApply}
       />
@@ -220,7 +194,6 @@ export default function ColorStep({ state, onScnrChange, onResult }: ColorStepPr
         <div className="text-[9px] text-zinc-500">
           {result.elapsed_ms}ms
           {result.curves_applied && " | curves applied"}
-          {result.scnr_applied && " | SCNR applied"}
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

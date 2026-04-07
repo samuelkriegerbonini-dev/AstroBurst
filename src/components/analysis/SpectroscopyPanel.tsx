@@ -9,7 +9,7 @@ interface SpectroscopyPanelProps {
   wavelengths?: number[] | null;
   pixelCoord?: { x: number; y: number } | null;
   isLoading?: boolean;
-  cubeDims?: { naxis1: number; naxis2: number; naxis3: number; width?: number; height?: number; frames?: number } | null;
+  cubeDims?: { width: number; height: number; frames: number; naxis3?: number } | null;
   elapsed?: number;
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
@@ -269,7 +269,7 @@ export default function SpectroscopyPanel({
     );
   }
 
-  const totalFrames = cubeDims ? (cubeDims.naxis3 ?? cubeDims.frames ?? 0) : 0;
+  const totalFrames = cubeDims ? (cubeDims.frames ?? cubeDims.naxis3 ?? 0) : 0;
 
   return (
     <div className="ab-panel overflow-hidden animate-fade-in">
@@ -322,7 +322,7 @@ export default function SpectroscopyPanel({
 
       {cubeDims && (
         <div className="px-3 pb-1 text-[10px] font-mono text-zinc-600">
-          Cube: {cubeDims.naxis1 ?? cubeDims.width} \u00d7 {cubeDims.naxis2 ?? cubeDims.height} \u00d7 {cubeDims.naxis3 ?? cubeDims.frames}
+          Cube: {cubeDims.width} \u00d7 {cubeDims.height} \u00d7 {cubeDims.frames}
           {spectrum.length > 0 ? ` \u2014 ${spectrum.length} channels` : ""}
         </div>
       )}

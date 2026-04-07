@@ -10,6 +10,7 @@ export interface DeconvolveResult {
 
 export interface BackgroundResult {
   corrected_png: string;
+  corrected_fits?: string;
   model_png: string;
   previewUrl?: string;
   modelUrl?: string;

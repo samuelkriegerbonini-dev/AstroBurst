@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, save_preview_png, auto_stretch_preview};
 use crate::core::imaging::background::{extract_background, BackgroundConfig, BackgroundMode};
+use crate::core::imaging::stats::compute_image_stats;
+use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS, DEFAULT_STEM,
@@ -54,17 +58,19 @@ pub async fn extract_background_cmd(
 
         let corrected_png = format!("{}/{}_bg_corrected.png", output_dir, stem);
         let model_png = format!("{}/{}_bg_model.png", output_dir, stem);
-        let corrected_fits = format!("{}/{}_bg_corrected.fits", output_dir, stem);
+        let cache_key = format!("{}/{}_bg_corrected.fits", output_dir, stem);
 
         let (rows, cols) = bg_result.corrected.dim();
         save_preview_png(rendered, cols, rows, &corrected_png)?;
         save_preview_png(model_rendered, cols, rows, &model_png)?;
-        crate::infra::fits::writer::write_fits_mono(&corrected_fits, &bg_result.corrected, None)?;
+
+        let stats = compute_image_stats(&bg_result.corrected);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(bg_result.corrected), stats);
 
         Ok(json!({
             RES_CORRECTED_PNG: corrected_png,
             RES_MODEL_PNG: model_png,
-            RES_CORRECTED_FITS: corrected_fits,
+            RES_CORRECTED_FITS: cache_key,
             RES_SAMPLE_COUNT: bg_result.sample_count,
             RES_RMS_RESIDUAL: bg_result.rms_residual,
             RES_ELAPSED_MS: bg_result.elapsed_ms,

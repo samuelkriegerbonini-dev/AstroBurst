@@ -30,12 +30,12 @@ function formatDec(dec: number): string {
 }
 
 interface SolveResult {
-  success: boolean;
-  ra_center?: number;
-  dec_center?: number;
-  pixel_scale?: number;
-  field_w_arcmin?: number;
-  field_h_arcmin?: number;
+  center_ra: number;
+  center_dec: number;
+  pixel_scale_arcsec: number;
+  field_of_view_w_arcmin: number;
+  field_of_view_h_arcmin: number;
+  fov_arcmin?: [number, number];
   orientation?: number;
 }
 
@@ -188,11 +188,9 @@ export default function PlateSolvePanel({
         scaleUnits: "arcsecperpix",
       }) as SolveResult;
       setSolveResult(result);
-      if (result.success) {
-        getWcsInfo(filePath)
-          .then((info) => setWcsInfo(info))
-          .catch(() => {});
-      }
+      getWcsInfo(filePath)
+        .then((info) => setWcsInfo(info))
+        .catch(() => {});
     } catch (e: unknown) {
       setSolveError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -208,7 +206,7 @@ export default function PlateSolvePanel({
     })()
     : null;
 
-  const activeWcs = solveResult?.success ? solveResult : wcsInfo;
+  const activeWcs = solveResult ? solveResult : wcsInfo;
 
   return (
     <div className="flex flex-col gap-3">
@@ -396,24 +394,24 @@ export default function PlateSolvePanel({
             </div>
           )}
 
-          {solveResult?.success && (
+          {solveResult && (
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
                 <div className="text-zinc-500">Center RA</div>
-                <div className="text-emerald-300 font-mono">{formatRA(solveResult.ra_center!)}</div>
+                <div className="text-emerald-300 font-mono">{formatRA(solveResult.center_ra)}</div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
                 <div className="text-zinc-500">Center Dec</div>
-                <div className="text-emerald-300 font-mono">{formatDec(solveResult.dec_center!)}</div>
+                <div className="text-emerald-300 font-mono">{formatDec(solveResult.center_dec)}</div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
                 <div className="text-zinc-500">Pixel Scale</div>
-                <div className="text-emerald-300 font-mono">{solveResult.pixel_scale?.toFixed(3)}"/px</div>
+                <div className="text-emerald-300 font-mono">{solveResult.pixel_scale_arcsec?.toFixed(3)}"/px</div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
                 <div className="text-zinc-500">FOV</div>
                 <div className="text-emerald-300 font-mono">
-                  {solveResult.field_w_arcmin?.toFixed(1)}' x {solveResult.field_h_arcmin?.toFixed(1)}'
+                  {solveResult.field_of_view_w_arcmin?.toFixed(1)}' x {solveResult.field_of_view_h_arcmin?.toFixed(1)}'
                 </div>
               </div>
               {solveResult.orientation !== undefined && (

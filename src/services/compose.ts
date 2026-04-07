@@ -6,6 +6,8 @@ import type {
   RestretchResult,
   AutoWbResult,
   CalibrateCompositeResult,
+  CalibrateAndScnrResult,
+  ResetWbResult,
   ScnrOptions,
 } from "../shared/types/compose";
 
@@ -45,14 +47,12 @@ export function blendChannels(
   channelPaths: string[],
   weights: { channelIdx: number; r: number; g: number; b: number }[],
   outputDir?: string,
-  options: { preset?: string; autoStretch?: boolean; linkedStf?: boolean } = {},
+  options: { preset?: string } = {},
 ): Promise<BlendResult> {
   return withPreview<BlendResult>("blend_channels_cmd", outputDir, {
     channelPaths,
     weights,
     preset: options.preset ?? "",
-    autoStretch: options.autoStretch ?? true,
-    linkedStf: options.linkedStf ?? false,
   });
 }
 
@@ -83,10 +83,34 @@ export function calibrateComposite(
   });
 }
 
+export function calibrateAndScnr(
+  outputDir: string,
+  rFactor: number,
+  gFactor: number,
+  bFactor: number,
+  scnr?: {
+    enabled: boolean;
+    method: string;
+    amount: number;
+    preserveLuminance: boolean;
+  },
+): Promise<CalibrateAndScnrResult> {
+  return typedInvoke<CalibrateAndScnrResult>("calibrate_and_scnr_cmd", {
+    outputDir,
+    rFactor,
+    gFactor,
+    bFactor,
+    scnrEnabled: scnr?.enabled ?? false,
+    scnrMethod: scnr?.method,
+    scnrAmount: scnr?.amount,
+    scnrPreserveLuminance: scnr?.preserveLuminance,
+  });
+}
+
 export function computeAutoWb(): Promise<AutoWbResult> {
   return typedInvoke<AutoWbResult>("compute_auto_wb_cmd", {});
 }
 
-export function resetWb(outputDir = "./output"): Promise<void> {
-  return typedInvoke<void>("reset_wb_cmd", { outputDir });
+export function resetWb(outputDir: string): Promise<ResetWbResult> {
+  return typedInvoke<ResetWbResult>("reset_wb_cmd", { outputDir });
 }

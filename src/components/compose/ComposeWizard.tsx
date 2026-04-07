@@ -19,10 +19,10 @@ const StackStep = lazy(() => import("./steps/StackStep"));
 const BackgroundStep = lazy(() => import("./steps/BackgroundStep"));
 const AlignStep = lazy(() => import("./steps/AlignStep"));
 const BlendStep = lazy(() => import("./steps/BlendStep"));
-const CalibrateStep = lazy(() => import("./steps/CalibrateStep"));
+const ColorBalanceStep = lazy(() => import("./steps/ColorBalanceStep"));
 const MaskStep = lazy(() => import("./steps/MaskStep"));
 const StretchStep = lazy(() => import("./steps/StretchStep"));
-const ColorStep = lazy(() => import("./steps/ColorStep"));
+const AdjustStep = lazy(() => import("./steps/AdjustStep"));
 const ExportStep = lazy(() => import("./steps/ExportStep"));
 
 type Action =
@@ -36,7 +36,7 @@ type Action =
   | { type: "SET_MASK_PARAMS"; growth: number; protection: number }
   | { type: "SET_SEGM"; path: string | null }
   | { type: "SET_STRETCH"; mode: WizardState["stretchMode"]; factor?: number; target?: number }
-  | { type: "SET_SCNR"; enabled: boolean; amount?: number }
+  | { type: "SET_SCNR"; enabled: boolean; amount?: number; method?: string; preserveLuminance?: boolean }
   | { type: "SET_RESULT"; png: string | null; fits: string | null }
   | { type: "SET_COMPOSITE_READY"; ready: boolean }
   | { type: "UPDATE"; partial: Partial<WizardState> }
@@ -75,7 +75,13 @@ function reducer(state: WizardState, action: Action): WizardState {
     case "SET_STRETCH":
       return { ...state, stretchMode: action.mode, stretchFactor: action.factor ?? state.stretchFactor, targetBackground: action.target ?? state.targetBackground };
     case "SET_SCNR":
-      return { ...state, scnrEnabled: action.enabled, scnrAmount: action.amount ?? state.scnrAmount };
+      return {
+        ...state,
+        scnrEnabled: action.enabled,
+        scnrAmount: action.amount ?? state.scnrAmount,
+        scnrMethod: (action.method as WizardState["scnrMethod"]) ?? state.scnrMethod,
+        scnrPreserveLuminance: action.preserveLuminance ?? state.scnrPreserveLuminance,
+      };
     case "SET_RESULT":
       return { ...state, resultPng: action.png, resultFits: action.fits };
     case "SET_COMPOSITE_READY":
@@ -293,17 +299,31 @@ export default function ComposeWizard() {
           <BlendStep
             state={state}
             onWeightsChange={(weights, preset) => dispatch({ type: "SET_BLEND_WEIGHTS", weights, preset })}
-            onCompositeReady={handleCompositePreview}
+            onCompositeReady={(url, autoStf) => {
+              if (autoStf) {
+                handleCompositePreview(url, autoStf, autoStf, autoStf);
+              } else {
+                handleCompositePreview(url);
+              }
+            }}
           />
         );
-      case "calibrate":
+      case "colorbalance":
         return (
-          <CalibrateStep
+          <ColorBalanceStep
             state={state}
             onWbChange={(mode, r, g, b) => dispatch({ type: "SET_WB", mode, r, g, b })}
-            onResult={(url) => {
-              handleRestretchPreview(url);
-              completeStep("calibrate");
+            onScnrChange={(enabled, amount, method, preserveLuminance) =>
+              dispatch({ type: "SET_SCNR", enabled, amount, method, preserveLuminance })
+            }
+            onResult={(url, autoStf) => {
+              if (autoStf) {
+                handleRestretchPreview(url, { r: autoStf, g: autoStf, b: autoStf });
+                setCompositeAutoStf(autoStf, autoStf, autoStf);
+              } else {
+                handleRestretchPreview(url);
+              }
+              completeStep("colorbalance");
             }}
           />
         );
@@ -328,14 +348,13 @@ export default function ComposeWizard() {
             }}
           />
         );
-      case "color":
+      case "adjust":
         return (
-          <ColorStep
+          <AdjustStep
             state={state}
-            onScnrChange={(enabled, amount) => dispatch({ type: "SET_SCNR", enabled, amount })}
             onResult={(url) => {
               handleRestretchPreview(url);
-              completeStep("color");
+              completeStep("adjust");
             }}
           />
         );
@@ -344,7 +363,7 @@ export default function ComposeWizard() {
       default:
         return null;
     }
-  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, narrowbandPalette, filterDetections, completeStep]);
+  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep]);
 
   return (
     <div className="flex flex-col h-full">

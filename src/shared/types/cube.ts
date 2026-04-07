@@ -1,10 +1,17 @@
 export interface CubeDims {
-  naxis3: number;
+  width: number;
+  height: number;
+  frames: number;
   frame_count: number;
+  bitpix?: number;
   axis_labels?: string[];
+  wavelengths?: number[];
   spectral_classification?: {
     is_spectral: boolean;
     reason: string | null;
+    axis_type?: string | null;
+    axis_unit?: string | null;
+    channel_count?: number;
   };
 }
 

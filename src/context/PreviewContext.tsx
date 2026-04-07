@@ -378,4 +378,4 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 }
 
-export type { PaletteSuggestion, ChannelSuggestion, RgbChannelMap };
+

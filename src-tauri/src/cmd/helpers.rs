@@ -69,7 +69,6 @@ pub(crate) fn align_method_str(method: AlignMethod) -> &'static str {
         AlignMethod::PhaseCorrelation => "phase_correlation",
     }
 }
-
 pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
     match kernel {
         Some(KERNEL_GAUSSIAN) => DrizzleKernel::Gaussian,
@@ -77,6 +76,7 @@ pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
         _ => DrizzleKernel::Square,
     }
 }
+
 
 pub(crate) fn load_composite_channel(key: &str) -> anyhow::Result<ImageEntry> {
     GLOBAL_IMAGE_CACHE
@@ -178,6 +178,16 @@ pub(crate) fn compute_linked_stf(
     stats_b: &ImageStats,
     config: &AutoStfConfig,
 ) -> StfParams {
+    let (stf, _) = compute_linked_stf_with_stats(stats_r, stats_g, stats_b, config);
+    stf
+}
+
+pub(crate) fn compute_linked_stf_with_stats(
+    stats_r: &ImageStats,
+    stats_g: &ImageStats,
+    stats_b: &ImageStats,
+    config: &AutoStfConfig,
+) -> (StfParams, ImageStats) {
     let combined = ImageStats {
         min: stats_r.min.min(stats_g.min).min(stats_b.min),
         max: stats_r.max.max(stats_g.max).max(stats_b.max),
@@ -187,7 +197,8 @@ pub(crate) fn compute_linked_stf(
         mad: (stats_r.mad + stats_g.mad + stats_b.mad) / 3.0,
         valid_count: stats_r.valid_count,
     };
-    auto_stf(&combined, config)
+    let stf = auto_stf(&combined, config);
+    (stf, combined)
 }
 
 pub(crate) fn render_rgb_preview(

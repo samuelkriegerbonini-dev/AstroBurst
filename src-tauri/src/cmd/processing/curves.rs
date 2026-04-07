@@ -8,10 +8,9 @@ use crate::core::imaging::curves::{
     apply_curve_rgb, apply_levels_rgb, LevelsParams, SplineLut,
 };
 use crate::core::imaging::scnr;
-use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig};
 use crate::types::constants::{
-    COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B,
+    COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B,
     RES_COMPOSITE_DIMS, RES_CURVES_APPLIED, RES_DIMENSIONS,
     RES_ELAPSED_MS, RES_LEVELS_APPLIED, RES_PNG_PATH,
     RES_SCNR_APPLIED, RES_STF_APPLIED, RES_STF,
@@ -74,27 +73,30 @@ pub async fn apply_tone_composite_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let orig_r = helpers::load_composite_channel(COMPOSITE_ORIG_R)?;
-        let orig_g = helpers::load_composite_channel(COMPOSITE_ORIG_G)?;
-        let orig_b = helpers::load_composite_channel(COMPOSITE_ORIG_B)?;
+        let src_r = helpers::load_composite_channel(COMPOSITE_KEY_R)?;
+        let src_g = helpers::load_composite_channel(COMPOSITE_KEY_G)?;
+        let src_b = helpers::load_composite_channel(COMPOSITE_KEY_B)?;
 
-        let (rows, cols) = orig_r.arr().dim();
+        let (rows, cols) = src_r.arr().dim();
 
-        let stats_r = compute_image_stats(orig_r.arr());
-        let stats_g = compute_image_stats(orig_g.arr());
-        let stats_b = compute_image_stats(orig_b.arr());
+        let stats_r = src_r.stats().clone();
+        let stats_g = src_g.stats().clone();
+        let stats_b = src_b.stats().clone();
 
         let stf_config = AutoStfConfig::default();
         let linked = linked_stf.unwrap_or(false);
 
-        let (auto_r, auto_g, auto_b) = if linked {
-            let p = helpers::compute_linked_stf(&stats_r, &stats_g, &stats_b, &stf_config);
-            (p, p, p)
+        let (auto_r, auto_g, auto_b, norm_r, norm_g, norm_b) = if linked {
+            let (p, combined) = helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
+            (p, p, p, combined.clone(), combined.clone(), combined)
         } else {
             (
                 auto_stf(&stats_r, &stf_config),
                 auto_stf(&stats_g, &stf_config),
                 auto_stf(&stats_b, &stf_config),
+                stats_r.clone(),
+                stats_g.clone(),
+                stats_b.clone(),
             )
         };
 
@@ -109,10 +111,10 @@ pub async fn apply_tone_composite_cmd(
             .unwrap_or(auto_b);
 
         let (mut r_img, (mut g_img, mut b_img)) = rayon::join(
-            || apply_stf_f32(orig_r.arr(), &stf_r_params, &stats_r),
+            || apply_stf_f32(src_r.arr(), &stf_r_params, &norm_r),
             || rayon::join(
-                || apply_stf_f32(orig_g.arr(), &stf_g_params, &stats_g),
-                || apply_stf_f32(orig_b.arr(), &stf_b_params, &stats_b),
+                || apply_stf_f32(src_g.arr(), &stf_g_params, &norm_g),
+                || apply_stf_f32(src_b.arr(), &stf_b_params, &norm_b),
             ),
         );
 
@@ -144,7 +146,7 @@ pub async fn apply_tone_composite_cmd(
         }
 
         let scnr_applied = match scnr {
-            Some(ref cfg) if r_img.dim() == g_img.dim() && g_img.dim() == b_img.dim() => {
+            Some(ref cfg) if cfg.amount > 1e-7 && r_img.dim() == g_img.dim() && g_img.dim() == b_img.dim() => {
                 scnr::apply_scnr_inplace(&mut r_img, &mut g_img, &mut b_img, cfg);
                 true
             }
@@ -153,11 +155,6 @@ pub async fn apply_tone_composite_cmd(
 
         let png_path = format!("{}/composite_tone.png", output_dir);
         helpers::render_rgb_preview(&r_img, &g_img, &b_img, &png_path, MAX_PREVIEW_DIM)?;
-
-        let stats_out_r = compute_image_stats(&r_img);
-        let stats_out_g = compute_image_stats(&g_img);
-        let stats_out_b = compute_image_stats(&b_img);
-        helpers::insert_composite_rgb(r_img, g_img, b_img, stats_out_r, stats_out_g, stats_out_b);
 
         Ok(json!({
             RES_PNG_PATH: png_path,

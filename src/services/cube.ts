@@ -23,10 +23,10 @@ export async function getCubeFrame(
   frameIndex: number,
   outputPath: string,
   outputFits?: string,
-): Promise<{ png_path: string; fits_path?: string }> {
+): Promise<{ output_path: string; fits_path?: string }> {
   const dir = await getOutputDir();
   const resolve = (p: string) => p.startsWith("./output") ? p.replace("./output", dir) : p;
-  return typedInvoke<{ png_path: string; fits_path?: string }>("get_cube_frame", {
+  return typedInvoke<{ output_path: string; fits_path?: string }>("get_cube_frame", {
     path,
     frameIndex,
     outputPath: resolve(outputPath),

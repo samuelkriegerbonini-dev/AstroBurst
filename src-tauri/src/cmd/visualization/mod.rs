@@ -81,22 +81,26 @@ pub async fn generate_tiles_rgb(
             .map_err(|_| anyhow::anyhow!("RGB composite not available. Run Compose RGB first."))?;
 
         let cfg = AutoStfConfig::default();
-        let stf = helpers::compute_linked_stf(entry_r.stats(), entry_g.stats(), entry_b.stats(), &cfg);
+        let (stf, combined) = helpers::compute_linked_stf_with_stats(
+            entry_r.stats(), entry_g.stats(), entry_b.stats(), &cfg,
+        );
 
-        let stretched_r = apply_stf_f32(entry_r.arr(), &stf, entry_r.stats());
-        let stretched_g = apply_stf_f32(entry_g.arr(), &stf, entry_g.stats());
-        let stretched_b = apply_stf_f32(entry_b.arr(), &stf, entry_b.stats());
+        use crate::core::imaging::stf::make_stf_u8_fn;
+        let fn_r = make_stf_u8_fn(&stf, &combined);
+        let fn_g = make_stf_u8_fn(&stf, &combined);
+        let fn_b = make_stf_u8_fn(&stf, &combined);
 
         let params = tiles::TileParams {
             tile_size: tile_size as usize,
         };
 
-        let result = tiles::generate_tile_pyramid_rgb(
-            &stretched_r,
-            &stretched_g,
-            &stretched_b,
+        let result = tiles::generate_tile_pyramid_rgb_stf(
+            entry_r.arr(),
+            entry_g.arr(),
+            entry_b.arr(),
             &output_dir,
             &params,
+            fn_r, fn_g, fn_b,
         )?;
         Ok(serde_json::to_value(&result).unwrap_or(json!({})))
     })

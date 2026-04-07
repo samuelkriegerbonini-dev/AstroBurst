@@ -47,6 +47,8 @@ export interface ExportResult {
   output_path: string;
   format: string;
   elapsed_ms: number;
+  file_size_bytes?: number;
+  channels?: Array<{ path: string; channel: string }>;
 }
 
 export function exportPng(

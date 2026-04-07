@@ -1,10 +1,11 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { WizardState } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
-import { restretchComposite, resetWb } from "../../../services/compose";
+import { restretchComposite } from "../../../services/compose";
 import { maskedStretch, applyArcsinhStretch } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { getOutputDir } from "../../../infrastructure/tauri";
+import { useCompositeContext } from "../../../context/CompositeContext";
 
 interface StretchStepProps {
   state: WizardState;
@@ -31,6 +32,7 @@ function resolveAnyChannelPath(state: WizardState): string | null {
 }
 
 export default function StretchStep({ state, onStretchChange, onResult }: StretchStepProps) {
+  const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeContext();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
@@ -38,6 +40,19 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
   const [stfR, setStfR] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfG, setStfG] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfB, setStfB] = useState<ChannelStf>({ ...DEFAULT_STF });
+  const prevAutoStf = useRef<ChannelStf | null>(null);
+
+  useEffect(() => {
+    if (!compositeAutoStfR) return;
+    if (prevAutoStf.current === compositeAutoStfR) return;
+    prevAutoStf.current = compositeAutoStfR;
+    const r = compositeAutoStfR as ChannelStf;
+    const g = (compositeAutoStfG ?? compositeAutoStfR) as ChannelStf;
+    const b = (compositeAutoStfB ?? compositeAutoStfR) as ChannelStf;
+    setStfR({ ...r });
+    setStfG({ ...g });
+    setStfB({ ...b });
+  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB]);
 
   const handleLinkedChange = useCallback((v: boolean) => {
     setLinked(v);
@@ -123,25 +138,15 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
     }
   }, [state, stfR, stfG, stfB, onResult]);
 
-  const handleResetToBlend = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const res = await resetWb(await getOutputDir());
-      if (res?.png_path) {
-        const url = await getPreviewUrl(res.png_path);
-        onResult(url, { r: DEFAULT_STF, g: DEFAULT_STF, b: DEFAULT_STF });
-      }
-      setStfR({ ...DEFAULT_STF });
-      setStfG({ ...DEFAULT_STF });
-      setStfB({ ...DEFAULT_STF });
-      setResult(null);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [onResult]);
+  const handleResetStf = useCallback(() => {
+    const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
+    const autoG = (compositeAutoStfG ?? compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
+    const autoB = (compositeAutoStfB ?? compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
+    setStfR({ ...autoR });
+    setStfG({ ...autoG });
+    setStfB({ ...autoB });
+    setResult(null);
+  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB]);
 
   const isSaturated = state.compositeReady && (state.wbR > 1.3 || state.wbG > 1.3 || state.wbB > 1.3);
 
@@ -155,7 +160,7 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
 
           {isSaturated && (
             <div className="text-[10px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md px-2 py-1.5">
-              WB factors &gt; 1.3 detected (R={state.wbR.toFixed(2)} G={state.wbG.toFixed(2)} B={state.wbB.toFixed(2)}). Composite may be clipped/saturated. Consider resetting WB or reducing factors in the Calibrate step.
+              WB factors &gt; 1.3 detected (R={state.wbR.toFixed(2)} G={state.wbG.toFixed(2)} B={state.wbB.toFixed(2)}). Composite may be clipped/saturated. Consider resetting WB or reducing factors in the Color Balance step.
             </div>
           )}
 
@@ -248,11 +253,11 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
         </div>
         {state.compositeReady && (
           <button
-            onClick={handleResetToBlend}
+            onClick={handleResetStf}
             disabled={loading}
             className="px-2.5 py-1.5 rounded-md text-[10px] font-medium bg-zinc-800/60 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 transition-all disabled:opacity-40"
           >
-            Reset to Blend
+            Reset to Auto STF
           </button>
         )}
       </div>
