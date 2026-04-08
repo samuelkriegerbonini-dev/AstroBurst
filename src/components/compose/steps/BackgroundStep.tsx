@@ -11,8 +11,9 @@ interface BackgroundStepProps {
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
+  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
+  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
   if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];
   return null;
@@ -46,10 +47,12 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         sigmaClip,
         iterations: 3,
         mode: "subtract",
+        binId,
       });
       setResults((prev) => ({ ...prev, [binId]: result }));
-      if (result.corrected_fits) {
-        onBackground(binId, result.corrected_fits);
+      const key = result.cache_key || result.corrected_fits;
+      if (key) {
+        onBackground(binId, key);
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
@@ -78,11 +81,11 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     <div className="flex flex-col gap-3 p-3">
       <div className="flex flex-col gap-2">
         <Slider label="Grid Size" value={gridSize} min={3} max={32} step={1} accent="emerald"
-          format={(v) => `${v}`} onChange={setGridSize} />
+                format={(v) => `${v}`} onChange={setGridSize} />
         <Slider label="Poly Degree" value={polyDegree} min={1} max={5} step={1} accent="emerald"
-          format={(v) => `${v}`} onChange={setPolyDegree} />
+                format={(v) => `${v}`} onChange={setPolyDegree} />
         <Slider label="Sigma Clip" value={sigmaClip} min={1.0} max={5.0} step={0.1} accent="emerald"
-          format={(v) => v.toFixed(1)} onChange={setSigmaClip} />
+                format={(v) => v.toFixed(1)} onChange={setSigmaClip} />
       </div>
 
       <div className="flex items-center justify-between pt-1">
@@ -103,16 +106,24 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         const error = errors[bin.id];
         const done = !!state.backgroundPaths[bin.id] || !!result;
         const path = resolveChannelPath(state, bin.id);
+        const source = state.croppedPaths[bin.id]
+          ? "cropped"
+          : state.alignedPaths[bin.id]
+            ? "aligned"
+            : state.stackedPaths[bin.id]
+              ? "stacked"
+              : "raw";
         return (
           <div key={bin.id} className="flex flex-col gap-1 p-2 rounded-lg border"
-            style={{
-              borderColor: done ? `${bin.color}40` : "rgba(63,63,70,0.3)",
-              background: done ? `${bin.color}08` : "rgba(24,24,27,0.3)",
-            }}>
+               style={{
+                 borderColor: done ? `${bin.color}40` : "rgba(63,63,70,0.3)",
+                 background: done ? `${bin.color}08` : "rgba(24,24,27,0.3)",
+               }}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full" style={{ background: bin.color }} />
                 <span className="text-[10px] font-medium text-zinc-300">{bin.shortLabel}</span>
+                <span className="text-[8px] text-zinc-600">{source}</span>
                 {!path && (
                   <span className="text-[8px] text-red-400/60">no path</span>
                 )}
@@ -127,7 +138,9 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
               </button>
             </div>
             {path && (
-              <div className="text-[8px] text-zinc-700 font-mono truncate">{path.split(/[/\\]/).pop()}</div>
+              <div className="text-[8px] text-zinc-700 font-mono truncate">
+                {path.startsWith("__wizard_ch_") ? `${bin.shortLabel} (cache)` : path.split(/[/\\]/).pop()}
+              </div>
             )}
             {result && (
               <div className="text-[9px] text-zinc-500">

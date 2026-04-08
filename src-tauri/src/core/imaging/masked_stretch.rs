@@ -71,39 +71,36 @@ pub fn masked_stretch_with_mask(
     let mut iterations_run = 0;
     let mut converged = false;
 
-    for _iter in 0..config.iterations {
+    for iter_idx in 0..config.iterations {
+        iterations_run = iter_idx + 1;
+
         let bg = compute_masked_median(&working, mask);
 
-        if (bg - target_bg).abs() < config.convergence_threshold {
+        let at_target = (bg - target_bg).abs() < config.convergence_threshold;
+        let stagnated = iter_idx > 0
+            && (bg - prev_bg).abs() < config.convergence_threshold * 0.1;
+
+        if at_target {
             converged = true;
+            break;
+        }
+
+        if stagnated {
             break;
         }
 
         let midtone = mtf_balance(bg, target_bg);
-
         let unmasked = apply_mtf(&working, midtone as f32);
 
-        let work_slice = working.as_slice_mut().unwrap();
-        let unmask_slice = unmasked.as_slice().unwrap();
-        let mask_slice = mask.as_slice().unwrap();
-
-        work_slice
-            .par_iter_mut()
-            .zip(unmask_slice.par_iter())
-            .zip(mask_slice.par_iter())
-            .for_each(|((dst, &stretched), &m)| {
+        ndarray::Zip::from(&mut working)
+            .and(&unmasked)
+            .and(mask)
+            .par_for_each(|dst, &stretched, &m| {
                 let blend = m * protection;
                 *dst = *dst * blend + stretched * (1.0 - blend);
             });
 
-        let new_bg = compute_masked_median(&working, mask);
-        if (new_bg - prev_bg).abs() < config.convergence_threshold * 0.1 {
-            converged = true;
-            iterations_run = _iter + 1;
-            break;
-        }
-        prev_bg = new_bg;
-        iterations_run = _iter + 1;
+        prev_bg = bg;
     }
 
     let final_bg = compute_masked_median(&working, mask);
@@ -117,6 +114,78 @@ pub fn masked_stretch_with_mask(
         stars_masked: mask_result.stars_masked,
         mask_coverage: mask_result.coverage_fraction,
         converged,
+    })
+}
+
+pub struct MaskedStretchRgbResult {
+    pub r: MaskedStretchResult,
+    pub g: MaskedStretchResult,
+    pub b: MaskedStretchResult,
+    pub shared_mask_coverage: f64,
+    pub shared_stars_masked: usize,
+}
+
+fn compute_luminance(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+) -> Result<Array2<f32>, String> {
+    let dim = r.dim();
+    if g.dim() != dim || b.dim() != dim {
+        return Err(format!(
+            "Channel dimension mismatch: R={:?} G={:?} B={:?}",
+            dim,
+            g.dim(),
+            b.dim()
+        ));
+    }
+
+    let mut out = Array2::zeros(dim);
+    ndarray::Zip::from(&mut out)
+        .and(r)
+        .and(g)
+        .and(b)
+        .par_for_each(|o, &rv, &gv, &bv| {
+            let rn = if rv.is_finite() { rv } else { 0.0 };
+            let gn = if gv.is_finite() { gv } else { 0.0 };
+            let bn = if bv.is_finite() { bv } else { 0.0 };
+            *o = 0.2126 * rn + 0.7152 * gn + 0.0722 * bn;
+        });
+    Ok(out)
+}
+
+pub fn masked_stretch_rgb_shared(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    config: &MaskedStretchConfig,
+) -> Result<MaskedStretchRgbResult, String> {
+    let luminance = compute_luminance(r, g, b)?;
+
+    let mask_config = StarMaskConfig {
+        growth_factor: config.mask_growth,
+        softness: config.mask_softness,
+        luminance_protect: config.luminance_protect,
+        luminance_ceiling: config.luminance_ceiling,
+        ..StarMaskConfig::default()
+    };
+
+    let shared_mask = generate_star_mask(&luminance, &mask_config)?;
+
+    let (res_r, (res_g, res_b)) = rayon::join(
+        || masked_stretch_with_mask(r, &shared_mask, config),
+        || rayon::join(
+            || masked_stretch_with_mask(g, &shared_mask, config),
+            || masked_stretch_with_mask(b, &shared_mask, config),
+        ),
+    );
+
+    Ok(MaskedStretchRgbResult {
+        shared_mask_coverage: shared_mask.coverage_fraction,
+        shared_stars_masked: shared_mask.stars_masked,
+        r: res_r?,
+        g: res_g?,
+        b: res_b?,
     })
 }
 
@@ -140,20 +209,14 @@ fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
 }
 
 fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>) -> f64 {
-    let img_slice = image.as_slice().unwrap();
-    let mask_slice = mask.as_slice().unwrap();
-
-    let mut bg_vals: Vec<f32> = img_slice
-        .iter()
-        .zip(mask_slice.iter())
-        .filter_map(|(&v, &m)| {
+    let mut bg_vals: Vec<f32> = Vec::new();
+    ndarray::Zip::from(image)
+        .and(mask)
+        .for_each(|&v, &m| {
             if m < 0.5 && v.is_finite() && v > 0.0 {
-                Some(v)
-            } else {
-                None
+                bg_vals.push(v);
             }
-        })
-        .collect();
+        });
 
     if bg_vals.is_empty() {
         return 0.0;

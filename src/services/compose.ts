@@ -5,11 +5,21 @@ import type {
   AlignResult,
   RestretchResult,
   AutoWbResult,
-  CalibrateCompositeResult,
   CalibrateAndScnrResult,
   ResetWbResult,
   ScnrOptions,
 } from "../shared/types/compose";
+
+export interface CropResult {
+  paths: string[];
+  cache_keys?: string[];
+  dimensions: [number, number];
+  crop_top: number;
+  crop_bottom: number;
+  crop_left: number;
+  crop_right: number;
+  elapsed_ms: number;
+}
 
 export function restretchComposite(
   outputDir: string,
@@ -60,26 +70,39 @@ export async function alignChannels(
   paths: string[],
   outputDir?: string,
   alignMethod = "phase_correlation",
+  binIds?: string[],
 ): Promise<AlignResult> {
   const dir = outputDir ?? await getOutputDir();
   return typedInvoke<AlignResult>("align_channels_cmd", {
     paths,
     outputDir: dir,
     alignMethod,
+    binIds: binIds ?? null,
+    persistToDisk: false,
   });
 }
 
-export function calibrateComposite(
-  outputDir: string,
-  rFactor: number,
-  gFactor: number,
-  bFactor: number,
-): Promise<CalibrateCompositeResult> {
-  return typedInvoke<CalibrateCompositeResult>("calibrate_composite_cmd", {
-    outputDir,
-    rFactor,
-    gFactor,
-    bFactor,
+export async function cropChannels(
+  paths: string[],
+  outputDir?: string,
+  top?: number,
+  bottom?: number,
+  left?: number,
+  right?: number,
+  autoDetect?: boolean,
+  binIds?: string[],
+): Promise<CropResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<CropResult>("crop_channels_cmd", {
+    paths,
+    outputDir: dir,
+    top: top ?? 0,
+    bottom: bottom ?? 0,
+    left: left ?? 0,
+    right: right ?? 0,
+    autoDetect: autoDetect ?? true,
+    binIds: binIds ?? null,
+    persistToDisk: false,
   });
 }
 

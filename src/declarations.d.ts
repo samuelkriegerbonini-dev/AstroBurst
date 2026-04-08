@@ -90,6 +90,7 @@ declare module "lucide-react" {
   export const Zap: Icon;
   export const ZoomIn: Icon;
   export const ZoomOut: Icon;
+  export const Scissors: Icon;
 }
 
 declare module "@tauri-apps/plugin-dialog" {

@@ -35,7 +35,7 @@ function ExportTabInner() {
         setExportLoading(false);
       }
     },
-    [exportFits],
+    [],
   );
 
   const handleExportFitsRgb = useCallback(
@@ -59,7 +59,7 @@ function ExportTabInner() {
         setExportLoading(false);
       }
     },
-    [exportFitsRgb],
+    [],
   );
 
   const handleDownloadPng = useCallback(() => {
@@ -100,14 +100,20 @@ function ExportTabInner() {
     } finally {
       setCubeExporting(false);
     }
-  }, [file?.path, file?.name, cubeDims, getCubeFrame, cubeExportFits]);
+  }, [file?.path, file?.name, cubeDims, cubeExportFits]);
 
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
 
   const compositeStf = useMemo(() => {
-    if (!rgbChannels || !isShowingComposite) return null;
+    if (!isShowingComposite) return null;
     return { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-  }, [rgbChannels, isShowingComposite, compositeStfR, compositeStfG, compositeStfB]);
+  }, [isShowingComposite, compositeStfR, compositeStfG, compositeStfB]);
+
+  const effectiveRgbChannels = useMemo(() => {
+    if (rgbChannels) return rgbChannels;
+    if (isShowingComposite) return { r: null, g: null, b: null };
+    return null;
+  }, [rgbChannels, isShowingComposite]);
 
   return (
     <Suspense
@@ -123,7 +129,7 @@ function ExportTabInner() {
           stfParams={stfParams}
           onExport={handleExportFits}
           onExportRgb={handleExportFitsRgb}
-          rgbChannels={rgbChannels}
+          rgbChannels={effectiveRgbChannels}
           compositeStf={compositeStf}
           isLoading={exportLoading}
           lastResult={exportResult}

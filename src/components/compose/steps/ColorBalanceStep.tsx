@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { resolveChannelPath, isNarrowbandWorkflow } from "../../../utils/wizard";
+import { resolveChannelPath, isNarrowbandWorkflow, type FilterDetectionRef } from "../../../utils/wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { calibrateAndScnr, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
@@ -11,13 +11,14 @@ const SpccPanel = lazy(() => import("../SpccPanel"));
 
 interface ColorBalanceStepProps {
   state: WizardState;
+  filterDetections?: FilterDetectionRef[];
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
   onScnrChange: (enabled: boolean, amount?: number, method?: string, preserveLuminance?: boolean) => void;
   onResult: (png: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
 }
 
-export default function ColorBalanceStep({ state, onWbChange, onScnrChange, onResult }: ColorBalanceStepProps) {
-  const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset), [state.bins, state.blendPreset]);
+export default function ColorBalanceStep({ state, filterDetections, onWbChange, onScnrChange, onResult }: ColorBalanceStepProps) {
+  const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset, filterDetections), [state.bins, state.blendPreset, filterDetections]);
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -214,11 +215,11 @@ export default function ColorBalanceStep({ state, onWbChange, onScnrChange, onRe
             </div>
           )}
           <Slider label="R" value={localR} min={sliderMin} max={sliderMax} step={0.01} accent="red"
-            format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("r", v)} />
+                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("r", v)} />
           <Slider label="G" value={localG} min={sliderMin} max={sliderMax} step={0.01} accent="green"
-            format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("g", v)} />
+                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("g", v)} />
           <Slider label="B" value={localB} min={sliderMin} max={sliderMax} step={0.01} accent="blue"
-            format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("b", v)} />
+                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("b", v)} />
         </div>
       )}
 

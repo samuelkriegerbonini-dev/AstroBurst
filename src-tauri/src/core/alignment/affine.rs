@@ -5,21 +5,52 @@ use crate::core::alignment::phase_correlation;
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::imaging::sampling::bicubic_sample;
 
-const MAX_STARS: usize = 80;
-const TRIANGLE_TOLERANCE: f64 = 0.008;
+const MAX_STARS: usize = 120;
+const TRIANGLE_TOLERANCE: f64 = 0.02;
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
-const RANSAC_ITERATIONS: usize = 1000;
+const RANSAC_ITERATIONS: usize = 2000;
 const RANSAC_INLIER_PX: f64 = 3.0;
-const DETECTION_SIGMA: f64 = 5.0;
+const DETECTION_SIGMA: f64 = 3.5;
 const MIN_TRIANGLE_SIDE: f64 = 15.0;
-const MIN_VOTES: u32 = 2;
+const MIN_VOTES: u32 = 1;
 const MIN_INLIER_RATIO: f64 = 0.20;
 const MAX_RESIDUAL_PX: f64 = 5.0;
 const MAX_OFFSET_FRACTION: f64 = 0.40;
-const MAX_ROTATION_DEG: f64 = 10.0;
+const MAX_ROTATION_DEG: f64 = 30.0;
 const MIN_SCALE: f64 = 0.70;
 const MAX_SCALE: f64 = 1.40;
+
+fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
+    let slice = image.as_slice().unwrap();
+    let len = slice.len();
+    if len == 0 {
+        return image.clone();
+    }
+
+    let sample_step = (len / 100_000).max(1);
+    let mut samples: Vec<f32> = slice.iter().step_by(sample_step).copied().filter(|v| v.is_finite()).collect();
+    if samples.len() < 100 {
+        return image.clone();
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let lo = samples[samples.len() / 100] as f64;
+    let hi = samples[samples.len() * 999 / 1000] as f64;
+    let range = hi - lo;
+    if range < 1e-15 {
+        return image.clone();
+    }
+    let inv_range = 1.0 / range;
+
+    let mut result = Array2::zeros(image.dim());
+    ndarray::Zip::from(&mut result)
+        .and(image)
+        .par_for_each(|o, &v| {
+            *o = ((v as f64 - lo) * inv_range).clamp(0.0, 1.0) as f32;
+        });
+    result
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AffineTransform {
@@ -100,8 +131,17 @@ pub fn align_channel_affine(
     target: &Array2<f32>,
 ) -> AffineAlignResult {
     let (rows, cols) = reference.dim();
-    let ref_det = detect_stars(reference, DETECTION_SIGMA);
-    let tgt_det = detect_stars(target, DETECTION_SIGMA);
+
+    let ref_norm = normalize_for_detection(reference);
+    let tgt_norm = normalize_for_detection(target);
+
+    let ref_det = detect_stars(&ref_norm, DETECTION_SIGMA);
+    let tgt_det = detect_stars(&tgt_norm, DETECTION_SIGMA);
+
+    log::info!(
+        "Affine: detected {} ref stars, {} tgt stars (image {}x{})",
+        ref_det.stars.len(), tgt_det.stars.len(), cols, rows
+    );
 
     let ref_stars = top_n_stars(&ref_det.stars, MAX_STARS);
     let tgt_stars = top_n_stars(&tgt_det.stars, MAX_STARS);
@@ -116,6 +156,11 @@ pub fn align_channel_affine(
 
     let ref_tris = build_triangles(&ref_stars);
     let tgt_tris = build_triangles(&tgt_stars);
+
+    log::info!(
+        "Affine: triangles ref={}, tgt={}, stars ref={}, tgt={}",
+        ref_tris.len(), tgt_tris.len(), ref_stars.len(), tgt_stars.len()
+    );
 
     if ref_tris.is_empty() || tgt_tris.is_empty() {
         log::info!(
@@ -236,7 +281,7 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
     if n < 3 {
         return Vec::new();
     }
-    let limit = n.min(50);
+    let limit = n.min(60);
 
     let tris: Vec<TriangleDesc> = (0..limit)
         .into_par_iter()
@@ -342,16 +387,14 @@ fn sort_triangle_vertices(
     stars: &[(f64, f64)],
     indices: &[usize; 3],
 ) -> [usize; 3] {
-    let mut sorted = *indices;
-    let cx = (stars[sorted[0]].0 + stars[sorted[1]].0 + stars[sorted[2]].0) / 3.0;
-    let cy = (stars[sorted[0]].1 + stars[sorted[1]].1 + stars[sorted[2]].1) / 3.0;
-
-    sorted.sort_by(|&a, &b| {
-        let ang_a = (stars[a].1 - cy).atan2(stars[a].0 - cx);
-        let ang_b = (stars[b].1 - cy).atan2(stars[b].0 - cx);
-        ang_a.partial_cmp(&ang_b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    sorted
+    let [i, j, k] = *indices;
+    let mut verts = [
+        (i, dist(stars[j], stars[k])),
+        (j, dist(stars[i], stars[k])),
+        (k, dist(stars[i], stars[j])),
+    ];
+    verts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    [verts[0].0, verts[1].0, verts[2].0]
 }
 
 fn ransac_affine(
@@ -456,7 +499,7 @@ fn ransac_affine(
         AffineAlignMethod::Affine => fit_affine(&inlier_matches),
         _ => fit_rigid(&inlier_matches),
     }
-    .unwrap_or(_best_transform);
+        .unwrap_or(_best_transform);
 
     let residual = compute_residual(&inlier_matches, &refined);
     if residual > MAX_RESIDUAL_PX {
@@ -517,8 +560,8 @@ fn solve_3x3_ls(
 
 fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-            - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
-            + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+        - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+        + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
 
     if det.abs() < 1e-12 {
         return None;
@@ -626,7 +669,7 @@ pub fn warp_image(
     let (src_rows, src_cols) = image.dim();
     let slice = image.as_slice().expect("contiguous");
     let total = out_rows * out_cols;
-    let mut buf = vec![f32::NAN; total];
+    let mut buf = vec![0.0f32; total];
 
     buf.par_chunks_mut(out_cols)
         .enumerate()
@@ -785,6 +828,6 @@ mod tests {
         let img = Array2::from_elem((50, 50), 100.0f32);
         let t = AffineTransform::translation(1000.0, 1000.0);
         let warped = warp_image(&img, &t, 50, 50);
-        assert!(warped[[25, 25]].is_nan());
+        assert!((warped[[25, 25]] - 0.0).abs() < 1e-10);
     }
 }

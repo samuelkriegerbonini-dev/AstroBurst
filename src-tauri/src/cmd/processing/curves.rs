@@ -153,7 +153,11 @@ pub async fn apply_tone_composite_cmd(
             _ => false,
         };
 
-        let png_path = format!("{}/composite_tone.png", output_dir);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let png_path = format!("{}/composite_tone_{}.png", output_dir, ts);
         helpers::render_rgb_preview(&r_img, &g_img, &b_img, &png_path, MAX_PREVIEW_DIM)?;
 
         Ok(json!({

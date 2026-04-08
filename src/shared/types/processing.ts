@@ -11,10 +11,13 @@ export interface DeconvolveResult {
 export interface BackgroundResult {
   corrected_png: string;
   corrected_fits?: string;
+  cache_key?: string;
   model_png: string;
   previewUrl?: string;
   modelUrl?: string;
   dimensions: [number, number];
+  sample_count?: number;
+  rms_residual?: number;
   elapsed_ms: number;
 }
 

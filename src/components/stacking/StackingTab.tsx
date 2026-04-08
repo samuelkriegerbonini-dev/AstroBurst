@@ -5,11 +5,13 @@ import { useDoneFilesContext, useRenderContext } from "../../context/PreviewCont
 const CalibrationPanel = lazy(() => import("./CalibrationPanel"));
 const StackingPanel = lazy(() => import("./StackingPanel"));
 const PipelinePanel = lazy(() => import("./PipelinePanel"));
+const SubframeSelectorPanel = lazy(() => import("./SubframeSelectorPanel"));
 
-type StackSection = "calibrate" | "stack" | "pipeline";
+type StackSection = "calibrate" | "subframe" | "stack" | "pipeline";
 
 const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "calibrate", label: "Calibrate", color: "violet" },
+  { id: "subframe", label: "Subframes", color: "teal" },
   { id: "stack", label: "Stack", color: "amber" },
   { id: "pipeline", label: "Pipeline", color: "cyan" },
 ];
@@ -108,7 +110,9 @@ function StackingTabInner() {
                     ? "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30"
                     : s.color === "amber"
                       ? "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30"
-                      : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
+                      : s.color === "teal"
+                        ? "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30"
+                        : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
                   : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
               }`}
             >
@@ -135,6 +139,9 @@ function StackingTabInner() {
               onPreviewUpdate={handlePreviewUpdate}
               onCalibrationDone={handleCalibrationDone}
             />
+          </div>
+          <div style={{ display: active === "subframe" ? "block" : "none" }}>
+            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} />
           </div>
           <div style={{ display: active === "stack" ? "block" : "none" }}>
             <StackingPanel

@@ -14,11 +14,34 @@ export interface BlendWeight {
   b: number;
 }
 
+export interface SubframeMetrics {
+  file_path: string;
+  file_name: string;
+  star_count: number;
+  median_fwhm: number;
+  median_eccentricity: number;
+  median_snr: number;
+  background_median: number;
+  background_sigma: number;
+  noise_ratio: number;
+  weight: number;
+  accepted: boolean;
+}
+
+export interface SubframeAnalysisResult {
+  subframes: SubframeMetrics[];
+  total: number;
+  accepted: number;
+  rejected: number;
+  elapsed_ms: number;
+}
+
 export interface WizardState {
   bins: FrequencyBin[];
   stackedPaths: Record<string, string>;
-  backgroundPaths: Record<string, string>;
   alignedPaths: Record<string, string>;
+  croppedPaths: Record<string, string>;
+  backgroundPaths: Record<string, string>;
   blendWeights: BlendWeight[];
   blendPreset: string;
   compositeReady: boolean;
@@ -41,6 +64,8 @@ export interface WizardState {
   resultPng: string | null;
   resultFits: string | null;
   completedSteps: Record<string, boolean>;
+  subframeResults: Record<string, SubframeAnalysisResult>;
+  excludedFiles: Record<string, string[]>;
 }
 
 export const DEFAULT_BINS: FrequencyBin[] = [
@@ -111,8 +136,9 @@ export const BLEND_PRESETS: Record<string, { label: string; desc: string; weight
 export const INITIAL_STATE: WizardState = {
   bins: DEFAULT_BINS.map((b) => ({ ...b, files: [] })),
   stackedPaths: {},
-  backgroundPaths: {},
   alignedPaths: {},
+  croppedPaths: {},
+  backgroundPaths: {},
   blendWeights: BLEND_PRESETS.sho.weights,
   blendPreset: "sho",
   compositeReady: false,
@@ -135,6 +161,8 @@ export const INITIAL_STATE: WizardState = {
   resultPng: null,
   resultFits: null,
   completedSteps: {},
+  subframeResults: {},
+  excludedFiles: {},
 };
 
 export interface StepDef {
@@ -158,10 +186,32 @@ const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
 
 const NB_PRESETS = new Set(["sho", "hoo", "dynamic_hoo", "foraxx", "hubble_legacy"]);
 
-export function isNarrowbandWorkflow(bins: FrequencyBin[], blendPreset?: string): boolean {
+const NB_FILTERS = new Set(["Hα (656nm)", "[OIII] (502nm)", "[SII] (673nm)"]);
+
+export interface FilterDetectionRef {
+  path: string;
+  filter: string | null;
+}
+
+export function isNarrowbandWorkflow(
+  bins: FrequencyBin[],
+  blendPreset?: string,
+  filterDetections?: FilterDetectionRef[],
+): boolean {
   const filled = bins.filter((b) => b.files.length > 0);
   if (filled.some((b) => NARROWBAND_IDS.has(b.id))) return true;
-  return !!blendPreset && NB_PRESETS.has(blendPreset);
+  if (blendPreset && NB_PRESETS.has(blendPreset)) return true;
+
+  if (filterDetections && filterDetections.length > 0) {
+    const assignedFiles = new Set(filled.flatMap((b) => b.files));
+    for (const det of filterDetections) {
+      if (det.filter && NB_FILTERS.has(det.filter) && assignedFiles.has(det.path)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 export const STEPS: StepDef[] = [
@@ -188,22 +238,36 @@ export const STEPS: StepDef[] = [
     },
   },
   {
-    id: "background",
-    label: "Background Extraction",
-    shortLabel: "BG",
-    color: "emerald",
-    enabled: (s) => totalFilesCount(s) > 0,
-    badge: (s) => {
-      const n = Object.keys(s.backgroundPaths).length;
-      return n > 0 ? `${n}` : null;
-    },
-  },
-  {
     id: "align",
     label: "Channel Alignment",
     shortLabel: "Align",
     color: "sky",
     enabled: (s) => filledCount(s) >= 2,
+  },
+  {
+    id: "crop",
+    label: "Crop",
+    shortLabel: "Crop",
+    color: "cyan",
+    enabled: (s) => Object.keys(s.alignedPaths).length > 0,
+    badge: (s) => {
+      const n = Object.keys(s.croppedPaths).length;
+      return n > 0 ? `${n}` : null;
+    },
+  },
+  {
+    id: "background",
+    label: "Background Extraction",
+    shortLabel: "BG",
+    color: "emerald",
+    enabled: (s) =>
+      Object.keys(s.alignedPaths).length > 0 ||
+      Object.keys(s.croppedPaths).length > 0 ||
+      totalFilesCount(s) > 0,
+    badge: (s) => {
+      const n = Object.keys(s.backgroundPaths).length;
+      return n > 0 ? `${n}` : null;
+    },
   },
   {
     id: "blend",
@@ -265,6 +329,26 @@ export function invalidateFromStep(
   return next;
 }
 
+export function invalidateDownstream(
+  state: WizardState,
+  fromStepId: string,
+): Partial<WizardState> {
+  const idx = STEP_ORDER.indexOf(fromStepId);
+  if (idx === -1) return {};
+  const partial: Partial<WizardState> = {
+    completedSteps: invalidateFromStep(state.completedSteps, fromStepId),
+  };
+
+  const clear = (stepId: string) => STEP_ORDER.indexOf(stepId) > idx;
+
+  if (clear("align")) partial.alignedPaths = {};
+  if (clear("crop")) partial.croppedPaths = {};
+  if (clear("background")) partial.backgroundPaths = {};
+  if (clear("blend")) partial.compositeReady = false;
+
+  return partial;
+}
+
 export function nextEnabledStep(
   currentId: string,
   state: WizardState,
@@ -278,8 +362,9 @@ export function nextEnabledStep(
 }
 
 export function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
   if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
+  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
+  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
   if (state.stackedPaths[binId]) return state.stackedPaths[binId];
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];
@@ -288,8 +373,9 @@ export function resolveChannelPath(state: WizardState, binId: string): string | 
 
 export function resolveAnyChannelPath(state: WizardState): string | null {
   for (const bin of state.bins) {
-    if (state.alignedPaths[bin.id]) return state.alignedPaths[bin.id];
     if (state.backgroundPaths[bin.id]) return state.backgroundPaths[bin.id];
+    if (state.croppedPaths[bin.id]) return state.croppedPaths[bin.id];
+    if (state.alignedPaths[bin.id]) return state.alignedPaths[bin.id];
     if (state.stackedPaths[bin.id]) return state.stackedPaths[bin.id];
     if (bin.files.length > 0) return bin.files[0];
   }

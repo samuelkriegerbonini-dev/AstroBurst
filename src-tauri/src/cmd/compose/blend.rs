@@ -12,6 +12,7 @@ use crate::core::compose::channel_blend::{blend_channels, BlendWeight};
 use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::fits::writer::{write_fits_mono, filter_header};
+use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT};
 
 use super::rgb::{composite_png_path, load_entry};
@@ -226,10 +227,15 @@ pub async fn align_channels_cmd(
     paths: Vec<String>,
     output_dir: String,
     align_method: Option<String>,
+    bin_ids: Option<Vec<String>>,
+    persist_to_disk: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
-        resolve_output_dir(&output_dir)?;
+        let write_disk = persist_to_disk.unwrap_or(false);
+        if write_disk {
+            resolve_output_dir(&output_dir)?;
+        }
 
         if paths.len() < 2 {
             anyhow::bail!("Need at least 2 channels to align");
@@ -245,15 +251,38 @@ pub async fn align_channels_cmd(
 
         let method = helpers::parse_align_method(align_method.as_deref());
 
-        let mut aligned_paths = Vec::new();
+        let use_bin_ids = bin_ids.as_ref().map(|ids| ids.len() == paths.len()).unwrap_or(false);
 
-        let stem0 = std::path::Path::new(&paths[0])
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ch0");
-        let out0 = format!("{}/{}_aligned.fits", output_dir, stem0);
-        crate::infra::fits::writer::write_fits_mono(&out0, ref_arr, None)?;
-        aligned_paths.push(json!({ RES_PATH: out0, RES_OFFSET: [0.0, 0.0] }));
+        let mut channel_results = Vec::new();
+
+        let ref_key = if use_bin_ids {
+            let bid = &bin_ids.as_ref().unwrap()[0];
+            let k = crate::types::constants::wizard_aligned_key(bid);
+            let stats = compute_image_stats(ref_arr);
+            GLOBAL_IMAGE_CACHE.insert_synthetic(&k, std::sync::Arc::new(ref_arr.to_owned()), stats);
+            k
+        } else {
+            String::new()
+        };
+
+        if write_disk {
+            let stem0 = std::path::Path::new(&paths[0])
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("ch0");
+            let out0 = format!("{}/{}_aligned.fits", output_dir, stem0);
+            crate::infra::fits::writer::write_fits_mono(&out0, ref_arr, None)?;
+            channel_results.push(json!({
+                RES_OFFSET: [0.0, 0.0],
+                RES_PATH: out0,
+                "cache_key": ref_key,
+            }));
+        } else {
+            channel_results.push(json!({
+                RES_OFFSET: [0.0, 0.0],
+                "cache_key": ref_key,
+            }));
+        }
 
         for (i, entry) in entries.iter().enumerate().skip(1) {
             let target = entry.arr();
@@ -279,24 +308,39 @@ pub async fn align_channels_cmd(
                 label,
             )?;
 
-            let out_path = format!("{}/{}_aligned.fits", output_dir, label);
-            crate::infra::fits::writer::write_fits_mono(&out_path, &result.aligned, None)?;
+            let cache_key = if use_bin_ids {
+                let bid = &bin_ids.as_ref().unwrap()[i];
+                let k = crate::types::constants::wizard_aligned_key(bid);
+                let stats = compute_image_stats(&result.aligned);
+                GLOBAL_IMAGE_CACHE.insert_synthetic(&k, std::sync::Arc::new(result.aligned.clone()), stats);
+                k
+            } else {
+                String::new()
+            };
 
-            aligned_paths.push(json!({
-                RES_PATH: out_path,
+            let mut entry_json = json!({
                 RES_OFFSET: [result.offset.0, result.offset.1],
                 "confidence": result.confidence,
                 "method_used": result.method_used,
                 "matched_stars": result.matched_stars,
                 "inliers": result.inliers,
                 "residual_px": result.residual_px,
-            }));
+                "cache_key": cache_key,
+            });
+
+            if write_disk {
+                let out_path = format!("{}/{}_aligned.fits", output_dir, label);
+                crate::infra::fits::writer::write_fits_mono(&out_path, &result.aligned, None)?;
+                entry_json.as_object_mut().unwrap().insert(RES_PATH.to_string(), json!(out_path));
+            }
+
+            channel_results.push(entry_json);
         }
 
         let elapsed = t0.elapsed().as_millis() as u64;
 
         Ok(json!({
-            CHANNELS: aligned_paths,
+            CHANNELS: channel_results,
             ALIGN_METHOD: helpers::align_method_str(method),
             DIMENSIONS: [cols, rows],
             RES_ELAPSED_MS: elapsed,

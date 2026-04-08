@@ -24,6 +24,8 @@ pub async fn extract_background_cmd(
     sigma_clip: f64,
     iterations: usize,
     mode: String,
+    bin_id: Option<String>,
+    persist_to_disk: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let progress = ProgressHandle::new(&app, PROGRESS_EVENT, PROGRESS_STEPS as u64);
     let progress_clone = progress.clone();
@@ -58,19 +60,31 @@ pub async fn extract_background_cmd(
 
         let corrected_png = format!("{}/{}_bg_corrected.png", output_dir, stem);
         let model_png = format!("{}/{}_bg_model.png", output_dir, stem);
-        let cache_key = format!("{}/{}_bg_corrected.fits", output_dir, stem);
 
         let (rows, cols) = bg_result.corrected.dim();
         save_preview_png(rendered, cols, rows, &corrected_png)?;
         save_preview_png(model_rendered, cols, rows, &model_png)?;
 
+        let cache_key = match &bin_id {
+            Some(bid) => crate::types::constants::wizard_bg_key(bid),
+            None => format!("{}/{}_bg_corrected.fits", output_dir, stem),
+        };
+
         let stats = compute_image_stats(&bg_result.corrected);
+
+        let write_disk = persist_to_disk.unwrap_or(false);
+        if write_disk && bin_id.is_none() {
+            let fits_path = format!("{}/{}_bg_corrected.fits", output_dir, stem);
+            crate::infra::fits::writer::write_fits_mono(&fits_path, &bg_result.corrected, None)?;
+        }
+
         GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(bg_result.corrected), stats);
 
         Ok(json!({
             RES_CORRECTED_PNG: corrected_png,
             RES_MODEL_PNG: model_png,
             RES_CORRECTED_FITS: cache_key,
+            "cache_key": cache_key,
             RES_SAMPLE_COUNT: bg_result.sample_count,
             RES_RMS_RESIDUAL: bg_result.rms_residual,
             RES_ELAPSED_MS: bg_result.elapsed_ms,

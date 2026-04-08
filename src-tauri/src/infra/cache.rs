@@ -88,7 +88,7 @@ impl LruInner {
     }
 
     fn is_pinned(key: &str) -> bool {
-        key.starts_with("__composite")
+        key.starts_with("__composite") || key.starts_with("__wizard_ch_") || key == "__star_mask"
     }
 
     fn evict_lru(&mut self) {

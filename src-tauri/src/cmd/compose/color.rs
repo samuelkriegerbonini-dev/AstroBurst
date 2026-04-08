@@ -95,60 +95,6 @@ pub async fn reset_wb_cmd(
 }
 
 #[tauri::command]
-pub async fn calibrate_composite_cmd(
-    output_dir: String,
-    r_factor: f64,
-    g_factor: f64,
-    b_factor: f64,
-) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let t0 = Instant::now();
-        resolve_output_dir(&output_dir)?;
-
-        let (orig_r, orig_g, orig_b) = helpers::load_orig_or_composite()?;
-
-        let rf = r_factor as f32;
-        let gf = g_factor as f32;
-        let bf = b_factor as f32;
-
-        let sr = orig_r.stats();
-        let sg = orig_g.stats();
-        let sb = orig_b.stats();
-
-        let ((r, stats_r), ((g, stats_g), (b, stats_b))) = rayon::join(
-            || calibrate_channel(orig_r.arr(), rf, sr),
-            || rayon::join(
-                || calibrate_channel(orig_g.arr(), gf, sg),
-                || calibrate_channel(orig_b.arr(), bf, sb),
-            ),
-        );
-
-        let png_path = composite_png_path(&output_dir);
-
-        let stf_config = AutoStfConfig::default();
-        let linked_stf = helpers::compute_linked_stf(&stats_r, &stats_g, &stats_b, &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, &stats_r);
-        let fn_g = make_stf_u8_fn(&linked_stf, &stats_g);
-        let fn_b = make_stf_u8_fn(&linked_stf, &stats_b);
-        helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
-
-        helpers::insert_composite_rgb(r, g, b, stats_r, stats_g, stats_b);
-
-        let elapsed = t0.elapsed().as_millis() as u64;
-
-        Ok(json!({
-            RES_PNG_PATH: png_path,
-            RES_WB_APPLIED: true,
-            RES_R_FACTOR: r_factor,
-            RES_G_FACTOR: g_factor,
-            RES_B_FACTOR: b_factor,
-            "auto_stf": helpers::stf_json(&linked_stf),
-            RES_ELAPSED_MS: elapsed,
-        }))
-    })
-}
-
-#[tauri::command]
 pub async fn calibrate_and_scnr_cmd(
     output_dir: String,
     r_factor: f64,

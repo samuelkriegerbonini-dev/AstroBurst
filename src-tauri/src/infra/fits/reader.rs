@@ -34,40 +34,68 @@ fn scaling(header: &HduHeader) -> (f64, f64) {
     (bzero, bscale)
 }
 
+#[inline]
+fn is_identity_scaling(bscale: f64, bzero: f64) -> bool {
+    (bscale - 1.0).abs() < 1e-15 && bzero.abs() < 1e-15
+}
+
 pub fn decode_pixels(data: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> Vec<f32> {
+    let identity = is_identity_scaling(bscale, bzero);
+
     match bitpix {
-        8 => data
-            .par_iter()
-            .map(|&b| (b as f64 * bscale + bzero) as f32)
-            .collect(),
+        8 => {
+            if identity {
+                data.par_iter().map(|&b| b as f32).collect()
+            } else {
+                data.par_iter()
+                    .map(|&b| (b as f64 * bscale + bzero) as f32)
+                    .collect()
+            }
+        }
         16 => data
             .par_chunks_exact(2)
             .map(|c| {
                 let v = i16::from_be_bytes([c[0], c[1]]);
-                (v as f64 * bscale + bzero) as f32
+                if identity { v as f32 } else { (v as f64 * bscale + bzero) as f32 }
             })
             .collect(),
         32 => data
             .par_chunks_exact(4)
             .map(|c| {
                 let v = i32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                (v as f64 * bscale + bzero) as f32
+                if identity { v as f32 } else { (v as f64 * bscale + bzero) as f32 }
             })
             .collect(),
-        -32 => data
-            .par_chunks_exact(4)
-            .map(|c| {
-                let v = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                (v as f64 * bscale + bzero) as f32
-            })
-            .collect(),
-        -64 => data
-            .par_chunks_exact(8)
-            .map(|c| {
-                let v = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-                (v * bscale + bzero) as f32
-            })
-            .collect(),
+        -32 => {
+            if identity {
+                data.par_chunks_exact(4)
+                    .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            } else {
+                data.par_chunks_exact(4)
+                    .map(|c| {
+                        let v = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+                        (v as f64 * bscale + bzero) as f32
+                    })
+                    .collect()
+            }
+        }
+        -64 => {
+            if identity {
+                data.par_chunks_exact(8)
+                    .map(|c| {
+                        f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                    })
+                    .collect()
+            } else {
+                data.par_chunks_exact(8)
+                    .map(|c| {
+                        let v = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                        (v * bscale + bzero) as f32
+                    })
+                    .collect()
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -576,6 +604,21 @@ mod tests {
         let bytes = 256i16.to_be_bytes();
         let val = decode_single_pixel(&bytes, 16, 1.0, 0.0);
         assert!((val - 256.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_decode_pixels_identity_f32_fast_path() {
+        let val = std::f32::consts::PI;
+        let data = val.to_be_bytes();
+        let pixels = decode_pixels(&data, -32, 1.0, 0.0);
+        assert_eq!(pixels[0], val);
+    }
+
+    #[test]
+    fn test_is_identity_scaling() {
+        assert!(is_identity_scaling(1.0, 0.0));
+        assert!(!is_identity_scaling(2.0, 0.0));
+        assert!(!is_identity_scaling(1.0, 32768.0));
     }
 
     #[test]

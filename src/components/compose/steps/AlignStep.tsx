@@ -10,7 +10,6 @@ interface AlignStepProps {
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
   if (state.stackedPaths[binId]) return state.stackedPaths[binId];
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];
@@ -43,14 +42,16 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
     setError("");
     try {
       const paths = channelPaths.map((c) => c.path);
+      const binIds = channelPaths.map((c) => c.binId);
       const dir = await getOutputDir();
-      const res = await alignChannels(paths, dir, method);
+      const res = await alignChannels(paths, dir, method, binIds);
       setResult(res);
       if (res.channels) {
         const aligned: Record<string, string> = {};
         res.channels.forEach((ch: any, i: number) => {
-          if (ch.path && channelPaths[i]) {
-            aligned[channelPaths[i].binId] = ch.path;
+          if (channelPaths[i]) {
+            const key = ch.cache_key || ch.path;
+            if (key) aligned[channelPaths[i].binId] = key;
           }
         });
         onAligned(aligned);

@@ -53,8 +53,9 @@ interface BlendStepProps {
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
   if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
+  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
+  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
   if (state.stackedPaths[binId]) return state.stackedPaths[binId];
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];

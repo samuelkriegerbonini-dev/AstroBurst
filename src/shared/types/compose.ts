@@ -22,7 +22,8 @@ export interface BlendResult {
 }
 
 export interface AlignedChannel {
-  path: string;
+  path?: string;
+  cache_key?: string;
   offset: [number, number];
   confidence?: number;
   method_used?: string;

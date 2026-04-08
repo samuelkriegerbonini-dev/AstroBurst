@@ -24,7 +24,7 @@ fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
     }
     let (rows, cols) = image.dim();
     let src = image.as_slice().expect("contiguous");
-    let mut out = vec![f32::NAN; rows * cols];
+    let mut out = vec![0.0f32; rows * cols];
     out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
         for x in 0..cols {
             let sy = y as f64 - dy;

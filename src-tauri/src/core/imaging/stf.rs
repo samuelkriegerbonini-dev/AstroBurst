@@ -140,7 +140,7 @@ pub(crate) fn make_stf_u8_fn(params: &StfParams, stats: &ImageStats) -> impl Fn(
         let norm = (vd - tx_dmin) * tx_inv_range;
         let clipped = ((norm - tx_shadow) * tx_inv_clip).clamp(0.0, 1.0);
         let stretched = mtf(clipped, tx_midtone);
-        (stretched * 255.0) as u8
+        (stretched * 255.0).round() as u8
     }
 }
 
@@ -241,6 +241,23 @@ mod tests {
         let buf = apply_stf(&data, &params, &st);
         for i in 0..8 {
             assert_eq!(buf[i], 0, "padding pixel {} should be black", i);
+        }
+    }
+
+    #[test]
+    fn test_make_stf_u8_fn_matches_apply_stf() {
+        let data = Array2::from_shape_vec(
+            (4, 4),
+            (1..=16).map(|i| i as f32 * 100.0).collect(),
+        )
+            .unwrap();
+        let (st, _) = analyze(&data);
+        let params = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
+        let buf = apply_stf(&data, &params, &st);
+        let f = make_stf_u8_fn(&params, &st);
+        let slice = data.as_slice().unwrap();
+        for (i, &v) in slice.iter().enumerate() {
+            assert_eq!(buf[i], f(v), "mismatch at pixel {}: apply_stf={} make_stf_u8_fn={}", i, buf[i], f(v));
         }
     }
 }

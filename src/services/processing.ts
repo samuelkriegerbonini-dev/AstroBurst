@@ -1,4 +1,4 @@
-import { typedInvoke, withPreview } from "../infrastructure/tauri";
+import { typedInvoke, withPreview, getOutputDir } from "../infrastructure/tauri";
 import type {
   DeconvolveResult,
   BackgroundResult,
@@ -47,6 +47,7 @@ export function extractBackground(
     sigmaClip?: number;
     iterations?: number;
     mode?: string;
+    binId?: string;
   } = {},
 ): Promise<BackgroundResult> {
   return withPreview<BackgroundResult>("extract_background_cmd", outputDir, {
@@ -56,6 +57,8 @@ export function extractBackground(
     sigmaClip: options.sigmaClip ?? 2.5,
     iterations: options.iterations ?? 3,
     mode: options.mode ?? "subtract",
+    binId: options.binId ?? null,
+    persistToDisk: false,
   }, [
     ["corrected_png", "previewUrl"],
     ["model_png", "modelUrl"],
@@ -115,6 +118,40 @@ export function maskedStretch(
 ): Promise<MaskedStretchResult> {
   return withPreview<MaskedStretchResult>("masked_stretch_cmd", outputDir, {
     path,
+    iterations: options.iterations ?? 10,
+    targetBackground: options.targetBackground ?? 0.25,
+    maskGrowth: options.maskGrowth ?? 2.5,
+    maskSoftness: options.maskSoftness ?? 4.0,
+    protectionAmount: options.protectionAmount ?? 0.85,
+    luminanceProtect: options.luminanceProtect ?? true,
+  });
+}
+
+export async function arcsinhStretchComposite(
+  factor = 50.0,
+  outputDir?: string,
+): Promise<ArcsinhResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<ArcsinhResult>("arcsinh_stretch_composite_cmd", {
+    outputDir: dir,
+    factor,
+  });
+}
+
+export async function maskedStretchComposite(
+  outputDir?: string,
+  options: {
+    iterations?: number;
+    targetBackground?: number;
+    maskGrowth?: number;
+    maskSoftness?: number;
+    protectionAmount?: number;
+    luminanceProtect?: boolean;
+  } = {},
+): Promise<MaskedStretchResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<MaskedStretchResult>("masked_stretch_composite_cmd", {
+    outputDir: dir,
     iterations: options.iterations ?? 10,
     targetBackground: options.targetBackground ?? 0.25,
     maskGrowth: options.maskGrowth ?? 2.5,

@@ -35,6 +35,7 @@ export default function ExportStep({ state }: ExportStepProps) {
 
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
+  const [bitpix, setBitpix] = useState(-32);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
@@ -61,19 +62,26 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       if (state.compositeReady) {
         if (format === "png") {
-          const restretchRes = await restretchComposite(
-            dir,
-            compositeStfR,
-            compositeStfG,
-            compositeStfB
-          );
-
-          if (restretchRes?.png_path) {
-            setResult(restretchRes);
-            setSavedPath(restretchRes.png_path);
-          } else {
-            throw new Error("Composite stretch failed. Re-run Blend and try again.");
-          }
+          const outputPath = `${dir}/astroburst_composite_${ts}.png`;
+          const hasExplicitStf =
+            Math.abs(compositeStfR.midtone - 0.5) > 1e-4 ||
+            Math.abs(compositeStfG.midtone - 0.5) > 1e-4 ||
+            Math.abs(compositeStfB.midtone - 0.5) > 1e-4;
+          const res = await exportRgbPng(null, null, null, outputPath, {
+            bitDepth,
+            applyStfStretch: hasExplicitStf,
+            shadowR: hasExplicitStf ? compositeStfR.shadow : undefined,
+            midtoneR: hasExplicitStf ? compositeStfR.midtone : undefined,
+            highlightR: hasExplicitStf ? compositeStfR.highlight : undefined,
+            shadowG: hasExplicitStf ? compositeStfG.shadow : undefined,
+            midtoneG: hasExplicitStf ? compositeStfG.midtone : undefined,
+            highlightG: hasExplicitStf ? compositeStfG.highlight : undefined,
+            shadowB: hasExplicitStf ? compositeStfB.shadow : undefined,
+            midtoneB: hasExplicitStf ? compositeStfB.midtone : undefined,
+            highlightB: hasExplicitStf ? compositeStfB.highlight : undefined,
+          });
+          setResult(res);
+          setSavedPath(outputPath);
         } else {
           const outputPath = `${dir}/astroburst_composite_${ts}.fits`;
           const headerSource = resolveHeaderSourcePath(state);
@@ -81,7 +89,8 @@ export default function ExportStep({ state }: ExportStepProps) {
             headerSource,
             null,
             null,
-            outputPath
+            outputPath,
+            { bitpix },
           );
           setResult(res);
           setSavedPath(outputPath);
@@ -103,7 +112,7 @@ export default function ExportStep({ state }: ExportStepProps) {
         setSavedPath(outputPath);
       } else {
         const outputPath = `${dir}/astroburst_rgb_${ts}.fits`;
-        const res = await exportFitsRgb(r, g, b, outputPath);
+        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix });
         setResult(res);
         setSavedPath(outputPath);
       }
@@ -112,7 +121,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [state, format, bitDepth, compositeStfR, compositeStfG, compositeStfB]);
+  }, [state, format, bitDepth, bitpix, compositeStfR, compositeStfG, compositeStfB]);
 
   const handleZipExport = useCallback(async () => {
     setZipLoading(true);
@@ -231,6 +240,21 @@ export default function ExportStep({ state }: ExportStepProps) {
         </div>
       )}
 
+      {format === "fits" && (
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">BITPIX</label>
+          <select
+            value={bitpix}
+            onChange={(e) => setBitpix(Number(e.target.value))}
+            className="ab-select"
+          >
+            <option value={-32}>Float32 (-32)</option>
+            <option value={16}>Int16 (16)</option>
+            <option value={-64}>Float64 (-64)</option>
+          </select>
+        </div>
+      )}
+
       <RunButton
         label={`Export ${format.toUpperCase()}`}
         runningLabel="Exporting..."
@@ -248,6 +272,7 @@ export default function ExportStep({ state }: ExportStepProps) {
             {result.file_size_bytes && (
               <span className="text-[9px] text-zinc-600">
                 {(result.file_size_bytes / 1024).toFixed(0)} KB, {result.elapsed_ms}ms
+                {result.bitpix && format === "fits" && ` BITPIX=${result.bitpix}`}
               </span>
             )}
           </div>

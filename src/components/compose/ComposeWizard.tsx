@@ -1,107 +1,26 @@
-import { useState, useCallback, useMemo, useReducer, useEffect, useRef, lazy, Suspense } from "react";
-import { Loader2, ChevronRight, Check, ArrowRight } from "lucide-react";
+import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from "react";
+import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
+import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import { detectNarrowbandFilters } from "../../services/header";
 import {
-  BlendWeight,
-  FrequencyBin,
-  INITIAL_STATE,
   nextEnabledStep,
-  STEP_ORDER,
   STEPS,
-  WizardState
 } from "../../utils/wizard";
 
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
 const StackStep = lazy(() => import("./steps/StackStep"));
-const BackgroundStep = lazy(() => import("./steps/BackgroundStep"));
 const AlignStep = lazy(() => import("./steps/AlignStep"));
+const CropStep = lazy(() => import("./steps/CropStep"));
+const BackgroundStep = lazy(() => import("./steps/BackgroundStep"));
 const BlendStep = lazy(() => import("./steps/BlendStep"));
 const ColorBalanceStep = lazy(() => import("./steps/ColorBalanceStep"));
 const MaskStep = lazy(() => import("./steps/MaskStep"));
 const StretchStep = lazy(() => import("./steps/StretchStep"));
 const AdjustStep = lazy(() => import("./steps/AdjustStep"));
 const ExportStep = lazy(() => import("./steps/ExportStep"));
-
-type Action =
-  | { type: "SET_BINS"; bins: FrequencyBin[] }
-  | { type: "SET_BLEND_WEIGHTS"; weights: BlendWeight[]; preset: string }
-  | { type: "SET_WB"; mode: WizardState["wbMode"]; r?: number; g?: number; b?: number }
-  | { type: "SET_STACKED"; channelId: string; path: string }
-  | { type: "SET_BACKGROUND"; channelId: string; path: string }
-  | { type: "SET_ALIGNED"; paths: Record<string, string> }
-  | { type: "SET_MASK"; path: string | null }
-  | { type: "SET_MASK_PARAMS"; growth: number; protection: number }
-  | { type: "SET_SEGM"; path: string | null }
-  | { type: "SET_STRETCH"; mode: WizardState["stretchMode"]; factor?: number; target?: number }
-  | { type: "SET_SCNR"; enabled: boolean; amount?: number; method?: string; preserveLuminance?: boolean }
-  | { type: "SET_RESULT"; png: string | null; fits: string | null }
-  | { type: "SET_COMPOSITE_READY"; ready: boolean }
-  | { type: "UPDATE"; partial: Partial<WizardState> }
-  | { type: "COMPLETE_STEP"; stepId: string }
-  | { type: "RESET" };
-
-function reducer(state: WizardState, action: Action): WizardState {
-  switch (action.type) {
-    case "SET_BINS": {
-      const hasFiles = action.bins.some((b) => b.files.length > 0);
-      const completed: Record<string, boolean> = hasFiles
-        ? { channels: true }
-        : {};
-      return { ...state, bins: action.bins, completedSteps: completed };
-    }
-    case "SET_BLEND_WEIGHTS":
-      return { ...state, blendWeights: action.weights, blendPreset: action.preset };
-    case "SET_WB":
-      return { ...state, wbMode: action.mode, wbR: action.r ?? state.wbR, wbG: action.g ?? state.wbG, wbB: action.b ?? state.wbB };
-    case "SET_STACKED": {
-      const next = { ...state, stackedPaths: { ...state.stackedPaths, [action.channelId]: action.path } };
-      return next;
-    }
-    case "SET_BACKGROUND": {
-      const next = { ...state, backgroundPaths: { ...state.backgroundPaths, [action.channelId]: action.path } };
-      return next;
-    }
-    case "SET_ALIGNED":
-      return { ...state, alignedPaths: { ...state.alignedPaths, ...action.paths } };
-    case "SET_MASK":
-      return { ...state, starMaskPath: action.path };
-    case "SET_MASK_PARAMS":
-      return { ...state, maskGrowth: action.growth, maskProtection: action.protection };
-    case "SET_SEGM":
-      return { ...state, segmPath: action.path };
-    case "SET_STRETCH":
-      return { ...state, stretchMode: action.mode, stretchFactor: action.factor ?? state.stretchFactor, targetBackground: action.target ?? state.targetBackground };
-    case "SET_SCNR":
-      return {
-        ...state,
-        scnrEnabled: action.enabled,
-        scnrAmount: action.amount ?? state.scnrAmount,
-        scnrMethod: (action.method as WizardState["scnrMethod"]) ?? state.scnrMethod,
-        scnrPreserveLuminance: action.preserveLuminance ?? state.scnrPreserveLuminance,
-      };
-    case "SET_RESULT":
-      return { ...state, resultPng: action.png, resultFits: action.fits };
-    case "SET_COMPOSITE_READY":
-      return { ...state, compositeReady: action.ready };
-    case "COMPLETE_STEP": {
-      const completed = { ...state.completedSteps, [action.stepId]: true };
-      const idx = STEP_ORDER.indexOf(action.stepId);
-      for (let i = idx + 1; i < STEP_ORDER.length; i++) {
-        delete completed[STEP_ORDER[i]];
-      }
-      return { ...state, completedSteps: completed };
-    }
-    case "UPDATE":
-      return { ...state, ...action.partial };
-    case "RESET":
-      return { ...INITIAL_STATE, bins: INITIAL_STATE.bins.map((b) => ({ ...b, files: [] })) };
-    default:
-      return state;
-  }
-}
 
 const COLOR_MAP: Record<string, { tab: string; dot: string }> = {
   violet: { tab: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30", dot: "bg-violet-400" },
@@ -184,8 +103,7 @@ export default function ComposeWizard() {
 
   const { narrowbandPalette } = useNarrowbandContext();
 
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
-  const [activeStep, setActiveStep] = useState("channels");
+  const { state, dispatch, activeStep, setActiveStep } = useComposeWizardContext();
   const [filterDetections, setFilterDetections] = useState<FilterDetection[]>([]);
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -220,13 +138,13 @@ export default function ComposeWizard() {
   const completeStep = useCallback((stepId: string) => {
     dispatch({ type: "COMPLETE_STEP", stepId });
     advanceToNext(stepId);
-  }, [advanceToNext]);
+  }, [advanceToNext, dispatch]);
 
   const handleStepClick = useCallback((stepId: string) => {
     setActiveStep(stepId);
     if (suggestedTimerRef.current) clearTimeout(suggestedTimerRef.current);
     setSuggestedStep(null);
-  }, []);
+  }, [setActiveStep]);
 
   const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => {
     if (previewUrl) {
@@ -241,7 +159,7 @@ export default function ComposeWizard() {
     }
     dispatch({ type: "SET_COMPOSITE_READY", ready: true });
     completeStep("blend");
-  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep]);
+  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep, dispatch]);
 
   const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: any; g: any; b: any }) => {
     if (previewUrl) {
@@ -251,6 +169,11 @@ export default function ComposeWizard() {
       setCompositeStf(stf.r, stf.g, stf.b);
     }
   }, [setCompositePreviewUrl, setCompositeStf]);
+
+  const handleReset = useCallback(() => {
+    dispatch({ type: "RESET" });
+    setActiveStep("channels");
+  }, [dispatch, setActiveStep]);
 
   const stepContent = useMemo(() => {
     switch (activeStep) {
@@ -268,19 +191,10 @@ export default function ComposeWizard() {
         return (
           <StackStep
             state={state}
+            dispatch={dispatch}
             onStacked={(channelId, path) => {
               dispatch({ type: "SET_STACKED", channelId, path });
               completeStep("stack");
-            }}
-          />
-        );
-      case "background":
-        return (
-          <BackgroundStep
-            state={state}
-            onBackground={(channelId, path) => {
-              dispatch({ type: "SET_BACKGROUND", channelId, path });
-              completeStep("background");
             }}
           />
         );
@@ -291,6 +205,26 @@ export default function ComposeWizard() {
             onAligned={(paths) => {
               dispatch({ type: "SET_ALIGNED", paths });
               completeStep("align");
+            }}
+          />
+        );
+      case "crop":
+        return (
+          <CropStep
+            state={state}
+            onCropped={(paths) => {
+              dispatch({ type: "SET_CROPPED", paths });
+              completeStep("crop");
+            }}
+          />
+        );
+      case "background":
+        return (
+          <BackgroundStep
+            state={state}
+            onBackground={(channelId: string, path: string) => {
+              dispatch({ type: "SET_BACKGROUND", channelId, path });
+              completeStep("background");
             }}
           />
         );
@@ -312,6 +246,7 @@ export default function ComposeWizard() {
         return (
           <ColorBalanceStep
             state={state}
+            filterDetections={filterDetections}
             onWbChange={(mode, r, g, b) => dispatch({ type: "SET_WB", mode, r, g, b })}
             onScnrChange={(enabled, amount, method, preserveLuminance) =>
               dispatch({ type: "SET_SCNR", enabled, amount, method, preserveLuminance })
@@ -363,7 +298,7 @@ export default function ComposeWizard() {
       default:
         return null;
     }
-  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep]);
+  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch]);
 
   return (
     <div className="flex flex-col h-full">
@@ -405,6 +340,14 @@ export default function ComposeWizard() {
             </button>
           );
         })}
+
+        <button
+          onClick={handleReset}
+          className="ml-auto px-1.5 py-1 rounded text-[9px] text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
+          title="Reset Wizard"
+        >
+          <RotateCcw size={10} />
+        </button>
       </div>
 
       {totalFiles > 0 && (

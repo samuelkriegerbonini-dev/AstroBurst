@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Image, Cpu, Zap, Layers, Sparkles, Loader2,
-  Layers2, FlaskConical, Info, Settings,
+  Layers2, FlaskConical, Info, Settings, Download,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
@@ -19,8 +19,9 @@ const StackingTab = lazy(() => import("./stacking/StackingTab"));
 const ConfigTab = lazy(() => import("./preview/ConfigTab"));
 const SynthPanel = lazy(() => import("./synth/SynthPanel"));
 const InfoPanel = lazy(() => import("./file/SidebarPanels").then((m) => ({ default: m.InfoPanel })));
+const ExportTab = lazy(() => import("./export/ExportTab"));
 
-type ToolId = "processing" | "compose" | "stacking" | "info" | "synth" | "config";
+type ToolId = "processing" | "compose" | "stacking" | "info" | "synth" | "config" | "export";
 
 interface ToolDef {
   id: ToolId;
@@ -39,6 +40,7 @@ const TOP_TOOLS: ToolDef[] = [
 const BOTTOM_STRIP_TOOLS: ToolDef[] = [
   { id: "info", label: "Info", shortLabel: "Info", icon: Info, accent: "var(--ab-teal)" },
   { id: "synth", label: "Synth", shortLabel: "Synth", icon: FlaskConical, accent: "var(--ab-rose)" },
+  { id: "export", label: "Export", shortLabel: "Export", icon: Download, accent: "var(--ab-amber)" },
   { id: "config", label: "Settings", shortLabel: "Config", icon: Settings, accent: "#a1a1aa" },
 ];
 
@@ -58,6 +60,7 @@ function ToolContent({ toolId }: { toolId: ToolId }) {
     case "info": return <InfoPanel />;
     case "config": return <ConfigTab />;
     case "synth": return <SynthPanel />;
+    case "export": return <ExportTab />;
     default: return null;
   }
 }
@@ -195,8 +198,8 @@ export default function PreviewPanel() {
           <div className="flex items-center gap-2 shrink-0">
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu)}
-                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-                style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
+                      className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                      style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
                 {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : rawPixelsLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
                 {gpuProbing ? "..." : rawPixelsLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
               </button>

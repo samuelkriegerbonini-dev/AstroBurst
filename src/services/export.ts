@@ -13,6 +13,7 @@ export interface ExportFitsOptions {
 export interface ExportFitsRgbOptions {
   copyWcs?: boolean;
   copyMetadata?: boolean;
+  bitpix?: number;
 }
 
 export interface ExportAlignedOptions {
@@ -48,6 +49,7 @@ export interface ExportResult {
   format: string;
   elapsed_ms: number;
   file_size_bytes?: number;
+  bitpix?: number;
   channels?: Array<{ path: string; channel: string }>;
 }
 
@@ -111,7 +113,11 @@ export function exportAlignedChannels(
   });
 }
 
-export function exportFits(path: string, outputPath: string, options: ExportFitsOptions = {}): Promise<ExportResult> {
+export function exportFits(
+  path: string,
+  outputPath: string,
+  options: ExportFitsOptions = {},
+): Promise<ExportResult> {
   return typedInvoke<ExportResult>("export_fits", {
     path,
     outputPath,
@@ -139,5 +145,6 @@ export function exportFitsRgb(
     outputPath,
     copyWcs: options.copyWcs ?? true,
     copyMetadata: options.copyMetadata ?? true,
+    bitpix: options.bitpix ?? -32,
   });
 }

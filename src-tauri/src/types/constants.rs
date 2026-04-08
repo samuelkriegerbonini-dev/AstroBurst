@@ -256,3 +256,26 @@ pub const RES_CLEANED_FILES: &str = "cleaned_files";
 pub const RES_FILE_COUNT: &str = "file_count";
 pub const RES_OUTPUT_DIR: &str = "output_dir";
 pub const RES_TOTAL_SIZE: &str = "total_size";
+
+pub const WIZARD_CACHE_PREFIX: &str = "__wizard_ch_";
+
+pub fn wizard_cache_key(bin_id: &str, stage: &str) -> String {
+    format!("{}{}{}", WIZARD_CACHE_PREFIX, bin_id, stage)
+}
+
+pub fn wizard_aligned_key(bin_id: &str) -> String {
+    wizard_cache_key(bin_id, "_aligned")
+}
+
+pub fn wizard_cropped_key(bin_id: &str) -> String {
+    wizard_cache_key(bin_id, "_cropped")
+}
+
+pub fn wizard_bg_key(bin_id: &str) -> String {
+    wizard_cache_key(bin_id, "_bg")
+}
+
+pub const STAR_MASK_KEY: &str = "__star_mask";
+
+pub const RES_CACHE_KEYS: &str = "cache_keys";
+pub const RES_PERSIST_TO_DISK: &str = "persist_to_disk";

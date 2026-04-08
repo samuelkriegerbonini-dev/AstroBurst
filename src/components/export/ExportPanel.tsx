@@ -140,14 +140,19 @@ export default function ExportPanel({
   }, [filePath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, onExport]);
 
   const handleExportRgb = useCallback(async () => {
-    if (!rgbChannels || !onExportRgb) return;
+    if ((!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
+    if (!onExportRgb) return;
     const dir = await getExportDir();
     const outputPath = `${dir}/rgb_composite.fits`;
     try {
-      await onExportRgb(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
-        copyWcs,
-        copyMetadata,
-      });
+      await onExportRgb(
+        rgbChannels?.r ?? null,
+        rgbChannels?.g ?? null,
+        rgbChannels?.b ?? null,
+        outputPath, {
+          copyWcs,
+          copyMetadata,
+        });
       setExportDone(true);
       setSavedPath(outputPath);
       setTimeout(() => {
@@ -157,7 +162,7 @@ export default function ExportPanel({
     } catch (e) {
       console.error("RGB FITS export failed:", e);
     }
-  }, [rgbChannels, copyWcs, copyMetadata, onExportRgb]);
+  }, [rgbChannels, copyWcs, copyMetadata, onExportRgb, compositeStf]);
 
   const handleExportAligned = useCallback(async () => {
     if (!rgbChannels) return;
@@ -214,27 +219,35 @@ export default function ExportPanel({
   }, [filePath, pngBitDepth, pngApplyStf, stfParams]);
 
   const handleExportRgbPng = useCallback(async () => {
-    if (!rgbChannels) return;
+    if (!rgbChannels && !compositeStf) return;
     setPngExporting(true);
     try {
       const dir = await getExportDir();
       const hasComposite = !!compositeStf;
-      const effectiveStf = hasComposite || pngApplyStf;
+      const hasExplicitStf = hasComposite &&
+        compositeStf!.r.midtone !== 0.5 &&
+        compositeStf!.g.midtone !== 0.5 &&
+        compositeStf!.b.midtone !== 0.5;
+      const effectiveStf = hasExplicitStf || pngApplyStf;
       const suffix = effectiveStf ? "_stf" : "";
       const outputPath = `${dir}/rgb_composite${suffix}_${pngBitDepth}bit.png`;
-      await exportRgbPng(rgbChannels.r, rgbChannels.g, rgbChannels.b, outputPath, {
-        bitDepth: pngBitDepth,
-        applyStfStretch: effectiveStf,
-        shadowR: hasComposite ? compositeStf!.r.shadow : undefined,
-        midtoneR: hasComposite ? compositeStf!.r.midtone : undefined,
-        highlightR: hasComposite ? compositeStf!.r.highlight : undefined,
-        shadowG: hasComposite ? compositeStf!.g.shadow : undefined,
-        midtoneG: hasComposite ? compositeStf!.g.midtone : undefined,
-        highlightG: hasComposite ? compositeStf!.g.highlight : undefined,
-        shadowB: hasComposite ? compositeStf!.b.shadow : undefined,
-        midtoneB: hasComposite ? compositeStf!.b.midtone : undefined,
-        highlightB: hasComposite ? compositeStf!.b.highlight : undefined,
-      });
+      await exportRgbPng(
+        rgbChannels?.r ?? null,
+        rgbChannels?.g ?? null,
+        rgbChannels?.b ?? null,
+        outputPath, {
+          bitDepth: pngBitDepth,
+          applyStfStretch: effectiveStf,
+          shadowR: hasExplicitStf ? compositeStf!.r.shadow : undefined,
+          midtoneR: hasExplicitStf ? compositeStf!.r.midtone : undefined,
+          highlightR: hasExplicitStf ? compositeStf!.r.highlight : undefined,
+          shadowG: hasExplicitStf ? compositeStf!.g.shadow : undefined,
+          midtoneG: hasExplicitStf ? compositeStf!.g.midtone : undefined,
+          highlightG: hasExplicitStf ? compositeStf!.g.highlight : undefined,
+          shadowB: hasExplicitStf ? compositeStf!.b.shadow : undefined,
+          midtoneB: hasExplicitStf ? compositeStf!.b.midtone : undefined,
+          highlightB: hasExplicitStf ? compositeStf!.b.highlight : undefined,
+        });
       setPngExported(true);
       setSavedPath(outputPath);
       setTimeout(() => {
@@ -248,7 +261,7 @@ export default function ExportPanel({
     }
   }, [rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
 
-  const hasRgb = rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b);
+  const hasRgb = (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) || !!compositeStf;
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
 
@@ -328,7 +341,7 @@ export default function ExportPanel({
         )}
       </div>
 
-      {hasRgb && (
+      {hasRgb && rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b) && (
         <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
           <div className="flex items-center justify-between">
             <label className="text-xs text-zinc-400">Align Method</label>

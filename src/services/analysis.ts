@@ -21,6 +21,48 @@ export function detectStarsComposite(sigma = 5.0, maxStars = 200): Promise<StarD
   return typedInvoke<StarDetectionResult>("detect_stars_composite", { sigma, maxStars });
 }
 
+export interface SubframeMetrics {
+  file_path: string;
+  file_name: string;
+  star_count: number;
+  median_fwhm: number;
+  median_eccentricity: number;
+  median_snr: number;
+  background_median: number;
+  background_sigma: number;
+  noise_ratio: number;
+  weight: number;
+  accepted: boolean;
+}
+
+export interface SubframeAnalysisResult {
+  subframes: SubframeMetrics[];
+  total: number;
+  accepted: number;
+  rejected: number;
+  elapsed_ms: number;
+}
+
+export interface SubframeOptions {
+  maxFwhm?: number;
+  maxEccentricity?: number;
+  minSnr?: number;
+  minStars?: number;
+}
+
+export function analyzeSubframes(
+  paths: string[],
+  options: SubframeOptions = {},
+): Promise<SubframeAnalysisResult> {
+  return typedInvoke<SubframeAnalysisResult>("analyze_subframes_cmd", {
+    paths,
+    maxFwhm: options.maxFwhm,
+    maxEccentricity: options.maxEccentricity,
+    minSnr: options.minSnr,
+    minStars: options.minStars,
+  });
+}
+
 export function applyStfRender(
   path: string,
   outputDir: string | undefined,

@@ -97,7 +97,7 @@ fn compute_stats_hist_core(slice: &[f32], global_min: f64, global_max: f64) -> I
 
     let n = total_valid as u64;
     let mean = global_sum / n as f64;
-    let half_count = (total_valid as f64 * 0.5) as u64;
+    let half_count = (total_valid as f64 * 0.5).ceil() as u64;
 
     let median_bin = find_percentile_bin(&value_hist, total_valid, 0.5);
     let count_before_median: u64 = value_hist[..median_bin].iter().sum();
@@ -145,7 +145,7 @@ fn compute_stats_hist_core(slice: &[f32], global_min: f64, global_max: f64) -> I
             },
         );
 
-    let median_rank_in_bin = half_count - count_before_median;
+    let median_rank_in_bin = half_count.saturating_sub(count_before_median);
     let median_refine_bw = refine_range / HIST_BINS as f64;
     let median = resolve_rank_in_hist(
         &median_refine, median_rank_in_bin, median_bin_lo, median_refine_bw,
@@ -300,7 +300,7 @@ fn scan_sum_and_hist(
 }
 
 fn find_percentile_bin(hist: &[u64], total: usize, pct: f64) -> usize {
-    let target = (total as f64 * pct) as u64;
+    let target = (total as f64 * pct).ceil() as u64;
     let mut cum = 0u64;
     for (i, &count) in hist.iter().enumerate() {
         cum += count;
@@ -318,7 +318,7 @@ fn interpolate_percentile(
     data_min: f64,
     bin_width: f64,
 ) -> f64 {
-    let target = (total as f64 * pct) as u64;
+    let target = (total as f64 * pct).ceil() as u64;
     let mut cum = 0u64;
     for (i, &count) in hist.iter().enumerate() {
         cum += count;

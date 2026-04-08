@@ -104,7 +104,7 @@ fn render_tile(
         for dx in 0..tile_w {
             let v = src[src_row + x_start + dx];
             buf[dst_row + dx] = if v.is_finite() {
-                ((v - global_min) * inv_range).clamp(0.0, 255.0) as u8
+                ((v - global_min) * inv_range).round().clamp(0.0, 255.0) as u8
             } else {
                 0
             };
@@ -159,18 +159,19 @@ fn percentile_bounds(slice: &[f32], low_pct: f64, high_pct: f64) -> (f32, f32) {
     }
 
     let n = valid.len();
-    let lo_idx = ((n as f64 * low_pct) as usize).min(n - 1);
     let hi_idx = ((n as f64 * high_pct) as usize).min(n - 1);
-
-    let (_, lo_val, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let lo = *lo_val;
+    let lo_idx = ((n as f64 * low_pct) as usize).min(n - 1);
 
     let (_, hi_val, _) = valid.select_nth_unstable_by(hi_idx, |a, b| {
         a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
     });
     let hi = *hi_val;
+
+    let (left, _, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let _ = left;
+    let lo = valid[lo_idx];
 
     (lo, hi)
 }
@@ -287,9 +288,9 @@ fn render_tile_rgb(
         for dx in 0..tile_w {
             let si = src_row + x_start + dx;
             let di = (dst_row + dx) * 3;
-            buf[di] = (r_src[si].clamp(0.0, 1.0) * 255.0) as u8;
-            buf[di + 1] = (g_src[si].clamp(0.0, 1.0) * 255.0) as u8;
-            buf[di + 2] = (b_src[si].clamp(0.0, 1.0) * 255.0) as u8;
+            buf[di] = (r_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+            buf[di + 1] = (g_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+            buf[di + 2] = (b_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
 

@@ -141,11 +141,10 @@ fn write_f32_array_as_be(writer: &mut BufWriter<File>, data: &Array2<f32>) -> Re
     Ok(slice.len() * 4)
 }
 
-fn compute_bzero_bscale(data: &Array2<f32>) -> (f64, f64) {
-    let slice = data.as_slice().unwrap_or(&[]);
+fn compute_bzero_bscale(data: &[f32]) -> (f64, f64) {
     let mut dmin = f64::INFINITY;
     let mut dmax = f64::NEG_INFINITY;
-    for &v in slice {
+    for &v in data {
         let v = v as f64;
         if v.is_finite() {
             if v < dmin { dmin = v; }
@@ -160,6 +159,11 @@ fn compute_bzero_bscale(data: &Array2<f32>) -> (f64, f64) {
     (bzero, bscale)
 }
 
+fn compute_bzero_bscale_array(data: &Array2<f32>) -> (f64, f64) {
+    let slice = data.as_slice().unwrap_or(&[]);
+    compute_bzero_bscale(slice)
+}
+
 fn write_array_with_bitpix(
     writer: &mut BufWriter<File>,
     data: &Array2<f32>,
@@ -168,6 +172,29 @@ fn write_array_with_bitpix(
     bscale: f64,
 ) -> Result<usize> {
     let slice = data.as_slice().context("Array not contiguous")?;
+    match bitpix {
+        16 => {
+            write_i16_slice_as_be(writer, slice, bzero, bscale)?;
+            Ok(slice.len() * 2)
+        }
+        -64 => {
+            write_f64_slice_as_be(writer, slice)?;
+            Ok(slice.len() * 8)
+        }
+        _ => {
+            write_f32_slice_as_be(writer, slice)?;
+            Ok(slice.len() * 4)
+        }
+    }
+}
+
+fn write_slice_with_bitpix(
+    writer: &mut BufWriter<File>,
+    slice: &[f32],
+    bitpix: i32,
+    bzero: f64,
+    bscale: f64,
+) -> Result<usize> {
     match bitpix {
         16 => {
             write_i16_slice_as_be(writer, slice, bzero, bscale)?;
@@ -228,7 +255,7 @@ pub fn write_fits_mono_bitpix(
     };
 
     let (bzero, bscale) = if bitpix == 16 {
-        compute_bzero_bscale(data)
+        compute_bzero_bscale_array(data)
     } else {
         (0.0, 1.0)
     };
@@ -264,6 +291,17 @@ pub fn write_fits_rgb(
     b: &Array2<f32>,
     header: Option<&HduHeader>,
 ) -> Result<()> {
+    write_fits_rgb_bitpix(path, r, g, b, header, -32)
+}
+
+pub fn write_fits_rgb_bitpix(
+    path: &str,
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    header: Option<&HduHeader>,
+    bitpix: i32,
+) -> Result<()> {
     let (rows, cols) = r.dim();
     if g.dim() != (rows, cols) || b.dim() != (rows, cols) {
         bail!(
@@ -271,18 +309,38 @@ pub fn write_fits_rgb(
             cols, rows, g.dim().1, g.dim().0, b.dim().1, b.dim().0
         );
     }
+
     let file = File::create(path).context("Failed to create FITS file")?;
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     let mut bytes = 0;
 
+    let (bitpix_str, bitpix_comment) = match bitpix {
+        16 => ("16", "16-bit signed integer"),
+        -64 => ("-64", "64-bit double"),
+        _ => ("-32", "32-bit float"),
+    };
+
+    let (bzero, bscale) = if bitpix == 16 {
+        let r_sl = r.as_slice().unwrap_or(&[]);
+        let g_sl = g.as_slice().unwrap_or(&[]);
+        let b_sl = b.as_slice().unwrap_or(&[]);
+        let mut combined = Vec::with_capacity(r_sl.len() + g_sl.len() + b_sl.len());
+        combined.extend_from_slice(r_sl);
+        combined.extend_from_slice(g_sl);
+        combined.extend_from_slice(b_sl);
+        compute_bzero_bscale(&combined)
+    } else {
+        (0.0, 1.0)
+    };
+
     bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", "-32", "32-bit float")?;
+    bytes += write_header_card(&mut writer, "BITPIX", bitpix_str, bitpix_comment)?;
     bytes += write_header_card(&mut writer, "NAXIS", "3", "3D RGB cube")?;
     bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
     bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
     bytes += write_header_card(&mut writer, "NAXIS3", "3", "RGB channels")?;
-    bytes += write_header_card(&mut writer, "BZERO", "0.0", "")?;
-    bytes += write_header_card(&mut writer, "BSCALE", "1.0", "")?;
+    bytes += write_header_card(&mut writer, "BZERO", &format!("{:.10E}", bzero), "")?;
+    bytes += write_header_card(&mut writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
 
     if let Some(hdr) = header {
         static SKIP_RGB: &[&str] = &[
@@ -296,7 +354,8 @@ pub fn write_fits_rgb(
 
     let mut data_bytes = 0;
     for channel in [r, g, b] {
-        data_bytes += write_f32_array_as_be(&mut writer, channel)?;
+        let sl = channel.as_slice().context("Channel not contiguous")?;
+        data_bytes += write_slice_with_bitpix(&mut writer, sl, bitpix, bzero, bscale)?;
     }
     pad_to_block(&mut writer, data_bytes)?;
 

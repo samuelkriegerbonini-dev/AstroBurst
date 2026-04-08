@@ -13,6 +13,7 @@ pub struct DetectedStar {
     pub y: f64,
     pub flux: f64,
     pub fwhm: f64,
+    pub eccentricity: f64,
     pub peak: f64,
     pub npix: usize,
     pub snr: f64,
@@ -52,7 +53,7 @@ pub fn estimate_background(image: &Array2<f32>, tile_size: usize) -> (f64, f64) 
             for r in ty..ye {
                 for c in tx..xe {
                     let v = image[[r, c]];
-                    if v.is_finite() {
+                    if v.is_finite() && v > 1e-7 {
                         vals.push(v);
                     }
                 }
@@ -84,6 +85,18 @@ pub fn estimate_background(image: &Array2<f32>, tile_size: usize) -> (f64, f64) 
 
 pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResult {
     let (rows, cols) = image.dim();
+
+    if rows < 3 || cols < 3 {
+        return DetectionResult {
+            stars: Vec::new(),
+            background_median: 0.0,
+            background_sigma: 1.0,
+            threshold_sigma: sigma_threshold,
+            image_width: cols,
+            image_height: rows,
+        };
+    }
+
     let tile_size = (rows.min(cols) / 8).max(32).min(256);
     let (bg_median, bg_sigma) = estimate_background(image, tile_size);
 
@@ -140,9 +153,7 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
                 sum_flux += v;
                 sum_x += pc as f64 * v;
                 sum_y += pr as f64 * v;
-                if v > peak_val {
-                    peak_val = v;
-                }
+                peak_val = peak_val.max(v);
             }
 
             if sum_flux <= 0.0 {
@@ -153,11 +164,17 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
             let cy = sum_y / sum_flux;
 
             let mut sum_r2 = 0.0f64;
+            let mut sum_xx = 0.0f64;
+            let mut sum_yy = 0.0f64;
+            let mut sum_xy = 0.0f64;
             for &(pr, pc) in &component {
                 let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
                 let dx = pc as f64 - cx;
                 let dy = pr as f64 - cy;
                 sum_r2 += (dx * dx + dy * dy) * v;
+                sum_xx += dx * dx * v;
+                sum_yy += dy * dy * v;
+                sum_xy += dx * dy * v;
             }
             let sigma_star = (sum_r2 / sum_flux).sqrt();
             let fwhm = sigma_star * 2.355;
@@ -166,6 +183,20 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
                 continue;
             }
 
+            let ixx = sum_xx / sum_flux;
+            let iyy = sum_yy / sum_flux;
+            let ixy = sum_xy / sum_flux;
+            let trace = ixx + iyy;
+            let det = (ixx * iyy - ixy * ixy).max(0.0);
+            let disc = ((trace * trace / 4.0) - det).max(0.0).sqrt();
+            let lambda1 = trace / 2.0 + disc;
+            let lambda2 = (trace / 2.0 - disc).max(0.0);
+            let eccentricity = if lambda1 > 1e-15 {
+                (1.0 - lambda2 / lambda1).sqrt().clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
             let snr = confidence::compute_detection_snr(peak_val, bg_sigma);
 
             stars.push(DetectedStar {
@@ -173,6 +204,7 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
                 y: cy,
                 flux: sum_flux,
                 fwhm,
+                eccentricity,
                 peak: peak_val,
                 npix,
                 snr,
