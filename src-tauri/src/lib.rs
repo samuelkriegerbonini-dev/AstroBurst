@@ -121,6 +121,7 @@ pub fn run() {
             cmd::export::export_fits_rgb,
             cmd::export::export_png,
             cmd::export::export_rgb_png,
+            cmd::compose::compose_rgb_cmd,
             cmd::metadata::get_header,
             cmd::metadata::get_full_header,
             cmd::metadata::get_fits_extensions,

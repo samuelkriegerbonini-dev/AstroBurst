@@ -150,7 +150,33 @@ pub async fn detect_stars_composite(
                 .map(|i| r_s[i] * 0.2126 + g_s[i] * 0.7152 + b_s[i] * 0.0722)
                 .collect()
         };
-        let lum = ndarray::Array2::from_shape_vec((rows, cols), lum_vec)
+
+        let mut lum_min = f32::INFINITY;
+        let mut lum_max = f32::NEG_INFINITY;
+        for &v in &lum_vec {
+            if v.is_finite() {
+                if v < lum_min { lum_min = v; }
+                if v > lum_max { lum_max = v; }
+            }
+        }
+
+        let range = lum_max - lum_min;
+        let normalized: Vec<f32> = if range > 1e-10 {
+            let inv = 1.0 / range;
+            if n > PAR_THRESHOLD {
+                lum_vec.par_iter()
+                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
+                    .collect()
+            } else {
+                lum_vec.iter()
+                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
+                    .collect()
+            }
+        } else {
+            vec![0.0; n]
+        };
+
+        let lum = ndarray::Array2::from_shape_vec((rows, cols), normalized)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut result = detect_stars_core(&lum, sigma);

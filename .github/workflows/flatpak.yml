@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          manifest-path: flatpak/com.astroburst.AstroBurst.yml
+          manifest-path: flatpak/io.github.samuelkriegerbonini_dev.AstroBurst.yml
           bundle: astroburst.flatpak
       - uses: actions/upload-artifact@v4
         with:

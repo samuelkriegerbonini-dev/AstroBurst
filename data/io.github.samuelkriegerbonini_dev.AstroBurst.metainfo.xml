@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.astroburst.desktop</id>
+  <id>io.github.samuelkriegerbonini_dev.AstroBurst</id>
 
   <name>AstroBurst</name>
   <summary>High-performance astronomical image processor</summary>
@@ -8,7 +8,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
 
-  <developer id="com.astroburst">
+  <developer id="io.github.samuelkriegerbonini_dev">
     <name>Samuel Krieger</name>
   </developer>
 
@@ -47,12 +47,13 @@
     <color type="primary" scheme_preference="dark">#065f46</color>
   </branding>
 
-  <launchable type="desktop-id">com.astroburst.desktop.desktop</launchable>
+  <launchable type="desktop-id">io.github.samuelkriegerbonini_dev.AstroBurst.desktop</launchable>
 
   <provides>
     <binary>astroburst</binary>
     <mediatype>application/fits</mediatype>
     <mediatype>image/fits</mediatype>
+    <mediatype>application/asdf</mediatype>
   </provides>
 
   <requires>
@@ -64,33 +65,22 @@
     <control>pointing</control>
   </recommends>
 
-  <supports>
-    <internet>offline-only</internet>
-  </supports>
-
-  <categories>
-    <category>Science</category>
-    <category>Astronomy</category>
-    <category>Graphics</category>
-    <category>ImageProcessing</category>
-  </categories>
-
   <screenshots>
     <screenshot type="default">
       <caption>NGC 628 RGB composite from 17 JWST NIRCam filters with ComposeWizard</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/docs/screenshots/ngc628-rgb-composite-gpu.png</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/v0.4.6/docs/screenshots/ngc628-rgb-composite-gpu.png</image>
     </screenshot>
     <screenshot>
       <caption>Eagle Nebula HST narrowband with automatic channel mapping</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/docs/screenshots/eagle-nebula-channel-mapping-v2.png</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/v0.4.6/docs/screenshots/eagle-nebula-channel-mapping-v2.png</image>
     </screenshot>
     <screenshot>
       <caption>M51 galaxy with spline-based tone curves in AdjustStep</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/docs/screenshots/m51-curves-adjust-step.png</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/v0.4.6/docs/screenshots/m51-curves-adjust-step.png</image>
     </screenshot>
     <screenshot>
       <caption>NGC 628 masked stretch with star protection</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/docs/screenshots/ngc628-masked-stretch.png</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/v0.4.6/docs/screenshots/ngc628-masked-stretch.png</image>
     </screenshot>
   </screenshots>
 
