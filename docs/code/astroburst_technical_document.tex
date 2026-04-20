@@ -105,7 +105,7 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.4.5}}
+\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.4.6}}
 \fancyhead[R]{\small\textcolor{gray}{\thepage}}
 \fancyfoot[C]{\small\textcolor{gray}{GPL-3.0 License \textbullet\ \the\year}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -123,10 +123,10 @@
     \vspace{-1cm}
     {\Huge\bfseries\textcolor{astropurple}{AstroBurst}}\\[0.3cm]
     {\Large High-Performance Astronomical Image Processor}\\[0.2cm]
-    {\large Technical Document --- Release v0.4.5}
+    {\large Technical Document --- Release v0.4.6}
 }
 \author{Samuel Krieger Bonini}
-\date{March 2026}
+\date{April 2026}
 
 \begin{document}
 
@@ -140,9 +140,9 @@
             \toprule
             \textbf{Field} & \textbf{Value} \\
             \midrule
-            Document Version & 0.4.5 \\
-            Release & v0.4.5 \\
-            Date & March 2026 \\
+            Document Version & 0.4.6 \\
+            Release & v0.4.6 \\
+            Date & April 2026 \\
             Author & Samuel Krieger Bonini \\
             Stack & Rust 1.75+ $\cdot$ Tauri v2.10 $\cdot$ React 19 $\cdot$ TypeScript 5.7 \\
             Platforms & Windows $\cdot$ macOS $\cdot$ Linux \\
@@ -168,7 +168,21 @@
     \item Advanced astrophotographers processing deep-sky narrowband and broadband imaging data
     \end{itemize}
 
-    Version 0.4.5 delivers a complete processing pipeline from raw FITS/ASDF ingestion through calibration, stacking, alignment, color composition, and export, with \textbf{47 backend commands} exposed through a typed TypeScript API layer and a 10-step ComposeWizard pipeline.
+    Version 0.4.6 delivers a complete processing pipeline from raw FITS/ASDF ingestion through calibration, stacking, alignment, color composition, and export, with \textbf{47 backend commands} exposed through a typed TypeScript API layer and an 11-step ComposeWizard pipeline.
+
+    \subsection{What's New in v0.4.6}
+    \begin{itemize}[nosep]
+    \item \textbf{Tone curves (AdjustStep)} --- Spline-based curve editor with per-channel R/G/B and linked RGB modes; non-destructive (reads COMPOSITE\_KEY, applies STF + curves for preview only)
+    \item \textbf{Auto-STF preview} --- All linear-domain commands (blend, calibrate, WB, SCNR, reset) render preview with linked auto-STF, eliminating washed-out previews
+    \item \textbf{Cache-only intermediate processing} --- align, stack, calibrate, and background extraction store results in GLOBAL\_IMAGE\_CACHE; only PNG previews written to disk until explicit export
+    \item \textbf{Narrowband detection via blend preset} --- \code{isNarrowbandWorkflow} checks preset (SHO, HOO, Foraxx) as fallback when bin IDs are r/g/b; SCNR warning badge for narrowband workflows
+    \item \textbf{Auto-STF propagation} --- blend, calibrate, WB, and reset commands return \code{auto\_stf} in response; StretchStep sliders initialize from auto-STF; ColorBalanceStep propagates post-WB STF to CompositeContext
+    \item \textbf{Export pipeline fixes} --- STF cache hit corruption fixed (linear data rendered directly when \code{applyStfStretch = false}); WCS header preservation for composite FITS; sentinel path handling
+    \item \textbf{Star detection safety} --- NaN guard (\code{is\_finite \&\& > 1e-7}), degenerate image early return, NaN-safe sort comparator
+    \item \textbf{TypeScript strict mode} --- 39 errors resolved (0 remaining); 22 missing lucide-react declarations added
+    \item \textbf{Windows asset protocol} --- Path safety with canonicalize, URL decode compatibility, async runtime
+    \item \textbf{Flatpak/Flathub} --- Submission pending approval for Linux distribution
+    \end{itemize}
 
     \subsection{What's New in v0.4.5}
     \begin{itemize}[nosep]
@@ -181,7 +195,7 @@
 
     \subsection{What's New in v0.4.2}
     \begin{itemize}[nosep]
-    \item \textbf{ComposeWizard} --- 10-step pipeline (Channels, Stack, BG, Align, Blend, Color, Mask, Stretch, Adjust, Export)
+    \item \textbf{ComposeWizard} --- 11-step pipeline (Channels, Stack, Align, Crop, BG, Blend, Color, Mask, Stretch, Adjust, Export)
     \item \textbf{Synthetic FITS generation} --- Star field, PSF, and noise injection for testing
     \item \textbf{Narrowband palette system} --- SHO, HOO, HOS, NaturalColor, Custom with auto-detection
     \item \textbf{Live composite STF re-stretch} --- Per-channel shadow/midtone/highlight without re-composing
@@ -289,11 +303,11 @@
 
     \subsection{Frontend (React + TypeScript)}
 
-    The frontend is organized around the ComposeWizard (10-step pipeline) and split preview contexts:
+    The frontend is organized around the ComposeWizard (11-step pipeline) and split preview contexts:
 
     \begin{description}[style=nextline, leftmargin=2cm]
     \item[\texttt{services/}] 12 domain-specific service modules wrapping Tauri IPC: compose, fits, analysis, header, cube, stacking, processing, config, astrometry, export, synth, tiles.
-    \item[\texttt{ComposeWizard}] 10-step pipeline: Channels $\to$ Stack $\to$ BG $\to$ Align $\to$ Blend $\to$ Color $\to$ Mask $\to$ Stretch $\to$ Adjust $\to$ Export. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic.
+    \item[\texttt{ComposeWizard}] 11-step pipeline: Channels $\to$ Stack $\to$ Align $\to$ Crop $\to$ BG $\to$ Blend $\to$ Color $\to$ Mask $\to$ Stretch $\to$ Adjust $\to$ Export. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic.
     \item[Preview Contexts] 8 split React contexts (FileCtx, DoneFilesCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RawPixelsCtx, NarrowbandCtx) for granular re-render control.
     \item[GPU Rendering] WebGPU singleton with WGSL fragment shader for real-time STF. CPU worker fallback with identical MTF implementation. Both use symmetric denominator protection and padding threshold matching the Rust backend.
     \end{description}
@@ -518,7 +532,7 @@
         \bar{x}_C = \frac{\sum_{(i,j) \in C} i \cdot (I_{ij} - b)}{\sum_{(i,j) \in C} (I_{ij} - b)}
     \end{equation}
 
-    FWHM from second intensity moments (true \textbf{median} across detected stars, v0.4.5):
+    FWHM from second intensity moments (true \textbf{median} across detected stars, v0.4.6):
 
     \begin{equation}
         \text{FWHM} = 2\sqrt{2\ln 2} \cdot \sqrt{\frac{\sigma_x^2 + \sigma_y^2}{2}}
@@ -647,7 +661,8 @@
     \item No session persistence
     \item ASDF read-only (writer not implemented)
     \item No MAST API integration (manual download required)
-    \item Cube ``Collapse Sum'' is actually collapse mean (labeled correctly in v0.4.5)
+    \item Cube ``Collapse Sum'' relabeled to ``Collapse Mean'' in v0.4.5
+    \item Flatpak/Flathub distribution pending reviewer approval
     \end{enumerate}
 
 
@@ -667,6 +682,10 @@
             Masked stretch & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
             SPCC calibration & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
             STF GPU/CPU consistency & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
+            Tone curves (AdjustStep) & High & \textcolor{ForestGreen}{Done (v0.4.6)} \\
+            Cache-only processing & High & \textcolor{ForestGreen}{Done (v0.4.6)} \\
+            Auto-STF preview & Medium & \textcolor{ForestGreen}{Done (v0.4.6)} \\
+            Flatpak/Flathub & Medium & \textcolor{YellowOrange}{Pending} \\
             \midrule
             Multi-extension FITS (ERR/DQ/VAR) & High & Planned (v0.5) \\
             MAST API integration & High & Planned (v0.5) \\

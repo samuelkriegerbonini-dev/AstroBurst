@@ -1,8 +1,8 @@
 import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
-import { Download, Loader2, Box, Film } from "lucide-react";
+import { Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
-import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useRgbContext, useCubeContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
 
@@ -12,7 +12,6 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels } = useRgbContext();
-  const { renderedPreviewUrl } = useRenderContext();
   const { isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
   const { isCube, cubeDims } = useCubeContext();
 
@@ -61,15 +60,6 @@ function ExportTabInner() {
     },
     [],
   );
-
-  const handleDownloadPng = useCallback(() => {
-    const url = renderedPreviewUrl || file?.result?.previewUrl;
-    if (!url) return;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = (file?.name || "image").replace(/\.(fits?|zip)$/i, ".png");
-    a.click();
-  }, [file, renderedPreviewUrl]);
 
   const handleExportCubeFrames = useCallback(async () => {
     if (!file?.path || !cubeDims) return;
@@ -204,14 +194,6 @@ function ExportTabInner() {
             </div>
           </div>
         )}
-
-        <button
-          onClick={handleDownloadPng}
-          className="flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg px-4 py-2.5 font-medium transition-colors text-sm w-full"
-        >
-          <Download size={16} />
-          Download PNG
-        </button>
       </div>
     </Suspense>
   );

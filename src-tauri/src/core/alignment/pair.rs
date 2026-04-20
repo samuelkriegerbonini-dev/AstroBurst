@@ -27,8 +27,8 @@ fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
     let mut out = vec![0.0f32; rows * cols];
     out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
         for x in 0..cols {
-            let sy = y as f64 - dy;
-            let sx = x as f64 - dx;
+            let sy = y as f64 + dy;
+            let sx = x as f64 + dx;
             if sy < -0.5 || sy > (rows as f64 - 0.5) || sx < -0.5 || sx > (cols as f64 - 0.5) {
                 continue;
             }
@@ -100,4 +100,71 @@ pub fn align_pair_with_label(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pattern(rows: usize, cols: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(y, x)| {
+            ((y as f32 * 0.3).sin() * (x as f32 * 0.2).cos() * 1000.0) + 500.0
+                + ((y * 7 + x * 13) as f32 * 0.01).sin() * 200.0
+        })
+    }
+
+    fn shift_array(img: &Array2<f32>, dy: i32, dx: i32) -> Array2<f32> {
+        let (rows, cols) = img.dim();
+        let mut out = Array2::<f32>::zeros((rows, cols));
+        for y in 0..rows {
+            let sy = y as i32 - dy;
+            if sy < 0 || sy >= rows as i32 { continue; }
+            for x in 0..cols {
+                let sx = x as i32 - dx;
+                if sx < 0 || sx >= cols as i32 { continue; }
+                out[[y, x]] = img[[sy as usize, sx as usize]];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_phase_correlation_actually_aligns() {
+        let reference = make_pattern(128, 128);
+        let target = shift_array(&reference, 6, -4);
+        let result = align_pair(
+            &reference,
+            &target,
+            AlignMethod::PhaseCorrelation,
+            128,
+            128,
+        ).unwrap();
+
+        let mut residual_sum = 0.0f64;
+        let mut count = 0u32;
+        for y in 20..108 {
+            for x in 20..108 {
+                let rv = reference[[y, x]];
+                let av = result.aligned[[y, x]];
+                if av.is_finite() && rv.is_finite() {
+                    let d = (av - rv) as f64;
+                    residual_sum += d * d;
+                    count += 1;
+                }
+            }
+        }
+        let rmse = (residual_sum / count as f64).sqrt();
+        assert!(rmse < 50.0, "RMSE too high after alignment: {}", rmse);
+    }
+
+    #[test]
+    fn test_shift_subpixel_zero() {
+        let img = make_pattern(64, 64);
+        let shifted = shift_image_subpixel(&img, 0.0, 0.0);
+        for y in 0..64 {
+            for x in 0..64 {
+                assert!((img[[y, x]] - shifted[[y, x]]).abs() < 1e-5);
+            }
+        }
+    }
 }

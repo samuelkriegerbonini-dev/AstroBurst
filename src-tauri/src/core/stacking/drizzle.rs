@@ -8,6 +8,7 @@ use crate::core::alignment::phase_correlation;
 use crate::core::imaging::boundary::clamp_index;
 use crate::core::stacking::align;
 use crate::math::median::median_f32_mut;
+use crate::types::compose::AlignMethod;
 use crate::types::constants::MAD_TO_SIGMA;
 
 struct DrizzleAccumulator {
@@ -215,6 +216,13 @@ fn lanczos3(x: f64) -> f64 {
     (pi_x.sin() / pi_x) * (pi_x_3.sin() / pi_x_3)
 }
 
+fn map_alignment_method(m: AlignmentMethod) -> AlignMethod {
+    match m {
+        AlignmentMethod::PhaseCorrelation => AlignMethod::PhaseCorrelation,
+        AlignmentMethod::Zncc => AlignMethod::Affine,
+    }
+}
+
 pub fn drizzle_stack(
     images: &[Array2<f32>],
     config: &DrizzleConfig,
@@ -276,27 +284,34 @@ pub fn drizzle_stack(
                 let computed: Vec<(f64, f64)> = images_ref[1..]
                     .par_iter()
                     .map(|target| {
-                        let result = phase_correlation::phase_correlate(reference, target);
-                        if phase_correlation::is_low_confidence(result.confidence) {
-                            let (dy, dx) = align::compute_subpixel_offset(reference, target, 50);
-                            (dx, dy)
+                        let pc = phase_correlation::phase_correlate(reference, target);
+                        if phase_correlation::is_low_confidence(pc.confidence) {
+                            let fallback = align::estimate_offset(
+                                reference,
+                                target,
+                                AlignMethod::Affine,
+                            );
+                            (fallback.dx, fallback.dy)
                         } else {
-                            (result.dx, result.dy)
+                            (pc.dx, pc.dy)
                         }
                     })
                     .collect();
                 offsets.extend(computed);
             }
             AlignmentMethod::Zncc => {
-                let search_radius = 50i32;
-                for i in 1..images_ref.len() {
-                    let (dy, dx) = align::compute_subpixel_offset(
-                        reference,
-                        images_ref[i],
-                        search_radius,
-                    );
-                    offsets.push((dx, dy));
-                }
+                log::warn!(
+                    "ZNCC alignment requested; routing to star-based Affine (ZNCC path was removed)"
+                );
+                let mapped = map_alignment_method(AlignmentMethod::Zncc);
+                let computed: Vec<(f64, f64)> = images_ref[1..]
+                    .par_iter()
+                    .map(|target| {
+                        let est = align::estimate_offset(reference, target, mapped);
+                        (est.dx, est.dy)
+                    })
+                    .collect();
+                offsets.extend(computed);
             }
         }
     } else {

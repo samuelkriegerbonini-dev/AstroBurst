@@ -1,9 +1,12 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use anyhow::{bail, Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
 pub use crate::types::stacking::{StackConfig, StackResult};
 use crate::math::median::f32_cmp;
+use crate::types::compose::AlignMethod;
 use crate::types::constants::MAD_TO_SIGMA;
 
 use crate::core::stacking::align;
@@ -14,18 +17,17 @@ pub fn sigma_clip_combine(
     sigma_high: f32,
     max_iter: usize,
 ) -> (f32, u32) {
-    if values.is_empty() {
+    let n_orig = values.len();
+    if n_orig == 0 {
         return (0.0, 0);
     }
-    if values.len() == 1 {
+    if n_orig == 1 {
         return (values[0], 0);
     }
 
-    let n_orig = values.len();
     let mut len = n_orig;
     let mut rejected = 0u32;
-    let mut devs = Vec::with_capacity(n_orig);
-    let mut last_center: f32 = 0.0;
+    let mut last_center: f32 = f32::NAN;
 
     for iteration in 0..max_iter {
         if len < 2 {
@@ -37,8 +39,8 @@ pub fn sigma_clip_combine(
             values[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
             let med = values[mid];
 
-            devs.clear();
-            devs.extend(values[..len].iter().map(|v| (v - med).abs()));
+            let mut devs: Vec<f32> =
+                values[..len].iter().map(|v| (v - med).abs()).collect();
             let dmid = devs.len() / 2;
             devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
             let mad = devs[dmid];
@@ -81,7 +83,8 @@ pub fn sigma_clip_combine(
     }
 
     if len == 0 {
-        return (last_center, rejected);
+        let fallback = if last_center.is_finite() { last_center } else { 0.0 };
+        return (fallback, rejected);
     }
 
     let mean = values[..len].iter().map(|v| *v as f64).sum::<f64>() / len as f64;
@@ -96,7 +99,6 @@ pub fn stack_images(
         bail!("No images to stack");
     }
 
-    let reference = &images[0];
     let n = images.len();
 
     let min_rows = images.iter().map(|img| img.dim().0).min().unwrap();
@@ -110,7 +112,7 @@ pub fn stack_images(
         img.slice(ndarray::s![..min_rows, ..min_cols]).to_owned()
     };
 
-    let ref_cropped = crop(reference);
+    let ref_cropped = crop(&images[0]);
 
     let mut aligned: Vec<Array2<f32>> = Vec::with_capacity(n);
     let mut offsets: Vec<(i32, i32)> = Vec::with_capacity(n);
@@ -118,15 +120,22 @@ pub fn stack_images(
     aligned.push(ref_cropped.clone());
     offsets.push((0, 0));
 
-    let search_radius = 50i32;
-
     for i in 1..n {
         let cropped = crop(&images[i]);
 
         if config.align {
-            let (dy, dx) = align::compute_offset(&ref_cropped, &cropped, search_radius);
+            let result = align::align_pair_with_label(
+                &ref_cropped,
+                &cropped,
+                AlignMethod::PhaseCorrelation,
+                min_rows,
+                min_cols,
+                &format!("frame_{}", i),
+            )?;
+            let dy = result.offset.0.round() as i32;
+            let dx = result.offset.1.round() as i32;
             offsets.push((dy, dx));
-            aligned.push(align::shift_image(&cropped, dy, dx));
+            aligned.push(result.aligned);
         } else {
             offsets.push((0, 0));
             aligned.push(cropped);
@@ -135,40 +144,50 @@ pub fn stack_images(
 
     let rows = min_rows;
     let cols = min_cols;
-
     let npix = rows * cols;
     let sigma_low = config.sigma_low;
     let sigma_high = config.sigma_high;
     let max_iter = config.max_iterations;
 
-    let pixel_results: Vec<(f32, u32)> = (0..npix)
-        .into_par_iter()
-        .map(|i| {
-            let y = i / cols;
-            let x = i % cols;
-            let mut vals: Vec<f32> = aligned
-                .iter()
-                .map(|img| img[[y, x]])
-                .filter(|v| v.is_finite())
-                .collect();
-
-            sigma_clip_combine(&mut vals, sigma_low, sigma_high, max_iter)
-        })
+    let aligned_slices: Vec<&[f32]> = aligned
+        .iter()
+        .map(|img| img.as_slice().expect("contiguous"))
         .collect();
 
-    let mut result_data = Vec::with_capacity(npix);
-    let mut total_rejected = 0u64;
+    let mut result_data = vec![0.0f32; npix];
+    let total_rejected = AtomicU64::new(0);
 
-    for (val, rej) in pixel_results {
-        result_data.push(val);
-        total_rejected += rej as u64;
-    }
+    result_data
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(y, row_buf)| {
+            let mut vals: Vec<f32> = Vec::with_capacity(aligned_slices.len());
+            let base = y * cols;
+            let mut local_rejected: u64 = 0;
+            for x in 0..cols {
+                vals.clear();
+                let idx = base + x;
+                for s in &aligned_slices {
+                    let v = s[idx];
+                    if v.is_finite() {
+                        vals.push(v);
+                    }
+                }
+                let (val, rej) =
+                    sigma_clip_combine(&mut vals, sigma_low, sigma_high, max_iter);
+                row_buf[x] = val;
+                local_rejected += rej as u64;
+            }
+            total_rejected.fetch_add(local_rejected, Ordering::Relaxed);
+        });
+
+    let rejected_pixels = total_rejected.load(Ordering::Relaxed);
 
     Ok(StackResult {
         image: Array2::from_shape_vec((rows, cols), result_data)
             .context("Failed to reshape stacked image")?,
         frame_count: n,
-        rejected_pixels: total_rejected,
+        rejected_pixels,
         offsets,
     })
 }
@@ -199,6 +218,22 @@ mod tests {
         let (mean, rejected) = sigma_clip_combine(&mut vals, 2.0, 2.0, 5);
         assert!((mean - 100.0).abs() < 1.0);
         assert!(rejected >= 1);
+    }
+
+    #[test]
+    fn test_sigma_clip_empty() {
+        let mut vals: Vec<f32> = vec![];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(mean, 0.0);
+        assert_eq!(rejected, 0);
+    }
+
+    #[test]
+    fn test_sigma_clip_single() {
+        let mut vals = vec![42.0];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(mean, 42.0);
+        assert_eq!(rejected, 0);
     }
 
     #[test]
