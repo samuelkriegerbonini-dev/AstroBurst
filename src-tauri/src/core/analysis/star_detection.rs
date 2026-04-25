@@ -176,8 +176,8 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
                 sum_yy += dy * dy * v;
                 sum_xy += dx * dy * v;
             }
-            let sigma_star = (sum_r2 / sum_flux).sqrt();
-            let fwhm = sigma_star * 2.355;
+            let sigma_star = (sum_r2 / (2.0 * sum_flux)).sqrt();
+            let fwhm = sigma_star * 2.3548200450309493;
 
             if fwhm < 0.5 || fwhm > 30.0 {
                 continue;

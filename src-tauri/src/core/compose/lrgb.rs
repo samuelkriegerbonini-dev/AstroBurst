@@ -13,7 +13,7 @@ pub fn apply_lrgb(
 
     if r.dim() != dim || g.dim() != dim || b.dim() != dim {
         bail!(
-            "Dimensões L {:?} não correspondem ao RGB (R: {:?}, G: {:?}, B: {:?})",
+            "L dimensions {:?} do not match RGB (R: {:?}, G: {:?}, B: {:?})",
             dim, r.dim(), g.dim(), b.dim()
         );
     }

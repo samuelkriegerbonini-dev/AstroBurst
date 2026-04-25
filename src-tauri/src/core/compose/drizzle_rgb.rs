@@ -241,9 +241,9 @@ pub fn drizzle_rgb(
             for x in 0..out_cols {
                 let i = base + x;
                 let o = x * 3;
-                row_buf[o] = (r_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 1] = (g_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 2] = (b_slice[i].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o] = (r_slice[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 1] = (g_slice[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 2] = (b_slice[i].clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
 

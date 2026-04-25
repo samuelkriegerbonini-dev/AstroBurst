@@ -294,7 +294,9 @@ fn cross_match_stars(
         let mut best_cat: Option<&CatalogStar> = None;
 
         for cat in catalog {
-            let dra = (wc.ra - cat.ra) * wc.dec.to_radians().cos();
+            let mut dra = wc.ra - cat.ra;
+            if dra > 180.0 { dra -= 360.0; } else if dra < -180.0 { dra += 360.0; }
+            let dra = dra * wc.dec.to_radians().cos();
             let ddec = wc.dec - cat.dec;
             let d2 = dra * dra + ddec * ddec;
             if d2 < match_r2 && d2 < best_dist {
