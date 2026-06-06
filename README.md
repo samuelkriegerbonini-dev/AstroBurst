@@ -43,75 +43,85 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/01-rgb-composite.png" alt="JWST spiral galaxy RGB composite" width="100%">
+  <img src="docs/screenshots/01-rgb-composite.png" alt="JWST supernova remnant composite with tone curves" width="100%">
 </p>
-<p align="center"><em>Finished RGB composite of a JWST NIRCam spiral galaxy — blue young clusters, orange dust lanes, bright nucleus — with the spline tone-curve editor open in the Adjust step. Built end-to-end in the ComposeWizard from raw <code>i2d</code> frames.</em></p>
+<p align="center"><em>Finished color composite of a JWST supernova remnant — violet/pink filaments and orange knots over a dense star field — with the spline tone-curve editor open in the Adjust step. Built end-to-end in the ComposeWizard.</em></p>
 
 <p align="center">
   <img src="docs/screenshots/02-channels-mapping.png" alt="Channel assignment" width="100%">
 </p>
-<p align="center"><em><strong>1 · Channels.</strong> JWST NIRCam filters (I2D filter active) mapped to R/G/B by wavelength with the SmartChannelMapper. Per-bin file slots, narrowband Hα/OIII/SII targets, custom-wavelength channels, and Auto Map.</em></p>
+<p align="center"><em><strong>1 · Channels.</strong> Telescope filters mapped to R/G/B by wavelength with the SmartChannelMapper. Per-bin file slots, narrowband Hα/OIII/SII targets, custom-wavelength channels, and Auto Map.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/03-stacking-drizzle.png" alt="Drizzle stacking with subframe selector" width="100%">
+  <img src="docs/screenshots/03-blend-composite.png" alt="Channel blending into an RGB composite" width="100%">
 </p>
-<p align="center"><em><strong>2 · Stack — Drizzle + subframe selector.</strong> Per-channel integration with the Drizzle toggle and scale slider for super-resolution, alongside the subframe selector that scores every frame (stars, FWHM, SNR) and feeds quality-weighted sigma-clipped stacking.</em></p>
+<p align="center"><em><strong>6 · Blend.</strong> Per-channel weight matrix and preset palettes — RGB, SHO (Hubble), Hubble Legacy, HOO, Dynamic HOO, Foraxx — resolved by spectral wavelength for any bin layout, producing a non-destructive linear composite. Shown mid-blend on a NIRCam spiral galaxy.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/04-blend-presets.png" alt="Blend presets and weight matrix" width="100%">
-</p>
-<p align="center"><em><strong>6 · Blend.</strong> Preset palettes — RGB, SHO (Hubble), Hubble Legacy, HOO, Dynamic HOO, Foraxx — with a per-channel weight matrix and a spectral wavelength resolver for any bin layout. Produces a non-destructive linear composite.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/05-color-balance-scnr.png" alt="Color balance and SCNR" width="100%">
+  <img src="docs/screenshots/04-color-balance-scnr.png" alt="Color balance and SCNR" width="100%">
 </p>
 <p align="center"><em><strong>7 · Color.</strong> White balance (Auto / SPCC / Manual / None) with per-channel factors and a stability-based reference, plus SCNR green-excess reduction (average/maximum neutral) with luminance redistribution and a narrowband-aware warning.</em></p>
 
+<p align="center">
+  <img src="docs/screenshots/05-masked-stretch.png" alt="Masked stretch with shared star mask" width="100%">
+</p>
+<p align="center"><em><strong>8 · Stretch.</strong> Masked Stretch (star-protected) with target background, mask growth, and protection controls — including the shared-luminance star-mask toggle to avoid chromatic halos. Also offers arcsinh and per-channel STF.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/06-tone-curves.png" alt="Spline tone curves on a narrowband Pillars composite" width="100%">
+</p>
+<p align="center"><em><strong>9 · Adjust.</strong> Spline-based tone curves with interactive control points — linked-RGB or per-channel R/G/B — applied non-destructively to the cached composite. Shown shaping an SHO (Hα/OIII/SII) Pillars of Creation composite.</em></p>
+
 <details>
-<summary><strong>More of the pipeline</strong></summary>
+<summary><strong>More of the pipeline &amp; processing tools</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/06-masked-stretch.png" alt="Masked stretch with shared star mask" width="100%">
+  <img src="docs/screenshots/07-crop-align.png" alt="Crop aligned channels" width="100%">
 </p>
-<p align="center"><em><strong>8 · Stretch.</strong> Masked Stretch (star-protected) with target background, mask growth, and protection controls — now including the shared-luminance star-mask toggle to avoid chromatic halos. Also offers arcsinh and per-channel STF.</em></p>
+<p align="center"><em><strong>4 · Crop.</strong> Trim to the common field after sub-pixel channel alignment (phase-correlation or star-based affine), with auto-detect borders to remove the non-overlapping edges left by registration.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/07-tone-curves.png" alt="Spline tone curves" width="100%">
+  <img src="docs/screenshots/08-background-extraction.png" alt="Background extraction" width="100%">
 </p>
-<p align="center"><em><strong>9 · Adjust.</strong> Spline-based tone curves with interactive control points, linked-RGB or per-channel R/G/B editing, applied non-destructively to the cached composite.</em></p>
+<p align="center"><em><strong>Background extraction.</strong> Gradient and light-pollution removal with a grid-sampled polynomial model, sigma-clipped rejection of stars and nebulosity, in subtract or divide mode.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/08-analysis-platesolve.png" alt="Analysis panel" width="100%">
+  <img src="docs/screenshots/09-wavelet-denoise.png" alt="Wavelet denoise" width="100%">
 </p>
-<p align="center"><em><strong>Analysis.</strong> Star detection with FWHM/SNR, plate solving (RA/Dec, pixel scale, field of view), FFT power spectrum with a Hann window, and a 16K-bin histogram with auto-STF.</em></p>
+<p align="center"><em><strong>Wavelet denoise.</strong> À-trous wavelet noise reduction with per-scale sigma thresholds (fine detail through very-large structures) and a soft/linear threshold option that preserves faint signal.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/09-header-explorer.png" alt="FITS header explorer" width="100%">
+  <img src="docs/screenshots/10-psf-estimation.png" alt="PSF estimation" width="100%">
+</p>
+<p align="center"><em><strong>PSF estimation.</strong> Empirical point-spread-function measurement from sampled stars — count, cutout radius, max ellipticity, and saturation rejection — feeding the deconvolution kernel.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/11-deconvolution.png" alt="Richardson-Lucy deconvolution" width="100%">
+</p>
+<p align="center"><em><strong>Deconvolution.</strong> FFT-based Richardson-Lucy with Tikhonov regularization, configurable PSF (synthetic or empirical), iterations, and deringing.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/12-arcsinh-stretch.png" alt="Arcsinh stretch" width="100%">
+</p>
+<p align="center"><em><strong>Arcsinh stretch.</strong> Flux-preserving asinh stretch with a single intensity factor, chainable after denoise or deconvolution and reading the previous tool's output.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/13-header-explorer.png" alt="FITS header explorer" width="100%">
 </p>
 <p align="center"><em><strong>Headers.</strong> Multi-extension (MEF) selector with auto SCI detection and a categorized FITS keyword browser (observation, instrument, WCS, other).</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/10-deconvolution.png" alt="Richardson-Lucy deconvolution" width="100%">
+  <img src="docs/screenshots/14-compare-view.png" alt="Compare and export" width="100%">
 </p>
-<p align="center"><em><strong>Deconvolution.</strong> FFT-based Richardson-Lucy with Tikhonov regularization, configurable PSF, iterations, and deringing.</em></p>
+<p align="center"><em><strong>Compare &amp; export.</strong> Before/after inspection against the original, with PNG (8/16-bit) and RGB-FITS export — FITS now carries valid WCS/metadata headers plus <code>PROGRAM</code>/<code>HISTORY</code> provenance cards documenting the applied processing.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/11-export.png" alt="Export" width="100%">
-</p>
-<p align="center"><em><strong>10 · Export.</strong> PNG (8/16-bit), RGB FITS, and ZIP bundle. FITS exports now carry valid WCS/metadata headers plus <code>PROGRAM</code>/<code>HISTORY</code> provenance cards documenting the applied processing.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/12-compare-view.png" alt="Before/after compare" width="100%">
-</p>
-<p align="center"><em><strong>Compare.</strong> Before/after slider to inspect any processing step against the original.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/13-synthetic-fits.png" alt="Synthetic FITS generator" width="100%">
+  <img src="docs/screenshots/15-synthetic-fits.png" alt="Synthetic FITS generator" width="100%">
 </p>
 <p align="center"><em><strong>Synthetic data.</strong> Configurable star-field generator with a PSF model (Gaussian/Moffat) and a CCD noise model (gain, read noise, sky background, exposure) for testing calibration and alignment.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/14-calibration-pipeline.png" alt="Calibration pipeline" width="100%">
+  <img src="docs/screenshots/16-calibration-pipeline.png" alt="Calibration pipeline" width="100%">
 </p>
 <p align="center"><em><strong>Calibration.</strong> Bias / dark / flat correction with median-combined masters and per-channel R/G/B assignment, with crop-to-intersection for mismatched dimensions.</em></p>
 
