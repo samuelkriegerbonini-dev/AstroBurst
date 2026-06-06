@@ -2,6 +2,8 @@
   <img src="src/assets/logo.png" alt="AstroBurst Logo" width="128" />
 </p>
 
+> ⚠️ **Project Status**: Development of AstroBurst is temporarily paused while I focus on other projects. Active development will resume in **June**. Thank you for your understanding and continued support!
+
 <h1 align="center">AstroBurst</h1>
 
 <p align="center">
