@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw, Info as InfoIcon, BarChart3, FileText, PackageOpen, FolderOpen } from "lucide-react";
+import { Plus, RotateCcw, Info as InfoIcon, BarChart3, FileText, FolderOpen } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
@@ -44,7 +44,6 @@ const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
   { id: "analysis", label: "Analysis", icon: BarChart3 },
   { id: "headers", label: "Headers", icon: FileText },
-  { id: "export", label: "Export", icon: PackageOpen },
 ];
 
 function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {

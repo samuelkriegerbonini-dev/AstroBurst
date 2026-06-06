@@ -2,16 +2,18 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, render_asinh_and_save, resolve_output_dir};
 use crate::core::imaging::stats::compute_image_stats;
+use crate::cmd::helpers;
 use crate::core::stacking::calibration::calibrate_from_paths;
+use crate::core::stacking::calibration::drizzle_from_paths;
 use crate::core::stacking::calibration::stack_from_paths;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, STAGE_RENDER, STAGE_SAVE,
     RES_DIMENSIONS, RES_DX, RES_DY, RES_FITS_PATH, RES_FRAME_COUNT,
     RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_MAX, RES_MEAN, RES_MIN,
-    RES_OFFSETS, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SIGMA, RES_STATS,
+    RES_OFFSETS, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STATS,
 };
-use crate::types::stacking::StackConfig;
+use crate::types::stacking::{DrizzleConfig, StackConfig};
 
 #[tauri::command]
 pub async fn calibrate(
@@ -83,6 +85,7 @@ pub async fn stack(
     max_iterations: Option<usize>,
     align: Option<bool>,
     name: Option<String>,
+    weights: Option<Vec<f64>>,
 ) -> Result<serde_json::Value, String> {
     let frame_count = paths.len() as u64;
     let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
@@ -96,6 +99,7 @@ pub async fn stack(
             sigma_high: sigma_high.unwrap_or(3.0),
             max_iterations: max_iterations.unwrap_or(5),
             align: align.unwrap_or(true),
+            weights,
         };
 
         let result = stack_from_paths(&paths, &config, None)?;
@@ -124,6 +128,68 @@ pub async fn stack(
             RES_FRAME_COUNT: result.frame_count,
             RES_REJECTED_PIXELS: result.rejected_pixels,
             RES_OFFSETS: result.offsets.iter().map(|(dy, dx)| json!({RES_DY: dy, RES_DX: dx})).collect::<Vec<_>>(),
+            RES_STATS: {
+                RES_MIN: stats.min,
+                RES_MAX: stats.max,
+                RES_MEAN: stats.mean,
+                RES_SIGMA: stats.sigma,
+            },
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn drizzle_stack(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    output_dir: String,
+    scale: Option<f64>,
+    pixfrac: Option<f64>,
+    kernel: Option<String>,
+    align: Option<bool>,
+    name: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let frame_count = paths.len() as u64;
+    let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
+    let progress_clone = progress.clone();
+
+    blocking_cmd!({
+        resolve_output_dir(&output_dir)?;
+
+        let config = DrizzleConfig {
+            scale: scale.unwrap_or(2.0),
+            pixfrac: pixfrac.unwrap_or(0.7),
+            kernel: helpers::parse_drizzle_kernel(kernel.as_deref()),
+            align: align.unwrap_or(true),
+            ..DrizzleConfig::default()
+        };
+
+        let result = drizzle_from_paths(&paths, &config, None)?;
+
+        progress_clone.tick_with_stage(STAGE_RENDER);
+
+        let stem = name.as_deref().unwrap_or("drizzled");
+
+        let (png_path, fits_path) = render_asinh_and_save(
+            &result.image,
+            &output_dir,
+            stem,
+            true,
+        )?;
+
+        let (rows, cols) = result.image.dim();
+        let stats = compute_image_stats(&result.image);
+
+        progress_clone.tick_with_stage(STAGE_SAVE);
+        progress_clone.emit_complete();
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            RES_FITS_PATH: fits_path,
+            RES_DIMENSIONS: [cols, rows],
+            RES_FRAME_COUNT: result.frame_count,
+            RES_REJECTED_PIXELS: result.rejected_pixels,
+            RES_SCALE: result.output_scale,
             RES_STATS: {
                 RES_MIN: stats.min,
                 RES_MAX: stats.max,

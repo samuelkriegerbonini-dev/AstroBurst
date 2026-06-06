@@ -147,6 +147,7 @@ export async function maskedStretchComposite(
     maskSoftness?: number;
     protectionAmount?: number;
     luminanceProtect?: boolean;
+    sharedMask?: boolean;
   } = {},
 ): Promise<MaskedStretchResult> {
   const dir = outputDir ?? await getOutputDir();
@@ -158,6 +159,7 @@ export async function maskedStretchComposite(
     maskSoftness: options.maskSoftness ?? 4.0,
     protectionAmount: options.protectionAmount ?? 0.85,
     luminanceProtect: options.luminanceProtect ?? true,
+    sharedMask: options.sharedMask ?? true,
   });
 }
 

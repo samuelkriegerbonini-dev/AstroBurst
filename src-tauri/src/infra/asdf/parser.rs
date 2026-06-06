@@ -121,12 +121,17 @@ impl AsdfFile {
 
             let (header, header_end) = BlockHeader::parse(&buf[offset..])?;
             let data_start = offset + header_end;
-            let data_end = data_start + header.allocated_size as usize;
+            let data_end = data_start
+                .checked_add(header.allocated_size as usize)
+                .ok_or(AsdfError::BlockTruncated)?;
 
             if data_end > buf.len() {
                 return Err(AsdfError::BlockTruncated);
             }
 
+            if header.used_size > header.allocated_size {
+                return Err(AsdfError::BlockTruncated);
+            }
             let raw = &buf[data_start..data_start + header.used_size as usize];
             let decompressed = header.decompress(raw)?;
 

@@ -1,10 +1,20 @@
 use ndarray::{Array2, Zip};
 
-use crate::core::imaging::stats::compute_image_stats;
+fn finite_min_max(data: &Array2<f32>) -> (f32, f32) {
+    let mut mn = f32::INFINITY;
+    let mut mx = f32::NEG_INFINITY;
+    for &v in data.iter() {
+        if v.is_finite() {
+            if v < mn { mn = v; }
+            if v > mx { mx = v; }
+        }
+    }
+    if mn <= mx { (mn, mx) } else { (0.0, 1.0) }
+}
 
 pub fn arcsinh_stretch(data: &Array2<f32>, factor: f32) -> Array2<f32> {
-    let stats = compute_image_stats(data);
-    arcsinh_stretch_with_stats(data, stats.min as f32, stats.max as f32, factor, 1.0)
+    let (dmin, dmax) = finite_min_max(data);
+    arcsinh_stretch_with_stats(data, dmin, dmax, factor, 1.0)
 }
 
 pub fn arcsinh_stretch_with_stats(
@@ -69,13 +79,10 @@ pub fn arcsinh_stretch_rgb_with_stats(
     let (gmin, gmax) = match (global_min, global_max) {
         (Some(mn), Some(mx)) => (mn, mx),
         _ => {
-            let sr = compute_image_stats(r);
-            let sg = compute_image_stats(g);
-            let sb = compute_image_stats(b);
-            (
-                (sr.min as f32).min(sg.min as f32).min(sb.min as f32),
-                (sr.max as f32).max(sg.max as f32).max(sb.max as f32),
-            )
+            let (rmn, rmx) = finite_min_max(r);
+            let (gmn, gmx) = finite_min_max(g);
+            let (bmn, bmx) = finite_min_max(b);
+            (rmn.min(gmn).min(bmn), rmx.max(gmx).max(bmx))
         }
     };
 
@@ -113,10 +120,11 @@ mod tests {
 
     #[test]
     fn test_arcsinh_stretch_factor_effect() {
-        let data = Array2::from_shape_vec((1, 1), vec![0.1]).unwrap();
+        // Use a ranged array (a 1x1 constant has no range to normalize against).
+        let data = Array2::from_shape_vec((1, 3), vec![0.0, 0.1, 1.0]).unwrap();
         let mild = arcsinh_stretch(&data, 5.0);
         let strong = arcsinh_stretch(&data, 100.0);
-        assert!(strong[[0, 0]] > mild[[0, 0]]);
+        assert!(strong[[0, 1]] > mild[[0, 1]]);
     }
 
     #[test]

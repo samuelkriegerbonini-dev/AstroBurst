@@ -30,6 +30,17 @@ function resolveHeaderSourcePath(state: WizardState): string | null {
   return r ?? g ?? b ?? null;
 }
 
+function buildHistory(state: WizardState): string[] {
+  const h: string[] = [];
+  if (state.blendPreset) h.push(`Blend: ${state.blendPreset}`);
+  if (state.compositeReady) {
+    h.push(`Stretch: ${state.stretchMode} (target bg ${state.targetBackground.toFixed(2)})`);
+    h.push(`White balance: ${state.wbMode}`);
+    if (state.scnrEnabled) h.push(`SCNR: ${state.scnrMethod} ${Math.round(state.scnrAmount * 100)}%`);
+  }
+  return h;
+}
+
 export default function ExportStep({ state }: ExportStepProps) {
   const { compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
 
@@ -90,7 +101,7 @@ export default function ExportStep({ state }: ExportStepProps) {
             null,
             null,
             outputPath,
-            { bitpix },
+            { bitpix, history: buildHistory(state) },
           );
           setResult(res);
           setSavedPath(outputPath);
@@ -112,7 +123,7 @@ export default function ExportStep({ state }: ExportStepProps) {
         setSavedPath(outputPath);
       } else {
         const outputPath = `${dir}/astroburst_rgb_${ts}.fits`;
-        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix });
+        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix, history: buildHistory(state) });
         setResult(res);
         setSavedPath(outputPath);
       }

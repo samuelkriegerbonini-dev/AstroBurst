@@ -1,10 +1,10 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { stackFrames } from "../../../services/stacking";
+import { stackFrames, drizzleFrames } from "../../../services/stacking";
 import { analyzeSubframes, type SubframeMetrics, type SubframeAnalysisResult } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton, Slider } from "../../ui";
+import { RunButton, Slider, Toggle } from "../../ui";
 
 interface StackStepProps {
   state: WizardState;
@@ -23,6 +23,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   const [maxEcc, setMaxEcc] = useState(0.7);
   const [minSnr, setMinSnr] = useState(5.0);
   const [minStars, setMinStars] = useState(5);
+  const [useDrizzle, setUseDrizzle] = useState(false);
+  const [drizzleScale, setDrizzleScale] = useState(2.0);
 
   const stackableBins = useMemo(
     () => state.bins.filter((b) => b.files.length > 1),
@@ -92,12 +94,25 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     setLoading((prev) => ({ ...prev, [binId]: true }));
     setErrors((prev) => ({ ...prev, [binId]: "" }));
     try {
-      const result = await stackFrames(files, await getOutputDir(), {
-        sigmaLow: 3.0,
-        sigmaHigh: 3.0,
-        align: true,
-        name: `stacked_${binId}`,
-      });
+      const subResult = state.subframeResults[binId];
+      let weights: number[] | undefined;
+      if (subResult) {
+        const byPath = new Map(subResult.subframes.map((s) => [s.file_path, s.weight]));
+        weights = files.map((f) => byPath.get(f) ?? 1.0);
+      }
+      const result = useDrizzle
+        ? await drizzleFrames(files, await getOutputDir(), {
+            scale: drizzleScale,
+            align: true,
+            name: `stacked_${binId}`,
+          })
+        : await stackFrames(files, await getOutputDir(), {
+            sigmaLow: 3.0,
+            sigmaHigh: 3.0,
+            align: true,
+            name: `stacked_${binId}`,
+            weights,
+          });
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
@@ -109,7 +124,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     } finally {
       setLoading((prev) => ({ ...prev, [binId]: false }));
     }
-  }, [onStacked, getEffectiveFiles]);
+  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
@@ -144,6 +159,16 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
           onClick={handleStackAll}
           small
         />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <Toggle label="Drizzle" checked={useDrizzle} accent="blue" onChange={setUseDrizzle} />
+        {useDrizzle && (
+          <div className="flex-1">
+            <Slider label="Scale" value={drizzleScale} min={1.5} max={3.0} step={0.5} accent="blue"
+                    format={(v) => `${v.toFixed(1)}x`} onChange={setDrizzleScale} />
+          </div>
+        )}
       </div>
 
       {stackableBins.map((bin) => {

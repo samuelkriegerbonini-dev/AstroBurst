@@ -36,125 +36,100 @@ AstroBurst is an open-source desktop app for processing astronomical images. Dro
 
 It's built on Rust for the heavy lifting, React for the interface, and WebGPU for real-time preview. The result is a tool that opens a 2 GB IFU datacube in 300 ms, processes 10 frames at 1.4 GB/s, and renders STF adjustments in 8 ms on GPU.
 
-> **What's new in v0.4.6**: Tone curves (spline editor, per-channel R/G/B), auto-STF preview for all linear commands, cache-only intermediate processing (zero disk writes until export), narrowband detection via blend preset, 39 TypeScript strict errors resolved, Windows asset protocol fix, export pipeline critical fixes (STF cache hit corruption, WCS header preservation), star detection NaN safety, Flatpak/Flathub submission pending. See the [changelog](CHANGELOG.md).
+> **What's new in v0.5**: **Drizzle integration** in the ComposeWizard (per-channel super-resolution with scale/pixfrac/kernel), **quality-weighted stacking** driven by the subframe selector, **valid-FITS export** with restored WCS/metadata header preservation plus `PROGRAM`/`HISTORY` provenance cards documenting the processing, and a **shared-luminance star mask** for the masked stretch (no chromatic halos). Major numerical-correctness pass on the alignment/stacking core — phase-correlation sign + DC-pedestal fix (alignment now works on real sky-background data), flux-conserving drizzle weighting, and sub-pixel registration sign fix. Hardened FITS/ASDF parsing against malformed files (checked arithmetic, no overflow/panics), merged the Star Mask step into Stretch, de-duplicated the Export panel, and surfaced previously swallowed errors. 305 backend tests green. See the [changelog](CHANGELOG.md).
 >
 > **v0.4.x highlights**: 11-step ComposeWizard pipeline with tone curves, non-destructive composite (ORIG/KEY dual cache), masked stretch with star protection, SPCC color calibration, star-based affine alignment with rotation correction, stability white balance (MAD/median reference), SCNR luminance redistribution (BT.709), blend presets (SHO/HOO/Foraxx/Dynamic HOO/Hubble Legacy), live composite STF re-stretch, synthetic FITS generation, subframe selector with per-channel star metrics, and a full numerical correctness audit. The frontend was refactored into 12 domain services with shared UI primitives.
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/01-pillars-sho-blend.png" alt="Pillars of Creation SHO Blend" width="100%">
+  <img src="docs/screenshots/01-rgb-composite.png" alt="JWST spiral galaxy RGB composite" width="100%">
 </p>
-<p align="center"><em>HST Pillars of Creation (M16) SHO palette blend via ComposeWizard. Three WFPC2 narrowband files (502nm [OIII], 656nm H-alpha, 673nm [SII]) blended with per-channel weight matrix. Full 10-step wizard bar with Align, BG, and Blend completed. 1600x1600 float32. Auto Stretch + Linked STF toggles. 3 channels, 345ms blend time.</em></p>
+<p align="center"><em>Finished RGB composite of a JWST NIRCam spiral galaxy — blue young clusters, orange dust lanes, bright nucleus — with the spline tone-curve editor open in the Adjust step. Built end-to-end in the ComposeWizard from raw <code>i2d</code> frames.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/02-cassiopeia-a-curves.png" alt="Cassiopeia A Tone Curves" width="100%">
+  <img src="docs/screenshots/02-channels-mapping.png" alt="Channel assignment" width="100%">
 </p>
-<p align="center"><em>JWST Cassiopeia A (Cas A) with tone curves applied in AdjustStep. Three NIRCam files (F150W2, F444W, F356W) at 13759x12451. Spline-based curve editor with interactive control points (linked RGB mode). File sidebar with JWST filter chips (F150W2, F444W, F356W) and NIRCAM badges. I2D/SEGM filter toggles. Download ZIP (3) button. 2425ms curves applied.</em></p>
+<p align="center"><em><strong>1 · Channels.</strong> JWST NIRCam filters (I2D filter active) mapped to R/G/B by wavelength with the SmartChannelMapper. Per-bin file slots, narrowband Hα/OIII/SII targets, custom-wavelength channels, and Auto Map.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/03-pillars-channel-mapping.png" alt="Pillars Channel Mapping" width="100%">
+  <img src="docs/screenshots/03-stacking-drizzle.png" alt="Drizzle stacking with subframe selector" width="100%">
 </p>
-<p align="center"><em>HST Eagle Nebula (M16) RGB composite via ComposeWizard. Three WFPC2 narrowband files auto-mapped to R/G/B channels with SmartChannelMapper. Ha 656nm, OIII 502nm, SII 673nm. Full 11-step wizard bar. 1600x1600 float32. File sidebar with WFPC2 instrument badges. Auto Map button with custom channel bins.</em></p>
+<p align="center"><em><strong>2 · Stack — Drizzle + subframe selector.</strong> Per-channel integration with the Drizzle toggle and scale slider for super-resolution, alongside the subframe selector that scores every frame (stars, FWHM, SNR) and feeds quality-weighted sigma-clipped stacking.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/04-jwst-analysis-blend.png" alt="JWST Analysis and Blend" width="100%">
+  <img src="docs/screenshots/04-blend-presets.png" alt="Blend presets and weight matrix" width="100%">
 </p>
-<p align="center"><em>JWST NIRCam composite with full analysis panel: histogram/STF, star detection (200 stars, 15.18px FWHM, 97ms), plate solve (RA 13h 29m 52.13s, Dec +47 12' 0.7", 0.063"/px), FFT power spectrum, and deep zoom. SHO (Hubble) blend preset with per-channel weight matrix. 5655x2206 composite. 16 files processed.</em></p>
+<p align="center"><em><strong>6 · Blend.</strong> Preset palettes — RGB, SHO (Hubble), Hubble Legacy, HOO, Dynamic HOO, Foraxx — with a per-channel weight matrix and a spectral wavelength resolver for any bin layout. Produces a non-destructive linear composite.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/05-jwst-color-balance-scnr.png" alt="JWST Color Balance and SCNR" width="100%">
+  <img src="docs/screenshots/05-color-balance-scnr.png" alt="Color balance and SCNR" width="100%">
 </p>
-<p align="center"><em>JWST NIRCam composite at ColorBalance step. Stability-based auto white balance (R=2.14, G=0.96, B=1.00, reference channel B with lowest MAD/median). SCNR green excess reduction with narrowband warning: "In narrowband data, green carries real emission signal (Ha/SII/OIII depending on mapping). Enable only for blend matrix artifacts." 5655x2206, NARROWBAND badge.</em></p>
+<p align="center"><em><strong>7 · Color.</strong> White balance (Auto / SPCC / Manual / None) with per-channel factors and a stability-based reference, plus SCNR green-excess reduction (average/maximum neutral) with luminance redistribution and a narrowband-aware warning.</em></p>
 
 <details>
-<summary><strong>More screenshots</strong></summary>
+<summary><strong>More of the pipeline</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/06-jwst-galaxy-curves.png" alt="JWST Galaxy Curves" width="100%">
+  <img src="docs/screenshots/06-masked-stretch.png" alt="Masked stretch with shared star mask" width="100%">
 </p>
-<p align="center"><em>JWST NIRCam galaxy composite with tone curves in AdjustStep. Full 11-step wizard bar (all steps completed). Spline curve editor with multiple control points (linked RGB mode). 5655x2206 composite. Curves applied in 2425ms.</em></p>
+<p align="center"><em><strong>8 · Stretch.</strong> Masked Stretch (star-protected) with target background, mask growth, and protection controls — now including the shared-luminance star-mask toggle to avoid chromatic halos. Also offers arcsinh and per-channel STF.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/07-pillars-curves-adjust.png" alt="Pillars Tone Curves" width="100%">
+  <img src="docs/screenshots/07-tone-curves.png" alt="Spline tone curves" width="100%">
 </p>
-<p align="center"><em>HST Pillars of Creation with tone curves applied in AdjustStep. Spline-based curve editor (linked RGB). 1600x1600 float32. Full 11-step wizard bar with all steps completed. 3 files, 3 done. BFPC2 composite.</em></p>
+<p align="center"><em><strong>9 · Adjust.</strong> Spline-based tone curves with interactive control points, linked-RGB or per-channel R/G/B editing, applied non-destructively to the cached composite.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/08-m51-curves-analysis.png" alt="M51 Tone Curves and Analysis" width="100%">
+  <img src="docs/screenshots/08-analysis-platesolve.png" alt="Analysis panel" width="100%">
 </p>
-<p align="center"><em>JWST M51 (NGC 5194) with tone curves applied in AdjustStep. Left panel: histogram/STF, star detection (200 stars, 15.42px FWHM), plate solve (RA 13h 29m 52.13s, Dec +47 12' 0.7", 0.063"/px), FFT power spectrum, deep zoom. 5655x2206 NIRCam F444W composite. 16 files processed.</em></p>
+<p align="center"><em><strong>Analysis.</strong> Star detection with FWHM/SNR, plate solving (RA/Dec, pixel scale, field of view), FFT power spectrum with a Hann window, and a 16K-bin histogram with auto-STF.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/09-jwst-headers-subframe.png" alt="JWST Headers and Subframe Selector" width="100%">
+  <img src="docs/screenshots/09-header-explorer.png" alt="FITS header explorer" width="100%">
 </p>
-<p align="center"><em>JWST NIRCam data with FITS header explorer and subframe selector. BITPIX -32, NAXIS 5655x2206, JWST NIRCAM F444W. Per-channel (R/G/B) star metrics: star count, FWHM, SNR, and weight percentages. Categorized header browser (Observation, Filter, Instrument, Other). 16 files, 16 done.</em></p>
+<p align="center"><em><strong>Headers.</strong> Multi-extension (MEF) selector with auto SCI detection and a categorized FITS keyword browser (observation, instrument, WCS, other).</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/10-m51-stacking.png" alt="M51 Sigma-Clipped Stacking" width="100%">
+  <img src="docs/screenshots/10-deconvolution.png" alt="Richardson-Lucy deconvolution" width="100%">
 </p>
-<p align="center"><em>JWST M51 sigma-clipped stacking panel. 17 NIRCam files with sigma low/high 3.0, max 5 iterations, auto-align enabled. Left panel: histogram with auto-STF, star detection, plate solve with WCS, FFT power spectrum, and deep zoom tile viewer. 5655x2206 composite at 0.063"/px.</em></p>
+<p align="center"><em><strong>Deconvolution.</strong> FFT-based Richardson-Lucy with Tikhonov regularization, configurable PSF, iterations, and deringing.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/11-ngc628-rgb-composite.png" alt="NGC 628 RGB Composite" width="100%">
+  <img src="docs/screenshots/11-export.png" alt="Export" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) RGB composite from JWST NIRCam files. GPU-rendered preview. ComposeWizard with blend presets, auto-STF, and per-channel weight matrix.</em></p>
+<p align="center"><em><strong>10 · Export.</strong> PNG (8/16-bit), RGB FITS, and ZIP bundle. FITS exports now carry valid WCS/metadata headers plus <code>PROGRAM</code>/<code>HISTORY</code> provenance cards documenting the applied processing.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/12-ngc628-masked-stretch.png" alt="NGC 628 Masked Stretch" width="100%">
+  <img src="docs/screenshots/12-compare-view.png" alt="Before/after compare" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) RGB composite with masked stretch. Star-protected MTF: 10 iterations, 15% target background, 85% star protection, 2.5x FWHM mask growth. Result: 42,391 stars masked, 69.3% coverage, converged in 4 iterations (0.7s).</em></p>
+<p align="center"><em><strong>Compare.</strong> Before/after slider to inspect any processing step against the original.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/13-ngc628-deconvolution.png" alt="NGC 628 Deconvolution" width="100%">
+  <img src="docs/screenshots/13-synthetic-fits.png" alt="Synthetic FITS generator" width="100%">
 </p>
-<p align="center"><em>JWST NGC 628 Richardson-Lucy deconvolution. 16 NIRCam files with I2D/SEGM filter chips. RL with 20 iterations, PSF sigma 2.0, Tikhonov regularization (0.001), deringing threshold 0.10. AdvancedImageViewer with zoom presets.</em></p>
+<p align="center"><em><strong>Synthetic data.</strong> Configurable star-field generator with a PSF model (Gaussian/Moffat) and a CCD noise model (gain, read noise, sky background, exposure) for testing calibration and alignment.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/14-ngc628-export.png" alt="NGC 628 Export" width="100%">
+  <img src="docs/screenshots/14-calibration-pipeline.png" alt="Calibration pipeline" width="100%">
 </p>
-<p align="center"><em>NGC 628 (M74) RGB composite export. 18 JWST NIRCam files. ExportStep with FITS RGB format, export complete (618 MB, 617ms), file reveal button, and ZIP bundle. ComposeWizard bar showing Channels and Blend completed.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/15-pillars-blend-presets.png" alt="Pillars Blend Presets" width="100%">
-</p>
-<p align="center"><em>Pillars of Creation with SHO blend presets. Preset selector with RGB, SHO (Hubble), Hubble Legacy, HOO, Dynamic HOO, and Foraxx options. Per-channel weight matrix visualization.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/17-ngc6744-compare.png" alt="NGC 6744 Export Compare" width="100%">
-</p>
-<p align="center"><em>NGC 6744 RGB FITS export with masked stretch comparison. Before/after CompareView slider. Export sidebar: FITS with STF stretch, WCS coordinates, observation metadata, and BITPIX selection.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/18-synth-generator.png" alt="Synthetic Generator" width="100%">
-</p>
-<p align="center"><em>Synthetic FITS generator with 28 JWST NIRCam files loaded. Configurable star field: 2048x2048, 500 stars, Gaussian PSF (3.0px FWHM). CCD noise model: gain 1.5 e-/ADU, read noise 8.0 e-, sky background 200 ADU, 300s exposure.</em></p>
-
-### Panels
-
-<p align="center">
-  <img src="docs/screenshots/20-panel-calibration-mapper.png" alt="Calibration Mapper" width="32%">
-  <img src="docs/screenshots/21-panel-stacking.png" alt="Sigma-Clipped Stacking" width="32%">
-  <img src="docs/screenshots/22-panel-calibration-pipeline.png" alt="Calibration Pipeline" width="32%">
-</p>
-<p align="center"><em>Left: Calibration mapper with science, bias, dark, and flat frame slots. Center: Sigma-clipped stacking with configurable low/high thresholds. Right: Calibration pipeline with per-channel R/G/B file assignment.</em></p>
+<p align="center"><em><strong>Calibration.</strong> Bias / dark / flat correction with median-combined masters and per-channel R/G/B assignment, with crop-to-intersection for mismatched dimensions.</em></p>
 
 </details>
 
 ## Features
 
-### ComposeWizard (11-Step Pipeline)
+### ComposeWizard (10-Step Pipeline)
 1. **Channels**: Auto-detect narrowband filters from headers, drag-and-drop assignment, JWST wavelength mapping, custom bins
-2. **Stack**: Per-channel sigma-clipped stacking with configurable thresholds, auto-align, and subframe selector (star count, FWHM, SNR, weight per frame)
+2. **Stack**: Per-channel sigma-clipped stacking with a subframe selector (star count, FWHM, SNR, and a per-frame quality weight that drives **weighted integration**), auto-align, and optional **drizzle** super-resolution (scale, pixfrac, kernel)
 3. **Align**: Phase correlation (sub-pixel) or star-based affine (rotation/scale), automatic fallback
 4. **Crop**: Auto-detect valid data intersection across aligned channels, border scan with configurable margins
 5. **Background**: Polynomial surface extraction with sigma-clipped grid sampling (subtract/divide)
 6. **Blend**: Preset palettes (SHO, HOO, Foraxx, Dynamic HOO, Hubble Legacy, RGB) with spectral wavelength resolver for any bin configuration
 7. **Color**: Stability-based auto white balance (MAD/median reference) + SCNR green removal (average/maximum neutral) with BT.709 luminance redistribution. Narrowband warning for SHO/HOO workflows.
-8. **Mask**: Star mask with growth/protection controls for masked stretch
-9. **Stretch**: Per-channel STF, masked stretch with star protection, or arcsinh
-10. **Adjust**: Spline-based tone curves with per-channel R/G/B and linked RGB modes
-11. **Export**: PNG (8/16-bit), FITS RGB, ZIP bundle with all channels + composite
+8. **Stretch**: Masked stretch with star protection (growth/protection + shared-luminance mask), per-channel STF, or arcsinh
+9. **Adjust**: Spline-based tone curves with per-channel R/G/B and linked RGB modes
+10. **Export**: PNG (8/16-bit), FITS RGB with WCS/metadata preservation and `PROGRAM`/`HISTORY` provenance cards, ZIP bundle with all channels + composite
 
 ### Core Pipeline
 - **FITS + ASDF**: Memory-mapped I/O. MEF with auto SCI selection. First non-Python ASDF reader (zlib/bzip2/lz4, Roman Space Telescope gWCS). ZIP transparency. Multi-BITPIX export (16/float32/float64).
@@ -302,7 +277,7 @@ Frontend (React 19 + TypeScript 5.7 + Tailwind v4)
 +-- 12 domain services (compose, fits, analysis, header, synth, ...)
 +-- 8 shared UI primitives (Slider, Toggle, RunButton, ...)
 +-- 8 split PreviewContexts for minimal re-renders
-+-- 11-step ComposeWizard with useReducer state machine
++-- 10-step ComposeWizard with useReducer state machine
 +-- infrastructure/tauri/ IPC layer (safeInvoke, withPreview, getOutputDir)
 +-- Lazy-loaded panels via React.lazy + Suspense
          |
@@ -340,10 +315,10 @@ Backend (Rust + Tauri v2.10)
 
 | Version | What | Status |
 |:--------|:-----|:-------|
-| **v0.4** | ComposeWizard, non-destructive pipeline, tone curves, masked stretch, SPCC, affine alignment, stability WB, SCNR redistribution, blend presets, STF consistency, cache-only processing, numerical audit | **Released** |
-| **v0.5** | FITS ERR/DQ/VAR propagation, MAST API, levels, selective saturation | Next |
-| **v0.6** | Star removal, Gaia DR3 photometric calibration, PixelMath | Planned |
-| **v0.7** | Mosaic stitching, gradient-aware background, local normalization | Planned |
+| **v0.4** | ComposeWizard, non-destructive pipeline, tone curves, masked stretch, SPCC, affine alignment, stability WB, SCNR redistribution, blend presets, STF consistency, cache-only processing, numerical audit | Released |
+| **v0.5** | Drizzle in the wizard, quality-weighted stacking, valid-FITS export with WCS/metadata preservation + `PROGRAM`/`HISTORY` provenance, shared-luminance star mask, alignment/stacking correctness fixes (phase correlation, flux-conserving drizzle, sub-pixel registration), malformed-file parsing hardening | **Released** |
+| **v0.6** | FITS ERR/DQ/VAR propagation, MAST API, levels, selective saturation, star removal | Next |
+| **v0.7** | Gaia DR3 photometric calibration, PixelMath, mosaic stitching, gradient-aware background | Planned |
 | **v1.0** | Full WebGPU pipeline, WASM plugins, Python scripting | Planned |
 
 ## Contributing

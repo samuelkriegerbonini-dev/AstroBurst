@@ -20,7 +20,7 @@ pub fn quadratic_3pt(prev: f64, center: f64, next: f64) -> f64 {
     if denom.abs() < 1e-15 {
         return 0.0;
     }
-    let offset = (prev - next) / denom;
+    let offset = (next - prev) / denom;
     offset.clamp(-0.5, 0.5)
 }
 
@@ -56,7 +56,7 @@ pub fn quadratic_refine_1d<T: FftFloat>(
         return T::zero();
     }
     let half = T::half();
-    let result = (prev - next) / denom;
+    let result = (next - prev) / denom;
     result.max_of(T::zero() - half).min_of(half)
 }
 
@@ -230,7 +230,7 @@ mod tests {
         let result = quadratic_3pt(0.3, 1.0, 0.8);
         assert!(result > 0.0);
         assert!(result < 0.5);
-        let expected = (0.3 - 0.8) / (2.0 * (2.0 * 1.0 - 0.3 - 0.8));
+        let expected = (0.8 - 0.3) / (2.0 * (2.0 * 1.0 - 0.3 - 0.8));
         assert!((result - expected).abs() < 1e-15);
     }
 

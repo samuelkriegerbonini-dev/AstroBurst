@@ -256,3 +256,28 @@ fn apply_mtf(data: &Array2<f32>, m: f32) -> Array2<f32> {
 fn clamp_inplace(data: &mut Array2<f32>) {
     data.par_mapv_inplace(|v| v.clamp(0.0, 1.0));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene(peak: f32) -> Array2<f32> {
+        Array2::from_shape_fn((24, 24), |(y, x)| {
+            let dy = y as f32 - 12.0;
+            let dx = x as f32 - 12.0;
+            0.05 + (-(dy * dy + dx * dx) / 2.0).exp() * peak
+        })
+    }
+
+    #[test]
+    fn shared_mask_stretch_produces_valid_rgb() {
+        let r = scene(3.0);
+        let g = scene(2.0);
+        let b = scene(1.0);
+        let result = masked_stretch_rgb_shared(&r, &g, &b, &MaskedStretchConfig::default()).unwrap();
+        for img in [&result.r.image, &result.g.image, &result.b.image] {
+            assert_eq!(img.dim(), (24, 24));
+            assert!(img.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+        }
+    }
+}

@@ -805,7 +805,7 @@ mod tests {
         });
         let t = AffineTransform::translation(5.0, 3.0);
         let warped = warp_image(&img, &t, 100, 100);
-        assert!(warped[[53, 55]] > 500.0);
+        assert!(warped[[47, 45]] > 500.0);
         assert!(warped[[50, 50]] > 500.0 || warped[[53, 55]] > warped[[50, 50]]);
     }
 

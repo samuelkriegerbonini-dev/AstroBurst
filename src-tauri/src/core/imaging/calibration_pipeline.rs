@@ -299,7 +299,13 @@ fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
     }
 
     let inv_range = 1.0 / range;
-    ch.mapv(|v| ((v - min_val) * inv_range).clamp(0.0, 1.0))
+     ch.mapv(|v| {
+        if v.is_finite() {
+            ((v - min_val) * inv_range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    })
 }
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {

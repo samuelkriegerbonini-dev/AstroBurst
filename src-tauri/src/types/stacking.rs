@@ -6,6 +6,7 @@ pub struct StackConfig {
     pub sigma_high: f32,
     pub max_iterations: usize,
     pub align: bool,
+    pub weights: Option<Vec<f64>>,
 }
 
 impl Default for StackConfig {
@@ -15,6 +16,7 @@ impl Default for StackConfig {
             sigma_high: 3.0,
             max_iterations: 5,
             align: true,
+            weights: None,
         }
     }
 }

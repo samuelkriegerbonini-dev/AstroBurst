@@ -78,4 +78,5 @@ export interface StackOptions {
   align?: boolean;
   drizzleScale?: number;
   weightMode?: string;
+  weights?: number[];
 }

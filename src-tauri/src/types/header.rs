@@ -10,6 +10,13 @@ pub struct HduHeader {
 }
 
 impl HduHeader {
+    pub fn empty() -> Self {
+        Self {
+            cards: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.index.get(key).map(|s| s.as_str())
     }

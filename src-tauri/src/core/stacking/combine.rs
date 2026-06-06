@@ -91,6 +91,95 @@ pub fn sigma_clip_combine(
     (mean as f32, rejected)
 }
 
+pub fn sigma_clip_combine_weighted(
+    vals: &mut Vec<(f32, f32)>,
+    sigma_low: f32,
+    sigma_high: f32,
+    max_iter: usize,
+) -> (f32, u32) {
+    let n_orig = vals.len();
+    if n_orig == 0 {
+        return (0.0, 0);
+    }
+    if n_orig == 1 {
+        return (vals[0].0, 0);
+    }
+
+    let mut len = n_orig;
+    let mut rejected = 0u32;
+    let mut last_center: f32 = f32::NAN;
+
+    for iteration in 0..max_iter {
+        if len < 2 {
+            break;
+        }
+
+        let (center, sigma) = if iteration == 0 {
+            let mid = len / 2;
+            vals[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(&a.0, &b.0));
+            let med = vals[mid].0;
+            let mut devs: Vec<f32> = vals[..len].iter().map(|p| (p.0 - med).abs()).collect();
+            let dmid = devs.len() / 2;
+            devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
+            let mad = devs[dmid];
+            let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
+            (med, sig)
+        } else {
+            let nf = len as f64;
+            let mean = vals[..len].iter().map(|p| p.0 as f64).sum::<f64>() / nf;
+            let variance = vals[..len]
+                .iter()
+                .map(|p| {
+                    let d = p.0 as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (nf - 1.0).max(1.0);
+            (mean as f32, variance.sqrt().max(1e-10) as f32)
+        };
+
+        last_center = center;
+
+        let lo = -sigma_low * sigma;
+        let hi = sigma_high * sigma;
+        let mut write = 0;
+        for read in 0..len {
+            let dev = vals[read].0 - center;
+            if dev >= lo && dev <= hi {
+                vals[write] = vals[read];
+                write += 1;
+            }
+        }
+
+        let removed = len - write;
+        rejected += removed as u32;
+        len = write;
+
+        if removed == 0 {
+            break;
+        }
+    }
+
+    if len == 0 {
+        let fallback = if last_center.is_finite() { last_center } else { 0.0 };
+        return (fallback, rejected);
+    }
+
+    let mut vsum = 0.0f64;
+    let mut wsum = 0.0f64;
+    for &(v, w) in &vals[..len] {
+        let wf = w as f64;
+        vsum += v as f64 * wf;
+        wsum += wf;
+    }
+    let mean = if wsum > 1e-12 {
+        (vsum / wsum) as f32
+    } else {
+        (vals[..len].iter().map(|p| p.0 as f64).sum::<f64>() / len as f64) as f32
+    };
+    (mean, rejected)
+}
+
 pub fn stack_images(
     images: &[Array2<f32>],
     config: &StackConfig,
@@ -154,6 +243,12 @@ pub fn stack_images(
         .map(|img| img.as_slice().expect("contiguous"))
         .collect();
 
+    let weights_f32: Option<Vec<f32>> = config
+        .weights
+        .as_ref()
+        .filter(|w| w.len() == n)
+        .map(|w| w.iter().map(|&x| x as f32).collect());
+
     let mut result_data = vec![0.0f32; npix];
     let total_rejected = AtomicU64::new(0);
 
@@ -161,22 +256,40 @@ pub fn stack_images(
         .par_chunks_mut(cols)
         .enumerate()
         .for_each(|(y, row_buf)| {
-            let mut vals: Vec<f32> = Vec::with_capacity(aligned_slices.len());
             let base = y * cols;
             let mut local_rejected: u64 = 0;
-            for x in 0..cols {
-                vals.clear();
-                let idx = base + x;
-                for s in &aligned_slices {
-                    let v = s[idx];
-                    if v.is_finite() {
-                        vals.push(v);
+            if let Some(ref weights) = weights_f32 {
+                let mut wvals: Vec<(f32, f32)> = Vec::with_capacity(aligned_slices.len());
+                for x in 0..cols {
+                    wvals.clear();
+                    let idx = base + x;
+                    for (i, s) in aligned_slices.iter().enumerate() {
+                        let v = s[idx];
+                        if v.is_finite() {
+                            wvals.push((v, weights[i]));
+                        }
                     }
+                    let (val, rej) =
+                        sigma_clip_combine_weighted(&mut wvals, sigma_low, sigma_high, max_iter);
+                    row_buf[x] = val;
+                    local_rejected += rej as u64;
                 }
-                let (val, rej) =
-                    sigma_clip_combine(&mut vals, sigma_low, sigma_high, max_iter);
-                row_buf[x] = val;
-                local_rejected += rej as u64;
+            } else {
+                let mut vals: Vec<f32> = Vec::with_capacity(aligned_slices.len());
+                for x in 0..cols {
+                    vals.clear();
+                    let idx = base + x;
+                    for s in &aligned_slices {
+                        let v = s[idx];
+                        if v.is_finite() {
+                            vals.push(v);
+                        }
+                    }
+                    let (val, rej) =
+                        sigma_clip_combine(&mut vals, sigma_low, sigma_high, max_iter);
+                    row_buf[x] = val;
+                    local_rejected += rej as u64;
+                }
             }
             total_rejected.fetch_add(local_rejected, Ordering::Relaxed);
         });
@@ -276,10 +389,45 @@ mod tests {
             sigma_high: 3.0,
             max_iterations: 5,
             align: false,
+            weights: None,
         };
 
         let result = stack_images(&images, &config).unwrap();
         assert!((result.image[[2, 2]] - 100.0).abs() < 1.0);
         assert!(result.rejected_pixels > 0);
+    }
+
+    #[test]
+    fn weighted_combine_favors_high_weight() {
+        let mut vals = vec![(10.0f32, 1.0f32), (20.0f32, 3.0f32)];
+        let (m, _) = sigma_clip_combine_weighted(&mut vals, 3.0, 3.0, 5);
+        assert!((m - 17.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn weighted_combine_rejects_outlier() {
+        let mut vals = vec![
+            (100.0f32, 1.0f32),
+            (100.2f32, 1.0f32),
+            (99.8f32, 1.0f32),
+            (100.1f32, 1.0f32),
+            (5000.0f32, 1.0f32),
+        ];
+        let (m, rej) = sigma_clip_combine_weighted(&mut vals, 2.0, 2.0, 5);
+        assert!((m - 100.0).abs() < 1.0);
+        assert!(rej >= 1);
+    }
+
+    #[test]
+    fn weighted_stack_pulls_toward_high_weight_frame() {
+        let dark = Array2::from_elem((2, 2), 10.0f32);
+        let bright = Array2::from_elem((2, 2), 20.0f32);
+        let config = StackConfig {
+            align: false,
+            weights: Some(vec![1.0, 3.0]),
+            ..Default::default()
+        };
+        let result = stack_images(&[dark, bright], &config).unwrap();
+        assert!((result.image[[0, 0]] - 17.5).abs() < 1e-3);
     }
 }

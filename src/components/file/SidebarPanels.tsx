@@ -6,7 +6,6 @@ import WcsReadout from "../header/WcsReadout";
 
 const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
-const ExportTab = lazy(() => import("../export/ExportTab"));
 
 const EMPTY_SPECTRUM: number[] = [];
 
@@ -83,7 +82,7 @@ function AnalysisWrapper() {
   );
 }
 
-export type LeftTabId = "files" | "info" | "analysis" | "headers" | "export";
+export type LeftTabId = "files" | "info" | "analysis" | "headers";
 
 interface SidebarPanelsProps {
   activeTab: LeftTabId;
@@ -96,7 +95,6 @@ export default function SidebarPanels({ activeTab }: SidebarPanelsProps) {
         {activeTab === "info" && <InfoPanel />}
         {activeTab === "analysis" && <AnalysisWrapper />}
         {activeTab === "headers" && <HeadersTab />}
-        {activeTab === "export" && <ExportTab />}
       </Suspense>
     </div>
   );

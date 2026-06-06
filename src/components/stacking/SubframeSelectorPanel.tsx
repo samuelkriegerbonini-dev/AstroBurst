@@ -115,7 +115,7 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
                 format={(v) => v.toFixed(1)} onChange={setMaxFwhm} />
         <Slider label="Max Eccentricity" value={maxEcc} min={0.1} max={1.0} step={0.05} accent="teal"
                 format={(v) => v.toFixed(2)} onChange={setMaxEcc} />
-        <Slider label="Min SNR" value={minSnr} min={1} max={50} step={1} accent="teal"
+        <Slider label="Min Star SNR" value={minSnr} min={0} max={200} step={1} accent="teal"
                 format={(v) => v.toFixed(0)} onChange={setMinSnr} />
         <Slider label="Min Stars" value={minStars} min={1} max={50} step={1} accent="teal"
                 format={(v) => `${v}`} onChange={(v) => setMinStars(Math.round(v))} />

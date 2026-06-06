@@ -108,8 +108,11 @@ mod tests {
 
     fn make_pattern(rows: usize, cols: usize) -> Array2<f32> {
         Array2::from_shape_fn((rows, cols), |(y, x)| {
+            let h = (y.wrapping_mul(73856093) ^ x.wrapping_mul(19349663)) & 0xffff;
+            let texture = (h as f32 / 65535.0 - 0.5) * 400.0;
             ((y as f32 * 0.3).sin() * (x as f32 * 0.2).cos() * 1000.0) + 500.0
                 + ((y * 7 + x * 13) as f32 * 0.01).sin() * 200.0
+                + texture
         })
     }
 

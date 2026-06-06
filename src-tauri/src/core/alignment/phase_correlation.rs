@@ -103,6 +103,22 @@ fn extract_crop(
     img.slice(ndarray::s![y0..y1, x0..x1]).to_owned()
 }
 
+fn remove_mean(img: &Array2<f32>) -> Array2<f32> {
+    let mut sum = 0.0f64;
+    let mut cnt = 0u64;
+    for &v in img.iter() {
+        if v.is_finite() {
+            sum += v as f64;
+            cnt += 1;
+        }
+    }
+    if cnt == 0 {
+        return img.clone();
+    }
+    let mean = (sum / cnt as f64) as f32;
+    img.mapv(|v| if v.is_finite() { v - mean } else { 0.0 })
+}
+
 fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult {
     let (rows, cols) = a.dim();
     let fft_rows = fft::next_power_of_two(rows);
@@ -113,13 +129,16 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
     let hann_y = window::hann_periodic::<f64>(rows);
     let hann_x = window::hann_periodic::<f64>(cols);
 
-    let mut fa = fft::prepare_windowed_buffer(a, &hann_y, &hann_x, fft_rows, fft_cols);
-    let mut fb = fft::prepare_windowed_buffer(b, &hann_y, &hann_x, fft_rows, fft_cols);
+    let a = remove_mean(a);
+    let b = remove_mean(b);
+
+    let mut fa = fft::prepare_windowed_buffer(&a, &hann_y, &hann_x, fft_rows, fft_cols);
+    let mut fb = fft::prepare_windowed_buffer(&b, &hann_y, &hann_x, fft_rows, fft_cols);
 
     engine.forward_2d(&mut fa);
     engine.forward_2d(&mut fb);
 
-    let mut cross = complex::cross_power_spectrum(&fa, &fb, EPSILON);
+    let mut cross = complex::cross_power_spectrum(&fb, &fa, EPSILON);
 
     engine.inverse_2d(&mut cross);
 
@@ -170,8 +189,11 @@ mod tests {
 
     fn make_pattern(rows: usize, cols: usize) -> Array2<f32> {
         Array2::from_shape_fn((rows, cols), |(y, x)| {
+            let h = (y.wrapping_mul(73856093) ^ x.wrapping_mul(19349663)) & 0xffff;
+            let texture = (h as f32 / 65535.0 - 0.5) * 400.0;
             ((y as f32 * 0.3).sin() * (x as f32 * 0.2).cos() * 1000.0) + 500.0
                 + ((y * 7 + x * 13) as f32 * 0.01).sin() * 200.0
+                + texture
         })
     }
 

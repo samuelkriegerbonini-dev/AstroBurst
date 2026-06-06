@@ -17,7 +17,6 @@ const CropStep = lazy(() => import("./steps/CropStep"));
 const BackgroundStep = lazy(() => import("./steps/BackgroundStep"));
 const BlendStep = lazy(() => import("./steps/BlendStep"));
 const ColorBalanceStep = lazy(() => import("./steps/ColorBalanceStep"));
-const MaskStep = lazy(() => import("./steps/MaskStep"));
 const StretchStep = lazy(() => import("./steps/StretchStep"));
 const AdjustStep = lazy(() => import("./steps/AdjustStep"));
 const ExportStep = lazy(() => import("./steps/ExportStep"));
@@ -121,7 +120,9 @@ export default function ComposeWizard() {
           setFilterDetections(result.filters);
         }
       })
-      .catch(() => {});
+      .catch((e) => {
+        console.error("[AstroBurst] Narrowband filter detection failed:", e);
+      });
   }, [doneFiles]);
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
@@ -262,21 +263,13 @@ export default function ComposeWizard() {
             }}
           />
         );
-      case "mask":
-        return (
-          <MaskStep
-            state={state}
-            onMask={(path) => dispatch({ type: "SET_MASK", path })}
-            onMaskParams={(growth, protection) => {
-              dispatch({ type: "SET_MASK_PARAMS", growth, protection });
-            }}
-          />
-        );
       case "stretch":
         return (
           <StretchStep
             state={state}
             onStretchChange={(mode, factor, target) => dispatch({ type: "SET_STRETCH", mode, factor, target })}
+            onMask={(path) => dispatch({ type: "SET_MASK", path })}
+            onMaskParams={(growth, protection) => dispatch({ type: "SET_MASK_PARAMS", growth, protection })}
             onResult={(url, stf) => {
               handleRestretchPreview(url, stf);
               completeStep("stretch");

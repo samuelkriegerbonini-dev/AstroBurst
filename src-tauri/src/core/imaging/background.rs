@@ -370,7 +370,7 @@ fn apply_correction(
                 img - bg + model_median
             }
             BackgroundMode::Divide => {
-                if bg.abs() > 1e-10 {
+                if bg > 1e-10 {
                     (img / bg) * model_median
                 } else {
                     img
@@ -523,12 +523,12 @@ mod tests {
         let result = extract_background(&image, &config, None).unwrap();
         assert!(result.sample_count > 0);
 
-        for y in 10..rows - 10 {
+       for y in 10..rows - 10 {
             for x in 10..cols - 10 {
                 assert!(
-                    result.corrected[[y, x]].abs() < 1.0,
-                    "Corrected pixel at ({},{}) = {} should be near 0",
-                    y, x, result.corrected[[y, x]]
+                    (result.corrected[[y, x]] - bg_level).abs() < 1.0,
+                    "Corrected pixel at ({},{}) = {} should stay near {}",
+                    y, x, result.corrected[[y, x]], bg_level
                 );
             }
         }
@@ -579,8 +579,9 @@ mod tests {
         let mut a = vec![2.0, 1.0, 5.0, 7.0];
         let mut b = vec![11.0, 13.0];
         solve_linear_system(&mut a, &mut b, 2).unwrap();
-        assert!((b[0] - 7.444).abs() < 0.01);
-        assert!((b[1] + 3.888).abs() < 0.01);
+        // Solution of [[2,1],[5,7]] x = [11,13] is x = [64/9, -29/9].
+        assert!((b[0] - 7.1111).abs() < 0.01);
+        assert!((b[1] + 3.2222).abs() < 0.01);
     }
 
     #[test]
@@ -589,5 +590,14 @@ mod tests {
         assert!((median_f32_mut(&mut v1) - 3.0).abs() < 1e-6);
         let mut v2 = vec![1.0, 2.0, 3.0, 4.0];
         assert!((median_f32_mut(&mut v2) - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn divide_mode_skips_nonpositive_background() {
+        let image = Array2::from_shape_vec((1, 2), vec![100.0, 100.0]).unwrap();
+        let model = Array2::from_shape_vec((1, 2), vec![50.0, -50.0]).unwrap();
+        let corrected = apply_correction(&image, &model, &BackgroundMode::Divide);
+        assert!(corrected[[0, 0]] > 0.0);
+        assert_eq!(corrected[[0, 1]], 100.0);
     }
 }

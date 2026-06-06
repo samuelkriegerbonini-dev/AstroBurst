@@ -285,13 +285,6 @@ export const STEPS: StepDef[] = [
     enabled: (s) => s.compositeReady || filledCount(s) >= 2,
   },
   {
-    id: "mask",
-    label: "Star Mask",
-    shortLabel: "Mask",
-    color: "rose",
-    enabled: (s) => totalFilesCount(s) > 0,
-  },
-  {
     id: "stretch",
     label: "Stretch",
     shortLabel: "Stretch",
@@ -406,5 +399,16 @@ export function resolveRgbPaths(state: WizardState): { r: string | null; g: stri
   let b = findBest(bCandidates);
   if (!b) b = findBest(bCandidates, true);
 
-  return { r, g, b };
+  const fillFromUnused = (): string | null => {
+    const bin = activeBins.find((bn) => !usedIds.has(bn.id));
+    if (!bin) return null;
+    usedIds.add(bin.id);
+    return resolveChannelPath(state, bin.id);
+  };
+
+  return {
+    r: r ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+    g: g ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+    b: b ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+  };
 }

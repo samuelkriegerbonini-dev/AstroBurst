@@ -96,8 +96,8 @@ pub fn spcc_calibrate_rgb(
                 && s.peak < sat_limit as f64
                 && s.x >= 10.0
                 && s.y >= 10.0
-                && s.x < (w - 10) as f64
-                && s.y < (h - 10) as f64
+                && s.x < w.saturating_sub(10) as f64
+                && s.y < h.saturating_sub(10) as f64
         })
         .collect();
 

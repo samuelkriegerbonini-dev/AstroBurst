@@ -96,22 +96,10 @@ pub fn run() {
                     let _ = std::fs::create_dir_all(&data_dir);
                 }
                 let output_dir = data_dir.join("output");
-                if !output_dir.exists() {
-                    let _ = std::fs::create_dir_all(&output_dir);
-                }
+                let _ = std::fs::remove_dir_all(&output_dir);
+                let _ = std::fs::create_dir_all(&output_dir);
             }
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Ok(data_dir) = window.app_handle().path().app_data_dir() {
-                    let output_dir = data_dir.join("output");
-                    if output_dir.exists() {
-                        let _ = std::fs::remove_dir_all(&output_dir);
-                        let _ = std::fs::create_dir_all(&output_dir);
-                    }
-                }
-            }
         })
         .invoke_handler(tauri::generate_handler![
             cmd::io::process_fits,
@@ -137,6 +125,7 @@ pub fn run() {
             cmd::visualization::generate_tiles_rgb,
             cmd::stacking::calibrate,
             cmd::stacking::stack,
+            cmd::stacking::drizzle_stack,
             cmd::stacking::run_pipeline_cmd,
             cmd::compose::restretch_composite_cmd,
             cmd::compose::clear_composite_cache_cmd,

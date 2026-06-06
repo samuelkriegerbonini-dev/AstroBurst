@@ -121,6 +121,22 @@ pub struct LazyCube {
     cache: Mutex<LruFrameCache>,
 }
 
+fn checked_cube_bytes(
+    naxis1: usize,
+    naxis2: usize,
+    naxis3: usize,
+    bytes_per_pixel: usize,
+) -> Result<(usize, usize)> {
+    let frame_bytes = naxis1
+        .checked_mul(naxis2)
+        .and_then(|v| v.checked_mul(bytes_per_pixel))
+        .context("Cube frame size overflow")?;
+    let total_bytes = frame_bytes
+        .checked_mul(naxis3)
+        .context("Cube data size overflow")?;
+    Ok((frame_bytes, total_bytes))
+}
+
 impl LazyCube {
     pub fn open(path: &str) -> Result<Self> {
         Self::open_with_cache(path, DEFAULT_CACHE_SIZE)
@@ -142,18 +158,28 @@ impl LazyCube {
             let naxis3 = header.get_i64("NAXIS3").unwrap_or(0);
 
             if naxis == 3 && naxis3 > 1 {
-                let naxis1 = header.get_i64("NAXIS1").unwrap_or(0) as usize;
-                let naxis2 = header.get_i64("NAXIS2").unwrap_or(0) as usize;
+                let naxis1_i = header.get_i64("NAXIS1").unwrap_or(0);
+                let naxis2_i = header.get_i64("NAXIS2").unwrap_or(0);
+                if naxis1_i <= 0 || naxis2_i <= 0 {
+                    bail!("Invalid cube dimensions NAXIS1={}, NAXIS2={}", naxis1_i, naxis2_i);
+                }
+                let naxis1 = naxis1_i as usize;
+                let naxis2 = naxis2_i as usize;
                 let naxis3 = naxis3 as usize;
 
                 let bitpix = header.get_i64("BITPIX")
                     .context("Missing BITPIX")?;
                 let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-                let frame_bytes = naxis1 * naxis2 * bytes_per_pixel;
+                if bytes_per_pixel == 0 {
+                    bail!("Unsupported BITPIX={}", bitpix);
+                }
+                let (frame_bytes, total_bytes) =
+                    checked_cube_bytes(naxis1, naxis2, naxis3, bytes_per_pixel)?;
                 let data_offset = header.data_offset(parsed.header_start);
 
-                let total_bytes = frame_bytes * naxis3;
-                let data_end = data_offset + total_bytes;
+                let data_end = data_offset
+                    .checked_add(total_bytes)
+                    .context("Cube data end overflow")?;
                 if data_end > mmap.len() {
                     bail!(
                         "Cube data [{}, {}) exceeds file size {}",
@@ -464,5 +490,13 @@ mod tests {
         for &v in normalized.iter() {
             assert!(v.is_finite());
         }
+    }
+
+    #[test]
+    fn cube_bytes_overflow_is_rejected() {
+        assert_eq!(checked_cube_bytes(2, 2, 2, 4).unwrap(), (16, 32));
+        assert!(checked_cube_bytes(usize::MAX, 2, 1, 1).is_err());
+        assert!(checked_cube_bytes(1 << 40, 1 << 40, 1, 1).is_err());
+        assert!(checked_cube_bytes(4, 4, usize::MAX, 1).is_err());
     }
 }

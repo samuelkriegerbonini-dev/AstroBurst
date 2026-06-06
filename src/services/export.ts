@@ -14,6 +14,7 @@ export interface ExportFitsRgbOptions {
   copyWcs?: boolean;
   copyMetadata?: boolean;
   bitpix?: number;
+  history?: string[];
 }
 
 export interface ExportAlignedOptions {
@@ -146,5 +147,6 @@ export function exportFitsRgb(
     copyWcs: options.copyWcs ?? true,
     copyMetadata: options.copyMetadata ?? true,
     bitpix: options.bitpix ?? -32,
+    history: options.history,
   });
 }

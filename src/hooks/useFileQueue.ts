@@ -91,7 +91,7 @@ export function useFileQueue() {
           try {
             const result = await processFits(file.path);
             let header = null;
-            try { header = await getHeader(file.path); } catch {}
+            try { header = await getHeader(file.path); } catch (e) { console.warn(`[AstroBurst] Header fetch failed for ${file.path}:`, e); }
             fileStore.fileDone(file.id, { ...result, header });
             return;
           } catch {}
@@ -119,7 +119,9 @@ export function useFileQueue() {
       try {
         const result = await resampleFits(file.path, targetGroup.width, targetGroup.height);
         fileStore.fileResampled(file.id, result);
-      } catch {}
+      } catch (e) {
+        console.error(`[AstroBurst] Auto-resample failed for ${file.path}; stacking/blend may fail later:`, e);
+      }
       completed++;
       setResampleProgress(Math.round((completed / filesToResample.length) * 100));
       await yieldToUI();

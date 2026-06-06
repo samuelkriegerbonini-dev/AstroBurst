@@ -10,6 +10,8 @@ import { useCompositeContext } from "../../../context/CompositeContext";
 interface StretchStepProps {
   state: WizardState;
   onStretchChange: (mode: WizardState["stretchMode"], factor?: number, target?: number) => void;
+  onMaskParams: (growth: number, protection: number) => void;
+  onMask: (path: string | null) => void;
   onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
 }
 
@@ -32,12 +34,13 @@ function resolveAnyChannelPath(state: WizardState): string | null {
   return null;
 }
 
-export default function StretchStep({ state, onStretchChange, onResult }: StretchStepProps) {
+export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult }: StretchStepProps) {
   const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeContext();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
   const [linked, setLinked] = useState(state.linkedStf);
+  const [sharedMask, setSharedMask] = useState(true);
   const [stfR, setStfR] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfG, setStfG] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfB, setStfB] = useState<ChannelStf>({ ...DEFAULT_STF });
@@ -104,6 +107,7 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
             targetBackground: state.targetBackground,
             maskGrowth: state.maskGrowth,
             protectionAmount: state.maskProtection,
+            sharedMask,
           });
         } else {
           const path = resolveAnyChannelPath(state);
@@ -201,8 +205,22 @@ export default function StretchStep({ state, onStretchChange, onResult }: Stretc
         <div className="flex flex-col gap-2">
           <Slider label="Target Background" value={state.targetBackground} min={0.05} max={0.5} step={0.01} accent="amber"
                   format={(v) => v.toFixed(2)} onChange={handleTargetChange} />
+          <Slider label="Mask Growth" value={state.maskGrowth} min={0.5} max={10.0} step={0.1} accent="rose"
+                  format={(v) => `${v.toFixed(1)}x FWHM`} onChange={(v) => onMaskParams(v, state.maskProtection)} />
+          <Slider label="Star Protection" value={state.maskProtection} min={0.0} max={1.0} step={0.01} accent="rose"
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={(v) => onMaskParams(state.maskGrowth, v)} />
+          {state.compositeReady && (
+            <Toggle label="Shared star mask" checked={sharedMask} accent="rose" onChange={setSharedMask} />
+          )}
+          {state.starMaskPath && (
+            <div className="flex items-center gap-2 p-2 rounded-lg bg-rose-600/10 border border-rose-500/20">
+              <span className="w-2 h-2 rounded-full bg-rose-400" />
+              <span className="text-[10px] text-rose-300 flex-1 truncate">{state.starMaskPath.split(/[/\\]/).pop()}</span>
+              <button onClick={() => onMask(null)} className="text-[9px] text-zinc-500 hover:text-red-400">Clear</button>
+            </div>
+          )}
           <div className="text-[9px] text-zinc-600">
-            Uses star mask (growth={state.maskGrowth.toFixed(1)}, protection={((state.maskProtection) * 100).toFixed(0)}%)
+            Star mask protects bright stars during the stretch. You can also import a .segm FITS mask from external software.
           </div>
         </div>
       )}

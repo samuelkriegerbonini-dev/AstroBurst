@@ -78,6 +78,7 @@ pub async fn export_fits_rgb(
     copy_wcs: Option<bool>,
     copy_metadata: Option<bool>,
     bitpix: Option<i32>,
+    history: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -135,9 +136,17 @@ pub async fn export_fits_rgb(
             (r_final, g_final, b_final, Some(r_resolved.header))
         };
 
-        let filtered = header_source
+        let mut filtered = header_source
             .as_ref()
             .and_then(|h| filter_header(h, do_wcs, do_meta));
+
+        if let Some(steps) = &history {
+            let h = filtered.get_or_insert_with(crate::types::header::HduHeader::empty);
+            for step in steps {
+                let line: String = step.chars().take(70).collect();
+                h.cards.push(("HISTORY".to_string(), line));
+            }
+        }
 
         write_fits_rgb_bitpix(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix)?;
 
@@ -257,6 +266,13 @@ pub async fn export_png(
     })
 }
 
+fn explicit_stf_requested(do_stf: bool, mr: Option<f64>, mg: Option<f64>, mb: Option<f64>) -> bool {
+    do_stf
+        && [mr, mg, mb]
+            .iter()
+            .any(|m| m.map_or(false, |v| (v - 0.5).abs() > 1e-4))
+}
+
 #[tauri::command]
 pub async fn export_rgb_png(
     r_path: Option<String>,
@@ -285,10 +301,7 @@ pub async fn export_rgb_png(
         let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
 
         if let (Some(cr), Some(cg), Some(cb)) = (&cache_r, &cache_g, &cache_b) {
-            let has_explicit_stf = do_stf
-                && shadow_r.is_some()
-                && midtone_r.is_some()
-                && (midtone_r.unwrap() - 0.5).abs() > 1e-4;
+            let has_explicit_stf = explicit_stf_requested(do_stf, midtone_r, midtone_g, midtone_b);
 
             let (stf_r, stf_g, stf_b) = if has_explicit_stf {
                 (
@@ -408,4 +421,19 @@ pub async fn export_rgb_png(
 
         stretch_and_render(ra, ga, ba)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::explicit_stf_requested;
+
+    #[test]
+    fn explicit_stf_honored_when_any_channel_deviates() {
+        assert!(explicit_stf_requested(true, Some(0.5), Some(0.3), Some(0.5)));
+        assert!(explicit_stf_requested(true, Some(0.2), Some(0.5), Some(0.5)));
+        assert!(explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.7)));
+        assert!(!explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.5)));
+        assert!(!explicit_stf_requested(false, Some(0.2), Some(0.3), Some(0.7)));
+        assert!(!explicit_stf_requested(true, None, None, None));
+    }
 }

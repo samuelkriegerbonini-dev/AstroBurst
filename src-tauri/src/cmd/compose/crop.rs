@@ -70,6 +70,25 @@ fn crop_array(arr: &Array2<f32>, top: usize, bottom: usize, left: usize, right: 
     arr.slice(ndarray::s![t..b, l..r]).to_owned()
 }
 
+fn manual_crop_bounds(
+    rows: usize,
+    cols: usize,
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let crop_top = top;
+    let crop_bottom = rows.saturating_sub(bottom);
+    let crop_left = left;
+    let crop_right = cols.saturating_sub(right);
+    if crop_bottom <= crop_top || crop_right <= crop_left {
+        None
+    } else {
+        Some((crop_top, crop_bottom, crop_left, crop_right))
+    }
+}
+
 #[tauri::command]
 pub async fn crop_channels_cmd(
     paths: Vec<String>,
@@ -122,7 +141,10 @@ pub async fn crop_channels_cmd(
             (max_top, min_bottom, max_left, min_right)
         } else {
             let (rows, cols) = entries[0].arr().dim();
-            (top, rows.saturating_sub(bottom), left, cols.saturating_sub(right))
+            match manual_crop_bounds(rows, cols, top, bottom, left, right) {
+                Some(bounds) => bounds,
+                None => anyhow::bail!("Crop region is empty (margins exceed image size)"),
+            }
         };
 
         let use_bin_ids = bin_ids.as_ref().map(|ids| ids.len() == paths.len()).unwrap_or(false);
@@ -194,4 +216,17 @@ pub async fn crop_channels_cmd(
             "elapsed_ms": elapsed,
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manual_crop_bounds;
+
+    #[test]
+    fn manual_crop_rejects_excessive_margins() {
+        assert_eq!(manual_crop_bounds(100, 100, 10, 10, 10, 10), Some((10, 90, 10, 90)));
+        assert_eq!(manual_crop_bounds(100, 100, 60, 60, 0, 0), None);
+        assert_eq!(manual_crop_bounds(100, 100, 0, 0, 70, 70), None);
+        assert_eq!(manual_crop_bounds(100, 100, 50, 50, 0, 0), None);
+    }
 }

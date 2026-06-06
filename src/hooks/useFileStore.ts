@@ -301,7 +301,6 @@ class FileStore {
     this._doneFilesCacheVersion = -1;
     this._allFilesCache = [];
     this._allFilesCacheVersion = -1;
-    this.fileListeners.clear();
     this.pendingFileIds.clear();
     this.pendingChannels = 0;
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);

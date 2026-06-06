@@ -13,6 +13,7 @@ use crate::types::constants::MAD_TO_SIGMA;
 
 struct DrizzleAccumulator {
     storage: Vec<f32>,
+    sample_weights: Vec<f32>,
     counts: Vec<u16>,
     weights: Vec<f64>,
     max_per_pixel: usize,
@@ -26,6 +27,7 @@ impl DrizzleAccumulator {
         let max_per_pixel = (n_frames * 2).max(4);
         Self {
             storage: vec![0.0f32; n * max_per_pixel],
+            sample_weights: vec![0.0f32; n * max_per_pixel],
             counts: vec![0u16; n],
             weights: vec![0.0; n],
             max_per_pixel,
@@ -38,7 +40,9 @@ impl DrizzleAccumulator {
     fn push(&mut self, idx: usize, val: f32, w: f64) {
         let count = self.counts[idx] as usize;
         if count < self.max_per_pixel {
-            self.storage[idx * self.max_per_pixel + count] = val;
+            let slot = idx * self.max_per_pixel + count;
+            self.storage[slot] = val;
+            self.sample_weights[slot] = w as f32;
             self.counts[idx] += 1;
             self.weights[idx] += w;
         }
@@ -134,12 +138,15 @@ impl DrizzleAccumulator {
                 if count == 0 {
                     return (0.0, 0.0, 0);
                 }
+                let base = i * mpp;
                 if count == 1 {
-                    return (self.storage[i * mpp], self.weights[i] as f32, 0);
+                    return (self.storage[base], self.weights[i] as f32, 0);
                 }
 
-                let base = i * mpp;
-                let mut active: Vec<f32> = self.storage[base..base + count].to_vec();
+                // (value, kernel weight) pairs contributing to this output pixel.
+                let mut active: Vec<(f32, f32)> = (0..count)
+                    .map(|k| (self.storage[base + k], self.sample_weights[base + k]))
+                    .collect();
                 let mut rejected = 0u64;
 
                 for _ in 0..sigma_iterations {
@@ -147,13 +154,14 @@ impl DrizzleAccumulator {
                         break;
                     }
 
-                    let median = median_f32_mut(&mut active);
-                    let mut devs: Vec<f32> = active.iter().map(|v| (v - median).abs()).collect();
+                    let mut vals: Vec<f32> = active.iter().map(|(v, _)| *v).collect();
+                    let median = median_f32_mut(&mut vals);
+                    let mut devs: Vec<f32> = vals.iter().map(|v| (v - median).abs()).collect();
                     let mad = median_f32_mut(&mut devs);
                     let sigma = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
 
                     let before = active.len();
-                    active.retain(|&v| {
+                    active.retain(|&(v, _)| {
                         let dev = v - median;
                         dev >= -sigma_low * sigma && dev <= sigma_high * sigma
                     });
@@ -164,16 +172,26 @@ impl DrizzleAccumulator {
                     }
                 }
 
+                // Flux-conserving weighted mean: sum(w*v) / sum(w). The drizzle
+                // kernel weight now actually affects the reconstructed value
+                // (previously it was computed but discarded, so the kernel and
+                // pixfrac had no effect on output pixels).
+                let (mut vsum, mut wsum) = (0.0f64, 0.0f64);
                 if active.is_empty() {
-                    let sum: f64 = self.storage[base..base + count]
-                        .iter()
-                        .map(|v| *v as f64)
-                        .sum();
-                    return ((sum / count as f64) as f32, self.weights[i] as f32, rejected);
+                    for k in 0..count {
+                        let w = self.sample_weights[base + k] as f64;
+                        vsum += self.storage[base + k] as f64 * w;
+                        wsum += w;
+                    }
+                } else {
+                    for &(v, w) in &active {
+                        vsum += v as f64 * w as f64;
+                        wsum += w as f64;
+                    }
                 }
 
-                let mean = active.iter().map(|v| *v as f64).sum::<f64>() / active.len() as f64;
-                (mean as f32, self.weights[i] as f32, rejected)
+                let mean = if wsum > 1e-12 { (vsum / wsum) as f32 } else { 0.0 };
+                (mean, self.weights[i] as f32, rejected)
             })
             .collect();
 

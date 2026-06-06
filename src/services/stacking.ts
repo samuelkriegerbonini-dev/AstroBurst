@@ -18,6 +18,15 @@ export function stackFrames(
   return withPreview<StackResult>("stack", outputDir, { paths, name, ...rest });
 }
 
+export function drizzleFrames(
+  paths: string[],
+  outputDir?: string,
+  options: { scale?: number; pixfrac?: number; kernel?: string; align?: boolean; name?: string } = {},
+): Promise<StackResult> {
+  const { name, ...rest } = options;
+  return withPreview<StackResult>("drizzle_stack", outputDir, { paths, name, ...rest });
+}
+
 export function runCalibrationPipeline(request: PipelineRequest): Promise<PipelineResult> {
   return typedInvoke<PipelineResult>("run_pipeline_cmd", { request });
 }

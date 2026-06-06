@@ -158,7 +158,7 @@ pub async fn masked_stretch_composite_cmd(
         };
 
         let t0 = std::time::Instant::now();
-        let use_shared = shared_mask.unwrap_or(false);
+        let use_shared = shared_mask.unwrap_or(true);
 
         let (r_img, g_img, b_img, per_channel, stars, coverage, mask_mode) = if use_shared {
             let result = masked_stretch_rgb_shared(er.arr(), eg.arr(), eb.arr(), &config)

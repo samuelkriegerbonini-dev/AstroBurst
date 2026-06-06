@@ -315,13 +315,28 @@ fn extract_image_from_hdu(
     hdu: &ScannedHdu,
 ) -> Result<Array2<f32>> {
     let h = &hdu.header;
-    let naxis1 = h.get_i64("NAXIS1").unwrap_or(0) as usize;
-    let naxis2 = h.get_i64("NAXIS2").unwrap_or(0) as usize;
+    let naxis1_i = h.get_i64("NAXIS1").unwrap_or(0);
+    let naxis2_i = h.get_i64("NAXIS2").unwrap_or(0);
+    if naxis1_i <= 0 || naxis2_i <= 0 {
+        bail!("Invalid image dimensions NAXIS1={}, NAXIS2={}", naxis1_i, naxis2_i);
+    }
+    let naxis1 = naxis1_i as usize;
+    let naxis2 = naxis2_i as usize;
     let bitpix = h.get_i64("BITPIX").context("Missing BITPIX")?;
     let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-    let slice_bytes = naxis1 * naxis2 * bytes_per_pixel;
+    if bytes_per_pixel == 0 {
+        bail!("Unsupported BITPIX={}", bitpix);
+    }
+    let slice_bytes = naxis1
+        .checked_mul(naxis2)
+        .and_then(|v| v.checked_mul(bytes_per_pixel))
+        .context("Image size overflow")?;
 
-    let data_end = hdu.info.data_start + slice_bytes;
+    let data_end = hdu
+        .info
+        .data_start
+        .checked_add(slice_bytes)
+        .context("Image data end overflow")?;
     if data_end > mmap.len() {
         bail!("Image data exceeds file size");
     }

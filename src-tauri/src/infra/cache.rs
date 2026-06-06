@@ -71,7 +71,7 @@ impl LruInner {
 
     fn entry_bytes(entry: &Arc<CachedImage>) -> usize {
         let (rows, cols) = entry.arr.dim();
-        rows * cols * std::mem::size_of::<f32>()
+        rows.saturating_mul(cols).saturating_mul(std::mem::size_of::<f32>())
     }
 
     fn next_gen(&self) -> u64 {
@@ -103,7 +103,7 @@ impl LruInner {
             .map(|(k, _)| k.clone());
         if let Some(key) = victim {
             if let Some(removed) = self.map.remove(&key) {
-                self.current_bytes -= removed.byte_size;
+                self.current_bytes = self.current_bytes.saturating_sub(removed.byte_size);
                 return true;
             }
         }
@@ -114,7 +114,7 @@ impl LruInner {
         let new_bytes = Self::entry_bytes(&value);
 
         if let Some(old) = self.map.remove(&key) {
-            self.current_bytes -= old.byte_size;
+            self.current_bytes = self.current_bytes.saturating_sub(old.byte_size);
         }
 
         while (self.current_bytes + new_bytes > self.max_bytes
@@ -132,7 +132,7 @@ impl LruInner {
         }
 
         let gen = self.next_gen();
-        self.current_bytes += new_bytes;
+        self.current_bytes = self.current_bytes.saturating_add(new_bytes);
         self.map.insert(
             key,
             LruEntry {
