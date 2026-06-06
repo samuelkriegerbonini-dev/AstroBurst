@@ -4,13 +4,22 @@ use image::{ColorType, ImageEncoder};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::resample::resample_image;
+
 pub fn render_rgb(
     r: &Array2<f32>,
     g: &Array2<f32>,
     b: &Array2<f32>,
     path: &str,
 ) -> Result<()> {
-    let (rows, cols) = r.dim();
+    let rows = r.dim().0.max(g.dim().0).max(b.dim().0);
+    let cols = r.dim().1.max(g.dim().1).max(b.dim().1);
+    let rf = if r.dim() == (rows, cols) { None } else { Some(resample_image(r, rows, cols)?) };
+    let gf = if g.dim() == (rows, cols) { None } else { Some(resample_image(g, rows, cols)?) };
+    let bf = if b.dim() == (rows, cols) { None } else { Some(resample_image(b, rows, cols)?) };
+    let r = rf.as_ref().unwrap_or(r);
+    let g = gf.as_ref().unwrap_or(g);
+    let b = bf.as_ref().unwrap_or(b);
     let r_slice = r.as_slice().context("R channel not contiguous")?;
     let g_slice = g.as_slice().context("G channel not contiguous")?;
     let b_slice = b.as_slice().context("B channel not contiguous")?;
@@ -52,7 +61,14 @@ pub fn render_rgb_16bit(
     b: &Array2<f32>,
     path: &str,
 ) -> Result<()> {
-    let (rows, cols) = r.dim();
+    let rows = r.dim().0.max(g.dim().0).max(b.dim().0);
+    let cols = r.dim().1.max(g.dim().1).max(b.dim().1);
+    let rf = if r.dim() == (rows, cols) { None } else { Some(resample_image(r, rows, cols)?) };
+    let gf = if g.dim() == (rows, cols) { None } else { Some(resample_image(g, rows, cols)?) };
+    let bf = if b.dim() == (rows, cols) { None } else { Some(resample_image(b, rows, cols)?) };
+    let r = rf.as_ref().unwrap_or(r);
+    let g = gf.as_ref().unwrap_or(g);
+    let b = bf.as_ref().unwrap_or(b);
     let r_slice = r.as_slice().context("R channel not contiguous")?;
     let g_slice = g.as_slice().context("G channel not contiguous")?;
     let b_slice = b.as_slice().context("B channel not contiguous")?;

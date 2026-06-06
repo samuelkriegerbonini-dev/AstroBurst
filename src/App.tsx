@@ -26,7 +26,6 @@ import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
-// @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
@@ -125,9 +124,14 @@ export default function App() {
 
   useEffect(() => {
     if (view === "processing" && stats.total > 0 && !isProcessing && !isComplete) {
-      startProcessing(() => timer.start(), () => timer.stop());
+      startProcessing();
     }
-  }, [view, stats.total, isProcessing, isComplete, startProcessing, timer]);
+  }, [view, stats.total, isProcessing, isComplete, startProcessing]);
+
+  useEffect(() => {
+    if (isProcessing) timer.start();
+    else timer.stop();
+  }, [isProcessing, timer.start, timer.stop]);
 
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {

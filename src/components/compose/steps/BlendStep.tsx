@@ -77,9 +77,17 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   }, [filledBins, onWeightsChange]);
 
   const handleWeightChange = useCallback((channelId: string, axis: "r" | "g" | "b", value: number) => {
-    const next = state.blendWeights.map((w) =>
-      w.channelId === channelId ? { ...w, [axis]: value } : w
-    );
+    const exists = state.blendWeights.some((w) => w.channelId === channelId);
+    let next: BlendWeight[];
+    if (exists) {
+      next = state.blendWeights.map((w) =>
+        w.channelId === channelId ? { ...w, [axis]: value } : w
+      );
+    } else {
+      const created: BlendWeight = { channelId, r: 0, g: 0, b: 0 };
+      created[axis] = value;
+      next = [...state.blendWeights, created];
+    }
     onWeightsChange(next, "custom");
   }, [state.blendWeights, onWeightsChange]);
 

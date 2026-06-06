@@ -351,19 +351,17 @@ pub async fn export_rgb_png(
             }));
         }
 
-        let r_entry = load_cached(
-            r_path.as_deref().ok_or_else(|| anyhow::anyhow!("R channel path required"))?
-        )?;
-        let g_entry = load_cached(
-            g_path.as_deref().ok_or_else(|| anyhow::anyhow!("G channel path required"))?
-        )?;
-        let b_entry = load_cached(
-            b_path.as_deref().ok_or_else(|| anyhow::anyhow!("B channel path required"))?
-        )?;
+        let r_entry = r_path.as_deref().map(load_cached).transpose()?;
+        let g_entry = g_path.as_deref().map(load_cached).transpose()?;
+        let b_entry = b_path.as_deref().map(load_cached).transpose()?;
 
-        let ra = r_entry.arr();
-        let ga = g_entry.arr();
-        let ba = b_entry.arr();
+        let any_entry = r_entry.as_ref().or(g_entry.as_ref()).or(b_entry.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("At least one channel path required"))?;
+        let zeros = ndarray::Array2::<f32>::zeros(any_entry.arr().dim());
+
+        let ra = r_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
+        let ga = g_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
+        let ba = b_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
 
         let has_explicit_stf = shadow_r.is_some() || shadow_g.is_some() || shadow_b.is_some();
 

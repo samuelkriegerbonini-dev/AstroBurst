@@ -1,3 +1,13 @@
+declare module "*.png" {
+  const src: string;
+  export default src;
+}
+
+declare module "*.jpg" {
+  const src: string;
+  export default src;
+}
+
 declare module "lucide-react" {
   import { FC, SVGAttributes } from "react";
   interface IconProps extends SVGAttributes<SVGElement> {
