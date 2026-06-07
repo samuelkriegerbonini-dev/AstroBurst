@@ -12,13 +12,19 @@ pub struct NdArrayMeta {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DType {
-    Float32,
-    Float64,
+    Int8,
     Int16,
     Int32,
-    UInt16,
+    Int64,
     UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64,
+    Bool8,
     Complex64,
+    Complex128,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +63,13 @@ impl NdArrayMeta {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AsdfError::MissingField("datatype".into()))?;
 
-        let (dtype, byteorder) = Self::parse_dtype(dtype_str)?;
+        let (dtype, prefix_order) = Self::parse_dtype(dtype_str)?;
+
+        let byteorder = node
+            .get("byteorder")
+            .and_then(|v| v.as_str())
+            .map(|s| if s == "big" { ByteOrder::Big } else { ByteOrder::Little })
+            .unwrap_or(prefix_order);
 
         Ok(Self {
             source,
@@ -79,13 +91,19 @@ impl NdArrayMeta {
         };
 
         let dtype = match type_str {
-            "f4" | "float32" => DType::Float32,
-            "f8" | "float64" => DType::Float64,
+            "i1" | "int8" => DType::Int8,
             "i2" | "int16" => DType::Int16,
             "i4" | "int32" => DType::Int32,
-            "u2" | "uint16" => DType::UInt16,
+            "i8" | "int64" => DType::Int64,
             "u1" | "uint8" => DType::UInt8,
+            "u2" | "uint16" => DType::UInt16,
+            "u4" | "uint32" => DType::UInt32,
+            "u8" | "uint64" => DType::UInt64,
+            "f4" | "float32" => DType::Float32,
+            "f8" | "float64" => DType::Float64,
+            "b1" | "bool8" | "bool" => DType::Bool8,
             "c8" | "complex64" => DType::Complex64,
+            "c16" | "complex128" => DType::Complex128,
             other => return Err(AsdfError::InvalidDtype(other.into())),
         };
 
@@ -94,10 +112,11 @@ impl NdArrayMeta {
 
     pub fn byte_size_per_element(&self) -> usize {
         match self.dtype {
-            DType::Float64 | DType::Complex64 => 8,
-            DType::Float32 | DType::Int32 => 4,
+            DType::Complex128 => 16,
+            DType::Float64 | DType::Complex64 | DType::Int64 | DType::UInt64 => 8,
+            DType::Float32 | DType::Int32 | DType::UInt32 => 4,
             DType::Int16 | DType::UInt16 => 2,
-            DType::UInt8 => 1,
+            DType::Int8 | DType::UInt8 | DType::Bool8 => 1,
         }
     }
 
@@ -281,5 +300,51 @@ mod tests {
         };
         assert_eq!(meta.byte_size_per_element(), 8);
         assert_eq!(meta.expected_byte_size(), 10 * 20 * 8);
+    }
+
+    #[test]
+    fn test_parse_dtype_full_set() {
+        let cases = [
+            ("int8", DType::Int8, 1),
+            ("int16", DType::Int16, 2),
+            ("int32", DType::Int32, 4),
+            ("int64", DType::Int64, 8),
+            ("uint8", DType::UInt8, 1),
+            ("uint16", DType::UInt16, 2),
+            ("uint32", DType::UInt32, 4),
+            ("uint64", DType::UInt64, 8),
+            ("float32", DType::Float32, 4),
+            ("float64", DType::Float64, 8),
+            ("bool8", DType::Bool8, 1),
+            ("complex64", DType::Complex64, 8),
+            ("complex128", DType::Complex128, 16),
+        ];
+        for (name, expected, size) in cases {
+            let (dtype, _) = NdArrayMeta::parse_dtype(name).unwrap();
+            assert_eq!(dtype, expected, "dtype mismatch for {}", name);
+            let meta = NdArrayMeta {
+                source: 0,
+                shape: vec![1],
+                dtype,
+                byteorder: ByteOrder::Little,
+            };
+            assert_eq!(meta.byte_size_per_element(), size, "size mismatch for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_byteorder_field_overrides_prefix() {
+        let node: Value = serde_yaml::from_str(
+            "source: 0\nshape: [4]\ndatatype: int32\nbyteorder: big\n",
+        )
+        .unwrap();
+        let meta = NdArrayMeta::from_yaml(&node).unwrap();
+        assert_eq!(meta.byteorder, ByteOrder::Big);
+        assert_eq!(meta.dtype, DType::Int32);
+    }
+
+    #[test]
+    fn test_unsupported_dtype_errors() {
+        assert!(NdArrayMeta::parse_dtype("float16").is_err());
     }
 }

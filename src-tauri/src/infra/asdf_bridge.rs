@@ -12,15 +12,17 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
         .map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
 
     let arr = asdf_img.to_array2();
+    let has_image = asdf_img.has_image();
+    let naxis_str = if has_image { "2" } else { "0" };
 
     let mut cards = Vec::new();
     let mut index = HashMap::new();
 
-    index.insert("NAXIS".into(), "2".into());
+    index.insert("NAXIS".into(), naxis_str.into());
     index.insert("NAXIS1".into(), asdf_img.width.to_string());
     index.insert("NAXIS2".into(), asdf_img.height.to_string());
     index.insert("BITPIX".into(), "-32".into());
-    cards.push(("NAXIS".into(), "2".into()));
+    cards.push(("NAXIS".into(), naxis_str.into()));
     cards.push(("NAXIS1".into(), asdf_img.width.to_string()));
     cards.push(("NAXIS2".into(), asdf_img.height.to_string()));
     cards.push(("BITPIX".into(), "-32".into()));
@@ -70,12 +72,12 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
         index: 0,
         extname: Some("SCI".into()),
         extver: Some(1),
-        naxis: 2,
+        naxis: if has_image { 2 } else { 0 },
         naxis1: asdf_img.width as i64,
         naxis2: asdf_img.height as i64,
         naxis3: 0,
         bitpix: -32,
-        has_data: true,
+        has_data: has_image,
         header_start: 0,
         data_start: 0,
     };

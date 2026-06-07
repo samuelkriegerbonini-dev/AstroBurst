@@ -279,3 +279,8 @@ pub const STAR_MASK_KEY: &str = "__star_mask";
 
 pub const RES_CACHE_KEYS: &str = "cache_keys";
 pub const RES_PERSIST_TO_DISK: &str = "persist_to_disk";
+
+pub const RES_STAB_R: &str = "stab_r";
+pub const RES_STAB_G: &str = "stab_g";
+pub const RES_STAB_B: &str = "stab_b";
+pub const RES_REF_CHANNEL: &str = "ref_channel";

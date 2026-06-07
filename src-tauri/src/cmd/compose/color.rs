@@ -9,10 +9,7 @@ use crate::core::imaging::stats::{compute_image_stats, compute_image_stats_with_
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::types::image::ImageStats;
-use crate::types::constants::{
-    RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR,
-    COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B,
-};
+use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_SCNR_APPLIED, RES_AUTO_STF, RES_STAB_R, RES_STAB_G, RES_STAB_B, RES_REF_CHANNEL};
 
 use super::rgb::composite_png_path;
 
@@ -177,8 +174,8 @@ pub async fn calibrate_and_scnr_cmd(
             RES_R_FACTOR: r_factor,
             RES_G_FACTOR: g_factor,
             RES_B_FACTOR: b_factor,
-            "scnr_applied": scnr_applied,
-            "auto_stf": stf_json,
+            RES_SCNR_APPLIED: scnr_applied,
+            RES_AUTO_STF: stf_json,
             RES_ELAPSED_MS: elapsed,
         }))
     })
@@ -215,10 +212,10 @@ pub async fn compute_auto_wb_cmd() -> Result<serde_json::Value, String> {
             RES_R_FACTOR: wb_r,
             RES_G_FACTOR: wb_g,
             RES_B_FACTOR: wb_b,
-            "stab_r": stab_r,
-            "stab_g": stab_g,
-            "stab_b": stab_b,
-            "ref_channel": if stab_r <= stab_g && stab_r <= stab_b { "R" } else if stab_b <= stab_g { "B" } else { "G" },
+            RES_STAB_R: stab_r,
+            RES_STAB_G: stab_g,
+            RES_STAB_B: stab_b,
+            RES_REF_CHANNEL: if stab_r <= stab_g && stab_r <= stab_b { "R" } else if stab_b <= stab_g { "B" } else { "G" },
         }))
     })
 }
