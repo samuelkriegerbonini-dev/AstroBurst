@@ -1,10 +1,11 @@
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
+use rayon::prelude::*;
 use serde_yaml::Value;
 
-use super::parser::{AsdfFile, AsdfError};
-use super::tree::{NdArrayMeta, DType, ByteOrder, WcsInfo};
+use super::parser::{AsdfError, AsdfFile};
+use super::tree::{ByteOrder, DType, NdArrayMeta, WcsInfo};
 
 enum PixelLayout {
     Planar,
@@ -24,74 +25,72 @@ pub struct AsdfImage {
 impl AsdfImage {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, AsdfError> {
         let asdf = AsdfFile::open(path)?;
-
-        let wcs = WcsInfo::from_yaml(&asdf.tree)
-            .or_else(|| WcsInfo::from_gwcs(&asdf.tree));
+        let wcs = Self::resolve_wcs(&asdf.tree);
 
         match Self::find_data_array(&asdf.tree) {
-            Some((array_key, meta)) => {
-                let block = asdf
-                    .blocks
-                    .get(meta.source)
-                    .ok_or_else(|| AsdfError::MissingField(format!("block {}", meta.source)))?;
-
-                let (height, width, channels, layout) = match Self::interpret_shape(&meta.shape) {
-                    Ok(dims) => dims,
-                    Err(_) => {
-                        let metadata = Self::extract_metadata(&asdf.tree, &array_key);
-                        return Ok(Self {
-                            width: 0,
-                            height: 0,
-                            channels: 0,
-                            data: Vec::new(),
-                            wcs,
-                            metadata,
-                        });
-                    }
-                };
-
-                let mut pixels = Self::to_f32_pixels(&block.data, &meta);
-
-                let expected: usize = meta.shape.iter().product();
-                if pixels.len() < expected {
-                    return Err(AsdfError::MissingField(format!(
-                        "array element count mismatch: got {} expected {}",
-                        pixels.len(),
-                        expected
-                    )));
-                }
-                pixels.truncate(expected);
-
-                let data = match layout {
-                    PixelLayout::Interleaved if channels > 1 => {
-                        Self::deinterleave(&pixels, width, height, channels)
-                    }
-                    _ => pixels,
-                };
-
-                let metadata = Self::extract_metadata(&asdf.tree, &array_key);
-
-                Ok(Self {
-                    width,
-                    height,
-                    channels,
-                    data,
-                    wcs,
-                    metadata,
-                })
-            }
-            None => {
-                let metadata = Self::extract_metadata(&asdf.tree, "");
-                Ok(Self {
-                    width: 0,
-                    height: 0,
-                    channels: 0,
-                    data: Vec::new(),
-                    wcs,
-                    metadata,
-                })
-            }
+            Some((key, meta)) => Self::from_array(&asdf, &key, meta, wcs),
+            None => Ok(Self::empty(wcs, Self::extract_metadata(&asdf.tree, ""))),
         }
+    }
+
+    fn resolve_wcs(tree: &Value) -> Option<WcsInfo> {
+        WcsInfo::from_yaml(tree).or_else(|| WcsInfo::from_gwcs(tree))
+    }
+
+    fn empty(wcs: Option<WcsInfo>, metadata: HashMap<String, String>) -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            channels: 0,
+            data: Vec::new(),
+            wcs,
+            metadata,
+        }
+    }
+
+    fn from_array(
+        asdf: &AsdfFile,
+        key: &str,
+        meta: NdArrayMeta,
+        wcs: Option<WcsInfo>,
+    ) -> Result<Self, AsdfError> {
+        let block = asdf
+            .blocks
+            .get(meta.source)
+            .ok_or(AsdfError::BlockOutOfRange(meta.source))?;
+
+        let (height, width, channels, layout) = match Self::interpret_shape(&meta.shape) {
+            Ok(dims) => dims,
+            Err(_) => return Ok(Self::empty(wcs, Self::extract_metadata(&asdf.tree, key))),
+        };
+
+        let raw = Self::gather_array_bytes(&block.data, &meta);
+        let mut pixels = Self::to_f32_pixels(&raw, &meta);
+
+        let expected: usize = meta.shape.iter().product();
+        if pixels.len() < expected {
+            return Err(AsdfError::ShapeMismatch {
+                got: pixels.len(),
+                expected,
+            });
+        }
+        pixels.truncate(expected);
+
+        let data = match layout {
+            PixelLayout::Interleaved if channels > 1 => {
+                Self::deinterleave(&pixels, width, height, channels)
+            }
+            _ => pixels,
+        };
+
+        Ok(Self {
+            width,
+            height,
+            channels,
+            data,
+            wcs,
+            metadata: Self::extract_metadata(&asdf.tree, key),
+        })
     }
 
     pub fn has_image(&self) -> bool {
@@ -176,131 +175,120 @@ impl AsdfImage {
         None
     }
 
+    fn gather_array_bytes(block: &[u8], meta: &NdArrayMeta) -> Vec<u8> {
+        Self::gather_elements(
+            block,
+            &meta.shape,
+            meta.byte_size_per_element(),
+            meta.offset,
+            &meta.effective_strides(),
+        )
+    }
+
+    fn gather_elements(
+        block: &[u8],
+        shape: &[usize],
+        element_size: usize,
+        offset: usize,
+        strides: &[usize],
+    ) -> Vec<u8> {
+        let elem = element_size.max(1);
+        let count: usize = shape.iter().product();
+        let expected = count.saturating_mul(elem);
+
+        if strides == NdArrayMeta::contiguous_strides(shape, elem).as_slice()
+            && offset <= block.len()
+        {
+            let end = offset.saturating_add(expected).min(block.len());
+            let usable = ((end - offset) / elem) * elem;
+            return block[offset..offset + usable].to_vec();
+        }
+
+        let ndim = shape.len();
+        let mut out = Vec::with_capacity(expected);
+        let mut idx = vec![0usize; ndim];
+        for _ in 0..count {
+            let mut pos = offset;
+            for axis in 0..ndim {
+                pos = pos.saturating_add(idx[axis].saturating_mul(strides[axis]));
+            }
+            let end = pos.saturating_add(elem);
+            if end > block.len() {
+                break;
+            }
+            out.extend_from_slice(&block[pos..end]);
+            for axis in (0..ndim).rev() {
+                idx[axis] += 1;
+                if idx[axis] < shape[axis] {
+                    break;
+                }
+                idx[axis] = 0;
+            }
+        }
+        out
+    }
+
+    fn read_f32(c: &[u8], order: ByteOrder) -> f32 {
+        let b = [c[0], c[1], c[2], c[3]];
+        match order {
+            ByteOrder::Big => f32::from_be_bytes(b),
+            ByteOrder::Little => f32::from_le_bytes(b),
+        }
+    }
+
+    fn read_f64(c: &[u8], order: ByteOrder) -> f64 {
+        let b = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]];
+        match order {
+            ByteOrder::Big => f64::from_be_bytes(b),
+            ByteOrder::Little => f64::from_le_bytes(b),
+        }
+    }
+
+    fn decode_par<F>(raw: &[u8], elem: usize, f: F) -> Vec<f32>
+    where
+        F: Fn(&[u8]) -> f32 + Sync + Send,
+    {
+        const PAR_MIN_ELEMS: usize = 1 << 16;
+        if raw.len() / elem.max(1) >= PAR_MIN_ELEMS {
+            raw.par_chunks_exact(elem).map(|c| f(c)).collect()
+        } else {
+            raw.chunks_exact(elem).map(|c| f(c)).collect()
+        }
+    }
+
     fn to_f32_pixels(raw: &[u8], meta: &NdArrayMeta) -> Vec<f32> {
-        match (&meta.dtype, &meta.byteorder) {
-            (DType::Int8, _) => raw.iter().map(|&b| b as i8 as f32).collect(),
+        let order = meta.byteorder;
 
-            (DType::UInt8, _) => raw.iter().map(|&b| b as f32).collect(),
-
-            (DType::Bool8, _) => raw.iter().map(|&b| if b != 0 { 1.0 } else { 0.0 }).collect(),
-
-            (DType::Int16, ByteOrder::Big) => raw
-                .chunks_exact(2)
-                .map(|c| i16::from_be_bytes([c[0], c[1]]) as f32)
-                .collect(),
-            (DType::Int16, ByteOrder::Little) => raw
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
-                .collect(),
-
-            (DType::UInt16, ByteOrder::Big) => raw
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]) as f32)
-                .collect(),
-            (DType::UInt16, ByteOrder::Little) => raw
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]) as f32)
-                .collect(),
-
-            (DType::Int32, ByteOrder::Big) => raw
-                .chunks_exact(4)
-                .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f32)
-                .collect(),
-            (DType::Int32, ByteOrder::Little) => raw
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
-                .collect(),
-
-            (DType::UInt32, ByteOrder::Big) => raw
-                .chunks_exact(4)
-                .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f32)
-                .collect(),
-            (DType::UInt32, ByteOrder::Little) => raw
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
-                .collect(),
-
-            (DType::Int64, ByteOrder::Big) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+        macro_rules! decode {
+            ($n:literal, $ty:ty) => {
+                Self::decode_par(raw, $n, |c| {
+                    let b: [u8; $n] = c.try_into().unwrap();
+                    (match order {
+                        ByteOrder::Big => <$ty>::from_be_bytes(b),
+                        ByteOrder::Little => <$ty>::from_le_bytes(b),
+                    }) as f32
                 })
-                .collect(),
-            (DType::Int64, ByteOrder::Little) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect(),
+            };
+        }
 
-            (DType::UInt64, ByteOrder::Big) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect(),
-            (DType::UInt64, ByteOrder::Little) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect(),
-
-            (DType::Float32, ByteOrder::Big) => raw
-                .chunks_exact(4)
-                .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-            (DType::Float32, ByteOrder::Little) => raw
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-
-            (DType::Float64, ByteOrder::Big) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect(),
-            (DType::Float64, ByteOrder::Little) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect(),
-
-            (DType::Complex64, ByteOrder::Big) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    let re = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                    let im = f32::from_be_bytes([c[4], c[5], c[6], c[7]]);
-                    re.hypot(im)
-                })
-                .collect(),
-            (DType::Complex64, ByteOrder::Little) => raw
-                .chunks_exact(8)
-                .map(|c| {
-                    let re = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    let im = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);
-                    re.hypot(im)
-                })
-                .collect(),
-
-            (DType::Complex128, ByteOrder::Big) => raw
-                .chunks_exact(16)
-                .map(|c| {
-                    let re = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-                    let im = f64::from_be_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
-                    re.hypot(im) as f32
-                })
-                .collect(),
-            (DType::Complex128, ByteOrder::Little) => raw
-                .chunks_exact(16)
-                .map(|c| {
-                    let re = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-                    let im = f64::from_le_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
-                    re.hypot(im) as f32
-                })
-                .collect(),
+        match &meta.dtype {
+            DType::Int8 => Self::decode_par(raw, 1, |c| c[0] as i8 as f32),
+            DType::UInt8 => Self::decode_par(raw, 1, |c| c[0] as f32),
+            DType::Bool8 => Self::decode_par(raw, 1, |c| (c[0] != 0) as u8 as f32),
+            DType::Int16 => decode!(2, i16),
+            DType::UInt16 => decode!(2, u16),
+            DType::Int32 => decode!(4, i32),
+            DType::UInt32 => decode!(4, u32),
+            DType::Int64 => decode!(8, i64),
+            DType::UInt64 => decode!(8, u64),
+            DType::Float32 => Self::decode_par(raw, 4, |c| Self::read_f32(c, order)),
+            DType::Float64 => Self::decode_par(raw, 8, |c| Self::read_f64(c, order) as f32),
+            DType::Complex64 => Self::decode_par(raw, 8, |c| {
+                Self::read_f32(&c[0..4], order).hypot(Self::read_f32(&c[4..8], order))
+            }),
+            DType::Complex128 => Self::decode_par(raw, 16, |c| {
+                (Self::read_f64(&c[0..8], order).hypot(Self::read_f64(&c[8..16], order))) as f32
+            }),
         }
     }
 
@@ -323,7 +311,10 @@ impl AsdfImage {
             3 if shape[0] <= 4 => Ok((shape[1], shape[2], shape[0], PixelLayout::Planar)),
             3 if shape[2] <= 4 => Ok((shape[0], shape[1], shape[2], PixelLayout::Interleaved)),
             3 => Ok((shape[1], shape[2], shape[0], PixelLayout::Planar)),
-            n => Err(AsdfError::MissingField(format!("unsupported array rank: {}", n))),
+            n => Err(AsdfError::MissingField(format!(
+                "unsupported array rank: {}",
+                n
+            ))),
         }
     }
 
@@ -372,7 +363,6 @@ impl AsdfImage {
             _ => {}
         }
     }
-
 }
 
 pub fn is_asdf_file<P: AsRef<Path>>(path: P) -> bool {
@@ -400,11 +390,22 @@ pub fn is_asdf_file<P: AsRef<Path>>(path: P) -> bool {
 mod tests {
     use super::*;
 
+    fn fixtures_dir() -> Option<std::path::PathBuf> {
+        if let Ok(d) = std::env::var("ASDF_FIXTURES") {
+            return Some(std::path::PathBuf::from(d));
+        }
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("asdf");
+        bundled.is_dir().then_some(bundled)
+    }
+
     #[test]
     fn asdf_reference_suite() {
-        let dir = match std::env::var("ASDF_FIXTURES") {
-            Ok(d) => std::path::PathBuf::from(d),
-            Err(_) => return,
+        let dir = match fixtures_dir() {
+            Some(d) => d,
+            None => return,
         };
 
         let no_image = [
@@ -445,10 +446,17 @@ mod tests {
 
         for name in all {
             let path = dir.join(name);
+            if !path.exists() {
+                eprintln!("SKIP {} (not bundled)", name);
+                continue;
+            }
             match AsdfImage::load(&path) {
                 Ok(img) => {
                     if no_image.contains(&name) && img.has_image() {
-                        eprintln!("FAIL {} (expected no image, got {}x{})", name, img.width, img.height);
+                        eprintln!(
+                            "FAIL {} (expected no image, got {}x{})",
+                            name, img.width, img.height
+                        );
                         failures.push(name);
                         continue;
                     }
@@ -477,6 +485,84 @@ mod tests {
             }
         }
 
-        assert!(failures.is_empty(), "ASDF reference suite failures: {:?}", failures);
+        assert!(
+            failures.is_empty(),
+            "ASDF reference suite failures: {:?}",
+            failures
+        );
+    }
+
+    #[test]
+    fn asdf_view_offset_strides() {
+        use super::super::parser::AsdfFile;
+        use super::super::tree::NdArrayMeta;
+
+        let dir = match fixtures_dir() {
+            Some(d) => d,
+            None => return,
+        };
+
+        let path = dir.join("12_shared_view.asdf");
+        if !path.exists() {
+            return;
+        }
+        let asdf = AsdfFile::open(&path).expect("open 12_shared_view.asdf");
+
+        let cases: &[(&str, f64)] = &[
+            ("full", 4950.0),
+            ("first_half", 1225.0),
+            ("strided", 2450.0),
+        ];
+
+        let mut failures = Vec::new();
+        for (key, expected) in cases {
+            let node = asdf.tree.get(*key).expect("array node present");
+            let meta = NdArrayMeta::from_yaml(node).expect("parse ndarray meta");
+            let block = asdf.blocks.get(meta.source).expect("source block present");
+            let raw = AsdfImage::gather_array_bytes(&block.data, &meta);
+            let pixels = AsdfImage::to_f32_pixels(&raw, &meta);
+            let sum: f64 = pixels.iter().map(|&v| v as f64).sum();
+            if (sum - expected).abs() > 1e-6 || pixels.len() != meta.element_count() {
+                eprintln!(
+                    "FAIL view {} (len {} sum {} expected {})",
+                    key,
+                    pixels.len(),
+                    sum,
+                    expected
+                );
+                failures.push(*key);
+            } else {
+                eprintln!("PASS view {} (len {} sum {})", key, pixels.len(), sum);
+            }
+        }
+
+        assert!(failures.is_empty(), "ASDF view failures: {:?}", failures);
+    }
+
+    #[test]
+    fn to_f32_pixels_parallel_matches_sequential() {
+        use super::super::tree::{ByteOrder, DType, NdArrayMeta};
+
+        let n = 100_000usize;
+        let mut raw = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            raw.extend_from_slice(&(i as f32).to_le_bytes());
+        }
+        let meta = NdArrayMeta {
+            source: 0,
+            shape: vec![n],
+            dtype: DType::Float32,
+            byteorder: ByteOrder::Little,
+            offset: 0,
+            strides: None,
+        };
+        let px = AsdfImage::to_f32_pixels(&raw, &meta);
+        assert_eq!(px.len(), n);
+        assert_eq!(px[0], 0.0);
+        assert_eq!(px[1], 1.0);
+        assert_eq!(px[n - 1], (n - 1) as f32);
+        let sum: f64 = px.iter().map(|&v| v as f64).sum();
+        let expected: f64 = (0..n).map(|i| i as f64).sum();
+        assert_eq!(sum, expected);
     }
 }
