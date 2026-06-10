@@ -63,10 +63,11 @@ pub async fn reset_wb_cmd(
         let png_path = composite_png_path(&output_dir);
 
         let stf_config = AutoStfConfig::default();
-        let linked_stf = helpers::compute_linked_stf(&stats_r, &stats_g, &stats_b, &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, &stats_r);
-        let fn_g = make_stf_u8_fn(&linked_stf, &stats_g);
-        let fn_b = make_stf_u8_fn(&linked_stf, &stats_b);
+        let (linked_stf, combined_stats) =
+            helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
+        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(orig_r.arr(), orig_g.arr(), orig_b.arr(), fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
         let arc_r = orig_r.data_arc();
@@ -158,10 +159,11 @@ pub async fn calibrate_and_scnr_cmd(
         let png_path = composite_png_path(&output_dir);
 
         let stf_config = AutoStfConfig::default();
-        let linked_stf = helpers::compute_linked_stf(&stats_r, &stats_g, &stats_b, &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, &stats_r);
-        let fn_g = make_stf_u8_fn(&linked_stf, &stats_g);
-        let fn_b = make_stf_u8_fn(&linked_stf, &stats_b);
+        let (linked_stf, combined_stats) =
+            helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
+        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
         helpers::insert_composite_rgb(r, g, b, stats_r, stats_g, stats_b);
 

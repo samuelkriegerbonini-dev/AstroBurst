@@ -175,7 +175,7 @@ impl LazyCube {
                 }
                 let (frame_bytes, total_bytes) =
                     checked_cube_bytes(naxis1, naxis2, naxis3, bytes_per_pixel)?;
-                let data_offset = header.data_offset(parsed.header_start);
+                let data_offset = parsed.data_start;
 
                 let data_end = data_offset
                     .checked_add(total_bytes)

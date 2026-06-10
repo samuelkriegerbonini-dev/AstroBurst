@@ -150,6 +150,11 @@ pub fn richardson_lucy(
 
     let convolver = FftConvolver::new(rows, cols, psf);
 
+    let image_max = image
+        .iter()
+        .fold(0.0f32, |a, &b| if b.is_finite() { a.max(b) } else { a });
+    let inv_image_max = if image_max > 0.0 { 1.0 / image_max } else { 1.0 };
+
     let convergence_threshold = 1e-6;
     let mut last_convergence = f64::MAX;
     let mut iterations_run = 0;
@@ -172,8 +177,6 @@ pub fn richardson_lucy(
 
         let correction = convolver.convolve_psf_transpose(&ratio);
 
-        let inv_reg = if lambda > 0.0 { 1.0 / (1.0 + lambda) } else { 1.0 };
-
         let sum_sq_delta: f64 = estimate
             .as_slice_mut()
             .context("Estimate not contiguous")?
@@ -181,7 +184,8 @@ pub fn richardson_lucy(
             .zip(correction.as_slice().context("Correction not contiguous")?)
             .map(|(est, &cor)| {
                 let old = *est;
-                *est = (old * cor * inv_reg).max(0.0);
+                let damping = 1.0 + lambda * old * inv_image_max;
+                *est = (old * cor / damping).max(0.0);
                 let d = (*est - old) as f64;
                 d * d
             })
@@ -233,11 +237,8 @@ fn apply_deringing(estimate: &mut Array2<f32>, original: &Array2<f32>, threshold
             for x in 0..cols {
                 let orig = orig_row[x];
                 let est = row[x];
-                let upper = orig * (1.0 + threshold);
                 let lower = (orig * (1.0 - threshold)).max(0.0);
-                if est > upper {
-                    row[x] = upper;
-                } else if est < lower {
+                if est < lower {
                     row[x] = lower;
                 }
             }
@@ -312,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deringing_bidirectional() {
+    fn test_deringing_limits_undershoot_only() {
         let size = 16;
         let original = Array2::from_elem((size, size), 100.0f32);
         let mut estimate = original.clone();
@@ -321,7 +322,7 @@ mod tests {
 
         apply_deringing(&mut estimate, &original, 0.1);
 
-        assert!((estimate[[5, 5]] - 110.0).abs() < 1e-4);
+        assert!((estimate[[5, 5]] - 200.0).abs() < 1e-4);
         assert!((estimate[[8, 8]] - 90.0).abs() < 1e-4);
         assert!((estimate[[0, 0]] - 100.0).abs() < 1e-4);
     }

@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use ndarray::{Array2, Zip};
-use rayon::prelude::*;
 
 use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::white_balance;
@@ -150,18 +149,6 @@ fn channel_or_synth(
     }
 }
 
-fn merge_for_stf(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
-    let (rows, cols) = r.dim();
-    let mut out = Array2::zeros((rows, cols));
-
-    Zip::from(&mut out).and(r).and(g).and(b)
-        .par_for_each(|o, &rv, &gv, &bv| {
-            *o = (rv + gv + bv) * (1.0 / 3.0);
-        });
-
-    out
-}
-
 pub(crate) fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
     rows: usize, cols: usize, method: AlignMethod,
@@ -258,16 +245,17 @@ pub fn process_rgb(
 
     let stf_config = AutoStfConfig::default();
 
+    let mut linked_apply_stats: Option<ImageStats> = None;
+
     let (stf_r_params, stf_g_params, stf_b_params, stats_wb_r, stats_wb_g, stats_wb_b) =
         if config.auto_stretch {
             if config.linked_stf {
-                let combined = merge_for_stf(&r_img, &g_img, &b_img);
-                let (st, _hist) = stf::analyze(&combined);
-                drop(combined);
-                let params = stf::auto_stf(&st, &stf_config);
                 let sr = stats::compute_image_stats(&r_img);
                 let sg = stats::compute_image_stats(&g_img);
                 let sb = stats::compute_image_stats(&b_img);
+                let combined = stats::combine_channel_stats(&sr, &sg, &sb);
+                let params = stf::auto_stf(&combined, &stf_config);
+                linked_apply_stats = Some(combined);
                 (params, params, params, sr, sg, sb)
             } else {
                 let (sr, _) = stf::analyze(&r_img);
@@ -297,9 +285,18 @@ pub fn process_rgb(
     let pre_sg = Some(stats_wb_g.clone());
     let pre_sb = Some(stats_wb_b.clone());
 
-    apply_stf_inplace(&mut r_img, &stf_r_params, &stats_wb_r);
-    apply_stf_inplace(&mut g_img, &stf_g_params, &stats_wb_g);
-    apply_stf_inplace(&mut b_img, &stf_b_params, &stats_wb_b);
+    match &linked_apply_stats {
+        Some(combined) => {
+            apply_stf_inplace(&mut r_img, &stf_r_params, combined);
+            apply_stf_inplace(&mut g_img, &stf_g_params, combined);
+            apply_stf_inplace(&mut b_img, &stf_b_params, combined);
+        }
+        None => {
+            apply_stf_inplace(&mut r_img, &stf_r_params, &stats_wb_r);
+            apply_stf_inplace(&mut g_img, &stf_g_params, &stats_wb_g);
+            apply_stf_inplace(&mut b_img, &stf_b_params, &stats_wb_b);
+        }
+    }
 
     let scnr_applied = if let Some(ref scnr_cfg) = config.scnr {
         if r_img.dim() == g_img.dim() && g_img.dim() == b_img.dim() {

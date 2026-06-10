@@ -46,7 +46,7 @@ pub async fn plate_solve_cmd(
     center_dec: Option<f64>,
     radius: Option<f64>,
 ) -> Result<serde_json::Value, String> {
-    let (upload_path, _tmp, _tmp_ds, stars, width, height, cfg) = tokio::task::spawn_blocking(
+    let (upload_path, _tmp, _tmp_ds, stars, width, height, ds_factor, cfg) = tokio::task::spawn_blocking(
         move || -> anyhow::Result<_> {
             let resolved_key = resolve_api_key(api_key);
 
@@ -62,7 +62,7 @@ pub async fn plate_solve_cmd(
                 5.0,
             );
 
-            let (upload_fits, tmp_ds) = if naxis1 > MAX_UPLOAD_DIM || naxis2 > MAX_UPLOAD_DIM {
+            let (upload_fits, tmp_ds, ds_factor) = if naxis1 > MAX_UPLOAD_DIM || naxis2 > MAX_UPLOAD_DIM {
                 let scale = MAX_UPLOAD_DIM as f64 / naxis1.max(naxis2) as f64;
                 let ds_rows = (naxis2 as f64 * scale).round() as usize;
                 let ds_cols = (naxis1 as f64 * scale).round() as usize;
@@ -87,10 +87,14 @@ pub async fn plate_solve_cmd(
                     Some(&result.header),
                 )?;
 
-                (tmp_path, Some(tmp_file))
+                let fx = naxis1 as f64 / ds_cols as f64;
+                let fy = naxis2 as f64 / ds_rows as f64;
+                (tmp_path, Some(tmp_file), Some((fx, fy)))
             } else {
-                (resolved_path.to_string_lossy().to_string(), None)
+                (resolved_path.to_string_lossy().to_string(), None, None)
             };
+
+            let hint_scale = ds_factor.map_or(1.0, |(fx, fy)| (fx * fy).sqrt());
 
             let cfg = crate::infra::astrometry::plate_solve::SolveConfig {
                 api_url: config::load_config()
@@ -100,14 +104,14 @@ pub async fn plate_solve_cmd(
                 ra_hint: center_ra,
                 dec_hint: center_dec,
                 radius_hint: radius,
-                scale_low: scale_lower,
-                scale_high: scale_upper,
+                scale_low: scale_lower.map(|v| v * hint_scale),
+                scale_high: scale_upper.map(|v| v * hint_scale),
                 max_stars: config::load_config()
                     .map(|c| Some(c.plate_solve_max_stars))
                     .unwrap_or(Some(100)),
             };
 
-            Ok((upload_fits, tmp, tmp_ds, detection.stars, naxis1, naxis2, cfg))
+            Ok((upload_fits, tmp, tmp_ds, detection.stars, naxis1, naxis2, ds_factor, cfg))
         },
     )
         .await
@@ -116,11 +120,15 @@ pub async fn plate_solve_cmd(
 
     #[cfg(feature = "astrometry-net")]
     {
-        let solve_result = crate::infra::astrometry::plate_solve::solve_astrometry_net(
+        let mut solve_result = crate::infra::astrometry::plate_solve::solve_astrometry_net(
             &upload_path, &stars, width, height, &cfg,
         )
             .await
             .map_err(|e| e.to_string())?;
+
+        if let Some((fx, fy)) = ds_factor {
+            rescale_solve_to_original(&mut solve_result, fx, fy, width, height);
+        }
 
         drop((_tmp, _tmp_ds));
         return serde_json::to_value(&solve_result).map_err(|e| e.to_string());
@@ -128,10 +136,64 @@ pub async fn plate_solve_cmd(
 
     #[cfg(not(feature = "astrometry-net"))]
     {
-        drop((_tmp, _tmp_ds, upload_path, stars, width, height, cfg));
+        drop((_tmp, _tmp_ds, upload_path, stars, width, height, ds_factor, cfg));
         let result = crate::infra::astrometry::plate_solve::solve_offline_placeholder()
             .map_err(|e| e.to_string())?;
         serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(feature = "astrometry-net")]
+fn rescale_solve_to_original(
+    result: &mut crate::infra::astrometry::plate_solve::SolveResult,
+    fx: f64,
+    fy: f64,
+    width: usize,
+    height: usize,
+) {
+    let f_mean = (fx * fy).sqrt();
+    result.pixel_scale /= f_mean;
+    result.field_w_arcmin = result.pixel_scale * width as f64 / 60.0;
+    result.field_h_arcmin = result.pixel_scale * height as f64 / 60.0;
+
+    result
+        .wcs_headers
+        .retain(|k, _| !["A_", "B_", "AP_", "BP_"].iter().any(|p| k.starts_with(p)));
+
+    let mut updates: Vec<(String, String)> = Vec::new();
+    for (key, value) in &result.wcs_headers {
+        match key.as_str() {
+            "CRPIX1" | "CRPIX2" | "CD1_1" | "CD1_2" | "CD2_1" | "CD2_2" | "CDELT1" | "CDELT2" => {
+                if let Ok(num) = value.trim().parse::<f64>() {
+                    let scaled = match key.as_str() {
+                        "CRPIX1" => fx * (num - 0.5) + 0.5,
+                        "CRPIX2" => fy * (num - 0.5) + 0.5,
+                        "CD1_1" | "CD2_1" | "CDELT1" => num / fx,
+                        _ => num / fy,
+                    };
+                    updates.push((key.clone(), format!("{:.12E}", scaled)));
+                }
+            }
+            "IMAGEW" => updates.push((key.clone(), width.to_string())),
+            "IMAGEH" => updates.push((key.clone(), height.to_string())),
+            "CTYPE1" | "CTYPE2" => {
+                if value.contains("-SIP") {
+                    updates.push((key.clone(), value.replace("-SIP", "")));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (key, value) in updates {
+        result.wcs_headers.insert(key, value);
+    }
+
+    for ann in &mut result.annotations {
+        ann.pixelx = fx * (ann.pixelx - 0.5) + 0.5;
+        ann.pixely = fy * (ann.pixely - 0.5) + 0.5;
+        if let Some(r) = ann.radius.as_mut() {
+            *r *= f_mean;
+        }
     }
 }
 

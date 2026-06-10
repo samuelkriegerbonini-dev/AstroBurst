@@ -41,6 +41,7 @@ pub fn tukey<T: FftFloat>(n: usize, alpha: T) -> Vec<T> {
     if n == 1 {
         return vec![T::one()];
     }
+    let alpha = alpha.max_of(T::zero()).min_of(T::one());
     let nf = <T as FftFloat>::from_usize(n - 1);
     let half_alpha_n = alpha * nf * T::half();
     (0..n)

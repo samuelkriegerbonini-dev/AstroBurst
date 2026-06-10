@@ -40,6 +40,18 @@ pub fn compute_image_stats_with_known_range(
     compute_stats_hist_core(slice, known_min, known_max)
 }
 
+pub fn combine_channel_stats(a: &ImageStats, b: &ImageStats, c: &ImageStats) -> ImageStats {
+    ImageStats {
+        min: a.min.min(b.min).min(c.min),
+        max: a.max.max(b.max).max(c.max),
+        mean: (a.mean + b.mean + c.mean) / 3.0,
+        median: (a.median + b.median + c.median) / 3.0,
+        sigma: ((a.sigma.powi(2) + b.sigma.powi(2) + c.sigma.powi(2)) / 3.0).sqrt(),
+        mad: (a.mad + b.mad + c.mad) / 3.0,
+        valid_count: a.valid_count.max(b.valid_count).max(c.valid_count),
+    }
+}
+
 fn compute_image_stats_exact(slice: &[f32]) -> ImageStats {
     let (global_min, global_max, global_sum, total_valid) = scan_stats(slice);
 

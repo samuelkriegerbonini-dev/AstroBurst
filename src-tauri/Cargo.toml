@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "GPL-3.0-or-later"
@@ -44,7 +44,7 @@ config = "0.15.22"
 urlencoding = "2.1.3"
 
 [features]
-default = ["astrometry-net", "asdf-full"]
+default = ["astrometry-net", "asdf-full", "vizier"]
 astrometry-net = ["dep:reqwest"]
 vizier = ["reqwest/blocking"]
 asdf-full = ["dep:bzip2", "dep:lz4_flex"]

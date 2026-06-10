@@ -198,10 +198,11 @@ pub async fn blend_channels_cmd(
         let (er, eg, eb) = helpers::load_composite_rgb()?;
 
         let stf_config = AutoStfConfig::default();
-        let linked_stf = helpers::compute_linked_stf(er.stats(), eg.stats(), eb.stats(), &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, er.stats());
-        let fn_g = make_stf_u8_fn(&linked_stf, eg.stats());
-        let fn_b = make_stf_u8_fn(&linked_stf, eb.stats());
+        let (linked_stf, combined_stats) =
+            helpers::compute_linked_stf_with_stats(er.stats(), eg.stats(), eb.stats(), &stf_config);
+        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(er.arr(), eg.arr(), eb.arr(), fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
         let stf_json = helpers::stf_json(&linked_stf);

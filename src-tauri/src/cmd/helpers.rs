@@ -172,31 +172,13 @@ pub(crate) fn stf_json(stf: &StfParams) -> serde_json::Value {
     })
 }
 
-pub(crate) fn compute_linked_stf(
-    stats_r: &ImageStats,
-    stats_g: &ImageStats,
-    stats_b: &ImageStats,
-    config: &AutoStfConfig,
-) -> StfParams {
-    let (stf, _) = compute_linked_stf_with_stats(stats_r, stats_g, stats_b, config);
-    stf
-}
-
 pub(crate) fn compute_linked_stf_with_stats(
     stats_r: &ImageStats,
     stats_g: &ImageStats,
     stats_b: &ImageStats,
     config: &AutoStfConfig,
 ) -> (StfParams, ImageStats) {
-    let combined = ImageStats {
-        min: stats_r.min.min(stats_g.min).min(stats_b.min),
-        max: stats_r.max.max(stats_g.max).max(stats_b.max),
-        mean: (stats_r.mean + stats_g.mean + stats_b.mean) / 3.0,
-        median: (stats_r.median + stats_g.median + stats_b.median) / 3.0,
-        sigma: ((stats_r.sigma.powi(2) + stats_g.sigma.powi(2) + stats_b.sigma.powi(2)) / 3.0).sqrt(),
-        mad: (stats_r.mad + stats_g.mad + stats_b.mad) / 3.0,
-        valid_count: stats_r.valid_count,
-    };
+    let combined = crate::core::imaging::stats::combine_channel_stats(stats_r, stats_g, stats_b);
     let stf = auto_stf(&combined, config);
     (stf, combined)
 }

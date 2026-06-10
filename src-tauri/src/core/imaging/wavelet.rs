@@ -77,10 +77,9 @@ pub fn wavelet_denoise(
         scales.push(detail);
 
         std::mem::swap(&mut current, &mut buf_a);
-        buf_a.par_iter_mut().for_each(|v| *v = 0.0);
     }
 
-    let noise_sigma = estimate_noise_sigma(&scales[0]);
+    let noise_sigma = estimate_noise_sigma(&scales[0]) / atrous_noise_scaling(0);
 
     for (scale_idx, scale) in scales.iter_mut().enumerate() {
         if let Some(p) = progress {

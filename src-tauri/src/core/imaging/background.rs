@@ -60,6 +60,17 @@ pub fn extract_background(
     let start = std::time::Instant::now();
     let (rows, cols) = image.dim();
 
+    if config.poly_degree < crate::types::constants::MIN_POLY_DEGREE
+        || config.poly_degree > crate::types::constants::MAX_POLY_DEGREE
+    {
+        anyhow::bail!(
+            "Polynomial degree {} outside supported range [{}, {}]",
+            config.poly_degree,
+            crate::types::constants::MIN_POLY_DEGREE,
+            crate::types::constants::MAX_POLY_DEGREE
+        );
+    }
+
     if let Some(p) = progress {
         p.set_total(4);
         p.tick_with_stage("sampling background");

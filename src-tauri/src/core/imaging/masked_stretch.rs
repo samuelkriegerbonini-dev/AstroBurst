@@ -1,8 +1,7 @@
 use ndarray::Array2;
-use rayon::prelude::*;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig, StarMaskResult};
-use crate::core::imaging::stats::compute_image_stats;
+use crate::core::imaging::stats::is_valid_pixel;
 
 #[derive(Debug, Clone)]
 pub struct MaskedStretchConfig {
@@ -53,8 +52,9 @@ pub fn masked_stretch(
         ..StarMaskConfig::default()
     };
 
-    let mask_result = generate_star_mask(image, &mask_config)?;
-    masked_stretch_with_mask(image, &mask_result, config)
+    let normalized = normalize_to_01(image);
+    let mask_result = generate_star_mask(&normalized, &mask_config)?;
+    masked_stretch_with_mask(&normalized, &mask_result, config)
 }
 
 pub fn masked_stretch_with_mask(
@@ -170,7 +170,7 @@ pub fn masked_stretch_rgb_shared(
         ..StarMaskConfig::default()
     };
 
-    let shared_mask = generate_star_mask(&luminance, &mask_config)?;
+    let shared_mask = generate_star_mask(&normalize_to_01(&luminance), &mask_config)?;
 
     let (res_r, (res_g, res_b)) = rayon::join(
         || masked_stretch_with_mask(r, &shared_mask, config),
@@ -190,12 +190,22 @@ pub fn masked_stretch_rgb_shared(
 }
 
 fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
-    let stats = compute_image_stats(image);
-    let range = (stats.max - stats.min) as f32;
-    if range < 1e-10 {
+    let mut dmin = f32::INFINITY;
+    let mut dmax = f32::NEG_INFINITY;
+    for &v in image.iter() {
+        if is_valid_pixel(v) {
+            if v < dmin {
+                dmin = v;
+            }
+            if v > dmax {
+                dmax = v;
+            }
+        }
+    }
+    let range = dmax - dmin;
+    if !range.is_finite() || range < 1e-10 {
         return Array2::zeros(image.dim());
     }
-    let dmin = stats.min as f32;
     let inv = 1.0 / range;
     let mut out = image.clone();
     out.par_mapv_inplace(|v| {

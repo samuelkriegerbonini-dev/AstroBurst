@@ -74,7 +74,7 @@ pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Array2<
                 }
             }
 
-            if v < 0.0 { 0.0 } else { v }
+            v
         })
         .collect();
 
@@ -254,6 +254,11 @@ pub fn create_master_flat(
         .context("Failed to reshape normalized master flat")?)
 }
 
+fn clamp_non_negative(mut img: Array2<f32>) -> Array2<f32> {
+    img.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
+    img
+}
+
 pub fn calibrate_from_paths(
     science_path: &str,
     bias_paths: Option<&[String]>,
@@ -291,7 +296,7 @@ pub fn calibrate_from_paths(
         dark_exposure_ratio,
     };
 
-    Ok(calibrate_image(&science, &config))
+    Ok(clamp_non_negative(calibrate_image(&science, &config)))
 }
 
 pub fn stack_from_paths(
@@ -314,7 +319,9 @@ pub fn stack_from_paths(
         })
         .collect::<Result<_>>()?;
 
-    crate::core::stacking::combine::stack_images(&images, config)
+    let mut result = crate::core::stacking::combine::stack_images(&images, config)?;
+    result.image = clamp_non_negative(result.image);
+    Ok(result)
 }
 
 pub fn drizzle_from_paths(
@@ -335,7 +342,9 @@ pub fn drizzle_from_paths(
         images.push(img);
     }
 
-    crate::core::stacking::drizzle::drizzle_stack(&images, config)
+    let mut result = crate::core::stacking::drizzle::drizzle_stack(&images, config)?;
+    result.image = clamp_non_negative(result.image);
+    Ok(result)
 }
 #[cfg(test)]
 mod tests {

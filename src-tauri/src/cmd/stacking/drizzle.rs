@@ -87,6 +87,11 @@ pub async fn drizzle_rgb_cmd(
             auto_stretch: true,
             linked_stf: false,
             scnr: scnr_cfg,
+            align: align.unwrap_or(true),
+            align_method: match am {
+                AlignmentMethod::Zncc => crate::types::compose::AlignMethod::Affine,
+                AlignmentMethod::PhaseCorrelation => crate::types::compose::AlignMethod::PhaseCorrelation,
+            },
         };
 
         let png_path = format!("{}/{}", output_dir, FILE_DRIZZLE_RGB_PNG);

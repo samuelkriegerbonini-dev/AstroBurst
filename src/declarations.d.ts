@@ -90,6 +90,7 @@ declare module "lucide-react" {
   export const Square: Icon;
   export const Star: Icon;
   export const Sun: Icon;
+  export const Tag: Icon;
   export const Telescope: Icon;
   export const Timer: Icon;
   export const Unlink: Icon;

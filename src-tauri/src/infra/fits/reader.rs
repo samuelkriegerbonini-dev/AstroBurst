@@ -35,35 +35,79 @@ fn scaling(header: &HduHeader) -> (f64, f64) {
 }
 
 #[inline]
+fn blank_value(header: &HduHeader) -> Option<i64> {
+    header.get_i64("BLANK")
+}
+
+#[inline]
 fn is_identity_scaling(bscale: f64, bzero: f64) -> bool {
     (bscale - 1.0).abs() < 1e-15 && bzero.abs() < 1e-15
 }
 
 pub fn decode_pixels(data: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> Vec<f32> {
+    decode_pixels_blank(data, bitpix, bscale, bzero, None)
+}
+
+pub fn decode_pixels_blank(
+    data: &[u8],
+    bitpix: i64,
+    bscale: f64,
+    bzero: f64,
+    blank: Option<i64>,
+) -> Vec<f32> {
     let identity = is_identity_scaling(bscale, bzero);
 
     match bitpix {
         8 => {
-            if identity {
-                data.par_iter().map(|&b| b as f32).collect()
-            } else {
-                data.par_iter()
-                    .map(|&b| (b as f64 * bscale + bzero) as f32)
-                    .collect()
-            }
+            data.par_iter()
+                .map(|&b| {
+                    if blank == Some(b as i64) {
+                        f32::NAN
+                    } else if identity {
+                        b as f32
+                    } else {
+                        (b as f64 * bscale + bzero) as f32
+                    }
+                })
+                .collect()
         }
         16 => data
             .par_chunks_exact(2)
             .map(|c| {
                 let v = i16::from_be_bytes([c[0], c[1]]);
-                if identity { v as f32 } else { (v as f64 * bscale + bzero) as f32 }
+                if blank == Some(v as i64) {
+                    f32::NAN
+                } else if identity {
+                    v as f32
+                } else {
+                    (v as f64 * bscale + bzero) as f32
+                }
             })
             .collect(),
         32 => data
             .par_chunks_exact(4)
             .map(|c| {
                 let v = i32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                if identity { v as f32 } else { (v as f64 * bscale + bzero) as f32 }
+                if blank == Some(v as i64) {
+                    f32::NAN
+                } else if identity {
+                    v as f32
+                } else {
+                    (v as f64 * bscale + bzero) as f32
+                }
+            })
+            .collect(),
+        64 => data
+            .par_chunks_exact(8)
+            .map(|c| {
+                let v = i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                if blank == Some(v) {
+                    f32::NAN
+                } else if identity {
+                    v as f32
+                } else {
+                    (v as f64 * bscale + bzero) as f32
+                }
             })
             .collect(),
         -32 => {
@@ -111,6 +155,12 @@ pub fn decode_single_pixel(raw: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> 
             let v = i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
             (v as f64 * bscale + bzero) as f32
         }
+        64 => {
+            let v = i64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]);
+            (v as f64 * bscale + bzero) as f32
+        }
         -32 => {
             let v = f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
             (v as f64 * bscale + bzero) as f32
@@ -127,10 +177,22 @@ pub fn decode_single_pixel(raw: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> 
 
 fn extract_header_value(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.starts_with('\'') {
-        if let Some(end) = trimmed[1..].find('\'') {
-            return trimmed[1..1 + end].trim_end().to_string();
+    if let Some(rest) = trimmed.strip_prefix('\'') {
+        let mut out = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    out.push('\'');
+                    chars.next();
+                } else {
+                    break;
+                }
+            } else {
+                out.push(c);
+            }
         }
+        return out.trim_end().to_string();
     }
     match trimmed.find('/') {
         Some(pos) => trimmed[..pos].trim().to_string(),
@@ -245,7 +307,10 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
         let extname = h.get("EXTNAME").map(|s| s.to_string());
         let extver = h.get_i64("EXTVER");
 
-        let has_data = naxis >= 2 && naxis1 > 1 && naxis2 > 1;
+        let is_image_hdu = h
+            .get("XTENSION")
+            .map_or(true, |x| x.trim().eq_ignore_ascii_case("IMAGE"));
+        let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
 
         hdus.push(ScannedHdu {
             info: HduInfo {
@@ -343,7 +408,7 @@ fn extract_image_from_hdu(
 
     let raw = &mmap[hdu.info.data_start..data_end];
     let (bzero, bscale) = scaling(h);
-    let pixels = decode_pixels(raw, bitpix, bscale, bzero);
+    let pixels = decode_pixels_blank(raw, bitpix, bscale, bzero, blank_value(h));
     let image = Array2::from_shape_vec((naxis2, naxis1), pixels)
         .context("Failed to reshape image pixels")?;
 
@@ -483,9 +548,10 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
     }
 
     let base = hdu.info.data_start;
-    let r_pixels = decode_pixels(&mmap[base..base + plane_size], bitpix, bscale, bzero);
-    let g_pixels = decode_pixels(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero);
-    let b_pixels = decode_pixels(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero);
+    let blank = blank_value(h);
+    let r_pixels = decode_pixels_blank(&mmap[base..base + plane_size], bitpix, bscale, bzero, blank);
+    let g_pixels = decode_pixels_blank(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero, blank);
+    let b_pixels = decode_pixels_blank(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero, blank);
 
     let r = Array2::from_shape_vec((naxis2, naxis1), r_pixels)
         .context("Failed to reshape R channel")?;
@@ -555,7 +621,7 @@ pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
 
             let raw = &mmap[data_offset..data_end];
             let (bzero, bscale) = scaling(header);
-            let pixels = decode_pixels(raw, bitpix, bscale, bzero);
+            let pixels = decode_pixels_blank(raw, bitpix, bscale, bzero, blank_value(header));
             let cube = Array3::from_shape_vec((naxis3, naxis2, naxis1), pixels)
                 .context("Failed to reshape cube pixels")?;
 
@@ -577,6 +643,13 @@ pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
     let result = extract_image_mmap(&file)
         .with_context(|| format!("Failed to load {}", path))?;
     Ok(result.image)
+}
+
+pub fn read_primary_header(path: &str) -> Result<HduHeader> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open {}", path))?;
+    let mmap = create_mmap(&file)?;
+    Ok(parse_header_at(&mmap, 0)?.header)
 }
 
 #[cfg(test)]

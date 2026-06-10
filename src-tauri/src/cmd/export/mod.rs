@@ -188,6 +188,7 @@ pub async fn export_png(
             let sg = compute_image_stats(&rgb.g);
             let sb = compute_image_stats(&rgb.b);
 
+            let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
             let (r_out, g_out, b_out) = if do_stf {
                 let stf = StfParams {
                     shadow: shadow.unwrap_or(0.0),
@@ -195,17 +196,17 @@ pub async fn export_png(
                     highlight: highlight.unwrap_or(1.0),
                 };
                 (
-                    apply_stf_f32(&rgb.r, &stf, &sr),
-                    apply_stf_f32(&rgb.g, &stf, &sg),
-                    apply_stf_f32(&rgb.b, &stf, &sb),
+                    apply_stf_f32(&rgb.r, &stf, &combined),
+                    apply_stf_f32(&rgb.g, &stf, &combined),
+                    apply_stf_f32(&rgb.b, &stf, &combined),
                 )
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(&sr, &sg, &sb, &stf_config);
+                let (linked, _) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
                 (
-                    apply_stf_f32(&rgb.r, &linked, &sr),
-                    apply_stf_f32(&rgb.g, &linked, &sg),
-                    apply_stf_f32(&rgb.b, &linked, &sb),
+                    apply_stf_f32(&rgb.r, &linked, &combined),
+                    apply_stf_f32(&rgb.g, &linked, &combined),
+                    apply_stf_f32(&rgb.b, &linked, &combined),
                 )
             };
 
@@ -323,17 +324,39 @@ pub async fn export_rgb_png(
                 )
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(cr.stats(), cg.stats(), cb.stats(), &stf_config);
-                (
-                    StfParams { shadow: linked.shadow, midtone: linked.midtone, highlight: linked.highlight },
-                    StfParams { shadow: linked.shadow, midtone: linked.midtone, highlight: linked.highlight },
-                    linked,
-                )
+                let (linked, _) = helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &stf_config);
+                (linked, linked, linked)
             };
 
-            let r_out = apply_stf_f32(cr.arr(), &stf_r, cr.stats());
-            let g_out = apply_stf_f32(cg.arr(), &stf_g, cg.stats());
-            let b_out = apply_stf_f32(cb.arr(), &stf_b, cb.stats());
+            let identical_params = stf_r.shadow == stf_g.shadow
+                && stf_g.shadow == stf_b.shadow
+                && stf_r.midtone == stf_g.midtone
+                && stf_g.midtone == stf_b.midtone
+                && stf_r.highlight == stf_g.highlight
+                && stf_g.highlight == stf_b.highlight;
+
+            let linked_stats = if identical_params {
+                Some(crate::core::imaging::stats::combine_channel_stats(
+                    cr.stats(),
+                    cg.stats(),
+                    cb.stats(),
+                ))
+            } else {
+                None
+            };
+
+            let (r_out, g_out, b_out) = match &linked_stats {
+                Some(combined) => (
+                    apply_stf_f32(cr.arr(), &stf_r, combined),
+                    apply_stf_f32(cg.arr(), &stf_g, combined),
+                    apply_stf_f32(cb.arr(), &stf_b, combined),
+                ),
+                None => (
+                    apply_stf_f32(cr.arr(), &stf_r, cr.stats()),
+                    apply_stf_f32(cg.arr(), &stf_g, cg.stats()),
+                    apply_stf_f32(cb.arr(), &stf_b, cb.stats()),
+                ),
+            };
             if depth == 16 {
                 render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
             } else {
@@ -374,18 +397,35 @@ pub async fn export_rgb_png(
                 let stf_r = StfParams { shadow: shadow_r.unwrap_or(0.0), midtone: midtone_r.unwrap_or(0.5), highlight: highlight_r.unwrap_or(1.0) };
                 let stf_g = StfParams { shadow: shadow_g.unwrap_or(0.0), midtone: midtone_g.unwrap_or(0.5), highlight: highlight_g.unwrap_or(1.0) };
                 let stf_b = StfParams { shadow: shadow_b.unwrap_or(0.0), midtone: midtone_b.unwrap_or(0.5), highlight: highlight_b.unwrap_or(1.0) };
-                (
-                    apply_stf_f32(r, &stf_r, &sr),
-                    apply_stf_f32(g, &stf_g, &sg),
-                    apply_stf_f32(b, &stf_b, &sb),
-                )
+
+                let identical_params = stf_r.shadow == stf_g.shadow
+                    && stf_g.shadow == stf_b.shadow
+                    && stf_r.midtone == stf_g.midtone
+                    && stf_g.midtone == stf_b.midtone
+                    && stf_r.highlight == stf_g.highlight
+                    && stf_g.highlight == stf_b.highlight;
+
+                if identical_params {
+                    let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
+                    (
+                        apply_stf_f32(r, &stf_r, &combined),
+                        apply_stf_f32(g, &stf_g, &combined),
+                        apply_stf_f32(b, &stf_b, &combined),
+                    )
+                } else {
+                    (
+                        apply_stf_f32(r, &stf_r, &sr),
+                        apply_stf_f32(g, &stf_g, &sg),
+                        apply_stf_f32(b, &stf_b, &sb),
+                    )
+                }
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(&sr, &sg, &sb, &stf_config);
+                let (linked, combined) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
                 (
-                    apply_stf_f32(r, &linked, &sr),
-                    apply_stf_f32(g, &linked, &sg),
-                    apply_stf_f32(b, &linked, &sb),
+                    apply_stf_f32(r, &linked, &combined),
+                    apply_stf_f32(g, &linked, &combined),
+                    apply_stf_f32(b, &linked, &combined),
                 )
             };
 

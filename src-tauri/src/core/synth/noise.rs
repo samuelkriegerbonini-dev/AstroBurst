@@ -98,14 +98,11 @@ pub fn generate_flat_field(width: u32, height: u32, seed: u64, vignette_strength
     flat
 }
 
-pub fn apply_flat_field(image: &mut Array2<f32>, flat: &Array2<f32>) {
+pub fn apply_vignette(image: &mut Array2<f32>, flat: &Array2<f32>) {
     let (h, w) = image.dim();
     for y in 0..h {
         for x in 0..w {
-            let f = flat[[y, x]];
-            if f > 1e-6 {
-                image[[y, x]] /= f;
-            }
+            image[[y, x]] *= flat[[y, x]];
         }
     }
 }

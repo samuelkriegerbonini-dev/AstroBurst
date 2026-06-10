@@ -70,7 +70,7 @@ export interface WizardState {
 
 export const DEFAULT_BINS: FrequencyBin[] = [
   { id: "ha", label: "Hα (656nm)", shortLabel: "Hα", wavelength: 656, color: "#ef4444", files: [] },
-  { id: "oiii", label: "OIII (502nm)", shortLabel: "OIII", wavelength: 502, color: "#3b82f6", files: [] },
+  { id: "oiii", label: "OIII (501nm)", shortLabel: "OIII", wavelength: 501, color: "#3b82f6", files: [] },
   { id: "sii", label: "SII (673nm)", shortLabel: "SII", wavelength: 673, color: "#f97316", files: [] },
   { id: "r", label: "Red", shortLabel: "R", color: "#dc2626", files: [] },
   { id: "g", label: "Green", shortLabel: "G", color: "#16a34a", files: [] },
@@ -186,7 +186,7 @@ const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
 
 const NB_PRESETS = new Set(["sho", "hoo", "dynamic_hoo", "foraxx", "hubble_legacy"]);
 
-const NB_FILTERS = new Set(["Hα (656nm)", "[OIII] (502nm)", "[SII] (673nm)"]);
+const NB_FILTERS = new Set(["Hα (656nm)", "[OIII] (501nm)", "[SII] (673nm)"]);
 
 export interface FilterDetectionRef {
   path: string;

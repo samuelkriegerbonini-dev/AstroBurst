@@ -61,16 +61,6 @@ impl HduHeader {
         ((raw + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE
     }
 
-    pub fn header_blocks(&self) -> usize {
-        let total_cards = self.cards.len() + 1;
-        let cards_per_block = BLOCK_SIZE / 80;
-        (total_cards + cards_per_block - 1) / cards_per_block
-    }
-
-    pub fn data_offset(&self, header_start: usize) -> usize {
-        header_start + self.header_blocks() * BLOCK_SIZE
-    }
-
     pub fn merge_with(&self, extension: &HduHeader) -> HduHeader {
         let skip_keys: &[&str] = &[
             "SIMPLE", "XTENSION", "EXTEND", "PCOUNT", "GCOUNT",

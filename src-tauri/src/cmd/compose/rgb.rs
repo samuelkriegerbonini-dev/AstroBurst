@@ -225,9 +225,35 @@ pub async fn restretch_composite_cmd(
         let stf_g = StfParams { shadow: shadow_g, midtone: midtone_g, highlight: highlight_g };
         let stf_b = StfParams { shadow: shadow_b, midtone: midtone_b, highlight: highlight_b };
 
-        let mut r_stretched = apply_stf_f32(entry_r.arr(), &stf_r, entry_r.stats());
-        let mut g_stretched = apply_stf_f32(entry_g.arr(), &stf_g, entry_g.stats());
-        let mut b_stretched = apply_stf_f32(entry_b.arr(), &stf_b, entry_b.stats());
+        let identical_params = shadow_r == shadow_g
+            && shadow_g == shadow_b
+            && midtone_r == midtone_g
+            && midtone_g == midtone_b
+            && highlight_r == highlight_g
+            && highlight_g == highlight_b;
+
+        let linked_stats = if identical_params {
+            Some(crate::core::imaging::stats::combine_channel_stats(
+                entry_r.stats(),
+                entry_g.stats(),
+                entry_b.stats(),
+            ))
+        } else {
+            None
+        };
+
+        let (mut r_stretched, mut g_stretched, mut b_stretched) = match &linked_stats {
+            Some(combined) => (
+                apply_stf_f32(entry_r.arr(), &stf_r, combined),
+                apply_stf_f32(entry_g.arr(), &stf_g, combined),
+                apply_stf_f32(entry_b.arr(), &stf_b, combined),
+            ),
+            None => (
+                apply_stf_f32(entry_r.arr(), &stf_r, entry_r.stats()),
+                apply_stf_f32(entry_g.arr(), &stf_g, entry_g.stats()),
+                apply_stf_f32(entry_b.arr(), &stf_b, entry_b.stats()),
+            ),
+        };
 
         if let Some(cfg) = helpers::parse_scnr_config(scnr_enabled, scnr_method.as_deref(), scnr_amount, None) {
             apply_scnr_inplace(&mut r_stretched, &mut g_stretched, &mut b_stretched, &cfg);

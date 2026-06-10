@@ -22,36 +22,41 @@ pub fn compute_power_spectrum(data: &Array2<f32>) -> Result<FftResult> {
 
 pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Result<FftResult> {
     let (rows, cols) = data.dim();
-    let size = rows.max(cols).next_power_of_two();
+    let fft_rows = rows.next_power_of_two();
+    let fft_cols = cols.next_power_of_two();
 
-    let engine = FftEngine2D::<f32>::new(size, size);
+    let engine = FftEngine2D::<f32>::new(fft_rows, fft_cols);
 
     let mut buf = if apply_window {
         let hann_row = window::hann_symmetric::<f32>(rows);
         let hann_col = window::hann_symmetric::<f32>(cols);
-        fft::prepare_windowed_buffer(data, &hann_row, &hann_col, size, size)
+        fft::prepare_windowed_buffer(data, &hann_row, &hann_col, fft_rows, fft_cols)
     } else {
-        fft::prepare_buffer_no_window(data, size, size)
+        fft::prepare_buffer_no_window(data, fft_rows, fft_cols)
     };
 
     engine.forward_2d(&mut buf);
 
-    let half = size / 2;
-    let shifted_log: Vec<f32> = (0..size * size)
+    let half_r = (fft_rows + 1) / 2;
+    let half_c = (fft_cols + 1) / 2;
+    let shifted_log: Vec<f32> = (0..fft_rows * fft_cols)
         .into_par_iter()
         .map(|idx| {
-            let r = idx / size;
-            let c = idx % size;
-            let sr = (r + half) % size;
-            let sc = (c + half) % size;
-            let mag = complex::norm(buf[sr * size + sc]);
+            let r = idx / fft_cols;
+            let c = idx % fft_cols;
+            let sr = (r + half_r) % fft_rows;
+            let sc = (c + half_c) % fft_cols;
+            let mag = complex::norm(buf[sr * fft_cols + sc]);
             (1.0 + mag).ln()
         })
         .collect();
-    let spectrum = Array2::from_shape_vec((size, size), shifted_log).unwrap();
+    let spectrum = Array2::from_shape_vec((fft_rows, fft_cols), shifted_log).unwrap();
 
-    let display = if size > MAX_DISPLAY_SIZE {
-        downsample_area_average(&spectrum, MAX_DISPLAY_SIZE, MAX_DISPLAY_SIZE)
+    let display = if fft_rows > MAX_DISPLAY_SIZE || fft_cols > MAX_DISPLAY_SIZE {
+        let scale = MAX_DISPLAY_SIZE as f64 / fft_rows.max(fft_cols) as f64;
+        let target_h = ((fft_rows as f64 * scale).round() as usize).max(1);
+        let target_w = ((fft_cols as f64 * scale).round() as usize).max(1);
+        downsample_area_average(&spectrum, target_h, target_w)
     } else {
         spectrum
     };
@@ -62,7 +67,7 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
         spectrum: display,
         display_width: dw,
         display_height: dh,
-        original_size: size,
+        original_size: fft_rows.max(fft_cols),
         windowed: apply_window,
     })
 }

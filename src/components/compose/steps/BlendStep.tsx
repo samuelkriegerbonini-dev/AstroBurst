@@ -6,7 +6,7 @@ import { RunButton } from "../../ui";
 import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
-  sii: 673, ha: 656, nii: 658, oiii: 502,
+  sii: 673, ha: 656, nii: 658, oiii: 501,
   r: 620, g: 530, b: 470, l: 550,
 };
 

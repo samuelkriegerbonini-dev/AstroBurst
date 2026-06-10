@@ -80,3 +80,29 @@ export interface StackOptions {
   weightMode?: string;
   weights?: number[];
 }
+
+export interface DrizzleRgbOptions {
+  scale?: number;
+  pixfrac?: number;
+  kernel?: "square" | "gaussian" | "lanczos3";
+  align?: boolean;
+  wbMode?: string;
+  scnrEnabled?: boolean;
+  scnrAmount?: number;
+  saveFits?: boolean;
+}
+
+export interface DrizzleRgbResult {
+  png_path: string;
+  fits_path?: string | null;
+  previewUrl?: string;
+  dimensions: [number, number];
+  output_dims: [number, number];
+  input_dims: [number, number];
+  frame_count_r: number;
+  frame_count_g: number;
+  frame_count_b: number;
+  rejected_pixels: number;
+  scale: number;
+  elapsed_ms: number;
+}

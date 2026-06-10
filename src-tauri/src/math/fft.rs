@@ -29,7 +29,7 @@ impl FftFloat for f32 {
     #[inline] fn sin_val(self) -> Self { self.sin() }
     #[inline] fn sqrt_val(self) -> Self { self.sqrt() }
     #[inline] fn abs_val(self) -> Self { self.abs() }
-    #[inline] fn ln1p_val(self) -> Self { (1.0 + self).ln() }
+    #[inline] fn ln1p_val(self) -> Self { self.ln_1p() }
     #[inline] fn is_finite_val(self) -> bool { self.is_finite() }
     #[inline] fn max_of(self, other: Self) -> Self { self.max(other) }
     #[inline] fn min_of(self, other: Self) -> Self { self.min(other) }
@@ -48,7 +48,7 @@ impl FftFloat for f64 {
     #[inline] fn sin_val(self) -> Self { self.sin() }
     #[inline] fn sqrt_val(self) -> Self { self.sqrt() }
     #[inline] fn abs_val(self) -> Self { self.abs() }
-    #[inline] fn ln1p_val(self) -> Self { (1.0 + self).ln() }
+    #[inline] fn ln1p_val(self) -> Self { self.ln_1p() }
     #[inline] fn is_finite_val(self) -> bool { self.is_finite() }
     #[inline] fn max_of(self, other: Self) -> Self { self.max(other) }
     #[inline] fn min_of(self, other: Self) -> Self { self.min(other) }
@@ -253,8 +253,8 @@ pub fn shifted_log_magnitude<T: FftFloat>(
     rows: usize,
     cols: usize,
 ) -> Vec<T> {
-    let half_r = rows / 2;
-    let half_c = cols / 2;
+    let half_r = (rows + 1) / 2;
+    let half_c = (cols + 1) / 2;
     (0..rows * cols)
         .into_par_iter()
         .map(|idx| {

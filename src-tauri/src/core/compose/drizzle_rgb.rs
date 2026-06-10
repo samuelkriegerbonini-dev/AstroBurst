@@ -1,5 +1,6 @@
 use ndarray::{Array2, s};
 
+use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::white_balance;
 use crate::core::imaging::scnr;
 use crate::core::imaging::stats;
@@ -61,9 +62,36 @@ pub fn process_drizzle_rgb(
     };
 
     let zeros = Array2::<f32>::zeros((out_rows, out_cols));
-    let r_img = channels.r.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
-    let g_img = channels.g.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
-    let b_img = channels.b.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
+    let mut r_img = channels.r.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
+    let mut g_img = channels.g.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
+    let mut b_img = channels.b.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
+
+    let present: Vec<usize> = [channels.r.is_some(), channels.g.is_some(), channels.b.is_some()]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &p)| if p { Some(i) } else { None })
+        .collect();
+
+    if config.align && present.len() >= 2 && out_rows > 0 && out_cols > 0 {
+        let reference = match present[0] {
+            0 => r_img.clone(),
+            1 => g_img.clone(),
+            _ => b_img.clone(),
+        };
+        let align_to_ref = |img: &mut Array2<f32>, label: &str| {
+            match align_pair_with_label(&reference, img, config.align_method, out_rows, out_cols, label) {
+                Ok(res) => *img = res.aligned,
+                Err(e) => log::warn!("Drizzle RGB: channel '{}' registration failed: {}", label, e),
+            }
+        };
+        for &idx in &present[1..] {
+            match idx {
+                0 => align_to_ref(&mut r_img, "R"),
+                1 => align_to_ref(&mut g_img, "G"),
+                _ => align_to_ref(&mut b_img, "B"),
+            }
+        }
+    }
 
     let sr_full = stats::compute_image_stats(&r_img);
     let sg_full = stats::compute_image_stats(&g_img);
@@ -87,13 +115,12 @@ pub fn process_drizzle_rgb(
 
     let (stf_r, stf_g, stf_b, st_r, st_g, st_b) = if config.auto_stretch {
         if config.linked_stf {
-            let combined = (&r_wb + &g_wb + &b_wb) / 3.0;
-            let (st, _) = stf::analyze(&combined);
-            let params = stf::auto_stf(&st, &stf_cfg);
             let sr = stats::compute_image_stats(&r_wb);
             let sg = stats::compute_image_stats(&g_wb);
             let sb = stats::compute_image_stats(&b_wb);
-            (params, params, params, sr, sg, sb)
+            let combined = stats::combine_channel_stats(&sr, &sg, &sb);
+            let params = stf::auto_stf(&combined, &stf_cfg);
+            (params, params, params, combined.clone(), combined.clone(), combined)
         } else {
             let (sr, _) = stf::analyze(&r_wb);
             let (sg, _) = stf::analyze(&g_wb);

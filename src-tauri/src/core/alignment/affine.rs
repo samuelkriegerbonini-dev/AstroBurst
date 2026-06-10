@@ -250,7 +250,7 @@ fn fallback_phase_correlation(
 
     let max_tx = cols as f64 * MAX_OFFSET_FRACTION;
     let max_ty = rows as f64 * MAX_OFFSET_FRACTION;
-    if pc.dx.abs() > max_tx || pc.dy.abs() > max_ty || pc.confidence < 1.5 {
+    if pc.dx.abs() > max_tx || pc.dy.abs() > max_ty || phase_correlation::is_low_confidence(pc.confidence) {
         return AffineAlignResult {
             transform: AffineTransform::identity(),
             matched_stars: 0,
@@ -669,7 +669,7 @@ pub fn warp_image(
     let (src_rows, src_cols) = image.dim();
     let slice = image.as_slice().expect("contiguous");
     let total = out_rows * out_cols;
-    let mut buf = vec![0.0f32; total];
+    let mut buf = vec![f32::NAN; total];
 
     buf.par_chunks_mut(out_cols)
         .enumerate()
@@ -828,6 +828,6 @@ mod tests {
         let img = Array2::from_elem((50, 50), 100.0f32);
         let t = AffineTransform::translation(1000.0, 1000.0);
         let warped = warp_image(&img, &t, 50, 50);
-        assert!((warped[[25, 25]] - 0.0).abs() < 1e-10);
+        assert!(warped[[25, 25]].is_nan());
     }
 }

@@ -11,26 +11,99 @@ use crate::math::median::median_f32_mut;
 use crate::types::compose::AlignMethod;
 use crate::types::constants::MAD_TO_SIGMA;
 
+fn frame_contributions(
+    frame: &Array2<f32>,
+    dx: f64,
+    dy: f64,
+    scale: f64,
+    pixfrac: f64,
+    kernel: DrizzleKernel,
+    out_rows: usize,
+    out_cols: usize,
+) -> Vec<Vec<(usize, f32, f64)>> {
+    let (in_rows, in_cols) = frame.dim();
+    let src = frame.as_slice().expect("contiguous");
+
+    (0..in_rows)
+        .into_par_iter()
+        .map(|iy| {
+            let mut contribs = Vec::new();
+            let row_base = iy * in_cols;
+            for ix in 0..in_cols {
+                let val = src[row_base + ix];
+                if !val.is_finite() {
+                    continue;
+                }
+
+                let cx = (ix as f64 + dx) * scale;
+                let cy = (iy as f64 + dy) * scale;
+
+                let half = pixfrac * scale * 0.5;
+                let ox_min = clamp_index((cx - half).floor() as i64, out_cols);
+                let ox_max = clamp_index((cx + half).ceil() as i64, out_cols);
+                let oy_min = clamp_index((cy - half).floor() as i64, out_rows);
+                let oy_max = clamp_index((cy + half).ceil() as i64, out_rows);
+
+                for oy in oy_min..=oy_max {
+                    for ox in ox_min..=ox_max {
+                        let w = match kernel {
+                            DrizzleKernel::Square => {
+                                overlap_area(
+                                    cx - half, cy - half, cx + half, cy + half,
+                                    ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
+                                )
+                            }
+                            DrizzleKernel::Gaussian => {
+                                let dist2 = (ox as f64 + 0.5 - cx).powi(2)
+                                    + (oy as f64 + 0.5 - cy).powi(2);
+                                let sigma = half.max(0.5);
+                                (-dist2 / (2.0 * sigma * sigma)).exp()
+                            }
+                            DrizzleKernel::Lanczos3 => {
+                                let ddx = (ox as f64 + 0.5 - cx).abs();
+                                let ddy = (oy as f64 + 0.5 - cy).abs();
+                                lanczos3(ddx) * lanczos3(ddy)
+                            }
+                        };
+
+                        if w > 1e-12 {
+                            let idx = oy * out_cols + ox;
+                            contribs.push((idx, val, w));
+                        }
+                    }
+                }
+            }
+            contribs
+        })
+        .collect()
+}
+
 struct DrizzleAccumulator {
     storage: Vec<f32>,
     sample_weights: Vec<f32>,
-    counts: Vec<u16>,
+    slot_starts: Vec<usize>,
+    fill: Vec<u32>,
     weights: Vec<f64>,
-    max_per_pixel: usize,
     out_rows: usize,
     out_cols: usize,
 }
 
 impl DrizzleAccumulator {
-    fn new(out_rows: usize, out_cols: usize, n_frames: usize) -> Self {
+    fn new(out_rows: usize, out_cols: usize, counts: &[u32]) -> Self {
         let n = out_rows * out_cols;
-        let max_per_pixel = (n_frames * 2).max(4);
+        let mut slot_starts = Vec::with_capacity(n + 1);
+        let mut total = 0usize;
+        slot_starts.push(0);
+        for &c in counts {
+            total += c as usize;
+            slot_starts.push(total);
+        }
         Self {
-            storage: vec![0.0f32; n * max_per_pixel],
-            sample_weights: vec![0.0f32; n * max_per_pixel],
-            counts: vec![0u16; n],
+            storage: vec![0.0f32; total],
+            sample_weights: vec![0.0f32; total],
+            slot_starts,
+            fill: vec![0u32; n],
             weights: vec![0.0; n],
-            max_per_pixel,
             out_rows,
             out_cols,
         }
@@ -38,12 +111,11 @@ impl DrizzleAccumulator {
 
     #[inline]
     fn push(&mut self, idx: usize, val: f32, w: f64) {
-        let count = self.counts[idx] as usize;
-        if count < self.max_per_pixel {
-            let slot = idx * self.max_per_pixel + count;
+        let slot = self.slot_starts[idx] + self.fill[idx] as usize;
+        if slot < self.slot_starts[idx + 1] {
             self.storage[slot] = val;
             self.sample_weights[slot] = w as f32;
-            self.counts[idx] += 1;
+            self.fill[idx] += 1;
             self.weights[idx] += w;
         }
     }
@@ -57,65 +129,10 @@ impl DrizzleAccumulator {
         pixfrac: f64,
         kernel: DrizzleKernel,
     ) {
-        let (in_rows, in_cols) = frame.dim();
-        let src = frame.as_slice().expect("contiguous");
-        let out_rows = self.out_rows;
-        let out_cols = self.out_cols;
-
-        let row_contribs: Vec<Vec<(usize, f32, f64)>> = (0..in_rows)
-            .into_par_iter()
-            .map(|iy| {
-                let mut contribs = Vec::new();
-                let row_base = iy * in_cols;
-                for ix in 0..in_cols {
-                    let val = src[row_base + ix];
-                    if !val.is_finite() {
-                        continue;
-                    }
-
-                    let cx = (ix as f64 + dx) * scale;
-                    let cy = (iy as f64 + dy) * scale;
-
-                    let half = pixfrac * scale * 0.5;
-                    let ox_min = clamp_index((cx - half).floor() as i64, out_cols);
-                    let ox_max = clamp_index((cx + half).ceil() as i64, out_cols);
-                    let oy_min = clamp_index((cy - half).floor() as i64, out_rows);
-                    let oy_max = clamp_index((cy + half).ceil() as i64, out_rows);
-
-                    for oy in oy_min..=oy_max {
-                        for ox in ox_min..=ox_max {
-                            let w = match kernel {
-                                DrizzleKernel::Square => {
-                                    overlap_area(
-                                        cx - half, cy - half, cx + half, cy + half,
-                                        ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
-                                    )
-                                }
-                                DrizzleKernel::Gaussian => {
-                                    let dist2 = (ox as f64 + 0.5 - cx).powi(2)
-                                        + (oy as f64 + 0.5 - cy).powi(2);
-                                    let sigma = half.max(0.5);
-                                    (-dist2 / (2.0 * sigma * sigma)).exp()
-                                }
-                                DrizzleKernel::Lanczos3 => {
-                                    let ddx = (ox as f64 + 0.5 - cx).abs();
-                                    let ddy = (oy as f64 + 0.5 - cy).abs();
-                                    lanczos3(ddx) * lanczos3(ddy)
-                                }
-                            };
-
-                            if w > 1e-12 {
-                                let idx = oy * out_cols + ox;
-                                contribs.push((idx, val, w));
-                            }
-                        }
-                    }
-                }
-                contribs
-            })
-            .collect();
-
-        for contribs in row_contribs {
+        let rows = frame_contributions(
+            frame, dx, dy, scale, pixfrac, kernel, self.out_rows, self.out_cols,
+        );
+        for contribs in rows {
             for (idx, val, w) in contribs {
                 self.push(idx, val, w);
             }
@@ -129,21 +146,19 @@ impl DrizzleAccumulator {
         sigma_iterations: usize,
     ) -> (Array2<f32>, Array2<f32>, u64) {
         let n = self.out_rows * self.out_cols;
-        let mpp = self.max_per_pixel;
 
         let results: Vec<(f32, f32, u64)> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let count = self.counts[i] as usize;
+                let count = self.fill[i] as usize;
                 if count == 0 {
                     return (0.0, 0.0, 0);
                 }
-                let base = i * mpp;
+                let base = self.slot_starts[i];
                 if count == 1 {
                     return (self.storage[base], self.weights[i] as f32, 0);
                 }
 
-                // (value, kernel weight) pairs contributing to this output pixel.
                 let mut active: Vec<(f32, f32)> = (0..count)
                     .map(|k| (self.storage[base + k], self.sample_weights[base + k]))
                     .collect();
@@ -338,7 +353,21 @@ pub fn drizzle_stack(
         }
     }
 
-    let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols, images_ref.len());
+    let mut counts = vec![0u32; out_rows * out_cols];
+    for (i, img) in images_ref.iter().enumerate() {
+        let (dx, dy) = offsets[i];
+        let rows = frame_contributions(
+            img, -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
+        );
+        for contribs in rows {
+            for (idx, _, _) in contribs {
+                counts[idx] += 1;
+            }
+        }
+    }
+
+    let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols, &counts);
+    drop(counts);
 
     for (i, img) in images_ref.iter().enumerate() {
         let (dx, dy) = offsets[i];

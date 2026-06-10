@@ -126,6 +126,8 @@ unsafe fn normalize_chunk_avx2(
     let v_high = _mm256_set1_ps(high);
     let v_padding = _mm256_set1_ps(PADDING_THRESHOLD);
     let v_zero = _mm256_setzero_ps();
+    let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    let v_inf = _mm256_set1_ps(f32::INFINITY);
 
     let chunks = input.len() / 8;
     let remainder = input.len() % 8;
@@ -133,7 +135,7 @@ unsafe fn normalize_chunk_avx2(
     for i in 0..chunks {
         let offset = i * 8;
         let data = _mm256_loadu_ps(input.as_ptr().add(offset));
-        let is_finite = _mm256_cmp_ps(data, data, _CMP_EQ_OQ);
+        let is_finite = _mm256_cmp_ps(_mm256_and_ps(data, abs_mask), v_inf, _CMP_LT_OQ);
         let is_above_pad = _mm256_cmp_ps(data, v_padding, _CMP_GT_OQ);
         let is_valid_mask = _mm256_and_ps(is_finite, is_above_pad);
         let clamped = _mm256_min_ps(_mm256_max_ps(data, v_low), v_high);
@@ -172,9 +174,10 @@ pub fn asinh_normalize_simd(data: &Array2<f32>) -> Array2<f32> {
     let mut deviations: Vec<f32> = finite.iter().map(|v| (v - median).abs()).collect();
     let sigma = (median_f32_mut(&mut deviations) * MAD_TO_SIGMA as f32).max(1e-10);
 
-    finite.sort_unstable_by(f32_cmp);
-    let low = finite[(n as f64 * 0.01) as usize];
-    let high = finite[((n as f64 * 0.999) as usize).min(n - 1)];
+    let lo_idx = (n as f64 * 0.01) as usize;
+    let hi_idx = ((n as f64 * 0.999) as usize).min(n - 1);
+    let (_, &mut low, _) = finite.select_nth_unstable_by(lo_idx, f32_cmp);
+    let (_, &mut high, _) = finite.select_nth_unstable_by(hi_idx, f32_cmp);
 
     let alpha: f32 = 10.0;
     let inv_sigma_alpha = alpha / sigma;
@@ -279,11 +282,13 @@ unsafe fn find_minmax_avx2(data: &[f32]) -> (f32, f32) {
 
     let mut v_min = _mm256_set1_ps(f32::MAX);
     let mut v_max = _mm256_set1_ps(f32::MIN);
+    let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    let v_inf = _mm256_set1_ps(f32::INFINITY);
 
     for i in 0..chunks {
         let offset = i * 8;
         let v = _mm256_loadu_ps(data.as_ptr().add(offset));
-        let is_finite = _mm256_cmp_ps(v, v, _CMP_EQ_OQ);
+        let is_finite = _mm256_cmp_ps(_mm256_and_ps(v, abs_mask), v_inf, _CMP_LT_OQ);
         let masked_for_min = _mm256_blendv_ps(_mm256_set1_ps(f32::MAX), v, is_finite);
         let masked_for_max = _mm256_blendv_ps(_mm256_set1_ps(f32::MIN), v, is_finite);
         v_min = _mm256_min_ps(v_min, masked_for_min);

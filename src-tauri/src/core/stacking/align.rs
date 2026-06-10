@@ -40,7 +40,7 @@ pub fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32
     let owned = ensure_contiguous(image);
     let (rows, cols) = owned.dim();
     let src = owned.as_slice().expect("contiguous after ensure_contiguous");
-    let mut out = vec![0.0f32; rows * cols];
+    let mut out = vec![f32::NAN; rows * cols];
     let rows_f = rows as f64;
     let cols_f = cols as f64;
     out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {

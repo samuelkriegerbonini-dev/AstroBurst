@@ -126,6 +126,7 @@ pub fn run() {
             cmd::stacking::calibrate,
             cmd::stacking::stack,
             cmd::stacking::drizzle_stack,
+            cmd::stacking::drizzle_rgb_cmd,
             cmd::stacking::run_pipeline_cmd,
             cmd::compose::restretch_composite_cmd,
             cmd::compose::clear_composite_cache_cmd,

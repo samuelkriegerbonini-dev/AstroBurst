@@ -14,6 +14,7 @@ pub struct CalibrationMasters {
 pub struct ChannelInput {
     pub lights: Vec<Array2<f32>>,
     pub label: String,
+    pub dark_scales: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ pub struct BatchChannelStats {
 pub fn calibrate_light(
     light: &Array2<f32>,
     masters: &CalibrationMasters,
+    dark_scale: f32,
 ) -> Array2<f32> {
     let (rows, cols) = light.dim();
     let npix = rows * cols;
@@ -99,7 +101,7 @@ pub fn calibrate_light(
             }
             if dark_ok {
                 if let Some(d) = dark_slice {
-                    v -= d[i];
+                    v -= d[i] * dark_scale;
                 }
             }
             if flat_ok {
@@ -110,7 +112,7 @@ pub fn calibrate_light(
                     }
                 }
             }
-            if v < 0.0 { 0.0 } else { v }
+            v
         })
         .collect();
 
@@ -154,7 +156,11 @@ pub fn run_batch_pipeline(
         let calibrated: Vec<Array2<f32>> = channel
             .lights
             .par_iter()
-            .map(|l| calibrate_light(l, masters))
+            .enumerate()
+            .map(|(i, l)| {
+                let scale = channel.dark_scales.get(i).copied().unwrap_or(1.0);
+                calibrate_light(l, masters, scale)
+            })
             .collect();
 
         let normalized = if config.stack.normalize_before_stack {
@@ -163,8 +169,9 @@ pub fn run_batch_pipeline(
             calibrated
         };
 
-        let (stacked, rejection_counts) =
+        let (mut stacked, rejection_counts) =
             sigma_clipped_mean_stack(&normalized, &config.stack);
+        stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
         let var: f64 = stacked
@@ -343,7 +350,10 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
             vals.clear();
             let idx = base + x;
             for (i, slice) in frame_slices.iter().enumerate() {
-                vals.push((slice[idx], i));
+                let v = slice[idx];
+                if v.is_finite() {
+                    vals.push((v, i));
+                }
             }
 
             for _ in 0..config.max_iterations {

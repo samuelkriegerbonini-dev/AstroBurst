@@ -74,7 +74,7 @@ pub fn generate(config: &SynthConfig) -> (Array2<f32>, Array2<f32>, Vec<Star>) {
             config.noise.seed + 999,
             config.vignette_strength,
         );
-        noise::apply_flat_field(&mut image, &flat);
+        noise::apply_vignette(&mut image, &flat);
     }
 
     let noisy = noise::apply_noise(&image, &config.noise);
@@ -96,7 +96,7 @@ pub fn generate_stack(config: &SynthConfig) -> (Vec<Array2<f32>>, Array2<f32>, V
                     config.noise.seed + 999 + i as u64,
                     config.vignette_strength,
                 );
-                noise::apply_flat_field(&mut img, &flat);
+                noise::apply_vignette(&mut img, &flat);
             }
             let mut np = config.noise.clone();
             np.seed = config.noise.seed + i as u64 * 7919;

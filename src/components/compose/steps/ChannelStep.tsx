@@ -51,7 +51,7 @@ const FILTER_TO_BIN: Record<string, string> = {
 
 const FILTER_PATTERNS: [string, RegExp][] = [
   ["ha", /(?:H[\-_]?(?:alpha|a)|656\s*(?:nm)?|H_?α|F656N)/i],
-  ["oiii", /(?:O\s*III|\[?OIII\]?|502\s*(?:nm)?|O3\b|F502N|F501N)/i],
+  ["oiii", /(?:O\s*III|\[?OIII\]?|50[012](?:\.\d+)?\s*nm|502\b|5007|O3\b|F502N|F501N)/i],
   ["sii", /(?:S\s*II|\[?SII\]?|673\s*(?:nm)?|S2\b|F673N)/i],
   ["r", /\b(?:Red|R['_\-]?band|Sloan[_\-]?r|F444W|F410M|F356W)\b/i],
   ["g", /\b(?:Green|G['_\-]?band|Sloan[_\-]?g|V[_\-]?band|F200W|F277W)\b/i],

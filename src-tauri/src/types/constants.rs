@@ -284,3 +284,4 @@ pub const RES_STAB_R: &str = "stab_r";
 pub const RES_STAB_G: &str = "stab_g";
 pub const RES_STAB_B: &str = "stab_b";
 pub const RES_REF_CHANNEL: &str = "ref_channel";
+pub const IS_SYNTHETIC_CATALOG: &str = "is_synthetic_catalog";

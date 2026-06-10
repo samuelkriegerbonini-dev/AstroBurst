@@ -270,8 +270,122 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
     (1.0 / norm_flux.sqrt() + fwhm_factor).clamp(-0.3, 4.0)
 }
 
+#[cfg(not(feature = "vizier"))]
 fn query_gaia_vizier(_ra_center: f64, _dec_center: f64, _radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
-    Err("Gaia DR3 TAP requires 'vizier' feature. Using built-in Bp-Rp estimation.".into())
+    Err("Gaia DR3 query requires the 'vizier' feature. Using built-in Bp-Rp estimation.".into())
+}
+
+#[cfg(feature = "vizier")]
+fn query_gaia_vizier(ra_center: f64, dec_center: f64, radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
+    let radius = radius_deg.clamp(0.01, 5.0);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("HTTP client init failed: {}", e))?;
+
+    let response = client
+        .get("https://vizier.cds.unistra.fr/viz-bin/asu-tsv")
+        .query(&[
+            ("-source", "I/355/gaiadr3"),
+            ("-c", format!("{:.6} {:+.6}", ra_center, dec_center).as_str()),
+            ("-c.r", format!("{:.4}", radius).as_str()),
+            ("-c.u", "deg"),
+            ("-out", "RA_ICRS,DE_ICRS,BP-RP,Gmag"),
+            ("-out.max", "500"),
+            ("-sort", "Gmag"),
+            ("Gmag", "<17"),
+        ])
+        .send()
+        .map_err(|e| format!("VizieR request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("VizieR returned HTTP {}", response.status()));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| format!("VizieR response read failed: {}", e))?;
+
+    let stars = parse_vizier_tsv(&body);
+    if stars.len() < 3 {
+        return Err(format!(
+            "VizieR returned only {} usable stars within {:.2} deg",
+            stars.len(),
+            radius
+        ));
+    }
+
+    log::info!(
+        "Gaia DR3 via VizieR: {} stars within {:.2} deg of ({:.4}, {:+.4})",
+        stars.len(),
+        radius,
+        ra_center,
+        dec_center
+    );
+
+    Ok(stars)
+}
+
+#[cfg_attr(not(feature = "vizier"), allow(dead_code))]
+fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
+    let mut col_ra: Option<usize> = None;
+    let mut col_dec: Option<usize> = None;
+    let mut col_color: Option<usize> = None;
+    let mut in_data = false;
+    let mut out = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = trimmed.split('\t').map(|f| f.trim()).collect();
+
+        if !in_data {
+            let is_dashes = fields
+                .iter()
+                .all(|f| !f.is_empty() && f.chars().all(|c| c == '-'));
+            if is_dashes {
+                if col_ra.is_none() || col_dec.is_none() || col_color.is_none() {
+                    return out;
+                }
+                in_data = true;
+            } else if col_ra.is_none() {
+                col_ra = fields.iter().position(|f| *f == "RA_ICRS");
+                col_dec = fields.iter().position(|f| *f == "DE_ICRS");
+                col_color = fields.iter().position(|f| *f == "BP-RP");
+            }
+            continue;
+        }
+
+        let (Some(ir), Some(id), Some(ic)) = (col_ra, col_dec, col_color) else {
+            break;
+        };
+        if fields.len() <= ir.max(id).max(ic) {
+            continue;
+        }
+
+        let (Ok(ra), Ok(dec), Ok(bp_rp)) = (
+            fields[ir].parse::<f64>(),
+            fields[id].parse::<f64>(),
+            fields[ic].parse::<f64>(),
+        ) else {
+            continue;
+        };
+
+        if !(ra.is_finite() && dec.is_finite() && bp_rp.is_finite()) {
+            continue;
+        }
+        if !(0.0..360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+            continue;
+        }
+
+        out.push(CatalogStar { ra, dec, bp_rp });
+    }
+
+    out
 }
 
 fn cross_match_stars(
@@ -333,6 +447,7 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
     let inner_r2 = inner_annulus * inner_annulus;
     let outer_r2 = outer_annulus * outer_annulus;
     let mut flux = 0.0f64;
+    let mut aperture_count = 0u32;
     let mut bg_sum = 0.0f64;
     let mut bg_count = 0u32;
 
@@ -347,8 +462,12 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
             let dy = py as f64 - y;
             let d2 = dx * dx + dy * dy;
             let v = image[[py, px]] as f64;
+            if !v.is_finite() {
+                continue;
+            }
             if d2 <= r2 {
                 flux += v;
+                aperture_count += 1;
             } else if d2 >= inner_r2 && d2 <= outer_r2 {
                 bg_sum += v;
                 bg_count += 1;
@@ -356,10 +475,9 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
         }
     }
 
-    if bg_count > 0 {
+    if bg_count > 0 && aperture_count > 0 {
         let bg_per_pixel = bg_sum / bg_count as f64;
-        let aperture_area = std::f64::consts::PI * r2;
-        flux -= bg_per_pixel * aperture_area;
+        flux -= bg_per_pixel * aperture_count as f64;
     }
 
     flux.max(0.0)
@@ -374,8 +492,11 @@ fn compute_correction_factors(
     let mut sum_ratio_r = 0.0f64;
     let mut sum_ratio_g = 0.0f64;
     let mut sum_ratio_b = 0.0f64;
-    let mut sum_weight = 0.0f64;
+    let mut sum_weight_r = 0.0f64;
+    let mut sum_weight_g = 0.0f64;
+    let mut sum_weight_b = 0.0f64;
     let mut sum_ci = 0.0f64;
+    let mut ci_count = 0usize;
 
     for star in matched {
         let teff = bp_rp_to_teff(star.bp_rp);
@@ -399,28 +520,31 @@ fn compute_correction_factors(
 
         if mr > 1e-6 {
             sum_ratio_r += (er / mr) * weight;
+            sum_weight_r += weight;
         }
         if mg > 1e-6 {
             sum_ratio_g += (eg / mg) * weight;
+            sum_weight_g += weight;
         }
         if mb > 1e-6 {
             sum_ratio_b += (eb / mb) * weight;
+            sum_weight_b += weight;
         }
-        sum_weight += weight;
         sum_ci += star.bp_rp;
+        ci_count += 1;
     }
 
-    if sum_weight < 1e-10 || matched.is_empty() {
+    if sum_weight_r < 1e-10 || sum_weight_g < 1e-10 || sum_weight_b < 1e-10 {
         return (1.0, 1.0, 1.0, 0.0);
     }
 
-    let mut r_factor = sum_ratio_r / sum_weight;
-    let mut g_factor = sum_ratio_g / sum_weight;
-    let mut b_factor = sum_ratio_b / sum_weight;
+    let mut r_factor = sum_ratio_r / sum_weight_r;
+    let mut g_factor = sum_ratio_g / sum_weight_g;
+    let mut b_factor = sum_ratio_b / sum_weight_b;
 
-    r_factor *= wr_r;
-    g_factor *= wr_g;
-    b_factor *= wr_b;
+    r_factor /= wr_r.max(1e-10);
+    g_factor /= wr_g.max(1e-10);
+    b_factor /= wr_b.max(1e-10);
 
     let norm = g_factor;
     if norm > 1e-10 {
@@ -429,7 +553,44 @@ fn compute_correction_factors(
         b_factor /= norm;
     }
 
-    let avg_ci = sum_ci / matched.len() as f64;
+    let avg_ci = if ci_count > 0 { sum_ci / ci_count as f64 } else { 0.0 };
 
     (r_factor, g_factor, b_factor, avg_ci)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vizier_tsv_basic() {
+        let body = "#INFO VizieR result\n#Column list\nRA_ICRS\tDE_ICRS\tBP-RP\tGmag\ndeg\tdeg\tmag\tmag\n---------\t---------\t------\t----\n83.633083\t22.014472\t0.650\t8.5\n83.700000\t22.100000\t\t9.0\n84.000000\t21.900000\t1.234\t10.2\n";
+        let stars = parse_vizier_tsv(body);
+        assert_eq!(stars.len(), 2);
+        assert!((stars[0].ra - 83.633083).abs() < 1e-9);
+        assert!((stars[0].dec - 22.014472).abs() < 1e-9);
+        assert!((stars[0].bp_rp - 0.650).abs() < 1e-9);
+        assert!((stars[1].bp_rp - 1.234).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_missing_columns() {
+        let body = "RA_ICRS\tDE_ICRS\tGmag\ndeg\tdeg\tmag\n----\t----\t----\n83.6\t22.0\t8.5\n";
+        let stars = parse_vizier_tsv(body);
+        assert!(stars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_rejects_out_of_range() {
+        let body = "RA_ICRS\tDE_ICRS\tBP-RP\n---\t---\t---\n400.0\t22.0\t0.5\n83.6\t95.0\t0.5\n83.6\t22.0\t0.5\n";
+        let stars = parse_vizier_tsv(body);
+        assert_eq!(stars.len(), 1);
+        assert!((stars[0].ra - 83.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_empty_response() {
+        assert!(parse_vizier_tsv("").is_empty());
+        assert!(parse_vizier_tsv("#nothing here\n#at all\n").is_empty());
+    }
 }

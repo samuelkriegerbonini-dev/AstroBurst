@@ -172,6 +172,7 @@ export function spccCalibrate(
     whiteReference?: string;
     minSnr?: number;
     maxStars?: number;
+    catalog?: "gaia" | "builtin";
   } = {},
 ): Promise<SpccResult> {
   return typedInvoke<SpccResult>("spcc_calibrate_cmd", {
@@ -182,5 +183,6 @@ export function spccCalibrate(
     whiteReference: options.whiteReference ?? "average_spiral",
     minSnr: options.minSnr ?? 20.0,
     maxStars: options.maxStars ?? 200,
+    catalog: options.catalog ?? "gaia",
   });
 }

@@ -104,8 +104,12 @@ impl SplineLut {
 
     #[inline(always)]
     pub fn apply(&self, v: f32) -> f32 {
-        let idx = (v.clamp(0.0, 1.0) * 4095.0) as usize;
-        unsafe { *self.lut.get_unchecked(idx.min(4095)) }
+        let pos = v.clamp(0.0, 1.0) * 4095.0;
+        let idx = (pos as usize).min(4094);
+        let frac = pos - idx as f32;
+        let a = unsafe { *self.lut.get_unchecked(idx) };
+        let b = unsafe { *self.lut.get_unchecked(idx + 1) };
+        a + (b - a) * frac
     }
 }
 

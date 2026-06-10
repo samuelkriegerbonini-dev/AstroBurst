@@ -1,5 +1,5 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
-import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions } from "../shared/types/stacking";
+import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions, DrizzleRgbOptions, DrizzleRgbResult } from "../shared/types/stacking";
 
 export function calibrate(
   sciencePath: string,
@@ -29,4 +29,30 @@ export function drizzleFrames(
 
 export function runCalibrationPipeline(request: PipelineRequest): Promise<PipelineResult> {
   return typedInvoke<PipelineResult>("run_pipeline_cmd", { request });
+}
+
+function channelOrNull(paths: string[]): string[] | null {
+  return paths.length >= 2 ? paths : null;
+}
+
+export function drizzleRgbStack(
+  rPaths: string[],
+  gPaths: string[],
+  bPaths: string[],
+  outputDir?: string,
+  options: DrizzleRgbOptions = {},
+): Promise<DrizzleRgbResult> {
+  return withPreview<DrizzleRgbResult>("drizzle_rgb_cmd", outputDir, {
+    rPaths: channelOrNull(rPaths),
+    gPaths: channelOrNull(gPaths),
+    bPaths: channelOrNull(bPaths),
+    scale: options.scale ?? 2.0,
+    pixfrac: options.pixfrac ?? 0.7,
+    kernel: options.kernel ?? "square",
+    align: options.align ?? true,
+    wbMode: options.wbMode ?? null,
+    scnrEnabled: options.scnrEnabled ?? null,
+    scnrAmount: options.scnrAmount ?? null,
+    saveFits: options.saveFits ?? false,
+  });
 }

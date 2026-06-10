@@ -51,10 +51,10 @@ pub fn phase_correlate(
         return correlate_single(&ref_cropped, &tgt_cropped);
     }
 
-    let scale_y = rows as f64 / COARSE_MAX_DIM as f64;
-    let scale_x = cols as f64 / COARSE_MAX_DIM as f64;
     let ds_rows = COARSE_MAX_DIM.min(rows);
     let ds_cols = COARSE_MAX_DIM.min(cols);
+    let scale_y = rows as f64 / ds_rows as f64;
+    let scale_x = cols as f64 / ds_cols as f64;
 
     let ref_ds = area_downsample(&ref_cropped, ds_rows, ds_cols);
     let tgt_ds = area_downsample(&tgt_cropped, ds_rows, ds_cols);
@@ -69,8 +69,8 @@ pub fn phase_correlate(
     let tgt_cy = ((ref_cy as f64 + coarse_dy).round() as isize).clamp(0, rows as isize - 1) as usize;
     let tgt_cx = ((ref_cx as f64 + coarse_dx).round() as isize).clamp(0, cols as isize - 1) as usize;
 
-    let ref_crop = extract_crop(&ref_cropped, ref_cy, ref_cx, half, rows, cols);
-    let tgt_crop = extract_crop(&tgt_cropped, tgt_cy, tgt_cx, half, rows, cols);
+    let (ref_crop, ref_y0, ref_x0) = extract_crop(&ref_cropped, ref_cy, ref_cx, half, rows, cols);
+    let (tgt_crop, tgt_y0, tgt_x0) = extract_crop(&tgt_cropped, tgt_cy, tgt_cx, half, rows, cols);
 
     if ref_crop.dim() != tgt_crop.dim() {
         return PhaseCorrelationResult {
@@ -82,8 +82,8 @@ pub fn phase_correlate(
 
     let refine = correlate_single(&ref_crop, &tgt_crop);
     PhaseCorrelationResult {
-        dx: coarse_dx + refine.dx,
-        dy: coarse_dy + refine.dy,
+        dx: (tgt_x0 as f64 - ref_x0 as f64) + refine.dx,
+        dy: (tgt_y0 as f64 - ref_y0 as f64) + refine.dy,
         confidence: refine.confidence,
     }
 }
@@ -95,12 +95,12 @@ fn extract_crop(
     half: usize,
     rows: usize,
     cols: usize,
-) -> Array2<f32> {
+) -> (Array2<f32>, usize, usize) {
     let y0 = cy.saturating_sub(half);
     let y1 = (cy + half).min(rows);
     let x0 = cx.saturating_sub(half);
     let x1 = (cx + half).min(cols);
-    img.slice(ndarray::s![y0..y1, x0..x1]).to_owned()
+    (img.slice(ndarray::s![y0..y1, x0..x1]).to_owned(), y0, x0)
 }
 
 fn remove_mean(img: &Array2<f32>) -> Array2<f32> {
