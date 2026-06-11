@@ -34,10 +34,6 @@ pub struct WaveletResult {
 
 static B3_KERNEL_1D: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 
-const TRANSPOSE_BLOCK: usize = 64;
-const TRANSPOSE_THRESHOLD_STEP: usize = 16;
-const TRANSPOSE_THRESHOLD_ROWS: usize = 256;
-
 pub fn wavelet_denoise(
     image: &Array2<f32>,
     config: &WaveletConfig,
@@ -56,7 +52,6 @@ pub fn wavelet_denoise(
     let mut current = image.as_slice().unwrap().to_vec();
     let mut h_buf = vec![0.0f32; npix];
     let mut buf_a = vec![0.0f32; npix];
-    let mut t_buf = vec![0.0f32; npix];
 
     for scale_idx in 0..num_scales {
         if let Some(p) = progress {
@@ -67,7 +62,7 @@ pub fn wavelet_denoise(
         }
 
         let step = 1usize << scale_idx;
-        atrous_smooth_buffers(&current, rows, cols, step, &mut h_buf, &mut buf_a, &mut t_buf);
+        atrous_smooth_buffers(&current, rows, cols, step, &mut h_buf, &mut buf_a);
 
         let detail: Vec<f32> = current
             .par_iter()
@@ -138,65 +133,41 @@ fn atrous_smooth_buffers(
     step: usize,
     h_buf: &mut [f32],
     out: &mut [f32],
-    t_buf: &mut [f32],
 ) {
     h_buf.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
         let src_row = &input[y * cols..(y + 1) * cols];
         for x in 0..cols {
             let mut sum = 0.0f32;
+            let mut wsum = 0.0f32;
             for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
                 let ox = x as isize + (ki as isize - 2) * step as isize;
                 let cx = ox.clamp(0, cols as isize - 1) as usize;
-                sum += src_row[cx] * kv;
+                let v = src_row[cx];
+                if v.is_finite() {
+                    sum += v * kv;
+                    wsum += kv;
+                }
             }
-            row[x] = sum;
+            row[x] = if wsum > 0.0 { sum / wsum } else { f32::NAN };
         }
     });
 
-    if step > TRANSPOSE_THRESHOLD_STEP && rows > TRANSPOSE_THRESHOLD_ROWS {
-        block_transpose(h_buf, t_buf, rows, cols);
-
-        let t_ref: &[f32] = t_buf;
-        out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-            for x in 0..cols {
-                let col_base = x * rows;
-                let mut sum = 0.0f32;
-                for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
-                    let oy = y as isize + (ki as isize - 2) * step as isize;
-                    let cy = oy.clamp(0, rows as isize - 1) as usize;
-                    sum += t_ref[col_base + cy] * kv;
-                }
-                row[x] = sum;
-            }
-        });
-    } else {
-        out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-            for x in 0..cols {
-                let mut sum = 0.0f32;
-                for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
-                    let oy = y as isize + (ki as isize - 2) * step as isize;
-                    let cy = oy.clamp(0, rows as isize - 1) as usize;
-                    sum += h_buf[cy * cols + x] * kv;
-                }
-                row[x] = sum;
-            }
-        });
-    }
-}
-
-fn block_transpose(src: &[f32], dst: &mut [f32], rows: usize, cols: usize) {
-    for by in (0..rows).step_by(TRANSPOSE_BLOCK) {
-        let ye = (by + TRANSPOSE_BLOCK).min(rows);
-        for bx in (0..cols).step_by(TRANSPOSE_BLOCK) {
-            let xe = (bx + TRANSPOSE_BLOCK).min(cols);
-            for y in by..ye {
-                let src_row = y * cols;
-                for x in bx..xe {
-                    dst[x * rows + y] = src[src_row + x];
+    out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
+        for x in 0..cols {
+            let mut sum = 0.0f32;
+            let mut wsum = 0.0f32;
+            for (ki, &kv) in B3_KERNEL_1D.iter().enumerate() {
+                let oy = y as isize + (ki as isize - 2) * step as isize;
+                let cy = oy.clamp(0, rows as isize - 1) as usize;
+                let v = h_buf[cy * cols + x];
+                if v.is_finite() {
+                    sum += v * kv;
+                    wsum += kv;
                 }
             }
+            row[x] = if wsum > 0.0 { sum / wsum } else { f32::NAN };
         }
-    }
+    });
 }
 
 fn estimate_noise_sigma(finest_scale: &[f32]) -> f64 {
@@ -257,9 +228,8 @@ mod tests {
         let input = image.as_slice().unwrap().to_vec();
         let mut h_buf = vec![0.0f32; npix];
         let mut out = vec![0.0f32; npix];
-        let mut t_buf = vec![0.0f32; npix];
         let step = 1usize << scale;
-        atrous_smooth_buffers(&input, rows, cols, step, &mut h_buf, &mut out, &mut t_buf);
+        atrous_smooth_buffers(&input, rows, cols, step, &mut h_buf, &mut out);
         Array2::from_shape_vec((rows, cols), out).unwrap()
     }
 
@@ -361,15 +331,28 @@ mod tests {
     }
 
     #[test]
-    fn test_block_transpose() {
-        let rows = 130;
-        let cols = 97;
-        let src: Vec<f32> = (0..rows * cols).map(|i| i as f32).collect();
-        let mut dst = vec![0.0f32; rows * cols];
-        block_transpose(&src, &mut dst, rows, cols);
-        for y in 0..rows {
-            for x in 0..cols {
-                assert_eq!(dst[x * rows + y], src[y * cols + x]);
+    fn test_nan_region_does_not_dilate() {
+        let mut image = Array2::from_elem((64, 64), 100.0f32);
+        for y in 0..64 {
+            for x in 0..4 {
+                image[[y, x]] = f32::NAN;
+            }
+        }
+
+        let config = WaveletConfig {
+            num_scales: 4,
+            thresholds: vec![0.0, 0.0, 0.0, 0.0],
+            linear_denoise: true,
+        };
+
+        let result = wavelet_denoise(&image, &config, None).unwrap();
+        for y in 8..56 {
+            for x in 8..56 {
+                assert!(
+                    (result.denoised[[y, x]] - 100.0).abs() < 0.5,
+                    "Real data at ({},{}) was destroyed: {}",
+                    y, x, result.denoised[[y, x]]
+                );
             }
         }
     }

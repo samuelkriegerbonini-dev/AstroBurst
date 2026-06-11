@@ -21,6 +21,7 @@ pub fn blend_channels(
     let valid_weights: Vec<(usize, f32, f32, f32)> = weights
         .iter()
         .filter(|w| w.channel_idx < channels.len())
+        .filter(|w| w.r_weight != 0.0 || w.g_weight != 0.0 || w.b_weight != 0.0)
         .map(|w| (w.channel_idx, w.r_weight as f32, w.g_weight as f32, w.b_weight as f32))
         .collect();
 
@@ -50,6 +51,9 @@ pub fn blend_channels(
                     let src = slices[ch_idx];
                     if i < src.len() {
                         let v = src[i];
+                        if !v.is_finite() {
+                            continue;
+                        }
                         rv += v * rw;
                         gv += v * gw;
                         bv += v * bw;

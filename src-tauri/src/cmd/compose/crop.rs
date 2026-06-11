@@ -8,6 +8,10 @@ use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_d
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::write_fits_mono;
+use crate::types::constants::{
+    RES_PATHS, RES_CACHE_KEYS, RES_DIMENSIONS, RES_CROP_TOP, RES_CROP_BOTTOM,
+    RES_CROP_LEFT, RES_CROP_RIGHT, RES_AUTO_DETECTED, RES_ELAPSED_MS,
+};
 
 const AUTO_THRESHOLD: f32 = 1e-6;
 
@@ -205,15 +209,15 @@ pub async fn crop_channels_cmd(
         let actual_right = first_dim.1.saturating_sub(crop_right);
 
         Ok(json!({
-            "paths": out_paths,
-            "cache_keys": cache_keys,
-            "dimensions": [out_cols, out_rows],
-            "crop_top": actual_top,
-            "crop_bottom": actual_bottom,
-            "crop_left": actual_left,
-            "crop_right": actual_right,
-            "auto_detected": auto,
-            "elapsed_ms": elapsed,
+            RES_PATHS: out_paths,
+            RES_CACHE_KEYS: cache_keys,
+            RES_DIMENSIONS: [out_cols, out_rows],
+            RES_CROP_TOP: actual_top,
+            RES_CROP_BOTTOM: actual_bottom,
+            RES_CROP_LEFT: actual_left,
+            RES_CROP_RIGHT: actual_right,
+            RES_AUTO_DETECTED: auto,
+            RES_ELAPSED_MS: elapsed,
         }))
     })
 }

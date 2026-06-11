@@ -1,17 +1,25 @@
-import { memo } from "react";
+import { memo, useEffect } from "react";
 import { formatThroughput } from "../../utils/format";
+import { useTimer } from "../../hooks/useTimer";
 import type { QueueStats } from "../../shared/types";
 
 interface StatsBarProps {
   stats: QueueStats;
-  elapsed: number;
-  formatted: string;
+  isProcessing: boolean;
   isComplete: boolean;
 }
 
-function StatsBar({ stats, elapsed, formatted, isComplete }: StatsBarProps) {
-  const throughput = stats.totalBytes > 0 && elapsed > 0
-    ? formatThroughput(stats.totalBytes, elapsed)
+function StatsBar({ stats, isProcessing, isComplete }: StatsBarProps) {
+  const timer = useTimer();
+  const { start, stop } = timer;
+
+  useEffect(() => {
+    if (isProcessing) start();
+    else stop();
+  }, [isProcessing, start, stop]);
+
+  const throughput = stats.totalBytes > 0 && timer.elapsed > 0
+    ? formatThroughput(stats.totalBytes, timer.elapsed)
     : null;
 
   return (
@@ -27,7 +35,7 @@ function StatsBar({ stats, elapsed, formatted, isComplete }: StatsBarProps) {
           </>
         )}
         <span style={{ color: "rgba(20,184,166,0.25)" }}>|</span>
-        <span className="text-zinc-300">{formatted}</span>
+        <span className="text-zinc-300">{timer.formatted}</span>
       </div>
 
       <div className="flex items-center gap-2.5 text-zinc-500 font-mono">

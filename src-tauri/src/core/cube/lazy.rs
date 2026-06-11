@@ -10,7 +10,6 @@ use rayon::prelude::*;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::HduHeader;
 use crate::math::median::f32_cmp;
-use crate::core::imaging::stats;
 use crate::infra::fits::reader::{create_mmap_random, decode_pixels, decode_single_pixel, parse_header_at};
 
 #[derive(Debug, Clone)]
@@ -291,7 +290,7 @@ impl LazyCube {
                 let pixels = &frames[frame_idx];
                 for i in 0..npix {
                     let v = pixels[i];
-                    if stats::is_valid_pixel(v) {
+                    if v.is_finite() && v != 0.0 {
                         sum[i] += v as f64;
                         count[i] += 1;
                     }
@@ -331,7 +330,7 @@ impl LazyCube {
             for pixels in &frames {
                 for i in 0..npix {
                     let v = pixels[i];
-                    if stats::is_valid_pixel(v) {
+                    if v.is_finite() && v != 0.0 {
                         pixel_vals[i].push(v);
                     }
                 }
@@ -365,7 +364,7 @@ impl LazyCube {
             .par_iter()
             .map(|&z| {
                 let pixels = self.decode_frame_nocache(z);
-                pixels.into_iter().filter(|v| stats::is_valid_pixel(*v)).collect()
+                pixels.into_iter().filter(|v| v.is_finite() && *v != 0.0).collect()
             })
             .collect();
 
@@ -388,9 +387,12 @@ impl LazyCube {
         deviations.select_nth_unstable_by(dev_mid, |a, b| f32_cmp(a, b));
         let sigma = (deviations[dev_mid] * MAD_TO_SIGMA as f32).max(1e-10);
 
-        sampled.sort_unstable_by(|a, b| f32_cmp(a, b));
-        let low = sampled[(n as f64 * 0.01) as usize];
-        let high = sampled[((n as f64 * 0.999) as usize).min(n - 1)];
+        let low_idx = (n as f64 * 0.01) as usize;
+        let high_idx = ((n as f64 * 0.999) as usize).min(n - 1);
+        sampled.select_nth_unstable_by(low_idx, |a, b| f32_cmp(a, b));
+        let low = sampled[low_idx];
+        sampled.select_nth_unstable_by(high_idx, |a, b| f32_cmp(a, b));
+        let high = sampled[high_idx];
 
         Ok(GlobalCubeStats { median, sigma, low, high })
     }

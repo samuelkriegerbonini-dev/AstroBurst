@@ -148,12 +148,13 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
     if (!ctx) return;
 
     const raw = atob(result.rgb_preview);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
     const imgData = ctx.createImageData(w, h);
-    for (let i = 0; i < w * h; i++) {
-      imgData.data[i * 4] = raw.charCodeAt(i * 3);
-      imgData.data[i * 4 + 1] = raw.charCodeAt(i * 3 + 1);
-      imgData.data[i * 4 + 2] = raw.charCodeAt(i * 3 + 2);
-      imgData.data[i * 4 + 3] = 255;
+    const px = new Uint32Array(imgData.data.buffer);
+    for (let i = 0, j = 0; i < w * h; i++, j += 3) {
+      px[i] = (255 << 24) | (bytes[j + 2] << 16) | (bytes[j + 1] << 8) | bytes[j];
     }
     ctx.putImageData(imgData, 0, 0);
   }, [result]);

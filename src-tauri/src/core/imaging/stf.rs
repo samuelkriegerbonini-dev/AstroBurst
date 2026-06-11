@@ -74,7 +74,7 @@ impl StfTransform {
             dmin: stats.min,
             shadow: params.shadow,
             inv_clip: 1.0 / clip_range,
-            midtone: params.midtone,
+            midtone: params.midtone.clamp(0.0001, 0.9999),
         }
     }
 
@@ -130,7 +130,7 @@ pub(crate) fn make_stf_u8_fn(params: &StfParams, stats: &ImageStats) -> impl Fn(
         let clip_range = (params.highlight - params.shadow).max(1e-15);
         1.0 / clip_range
     };
-    let tx_midtone = params.midtone;
+    let tx_midtone = params.midtone.clamp(0.0001, 0.9999);
 
     move |v: f32| {
         if !is_valid_pixel(v) {

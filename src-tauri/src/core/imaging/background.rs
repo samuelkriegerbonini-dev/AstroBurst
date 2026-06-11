@@ -144,18 +144,12 @@ fn auto_sample_grid(
     let inner_h = cell_h - 2 * margin_h;
     let inner_w = cell_w - 2 * margin_w;
 
-    let mut all_pixels: Vec<f32> = image
+    image
         .as_slice()
-        .context("Image not contiguous")?
-        .iter()
-        .filter(|v| v.is_finite() && **v > 0.0)
-        .copied()
-        .collect();
-
-    let global_median = median_f32_mut(&mut all_pixels);
-    let mut devs: Vec<f32> = all_pixels.iter().map(|v| (v - global_median).abs()).collect();
-    let global_mad = median_f32_mut(&mut devs);
-    let sigma = global_mad * MAD_TO_SIGMA as f32;
+        .context("Image not contiguous")?;
+    let stats = super::stats::compute_image_stats(image);
+    let global_median = stats.median as f32;
+    let sigma = stats.sigma as f32;
 
     let mut samples = Vec::with_capacity(grid * grid);
 
@@ -326,7 +320,7 @@ fn evaluate_polynomial_surface(
 
     let result: Vec<f32> = (0..rows)
         .into_par_iter()
-        .flat_map(|y| {
+        .flat_map_iter(|y| {
             let ny = y as f64 / row_scale - 0.5;
             let mut y_pows = [0.0f64; 7];
             y_pows[0] = 1.0;
@@ -334,17 +328,15 @@ fn evaluate_polynomial_surface(
                 y_pows[i] = y_pows[i - 1] * ny;
             }
 
-            (0..cols)
-                .map(|x| {
-                    let nx = x as f64 / col_scale - 0.5;
-                    let mut x_pows = [0.0f64; 7];
-                    x_pows[0] = 1.0;
-                    for i in 1..=degree.min(6) {
-                        x_pows[i] = x_pows[i - 1] * nx;
-                    }
-                    eval_poly_inline(ny, nx, degree, coeffs, &y_pows, &x_pows) as f32
-                })
-                .collect::<Vec<f32>>()
+            (0..cols).map(move |x| {
+                let nx = x as f64 / col_scale - 0.5;
+                let mut x_pows = [0.0f64; 7];
+                x_pows[0] = 1.0;
+                for i in 1..=degree.min(6) {
+                    x_pows[i] = x_pows[i - 1] * nx;
+                }
+                eval_poly_inline(ny, nx, degree, coeffs, &y_pows, &x_pows) as f32
+            })
         })
         .collect();
 
@@ -488,7 +480,6 @@ mod tests {
         let x = 0.3;
         for degree in 1..=5 {
             let alloc = poly_basis(y, x, degree);
-            let mut buf = [0.0f64; MAX_POLY_TERMS];
             let mut y_pows = [0.0f64; 7];
             let mut x_pows = [0.0f64; 7];
             y_pows[0] = 1.0;

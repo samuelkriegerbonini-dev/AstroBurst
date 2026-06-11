@@ -66,8 +66,22 @@ pub fn next_power_of_two(n: usize) -> usize {
 }
 
 pub fn transpose<T: FftFloat>(data: &[Complex<T>], rows: usize, cols: usize) -> Vec<Complex<T>> {
+    let mut out = Vec::new();
+    transpose_into(data, &mut out, rows, cols);
+    out
+}
+
+pub fn transpose_into<T: FftFloat>(
+    data: &[Complex<T>],
+    out: &mut Vec<Complex<T>>,
+    rows: usize,
+    cols: usize,
+) {
     let zero = Complex::new(T::zero(), T::zero());
-    let mut out = vec![zero; rows * cols];
+    if out.len() != rows * cols {
+        out.clear();
+        out.resize(rows * cols, zero);
+    }
     out.par_chunks_mut(rows)
         .enumerate()
         .for_each(|(x, col_buf)| {
@@ -75,7 +89,6 @@ pub fn transpose<T: FftFloat>(data: &[Complex<T>], rows: usize, cols: usize) -> 
                 col_buf[y] = data[y * cols + x];
             }
         });
-    out
 }
 
 pub fn transpose_back<T: FftFloat>(
@@ -135,29 +148,39 @@ impl<T: FftFloat> FftEngine2D<T> {
     }
 
     pub fn forward_2d(&self, buf: &mut [Complex<T>]) {
+        let mut scratch = Vec::new();
+        self.forward_2d_with_scratch(buf, &mut scratch);
+    }
+
+    pub fn forward_2d_with_scratch(&self, buf: &mut [Complex<T>], scratch: &mut Vec<Complex<T>>) {
         buf.par_chunks_mut(self.fft_cols).for_each(|row| {
             self.fwd_row.process(row);
         });
 
-        let mut col_major = transpose(buf, self.fft_rows, self.fft_cols);
-        col_major.par_chunks_mut(self.fft_rows).for_each(|col| {
+        transpose_into(buf, scratch, self.fft_rows, self.fft_cols);
+        scratch.par_chunks_mut(self.fft_rows).for_each(|col| {
             self.fwd_col.process(col);
         });
 
-        transpose_back(&col_major, buf, self.fft_rows, self.fft_cols);
+        transpose_back(scratch, buf, self.fft_rows, self.fft_cols);
     }
 
     pub fn inverse_2d(&self, buf: &mut [Complex<T>]) {
+        let mut scratch = Vec::new();
+        self.inverse_2d_with_scratch(buf, &mut scratch);
+    }
+
+    pub fn inverse_2d_with_scratch(&self, buf: &mut [Complex<T>], scratch: &mut Vec<Complex<T>>) {
         buf.par_chunks_mut(self.fft_cols).for_each(|row| {
             self.inv_row.process(row);
         });
 
-        let mut col_major = transpose(buf, self.fft_rows, self.fft_cols);
-        col_major.par_chunks_mut(self.fft_rows).for_each(|col| {
+        transpose_into(buf, scratch, self.fft_rows, self.fft_cols);
+        scratch.par_chunks_mut(self.fft_rows).for_each(|col| {
             self.inv_col.process(col);
         });
 
-        transpose_back(&col_major, buf, self.fft_rows, self.fft_cols);
+        transpose_back(scratch, buf, self.fft_rows, self.fft_cols);
 
         let norm = T::one() / <T as FftFloat>::from_usize(self.fft_rows * self.fft_cols);
         buf.par_iter_mut().for_each(|c| {

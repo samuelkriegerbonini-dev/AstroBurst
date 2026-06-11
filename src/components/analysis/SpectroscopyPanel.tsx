@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, memo } from "react";
 import { Activity, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import { processCube, processCubeLazy } from "../../services/cube";
@@ -33,7 +33,7 @@ const CANVAS_H = 180;
 const PAD = { top: 10, bottom: 24, left: 50, right: 12 } as const;
 const N_GRID_Y = 4;
 
-export default function SpectroscopyPanel({
+function SpectroscopyPanel({
                                             spectrum = [],
                                             wavelengths = null,
                                             pixelCoord = null,
@@ -400,3 +400,5 @@ function CollapseBtn({
     </button>
   );
 }
+
+export default memo(SpectroscopyPanel);

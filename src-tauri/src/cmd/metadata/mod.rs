@@ -14,6 +14,8 @@ use crate::types::constants::{
     RES_HUBBLE_CHANNEL, RES_INDEX, RES_KEY, RES_MATCHED_KEYWORD, RES_MATCHED_VALUE,
     RES_NAXIS, RES_NAXIS1, RES_NAXIS2, RES_NAXIS3, RES_PALETTE, RES_PATH,
     RES_TOTAL_CARDS, RES_VALUE,
+    CATEGORY_OBSERVATION, CATEGORY_INSTRUMENT, CATEGORY_IMAGE,
+    CATEGORY_WCS, CATEGORY_PROCESSING, CATEGORY_OTHER,
 };
 
 #[tauri::command]
@@ -99,28 +101,28 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
             "ORIGIN","PIPELINE"];
 
         let mut categories: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-        categories.insert("observation".into(), std::collections::HashMap::new());
-        categories.insert("instrument".into(), std::collections::HashMap::new());
-        categories.insert("image".into(), std::collections::HashMap::new());
-        categories.insert("wcs".into(), std::collections::HashMap::new());
-        categories.insert("processing".into(), std::collections::HashMap::new());
-        categories.insert("other".into(), std::collections::HashMap::new());
+        for cat in [
+            CATEGORY_OBSERVATION, CATEGORY_INSTRUMENT, CATEGORY_IMAGE,
+            CATEGORY_WCS, CATEGORY_PROCESSING, CATEGORY_OTHER,
+        ] {
+            categories.insert(cat.into(), std::collections::HashMap::new());
+        }
 
         for (key, val) in &header.cards {
             let ku = key.to_uppercase();
             if ku == "SIMPLE" || ku == "END" || ku == "EXTEND" { continue; }
             let cat = if wcs_keys.iter().any(|&k| ku == k || ku.starts_with("A_") || ku.starts_with("B_") || ku.starts_with("AP_") || ku.starts_with("BP_")) {
-                "wcs"
+                CATEGORY_WCS
             } else if obs_keys.iter().any(|&k| ku == k) {
-                "observation"
+                CATEGORY_OBSERVATION
             } else if image_keys.iter().any(|&k| ku == k) {
-                "image"
+                CATEGORY_IMAGE
             } else if proc_keys.iter().any(|&k| ku == k || ku.starts_with("HISTORY") || ku.starts_with("COMMENT")) {
-                "processing"
+                CATEGORY_PROCESSING
             } else if ku.starts_with("TELESCOP") || ku.starts_with("INSTRUME") || ku.starts_with("CAMERA") || ku.starts_with("CCD") || ku.starts_with("SENSOR") {
-                "instrument"
+                CATEGORY_INSTRUMENT
             } else {
-                "other"
+                CATEGORY_OTHER
             };
             if let Some(c) = categories.get_mut(cat) {
                 c.insert(key.clone(), val.clone());

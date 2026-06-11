@@ -158,7 +158,7 @@ export default function GpuRenderer({
   const pixelsGenRef = useRef(0);
 
   useEffect(() => {
-    if (!rawData || !width || !height) {
+    if (!rawData || !width || !height || !gpuReady || !fallbackRef.current) {
       workerPixelsReadyRef.current = false;
       return;
     }
@@ -169,7 +169,7 @@ export default function GpuRenderer({
         workerPixelsReadyRef.current = true;
       }
     });
-  }, [rawData, width, height]);
+  }, [rawData, width, height, gpuReady]);
 
   const renderGPU = useCallback(() => {
     const gpu = getGpuState();
@@ -253,46 +253,64 @@ export default function GpuRenderer({
     device.queue.submit([commandEncoder.finish()]);
   }, [displayData, display, dataMin, dataMax, shadow, midtone, highlight, destroyGPUResources]);
 
+  const cpuBusyRef = useRef(false);
+  const cpuPendingRef = useRef(false);
+  const renderCPUWorkerRef = useRef<() => void>(() => {});
+
   const renderCPUWorker = useCallback(async () => {
     if (!rawData || !width || !height) return;
+    if (cpuBusyRef.current) {
+      cpuPendingRef.current = true;
+      return;
+    }
+    cpuBusyRef.current = true;
     const seq = ++renderSeqRef.current;
 
-    const needsDownsample = display.scale < 1;
-    const sendPixels = !workerPixelsReadyRef.current;
-    const result = await renderStfInWorker({
-      pixels: sendPixels ? rawData : undefined,
-      width: sendPixels ? width : undefined,
-      height: sendPixels ? height : undefined,
-      dstWidth: needsDownsample ? display.width : undefined,
-      dstHeight: needsDownsample ? display.height : undefined,
-      dataMin,
-      dataMax,
-      shadow,
-      midtone,
-      highlight,
-    });
+    try {
+      const needsDownsample = display.scale < 1;
+      const sendPixels = !workerPixelsReadyRef.current;
+      const result = await renderStfInWorker({
+        pixels: sendPixels ? rawData : undefined,
+        width: sendPixels ? width : undefined,
+        height: sendPixels ? height : undefined,
+        dstWidth: needsDownsample ? display.width : undefined,
+        dstHeight: needsDownsample ? display.height : undefined,
+        dataMin,
+        dataMax,
+        shadow,
+        midtone,
+        highlight,
+      });
 
-    if (renderSeqRef.current !== seq) return;
+      if (renderSeqRef.current !== seq) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas || !result.bitmap) return;
-    const w = result.width;
-    const h = result.height;
+      const canvas = canvasRef.current;
+      if (!canvas || !result.bitmap) return;
+      const w = result.width;
+      const h = result.height;
 
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
 
-    const ctx = canvas.getContext("bitmaprenderer");
-    if (ctx) {
-      ctx.transferFromImageBitmap(result.bitmap);
-    } else {
-      const ctx2d = canvas.getContext("2d")!;
-      ctx2d.drawImage(result.bitmap, 0, 0);
-      result.bitmap.close();
+      const ctx = canvas.getContext("bitmaprenderer");
+      if (ctx) {
+        ctx.transferFromImageBitmap(result.bitmap);
+      } else {
+        const ctx2d = canvas.getContext("2d")!;
+        ctx2d.drawImage(result.bitmap, 0, 0);
+        result.bitmap.close();
+      }
+    } finally {
+      cpuBusyRef.current = false;
+      if (cpuPendingRef.current) {
+        cpuPendingRef.current = false;
+        renderCPUWorkerRef.current();
+      }
     }
   }, [rawData, width, height, display, dataMin, dataMax, shadow, midtone, highlight]);
+  renderCPUWorkerRef.current = renderCPUWorker;
 
   useEffect(() => {
     if (!gpuReady || (!displayData && !rawData)) return;

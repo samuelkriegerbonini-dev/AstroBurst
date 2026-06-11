@@ -154,25 +154,34 @@ pub(crate) fn align_channels(
     rows: usize, cols: usize, method: AlignMethod,
 ) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (f64, f64), (f64, f64))> {
     let ref_ch = r.or(g).or(b).unwrap();
-    let r_img = channel_or_synth(r, g, b, rows, cols);
-    let g_img = channel_or_synth(g, r, b, rows, cols);
-    let b_img = channel_or_synth(b, r, g, rows, cols);
 
-    let (g_aligned, off_g) = if g.is_some() {
-        let res = align_pair_with_label(ref_ch, &g_img, method, rows, cols, "G")?;
-        (res.aligned, res.offset)
-    } else {
-        (g_img, (0.0, 0.0))
+    let align_to_ref = |ch: Option<&Array2<f32>>,
+                        label: &str|
+     -> Result<(Option<Array2<f32>>, (f64, f64))> {
+        match ch {
+            Some(img) if std::ptr::eq(img, ref_ch) => Ok((Some(img.clone()), (0.0, 0.0))),
+            Some(img) => {
+                let res = align_pair_with_label(ref_ch, img, method, rows, cols, label)?;
+                Ok((Some(res.aligned), res.offset))
+            }
+            None => Ok((None, (0.0, 0.0))),
+        }
     };
 
-    let (b_aligned, off_b) = if b.is_some() {
-        let res = align_pair_with_label(ref_ch, &b_img, method, rows, cols, "B")?;
-        (res.aligned, res.offset)
-    } else {
-        (b_img, (0.0, 0.0))
+    let (g_aligned, off_g) = align_to_ref(g, "G")?;
+    let (b_aligned, off_b) = align_to_ref(b, "B")?;
+
+    let r_img = channel_or_synth(r, g_aligned.as_ref(), b_aligned.as_ref(), rows, cols);
+    let g_img = match g_aligned {
+        Some(img) => img,
+        None => channel_or_synth(None, r, b_aligned.as_ref(), rows, cols),
+    };
+    let b_img = match b_aligned {
+        Some(img) => img,
+        None => channel_or_synth(None, r, Some(&g_img), rows, cols),
     };
 
-    Ok((r_img, g_aligned, b_aligned, off_g, off_b))
+    Ok((r_img, g_img, b_img, off_g, off_b))
 }
 
 fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, st: &ImageStats) {
@@ -243,6 +252,20 @@ pub fn process_rgb(
     apply_multiplier_inplace(&mut g_img, wb_g as f32);
     apply_multiplier_inplace(&mut b_img, wb_b as f32);
 
+    let wb_identity = (wb_r - 1.0).abs() < 1e-12
+        && (wb_g - 1.0).abs() < 1e-12
+        && (wb_b - 1.0).abs() < 1e-12;
+
+    let (sr_wb, sg_wb, sb_wb) = if wb_identity {
+        (sr_full.clone(), sg_full.clone(), sb_full.clone())
+    } else {
+        (
+            stats::compute_image_stats(&r_img),
+            stats::compute_image_stats(&g_img),
+            stats::compute_image_stats(&b_img),
+        )
+    };
+
     let stf_config = AutoStfConfig::default();
 
     let mut linked_apply_stats: Option<ImageStats> = None;
@@ -250,31 +273,22 @@ pub fn process_rgb(
     let (stf_r_params, stf_g_params, stf_b_params, stats_wb_r, stats_wb_g, stats_wb_b) =
         if config.auto_stretch {
             if config.linked_stf {
-                let sr = stats::compute_image_stats(&r_img);
-                let sg = stats::compute_image_stats(&g_img);
-                let sb = stats::compute_image_stats(&b_img);
-                let combined = stats::combine_channel_stats(&sr, &sg, &sb);
+                let combined = stats::combine_channel_stats(&sr_wb, &sg_wb, &sb_wb);
                 let params = stf::auto_stf(&combined, &stf_config);
                 linked_apply_stats = Some(combined);
-                (params, params, params, sr, sg, sb)
+                (params, params, params, sr_wb, sg_wb, sb_wb)
             } else {
-                let (sr, _) = stf::analyze(&r_img);
-                let (sg, _) = stf::analyze(&g_img);
-                let (sb, _) = stf::analyze(&b_img);
-                let pr = stf::auto_stf(&sr, &stf_config);
-                let pg = stf::auto_stf(&sg, &stf_config);
-                let pb = stf::auto_stf(&sb, &stf_config);
-                (pr, pg, pb, sr, sg, sb)
+                let pr = stf::auto_stf(&sr_wb, &stf_config);
+                let pg = stf::auto_stf(&sg_wb, &stf_config);
+                let pb = stf::auto_stf(&sb_wb, &stf_config);
+                (pr, pg, pb, sr_wb, sg_wb, sb_wb)
             }
         } else {
-            let sr = stats::compute_image_stats(&r_img);
-            let sg = stats::compute_image_stats(&g_img);
-            let sb = stats::compute_image_stats(&b_img);
             (
                 config.stf_r.unwrap_or(StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 }),
                 config.stf_g.unwrap_or(StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 }),
                 config.stf_b.unwrap_or(StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 }),
-                sr, sg, sb,
+                sr_wb, sg_wb, sb_wb,
             )
         };
 

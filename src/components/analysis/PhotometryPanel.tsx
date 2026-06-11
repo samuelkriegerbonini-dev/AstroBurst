@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { Crosshair, Loader2, Star as StarIcon } from "lucide-react";
 import { measurePhotometry } from "../../services/analysis";
 import type { PhotometryMeasurement } from "../../services/analysis";
@@ -13,7 +13,7 @@ function formatMag(v: number | null | undefined): string {
   return v == null || !isFinite(v) ? "--" : v.toFixed(2);
 }
 
-export default function PhotometryPanel({ filePath }: PhotometryPanelProps) {
+function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [armed, setArmed] = useState(false);
   const [gaiaMatch, setGaiaMatch] = useState(true);
   const [isMeasuring, setIsMeasuring] = useState(false);
@@ -167,3 +167,5 @@ export default function PhotometryPanel({ filePath }: PhotometryPanelProps) {
     </div>
   );
 }
+
+export default memo(PhotometryPanel);

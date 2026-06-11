@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ndarray::Array2;
 
 use super::downsample::area_downsample;
@@ -28,15 +30,15 @@ pub fn phase_correlate(
     let rows = ref_rows.min(tgt_rows);
     let cols = ref_cols.min(tgt_cols);
 
-    let ref_cropped = if ref_rows != rows || ref_cols != cols {
-        reference.slice(ndarray::s![..rows, ..cols]).to_owned()
+    let ref_cropped: Cow<Array2<f32>> = if ref_rows != rows || ref_cols != cols {
+        Cow::Owned(reference.slice(ndarray::s![..rows, ..cols]).to_owned())
     } else {
-        reference.clone()
+        Cow::Borrowed(reference)
     };
-    let tgt_cropped = if tgt_rows != rows || tgt_cols != cols {
-        target.slice(ndarray::s![..rows, ..cols]).to_owned()
+    let tgt_cropped: Cow<Array2<f32>> = if tgt_rows != rows || tgt_cols != cols {
+        Cow::Owned(target.slice(ndarray::s![..rows, ..cols]).to_owned())
     } else {
-        target.clone()
+        Cow::Borrowed(target)
     };
 
     if is_constant_or_zero(&ref_cropped) || is_constant_or_zero(&tgt_cropped) {

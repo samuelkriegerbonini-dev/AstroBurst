@@ -285,3 +285,72 @@ pub const RES_STAB_G: &str = "stab_g";
 pub const RES_STAB_B: &str = "stab_b";
 pub const RES_REF_CHANNEL: &str = "ref_channel";
 pub const IS_SYNTHETIC_CATALOG: &str = "is_synthetic_catalog";
+
+pub const RES_RA: &str = "ra";
+pub const RES_DEC: &str = "dec";
+pub const RES_GMAG: &str = "gmag";
+pub const RES_BP_RP: &str = "bp_rp";
+pub const RES_SEPARATION_ARCSEC: &str = "separation_arcsec";
+pub const RES_PHOTOMETRY: &str = "photometry";
+pub const RES_SKY: &str = "sky";
+pub const RES_GAIA: &str = "gaia";
+
+pub const RES_SUBFRAMES: &str = "subframes";
+pub const RES_TOTAL: &str = "total";
+pub const RES_ACCEPTED: &str = "accepted";
+pub const RES_REJECTED: &str = "rejected";
+
+pub const RES_SIP_A: &str = "sip_a";
+pub const RES_SIP_B: &str = "sip_b";
+
+pub const RES_CACHE_KEY: &str = "cache_key";
+pub const RES_METHOD_USED: &str = "method_used";
+pub const RES_MATCHED_STARS: &str = "matched_stars";
+pub const RES_INLIERS: &str = "inliers";
+pub const RES_RESIDUAL_PX: &str = "residual_px";
+
+pub const RES_RESET: &str = "reset";
+pub const RES_UPDATED: &str = "updated";
+pub const RES_IS_RGB: &str = "is_rgb";
+
+pub const RES_PATHS: &str = "paths";
+pub const RES_CROP_TOP: &str = "crop_top";
+pub const RES_CROP_BOTTOM: &str = "crop_bottom";
+pub const RES_CROP_LEFT: &str = "crop_left";
+pub const RES_CROP_RIGHT: &str = "crop_right";
+pub const RES_AUTO_DETECTED: &str = "auto_detected";
+
+pub const RES_R: &str = "r";
+pub const RES_G: &str = "g";
+pub const RES_B: &str = "b";
+
+pub const RES_PATTERN: &str = "pattern";
+pub const RES_METHOD: &str = "method";
+pub const RES_R_PATH: &str = "r_path";
+pub const RES_G_PATH: &str = "g_path";
+pub const RES_B_PATH: &str = "b_path";
+pub const RES_ERROR: &str = "error";
+pub const RES_RESULTS: &str = "results";
+pub const RES_SUCCEEDED: &str = "succeeded";
+pub const RES_FAILED: &str = "failed";
+pub const METHOD_SUPERPIXEL: &str = "superpixel";
+pub const METHOD_BILINEAR: &str = "bilinear";
+
+pub const RES_LOCAL_INTENSITY: &str = "local_intensity";
+pub const RES_SYMMETRY_POINT: &str = "symmetry_point";
+pub const RES_SHADOW_PROTECT: &str = "shadow_protect";
+pub const RES_HIGHLIGHT_PROTECT: &str = "highlight_protect";
+
+pub const RES_MASK_MODE: &str = "mask_mode";
+pub const MASK_MODE_SHARED: &str = "shared_luminance";
+pub const MASK_MODE_PER_CHANNEL: &str = "per_channel";
+
+pub const ALIGN_METHOD_AFFINE: &str = "affine";
+pub const ALIGN_METHOD_PHASE: &str = "phase_correlation";
+
+pub const CATEGORY_OBSERVATION: &str = "observation";
+pub const CATEGORY_INSTRUMENT: &str = "instrument";
+pub const CATEGORY_IMAGE: &str = "image";
+pub const CATEGORY_WCS: &str = "wcs";
+pub const CATEGORY_PROCESSING: &str = "processing";
+pub const CATEGORY_OTHER: &str = "other";

@@ -11,7 +11,7 @@ use crate::types::constants::{
     MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS, DEFAULT_STEM,
     MIN_GRID_SIZE, MAX_GRID_SIZE, MIN_POLY_DEGREE, MAX_POLY_DEGREE, MIN_ITERATIONS, MAX_ITERATIONS,
     RES_CORRECTED_PNG, RES_MODEL_PNG, RES_CORRECTED_FITS, RES_SAMPLE_COUNT,
-    RES_RMS_RESIDUAL, RES_ELAPSED_MS, RES_DIMENSIONS,
+    RES_RMS_RESIDUAL, RES_ELAPSED_MS, RES_DIMENSIONS, RES_CACHE_KEY,
 };
 
 #[tauri::command]
@@ -84,7 +84,7 @@ pub async fn extract_background_cmd(
             RES_CORRECTED_PNG: corrected_png,
             RES_MODEL_PNG: model_png,
             RES_CORRECTED_FITS: cache_key,
-            "cache_key": cache_key,
+            RES_CACHE_KEY: cache_key,
             RES_SAMPLE_COUNT: bg_result.sample_count,
             RES_RMS_RESIDUAL: bg_result.rms_residual,
             RES_ELAPSED_MS: bg_result.elapsed_ms,

@@ -13,6 +13,7 @@ use crate::types::constants::{
     RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_NAXIS1, RES_NAXIS2,
     RES_PIXEL_SCALE_ARCSEC, RES_WCS_CD, RES_WCS_CRPIX1, RES_WCS_CRPIX2,
     RES_WCS_CRVAL1, RES_WCS_CRVAL2, RES_WCS_PARAMS, RES_WCS_PROJECTION,
+    RES_SIP_A, RES_SIP_B,
 };
 
 const MAX_UPLOAD_DIM: usize = 2048;
@@ -234,8 +235,8 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
                 RES_WCS_CRVAL2: params.3,
                 RES_WCS_CD: params.4,
                 RES_WCS_PROJECTION: params.5,
-                "sip_a": sip_terms_json(sip_a),
-                "sip_b": sip_terms_json(sip_b),
+                RES_SIP_A: sip_terms_json(sip_a),
+                RES_SIP_B: sip_terms_json(sip_b),
             },
         }))
     })

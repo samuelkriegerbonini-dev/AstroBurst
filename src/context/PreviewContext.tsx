@@ -12,6 +12,8 @@ import { computeHistogram } from "../services/analysis";
 import { getCubeInfo } from "../services/cube";
 import { getRawPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
+import type { NarrowbandFilterDetection } from "../services/header";
+import { fileStore } from "../hooks/useFileStore";
 import { useCompositeContext } from "./CompositeContext";
 import { clearCompositeCache } from "../services/compose";
 import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../shared/types";
@@ -86,6 +88,7 @@ interface RawPixelsContextValue {
 
 interface NarrowbandContextValue {
   narrowbandPalette: PaletteSuggestion | null;
+  narrowbandFilters: NarrowbandFilterDetection[];
   selectedPalette: string;
   setSelectedPalette: (p: string) => void;
 }
@@ -151,6 +154,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
+  const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
 
   const prevFileIdRef = useRef<string | null>(null);
@@ -188,12 +192,22 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const paths = doneFiles.map((f) => f.path);
     const key = paths.join("|") + "|" + selectedPalette;
     if (key === narrowbandKeyRef.current) return;
-    narrowbandKeyRef.current = key;
-    detectNarrowbandFilters(paths, selectedPalette)
-      .then((result) => {
-        if (result?.palette) setNarrowbandPalette(result.palette);
-      })
-      .catch(() => {});
+    let timer = 0;
+    const attempt = () => {
+      if (fileStore.getIsProcessing()) {
+        timer = window.setTimeout(attempt, 400);
+        return;
+      }
+      narrowbandKeyRef.current = key;
+      detectNarrowbandFilters(paths, selectedPalette)
+        .then((result) => {
+          if (result?.palette) setNarrowbandPalette(result.palette);
+          if (result?.filters) setNarrowbandFilters(result.filters);
+        })
+        .catch(() => {});
+    };
+    timer = window.setTimeout(attempt, 250);
+    return () => window.clearTimeout(timer);
   }, [doneFiles, selectedPalette]);
 
   const loadRawPixels = useCallback(() => {
@@ -346,8 +360,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const narrowbandValue = useMemo<NarrowbandContextValue>(
-    () => ({ narrowbandPalette, selectedPalette, setSelectedPalette }),
-    [narrowbandPalette, selectedPalette, setSelectedPalette],
+    () => ({ narrowbandPalette, narrowbandFilters, selectedPalette, setSelectedPalette }),
+    [narrowbandPalette, narrowbandFilters, selectedPalette, setSelectedPalette],
   );
 
   const starOverlayValue = useMemo<StarOverlayContextValue>(

@@ -1,6 +1,20 @@
 use ndarray::Array2;
 use serde::Serialize;
 
+use crate::types::constants::MAD_TO_SIGMA;
+
+fn sorted_median(vals: &[f64]) -> f64 {
+    let n = vals.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 0 {
+        (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+    } else {
+        vals[n / 2]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PhotometryConfig {
     pub search_radius: usize,
@@ -89,7 +103,7 @@ fn annulus_stats(image: &Array2<f32>, x: f64, y: f64, inner_r: f64, outer_r: f64
     }
 
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = vals[vals.len() / 2];
+    let median = sorted_median(&vals);
 
     let lo = vals.len() / 4;
     let hi = (3 * vals.len() / 4).max(lo + 1).min(vals.len());
@@ -102,7 +116,7 @@ fn annulus_stats(image: &Array2<f32>, x: f64, y: f64, inner_r: f64, outer_r: f64
 
     let mut devs: Vec<f64> = vals.iter().map(|v| (v - median).abs()).collect();
     devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let sigma = devs[devs.len() / 2] * 1.4826;
+    let sigma = sorted_median(&devs) * MAD_TO_SIGMA;
 
     (mean, sigma)
 }

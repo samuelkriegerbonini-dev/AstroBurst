@@ -160,34 +160,42 @@ struct LocalStats {
 
 fn compute_image_stats(image: &Array2<f32>) -> LocalStats {
     let slice = image.as_slice().unwrap_or(&[]);
-    let n = slice.len() as f64;
-    if n == 0.0 {
-        return LocalStats { _mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
-    }
 
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
-    let mut max_val = f32::NEG_INFINITY;
+    let mut vals: Vec<f32> = Vec::with_capacity(slice.len());
 
     for &v in slice {
+        if !v.is_finite() {
+            continue;
+        }
         let vf = v as f64;
         sum += vf;
         sum_sq += vf * vf;
-        if v > max_val {
-            max_val = v;
-        }
+        vals.push(v);
     }
 
+    if vals.is_empty() {
+        return LocalStats { _mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
+    }
+
+    let n = vals.len() as f64;
     let mean = sum / n;
     let var = (sum_sq / n) - mean * mean;
     let stddev = if var > 0.0 { var.sqrt() } else { 0.0 };
 
-    let mut vals: Vec<f32> = slice.to_vec();
     let mid = vals.len() / 2;
     vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = vals[mid] as f64;
 
-    LocalStats { _mean: mean, stddev, max_val: max_val as f64, median }
+    let k = 64.min(vals.len());
+    let kth_idx = vals.len() - k;
+    let (_, kth, _) = vals.select_nth_unstable_by(kth_idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_val = (*kth as f64).max(median);
+
+    LocalStats { _mean: mean, stddev, max_val, median }
 }
 
 fn detect_stars_for_psf(
@@ -196,10 +204,13 @@ fn detect_stars_for_psf(
     config: &PsfEstimationConfig,
 ) -> Vec<StarCandidate> {
     let (h, w) = image.dim();
+    let margin = config.edge_margin;
+    if h <= margin * 2 || w <= margin * 2 {
+        return Vec::new();
+    }
     let cx = w as f64 / 2.0;
     let cy = h as f64 / 2.0;
     let threshold = stats.median + 5.0 * stats.stddev;
-    let margin = config.edge_margin;
     let search_radius = 5i64;
 
     let mut stars = Vec::new();
@@ -208,7 +219,7 @@ fn detect_stars_for_psf(
     for y in margin..(h - margin) {
         for x in margin..(w - margin) {
             let val = image[[y, x]] as f64;
-            if val < threshold || visited[[y, x]] {
+            if !val.is_finite() || val < threshold || visited[[y, x]] {
                 continue;
             }
 

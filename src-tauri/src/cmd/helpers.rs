@@ -8,6 +8,7 @@ use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{AlignMethod, WhiteBalance};
 use crate::types::constants::{
+    ALIGN_METHOD_AFFINE, ALIGN_METHOD_PHASE,
     DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE,
     KERNEL_GAUSSIAN, KERNEL_LANCZOS, KERNEL_LANCZOS3,
     SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE,
@@ -58,15 +59,15 @@ pub(crate) fn parse_wb(
 
 pub(crate) fn parse_align_method(method: Option<&str>) -> AlignMethod {
     match method {
-        Some("affine") => AlignMethod::Affine,
+        Some(ALIGN_METHOD_AFFINE) => AlignMethod::Affine,
         _ => AlignMethod::PhaseCorrelation,
     }
 }
 
 pub(crate) fn align_method_str(method: AlignMethod) -> &'static str {
     match method {
-        AlignMethod::Affine => "affine",
-        AlignMethod::PhaseCorrelation => "phase_correlation",
+        AlignMethod::Affine => ALIGN_METHOD_AFFINE,
+        AlignMethod::PhaseCorrelation => ALIGN_METHOD_PHASE,
     }
 }
 pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
@@ -222,9 +223,9 @@ pub(crate) fn render_rgb_preview(
                 let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
                 let si = src_base + sx;
                 let o = dx * 3;
-                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
 

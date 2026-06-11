@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +14,17 @@ use crate::core::stacking::align;
 
 pub fn sigma_clip_combine(
     values: &mut Vec<f32>,
+    sigma_low: f32,
+    sigma_high: f32,
+    max_iter: usize,
+) -> (f32, u32) {
+    let mut scratch = Vec::with_capacity(values.len());
+    sigma_clip_combine_with(values, &mut scratch, sigma_low, sigma_high, max_iter)
+}
+
+fn sigma_clip_combine_with(
+    values: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
     sigma_low: f32,
     sigma_high: f32,
     max_iter: usize,
@@ -39,11 +51,11 @@ pub fn sigma_clip_combine(
             values[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
             let med = values[mid];
 
-            let mut devs: Vec<f32> =
-                values[..len].iter().map(|v| (v - med).abs()).collect();
-            let dmid = devs.len() / 2;
-            devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
-            let mad = devs[dmid];
+            scratch.clear();
+            scratch.extend(values[..len].iter().map(|v| (v - med).abs()));
+            let dmid = scratch.len() / 2;
+            scratch.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
+            let mad = scratch[dmid];
             let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
             (med, sig)
         } else {
@@ -97,6 +109,17 @@ pub fn sigma_clip_combine_weighted(
     sigma_high: f32,
     max_iter: usize,
 ) -> (f32, u32) {
+    let mut scratch = Vec::with_capacity(vals.len());
+    sigma_clip_combine_weighted_with(vals, &mut scratch, sigma_low, sigma_high, max_iter)
+}
+
+fn sigma_clip_combine_weighted_with(
+    vals: &mut Vec<(f32, f32)>,
+    scratch: &mut Vec<f32>,
+    sigma_low: f32,
+    sigma_high: f32,
+    max_iter: usize,
+) -> (f32, u32) {
     let n_orig = vals.len();
     if n_orig == 0 {
         return (0.0, 0);
@@ -118,10 +141,11 @@ pub fn sigma_clip_combine_weighted(
             let mid = len / 2;
             vals[..len].select_nth_unstable_by(mid, |a, b| f32_cmp(&a.0, &b.0));
             let med = vals[mid].0;
-            let mut devs: Vec<f32> = vals[..len].iter().map(|p| (p.0 - med).abs()).collect();
-            let dmid = devs.len() / 2;
-            devs.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
-            let mad = devs[dmid];
+            scratch.clear();
+            scratch.extend(vals[..len].iter().map(|p| (p.0 - med).abs()));
+            let dmid = scratch.len() / 2;
+            scratch.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
+            let mad = scratch[dmid];
             let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
             (med, sig)
         } else {
@@ -193,29 +217,30 @@ pub fn stack_images(
     let min_rows = images.iter().map(|img| img.dim().0).min().unwrap();
     let min_cols = images.iter().map(|img| img.dim().1).min().unwrap();
 
-    let crop = |img: &Array2<f32>| -> Array2<f32> {
+    fn crop_to(img: &Array2<f32>, rows: usize, cols: usize) -> Cow<'_, Array2<f32>> {
         let (r, c) = img.dim();
-        if r == min_rows && c == min_cols {
-            return img.clone();
+        if r == rows && c == cols {
+            Cow::Borrowed(img)
+        } else {
+            Cow::Owned(img.slice(ndarray::s![..rows, ..cols]).to_owned())
         }
-        img.slice(ndarray::s![..min_rows, ..min_cols]).to_owned()
-    };
+    }
 
-    let ref_cropped = crop(&images[0]);
+    let ref_cropped = crop_to(&images[0], min_rows, min_cols);
 
-    let mut aligned: Vec<Array2<f32>> = Vec::with_capacity(n);
+    let mut aligned: Vec<Cow<Array2<f32>>> = Vec::with_capacity(n);
     let mut offsets: Vec<(i32, i32)> = Vec::with_capacity(n);
 
-    aligned.push(ref_cropped.clone());
+    aligned.push(Cow::Borrowed(ref_cropped.as_ref()));
     offsets.push((0, 0));
 
     for i in 1..n {
-        let cropped = crop(&images[i]);
+        let cropped = crop_to(&images[i], min_rows, min_cols);
 
         if config.align {
             let result = align::align_pair_with_label(
-                &ref_cropped,
-                &cropped,
+                ref_cropped.as_ref(),
+                cropped.as_ref(),
                 AlignMethod::PhaseCorrelation,
                 min_rows,
                 min_cols,
@@ -224,7 +249,7 @@ pub fn stack_images(
             let dy = result.offset.0.round() as i32;
             let dx = result.offset.1.round() as i32;
             offsets.push((dy, dx));
-            aligned.push(result.aligned);
+            aligned.push(Cow::Owned(result.aligned));
         } else {
             offsets.push((0, 0));
             aligned.push(cropped);
@@ -258,6 +283,7 @@ pub fn stack_images(
         .for_each(|(y, row_buf)| {
             let base = y * cols;
             let mut local_rejected: u64 = 0;
+            let mut scratch: Vec<f32> = Vec::with_capacity(aligned_slices.len());
             if let Some(ref weights) = weights_f32 {
                 let mut wvals: Vec<(f32, f32)> = Vec::with_capacity(aligned_slices.len());
                 for x in 0..cols {
@@ -269,8 +295,9 @@ pub fn stack_images(
                             wvals.push((v, weights[i]));
                         }
                     }
-                    let (val, rej) =
-                        sigma_clip_combine_weighted(&mut wvals, sigma_low, sigma_high, max_iter);
+                    let (val, rej) = sigma_clip_combine_weighted_with(
+                        &mut wvals, &mut scratch, sigma_low, sigma_high, max_iter,
+                    );
                     row_buf[x] = val;
                     local_rejected += rej as u64;
                 }
@@ -285,8 +312,9 @@ pub fn stack_images(
                             vals.push(v);
                         }
                     }
-                    let (val, rej) =
-                        sigma_clip_combine(&mut vals, sigma_low, sigma_high, max_iter);
+                    let (val, rej) = sigma_clip_combine_with(
+                        &mut vals, &mut scratch, sigma_low, sigma_high, max_iter,
+                    );
                     row_buf[x] = val;
                     local_rejected += rej as u64;
                 }

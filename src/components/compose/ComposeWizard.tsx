@@ -1,9 +1,8 @@
-import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
-import { detectNarrowbandFilters } from "../../services/header";
 import {
   nextEnabledStep,
   STEPS,
@@ -32,15 +31,6 @@ const COLOR_MAP: Record<string, { tab: string; dot: string }> = {
   purple: { tab: "bg-purple-600/20 text-purple-400 ring-1 ring-purple-500/30", dot: "bg-purple-400" },
   teal: { tab: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
-
-interface FilterDetection {
-  path: string;
-  filter: string | null;
-  hubble_channel?: string | null;
-  confidence?: number;
-  matched_keyword?: string;
-  matched_value?: string;
-}
 
 function MiniInfoBar() {
   const { file } = useFileContext();
@@ -100,30 +90,11 @@ export default function ComposeWizard() {
     setActiveImagePath,
   } = useRenderContext();
 
-  const { narrowbandPalette } = useNarrowbandContext();
+  const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
 
   const { state, dispatch, activeStep, setActiveStep } = useComposeWizardContext();
-  const [filterDetections, setFilterDetections] = useState<FilterDetection[]>([]);
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const detectionKeyRef = useRef("");
-
-  useEffect(() => {
-    if (doneFiles.length < 2) return;
-    const paths = doneFiles.map((f) => f.path);
-    const key = paths.join("|");
-    if (key === detectionKeyRef.current) return;
-    detectionKeyRef.current = key;
-    detectNarrowbandFilters(paths)
-      .then((result: any) => {
-        if (result?.filters) {
-          setFilterDetections(result.filters);
-        }
-      })
-      .catch((e) => {
-        console.error("[AstroBurst] Narrowband filter detection failed:", e);
-      });
-  }, [doneFiles]);
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
   const totalFiles = useMemo(() => state.bins.reduce((a, b) => a + b.files.length, 0), [state.bins]);

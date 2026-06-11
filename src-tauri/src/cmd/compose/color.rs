@@ -9,7 +9,7 @@ use crate::core::imaging::stats::{compute_image_stats, compute_image_stats_with_
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::types::image::ImageStats;
-use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_SCNR_APPLIED, RES_AUTO_STF, RES_STAB_R, RES_STAB_G, RES_STAB_B, RES_REF_CHANNEL};
+use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_SCNR_APPLIED, RES_AUTO_STF, RES_STAB_R, RES_STAB_G, RES_STAB_B, RES_REF_CHANNEL, RES_RESET};
 
 use super::rgb::composite_png_path;
 
@@ -82,11 +82,11 @@ pub async fn reset_wb_cmd(
 
         Ok(json!({
             RES_PNG_PATH: png_path,
-            "reset": true,
+            RES_RESET: true,
             RES_R_FACTOR: 1.0,
             RES_G_FACTOR: 1.0,
             RES_B_FACTOR: 1.0,
-            "auto_stf": helpers::stf_json(&linked_stf),
+            RES_AUTO_STF: helpers::stf_json(&linked_stf),
             RES_ELAPSED_MS: elapsed,
         }))
     })

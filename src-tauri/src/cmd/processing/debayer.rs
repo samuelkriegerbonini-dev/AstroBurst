@@ -8,7 +8,12 @@ use crate::core::imaging::debayer::{debayer_bilinear, debayer_superpixel, BayerP
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::infra::fits::writer::write_fits_mono;
-use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH};
+use crate::types::constants::{
+    RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH,
+    RES_PATTERN, RES_METHOD, RES_R_PATH, RES_G_PATH, RES_B_PATH,
+    RES_PATH, RES_ERROR, RES_RESULTS, RES_SUCCEEDED, RES_FAILED,
+    METHOD_SUPERPIXEL, METHOD_BILINEAR,
+};
 use crate::types::header::HduHeader;
 
 fn output_header(source: Option<&HduHeader>, superpixel: bool) -> Option<HduHeader> {
@@ -95,7 +100,7 @@ pub async fn debayer_fits_cmd(
 
         let entry = load_cached_full(&path)?;
         let pat = resolve_pattern(pattern.as_deref(), entry.header())?;
-        let superpixel = matches!(method.as_deref(), Some("superpixel"));
+        let superpixel = matches!(method.as_deref(), Some(METHOD_SUPERPIXEL));
 
         let (r, g, b) = if superpixel {
             debayer_superpixel(entry.arr(), pat)
@@ -129,11 +134,11 @@ pub async fn debayer_fits_cmd(
 
         Ok(json!({
             RES_PNG_PATH: png_path,
-            "pattern": pat.name(),
-            "method": if superpixel { "superpixel" } else { "bilinear" },
-            "r_path": r_path,
-            "g_path": g_path,
-            "b_path": b_path,
+            RES_PATTERN: pat.name(),
+            RES_METHOD: if superpixel { METHOD_SUPERPIXEL } else { METHOD_BILINEAR },
+            RES_R_PATH: r_path,
+            RES_G_PATH: g_path,
+            RES_B_PATH: b_path,
             RES_DIMENSIONS: [cols, rows],
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
@@ -150,7 +155,7 @@ pub async fn debayer_batch_cmd(
     blocking_cmd!({
         let t0 = Instant::now();
         let out_dir = resolve_output_dir(&output_dir)?;
-        let superpixel = matches!(method.as_deref(), Some("superpixel"));
+        let superpixel = matches!(method.as_deref(), Some(METHOD_SUPERPIXEL));
 
         let mut results = Vec::with_capacity(paths.len());
         let mut ok_count = 0usize;
@@ -169,28 +174,28 @@ pub async fn debayer_batch_cmd(
                 Ok((pat, rp, gp, bp, (rows, cols))) => {
                     ok_count += 1;
                     results.push(json!({
-                        "path": path,
-                        "pattern": pat.name(),
-                        "r_path": rp,
-                        "g_path": gp,
-                        "b_path": bp,
+                        RES_PATH: path,
+                        RES_PATTERN: pat.name(),
+                        RES_R_PATH: rp,
+                        RES_G_PATH: gp,
+                        RES_B_PATH: bp,
                         RES_DIMENSIONS: [cols, rows],
                     }));
                 }
                 Err(e) => {
                     results.push(json!({
-                        "path": path,
-                        "error": format!("{:#}", e),
+                        RES_PATH: path,
+                        RES_ERROR: format!("{:#}", e),
                     }));
                 }
             }
         }
 
         Ok(json!({
-            "results": results,
-            "succeeded": ok_count,
-            "failed": paths.len() - ok_count,
-            "method": if superpixel { "superpixel" } else { "bilinear" },
+            RES_RESULTS: results,
+            RES_SUCCEEDED: ok_count,
+            RES_FAILED: paths.len() - ok_count,
+            RES_METHOD: if superpixel { METHOD_SUPERPIXEL } else { METHOD_BILINEAR },
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })

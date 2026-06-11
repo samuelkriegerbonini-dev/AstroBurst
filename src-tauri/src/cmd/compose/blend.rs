@@ -13,7 +13,7 @@ use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::fits::writer::{write_fits_mono, filter_header};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
-use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT};
+use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX};
 
 use super::rgb::{composite_png_path, load_entry};
 
@@ -217,7 +217,7 @@ pub async fn blend_channels_cmd(
             RES_STATS_R: { RES_MEDIAN: stats_r.median, RES_MEAN: stats_r.mean, RES_MIN: stats_r.min, RES_MAX: stats_r.max },
             RES_STATS_G: { RES_MEDIAN: stats_g.median, RES_MEAN: stats_g.mean, RES_MIN: stats_g.min, RES_MAX: stats_g.max },
             RES_STATS_B: { RES_MEDIAN: stats_b.median, RES_MEAN: stats_b.mean, RES_MIN: stats_b.min, RES_MAX: stats_b.max },
-            "auto_stf": stf_json,
+            RES_AUTO_STF: stf_json,
             RES_ELAPSED_MS: elapsed,
         }))
     })
@@ -276,12 +276,12 @@ pub async fn align_channels_cmd(
             channel_results.push(json!({
                 RES_OFFSET: [0.0, 0.0],
                 RES_PATH: out0,
-                "cache_key": ref_key,
+                RES_CACHE_KEY: ref_key,
             }));
         } else {
             channel_results.push(json!({
                 RES_OFFSET: [0.0, 0.0],
-                "cache_key": ref_key,
+                RES_CACHE_KEY: ref_key,
             }));
         }
 
@@ -321,12 +321,12 @@ pub async fn align_channels_cmd(
 
             let mut entry_json = json!({
                 RES_OFFSET: [result.offset.0, result.offset.1],
-                "confidence": result.confidence,
-                "method_used": result.method_used,
-                "matched_stars": result.matched_stars,
-                "inliers": result.inliers,
-                "residual_px": result.residual_px,
-                "cache_key": cache_key,
+                RES_CONFIDENCE: result.confidence,
+                RES_METHOD_USED: result.method_used,
+                RES_MATCHED_STARS: result.matched_stars,
+                RES_INLIERS: result.inliers,
+                RES_RESIDUAL_PX: result.residual_px,
+                RES_CACHE_KEY: cache_key,
             });
 
             if write_disk {

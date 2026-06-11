@@ -35,14 +35,20 @@ fn frame_contributions(
                     continue;
                 }
 
-                let cx = (ix as f64 + dx) * scale;
-                let cy = (iy as f64 + dy) * scale;
+                let cx = (ix as f64 + 0.5 + dx) * scale;
+                let cy = (iy as f64 + 0.5 + dy) * scale;
 
                 let half = pixfrac * scale * 0.5;
-                let ox_min = clamp_index((cx - half).floor() as i64, out_cols);
-                let ox_max = clamp_index((cx + half).ceil() as i64, out_cols);
-                let oy_min = clamp_index((cy - half).floor() as i64, out_rows);
-                let oy_max = clamp_index((cy + half).ceil() as i64, out_rows);
+                let sigma = half.max(0.5);
+                let support = match kernel {
+                    DrizzleKernel::Square => half,
+                    DrizzleKernel::Gaussian => sigma * 3.0,
+                    DrizzleKernel::Lanczos3 => 3.0,
+                };
+                let ox_min = clamp_index((cx - support).floor() as i64, out_cols);
+                let ox_max = clamp_index((cx + support).ceil() as i64, out_cols);
+                let oy_min = clamp_index((cy - support).floor() as i64, out_rows);
+                let oy_max = clamp_index((cy + support).ceil() as i64, out_rows);
 
                 for oy in oy_min..=oy_max {
                     for ox in ox_min..=ox_max {
@@ -56,7 +62,6 @@ fn frame_contributions(
                             DrizzleKernel::Gaussian => {
                                 let dist2 = (ox as f64 + 0.5 - cx).powi(2)
                                     + (oy as f64 + 0.5 - cy).powi(2);
-                                let sigma = half.max(0.5);
                                 (-dist2 / (2.0 * sigma * sigma)).exp()
                             }
                             DrizzleKernel::Lanczos3 => {
@@ -66,7 +71,7 @@ fn frame_contributions(
                             }
                         };
 
-                        if w > 1e-12 {
+                        if w.abs() > 1e-12 {
                             let idx = oy * out_cols + ox;
                             contribs.push((idx, val, w));
                         }
@@ -149,65 +154,67 @@ impl DrizzleAccumulator {
 
         let results: Vec<(f32, f32, u64)> = (0..n)
             .into_par_iter()
-            .map(|i| {
-                let count = self.fill[i] as usize;
-                if count == 0 {
-                    return (0.0, 0.0, 0);
-                }
-                let base = self.slot_starts[i];
-                if count == 1 {
-                    return (self.storage[base], self.weights[i] as f32, 0);
-                }
-
-                let mut active: Vec<(f32, f32)> = (0..count)
-                    .map(|k| (self.storage[base + k], self.sample_weights[base + k]))
-                    .collect();
-                let mut rejected = 0u64;
-
-                for _ in 0..sigma_iterations {
-                    if active.len() < 3 {
-                        break;
+            .map_init(
+                || (Vec::new(), Vec::new(), Vec::new()),
+                |(active, vals, devs): &mut (Vec<(f32, f32)>, Vec<f32>, Vec<f32>), i| {
+                    let count = self.fill[i] as usize;
+                    if count == 0 {
+                        return (0.0, 0.0, 0);
+                    }
+                    let base = self.slot_starts[i];
+                    if count == 1 {
+                        return (self.storage[base], self.weights[i] as f32, 0);
                     }
 
-                    let mut vals: Vec<f32> = active.iter().map(|(v, _)| *v).collect();
-                    let median = median_f32_mut(&mut vals);
-                    let mut devs: Vec<f32> = vals.iter().map(|v| (v - median).abs()).collect();
-                    let mad = median_f32_mut(&mut devs);
-                    let sigma = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
+                    active.clear();
+                    active.extend(
+                        (0..count).map(|k| (self.storage[base + k], self.sample_weights[base + k])),
+                    );
+                    let mut rejected = 0u64;
 
-                    let before = active.len();
-                    active.retain(|&(v, _)| {
-                        let dev = v - median;
-                        dev >= -sigma_low * sigma && dev <= sigma_high * sigma
-                    });
-                    let removed = before - active.len();
-                    rejected += removed as u64;
-                    if removed == 0 {
-                        break;
-                    }
-                }
+                    for _ in 0..sigma_iterations {
+                        if active.len() < 3 {
+                            break;
+                        }
 
-                // Flux-conserving weighted mean: sum(w*v) / sum(w). The drizzle
-                // kernel weight now actually affects the reconstructed value
-                // (previously it was computed but discarded, so the kernel and
-                // pixfrac had no effect on output pixels).
-                let (mut vsum, mut wsum) = (0.0f64, 0.0f64);
-                if active.is_empty() {
-                    for k in 0..count {
-                        let w = self.sample_weights[base + k] as f64;
-                        vsum += self.storage[base + k] as f64 * w;
-                        wsum += w;
-                    }
-                } else {
-                    for &(v, w) in &active {
-                        vsum += v as f64 * w as f64;
-                        wsum += w as f64;
-                    }
-                }
+                        vals.clear();
+                        vals.extend(active.iter().map(|(v, _)| *v));
+                        let median = median_f32_mut(vals);
+                        devs.clear();
+                        devs.extend(vals.iter().map(|v| (v - median).abs()));
+                        let mad = median_f32_mut(devs);
+                        let sigma = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
 
-                let mean = if wsum > 1e-12 { (vsum / wsum) as f32 } else { 0.0 };
-                (mean, self.weights[i] as f32, rejected)
-            })
+                        let before = active.len();
+                        active.retain(|&(v, _)| {
+                            let dev = v - median;
+                            dev >= -sigma_low * sigma && dev <= sigma_high * sigma
+                        });
+                        let removed = before - active.len();
+                        rejected += removed as u64;
+                        if removed == 0 {
+                            break;
+                        }
+                    }
+
+                    let (mut vsum, mut wsum) = (0.0f64, 0.0f64);
+                    if active.is_empty() {
+                        for k in 0..count {
+                            let w = self.sample_weights[base + k] as f64;
+                            vsum += self.storage[base + k] as f64 * w;
+                            wsum += w;
+                        }
+                    } else {
+                        for &(v, w) in active.iter() {
+                            vsum += v as f64 * w as f64;
+                            wsum += w as f64;
+                        }
+                    }
+
+                    let mean = if wsum > 1e-12 { (vsum / wsum) as f32 } else { 0.0 };
+                    (mean, wsum as f32, rejected)
+                },
+            )
             .collect();
 
         let mut img_data = Vec::with_capacity(n);

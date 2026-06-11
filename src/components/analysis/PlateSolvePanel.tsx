@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo, memo } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag } from "lucide-react";
 import { plateSolve, getWcsInfo } from "../../services/astrometry";
 import type { WcsInfo } from "../../services/astrometry";
@@ -63,7 +63,7 @@ interface PlateSolvePanelProps {
   filePath?: string | null;
 }
 
-export default function PlateSolvePanel({
+function PlateSolvePanel({
                                           stars = [],
                                           isLoading = false,
                                           onDetect,
@@ -244,13 +244,12 @@ export default function PlateSolvePanel({
     }
   }, [filePath, scaleLow, scaleHigh]);
 
-  const medianFwhm = stars.length > 0
-    ? (() => {
-      const sorted = [...stars].map((s) => s.fwhm).sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
-    })()
-    : null;
+  const medianFwhm = useMemo(() => {
+    if (stars.length === 0) return null;
+    const sorted = stars.map((s) => s.fwhm).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
+  }, [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
 
@@ -519,3 +518,5 @@ export default function PlateSolvePanel({
     </div>
   );
 }
+
+export default memo(PlateSolvePanel);

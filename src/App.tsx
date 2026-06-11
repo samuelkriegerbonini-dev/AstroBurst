@@ -15,7 +15,6 @@ import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
-import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
 import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters } from "./hooks/useProductFilter";
@@ -35,7 +34,6 @@ type ViewState = "empty" | "processing" | "complete";
 
 const MemoizedPreviewPanel = memo(PreviewPanel);
 
-const SIDEBAR_MIN = 42;
 const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MAX = 480;
 
@@ -45,12 +43,18 @@ const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
   { id: "headers", label: "Headers", icon: FileText },
 ];
 
-function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
+function toMetadataFiles(
+  fileIds: string[],
+  getFile: (id: string) => ProcessedFile | undefined,
+  cache: WeakMap<ProcessedFile, MetadataFile>,
+): MetadataFile[] {
   return fileIds.map((id) => {
     const f = getFile(id);
     if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" as const };
+    const hit = cache.get(f);
+    if (hit) return hit;
     const header = f.result?.header;
-    return {
+    const built: MetadataFile = {
       id: f.id,
       name: f.name,
       path: f.path,
@@ -71,6 +75,8 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       dimensions: f.result?.dimensions,
       elapsed_ms: f.result?.elapsed_ms,
     };
+    cache.set(f, built);
+    return built;
   });
 }
 
@@ -97,7 +103,6 @@ export default function App() {
   const selectedFile = useSelectedFile();
   const allDoneFiles = useDoneFiles();
 
-  const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
 
   const activeFilters = useActiveFilters();
@@ -127,11 +132,6 @@ export default function App() {
       startProcessing();
     }
   }, [view, stats.total, isProcessing, isComplete, startProcessing]);
-
-  useEffect(() => {
-    if (isProcessing) timer.start();
-    else timer.stop();
-  }, [isProcessing, timer.start, timer.stop]);
 
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
@@ -186,12 +186,11 @@ export default function App() {
 
   const handleNewBatch = useCallback(() => {
     reset();
-    timer.reset();
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);
     setLeftTab("files");
-  }, [reset, timer, resetProductFilter]);
+  }, [reset, resetProductFilter]);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -202,14 +201,15 @@ export default function App() {
   }, [exportZip]);
 
   const storeVersion = useSyncExternalStore(fileStore.subscribe, fileStore.getVersion);
+  const metaCacheRef = useRef<WeakMap<ProcessedFile, MetadataFile>>(new WeakMap());
   const metadataFiles = useMemo(
-    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id)),
+    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id), metaCacheRef.current),
     [fileIds, storeVersion],
   );
 
   const productTypes = useMemo(
-    () => detectProductTypes(metadataFiles.map((f) => f.name)),
-    [metadataFiles],
+    () => detectProductTypes(fileIds.map((id) => fileStore.getFile(id)?.name ?? "")),
+    [fileIds],
   );
 
   const filteredMetadataFiles = useMemo(() => {
@@ -294,7 +294,7 @@ export default function App() {
                             borderBottom: "1px solid rgba(20,184,166,0.1)",
                           }}
                         >
-                          <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
+                          <StatsBar stats={stats} isProcessing={isProcessing} isComplete={isComplete} />
                           <GlobalProgress progress={progress} isComplete={isComplete} />
                         </div>
 

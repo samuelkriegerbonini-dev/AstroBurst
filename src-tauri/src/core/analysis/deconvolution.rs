@@ -38,6 +38,8 @@ struct FftConvolver {
     engine: FftEngine2D<f32>,
     psf_freq: Vec<Complex<f32>>,
     psf_conj_freq: Vec<Complex<f32>>,
+    io_buf: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
 }
 
 impl FftConvolver {
@@ -55,6 +57,8 @@ impl FftConvolver {
             engine,
             psf_freq,
             psf_conj_freq,
+            io_buf: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -79,46 +83,74 @@ impl FftConvolver {
         buf
     }
 
-    fn forward_2d(&self, image: &Array2<f32>) -> Vec<Complex<f32>> {
+    fn convolve_with(&mut self, image: &Array2<f32>, transpose_psf: bool) -> Array2<f32> {
+        let rows = self.rows;
+        let cols = self.cols;
         let fft_cols = self.engine.fft_cols;
-        let mut buf = self.engine.alloc_buffer();
+        let total = self.engine.total_size();
+        let zero = Complex::new(0.0f32, 0.0f32);
 
-        for y in 0..self.rows {
-            for x in 0..self.cols {
-                buf[y * fft_cols + x] = Complex::new(image[[y, x]], 0.0);
-            }
+        if self.io_buf.len() != total {
+            self.io_buf.clear();
+            self.io_buf.resize(total, zero);
         }
 
-        self.engine.forward_2d(&mut buf);
-        buf
-    }
+        let img_slice = image.as_slice().expect("contiguous");
+        self.io_buf
+            .par_chunks_mut(fft_cols)
+            .enumerate()
+            .for_each(|(y, row)| {
+                if y < rows {
+                    let src = &img_slice[y * cols..y * cols + cols];
+                    for (dst, &v) in row[..cols].iter_mut().zip(src) {
+                        *dst = Complex::new(if v.is_finite() { v } else { 0.0 }, 0.0);
+                    }
+                    for c in row[cols..].iter_mut() {
+                        *c = zero;
+                    }
+                } else {
+                    for c in row.iter_mut() {
+                        *c = zero;
+                    }
+                }
+            });
 
-    fn inverse_2d(&self, buf: &mut [Complex<f32>]) -> Array2<f32> {
-        self.engine.inverse_2d(buf);
+        let Self {
+            engine,
+            io_buf,
+            scratch,
+            psf_freq,
+            psf_conj_freq,
+            ..
+        } = self;
+        engine.forward_2d_with_scratch(io_buf, scratch);
+        let freq = if transpose_psf { &**psf_conj_freq } else { &**psf_freq };
+        complex::pointwise_multiply_into(io_buf, freq);
+        engine.inverse_2d_with_scratch(io_buf, scratch);
 
-        let fft_cols = self.engine.fft_cols;
-        let mut result = Array2::<f32>::zeros((self.rows, self.cols));
-        for y in 0..self.rows {
-            for x in 0..self.cols {
-                result[[y, x]] = buf[y * fft_cols + x].re;
-            }
-        }
+        let io_ref: &[Complex<f32>] = io_buf;
+        let mut result = Array2::<f32>::zeros((rows, cols));
+        result
+            .as_slice_mut()
+            .expect("contiguous")
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(y, out_row)| {
+                let base = y * fft_cols;
+                for x in 0..cols {
+                    out_row[x] = io_ref[base + x].re;
+                }
+            });
 
         result
     }
 
-    fn convolve_with_freq(&self, image: &Array2<f32>, freq: &[Complex<f32>]) -> Array2<f32> {
-        let mut buf = self.forward_2d(image);
-        complex::pointwise_multiply_into(&mut buf, freq);
-        self.inverse_2d(&mut buf)
+    fn convolve_psf(&mut self, image: &Array2<f32>) -> Array2<f32> {
+        self.convolve_with(image, false)
     }
 
-    fn convolve_psf(&self, image: &Array2<f32>) -> Array2<f32> {
-        self.convolve_with_freq(image, &self.psf_freq)
-    }
-
-    fn convolve_psf_transpose(&self, image: &Array2<f32>) -> Array2<f32> {
-        self.convolve_with_freq(image, &self.psf_conj_freq)
+    fn convolve_psf_transpose(&mut self, image: &Array2<f32>) -> Array2<f32> {
+        self.convolve_with(image, true)
     }
 }
 
@@ -148,7 +180,7 @@ pub fn richardson_lucy(
     let (rows, cols) = image.dim();
     let mut estimate = image.clone();
 
-    let convolver = FftConvolver::new(rows, cols, psf);
+    let mut convolver = FftConvolver::new(rows, cols, psf);
 
     let image_max = image
         .iter()
@@ -276,7 +308,7 @@ mod tests {
         psf[[1, 1]] = 1.0;
 
         let image = Array2::from_shape_fn((rows, cols), |(y, x)| (y * cols + x) as f32);
-        let convolver = FftConvolver::new(rows, cols, &psf);
+        let mut convolver = FftConvolver::new(rows, cols, &psf);
         let result = convolver.convolve_psf(&image);
 
         for y in 1..rows - 1 {

@@ -400,11 +400,10 @@ fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogra
 
     let inv_bin_width = bins as f64 / range;
 
-    let initial = vec![0u32; bins];
     let last = bins - 1;
     let histogram = slice
         .par_chunks(CHUNK_SIZE)
-        .fold_with(initial.clone(), |mut local_bins, chunk| {
+        .fold(|| vec![0u32; bins], |mut local_bins, chunk| {
             for &v in chunk {
                 if is_valid_pixel(v) {
                     let idx = ((v as f64 - dmin) * inv_bin_width) as usize;
@@ -419,7 +418,7 @@ fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogra
             }
             a
         })
-        .unwrap_or(initial);
+        .unwrap_or_else(|| vec![0u32; bins]);
 
     let step = range / bins as f64;
     let bin_edges: Vec<f64> = (0..=bins).map(|i| dmin + i as f64 * step).collect();

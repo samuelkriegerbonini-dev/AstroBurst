@@ -278,18 +278,13 @@ impl WcsTransform {
                 }
             }
             Projection::Car => {
-                let ra = self.ra0_rad + xi / self.cos_dec0;
+                let ra = self.ra0_rad + xi / self.cos_dec0.max(1e-12);
                 let dec = self.crval2.to_radians() + eta;
                 (ra, dec)
             }
         };
 
-        let mut ra_deg = ra.to_degrees();
-        if ra_deg < 0.0 {
-            ra_deg += 360.0;
-        } else if ra_deg >= 360.0 {
-            ra_deg -= 360.0;
-        }
+        let ra_deg = ra.to_degrees().rem_euclid(360.0);
 
         CelestialCoord {
             ra: ra_deg,

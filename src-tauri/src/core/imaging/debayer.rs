@@ -74,6 +74,10 @@ pub fn debayer_bilinear(
     pattern: BayerPattern,
 ) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
     let (h, w) = img.dim();
+    if h == 0 || w == 0 {
+        let empty = Array2::<f32>::zeros((h, w));
+        return (empty.clone(), empty.clone(), empty);
+    }
     let cell = pattern.cell();
     let src = img.as_slice().expect("contiguous");
 
@@ -138,6 +142,10 @@ pub fn debayer_superpixel(
     let (h, w) = img.dim();
     let oh = h / 2;
     let ow = w / 2;
+    if oh == 0 || ow == 0 {
+        let empty = Array2::<f32>::zeros((oh, ow));
+        return (empty.clone(), empty.clone(), empty);
+    }
     let cell = pattern.cell();
     let src = img.as_slice().expect("contiguous");
 

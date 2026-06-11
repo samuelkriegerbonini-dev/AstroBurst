@@ -141,6 +141,21 @@ pub fn run_batch_pipeline(
                 ));
             }
         }
+        let master_dims = [
+            ("bias", masters.bias.as_ref().map(|m| m.dim())),
+            ("dark", masters.dark.as_ref().map(|m| m.dim())),
+            ("flat", masters.flat.as_ref().map(|m| m.dim())),
+        ];
+        for (name, dim) in master_dims {
+            if let Some(d) = dim {
+                if d != ref_dim {
+                    return Err(format!(
+                        "Master {} has shape {:?} but channel '{}' lights have {:?}. Calibration masters must match light dimensions.",
+                        name, d, ch.label, ref_dim
+                    ));
+                }
+            }
+        }
     }
 
     let mut pipeline_stats = BatchPipelineStats {
@@ -241,11 +256,7 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
             let g_n = normalize_channel(g);
             let b_n = normalize_channel(b);
             let l_n = normalize_channel(lum);
-            (
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 0),
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 1),
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 2),
-            )
+            apply_luminance_rgb(&r_n, &g_n, &b_n, &l_n)
         }
         _ => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
     };
@@ -268,7 +279,12 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
     Some(Array3::from_shape_vec((h, w, 3), pixels).unwrap())
 }
 
-fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Array2<f32>, ch: usize) -> Array2<f32> {
+fn apply_luminance_rgb(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    lum: &Array2<f32>,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
     let (h, w) = r.dim();
     let npix = h * w;
 
@@ -277,17 +293,28 @@ fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Arra
     let b_s = b.as_slice().unwrap();
     let l_s = lum.as_slice().unwrap();
 
-    let result: Vec<f32> = (0..npix)
-        .into_par_iter()
-        .map(|i| {
+    let mut out_r = vec![0.0f32; npix];
+    let mut out_g = vec![0.0f32; npix];
+    let mut out_b = vec![0.0f32; npix];
+
+    out_r
+        .par_iter_mut()
+        .zip(out_g.par_iter_mut())
+        .zip(out_b.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((or, og), ob))| {
             let rgb_lum = 0.2126 * r_s[i] + 0.7152 * g_s[i] + 0.0722 * b_s[i];
             let scale = if rgb_lum > 1e-10 { l_s[i] / rgb_lum } else { 1.0 };
-            let val = match ch { 0 => r_s[i], 1 => g_s[i], _ => b_s[i] };
-            (val * scale).clamp(0.0, 1.0)
-        })
-        .collect();
+            *or = (r_s[i] * scale).clamp(0.0, 1.0);
+            *og = (g_s[i] * scale).clamp(0.0, 1.0);
+            *ob = (b_s[i] * scale).clamp(0.0, 1.0);
+        });
 
-    Array2::from_shape_vec((h, w), result).unwrap()
+    (
+        Array2::from_shape_vec((h, w), out_r).unwrap(),
+        Array2::from_shape_vec((h, w), out_g).unwrap(),
+        Array2::from_shape_vec((h, w), out_b).unwrap(),
+    )
 }
 
 fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
@@ -317,7 +344,15 @@ fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     frames.par_iter().map(|frame| {
-        let mean = frame.iter().map(|&v| v as f64).sum::<f64>() / frame.len() as f64;
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        for &v in frame.iter() {
+            if v.is_finite() {
+                sum += v as f64;
+                count += 1;
+            }
+        }
+        let mean = if count > 0 { sum / count as f64 } else { 0.0 };
         if mean > 0.0 {
             let inv_mean = 1.0 / mean as f32;
             frame.mapv(|v| v * inv_mean)

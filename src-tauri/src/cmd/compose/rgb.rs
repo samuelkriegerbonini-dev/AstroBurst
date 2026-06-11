@@ -13,7 +13,7 @@ use crate::core::imaging::stf::{StfParams, apply_stf_f32};
 use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{RgbComposeConfig, RgbComposeResult};
-use crate::types::constants::{RES_DIMENSIONS, RES_DIMENSION_INFO, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B};
+use crate::types::constants::{RES_DIMENSIONS, RES_DIMENSION_INFO, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, RES_CHANNEL, RES_UPDATED};
 
 pub(super) fn composite_png_path(output_dir: &str) -> String {
     if let Ok(entries) = std::fs::read_dir(output_dir) {
@@ -128,13 +128,18 @@ pub async fn compose_rgb_cmd(
             };
 
             let l_stretched = if config.auto_stretch {
-                use crate::core::imaging::stf::{auto_stf, analyze};
+                use crate::core::imaging::stf::auto_stf;
                 use crate::types::image::AutoStfConfig;
-                let (stats, _) = analyze(&l_matched);
+                let stats = compute_image_stats(&l_matched);
                 let stf = auto_stf(&stats, &AutoStfConfig::default());
                 apply_stf_f32(&l_matched, &stf, &stats)
             } else {
-                l_matched
+                let stats = compute_image_stats(&l_matched);
+                apply_stf_f32(
+                    &l_matched,
+                    &StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 },
+                    &stats,
+                )
             };
 
             apply_lrgb(
@@ -314,6 +319,6 @@ pub async fn update_composite_channel_cmd(
 
         GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
 
-        Ok(json!({ "channel": channel, "updated": true }))
+        Ok(json!({ RES_CHANNEL: channel, RES_UPDATED: true }))
     })
 }

@@ -9,6 +9,9 @@ use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_BIN_EDGES, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
     RES_AUTO_STF, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, RES_ELAPSED_MS,
+    RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
+    RES_PHOTOMETRY, RES_SKY, RES_GAIA,
+    RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
@@ -220,7 +223,7 @@ pub async fn measure_photometry_cmd(
         if let Some(header) = entry.header() {
             if let Ok(wcs) = WcsTransform::from_header(header) {
                 let coord = wcs.pixel_to_world(phot.x, phot.y);
-                sky = json!({ "ra": coord.ra, "dec": coord.dec });
+                sky = json!({ RES_RA: coord.ra, RES_DEC: coord.dec });
 
                 if gaia_match.unwrap_or(true) {
                     if let Ok(stars) = query_gaia_vizier(coord.ra, coord.dec, 0.01, 1) {
@@ -240,9 +243,9 @@ pub async fn measure_photometry_cmd(
                         }
                         if let Some((sep, i)) = best {
                             gaia = json!({
-                                "gmag": stars[i].gmag,
-                                "bp_rp": stars[i].bp_rp,
-                                "separation_arcsec": sep,
+                                RES_GMAG: stars[i].gmag,
+                                RES_BP_RP: stars[i].bp_rp,
+                                RES_SEPARATION_ARCSEC: sep,
                             });
                         }
                     }
@@ -251,9 +254,9 @@ pub async fn measure_photometry_cmd(
         }
 
         Ok(json!({
-            "photometry": serde_json::to_value(&phot)?,
-            "sky": sky,
-            "gaia": gaia,
+            RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+            RES_SKY: sky,
+            RES_GAIA: gaia,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
@@ -301,10 +304,10 @@ pub async fn analyze_subframes_cmd(
         let elapsed = t0.elapsed().as_millis() as u64;
 
         Ok(json!({
-            "subframes": metrics,
-            "total": metrics.len(),
-            "accepted": accepted,
-            "rejected": rejected,
+            RES_SUBFRAMES: metrics,
+            RES_TOTAL: metrics.len(),
+            RES_ACCEPTED: accepted,
+            RES_REJECTED: rejected,
             RES_ELAPSED_MS: elapsed,
         }))
     })

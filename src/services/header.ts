@@ -26,7 +26,17 @@ export function getHeaderByHdu(path: string, hduIndex: number): Promise<HeaderDa
   return typedInvoke<HeaderData>("get_header_by_hdu", { path, hduIndex });
 }
 
+export interface NarrowbandFilterDetection {
+  path: string;
+  filter: string | null;
+  hubble_channel?: string | null;
+  confidence?: number;
+  matched_keyword?: string;
+  matched_value?: string;
+}
+
 export interface NarrowbandDetection {
+  filters: NarrowbandFilterDetection[];
   palette: {
     r_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;
     g_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;

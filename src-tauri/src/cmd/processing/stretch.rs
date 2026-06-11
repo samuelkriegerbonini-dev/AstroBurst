@@ -9,6 +9,9 @@ use crate::types::constants::{
     RES_STRETCH_FACTOR, RES_ITERATIONS_RUN, RES_STARS_MASKED,
     RES_MASK_COVERAGE, RES_FINAL_BACKGROUND, RES_CONVERGED,
     SUFFIX_MASKED_STRETCH,
+    RES_LOCAL_INTENSITY, RES_SYMMETRY_POINT, RES_SHADOW_PROTECT, RES_HIGHLIGHT_PROTECT,
+    RES_R, RES_G, RES_B, RES_MASK_MODE, CHANNELS,
+    MASK_MODE_SHARED, MASK_MODE_PER_CHANNEL,
 };
 
 #[tauri::command]
@@ -94,10 +97,10 @@ pub async fn apply_ghs_stretch_cmd(
             RES_PNG_PATH: ro.png_path,
             RES_FITS_PATH: ro.fits_path,
             RES_STRETCH_FACTOR: params.d,
-            "local_intensity": params.b,
-            "symmetry_point": params.sp,
-            "shadow_protect": params.lp,
-            "highlight_protect": params.hp,
+            RES_LOCAL_INTENSITY: params.b,
+            RES_SYMMETRY_POINT: params.sp,
+            RES_SHADOW_PROTECT: params.lp,
+            RES_HIGHLIGHT_PROTECT: params.hp,
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
@@ -142,10 +145,10 @@ pub async fn ghs_stretch_composite_cmd(
         Ok(json!({
             RES_PNG_PATH: png_path,
             RES_STRETCH_FACTOR: params.d,
-            "local_intensity": params.b,
-            "symmetry_point": params.sp,
-            "shadow_protect": params.lp,
-            "highlight_protect": params.hp,
+            RES_LOCAL_INTENSITY: params.b,
+            RES_SYMMETRY_POINT: params.sp,
+            RES_SHADOW_PROTECT: params.lp,
+            RES_HIGHLIGHT_PROTECT: params.hp,
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
@@ -274,14 +277,14 @@ pub async fn masked_stretch_composite_cmd(
             let result = masked_stretch_rgb_shared(er.arr(), eg.arr(), eb.arr(), &config)
                 .map_err(|e| anyhow::anyhow!(e))?;
             let pc = json!({
-                "r": channel_stats_json(&result.r),
-                "g": channel_stats_json(&result.g),
-                "b": channel_stats_json(&result.b),
+                RES_R: channel_stats_json(&result.r),
+                RES_G: channel_stats_json(&result.g),
+                RES_B: channel_stats_json(&result.b),
             });
             (
                 result.r.image, result.g.image, result.b.image,
                 pc, result.shared_stars_masked, result.shared_mask_coverage,
-                "shared_luminance",
+                MASK_MODE_SHARED,
             )
         } else {
             let (res_r, (res_g, res_b)) = rayon::join(
@@ -295,16 +298,16 @@ pub async fn masked_stretch_composite_cmd(
             let g = res_g.map_err(|e| anyhow::anyhow!(e))?;
             let b = res_b.map_err(|e| anyhow::anyhow!(e))?;
             let pc = json!({
-                "r": channel_stats_json(&r),
-                "g": channel_stats_json(&g),
-                "b": channel_stats_json(&b),
+                RES_R: channel_stats_json(&r),
+                RES_G: channel_stats_json(&g),
+                RES_B: channel_stats_json(&b),
             });
             let total_stars = r.stars_masked + g.stars_masked + b.stars_masked;
             let avg_coverage = (r.mask_coverage + g.mask_coverage + b.mask_coverage) / 3.0;
             (
                 r.image, g.image, b.image,
                 pc, total_stars, avg_coverage,
-                "per_channel",
+                MASK_MODE_PER_CHANNEL,
             )
         };
 
@@ -322,8 +325,8 @@ pub async fn masked_stretch_composite_cmd(
             RES_PNG_PATH: png_path,
             RES_STARS_MASKED: stars,
             RES_MASK_COVERAGE: coverage,
-            "channels": per_channel,
-            "mask_mode": mask_mode,
+            CHANNELS: per_channel,
+            RES_MASK_MODE: mask_mode,
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
