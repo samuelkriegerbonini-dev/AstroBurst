@@ -104,6 +104,100 @@ export function applyArcsinhStretch(path: string, outputDir?: string, factor = 5
   return withPreview<ArcsinhResult>("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
 }
 
+export interface DebayerResult {
+  png_path?: string;
+  previewUrl?: string;
+  pattern: string;
+  method: string;
+  r_path: string;
+  g_path: string;
+  b_path: string;
+  dimensions: [number, number];
+  elapsed_ms: number;
+}
+
+export interface DebayerBatchItem {
+  path: string;
+  pattern?: string;
+  r_path?: string;
+  g_path?: string;
+  b_path?: string;
+  dimensions?: [number, number];
+  error?: string;
+}
+
+export interface DebayerBatchResult {
+  results: DebayerBatchItem[];
+  succeeded: number;
+  failed: number;
+  method: string;
+  elapsed_ms: number;
+}
+
+export function debayerFits(
+  path: string,
+  outputDir?: string,
+  options: { method?: "bilinear" | "superpixel"; pattern?: string } = {},
+): Promise<DebayerResult> {
+  return withPreview<DebayerResult>("debayer_fits_cmd", outputDir, {
+    path,
+    method: options.method ?? "bilinear",
+    pattern: options.pattern ?? null,
+  });
+}
+
+export async function debayerBatch(
+  paths: string[],
+  outputDir?: string,
+  options: { method?: "bilinear" | "superpixel"; pattern?: string } = {},
+): Promise<DebayerBatchResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<DebayerBatchResult>("debayer_batch_cmd", {
+    paths,
+    outputDir: dir,
+    method: options.method ?? "bilinear",
+    pattern: options.pattern ?? null,
+  });
+}
+
+export interface GhsOptions {
+  stretchFactor: number;
+  localIntensity?: number;
+  symmetryPoint?: number;
+  shadowProtect?: number;
+  highlightProtect?: number;
+}
+
+export function applyGhsStretch(
+  path: string,
+  outputDir?: string,
+  options: GhsOptions = { stretchFactor: 2.0 },
+): Promise<ArcsinhResult> {
+  return withPreview<ArcsinhResult>("apply_ghs_stretch_cmd", outputDir, {
+    path,
+    stretchFactor: options.stretchFactor,
+    localIntensity: options.localIntensity ?? 0.0,
+    symmetryPoint: options.symmetryPoint ?? 0.05,
+    shadowProtect: options.shadowProtect ?? 0.0,
+    highlightProtect: options.highlightProtect ?? 1.0,
+  });
+}
+
+export async function ghsStretchComposite(
+  outputDir?: string,
+  options: GhsOptions = { stretchFactor: 2.0 },
+): Promise<ArcsinhResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<ArcsinhResult>("ghs_stretch_composite_cmd", {
+    outputDir: dir,
+    stretchFactor: options.stretchFactor,
+    localIntensity: options.localIntensity ?? 0.0,
+    symmetryPoint: options.symmetryPoint ?? 0.05,
+    shadowProtect: options.shadowProtect ?? 0.0,
+    highlightProtect: options.highlightProtect ?? 1.0,
+  });
+}
+
 export function maskedStretch(
   path: string,
   outputDir?: string,

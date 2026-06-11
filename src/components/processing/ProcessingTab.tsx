@@ -12,10 +12,12 @@ const WaveletPanel = lazy(() => import("./WaveletPanel"));
 const PsfPanel = lazy(() => import("./PsfPanel"));
 const ArcsinhStretchPanel = lazy(() => import("./ArcsinhStretchPanel"));
 const MaskedStretchPanel = lazy(() => import("./MaskedStretchPanel"));
+const DebayerPanel = lazy(() => import("./DebayerPanel"));
 
-type ProcessingSection = "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
+type ProcessingSection = "debayer" | "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
+  { id: "debayer", label: "Debayer", color: "orange" },
   { id: "background", label: "Background", color: "emerald" },
   { id: "denoise", label: "Denoise", color: "sky" },
   { id: "psf", label: "PSF", color: "violet" },
@@ -59,6 +61,7 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
 }
 
 const COLOR_MAP: Record<string, { active: string; dot: string }> = {
+  orange: { active: "bg-orange-600/20 text-orange-400 ring-1 ring-orange-500/30", dot: "bg-orange-400" },
   emerald: { active: "bg-emerald-600/20 text-emerald-400 ring-1 ring-emerald-500/30", dot: "bg-emerald-400" },
   sky: { active: "bg-sky-600/20 text-sky-400 ring-1 ring-sky-500/30", dot: "bg-sky-400" },
   violet: { active: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30", dot: "bg-violet-400" },
@@ -301,6 +304,13 @@ function ProcessingTabInner() {
         }
       >
         <div className="flex-1 overflow-y-auto">
+          <div style={{ display: active === "debayer" ? "block" : "none" }}>
+            <DebayerPanel
+              selectedFile={file}
+              outputDir={resolvedDir}
+              onPreviewUpdate={handlePreviewUpdate}
+            />
+          </div>
           <div style={{ display: active === "background" ? "block" : "none" }}>
             <BackgroundPanel
               selectedFile={backgroundInput}

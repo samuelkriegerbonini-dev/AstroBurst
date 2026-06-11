@@ -42,6 +42,11 @@ impl HduHeader {
         self.set(key, format!("{:.14E}", value));
     }
 
+    pub fn remove(&mut self, key: &str) {
+        self.cards.retain(|(k, _)| k != key);
+        self.index.remove(key);
+    }
+
     pub fn data_byte_count(&self) -> usize {
         let naxis = self.get_i64("NAXIS").unwrap_or(0);
         if naxis == 0 {

@@ -35,6 +35,7 @@ interface AdvancedImageViewerProps {
   processed?: ViewerImage | null;
   pixelValue?: { x: number; y: number; value: number } | null;
   onMousePixel?: (x: number, y: number) => void;
+  onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   className?: string;
@@ -45,6 +46,7 @@ function AdvancedImageViewer({
   processed,
   pixelValue,
   onMousePixel,
+  onPixelClick,
   onMouseLeave,
   overlayCanvasRef,
   className = "",
@@ -59,6 +61,7 @@ function AdvancedImageViewer({
   const isPanningRef = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const compareDragging = useRef(false);
+  const clickStart = useRef<{ x: number; y: number } | null>(null);
 
   const activeImage = processed ?? original;
   const hasComparison = !!original && !!processed;
@@ -77,6 +80,7 @@ function AdvancedImageViewer({
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      clickStart.current = { x: e.clientX, y: e.clientY };
       if (compareMode && Math.abs(e.nativeEvent.offsetX - (containerRef.current?.clientWidth ?? 0) * comparePos / 100) < 12) {
         compareDragging.current = true;
         return;
@@ -125,6 +129,24 @@ function AdvancedImageViewer({
     isPanningRef.current = false;
     compareDragging.current = false;
   }, []);
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (cursorMode !== "crosshair" || !onPixelClick || !hasRenderDims) return;
+      const start = clickStart.current;
+      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const fitsW = activeImage?.width ?? renderW;
+      const fitsH = activeImage?.height ?? renderH;
+      const coord = screenToImagePixel(
+        e.clientX, e.clientY, rect, transformRef.current,
+        renderW, renderH, fitsW, fitsH,
+      );
+      if (coord) onPixelClick(coord.x, coord.y);
+    },
+    [cursorMode, onPixelClick, hasRenderDims, activeImage, renderW, renderH, transformRef],
+  );
 
   const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
@@ -219,6 +241,7 @@ function AdvancedImageViewer({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={() => { handlePointerUp(); onMouseLeave?.(); }}
+        onClick={handleClick}
         style={{ cursor: isPanning ? "grabbing" : cursorMode === "pan" ? "grab" : "crosshair" }}
       >
         {mainRetry.loading && !hasRenderDims && !mainRetry.error && (

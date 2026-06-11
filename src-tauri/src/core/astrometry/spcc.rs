@@ -56,10 +56,11 @@ pub struct SpccResult {
 }
 
 #[derive(Debug, Clone)]
-struct CatalogStar {
-    ra: f64,
-    dec: f64,
-    bp_rp: f64,
+pub(crate) struct CatalogStar {
+    pub(crate) ra: f64,
+    pub(crate) dec: f64,
+    pub(crate) bp_rp: f64,
+    pub(crate) gmag: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +124,7 @@ pub fn spcc_calibrate_rgb(
             (generate_synthetic_catalog(&world_coords, &good_stars), true)
         }
         SpccCatalog::GaiaDr3Tap => {
-            match query_gaia_vizier(center.ra, center.dec, search_radius) {
+            match query_gaia_vizier(center.ra, center.dec, search_radius, 3) {
                 Ok(stars) => (stars, false),
                 Err(_) => (generate_synthetic_catalog(&world_coords, &good_stars), true),
             }
@@ -259,6 +260,7 @@ fn generate_synthetic_catalog(
                 ra: coord.ra,
                 dec: coord.dec,
                 bp_rp,
+                gmag: None,
             }
         })
         .collect()
@@ -271,12 +273,22 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
 }
 
 #[cfg(not(feature = "vizier"))]
-fn query_gaia_vizier(_ra_center: f64, _dec_center: f64, _radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
+pub(crate) fn query_gaia_vizier(
+    _ra_center: f64,
+    _dec_center: f64,
+    _radius_deg: f64,
+    _min_stars: usize,
+) -> Result<Vec<CatalogStar>, String> {
     Err("Gaia DR3 query requires the 'vizier' feature. Using built-in Bp-Rp estimation.".into())
 }
 
 #[cfg(feature = "vizier")]
-fn query_gaia_vizier(ra_center: f64, dec_center: f64, radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
+pub(crate) fn query_gaia_vizier(
+    ra_center: f64,
+    dec_center: f64,
+    radius_deg: f64,
+    min_stars: usize,
+) -> Result<Vec<CatalogStar>, String> {
     let radius = radius_deg.clamp(0.01, 5.0);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -308,7 +320,7 @@ fn query_gaia_vizier(ra_center: f64, dec_center: f64, radius_deg: f64) -> Result
         .map_err(|e| format!("VizieR response read failed: {}", e))?;
 
     let stars = parse_vizier_tsv(&body);
-    if stars.len() < 3 {
+    if stars.len() < min_stars {
         return Err(format!(
             "VizieR returned only {} usable stars within {:.2} deg",
             stars.len(),
@@ -332,6 +344,7 @@ fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
     let mut col_ra: Option<usize> = None;
     let mut col_dec: Option<usize> = None;
     let mut col_color: Option<usize> = None;
+    let mut col_gmag: Option<usize> = None;
     let mut in_data = false;
     let mut out = Vec::new();
 
@@ -356,6 +369,7 @@ fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
                 col_ra = fields.iter().position(|f| *f == "RA_ICRS");
                 col_dec = fields.iter().position(|f| *f == "DE_ICRS");
                 col_color = fields.iter().position(|f| *f == "BP-RP");
+                col_gmag = fields.iter().position(|f| *f == "Gmag");
             }
             continue;
         }
@@ -382,7 +396,12 @@ fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
             continue;
         }
 
-        out.push(CatalogStar { ra, dec, bp_rp });
+        let gmag = col_gmag
+            .and_then(|ig| fields.get(ig))
+            .and_then(|f| f.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
+
+        out.push(CatalogStar { ra, dec, bp_rp, gmag });
     }
 
     out
@@ -571,6 +590,8 @@ mod tests {
         assert!((stars[0].dec - 22.014472).abs() < 1e-9);
         assert!((stars[0].bp_rp - 0.650).abs() < 1e-9);
         assert!((stars[1].bp_rp - 1.234).abs() < 1e-9);
+        assert_eq!(stars[0].gmag, Some(8.5));
+        assert_eq!(stars[1].gmag, Some(10.2));
     }
 
     #[test]

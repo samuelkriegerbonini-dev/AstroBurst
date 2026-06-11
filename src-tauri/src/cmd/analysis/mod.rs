@@ -12,7 +12,10 @@ use crate::types::constants::{
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
+use crate::core::analysis::photometry::{measure_star, PhotometryConfig};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
+use crate::core::astrometry::spcc::query_gaia_vizier;
+use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::{compute_histogram_with_stats, downsample_histogram};
 use crate::core::imaging::stf::auto_stf;
 
@@ -186,6 +189,73 @@ pub async fn detect_stars_composite(
             obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
         }
         Ok(val)
+    })
+}
+
+#[tauri::command]
+pub async fn measure_photometry_cmd(
+    path: String,
+    x: f64,
+    y: f64,
+    aperture_radius: Option<f64>,
+    gaia_match: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        let entry = crate::cmd::common::load_cached_full(&path)
+            .or_else(|_| load_cached(&path))?;
+
+        let config = PhotometryConfig {
+            aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
+            image_max: Some(entry.stats().max),
+            ..PhotometryConfig::default()
+        };
+
+        let phot = measure_star(entry.arr(), x, y, &config)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let mut sky = serde_json::Value::Null;
+        let mut gaia = serde_json::Value::Null;
+
+        if let Some(header) = entry.header() {
+            if let Ok(wcs) = WcsTransform::from_header(header) {
+                let coord = wcs.pixel_to_world(phot.x, phot.y);
+                sky = json!({ "ra": coord.ra, "dec": coord.dec });
+
+                if gaia_match.unwrap_or(true) {
+                    if let Ok(stars) = query_gaia_vizier(coord.ra, coord.dec, 0.01, 1) {
+                        let cos_dec = coord.dec.to_radians().cos();
+                        let mut best: Option<(f64, usize)> = None;
+                        for (i, s) in stars.iter().enumerate() {
+                            let mut dra = (coord.ra - s.ra).abs();
+                            if dra > 180.0 {
+                                dra = 360.0 - dra;
+                            }
+                            let sep = ((dra * cos_dec).powi(2) + (coord.dec - s.dec).powi(2))
+                                .sqrt()
+                                * 3600.0;
+                            if sep < 5.0 && best.map_or(true, |(bd, _)| sep < bd) {
+                                best = Some((sep, i));
+                            }
+                        }
+                        if let Some((sep, i)) = best {
+                            gaia = json!({
+                                "gmag": stars[i].gmag,
+                                "bp_rp": stars[i].bp_rp,
+                                "separation_arcsec": sep,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "photometry": serde_json::to_value(&phot)?,
+            "sky": sky,
+            "gaia": gaia,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
     })
 }
 

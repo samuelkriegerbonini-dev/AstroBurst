@@ -72,3 +72,40 @@ export function applyStfRender(
 ): Promise<ProcessResult> {
   return withPreview<ProcessResult>("apply_stf_render", outputDir, { path, shadow, midtone, highlight });
 }
+
+export interface StarPhotometry {
+  x: number;
+  y: number;
+  peak: number;
+  net_flux: number;
+  mag_inst: number;
+  snr: number;
+  fwhm: number;
+  aperture_radius: number;
+  aperture_pixels: number;
+  bg_mean: number;
+  bg_sigma: number;
+  saturated: boolean;
+}
+
+export interface PhotometryMeasurement {
+  photometry: StarPhotometry;
+  sky?: { ra: number; dec: number } | null;
+  gaia?: { gmag?: number | null; bp_rp: number; separation_arcsec: number } | null;
+  elapsed_ms: number;
+}
+
+export function measurePhotometry(
+  path: string,
+  x: number,
+  y: number,
+  options: { apertureRadius?: number; gaiaMatch?: boolean } = {},
+): Promise<PhotometryMeasurement> {
+  return typedInvoke<PhotometryMeasurement>("measure_photometry_cmd", {
+    path,
+    x,
+    y,
+    apertureRadius: options.apertureRadius ?? null,
+    gaiaMatch: options.gaiaMatch ?? true,
+  });
+}

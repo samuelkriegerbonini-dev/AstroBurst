@@ -3,6 +3,49 @@ use rayon::prelude::*;
 
 use crate::types::header::HduHeader;
 
+#[derive(Debug, Clone, Default)]
+pub struct SipPoly {
+    terms: Vec<(i32, i32, f64)>,
+}
+
+impl SipPoly {
+    fn parse(header: &HduHeader, prefix: &str) -> Option<SipPoly> {
+        let order = header.get_f64(&format!("{}_ORDER", prefix))?;
+        if !order.is_finite() || !(0.0..=9.0).contains(&order) {
+            return None;
+        }
+        let order = order as i32;
+        let mut terms = Vec::new();
+        for p in 0..=order {
+            for q in 0..=(order - p) {
+                if let Some(c) = header.get_f64(&format!("{}_{}_{}", prefix, p, q)) {
+                    if c.is_finite() && c != 0.0 {
+                        terms.push((p, q, c));
+                    }
+                }
+            }
+        }
+        if terms.is_empty() {
+            None
+        } else {
+            Some(SipPoly { terms })
+        }
+    }
+
+    #[inline]
+    fn eval(&self, u: f64, v: f64) -> f64 {
+        let mut sum = 0.0;
+        for &(p, q, c) in &self.terms {
+            sum += c * u.powi(p) * v.powi(q);
+        }
+        sum
+    }
+
+    pub fn terms(&self) -> &[(i32, i32, f64)] {
+        &self.terms
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WcsTransform {
     crpix1: f64,
@@ -14,6 +57,10 @@ pub struct WcsTransform {
     sin_dec0: f64,
     cos_dec0: f64,
     ra0_rad: f64,
+    sip_a: Option<SipPoly>,
+    sip_b: Option<SipPoly>,
+    sip_ap: Option<SipPoly>,
+    sip_bp: Option<SipPoly>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,7 +120,15 @@ impl WcsTransform {
             sin_dec0: dec0_rad.sin(),
             cos_dec0: dec0_rad.cos(),
             ra0_rad: crval1.to_radians(),
+            sip_a: SipPoly::parse(header, "A"),
+            sip_b: SipPoly::parse(header, "B"),
+            sip_ap: SipPoly::parse(header, "AP"),
+            sip_bp: SipPoly::parse(header, "BP"),
         })
+    }
+
+    pub fn sip_forward_terms(&self) -> (Option<&SipPoly>, Option<&SipPoly>) {
+        (self.sip_a.as_ref(), self.sip_b.as_ref())
     }
 
     pub fn raw_params(&self) -> (f64, f64, f64, f64, [[f64; 2]; 2], &str) {
@@ -112,7 +167,8 @@ impl WcsTransform {
 
     fn detect_projection(header: &HduHeader) -> Projection {
         let ctype1 = header.get("CTYPE1").unwrap_or("");
-        let suffix = ctype1
+        let base = ctype1.trim().trim_end_matches("-SIP");
+        let suffix = base
             .rsplit('-')
             .next()
             .unwrap_or("TAN");
@@ -126,12 +182,49 @@ impl WcsTransform {
         }
     }
 
+    #[inline]
+    fn sip_forward(&self, dx: f64, dy: f64) -> (f64, f64) {
+        if self.sip_a.is_none() && self.sip_b.is_none() {
+            return (dx, dy);
+        }
+        (
+            dx + self.sip_a.as_ref().map_or(0.0, |p| p.eval(dx, dy)),
+            dy + self.sip_b.as_ref().map_or(0.0, |p| p.eval(dx, dy)),
+        )
+    }
+
+    fn sip_inverse(&self, u_lin: f64, v_lin: f64) -> (f64, f64) {
+        if self.sip_a.is_none() && self.sip_b.is_none() {
+            return (u_lin, v_lin);
+        }
+        if self.sip_ap.is_some() || self.sip_bp.is_some() {
+            return (
+                u_lin + self.sip_ap.as_ref().map_or(0.0, |p| p.eval(u_lin, v_lin)),
+                v_lin + self.sip_bp.as_ref().map_or(0.0, |p| p.eval(u_lin, v_lin)),
+            );
+        }
+        let mut u = u_lin;
+        let mut v = v_lin;
+        for _ in 0..12 {
+            let nu = u_lin - self.sip_a.as_ref().map_or(0.0, |p| p.eval(u, v));
+            let nv = v_lin - self.sip_b.as_ref().map_or(0.0, |p| p.eval(u, v));
+            if (nu - u).abs() < 1e-10 && (nv - v).abs() < 1e-10 {
+                return (nu, nv);
+            }
+            u = nu;
+            v = nv;
+        }
+        (u, v)
+    }
+
     pub fn pixel_to_world(&self, x: f64, y: f64) -> CelestialCoord {
         let dx = x - self.crpix1 + 1.0;
         let dy = y - self.crpix2 + 1.0;
 
-        let xi = self.cd[0][0] * dx + self.cd[0][1] * dy;
-        let eta = self.cd[1][0] * dx + self.cd[1][1] * dy;
+        let (u, v) = self.sip_forward(dx, dy);
+
+        let xi = self.cd[0][0] * u + self.cd[0][1] * v;
+        let eta = self.cd[1][0] * u + self.cd[1][1] * v;
 
         self.deproject(xi, eta)
     }
@@ -145,8 +238,10 @@ impl WcsTransform {
         }
 
         let inv_det = 1.0 / det;
-        let dx = inv_det * (self.cd[1][1] * xi - self.cd[0][1] * eta);
-        let dy = inv_det * (-self.cd[1][0] * xi + self.cd[0][0] * eta);
+        let u_lin = inv_det * (self.cd[1][1] * xi - self.cd[0][1] * eta);
+        let v_lin = inv_det * (-self.cd[1][0] * xi + self.cd[0][0] * eta);
+
+        let (dx, dy) = self.sip_inverse(u_lin, v_lin);
 
         (dx + self.crpix1 - 1.0, dy + self.crpix2 - 1.0)
     }
@@ -407,9 +502,105 @@ mod tests {
             ("RA---ARC", Projection::Arc),
             ("RA---CAR", Projection::Car),
             ("GLON-TAN", Projection::Tan),
+            ("RA---TAN-SIP", Projection::Tan),
+            ("RA---SIN-SIP", Projection::Sin),
         ] {
             let h = make_header(&[("CTYPE1", ctype)]);
             assert_eq!(WcsTransform::detect_projection(&h), expected, "Failed for {ctype}");
         }
+    }
+
+    fn sip_header() -> HduHeader {
+        make_header(&[
+            ("CRPIX1", "1024"),
+            ("CRPIX2", "1024"),
+            ("CRVAL1", "83.633"),
+            ("CRVAL2", "22.014"),
+            ("CD1_1", "-2.7778E-04"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "2.7778E-04"),
+            ("CTYPE1", "RA---TAN-SIP"),
+            ("CTYPE2", "DEC--TAN-SIP"),
+            ("A_ORDER", "2"),
+            ("A_2_0", "2.5E-06"),
+            ("A_0_2", "1.2E-06"),
+            ("A_1_1", "-1.5E-06"),
+            ("B_ORDER", "2"),
+            ("B_2_0", "-1.1E-06"),
+            ("B_0_2", "2.2E-06"),
+            ("B_1_1", "0.9E-06"),
+        ])
+    }
+
+    #[test]
+    fn test_sip_changes_corner_coordinates() {
+        let with_sip = WcsTransform::from_header(&sip_header()).unwrap();
+
+        let mut cards: Vec<(&str, &str)> = vec![
+            ("CRPIX1", "1024"),
+            ("CRPIX2", "1024"),
+            ("CRVAL1", "83.633"),
+            ("CRVAL2", "22.014"),
+            ("CD1_1", "-2.7778E-04"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "2.7778E-04"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ];
+        cards.retain(|(k, _)| !k.starts_with("A_") && !k.starts_with("B_"));
+        let without_sip = WcsTransform::from_header(&make_header(&cards)).unwrap();
+
+        let center_sip = with_sip.pixel_to_world(1023.0, 1023.0);
+        let center_lin = without_sip.pixel_to_world(1023.0, 1023.0);
+        assert!((center_sip.ra - center_lin.ra).abs() < 1e-9);
+        assert!((center_sip.dec - center_lin.dec).abs() < 1e-9);
+
+        let corner_sip = with_sip.pixel_to_world(0.0, 0.0);
+        let corner_lin = without_sip.pixel_to_world(0.0, 0.0);
+        let dra = (corner_sip.ra - corner_lin.ra).abs() * 3600.0;
+        let ddec = (corner_sip.dec - corner_lin.dec).abs() * 3600.0;
+        assert!(dra + ddec > 1.0, "SIP had no effect at corner: {} {}", dra, ddec);
+    }
+
+    #[test]
+    fn test_sip_roundtrip_iterative_inverse() {
+        let wcs = WcsTransform::from_header(&sip_header()).unwrap();
+        for &(x, y) in &[(0.0, 0.0), (100.0, 1900.0), (2047.0, 2047.0), (1024.0, 512.0)] {
+            let coord = wcs.pixel_to_world(x, y);
+            let (px, py) = wcs.world_to_pixel(coord.ra, coord.dec);
+            assert!(
+                (px - x).abs() < 1e-4 && (py - y).abs() < 1e-4,
+                "roundtrip failed at ({}, {}): got ({}, {})",
+                x,
+                y,
+                px,
+                py
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_sip_keys_behaves_linearly() {
+        let h = make_header(&[
+            ("CRPIX1", "100"),
+            ("CRPIX2", "100"),
+            ("CRVAL1", "83.633"),
+            ("CRVAL2", "22.014"),
+            ("CD1_1", "-7.27778E-05"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "7.27778E-05"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ]);
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        assert!(wcs.sip_forward_terms().0.is_none());
+        assert!(wcs.sip_forward_terms().1.is_none());
+        let coord = wcs.pixel_to_world(150.0, 200.0);
+        let (px, py) = wcs.world_to_pixel(coord.ra, coord.dec);
+        assert!((px - 150.0).abs() < 1e-3);
+        assert!((py - 200.0).abs() < 1e-3);
     }
 }

@@ -47,6 +47,41 @@ export function useMousePixel(): PixelCoord | null {
   return useSyncExternalStore(store.subscribe, store.getSnapshot);
 }
 
+export interface PixelClick {
+  x: number;
+  y: number;
+  seq: number;
+}
+
+class PixelClickStore {
+  private value: PixelClick | null = null;
+  private seq = 0;
+  private listeners = new Set<Listener>();
+
+  getSnapshot = (): PixelClick | null => this.value;
+
+  subscribe = (listener: Listener): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  emit(x: number, y: number) {
+    this.seq += 1;
+    this.value = { x, y, seq: this.seq };
+    this.listeners.forEach((l) => l());
+  }
+}
+
+const clickStore = new PixelClickStore();
+
+export function emitPixelClick(x: number, y: number) {
+  clickStore.emit(x, y);
+}
+
+export function usePixelClick(): PixelClick | null {
+  return useSyncExternalStore(clickStore.subscribe, clickStore.getSnapshot);
+}
+
 export function useMousePixelActions() {
   const previewTargetRef = useRef<HTMLElement | null>(null);
   const rafRef = useRef<number | null>(null);

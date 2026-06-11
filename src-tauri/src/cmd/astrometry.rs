@@ -208,6 +208,16 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
         let center = wcs.pixel_to_world(naxis1 as f64 / 2.0, naxis2 as f64 / 2.0);
         let params = wcs.raw_params();
 
+        let sip_terms_json = |poly: Option<&crate::core::astrometry::wcs::SipPoly>| {
+            poly.map(|p| {
+                p.terms()
+                    .iter()
+                    .map(|&(pw, qw, c)| json!([pw, qw, c]))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let (sip_a, sip_b) = wcs.sip_forward_terms();
+
         Ok(json!({
             RES_CENTER_RA: center.ra,
             RES_CENTER_DEC: center.dec,
@@ -224,6 +234,8 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
                 RES_WCS_CRVAL2: params.3,
                 RES_WCS_CD: params.4,
                 RES_WCS_PROJECTION: params.5,
+                "sip_a": sip_terms_json(sip_a),
+                "sip_b": sip_terms_json(sip_b),
             },
         }))
     })

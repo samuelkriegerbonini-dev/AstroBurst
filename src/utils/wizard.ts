@@ -53,7 +53,7 @@ export interface WizardState {
   segmPath: string | null;
   maskGrowth: number;
   maskProtection: number;
-  stretchMode: "masked" | "arcsinh" | "auto_stf";
+  stretchMode: "masked" | "arcsinh" | "ghs" | "auto_stf";
   stretchFactor: number;
   targetBackground: number;
   scnrEnabled: boolean;

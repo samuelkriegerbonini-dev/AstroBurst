@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type { WizardState } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { restretchComposite } from "../../../services/compose";
-import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite } from "../../../services/processing";
+import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeContext } from "../../../context/CompositeContext";
@@ -41,6 +41,11 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [error, setError] = useState("");
   const [linked, setLinked] = useState(state.linkedStf);
   const [sharedMask, setSharedMask] = useState(true);
+  const [ghsD, setGhsD] = useState(2.0);
+  const [ghsB, setGhsB] = useState(0.0);
+  const [ghsSp, setGhsSp] = useState(0.05);
+  const [ghsLp, setGhsLp] = useState(0.0);
+  const [ghsHp, setGhsHp] = useState(1.0);
   const [stfR, setStfR] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfG, setStfG] = useState<ChannelStf>({ ...DEFAULT_STF });
   const [stfB, setStfB] = useState<ChannelStf>({ ...DEFAULT_STF });
@@ -139,6 +144,27 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
         } else if (res?.previewUrl) {
           onResult(res.previewUrl, stfBundle);
         }
+      } else if (state.stretchMode === "ghs") {
+        const ghsOptions = {
+          stretchFactor: ghsD,
+          localIntensity: ghsB,
+          symmetryPoint: ghsSp,
+          shadowProtect: ghsLp,
+          highlightProtect: ghsHp,
+        };
+        if (state.compositeReady) {
+          res = await ghsStretchComposite(dir, ghsOptions);
+        } else {
+          const path = resolveAnyChannelPath(state);
+          if (!path) throw new Error("No channel path found");
+          res = await applyGhsStretch(path, dir, ghsOptions);
+        }
+        if (res?.png_path) {
+          const url = await getPreviewUrl(res.png_path);
+          onResult(url, stfBundle);
+        } else if (res?.previewUrl) {
+          onResult(res.previewUrl, stfBundle);
+        }
       } else {
         if (state.compositeReady) {
           res = await restretchComposite(dir, stfR, stfG, stfB);
@@ -155,7 +181,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     } finally {
       setLoading(false);
     }
-  }, [state, stfR, stfG, stfB, onResult]);
+  }, [state, stfR, stfG, stfB, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, onResult]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
@@ -174,9 +200,11 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       ? "Apply Masked Stretch"
       : state.stretchMode === "arcsinh"
         ? "Apply Arcsinh Stretch"
-        : state.compositeReady
-          ? "Re-stretch Composite"
-          : "Apply Auto STF";
+        : state.stretchMode === "ghs"
+          ? "Apply GHS Stretch"
+          : state.compositeReady
+            ? "Re-stretch Composite"
+            : "Apply Auto STF";
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -197,6 +225,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
         <select value={state.stretchMode} onChange={(e) => handleModeChange(e.target.value as WizardState["stretchMode"])} className="ab-select">
           <option value="masked">Masked Stretch (star-protected)</option>
           <option value="arcsinh">Arcsinh Stretch</option>
+          <option value="ghs">GHS (Generalized Hyperbolic)</option>
           <option value="auto_stf">Auto STF</option>
         </select>
       </div>
@@ -228,6 +257,30 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       {state.stretchMode === "arcsinh" && (
         <Slider label="Stretch Factor" value={state.stretchFactor} min={1} max={500} step={1} accent="amber"
                 format={(v) => `${v}`} onChange={handleFactorChange} />
+      )}
+
+      {state.stretchMode === "ghs" && (
+        <div className="flex flex-col gap-2">
+          <Slider label="Stretch (D)" value={ghsD} min={0} max={10} step={0.05} accent="amber"
+                  format={(v) => v.toFixed(2)} onChange={setGhsD} />
+          <Slider label="Local Intensity (b)" value={ghsB} min={-5} max={15} step={0.1} accent="amber"
+                  format={(v) => v.toFixed(1)} onChange={setGhsB} />
+          <Slider label="Symmetry Point (SP)" value={ghsSp} min={0} max={1} step={0.005} accent="amber"
+                  format={(v) => v.toFixed(3)}
+                  onChange={(v) => {
+                    setGhsSp(v);
+                    if (ghsLp > v) setGhsLp(v);
+                    if (ghsHp < v) setGhsHp(v);
+                  }} />
+          <Slider label="Shadow Protect (LP)" value={ghsLp} min={0} max={1} step={0.005} accent="amber"
+                  format={(v) => v.toFixed(3)} onChange={(v) => setGhsLp(Math.min(v, ghsSp))} />
+          <Slider label="Highlight Protect (HP)" value={ghsHp} min={0} max={1} step={0.005} accent="amber"
+                  format={(v) => v.toFixed(3)} onChange={(v) => setGhsHp(Math.max(v, ghsSp))} />
+          <div className="text-[9px] text-zinc-600">
+            b&lt;0 super-stretches faint signal (b=-1 log), b=0 exponential, b&gt;0 focuses contrast near SP.
+            LP/HP keep shadows/highlights linear.
+          </div>
+        </div>
       )}
 
       {state.stretchMode === "auto_stf" && state.compositeReady && (

@@ -8,7 +8,7 @@ import { getCubeSpectrum } from "../services/cube";
 import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
 import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
 import { useCompositeContext } from "../context/CompositeContext";
-import { useMousePixelActions, setMousePixel } from "../hooks/useMousePixelStore";
+import { useMousePixelActions, setMousePixel, emitPixelClick } from "../hooks/useMousePixelStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { useProgress } from "../hooks/useProgress";
 
@@ -217,6 +217,7 @@ export default function PreviewPanel() {
               original={originalImage}
               processed={processedImage}
               onMousePixel={handleViewerMousePixel}
+              onPixelClick={emitPixelClick}
               onMouseLeave={handleLeave}
               overlayCanvasRef={starOverlayRef}
             />

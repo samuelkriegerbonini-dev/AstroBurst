@@ -2,6 +2,7 @@ pub mod background;
 pub mod boundary;
 pub mod calibration_pipeline;
 pub mod curves;
+pub mod debayer;
 pub mod masked_stretch;
 pub mod normalize;
 pub mod psf_estimation;

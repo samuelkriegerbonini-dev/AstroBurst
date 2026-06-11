@@ -10,6 +10,7 @@ import type { StfParams } from "../../shared/types";
 const FFTPanel = lazy(() => import("./FFTPanel"));
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PlateSolvePanel = lazy(() => import("./PlateSolvePanel"));
+const PhotometryPanel = lazy(() => import("./PhotometryPanel"));
 const TileViewerPanel = lazy(() => import("./TileViewerPanel"));
 
 const EMPTY_STARS: any[] = [];
@@ -185,6 +186,8 @@ function AnalysisTabInner({
           overlayCanvasRef={starOverlayRef}
           filePath={effectivePath ?? null}
         />
+
+        <PhotometryPanel filePath={effectivePath ?? null} />
 
         {effectivePath && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
           <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />

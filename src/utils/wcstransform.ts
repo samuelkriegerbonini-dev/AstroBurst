@@ -1,3 +1,5 @@
+export type SipTerm = [number, number, number];
+
 export interface WcsParams {
   crpix1: number;
   crpix2: number;
@@ -5,6 +7,16 @@ export interface WcsParams {
   crval2: number;
   cd: [[number, number], [number, number]];
   projection: string;
+  sip_a?: SipTerm[] | null;
+  sip_b?: SipTerm[] | null;
+}
+
+function evalSip(terms: SipTerm[], u: number, v: number): number {
+  let sum = 0;
+  for (const [p, q, c] of terms) {
+    sum += c * Math.pow(u, p) * Math.pow(v, q);
+  }
+  return sum;
 }
 
 export interface CelestialCoord {
@@ -93,8 +105,11 @@ export function pixelToWorld(params: WcsParams, x: number, y: number): Celestial
   const dx = x - params.crpix1 + 1;
   const dy = y - params.crpix2 + 1;
 
-  const xi = params.cd[0][0] * dx + params.cd[0][1] * dy;
-  const eta = params.cd[1][0] * dx + params.cd[1][1] * dy;
+  const u = params.sip_a?.length ? dx + evalSip(params.sip_a, dx, dy) : dx;
+  const v = params.sip_b?.length ? dy + evalSip(params.sip_b, dx, dy) : dy;
+
+  const xi = params.cd[0][0] * u + params.cd[0][1] * v;
+  const eta = params.cd[1][0] * u + params.cd[1][1] * v;
 
   return deproject(xi, eta, params.crval1, params.crval2, params.projection);
 }
