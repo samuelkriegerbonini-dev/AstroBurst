@@ -237,6 +237,11 @@ fn check_transform_sanity(result: &AffineAlignResult, rows: usize, cols: usize) 
         ));
     }
 
+    let det = t.a * t.d - t.b * t.c;
+    if det <= 0.0 {
+        return Err(format!("reflection (det={:.3}) rejected", det));
+    }
+
     Ok(())
 }
 
@@ -667,20 +672,23 @@ pub fn warp_image(
     out_cols: usize,
 ) -> Array2<f32> {
     let (src_rows, src_cols) = image.dim();
-    let slice = image.as_slice().expect("contiguous");
     let total = out_rows * out_cols;
     let mut buf = vec![f32::NAN; total];
+
+    if src_rows == 0 || src_cols == 0 {
+        return Array2::from_shape_vec((out_rows, out_cols), buf).unwrap();
+    }
+
+    let slice = image.as_slice().expect("contiguous");
+    let max_x = src_cols as f64 - 0.5;
+    let max_y = src_rows as f64 - 0.5;
 
     buf.par_chunks_mut(out_cols)
         .enumerate()
         .for_each(|(y, row)| {
             for x in 0..out_cols {
                 let (sx, sy) = transform.map(x as f64, y as f64);
-                if sx >= 0.0
-                    && sy >= 0.0
-                    && sx < (src_cols - 1) as f64
-                    && sy < (src_rows - 1) as f64
-                {
+                if sx >= -0.5 && sy >= -0.5 && sx <= max_x && sy <= max_y {
                     row[x] = bicubic_sample(slice, src_rows, src_cols, sy, sx);
                 }
             }
@@ -829,5 +837,46 @@ mod tests {
         let t = AffineTransform::translation(1000.0, 1000.0);
         let warped = warp_image(&img, &t, 50, 50);
         assert!(warped[[25, 25]].is_nan());
+    }
+
+    #[test]
+    fn test_warp_identity_fills_edges() {
+        let img = Array2::from_shape_fn((20, 20), |(r, c)| (r * 20 + c) as f32);
+        let warped = warp_image(&img, &AffineTransform::identity(), 20, 20);
+        assert!(warped[[19, 19]].is_finite());
+        assert!(warped[[0, 19]].is_finite());
+        assert!(warped[[19, 0]].is_finite());
+    }
+
+    #[test]
+    fn test_warp_empty_source_is_all_nan() {
+        let img = Array2::<f32>::zeros((0, 0));
+        let warped = warp_image(&img, &AffineTransform::identity(), 5, 5);
+        assert!(warped.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn test_check_transform_sanity_rejects_reflection() {
+        let reflection = AffineTransform { a: 1.0, b: 0.0, tx: 0.0, c: 0.0, d: -1.0, ty: 0.0 };
+        let result = AffineAlignResult {
+            transform: reflection,
+            matched_stars: 10,
+            inliers: 10,
+            residual_px: 0.5,
+            method: AffineAlignMethod::Affine,
+        };
+        assert!(check_transform_sanity(&result, 100, 100).is_err());
+    }
+
+    #[test]
+    fn test_check_transform_sanity_accepts_identity() {
+        let result = AffineAlignResult {
+            transform: AffineTransform::identity(),
+            matched_stars: 10,
+            inliers: 10,
+            residual_px: 0.5,
+            method: AffineAlignMethod::Affine,
+        };
+        assert!(check_transform_sanity(&result, 100, 100).is_ok());
     }
 }

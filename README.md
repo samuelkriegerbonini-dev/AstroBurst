@@ -170,6 +170,11 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 </p>
 <p align="center"><em><strong>More results.</strong> The same end-to-end pipeline on a JWST supernova remnant — violet/pink filaments and orange knots over a dense star field — finished with the tone-curve editor.</em></p>
 
+<p align="center">
+  <img src="docs/screenshots/26-spiral-galaxy-composite.png" alt="JWST NIRCam spiral galaxy composite" width="100%">
+</p>
+<p align="center"><em><strong>And a galaxy.</strong> A face-on spiral from eight JWST NIRCam filters (F115W–F405N) composed into an RGB + L stack. The short-wave (~11.5K px) and long-wave (~5.7K px) detectors are auto-resampled to a common grid and registered before blending, so the pink star-forming knots threading the arms and the dense field of resolved stars stay crisp — finished with the tone-curve editor.</em></p>
+
 </details>
 
 ## Features

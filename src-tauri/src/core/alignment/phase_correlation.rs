@@ -262,4 +262,50 @@ mod tests {
         assert_eq!(result.dy, 0.0);
         assert_eq!(result.confidence, 0.0);
     }
+
+    fn fft_shift(img: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
+        use crate::math::fft::{extract_real, prepare_buffer_no_window, FftEngine2D};
+        use std::f64::consts::PI;
+        let (rows, cols) = img.dim();
+        let engine = FftEngine2D::<f64>::new(rows, cols);
+        let mut buf = prepare_buffer_no_window::<f64>(img, rows, cols);
+        engine.forward_2d(&mut buf);
+        for ky in 0..rows {
+            let fy = if ky > rows / 2 { ky as f64 - rows as f64 } else { ky as f64 };
+            for kx in 0..cols {
+                let fx = if kx > cols / 2 { kx as f64 - cols as f64 } else { kx as f64 };
+                let ang = -2.0 * PI * (fy * dy / rows as f64 + fx * dx / cols as f64);
+                let (s, c) = ang.sin_cos();
+                let idx = ky * cols + kx;
+                let re = buf[idx].re * c - buf[idx].im * s;
+                let im = buf[idx].re * s + buf[idx].im * c;
+                buf[idx].re = re;
+                buf[idx].im = im;
+            }
+        }
+        engine.inverse_2d(&mut buf);
+        let real = extract_real(&buf, rows, cols);
+        Array2::from_shape_vec((rows, cols), real.iter().map(|&v| v as f32).collect()).unwrap()
+    }
+
+    #[test]
+    fn test_subpixel_fractional_recovery() {
+        let img = make_pattern(128, 128);
+        for &(dy, dx) in &[(0.3f64, -0.2f64), (0.45, 0.15), (-0.35, 0.4)] {
+            let shifted = fft_shift(&img, dy, dx);
+            let result = phase_correlate(&img, &shifted);
+            assert!(
+                (result.dy - dy).abs() < 0.05,
+                "dy={} expected {}",
+                result.dy,
+                dy
+            );
+            assert!(
+                (result.dx - dx).abs() < 0.05,
+                "dx={} expected {}",
+                result.dx,
+                dx
+            );
+        }
+    }
 }
