@@ -44,8 +44,30 @@ pub fn divide_flat(image: &Array2<f32>, master_flat: &Array2<f32>) -> Array2<f32
     Array2::from_shape_vec((rows, cols), result).unwrap()
 }
 
-pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Array2<f32> {
+fn ensure_master_dims(
+    name: &str,
+    master: Option<&Array2<f32>>,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    if let Some(m) = master {
+        if m.dim() != (rows, cols) {
+            bail!(
+                "master {} shape {:?} does not match science frame {:?}",
+                name,
+                m.dim(),
+                (rows, cols)
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Result<Array2<f32>> {
     let (rows, cols) = raw.dim();
+    ensure_master_dims("bias", config.master_bias.as_ref(), rows, cols)?;
+    ensure_master_dims("dark", config.master_dark.as_ref(), rows, cols)?;
+    ensure_master_dims("flat", config.master_flat.as_ref(), rows, cols)?;
     let npix = rows * cols;
     let src = raw.as_slice().expect("contiguous");
 
@@ -78,7 +100,7 @@ pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Array2<
         })
         .collect();
 
-    Array2::from_shape_vec((rows, cols), result).unwrap()
+    Ok(Array2::from_shape_vec((rows, cols), result).unwrap())
 }
 
 fn median_combine_row_major(
@@ -229,21 +251,21 @@ pub fn create_master_flat(
 
     let mut result = median_combine_row_major(frames, rows, cols);
 
-    let sum: f64 = result.iter()
+    let mut positives: Vec<f32> = result
+        .iter()
         .filter(|v| v.is_finite() && **v > 0.0)
-        .map(|v| *v as f64)
-        .sum();
-    let count = result.iter()
-        .filter(|v| v.is_finite() && **v > 0.0)
-        .count();
+        .copied()
+        .collect();
 
-    if count > 0 {
-        let mean = sum / count as f64;
-        let inv_mean = if mean.abs() > 1e-10 { 1.0 / mean as f32 } else { 1.0 };
+    if !positives.is_empty() {
+        let mid = positives.len() / 2;
+        positives.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+        let median = positives[mid] as f64;
+        let inv_median = if median.abs() > 1e-10 { 1.0 / median as f32 } else { 1.0 };
 
         result.par_iter_mut().for_each(|v| {
             if v.is_finite() && *v > 0.0 {
-                *v *= inv_mean;
+                *v *= inv_median;
             } else {
                 *v = 1.0;
             }
@@ -296,7 +318,7 @@ pub fn calibrate_from_paths(
         dark_exposure_ratio,
     };
 
-    Ok(clamp_non_negative(calibrate_image(&science, &config)))
+    Ok(clamp_non_negative(calibrate_image(&science, &config)?))
 }
 
 pub fn stack_from_paths(
@@ -313,7 +335,7 @@ pub fn stack_from_paths(
         .map(|path| {
             let img = load_fits_image(path)?;
             match calibration {
-                Some(cal) => Ok(calibrate_image(&img, cal)),
+                Some(cal) => calibrate_image(&img, cal),
                 None => Ok(img),
             }
         })
@@ -337,7 +359,7 @@ pub fn drizzle_from_paths(
     for path in paths {
         let mut img = load_fits_image(path)?;
         if let Some(cal) = calibration {
-            img = calibrate_image(&img, cal);
+            img = calibrate_image(&img, cal)?;
         }
         images.push(img);
     }
@@ -413,8 +435,20 @@ mod tests {
             dark_exposure_ratio: 1.0,
         };
 
-        let result = calibrate_image(&raw, &config);
+        let result = calibrate_image(&raw, &config).unwrap();
         assert!((result[[0, 0]] - 95.0).abs() < 1e-4);
         assert!((result[[2, 2]] - 175.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_calibrate_rejects_mismatched_master() {
+        let raw = Array2::from_elem((4, 4), 100.0f32);
+        let config = CalibrationConfig {
+            master_bias: Some(Array2::from_elem((3, 3), 10.0f32)),
+            master_dark: None,
+            master_flat: None,
+            dark_exposure_ratio: 1.0,
+        };
+        assert!(calibrate_image(&raw, &config).is_err());
     }
 }

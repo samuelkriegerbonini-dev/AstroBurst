@@ -156,7 +156,8 @@ mod astrometry_net_impl {
             upload_json["scale_lower"] = serde_json::json!(lo);
             upload_json["scale_upper"] = serde_json::json!(hi);
             upload_json["scale_type"] = serde_json::json!("ul");
-            upload_json["scale_units"] = serde_json::json!("arcsecperpix");
+            upload_json["scale_units"] =
+                serde_json::json!(config.scale_units.as_deref().unwrap_or("arcsecperpix"));
         }
 
         let file_bytes = std::fs::read(fits_path)

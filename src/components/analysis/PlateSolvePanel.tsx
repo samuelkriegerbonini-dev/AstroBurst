@@ -87,6 +87,8 @@ function PlateSolvePanel({
   const [hasApiKey, setHasApiKey] = useState(false);
   const [scaleLow, setScaleLow] = useState(0.1);
   const [scaleHigh, setScaleHigh] = useState(10.0);
+  const [scaleUnits, setScaleUnits] = useState<"arcsecperpix" | "arcminwidth" | "degwidth">("arcsecperpix");
+  const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
 
   useEffect(() => {
@@ -231,7 +233,8 @@ function PlateSolvePanel({
       const result = await plateSolve(filePath, {
         scaleLower: scaleLow,
         scaleUpper: scaleHigh,
-        scaleUnits: "arcsecperpix",
+        scaleUnits,
+        downsampleFactor: downsample > 1 ? downsample : undefined,
       }) as SolveResult;
       setSolveResult(result);
       getWcsInfo(filePath)
@@ -242,7 +245,7 @@ function PlateSolvePanel({
     } finally {
       setSolveLoading(false);
     }
-  }, [filePath, scaleLow, scaleHigh]);
+  }, [filePath, scaleLow, scaleHigh, scaleUnits, downsample]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -400,7 +403,7 @@ function PlateSolvePanel({
 
           <div className="flex gap-2">
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale low ("/px)</label>
+              <label className="text-[9px] text-zinc-500 uppercase">Scale low</label>
               <input
                 type="number"
                 min={0.01}
@@ -412,7 +415,7 @@ function PlateSolvePanel({
               />
             </div>
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale high ("/px)</label>
+              <label className="text-[9px] text-zinc-500 uppercase">Scale high</label>
               <input
                 type="number"
                 min={0.01}
@@ -422,6 +425,33 @@ function PlateSolvePanel({
                 onChange={(e) => setScaleHigh(parseFloat(e.target.value) || 10.0)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-emerald-500/50 w-full"
               />
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label className="text-[9px] text-zinc-500 uppercase">Scale units</label>
+              <select
+                value={scaleUnits}
+                onChange={(e) => setScaleUnits(e.target.value as typeof scaleUnits)}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+              >
+                <option value="arcsecperpix">arcsec/px</option>
+                <option value="arcminwidth">arcmin width</option>
+                <option value="degwidth">deg width</option>
+              </select>
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label className="text-[9px] text-zinc-500 uppercase">Downsample</label>
+              <select
+                value={downsample}
+                onChange={(e) => setDownsample(parseInt(e.target.value, 10))}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+              >
+                <option value={0}>Auto</option>
+                <option value={2}>2x</option>
+                <option value={4}>4x</option>
+              </select>
             </div>
           </div>
 

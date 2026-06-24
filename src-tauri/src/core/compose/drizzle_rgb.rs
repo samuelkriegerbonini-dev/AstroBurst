@@ -199,6 +199,18 @@ pub fn drizzle_rgb(
         bail!("Need at least 2 channels for RGB drizzle (got {})", channel_count);
     }
 
+    for (name, paths) in [("R", r_paths), ("G", g_paths), ("B", b_paths)] {
+        if let Some(p) = paths {
+            if p.len() < 2 {
+                bail!(
+                    "Channel {} has {} frame(s); drizzle needs at least 2 per channel",
+                    name,
+                    p.len()
+                );
+            }
+        }
+    }
+
     let (r_result, (g_result, b_result)) = rayon::join(
         || {
             r_paths

@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
-import { BarChart3, Check, X, Loader2 } from "lucide-react";
+import { BarChart3, Check, X } from "lucide-react";
 import { Slider, RunButton, SectionHeader } from "../ui";
 import { analyzeSubframes, type SubframeMetrics, type SubframeAnalysisResult } from "../../services/analysis";
 
@@ -21,6 +21,11 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
   const [minSnr, setMinSnr] = useState(5.0);
   const [minStars, setMinStars] = useState(5);
 
+  const [fwhmWeight, setFwhmWeight] = useState(1.0);
+  const [eccWeight, setEccWeight] = useState(0.5);
+  const [snrWeight, setSnrWeight] = useState(1.0);
+  const [noiseWeight, setNoiseWeight] = useState(0.3);
+
   const [sortBy, setSortBy] = useState<keyof SubframeMetrics>("weight");
   const [sortAsc, setSortAsc] = useState(false);
 
@@ -31,14 +36,23 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
     setResult(null);
     setOverrides({});
     try {
-      const res = await analyzeSubframes(files, { maxFwhm, maxEccentricity: maxEcc, minSnr, minStars });
+      const res = await analyzeSubframes(files, {
+        maxFwhm,
+        maxEccentricity: maxEcc,
+        minSnr,
+        minStars,
+        fwhmWeight,
+        eccentricityWeight: eccWeight,
+        snrWeight,
+        noiseWeight,
+      });
       setResult(res);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [files, maxFwhm, maxEcc, minSnr, minStars]);
+  }, [files, maxFwhm, maxEcc, minSnr, minStars, fwhmWeight, eccWeight, snrWeight, noiseWeight]);
 
   const toggleOverride = useCallback((path: string) => {
     setOverrides((prev) => {
@@ -119,6 +133,18 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
                 format={(v) => v.toFixed(0)} onChange={setMinSnr} />
         <Slider label="Min Stars" value={minStars} min={1} max={50} step={1} accent="teal"
                 format={(v) => `${v}`} onChange={(v) => setMinStars(Math.round(v))} />
+      </div>
+
+      <div className="text-[10px] text-zinc-500 uppercase tracking-wider">Scoring weights</div>
+      <div className="grid grid-cols-2 gap-2">
+        <Slider label="FWHM weight" value={fwhmWeight} min={0} max={3} step={0.1} accent="teal"
+                format={(v) => v.toFixed(1)} onChange={setFwhmWeight} />
+        <Slider label="Ecc weight" value={eccWeight} min={0} max={3} step={0.1} accent="teal"
+                format={(v) => v.toFixed(1)} onChange={setEccWeight} />
+        <Slider label="SNR weight" value={snrWeight} min={0} max={3} step={0.1} accent="teal"
+                format={(v) => v.toFixed(1)} onChange={setSnrWeight} />
+        <Slider label="Noise weight" value={noiseWeight} min={0} max={3} step={0.1} accent="teal"
+                format={(v) => v.toFixed(1)} onChange={setNoiseWeight} />
       </div>
 
       <RunButton

@@ -31,7 +31,7 @@ fn sigma_clip_combine_with(
 ) -> (f32, u32) {
     let n_orig = values.len();
     if n_orig == 0 {
-        return (0.0, 0);
+        return (f32::NAN, 0);
     }
     if n_orig == 1 {
         return (values[0], 0);
@@ -122,7 +122,7 @@ fn sigma_clip_combine_weighted_with(
 ) -> (f32, u32) {
     let n_orig = vals.len();
     if n_orig == 0 {
-        return (0.0, 0);
+        return (f32::NAN, 0);
     }
     if n_orig == 1 {
         return (vals[0].0, 0);
@@ -365,7 +365,7 @@ mod tests {
     fn test_sigma_clip_empty() {
         let mut vals: Vec<f32> = vec![];
         let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
-        assert_eq!(mean, 0.0);
+        assert!(mean.is_nan());
         assert_eq!(rejected, 0);
     }
 

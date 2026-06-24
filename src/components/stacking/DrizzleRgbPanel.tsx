@@ -47,6 +47,13 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
   const [pixfrac, setPixfrac] = useState(0.7);
   const [kernel, setKernel] = useState<"square" | "gaussian" | "lanczos3">("square");
   const [align, setAlign] = useState(true);
+  const [alignmentMethod, setAlignmentMethod] = useState<"phase_correlation" | "zncc">("phase_correlation");
+  const [sigmaLow, setSigmaLow] = useState(3.0);
+  const [sigmaHigh, setSigmaHigh] = useState(3.0);
+  const [wbMode, setWbMode] = useState<"auto" | "manual" | "none">("auto");
+  const [wbR, setWbR] = useState(1.0);
+  const [wbG, setWbG] = useState(1.0);
+  const [wbB, setWbB] = useState(1.0);
   const [saveFits, setSaveFits] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<DrizzleRgbResult | null>(null);
@@ -102,7 +109,20 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
         channelPaths.g,
         channelPaths.b,
         await getOutputDir(),
-        { scale, pixfrac, kernel, align, saveFits },
+        {
+          scale,
+          pixfrac,
+          kernel,
+          align,
+          alignmentMethod: align ? alignmentMethod : undefined,
+          sigmaLow,
+          sigmaHigh,
+          wbMode,
+          wbR: wbMode === "manual" ? wbR : undefined,
+          wbG: wbMode === "manual" ? wbG : undefined,
+          wbB: wbMode === "manual" ? wbB : undefined,
+          saveFits,
+        },
       );
       setResult(res);
       onResult?.(res);
@@ -111,7 +131,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
     } finally {
       setIsRunning(false);
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, saveFits, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, saveFits, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -202,7 +222,58 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             ))}
           </select>
         </div>
+        <Slider label="Sigma low" value={sigmaLow} min={0} max={6} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
+        <Slider label="Sigma high" value={sigmaHigh} min={0} max={6} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
         <Toggle label="Align frames and channels" checked={align} accent="rose" onChange={setAlign} />
+        {align && (
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-zinc-400">Alignment</label>
+            <select
+              value={alignmentMethod}
+              onChange={(e) => setAlignmentMethod(e.target.value as typeof alignmentMethod)}
+              className="ab-select"
+              disabled={isRunning}
+            >
+              <option value="phase_correlation">Phase Correlation</option>
+              <option value="zncc">Star-based (ZNCC)</option>
+            </select>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">White balance</label>
+          <select
+            value={wbMode}
+            onChange={(e) => setWbMode(e.target.value as typeof wbMode)}
+            className="ab-select"
+            disabled={isRunning}
+          >
+            <option value="auto">Auto</option>
+            <option value="manual">Manual</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+        {wbMode === "manual" && (
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: "R", val: wbR, set: setWbR },
+              { label: "G", val: wbG, set: setWbG },
+              { label: "B", val: wbB, set: setWbB },
+            ].map(({ label, val, set }) => (
+              <div key={label} className="flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.05}
+                  value={val}
+                  onChange={(e) => set(parseFloat(e.target.value) || 0)}
+                  disabled={isRunning}
+                  className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-rose-500/50 w-full"
+                />
+              </div>
+            ))}
+          </div>
+        )}
         <Toggle label="Save FITS alongside PNG" checked={saveFits} accent="rose" onChange={setSaveFits} />
       </div>
 

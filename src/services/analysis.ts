@@ -48,6 +48,10 @@ export interface SubframeOptions {
   maxEccentricity?: number;
   minSnr?: number;
   minStars?: number;
+  fwhmWeight?: number;
+  eccentricityWeight?: number;
+  snrWeight?: number;
+  noiseWeight?: number;
 }
 
 export function analyzeSubframes(
@@ -60,6 +64,10 @@ export function analyzeSubframes(
     maxEccentricity: options.maxEccentricity,
     minSnr: options.minSnr,
     minStars: options.minStars,
+    fwhmWeight: options.fwhmWeight,
+    eccentricityWeight: options.eccentricityWeight,
+    snrWeight: options.snrWeight,
+    noiseWeight: options.noiseWeight,
   });
 }
 

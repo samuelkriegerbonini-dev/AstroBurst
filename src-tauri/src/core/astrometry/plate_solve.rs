@@ -43,6 +43,7 @@ pub struct SolveConfig {
     pub radius_hint: Option<f64>,
     pub scale_low: Option<f64>,
     pub scale_high: Option<f64>,
+    pub scale_units: Option<String>,
     pub max_stars: Option<usize>,
 }
 
@@ -56,6 +57,7 @@ impl Default for SolveConfig {
             radius_hint: Some(10.0),
             scale_low: None,
             scale_high: None,
+            scale_units: None,
             max_stars: Some(100),
         }
     }

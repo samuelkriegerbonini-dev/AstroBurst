@@ -59,25 +59,18 @@ export interface PipelineResult {
 }
 
 export interface CalibrateOptions {
-  darkPath?: string;
-  flatPath?: string;
-  biasPath?: string;
   darkPaths?: string[];
   flatPaths?: string[];
   biasPaths?: string[];
   darkExposureRatio?: number;
-  normalize?: boolean;
 }
 
 export interface StackOptions {
   name?: string;
-  method?: string;
   sigmaLow?: number;
   sigmaHigh?: number;
   maxIterations?: number;
   align?: boolean;
-  drizzleScale?: number;
-  weightMode?: string;
   weights?: number[];
 }
 
@@ -86,7 +79,13 @@ export interface DrizzleRgbOptions {
   pixfrac?: number;
   kernel?: "square" | "gaussian" | "lanczos3";
   align?: boolean;
-  wbMode?: string;
+  alignmentMethod?: "phase_correlation" | "zncc";
+  sigmaLow?: number;
+  sigmaHigh?: number;
+  wbMode?: "auto" | "manual" | "none";
+  wbR?: number;
+  wbG?: number;
+  wbB?: number;
   scnrEnabled?: boolean;
   scnrAmount?: number;
   saveFits?: boolean;

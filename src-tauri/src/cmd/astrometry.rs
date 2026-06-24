@@ -41,8 +41,8 @@ pub async fn plate_solve_cmd(
     api_key: Option<String>,
     scale_lower: Option<f64>,
     scale_upper: Option<f64>,
-    _scale_units: Option<String>,
-    _downsample_factor: Option<u32>,
+    scale_units: Option<String>,
+    downsample_factor: Option<u32>,
     center_ra: Option<f64>,
     center_dec: Option<f64>,
     radius: Option<f64>,
@@ -63,11 +63,21 @@ pub async fn plate_solve_cmd(
                 5.0,
             );
 
-            let (upload_fits, tmp_ds, ds_factor) = if naxis1 > MAX_UPLOAD_DIM || naxis2 > MAX_UPLOAD_DIM {
+            let target_dims: Option<(usize, usize)> = if let Some(f) = downsample_factor.filter(|&f| f > 1) {
+                let ds_cols = (naxis1 / f as usize).max(1);
+                let ds_rows = (naxis2 / f as usize).max(1);
+                Some((ds_rows, ds_cols))
+            } else if naxis1 > MAX_UPLOAD_DIM || naxis2 > MAX_UPLOAD_DIM {
                 let scale = MAX_UPLOAD_DIM as f64 / naxis1.max(naxis2) as f64;
-                let ds_rows = (naxis2 as f64 * scale).round() as usize;
-                let ds_cols = (naxis1 as f64 * scale).round() as usize;
+                Some((
+                    (naxis2 as f64 * scale).round() as usize,
+                    (naxis1 as f64 * scale).round() as usize,
+                ))
+            } else {
+                None
+            };
 
+            let (upload_fits, tmp_ds, ds_factor) = if let Some((ds_rows, ds_cols)) = target_dims {
                 log::info!(
                     "Plate solve: downsampling {}x{} to {}x{} for upload",
                     naxis1, naxis2, ds_cols, ds_rows
@@ -95,7 +105,12 @@ pub async fn plate_solve_cmd(
                 (resolved_path.to_string_lossy().to_string(), None, None)
             };
 
-            let hint_scale = ds_factor.map_or(1.0, |(fx, fy)| (fx * fy).sqrt());
+            let is_pixel_scale = scale_units.as_deref().map_or(true, |u| u.contains("pix"));
+            let hint_scale = if is_pixel_scale {
+                ds_factor.map_or(1.0, |(fx, fy)| (fx * fy).sqrt())
+            } else {
+                1.0
+            };
 
             let cfg = crate::infra::astrometry::plate_solve::SolveConfig {
                 api_url: config::load_config()
@@ -107,6 +122,7 @@ pub async fn plate_solve_cmd(
                 radius_hint: radius,
                 scale_low: scale_lower.map(|v| v * hint_scale),
                 scale_high: scale_upper.map(|v| v * hint_scale),
+                scale_units,
                 max_stars: config::load_config()
                     .map(|c| Some(c.plate_solve_max_stars))
                     .unwrap_or(Some(100)),

@@ -182,6 +182,14 @@ pub async fn blend_channels_cmd(
             })
             .collect();
 
+        if blend_weights.len() < weights.len() {
+            log::warn!(
+                "blend: dropped {} malformed weight(s) of {}",
+                weights.len() - blend_weights.len(),
+                weights.len()
+            );
+        }
+
         let (r, g, b) = blend_channels(&refs, &blend_weights, max_rows, max_cols);
 
         let (stats_r, (stats_g, stats_b)) = rayon::join(

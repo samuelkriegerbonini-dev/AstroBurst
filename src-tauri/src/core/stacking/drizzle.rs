@@ -211,8 +211,8 @@ impl DrizzleAccumulator {
                         }
                     }
 
-                    let mean = if wsum > 1e-12 { (vsum / wsum) as f32 } else { 0.0 };
-                    (mean, wsum as f32, rejected)
+                    let mean = if wsum > 1e-6 { (vsum / wsum) as f32 } else { 0.0 };
+                    (mean, wsum.max(0.0) as f32, rejected)
                 },
             )
             .collect();
