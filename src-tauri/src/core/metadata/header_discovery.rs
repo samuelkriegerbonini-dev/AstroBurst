@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::types::constants::FILTER_WAVELENGTHS_NM;
 use crate::types::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -266,6 +267,29 @@ fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
     } else {
         None
     }
+}
+
+pub fn filter_to_wavelength_nm(filter: &str) -> Option<u32> {
+    let upper = filter.to_uppercase();
+    if let Some(nm) = lookup_filter_nm(upper.trim()) {
+        return Some(nm);
+    }
+    for token in upper.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() || token == "CLEAR" {
+            continue;
+        }
+        if let Some(nm) = lookup_filter_nm(token) {
+            return Some(nm);
+        }
+    }
+    None
+}
+
+fn lookup_filter_nm(key: &str) -> Option<u32> {
+    FILTER_WAVELENGTHS_NM
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, nm)| *nm)
 }
 
 pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
@@ -614,6 +638,46 @@ mod tests {
         assert!(p.g_file.is_none());
         assert!(p.b_file.is_none());
         assert_eq!(p.unmapped.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_named() {
+        assert_eq!(filter_to_wavelength_nm("F656N"), Some(656));
+        assert_eq!(filter_to_wavelength_nm("F501N"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("F502N"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("F673N"), Some(673));
+        assert_eq!(filter_to_wavelength_nm("F090W"), Some(900));
+        assert_eq!(filter_to_wavelength_nm("F187N"), Some(1870));
+        assert_eq!(filter_to_wavelength_nm("F200W"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F335M"), Some(3350));
+        assert_eq!(filter_to_wavelength_nm("F444W"), Some(4440));
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_normalization() {
+        assert_eq!(filter_to_wavelength_nm("f200w"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F200W-CLEAR"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("CLEAR;F200W"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F164N+F150W2"), Some(1640));
+        assert_eq!(filter_to_wavelength_nm("  F090W  "), Some(900));
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_aliases_and_unknown() {
+        assert_eq!(filter_to_wavelength_nm("Ha"), Some(656));
+        assert_eq!(filter_to_wavelength_nm("OIII"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("SII"), Some(673));
+        assert_eq!(filter_to_wavelength_nm("Luminance"), None);
+        assert_eq!(filter_to_wavelength_nm(""), None);
+    }
+
+    #[test]
+    fn test_filter_wavelength_table_no_duplicate_keys() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for (k, _) in FILTER_WAVELENGTHS_NM {
+            assert!(seen.insert(*k), "duplicate filter key in table: {k}");
+        }
     }
 
     #[test]

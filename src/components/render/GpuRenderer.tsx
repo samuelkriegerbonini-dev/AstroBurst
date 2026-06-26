@@ -1,67 +1,6 @@
-import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { renderStfInWorker, cancelPendingRenders, setWorkerPixels } from "../../utils/stfworker";
-import { getGpuSingleton, getGpuState, type GpuResources as GpuSingleton } from "../../infrastructure/gpu/GpuSingleton";
-
-const MAX_DISPLAY_DIM = 4096;
-
-interface DisplayDims {
-  width: number;
-  height: number;
-  scale: number;
-}
-
-function clampDimensions(w: number, h: number, maxDim: number): DisplayDims {
-  if (w <= maxDim && h <= maxDim) return { width: w, height: h, scale: 1 };
-  const scale = maxDim / Math.max(w, h);
-  return {
-    width: Math.round(w * scale),
-    height: Math.round(h * scale),
-    scale,
-  };
-}
-
-let _dsWorker: Worker | null = null;
-let _dsWorkerUrl: string | null = null;
-function getDownsampleWorker(): Worker {
-  if (_dsWorker) return _dsWorker;
-  const code = `
-    self.onmessage = (e) => {
-      const { src, srcW, srcH, dstW, dstH, seq } = e.data;
-      const dst = new Float32Array(dstW * dstH);
-      const xR = srcW / dstW;
-      const yR = srcH / dstH;
-      for (let y = 0; y < dstH; y++) {
-        const sY = Math.min(Math.floor(y * yR), srcH - 1);
-        const sOff = sY * srcW;
-        const dOff = y * dstW;
-        for (let x = 0; x < dstW; x++) {
-          dst[dOff + x] = src[sOff + Math.min(Math.floor(x * xR), srcW - 1)];
-        }
-      }
-      self.postMessage({ dst, dstW, dstH, seq }, [dst.buffer]);
-    };
-  `;
-  _dsWorkerUrl = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
-  _dsWorker = new Worker(_dsWorkerUrl);
-  return _dsWorker;
-}
-
-function downsampleF32Async(
-  src: Float32Array, srcW: number, srcH: number,
-  dstW: number, dstH: number, seq: number,
-): Promise<{ dst: Float32Array; seq: number }> {
-  return new Promise((resolve) => {
-    const w = getDownsampleWorker();
-    const handler = (e: MessageEvent) => {
-      if (e.data.seq !== seq) return;
-      w.removeEventListener("message", handler);
-      resolve({ dst: e.data.dst, seq: e.data.seq });
-    };
-    w.addEventListener("message", handler);
-    const copy = new Float32Array(src);
-    w.postMessage({ src: copy, srcW, srcH, dstW, dstH, seq }, [copy.buffer]);
-  });
-}
+import { getGpuSingleton, getGpuState, onGpuLost, type GpuResources as GpuSingleton } from "../../infrastructure/gpu/GpuSingleton";
 
 interface GpuResources {
   uniformBuffer: GPUBuffer;
@@ -98,33 +37,12 @@ export default function GpuRenderer({
   const prevDimsRef = useRef({ w: 0, h: 0 });
   const uploadedDataRef = useRef<Float32Array | null>(null);
   const [gpuReady, setGpuReady] = useState(false);
+  const [gpuGen, setGpuGen] = useState(0);
   const renderSeqRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const contextConfiguredRef = useRef(false);
-
-  const display = useMemo(
-    () => clampDimensions(width, height, MAX_DISPLAY_DIM),
-    [width, height],
-  );
-
-  const [displayData, setDisplayData] = useState<Float32Array | null>(null);
-  const dsSeqRef = useRef(0);
-
-  useEffect(() => {
-    if (!rawData || !width || !height) {
-      setDisplayData(null);
-      return;
-    }
-    if (display.scale === 1) {
-      setDisplayData(rawData);
-      return;
-    }
-    const seq = ++dsSeqRef.current;
-    downsampleF32Async(rawData, width, height, display.width, display.height, seq)
-      .then(({ dst, seq: rSeq }) => {
-        if (rSeq === dsSeqRef.current) setDisplayData(dst);
-      });
-  }, [rawData, width, height, display]);
+  const uniformScratchRef = useRef<Float32Array | null>(null);
+  const lastUniformWriteRef = useRef<Float32Array | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,6 +62,7 @@ export default function GpuRenderer({
     resourcesRef.current = null;
     uploadedDataRef.current = null;
     contextConfiguredRef.current = false;
+    lastUniformWriteRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -152,6 +71,16 @@ export default function GpuRenderer({
       cancelPendingRenders();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
+  }, [destroyGPUResources]);
+
+  useEffect(() => {
+    const unsubscribe = onGpuLost(() => {
+      if (fallbackRef.current) return;
+      fallbackRef.current = true;
+      destroyGPUResources();
+      setGpuGen((g) => g + 1);
+    });
+    return unsubscribe;
   }, [destroyGPUResources]);
 
   const workerPixelsReadyRef = useRef(false);
@@ -173,10 +102,17 @@ export default function GpuRenderer({
 
   const renderGPU = useCallback(() => {
     const gpu = getGpuState();
-    if (!gpu || !displayData || !canvasRef.current) return;
+    if (!gpu || !rawData || !canvasRef.current) return;
     const { device, pipeline, format } = gpu;
-    const w = display.width;
-    const h = display.height;
+    const w = width;
+    const h = height;
+
+    const maxTex = device.limits.maxTextureDimension2D;
+    if (w > maxTex || h > maxTex) {
+      fallbackRef.current = true;
+      setGpuGen((g) => g + 1);
+      return;
+    }
 
     const canvas = canvasRef.current;
     if (canvas.width !== w || canvas.height !== h) {
@@ -217,22 +153,41 @@ export default function GpuRenderer({
 
       resourcesRef.current = { uniformBuffer, texture, bindGroup };
       prevDimsRef.current = { w, h };
+      lastUniformWriteRef.current = null;
     }
 
     const res = resourcesRef.current;
 
-    if (uploadedDataRef.current !== displayData) {
+    if (uploadedDataRef.current !== rawData) {
       device.queue.writeTexture(
         { texture: res.texture },
-        displayData as Float32Array<ArrayBuffer>,
+        rawData as Float32Array<ArrayBuffer>,
         { bytesPerRow: w * 4 },
         [w, h, 1]
       );
-      uploadedDataRef.current = displayData;
+      uploadedDataRef.current = rawData;
     }
 
-    const uniforms = new Float32Array([dataMin, dataMax, shadow, midtone, highlight, w, h, 0]);
-    device.queue.writeBuffer(res.uniformBuffer, 0, uniforms as Float32Array<ArrayBuffer>);
+    let uniforms = uniformScratchRef.current;
+    if (!uniforms) {
+      uniforms = new Float32Array(8);
+      uniformScratchRef.current = uniforms;
+    }
+    uniforms[0] = dataMin; uniforms[1] = dataMax; uniforms[2] = shadow; uniforms[3] = midtone;
+    uniforms[4] = highlight; uniforms[5] = w; uniforms[6] = h; uniforms[7] = 0;
+
+    const last = lastUniformWriteRef.current;
+    let unchanged = last !== null;
+    if (last) {
+      for (let i = 0; i < 8; i++) {
+        if (last[i] !== uniforms[i]) { unchanged = false; break; }
+      }
+    }
+    if (!unchanged) {
+      device.queue.writeBuffer(res.uniformBuffer, 0, uniforms as Float32Array<ArrayBuffer>);
+      if (!lastUniformWriteRef.current) lastUniformWriteRef.current = new Float32Array(8);
+      lastUniformWriteRef.current.set(uniforms);
+    }
 
     const commandEncoder = device.createCommandEncoder();
     const renderPassDescriptor: GPURenderPassDescriptor = {
@@ -251,7 +206,7 @@ export default function GpuRenderer({
     passEncoder.end();
 
     device.queue.submit([commandEncoder.finish()]);
-  }, [displayData, display, dataMin, dataMax, shadow, midtone, highlight, destroyGPUResources]);
+  }, [rawData, width, height, dataMin, dataMax, shadow, midtone, highlight, destroyGPUResources]);
 
   const cpuBusyRef = useRef(false);
   const cpuPendingRef = useRef(false);
@@ -267,14 +222,11 @@ export default function GpuRenderer({
     const seq = ++renderSeqRef.current;
 
     try {
-      const needsDownsample = display.scale < 1;
       const sendPixels = !workerPixelsReadyRef.current;
       const result = await renderStfInWorker({
         pixels: sendPixels ? rawData : undefined,
         width: sendPixels ? width : undefined,
         height: sendPixels ? height : undefined,
-        dstWidth: needsDownsample ? display.width : undefined,
-        dstHeight: needsDownsample ? display.height : undefined,
         dataMin,
         dataMax,
         shadow,
@@ -309,11 +261,11 @@ export default function GpuRenderer({
         renderCPUWorkerRef.current();
       }
     }
-  }, [rawData, width, height, display, dataMin, dataMax, shadow, midtone, highlight]);
+  }, [rawData, width, height, dataMin, dataMax, shadow, midtone, highlight]);
   renderCPUWorkerRef.current = renderCPUWorker;
 
   useEffect(() => {
-    if (!gpuReady || (!displayData && !rawData)) return;
+    if (!gpuReady || !rawData) return;
 
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
@@ -324,7 +276,7 @@ export default function GpuRenderer({
         renderGPU();
       }
     });
-  }, [gpuReady, displayData, rawData, renderCPUWorker, renderGPU]);
+  }, [gpuReady, rawData, renderCPUWorker, renderGPU, gpuGen]);
 
   if (!gpuReady) {
     return <div className={`animate-pulse bg-zinc-800/50 ${className}`} style={{ aspectRatio: width / height }} />;
@@ -335,7 +287,7 @@ export default function GpuRenderer({
       key={fallbackRef.current ? "cpu-canvas" : "gpu-canvas"}
       ref={canvasRef}
       className={`max-w-full h-auto ${className}`}
-      style={{ imageRendering: display.scale < 1 ? "auto" : "pixelated" }}
+      style={{ imageRendering: "pixelated" }}
     />
   );
 }

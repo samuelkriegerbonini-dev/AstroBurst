@@ -8,8 +8,6 @@ interface RenderParams {
   pixels?: Float32Array;
   width?: number;
   height?: number;
-  dstWidth?: number;
-  dstHeight?: number;
   dataMin: number;
   dataMax: number;
   shadow: number;
@@ -89,46 +87,25 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
     const {
       pixels, width, height,
       dataMin, dataMax, shadow, midtone, highlight,
-      dstWidth, dstHeight,
     } = params;
 
     const useRetained = _hasPixels && !pixels;
 
-    if (dstWidth && dstHeight && (dstWidth !== (width || 0) || dstHeight !== (height || 0))) {
-      const msg: Record<string, unknown> = {
-        type: "downsampleAndRender",
-        id,
-        srcWidth: width,
-        srcHeight: height,
-        dstWidth,
-        dstHeight,
-        dataMin,
-        dataMax,
-        shadow,
-        midtone,
-        highlight,
-      };
-      if (!useRetained && pixels) {
-        msg.pixels = pixels;
-      }
-      worker.postMessage(msg);
-    } else {
-      const msg: Record<string, unknown> = {
-        type: "render",
-        id,
-        width,
-        height,
-        dataMin,
-        dataMax,
-        shadow,
-        midtone,
-        highlight,
-      };
-      if (!useRetained && pixels) {
-        msg.pixels = pixels;
-      }
-      worker.postMessage(msg);
+    const msg: Record<string, unknown> = {
+      type: "render",
+      id,
+      width,
+      height,
+      dataMin,
+      dataMax,
+      shadow,
+      midtone,
+      highlight,
+    };
+    if (!useRetained && pixels) {
+      msg.pixels = pixels;
     }
+    worker.postMessage(msg);
   });
 }
 

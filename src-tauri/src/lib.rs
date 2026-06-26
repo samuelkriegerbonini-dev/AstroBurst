@@ -105,6 +105,7 @@ pub fn run() {
             cmd::io::process_fits,
             cmd::io::process_fits_full,
             cmd::io::get_raw_pixels_preview,
+            cmd::io::get_raw_rgb_pixels_preview,
             cmd::export::export_fits,
             cmd::export::export_fits_rgb,
             cmd::export::export_png,

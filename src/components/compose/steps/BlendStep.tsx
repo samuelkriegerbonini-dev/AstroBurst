@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 
 import { blendChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -13,6 +13,22 @@ const CANONICAL_WAVELENGTH: Record<string, number> = {
 function binWavelength(bin: FrequencyBin): number {
   if (bin.wavelength) return bin.wavelength;
   return CANONICAL_WAVELENGTH[bin.id] ?? 550;
+}
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+function wavelengthAutoWeights(filledBins: FrequencyBin[]): BlendWeight[] {
+  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
+  const n = sorted.length;
+  return sorted.map((bin, i) => {
+    const p = n > 1 ? i / (n - 1) : 0.5;
+    return {
+      channelId: bin.id,
+      r: round2(Math.max(0, 2 * p - 1)),
+      g: round2(1 - Math.abs(2 * p - 1)),
+      b: round2(Math.max(0, 1 - 2 * p)),
+    };
+  });
 }
 
 function resolvePresetWeights(
@@ -75,6 +91,24 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     const resolved = resolvePresetWeights(preset, filledBins);
     if (resolved) onWeightsChange(resolved, presetId);
   }, [filledBins, onWeightsChange]);
+
+  const handleAutoWavelength = useCallback(() => {
+    onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
+  }, [filledBins, onWeightsChange]);
+
+  const autoAppliedRef = useRef<string>("");
+  useEffect(() => {
+    if (filledBins.length < 2) return;
+    const sig = filledBins.map((b) => b.id).sort().join("|");
+    if (autoAppliedRef.current === sig) return;
+    autoAppliedRef.current = sig;
+    const hasAssigned = state.blendWeights.some(
+      (w) => (w.r > 0 || w.g > 0 || w.b > 0) && filledBins.some((b) => b.id === w.channelId),
+    );
+    if (!hasAssigned) {
+      onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
+    }
+  }, [filledBins, state.blendWeights, onWeightsChange]);
 
   const handleWeightChange = useCallback((channelId: string, axis: "r" | "g" | "b", value: number) => {
     const exists = state.blendWeights.some((w) => w.channelId === channelId);
@@ -161,6 +195,16 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="flex flex-wrap gap-1.5">
+        <button onClick={handleAutoWavelength}
+                title="Spread all channels across R/G/B by wavelength (works for any number of channels)"
+                className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                  state.blendPreset === "auto_wavelength"
+                    ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
+                    : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}>
+          <div className="font-semibold">Auto (λ)</div>
+          <div className="text-[8px] opacity-60">Spread channels across RGB by wavelength</div>
+        </button>
         {Object.entries(BLEND_PRESETS).map(([id, preset]) => {
           const isActive = state.blendPreset === id;
           return (

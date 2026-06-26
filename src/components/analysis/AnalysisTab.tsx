@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "react";
-import { Loader2 } from "lucide-react";
 import HistogramPanel from "./HistogramPanel";
+import RgbStfPanel from "./RgbStfPanel";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
@@ -48,7 +48,7 @@ function AnalysisTabInner({
   const { isCube, cubeDims } = useCubeContext();
   const { setRenderedPreviewUrl, activeImagePath } = useRenderContext();
   const { isShowingComposite } = useCompositeContext();
-  const { rawPixels } = useRawPixelsContext();
+  const { rawPixels, rgbRawPixels } = useRawPixelsContext();
 
   const [starResult, setStarResult] = useState<any>(null);
   const [starLoading, setStarLoading] = useState(false);
@@ -95,7 +95,7 @@ function AnalysisTabInner({
   const handleStfChange = useCallback(
     (params: StfParams) => {
       setStfParams(params);
-      if (rawPixels) return;
+      if (rawPixels || rgbRawPixels) return;
       pendingStfRef.current = params;
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = requestAnimationFrame(() => {
@@ -103,7 +103,7 @@ function AnalysisTabInner({
         flushStfIpc();
       });
     },
-    [setStfParams, flushStfIpc, rawPixels],
+    [setStfParams, flushStfIpc, rawPixels, rgbRawPixels],
   );
 
   const handleAutoStf = useCallback(() => {
@@ -173,6 +173,8 @@ function AnalysisTabInner({
             stats={histStats}
           />
         )}
+
+        {isShowingComposite && rgbRawPixels && <RgbStfPanel />}
 
         <PlateSolvePanel
           stars={stars}

@@ -2,15 +2,17 @@ import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense
 import { Image, Loader2, X } from "lucide-react";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
-import type { RawPixelData } from "../../shared/types";
+import type { RawPixelData, RawRgbPixelData } from "../../shared/types";
 
 import ZoomPanView from "../ui/ZoomPanView";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
+const GpuRgbRenderer = lazy(() => import("../render/GpuRgbRenderer"));
 
 interface PreviewTabProps {
   useGpu: boolean;
   rawPixels: RawPixelData | null;
+  rgbRawPixels?: RawRgbPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLImageElement>) => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
@@ -41,12 +43,12 @@ const Overlay = memo(function Overlay({
   );
 });
 
-function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: PreviewTabProps) {
+function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOverlayRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { isCube } = useCubeContext();
   const { renderedPreviewUrl } = useRenderContext();
-  const { compositePreviewUrl, clearComposite } = useCompositeContext();
+  const { compositePreviewUrl, clearComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
 
   const [previewError, setPreviewError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
@@ -91,10 +93,11 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
   }, [baseUrl, retryKey]);
 
   if (compositePreviewUrl) {
+    const rgbOnGpu = useGpu && !!rgbRawPixels;
     return (
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-violet-900/30 border-b border-violet-600/20">
-          <span className="text-[10px] text-violet-300">RGB Composite</span>
+          <span className="text-[10px] text-violet-300">RGB Composite{rgbOnGpu ? " · GPU" : ""}</span>
           <button
             onClick={clearComposite}
             className="ml-auto flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
@@ -103,11 +106,25 @@ function PreviewTabInner({ useGpu, rawPixels, onImageClick, starOverlayRef }: Pr
             <X size={10} />
           </button>
         </div>
-        <ZoomPanView
-          src={compositePreviewUrl}
-          alt="RGB composite"
-          className="flex-1 min-h-0"
-        />
+        {useGpu && rgbRawPixels ? (
+          <div className="relative flex-1 min-h-0 flex items-center justify-center">
+            <Suspense fallback={<Loader2 size={20} className="animate-spin text-zinc-600" />}>
+              <GpuRgbRenderer
+                rgb={rgbRawPixels}
+                stfR={compositeStfR}
+                stfG={compositeStfG}
+                stfB={compositeStfB}
+                className="max-w-full max-h-full object-contain"
+              />
+            </Suspense>
+          </div>
+        ) : (
+          <ZoomPanView
+            src={compositePreviewUrl}
+            alt="RGB composite"
+            className="flex-1 min-h-0"
+          />
+        )}
       </div>
     );
   }

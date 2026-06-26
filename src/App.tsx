@@ -1,13 +1,11 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw, Info as InfoIcon, BarChart3, FileText, FolderOpen } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Layers } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
-import SidebarPanels from "./components/file/SidebarPanels";
-import type { LeftTabId } from "./components/file/SidebarPanels";
-import PreviewPanel from "./components/PreviewPanel";
+import PreviewPanel, { type ToolId } from "./components/PreviewPanel";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -37,10 +35,8 @@ const MemoizedPreviewPanel = memo(PreviewPanel);
 const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MAX = 480;
 
-const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
+const LEFT_TABS: { id: "files"; label: string; icon: typeof FolderOpen }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
-  { id: "analysis", label: "Analysis", icon: BarChart3 },
-  { id: "headers", label: "Headers", icon: FileText },
 ];
 
 function toMetadataFiles(
@@ -94,7 +90,10 @@ export default function App() {
   const sidebarElRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
-  const [leftTab, setLeftTab] = useState<LeftTabId>("files");
+  const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
+  const handleToggleTool = useCallback((toolId: ToolId) => {
+    setActiveTool((prev) => (prev === toolId ? null : toolId));
+  }, []);
 
   const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
@@ -189,7 +188,7 @@ export default function App() {
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);
-    setLeftTab("files");
+    setActiveTool("compose");
   }, [reset, resetProductFilter]);
 
   const handleSelectFile = useCallback((id: string) => {
@@ -302,20 +301,11 @@ export default function App() {
                           <div className="ab-left-strip shrink-0">
                             {LEFT_TABS.map((tab) => {
                               const Icon = tab.icon;
-                              const isActive = leftTab === tab.id;
                               return (
                                 <button
                                   key={tab.id}
-                                  onClick={() => {
-                                    if (tab.id === "files") {
-                                      if (leftTab === "files") setSidebarOpen((p) => !p);
-                                      else { setLeftTab("files"); setSidebarOpen(true); }
-                                    } else {
-                                      if (leftTab === tab.id && sidebarOpen) setSidebarOpen(false);
-                                      else { setLeftTab(tab.id); setSidebarOpen(true); }
-                                    }
-                                  }}
-                                  className={`ab-left-strip-btn ${isActive && sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
+                                  onClick={() => setSidebarOpen((p) => !p)}
+                                  className={`ab-left-strip-btn ${sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
                                   title={tab.label}
                                 >
                                   <Icon size={14} />
@@ -323,6 +313,15 @@ export default function App() {
                                 </button>
                               );
                             })}
+                            <div className="my-1 mx-2 h-px" style={{ background: "rgba(20,184,166,0.12)" }} />
+                            <button
+                              onClick={() => handleToggleTool("compose")}
+                              className={`ab-left-strip-btn ${activeTool === "compose" ? "ab-left-strip-btn-active" : ""}`}
+                              title="Compose"
+                            >
+                              <Layers size={14} />
+                              <span>Comp</span>
+                            </button>
                           </div>
 
                           {sidebarOpen && (
@@ -336,31 +335,27 @@ export default function App() {
                                 background: "rgba(5,5,16,0.55)",
                               }}
                             >
-                              {leftTab === "files" ? (
-                                <MetadataFileList
-                                  files={filteredMetadataFiles}
-                                  totalFiles={metadataFiles.length}
-                                  selectedId={selectedId}
-                                  onSelect={handleSelectFile}
-                                  onExportZip={handleExportZip}
-                                  collapsed={false}
-                                  onToggle={() => setSidebarOpen((p) => !p)}
-                                  isExporting={isExporting}
-                                  zipProgress={zipProgress}
-                                  downloaded={downloaded}
-                                  productTypes={productTypes}
-                                  customChips={filterState.customChips}
-                                  activeFilters={activeFilters}
-                                  filterMode={filterMode}
-                                  onToggleFilter={toggleFilter}
-                                  onToggleMode={toggleMode}
-                                  onClearFilters={clearAll}
-                                  onAddCustomChip={addCustomChip}
-                                  onRemoveCustomChip={removeCustomChip}
-                                />
-                              ) : (
-                                <SidebarPanels activeTab={leftTab} />
-                              )}
+                              <MetadataFileList
+                                files={filteredMetadataFiles}
+                                totalFiles={metadataFiles.length}
+                                selectedId={selectedId}
+                                onSelect={handleSelectFile}
+                                onExportZip={handleExportZip}
+                                collapsed={false}
+                                onToggle={() => setSidebarOpen((p) => !p)}
+                                isExporting={isExporting}
+                                zipProgress={zipProgress}
+                                downloaded={downloaded}
+                                productTypes={productTypes}
+                                customChips={filterState.customChips}
+                                activeFilters={activeFilters}
+                                filterMode={filterMode}
+                                onToggleFilter={toggleFilter}
+                                onToggleMode={toggleMode}
+                                onClearFilters={clearAll}
+                                onAddCustomChip={addCustomChip}
+                                onRemoveCustomChip={removeCustomChip}
+                              />
                             </div>
                           )}
 
@@ -369,7 +364,7 @@ export default function App() {
                           )}
 
                           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                            <MemoizedPreviewPanel />
+                            <MemoizedPreviewPanel activeTool={activeTool} />
                           </div>
                         </div>
 

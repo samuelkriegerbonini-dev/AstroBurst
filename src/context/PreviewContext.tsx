@@ -10,13 +10,13 @@ import {
 } from "react";
 import { computeHistogram } from "../services/analysis";
 import { getCubeInfo } from "../services/cube";
-import { getRawPixelsPreview } from "../services/fits";
+import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
 import { useCompositeContext } from "./CompositeContext";
 import { clearCompositeCache } from "../services/compose";
-import type { ProcessedFile, StfParams, HistogramData, RawPixelData } from "../shared/types";
+import type { ProcessedFile, StfParams, HistogramData, RawPixelData, RawRgbPixelData } from "../shared/types";
 import type { CubeDims } from "../shared/types/cube";
 
 export interface ChannelSuggestion {
@@ -82,8 +82,12 @@ interface StarOverlayContextValue {
 interface RawPixelsContextValue {
   rawPixels: RawPixelData | null;
   rawPixelsLoading: boolean;
-  loadRawPixels: () => void;
+  loadRawPixels: (force?: boolean) => void;
   clearRawPixels: () => void;
+  rgbRawPixels: RawRgbPixelData | null;
+  rgbRawPixelsLoading: boolean;
+  loadRgbRawPixels: (source: string | null, force?: boolean) => void;
+  clearRgbRawPixels: () => void;
 }
 
 interface NarrowbandContextValue {
@@ -153,6 +157,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
+  const [rgbRawPixels, setRgbRawPixels] = useState<RawRgbPixelData | null>(null);
+  const [rgbRawPixelsLoading, setRgbRawPixelsLoading] = useState(false);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
@@ -160,6 +166,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const prevFileIdRef = useRef<string | null>(null);
   const seqRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
+  const rgbRawPixelsAbortRef = useRef(0);
   const narrowbandKeyRef = useRef("");
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
 
@@ -167,6 +174,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   rawPixelsRef.current = rawPixels;
   const rawPixelsLoadingRef = useRef(rawPixelsLoading);
   rawPixelsLoadingRef.current = rawPixelsLoading;
+  const rgbRawPixelsRef = useRef(rgbRawPixels);
+  rgbRawPixelsRef.current = rgbRawPixels;
+  const rgbRawPixelsLoadingRef = useRef(rgbRawPixelsLoading);
+  rgbRawPixelsLoadingRef.current = rgbRawPixelsLoading;
   const filePathRef = useRef(file?.path);
   filePathRef.current = file?.path;
 
@@ -210,9 +221,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => window.clearTimeout(timer);
   }, [doneFiles, selectedPalette]);
 
-  const loadRawPixels = useCallback(() => {
+  const loadRawPixels = useCallback((force = false) => {
     const path = filePathRef.current;
-    if (!path || rawPixelsRef.current || rawPixelsLoadingRef.current) return;
+    if (!path) return;
+    if (!force && (rawPixelsRef.current || rawPixelsLoadingRef.current)) return;
     setRawPixelsLoading(true);
     const seq = ++rawPixelsAbortRef.current;
     const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
@@ -243,6 +255,32 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRawPixelsLoading(false);
   }, []);
 
+  const loadRgbRawPixels = useCallback((source: string | null, force = false) => {
+    if (!force && (rgbRawPixelsRef.current || rgbRawPixelsLoadingRef.current)) return;
+    setRgbRawPixelsLoading(true);
+    const seq = ++rgbRawPixelsAbortRef.current;
+    const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
+    getRawRgbPixelsPreview(source, maxDim)
+      .then((result) => {
+        if (rgbRawPixelsAbortRef.current !== seq) return;
+        setRgbRawPixels(result);
+      })
+      .catch((err) => {
+        if (rgbRawPixelsAbortRef.current !== seq) return;
+        console.error("[AstroBurst] RGB raw pixels load failed:", err);
+      })
+      .finally(() => {
+        if (rgbRawPixelsAbortRef.current !== seq) return;
+        setRgbRawPixelsLoading(false);
+      });
+  }, []);
+
+  const clearRgbRawPixels = useCallback(() => {
+    rgbRawPixelsAbortRef.current++;
+    setRgbRawPixels(null);
+    setRgbRawPixelsLoading(false);
+  }, []);
+
   useEffect(() => {
     if (!file?.path || file.id === prevFileIdRef.current) return;
     prevFileIdRef.current = file.id;
@@ -257,9 +295,12 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setLastAlignMethod(null);
     setRawPixels(null);
     setRawPixelsLoading(false);
+    setRgbRawPixels(null);
+    setRgbRawPixelsLoading(false);
     setNarrowbandPalette(null);
     setActiveImagePathRaw(null);
     rawPixelsAbortRef.current++;
+    rgbRawPixelsAbortRef.current++;
 
     composite.resetComposite();
 
@@ -355,8 +396,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
-    () => ({ rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels }),
-    [rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels],
+    () => ({
+      rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+      rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
+    }),
+    [
+      rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+      rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
+    ],
   );
 
   const narrowbandValue = useMemo<NarrowbandContextValue>(

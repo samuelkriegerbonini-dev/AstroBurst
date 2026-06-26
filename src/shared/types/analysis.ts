@@ -23,6 +23,20 @@ export interface RawPixelData {
   max: number;
 }
 
+export interface RawRgbChannel {
+  data: Float32Array;
+  min: number;
+  max: number;
+}
+
+export interface RawRgbPixelData {
+  width: number;
+  height: number;
+  r: RawRgbChannel;
+  g: RawRgbChannel;
+  b: RawRgbChannel;
+}
+
 export interface FftData {
   pixels: Uint8Array;
   width: number;

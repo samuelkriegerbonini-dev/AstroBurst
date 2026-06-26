@@ -1,11 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
-  Image, Cpu, Zap, Layers, Sparkles, Loader2,
-  Layers2, FlaskConical, Info, Settings, Download,
+  Image, Cpu, Zap, Sparkles, Loader2,
+  Layers2, FlaskConical, Info, Settings, Download, FileText, BarChart3,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
-import { probeGpu, isGpuAvailable } from "../infrastructure/gpu/GpuSingleton";
+import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
 import { useCompositeContext } from "../context/CompositeContext";
 import { useMousePixelActions, setMousePixel, emitPixelClick } from "../hooks/useMousePixelStore";
@@ -20,11 +20,16 @@ const ConfigTab = lazy(() => import("./preview/ConfigTab"));
 const SynthPanel = lazy(() => import("./synth/SynthPanel"));
 const InfoPanel = lazy(() => import("./file/SidebarPanels").then((m) => ({ default: m.InfoPanel })));
 const ExportTab = lazy(() => import("./export/ExportTab"));
+const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
+const HeadersTab = lazy(() => import("./header/HeadersTab"));
 
-type ToolId = "processing" | "compose" | "stacking" | "info" | "synth" | "config" | "export";
+const EMPTY_SPECTRUM: number[] = [];
+
+export type ToolId = "compose" | "processing" | "stacking" | "info" | "synth" | "config" | "export" | "headers" | "analysis";
+export type RightToolId = Exclude<ToolId, "compose">;
 
 interface ToolDef {
-  id: ToolId;
+  id: RightToolId;
   label: string;
   shortLabel: string;
   icon: typeof Image;
@@ -32,7 +37,8 @@ interface ToolDef {
 }
 
 const TOP_TOOLS: ToolDef[] = [
-  { id: "compose", label: "Compose", shortLabel: "Comp", icon: Layers, accent: "var(--ab-teal)" },
+  { id: "headers", label: "Headers", shortLabel: "Headers", icon: FileText, accent: "var(--ab-teal)" },
+  { id: "analysis", label: "Analysis", shortLabel: "Analysis", icon: BarChart3, accent: "var(--ab-blue)" },
   { id: "processing", label: "Processing", shortLabel: "Proc", icon: Sparkles, accent: "var(--ab-amber)" },
   { id: "stacking", label: "Stacking", shortLabel: "Stack", icon: Layers2, accent: "var(--ab-blue)" },
 ];
@@ -52,10 +58,20 @@ function TabSpinner() {
   return <div className="flex items-center justify-center py-8"><Loader2 size={16} className="animate-spin" style={{ color: "var(--ab-teal)" }} /></div>;
 }
 
-function ToolContent({ toolId }: { toolId: ToolId }) {
+function RightToolContent({ toolId, starOverlayRef }: { toolId: RightToolId; starOverlayRef: React.RefObject<HTMLCanvasElement | null> }) {
   switch (toolId) {
+    case "headers": return <HeadersTab />;
+    case "analysis": return (
+      <AnalysisTab
+        spectrum={EMPTY_SPECTRUM}
+        specWavelengths={null}
+        specCoord={null}
+        specLoading={false}
+        specElapsed={0}
+        starOverlayRef={starOverlayRef}
+      />
+    );
     case "processing": return <ProcessingTab />;
-    case "compose": return <ComposeWizard />;
     case "stacking": return <StackingTab />;
     case "info": return <InfoPanel />;
     case "config": return <ConfigTab />;
@@ -76,25 +92,38 @@ function ProgressBarInner() {
   );
 }
 
-export default function PreviewPanel() {
+export interface PreviewPanelProps {
+  activeTool: ToolId | null;
+}
+
+export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
-  const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels } = useRawPixelsContext();
+  const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+          rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { renderedPreviewUrl } = useRenderContext();
   const { compositePreviewUrl } = useCompositeContext();
   const { starOverlayRef } = useStarOverlayContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
-  const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
   const [useGpu, setUseGpu] = useState(false);
   const [gpuAvailable, setGpuAvailable] = useState<boolean | null>(null);
   const [gpuProbing, setGpuProbing] = useState(true);
+  const [gpuReason, setGpuReason] = useState<string | null>(null);
   const [, forceRender] = useState(0);
+  const [rightTool, setRightTool] = useState<RightToolId | null>(null);
+  const toggleRightTool = useCallback((id: RightToolId) => {
+    setRightTool((prev) => (prev === id ? null : id));
+  }, []);
 
   const prevFileIdRef = useRef<string | null>(null);
   const specAbortRef = useRef(0);
   const fileDimsRef = useRef<[number, number] | undefined>(undefined);
   fileDimsRef.current = file?.result?.dimensions;
+
+  const isRgbView = compositePreviewUrl !== null;
+  const rgbSource = file?.result?.is_rgb ? (file.path ?? null) : null;
+  const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
 
   const bottomHeightRef = useRef(BOTTOM_DEFAULT);
   const bottomElRef = useRef<HTMLDivElement>(null);
@@ -102,7 +131,16 @@ export default function PreviewPanel() {
   const bStartY = useRef(0);
   const bStartH = useRef(0);
 
-  useEffect(() => { probeGpu().then(() => { setGpuAvailable(isGpuAvailable() === true); setGpuProbing(false); }); }, []);
+  useEffect(() => { probeGpu().then(() => { setGpuAvailable(isGpuAvailable() === true); setGpuReason(getGpuReason()); setGpuProbing(false); }); }, []);
+
+  useEffect(() => {
+    const unsub = onGpuLost(() => {
+      setGpuAvailable(false);
+      setGpuReason(getGpuReason());
+      clearRgbRawPixels();
+    });
+    return unsub;
+  }, [clearRgbRawPixels]);
 
   useEffect(() => {
     if (!file || file.id === prevFileIdRef.current) return;
@@ -110,12 +148,24 @@ export default function PreviewPanel() {
     specAbortRef.current++;
     resetMouse();
     clearRawPixels();
-    if (gpuAvailable && useGpu) loadRawPixels();
-  }, [file?.id, gpuAvailable, useGpu, clearRawPixels, loadRawPixels, resetMouse]);
+    clearRgbRawPixels();
+    if (gpuAvailable && useGpu) {
+      if (file.result?.is_rgb) loadRgbRawPixels(file.path, true);
+      else loadRawPixels(true);
+    }
+  }, [file?.id, file?.path, file?.result?.is_rgb, gpuAvailable, useGpu, clearRawPixels, clearRgbRawPixels, loadRawPixels, loadRgbRawPixels, resetMouse]);
 
   const handleToggleGpu = useCallback(() => {
-    if (useGpu) { setUseGpu(false); clearRawPixels(); } else { setUseGpu(true); loadRawPixels(); }
-  }, [useGpu, loadRawPixels, clearRawPixels]);
+    if (useGpu) {
+      setUseGpu(false);
+      clearRawPixels();
+      clearRgbRawPixels();
+    } else {
+      setUseGpu(true);
+      if (compositePreviewUrl) loadRgbRawPixels(rgbSource);
+      else loadRawPixels();
+    }
+  }, [useGpu, compositePreviewUrl, rgbSource, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
 
   const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
     if (!isCube || !file?.path) return;
@@ -131,10 +181,6 @@ export default function PreviewPanel() {
 
   const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => { handleMove(e, fileDimsRef.current); }, [handleMove]);
   const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
-
-  const handleToggleTool = useCallback((toolId: ToolId) => {
-    setActiveTool((prev) => prev === toolId ? null : toolId);
-  }, []);
 
   const handleBottomResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -198,10 +244,11 @@ export default function PreviewPanel() {
           <div className="flex items-center gap-2 shrink-0">
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu)}
+                      title={gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
                       className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
                       style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
-                {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : rawPixelsLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
-                {gpuProbing ? "..." : rawPixelsLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
+                {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : toggleLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
+                {gpuProbing ? "..." : toggleLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
               </button>
             )}
           </div>
@@ -224,13 +271,13 @@ export default function PreviewPanel() {
           ) : (
             <div className="h-full" onMouseMove={handlePreviewMouseMove} onMouseLeave={handleLeave}>
               <Suspense fallback={<TabSpinner />}>
-                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} />
+                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} rgbRawPixels={rgbRawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} />
               </Suspense>
             </div>
           )}
         </div>
 
-        {file && activeTool && (
+        {file && activeTool === "compose" && (
           <>
             <div className="ab-resize-handle-h" onMouseDown={handleBottomResize} />
             <div
@@ -239,22 +286,35 @@ export default function PreviewPanel() {
               style={{ height: bottomHeightRef.current }}
             >
               <Suspense fallback={<TabSpinner />}>
-                <ToolContent toolId={activeTool} />
+                <ComposeWizard />
               </Suspense>
             </div>
           </>
         )}
       </div>
 
+      {file && rightTool && (
+        <div
+          className="shrink-0 flex flex-col overflow-hidden"
+          style={{ width: 380, borderLeft: "1px solid rgba(20,184,166,0.08)", background: "rgba(5,5,16,0.55)" }}
+        >
+          <div className="flex-1 overflow-y-auto min-h-0">
+            <Suspense fallback={<TabSpinner />}>
+              <RightToolContent toolId={rightTool} starOverlayRef={starOverlayRef} />
+            </Suspense>
+          </div>
+        </div>
+      )}
+
       {file && (
         <div className="ab-tool-strip">
           {TOP_TOOLS.map((def) => {
             const Icon = def.icon;
-            const isActive = activeTool === def.id;
+            const isActive = rightTool === def.id;
             return (
               <button
                 key={def.id}
-                onClick={() => handleToggleTool(def.id)}
+                onClick={() => toggleRightTool(def.id)}
                 className={`ab-tool-strip-btn ${isActive ? "ab-tool-strip-btn-active" : ""}`}
                 style={isActive ? { "--strip-accent": def.accent } as React.CSSProperties : undefined}
                 title={def.label}
@@ -267,11 +327,11 @@ export default function PreviewPanel() {
           <div className="flex-1" />
           {BOTTOM_STRIP_TOOLS.map((def) => {
             const Icon = def.icon;
-            const isActive = activeTool === def.id;
+            const isActive = rightTool === def.id;
             return (
               <button
                 key={def.id}
-                onClick={() => handleToggleTool(def.id)}
+                onClick={() => toggleRightTool(def.id)}
                 className={`ab-tool-strip-btn ${isActive ? "ab-tool-strip-btn-active" : ""}`}
                 style={isActive ? { "--strip-accent": def.accent } as React.CSSProperties : undefined}
                 title={def.label}

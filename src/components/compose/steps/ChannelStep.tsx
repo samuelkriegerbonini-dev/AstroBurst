@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Wand2, FolderOpen, ChevronDown, X, Sparkles } from "lucide-react";
 import type { ProcessedFile } from "../../../shared/types";
-import {BLEND_PRESETS, BlendWeight, DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
+import {DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
+import { filterCodeAndWavelengthNm } from "../../../utils/filterWavelengths";
 
 interface NarrowbandPalette {
   palette_name: string;
@@ -29,15 +30,6 @@ interface ChannelStepProps {
   filterDetections?: FilterDetection[];
 }
 
-const JWST_FILTER_WAVELENGTH: Record<string, number> = {
-  F070W: 700, F090W: 900, F115W: 1150, F140M: 1400, F150W: 1500,
-  F162M: 1620, F164N: 1640, F150W2: 1500, F182M: 1820, F187N: 1870,
-  F200W: 2000, F210M: 2100, F212N: 2120, F250M: 2500, F277W: 2770,
-  F300M: 3000, F322W2: 3220, F323N: 3230, F335M: 3350, F356W: 3560,
-  F360M: 3600, F405N: 4050, F410M: 4100, F430M: 4300, F444W: 4440,
-  F460M: 4600, F466N: 4660, F470N: 4700, F480M: 4800,
-};
-
 const FILTER_TO_BIN: Record<string, string> = {
   "Halpha": "ha", "Ha": "ha", "H_alpha": "ha", "H-alpha": "ha",
   "OIII": "oiii", "O3": "oiii", "[OIII]": "oiii",
@@ -50,12 +42,12 @@ const FILTER_TO_BIN: Record<string, string> = {
 };
 
 const FILTER_PATTERNS: [string, RegExp][] = [
-  ["ha", /(?:H[\-_]?(?:alpha|a)|656\s*(?:nm)?|H_?α|F656N)/i],
-  ["oiii", /(?:O\s*III|\[?OIII\]?|50[012](?:\.\d+)?\s*nm|502\b|5007|O3\b|F502N|F501N)/i],
-  ["sii", /(?:S\s*II|\[?SII\]?|673\s*(?:nm)?|S2\b|F673N)/i],
-  ["r", /\b(?:Red|R['_\-]?band|Sloan[_\-]?r|F444W|F410M|F356W)\b/i],
-  ["g", /\b(?:Green|G['_\-]?band|Sloan[_\-]?g|V[_\-]?band|F200W|F277W)\b/i],
-  ["b", /\b(?:Blue|B['_\-]?band|Sloan[_\-]?b|F115W|F090W|F150W)\b/i],
+  ["ha", /(?:H[\-_]?(?:alpha|a)|\b656\s*(?:nm)?|H_?α|F656N)/i],
+  ["oiii", /(?:O\s*III|\[?OIII\]?|50[012](?:\.\d+)?\s*nm|\b50[12]\b|\b5007\b|O3\b|F50[123]N)/i],
+  ["sii", /(?:S\s*II|\[?SII\]?|\b673\s*(?:nm)?|S2\b|F673N)/i],
+  ["r", /\b(?:Red|R['_\-]?band|Sloan[_\-]?r)\b/i],
+  ["g", /\b(?:Green|G['_\-]?band|Sloan[_\-]?g|V[_\-]?band)\b/i],
+  ["b", /\b(?:Blue|B['_\-]?band|Sloan[_\-]?b)\b/i],
   ["l", /\b(?:Lum(?:inance)?|L['_\-]?band|Clear|CLR)\b/i],
 ];
 
@@ -81,13 +73,6 @@ function detectChannelByHeader(file: ProcessedFile): string | null {
 
   for (const [binId, pattern] of FILTER_PATTERNS) {
     if (pattern.test(filterVal)) return binId;
-  }
-
-  const jwstWl = JWST_FILTER_WAVELENGTH[filterVal.toUpperCase()];
-  if (jwstWl) {
-    if (jwstWl <= 1200) return "b";
-    if (jwstWl <= 2500) return "g";
-    return "r";
   }
 
   return null;
@@ -284,8 +269,10 @@ export default function ChannelStep({
     }
 
     let headerMapped = 0;
+    const dynamicBins: FrequencyBin[] = [];
     for (const file of doneFiles) {
       if (assignedSet.has(file.path)) continue;
+
       const ch = detectChannelByHeader(file);
       if (ch) {
         const bin = next.find((b) => b.id === ch);
@@ -293,11 +280,35 @@ export default function ChannelStep({
           bin.files.push(file.path);
           headerMapped++;
         }
+        continue;
+      }
+
+      const fv = getFilterInfo(file);
+      const info = fv ? filterCodeAndWavelengthNm(fv) : null;
+      if (!info) continue;
+
+      const binId = `wl${info.nm}`;
+      let bin = next.find((b) => b.id === binId) ?? dynamicBins.find((b) => b.id === binId);
+      if (!bin) {
+        const hue = Math.round((info.nm * 0.18) % 360);
+        bin = {
+          id: binId,
+          label: `${info.code} (${info.nm}nm)`,
+          shortLabel: info.code.slice(0, 5),
+          wavelength: info.nm,
+          color: `hsl(${hue}, 70%, 55%)`,
+          files: [],
+        };
+        dynamicBins.push(bin);
+      }
+      if (!bin.files.includes(file.path)) {
+        bin.files.push(file.path);
+        headerMapped++;
       }
     }
     if (headerMapped > 0) {
-      onBinsChange(next);
-      setAutoMapSource("FITS Headers");
+      onBinsChange(dynamicBins.length > 0 ? [...next, ...dynamicBins] : next);
+      setAutoMapSource(dynamicBins.length > 0 ? "FITS Headers + Wavelength" : "FITS Headers");
       return;
     }
 
@@ -317,32 +328,6 @@ export default function ChannelStep({
       onBinsChange(next);
       setAutoMapSource("Filename");
       return;
-    }
-
-    const remaining = doneFiles.filter((f) => !assignedSet.has(f.path));
-    if (remaining.length >= 3) {
-      const withWl = remaining
-        .map((f) => {
-          const h = f.result?.header;
-          const fv = (h?.FILTER ?? h?.FILTER1 ?? "").toString().toUpperCase().trim();
-          const wl = JWST_FILTER_WAVELENGTH[fv];
-          return { file: f, wl: wl ?? null };
-        })
-        .filter((x): x is { file: ProcessedFile; wl: number } => x.wl !== null)
-        .sort((a, b) => a.wl - b.wl);
-
-      if (withWl.length >= 3) {
-        const sorted = [...withWl].sort((a, b) => b.wl - a.wl);
-        const rBin = next.find((b) => b.id === "r");
-        const gBin = next.find((b) => b.id === "g");
-        const bBin = next.find((b) => b.id === "b");
-        if (rBin) rBin.files.push(sorted[0].file.path);
-        if (gBin) gBin.files.push(sorted[Math.floor(sorted.length / 2)].file.path);
-        if (bBin) bBin.files.push(sorted[sorted.length - 1].file.path);
-        onBinsChange(next);
-        setAutoMapSource("Wavelength Sort");
-        return;
-      }
     }
 
     setAutoMapSource(null);

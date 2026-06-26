@@ -17,6 +17,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { RunButton, SectionHeader } from "../ui";
+import { filterToWavelengthNm } from "../../utils/filterWavelengths";
 
 export interface ChannelFile {
   id: string;
@@ -83,15 +84,6 @@ const CALIB_META: Record<CalibSlot, { color: string; label: string; bg: string; 
   flat: { color: "#fbbf24", label: "Flat", bg: "rgba(251,191,36,0.06)", border: "rgba(251,191,36,0.2)", multi: true },
 };
 
-const JWST_FILTER_WAVELENGTH: Record<string, number> = {
-  F070W: 700, F090W: 900, F115W: 1150, F140M: 1400, F150W: 1500,
-  F162M: 1620, F164N: 1640, F150W2: 1500, F182M: 1820, F187N: 1870,
-  F200W: 2000, F210M: 2100, F212N: 2120, F250M: 2500, F277W: 2770,
-  F300M: 3000, F322W2: 3220, F323N: 3230, F335M: 3350, F356W: 3560,
-  F360M: 3600, F405N: 4050, F410M: 4100, F430M: 4300, F444W: 4440,
-  F460M: 4600, F466N: 4660, F470N: 4700, F480M: 4800,
-};
-
 const PALETTE_PRESETS = [
   { id: "SHO", label: "SHO (Hubble)", desc: "SII\u2192R  Ha\u2192G  OIII\u2192B", icon: "\u2728" },
   { id: "HOO", label: "HOO", desc: "Ha\u2192R  OIII\u2192G+B", icon: "\ud83c\udf11" },
@@ -100,15 +92,9 @@ const PALETTE_PRESETS = [
   { id: "Custom", label: "Custom", desc: "Manual assignment", icon: "\ud83c\udfa8" },
 ] as const;
 
-function getFilterWavelength(filter?: string): number | null {
-  if (!filter) return null;
-  const key = filter.toUpperCase().trim();
-  return JWST_FILTER_WAVELENGTH[key] ?? null;
-}
-
 function autoMapByMetadata(files: ChannelFile[]): Partial<ChannelAssignment> {
   const withWavelength = files
-    .map((f) => ({ file: f, wl: getFilterWavelength(f.filter) }))
+    .map((f) => ({ file: f, wl: filterToWavelengthNm(f.filter) }))
     .filter((x): x is { file: ChannelFile; wl: number } => x.wl !== null)
     .sort((a, b) => a.wl - b.wl);
 
@@ -179,7 +165,6 @@ interface DropZoneSlotProps {
   file: ChannelFile | null;
   onDrop: (slot: string, file: ChannelFile) => void;
   onClear: (slot: string) => void;
-  onSelectFile: (slot: string) => void;
   allFiles: ChannelFile[];
 }
 
@@ -192,7 +177,6 @@ function DropZoneSlot({
   file,
   onDrop,
   onClear,
-  onSelectFile,
   allFiles,
 }: DropZoneSlotProps) {
   const [isDragOver, setIsDragOver] = useState(false);
@@ -528,7 +512,6 @@ function SmartChannelMapper({
                 file={channels[slot]}
                 onDrop={assignChannel}
                 onClear={clearChannel}
-                onSelectFile={() => {}}
                 allFiles={files}
               />
               {slot !== "B" && slot !== "L" && i < 3 && (
@@ -559,7 +542,6 @@ function SmartChannelMapper({
               file={slot === "science" ? calibFrames.science : (calibFrames[slot] as ChannelFile[])[0] ?? null}
               onDrop={assignChannel}
               onClear={clearChannel}
-              onSelectFile={() => {}}
               allFiles={files}
             />
           ))}

@@ -121,7 +121,6 @@ src-tauri/src/
 |   +-- progress.rs  # progress events via Tauri emit
 +-- math/        # SIMD, median, sigma clipping
 +-- types/       # shared data structures, constants, error types
-+-- shaders/     # WebGPU compute shaders (WGSL)
 
 src/             # Frontend (React + TypeScript + Tailwind)
 +-- components/
