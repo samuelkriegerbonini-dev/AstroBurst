@@ -37,6 +37,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ExportStep detects STF identity (`Math.abs(midtone - 0.5) > 1e-4`) before composite PNG export; sends `applyStfStretch: false` when identity, activating backend auto-stretch
 
+## [0.5.5] - 2026-06-26
+
+### Added
+- **WebGPU RGB preview**: GPU-only `GpuRgbRenderer` renders full RGB composites from three `r32float` textures with per-channel STF in the WGSL shader (MTF identical to the mono shader, CPU worker, and Rust backend). Routed through PreviewTab/PreviewPanel; falls back to the PNG composite when WebGPU is unavailable, no adapter is found, or the device is lost.
+- **Live per-channel RGB STF** (`RgbStfPanel`, Analysis tab): per-channel shadow/midtone restretch the GPU composite live with no backend round-trip; the mono STF slider skips its backend render while a GPU preview is active.
+- Backend command `get_raw_rgb_pixels_preview(path?, max_dim)`: linear 3-channel float preview with per-channel min/max, from a native RGB FITS or the composite cache (planar R|G|B with a 32-byte header). Shared `encode_channel_preview` factored out of the mono encoder (byte-identical).
+- **Canonical filter→wavelength table** (`FILTER_WAVELENGTHS_NM` + `filter_to_wavelength_nm` in `types/constants.rs`, mirrored by `utils/filterWavelengths.ts`): normalizes CLEAR / separators / dual filters, replacing the two duplicated JWST tables.
+- **Dynamic channel Auto-Map** (Compose ▸ Channels): each non-narrowband/non-RGB filter gets its own wavelength-labelled channel (e.g. NIRCam F090W–F444W → five distinct channels), grouped by nm.
+- **Auto (λ) blend**: spreads any number of channels across R/G/B by wavelength; auto-applies once for untouched broadband stacks, never overriding a palette or manual weights.
+
+### Changed
+- Compose tool moved from the right tool strip to the left strip.
+- Preview downsample replaced nearest-neighbor with a contrast-weighted hybrid (mean↔max) area kernel that preserves faint point sources while anti-aliasing the background.
+- `parseRawPixelBuffer` accepts an `ArrayBufferView`, validates length, and stays zero-copy in the normal case.
+- The GPU/CPU toggle surfaces the fallback reason (no WebGPU / no adapter / init failed / device lost / GPU error) via tooltip.
+
+### Fixed
+- **STF GPU/CPU parity**: the CPU fallback worker no longer hard-zeros `raw ≤ 1e-7` (was blacking out background-subtracted pixels the GPU shader maps to gray); epsilons aligned to 1e-8 so GPU and CPU render identically.
+- **Preview normalization**: `data_min`/`data_max` now describe the full image (shared `scan_extrema`) instead of the nearest-neighbor decimated subset, so the live preview matches the canonical PNG.
+- **File switch in GPU mode**: `loadRawPixels` gained a force flag so switching files no longer leaves stale previous-file pixels blocking the fetch.
+- **Device loss / uncaptured errors**: `GpuSingleton` exposes `onGpuLost` + an uncaptured-error handler; `GpuRenderer` drops the dead device's resources and falls back to the CPU worker instead of a permanently blank canvas.
+- **Texture-limit guard**: an oversized image degrades to the CPU worker instead of an unobserved validation error and a blank canvas.
+- **Uniforms**: reused scratch buffer + skip-when-unchanged guard (no per-frame allocation; cache invalidated on uniformBuffer recreation).
+- Fixed OIII / Hα / SII filter-regex false positives.
+
+### Removed
+- Orphaned ZNCC WebGPU shader (`zncc_align.wgsl`) and its CONTRIBUTING reference; the unreachable client-side downsample worker; unused imports.
+
 ## [0.4.6] - 2026-04-06
 
 ### Added
