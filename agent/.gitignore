@@ -1,0 +1,6 @@
+# Contributed by Jae-Joon Lee — https://github.com/leejjoon
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/

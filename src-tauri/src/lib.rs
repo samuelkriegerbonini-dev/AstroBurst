@@ -3,10 +3,13 @@ pub mod math;
 pub mod infra;
 pub mod core;
 
+#[cfg(feature = "tauri")]
 mod cmd;
 
+#[cfg(feature = "tauri")]
 use tauri::Manager;
 
+#[cfg(feature = "tauri")]
 fn urlencoding_decode(input: &str) -> String {
     let mut result = Vec::new();
     let bytes = input.as_bytes();
@@ -27,6 +30,7 @@ fn urlencoding_decode(input: &str) -> String {
     String::from_utf8_lossy(&result).to_string()
 }
 
+#[cfg(feature = "tauri")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

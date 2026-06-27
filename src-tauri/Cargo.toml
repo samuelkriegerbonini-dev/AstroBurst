@@ -8,11 +8,22 @@ authors = ["Samuel Krieger Bonini"]
 repository = "https://github.com/samuelkriegerbonini-dev/AstroBurst"
 
 [dependencies]
-tauri = { version = "2.10", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2.6.0"
-tauri-plugin-fs = "2.2.0"
-tauri-plugin-shell = "2.3"
-tauri-plugin-opener = "2.3"
+tauri = { version = "2.10", features = ["protocol-asset"], optional = true }
+tauri-plugin-dialog = { version = "2.6.0", optional = true }
+tauri-plugin-fs = { version = "2.2.0", optional = true }
+tauri-plugin-shell = { version = "2.3", optional = true }
+tauri-plugin-opener = { version = "2.3", optional = true }
+
+# Headless server (Axum) deps — contributed by Jae-Joon Lee (https://github.com/leejjoon).
+axum = { version = "0.7", optional = true }
+tower = { version = "0.4", features = ["util"], optional = true }
+env_logger = { version = "0.11", optional = true }
+tower-http = { version = "0.5", features = ["request-id", "trace", "util"], optional = true }
+dashmap = { version = "6", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
+
 tokio = { version = "1", features = ["full"] }
 
 serde = { version = "1", features = ["derive"] }
@@ -44,7 +55,11 @@ config = "0.15.22"
 urlencoding = "2.1.3"
 
 [features]
-default = ["astrometry-net", "asdf-full", "vizier"]
+default = ["tauri", "astrometry-net", "asdf-full", "vizier"]
+tauri = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:tauri-plugin-shell", "dep:tauri-plugin-opener"]
+# Headless HTTP server — contributed by Jae-Joon Lee (https://github.com/leejjoon).
+# Build: cargo build --no-default-features --features server,astrometry-net,asdf-full,vizier
+server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:dashmap", "dep:uuid", "dep:tokio-stream", "dep:tokio-util", "dep:env_logger"]
 astrometry-net = ["dep:reqwest"]
 vizier = ["reqwest/blocking"]
 asdf-full = ["dep:bzip2", "dep:lz4_flex"]
@@ -55,6 +70,17 @@ tauri-build = { version = "2.5", features = [] }
 [lib]
 name = "astroburst_lib"
 crate-type = ["lib"]
+
+[[bin]]
+name = "astroburst"
+path = "src/main.rs"
+required-features = ["tauri"]
+
+# Headless server binary — contributed by Jae-Joon Lee (https://github.com/leejjoon).
+[[bin]]
+name = "astroburst-server"
+path = "src/server/main.rs"
+required-features = ["server"]
 
 [profile.release]
 lto = true
