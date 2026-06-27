@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Image, Cpu, Zap, Sparkles, Loader2,
-  Layers2, FlaskConical, Info, Settings, Download, FileText, BarChart3,
+  Layers2, FlaskConical, Settings, Download, FileText, BarChart3,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
@@ -18,14 +18,13 @@ const ComposeWizard = lazy(() => import("./compose/ComposeWizard"));
 const StackingTab = lazy(() => import("./stacking/StackingTab"));
 const ConfigTab = lazy(() => import("./preview/ConfigTab"));
 const SynthPanel = lazy(() => import("./synth/SynthPanel"));
-const InfoPanel = lazy(() => import("./file/SidebarPanels").then((m) => ({ default: m.InfoPanel })));
 const ExportTab = lazy(() => import("./export/ExportTab"));
 const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("./header/HeadersTab"));
 
 const EMPTY_SPECTRUM: number[] = [];
 
-export type ToolId = "compose" | "processing" | "stacking" | "info" | "synth" | "config" | "export" | "headers" | "analysis";
+export type ToolId = "compose" | "processing" | "stacking" | "synth" | "config" | "export" | "headers" | "analysis";
 export type RightToolId = Exclude<ToolId, "compose">;
 
 interface ToolDef {
@@ -44,7 +43,6 @@ const TOP_TOOLS: ToolDef[] = [
 ];
 
 const BOTTOM_STRIP_TOOLS: ToolDef[] = [
-  { id: "info", label: "Info", shortLabel: "Info", icon: Info, accent: "var(--ab-teal)" },
   { id: "synth", label: "Synth", shortLabel: "Synth", icon: FlaskConical, accent: "var(--ab-rose)" },
   { id: "export", label: "Export", shortLabel: "Export", icon: Download, accent: "var(--ab-amber)" },
   { id: "config", label: "Settings", shortLabel: "Config", icon: Settings, accent: "#a1a1aa" },
@@ -73,7 +71,6 @@ function RightToolContent({ toolId, starOverlayRef }: { toolId: RightToolId; sta
     );
     case "processing": return <ProcessingTab />;
     case "stacking": return <StackingTab />;
-    case "info": return <InfoPanel />;
     case "config": return <ConfigTab />;
     case "synth": return <SynthPanel />;
     case "export": return <ExportTab />;

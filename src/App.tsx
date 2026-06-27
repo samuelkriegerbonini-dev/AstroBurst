@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw, FolderOpen, Layers } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
 import PreviewPanel, { type ToolId } from "./components/PreviewPanel";
+import { InfoPanel } from "./components/file/SidebarPanels";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -94,6 +95,7 @@ export default function App() {
   const handleToggleTool = useCallback((toolId: ToolId) => {
     setActiveTool((prev) => (prev === toolId ? null : toolId));
   }, []);
+  const [infoOpen, setInfoOpen] = useState(false);
 
   const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
@@ -189,6 +191,7 @@ export default function App() {
     setView("empty");
     setShowConfetti(false);
     setActiveTool("compose");
+    setInfoOpen(false);
   }, [reset, resetProductFilter]);
 
   const handleSelectFile = useCallback((id: string) => {
@@ -322,6 +325,14 @@ export default function App() {
                               <Layers size={14} />
                               <span>Comp</span>
                             </button>
+                            <button
+                              onClick={() => setInfoOpen((p) => !p)}
+                              className={`ab-left-strip-btn ${infoOpen ? "ab-left-strip-btn-active" : ""}`}
+                              title="Info"
+                            >
+                              <InfoIcon size={14} />
+                              <span>Info</span>
+                            </button>
                           </div>
 
                           {sidebarOpen && (
@@ -398,6 +409,34 @@ export default function App() {
                             )}
                           </div>
                         </div>
+
+                        {infoOpen && (
+                          <div
+                            className="fixed z-50 rounded-lg overflow-hidden flex flex-col animate-fade-in"
+                            style={{
+                              left: 60,
+                              bottom: 88,
+                              width: 300,
+                              maxHeight: "50vh",
+                              border: "1px solid rgba(20,184,166,0.2)",
+                              background: "rgba(8,8,18,0.97)",
+                              boxShadow: "0 8px 30px rgba(0,0,0,0.55)",
+                              backdropFilter: "blur(8px)",
+                            }}
+                          >
+                            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
+                              <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
+                                <InfoIcon size={12} style={{ color: "var(--ab-teal)" }} /> Info
+                              </span>
+                              <button onClick={() => setInfoOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                                <X size={12} />
+                              </button>
+                            </div>
+                            <div className="overflow-y-auto min-h-0">
+                              <InfoPanel />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </PreviewProvider>
                   </ComposeWizardProvider>
