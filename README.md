@@ -32,6 +32,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="AstroBurst processing the Pillars of Creation — full application interface with the file panel, live WebGPU preview, and the histogram / analysis tools" width="100%">
+</p>
+
 AstroBurst is an open-source desktop app for processing astronomical images. Drop in your FITS or ASDF files, compose RGB from narrowband channels, stack with sigma clipping, and export. Everything runs locally on your machine with no cloud dependencies.
 
 It's built on Rust for the heavy lifting, React for the interface, and WebGPU for real-time preview. The result is a tool that opens a 2 GB IFU datacube in 300 ms, processes 10 frames at 1.4 GB/s, and renders STF adjustments in 8 ms on GPU.
