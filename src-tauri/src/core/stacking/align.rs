@@ -75,7 +75,7 @@ pub fn estimate_offset(
             OffsetEstimate {
                 dy: result.transform.ty,
                 dx: result.transform.tx,
-                confidence: if result.inliers > 0 { 1.0 } else { 0.0 },
+                confidence: result.confidence,
             }
         }
     }
@@ -108,7 +108,7 @@ pub fn align_pair(
             Ok(AlignPairResult {
                 aligned: warped,
                 offset: (result.transform.ty, result.transform.tx),
-                confidence: if result.inliers > 0 { 1.0 } else { 0.0 },
+                confidence: result.confidence,
                 method_used: result.method.to_string(),
                 matched_stars: result.matched_stars,
                 inliers: result.inliers,

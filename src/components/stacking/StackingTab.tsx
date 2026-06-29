@@ -23,6 +23,7 @@ export interface StackConfig {
   sigmaHigh: number;
   maxIterations: number;
   align: boolean;
+  alignMethod?: string;
 }
 
 export interface CalibrationState {
@@ -38,6 +39,7 @@ const DEFAULT_STACK_CONFIG: StackConfig = {
   sigmaHigh: 3.0,
   maxIterations: 5,
   align: true,
+  alignMethod: "phase_correlation",
 };
 
 function StackingTabInner() {

@@ -84,6 +84,7 @@ pub async fn stack(
     sigma_high: Option<f32>,
     max_iterations: Option<usize>,
     align: Option<bool>,
+    align_method: Option<String>,
     name: Option<String>,
     weights: Option<Vec<f64>>,
 ) -> Result<serde_json::Value, String> {
@@ -99,6 +100,7 @@ pub async fn stack(
             sigma_high: sigma_high.unwrap_or(3.0),
             max_iterations: max_iterations.unwrap_or(5),
             align: align.unwrap_or(true),
+            align_method: helpers::parse_align_method(align_method.as_deref()),
             weights,
         };
 

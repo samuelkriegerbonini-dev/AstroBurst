@@ -71,6 +71,7 @@ export interface StackOptions {
   sigmaHigh?: number;
   maxIterations?: number;
   align?: boolean;
+  alignMethod?: string;
   weights?: number[];
 }
 

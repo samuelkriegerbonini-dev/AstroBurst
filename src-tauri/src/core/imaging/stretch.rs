@@ -86,13 +86,56 @@ pub fn arcsinh_stretch_rgb_with_stats(
         }
     };
 
-    let (ro, (go, bo)) = rayon::join(
-        || arcsinh_stretch_with_stats(r, gmin, gmax, factor, gamma),
-        || rayon::join(
-            || arcsinh_stretch_with_stats(g, gmin, gmax, factor, gamma),
-            || arcsinh_stretch_with_stats(b, gmin, gmax, factor, gamma),
-        ),
-    );
+    let range = gmax - gmin;
+    if range < 1e-10 {
+        return (
+            Array2::zeros(r.raw_dim()),
+            Array2::zeros(g.raw_dim()),
+            Array2::zeros(b.raw_dim()),
+        );
+    }
+
+    let inv_range = 1.0 / range;
+    let inv_denom = 1.0 / factor.asinh();
+    let apply_gamma = (gamma - 1.0).abs() > 1e-6;
+
+    let mut ro = Array2::zeros(r.raw_dim());
+    let mut go = Array2::zeros(g.raw_dim());
+    let mut bo = Array2::zeros(b.raw_dim());
+
+    Zip::from(&mut ro)
+        .and(&mut go)
+        .and(&mut bo)
+        .and(r)
+        .and(g)
+        .and(b)
+        .par_for_each(|rout, gout, bout, &rv, &gv, &bv| {
+            if !rv.is_finite() || !gv.is_finite() || !bv.is_finite() {
+                *rout = 0.0;
+                *gout = 0.0;
+                *bout = 0.0;
+                return;
+            }
+            let rn = ((rv - gmin) * inv_range).clamp(0.0, 1.0);
+            let gn = ((gv - gmin) * inv_range).clamp(0.0, 1.0);
+            let bn = ((bv - gmin) * inv_range).clamp(0.0, 1.0);
+            let lum = 0.2126 * rn + 0.7152 * gn + 0.0722 * bn;
+            if lum < 1e-12 {
+                *rout = 0.0;
+                *gout = 0.0;
+                *bout = 0.0;
+                return;
+            }
+            let mut stretched = (lum * factor).asinh() * inv_denom;
+            if apply_gamma {
+                stretched = stretched.powf(gamma);
+            }
+            let mult = stretched / lum;
+            *rout = (rn * mult).clamp(0.0, 1.0);
+            *gout = (gn * mult).clamp(0.0, 1.0);
+            *bout = (bn * mult).clamp(0.0, 1.0);
+        });
+
     (ro, go, bo)
 }
 
@@ -408,9 +451,11 @@ mod tests {
         let ch = Array2::from_shape_fn((10, 10), |(r, c)| (r + c) as f32 / 20.0);
         let single = arcsinh_stretch(&ch, 20.0);
         let (ro, go, bo) = arcsinh_stretch_rgb(&ch, &ch, &ch, 20.0);
-        assert_eq!(single, ro);
-        assert_eq!(single, go);
-        assert_eq!(single, bo);
+        assert_eq!(ro, go);
+        assert_eq!(go, bo);
+        for (a, b) in single.iter().zip(ro.iter()) {
+            assert!((a - b).abs() < 1e-4, "gray channel diverged from mono: {} vs {}", a, b);
+        }
     }
 
     #[test]
@@ -436,6 +481,19 @@ mod tests {
                 assert!(v >= 0.0 && v <= 1.0);
             }
         }
+    }
+
+    #[test]
+    fn arcsinh_rgb_preserves_color_ratio() {
+        let r = Array2::from_shape_vec((2, 2), vec![0.0, 0.2, 0.8, 0.2]).unwrap();
+        let g = Array2::from_shape_vec((2, 2), vec![0.0, 0.1, 0.0, 0.1]).unwrap();
+        let b = Array2::from_shape_vec((2, 2), vec![0.0, 0.05, 0.0, 0.05]).unwrap();
+        let (ro, go, bo) = arcsinh_stretch_rgb(&r, &g, &b, 20.0);
+        let rv = ro[[0, 1]];
+        let gv = go[[0, 1]];
+        let bv = bo[[0, 1]];
+        assert!((rv / gv - 2.0).abs() < 0.15, "R/G ratio not preserved: {}", rv / gv);
+        assert!((gv / bv - 2.0).abs() < 0.15, "G/B ratio not preserved: {}", gv / bv);
     }
 
     #[test]

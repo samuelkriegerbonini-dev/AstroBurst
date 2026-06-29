@@ -99,6 +99,7 @@ pub struct AffineAlignResult {
     pub inliers: usize,
     pub residual_px: f64,
     pub method: AffineAlignMethod,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -262,6 +263,7 @@ fn fallback_phase_correlation(
             inliers: 0,
             residual_px: 0.0,
             method: AffineAlignMethod::Identity,
+            confidence: 0.0,
         };
     }
 
@@ -271,6 +273,7 @@ fn fallback_phase_correlation(
         inliers: 0,
         residual_px: 0.0,
         method: AffineAlignMethod::PhaseCorrelation,
+        confidence: pc.confidence,
     }
 }
 
@@ -518,6 +521,7 @@ fn ransac_affine(
         inliers: best_inliers,
         residual_px: residual,
         method,
+        confidence: 1.0,
     })
 }
 
@@ -864,6 +868,7 @@ mod tests {
             inliers: 10,
             residual_px: 0.5,
             method: AffineAlignMethod::Affine,
+            confidence: 1.0,
         };
         assert!(check_transform_sanity(&result, 100, 100).is_err());
     }
@@ -876,6 +881,7 @@ mod tests {
             inliers: 10,
             residual_px: 0.5,
             method: AffineAlignMethod::Affine,
+            confidence: 1.0,
         };
         assert!(check_transform_sanity(&result, 100, 100).is_ok());
     }

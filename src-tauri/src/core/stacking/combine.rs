@@ -7,7 +7,6 @@ use rayon::prelude::*;
 
 pub use crate::types::stacking::{StackConfig, StackResult};
 use crate::math::median::f32_cmp;
-use crate::types::compose::AlignMethod;
 use crate::types::constants::MAD_TO_SIGMA;
 
 use crate::core::stacking::align;
@@ -241,7 +240,7 @@ pub fn stack_images(
             let result = align::align_pair_with_label(
                 ref_cropped.as_ref(),
                 cropped.as_ref(),
-                AlignMethod::PhaseCorrelation,
+                config.align_method,
                 min_rows,
                 min_cols,
                 &format!("frame_{}", i),
@@ -417,6 +416,7 @@ mod tests {
             sigma_high: 3.0,
             max_iterations: 5,
             align: false,
+            align_method: crate::types::compose::AlignMethod::default(),
             weights: None,
         };
 

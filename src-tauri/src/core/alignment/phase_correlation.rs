@@ -162,6 +162,9 @@ fn correlate_single(a: &Array2<f32>, b: &Array2<f32>) -> PhaseCorrelationResult 
 }
 
 fn is_constant_or_zero(img: &Array2<f32>) -> bool {
+    const MIN_FINITE_COUNT: u64 = 16;
+    const MIN_FINITE_FRACTION: f64 = 0.25;
+
     let mut min_val = f32::INFINITY;
     let mut max_val = f32::NEG_INFINITY;
     let mut finite_count = 0u64;
@@ -178,7 +181,16 @@ fn is_constant_or_zero(img: &Array2<f32>) -> bool {
         }
     }
 
-    finite_count < 16 || (max_val - min_val).abs() < 1e-10
+    let total = img.len() as u64;
+    let finite_fraction = if total > 0 {
+        finite_count as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    finite_count < MIN_FINITE_COUNT
+        || finite_fraction < MIN_FINITE_FRACTION
+        || (max_val - min_val).abs() < 1e-10
 }
 
 pub fn is_low_confidence(confidence: f64) -> bool {
@@ -261,6 +273,28 @@ mod tests {
         assert_eq!(result.dx, 0.0);
         assert_eq!(result.dy, 0.0);
         assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_is_constant_or_zero_rejects_nan_dominated() {
+        let mut img = Array2::<f32>::from_elem((64, 64), f32::NAN);
+        for i in 0..200usize {
+            let y = (i * 7) % 64;
+            let x = (i * 11) % 64;
+            img[[y, x]] = (i as f32) + 1.0;
+        }
+        assert!(is_constant_or_zero(&img));
+    }
+
+    #[test]
+    fn test_is_constant_or_zero_accepts_mostly_finite() {
+        let mut img = make_pattern(64, 64);
+        for (k, v) in img.iter_mut().enumerate() {
+            if k % 5 == 0 {
+                *v = f32::NAN;
+            }
+        }
+        assert!(!is_constant_or_zero(&img));
     }
 
     fn fft_shift(img: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {

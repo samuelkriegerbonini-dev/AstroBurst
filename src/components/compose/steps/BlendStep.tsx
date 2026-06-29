@@ -31,6 +31,33 @@ function wavelengthAutoWeights(filledBins: FrequencyBin[]): BlendWeight[] {
   });
 }
 
+function wavelengthAutoWeightsBalanced(filledBins: FrequencyBin[]): BlendWeight[] {
+  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
+  const n = sorted.length;
+  const raw = sorted.map((bin, i) => {
+    const p = n > 1 ? i / (n - 1) : 0.5;
+    return {
+      channelId: bin.id,
+      r: Math.max(0, 2 * p - 1),
+      g: 1 - Math.abs(2 * p - 1),
+      b: Math.max(0, 1 - 2 * p),
+    };
+  });
+
+  const colSum = (k: "r" | "g" | "b") => raw.reduce((acc, w) => acc + w[k], 0);
+  const norm = (total: number) => (total > 1e-6 ? 1 / total : 1);
+  const fr = norm(colSum("r"));
+  const fg = norm(colSum("g"));
+  const fb = norm(colSum("b"));
+
+  return raw.map((w) => ({
+    channelId: w.channelId,
+    r: round2(w.r * fr),
+    g: round2(w.g * fg),
+    b: round2(w.b * fb),
+  }));
+}
+
 function resolvePresetWeights(
   preset: { weights: BlendWeight[] },
   filledBins: FrequencyBin[],
@@ -94,6 +121,10 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
 
   const handleAutoWavelength = useCallback(() => {
     onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
+  }, [filledBins, onWeightsChange]);
+
+  const handleAutoWavelengthBalanced = useCallback(() => {
+    onWeightsChange(wavelengthAutoWeightsBalanced(filledBins), "auto_wavelength_balanced");
   }, [filledBins, onWeightsChange]);
 
   const autoAppliedRef = useRef<string>("");
@@ -204,6 +235,16 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
                 }`}>
           <div className="font-semibold">Auto (λ)</div>
           <div className="text-[8px] opacity-60">Spread channels across RGB by wavelength</div>
+        </button>
+        <button onClick={handleAutoWavelengthBalanced}
+                title="Wavelength spread with equal total weight per R/G/B (removes the green over-weighting from the spectral middle)"
+                className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                  state.blendPreset === "auto_wavelength_balanced"
+                    ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
+                    : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}>
+          <div className="font-semibold">Balanced (λ)</div>
+          <div className="text-[8px] opacity-60">Wavelength spread, equal weight per R/G/B</div>
         </button>
         {Object.entries(BLEND_PRESETS).map(([id, preset]) => {
           const isActive = state.blendPreset === id;

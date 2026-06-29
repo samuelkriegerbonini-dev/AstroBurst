@@ -1,14 +1,15 @@
+use std::borrow::Cow;
+
 use anyhow::{bail, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
 pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, DrizzleResult};
 
+use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
 use crate::core::imaging::boundary::clamp_index;
-use crate::core::stacking::align;
 use crate::math::median::median_f32_mut;
-use crate::types::compose::AlignMethod;
 use crate::types::constants::MAD_TO_SIGMA;
 
 fn frame_contributions(
@@ -256,13 +257,6 @@ fn lanczos3(x: f64) -> f64 {
     (pi_x.sin() / pi_x) * (pi_x_3.sin() / pi_x_3)
 }
 
-fn map_alignment_method(m: AlignmentMethod) -> AlignMethod {
-    match m {
-        AlignmentMethod::PhaseCorrelation => AlignMethod::PhaseCorrelation,
-        AlignmentMethod::Zncc => AlignMethod::Affine,
-    }
-}
-
 pub fn drizzle_stack(
     images: &[Array2<f32>],
     config: &DrizzleConfig,
@@ -317,54 +311,59 @@ pub fn drizzle_stack(
     let reference = images_ref[0];
     let mut offsets: Vec<(f64, f64)> = Vec::with_capacity(images_ref.len());
     offsets.push((0.0, 0.0));
+    let mut frames: Vec<Cow<Array2<f32>>> = Vec::with_capacity(images_ref.len());
+    frames.push(Cow::Borrowed(reference));
 
     if config.align {
         match config.alignment_method {
             AlignmentMethod::PhaseCorrelation => {
-                let computed: Vec<(f64, f64)> = images_ref[1..]
+                let aligned: Vec<(f64, f64, Option<Array2<f32>>)> = images_ref[1..]
                     .par_iter()
                     .map(|target| {
                         let pc = phase_correlation::phase_correlate(reference, target);
                         if phase_correlation::is_low_confidence(pc.confidence) {
-                            let fallback = align::estimate_offset(
-                                reference,
-                                target,
-                                AlignMethod::Affine,
-                            );
-                            (fallback.dx, fallback.dy)
+                            let result = affine::align_channel_affine(reference, target);
+                            let warped = affine::warp_image(target, &result.transform, in_rows, in_cols);
+                            (0.0, 0.0, Some(warped))
                         } else {
-                            (pc.dx, pc.dy)
+                            (pc.dx, pc.dy, None)
                         }
                     })
                     .collect();
-                offsets.extend(computed);
+                for (i, (dx, dy, warped)) in aligned.into_iter().enumerate() {
+                    offsets.push((dx, dy));
+                    match warped {
+                        Some(w) => frames.push(Cow::Owned(w)),
+                        None => frames.push(Cow::Borrowed(images_ref[1 + i])),
+                    }
+                }
             }
             AlignmentMethod::Zncc => {
-                log::warn!(
-                    "ZNCC alignment requested; routing to star-based Affine (ZNCC path was removed)"
-                );
-                let mapped = map_alignment_method(AlignmentMethod::Zncc);
-                let computed: Vec<(f64, f64)> = images_ref[1..]
+                let warped: Vec<Array2<f32>> = images_ref[1..]
                     .par_iter()
                     .map(|target| {
-                        let est = align::estimate_offset(reference, target, mapped);
-                        (est.dx, est.dy)
+                        let result = affine::align_channel_affine(reference, target);
+                        affine::warp_image(target, &result.transform, in_rows, in_cols)
                     })
                     .collect();
-                offsets.extend(computed);
+                for w in warped {
+                    offsets.push((0.0, 0.0));
+                    frames.push(Cow::Owned(w));
+                }
             }
         }
     } else {
-        for _ in 1..images_ref.len() {
+        for target in &images_ref[1..] {
             offsets.push((0.0, 0.0));
+            frames.push(Cow::Borrowed(*target));
         }
     }
 
     let mut counts = vec![0u32; out_rows * out_cols];
-    for (i, img) in images_ref.iter().enumerate() {
+    for (i, img) in frames.iter().enumerate() {
         let (dx, dy) = offsets[i];
         let rows = frame_contributions(
-            img, -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
+            img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
         );
         for contribs in rows {
             for (idx, _, _) in contribs {
@@ -376,9 +375,9 @@ pub fn drizzle_stack(
     let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols, &counts);
     drop(counts);
 
-    for (i, img) in images_ref.iter().enumerate() {
+    for (i, img) in frames.iter().enumerate() {
         let (dx, dy) = offsets[i];
-        accumulator.drizzle_frame(img, -dx, -dy, scale, pixfrac, config.kernel);
+        accumulator.drizzle_frame(img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel);
     }
 
     let (image, weight_map, rejected_pixels) = accumulator.finalize(

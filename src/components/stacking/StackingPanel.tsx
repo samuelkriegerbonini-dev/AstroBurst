@@ -33,6 +33,7 @@ export default function StackingPanel({
   const sigmaHigh = stackConfig?.sigmaHigh ?? 3.0;
   const maxIterations = stackConfig?.maxIterations ?? 5;
   const align = stackConfig?.align ?? true;
+  const alignMethod = stackConfig?.alignMethod ?? "phase_correlation";
 
   useEffect(() => {
     if (injectedPaths.length === 0) return;
@@ -75,6 +76,7 @@ export default function StackingPanel({
         sigmaHigh,
         maxIterations,
         align,
+        alignMethod,
       });
       setResult(res);
       onResult?.(res);
@@ -83,7 +85,7 @@ export default function StackingPanel({
     } finally {
       setIsStacking(false);
     }
-  }, [selectedPaths, sigmaLow, sigmaHigh, maxIterations, align, onResult]);
+  }, [selectedPaths, sigmaLow, sigmaHigh, maxIterations, align, alignMethod, onResult]);
 
   const injectedOnly = injectedPaths.filter((p) => !files.some((f) => f.path === p));
 
@@ -141,6 +143,15 @@ export default function StackingPanel({
         <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaHigh: v })} />
         <Slider label="Max Iterations" value={maxIterations} min={1} max={20} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ maxIterations: v })} />
         <Toggle label="Auto-align before stacking" checked={align} accent="amber" onChange={(v) => onStackConfigChange?.({ align: v })} />
+        {align && (
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-zinc-400">Alignment method</label>
+            <select value={alignMethod} onChange={(e) => onStackConfigChange?.({ alignMethod: e.target.value })} className="ab-select">
+              <option value="phase_correlation">Phase Correlation (translation)</option>
+              <option value="affine">Star-based Affine (rotation)</option>
+            </select>
+          </div>
+        )}
       </div>
 
       <RunButton label={`Stack ${selectedPaths.length} Frames`} runningLabel="Stacking..." running={isStacking} disabled={selectedPaths.length < 2} accent="amber" onClick={handleStack} />

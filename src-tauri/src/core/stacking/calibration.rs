@@ -213,14 +213,48 @@ pub fn create_master_dark(
         .context("Failed to reshape master dark")?)
 }
 
+fn median_exposure_seconds(paths: &[String]) -> Option<f64> {
+    let mut vals: Vec<f64> = paths
+        .iter()
+        .filter_map(|p| {
+            let header = crate::infra::fits::reader::read_primary_header(p).ok()?;
+            header
+                .get_f64("EXPTIME")
+                .or_else(|| header.get_f64("EXPOSURE"))
+                .filter(|v| v.is_finite() && *v > 0.0)
+        })
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(vals[vals.len() / 2])
+}
+
+fn flat_dark_scale(flat_exposure: Option<f64>, dark_exposure: Option<f64>) -> f32 {
+    match (flat_exposure, dark_exposure) {
+        (Some(flat), Some(dark)) if dark > 0.0 && flat.is_finite() && flat >= 0.0 => {
+            ((flat / dark) as f32).clamp(0.0, 20.0)
+        }
+        _ => 1.0,
+    }
+}
+
 pub fn create_master_flat(
     flat_paths: &[String],
     master_bias: Option<&Array2<f32>>,
     master_dark: Option<&Array2<f32>>,
+    dark_exposure_seconds: Option<f64>,
 ) -> Result<Array2<f32>> {
     if flat_paths.is_empty() {
         bail!("No flat frames provided");
     }
+
+    let dark_scale = if master_dark.is_some() {
+        flat_dark_scale(median_exposure_seconds(flat_paths), dark_exposure_seconds)
+    } else {
+        1.0
+    };
 
     let first = load_fits_image(&flat_paths[0])?;
     let (rows, cols) = first.dim();
@@ -230,7 +264,7 @@ pub fn create_master_flat(
             frame = subtract_bias(&frame, bias);
         }
         if let Some(dark) = master_dark {
-            frame = subtract_dark(&frame, dark, 1.0);
+            frame = subtract_dark(&frame, dark, dark_scale);
         }
         frame
     };
@@ -276,11 +310,6 @@ pub fn create_master_flat(
         .context("Failed to reshape normalized master flat")?)
 }
 
-fn clamp_non_negative(mut img: Array2<f32>) -> Array2<f32> {
-    img.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
-    img
-}
-
 pub fn calibrate_from_paths(
     science_path: &str,
     bias_paths: Option<&[String]>,
@@ -303,11 +332,15 @@ pub fn calibrate_from_paths(
     };
 
     let master_flat = match flat_paths {
-        Some(paths) if !paths.is_empty() => Some(create_master_flat(
-            paths,
-            master_bias.as_ref(),
-            master_dark.as_ref(),
-        )?),
+        Some(paths) if !paths.is_empty() => {
+            let dark_exposure = dark_paths.and_then(median_exposure_seconds);
+            Some(create_master_flat(
+                paths,
+                master_bias.as_ref(),
+                master_dark.as_ref(),
+                dark_exposure,
+            )?)
+        }
         _ => None,
     };
 
@@ -318,7 +351,7 @@ pub fn calibrate_from_paths(
         dark_exposure_ratio,
     };
 
-    Ok(clamp_non_negative(calibrate_image(&science, &config)?))
+    calibrate_image(&science, &config)
 }
 
 pub fn stack_from_paths(
@@ -341,8 +374,7 @@ pub fn stack_from_paths(
         })
         .collect::<Result<_>>()?;
 
-    let mut result = crate::core::stacking::combine::stack_images(&images, config)?;
-    result.image = clamp_non_negative(result.image);
+    let result = crate::core::stacking::combine::stack_images(&images, config)?;
     Ok(result)
 }
 
@@ -364,13 +396,30 @@ pub fn drizzle_from_paths(
         images.push(img);
     }
 
-    let mut result = crate::core::stacking::drizzle::drizzle_stack(&images, config)?;
-    result.image = clamp_non_negative(result.image);
+    let result = crate::core::stacking::drizzle::drizzle_stack(&images, config)?;
     Ok(result)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat_dark_scale_scales_by_exposure_ratio() {
+        let s = flat_dark_scale(Some(5.0), Some(300.0));
+        assert!((s - (5.0 / 300.0)).abs() < 1e-6, "got {}", s);
+    }
+
+    #[test]
+    fn flat_dark_scale_identity_on_equal_exposure() {
+        assert!((flat_dark_scale(Some(300.0), Some(300.0)) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flat_dark_scale_falls_back_to_one_when_unknown() {
+        assert_eq!(flat_dark_scale(None, Some(300.0)), 1.0);
+        assert_eq!(flat_dark_scale(Some(5.0), None), 1.0);
+        assert_eq!(flat_dark_scale(Some(5.0), Some(0.0)), 1.0);
+    }
 
     #[test]
     fn test_subtract_bias() {

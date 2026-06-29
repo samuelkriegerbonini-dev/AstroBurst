@@ -1,11 +1,14 @@
 use ndarray::Array2;
 
+use crate::types::compose::AlignMethod;
+
 #[derive(Debug, Clone)]
 pub struct StackConfig {
     pub sigma_low: f32,
     pub sigma_high: f32,
     pub max_iterations: usize,
     pub align: bool,
+    pub align_method: AlignMethod,
     pub weights: Option<Vec<f64>>,
 }
 
@@ -16,6 +19,7 @@ impl Default for StackConfig {
             sigma_high: 3.0,
             max_iterations: 5,
             align: true,
+            align_method: AlignMethod::default(),
             weights: None,
         }
     }

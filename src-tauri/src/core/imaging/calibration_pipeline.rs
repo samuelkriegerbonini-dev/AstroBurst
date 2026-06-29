@@ -2,6 +2,7 @@ use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::math::median::f32_cmp;
+use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
@@ -344,18 +345,17 @@ fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     frames.par_iter().map(|frame| {
-        let mut sum = 0.0f64;
-        let mut count = 0usize;
-        for &v in frame.iter() {
-            if v.is_finite() {
-                sum += v as f64;
-                count += 1;
-            }
-        }
-        let mean = if count > 0 { sum / count as f64 } else { 0.0 };
-        if mean > 0.0 {
-            let inv_mean = 1.0 / mean as f32;
-            frame.mapv(|v| v * inv_mean)
+        let stride = (frame.len() / 65536).max(1);
+        let mut samples: Vec<f32> = frame
+            .iter()
+            .step_by(stride)
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        let (background, _) = sigma_clipped_stats(&mut samples, 3.0, 3);
+        if background > 0.0 {
+            let inv_bg = 1.0 / background as f32;
+            frame.mapv(|v| v * inv_bg)
         } else {
             frame.clone()
         }
@@ -426,4 +426,28 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
         for (i, count) in local_rej.into_iter().enumerate() { rejection_counts[i] += count; }
     }
     (result, rejection_counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_with_stars(sky: f32, n_bright: usize) -> Array2<f32> {
+        let mut a = Array2::from_elem((40, 40), sky);
+        for i in 0..n_bright {
+            a[[i, i]] = 1000.0;
+        }
+        a
+    }
+
+    #[test]
+    fn normalize_uses_robust_background_not_mean() {
+        let a = frame_with_stars(10.0, 30);
+        let b = frame_with_stars(10.0, 0);
+        let out = normalize_frames(&[a, b]);
+        let sky_a = out[0][[39, 0]];
+        let sky_b = out[1][[39, 0]];
+        assert!((sky_a - sky_b).abs() < 0.05, "sky levels diverged: {} vs {}", sky_a, sky_b);
+        assert!((sky_a - 1.0).abs() < 0.1, "sky not normalized to ~1: {}", sky_a);
+    }
 }

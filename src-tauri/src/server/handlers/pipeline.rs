@@ -151,7 +151,7 @@ pub async fn run(
         let master_flat = if flat_paths.is_empty() {
             None
         } else {
-            match create_master_flat(&flat_paths, master_bias.as_ref(), master_dark.as_ref()) {
+            match create_master_flat(&flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&dark_paths)) {
                 Ok(f) => Some(f),
                 Err(e) => {
                     job.set_error();

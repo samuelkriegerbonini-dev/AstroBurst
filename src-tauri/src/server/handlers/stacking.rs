@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::calibration::{drizzle_from_paths, stack_from_paths};
+use astroburst_lib::types::compose::AlignMethod;
 use astroburst_lib::types::stacking::{DrizzleConfig, DrizzleKernel, StackConfig};
 
 use crate::error::{AppError, Result};
@@ -30,6 +31,7 @@ pub struct StackParams {
     pub sigma_high: Option<f32>,
     pub max_iterations: Option<usize>,
     pub align: Option<bool>,
+    pub align_method: Option<String>,
     pub weights: Option<Vec<f64>>,
 }
 
@@ -65,6 +67,10 @@ pub async fn stack(
         sigma_high: params.sigma_high.unwrap_or(3.0),
         max_iterations: params.max_iterations.unwrap_or(5),
         align: params.align.unwrap_or(true),
+        align_method: match params.align_method.as_deref() {
+            Some("affine") => AlignMethod::Affine,
+            _ => AlignMethod::PhaseCorrelation,
+        },
         weights: params.weights,
     };
 

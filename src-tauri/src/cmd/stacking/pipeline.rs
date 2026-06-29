@@ -125,7 +125,7 @@ pub async fn run_pipeline_cmd(
         let master_flat = if request.flat_paths.is_empty() {
             None
         } else {
-            Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref()).map_err(|e| format!("{:#}", e))?)
+            Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
         };
 
         let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {

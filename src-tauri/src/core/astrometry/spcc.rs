@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::compute_image_stats;
+use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::header::HduHeader;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,14 +462,13 @@ fn cross_match_stars(
 fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
     let (h, w) = image.dim();
     let r2 = radius * radius;
-    let inner_annulus = radius * 1.2;
-    let outer_annulus = radius * 1.8;
+    let inner_annulus = radius * 2.0;
+    let outer_annulus = radius * 3.5;
     let inner_r2 = inner_annulus * inner_annulus;
     let outer_r2 = outer_annulus * outer_annulus;
     let mut flux = 0.0f64;
     let mut aperture_count = 0u32;
-    let mut bg_sum = 0.0f64;
-    let mut bg_count = 0u32;
+    let mut bg_vals: Vec<f32> = Vec::new();
 
     let y_min = (y - outer_annulus).floor().max(0.0) as usize;
     let y_max = ((y + outer_annulus).ceil() as usize).min(h.saturating_sub(1));
@@ -488,14 +488,13 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
                 flux += v;
                 aperture_count += 1;
             } else if d2 >= inner_r2 && d2 <= outer_r2 {
-                bg_sum += v;
-                bg_count += 1;
+                bg_vals.push(v as f32);
             }
         }
     }
 
-    if bg_count > 0 && aperture_count > 0 {
-        let bg_per_pixel = bg_sum / bg_count as f64;
+    if !bg_vals.is_empty() && aperture_count > 0 {
+        let (bg_per_pixel, _) = sigma_clipped_stats(&mut bg_vals, 3.0, 3);
         flux -= bg_per_pixel * aperture_count as f64;
     }
 
@@ -613,5 +612,35 @@ mod tests {
     fn test_parse_vizier_tsv_empty_response() {
         assert!(parse_vizier_tsv("").is_empty());
         assert!(parse_vizier_tsv("#nothing here\n#at all\n").is_empty());
+    }
+
+    #[test]
+    fn aperture_background_rejects_neighbor_contamination() {
+        let mut img = Array2::from_elem((60, 60), 100.0f32);
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                img[[(30 + dy) as usize, (30 + dx) as usize]] = 500.0;
+            }
+        }
+        let radius = 4.0;
+        let flux_clean = aperture_flux_f32(&img, 30.0, 30.0, radius);
+
+        let mut contaminated = img.clone();
+        for dy in 0..3usize {
+            for dx in 0..3usize {
+                contaminated[[30 + dy, 41 + dx]] = 5000.0;
+            }
+        }
+        let flux_contaminated = aperture_flux_f32(&contaminated, 30.0, 30.0, radius);
+
+        let rel = (flux_contaminated - flux_clean).abs() / flux_clean.max(1.0);
+        assert!(
+            rel < 0.05,
+            "neighbor in annulus shifted flux by {:.1}% (clean={}, contaminated={})",
+            rel * 100.0,
+            flux_clean,
+            flux_contaminated
+        );
+        assert!(flux_clean > 9000.0, "expected ~10000 net star flux, got {}", flux_clean);
     }
 }
