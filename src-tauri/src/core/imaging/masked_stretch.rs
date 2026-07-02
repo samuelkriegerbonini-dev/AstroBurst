@@ -9,6 +9,8 @@ pub struct MaskedStretchConfig {
     pub target_background: f64,
     pub mask_growth: f64,
     pub mask_softness: f64,
+    pub detection_sigma: f64,
+    pub max_eccentricity: f64,
     pub luminance_protect: bool,
     pub luminance_ceiling: f64,
     pub protection_amount: f64,
@@ -22,6 +24,8 @@ impl Default for MaskedStretchConfig {
             target_background: 0.25,
             mask_growth: 2.5,
             mask_softness: 4.0,
+            detection_sigma: 8.0,
+            max_eccentricity: 0.85,
             luminance_protect: true,
             luminance_ceiling: 0.85,
             protection_amount: 0.85,
@@ -47,6 +51,8 @@ pub fn masked_stretch(
     let mask_config = StarMaskConfig {
         growth_factor: config.mask_growth,
         softness: config.mask_softness,
+        detection_sigma: config.detection_sigma,
+        max_eccentricity: config.max_eccentricity,
         luminance_protect: config.luminance_protect,
         luminance_ceiling: config.luminance_ceiling,
         ..StarMaskConfig::default()
@@ -165,6 +171,8 @@ pub fn masked_stretch_rgb_shared(
     let mask_config = StarMaskConfig {
         growth_factor: config.mask_growth,
         softness: config.mask_softness,
+        detection_sigma: config.detection_sigma,
+        max_eccentricity: config.max_eccentricity,
         luminance_protect: config.luminance_protect,
         luminance_ceiling: config.luminance_ceiling,
         ..StarMaskConfig::default()

@@ -7,6 +7,8 @@ use crate::core::alignment::phase_correlation;
 use crate::core::imaging::sampling::bicubic_sample;
 use crate::types::compose::AlignMethod;
 
+const MAX_OFFSET_FRACTION: f64 = 0.40;
+
 #[derive(Debug, Clone)]
 pub struct AlignPairResult {
     pub aligned: Array2<f32>,
@@ -18,18 +20,29 @@ pub struct AlignPairResult {
     pub residual_px: f64,
 }
 
-fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
+fn ensure_contiguous(image: &Array2<f32>) -> Array2<f32> {
+    if image.is_standard_layout() {
+        image.clone()
+    } else {
+        image.as_standard_layout().into_owned()
+    }
+}
+
+pub fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
     if dy.abs() < 1e-12 && dx.abs() < 1e-12 {
         return image.clone();
     }
-    let (rows, cols) = image.dim();
-    let src = image.as_slice().expect("contiguous");
+    let owned = ensure_contiguous(image);
+    let (rows, cols) = owned.dim();
+    let src = owned.as_slice().expect("contiguous after ensure_contiguous");
     let mut out = vec![f32::NAN; rows * cols];
+    let rows_f = rows as f64;
+    let cols_f = cols as f64;
     out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
         for x in 0..cols {
             let sy = y as f64 + dy;
             let sx = x as f64 + dx;
-            if sy < -0.5 || sy > (rows as f64 - 0.5) || sx < -0.5 || sx > (cols as f64 - 0.5) {
+            if sy < -0.5 || sy > rows_f - 0.5 || sx < -0.5 || sx > cols_f - 0.5 {
                 continue;
             }
             row[x] = bicubic_sample(src, rows, cols, sy, sx);
@@ -48,16 +61,33 @@ pub fn align_pair(
     match method {
         AlignMethod::PhaseCorrelation => {
             let pc = phase_correlation::phase_correlate(reference, target);
-            let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
-            Ok(AlignPairResult {
-                aligned: shifted,
-                offset: (pc.dy, pc.dx),
-                confidence: pc.confidence,
-                method_used: "phase_correlation".into(),
-                matched_stars: 0,
-                inliers: 0,
-                residual_px: 0.0,
-            })
+            let max_dx = cols as f64 * MAX_OFFSET_FRACTION;
+            let max_dy = rows as f64 * MAX_OFFSET_FRACTION;
+            let reject = pc.dx.abs() > max_dx
+                || pc.dy.abs() > max_dy
+                || phase_correlation::is_low_confidence(pc.confidence);
+            if reject {
+                Ok(AlignPairResult {
+                    aligned: target.clone(),
+                    offset: (0.0, 0.0),
+                    confidence: pc.confidence,
+                    method_used: "phase_correlation_identity".into(),
+                    matched_stars: 0,
+                    inliers: 0,
+                    residual_px: 0.0,
+                })
+            } else {
+                let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
+                Ok(AlignPairResult {
+                    aligned: shifted,
+                    offset: (pc.dy, pc.dx),
+                    confidence: pc.confidence,
+                    method_used: "phase_correlation".into(),
+                    matched_stars: 0,
+                    inliers: 0,
+                    residual_px: 0.0,
+                })
+            }
         }
         AlignMethod::Affine => {
             let result = affine::align_channel_affine(reference, target);
@@ -158,6 +188,32 @@ mod tests {
         }
         let rmse = (residual_sum / count as f64).sqrt();
         assert!(rmse < 50.0, "RMSE too high after alignment: {}", rmse);
+    }
+
+    fn blob_scene(rows: usize, cols: usize, cy: f32, cx: f32) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(y, x)| {
+            let dy = y as f32 - cy;
+            let dx = x as f32 - cx;
+            100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
+        })
+    }
+
+    #[test]
+    fn out_of_range_pc_shift_falls_back_to_identity() {
+        let reference = blob_scene(300, 300, 150.0, 50.0);
+        let target = blob_scene(300, 300, 150.0, 250.0);
+        let result = align_pair(
+            &reference,
+            &target,
+            AlignMethod::PhaseCorrelation,
+            300,
+            300,
+        ).unwrap();
+
+        assert_eq!(result.offset, (0.0, 0.0));
+        assert_eq!(result.method_used, "phase_correlation_identity");
+        assert!(result.aligned.iter().all(|v| v.is_finite()));
+        assert_eq!(result.aligned, target);
     }
 
     #[test]

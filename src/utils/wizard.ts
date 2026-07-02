@@ -354,23 +354,40 @@ export function nextEnabledStep(
   return null;
 }
 
-export function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
+export type PipelineStage = "background" | "cropped" | "aligned" | "stacked";
+
+const STAGE_ORDER: PipelineStage[] = ["background", "cropped", "aligned", "stacked"];
+
+function stagePath(state: WizardState, binId: string, stage: PipelineStage): string | undefined {
+  switch (stage) {
+    case "background": return state.backgroundPaths[binId];
+    case "cropped": return state.croppedPaths[binId];
+    case "aligned": return state.alignedPaths[binId];
+    case "stacked": return state.stackedPaths[binId];
+  }
+}
+
+export function resolveChannelPath(
+  state: WizardState,
+  binId: string,
+  upTo: PipelineStage = "background",
+): string | null {
+  for (let i = STAGE_ORDER.indexOf(upTo); i < STAGE_ORDER.length; i++) {
+    const p = stagePath(state, binId, STAGE_ORDER[i]);
+    if (p) return p;
+  }
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];
   return null;
 }
 
-export function resolveAnyChannelPath(state: WizardState): string | null {
+export function resolveAnyChannelPath(
+  state: WizardState,
+  upTo: PipelineStage = "background",
+): string | null {
   for (const bin of state.bins) {
-    if (state.backgroundPaths[bin.id]) return state.backgroundPaths[bin.id];
-    if (state.croppedPaths[bin.id]) return state.croppedPaths[bin.id];
-    if (state.alignedPaths[bin.id]) return state.alignedPaths[bin.id];
-    if (state.stackedPaths[bin.id]) return state.stackedPaths[bin.id];
-    if (bin.files.length > 0) return bin.files[0];
+    const p = resolveChannelPath(state, bin.id, upTo);
+    if (p) return p;
   }
   return null;
 }

@@ -6,6 +6,7 @@ interface SliderProps {
   min: number;
   max: number;
   step: number;
+  scale?: "linear" | "log";
   disabled?: boolean;
   accent?: string;
   format?: (v: number) => string;
@@ -13,12 +14,15 @@ interface SliderProps {
   hint?: string;
 }
 
+const LOG_STEPS = 1000;
+
 function Slider({
   label,
   value,
   min,
   max,
   step,
+  scale = "linear",
   disabled = false,
   accent = "teal",
   format,
@@ -27,24 +31,38 @@ function Slider({
 }: SliderProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
+  const editStartText = useRef("");
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const isLog = scale === "log" && min > 0 && max > min;
+  const logRange = isLog ? Math.log(max / min) : 1;
+  const toPos = useCallback(
+    (v: number) => Math.log(Math.max(min, Math.min(max, v)) / min) / logRange,
+    [isLog, min, max, logRange],
+  );
+  const fromPos = useCallback((p: number) => min * Math.exp(p * logRange), [min, logRange]);
+
   const handleChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => onChange(parseFloat(e.target.value)),
-    [onChange],
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const raw = parseFloat(e.target.value);
+      onChange(isLog ? fromPos(raw) : raw);
+    },
+    [onChange, isLog, fromPos],
   );
 
   const display = format ? format(value) : String(value);
-  const pct = ((value - min) / (max - min)) * 100;
+  const pct = isLog ? toPos(value) * 100 : ((value - min) / (max - min)) * 100;
 
   const handleValueClick = useCallback(() => {
     if (disabled) return;
     setEditing(true);
     setEditText(display);
+    editStartText.current = display;
   }, [disabled, display]);
 
   const commitEdit = useCallback(() => {
     setEditing(false);
+    if (editText === editStartText.current) return;
     const parsed = parseFloat(editText);
     if (!isNaN(parsed)) {
       const clamped = Math.max(min, Math.min(max, parsed));
@@ -92,10 +110,10 @@ function Slider({
       </div>
       <input
         type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
+        min={isLog ? 0 : min}
+        max={isLog ? 1 : max}
+        step={isLog ? 1 / LOG_STEPS : step}
+        value={isLog ? toPos(value) : value}
         onChange={handleChange}
         disabled={disabled}
         className="ab-slider"

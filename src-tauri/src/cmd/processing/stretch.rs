@@ -165,6 +165,8 @@ pub async fn masked_stretch_cmd(
     mask_softness: Option<f64>,
     protection_amount: Option<f64>,
     luminance_protect: Option<bool>,
+    detection_sigma: Option<f64>,
+    max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
@@ -179,6 +181,8 @@ pub async fn masked_stretch_cmd(
             mask_softness: mask_softness.unwrap_or(4.0),
             protection_amount: protection_amount.unwrap_or(0.85),
             luminance_protect: luminance_protect.unwrap_or(true),
+            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
+            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
             ..MaskedStretchConfig::default()
         };
 
@@ -254,6 +258,8 @@ pub async fn masked_stretch_composite_cmd(
     protection_amount: Option<f64>,
     luminance_protect: Option<bool>,
     shared_mask: Option<bool>,
+    detection_sigma: Option<f64>,
+    max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
@@ -267,6 +273,8 @@ pub async fn masked_stretch_composite_cmd(
             mask_softness: mask_softness.unwrap_or(4.0),
             protection_amount: protection_amount.unwrap_or(0.85),
             luminance_protect: luminance_protect.unwrap_or(true),
+            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
+            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
             ..MaskedStretchConfig::default()
         };
 

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, save_preview_png, auto_stretch_preview};
-use crate::core::imaging::background::{extract_background, BackgroundConfig, BackgroundMode};
+use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::progress::ProgressHandle;
@@ -89,6 +90,135 @@ pub async fn extract_background_cmd(
             RES_RMS_RESIDUAL: bg_result.rms_residual,
             RES_ELAPSED_MS: bg_result.elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
+        }))
+    })
+}
+
+fn mean_reference(channels: &[Array2<f32>]) -> Array2<f32> {
+    let (rows, cols) = channels[0].dim();
+    Array2::from_shape_fn((rows, cols), |(y, x)| {
+        let mut sum = 0.0f32;
+        let mut cnt = 0u32;
+        for ch in channels {
+            let v = ch[[y, x]];
+            if v.is_finite() {
+                sum += v;
+                cnt += 1;
+            }
+        }
+        if cnt > 0 {
+            sum / cnt as f32
+        } else {
+            f32::NAN
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn extract_background_batch_cmd(
+    paths: Vec<String>,
+    bin_ids: Vec<String>,
+    output_dir: String,
+    grid_size: usize,
+    poly_degree: usize,
+    sigma_clip: f64,
+    iterations: usize,
+    mode: String,
+    reference_bin: Option<String>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = std::time::Instant::now();
+        resolve_output_dir(&output_dir)?;
+
+        if paths.is_empty() || paths.len() != bin_ids.len() {
+            anyhow::bail!("paths and bin_ids must be non-empty and of equal length");
+        }
+
+        let deband_axis = match mode.as_str() {
+            "deband_rows" => Some(DebandAxis::Rows),
+            "deband_cols" => Some(DebandAxis::Columns),
+            "deband_both" => Some(DebandAxis::Both),
+            _ => None,
+        };
+        let neutralize = mode.as_str() == "neutralize";
+
+        let bg_mode = match mode.as_str() {
+            MODE_DIVIDE => BackgroundMode::Divide,
+            _ => BackgroundMode::Subtract,
+        };
+
+        let config = BackgroundConfig {
+            grid_size: grid_size.clamp(MIN_GRID_SIZE, MAX_GRID_SIZE),
+            poly_degree: poly_degree.clamp(MIN_POLY_DEGREE, MAX_POLY_DEGREE),
+            sigma_clip: sigma_clip as f32,
+            iterations: iterations.clamp(MIN_ITERATIONS, MAX_ITERATIONS),
+            mode: bg_mode,
+        };
+
+        let mut loaded: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
+        for p in &paths {
+            let entry = load_from_cache_or_disk(p)?;
+            loaded.push(entry.arr().to_owned());
+        }
+
+        let (rows, cols) = loaded[0].dim();
+        for ch in loaded.iter_mut().skip(1) {
+            if ch.dim() != (rows, cols) {
+                *ch = crate::core::imaging::resample::resample_image(ch, rows, cols)?;
+            }
+        }
+
+        let (corrected, sample_counts, rms_residual): (Vec<Array2<f32>>, Vec<usize>, f64) = if let Some(axis) = deband_axis {
+            let dcfg = DebandConfig {
+                axis,
+                sigma_clip: sigma_clip as f32,
+                iterations: iterations.clamp(1, 5),
+            };
+            let out: Vec<Array2<f32>> = loaded.iter().map(|ch| deband(ch, &dcfg)).collect();
+            let counts = vec![0usize; loaded.len()];
+            (out, counts, 0.0)
+        } else if neutralize {
+            let mut out = Vec::with_capacity(loaded.len());
+            let mut counts = Vec::with_capacity(loaded.len());
+            for ch in &loaded {
+                let r = neutralize_background(ch, &config)?;
+                counts.push(r.sample_count);
+                out.push(r.corrected);
+            }
+            (out, counts, 0.0)
+        } else {
+            let reference = match reference_bin
+                .as_ref()
+                .and_then(|rb| bin_ids.iter().position(|b| b == rb))
+            {
+                Some(idx) => loaded[idx].clone(),
+                None => mean_reference(&loaded),
+            };
+            let refs: Vec<&Array2<f32>> = loaded.iter().collect();
+            let linked = extract_background_linked(&refs, &reference, &config)?;
+            let count = linked.sample_count;
+            (linked.corrected, vec![count; loaded.len()], linked.rms_residual)
+        };
+
+        let mut results = Vec::with_capacity(paths.len());
+        for (i, bin_id) in bin_ids.iter().enumerate() {
+            let img = &corrected[i];
+            let cache_key = crate::types::constants::wizard_bg_key(bin_id);
+            let stats = compute_image_stats(img);
+            GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(img.clone()), stats);
+            results.push(json!({
+                "bin_id": bin_id,
+                RES_CACHE_KEY: cache_key,
+                RES_SAMPLE_COUNT: sample_counts[i],
+            }));
+        }
+
+        Ok(json!({
+            "results": results,
+            "mode": mode,
+            RES_RMS_RESIDUAL: rms_residual,
+            RES_DIMENSIONS: [cols, rows],
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
 }

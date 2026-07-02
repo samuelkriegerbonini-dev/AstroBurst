@@ -47,9 +47,9 @@ export default function RgbStfPanel() {
   const channel = (title: string, labelClass: string, accent: string, ch: "r" | "g" | "b", stf: StfParams) => (
     <div className="flex flex-col gap-1.5">
       <span className={`text-[10px] font-medium ${labelClass}`}>{title}</span>
-      <Slider label="Shadow" value={stf.shadow} min={0} max={0.5} step={0.001} accent={accent}
+      <Slider label="Shadow" value={stf.shadow} min={0} max={0.5} step={0.0001} accent={accent}
               format={fmt4} onChange={(v) => updateChannel(ch, "shadow", v)} />
-      <Slider label="Midtone" value={stf.midtone} min={0.01} max={1} step={0.01} accent={accent}
+      <Slider label="Midtone" value={stf.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent={accent}
               format={fmt4} onChange={(v) => updateChannel(ch, "midtone", v)} />
       <Slider label="Highlight" value={stf.highlight} min={0.5} max={1} step={0.001} accent={accent}
               format={fmt4} onChange={(v) => updateChannel(ch, "highlight", v)} />
@@ -74,9 +74,9 @@ export default function RgbStfPanel() {
 
       {compositeStfLinked ? (
         <div className="flex flex-col gap-2">
-          <Slider label="Shadow" value={compositeStfR.shadow} min={0} max={0.5} step={0.001} accent="amber"
+          <Slider label="Shadow" value={compositeStfR.shadow} min={0} max={0.5} step={0.0001} accent="amber"
                   format={fmt4} onChange={(v) => updateChannel("r", "shadow", v)} />
-          <Slider label="Midtone" value={compositeStfR.midtone} min={0.01} max={1} step={0.01} accent="amber"
+          <Slider label="Midtone" value={compositeStfR.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="amber"
                   format={fmt4} onChange={(v) => updateChannel("r", "midtone", v)} />
           <Slider label="Highlight" value={compositeStfR.highlight} min={0.5} max={1} step={0.001} accent="amber"
                   format={fmt4} onChange={(v) => updateChannel("r", "highlight", v)} />

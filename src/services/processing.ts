@@ -65,6 +65,40 @@ export function extractBackground(
   ]);
 }
 
+export interface BackgroundBatchResult {
+  results: { bin_id: string; cache_key: string; sample_count: number }[];
+  mode: string;
+  rms_residual: number;
+  dimensions: [number, number];
+  elapsed_ms: number;
+}
+
+export function extractBackgroundBatch(
+  paths: string[],
+  binIds: string[],
+  outputDir: string,
+  options: {
+    gridSize?: number;
+    polyDegree?: number;
+    sigmaClip?: number;
+    iterations?: number;
+    mode?: string;
+    referenceBin?: string | null;
+  } = {},
+): Promise<BackgroundBatchResult> {
+  return typedInvoke<BackgroundBatchResult>("extract_background_batch_cmd", {
+    paths,
+    binIds,
+    outputDir,
+    gridSize: options.gridSize ?? 8,
+    polyDegree: options.polyDegree ?? 3,
+    sigmaClip: options.sigmaClip ?? 2.5,
+    iterations: options.iterations ?? 3,
+    mode: options.mode ?? "subtract",
+    referenceBin: options.referenceBin ?? null,
+  });
+}
+
 export function waveletDenoise(
   path: string,
   outputDir?: string,
@@ -208,6 +242,8 @@ export function maskedStretch(
     maskSoftness?: number;
     protectionAmount?: number;
     luminanceProtect?: boolean;
+    detectionSigma?: number;
+    maxEccentricity?: number;
   } = {},
 ): Promise<MaskedStretchResult> {
   return withPreview<MaskedStretchResult>("masked_stretch_cmd", outputDir, {
@@ -218,6 +254,8 @@ export function maskedStretch(
     maskSoftness: options.maskSoftness ?? 4.0,
     protectionAmount: options.protectionAmount ?? 0.85,
     luminanceProtect: options.luminanceProtect ?? true,
+    detectionSigma: options.detectionSigma ?? 8.0,
+    maxEccentricity: options.maxEccentricity ?? 0.85,
   });
 }
 
@@ -242,6 +280,8 @@ export async function maskedStretchComposite(
     protectionAmount?: number;
     luminanceProtect?: boolean;
     sharedMask?: boolean;
+    detectionSigma?: number;
+    maxEccentricity?: number;
   } = {},
 ): Promise<MaskedStretchResult> {
   const dir = outputDir ?? await getOutputDir();
@@ -254,6 +294,8 @@ export async function maskedStretchComposite(
     protectionAmount: options.protectionAmount ?? 0.85,
     luminanceProtect: options.luminanceProtect ?? true,
     sharedMask: options.sharedMask ?? true,
+    detectionSigma: options.detectionSigma ?? 8.0,
+    maxEccentricity: options.maxEccentricity ?? 0.85,
   });
 }
 

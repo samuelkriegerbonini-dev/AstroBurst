@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::{median_f32_mut};
+use crate::math::sigma_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::error::AppError;
 
@@ -44,6 +45,21 @@ pub struct BackgroundResult {
     pub sample_count: usize,
     pub rms_residual: f64,
     pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkedBackgroundResult {
+    pub model: Array2<f32>,
+    pub corrected: Vec<Array2<f32>>,
+    pub sample_count: usize,
+    pub rms_residual: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NeutralizeResult {
+    pub corrected: Array2<f32>,
+    pub level: f32,
+    pub sample_count: usize,
 }
 
 struct SamplePoint {
@@ -124,6 +140,203 @@ pub fn extract_background(
         rms_residual,
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+pub fn extract_background_linked(
+    channels: &[&Array2<f32>],
+    reference: &Array2<f32>,
+    config: &BackgroundConfig,
+) -> Result<LinkedBackgroundResult> {
+    if config.poly_degree < crate::types::constants::MIN_POLY_DEGREE
+        || config.poly_degree > crate::types::constants::MAX_POLY_DEGREE
+    {
+        anyhow::bail!(
+            "Polynomial degree {} outside supported range [{}, {}]",
+            config.poly_degree,
+            crate::types::constants::MIN_POLY_DEGREE,
+            crate::types::constants::MAX_POLY_DEGREE
+        );
+    }
+
+    let (rows, cols) = reference.dim();
+    for ch in channels {
+        if ch.dim() != (rows, cols) {
+            anyhow::bail!(
+                "Linked background: channel dim {:?} does not match reference {:?}",
+                ch.dim(),
+                (rows, cols)
+            );
+        }
+    }
+
+    let samples = auto_sample_grid(reference, config)?;
+    let sample_count = samples.len();
+    if sample_count < min_samples_for_degree(config.poly_degree) {
+        anyhow::bail!(
+            "Not enough background samples ({}) for polynomial degree {}",
+            sample_count,
+            config.poly_degree
+        );
+    }
+
+    let coeffs = fit_polynomial_surface(&samples, rows, cols, config)?;
+    let model = evaluate_polynomial_surface(&coeffs, rows, cols, config.poly_degree);
+    let rms_residual = compute_rms_residual(&samples, &coeffs, rows, cols, config.poly_degree);
+
+    let corrected = channels
+        .iter()
+        .map(|ch| apply_correction(ch, &model, &config.mode))
+        .collect();
+
+    Ok(LinkedBackgroundResult {
+        model,
+        corrected,
+        sample_count,
+        rms_residual,
+    })
+}
+
+pub fn neutralize_background(
+    image: &Array2<f32>,
+    config: &BackgroundConfig,
+) -> Result<NeutralizeResult> {
+    let samples = auto_sample_grid(image, config).unwrap_or_default();
+    let sample_count = samples.len();
+
+    let level = if samples.is_empty() {
+        super::stats::compute_image_stats(image).median as f32
+    } else {
+        let mut vals: Vec<f32> = samples.iter().map(|s| s.value).collect();
+        median_f32_mut(&mut vals)
+    };
+
+    let corrected = image.mapv(|v| if v.is_finite() { v - level } else { v });
+
+    Ok(NeutralizeResult {
+        corrected,
+        level,
+        sample_count,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DebandAxis {
+    Rows,
+    Columns,
+    Both,
+}
+
+#[derive(Debug, Clone)]
+pub struct DebandConfig {
+    pub axis: DebandAxis,
+    pub sigma_clip: f32,
+    pub iterations: usize,
+}
+
+fn robust_line_level(mut vals: Vec<f32>, sigma_clip: f32, iterations: usize) -> f32 {
+    if vals.len() < 8 {
+        return f32::NAN;
+    }
+    sigma_clipped_stats(&mut vals, sigma_clip, iterations.max(1)).0 as f32
+}
+
+fn deband_rows(image: &mut Array2<f32>, config: &DebandConfig) {
+    let (rows, cols) = image.dim();
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    let slice = match image.as_slice() {
+        Some(s) => s,
+        None => return,
+    };
+    let row_bg: Vec<f32> = slice
+        .par_chunks(cols)
+        .map(|row| {
+            let vals: Vec<f32> = row.iter().copied().filter(|v| v.is_finite() && *v > 1e-7).collect();
+            robust_line_level(vals, config.sigma_clip, config.iterations)
+        })
+        .collect();
+
+    let mut finite: Vec<f32> = row_bg.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return;
+    }
+    let global = median_f32_mut(&mut finite);
+
+    let slice_mut = image.as_slice_mut().expect("contiguous");
+    slice_mut
+        .par_chunks_mut(cols)
+        .zip(row_bg.par_iter())
+        .for_each(|(row, &bg)| {
+            if !bg.is_finite() {
+                return;
+            }
+            let offset = bg - global;
+            if offset.abs() < 1e-12 {
+                return;
+            }
+            for v in row.iter_mut() {
+                if v.is_finite() {
+                    *v -= offset;
+                }
+            }
+        });
+}
+
+fn deband_cols(image: &mut Array2<f32>, config: &DebandConfig) {
+    let (rows, cols) = image.dim();
+    if rows == 0 || cols == 0 {
+        return;
+    }
+
+    let col_bg: Vec<f32> = (0..cols)
+        .into_par_iter()
+        .map(|j| {
+            let vals: Vec<f32> = (0..rows)
+                .map(|i| image[[i, j]])
+                .filter(|v| v.is_finite() && *v > 1e-7)
+                .collect();
+            robust_line_level(vals, config.sigma_clip, config.iterations)
+        })
+        .collect();
+
+    let mut finite: Vec<f32> = col_bg.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return;
+    }
+    let global = median_f32_mut(&mut finite);
+
+    let offsets: Vec<f32> = col_bg
+        .iter()
+        .map(|&bg| if bg.is_finite() { bg - global } else { 0.0 })
+        .collect();
+
+    let slice_mut = image.as_slice_mut().expect("contiguous");
+    slice_mut.par_chunks_mut(cols).for_each(|row| {
+        for (j, v) in row.iter_mut().enumerate() {
+            let offset = offsets[j];
+            if offset != 0.0 && v.is_finite() {
+                *v -= offset;
+            }
+        }
+    });
+}
+
+pub fn deband(image: &Array2<f32>, config: &DebandConfig) -> Array2<f32> {
+    let mut out = if image.is_standard_layout() {
+        image.to_owned()
+    } else {
+        Array2::from_shape_vec(image.raw_dim(), image.iter().copied().collect()).expect("shape matches")
+    };
+    match config.axis {
+        DebandAxis::Rows => deband_rows(&mut out, config),
+        DebandAxis::Columns => deband_cols(&mut out, config),
+        DebandAxis::Both => {
+            deband_rows(&mut out, config);
+            deband_cols(&mut out, config);
+        }
+    }
+    out
 }
 
 fn auto_sample_grid(
@@ -574,6 +787,109 @@ mod tests {
             "After gradient removal stddev should be small, got {}",
             stddev
         );
+    }
+
+    fn region_mean_sd(img: &Array2<f32>, rows: usize, cols: usize) -> (f32, f32) {
+        let mut vals: Vec<f32> = Vec::new();
+        for y in 10..rows - 10 {
+            for x in 10..cols - 10 {
+                vals.push(img[[y, x]]);
+            }
+        }
+        let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+        let sd = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32).sqrt();
+        (mean, sd)
+    }
+
+    #[test]
+    fn linked_removes_shared_gradient_preserves_color() {
+        let rows = 128;
+        let cols = 128;
+        let grad = |y: usize| (y as f32 / rows as f32) * 50.0;
+        let ch1 = Array2::from_shape_fn((rows, cols), |(y, _)| grad(y) + 100.0);
+        let ch2 = Array2::from_shape_fn((rows, cols), |(y, _)| grad(y) + 300.0);
+        let reference = Array2::from_shape_fn((rows, cols), |(y, _)| grad(y) + 200.0);
+
+        let config = BackgroundConfig {
+            grid_size: 6,
+            poly_degree: 1,
+            sigma_clip: 3.0,
+            iterations: 2,
+            mode: BackgroundMode::Subtract,
+        };
+
+        let res = extract_background_linked(&[&ch1, &ch2], &reference, &config).unwrap();
+        assert_eq!(res.corrected.len(), 2);
+
+        let (m1, sd1) = region_mean_sd(&res.corrected[0], rows, cols);
+        let (m2, sd2) = region_mean_sd(&res.corrected[1], rows, cols);
+
+        assert!(sd1 < 2.0, "gradient not removed from ch1: sd={}", sd1);
+        assert!(sd2 < 2.0, "gradient not removed from ch2: sd={}", sd2);
+        assert!(
+            ((m2 - m1) - 200.0).abs() < 5.0,
+            "per-channel offset (color) not preserved: {} expected ~200",
+            m2 - m1
+        );
+    }
+
+    #[test]
+    fn neutralize_subtracts_sky_level() {
+        let rows = 64;
+        let cols = 64;
+        let image = Array2::from_elem((rows, cols), 100.0f32);
+
+        let config = BackgroundConfig {
+            grid_size: 4,
+            poly_degree: 1,
+            sigma_clip: 3.0,
+            iterations: 2,
+            mode: BackgroundMode::Subtract,
+        };
+
+        let res = neutralize_background(&image, &config).unwrap();
+        assert!((res.level - 100.0).abs() < 1.0, "level={}", res.level);
+        for y in 10..rows - 10 {
+            for x in 10..cols - 10 {
+                assert!(
+                    res.corrected[[y, x]].abs() < 1.0,
+                    "background not neutralized: {}",
+                    res.corrected[[y, x]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deband_rows_flattens_horizontal_stripes() {
+        let rows = 64;
+        let cols = 64;
+        let img = Array2::from_shape_fn((rows, cols), |(y, _x)| {
+            100.0f32 + if y % 2 == 0 { 10.0 } else { -10.0 }
+        });
+
+        let cfg = DebandConfig { axis: DebandAxis::Rows, sigma_clip: 3.0, iterations: 2 };
+        let out = deband(&img, &cfg);
+
+        for y in 0..rows {
+            let mut rowvals: Vec<f32> = (0..cols).map(|x| out[[y, x]]).collect();
+            let m = median_f32_mut(&mut rowvals);
+            assert!((m - 100.0).abs() < 1.0, "row {} median {} not flattened", y, m);
+        }
+    }
+
+    #[test]
+    fn deband_preserves_overall_level() {
+        let rows = 48;
+        let cols = 48;
+        let img = Array2::from_shape_fn((rows, cols), |(y, _x)| 200.0f32 + (y as f32 % 3.0 - 1.0) * 5.0);
+        let cfg = DebandConfig { axis: DebandAxis::Rows, sigma_clip: 3.0, iterations: 2 };
+        let out = deband(&img, &cfg);
+        let mut before: Vec<f32> = img.iter().copied().collect();
+        let mut after: Vec<f32> = out.iter().copied().collect();
+        let mb = median_f32_mut(&mut before);
+        let ma = median_f32_mut(&mut after);
+        assert!((mb - ma).abs() < 1.0, "overall level shifted: {} -> {}", mb, ma);
     }
 
     #[test]

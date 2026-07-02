@@ -149,6 +149,7 @@ pub fn run() {
             cmd::processing::debayer_batch_cmd,
             cmd::processing::deconvolve_rl_cmd,
             cmd::processing::extract_background_cmd,
+            cmd::processing::extract_background_batch_cmd,
             cmd::processing::wavelet_denoise_cmd,
             cmd::processing::apply_arcsinh_stretch_cmd,
             cmd::processing::apply_ghs_stretch_cmd,

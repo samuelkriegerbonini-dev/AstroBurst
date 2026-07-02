@@ -121,7 +121,9 @@ function BinDropdown({ bin, files, assignedSet, onSelect }: BinDropdownProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const available = files.filter((f) => !assignedSet.has(f.path) || bin.files.includes(f.path));
+  const available = bin.id === "l"
+    ? files
+    : files.filter((f) => !assignedSet.has(f.path) || bin.files.includes(f.path));
 
   return (
     <div className="relative" ref={ref}>
@@ -192,6 +194,15 @@ export default function ChannelStep({
   const assignedSet = useMemo(() => {
     const s = new Set<string>();
     for (const bin of state.bins) for (const f of bin.files) s.add(f);
+    return s;
+  }, [state.bins]);
+
+  const colorAssignedSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const bin of state.bins) {
+      if (bin.id === "l") continue;
+      for (const f of bin.files) s.add(f);
+    }
     return s;
   }, [state.bins]);
 
@@ -335,9 +346,11 @@ export default function ChannelStep({
 
   const handleDrop = useCallback((binId: string, filePath: string) => {
     const next = state.bins.map((bin) => {
-      const without = bin.files.filter((f) => f !== filePath);
-      if (bin.id === binId) return { ...bin, files: [...without, filePath] };
-      return { ...bin, files: without };
+      if (bin.id === binId) {
+        return bin.files.includes(filePath) ? bin : { ...bin, files: [...bin.files, filePath] };
+      }
+      if (bin.id === "l" || binId === "l") return bin;
+      return { ...bin, files: bin.files.filter((f) => f !== filePath) };
     });
     onBinsChange(next);
     setAutoMapSource(null);
@@ -349,9 +362,9 @@ export default function ChannelStep({
         if (bin.files.includes(filePath)) {
           return { ...bin, files: bin.files.filter((f) => f !== filePath) };
         }
-        const withoutFromOthers = bin.files;
-        return { ...bin, files: [...withoutFromOthers, filePath] };
+        return { ...bin, files: [...bin.files, filePath] };
       }
+      if (bin.id === "l" || binId === "l") return bin;
       return { ...bin, files: bin.files.filter((f) => f !== filePath) };
     });
     onBinsChange(next);
@@ -473,7 +486,7 @@ export default function ChannelStep({
                   <BinDropdown
                     bin={bin}
                     files={doneFiles}
-                    assignedSet={assignedSet}
+                    assignedSet={colorAssignedSet}
                     onSelect={handleSelectFile}
                   />
                   <span className="text-[9px] font-mono text-zinc-600">{bin.files.length}</span>

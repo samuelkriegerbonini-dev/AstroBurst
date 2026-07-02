@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import type { WizardState } from "../wizard";
+import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import { alignChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
@@ -10,10 +11,7 @@ interface AlignStepProps {
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
+  return resolveWizardPath(state, binId, "stacked");
 }
 
 export default function AlignStep({ state, onAligned }: AlignStepProps) {

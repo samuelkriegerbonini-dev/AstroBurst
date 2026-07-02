@@ -1,59 +1,18 @@
-use anyhow::Result;
 use ndarray::Array2;
-use rayon::prelude::*;
 
 use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
-use crate::core::imaging::sampling::bicubic_sample;
 use crate::types::compose::AlignMethod;
 
-#[derive(Debug, Clone)]
-pub struct AlignPairResult {
-    pub aligned: Array2<f32>,
-    pub offset: (f64, f64),
-    pub confidence: f64,
-    pub method_used: String,
-    pub matched_stars: usize,
-    pub inliers: usize,
-    pub residual_px: f64,
-}
+pub use crate::core::alignment::pair::{
+    align_pair, align_pair_with_label, shift_image_subpixel, AlignPairResult,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct OffsetEstimate {
     pub dy: f64,
     pub dx: f64,
     pub confidence: f64,
-}
-
-fn ensure_contiguous(image: &Array2<f32>) -> Array2<f32> {
-    if image.is_standard_layout() {
-        image.clone()
-    } else {
-        image.to_owned()
-    }
-}
-
-pub fn shift_image_subpixel(image: &Array2<f32>, dy: f64, dx: f64) -> Array2<f32> {
-    if dy.abs() < 1e-12 && dx.abs() < 1e-12 {
-        return image.clone();
-    }
-    let owned = ensure_contiguous(image);
-    let (rows, cols) = owned.dim();
-    let src = owned.as_slice().expect("contiguous after ensure_contiguous");
-    let mut out = vec![f32::NAN; rows * cols];
-    let rows_f = rows as f64;
-    let cols_f = cols as f64;
-    out.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-        for x in 0..cols {
-            let sy = y as f64 + dy;
-            let sx = x as f64 + dx;
-            if sy < -0.5 || sy > rows_f - 0.5 || sx < -0.5 || sx > cols_f - 0.5 {
-                continue;
-            }
-            row[x] = bicubic_sample(src, rows, cols, sy, sx);
-        }
-    });
-    Array2::from_shape_vec((rows, cols), out).unwrap()
 }
 
 pub fn estimate_offset(
@@ -79,78 +38,6 @@ pub fn estimate_offset(
             }
         }
     }
-}
-
-pub fn align_pair(
-    reference: &Array2<f32>,
-    target: &Array2<f32>,
-    method: AlignMethod,
-    rows: usize,
-    cols: usize,
-) -> Result<AlignPairResult> {
-    match method {
-        AlignMethod::PhaseCorrelation => {
-            let pc = phase_correlation::phase_correlate(reference, target);
-            let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
-            Ok(AlignPairResult {
-                aligned: shifted,
-                offset: (pc.dy, pc.dx),
-                confidence: pc.confidence,
-                method_used: "phase_correlation".into(),
-                matched_stars: 0,
-                inliers: 0,
-                residual_px: 0.0,
-            })
-        }
-        AlignMethod::Affine => {
-            let result = affine::align_channel_affine(reference, target);
-            let warped = affine::warp_image(target, &result.transform, rows, cols);
-            Ok(AlignPairResult {
-                aligned: warped,
-                offset: (result.transform.ty, result.transform.tx),
-                confidence: result.confidence,
-                method_used: result.method.to_string(),
-                matched_stars: result.matched_stars,
-                inliers: result.inliers,
-                residual_px: result.residual_px,
-            })
-        }
-    }
-}
-
-pub fn align_pair_with_label(
-    reference: &Array2<f32>,
-    target: &Array2<f32>,
-    method: AlignMethod,
-    rows: usize,
-    cols: usize,
-    label: &str,
-) -> Result<AlignPairResult> {
-    let result = align_pair(reference, target, method, rows, cols)?;
-    match method {
-        AlignMethod::PhaseCorrelation => {
-            log::info!(
-                "{} alignment: phase_correlation, offset=({:.2}, {:.2}), confidence={:.4}",
-                label,
-                result.offset.0,
-                result.offset.1,
-                result.confidence,
-            );
-        }
-        AlignMethod::Affine => {
-            log::info!(
-                "{} alignment: method={}, stars={}, inliers={}, residual={:.3}px, tx={:.2}, ty={:.2}",
-                label,
-                result.method_used,
-                result.matched_stars,
-                result.inliers,
-                result.residual_px,
-                result.offset.1,
-                result.offset.0,
-            );
-        }
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -241,6 +128,15 @@ mod tests {
     fn test_shift_subpixel_nonzero() {
         let img = make_pattern(64, 64);
         let shifted = shift_image_subpixel(&img, 2.0, 3.0);
+        assert_eq!(shifted.dim(), (64, 64));
+        assert!(shifted[[30, 30]].is_finite());
+    }
+
+    #[test]
+    fn test_shift_subpixel_non_contiguous_input() {
+        let base = make_pattern(64, 64);
+        let view = base.t().to_owned();
+        let shifted = shift_image_subpixel(&view, 1.0, 1.0);
         assert_eq!(shifted.dim(), (64, 64));
         assert!(shifted[[30, 30]].is_finite());
     }

@@ -3,7 +3,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { blendChannels } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
-import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState} from "../../../utils/wizard";
+import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState, resolveChannelPath} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
   sii: 673, ha: 656, nii: 658, oiii: 501,
@@ -93,16 +93,6 @@ interface BlendStepProps {
   state: WizardState;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
   onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
-}
-
-function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
 }
 
 export default function BlendStep({ state, onWeightsChange, onCompositeReady }: BlendStepProps) {

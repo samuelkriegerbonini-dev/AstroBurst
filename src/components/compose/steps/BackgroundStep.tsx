@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { extractBackground } from "../../../services/processing";
+import { resolveChannelPath as resolveWizardPath } from "../wizard";
+import { extractBackground, extractBackgroundBatch } from "../../../services/processing";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
 
@@ -11,18 +12,14 @@ interface BackgroundStepProps {
 }
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
+  return resolveWizardPath(state, binId, "cropped");
 }
 
 export default function BackgroundStep({ state, onBackground }: BackgroundStepProps) {
   const [gridSize, setGridSize] = useState(8);
   const [polyDegree, setPolyDegree] = useState(3);
   const [sigmaClip, setSigmaClip] = useState(2.5);
+  const [mode, setMode] = useState<"independent" | "linked" | "neutralize" | "deband_rows" | "deband_cols" | "deband_both">("independent");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -63,11 +60,69 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     }
   }, [state, gridSize, polyDegree, sigmaClip, onBackground]);
 
+  const handleExtractAllBatch = useCallback(async (batchMode: string) => {
+    const paths: string[] = [];
+    const binIds: string[] = [];
+    for (const bin of activeBins) {
+      const p = resolveChannelPath(state, bin.id);
+      if (p) {
+        paths.push(p);
+        binIds.push(bin.id);
+      }
+    }
+    if (paths.length === 0) return;
+
+    setLoading((prev) => {
+      const next = { ...prev };
+      binIds.forEach((id) => { next[id] = true; });
+      return next;
+    });
+    setErrors({});
+    try {
+      const res = await extractBackgroundBatch(paths, binIds, await getOutputDir(), {
+        gridSize,
+        polyDegree,
+        sigmaClip,
+        iterations: 3,
+        mode: batchMode,
+      });
+      const nextResults: Record<string, any> = {};
+      for (const r of res.results ?? []) {
+        nextResults[r.bin_id] = {
+          sample_count: r.sample_count,
+          rms_residual: res.rms_residual,
+          elapsed_ms: res.elapsed_ms,
+        };
+        if (r.cache_key) onBackground(r.bin_id, r.cache_key);
+      }
+      setResults((prev) => ({ ...prev, ...nextResults }));
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      console.error(`[AstroBurst] Batch BG extraction (${batchMode}) failed:`, msg);
+      setErrors((prev) => {
+        const next = { ...prev };
+        binIds.forEach((id) => { next[id] = msg; });
+        return next;
+      });
+    } finally {
+      setLoading((prev) => {
+        const next = { ...prev };
+        binIds.forEach((id) => { next[id] = false; });
+        return next;
+      });
+    }
+  }, [activeBins, state, gridSize, polyDegree, sigmaClip, onBackground]);
+
   const handleExtractAll = useCallback(async () => {
-    const bins = activeBins.slice();
-    const promises = bins.map((bin) => handleExtract(bin.id));
-    await Promise.allSettled(promises);
-  }, [activeBins, handleExtract]);
+    if (mode === "independent") {
+      const bins = activeBins.slice();
+      const promises = bins.map((bin) => handleExtract(bin.id));
+      await Promise.allSettled(promises);
+      return;
+    }
+    const batchMode = mode === "linked" ? "subtract" : mode;
+    return handleExtractAllBatch(batchMode);
+  }, [mode, activeBins, handleExtract, handleExtractAllBatch]);
 
   if (activeBins.length === 0) {
     return (
@@ -86,6 +141,24 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
                 format={(v) => `${v}`} onChange={setPolyDegree} />
         <Slider label="Sigma Clip" value={sigmaClip} min={1.0} max={5.0} step={0.1} accent="emerald"
                 format={(v) => v.toFixed(1)} onChange={setSigmaClip} />
+      </div>
+
+      <div className="flex items-center justify-between">
+        <label className="text-xs text-zinc-400">Mode</label>
+        <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} className="ab-select">
+          <option value="independent">Per-channel (independent)</option>
+          <option value="linked">Linked (shared gradient)</option>
+          <option value="neutralize">Neutralize (remove pedestal)</option>
+          <option value="deband_rows">De-band rows (horizontal 1/f)</option>
+          <option value="deband_cols">De-band columns (vertical 1/f)</option>
+          <option value="deband_both">De-band both axes</option>
+        </select>
+      </div>
+      <div className="text-[9px] text-zinc-600">
+        {mode === "linked" && "Fits one gradient on the channel mean and removes the same surface from every channel, preserving color balance."}
+        {mode === "neutralize" && "Removes only a constant sky pedestal per channel (no spatial model). Safest for JWST banding / 1-f noise."}
+        {mode === "independent" && "Fits and removes a separate gradient per channel."}
+        {mode.startsWith("deband") && "Removes row/column striping (JWST 1/f noise) by equalizing per-line sigma-clipped background. Preserves overall level and color. Sigma Clip controls source rejection; grid/poly ignored."}
       </div>
 
       <div className="flex items-center justify-between pt-1">
@@ -130,7 +203,8 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
               </div>
               <button
                 onClick={() => handleExtract(bin.id)}
-                disabled={isLoading || !path}
+                disabled={isLoading || !path || mode !== "independent"}
+                title={mode !== "independent" ? "Use Extract All for shared modes" : undefined}
                 className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-40 transition-all"
               >
                 {isLoading ? <Loader2 size={9} className="animate-spin" /> : null}

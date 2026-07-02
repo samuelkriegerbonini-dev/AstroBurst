@@ -11,7 +11,7 @@ use crate::math::window;
 
 const COARSE_MAX_DIM: usize = 512;
 const REFINE_CROP_SIZE: usize = 512;
-const CONFIDENCE_THRESHOLD: f64 = 2.0;
+const CONFIDENCE_THRESHOLD: f64 = 5.0;
 const EPSILON: f64 = 1e-15;
 
 #[derive(Debug, Clone)]
@@ -320,6 +320,44 @@ mod tests {
         engine.inverse_2d(&mut buf);
         let real = extract_real(&buf, rows, cols);
         Array2::from_shape_vec((rows, cols), real.iter().map(|&v| v as f32).collect()).unwrap()
+    }
+
+    fn make_channel(rows: usize, cols: usize, seed: u32) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(y, x)| {
+            let h = ((y as u32).wrapping_mul(73856093)
+                ^ (x as u32).wrapping_mul(19349663)
+                ^ seed.wrapping_mul(83492791))
+                & 0xffff;
+            let texture = (h as f32 / 65535.0 - 0.5) * 300.0;
+            let stars = ((y * 5 + x * 3) as f32 * 0.02).sin() * 500.0;
+            (stars + 500.0 + texture).max(0.0)
+        })
+    }
+
+    #[test]
+    fn repro_aligned_two_channels_small() {
+        let r = make_channel(300, 400, 1);
+        let g = make_channel(300, 400, 2);
+        let res = phase_correlate(&r, &g);
+        eprintln!("SMALL aligned: dy={} dx={} conf={}", res.dy, res.dx, res.confidence);
+        assert!(res.dy.abs() < 2.0 && res.dx.abs() < 2.0, "dy={} dx={}", res.dy, res.dx);
+    }
+
+    #[test]
+    fn repro_aligned_two_channels_large() {
+        let r = make_channel(900, 1200, 1);
+        let g = make_channel(900, 1200, 2);
+        let res = phase_correlate(&r, &g);
+        eprintln!("LARGE aligned: dy={} dx={} conf={}", res.dy, res.dx, res.confidence);
+        assert!(res.dy.abs() < 2.0 && res.dx.abs() < 2.0, "dy={} dx={}", res.dy, res.dx);
+    }
+
+    #[test]
+    fn repro_identical_large() {
+        let r = make_channel(900, 1200, 1);
+        let res = phase_correlate(&r, &r);
+        eprintln!("LARGE identical: dy={} dx={} conf={}", res.dy, res.dx, res.confidence);
+        assert!(res.dy.abs() < 2.0 && res.dx.abs() < 2.0, "dy={} dx={}", res.dy, res.dx);
     }
 
     #[test]

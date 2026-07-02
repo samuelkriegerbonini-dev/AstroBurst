@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { WizardState } from "../wizard";
+import { resolveAnyChannelPath } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { restretchComposite } from "../../../services/compose";
 import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite } from "../../../services/processing";
@@ -23,17 +24,6 @@ interface ChannelStf {
 
 const DEFAULT_STF: ChannelStf = { shadow: 0, midtone: 0.5, highlight: 1 };
 
-function resolveAnyChannelPath(state: WizardState): string | null {
-  for (const bin of state.bins) {
-    if (state.backgroundPaths[bin.id]) return state.backgroundPaths[bin.id];
-    if (state.croppedPaths[bin.id]) return state.croppedPaths[bin.id];
-    if (state.alignedPaths[bin.id]) return state.alignedPaths[bin.id];
-    if (state.stackedPaths[bin.id]) return state.stackedPaths[bin.id];
-    if (bin.files.length > 0) return bin.files[0];
-  }
-  return null;
-}
-
 export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult }: StretchStepProps) {
   const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeContext();
   const [loading, setLoading] = useState(false);
@@ -41,9 +31,11 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [error, setError] = useState("");
   const [linked, setLinked] = useState(state.linkedStf);
   const [sharedMask, setSharedMask] = useState(true);
+  const [detectionSigma, setDetectionSigma] = useState(8.0);
+  const [maxEccentricity, setMaxEccentricity] = useState(0.85);
   const [ghsD, setGhsD] = useState(2.0);
   const [ghsB, setGhsB] = useState(0.0);
-  const [ghsSp, setGhsSp] = useState(0.05);
+  const [ghsSp, setGhsSp] = useState(0.01);
   const [ghsLp, setGhsLp] = useState(0.0);
   const [ghsHp, setGhsHp] = useState(1.0);
   const [stfR, setStfR] = useState<ChannelStf>({ ...DEFAULT_STF });
@@ -113,6 +105,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             maskGrowth: state.maskGrowth,
             protectionAmount: state.maskProtection,
             sharedMask,
+            detectionSigma,
+            maxEccentricity,
           });
         } else {
           const path = resolveAnyChannelPath(state);
@@ -122,6 +116,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             targetBackground: state.targetBackground,
             maskGrowth: state.maskGrowth,
             protectionAmount: state.maskProtection,
+            detectionSigma,
+            maxEccentricity,
           });
         }
         if (res?.png_path) {
@@ -181,7 +177,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     } finally {
       setLoading(false);
     }
-  }, [state, stfR, stfG, stfB, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, onResult]);
+  }, [state, stfR, stfG, stfB, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, detectionSigma, maxEccentricity, onResult]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
@@ -238,6 +234,12 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
                   format={(v) => `${v.toFixed(1)}x FWHM`} onChange={(v) => onMaskParams(v, state.maskProtection)} />
           <Slider label="Star Protection" value={state.maskProtection} min={0.0} max={1.0} step={0.01} accent="rose"
                   format={(v) => `${(v * 100).toFixed(0)}%`} onChange={(v) => onMaskParams(state.maskGrowth, v)} />
+          <Slider label="Detection Sigma" value={detectionSigma} min={3} max={15} step={0.5} accent="rose"
+                  format={(v) => `${v.toFixed(1)}σ`} onChange={setDetectionSigma}
+                  hint="higher = only strong stars masked" />
+          <Slider label="Max Eccentricity" value={maxEccentricity} min={0.5} max={1.0} step={0.01} accent="rose"
+                  format={(v) => v.toFixed(2)} onChange={setMaxEccentricity}
+                  hint="lower = reject elongated blobs" />
           {state.compositeReady && (
             <Toggle label="Shared star mask" checked={sharedMask} accent="rose" onChange={setSharedMask} />
           )}
@@ -261,22 +263,23 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
       {state.stretchMode === "ghs" && (
         <div className="flex flex-col gap-2">
-          <Slider label="Stretch (D)" value={ghsD} min={0} max={10} step={0.05} accent="amber"
+          <Slider label="Stretch (D)" value={ghsD} min={0} max={50} step={0.05} accent="amber"
                   format={(v) => v.toFixed(2)} onChange={setGhsD} />
           <Slider label="Local Intensity (b)" value={ghsB} min={-5} max={15} step={0.1} accent="amber"
                   format={(v) => v.toFixed(1)} onChange={setGhsB} />
-          <Slider label="Symmetry Point (SP)" value={ghsSp} min={0} max={1} step={0.005} accent="amber"
+          <Slider label="Symmetry Point (SP)" value={ghsSp} min={0} max={1} step={0.001} accent="amber"
                   format={(v) => v.toFixed(3)}
                   onChange={(v) => {
                     setGhsSp(v);
                     if (ghsLp > v) setGhsLp(v);
                     if (ghsHp < v) setGhsHp(v);
                   }} />
-          <Slider label="Shadow Protect (LP)" value={ghsLp} min={0} max={1} step={0.005} accent="amber"
+          <Slider label="Shadow Protect (LP)" value={ghsLp} min={0} max={1} step={0.001} accent="amber"
                   format={(v) => v.toFixed(3)} onChange={(v) => setGhsLp(Math.min(v, ghsSp))} />
-          <Slider label="Highlight Protect (HP)" value={ghsHp} min={0} max={1} step={0.005} accent="amber"
+          <Slider label="Highlight Protect (HP)" value={ghsHp} min={0} max={1} step={0.001} accent="amber"
                   format={(v) => v.toFixed(3)} onChange={(v) => setGhsHp(Math.max(v, ghsSp))} />
           <div className="text-[9px] text-zinc-600">
+            On linear data set SP near the background (~0.005&ndash;0.02) then raise D; an SP above the faint signal leaves it black.
             b&lt;0 super-stretches faint signal (b=-1 log), b=0 exponential, b&gt;0 focuses contrast near SP.
             LP/HP keep shadows/highlights linear.
           </div>
@@ -289,9 +292,9 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
           {linked ? (
             <div className="flex flex-col gap-2">
-              <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.001} accent="amber"
+              <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.0001} accent="amber"
                       format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "shadow", v)} />
-              <Slider label="Midtone" value={stfR.midtone} min={0.01} max={1} step={0.01} accent="amber"
+              <Slider label="Midtone" value={stfR.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="amber"
                       format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "midtone", v)} />
               <Slider label="Highlight" value={stfR.highlight} min={0.5} max={1} step={0.001} accent="amber"
                       format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "highlight", v)} />
@@ -300,27 +303,27 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-red-400">R Channel</span>
-                <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.001} accent="red"
+                <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.0001} accent="red"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "shadow", v)} />
-                <Slider label="Midtone" value={stfR.midtone} min={0.01} max={1} step={0.01} accent="red"
+                <Slider label="Midtone" value={stfR.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="red"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "midtone", v)} />
                 <Slider label="Highlight" value={stfR.highlight} min={0.5} max={1} step={0.001} accent="red"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "highlight", v)} />
               </div>
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-green-400">G Channel</span>
-                <Slider label="Shadow" value={stfG.shadow} min={0} max={0.5} step={0.001} accent="green"
+                <Slider label="Shadow" value={stfG.shadow} min={0} max={0.5} step={0.0001} accent="green"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("g", "shadow", v)} />
-                <Slider label="Midtone" value={stfG.midtone} min={0.01} max={1} step={0.01} accent="green"
+                <Slider label="Midtone" value={stfG.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="green"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("g", "midtone", v)} />
                 <Slider label="Highlight" value={stfG.highlight} min={0.5} max={1} step={0.001} accent="green"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("g", "highlight", v)} />
               </div>
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-blue-400">B Channel</span>
-                <Slider label="Shadow" value={stfB.shadow} min={0} max={0.5} step={0.001} accent="blue"
+                <Slider label="Shadow" value={stfB.shadow} min={0} max={0.5} step={0.0001} accent="blue"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("b", "shadow", v)} />
-                <Slider label="Midtone" value={stfB.midtone} min={0.01} max={1} step={0.01} accent="blue"
+                <Slider label="Midtone" value={stfB.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="blue"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("b", "midtone", v)} />
                 <Slider label="Highlight" value={stfB.highlight} min={0.5} max={1} step={0.001} accent="blue"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("b", "highlight", v)} />

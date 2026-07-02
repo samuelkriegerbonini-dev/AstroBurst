@@ -10,6 +10,7 @@ pub struct StarMaskConfig {
     pub detection_sigma: f64,
     pub min_fwhm: f64,
     pub max_fwhm: f64,
+    pub max_eccentricity: f64,
     pub luminance_protect: bool,
     pub luminance_ceiling: f64,
 }
@@ -22,6 +23,7 @@ impl Default for StarMaskConfig {
             detection_sigma: 5.0,
             min_fwhm: 1.5,
             max_fwhm: 30.0,
+            max_eccentricity: 0.85,
             luminance_protect: false,
             luminance_ceiling: 0.85,
         }
@@ -53,7 +55,11 @@ pub fn generate_star_mask_from_detection(
     let valid_stars: Vec<&DetectedStar> = detection
         .stars
         .iter()
-        .filter(|s| s.fwhm >= config.min_fwhm && s.fwhm <= config.max_fwhm)
+        .filter(|s| {
+            s.fwhm >= config.min_fwhm
+                && s.fwhm <= config.max_fwhm
+                && s.eccentricity <= config.max_eccentricity
+        })
         .collect();
 
     let star_count = valid_stars.len();
@@ -135,4 +141,43 @@ pub fn generate_star_mask_from_detection(
         stars_masked: star_count,
         coverage_fraction: coverage,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_star(x: f64, y: f64, fwhm: f64, ecc: f64) -> DetectedStar {
+        DetectedStar {
+            x,
+            y,
+            flux: 100.0,
+            fwhm,
+            eccentricity: ecc,
+            peak: 10.0,
+            npix: 9,
+            snr: 20.0,
+        }
+    }
+
+    #[test]
+    fn elongated_detections_excluded_from_mask() {
+        let img = Array2::<f32>::zeros((64, 64));
+        let detection = DetectionResult {
+            stars: vec![
+                synthetic_star(16.0, 16.0, 3.0, 0.1),
+                synthetic_star(48.0, 48.0, 3.0, 0.97),
+            ],
+            background_median: 0.0,
+            background_sigma: 1.0,
+            threshold_sigma: 5.0,
+            image_width: 64,
+            image_height: 64,
+        };
+        let config = StarMaskConfig::default();
+        let res = generate_star_mask_from_detection(&img, &detection, &config).unwrap();
+        assert_eq!(res.stars_masked, 1);
+        assert!(res.mask[[16, 16]] > 0.5);
+        assert!(res.mask[[48, 48]] < 0.01);
+    }
 }
