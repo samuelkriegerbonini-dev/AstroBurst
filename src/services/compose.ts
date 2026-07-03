@@ -45,6 +45,26 @@ export function restretchComposite(
   });
 }
 
+export interface LrgbResult {
+  png_path?: string;
+  lrgb_applied: boolean;
+  dimensions: [number, number];
+  elapsed_ms: number;
+  previewUrl?: string;
+}
+
+export function lrgbCombineComposite(
+  lPath: string,
+  outputDir?: string,
+  options: { lightness?: number; chrominance?: number } = {},
+): Promise<LrgbResult> {
+  return withPreview<LrgbResult>("lrgb_combine_composite_cmd", outputDir, {
+    lPath,
+    lightness: options.lightness ?? 1.0,
+    chrominance: options.chrominance ?? 1.0,
+  });
+}
+
 export function clearCompositeCache(): Promise<void> {
   return typedInvoke<void>("clear_composite_cache_cmd", {});
 }

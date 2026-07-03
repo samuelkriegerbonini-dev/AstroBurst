@@ -228,6 +228,8 @@ pub const RES_KERNEL: &str = "kernel";
 
 pub const RES_STARS_MASKED: &str = "stars_masked";
 pub const RES_MASK_COVERAGE: &str = "mask_coverage";
+pub const RES_STARS_PNG_PATH: &str = "stars_png_path";
+pub const RES_STARS_FITS_PATH: &str = "stars_fits_path";
 pub const RES_FINAL_BACKGROUND: &str = "final_background";
 pub const RES_CONVERGED: &str = "converged";
 pub const RES_R_FACTOR: &str = "r_factor";

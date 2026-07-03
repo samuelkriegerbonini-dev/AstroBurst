@@ -32,7 +32,12 @@ function HeadersTabInner() {
 
   const handleAssignChannel = useCallback(
     (channel: string, path: string) => {
-      setRgbChannels((prev: any) => ({ ...prev, [channel.toLowerCase()]: path }));
+      const key = channel.toLowerCase();
+      if (key !== "r" && key !== "g" && key !== "b") return;
+      setRgbChannels((prev) => ({
+        ...(prev ?? { r: null, g: null, b: null }),
+        [key]: path,
+      }));
     },
     [setRgbChannels],
   );

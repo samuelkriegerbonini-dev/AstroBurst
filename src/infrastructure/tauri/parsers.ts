@@ -63,12 +63,13 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   };
 }
 
-export function toUint8Array(raw: any): Uint8Array {
+export function toUint8Array(raw: unknown): Uint8Array {
   if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
   if (raw instanceof Uint8Array) return raw;
   if (ArrayBuffer.isView(raw)) return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   if (Array.isArray(raw)) return new Uint8Array(raw);
-  throw new Error(`Unexpected IPC response type: ${typeof raw} / ${raw?.constructor?.name}`);
+  const ctorName = (raw as { constructor?: { name?: string } } | null | undefined)?.constructor?.name;
+  throw new Error(`Unexpected IPC response type: ${typeof raw} / ${ctorName}`);
 }
 
 const FFT_HEADER_SIZE = 32;

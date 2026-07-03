@@ -7,6 +7,7 @@ import {
   nextEnabledStep,
   STEPS,
 } from "../../utils/wizard";
+import type { StfParams } from "../../shared/types";
 
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
@@ -118,7 +119,7 @@ export default function ComposeWizard() {
     setSuggestedStep(null);
   }, [setActiveStep]);
 
-  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => {
+  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams, lumFitsPath?: string | null) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -133,7 +134,7 @@ export default function ComposeWizard() {
     completeStep("blend");
   }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep, dispatch]);
 
-  const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: any; g: any; b: any }) => {
+  const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: StfParams; g: StfParams; b: StfParams }) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }

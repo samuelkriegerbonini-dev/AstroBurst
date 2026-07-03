@@ -10,6 +10,7 @@ pub mod resample;
 pub mod sampling;
 pub mod scnr;
 pub mod star_mask;
+pub mod star_removal;
 pub mod stats;
 pub mod stf;
 pub mod stretch;

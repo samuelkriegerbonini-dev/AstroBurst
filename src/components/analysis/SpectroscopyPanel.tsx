@@ -9,7 +9,7 @@ interface SpectroscopyPanelProps {
   wavelengths?: number[] | null;
   pixelCoord?: { x: number; y: number } | null;
   isLoading?: boolean;
-  cubeDims?: { width: number; height: number; frames: number; naxis3?: number } | null;
+  cubeDims?: { width: number; height: number; frames: number; naxis3?: number; spectral_classification?: { axis_unit?: string | null } | null } | null;
   elapsed?: number;
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
@@ -48,11 +48,11 @@ function SpectroscopyPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
-  const [collapseResult, setCollapseResult] = useState<any>(null);
+  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms?: number; elapsed?: number } | null>(null);
   const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
 
   const wlUnit = useMemo(() => {
-    const raw = (cubeDims as any)?.spectral_classification?.axis_unit as string | null;
+    const raw = cubeDims?.spectral_classification?.axis_unit ?? null;
     if (!raw) return null;
     return raw.trim().toUpperCase();
   }, [cubeDims]);

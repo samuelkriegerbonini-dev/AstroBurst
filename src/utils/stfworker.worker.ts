@@ -68,7 +68,7 @@ self.onmessage = function (e: MessageEvent) {
 
     const imgData = new ImageData(rgba.slice(0, len * 4), width, height);
     createImageBitmap(imgData).then((bitmap) => {
-      self.postMessage({ type: "rendered", id, bitmap, width, height }, [bitmap] as any);
+      self.postMessage({ type: "rendered", id, bitmap, width, height }, { transfer: [bitmap] });
     });
   }
 };

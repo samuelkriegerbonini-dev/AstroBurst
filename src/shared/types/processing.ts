@@ -50,7 +50,9 @@ export interface PsfEstimate {
 
 export interface ArcsinhResult {
   png_path: string;
+  fits_path?: string;
   previewUrl?: string;
+  stretch_factor?: number;
   dimensions: [number, number];
   elapsed_ms: number;
 }
@@ -80,9 +82,17 @@ export interface StarDetectionResult {
     x: number;
     y: number;
     flux: number;
-    fwhm?: number;
-    snr?: number;
+    fwhm: number;
+    snr: number;
+    eccentricity?: number;
+    peak?: number;
+    npix?: number;
   }>;
-  count: number;
+  background_median?: number;
+  background_sigma?: number;
+  threshold_sigma?: number;
+  image_width?: number;
+  image_height?: number;
+  count?: number;
   elapsed_ms: number;
 }

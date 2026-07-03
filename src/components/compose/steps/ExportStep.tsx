@@ -48,7 +48,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   const [bitDepth, setBitDepth] = useState(16);
   const [bitpix, setBitpix] = useState(-32);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<{ file_size_bytes?: number; elapsed_ms?: number; bitpix?: number } | null>(null);
   const [error, setError] = useState("");
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
@@ -127,8 +127,8 @@ export default function ExportStep({ state }: ExportStepProps) {
         setResult(res);
         setSavedPath(outputPath);
       }
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -207,8 +207,8 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       setZipDone(true);
       setTimeout(() => setZipDone(false), 3000);
-    } catch (e: any) {
-      setZipError(e?.message ?? String(e));
+    } catch (e) {
+      setZipError(e instanceof Error ? e.message : String(e));
     } finally {
       setZipLoading(false);
     }

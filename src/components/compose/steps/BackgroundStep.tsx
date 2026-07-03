@@ -11,6 +11,13 @@ interface BackgroundStepProps {
   onBackground: (channelId: string, path: string) => void;
 }
 
+interface BgExtractResult {
+  sample_count?: number;
+  rms_residual?: number;
+  elapsed_ms?: number;
+  axis?: string | null;
+}
+
 function resolveChannelPath(state: WizardState, binId: string): string | null {
   return resolveWizardPath(state, binId, "cropped");
 }
@@ -19,9 +26,9 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
   const [gridSize, setGridSize] = useState(8);
   const [polyDegree, setPolyDegree] = useState(3);
   const [sigmaClip, setSigmaClip] = useState(2.5);
-  const [mode, setMode] = useState<"independent" | "linked" | "neutralize" | "deband_rows" | "deband_cols" | "deband_both">("independent");
+  const [mode, setMode] = useState<"independent" | "linked" | "neutralize" | "deband_auto" | "deband_rows" | "deband_cols" | "deband_both">("independent");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [results, setResults] = useState<Record<string, any>>({});
+  const [results, setResults] = useState<Record<string, BgExtractResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const activeBins = useMemo(
@@ -51,8 +58,8 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
       if (key) {
         onBackground(binId, key);
       }
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error(`[AstroBurst] BG extraction failed for ${binId} (${path}):`, msg);
       setErrors((prev) => ({ ...prev, [binId]: msg }));
     } finally {
@@ -86,18 +93,19 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         iterations: 3,
         mode: batchMode,
       });
-      const nextResults: Record<string, any> = {};
+      const nextResults: Record<string, BgExtractResult> = {};
       for (const r of res.results ?? []) {
         nextResults[r.bin_id] = {
           sample_count: r.sample_count,
           rms_residual: res.rms_residual,
           elapsed_ms: res.elapsed_ms,
+          axis: r.axis ?? null,
         };
         if (r.cache_key) onBackground(r.bin_id, r.cache_key);
       }
       setResults((prev) => ({ ...prev, ...nextResults }));
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error(`[AstroBurst] Batch BG extraction (${batchMode}) failed:`, msg);
       setErrors((prev) => {
         const next = { ...prev };
@@ -149,6 +157,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
           <option value="independent">Per-channel (independent)</option>
           <option value="linked">Linked (shared gradient)</option>
           <option value="neutralize">Neutralize (remove pedestal)</option>
+          <option value="deband_auto">De-band auto (detect axis)</option>
           <option value="deband_rows">De-band rows (horizontal 1/f)</option>
           <option value="deband_cols">De-band columns (vertical 1/f)</option>
           <option value="deband_both">De-band both axes</option>
@@ -219,6 +228,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
             {result && (
               <div className="text-[9px] text-zinc-500">
                 {result.sample_count} samples, RMS {result.rms_residual?.toFixed(4)}, {result.elapsed_ms}ms
+                {result.axis && <span className="text-emerald-400/70"> · axis: {result.axis}</span>}
               </div>
             )}
             {error && <div className="text-[9px] text-red-400">{error}</div>}

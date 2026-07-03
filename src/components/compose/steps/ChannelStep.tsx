@@ -7,10 +7,10 @@ import { filterCodeAndWavelengthNm } from "../../../utils/filterWavelengths";
 interface NarrowbandPalette {
   palette_name: string;
   is_complete: boolean;
-  r_file?: { file_path: string; file_name: string; detection?: any } | null;
-  g_file?: { file_path: string; file_name: string; detection?: any } | null;
-  b_file?: { file_path: string; file_name: string; detection?: any } | null;
-  unmapped?: { file_path: string; file_name: string; detection?: any }[];
+  r_file?: { file_path: string; file_name: string; detection?: unknown } | null;
+  g_file?: { file_path: string; file_name: string; detection?: unknown } | null;
+  b_file?: { file_path: string; file_name: string; detection?: unknown } | null;
+  unmapped?: { file_path: string; file_name: string; detection?: unknown }[];
 }
 
 interface FilterDetection {
@@ -42,23 +42,23 @@ const FILTER_TO_BIN: Record<string, string> = {
 };
 
 const FILTER_PATTERNS: [string, RegExp][] = [
-  ["ha", /(?:H[\-_]?(?:alpha|a)|\b656\s*(?:nm)?|H_?α|F656N)/i],
+  ["ha", /(?:H[-_]?(?:alpha|a)|\b656\s*(?:nm)?|H_?α|F656N)/i],
   ["oiii", /(?:O\s*III|\[?OIII\]?|50[012](?:\.\d+)?\s*nm|\b50[12]\b|\b5007\b|O3\b|F50[123]N)/i],
   ["sii", /(?:S\s*II|\[?SII\]?|\b673\s*(?:nm)?|S2\b|F673N)/i],
-  ["r", /\b(?:Red|R['_\-]?band|Sloan[_\-]?r)\b/i],
-  ["g", /\b(?:Green|G['_\-]?band|Sloan[_\-]?g|V[_\-]?band)\b/i],
-  ["b", /\b(?:Blue|B['_\-]?band|Sloan[_\-]?b)\b/i],
-  ["l", /\b(?:Lum(?:inance)?|L['_\-]?band|Clear|CLR)\b/i],
+  ["r", /\b(?:Red|R['_-]?band|Sloan[_-]?r)\b/i],
+  ["g", /\b(?:Green|G['_-]?band|Sloan[_-]?g|V[_-]?band)\b/i],
+  ["b", /\b(?:Blue|B['_-]?band|Sloan[_-]?b)\b/i],
+  ["l", /\b(?:Lum(?:inance)?|L['_-]?band|Clear|CLR)\b/i],
 ];
 
 const FILENAME_PATTERNS: [string, RegExp][] = [
-  ["ha", /(?:[_\-]HA[_\-.\s]|[_\-]HALPHA|[_\-]H_?ALPHA|656)/i],
-  ["oiii", /(?:[_\-]OIII[_\-.\s]|[_\-]O3[_\-.\s]|502)/i],
-  ["sii", /(?:[_\-]SII[_\-.\s]|[_\-]S2[_\-.\s]|673)/i],
-  ["r", /(?:[_\-]RED[_\-.\s]|[_\-]R\.)/i],
-  ["g", /(?:[_\-]GREEN[_\-.\s]|[_\-]G\.)/i],
-  ["b", /(?:[_\-]BLUE[_\-.\s]|[_\-]B\.)/i],
-  ["l", /(?:[_\-]LUM[_\-.\s]|[_\-]L\.|[_\-]CLEAR)/i],
+  ["ha", /(?:[_-]HA[_\-.\s]|[_-]HALPHA|[_-]H_?ALPHA|656)/i],
+  ["oiii", /(?:[_-]OIII[_\-.\s]|[_-]O3[_\-.\s]|502)/i],
+  ["sii", /(?:[_-]SII[_\-.\s]|[_-]S2[_\-.\s]|673)/i],
+  ["r", /(?:[_-]RED[_\-.\s]|[_-]R\.)/i],
+  ["g", /(?:[_-]GREEN[_\-.\s]|[_-]G\.)/i],
+  ["b", /(?:[_-]BLUE[_\-.\s]|[_-]B\.)/i],
+  ["l", /(?:[_-]LUM[_\-.\s]|[_-]L\.|[_-]CLEAR)/i],
 ];
 
 function detectChannelByHeader(file: ProcessedFile): string | null {

@@ -2,27 +2,35 @@ import { useState, useCallback, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { stackFrames, drizzleFrames } from "../../../services/stacking";
-import { analyzeSubframes, type SubframeMetrics, type SubframeAnalysisResult } from "../../../services/analysis";
+import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider, Toggle } from "../../ui";
+import type { WizardAction } from "../../../context/ComposeWizardContext";
 
 interface StackStepProps {
   state: WizardState;
-  dispatch: React.Dispatch<any>;
+  dispatch: React.Dispatch<WizardAction>;
   onStacked: (channelId: string, path: string) => void;
+}
+
+interface StackDisplayResult {
+  fits_path?: string;
+  frame_count?: number;
+  rejected_pixels?: number;
+  elapsed_ms?: number;
 }
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
   const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [results, setResults] = useState<Record<string, any>>({});
+  const [results, setResults] = useState<Record<string, StackDisplayResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
   const [analyzeErrors, setAnalyzeErrors] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, Record<string, boolean>>>({});
-  const [maxFwhm, setMaxFwhm] = useState(8.0);
-  const [maxEcc, setMaxEcc] = useState(0.7);
-  const [minSnr, setMinSnr] = useState(5.0);
-  const [minStars, setMinStars] = useState(5);
+  const [maxFwhm, _setMaxFwhm] = useState(8.0);
+  const [maxEcc, _setMaxEcc] = useState(0.7);
+  const [minSnr, _setMinSnr] = useState(5.0);
+  const [minStars, _setMinStars] = useState(5);
   const [useDrizzle, setUseDrizzle] = useState(false);
   const [drizzleScale, setDrizzleScale] = useState(2.0);
 
@@ -51,8 +59,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     try {
       const res = await analyzeSubframes(files, { maxFwhm, maxEccentricity: maxEcc, minSnr, minStars });
       dispatch({ type: "SET_SUBFRAME_RESULT", binId, result: res });
-    } catch (e: any) {
-      setAnalyzeErrors((prev) => ({ ...prev, [binId]: e?.message ?? String(e) }));
+    } catch (e) {
+      setAnalyzeErrors((prev) => ({ ...prev, [binId]: e instanceof Error ? e.message : String(e) }));
     } finally {
       setAnalyzing((prev) => ({ ...prev, [binId]: false }));
     }
@@ -117,8 +125,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
       }
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error(`[AstroBurst] Stack failed for ${binId}:`, msg);
       setErrors((prev) => ({ ...prev, [binId]: msg }));
     } finally {

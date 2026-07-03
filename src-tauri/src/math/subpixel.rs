@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_quadratic_refine_flat_peak() {
-        let mut surface = vec![1.0f64; 16];
+        let surface = vec![1.0f64; 16];
         let result = quadratic_refine_1d(&surface, 4, 4, 1, 1, true);
         assert!(result.abs() < 1e-10);
     }

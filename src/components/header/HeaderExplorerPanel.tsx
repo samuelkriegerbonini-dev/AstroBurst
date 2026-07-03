@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
-  FileSearch, ChevronDown, ChevronRight, Search, Telescope,
+  FileSearch, ChevronRight, Search, Telescope,
   Camera, Image, Globe, Cpu, MoreHorizontal, Sparkles, Zap,
   Copy, Check, X, ClipboardCopy,
 } from "lucide-react";

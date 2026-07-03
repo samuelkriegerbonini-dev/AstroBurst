@@ -5,6 +5,18 @@ import { getExportDir } from "../../infrastructure/tauri";
 import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export";
 import type { StfParams } from "../../shared/types";
 
+interface AlignedExportState {
+  channels?: AlignedChannelOut[];
+  elapsed_ms?: number;
+}
+
+interface AlignedChannelOut {
+  channel: string;
+  path?: string;
+  file_size_bytes?: number;
+  offset?: [number, number];
+}
+
 interface BitpixOption {
   value: number;
   label: string;
@@ -96,7 +108,7 @@ export default function ExportPanel({
   const [exportDone, setExportDone] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [alignedExporting, setAlignedExporting] = useState(false);
-  const [alignedResult, setAlignedResult] = useState<any>(null);
+  const [alignedResult, setAlignedResult] = useState<AlignedExportState | null>(null);
   const [alignedMethod, setAlignedMethod] = useState(alignMethod ?? "phase_correlation");
   const [pngBitDepth, setPngBitDepth] = useState(16);
   const [pngApplyStf, setPngApplyStf] = useState(false);
@@ -368,7 +380,7 @@ export default function ExportPanel({
 
       {alignedResult?.channels && (
         <div className="flex flex-col gap-1 px-1">
-          {alignedResult.channels.map((ch: any) => (
+          {alignedResult.channels.map((ch) => (
             <div key={ch.channel} className="flex items-center justify-between text-[10px] text-zinc-400">
               <span className="text-teal-300">{ch.channel}</span>
               <span className="truncate ml-2">{ch.path?.split(/[/\\]/).pop()}</span>

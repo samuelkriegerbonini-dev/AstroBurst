@@ -2,13 +2,14 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 import { stackFrames } from "../../services/stacking";
+import type { StackResult } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { StackConfig } from "./StackingTab";
 
 interface StackingPanelProps {
   files: ProcessedFile[];
-  onResult?: (result: any) => void;
+  onResult?: (result: StackResult) => void;
   injectedPaths?: string[];
   stackConfig?: StackConfig;
   onStackConfigChange?: (config: Partial<StackConfig>) => void;
@@ -25,7 +26,7 @@ export default function StackingPanel({
 }: StackingPanelProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isStacking, setIsStacking] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<StackResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
 
@@ -80,8 +81,8 @@ export default function StackingPanel({
       });
       setResult(res);
       onResult?.(res);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsStacking(false);
     }
@@ -166,7 +167,7 @@ export default function StackingPanel({
           <ResultGrid columns={3} items={[
             { label: "Dimensions", value: result.dimensions ? `${result.dimensions[0]}×${result.dimensions[1]}` : "--" },
             { label: "Frames", value: result.frame_count },
-            { label: "Rejected", value: result.rejected_pixels > 0 ? result.rejected_pixels.toLocaleString() : "0" },
+            { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
           ]} />
         </div>
       )}

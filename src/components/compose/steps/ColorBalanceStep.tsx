@@ -138,8 +138,8 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         onResult(url, res.auto_stf ?? undefined);
       }
       if (res?.elapsed_ms) setElapsed(res.elapsed_ms);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -158,8 +158,8 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         const url = await getPreviewUrl(res.png_path);
         onResult(url, res.auto_stf ?? undefined);
       }
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -226,9 +226,9 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       {state.wbMode === "spcc" && rPath && gPath && bPath && (
         <Suspense fallback={<div className="flex items-center gap-2 py-4 text-zinc-600 text-xs"><Loader2 size={12} className="animate-spin" /> Loading SPCC...</div>}>
           <SpccPanel
-            rPath={{ path: rPath } as any}
-            gPath={{ path: gPath } as any}
-            bPath={{ path: bPath } as any}
+            rPath={rPath}
+            gPath={gPath}
+            bPath={bPath}
             onFactorsReady={handleSpccFactors}
           />
         </Suspense>

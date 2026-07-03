@@ -1,12 +1,13 @@
 import { useState, useCallback } from "react";
 import { applyArcsinhStretch } from "../../services/processing";
+import type { ArcsinhResult } from "../../shared/types/processing";
 import { Slider, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 
 interface ArcsinhStretchPanelProps {
-  selectedFile: { path: string; result?: any } | null;
+  selectedFile: { path: string; result?: unknown } | null;
   outputDir?: string;
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  onProcessingDone?: (result: any) => void;
+  onProcessingDone?: (result: ArcsinhResult) => void;
   chainedFrom?: string;
 }
 
@@ -32,7 +33,7 @@ const ICON = (
 export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: ArcsinhStretchPanelProps) {
   const [factor, setFactor] = useState(50.0);
   const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ArcsinhResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const logMin = linearToLog(FACTOR_MIN);
@@ -53,14 +54,15 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
       onProcessingDone?.(res);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
     }
   }, [selectedFile?.path, factor, outputDir, onPreviewUpdate, onProcessingDone]);
 
-  const originalUrl = selectedFile?.result?.previewUrl;
+  const fileResult = selectedFile?.result as { previewUrl?: string } | undefined;
+  const originalUrl = fileResult?.previewUrl;
   const stretchedUrl = result?.previewUrl;
 
   return (

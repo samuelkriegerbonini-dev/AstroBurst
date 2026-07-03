@@ -35,6 +35,12 @@ export interface ProcessingChain {
   maskedStretchFits: string | null;
 }
 
+interface StepDoneResult {
+  previewUrl?: string;
+  corrected_fits?: string;
+  fits_path?: string;
+}
+
 function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
   const steps: string[] = [originalName];
   if (chain.backgroundFits) steps.push("BG");
@@ -136,48 +142,51 @@ function ProcessingTabInner() {
   );
 
   const handleBackgroundDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.corrected_fits) {
+        const fits = result.corrected_fits;
         setChain((prev) => ({
           ...prev,
-          backgroundFits: result.corrected_fits,
+          backgroundFits: fits,
           denoiseFits: null,
           deconvFits: null,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.corrected_fits, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDenoiseDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          denoiseFits: result.fits_path,
+          denoiseFits: fits,
           deconvFits: null,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDeconvDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          deconvFits: result.fits_path,
+          deconvFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
@@ -188,30 +197,32 @@ function ProcessingTabInner() {
   }, []);
 
   const handleStretchDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          stretchFits: result.fits_path,
+          stretchFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleMaskedStretchDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          maskedStretchFits: result.fits_path,
+          maskedStretchFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],

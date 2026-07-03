@@ -1,4 +1,4 @@
-import { Telescope, Upload, FolderOpen, Keyboard } from "lucide-react";
+import { Telescope, Upload, FolderOpen } from "lucide-react";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;

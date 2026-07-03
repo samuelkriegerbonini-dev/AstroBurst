@@ -18,7 +18,7 @@ interface RenderParams {
 type Callback = (result: RenderResult | null) => void;
 
 let _worker: Worker | null = null;
-let _pendingCallbacks = new Map<number, Callback>();
+const _pendingCallbacks = new Map<number, Callback>();
 let _nextId = 0;
 let _hasPixels = false;
 let _pixelsGeneration = 0;
@@ -57,7 +57,7 @@ export function setWorkerPixels(
   width: number,
   height: number,
 ): Promise<void> {
-  const gen = ++_pixelsGeneration;
+  ++_pixelsGeneration;
   const promise = new Promise<void>((resolve) => {
     const worker = getStfWorker();
     const id = _nextId++;

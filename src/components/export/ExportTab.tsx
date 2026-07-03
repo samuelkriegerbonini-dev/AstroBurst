@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
 import { Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
+import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
 import { useFileContext, useHistContext, useRgbContext, useCubeContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
@@ -15,15 +16,15 @@ function ExportTabInner() {
   const { isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
   const { isCube, cubeDims } = useCubeContext();
 
-  const [exportResult, setExportResult] = useState<any>(null);
+  const [exportResult, setExportResult] = useState<ExportResult | null>(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [cubeExporting, setCubeExporting] = useState(false);
   const [cubeExportProgress, setCubeExportProgress] = useState(0);
-  const [cubeExportResult, setCubeExportResult] = useState<any>(null);
+  const [cubeExportResult, setCubeExportResult] = useState<{ exported?: number; total?: number; fits?: boolean; dir?: string; error?: string } | null>(null);
   const [cubeExportFits, setCubeExportFits] = useState(false);
 
   const handleExportFits = useCallback(
-    async (path: string, outputPath: string, options: any) => {
+    async (path: string, outputPath: string, options: ExportFitsOptions) => {
       setExportLoading(true);
       try {
         const result = await exportFits(path, outputPath, options);
@@ -43,7 +44,7 @@ function ExportTabInner() {
       gPath: string | null,
       bPath: string | null,
       outputPath: string,
-      options: any,
+      options: ExportFitsRgbOptions,
     ) => {
       setExportLoading(true);
       try {

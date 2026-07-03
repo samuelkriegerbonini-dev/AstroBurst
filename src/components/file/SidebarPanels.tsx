@@ -1,4 +1,4 @@
-import { lazy, Suspense, memo, useRef } from "react";
+import { lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import { useFileContext, useHistContext, useStarOverlayContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";

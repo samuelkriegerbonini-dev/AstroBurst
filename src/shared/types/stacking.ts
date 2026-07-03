@@ -1,6 +1,11 @@
 export interface CalibrateResult {
   png_path: string;
+  fits_path?: string;
   previewUrl?: string;
+  has_bias?: boolean;
+  has_dark?: boolean;
+  has_flat?: boolean;
+  stats?: { min: number; max: number; mean: number; sigma: number };
   dimensions: [number, number];
   elapsed_ms: number;
 }
@@ -9,9 +14,11 @@ export interface StackResult {
   png_path: string;
   fits_path?: string;
   previewUrl?: string;
+  frame_count?: number;
+  rejected_pixels?: number;
+  offsets?: [number, number][];
   dimensions: [number, number];
   elapsed_ms: number;
-  frames_stacked: number;
 }
 
 export interface PipelineChannel {

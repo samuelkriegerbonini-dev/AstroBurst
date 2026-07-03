@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { Globe } from "lucide-react";
 import { getWcsInfo } from "../../services/astrometry";
+import type { WcsInfo } from "../../shared/types/astrometry";
 import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcstransform";
 
 interface WcsReadoutProps {
@@ -28,9 +29,9 @@ function formatDec(dec: number): string {
   return `${sign}${degrees}° ${arcmin}' ${arcsec.toFixed(1)}"`;
 }
 
-function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
+function WcsReadoutInner({ filePath, mouseX, mouseY }: WcsReadoutProps) {
   const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
-  const [wcsInfo, setWcsInfo] = useState<any>(null);
+  const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
   const [wcsParams, setWcsParams] = useState<WcsParams | null>(null);
 
   useEffect(() => {
@@ -42,7 +43,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
     }
     let cancelled = false;
     getWcsInfo(filePath)
-      .then((info: any) => {
+      .then((info) => {
         if (cancelled) return;
         setWcsAvailable(true);
         setWcsInfo(info);

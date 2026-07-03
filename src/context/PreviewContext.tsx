@@ -316,7 +316,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const isRgbFits = file.result?.is_rgb === true;
 
     if (isRgbFits) {
-      const toStf = (s: any): StfParams => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
+      const toStf = (s: StfParams): StfParams => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
       if (file.result?.stf_r && file.result?.stf_g && file.result?.stf_b) {
         composite.initRgb(
           file.result.previewUrl ?? null,

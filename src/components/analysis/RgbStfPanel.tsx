@@ -2,9 +2,16 @@ import { useCallback } from "react";
 import { Slider, Toggle } from "../ui";
 import { useCompositeContext } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
+import StfHistogram from "../compose/StfHistogram";
 
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 const fmt4 = (v: number) => v.toFixed(4);
+
+const HIST_RGB = [
+  { key: "__composite_r", color: "#ef4444" },
+  { key: "__composite_g", color: "#22c55e" },
+  { key: "__composite_b", color: "#3b82f6" },
+];
 
 export default function RgbStfPanel() {
   const {
@@ -71,6 +78,13 @@ export default function RgbStfPanel() {
       </div>
 
       <Toggle label="Link channels" checked={compositeStfLinked} accent="amber" onChange={handleLinkedChange} />
+
+      <StfHistogram
+        channels={HIST_RGB}
+        shadow={compositeStfR.shadow}
+        midtone={compositeStfR.midtone}
+        highlight={compositeStfR.highlight}
+      />
 
       {compositeStfLinked ? (
         <div className="flex flex-col gap-2">

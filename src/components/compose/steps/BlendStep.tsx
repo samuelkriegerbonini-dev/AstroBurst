@@ -1,8 +1,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 
-import { blendChannels } from "../../../services/compose";
+import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton } from "../../ui";
+import { RunButton, Slider } from "../../ui";
 import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState, resolveChannelPath} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
@@ -95,10 +95,21 @@ interface BlendStepProps {
   onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
 }
 
+interface BlendRunResult {
+  channel_count?: number;
+  dimensions?: [number, number];
+  elapsed_ms?: number;
+}
+
 export default function BlendStep({ state, onWeightsChange, onCompositeReady }: BlendStepProps) {
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<BlendRunResult | null>(null);
   const [error, setError] = useState("");
+  const [lrgbLightness, setLrgbLightness] = useState(1.0);
+  const [lrgbChrominance, setLrgbChrominance] = useState(1.0);
+  const [lrgbLoading, setLrgbLoading] = useState(false);
+  const [lrgbApplied, setLrgbApplied] = useState(false);
+  const [lrgbError, setLrgbError] = useState("");
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
 
@@ -198,12 +209,34 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       const autoStf = res.auto_stf ?? undefined;
       onCompositeReady(previewUrl, autoStf);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
   }, [filledBins, state, activeWeights, onCompositeReady]);
+
+  const lPath = useMemo(() => resolveChannelPath(state, "l"), [state]);
+
+  const handleApplyLrgb = useCallback(async () => {
+    if (!lPath) return;
+    setLrgbLoading(true);
+    setLrgbError("");
+    try {
+      const dir = await getOutputDir();
+      const res = await lrgbCombineComposite(lPath, dir, {
+        lightness: lrgbLightness,
+        chrominance: lrgbChrominance,
+      });
+      setLrgbApplied(true);
+      const previewUrl = res.previewUrl ?? res.png_path ?? null;
+      onCompositeReady(previewUrl);
+    } catch (e) {
+      setLrgbError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLrgbLoading(false);
+    }
+  }, [lPath, lrgbLightness, lrgbChrominance, onCompositeReady]);
 
   if (filledBins.length < 2) {
     return (
@@ -330,6 +363,29 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}
+
+      {state.compositeReady && lPath && (
+        <div className="flex flex-col gap-2 p-2 rounded-lg border border-sky-500/15 bg-sky-500/5">
+          <span className="text-[10px] font-medium text-sky-300">Luminance (LRGB)</span>
+          <Slider label="Lightness" value={lrgbLightness} min={0} max={1} step={0.05} accent="sky"
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbLightness}
+                  hint="how much L replaces composite luminance" />
+          <Slider label="Chrominance" value={lrgbChrominance} min={0} max={1} step={0.05} accent="sky"
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbChrominance}
+                  hint="1.0 preserves blend colors fully" />
+          <RunButton
+            label={lrgbApplied ? "Re-apply Luminance" : "Apply Luminance"}
+            runningLabel="Combining..."
+            running={lrgbLoading}
+            accent="sky"
+            onClick={handleApplyLrgb}
+          />
+          <div className="text-[9px] text-zinc-600">
+            Transfers the L channel structure onto the composite, keeping color ratios. Updates the composite cache; re-run Blend to undo.
+          </div>
+          {lrgbError && <div className="text-[9px] text-red-400">{lrgbError}</div>}
+        </div>
+      )}
     </div>
   );
 }

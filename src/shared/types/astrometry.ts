@@ -12,8 +12,10 @@ export interface WcsInfo {
     crpix2: number;
     crval1: number;
     crval2: number;
-    cd: number[];
+    cd: [[number, number], [number, number]];
     projection: string;
+    sip_a?: { i: number; j: number; value: number }[] | null;
+    sip_b?: { i: number; j: number; value: number }[] | null;
   };
 }
 

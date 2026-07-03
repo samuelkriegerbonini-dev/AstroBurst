@@ -4,7 +4,7 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, save_preview_png, auto_stretch_preview};
-use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
+use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, deband_axis_name, detect_band_axis, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::progress::ProgressHandle;
@@ -134,12 +134,10 @@ pub async fn extract_background_batch_cmd(
             anyhow::bail!("paths and bin_ids must be non-empty and of equal length");
         }
 
-        let deband_axis = match mode.as_str() {
-            "deband_rows" => Some(DebandAxis::Rows),
-            "deband_cols" => Some(DebandAxis::Columns),
-            "deband_both" => Some(DebandAxis::Both),
-            _ => None,
-        };
+        let deband_mode = matches!(
+            mode.as_str(),
+            "deband_rows" | "deband_cols" | "deband_both" | "deband_auto"
+        );
         let neutralize = mode.as_str() == "neutralize";
 
         let bg_mode = match mode.as_str() {
@@ -168,13 +166,26 @@ pub async fn extract_background_batch_cmd(
             }
         }
 
-        let (corrected, sample_counts, rms_residual): (Vec<Array2<f32>>, Vec<usize>, f64) = if let Some(axis) = deband_axis {
-            let dcfg = DebandConfig {
-                axis,
+        let mut axes: Vec<Option<&'static str>> = vec![None; loaded.len()];
+
+        let (corrected, sample_counts, rms_residual): (Vec<Array2<f32>>, Vec<usize>, f64) = if deband_mode {
+            let base_cfg = DebandConfig {
+                axis: DebandAxis::Both,
                 sigma_clip: sigma_clip as f32,
                 iterations: iterations.clamp(1, 5),
             };
-            let out: Vec<Array2<f32>> = loaded.iter().map(|ch| deband(ch, &dcfg)).collect();
+            let mut out = Vec::with_capacity(loaded.len());
+            for (i, ch) in loaded.iter().enumerate() {
+                let axis = match mode.as_str() {
+                    "deband_rows" => DebandAxis::Rows,
+                    "deband_cols" => DebandAxis::Columns,
+                    "deband_both" => DebandAxis::Both,
+                    _ => detect_band_axis(ch, &base_cfg),
+                };
+                axes[i] = Some(deband_axis_name(axis));
+                let dcfg = DebandConfig { axis, ..base_cfg.clone() };
+                out.push(deband(ch, &dcfg));
+            }
             let counts = vec![0usize; loaded.len()];
             (out, counts, 0.0)
         } else if neutralize {
@@ -210,6 +221,7 @@ pub async fn extract_background_batch_cmd(
                 "bin_id": bin_id,
                 RES_CACHE_KEY: cache_key,
                 RES_SAMPLE_COUNT: sample_counts[i],
+                "axis": axes[i],
             }));
         }
 

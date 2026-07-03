@@ -3,10 +3,18 @@ import type { WizardState } from "../wizard";
 import { resolveAnyChannelPath } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { restretchComposite } from "../../../services/compose";
-import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite } from "../../../services/processing";
+import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite, removeStars, removeStarsComposite } from "../../../services/processing";
+import type { StarRemovalResult } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeContext } from "../../../context/CompositeContext";
+import StfHistogram from "../StfHistogram";
+
+const HIST_RGB = [
+  { key: "__composite_r", color: "#ef4444" },
+  { key: "__composite_g", color: "#22c55e" },
+  { key: "__composite_b", color: "#3b82f6" },
+];
 
 interface StretchStepProps {
   state: WizardState;
@@ -24,15 +32,30 @@ interface ChannelStf {
 
 const DEFAULT_STF: ChannelStf = { shadow: 0, midtone: 0.5, highlight: 1 };
 
+interface StretchRunResult {
+  png_path?: string;
+  previewUrl?: string;
+  elapsed_ms?: number;
+  iterations_run?: number;
+  converged?: boolean;
+  stretch_factor?: number;
+}
+
 export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult }: StretchStepProps) {
   const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeContext();
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<StretchRunResult | null | undefined>(null);
   const [error, setError] = useState("");
   const [linked, setLinked] = useState(state.linkedStf);
   const [sharedMask, setSharedMask] = useState(true);
   const [detectionSigma, setDetectionSigma] = useState(8.0);
   const [maxEccentricity, setMaxEccentricity] = useState(0.85);
+  const [srOpen, setSrOpen] = useState(false);
+  const [srSigma, setSrSigma] = useState(4.0);
+  const [srGrowth, setSrGrowth] = useState(3.0);
+  const [srLoading, setSrLoading] = useState(false);
+  const [srResult, setSrResult] = useState<StarRemovalResult | null>(null);
+  const [srError, setSrError] = useState("");
   const [ghsD, setGhsD] = useState(2.0);
   const [ghsB, setGhsB] = useState(0.0);
   const [ghsSp, setGhsSp] = useState(0.01);
@@ -93,7 +116,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     setLoading(true);
     setError("");
     try {
-      let res: any;
+      let res: StretchRunResult | undefined;
       const dir = await getOutputDir();
       const stfBundle = { r: stfR, g: stfG, b: stfB };
 
@@ -172,12 +195,37 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       }
 
       setResult(res);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
   }, [state, stfR, stfG, stfB, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, detectionSigma, maxEccentricity, onResult]);
+
+  const handleRemoveStars = useCallback(async () => {
+    setSrLoading(true);
+    setSrError("");
+    try {
+      const dir = await getOutputDir();
+      const opts = { detectionSigma: srSigma, growthFactor: srGrowth };
+      let res: StarRemovalResult;
+      if (state.compositeReady) {
+        res = await removeStarsComposite(dir, opts);
+      } else {
+        const path = resolveAnyChannelPath(state);
+        if (!path) throw new Error("No channel path found");
+        res = await removeStars(path, dir, opts);
+      }
+      setSrResult(res);
+      if (res.previewUrl) {
+        onResult(res.previewUrl, { r: stfR, g: stfG, b: stfB });
+      }
+    } catch (e) {
+      setSrError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSrLoading(false);
+    }
+  }, [state, srSigma, srGrowth, stfR, stfG, stfB, onResult]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
@@ -215,6 +263,43 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           WB factors &gt; 1.3 detected (R={state.wbR.toFixed(2)} G={state.wbG.toFixed(2)} B={state.wbB.toFixed(2)}). Consider reducing factors in Color Balance.
         </div>
       )}
+
+      <div className="flex flex-col gap-2 p-2 rounded-lg border border-violet-500/15 bg-violet-500/5">
+        <button
+          onClick={() => setSrOpen((v) => !v)}
+          className="flex items-center justify-between text-[10px] font-medium text-violet-300 hover:text-violet-200 transition-colors"
+        >
+          <span>Star Removal (experimental)</span>
+          <span className="text-zinc-600">{srOpen ? "−" : "+"}</span>
+        </button>
+        {srOpen && (
+          <>
+            <Slider label="Detection Sigma" value={srSigma} min={2} max={10} step={0.5} accent="violet"
+                    format={(v) => `${v.toFixed(1)}σ`} onChange={setSrSigma}
+                    hint="lower = more stars removed" />
+            <Slider label="Mask Growth" value={srGrowth} min={1} max={8} step={0.25} accent="violet"
+                    format={(v) => `${v.toFixed(2)}x FWHM`} onChange={setSrGrowth}
+                    hint="covers halos, may eat nebula if too high" />
+            <RunButton
+              label={state.compositeReady ? "Remove Stars from Composite" : "Remove Stars"}
+              runningLabel="Removing stars..."
+              running={srLoading}
+              accent="violet"
+              onClick={handleRemoveStars}
+            />
+            {srResult && (
+              <div className="text-[9px] text-zinc-500">
+                {srResult.stars_masked} stars removed, {(srResult.mask_coverage * 100).toFixed(1)}% masked, {srResult.elapsed_ms}ms.
+                Stars layer saved separately{srResult.stars_fits_path ? " (FITS)" : ""}.
+              </div>
+            )}
+            <div className="text-[9px] text-zinc-600">
+              Classic detection + inpaint on linear data; the composite cache becomes starless, so stretches below apply to it. Re-run Blend to restore stars. Big saturated stars and diffraction spikes may leave residue.
+            </div>
+            {srError && <div className="text-[9px] text-red-400">{srError}</div>}
+          </>
+        )}
+      </div>
 
       <div className="flex items-center justify-between">
         <label className="text-xs text-zinc-400">Stretch Mode</label>
@@ -292,6 +377,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
           {linked ? (
             <div className="flex flex-col gap-2">
+              <StfHistogram channels={HIST_RGB} shadow={stfR.shadow} midtone={stfR.midtone} highlight={stfR.highlight} />
               <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.0001} accent="amber"
                       format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "shadow", v)} />
               <Slider label="Midtone" value={stfR.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="amber"
@@ -303,6 +389,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-red-400">R Channel</span>
+                <StfHistogram channels={[HIST_RGB[0]]} shadow={stfR.shadow} midtone={stfR.midtone} highlight={stfR.highlight} height={32} />
                 <Slider label="Shadow" value={stfR.shadow} min={0} max={0.5} step={0.0001} accent="red"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("r", "shadow", v)} />
                 <Slider label="Midtone" value={stfR.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="red"
@@ -312,6 +399,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
               </div>
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-green-400">G Channel</span>
+                <StfHistogram channels={[HIST_RGB[1]]} shadow={stfG.shadow} midtone={stfG.midtone} highlight={stfG.highlight} height={32} />
                 <Slider label="Shadow" value={stfG.shadow} min={0} max={0.5} step={0.0001} accent="green"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("g", "shadow", v)} />
                 <Slider label="Midtone" value={stfG.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="green"
@@ -321,6 +409,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
               </div>
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-medium text-blue-400">B Channel</span>
+                <StfHistogram channels={[HIST_RGB[2]]} shadow={stfB.shadow} midtone={stfB.midtone} highlight={stfB.highlight} height={32} />
                 <Slider label="Shadow" value={stfB.shadow} min={0} max={0.5} step={0.0001} accent="blue"
                         format={(v) => v.toFixed(4)} onChange={(v) => updateChannel("b", "shadow", v)} />
                 <Slider label="Midtone" value={stfB.midtone} min={0.0001} max={1} step={0.0001} scale="log" accent="blue"

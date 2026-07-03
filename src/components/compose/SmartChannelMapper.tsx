@@ -52,11 +52,11 @@ interface SmartChannelMapperProps {
   files: ChannelFile[];
   onComposeRgb?: (
     assignments: ChannelAssignment,
-    options: Record<string, any>,
+    options: Record<string, unknown>,
   ) => void;
   onCalibrate?: (assignments: CalibAssignment) => void;
   isLoading?: boolean;
-  composeOptions?: Record<string, any>;
+  composeOptions?: Record<string, unknown>;
   hideButton?: boolean;
   onAssignmentChange?: (assignments: ChannelAssignment) => void;
   paletteSuggestion?: {

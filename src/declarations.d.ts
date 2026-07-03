@@ -150,15 +150,15 @@ declare module "framer-motion" {
   import { ComponentType, ReactNode, HTMLAttributes } from "react";
   export const AnimatePresence: ComponentType<{ children?: ReactNode; mode?: string; initial?: boolean }>;
   export const motion: {
-    div: ComponentType<HTMLAttributes<HTMLDivElement> & Record<string, any>>;
-    span: ComponentType<HTMLAttributes<HTMLSpanElement> & Record<string, any>>;
-    [key: string]: ComponentType<any>;
+    div: ComponentType<HTMLAttributes<HTMLDivElement> & Record<string, unknown>>;
+    span: ComponentType<HTMLAttributes<HTMLSpanElement> & Record<string, unknown>>;
+    [key: string]: ComponentType<Record<string, unknown>>;
   };
 }
 
 declare module "jszip" {
   class JSZip {
-    file(name: string, data: any, options?: any): this;
+    file(name: string, data: string | Uint8Array | ArrayBuffer | Blob, options?: Record<string, unknown>): this;
     generateAsync(options: { type: string; compression?: string }, onUpdate?: (meta: { percent: number }) => void): Promise<Blob>;
   }
   export default JSZip;
@@ -169,6 +169,17 @@ declare module "file-saver" {
 }
 
 declare module "openseadragon" {
-  const OSD: any;
+  export interface OsdTileEvent {
+    tile?: { url?: string };
+  }
+  export interface OsdViewer {
+    destroy(): void;
+    addHandler(eventName: string, handler: (event: OsdTileEvent) => void): void;
+    viewport?: {
+      zoomBy(factor: number): void;
+      goHome(): void;
+    };
+  }
+  const OSD: (options: Record<string, unknown>) => OsdViewer;
   export default OSD;
 }

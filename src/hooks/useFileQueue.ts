@@ -80,8 +80,8 @@ export function useFileQueue() {
       try {
         const result = await processFitsFull(file.path);
         fileStore.fileDone(file.id, result);
-      } catch (err: any) {
-        const msg = err?.message || String(err);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         const isRetriable = !msg.includes("Calibration reference file")
           && !msg.includes("No such file")
           && !msg.includes("not found")

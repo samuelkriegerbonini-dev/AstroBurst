@@ -2,7 +2,7 @@ import { useSyncExternalStore, useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
 import { isCalibRefAsdf } from "../utils/validation";
-import type { ProcessedFile, QueueStats, AstroFile, ProcessResult } from "../shared/types";
+import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
 
 type Listener = () => void;
 
@@ -262,7 +262,7 @@ class FileStore {
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
   }
 
-  fileResampled(id: string, resampleResult: any) {
+  fileResampled(id: string, resampleResult: ResampleResult) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
 

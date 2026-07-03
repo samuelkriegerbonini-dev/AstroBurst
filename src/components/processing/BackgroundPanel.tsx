@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { extractBackground } from "../../services/processing";
-import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 
 interface BackgroundResult {

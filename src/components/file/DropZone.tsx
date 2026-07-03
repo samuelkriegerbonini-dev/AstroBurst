@@ -30,7 +30,7 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
 
-        unlisten = await win.onDragDropEvent((event: any) => {
+        unlisten = await win.onDragDropEvent((event) => {
           if (cancelled) return;
           const t = event.payload.type;
 

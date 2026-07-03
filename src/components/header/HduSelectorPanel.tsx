@@ -1,19 +1,14 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { Database, ChevronRight, FileText, Search, X, Copy, Check } from "lucide-react";
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
+import type { FitsExtension } from "../../services/header";
 
 interface HduSelectorPanelProps {
   filePath: string;
-  onSelectHdu?: (hduIndex: number, header: any) => void;
+  onSelectHdu?: (hduIndex: number, header: Record<string, string>) => void;
 }
 
-interface HduInfo {
-  index: number;
-  name: string;
-  type: string;
-  naxis: number[];
-  bitpix: number;
-}
+type HduInfo = FitsExtension;
 
 const TYPE_STYLES: Record<string, { bg: string; border: string; text: string }> = {
   IMAGE: { bg: "rgba(59,130,246,0.1)", border: "rgba(59,130,246,0.25)", text: "#93c5fd" },
@@ -28,7 +23,7 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
   const [extensions, setExtensions] = useState<HduInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [hduHeader, setHduHeader] = useState<Record<string, any> | null>(null);
+  const [hduHeader, setHduHeader] = useState<Record<string, string> | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
   const [hduSearch, setHduSearch] = useState("");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -42,11 +37,11 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
     setHduSearch("");
 
     getFitsExtensions(filePath)
-      .then((result: any) => {
-        const exts = result?.extensions || result || [];
+      .then((result: FitsExtension[] | { extensions?: FitsExtension[] }) => {
+        const exts = Array.isArray(result) ? result : (result?.extensions ?? []);
         setExtensions(Array.isArray(exts) ? exts : []);
       })
-      .catch((err: any) => console.error("Failed to load FITS extensions:", err))
+      .catch((err) => console.error("Failed to load FITS extensions:", err))
       .finally(() => setLoading(false));
   }, [filePath]);
 
@@ -58,8 +53,8 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
       setHduSearch("");
       try {
         const header = await getHeaderByHdu(filePath, idx);
-        setHduHeader(header);
-        onSelectHdu?.(idx, header);
+        setHduHeader(header.index);
+        onSelectHdu?.(idx, header.index);
       } catch (err) {
         console.error("Failed to load HDU header:", err);
       } finally {
@@ -117,7 +112,7 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
           const idx = ext.index ?? i;
           const isSelected = selectedIdx === idx;
           const dims = ext.naxis?.length > 0 ? ext.naxis.join(" × ") : "";
-          const typeLabel = ext.type || (i === 0 ? "PRIMARY" : "EXT");
+          const typeLabel = ext.ext_type || (i === 0 ? "PRIMARY" : "EXT");
           const ts = TYPE_STYLES[typeLabel] || DEFAULT_TYPE_STYLE;
 
           return (

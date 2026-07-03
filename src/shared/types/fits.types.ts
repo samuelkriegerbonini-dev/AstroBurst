@@ -20,7 +20,7 @@ export interface ResampleResult {
   previewUrl?: string;
   dimensions: [number, number];
   original_dimensions: [number, number];
-  wcs_updates: Record<string, any>;
+  wcs_updates: Record<string, unknown>;
   stats: {
     min: number;
     max: number;
@@ -46,7 +46,7 @@ export interface ProcessResult {
     mad?: number;
   } | null;
   original_dimensions?: [number, number];
-  wcs_updates?: Record<string, any>;
+  wcs_updates?: Record<string, unknown>;
   resampled?: ResampleResult | null;
   resampledPath?: string | null;
   is_rgb?: boolean;

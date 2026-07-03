@@ -31,7 +31,6 @@ function HistogramPanel({
                           bins = [],
                           dataMin = 0,
                           dataMax = 1,
-                          autoStf,
                           shadow = 0,
                           midtone = 0.5,
                           highlight = 1,

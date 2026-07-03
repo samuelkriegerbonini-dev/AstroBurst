@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { estimatePsf } from "../../services/processing";
+import type { PsfEstimate } from "../../shared/types/processing";
 import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
 
 interface PsfResult {
@@ -13,10 +14,10 @@ interface PsfResult {
 }
 
 interface PsfPanelProps {
-  selectedFile: { path: string; result?: any } | null;
+  selectedFile: { path: string; result?: unknown } | null;
   onPsfReady?: (kernel: number[][]) => void;
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  onProcessingDone?: (result: any) => void;
+  onProcessingDone?: (result: PsfEstimate) => void;
   chainedFrom?: string;
 }
 

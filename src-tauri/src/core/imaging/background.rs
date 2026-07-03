@@ -322,6 +322,61 @@ fn deband_cols(image: &mut Array2<f32>, config: &DebandConfig) {
     });
 }
 
+fn levels_mad(levels: &[f32]) -> f32 {
+    let mut finite: Vec<f32> = levels.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.len() < 4 {
+        return 0.0;
+    }
+    let med = median_f32_mut(&mut finite);
+    let mut devs: Vec<f32> = finite.iter().map(|v| (v - med).abs()).collect();
+    median_f32_mut(&mut devs)
+}
+
+pub fn detect_band_axis(image: &Array2<f32>, config: &DebandConfig) -> DebandAxis {
+    let (rows, cols) = image.dim();
+
+    let row_lv: Vec<f32> = (0..rows)
+        .into_par_iter()
+        .map(|i| {
+            let vals: Vec<f32> = (0..cols)
+                .map(|j| image[[i, j]])
+                .filter(|v| v.is_finite() && *v > 1e-7)
+                .collect();
+            robust_line_level(vals, config.sigma_clip, config.iterations)
+        })
+        .collect();
+
+    let col_lv: Vec<f32> = (0..cols)
+        .into_par_iter()
+        .map(|j| {
+            let vals: Vec<f32> = (0..rows)
+                .map(|i| image[[i, j]])
+                .filter(|v| v.is_finite() && *v > 1e-7)
+                .collect();
+            robust_line_level(vals, config.sigma_clip, config.iterations)
+        })
+        .collect();
+
+    let mad_r = levels_mad(&row_lv);
+    let mad_c = levels_mad(&col_lv);
+
+    if mad_r > 1.5 * mad_c {
+        DebandAxis::Rows
+    } else if mad_c > 1.5 * mad_r {
+        DebandAxis::Columns
+    } else {
+        DebandAxis::Both
+    }
+}
+
+pub fn deband_axis_name(axis: DebandAxis) -> &'static str {
+    match axis {
+        DebandAxis::Rows => "rows",
+        DebandAxis::Columns => "columns",
+        DebandAxis::Both => "both",
+    }
+}
+
 pub fn deband(image: &Array2<f32>, config: &DebandConfig) -> Array2<f32> {
     let mut out = if image.is_standard_layout() {
         image.to_owned()
@@ -702,7 +757,7 @@ mod tests {
                 x_pows[i] = x_pows[i - 1] * x;
             }
             let val_alloc: f64 = alloc.iter().enumerate().map(|(i, &b)| b * (i as f64 + 1.0)).sum();
-            let coeffs: Vec<f64> = (0..alloc.len()).map(|i| (i as f64 + 1.0)).collect();
+            let coeffs: Vec<f64> = (0..alloc.len()).map(|i| i as f64 + 1.0).collect();
             let val_inline = eval_poly_inline(y, x, degree, &coeffs, &y_pows, &x_pows);
             assert!((val_alloc - val_inline).abs() < 1e-10, "Mismatch at degree {}", degree);
         }
@@ -876,6 +931,24 @@ mod tests {
             let m = median_f32_mut(&mut rowvals);
             assert!((m - 100.0).abs() < 1.0, "row {} median {} not flattened", y, m);
         }
+    }
+
+    #[test]
+    fn detect_axis_horizontal_stripes() {
+        let img = Array2::from_shape_fn((64, 64), |(y, _x)| {
+            100.0f32 + if y % 2 == 0 { 8.0 } else { -8.0 }
+        });
+        let cfg = DebandConfig { axis: DebandAxis::Both, sigma_clip: 3.0, iterations: 2 };
+        assert!(matches!(detect_band_axis(&img, &cfg), DebandAxis::Rows));
+    }
+
+    #[test]
+    fn detect_axis_vertical_stripes() {
+        let img = Array2::from_shape_fn((64, 64), |(_y, x)| {
+            100.0f32 + if x % 2 == 0 { 8.0 } else { -8.0 }
+        });
+        let cfg = DebandConfig { axis: DebandAxis::Both, sigma_clip: 3.0, iterations: 2 };
+        assert!(matches!(detect_band_axis(&img, &cfg), DebandAxis::Columns));
     }
 
     #[test]

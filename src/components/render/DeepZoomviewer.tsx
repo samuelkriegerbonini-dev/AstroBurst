@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
+import type { OsdViewer } from "openseadragon";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
 import { generateTiles, generateTilesRgb } from "../../services/tiles";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
@@ -49,7 +50,7 @@ function DeepZoomViewer({
   const rawPath = activeImagePath || filePathProp || file?.path || "";
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<any>(null);
+  const viewerRef = useRef<OsdViewer | null>(null);
   const convertRef = useRef<((path: string) => string) | null>(null);
   const [generating, setGenerating] = useState(false);
   const [ready, setReady] = useState(false);
@@ -60,7 +61,6 @@ function DeepZoomViewer({
   const modeRef = useRef<ViewerMode>("tiles");
 
   const hasRendered = !!renderedPreviewUrl;
-  const effectiveKey = hasRendered ? `rendered:${renderedPreviewUrl}` : `tiles:${rawPath}`;
 
   const destroyViewer = useCallback(() => {
     if (viewerRef.current) {
@@ -98,8 +98,8 @@ function DeepZoomViewer({
         modeRef.current = "tiles";
         setReady(true);
       }
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setGenerating(false);
     }
@@ -118,8 +118,8 @@ function DeepZoomViewer({
       renderedUrlRef.current = renderedPreviewUrl;
       modeRef.current = "image";
       setReady(true);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [renderedPreviewUrl]);
 
@@ -142,7 +142,7 @@ function DeepZoomViewer({
     let destroyed = false;
 
     (async () => {
-      let OSD: any;
+      let OSD: (options: Record<string, unknown>) => OsdViewer;
       try {
         OSD = (await import("openseadragon")).default;
       } catch {
@@ -153,7 +153,7 @@ function DeepZoomViewer({
 
       destroyViewer();
 
-      let tileSources: any;
+      let tileSources: Record<string, unknown>;
 
       const imageUrl = renderedPreviewUrl || (file?.result?.previewUrl ?? null);
 
@@ -221,7 +221,7 @@ function DeepZoomViewer({
       });
 
       viewer.addHandler("open", () => { if (!destroyed) setViewerReady(true); });
-      viewer.addHandler("tile-load-failed", (event: any) => {
+      viewer.addHandler("tile-load-failed", (event: { tile?: { url?: string } }) => {
         console.warn("[DeepZoom] Tile load failed:", event.tile?.url);
       });
 

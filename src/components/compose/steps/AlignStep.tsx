@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo } from "react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import { alignChannels } from "../../../services/compose";
+import type { AlignResult } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
 
@@ -17,7 +18,7 @@ function resolveChannelPath(state: WizardState, binId: string): string | null {
 export default function AlignStep({ state, onAligned }: AlignStepProps) {
   const [method, setMethod] = useState("phase_correlation");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<AlignResult | null>(null);
   const [error, setError] = useState("");
 
   const activeBins = useMemo(
@@ -46,7 +47,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
       setResult(res);
       if (res.channels) {
         const aligned: Record<string, string> = {};
-        res.channels.forEach((ch: any, i: number) => {
+        res.channels.forEach((ch, i) => {
           if (channelPaths[i]) {
             const key = ch.cache_key || ch.path;
             if (key) aligned[channelPaths[i].binId] = key;
@@ -54,8 +55,8 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
         });
         onAligned(aligned);
       }
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -93,12 +94,12 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
                 {i === 0 && <span className="text-[8px] text-sky-400/60 ml-1">REF</span>}
               </div>
               <div className="flex items-center gap-2">
-                {ch?.matched_stars > 0 && (
+                {ch && (ch.matched_stars ?? 0) > 0 && (
                   <span className="text-[8px] font-mono text-sky-400/50">
                     {ch.inliers}/{ch.matched_stars} stars, {ch.residual_px?.toFixed(2)}px
                   </span>
                 )}
-                {ch?.confidence > 0 && ch?.matched_stars === 0 && (
+                {ch && (ch.confidence ?? 0) > 0 && ch.matched_stars === 0 && (
                   <span className="text-[8px] font-mono text-sky-400/50">
                     conf={ch.confidence?.toFixed(3)}
                   </span>

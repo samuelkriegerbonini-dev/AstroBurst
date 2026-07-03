@@ -42,10 +42,10 @@ const ICON = (
 );
 
 interface PipelinePanelProps {
-  files?: any[];
+  files?: unknown[];
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  calibration?: any;
-  stackConfig?: any;
+  calibration?: unknown;
+  stackConfig?: unknown;
 }
 
 export default function PipelinePanel(_props: PipelinePanelProps) {

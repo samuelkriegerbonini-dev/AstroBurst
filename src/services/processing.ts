@@ -66,7 +66,7 @@ export function extractBackground(
 }
 
 export interface BackgroundBatchResult {
-  results: { bin_id: string; cache_key: string; sample_count: number }[];
+  results: { bin_id: string; cache_key: string; sample_count: number; axis?: string | null }[];
   mode: string;
   rms_residual: number;
   dimensions: [number, number];
@@ -297,6 +297,63 @@ export async function maskedStretchComposite(
     detectionSigma: options.detectionSigma ?? 8.0,
     maxEccentricity: options.maxEccentricity ?? 0.85,
   });
+}
+
+export interface StarRemovalResult {
+  png_path?: string;
+  fits_path?: string;
+  stars_png_path?: string;
+  stars_fits_path?: string;
+  stars_masked: number;
+  mask_coverage: number;
+  elapsed_ms: number;
+  dimensions: [number, number];
+  previewUrl?: string;
+  starsPreviewUrl?: string;
+}
+
+export interface StarRemovalOptions {
+  detectionSigma?: number;
+  maxEccentricity?: number;
+  growthFactor?: number;
+  softness?: number;
+  brightCeiling?: number;
+}
+
+function starRemovalArgs(options: StarRemovalOptions) {
+  return {
+    detectionSigma: options.detectionSigma ?? 4.0,
+    maxEccentricity: options.maxEccentricity ?? 0.9,
+    growthFactor: options.growthFactor ?? 3.0,
+    softness: options.softness ?? 6.0,
+    brightCeiling: options.brightCeiling ?? 0.95,
+  };
+}
+
+export function removeStars(
+  path: string,
+  outputDir?: string,
+  options: StarRemovalOptions = {},
+): Promise<StarRemovalResult> {
+  return withPreview<StarRemovalResult>("remove_stars_cmd", outputDir, {
+    path,
+    ...starRemovalArgs(options),
+  }, [
+    ["png_path", "previewUrl"],
+    ["stars_png_path", "starsPreviewUrl"],
+  ]);
+}
+
+export function removeStarsComposite(
+  outputDir?: string,
+  options: StarRemovalOptions = {},
+): Promise<StarRemovalResult> {
+  return withPreview<StarRemovalResult>("remove_stars_composite_cmd", outputDir, {
+    ...starRemovalArgs(options),
+  }, [
+    ["png_path", "previewUrl"],
+    ["stars_png_path", "starsPreviewUrl"],
+  ]);
 }
 
 export function spccCalibrate(

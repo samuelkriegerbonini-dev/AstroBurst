@@ -6,6 +6,8 @@ import { getOutputDir } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
 import { useCompositeContext } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
+import type { Star } from "./PlateSolvePanel";
+import type { StarDetectionResult } from "../../shared/types/processing";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
@@ -13,7 +15,7 @@ const PlateSolvePanel = lazy(() => import("./PlateSolvePanel"));
 const PhotometryPanel = lazy(() => import("./PhotometryPanel"));
 const TileViewerPanel = lazy(() => import("./TileViewerPanel"));
 
-const EMPTY_STARS: any[] = [];
+const EMPTY_STARS: Star[] = [];
 
 function TabSpinner() {
   return (
@@ -50,7 +52,7 @@ function AnalysisTabInner({
   const { isShowingComposite } = useCompositeContext();
   const { rawPixels, rgbRawPixels } = useRawPixelsContext();
 
-  const [starResult, setStarResult] = useState<any>(null);
+  const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
   const [starLoading, setStarLoading] = useState(false);
 
   const effectivePath = (isShowingComposite && activeImagePath) ? activeImagePath : file?.path;
@@ -160,7 +162,7 @@ function AnalysisTabInner({
       <div className="flex flex-col gap-3">
         {histData && histStats && (
           <HistogramPanel
-            bins={histData.bins as any}
+            bins={histData.bins}
             dataMin={histData.data_min}
             dataMax={histData.data_max}
             autoStf={histData.auto_stf}

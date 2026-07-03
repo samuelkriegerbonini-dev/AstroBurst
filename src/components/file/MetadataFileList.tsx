@@ -15,12 +15,10 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
-  ImageOff,
   GripVertical,
   Filter,
   Timer,
   Aperture,
-  ChevronRight,
   Search,
   SlidersHorizontal,
   Pin,
@@ -272,7 +270,6 @@ function MetadataFileList({
                             isExporting = false,
                             zipProgress = 0,
                             downloaded = false,
-                            groupByInstrument = false,
                             productTypes = [],
                             customChips = [],
                             activeFilters = [],
@@ -301,16 +298,6 @@ function MetadataFileList({
         || f.metadata?.instrument?.toLowerCase().includes(q),
     );
   }, [files, searchQuery]);
-
-  const groupedFiles = useMemo(() => {
-    if (!groupByInstrument) return null;
-    const groups: Record<string, MetadataFile[]> = {};
-    for (const f of filteredFiles) {
-      const key = f.metadata?.instrument ?? "Unknown";
-      (groups[key] ??= []).push(f);
-    }
-    return groups;
-  }, [filteredFiles, groupByInstrument]);
 
   useEffect(() => {
     const el = scrollRef.current;
