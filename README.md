@@ -5,13 +5,14 @@
 <h1 align="center">AstroBurst</h1>
 
 <p align="center">
-  <strong>High-Performance Astronomical Image Processor</strong><br>
-  <em>Rust + Tauri + WebGPU. Process JWST, Hubble, and Roman Space Telescope data at native speed.</em>
+  <strong>From raw space telescope data to a finished image — in minutes</strong><br>
+  <em>Drop in public JWST, Hubble, or Roman files and walk a 10-step wizard to a color composite.<br>
+  Rust + Tauri + WebGPU, everything local, at native speed.</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/samuelkriegerbonini-dev/AstroBurst/releases"><img src="https://img.shields.io/github/v/release/samuelkriegerbonini-dev/AstroBurst?style=flat-square&color=blue" alt="Release"></a>
-  <a href="https://github.com/samuelkriegerbonini-dev/AstroBurst/actions"><img src="https://img.shields.io/github/actions/workflow/status/samuelkriegerbonini-dev/AstroBurst/build.yml?style=flat-square" alt="Build"></a>
+  <a href="https://github.com/samuelkriegerbonini-dev/AstroBurst/actions"><img src="https://img.shields.io/github/actions/workflow/status/samuelkriegerbonini-dev/AstroBurst/ci.yml?style=flat-square" alt="CI"></a>
   <img src="https://img.shields.io/badge/rust-1.75+-orange.svg?style=flat-square" alt="Rust">
   <img src="https://img.shields.io/badge/tauri-2.10-purple.svg?style=flat-square" alt="Tauri">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/samuelkriegerbonini-dev/AstroBurst?style=flat-square&color=green" alt="License"></a>
@@ -40,6 +41,8 @@ AstroBurst is an open-source desktop app for processing astronomical images. Dro
 
 It's built on Rust for the heavy lifting, React for the interface, and WebGPU for real-time preview. The result is a tool that opens a 2 GB IFU datacube in 300 ms, processes 10 frames at 1.4 GB/s, and renders STF adjustments in 8 ms on GPU.
 
+> **What's new in v0.5.6**: **Star removal** — classic detection + multi-scale push-pull inpaint that produces a starless image *and* a separate stars layer (starless + stars ≈ original), with a shared luminance mask on RGB composites and a bright-ceiling that catches saturated cores the detector misses. **LRGB in the wizard** — assign a Luminance channel (it can share a file with a color bin) and transfer its structure onto the composite with color-ratio-preserving scaling and Lightness/Chrominance controls. **Background modes** — the per-channel gradient extraction is joined by **Linked** (one gradient fitted on the channel mean, same surface subtracted everywhere: color balance survives), **Neutralize** (constant sky pedestal only — the safe choice for space data), and **De-band** (sigma-clipped row/column equalization for JWST 1/f striping, with automatic axis detection). **Inline STF histograms** — log-scale RGB histograms with shadow / mid-gray / highlight markers right under the Auto STF sliders, which now use a **log scale reaching 0.0001** (the old 0.01 floor made faint-data midtones unreachable). **GHS tuned for linear data** — D range to 50, finer SP steps, defaults that actually lift faint signal out of black. **Sturdier alignment** — phase correlation falls back to identity when the measured shift is implausible or below the correlation noise floor, so an already-registered set can no longer be corrupted. Plus a fully typed frontend (eslint: 174 errors → 0, which surfaced and fixed three real wiring bugs), star-mask tuning sliders (detection sigma, roundness cut), and a CI workflow (typecheck + 404 backend tests). See the [changelog](CHANGELOG.md).
+>
 > **What's new in v0.5.5**: **GPU RGB preview** — full-color composites now render on the GPU, not just mono. A new WebGPU pipeline uploads the three channels as separate `r32float` textures and runs **per-channel STF in the shader** (MTF identical to the CPU worker and Rust backend), with automatic fallback to the PNG composite when WebGPU is unavailable or the device is lost. **Live per-channel RGB STF**: a dedicated panel restretches each channel's shadow/midtone live on the GPU with no backend round-trip. **Header → wavelength channel mapping**: a canonical filter→wavelength table now drives a **dynamic Auto-Map** that gives each broadband filter its own λ-labelled channel (JWST NIRCam F090W–F444W → five distinct channels, grouped by nm), and a new **Auto (λ) blend** spreads any number of channels across R/G/B by wavelength — auto-applied to untouched broadband stacks without overriding palettes or manual weights. Plus a GPU/CPU preview audit: STF parity, full-image extrema for preview normalization, device-loss/uncaptured-error fallback, an oversized-texture guard, and a contrast-weighted hybrid downsample that preserves faint stars. The Compose tool moved to the left tool strip. 375 backend tests green. See the [changelog](CHANGELOG.md).
 >
 > **What's new in v0.5.4**: **Foroosh sub-pixel phase correlation** — FFT registration now uses a closed-form Dirichlet-peak estimator instead of a 3-point parabola, removing a systematic ~0.1 px peak-locking bias on every frame for visibly tighter stacked stars. **NaN-aware bicubic resampling** so a single blank/out-of-footprint pixel no longer poisons its 4×4 neighborhood or erodes stack borders pass after pass. New controls wired end-to-end: **Drizzle RGB** gains rejection thresholds (sigma low/high), **manual per-channel white balance**, and an **alignment-method selector** (phase correlation or star-based); the **subframe selector** exposes the four quality-scoring weights (FWHM / eccentricity / SNR / noise); and **plate solve** adds a scale-units selector (arcsec/px, arcmin/deg width) and an explicit downsample factor. Plus correctness fixes: calibration validates master-vs-light dimensions (no more panic or silent mis-calibration on mismatched masters), master flats normalize by the **median** (robust to gradients/dust), all-blank stacked pixels stay **NaN** instead of collapsing to 0 (so they no longer bias background and stretch), affine alignment **rejects reflections**, and the drizzle Lanczos kernel guards low-coverage division. 364 backend tests green. See the [changelog](CHANGELOG.md).
@@ -71,14 +74,14 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 <p align="center"><em><strong>4 · Crop.</strong> Trim to the field the channels share after alignment, with manual margins or auto-detected borders to drop the non-overlapping edges left by registration.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/05-background-extraction.png" alt="Background extraction" width="100%">
+  <img src="docs/screenshots/05-background-modes.png" alt="Background step with the mode selector open: per-channel, linked, neutralize, and de-band" width="100%">
 </p>
-<p align="center"><em><strong>5 · Background.</strong> Gradient and light-pollution removal via a grid-sampled polynomial surface — grid size, polynomial degree (1-5), sigma-clipped rejection of stars and nebulosity, and subtract or divide mode — applied per channel.</em></p>
+<p align="center"><em><strong>5 · Background.</strong> Six correction modes: <strong>Per-channel</strong> polynomial gradient extraction (grid-sampled, sigma-clipped, degree 1-5), <strong>Linked</strong> (one gradient fitted on the channel mean and the same surface subtracted from every channel — color balance survives), <strong>Neutralize</strong> (constant sky pedestal only, the safe choice for space-telescope data), and <strong>De-band</strong> rows / columns / auto — sigma-clipped line equalization for JWST-style 1/f striping, with the detected axis reported per channel.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/06-blend-composite.png" alt="Channel blending into the SHO composite" width="100%">
+  <img src="docs/screenshots/06-blend-presets.png" alt="Blend presets bar with the header explorer detecting F502N as [OIII] 501nm" width="100%">
 </p>
-<p align="center"><em><strong>6 · Blend.</strong> Channels mapped to R/G/B through a per-channel weight matrix, shown here as a node graph — the green cast you see is exactly what the next step neutralizes. Presets: RGB, SHO, HOO, Dynamic HOO, Foraxx, Hubble Legacy, plus the new <strong>Auto (λ)</strong>, which spreads any number of channels across R/G/B by wavelength and auto-applies to untouched broadband stacks without overriding a palette or manual weights.</em></p>
+<p align="center"><em><strong>6 · Blend.</strong> Channels mapped to R/G/B through a per-channel weight matrix. Presets: RGB, SHO, HOO, Dynamic HOO, Foraxx, Hubble Legacy, plus <strong>Auto (λ)</strong> and <strong>Balanced (λ)</strong>, which spread any number of channels across R/G/B by wavelength. On the right, the Header Explorer has read <code>FILTNAM1: F502N</code> and identified it as <strong>[OIII] 501 nm → Channel B</strong> — the same canonical filter→wavelength table drives Auto-Map and the λ presets. The green cast and the raw 1/f banding still visible here are exactly what the Color and Background steps clean up. Fill the optional <strong>L bin</strong> and an <strong>LRGB section</strong> appears: the luminance structure is transferred onto the composite with color-ratio-preserving scaling (Lightness/Chrominance controls).</em></p>
 
 <p align="center">
   <img src="docs/screenshots/07-color-balance-scnr.png" alt="Color balance and SCNR" width="100%">
@@ -86,22 +89,27 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 <p align="center"><em><strong>7 · Color.</strong> White balance (Auto / SPCC / Manual / None) plus SCNR green-excess reduction (average/maximum neutral) with luminance redistribution — taming the green SHO cast into a balanced palette. Includes a narrowband-aware warning.</em></p>
 
 <p align="center">
-  <img src="docs/screenshots/08-masked-stretch.png" alt="Masked stretch panel" width="100%">
+  <img src="docs/screenshots/08-star-removal-stretch.png" alt="Star removal section and Auto STF with the inline histogram" width="100%">
 </p>
-<p align="center"><em><strong>8 · Stretch.</strong> Masked Stretch (star-protected MTF) with iterations, target background presets, star protection, mask growth/softness, and luminance protection to avoid chromatic halos. The step also offers <strong>GHS</strong> (Generalized Hyperbolic Stretch), arcsinh, and linked or per-channel STF.</em></p>
+<p align="center"><em><strong>8 · Stretch.</strong> The new <strong>Star Removal</strong> section (detection sigma + mask growth) has just run — "13 stars removed, stars layer saved separately" — the composite cache is now starless, so every stretch below applies to it (re-run Blend to restore the stars). Below, <strong>Auto STF</strong> with the new <strong>inline log-histogram</strong> and its shadow / mid-gray / highlight markers; the midtone slider is log-scaled down to 0.0001, and here sits at 0.0065 — a value the old linear slider physically could not reach. The step also offers <strong>Masked Stretch</strong> (star-protected MTF with detection-sigma and roundness tuning), <strong>GHS</strong>, and arcsinh.</em></p>
 
 <p align="center">
   <img src="docs/screenshots/19-tone-curves.png" alt="Tone curves in the Adjust step" width="100%">
 </p>
-<p align="center"><em><strong>9 · Adjust.</strong> Spline-based tone curves (monotone Fritsch-Carlson interpolation) with per-channel R/G/B and linked modes — the finishing touch before <strong>10 · Export</strong>.</em></p>
+<p align="center"><em><strong>9 · Adjust.</strong> Spline-based tone curves (monotone Fritsch-Carlson interpolation) with per-channel R/G/B and linked modes — the finishing touch.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/10-export-final.png" alt="Final SHO composite of the Pillars of Creation on the Export step" width="100%">
+</p>
+<p align="center"><em><strong>10 · Export.</strong> The finished SHO composite, exported as 16-bit PNG in 343 ms — WB and SCNR baked in from the calibrated linear composite, STF applied at write time. FITS export with WCS/metadata preservation and a ZIP bundle of all channels are one click away.</em></p>
 
 <details>
 <summary><strong>Analysis, processing tools &amp; more results</strong></summary>
 
 <p align="center">
-  <img src="docs/screenshots/09-analysis-platesolve.png" alt="Analysis panel" width="100%">
+  <img src="docs/screenshots/09-ghs-stretch-analysis.png" alt="GHS stretch with the Analysis panel: solved plate, star detection, Gaia photometry" width="100%">
 </p>
-<p align="center"><em><strong>Analysis.</strong> Star detection with FWHM/SNR and overlay circles, plate solving (RA/Dec, pixel scale, field of view, labeled object annotations), <strong>interactive photometry</strong> — click a star for centroid, net flux, instrumental magnitude and SNR, with optional Gaia DR3 cross-match — an FFT power spectrum with a Hann window, a 16K-bin histogram with auto-STF, and deep-zoom tiles.</em></p>
+<p align="center"><em><strong>Analysis.</strong> The Analysis strip alongside a GHS stretch in progress: the field is already <strong>plate-solved</strong> (RA 18h 18m, 0.100"/px, 2.7' FOV — labeled annotations available), star detection with FWHM/SNR overlays, <strong>interactive photometry</strong> with optional Gaia DR3 cross-match, an FFT power spectrum, and the histogram/STF readout. GHS exposes D / local intensity / symmetry point / shadow-highlight protection, with linear-data guidance built into the panel.</em></p>
 
 <p align="center">
   <img src="docs/screenshots/10-wavelet-denoise.png" alt="Wavelet denoise" width="100%">
@@ -192,10 +200,10 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 2. **Stack**: Per-channel sigma-clipped stacking with a subframe selector (star count, FWHM, SNR, and a per-frame quality weight that drives **weighted integration**), auto-align, and optional **drizzle** super-resolution (scale, pixfrac, kernel)
 3. **Align**: Phase correlation (sub-pixel) or star-based affine (rotation/scale), automatic fallback
 4. **Crop**: Auto-detect valid data intersection across aligned channels, border scan with configurable margins
-5. **Background**: Polynomial surface extraction with sigma-clipped grid sampling (subtract/divide)
-6. **Blend**: Preset palettes (SHO, HOO, Foraxx, Dynamic HOO, Hubble Legacy, RGB) with spectral wavelength resolver for any bin configuration
+5. **Background**: Six modes — per-channel polynomial surface (sigma-clipped grid sampling, subtract/divide), **linked** shared-gradient (color-balance preserving), **neutralize** (pedestal-only), and **de-band** rows/columns/**auto** for 1/f striping
+6. **Blend**: Preset palettes (SHO, HOO, Foraxx, Dynamic HOO, Hubble Legacy, RGB) plus Auto (λ) / Balanced (λ) wavelength spreading, with spectral wavelength resolver for any bin configuration; optional **LRGB** luminance transfer (color-ratio preserving, Lightness/Chrominance controls, L bin can share a file with a color bin)
 7. **Color**: Stability-based auto white balance (MAD/median reference) + SCNR green removal (average/maximum neutral) with BT.709 luminance redistribution. Narrowband warning for SHO/HOO workflows.
-8. **Stretch**: Masked stretch with star protection (growth/protection + shared-luminance mask), GHS (Generalized Hyperbolic Stretch), arcsinh, or linked/per-channel STF
+8. **Stretch**: **Star removal** (starless + separate stars layer, shared-luminance mask, tunable detection sigma / mask growth), masked stretch with star protection (growth/protection, detection sigma and roundness tuning, shared-luminance mask), GHS (Generalized Hyperbolic Stretch), arcsinh, or linked/per-channel STF with **inline log-histograms** and log-scale midtone sliders down to 0.0001
 9. **Adjust**: Spline-based tone curves with per-channel R/G/B and linked RGB modes
 10. **Export**: PNG (8/16-bit), FITS RGB with WCS/metadata preservation and `PROGRAM`/`HISTORY` provenance cards, ZIP bundle with all channels + composite
 
@@ -209,10 +217,12 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 - **Smart Pipeline**: Auto-detects 2D images vs 3D cubes per file and routes accordingly.
 
 ### Enhancement
+- **Star removal**: classic detection + multi-scale push-pull inpaint, producing a starless image and a separate stars layer (FITS + PNG); shared luminance mask on RGB, bright-ceiling for saturated cores
 - **Deconvolution**: Richardson-Lucy (FFT-based, Tikhonov regularization, deringing)
-- **Background**: Polynomial surface fitting with sigma-clipped grid sampling
+- **Background**: per-channel / linked / neutralize polynomial modes plus row/column de-banding with automatic axis detection
 - **Wavelet**: A trous multi-scale denoise with per-scale thresholds (up to 8 scales)
-- **Stretch**: GHS (Generalized Hyperbolic Stretch with symmetry point and shadow/highlight protection), arcsinh, masked stretch with star protection, linked/per-channel STF
+- **Stretch**: GHS (Generalized Hyperbolic Stretch with symmetry point and shadow/highlight protection), arcsinh, masked stretch with star protection, linked/per-channel STF with inline histograms
+- **LRGB**: luminance combination with color-ratio-preserving normalization and ratio-based transfer
 - **SPCC**: Spectrophotometric color calibration against real Gaia DR3 (VizieR cone search, default feature) with synthetic-catalog fallback
 
 ### Analysis
@@ -241,6 +251,16 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 - Plate solving via astrometry.net (auto-downsample for large images, results rescaled to full resolution)
 - WCS coordinate readout and pixel/world conversion (TAN/SIN/ARC/CAR projections, SIP distortion)
 - Labeled field annotations drawn as a toggleable overlay
+
+### For Scientists: ASDF Quick-Look
+ASDF is the native format of the JWST calibration pipeline and the primary format of the **Roman Space Telescope** — and almost no desktop tool opens it. AstroBurst ships one of the only non-Python ASDF readers in existence:
+- Full ASDF container parsing in Rust: block index, zlib/bzip2/lz4 decompression, YAML tree
+- gWCS extraction (approximated to a standard projection for readout), science-array discovery, tree/metadata explorer
+- Spectral cube support: click-to-extract spectra with automatic wavelength unit conversion
+- Aperture photometry with optional Gaia DR3 cross-match, FFT diagnostics, 16K-bin histograms
+- **Headless mode**: an optional Axum REST server (`--features server`) plus an async Python client (`agent/`) expose the pipeline for notebooks, batch jobs, and automation — no GUI required
+
+On the quick-look roadmap: DQ-flag overlays, ERR-array display, and unit-aware pixel readout (MJy/sr).
 
 ## Installation
 
@@ -331,7 +351,22 @@ NIRCam has two detector resolutions: short-wave (~0.031"/px, ~14K) and long-wave
 
 ### Hubble Narrowband
 
-HST narrowband filters are auto-detected from FITS headers. Six blend presets are available: SHO (Hubble Palette), HOO, Dynamic HOO, Foraxx, Hubble Legacy, and RGB. The spectral wavelength resolver maps presets to any bin configuration by sorting both preset weights and filled bins by wavelength. SHO maps [SII] 673nm to R, H-alpha 656nm to G, [OIII] 502nm to B. Custom bins with wavelength metadata (e.g., JWST filters) are resolved automatically.
+HST narrowband filters are auto-detected from FITS headers. Six blend presets are available: SHO (Hubble Palette), HOO, Dynamic HOO, Foraxx, Hubble Legacy, and RGB. The spectral wavelength resolver maps presets to any bin configuration by sorting both preset weights and filled bins by wavelength. SHO maps [SII] 673nm to R, H-alpha 656nm to G, [OIII] 502nm to B.
+
+**The Pillars of Creation in ten steps** — the exact recipe behind the screenshots above, using the three WFPC2 frames from `tests/sample-data/` (or your own MAST download):
+
+| Step | Setting | Why |
+|------|---------|-----|
+| 1 Channels | **Auto Map** | Filename/header detection bins 502→[OIII], 656→Hα, 673→[SII]; semantic bins are what make the SHO presets meaningful |
+| 2 Stack | Skip | One frame per filter |
+| 3 Align | Skip (already co-registered) — else Star (SBA) | Phase correlation self-rejects when the shift is implausible |
+| 4 Crop | Trim the WFPC2 stair-step | Removes the chip-mosaic edges |
+| 5 BG | **Neutralize** | Removes each channel's sky pedestal; there is no true gradient to model |
+| 6 Blend | **SHO (Hubble)** — or Hubble Legacy for the teal/gold 1995 look | |
+| 7 Color | Auto WB + SCNR average ≈ 0.4 | Hα dominates G; SCNR restores the golden palette |
+| 8 Stretch | Masked Stretch (target 0.15–0.20, sigma 8) or GHS (SP ≈ 0.005–0.02 via the histogram markers, D 8–15) | Optional: Star Removal before stretching |
+| 9 Adjust | Gentle S-curve | |
+| 10 Export | PNG 16-bit | |
 
 ### Roman Space Telescope (ASDF)
 
@@ -352,10 +387,10 @@ Frontend (React 19 + TypeScript 5.7 + Tailwind v4)
 +-- infrastructure/tauri/ IPC layer (safeInvoke, withPreview, getOutputDir)
 +-- Lazy-loaded panels via React.lazy + Suspense
          |
-         | Tauri Commands (66)
+         | Tauri Commands (71)
          v
 Backend (Rust + Tauri v2.10)
-+-- cmd/     66 command handlers across 16 modules
++-- cmd/     71 command handlers across 16 modules
 +-- core/    alignment (phase correlation + affine), analysis (stars, photometry,
 |            deconvolution), astrometry (WCS+SIP, plate solve, SPCC/Gaia),
 |            compose (RGB, blend, SCNR, LRGB, drizzle RGB), cube,
@@ -389,19 +424,21 @@ Backend (Rust + Tauri v2.10)
 | **v0.4** | ComposeWizard, non-destructive pipeline, tone curves, masked stretch, SPCC, affine alignment, stability WB, SCNR redistribution, blend presets, STF consistency, cache-only processing, numerical audit | Released |
 | **v0.5** | Drizzle in the wizard + dedicated Drizzle RGB tab, quality-weighted stacking, valid-FITS export with WCS/metadata preservation + `PROGRAM`/`HISTORY` provenance, shared-luminance star mask, GHS stretch, OSC debayer, interactive photometry with Gaia DR3 match, SPCC via Gaia DR3/VizieR, SIP distortion, linked STF (preview == export), NaN-safety + math audits, 16-bit PNG export fix | **Released** |
 | **v0.5.4** | Foroosh sub-pixel phase correlation, NaN-aware resampling, calibration master-dimension safety, median flat normalization, reflection rejection, NaN-preserving stacks, Lanczos low-coverage guard; UI knobs for Drizzle RGB rejection/manual WB/alignment method, subframe scoring weights, plate-solve scale units + downsample | **Released** |
-| **v0.6** | FITS ERR/DQ/VAR propagation, MAST API, levels, selective saturation, star removal | Next |
-| **v0.7** | PixelMath, mosaic stitching, gradient-aware background, photometric calibration refinements | Planned |
-| **v1.0** | Full WebGPU pipeline, WASM plugins, Python scripting | Planned |
+| **v0.5.6** | Star removal (starless + stars layer), wizard LRGB, background modes (linked / neutralize / de-band auto), inline STF histograms + log midtone sliders, GHS linear-data defaults, phase-correlation identity gate, star-mask tuning, typed frontend (eslint 0), CI | **Current** |
+| **v0.6** | ASDF/FITS ERR + DQ quick-look (flag overlays, unit-aware readout), MAST API, before/after (A/B) preview per step, levels + selective saturation | Next |
+| **v0.7** | PixelMath, mosaic stitching, star deblending for dense fields, streaming drizzle (memory-bounded), photometric calibration refinements | Planned |
+| **v1.0** | Full WebGPU pipeline, WASM plugins, Python scripting, ML star removal (ONNX) | Planned |
 
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 Some areas where help would be especially valuable:
-- FITS ERR/DQ/VAR error propagation through the processing chain
+- ASDF/FITS ERR + DQ quick-look: flag overlays and unit-aware pixel readout (MJy/sr)
 - MAST API integration for direct JWST/HST data access
 - Levels and selective saturation controls
-- Star removal algorithms
+- ML-based star removal (ONNX runtime integration)
+- Star deblending for dense-field detection
 - Mosaic stitching with WCS-aware reprojection
 - WebGPU compute shaders for stacking and alignment
 - Test data curation from public archives (MAST, ESA)
