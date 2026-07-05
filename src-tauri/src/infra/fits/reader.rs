@@ -9,6 +9,8 @@ use rayon::prelude::*;
 use crate::types::HduHeader;
 use crate::types::constants::BLOCK_SIZE;
 
+use super::compress;
+
 pub fn create_mmap(file: &File) -> Result<Mmap> {
     let mmap = unsafe { MmapOptions::new().map(file).context("mmap failed")? };
     #[cfg(unix)]
@@ -277,6 +279,7 @@ pub struct HduInfo {
 struct ScannedHdu {
     info: HduInfo,
     header: HduHeader,
+    is_compressed: bool,
 }
 
 fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
@@ -299,18 +302,34 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
         };
         let h = &parsed.header;
 
-        let naxis = h.get_i64("NAXIS").unwrap_or(0);
-        let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
-        let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
-        let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
-        let bitpix = h.get_i64("BITPIX").unwrap_or(0);
         let extname = h.get("EXTNAME").map(|s| s.to_string());
         let extver = h.get_i64("EXTVER");
-
         let is_image_hdu = h
             .get("XTENSION")
-            .map_or(true, |x| x.trim().eq_ignore_ascii_case("IMAGE"));
-        let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
+            .is_none_or(|x| x.trim().eq_ignore_ascii_case("IMAGE"));
+        let is_compressed = compress::is_compressed_image_hdu(h);
+
+        // For a compressed-image BINTABLE, the Z-prefixed keywords (ZNAXIS,
+        // ZNAXISn, ZBITPIX) describe the *decompressed* image shape; NAXIS/
+        // NAXISn/BITPIX describe the BINTABLE storage itself (row bytes, row
+        // count, BITPIX=8) and are irrelevant to callers picking an image HDU.
+        // v1 scope: only 2D (ZNAXIS=2) compressed images are selectable --
+        // 3D compressed cubes fall through as has_data=false rather than
+        // being mis-selected into the plain-image/cube/RGB byte-slicing paths.
+        let (naxis, naxis1, naxis2, naxis3, bitpix, has_data) = if is_compressed {
+            let shape = compress::read_compressed_shape(h);
+            let has_data =
+                shape.znaxis == 2 && shape.znaxis1 > 1 && shape.znaxis2 > 1;
+            (shape.znaxis, shape.znaxis1, shape.znaxis2, 0, shape.zbitpix, has_data)
+        } else {
+            let naxis = h.get_i64("NAXIS").unwrap_or(0);
+            let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
+            let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
+            let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
+            let bitpix = h.get_i64("BITPIX").unwrap_or(0);
+            let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
+            (naxis, naxis1, naxis2, naxis3, bitpix, has_data)
+        };
 
         hdus.push(ScannedHdu {
             info: HduInfo {
@@ -327,6 +346,7 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
                 data_start: parsed.data_start,
             },
             header: parsed.header,
+            is_compressed,
         });
 
         offset = parsed.next_hdu_offset;
@@ -379,6 +399,10 @@ fn extract_image_from_hdu(
     mmap: &[u8],
     hdu: &ScannedHdu,
 ) -> Result<Array2<f32>> {
+    if hdu.is_compressed {
+        return compress::decode_compressed_image(mmap, &hdu.header, hdu.info.data_start);
+    }
+
     let h = &hdu.header;
     let naxis1_i = h.get_i64("NAXIS1").unwrap_or(0);
     let naxis2_i = h.get_i64("NAXIS2").unwrap_or(0);
@@ -474,6 +498,24 @@ pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
         extension_count,
         extensions,
     })
+}
+
+/// Same HDU selection as `extract_image_mmap`, but skips `extract_image_from_hdu`
+/// (pixel decode/decompress) entirely -- for callers that only need the merged
+/// header (e.g. a WCS lookup driven by mouse movement, where re-decoding the
+/// whole image on every call would be far too slow).
+pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
+    let mmap = create_mmap(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+
+    if hdus.is_empty() {
+        bail!("No HDUs found in FITS file");
+    }
+
+    let selected_idx = select_best_image_hdu(&hdus)
+        .context("No 2D image block found in any HDU")?;
+
+    Ok(build_merged_header(&hdus, selected_idx))
 }
 
 pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<MmapImageResult> {
@@ -727,5 +769,99 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["extname"], "SCI");
         assert!(json.get("header_start").is_none());
+    }
+
+    fn compressed_fixtures_dir() -> Option<std::path::PathBuf> {
+        if let Ok(d) = std::env::var("FITS_COMPRESSED_FIXTURES") {
+            return Some(std::path::PathBuf::from(d));
+        }
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("fits_compressed");
+        bundled.is_dir().then_some(bundled)
+    }
+
+    #[test]
+    fn compressed_image_reference_suite() {
+        let dir = match compressed_fixtures_dir() {
+            Some(d) => d,
+            None => return,
+        };
+
+        // (filename, expected sum of finite pixels, absolute tolerance).
+        // Expected values computed once via astropy's own decompression
+        // (`uv run --with astropy`); RICE_1/GZIP_1/GZIP_2 are lossless for
+        // integer data so those match to a tight tolerance, while the
+        // quantized-float case carries float32-rounding-level slack.
+        let cases: &[(&str, f64, f64)] = &[
+            ("rice_i16_default_tile.fits", 261136.0, 1e-6),
+            ("rice_i32_default_tile.fits", 111456500.0, 1e-3),
+            ("rice_u8_default_tile.fits", 90752.0, 1e-6),
+            // same source data as rice_i16_default_tile, but tiled 6x16
+            // instead of row-tiled -- cross-checks the 2D tile-geometry math
+            // (tiles_x>1 and tiles_y>1, partial edge tiles) independent of
+            // BSCALE/BZERO/dtype correctness.
+            ("rice_i16_2d_tiles.fits", 261136.0, 1e-6),
+            ("rice_f32_quantized.fits", -650.953536, 1e-2),
+            // every row here is internally uniform, so the quantizer falls
+            // back to GZIP_COMPRESSED_DATA (raw physical float bytes) for
+            // every tile instead of quantized RICE_1 -- exercises that
+            // fallback path and its "use global BSCALE/BZERO, not per-tile
+            // ZSCALE/ZZERO" scaling rule.
+            ("rice_f32_uniform_rows_gzip_fallback.fits", -58506.25, 1e-2),
+            ("gzip1_i16.fits", 261136.0, 1e-6),
+            ("gzip2_i32.fits", 111456500.0, 1e-3),
+            ("gzip2_i16_2d_tiles.fits", 261136.0, 1e-6),
+        ];
+
+        let mut failures = Vec::new();
+        for (name, expected, tol) in cases {
+            let path = dir.join(name);
+            if !path.exists() {
+                eprintln!("SKIP {name} (not bundled)");
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            match load_fits_image(&path_str) {
+                Ok(image) => {
+                    let sum: f64 = image.iter().filter(|v| v.is_finite()).map(|&v| v as f64).sum();
+                    if (sum - expected).abs() > *tol {
+                        eprintln!("FAIL {name} (sum {sum} expected {expected})");
+                        failures.push(*name);
+                    } else {
+                        eprintln!("PASS {name} (sum {sum:.4})");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("FAIL {name} (load error: {e})");
+                    failures.push(*name);
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "compressed-image reference suite failures: {:?}", failures);
+    }
+
+    #[test]
+    fn compressed_image_hdu_info_reports_decompressed_shape() {
+        let dir = match compressed_fixtures_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        let path = dir.join("rice_i16_default_tile.fits");
+        if !path.exists() {
+            return;
+        }
+        let file = File::open(&path).unwrap();
+        let exts = list_extensions(&file).unwrap();
+        // HDU 1 is the compressed-image BINTABLE; HduInfo should surface the
+        // *decompressed* image shape (ZNAXISn/ZBITPIX), not the BINTABLE's
+        // own row-bytes/row-count/BITPIX=8 storage shape.
+        let compressed = &exts[1];
+        assert!(compressed.has_data);
+        assert_eq!(compressed.naxis1, 37);
+        assert_eq!(compressed.naxis2, 23);
+        assert_eq!(compressed.bitpix, 16);
     }
 }
