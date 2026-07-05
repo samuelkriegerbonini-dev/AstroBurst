@@ -6,14 +6,12 @@ use crate::cmd::common::blocking_cmd;
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::extract_image_mmap;
+use crate::infra::fits::reader::{extract_header_mmap, extract_image_mmap};
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, DEFAULT_ASTROMETRY_API_URL, HEADER_NAXIS1,
     HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_FOV_ARCMIN,
     RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_NAXIS1, RES_NAXIS2,
-    RES_PIXEL_SCALE_ARCSEC, RES_WCS_CD, RES_WCS_CRPIX1, RES_WCS_CRPIX2,
-    RES_WCS_CRVAL1, RES_WCS_CRVAL2, RES_WCS_PARAMS, RES_WCS_PROJECTION,
-    RES_SIP_A, RES_SIP_B,
+    RES_PIXEL_SCALE_ARCSEC,
 };
 
 const MAX_UPLOAD_DIM: usize = 2048;
@@ -24,6 +22,17 @@ fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduH
     let result = extract_image_mmap(&file)?;
     let wcs = WcsTransform::from_header(&result.header)?;
     Ok((result.header, wcs))
+}
+
+/// Header-only variant of `load_header_and_wcs` for `pixel_to_world_cmd`, which
+/// is driven by mouse movement (potentially dozens of calls per second while
+/// dragging) -- `extract_image_mmap` decodes/decompresses the full pixel array,
+/// far too expensive to redo on every hover; `extract_header_mmap` skips that.
+fn load_wcs_only(path: &str) -> anyhow::Result<WcsTransform> {
+    let (fits_path, _tmp) = resolve_single_image(path)?;
+    let file = File::open(&fits_path)?;
+    let header = extract_header_mmap(&file)?;
+    WcsTransform::from_header(&header)
 }
 
 fn resolve_api_key(provided: Option<String>) -> Option<String> {
@@ -223,18 +232,13 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
         let pixel_scale = wcs.pixel_scale_arcsec();
         let (fov_w, fov_h) = wcs.field_of_view(naxis1, naxis2);
         let center = wcs.pixel_to_world(naxis1 as f64 / 2.0, naxis2 as f64 / 2.0);
-        let params = wcs.raw_params();
 
-        let sip_terms_json = |poly: Option<&crate::core::astrometry::wcs::SipPoly>| {
-            poly.map(|p| {
-                p.terms()
-                    .iter()
-                    .map(|&(pw, qw, c)| json!([pw, qw, c]))
-                    .collect::<Vec<_>>()
-            })
-        };
-        let (sip_a, sip_b) = wcs.sip_forward_terms();
-
+        // Per-pixel wcs_params (crpix/crval/cd/projection/sip) used to be emitted
+        // here so the frontend could do its own pix->sky math client-side
+        // (src/utils/wcstransform.ts). That TS twin is retired in favor of the
+        // `pixel_to_world_cmd` IPC command, which drives the real engine (full
+        // projection coverage, not just TAN/SIN/ARC/CAR) -- so this endpoint now
+        // only reports the static summary fields.
         Ok(json!({
             RES_CENTER_RA: center.ra,
             RES_CENTER_DEC: center.dec,
@@ -244,16 +248,34 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_FOV_ARCMIN: [fov_w, fov_h],
             RES_NAXIS1: naxis1,
             RES_NAXIS2: naxis2,
-            RES_WCS_PARAMS: {
-                RES_WCS_CRPIX1: params.0,
-                RES_WCS_CRPIX2: params.1,
-                RES_WCS_CRVAL1: params.2,
-                RES_WCS_CRVAL2: params.3,
-                RES_WCS_CD: params.4,
-                RES_WCS_PROJECTION: params.5,
-                RES_SIP_A: sip_terms_json(sip_a),
-                RES_SIP_B: sip_terms_json(sip_b),
-            },
         }))
+    })
+}
+
+/// Batched pixel->sky conversion for the frontend cursor RA/Dec readout, backing
+/// the full projection coverage wcs-rs gives us (the old readout did its own
+/// client-side math in `src/utils/wcstransform.ts`, limited to TAN/SIN/ARC/CAR).
+/// `points` are 0-based image-array pixel coordinates. Each result entry is
+/// `[ra, dec]` in degrees, or `null` if that point has no valid sky position
+/// (e.g. a singular CD matrix) -- NaN cannot round-trip through JSON.
+#[tauri::command]
+pub async fn pixel_to_world_cmd(
+    path: String,
+    points: Vec<(f64, f64)>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let wcs = load_wcs_only(&path)?;
+        let coords = wcs.pixel_to_world_batch(&points);
+        let out: Vec<serde_json::Value> = coords
+            .into_iter()
+            .map(|c| {
+                if c.ra.is_finite() && c.dec.is_finite() {
+                    json!([c.ra, c.dec])
+                } else {
+                    serde_json::Value::Null
+                }
+            })
+            .collect();
+        Ok(json!({ "points": out }))
     })
 }

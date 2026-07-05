@@ -1,7 +1,7 @@
 import { typedInvoke } from "../infrastructure/tauri";
-import type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
+import type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/types/astrometry";
 
-export type { WcsInfo, PlateSolveOptions } from "../shared/types/astrometry";
+export type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/types/astrometry";
 
 export interface PlateSolveResult {
   center_ra: number;
@@ -12,14 +12,6 @@ export interface PlateSolveResult {
   fov_arcmin: [number, number];
   naxis1: number;
   naxis2: number;
-  wcs_params?: {
-    crpix1: number;
-    crpix2: number;
-    crval1: number;
-    crval2: number;
-    cd: number[][];
-    projection: string;
-  };
 }
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {
@@ -38,4 +30,10 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
 
 export function getWcsInfo(path: string): Promise<WcsInfo> {
   return typedInvoke<WcsInfo>("get_wcs_info", { path });
+}
+
+/** Batched 0-based pixel -> (ra, dec) via the wcs-rs-backed engine (replaces the
+ * old client-side `src/utils/wcstransform.ts`, which only covered TAN/SIN/ARC/CAR). */
+export function pixelToWorld(path: string, points: [number, number][]): Promise<PixelToWorldResult> {
+  return typedInvoke<PixelToWorldResult>("pixel_to_world_cmd", { path, points });
 }

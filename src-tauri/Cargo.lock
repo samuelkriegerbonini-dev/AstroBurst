@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "astroburst"
-version = "0.5.6"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -209,6 +209,7 @@ dependencies = [
  "tower-http 0.5.2",
  "urlencoding",
  "uuid",
+ "wcs",
  "zip",
 ]
 
@@ -1407,6 +1408,18 @@ name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
+
+[[package]]
+name = "enum_dispatch"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "enumflags2"
@@ -2901,6 +2914,12 @@ name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
+
+[[package]]
+name = "mapproj"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cef28b23f82a86b32a30cfbd8e45fb66645bd677b150636ae277ac9295054c44"
 
 [[package]]
 name = "markup5ever"
@@ -6447,6 +6466,19 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap 2.13.1",
  "semver",
+]
+
+[[package]]
+name = "wcs"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "596ba3e58d9861b3323c3cc572c3c7453f48e9b357c89ec04b16c5f9babcfd91"
+dependencies = [
+ "enum_dispatch",
+ "mapproj",
+ "paste",
+ "quick-error",
+ "serde",
 ]
 
 [[package]]

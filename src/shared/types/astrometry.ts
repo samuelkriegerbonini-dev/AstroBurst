@@ -7,16 +7,12 @@ export interface WcsInfo {
   field_of_view_h_arcmin: number;
   naxis1: number;
   naxis2: number;
-  wcs_params?: {
-    crpix1: number;
-    crpix2: number;
-    crval1: number;
-    crval2: number;
-    cd: [[number, number], [number, number]];
-    projection: string;
-    sip_a?: { i: number; j: number; value: number }[] | null;
-    sip_b?: { i: number; j: number; value: number }[] | null;
-  };
+}
+
+/** Result of `pixel_to_world_cmd`: one `[ra, dec]` pair (degrees) per input
+ * pixel, or `null` where that pixel has no valid sky position. */
+export interface PixelToWorldResult {
+  points: ([number, number] | null)[];
 }
 
 export interface PlateSolveOptions {
