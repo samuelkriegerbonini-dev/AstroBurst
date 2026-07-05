@@ -46,6 +46,8 @@ function getStfWorker(): Worker {
       if (cb) {
         _pendingCallbacks.delete(id);
         cb({ bitmap, width, height });
+      } else if (bitmap) {
+        (bitmap as ImageBitmap).close();
       }
     }
   };

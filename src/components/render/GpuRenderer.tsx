@@ -98,7 +98,7 @@ export default function GpuRenderer({
         workerPixelsReadyRef.current = true;
       }
     });
-  }, [rawData, width, height, gpuReady]);
+  }, [rawData, width, height, gpuReady, gpuGen]);
 
   const renderGPU = useCallback(() => {
     const gpu = getGpuState();

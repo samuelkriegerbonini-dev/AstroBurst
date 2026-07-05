@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { getGpuSingleton, getGpuState } from "../../infrastructure/gpu/GpuSingleton";
+import { getGpuSingleton, getGpuState, onGpuLost } from "../../infrastructure/gpu/GpuSingleton";
 import type { RawRgbPixelData, StfParams } from "../../shared/types";
 
 interface GpuRgbResources {
@@ -24,6 +24,7 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
   const prevDimsRef = useRef({ w: 0, h: 0 });
   const uploadedRgbRef = useRef<RawRgbPixelData | null>(null);
   const [gpuReady, setGpuReady] = useState(false);
+  const [gpuOk, setGpuOk] = useState(true);
   const rafRef = useRef<number | null>(null);
   const contextConfiguredRef = useRef(false);
   const uniformScratchRef = useRef<Float32Array | null>(null);
@@ -31,8 +32,10 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
 
   useEffect(() => {
     let cancelled = false;
-    getGpuSingleton().then(() => {
-      if (!cancelled) setGpuReady(true);
+    getGpuSingleton().then((gpu) => {
+      if (cancelled) return;
+      if (!gpu) setGpuOk(false);
+      setGpuReady(true);
     });
     return () => { cancelled = true; };
   }, []);
@@ -57,6 +60,14 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
     };
   }, [destroyGPUResources]);
 
+  useEffect(() => {
+    const unsubscribe = onGpuLost(() => {
+      destroyGPUResources();
+      setGpuOk(false);
+    });
+    return unsubscribe;
+  }, [destroyGPUResources]);
+
   const renderGPU = useCallback(() => {
     const gpu = getGpuState();
     if (!gpu || !canvasRef.current) return;
@@ -65,7 +76,10 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
     const h = rgb.height;
 
     const maxTex = device.limits.maxTextureDimension2D;
-    if (w > maxTex || h > maxTex) return;
+    if (w > maxTex || h > maxTex) {
+      setGpuOk(false);
+      return;
+    }
 
     const canvas = canvasRef.current;
     if (canvas.width !== w || canvas.height !== h) {
@@ -174,16 +188,20 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
   }, [rgb, stfR, stfG, stfB, destroyGPUResources]);
 
   useEffect(() => {
-    if (!gpuReady) return;
+    if (!gpuReady || !gpuOk) return;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       renderGPU();
     });
-  }, [gpuReady, renderGPU]);
+  }, [gpuReady, gpuOk, renderGPU]);
 
   if (!gpuReady) {
     return <div className={`animate-pulse bg-zinc-800/50 ${className}`} style={{ aspectRatio: rgb.width / rgb.height }} />;
+  }
+
+  if (!gpuOk) {
+    return null;
   }
 
   return (

@@ -45,6 +45,11 @@ fn mtf(m: f32, x: f32) -> f32 {
     return a / b;
 }
 
+fn is_nan_bits(v: f32) -> bool {
+    let bits = bitcast<u32>(v);
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+}
+
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let px = vec2<u32>(
@@ -52,6 +57,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         u32(clamp(uv.y * params.tex_h, 0.0, params.tex_h - 1.0)),
     );
     let val = textureLoad(raw_tex, px, 0).r;
+    if (is_nan_bits(val)) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
 
     let norm = (val - params.data_min) / max(params.data_max - params.data_min, 1e-8);
 
@@ -111,8 +119,14 @@ fn mtf(m: f32, x: f32) -> f32 {
     return a / b;
 }
 
+fn is_nan_bits(v: f32) -> bool {
+    let bits = bitcast<u32>(v);
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+}
+
 // c = (data_min, data_max, shadow, midtone); applies the same normalize + STF as the mono shader.
 fn stf_channel(c: vec4<f32>, high: f32, val: f32) -> f32 {
+    if (is_nan_bits(val)) { return 0.0; }
     let norm = (val - c.x) / max(c.y - c.x, 1e-8);
     let range = high - c.z;
     var x = (norm - c.z) / max(range, 1e-8);
@@ -144,6 +158,7 @@ let _gpuSingleton: GpuResources | null = null;
 let _gpuInitPromise: Promise<GpuResources | null> | null = null;
 let _gpuAvailable: boolean | null = null;
 let _gpuReason: string | null = null;
+let _gpuGeneration = 0;
 
 type GpuLostListener = () => void;
 const _gpuLostListeners = new Set<GpuLostListener>();
@@ -155,13 +170,19 @@ export function onGpuLost(listener: GpuLostListener): () => void {
   };
 }
 
-function handleGpuLost(reason: string, uiReason: string): void {
+function handleGpuLost(generation: number, reason: string, uiReason: string): void {
+  if (generation !== _gpuGeneration) return;
   if (_gpuSingleton === null && _gpuInitPromise === null) return;
   console.warn(`[AstroBurst] WebGPU device unusable (${reason}); switching to CPU rendering.`);
+  const device = _gpuSingleton?.device ?? null;
   _gpuSingleton = null;
   _gpuInitPromise = null;
   _gpuAvailable = null;
   _gpuReason = uiReason;
+  try {
+    device?.destroy();
+  } catch {
+  }
   for (const listener of _gpuLostListeners) {
     try {
       listener();
@@ -172,6 +193,7 @@ function handleGpuLost(reason: string, uiReason: string): void {
 
 export function getGpuSingleton(): Promise<GpuResources | null> {
   if (_gpuInitPromise) return _gpuInitPromise;
+  const generation = ++_gpuGeneration;
   _gpuInitPromise = (async () => {
     if (!navigator.gpu) {
       _gpuAvailable = false;
@@ -213,12 +235,14 @@ export function getGpuSingleton(): Promise<GpuResources | null> {
       });
 
       device.addEventListener("uncapturederror", (e) => {
-        console.error("[AstroBurst] WebGPU uncaptured error:", (e as GPUUncapturedErrorEvent).error);
-        handleGpuLost("uncaptured error", "GPU error — using CPU");
+        const error = (e as GPUUncapturedErrorEvent).error;
+        console.error("[AstroBurst] WebGPU uncaptured error:", error);
+        if (error instanceof GPUValidationError) return;
+        handleGpuLost(generation, "uncaptured error", "GPU error — using CPU");
       });
 
       device.lost.then((info) => {
-        handleGpuLost(`device lost: ${info?.reason ?? "unknown"}`, "GPU device lost — using CPU");
+        handleGpuLost(generation, `device lost: ${info?.reason ?? "unknown"}`, "GPU device lost — using CPU");
       });
 
       _gpuSingleton = { device, pipeline, rgbPipeline, format };

@@ -99,7 +99,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { renderedPreviewUrl } = useRenderContext();
-  const { compositePreviewUrl } = useCompositeContext();
+  const { compositePreviewUrl, initRgb, setCompositePreviewUrl } = useCompositeContext();
   const { starOverlayRef } = useStarOverlayContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
@@ -119,7 +119,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   fileDimsRef.current = file?.result?.dimensions;
 
   const isRgbView = compositePreviewUrl !== null;
-  const rgbSource = file?.result?.is_rgb ? (file.path ?? null) : null;
+  const isFileRgbView = isRgbView && !!file?.result?.is_rgb && compositePreviewUrl === (file?.result?.previewUrl ?? null);
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
 
   const bottomHeightRef = useRef(BOTTOM_DEFAULT);
@@ -134,10 +134,12 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     const unsub = onGpuLost(() => {
       setGpuAvailable(false);
       setGpuReason(getGpuReason());
+      setUseGpu(false);
+      clearRawPixels();
       clearRgbRawPixels();
     });
     return unsub;
-  }, [clearRgbRawPixels]);
+  }, [clearRawPixels, clearRgbRawPixels]);
 
   useEffect(() => {
     if (!file || file.id === prevFileIdRef.current) return;
@@ -147,8 +149,14 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     clearRawPixels();
     clearRgbRawPixels();
     if (gpuAvailable && useGpu) {
-      if (file.result?.is_rgb) loadRgbRawPixels(file.path, true);
-      else loadRawPixels(true);
+      const fid = file.id;
+      const path = file.path;
+      const isRgb = !!file.result?.is_rgb;
+      queueMicrotask(() => {
+        if (prevFileIdRef.current !== fid) return;
+        if (isRgb) loadRgbRawPixels(path, true);
+        else loadRawPixels(true);
+      });
     }
   }, [file?.id, file?.path, file?.result?.is_rgb, gpuAvailable, useGpu, clearRawPixels, clearRgbRawPixels, loadRawPixels, loadRgbRawPixels, resetMouse]);
 
@@ -159,10 +167,18 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       clearRgbRawPixels();
     } else {
       setUseGpu(true);
-      if (compositePreviewUrl) loadRgbRawPixels(rgbSource);
-      else loadRawPixels();
+      if (compositePreviewUrl) {
+        loadRgbRawPixels(isFileRgbView ? (file?.path ?? null) : null);
+      } else if (file?.result?.is_rgb) {
+        const r = file.result;
+        if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
+        else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
+        loadRgbRawPixels(file.path ?? null, true);
+      } else {
+        loadRawPixels();
+      }
     }
-  }, [useGpu, compositePreviewUrl, rgbSource, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
+  }, [useGpu, compositePreviewUrl, isFileRgbView, file, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels, initRgb, setCompositePreviewUrl]);
 
   const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
     if (!isCube || !file?.path) return;

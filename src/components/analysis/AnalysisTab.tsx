@@ -117,8 +117,8 @@ function AnalysisTabInner({
   }, [histData, handleStfChange, setStfParams]);
 
   const handleResetStf = useCallback(() => {
-    setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
-  }, [setStfParams]);
+    handleStfChange({ shadow: 0, midtone: 0.5, highlight: 1 });
+  }, [handleStfChange]);
 
   const handleDetectStars = useCallback(
     async (sigma: number) => {
