@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Flatpak/Flathub submission (PR pending approval)
 - Export panel accessible from PreviewPanel bottom strip (Download icon, lazy-loaded ExportTab)
+- WCS engine replaced with the [wcs](https://github.com/cds-astro/wcs-rs) crate (wcs-rs + mapproj), expanding projection support from TAN/SIN/ARC/CAR to ~20 FITS projections (adds STG, ZEA, ZPN, AIR, AZP, SZP, CYP, CEA, MER, SFL, PAR, MOL, AIT, conic COP/COD/COE/COO, HPX) and proper CD/PC/CDELT matrix handling; `WcsTransform`'s public API is unchanged, SIP distortion is still applied by AstroBurst's own math (see Fixed)
+- New `pixel_to_world_cmd` Tauri command backing the cursor RA/Dec readout, replacing a duplicated client-side pixel<->sky implementation (`src/utils/wcstransform.ts`, now removed) with the same wcs-rs-backed engine used everywhere else
 
 ### Fixed
+- WCS headers using the `PC` matrix convention (no `CD` keywords, e.g. ASDF/Roman-derived FITS) were silently mis-transformed: the old hand-rolled WCS math only ever read `CD1_1..CD2_2` or fell back to `CDELT`+`CROTA2`, ignoring `PC` entirely
+- Cross-checked against `mapproj` 0.4.0's own SIP polynomial evaluator, which has a confirmed bug (advances polynomial powers by repeated squaring instead of by degree) that silently produces wildly wrong sky coordinates for any SIP-distorted header; AstroBurst's WCS wrapper strips the `-SIP` CTYPE suffix before constructing the wcs-rs engine so its broken SIP path never runs, and applies/inverts SIP with its own (previously existing, still correct) math instead
 
 #### Export Pipeline (3 critical fixes)
 - `export_rgb_png` cache hit branch applied auto-STF even when `applyStfStretch = false`, corrupting linear exports; now renders raw linear data directly via `render_rgb` / `render_rgb_16bit`

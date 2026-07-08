@@ -249,7 +249,7 @@ It's built on Rust for the heavy lifting, React for the interface, and WebGPU fo
 
 ### Astrometry
 - Plate solving via astrometry.net (auto-downsample for large images, results rescaled to full resolution)
-- WCS coordinate readout and pixel/world conversion (TAN/SIN/ARC/CAR projections, SIP distortion)
+- WCS coordinate readout and pixel/world conversion, backed by the [wcs](https://github.com/cds-astro/wcs-rs) crate: ~20 FITS projections (TAN, SIN, ARC, CAR, STG, ZEA, ZPN, AIR, AZP, SZP, CYP, CEA, MER, SFL, PAR, MOL, AIT, conic COP/COD/COE/COO, HPX), CD/PC/CDELT matrix conventions, and SIP distortion
 - Labeled field annotations drawn as a toggleable overlay
 
 ### For Scientists: ASDF Quick-Look
