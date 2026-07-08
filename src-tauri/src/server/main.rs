@@ -7,6 +7,7 @@ mod job;
 mod router;
 mod session;
 mod state;
+mod v2;
 
 #[cfg(test)]
 mod tests;

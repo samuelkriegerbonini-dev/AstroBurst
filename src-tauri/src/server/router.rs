@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::handlers::{io, jobs, pipeline, render, sessions, stacking};
 use super::state::AppState;
+use super::v2;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -31,6 +32,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/:sid/stacking/stack",   routing::post(stacking::stack))
         .route("/sessions/:sid/stacking/drizzle", routing::post(stacking::drizzle))
         .route("/sessions/:sid/pipeline/run", routing::post(pipeline::run))
+        .route("/v2/sessions", routing::post(sessions::create))
+        .route(
+            "/v2/sessions/:sid",
+            get(v2::sessions::status).delete(v2::sessions::delete),
+        )
+        .route("/v2/sessions/:sid/keepalive", routing::post(v2::sessions::keepalive))
+        .route("/v2/sessions/:sid/open", routing::post(v2::images::open))
+        .route("/v2/sessions/:sid/hdu", routing::post(v2::images::switch_hdu))
+        .route("/v2/sessions/:sid/images", get(v2::images::list_images))
+        .route("/v2/sessions/:sid/structure", get(v2::inspect::structure))
+        .route("/v2/sessions/:sid/header", get(v2::inspect::header))
+        .route("/v2/sessions/:sid/wcs", get(v2::inspect::wcs))
+        .route("/v2/sessions/:sid/cutout", routing::post(v2::cutout::cutout))
+        .route("/v2/sessions/:sid/wcs/pix2sky", routing::post(v2::wcs::pix2sky))
+        .route("/v2/sessions/:sid/wcs/sky2pix", routing::post(v2::wcs::sky2pix))
+        .route("/v2/sessions/:sid/wcs/separation", routing::post(v2::wcs::separation))
+        .route("/v2/sessions/:sid/bin", routing::post(v2::bin::bin))
+        .route("/v2/sessions/:sid/pixel", routing::post(v2::pixel::pixel))
+        .route("/v2/sessions/:sid/stats", routing::post(v2::stats::stats))
+        .route("/v2/sessions/:sid/histogram", routing::post(v2::histogram::histogram))
+        .route("/v2/sessions/:sid/render", routing::post(v2::render::handler::render))
         .with_state(state)
         .layer(middleware::from_fn(request_id))
 }
