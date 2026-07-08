@@ -1,6 +1,7 @@
 pub mod background;
 pub mod boundary;
 pub mod calibration_pipeline;
+pub mod colormap;
 pub mod curves;
 pub mod debayer;
 pub mod masked_stretch;
@@ -15,3 +16,4 @@ pub mod stats;
 pub mod stf;
 pub mod stretch;
 pub mod wavelet;
+pub mod zscale;
