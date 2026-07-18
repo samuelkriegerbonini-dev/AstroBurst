@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { Slider, Toggle } from "../ui";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 import StfHistogram from "../compose/StfHistogram";
 
@@ -15,10 +15,11 @@ const HIST_RGB = [
 
 export default function RgbStfPanel() {
   const {
-    compositeStfR, compositeStfG, compositeStfB, setCompositeStf,
-    compositeStfLinked, setCompositeStfLinked,
+    compositeStfR, compositeStfG, compositeStfB,
+    compositeStfLinked,
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
-  } = useCompositeContext();
+  } = useCompositeStf();
+  const { setCompositeStf, setCompositeStfLinked } = useCompositeActions();
 
   const updateChannel = useCallback(
     (ch: "r" | "g" | "b", param: keyof StfParams, val: number) => {

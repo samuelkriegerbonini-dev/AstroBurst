@@ -61,6 +61,7 @@ interface PlateSolvePanelProps {
   elapsed?: number;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   filePath?: string | null;
+  detectError?: string | null;
 }
 
 function PlateSolvePanel({
@@ -74,6 +75,7 @@ function PlateSolvePanel({
                                           elapsed = 0,
                                           overlayCanvasRef,
                                           filePath,
+                                          detectError = null,
                                         }: PlateSolvePanelProps) {
 
   const [sigma, setSigma] = useState(5.0);
@@ -258,7 +260,7 @@ function PlateSolvePanel({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
+      <div className="ab-panel overflow-hidden">
         <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
           <div className="flex items-center gap-2">
             <Crosshair size={12} className="text-cyan-400" />
@@ -307,6 +309,12 @@ function PlateSolvePanel({
               <><StarIcon size={12} /> Detect Stars</>
             )}
           </button>
+
+          {detectError && (
+            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
+              Star detection failed: {detectError}
+            </div>
+          )}
 
           {stars.length > 0 && (
             <div className="space-y-1.5">
@@ -369,7 +377,7 @@ function PlateSolvePanel({
         </div>
       </div>
 
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
+      <div className="ab-panel overflow-hidden">
         <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
           <div className="flex items-center gap-2">
             <Compass size={12} className="text-emerald-400" />

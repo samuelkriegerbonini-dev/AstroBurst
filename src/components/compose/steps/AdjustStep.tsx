@@ -5,7 +5,7 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
-import { useCompositeContext } from "../../../context/CompositeContext";
+import { useCompositeStf } from "../../../context/CompositeContext";
 
 interface AdjustStepProps {
   state: WizardState;
@@ -37,7 +37,7 @@ function isIdentity(pts: CurvePoint[]): boolean {
 }
 
 export default function AdjustStep({ state, onResult }: AdjustStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeContext();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ToneResult | null>(null);
   const [error, setError] = useState("");

@@ -344,7 +344,7 @@ export default function HeaderExplorerPanel({
                             </span>
                             <button
                               onClick={() => handleCopy(key, displayValue)}
-                              className="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
+                              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
                               title={`Copy ${key}`}
                             >
                               {copiedKey === key

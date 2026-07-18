@@ -149,44 +149,50 @@ export function useFileQueue() {
 
       await yieldToUI();
 
-      let hasWork = true;
-      while (hasWork) {
-        pendingKickRef.current = false;
-        const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
-        if (queue.length === 0) {
-          if (pendingKickRef.current) continue;
-          break;
+      for (;;) {
+        let hasWork = true;
+        while (hasWork) {
+          pendingKickRef.current = false;
+          const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+          if (queue.length === 0) {
+            if (pendingKickRef.current) continue;
+            break;
+          }
+
+          let idx = 0;
+          let processedSinceYield = 0;
+          const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
+
+          const runNext = async (): Promise<void> => {
+            let file: ProcessedFile | null;
+            while ((file = getNext()) !== null) {
+              await processOneFile(file);
+              processedSinceYield++;
+              if (processedSinceYield >= YIELD_INTERVAL) {
+                processedSinceYield = 0;
+                await yieldToUI();
+              }
+            }
+          };
+
+          const workers = Array.from(
+            { length: Math.min(CONCURRENCY, queue.length) },
+            () => runNext(),
+          );
+          await Promise.all(workers);
+
+          const remaining = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+          hasWork = remaining.length > 0 || pendingKickRef.current;
         }
 
-        let idx = 0;
-        let processedSinceYield = 0;
-        const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
+        await runAutoResample();
 
-        const runNext = async (): Promise<void> => {
-          let file: ProcessedFile | null;
-          while ((file = getNext()) !== null) {
-            await processOneFile(file);
-            processedSinceYield++;
-            if (processedSinceYield >= YIELD_INTERVAL) {
-              processedSinceYield = 0;
-              await yieldToUI();
-            }
-          }
-        };
-
-        const workers = Array.from(
-          { length: Math.min(CONCURRENCY, queue.length) },
-          () => runNext(),
-        );
-        await Promise.all(workers);
-
-        const remaining = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
-        hasWork = remaining.length > 0 || pendingKickRef.current;
+        const queuedAfter = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+        if (queuedAfter.length === 0) break;
       }
 
       processingRef.current = false;
       fileStore.setProcessing(false);
-      await runAutoResample();
 
       if (onComplete) onComplete();
     },

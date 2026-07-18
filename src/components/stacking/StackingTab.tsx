@@ -57,6 +57,12 @@ function StackingTabInner() {
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_CONFIG);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
+  const [rejectedPaths, setRejectedPaths] = useState<string[]>([]);
+
+  const handleSubframeSelection = useCallback((_accepted: string[], rejected: string[]) => {
+    setRejectedPaths(rejected);
+    setActive("stack");
+  }, []);
 
   const handlePreviewUpdate = useCallback(
     (url: string | null | undefined) => {
@@ -154,7 +160,7 @@ function StackingTabInner() {
             />
           </div>
           <div style={{ display: active === "subframe" ? "block" : "none" }}>
-            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} />
+            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} onSelectionChange={handleSubframeSelection} />
           </div>
           <div style={{ display: active === "stack" ? "block" : "none" }}>
             <StackingPanel
@@ -163,6 +169,7 @@ function StackingTabInner() {
               injectedPaths={injectedPaths}
               stackConfig={stackConfig}
               onStackConfigChange={handleStackConfigChange}
+              rejectedPaths={rejectedPaths}
             />
           </div>
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>

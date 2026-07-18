@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositeActions } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
   nextEnabledStep,
@@ -86,7 +86,7 @@ export default function ComposeWizard() {
     setCompositePreviewUrl,
     setCompositeAutoStf,
     setCompositeStf,
-  } = useCompositeContext();
+  } = useCompositeActions();
   const {
     setActiveImagePath,
   } = useRenderContext();

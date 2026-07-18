@@ -7,7 +7,7 @@ import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStre
 import type { StarRemovalResult } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { useCompositeContext } from "../../../context/CompositeContext";
+import { useCompositeStf } from "../../../context/CompositeContext";
 import StfHistogram from "../StfHistogram";
 
 const HIST_RGB = [
@@ -42,7 +42,7 @@ interface StretchRunResult {
 }
 
 export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult }: StretchStepProps) {
-  const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeContext();
+  const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeStf();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<StretchRunResult | null | undefined>(null);
   const [error, setError] = useState("");
@@ -185,9 +185,10 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           onResult(res.previewUrl, stfBundle);
         }
       } else {
-        if (state.compositeReady) {
-          res = await restretchComposite(dir, stfR, stfG, stfB);
+        if (!state.compositeReady) {
+          throw new Error("Run Blend first — Auto STF re-stretch operates on the blended composite");
         }
+        res = await restretchComposite(dir, stfR, stfG, stfB);
         if (res?.png_path) {
           const url = await getPreviewUrl(res.png_path);
           onResult(url, stfBundle);

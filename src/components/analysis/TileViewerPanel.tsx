@@ -79,7 +79,7 @@ function TileViewerPanelInner({ filePath, imageWidth, imageHeight }: TileViewerP
       </div>
 
       {isOpen && filePath && (
-        <div className="fixed inset-0 z-50 bg-zinc-950">
+        <div className="fixed inset-0 z-[90] bg-zinc-950">
           <DeepZoomViewer
             filePath={filePath}
             imageWidth={imageWidth || 0}

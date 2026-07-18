@@ -14,7 +14,7 @@ import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
-import { useCompositeContext } from "./CompositeContext";
+import { useCompositeActions } from "./CompositeContext";
 import { clearCompositeCache } from "../services/compose";
 import type { ProcessedFile, StfParams, HistogramData, RawPixelData, RawRgbPixelData } from "../shared/types";
 import type { CubeDims } from "../shared/types/cube";
@@ -142,8 +142,15 @@ function setPreviewCache(key: string, value: string) {
 
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
+const PREVIEW_MAX_DIM_CAP = 2048;
+
+function computePreviewMaxDim(): number {
+  const dpr = window.devicePixelRatio || 1;
+  return Math.min(Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr), PREVIEW_MAX_DIM_CAP);
+}
+
 export function PreviewProvider({ file, doneFiles, children }: Props) {
-  const composite = useCompositeContext();
+  const composite = useCompositeActions();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
   const [stfParams, setStfParams] = useState<StfParams>(DEFAULT_STF);
@@ -167,7 +174,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const seqRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
   const rgbRawPixelsAbortRef = useRef(0);
+  const lastFetchMaxDimRef = useRef(0);
+  const rgbSourceRef = useRef<string | null>(null);
   const narrowbandKeyRef = useRef("");
+  const narrowbandSeqRef = useRef(0);
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
 
   const rawPixelsRef = useRef(rawPixels);
@@ -183,8 +193,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const setRenderedPreviewUrl = useCallback(
     (url: string | null) => {
+      const creatingId = file?.id ?? null;
+      if (prevFileIdRef.current !== creatingId) return;
       setRenderedPreviewUrlRaw(url);
-      if (url && file?.id) setPreviewCache(file.id, url);
+      if (url && creatingId) setPreviewCache(creatingId, url);
     },
     [file?.id],
   );
@@ -209,9 +221,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         timer = window.setTimeout(attempt, 400);
         return;
       }
-      narrowbandKeyRef.current = key;
+      const seq = ++narrowbandSeqRef.current;
       detectNarrowbandFilters(paths, selectedPalette)
         .then((result) => {
+          if (narrowbandSeqRef.current !== seq) return;
+          narrowbandKeyRef.current = key;
           if (result?.palette) setNarrowbandPalette(result.palette);
           if (result?.filters) setNarrowbandFilters(result.filters);
         })
@@ -227,7 +241,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (!force && (rawPixelsRef.current || rawPixelsLoadingRef.current)) return;
     setRawPixelsLoading(true);
     const seq = ++rawPixelsAbortRef.current;
-    const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
+    const maxDim = computePreviewMaxDim();
+    lastFetchMaxDimRef.current = maxDim;
     getRawPixelsPreview(path, maxDim)
       .then((result) => {
         if (rawPixelsAbortRef.current !== seq) return;
@@ -259,7 +274,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (!force && (rgbRawPixelsRef.current || rgbRawPixelsLoadingRef.current)) return;
     setRgbRawPixelsLoading(true);
     const seq = ++rgbRawPixelsAbortRef.current;
-    const maxDim = Math.min(window.innerWidth, window.innerHeight, 2048);
+    const maxDim = computePreviewMaxDim();
+    lastFetchMaxDimRef.current = maxDim;
+    rgbSourceRef.current = source;
     getRawRgbPixelsPreview(source, maxDim)
       .then((result) => {
         if (rgbRawPixelsAbortRef.current !== seq) return;
@@ -280,6 +297,26 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRgbRawPixels(null);
     setRgbRawPixelsLoading(false);
   }, []);
+
+  useEffect(() => {
+    let timer = 0;
+    const onResize = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const prev = lastFetchMaxDimRef.current;
+        if (prev === 0 || prev >= PREVIEW_MAX_DIM_CAP) return;
+        const next = computePreviewMaxDim();
+        if (next <= prev * 1.25) return;
+        if (rawPixelsRef.current) loadRawPixels(true);
+        if (rgbRawPixelsRef.current) loadRgbRawPixels(rgbSourceRef.current, true);
+      }, 300);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(timer);
+    };
+  }, [loadRawPixels, loadRgbRawPixels]);
 
   useEffect(() => {
     if (!file?.path || file.id === prevFileIdRef.current) return;

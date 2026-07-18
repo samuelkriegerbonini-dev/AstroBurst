@@ -115,6 +115,15 @@ export function cancelPendingRenders(): void {
   _pendingCallbacks.clear();
 }
 
+export function clearWorkerPixels(): void {
+  _hasPixels = false;
+  _pixelsGeneration++;
+  _pendingPixelsPromise = null;
+  if (_worker) {
+    _worker.postMessage({ type: "clearPixels" });
+  }
+}
+
 export function terminateStfWorker(): void {
   if (_worker) {
     _worker.terminate();

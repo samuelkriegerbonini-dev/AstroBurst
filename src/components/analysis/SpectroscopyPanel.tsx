@@ -11,6 +11,7 @@ interface SpectroscopyPanelProps {
   isLoading?: boolean;
   cubeDims?: { width: number; height: number; frames: number; naxis3?: number; spectral_classification?: { axis_unit?: string | null } | null } | null;
   elapsed?: number;
+  error?: string | null;
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
   onCollapsePreview?: (previewUrl: string) => void;
@@ -40,6 +41,7 @@ function SpectroscopyPanel({
                                             isLoading = false,
                                             cubeDims = null,
                                             elapsed = 0,
+                                            error = null,
                                             filePath,
                                             onFramePreview,
                                             onCollapsePreview,
@@ -265,6 +267,11 @@ function SpectroscopyPanel({
           <Activity size={18} style={{ color: "var(--ab-violet)", opacity: 0.5 }} />
         </div>
         <p className="text-[11px] text-zinc-500">Click on the preview image to extract a spectrum</p>
+        {error && (
+          <p className="text-[10px] text-red-400/80 text-center px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
+            Spectrum extraction failed: {error}
+          </p>
+        )}
       </div>
     );
   }

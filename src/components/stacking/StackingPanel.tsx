@@ -6,6 +6,7 @@ import type { StackResult } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { StackConfig } from "./StackingTab";
+import { resolveEffectivePath } from "../../hooks/useFileStore";
 
 interface StackingPanelProps {
   files: ProcessedFile[];
@@ -13,6 +14,7 @@ interface StackingPanelProps {
   injectedPaths?: string[];
   stackConfig?: StackConfig;
   onStackConfigChange?: (config: Partial<StackConfig>) => void;
+  rejectedPaths?: string[];
 }
 
 const ICON = <Layers size={14} className="text-amber-400" />;
@@ -23,6 +25,7 @@ export default function StackingPanel({
   injectedPaths = [],
   stackConfig,
   onStackConfigChange,
+  rejectedPaths = [],
 }: StackingPanelProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isStacking, setIsStacking] = useState(false);
@@ -50,6 +53,15 @@ export default function StackingPanel({
     });
   }, [injectedPaths]);
 
+  const prevRejectedRef = useRef<string>("");
+  useEffect(() => {
+    const key = rejectedPaths.join("|");
+    if (key === prevRejectedRef.current) return;
+    prevRejectedRef.current = key;
+    if (rejectedPaths.length === 0) return;
+    setSelectedPaths((prev) => prev.filter((p) => !rejectedPaths.includes(p)));
+  }, [rejectedPaths]);
+
   const toggleFile = useCallback((path: string) => {
     setSelectedPaths((prev) =>
       prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path],
@@ -72,7 +84,7 @@ export default function StackingPanel({
     setError(null);
     setResult(null);
     try {
-      const res = await stackFrames(selectedPaths, await getOutputDir(), {
+      const res = await stackFrames(selectedPaths.map(resolveEffectivePath), await getOutputDir(), {
         sigmaLow,
         sigmaHigh,
         maxIterations,
@@ -126,13 +138,17 @@ export default function StackingPanel({
 
         {files.map((f) => {
           const isSelected = selectedPaths.includes(f.path);
+          const isRejected = rejectedPaths.includes(f.path);
           return (
-            <button key={f.id} onClick={() => toggleFile(f.path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}>
+            <button key={f.id} onClick={() => toggleFile(f.path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"} ${isRejected && !isSelected ? "opacity-50" : ""}`}>
               <GripVertical size={10} className="text-zinc-700 shrink-0" />
               <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${isSelected ? "bg-amber-500/20 border-amber-500" : "border-zinc-600"}`}>
                 {isSelected && <CheckCircle2 size={10} className="text-amber-400" />}
               </span>
               <span className="truncate">{f.name}</span>
+              {isRejected && (
+                <span className="ml-auto text-[9px] text-red-400/70 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
+              )}
             </button>
           );
         })}

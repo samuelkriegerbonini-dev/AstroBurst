@@ -2,12 +2,11 @@ import { lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import { useFileContext, useHistContext, useStarOverlayContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
+import { useSpectrum } from "../../hooks/useSpectrumStore";
 import WcsReadout from "../header/WcsReadout";
 
 const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
-
-const EMPTY_SPECTRUM: number[] = [];
 
 function Spinner() {
   return (
@@ -70,13 +69,15 @@ export const InfoPanel = memo(function InfoPanel() {
 
 function AnalysisWrapper() {
   const { starOverlayRef } = useStarOverlayContext();
+  const spec = useSpectrum();
   return (
     <AnalysisTab
-      spectrum={EMPTY_SPECTRUM}
-      specWavelengths={null}
-      specCoord={null}
-      specLoading={false}
-      specElapsed={0}
+      spectrum={spec.spectrum}
+      specWavelengths={spec.wavelengths}
+      specCoord={spec.coord}
+      specLoading={spec.loading}
+      specElapsed={spec.elapsed}
+      specError={spec.error}
       starOverlayRef={starOverlayRef}
     />
   );

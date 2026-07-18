@@ -57,6 +57,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     if (state.wbMode !== "auto" || !state.compositeReady) return;
     let cancelled = false;
     setAutoLoading(true);
+    setError("");
     computeAutoWb()
       .then((res) => {
         if (cancelled) return;
@@ -69,7 +70,10 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         setRefChannel(res.ref_channel ?? null);
         onWbChange("auto", r, g, b);
       })
-      .catch(() => {})
+      .catch((e) => {
+        if (cancelled) return;
+        setError(`Auto WB failed: ${e instanceof Error ? e.message : String(e)}`);
+      })
       .finally(() => { if (!cancelled) setAutoLoading(false); });
     return () => { cancelled = true; };
   }, [state.wbMode, state.compositeReady]);

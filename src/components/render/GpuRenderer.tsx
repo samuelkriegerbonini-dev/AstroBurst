@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { renderStfInWorker, cancelPendingRenders, setWorkerPixels } from "../../utils/stfworker";
+import { renderStfInWorker, cancelPendingRenders, setWorkerPixels, clearWorkerPixels } from "../../utils/stfworker";
 import { getGpuSingleton, getGpuState, onGpuLost, type GpuResources as GpuSingleton } from "../../infrastructure/gpu/GpuSingleton";
 
 interface GpuResources {
@@ -69,6 +69,7 @@ export default function GpuRenderer({
     return () => {
       destroyGPUResources();
       cancelPendingRenders();
+      clearWorkerPixels();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, [destroyGPUResources]);
@@ -84,20 +85,14 @@ export default function GpuRenderer({
   }, [destroyGPUResources]);
 
   const workerPixelsReadyRef = useRef(false);
-  const pixelsGenRef = useRef(0);
 
   useEffect(() => {
     if (!rawData || !width || !height || !gpuReady || !fallbackRef.current) {
       workerPixelsReadyRef.current = false;
       return;
     }
-    workerPixelsReadyRef.current = false;
-    const gen = ++pixelsGenRef.current;
-    setWorkerPixels(rawData, width, height).then(() => {
-      if (pixelsGenRef.current === gen) {
-        workerPixelsReadyRef.current = true;
-      }
-    });
+    setWorkerPixels(rawData, width, height);
+    workerPixelsReadyRef.current = true;
   }, [rawData, width, height, gpuReady, gpuGen]);
 
   const renderGPU = useCallback(() => {

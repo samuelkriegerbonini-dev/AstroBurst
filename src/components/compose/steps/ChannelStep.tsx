@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Wand2, FolderOpen, ChevronDown, X, Sparkles } from "lucide-react";
 import type { ProcessedFile } from "../../../shared/types";
+import { ingestFiles } from "../../../hooks/useFileIngest";
 import {DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
 import { filterCodeAndWavelengthNm } from "../../../utils/filterWavelengths";
 
@@ -392,7 +393,7 @@ export default function ChannelStep({
       const paths = Array.isArray(selected) ? selected : [selected];
       if (paths.length === 0) return;
 
-      console.info("[ChannelStep] Files selected from dialog:", paths);
+      ingestFiles(paths.map((p) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
     } catch (err) {
       console.warn("[ChannelStep] Dialog not available:", err);
     }

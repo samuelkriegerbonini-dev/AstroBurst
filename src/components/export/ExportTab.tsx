@@ -4,7 +4,7 @@ import { exportFits, exportFitsRgb } from "../../services/export";
 import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
 import { useFileContext, useHistContext, useRgbContext, useCubeContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositePreview, useCompositeStf } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
@@ -13,7 +13,8 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels } = useRgbContext();
-  const { isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
+  const { isShowingComposite } = useCompositePreview();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
   const { isCube, cubeDims } = useCubeContext();
 
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
@@ -31,6 +32,7 @@ function ExportTabInner() {
         setExportResult(result);
       } catch (e) {
         console.error("FITS export failed:", e);
+        throw e;
       } finally {
         setExportLoading(false);
       }
@@ -55,6 +57,7 @@ function ExportTabInner() {
         setExportResult(result);
       } catch (e) {
         console.error("RGB FITS export failed:", e);
+        throw e;
       } finally {
         setExportLoading(false);
       }
@@ -114,7 +117,7 @@ function ExportTabInner() {
         </div>
       }
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4 p-3">
         <ExportPanel
           filePath={file?.path ?? null}
           stfParams={stfParams}

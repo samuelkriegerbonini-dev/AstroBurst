@@ -42,6 +42,14 @@ self.onmessage = function (e: MessageEvent) {
     return;
   }
 
+  if (type === "clearPixels") {
+    _pixels = null;
+    _width = 0;
+    _height = 0;
+    _rgba = null;
+    return;
+  }
+
   if (type === "render") {
     const pixels: Float32Array | null = e.data.pixels || _pixels;
     const width: number = e.data.width || _width;
@@ -66,7 +74,7 @@ self.onmessage = function (e: MessageEvent) {
       rgba[off + 3] = 255;
     }
 
-    const imgData = new ImageData(rgba.slice(0, len * 4), width, height);
+    const imgData = new ImageData(rgba.subarray(0, len * 4) as Uint8ClampedArray<ArrayBuffer>, width, height);
     createImageBitmap(imgData).then((bitmap) => {
       self.postMessage({ type: "rendered", id, bitmap, width, height }, { transfer: [bitmap] });
     });

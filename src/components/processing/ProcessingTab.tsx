@@ -1,7 +1,7 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
 import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositePreview, useCompositeStf, useCompositeScnr, useCompositeActions } from "../../context/CompositeContext";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri/client";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -79,8 +79,10 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 function ProcessingTabInner() {
   const { file } = useFileContext();
   const { setRenderedPreviewUrl } = useRenderContext();
-  const { compositePreviewUrl, setCompositePreviewUrl,
-    compositeStfR, compositeStfG, compositeStfB, compositeScnr } = useCompositeContext();
+  const { compositePreviewUrl } = useCompositePreview();
+  const { setCompositePreviewUrl } = useCompositeActions();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
+  const { compositeScnr } = useCompositeScnr();
   const { rgbChannels } = useRgbContext();
   const [active, setActive] = useState<ProcessingSection>("background");
 
@@ -93,6 +95,7 @@ function ProcessingTabInner() {
     maskedStretchFits: null,
   });
 
+  const [compositeSyncError, setCompositeSyncError] = useState<string | null>(null);
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
@@ -127,8 +130,10 @@ function ProcessingTabInner() {
         const url = await getPreviewUrl(result.png_path);
         setCompositePreviewUrl(url);
       }
+      setCompositeSyncError(null);
     } catch (e) {
       console.error("[AstroBurst] Composite channel sync failed:", e);
+      setCompositeSyncError(e instanceof Error ? e.message : String(e));
     }
   }, [setCompositePreviewUrl]);
 
@@ -232,6 +237,13 @@ function ProcessingTabInner() {
     setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null });
   }, []);
 
+  const chainFileIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (chainFileIdRef.current === (file?.id ?? null)) return;
+    chainFileIdRef.current = file?.id ?? null;
+    handleResetChain();
+  }, [file?.id, handleResetChain]);
+
   const backgroundInput = file;
 
   const denoiseInput = useMemo(() => {
@@ -306,6 +318,21 @@ function ProcessingTabInner() {
         chain={chain}
         originalName={file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original"}
       />
+
+      {compositeSyncError && (
+        <div className="flex items-center gap-2 mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
+          <span className="flex-1 truncate" title={compositeSyncError}>
+            Composite not updated: {compositeSyncError} — re-run Blend to sync
+          </span>
+          <button
+            onClick={() => setCompositeSyncError(null)}
+            className="shrink-0 text-amber-500/70 hover:text-amber-300 transition-colors"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <Suspense
         fallback={

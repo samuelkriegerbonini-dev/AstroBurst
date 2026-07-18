@@ -124,8 +124,9 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
   const handleExtractAll = useCallback(async () => {
     if (mode === "independent") {
       const bins = activeBins.slice();
-      const promises = bins.map((bin) => handleExtract(bin.id));
-      await Promise.allSettled(promises);
+      for (const bin of bins) {
+        await handleExtract(bin.id);
+      }
       return;
     }
     const batchMode = mode === "linked" ? "subtract" : mode;

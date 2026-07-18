@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { AlertTriangle } from "lucide-react";
 
 import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -168,6 +169,23 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     return base.filter((w) => filledBins.some((b) => b.id === w.channelId));
   }, [state.blendWeights, filledBins]);
 
+  const channelStages = useMemo(() => {
+    const stages: Record<string, "background" | "cropped" | "aligned" | "stacked" | "raw"> = {};
+    for (const bin of filledBins) {
+      if (state.backgroundPaths[bin.id]) stages[bin.id] = "background";
+      else if (state.croppedPaths[bin.id]) stages[bin.id] = "cropped";
+      else if (state.alignedPaths[bin.id]) stages[bin.id] = "aligned";
+      else if (state.stackedPaths[bin.id]) stages[bin.id] = "stacked";
+      else stages[bin.id] = "raw";
+    }
+    return stages;
+  }, [filledBins, state.backgroundPaths, state.croppedPaths, state.alignedPaths, state.stackedPaths]);
+
+  const unalignedBins = useMemo(
+    () => filledBins.filter((b) => channelStages[b.id] === "stacked" || channelStages[b.id] === "raw"),
+    [filledBins, channelStages],
+  );
+
   const handleRunBlend = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -298,9 +316,24 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
           if (!bin) return null;
           return (
             <div key={w.channelId} className="grid grid-cols-[1fr_60px_60px_60px] gap-1 items-center py-1 border-b border-zinc-800/20">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full" style={{ background: bin.color }} />
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: bin.color }} />
                 <span className="text-[10px] text-zinc-300">{bin.shortLabel}</span>
+                {(() => {
+                  const stage = channelStages[bin.id];
+                  const risky = stage === "stacked" || stage === "raw";
+                  const label = stage === "raw" && bin.files.length > 1 ? `raw 1/${bin.files.length}` : stage;
+                  return (
+                    <span
+                      className={`text-[8px] px-1 py-px rounded truncate ${risky ? "text-amber-400/90 bg-amber-900/25" : "text-zinc-500 bg-zinc-800/40"}`}
+                      title={stage === "raw" && bin.files.length > 1
+                        ? `Using 1 of ${bin.files.length} files — run Stack to combine them first`
+                        : `Source: ${stage} output`}
+                    >
+                      {label}
+                    </span>
+                  );
+                })()}
               </div>
               {(["r", "g", "b"] as const).map((axis) => {
                 const val = w[axis];
@@ -329,6 +362,16 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       <div className="text-[9px] text-zinc-600 bg-zinc-900/50 rounded px-2 py-1.5">
         Blend produces a linear composite. Preview uses auto-STF for visualization.
       </div>
+
+      {unalignedBins.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>
+            {unalignedBins.map((b) => b.shortLabel).join(", ")} {unalignedBins.length === 1 ? "was" : "were"} never
+            aligned — blending unregistered channels can cause color fringing. Run Align first.
+          </span>
+        </div>
+      )}
 
       <RunButton
         label="Run Blend"

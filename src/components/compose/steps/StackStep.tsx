@@ -6,6 +6,7 @@ import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider, Toggle } from "../../ui";
 import type { WizardAction } from "../../../context/ComposeWizardContext";
+import { resolveEffectivePath } from "../../../hooks/useFileStore";
 
 interface StackStepProps {
   state: WizardState;
@@ -22,6 +23,7 @@ interface StackDisplayResult {
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
   const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [stackAllProgress, setStackAllProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [results, setResults] = useState<Record<string, StackDisplayResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
@@ -94,7 +96,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   }, [state.subframeResults, overrides, dispatch]);
 
   const handleStack = useCallback(async (binId: string, allFiles: string[]) => {
-    const files = getEffectiveFiles(binId, allFiles);
+    const files = getEffectiveFiles(binId, allFiles)?.map(resolveEffectivePath);
     if (!files || files.length < 2) {
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files?.length ?? 0}` }));
       return;
@@ -136,8 +138,11 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
-    const promises = bins.map((bin) => handleStack(bin.id, bin.files));
-    await Promise.allSettled(promises);
+    for (let i = 0; i < bins.length; i++) {
+      setStackAllProgress({ current: i + 1, total: bins.length, label: bins[i].shortLabel });
+      await handleStack(bins[i].id, bins[i].files);
+    }
+    setStackAllProgress(null);
   }, [stackableBins, handleStack]);
 
   if (stackableBins.length === 0) {
@@ -161,7 +166,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         </span>
         <RunButton
           label="Stack All"
-          runningLabel="Stacking..."
+          runningLabel={stackAllProgress ? `Stacking ${stackAllProgress.label} — ${stackAllProgress.current}/${stackAllProgress.total}` : "Stacking..."}
           running={Object.values(loading).some(Boolean)}
           accent="blue"
           onClick={handleStackAll}
@@ -178,6 +183,12 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
           </div>
         )}
       </div>
+
+      {useDrizzle && Object.keys(state.subframeResults).length > 0 && (
+        <p className="text-[9px] text-amber-400/70">
+          Drizzle ignores subframe quality weights — they apply only to sigma-clip stacking.
+        </p>
+      )}
 
       {stackableBins.map((bin) => {
         const isLoading = loading[bin.id];

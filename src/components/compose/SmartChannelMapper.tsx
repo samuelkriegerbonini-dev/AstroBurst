@@ -166,6 +166,8 @@ interface DropZoneSlotProps {
   onDrop: (slot: string, file: ChannelFile) => void;
   onClear: (slot: string) => void;
   allFiles: ChannelFile[];
+  multi?: boolean;
+  count?: number;
 }
 
 function DropZoneSlot({
@@ -178,6 +180,8 @@ function DropZoneSlot({
   onDrop,
   onClear,
   allFiles,
+  multi = false,
+  count = 0,
 }: DropZoneSlotProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -241,19 +245,36 @@ function DropZoneSlot({
             <div className="ab-channel-file-detail">
               <span className="ab-channel-filename" title={file.name}>{file.name}</span>
               <div className="ab-channel-meta-row">
+                {multi && count > 1 && (
+                  <span className="ab-channel-exptime" style={{ color }}>{count} frames</span>
+                )}
                 {file.filter && <FilterChip filter={file.filter} color={color} />}
                 {file.exptime != null && (
                   <span className="ab-channel-exptime">{file.exptime}s</span>
                 )}
               </div>
             </div>
+            {multi && (
+              <button
+                className="ab-channel-browse"
+                style={{ flex: "0 0 auto", width: "auto", padding: "2px 6px" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowDropdown((v) => !v);
+                }}
+                title="Add another frame"
+              >
+                <ChevronDown size={12} />
+                <span>+</span>
+              </button>
+            )}
             <button
               className="ab-channel-clear"
               onClick={(e) => {
                 e.stopPropagation();
                 onClear(slot);
               }}
-              title="Remove"
+              title={multi && count > 1 ? `Clear all ${count} frames` : "Remove"}
             >
               <X size={12} />
             </button>
@@ -543,6 +564,8 @@ function SmartChannelMapper({
               onDrop={assignChannel}
               onClear={clearChannel}
               allFiles={files}
+              multi={CALIB_META[slot].multi}
+              count={slot === "science" ? (calibFrames.science ? 1 : 0) : (calibFrames[slot] as ChannelFile[]).length}
             />
           ))}
         </div>

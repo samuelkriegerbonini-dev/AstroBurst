@@ -275,8 +275,9 @@ class FileStore {
       } as ProcessResult,
     };
     this.state.fileMap.set(id, updated);
+    this.state.statsVersion++;
     this.bumpVersion();
-    this.scheduleFlush(NotifyChannel.All, id);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
   }
 
   selectFile(id: string) {
@@ -308,6 +309,13 @@ class FileStore {
 }
 
 export const fileStore = new FileStore();
+
+export function resolveEffectivePath(path: string): string {
+  for (const f of fileStore.getFiles()) {
+    if (f.path === path) return f.result?.resampledPath ?? path;
+  }
+  return path;
+}
 
 export function useFileIds(): string[] {
   return useSyncExternalStore(fileStore.subscribeToList, fileStore.getFileIds);

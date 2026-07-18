@@ -13,6 +13,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
+import { registerFileIngest } from "./hooks/useFileIngest";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
@@ -97,7 +98,7 @@ export default function App() {
   }, []);
   const [infoOpen, setInfoOpen] = useState(false);
 
-  const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
+  const { addFiles, startProcessing, scheduleProcessing, reset, isResampling, resampleProgress } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const fileIds = useFileIds();
   const selectedId = useSelectedId();
@@ -134,6 +135,8 @@ export default function App() {
     }
   }, [view, stats.total, isProcessing, isComplete, startProcessing]);
 
+  useEffect(() => registerFileIngest(handleFilesAdded), [handleFilesAdded]);
+
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
       setView("complete");
@@ -147,7 +150,7 @@ export default function App() {
     if (isTauri()) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
-        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "asdf"] }] });
+        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "asdf", "zip"] }] });
         if (result) {
           const paths = Array.isArray(result) ? result : [result];
           handleFilesAdded(paths.map((p: string) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
@@ -155,14 +158,38 @@ export default function App() {
       } catch (err) { console.error("[AstroBurst] File dialog error:", err); }
     } else {
       const input = document.createElement("input");
-      input.type = "file"; input.multiple = true; input.accept = ".fits,.fit,.fts,.asdf";
-      input.onchange = (e: any) => {
-        const list = Array.from(e.target.files as FileList).filter((f) => isValidFitsFile(f.name)).map((f) => ({ name: f.name, path: f.name, size: f.size }));
+      input.type = "file"; input.multiple = true; input.accept = ".fits,.fit,.fts,.asdf,.zip";
+      input.onchange = (e: Event) => {
+        const files = (e.target as HTMLInputElement).files;
+        if (!files) return;
+        const list = Array.from(files).filter((f) => isValidFitsFile(f.name)).map((f) => ({ name: f.name, path: f.name, size: f.size }));
         if (list.length > 0) handleFilesAdded(list);
       };
       input.click();
     }
   }, [handleFilesAdded]);
+
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
+        e.preventDefault();
+        handleBrowseFiles();
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target?.isContentEditable ?? false);
+      if (inInput) return;
+      if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((p) => !p);
+        return;
+      }
+      if (e.key === "Escape") setShortcutsOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleBrowseFiles]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!isTauri()) { handleBrowseFiles(); return; }
@@ -193,6 +220,19 @@ export default function App() {
     setActiveTool("compose");
     setInfoOpen(false);
   }, [reset, resetProductFilter]);
+
+  const [confirmNewBatch, setConfirmNewBatch] = useState(false);
+  const confirmNewBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleNewBatchClick = useCallback(() => {
+    if (stats.done === 0 || confirmNewBatch) {
+      if (confirmNewBatchTimerRef.current) clearTimeout(confirmNewBatchTimerRef.current);
+      setConfirmNewBatch(false);
+      handleNewBatch();
+      return;
+    }
+    setConfirmNewBatch(true);
+    confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
+  }, [stats.done, confirmNewBatch, handleNewBatch]);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -243,6 +283,7 @@ export default function App() {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     const el = sidebarElRef.current;
+    if (el) el.style.transition = "none";
     const onMove = (ev: MouseEvent) => {
       if (!sidebarResizing.current) return;
       const next = Math.max(180, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
@@ -253,6 +294,7 @@ export default function App() {
       sidebarResizing.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      if (el) el.style.transition = "";
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       forceSidebarRender((c) => c + 1);
@@ -265,6 +307,39 @@ export default function App() {
     <ErrorBoundary>
       <div className="relative h-screen w-full text-zinc-100 overflow-hidden" style={{ background: "var(--ab-deep)" }}>
         {showConfetti && <Confetti show />}
+        {shortcutsOpen && (
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={() => setShortcutsOpen(false)}
+          >
+            <div
+              className="rounded-lg p-4 min-w-[300px] animate-fade-in"
+              style={{ background: "rgba(8,8,18,0.97)", border: "1px solid rgba(20,184,166,0.2)", boxShadow: "0 8px 30px rgba(0,0,0,0.55)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
+                <button onClick={() => setShortcutsOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <X size={12} />
+                </button>
+              </div>
+              <div className="flex flex-col gap-1.5 text-[11px]">
+                {[
+                  { keys: navigator.platform?.toLowerCase().includes("mac") ? "⌘O" : "Ctrl+O", desc: "Open FITS files" },
+                  { keys: "↑ / ↓", desc: "Navigate file list (when focused)" },
+                  { keys: "Enter", desc: "Select focused file" },
+                  { keys: "?", desc: "Toggle this help" },
+                  { keys: "Esc", desc: "Close overlays" },
+                ].map((s) => (
+                  <div key={s.keys} className="flex items-center justify-between gap-6">
+                    <span className="text-zinc-400">{s.desc}</span>
+                    <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-300">{s.keys}</kbd>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         <div
           className="fixed inset-0 z-0 opacity-40 pointer-events-none"
           style={{
@@ -298,6 +373,12 @@ export default function App() {
                         >
                           <StatsBar stats={stats} isProcessing={isProcessing} isComplete={isComplete} />
                           <GlobalProgress progress={progress} isComplete={isComplete} />
+                          {isResampling && (
+                            <div className="flex items-center gap-2 text-[10px] font-mono" style={{ color: "rgba(56,189,248,0.75)" }}>
+                              <span className="w-2 h-2 rounded-full animate-spin" style={{ border: "1.5px solid transparent", borderTopColor: "rgba(56,189,248,0.75)" }} />
+                              Matching resolutions… {resampleProgress}%
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex-1 flex overflow-hidden min-h-0">
@@ -341,7 +422,7 @@ export default function App() {
                               className="shrink-0 flex flex-col overflow-hidden"
                               style={{
                                 width: sidebarWidthRef.current,
-                                transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
+                                transition: "width 0.15s ease-out",
                                 borderRight: "1px solid rgba(20,184,166,0.08)",
                                 background: "rgba(5,5,16,0.55)",
                               }}
@@ -387,16 +468,19 @@ export default function App() {
                             <div className="flex items-center gap-2.5 pointer-events-auto select-none">
                               <AstroLogo size={22} showText={false} className="opacity-40" />
                               <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
-                              <span className="text-[8px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.25)" }}>{APP_VERSION}</span>
+                              <span className="text-[9px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.55)" }}>{APP_VERSION}</span>
                             </div>
                             <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
                             {isComplete ? (
                               <button
-                                onClick={handleNewBatch}
+                                onClick={handleNewBatchClick}
                                 className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                                style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
+                                style={confirmNewBatch
+                                  ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "#fbbf24" }
+                                  : { background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
                               >
-                                <RotateCcw size={10} /> New Batch
+                                <RotateCcw size={10} />
+                                {confirmNewBatch ? `Discard ${stats.done} processed file${stats.done === 1 ? "" : "s"}?` : "New Batch"}
                               </button>
                             ) : (
                               <button

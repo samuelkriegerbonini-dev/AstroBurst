@@ -66,6 +66,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   const [activePreview, setActivePreview] = useState<string | null>(null);
 
   const rgbCanvasRef = useRef<HTMLCanvasElement>(null);
+  const chCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const pickFiles = useCallback(async (title: string): Promise<string[]> => {
     const selected = await open({
@@ -125,6 +126,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         normalize,
       }) as PipelineResponse;
       setResult(res);
+      setActivePreview(res.rgb_preview ? "RGB" : res.channel_previews[0]?.label ?? null);
       setProgress("");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -136,6 +138,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   };
 
   useEffect(() => {
+    if (activePreview !== "RGB") return;
     if (!result?.rgb_preview || !rgbCanvasRef.current) return;
     const firstCh = result.channel_previews[0];
     if (!firstCh) return;
@@ -157,7 +160,29 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       px[i] = (255 << 24) | (bytes[j + 2] << 16) | (bytes[j + 1] << 8) | bytes[j];
     }
     ctx.putImageData(imgData, 0, 0);
-  }, [result]);
+  }, [result, activePreview]);
+
+  useEffect(() => {
+    if (!activePreview || activePreview === "RGB") return;
+    const ch = result?.channel_previews.find((c) => c.label === activePreview);
+    const canvas = chCanvasRef.current;
+    if (!ch || !canvas) return;
+
+    const { width: w, height: h } = ch;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const raw = atob(ch.pixels_b64);
+    const imgData = ctx.createImageData(w, h);
+    const px = new Uint32Array(imgData.data.buffer);
+    for (let i = 0, j = 0; i < w * h; i++, j += 2) {
+      const v = (raw.charCodeAt(j) | (raw.charCodeAt(j + 1) << 8)) >> 8;
+      px[i] = (255 << 24) | (v << 16) | (v << 8) | v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, [result, activePreview]);
 
   const totalLights = channels.reduce((s, c) => s + c.paths.length, 0);
 
@@ -248,6 +273,9 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
 
           {activePreview === "RGB" && result.rgb_preview && (
             <canvas ref={rgbCanvasRef} className="w-full rounded border border-zinc-700" style={{ imageRendering: "auto" }} />
+          )}
+          {activePreview && activePreview !== "RGB" && (
+            <canvas ref={chCanvasRef} className="w-full rounded border border-zinc-700" style={{ imageRendering: "auto" }} />
           )}
 
           <div className="flex flex-col gap-1 text-[10px] text-zinc-500">

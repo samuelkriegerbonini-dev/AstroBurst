@@ -3,7 +3,7 @@ import type { OsdViewer } from "openseadragon";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
 import { generateTiles, generateTilesRgb } from "../../services/tiles";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositePreview } from "../../context/CompositeContext";
 
 interface DeepZoomViewerProps {
   filePath?: string;
@@ -45,7 +45,7 @@ function DeepZoomViewer({
                         }: DeepZoomViewerProps) {
   const { file } = useFileContext();
   const { activeImagePath, renderedPreviewUrl } = useRenderContext();
-  const { isShowingComposite } = useCompositeContext();
+  const { isShowingComposite } = useCompositePreview();
 
   const rawPath = activeImagePath || filePathProp || file?.path || "";
 

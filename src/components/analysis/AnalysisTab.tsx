@@ -4,7 +4,7 @@ import RgbStfPanel from "./RgbStfPanel";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositePreview } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
 import type { StarDetectionResult } from "../../shared/types/processing";
@@ -34,6 +34,7 @@ interface AnalysisTabProps {
   specCoord: { x: number; y: number } | null;
   specLoading: boolean;
   specElapsed: number;
+  specError?: string | null;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
@@ -43,17 +44,19 @@ function AnalysisTabInner({
                             specCoord,
                             specLoading,
                             specElapsed,
+                            specError = null,
                             starOverlayRef,
                           }: AnalysisTabProps) {
   const { file } = useFileContext();
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
   const { setRenderedPreviewUrl, activeImagePath } = useRenderContext();
-  const { isShowingComposite } = useCompositeContext();
+  const { isShowingComposite } = useCompositePreview();
   const { rawPixels, rgbRawPixels } = useRawPixelsContext();
 
   const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
   const [starLoading, setStarLoading] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
 
   const effectivePath = (isShowingComposite && activeImagePath) ? activeImagePath : file?.path;
 
@@ -123,6 +126,7 @@ function AnalysisTabInner({
   const handleDetectStars = useCallback(
     async (sigma: number) => {
       setStarLoading(true);
+      setDetectError(null);
       try {
         const result = isShowingComposite
           ? await detectStarsComposite(sigma, 200)
@@ -132,6 +136,7 @@ function AnalysisTabInner({
         setStarResult(result);
       } catch (e) {
         console.error("Star detection failed:", e);
+        setDetectError(e instanceof Error ? e.message : String(e));
       } finally {
         setStarLoading(false);
       }
@@ -159,7 +164,7 @@ function AnalysisTabInner({
 
   return (
     <Suspense fallback={<TabSpinner />}>
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 p-3">
         {histData && histStats && (
           <HistogramPanel
             bins={histData.bins}
@@ -182,6 +187,7 @@ function AnalysisTabInner({
           stars={stars}
           isLoading={starLoading}
           onDetect={handleDetectStars}
+          detectError={detectError}
           backgroundMedian={starResult?.background_median}
           backgroundSigma={starResult?.background_sigma}
           imageWidth={starResult?.image_width || file?.result?.dimensions?.[0]}
@@ -205,6 +211,7 @@ function AnalysisTabInner({
             isLoading={specLoading}
             cubeDims={cubeDims}
             elapsed={specElapsed}
+            error={specError}
             filePath={effectivePath}
             onCollapsePreview={handleCollapsePreview}
           />

@@ -53,7 +53,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const phot = result?.photometry;
 
   return (
-    <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
+    <div className="ab-panel overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
         <div className="flex items-center gap-2">
           <StarIcon size={12} className="text-yellow-400" />

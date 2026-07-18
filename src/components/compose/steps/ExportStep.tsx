@@ -5,7 +5,7 @@ import { resolveRgbPaths } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgb } from "../../../services/export";
 import { restretchComposite } from "../../../services/compose";
 import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
-import { useCompositeContext } from "../../../context/CompositeContext";
+import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
 
 interface ExportStepProps {
@@ -42,7 +42,7 @@ function buildHistory(state: WizardState): string[] {
 }
 
 export default function ExportStep({ state }: ExportStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
 
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
@@ -193,18 +193,27 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       const zip = new JSZip();
 
+      const missing: string[] = [];
       for (const f of filesToZip) {
         try {
           const data = await readFile(f.path);
           zip.file(f.name, data);
         } catch (err) {
           console.error("Failed to read:", f.path, err);
+          missing.push(f.name);
         }
+      }
+
+      if (missing.length === filesToZip.length) {
+        throw new Error(`ZIP failed — none of the ${filesToZip.length} files could be read`);
       }
 
       const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
       saveAs(blob, `astroburst-compose-${ts}.zip`);
 
+      if (missing.length > 0) {
+        setZipError(`ZIP created, but ${missing.length} of ${filesToZip.length} files could not be added: ${missing.join(", ")}`);
+      }
       setZipDone(true);
       setTimeout(() => setZipDone(false), 3000);
     } catch (e) {

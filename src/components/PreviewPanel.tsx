@@ -7,8 +7,9 @@ import {
 import { getCubeSpectrum } from "../services/cube";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
-import { useCompositeContext } from "../context/CompositeContext";
-import { useMousePixelActions, setMousePixel, emitPixelClick } from "../hooks/useMousePixelStore";
+import { useCompositePreview, useCompositeActions } from "../context/CompositeContext";
+import { useMousePixelActions, setMousePixel, emitPixelClick, usePixelClick } from "../hooks/useMousePixelStore";
+import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum } from "../hooks/useSpectrumStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { useProgress } from "../hooks/useProgress";
 
@@ -21,8 +22,6 @@ const SynthPanel = lazy(() => import("./synth/SynthPanel"));
 const ExportTab = lazy(() => import("./export/ExportTab"));
 const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("./header/HeadersTab"));
-
-const EMPTY_SPECTRUM: number[] = [];
 
 export type ToolId = "compose" | "processing" | "stacking" | "synth" | "config" | "export" | "headers" | "analysis";
 export type RightToolId = Exclude<ToolId, "compose">;
@@ -52,20 +51,24 @@ const BOTTOM_MIN = 140;
 const BOTTOM_MAX = 600;
 const BOTTOM_DEFAULT = 280;
 
+const gpuSupported = typeof navigator !== "undefined" && !!navigator.gpu;
+
 function TabSpinner() {
   return <div className="flex items-center justify-center py-8"><Loader2 size={16} className="animate-spin" style={{ color: "var(--ab-teal)" }} /></div>;
 }
 
 function RightToolContent({ toolId, starOverlayRef }: { toolId: RightToolId; starOverlayRef: React.RefObject<HTMLCanvasElement | null> }) {
+  const spec = useSpectrum();
   switch (toolId) {
     case "headers": return <HeadersTab />;
     case "analysis": return (
       <AnalysisTab
-        spectrum={EMPTY_SPECTRUM}
-        specWavelengths={null}
-        specCoord={null}
-        specLoading={false}
-        specElapsed={0}
+        spectrum={spec.spectrum}
+        specWavelengths={spec.wavelengths}
+        specCoord={spec.coord}
+        specLoading={spec.loading}
+        specElapsed={spec.elapsed}
+        specError={spec.error}
         starOverlayRef={starOverlayRef}
       />
     );
@@ -83,7 +86,7 @@ function ProgressBarInner() {
   if (!progress.active) return null;
   return (
     <div className="ab-compose-progress shrink-0">
-      <div className="ab-compose-progress-bar" style={{ width: `${progress.percent}%` }} />
+      <div className="ab-compose-progress-bar" style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress.percent)) / 100})` }} />
       <span className="ab-compose-progress-label">{progress.stage} {progress.percent > 0 ? `${progress.percent}%` : ""}</span>
     </div>
   );
@@ -99,7 +102,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { renderedPreviewUrl } = useRenderContext();
-  const { compositePreviewUrl, initRgb, setCompositePreviewUrl } = useCompositeContext();
+  const { compositePreviewUrl } = useCompositePreview();
+  const { initRgb, setCompositePreviewUrl } = useCompositeActions();
   const { starOverlayRef } = useStarOverlayContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
@@ -114,6 +118,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   }, []);
 
   const prevFileIdRef = useRef<string | null>(null);
+  const prevCompositeUrlRef = useRef<string | null>(null);
+  const rgbLoadKeyRef = useRef<string | null>(null);
   const specAbortRef = useRef(0);
   const fileDimsRef = useRef<[number, number] | undefined>(undefined);
   fileDimsRef.current = file?.result?.dimensions;
@@ -142,55 +148,133 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   }, [clearRawPixels, clearRgbRawPixels]);
 
   useEffect(() => {
-    if (!file || file.id === prevFileIdRef.current) return;
+    if (!file) {
+      if (prevFileIdRef.current !== null) {
+        prevFileIdRef.current = null;
+        rgbLoadKeyRef.current = null;
+        clearRawPixels();
+        clearRgbRawPixels();
+      }
+      return;
+    }
+    if (file.id === prevFileIdRef.current) return;
     prevFileIdRef.current = file.id;
     specAbortRef.current++;
+    resetSpectrum();
     resetMouse();
     clearRawPixels();
     clearRgbRawPixels();
+    rgbLoadKeyRef.current = null;
     if (gpuAvailable && useGpu) {
       const fid = file.id;
       const path = file.path;
       const isRgb = !!file.result?.is_rgb;
       queueMicrotask(() => {
         if (prevFileIdRef.current !== fid) return;
-        if (isRgb) loadRgbRawPixels(path, true);
-        else loadRawPixels(true);
+        if (isRgb) {
+          rgbLoadKeyRef.current = `${fid}|${path}`;
+          loadRgbRawPixels(path, true);
+        } else {
+          loadRawPixels(true);
+        }
       });
     }
-  }, [file?.id, file?.path, file?.result?.is_rgb, gpuAvailable, useGpu, clearRawPixels, clearRgbRawPixels, loadRawPixels, loadRgbRawPixels, resetMouse]);
+  }, [file, gpuAvailable, useGpu, clearRawPixels, clearRgbRawPixels, loadRawPixels, loadRgbRawPixels, resetMouse]);
+
+  useEffect(() => {
+    const prevUrl = prevCompositeUrlRef.current;
+    prevCompositeUrlRef.current = compositePreviewUrl;
+    if (compositePreviewUrl === prevUrl) return;
+    if (!file || !gpuAvailable || !useGpu) return;
+    if (compositePreviewUrl) {
+      const source = isFileRgbView ? file.path : null;
+      const key = `${file.id}|${source ?? compositePreviewUrl}`;
+      if (rgbLoadKeyRef.current === key) return;
+      rgbLoadKeyRef.current = key;
+      loadRgbRawPixels(source, true);
+    } else {
+      rgbLoadKeyRef.current = null;
+      clearRgbRawPixels();
+      loadRawPixels();
+    }
+  }, [compositePreviewUrl, file, gpuAvailable, useGpu, isFileRgbView, loadRgbRawPixels, clearRgbRawPixels, loadRawPixels]);
+
+  const enableGpu = useCallback(() => {
+    setUseGpu(true);
+    if (compositePreviewUrl) {
+      const source = isFileRgbView ? (file?.path ?? null) : null;
+      rgbLoadKeyRef.current = `${file?.id}|${source ?? compositePreviewUrl}`;
+      loadRgbRawPixels(source);
+    } else if (file?.result?.is_rgb) {
+      const r = file.result;
+      if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
+      else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
+      rgbLoadKeyRef.current = `${file.id}|${file.path}`;
+      loadRgbRawPixels(file.path ?? null, true);
+    } else {
+      loadRawPixels();
+    }
+  }, [compositePreviewUrl, isFileRgbView, file, loadRawPixels, loadRgbRawPixels, initRgb, setCompositePreviewUrl]);
 
   const handleToggleGpu = useCallback(() => {
     if (useGpu) {
       setUseGpu(false);
+      rgbLoadKeyRef.current = null;
       clearRawPixels();
       clearRgbRawPixels();
-    } else {
-      setUseGpu(true);
-      if (compositePreviewUrl) {
-        loadRgbRawPixels(isFileRgbView ? (file?.path ?? null) : null);
-      } else if (file?.result?.is_rgb) {
-        const r = file.result;
-        if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
-        else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
-        loadRgbRawPixels(file.path ?? null, true);
-      } else {
-        loadRawPixels();
-      }
+      return;
     }
-  }, [useGpu, compositePreviewUrl, isFileRgbView, file, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels, initRgb, setCompositePreviewUrl]);
+    if (gpuAvailable === false) {
+      setGpuProbing(true);
+      probeGpu().then(() => {
+        const ok = isGpuAvailable() === true;
+        setGpuAvailable(ok);
+        setGpuReason(getGpuReason());
+        setGpuProbing(false);
+        if (ok) enableGpu();
+      });
+      return;
+    }
+    enableGpu();
+  }, [useGpu, gpuAvailable, enableGpu, clearRawPixels, clearRgbRawPixels]);
 
-  const handleImageClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
+  const extractSpectrum = useCallback(async (x: number, y: number) => {
+    const path = file?.path;
+    if (!path) return;
+    const seq = ++specAbortRef.current;
+    beginSpectrum({ x, y });
+    const t0 = performance.now();
+    try {
+      const result = await getCubeSpectrum(path, x, y);
+      if (specAbortRef.current !== seq) return;
+      commitSpectrum(result, Math.round(performance.now() - t0));
+    } catch (err) {
+      if (specAbortRef.current !== seq) return;
+      failSpectrum(err instanceof Error ? err.message : String(err));
+    }
+  }, [file?.path]);
+
+  const handleImageClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
     if (!isCube || !file?.path) return;
-    const img = e.target as HTMLImageElement;
-    const rect = img.getBoundingClientRect();
+    const target = e.target as HTMLElement;
+    if (!(target instanceof HTMLImageElement) && !(target instanceof HTMLCanvasElement)) return;
+    const rect = target.getBoundingClientRect();
     const dims = file.result?.dimensions;
-    if (!dims) return;
+    if (!dims || rect.width <= 0 || rect.height <= 0) return;
     const pixelX = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
     const pixelY = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
-    ++specAbortRef.current;
-    try { await getCubeSpectrum(file.path, pixelX, pixelY); } catch {}
-  }, [isCube, file?.path, file?.result?.dimensions]);
+    if (pixelX < 0 || pixelX >= dims[0] || pixelY < 0 || pixelY >= dims[1]) return;
+    extractSpectrum(pixelX, pixelY);
+  }, [isCube, file?.path, file?.result?.dimensions, extractSpectrum]);
+
+  const pixelClick = usePixelClick();
+  const spectrumClickSeqRef = useRef(0);
+  useEffect(() => {
+    if (!pixelClick || !isCube) return;
+    if (pixelClick.seq === spectrumClickSeqRef.current) return;
+    spectrumClickSeqRef.current = pixelClick.seq;
+    extractSpectrum(pixelClick.x, pixelClick.y);
+  }, [pixelClick, isCube, extractSpectrum]);
 
   const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => { handleMove(e, fileDimsRef.current); }, [handleMove]);
   const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
@@ -245,19 +329,19 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
             <span className="text-[11px] font-medium text-zinc-300">Preview</span>
           </div>
           <div className="flex items-center gap-2 justify-center flex-1 min-w-0">
-            {file && <span className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">{file.name}</span>}
+            {file && <span className="text-[10px] font-mono text-zinc-400 truncate max-w-[200px]" title={file.name}>{file.name}</span>}
             {file?.result?.dimensions && (
               <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 shrink-0">
                 <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
-                {file.result.header?.BITPIX && <span className="text-zinc-600">BITPIX {file.result.header.BITPIX}</span>}
-                <span className="text-zinc-600">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
+                {file.result.header?.BITPIX && <span className="text-zinc-500">BITPIX {file.result.header.BITPIX}</span>}
+                <span className="text-zinc-500">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
               </span>
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {file && (
-              <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu)}
-                      title={gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
+              <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu && !gpuSupported)}
+                      title={gpuAvailable === false && gpuSupported ? `${gpuReason ?? "GPU unavailable"} — click to retry` : gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
                       className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
                       style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
                 {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : toggleLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
@@ -309,7 +393,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       {file && rightTool && (
         <div
           className="shrink-0 flex flex-col overflow-hidden"
-          style={{ width: 380, borderLeft: "1px solid rgba(20,184,166,0.08)", background: "rgba(5,5,16,0.55)" }}
+          style={{ width: "min(380px, 42vw)", borderLeft: "1px solid rgba(20,184,166,0.08)", background: "rgba(5,5,16,0.55)" }}
         >
           <div className="flex-1 overflow-y-auto min-h-0">
             <Suspense fallback={<TabSpinner />}>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Upload } from "lucide-react";
+import { Upload, AlertTriangle, X } from "lucide-react";
 import { isValidFitsFile, isCalibRefAsdf } from "../../utils/validation";
 import { AnimatePresence, motion } from "framer-motion";
 import { isTauri } from "../../infrastructure/tauri";
@@ -12,12 +12,29 @@ interface DropZoneProps {
 
 export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
   const [isDragOver, setIsDragOver] = useState(false);
+  const [rejected, setRejected] = useState<{ skipped: number; calib: number } | null>(null);
   const callbackRef = useRef(onFilesAdded);
   const dragCounterRef = useRef(0);
+  const rejectedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     callbackRef.current = onFilesAdded;
   }, [onFilesAdded]);
+
+  const reportRejected = useCallback((skipped: number, calib: number) => {
+    if (skipped === 0 && calib === 0) return;
+    setRejected({ skipped, calib });
+    if (rejectedTimerRef.current) clearTimeout(rejectedTimerRef.current);
+    rejectedTimerRef.current = setTimeout(() => setRejected(null), 6000);
+  }, []);
+  const reportRejectedRef = useRef(reportRejected);
+  reportRejectedRef.current = reportRejected;
+
+  useEffect(() => {
+    return () => {
+      if (rejectedTimerRef.current) clearTimeout(rejectedTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -39,14 +56,15 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
           } else if (t === "drop") {
             setIsDragOver(false);
             const paths: string[] = event.payload.paths || [];
-            const validFiles: AstroFile[] = paths
+            const fitsFiles: AstroFile[] = paths
               .filter((p: string) => isValidFitsFile(p))
               .map((p: string) => ({
                 name: p.split(/[/\\]/).pop() || "file",
                 path: p,
                 size: 0,
-              }))
-              .filter((f: AstroFile) => !isCalibRefAsdf(f.name));
+              }));
+            const validFiles = fitsFiles.filter((f: AstroFile) => !isCalibRefAsdf(f.name));
+            reportRejectedRef.current(paths.length - fitsFiles.length, fitsFiles.length - validFiles.length);
             if (validFiles.length > 0) {
               callbackRef.current(validFiles);
             }
@@ -101,18 +119,19 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
     setIsDragOver(false);
 
     const droppedFiles = Array.from(e.dataTransfer?.files || []);
-    const validFiles: AstroFile[] = droppedFiles
-      .filter((f) => isValidFitsFile(f.name) && !isCalibRefAsdf(f.name))
-      .map((f) => ({
-        name: f.name,
-        path: f.name,
-        size: f.size,
-      }));
+    const fitsFiles = droppedFiles.filter((f) => isValidFitsFile(f.name));
+    const accepted = fitsFiles.filter((f) => !isCalibRefAsdf(f.name));
+    const validFiles: AstroFile[] = accepted.map((f) => ({
+      name: f.name,
+      path: f.name,
+      size: f.size,
+    }));
 
+    reportRejected(droppedFiles.length - fitsFiles.length, fitsFiles.length - accepted.length);
     if (validFiles.length > 0) {
       callbackRef.current(validFiles);
     }
-  }, []);
+  }, [reportRejected]);
 
   useEffect(() => {
     if (isTauri()) return;
@@ -157,6 +176,34 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
                 Release to add .fits / .asdf / .zip files
               </p>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {rejected && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            transition={{ duration: 0.15 }}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-2 px-3 py-2 rounded-lg text-xs shadow-lg"
+            style={{ background: "rgba(24,17,4,0.96)", border: "1px solid rgba(245,158,11,0.3)", color: "#fbbf24" }}
+          >
+            <AlertTriangle size={13} className="shrink-0" />
+            <span>
+              {rejected.skipped > 0 && `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: .fits .fit .fts .asdf .zip`}
+              {rejected.skipped > 0 && rejected.calib > 0 && " · "}
+              {rejected.calib > 0 && `${rejected.calib} JWST calibration reference .asdf skipped (not a loadable image)`}
+            </span>
+            <button
+              onClick={() => setRejected(null)}
+              title="Dismiss"
+              aria-label="Dismiss"
+              className="ml-1 shrink-0 text-amber-500/70 hover:text-amber-300 transition-colors"
+            >
+              <X size={12} />
+            </button>
           </motion.div>
         )}
       </AnimatePresence>

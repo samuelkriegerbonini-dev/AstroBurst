@@ -8,9 +8,8 @@ const FALLBACK = "./output";
 
 async function resolveTauriOutputDir(): Promise<string> {
   try {
-    const { appDataDir } = await import("@tauri-apps/api/path");
-    const base = await appDataDir();
-    return `${base}output`;
+    const { appDataDir, join } = await import("@tauri-apps/api/path");
+    return await join(await appDataDir(), "output");
   } catch {
     return FALLBACK;
   }
