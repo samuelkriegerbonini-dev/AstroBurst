@@ -34,6 +34,10 @@ pub fn blend_channels(
     let mut g_out = vec![0.0f32; npix];
     let mut b_out = vec![0.0f32; npix];
 
+    let wr_total: f32 = valid_weights.iter().map(|w| w.1).sum();
+    let wg_total: f32 = valid_weights.iter().map(|w| w.2).sum();
+    let wb_total: f32 = valid_weights.iter().map(|w| w.3).sum();
+
     r_out
         .par_chunks_mut(cols)
         .zip(g_out.par_chunks_mut(cols))
@@ -46,6 +50,9 @@ pub fn blend_channels(
                 let mut rv = 0.0f32;
                 let mut gv = 0.0f32;
                 let mut bv = 0.0f32;
+                let mut rw_used = 0.0f32;
+                let mut gw_used = 0.0f32;
+                let mut bw_used = 0.0f32;
 
                 for &(ch_idx, rw, gw, bw) in &valid_weights {
                     let src = slices[ch_idx];
@@ -57,12 +64,15 @@ pub fn blend_channels(
                         rv += v * rw;
                         gv += v * gw;
                         bv += v * bw;
+                        rw_used += rw;
+                        gw_used += gw;
+                        bw_used += bw;
                     }
                 }
 
-                r_row[x] = rv;
-                g_row[x] = gv;
-                b_row[x] = bv;
+                r_row[x] = if rw_used.abs() > 1e-6 { rv * (wr_total / rw_used) } else { 0.0 };
+                g_row[x] = if gw_used.abs() > 1e-6 { gv * (wg_total / gw_used) } else { 0.0 };
+                b_row[x] = if bw_used.abs() > 1e-6 { bv * (wb_total / bw_used) } else { 0.0 };
             }
         });
 

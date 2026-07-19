@@ -83,6 +83,173 @@ pub fn estimate_background(image: &Array2<f32>, tile_size: usize) -> (f64, f64) 
     (global_median, global_sigma.max(1e-10))
 }
 
+const DEBLEND_MIN_SEP: f64 = 3.0;
+const DEBLEND_MIN_CONTRAST: f64 = 0.1;
+
+fn deblend_component(
+    image: &Array2<f32>,
+    component: &[(usize, usize)],
+    bg_median: f64,
+) -> Vec<Vec<(usize, usize)>> {
+    if component.len() < 8 {
+        return vec![component.to_vec()];
+    }
+    let (rows, cols) = image.dim();
+
+    let mut maxima: Vec<(usize, usize, f64)> = Vec::new();
+    for &(pr, pc) in component {
+        let v = image[[pr, pc]] as f64;
+        if !v.is_finite() {
+            continue;
+        }
+        let mut is_max = true;
+        'neighbors: for dr in -1i32..=1 {
+            for dc in -1i32..=1 {
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
+                let nr = pr as i32 + dr;
+                let nc = pc as i32 + dc;
+                if nr < 0 || nc < 0 || nr >= rows as i32 || nc >= cols as i32 {
+                    continue;
+                }
+                if image[[nr as usize, nc as usize]] as f64 > v {
+                    is_max = false;
+                    break 'neighbors;
+                }
+            }
+        }
+        if is_max {
+            maxima.push((pr, pc, v - bg_median));
+        }
+    }
+
+    if maxima.len() <= 1 {
+        return vec![component.to_vec()];
+    }
+
+    maxima.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let top = maxima[0].2.max(1e-12);
+    let mut kept: Vec<(usize, usize, f64)> = Vec::new();
+    for m in maxima {
+        if m.2 < DEBLEND_MIN_CONTRAST * top {
+            break;
+        }
+        let far = kept.iter().all(|k| {
+            let dx = m.1 as f64 - k.1 as f64;
+            let dy = m.0 as f64 - k.0 as f64;
+            (dx * dx + dy * dy).sqrt() >= DEBLEND_MIN_SEP
+        });
+        if far {
+            kept.push(m);
+        }
+    }
+
+    if kept.len() <= 1 {
+        return vec![component.to_vec()];
+    }
+
+    let mut subs: Vec<Vec<(usize, usize)>> = vec![Vec::new(); kept.len()];
+    for &(pr, pc) in component {
+        let mut best = 0usize;
+        let mut best_d = f64::MAX;
+        for (ki, k) in kept.iter().enumerate() {
+            let dx = pc as f64 - k.1 as f64;
+            let dy = pr as f64 - k.0 as f64;
+            let d = dx * dx + dy * dy;
+            if d < best_d {
+                best_d = d;
+                best = ki;
+            }
+        }
+        subs[best].push((pr, pc));
+    }
+    subs.retain(|s| s.len() >= 3);
+    if subs.is_empty() {
+        return vec![component.to_vec()];
+    }
+    subs
+}
+
+fn measure_component(
+    image: &Array2<f32>,
+    component: &[(usize, usize)],
+    bg_median: f64,
+    bg_sigma: f64,
+) -> Option<DetectedStar> {
+    let npix = component.len();
+    if npix < 3 {
+        return None;
+    }
+
+    let mut sum_flux = 0.0f64;
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut peak_val = 0.0f64;
+
+    for &(pr, pc) in component {
+        let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
+        sum_flux += v;
+        sum_x += pc as f64 * v;
+        sum_y += pr as f64 * v;
+        peak_val = peak_val.max(v);
+    }
+
+    if sum_flux <= 0.0 {
+        return None;
+    }
+
+    let cx = sum_x / sum_flux;
+    let cy = sum_y / sum_flux;
+
+    let mut sum_r2 = 0.0f64;
+    let mut sum_xx = 0.0f64;
+    let mut sum_yy = 0.0f64;
+    let mut sum_xy = 0.0f64;
+    for &(pr, pc) in component {
+        let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
+        let dx = pc as f64 - cx;
+        let dy = pr as f64 - cy;
+        sum_r2 += (dx * dx + dy * dy) * v;
+        sum_xx += dx * dx * v;
+        sum_yy += dy * dy * v;
+        sum_xy += dx * dy * v;
+    }
+    let sigma_star = (sum_r2 / (2.0 * sum_flux)).sqrt();
+    let fwhm = sigma_star * 2.3548200450309493;
+
+    if fwhm < 0.5 || fwhm > 30.0 {
+        return None;
+    }
+
+    let ixx = sum_xx / sum_flux;
+    let iyy = sum_yy / sum_flux;
+    let ixy = sum_xy / sum_flux;
+    let trace = ixx + iyy;
+    let det = (ixx * iyy - ixy * ixy).max(0.0);
+    let disc = ((trace * trace / 4.0) - det).max(0.0).sqrt();
+    let lambda1 = trace / 2.0 + disc;
+    let lambda2 = (trace / 2.0 - disc).max(0.0);
+    let eccentricity = if lambda1 > 1e-15 {
+        (1.0 - lambda2 / lambda1).sqrt().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let snr = confidence::compute_detection_snr(peak_val, bg_sigma);
+
+    Some(DetectedStar {
+        x: cx,
+        y: cy,
+        flux: sum_flux,
+        fwhm,
+        eccentricity,
+        peak: peak_val,
+        npix,
+        snr,
+    })
+}
+
 pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResult {
     let (rows, cols) = image.dim();
 
@@ -143,72 +310,12 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
             if npix < 3 || npix > 5000 {
                 continue;
             }
-            let mut sum_flux = 0.0f64;
-            let mut sum_x = 0.0f64;
-            let mut sum_y = 0.0f64;
-            let mut peak_val = 0.0f64;
 
-            for &(pr, pc) in &component {
-                let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
-                sum_flux += v;
-                sum_x += pc as f64 * v;
-                sum_y += pr as f64 * v;
-                peak_val = peak_val.max(v);
+            for pixels in deblend_component(image, &component, bg_median) {
+                if let Some(star) = measure_component(image, &pixels, bg_median, bg_sigma) {
+                    stars.push(star);
+                }
             }
-
-            if sum_flux <= 0.0 {
-                continue;
-            }
-
-            let cx = sum_x / sum_flux;
-            let cy = sum_y / sum_flux;
-
-            let mut sum_r2 = 0.0f64;
-            let mut sum_xx = 0.0f64;
-            let mut sum_yy = 0.0f64;
-            let mut sum_xy = 0.0f64;
-            for &(pr, pc) in &component {
-                let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
-                let dx = pc as f64 - cx;
-                let dy = pr as f64 - cy;
-                sum_r2 += (dx * dx + dy * dy) * v;
-                sum_xx += dx * dx * v;
-                sum_yy += dy * dy * v;
-                sum_xy += dx * dy * v;
-            }
-            let sigma_star = (sum_r2 / (2.0 * sum_flux)).sqrt();
-            let fwhm = sigma_star * 2.3548200450309493;
-
-            if fwhm < 0.5 || fwhm > 30.0 {
-                continue;
-            }
-
-            let ixx = sum_xx / sum_flux;
-            let iyy = sum_yy / sum_flux;
-            let ixy = sum_xy / sum_flux;
-            let trace = ixx + iyy;
-            let det = (ixx * iyy - ixy * ixy).max(0.0);
-            let disc = ((trace * trace / 4.0) - det).max(0.0).sqrt();
-            let lambda1 = trace / 2.0 + disc;
-            let lambda2 = (trace / 2.0 - disc).max(0.0);
-            let eccentricity = if lambda1 > 1e-15 {
-                (1.0 - lambda2 / lambda1).sqrt().clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            let snr = confidence::compute_detection_snr(peak_val, bg_sigma);
-
-            stars.push(DetectedStar {
-                x: cx,
-                y: cy,
-                flux: sum_flux,
-                fwhm,
-                eccentricity,
-                peak: peak_val,
-                npix,
-                snr,
-            });
         }
     }
 

@@ -12,6 +12,17 @@ use crate::core::imaging::boundary::clamp_index;
 use crate::math::median::median_f32_mut;
 use crate::types::constants::MAD_TO_SIGMA;
 
+fn drizzle_support(scale: f64, pixfrac: f64, kernel: DrizzleKernel) -> (f64, f64, f64) {
+    let half = pixfrac * scale * 0.5;
+    let sigma = half.max(0.5);
+    let support = match kernel {
+        DrizzleKernel::Square => half,
+        DrizzleKernel::Gaussian => sigma * 3.0,
+        DrizzleKernel::Lanczos3 => 3.0,
+    };
+    (half, sigma, support)
+}
+
 fn frame_contributions(
     frame: &Array2<f32>,
     dx: f64,
@@ -21,11 +32,20 @@ fn frame_contributions(
     kernel: DrizzleKernel,
     out_rows: usize,
     out_cols: usize,
+    band_start: usize,
+    band_end: usize,
 ) -> Vec<Vec<(usize, f32, f64)>> {
     let (in_rows, in_cols) = frame.dim();
     let src = frame.as_slice().expect("contiguous");
 
-    (0..in_rows)
+    let (half, sigma, support) = drizzle_support(scale, pixfrac, kernel);
+
+    let iy_lo_f = ((band_start as f64 - support) / scale) - dy - 2.5;
+    let iy_hi_f = ((band_end as f64 + support) / scale) - dy + 1.5;
+    let iy_lo = if iy_lo_f < 0.0 { 0 } else { (iy_lo_f.floor() as usize).min(in_rows) };
+    let iy_hi = if iy_hi_f < 0.0 { 0 } else { (iy_hi_f.ceil() as usize).min(in_rows) };
+
+    (iy_lo..iy_hi)
         .into_par_iter()
         .map(|iy| {
             let mut contribs = Vec::new();
@@ -39,17 +59,13 @@ fn frame_contributions(
                 let cx = (ix as f64 + 0.5 + dx) * scale;
                 let cy = (iy as f64 + 0.5 + dy) * scale;
 
-                let half = pixfrac * scale * 0.5;
-                let sigma = half.max(0.5);
-                let support = match kernel {
-                    DrizzleKernel::Square => half,
-                    DrizzleKernel::Gaussian => sigma * 3.0,
-                    DrizzleKernel::Lanczos3 => 3.0,
-                };
                 let ox_min = clamp_index((cx - support).floor() as i64, out_cols);
                 let ox_max = clamp_index((cx + support).ceil() as i64, out_cols);
-                let oy_min = clamp_index((cy - support).floor() as i64, out_rows);
-                let oy_max = clamp_index((cy + support).ceil() as i64, out_rows);
+                let oy_min = clamp_index((cy - support).floor() as i64, out_rows).max(band_start);
+                let oy_max = clamp_index((cy + support).ceil() as i64, out_rows).min(band_end - 1);
+                if oy_min > oy_max {
+                    continue;
+                }
 
                 for oy in oy_min..=oy_max {
                     for ox in ox_min..=ox_max {
@@ -72,8 +88,8 @@ fn frame_contributions(
                             }
                         };
 
-                        if w.abs() > 1e-12 {
-                            let idx = oy * out_cols + ox;
+                        if w.abs() > 1e-4 {
+                            let idx = (oy - band_start) * out_cols + ox;
                             contribs.push((idx, val, w));
                         }
                     }
@@ -134,9 +150,13 @@ impl DrizzleAccumulator {
         scale: f64,
         pixfrac: f64,
         kernel: DrizzleKernel,
+        full_out_rows: usize,
+        band_start: usize,
+        band_end: usize,
     ) {
         let rows = frame_contributions(
-            frame, dx, dy, scale, pixfrac, kernel, self.out_rows, self.out_cols,
+            frame, dx, dy, scale, pixfrac, kernel, full_out_rows, self.out_cols,
+            band_start, band_end,
         );
         for contribs in rows {
             for (idx, val, w) in contribs {
@@ -150,7 +170,7 @@ impl DrizzleAccumulator {
         sigma_low: f32,
         sigma_high: f32,
         sigma_iterations: usize,
-    ) -> (Array2<f32>, Array2<f32>, u64) {
+    ) -> (Vec<f32>, Vec<f32>, u64) {
         let n = self.out_rows * self.out_cols;
 
         let results: Vec<(f32, f32, u64)> = (0..n)
@@ -228,9 +248,7 @@ impl DrizzleAccumulator {
             total_rejected += rej;
         }
 
-        let image = Array2::from_shape_vec((self.out_rows, self.out_cols), img_data).unwrap();
-        let weights = Array2::from_shape_vec((self.out_rows, self.out_cols), wgt_data).unwrap();
-        (image, weights, total_rejected)
+        (img_data, wgt_data, total_rejected)
     }
 }
 
@@ -359,32 +377,67 @@ pub fn drizzle_stack(
         }
     }
 
-    let mut counts = vec![0u32; out_rows * out_cols];
-    for (i, img) in frames.iter().enumerate() {
-        let (dx, dy) = offsets[i];
-        let rows = frame_contributions(
-            img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
-        );
-        for contribs in rows {
-            for (idx, _, _) in contribs {
-                counts[idx] += 1;
+    let (_, sigma, _) = drizzle_support(scale, pixfrac, config.kernel);
+    let cells = |s: f64| ((2.0 * s).ceil() + 1.0).max(1.0);
+    let cpp = match config.kernel {
+        DrizzleKernel::Square => cells(pixfrac * scale * 0.5).powi(2),
+        DrizzleKernel::Gaussian => cells(sigma * 3.0).powi(2),
+        DrizzleKernel::Lanczos3 => 49.0,
+    };
+    const TARGET_BAND_CONTRIBS: f64 = 32_000_000.0;
+    let contribs_per_out_row =
+        (frames.len() as f64) * (in_cols as f64) * cpp / scale.max(1.0);
+    let band_rows = ((TARGET_BAND_CONTRIBS / contribs_per_out_row.max(1.0)).floor() as usize)
+        .clamp(16, out_rows.max(16));
+
+    let mut img_data = vec![0.0f32; out_rows * out_cols];
+    let mut wgt_data = vec![0.0f32; out_rows * out_cols];
+    let mut rejected_pixels = 0u64;
+
+    for band_start in (0..out_rows).step_by(band_rows) {
+        let band_end = (band_start + band_rows).min(out_rows);
+        let band_n = (band_end - band_start) * out_cols;
+
+        let mut counts = vec![0u32; band_n];
+        for (i, img) in frames.iter().enumerate() {
+            let (dx, dy) = offsets[i];
+            let rows = frame_contributions(
+                img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
+                band_start, band_end,
+            );
+            for contribs in rows {
+                for (idx, _, _) in contribs {
+                    counts[idx] += 1;
+                }
             }
         }
+
+        let mut accumulator = DrizzleAccumulator::new(band_end - band_start, out_cols, &counts);
+        drop(counts);
+
+        for (i, img) in frames.iter().enumerate() {
+            let (dx, dy) = offsets[i];
+            accumulator.drizzle_frame(
+                img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel,
+                out_rows, band_start, band_end,
+            );
+        }
+
+        let (band_img, band_wgt, band_rej) = accumulator.finalize(
+            config.sigma_low,
+            config.sigma_high,
+            config.sigma_iterations,
+        );
+        let off = band_start * out_cols;
+        img_data[off..off + band_n].copy_from_slice(&band_img);
+        wgt_data[off..off + band_n].copy_from_slice(&band_wgt);
+        rejected_pixels += band_rej;
     }
 
-    let mut accumulator = DrizzleAccumulator::new(out_rows, out_cols, &counts);
-    drop(counts);
-
-    for (i, img) in frames.iter().enumerate() {
-        let (dx, dy) = offsets[i];
-        accumulator.drizzle_frame(img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel);
-    }
-
-    let (image, weight_map, rejected_pixels) = accumulator.finalize(
-        config.sigma_low,
-        config.sigma_high,
-        config.sigma_iterations,
-    );
+    let image = Array2::from_shape_vec((out_rows, out_cols), img_data)
+        .expect("drizzle output shape");
+    let weight_map = Array2::from_shape_vec((out_rows, out_cols), wgt_data)
+        .expect("drizzle weight shape");
 
     Ok(DrizzleResult {
         image,

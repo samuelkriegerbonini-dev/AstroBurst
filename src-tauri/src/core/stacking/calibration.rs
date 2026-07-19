@@ -250,7 +250,7 @@ pub fn create_master_flat(
         bail!("No flat frames provided");
     }
 
-    let dark_scale = if master_dark.is_some() {
+    let dark_scale = if master_dark.is_some() && master_bias.is_some() {
         flat_dark_scale(median_exposure_seconds(flat_paths), dark_exposure_seconds)
     } else {
         1.0

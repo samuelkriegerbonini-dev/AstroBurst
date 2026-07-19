@@ -40,12 +40,14 @@ impl Default for BatchStackConfig {
 #[derive(Debug, Clone)]
 pub struct BatchPipelineConfig {
     pub stack: BatchStackConfig,
+    pub align: bool,
 }
 
 impl Default for BatchPipelineConfig {
     fn default() -> Self {
         Self {
             stack: BatchStackConfig::default(),
+            align: true,
         }
     }
 }
@@ -179,10 +181,54 @@ pub fn run_batch_pipeline(
             })
             .collect();
 
-        let normalized = if config.stack.normalize_before_stack {
-            normalize_frames(&calibrated)
+        let registered = if config.align && calibrated.len() > 1 {
+            let (rows, cols) = calibrated[0].dim();
+            let reference = calibrated[0].clone();
+            let rest: Vec<Array2<f32>> = calibrated[1..]
+                .par_iter()
+                .map(|target| {
+                    let pc = crate::core::alignment::pair::align_pair(
+                        &reference,
+                        target,
+                        crate::types::compose::AlignMethod::PhaseCorrelation,
+                        rows,
+                        cols,
+                    );
+                    match pc {
+                        Ok(res) if res.method_used == "phase_correlation" => {
+                            if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
+                                target.clone()
+                            } else {
+                                res.aligned
+                            }
+                        }
+                        _ => {
+                            match crate::core::alignment::pair::align_pair(
+                                &reference,
+                                target,
+                                crate::types::compose::AlignMethod::Affine,
+                                rows,
+                                cols,
+                            ) {
+                                Ok(res) => res.aligned,
+                                Err(_) => target.clone(),
+                            }
+                        }
+                    }
+                })
+                .collect();
+            let mut frames = Vec::with_capacity(calibrated.len());
+            frames.push(reference);
+            frames.extend(rest);
+            frames
         } else {
             calibrated
+        };
+
+        let normalized = if config.stack.normalize_before_stack {
+            normalize_frames(&registered)
+        } else {
+            registered
         };
 
         let (mut stacked, rejection_counts) =

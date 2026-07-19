@@ -68,7 +68,7 @@ pub fn apply_noise(image: &Array2<f32>, params: &NoiseParams) -> Array2<f32> {
     for y in 0..h {
         for x in 0..w {
             let flux = image[[y, x]] as f64;
-            let signal_e = (flux + params.sky_background) * params.gain * params.exposure_time
+            let signal_e = (flux + params.sky_background) * params.exposure_time
                 + params.dark_current * params.exposure_time;
             let photon_e = poisson_sample(&mut rng, signal_e.max(0.0));
             let read_e = normal.sample(&mut rng);

@@ -29,6 +29,7 @@ pub struct PipelineRequest {
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
+    pub align: Option<bool>,
 }
 
 fn load_batch(paths: &[String]) -> Result<Vec<ndarray::Array2<f32>>, anyhow::Error> {
@@ -183,6 +184,7 @@ pub async fn run_pipeline_cmd(
                 max_iterations: 5,
                 normalize_before_stack: request.normalize.unwrap_or(true),
             },
+            align: request.align.unwrap_or(true),
         };
 
         let result = run_batch_pipeline(channels, &masters, &config)?;

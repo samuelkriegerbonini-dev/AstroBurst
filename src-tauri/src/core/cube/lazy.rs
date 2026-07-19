@@ -311,43 +311,57 @@ impl LazyCube {
     pub fn collapse_median_lazy(&self) -> Result<Array2<f32>> {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
-        let npix = rows * cols;
         let depth = g.naxis3;
 
-        let mut pixel_vals: Vec<Vec<f32>> = Vec::with_capacity(npix);
-        for _ in 0..npix {
-            pixel_vals.push(Vec::with_capacity(depth));
-        }
+        const TARGET_BAND_BYTES: usize = 256 * 1024 * 1024;
+        let bytes_per_row = cols.max(1) * depth.max(1) * 4;
+        let band_rows = (TARGET_BAND_BYTES / bytes_per_row.max(1)).clamp(1, rows.max(1));
 
-        for batch_start in (0..depth).step_by(BATCH_SIZE) {
-            let batch_end = (batch_start + BATCH_SIZE).min(depth);
+        let mut result_data: Vec<f32> = Vec::with_capacity(rows * cols);
 
-            let frames: Vec<Vec<f32>> = (batch_start..batch_end)
-                .into_par_iter()
-                .map(|z| self.decode_frame_nocache(z))
-                .collect();
+        for band_start in (0..rows).step_by(band_rows) {
+            let band_end = (band_start + band_rows).min(rows);
+            let band_npix = (band_end - band_start) * cols;
 
-            for pixels in &frames {
-                for i in 0..npix {
-                    let v = pixels[i];
-                    if v.is_finite() && v != 0.0 {
-                        pixel_vals[i].push(v);
+            let mut pixel_vals: Vec<Vec<f32>> = vec![Vec::new(); band_npix];
+
+            for batch_start in (0..depth).step_by(BATCH_SIZE) {
+                let batch_end = (batch_start + BATCH_SIZE).min(depth);
+
+                let frames: Vec<Vec<f32>> = (batch_start..batch_end)
+                    .into_par_iter()
+                    .map(|z| {
+                        let start = g.data_offset
+                            + z * g.frame_bytes
+                            + band_start * cols * g.bytes_per_pixel;
+                        let end = start + band_npix * g.bytes_per_pixel;
+                        decode_pixels(&self.mmap[start..end], g.bitpix, g.bscale, g.bzero)
+                    })
+                    .collect();
+
+                for pixels in &frames {
+                    for i in 0..band_npix {
+                        let v = pixels[i];
+                        if v.is_finite() && v != 0.0 {
+                            pixel_vals[i].push(v);
+                        }
                     }
                 }
             }
-        }
 
-        let result_data: Vec<f32> = pixel_vals
-            .into_par_iter()
-            .map(|mut vals| {
-                if vals.is_empty() {
-                    return 0.0;
-                }
-                let mid = vals.len() / 2;
-                vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
-                vals[mid]
-            })
-            .collect();
+            let band_result: Vec<f32> = pixel_vals
+                .into_par_iter()
+                .map(|mut vals| {
+                    if vals.is_empty() {
+                        return 0.0;
+                    }
+                    let mid = vals.len() / 2;
+                    vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+                    vals[mid]
+                })
+                .collect();
+            result_data.extend_from_slice(&band_result);
+        }
 
         Ok(Array2::from_shape_vec((rows, cols), result_data)
             .context("Failed to reshape collapsed median")?)

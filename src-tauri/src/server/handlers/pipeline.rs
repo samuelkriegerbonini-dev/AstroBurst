@@ -35,6 +35,7 @@ pub struct PipelineParams {
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
+    pub align: Option<bool>,
     pub result_prefix: Option<String>,
 }
 
@@ -101,6 +102,7 @@ pub async fn run(
             max_iterations: 5,
             normalize_before_stack: params.normalize.unwrap_or(true),
         },
+        align: params.align.unwrap_or(true),
     };
 
     let slot_names: Vec<String> = params
