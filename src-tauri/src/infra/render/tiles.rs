@@ -167,11 +167,10 @@ fn percentile_bounds(slice: &[f32], low_pct: f64, high_pct: f64) -> (f32, f32) {
     });
     let hi = *hi_val;
 
-    let (left, _, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
+    let (_, lo_val, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
         a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let _ = left;
-    let lo = valid[lo_idx];
+    let lo = *lo_val;
 
     (lo, hi)
 }

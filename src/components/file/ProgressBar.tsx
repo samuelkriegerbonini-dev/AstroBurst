@@ -49,10 +49,12 @@ function ProgressBar({
   return (
     <div className={`${height} w-full rounded-full overflow-hidden ${className}`} style={{ background: "rgba(20,184,166,0.08)" }}>
       <div
-        className={`h-full ${colorClass} rounded-full ${glowClass}`}
+        className={`h-full w-full ${colorClass} rounded-full ${glowClass}`}
         style={{
-          width: `${clamped}%`,
-          transition: "width 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+          transform: `scaleX(${clamped / 100})`,
+          transformOrigin: "left",
+          transition: "transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+          willChange: "transform",
           ...inlineStyle,
         }}
       />

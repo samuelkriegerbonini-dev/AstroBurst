@@ -11,6 +11,7 @@ interface SpccResult {
   avg_color_index?: number;
   white_reference?: string;
   catalog_name?: string;
+  is_synthetic_catalog?: boolean;
   elapsed_ms?: number;
 }
 
@@ -28,6 +29,11 @@ const WHITE_REFS = [
   { value: "photopic", label: "Photopic (Human Eye)" },
 ];
 
+const CATALOGS = [
+  { value: "gaia", label: "Gaia DR3 (VizieR, online)" },
+  { value: "builtin", label: "Built-in (synthetic)" },
+] as const;
+
 const ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-cyan-400">
     <circle cx="12" cy="12" r="5" />
@@ -37,6 +43,7 @@ const ICON = (
 
 export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady }: SpccPanelProps) {
   const [whiteRef, setWhiteRef] = useState("average_spiral");
+  const [catalog, setCatalog] = useState<"gaia" | "builtin">("gaia");
   const [minSnr, setMinSnr] = useState(20);
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<SpccResult | null>(null);
@@ -54,6 +61,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
         wcsPath: wcsPath ?? undefined,
         whiteReference: whiteRef,
         minSnr,
+        catalog,
       }) as SpccResult;
       setResult(res);
       if (res?.r_factor != null && res?.g_factor != null && res?.b_factor != null) {
@@ -64,7 +72,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
     } finally {
       setIsRunning(false);
     }
-  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, onFactorsReady]);
+  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, catalog, onFactorsReady]);
 
   return (
     <div className="flex flex-col gap-3 p-3 border border-cyan-800/20 bg-cyan-900/5 rounded-lg">
@@ -86,6 +94,20 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
         >
           {WHITE_REFS.map((wr) => (
             <option key={wr.value} value={wr.value}>{wr.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <label className="text-xs text-zinc-400">Catalog</label>
+        <select
+          value={catalog}
+          onChange={(e) => setCatalog(e.target.value as "gaia" | "builtin")}
+          className="ab-select"
+          disabled={isRunning}
+        >
+          {CATALOGS.map((c) => (
+            <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
       </div>
@@ -139,6 +161,13 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
             { label: "Reference", value: result.white_reference },
             { label: "Time", value: result.elapsed_ms ? `${(result.elapsed_ms / 1000).toFixed(1)}s` : null },
           ]} />
+
+          {result.is_synthetic_catalog && (
+            <div className="text-[10px] text-amber-400/90 bg-amber-900/20 border border-amber-800/30 rounded px-2.5 py-1.5">
+              Gaia unavailable — factors come from the synthetic built-in catalog and are not
+              photometrically reliable. Check your connection and re-run for a real calibration.
+            </div>
+          )}
 
           <div className="text-[10px] text-cyan-400/80 bg-cyan-900/20 border border-cyan-800/20 rounded px-2.5 py-1.5">
             Factors applied to Manual WB. Re-compose to see the result.

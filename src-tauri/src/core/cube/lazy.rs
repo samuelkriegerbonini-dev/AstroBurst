@@ -10,7 +10,6 @@ use rayon::prelude::*;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::HduHeader;
 use crate::math::median::f32_cmp;
-use crate::core::imaging::stats;
 use crate::infra::fits::reader::{create_mmap_random, decode_pixels, decode_single_pixel, parse_header_at};
 
 #[derive(Debug, Clone)]
@@ -121,6 +120,22 @@ pub struct LazyCube {
     cache: Mutex<LruFrameCache>,
 }
 
+fn checked_cube_bytes(
+    naxis1: usize,
+    naxis2: usize,
+    naxis3: usize,
+    bytes_per_pixel: usize,
+) -> Result<(usize, usize)> {
+    let frame_bytes = naxis1
+        .checked_mul(naxis2)
+        .and_then(|v| v.checked_mul(bytes_per_pixel))
+        .context("Cube frame size overflow")?;
+    let total_bytes = frame_bytes
+        .checked_mul(naxis3)
+        .context("Cube data size overflow")?;
+    Ok((frame_bytes, total_bytes))
+}
+
 impl LazyCube {
     pub fn open(path: &str) -> Result<Self> {
         Self::open_with_cache(path, DEFAULT_CACHE_SIZE)
@@ -142,18 +157,28 @@ impl LazyCube {
             let naxis3 = header.get_i64("NAXIS3").unwrap_or(0);
 
             if naxis == 3 && naxis3 > 1 {
-                let naxis1 = header.get_i64("NAXIS1").unwrap_or(0) as usize;
-                let naxis2 = header.get_i64("NAXIS2").unwrap_or(0) as usize;
+                let naxis1_i = header.get_i64("NAXIS1").unwrap_or(0);
+                let naxis2_i = header.get_i64("NAXIS2").unwrap_or(0);
+                if naxis1_i <= 0 || naxis2_i <= 0 {
+                    bail!("Invalid cube dimensions NAXIS1={}, NAXIS2={}", naxis1_i, naxis2_i);
+                }
+                let naxis1 = naxis1_i as usize;
+                let naxis2 = naxis2_i as usize;
                 let naxis3 = naxis3 as usize;
 
                 let bitpix = header.get_i64("BITPIX")
                     .context("Missing BITPIX")?;
                 let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-                let frame_bytes = naxis1 * naxis2 * bytes_per_pixel;
-                let data_offset = header.data_offset(parsed.header_start);
+                if bytes_per_pixel == 0 {
+                    bail!("Unsupported BITPIX={}", bitpix);
+                }
+                let (frame_bytes, total_bytes) =
+                    checked_cube_bytes(naxis1, naxis2, naxis3, bytes_per_pixel)?;
+                let data_offset = parsed.data_start;
 
-                let total_bytes = frame_bytes * naxis3;
-                let data_end = data_offset + total_bytes;
+                let data_end = data_offset
+                    .checked_add(total_bytes)
+                    .context("Cube data end overflow")?;
                 if data_end > mmap.len() {
                     bail!(
                         "Cube data [{}, {}) exceeds file size {}",
@@ -265,7 +290,7 @@ impl LazyCube {
                 let pixels = &frames[frame_idx];
                 for i in 0..npix {
                     let v = pixels[i];
-                    if stats::is_valid_pixel(v) {
+                    if v.is_finite() && v != 0.0 {
                         sum[i] += v as f64;
                         count[i] += 1;
                     }
@@ -286,43 +311,57 @@ impl LazyCube {
     pub fn collapse_median_lazy(&self) -> Result<Array2<f32>> {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
-        let npix = rows * cols;
         let depth = g.naxis3;
 
-        let mut pixel_vals: Vec<Vec<f32>> = Vec::with_capacity(npix);
-        for _ in 0..npix {
-            pixel_vals.push(Vec::with_capacity(depth));
-        }
+        const TARGET_BAND_BYTES: usize = 256 * 1024 * 1024;
+        let bytes_per_row = cols.max(1) * depth.max(1) * 4;
+        let band_rows = (TARGET_BAND_BYTES / bytes_per_row.max(1)).clamp(1, rows.max(1));
 
-        for batch_start in (0..depth).step_by(BATCH_SIZE) {
-            let batch_end = (batch_start + BATCH_SIZE).min(depth);
+        let mut result_data: Vec<f32> = Vec::with_capacity(rows * cols);
 
-            let frames: Vec<Vec<f32>> = (batch_start..batch_end)
-                .into_par_iter()
-                .map(|z| self.decode_frame_nocache(z))
-                .collect();
+        for band_start in (0..rows).step_by(band_rows) {
+            let band_end = (band_start + band_rows).min(rows);
+            let band_npix = (band_end - band_start) * cols;
 
-            for pixels in &frames {
-                for i in 0..npix {
-                    let v = pixels[i];
-                    if stats::is_valid_pixel(v) {
-                        pixel_vals[i].push(v);
+            let mut pixel_vals: Vec<Vec<f32>> = vec![Vec::new(); band_npix];
+
+            for batch_start in (0..depth).step_by(BATCH_SIZE) {
+                let batch_end = (batch_start + BATCH_SIZE).min(depth);
+
+                let frames: Vec<Vec<f32>> = (batch_start..batch_end)
+                    .into_par_iter()
+                    .map(|z| {
+                        let start = g.data_offset
+                            + z * g.frame_bytes
+                            + band_start * cols * g.bytes_per_pixel;
+                        let end = start + band_npix * g.bytes_per_pixel;
+                        decode_pixels(&self.mmap[start..end], g.bitpix, g.bscale, g.bzero)
+                    })
+                    .collect();
+
+                for pixels in &frames {
+                    for i in 0..band_npix {
+                        let v = pixels[i];
+                        if v.is_finite() && v != 0.0 {
+                            pixel_vals[i].push(v);
+                        }
                     }
                 }
             }
-        }
 
-        let result_data: Vec<f32> = pixel_vals
-            .into_par_iter()
-            .map(|mut vals| {
-                if vals.is_empty() {
-                    return 0.0;
-                }
-                let mid = vals.len() / 2;
-                vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
-                vals[mid]
-            })
-            .collect();
+            let band_result: Vec<f32> = pixel_vals
+                .into_par_iter()
+                .map(|mut vals| {
+                    if vals.is_empty() {
+                        return 0.0;
+                    }
+                    let mid = vals.len() / 2;
+                    vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
+                    vals[mid]
+                })
+                .collect();
+            result_data.extend_from_slice(&band_result);
+        }
 
         Ok(Array2::from_shape_vec((rows, cols), result_data)
             .context("Failed to reshape collapsed median")?)
@@ -339,7 +378,7 @@ impl LazyCube {
             .par_iter()
             .map(|&z| {
                 let pixels = self.decode_frame_nocache(z);
-                pixels.into_iter().filter(|v| stats::is_valid_pixel(*v)).collect()
+                pixels.into_iter().filter(|v| v.is_finite() && *v != 0.0).collect()
             })
             .collect();
 
@@ -362,9 +401,12 @@ impl LazyCube {
         deviations.select_nth_unstable_by(dev_mid, |a, b| f32_cmp(a, b));
         let sigma = (deviations[dev_mid] * MAD_TO_SIGMA as f32).max(1e-10);
 
-        sampled.sort_unstable_by(|a, b| f32_cmp(a, b));
-        let low = sampled[(n as f64 * 0.01) as usize];
-        let high = sampled[((n as f64 * 0.999) as usize).min(n - 1)];
+        let low_idx = (n as f64 * 0.01) as usize;
+        let high_idx = ((n as f64 * 0.999) as usize).min(n - 1);
+        sampled.select_nth_unstable_by(low_idx, |a, b| f32_cmp(a, b));
+        let low = sampled[low_idx];
+        sampled.select_nth_unstable_by(high_idx, |a, b| f32_cmp(a, b));
+        let high = sampled[high_idx];
 
         Ok(GlobalCubeStats { median, sigma, low, high })
     }
@@ -464,5 +506,13 @@ mod tests {
         for &v in normalized.iter() {
             assert!(v.is_finite());
         }
+    }
+
+    #[test]
+    fn cube_bytes_overflow_is_rejected() {
+        assert_eq!(checked_cube_bytes(2, 2, 2, 4).unwrap(), (16, 32));
+        assert!(checked_cube_bytes(usize::MAX, 2, 1, 1).is_err());
+        assert!(checked_cube_bytes(1 << 40, 1 << 40, 1, 1).is_err());
+        assert!(checked_cube_bytes(4, 4, usize::MAX, 1).is_err());
     }
 }

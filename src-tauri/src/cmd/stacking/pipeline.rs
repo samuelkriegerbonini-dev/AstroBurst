@@ -8,6 +8,7 @@ use crate::core::imaging::calibration_pipeline::{
 use crate::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat, load_fits_image,
 };
+use crate::infra::fits::reader::read_primary_header;
 use crate::types::constants::{
     RES_LABEL, RES_PIXELS_B64, RES_WIDTH, RES_HEIGHT,
     RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW,
@@ -28,10 +29,48 @@ pub struct PipelineRequest {
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
+    pub align: Option<bool>,
 }
 
 fn load_batch(paths: &[String]) -> Result<Vec<ndarray::Array2<f32>>, anyhow::Error> {
     paths.iter().map(|p| load_fits_image(p)).collect()
+}
+
+fn read_exposure_seconds(path: &str) -> Option<f64> {
+    let header = read_primary_header(path).ok()?;
+    header
+        .get_f64("EXPTIME")
+        .or_else(|| header.get_f64("EXPOSURE"))
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+fn median_exposure(paths: &[String]) -> Option<f64> {
+    let mut vals: Vec<f64> = paths.iter().filter_map(|p| read_exposure_seconds(p)).collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(vals[vals.len() / 2])
+}
+
+fn compute_dark_scales(light_paths: &[String], dark_exposure: Option<f64>) -> Vec<f32> {
+    let Some(dark_exp) = dark_exposure else {
+        return vec![1.0; light_paths.len()];
+    };
+    light_paths
+        .iter()
+        .map(|p| match read_exposure_seconds(p) {
+            Some(light_exp) => {
+                let ratio = (light_exp / dark_exp) as f32;
+                if (ratio - 1.0).abs() < 0.01 {
+                    1.0
+                } else {
+                    ratio.clamp(0.05, 20.0)
+                }
+            }
+            None => 1.0,
+        })
+        .collect()
 }
 
 fn array2_to_b64_u16(arr: &ndarray::Array2<f32>) -> String {
@@ -87,7 +126,13 @@ pub async fn run_pipeline_cmd(
         let master_flat = if request.flat_paths.is_empty() {
             None
         } else {
-            Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref()).map_err(|e| format!("{:#}", e))?)
+            Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
+        };
+
+        let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {
+            None
+        } else {
+            median_exposure(&request.dark_paths)
         };
 
         let masters = CalibrationMasters {
@@ -114,9 +159,20 @@ pub async fn run_pipeline_cmd(
                     }
                 }
 
+                let dark_scales = compute_dark_scales(&ch.paths, dark_exposure);
+                if dark_scales.iter().any(|s| (*s - 1.0).abs() >= 0.01) {
+                    let min_s = dark_scales.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max_s = dark_scales.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    log::info!(
+                        "Channel '{}': scaling master dark by exposure ratio (range {:.3}..{:.3}, dark median {:.1}s)",
+                        ch.label, min_s, max_s, dark_exposure.unwrap_or(0.0)
+                    );
+                }
+
                 Ok(ChannelInput {
                     lights,
                     label: ch.label.clone(),
+                    dark_scales,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -128,6 +184,7 @@ pub async fn run_pipeline_cmd(
                 max_iterations: 5,
                 normalize_before_stack: request.normalize.unwrap_or(true),
             },
+            align: request.align.unwrap_or(true),
         };
 
         let result = run_batch_pipeline(channels, &masters, &config)?;

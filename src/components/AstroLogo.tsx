@@ -1,4 +1,3 @@
-// @ts-ignore
 import logoImg from "../assets/logo.png";
 import { APP_VERSION } from "../utils/constants";
 

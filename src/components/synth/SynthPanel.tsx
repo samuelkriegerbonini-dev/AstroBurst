@@ -44,8 +44,8 @@ export default function SynthPanel() {
   const [width, setWidth] = useState(2048);
   const [height, setHeight] = useState(2048);
   const [nStars, setNStars] = useState(500);
-  const [fluxMin, setFluxMin] = useState(100);
-  const [fluxMax, setFluxMax] = useState(50000);
+  const [fluxMin, _setFluxMin] = useState(100);
+  const [fluxMax, _setFluxMax] = useState(50000);
   const [seed, setSeed] = useState(42);
 
   const [fieldChoice, setFieldChoice] = useState<FieldChoice>("uniform");
@@ -62,9 +62,9 @@ export default function SynthPanel() {
   const [gain, setGain] = useState(1.5);
   const [readNoise, setReadNoise] = useState(8.0);
   const [skyBg, setSkyBg] = useState(200.0);
-  const [darkCurrent, setDarkCurrent] = useState(0.05);
+  const [darkCurrent, _setDarkCurrent] = useState(0.05);
   const [expTime, setExpTime] = useState(300.0);
-  const [biasLevel, setBiasLevel] = useState(1000.0);
+  const [biasLevel, _setBiasLevel] = useState(1000.0);
 
   const [vignette, setVignette] = useState(false);
   const [vigStrength, setVigStrength] = useState(0.3);

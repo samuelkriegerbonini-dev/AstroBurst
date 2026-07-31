@@ -1,6 +1,7 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
-import { parseRawPixelBuffer } from "../infrastructure/tauri/parsers";
+import { parseRawPixelBuffer, parseRawRgbPixelBuffer } from "../infrastructure/tauri/parsers";
 import type { ProcessResult, ResampleResult } from "../shared/types/fits.types";
+import type { RawRgbPixelData } from "../shared/types";
 
 export function processFits(path: string, outputDir?: string): Promise<ProcessResult> {
   return withPreview<ProcessResult>("process_fits", outputDir, { path });
@@ -21,6 +22,14 @@ export interface RawPixelsResult {
 export async function getRawPixelsPreview(path: string, maxDim = 2048): Promise<RawPixelsResult> {
   const buffer = await typedInvoke<ArrayBuffer>("get_raw_pixels_preview", { path, maxDim });
   return parseRawPixelBuffer(buffer);
+}
+
+export async function getRawRgbPixelsPreview(
+  path: string | null,
+  maxDim = 2048,
+): Promise<RawRgbPixelData> {
+  const buffer = await typedInvoke<ArrayBuffer>("get_raw_rgb_pixels_preview", { path, maxDim });
+  return parseRawRgbPixelBuffer(buffer);
 }
 
 export function resampleFits(

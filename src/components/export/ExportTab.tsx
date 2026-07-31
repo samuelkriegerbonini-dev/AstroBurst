@@ -1,9 +1,10 @@
 import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
-import { Download, Loader2, Box, Film } from "lucide-react";
+import { Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
+import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
-import { useFileContext, useHistContext, useRgbContext, useRenderContext, useCubeContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useFileContext, useHistContext, useRgbContext, useCubeContext } from "../../context/PreviewContext";
+import { useCompositePreview, useCompositeStf } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
@@ -12,25 +13,26 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels } = useRgbContext();
-  const { renderedPreviewUrl } = useRenderContext();
-  const { isShowingComposite, compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
+  const { isShowingComposite } = useCompositePreview();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
   const { isCube, cubeDims } = useCubeContext();
 
-  const [exportResult, setExportResult] = useState<any>(null);
+  const [exportResult, setExportResult] = useState<ExportResult | null>(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [cubeExporting, setCubeExporting] = useState(false);
   const [cubeExportProgress, setCubeExportProgress] = useState(0);
-  const [cubeExportResult, setCubeExportResult] = useState<any>(null);
+  const [cubeExportResult, setCubeExportResult] = useState<{ exported?: number; total?: number; fits?: boolean; dir?: string; error?: string } | null>(null);
   const [cubeExportFits, setCubeExportFits] = useState(false);
 
   const handleExportFits = useCallback(
-    async (path: string, outputPath: string, options: any) => {
+    async (path: string, outputPath: string, options: ExportFitsOptions) => {
       setExportLoading(true);
       try {
         const result = await exportFits(path, outputPath, options);
         setExportResult(result);
       } catch (e) {
         console.error("FITS export failed:", e);
+        throw e;
       } finally {
         setExportLoading(false);
       }
@@ -44,7 +46,7 @@ function ExportTabInner() {
       gPath: string | null,
       bPath: string | null,
       outputPath: string,
-      options: any,
+      options: ExportFitsRgbOptions,
     ) => {
       setExportLoading(true);
       try {
@@ -55,21 +57,13 @@ function ExportTabInner() {
         setExportResult(result);
       } catch (e) {
         console.error("RGB FITS export failed:", e);
+        throw e;
       } finally {
         setExportLoading(false);
       }
     },
     [],
   );
-
-  const handleDownloadPng = useCallback(() => {
-    const url = renderedPreviewUrl || file?.result?.previewUrl;
-    if (!url) return;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = (file?.name || "image").replace(/\.(fits?|zip)$/i, ".png");
-    a.click();
-  }, [file, renderedPreviewUrl]);
 
   const handleExportCubeFrames = useCallback(async () => {
     if (!file?.path || !cubeDims) return;
@@ -123,7 +117,7 @@ function ExportTabInner() {
         </div>
       }
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4 p-3">
         <ExportPanel
           filePath={file?.path ?? null}
           stfParams={stfParams}
@@ -204,14 +198,6 @@ function ExportTabInner() {
             </div>
           </div>
         )}
-
-        <button
-          onClick={handleDownloadPng}
-          className="flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg px-4 py-2.5 font-medium transition-colors text-sm w-full"
-        >
-          <Download size={16} />
-          Download PNG
-        </button>
       </div>
     </Suspense>
   );

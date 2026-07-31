@@ -1,18 +1,62 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { AlertTriangle } from "lucide-react";
 
-import { blendChannels } from "../../../services/compose";
+import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton } from "../../ui";
-import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState} from "../../../utils/wizard";
+import { RunButton, Slider } from "../../ui";
+import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState, resolveChannelPath} from "../../../utils/wizard";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
-  sii: 673, ha: 656, nii: 658, oiii: 502,
+  sii: 673, ha: 656, nii: 658, oiii: 501,
   r: 620, g: 530, b: 470, l: 550,
 };
 
 function binWavelength(bin: FrequencyBin): number {
   if (bin.wavelength) return bin.wavelength;
   return CANONICAL_WAVELENGTH[bin.id] ?? 550;
+}
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+function wavelengthAutoWeights(filledBins: FrequencyBin[]): BlendWeight[] {
+  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
+  const n = sorted.length;
+  return sorted.map((bin, i) => {
+    const p = n > 1 ? i / (n - 1) : 0.5;
+    return {
+      channelId: bin.id,
+      r: round2(Math.max(0, 2 * p - 1)),
+      g: round2(1 - Math.abs(2 * p - 1)),
+      b: round2(Math.max(0, 1 - 2 * p)),
+    };
+  });
+}
+
+function wavelengthAutoWeightsBalanced(filledBins: FrequencyBin[]): BlendWeight[] {
+  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
+  const n = sorted.length;
+  const raw = sorted.map((bin, i) => {
+    const p = n > 1 ? i / (n - 1) : 0.5;
+    return {
+      channelId: bin.id,
+      r: Math.max(0, 2 * p - 1),
+      g: 1 - Math.abs(2 * p - 1),
+      b: Math.max(0, 1 - 2 * p),
+    };
+  });
+
+  const colSum = (k: "r" | "g" | "b") => raw.reduce((acc, w) => acc + w[k], 0);
+  const norm = (total: number) => (total > 1e-6 ? 1 / total : 1);
+  const fr = norm(colSum("r"));
+  const fg = norm(colSum("g"));
+  const fb = norm(colSum("b"));
+
+  return raw.map((w) => ({
+    channelId: w.channelId,
+    r: round2(w.r * fr),
+    g: round2(w.g * fg),
+    b: round2(w.b * fb),
+  }));
 }
 
 function resolvePresetWeights(
@@ -52,20 +96,21 @@ interface BlendStepProps {
   onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
 }
 
-function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
-  const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
+interface BlendRunResult {
+  channel_count?: number;
+  dimensions?: [number, number];
+  elapsed_ms?: number;
 }
 
 export default function BlendStep({ state, onWeightsChange, onCompositeReady }: BlendStepProps) {
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<BlendRunResult | null>(null);
   const [error, setError] = useState("");
+  const [lrgbLightness, setLrgbLightness] = useState(1.0);
+  const [lrgbChrominance, setLrgbChrominance] = useState(1.0);
+  const [lrgbLoading, setLrgbLoading] = useState(false);
+  const [lrgbApplied, setLrgbApplied] = useState(false);
+  const [lrgbError, setLrgbError] = useState("");
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
 
@@ -76,10 +121,40 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     if (resolved) onWeightsChange(resolved, presetId);
   }, [filledBins, onWeightsChange]);
 
-  const handleWeightChange = useCallback((channelId: string, axis: "r" | "g" | "b", value: number) => {
-    const next = state.blendWeights.map((w) =>
-      w.channelId === channelId ? { ...w, [axis]: value } : w
+  const handleAutoWavelength = useCallback(() => {
+    onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
+  }, [filledBins, onWeightsChange]);
+
+  const handleAutoWavelengthBalanced = useCallback(() => {
+    onWeightsChange(wavelengthAutoWeightsBalanced(filledBins), "auto_wavelength_balanced");
+  }, [filledBins, onWeightsChange]);
+
+  const autoAppliedRef = useRef<string>("");
+  useEffect(() => {
+    if (filledBins.length < 2) return;
+    const sig = filledBins.map((b) => b.id).sort().join("|");
+    if (autoAppliedRef.current === sig) return;
+    autoAppliedRef.current = sig;
+    const hasAssigned = state.blendWeights.some(
+      (w) => (w.r > 0 || w.g > 0 || w.b > 0) && filledBins.some((b) => b.id === w.channelId),
     );
+    if (!hasAssigned) {
+      onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
+    }
+  }, [filledBins, state.blendWeights, onWeightsChange]);
+
+  const handleWeightChange = useCallback((channelId: string, axis: "r" | "g" | "b", value: number) => {
+    const exists = state.blendWeights.some((w) => w.channelId === channelId);
+    let next: BlendWeight[];
+    if (exists) {
+      next = state.blendWeights.map((w) =>
+        w.channelId === channelId ? { ...w, [axis]: value } : w
+      );
+    } else {
+      const created: BlendWeight = { channelId, r: 0, g: 0, b: 0 };
+      created[axis] = value;
+      next = [...state.blendWeights, created];
+    }
     onWeightsChange(next, "custom");
   }, [state.blendWeights, onWeightsChange]);
 
@@ -93,6 +168,23 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     }
     return base.filter((w) => filledBins.some((b) => b.id === w.channelId));
   }, [state.blendWeights, filledBins]);
+
+  const channelStages = useMemo(() => {
+    const stages: Record<string, "background" | "cropped" | "aligned" | "stacked" | "raw"> = {};
+    for (const bin of filledBins) {
+      if (state.backgroundPaths[bin.id]) stages[bin.id] = "background";
+      else if (state.croppedPaths[bin.id]) stages[bin.id] = "cropped";
+      else if (state.alignedPaths[bin.id]) stages[bin.id] = "aligned";
+      else if (state.stackedPaths[bin.id]) stages[bin.id] = "stacked";
+      else stages[bin.id] = "raw";
+    }
+    return stages;
+  }, [filledBins, state.backgroundPaths, state.croppedPaths, state.alignedPaths, state.stackedPaths]);
+
+  const unalignedBins = useMemo(
+    () => filledBins.filter((b) => channelStages[b.id] === "stacked" || channelStages[b.id] === "raw"),
+    [filledBins, channelStages],
+  );
 
   const handleRunBlend = useCallback(async () => {
     setLoading(true);
@@ -135,12 +227,34 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       const autoStf = res.auto_stf ?? undefined;
       onCompositeReady(previewUrl, autoStf);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
   }, [filledBins, state, activeWeights, onCompositeReady]);
+
+  const lPath = useMemo(() => resolveChannelPath(state, "l"), [state]);
+
+  const handleApplyLrgb = useCallback(async () => {
+    if (!lPath) return;
+    setLrgbLoading(true);
+    setLrgbError("");
+    try {
+      const dir = await getOutputDir();
+      const res = await lrgbCombineComposite(lPath, dir, {
+        lightness: lrgbLightness,
+        chrominance: lrgbChrominance,
+      });
+      setLrgbApplied(true);
+      const previewUrl = res.previewUrl ?? res.png_path ?? null;
+      onCompositeReady(previewUrl);
+    } catch (e) {
+      setLrgbError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLrgbLoading(false);
+    }
+  }, [lPath, lrgbLightness, lrgbChrominance, onCompositeReady]);
 
   if (filledBins.length < 2) {
     return (
@@ -153,6 +267,26 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="flex flex-wrap gap-1.5">
+        <button onClick={handleAutoWavelength}
+                title="Spread all channels across R/G/B by wavelength (works for any number of channels)"
+                className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                  state.blendPreset === "auto_wavelength"
+                    ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
+                    : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}>
+          <div className="font-semibold">Auto (λ)</div>
+          <div className="text-[8px] opacity-60">Spread channels across RGB by wavelength</div>
+        </button>
+        <button onClick={handleAutoWavelengthBalanced}
+                title="Wavelength spread with equal total weight per R/G/B (removes the green over-weighting from the spectral middle)"
+                className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                  state.blendPreset === "auto_wavelength_balanced"
+                    ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
+                    : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                }`}>
+          <div className="font-semibold">Balanced (λ)</div>
+          <div className="text-[8px] opacity-60">Wavelength spread, equal weight per R/G/B</div>
+        </button>
         {Object.entries(BLEND_PRESETS).map(([id, preset]) => {
           const isActive = state.blendPreset === id;
           return (
@@ -182,9 +316,24 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
           if (!bin) return null;
           return (
             <div key={w.channelId} className="grid grid-cols-[1fr_60px_60px_60px] gap-1 items-center py-1 border-b border-zinc-800/20">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full" style={{ background: bin.color }} />
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: bin.color }} />
                 <span className="text-[10px] text-zinc-300">{bin.shortLabel}</span>
+                {(() => {
+                  const stage = channelStages[bin.id];
+                  const risky = stage === "stacked" || stage === "raw";
+                  const label = stage === "raw" && bin.files.length > 1 ? `raw 1/${bin.files.length}` : stage;
+                  return (
+                    <span
+                      className={`text-[8px] px-1 py-px rounded truncate ${risky ? "text-amber-400/90 bg-amber-900/25" : "text-zinc-500 bg-zinc-800/40"}`}
+                      title={stage === "raw" && bin.files.length > 1
+                        ? `Using 1 of ${bin.files.length} files — run Stack to combine them first`
+                        : `Source: ${stage} output`}
+                    >
+                      {label}
+                    </span>
+                  );
+                })()}
               </div>
               {(["r", "g", "b"] as const).map((axis) => {
                 const val = w[axis];
@@ -213,6 +362,16 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
       <div className="text-[9px] text-zinc-600 bg-zinc-900/50 rounded px-2 py-1.5">
         Blend produces a linear composite. Preview uses auto-STF for visualization.
       </div>
+
+      {unalignedBins.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>
+            {unalignedBins.map((b) => b.shortLabel).join(", ")} {unalignedBins.length === 1 ? "was" : "were"} never
+            aligned — blending unregistered channels can cause color fringing. Run Align first.
+          </span>
+        </div>
+      )}
 
       <RunButton
         label="Run Blend"
@@ -247,6 +406,29 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}
+
+      {state.compositeReady && lPath && (
+        <div className="flex flex-col gap-2 p-2 rounded-lg border border-sky-500/15 bg-sky-500/5">
+          <span className="text-[10px] font-medium text-sky-300">Luminance (LRGB)</span>
+          <Slider label="Lightness" value={lrgbLightness} min={0} max={1} step={0.05} accent="sky"
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbLightness}
+                  hint="how much L replaces composite luminance" />
+          <Slider label="Chrominance" value={lrgbChrominance} min={0} max={1} step={0.05} accent="sky"
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setLrgbChrominance}
+                  hint="1.0 preserves blend colors fully" />
+          <RunButton
+            label={lrgbApplied ? "Re-apply Luminance" : "Apply Luminance"}
+            runningLabel="Combining..."
+            running={lrgbLoading}
+            accent="sky"
+            onClick={handleApplyLrgb}
+          />
+          <div className="text-[9px] text-zinc-600">
+            Transfers the L channel structure onto the composite, keeping color ratios. Updates the composite cache; re-run Blend to undo.
+          </div>
+          {lrgbError && <div className="text-[9px] text-red-400">{lrgbError}</div>}
+        </div>
+      )}
     </div>
   );
 }

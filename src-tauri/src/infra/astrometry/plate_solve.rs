@@ -156,7 +156,8 @@ mod astrometry_net_impl {
             upload_json["scale_lower"] = serde_json::json!(lo);
             upload_json["scale_upper"] = serde_json::json!(hi);
             upload_json["scale_type"] = serde_json::json!("ul");
-            upload_json["scale_units"] = serde_json::json!("arcsecperpix");
+            upload_json["scale_units"] =
+                serde_json::json!(config.scale_units.as_deref().unwrap_or("arcsecperpix"));
         }
 
         let file_bytes = std::fs::read(fits_path)
@@ -357,14 +358,14 @@ mod astrometry_net_impl {
         let mut h = HashMap::new();
         h.insert("CRVAL1".into(), format!("{:.8}", ra));
         h.insert("CRVAL2".into(), format!("{:.8}", dec));
-        h.insert("CRPIX1".into(), format!("{:.1}", width as f64 / 2.0));
-        h.insert("CRPIX2".into(), format!("{:.1}", height as f64 / 2.0));
+        h.insert("CRPIX1".into(), format!("{:.1}", (width as f64 + 1.0) / 2.0));
+        h.insert("CRPIX2".into(), format!("{:.1}", (height as f64 + 1.0) / 2.0));
 
         let theta = orientation.to_radians();
         let scale_deg = pixel_scale / 3600.0;
         h.insert("CD1_1".into(), format!("{:.12E}", -scale_deg * theta.cos()));
         h.insert("CD1_2".into(), format!("{:.12E}", scale_deg * theta.sin()));
-        h.insert("CD2_1".into(), format!("{:.12E}", -scale_deg * theta.sin()));
+        h.insert("CD2_1".into(), format!("{:.12E}", scale_deg * theta.sin()));
         h.insert("CD2_2".into(), format!("{:.12E}", scale_deg * theta.cos()));
         h.insert("CTYPE1".into(), "RA---TAN".into());
         h.insert("CTYPE2".into(), "DEC--TAN".into());

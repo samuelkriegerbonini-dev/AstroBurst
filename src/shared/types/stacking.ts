@@ -1,6 +1,11 @@
 export interface CalibrateResult {
   png_path: string;
+  fits_path?: string;
   previewUrl?: string;
+  has_bias?: boolean;
+  has_dark?: boolean;
+  has_flat?: boolean;
+  stats?: { min: number; max: number; mean: number; sigma: number };
   dimensions: [number, number];
   elapsed_ms: number;
 }
@@ -9,9 +14,11 @@ export interface StackResult {
   png_path: string;
   fits_path?: string;
   previewUrl?: string;
+  frame_count?: number;
+  rejected_pixels?: number;
+  offsets?: [number, number][];
   dimensions: [number, number];
   elapsed_ms: number;
-  frames_stacked: number;
 }
 
 export interface PipelineChannel {
@@ -59,23 +66,50 @@ export interface PipelineResult {
 }
 
 export interface CalibrateOptions {
-  darkPath?: string;
-  flatPath?: string;
-  biasPath?: string;
   darkPaths?: string[];
   flatPaths?: string[];
   biasPaths?: string[];
   darkExposureRatio?: number;
-  normalize?: boolean;
 }
 
 export interface StackOptions {
   name?: string;
-  method?: string;
   sigmaLow?: number;
   sigmaHigh?: number;
   maxIterations?: number;
   align?: boolean;
-  drizzleScale?: number;
-  weightMode?: string;
+  alignMethod?: string;
+  weights?: number[];
+}
+
+export interface DrizzleRgbOptions {
+  scale?: number;
+  pixfrac?: number;
+  kernel?: "square" | "gaussian" | "lanczos3";
+  align?: boolean;
+  alignmentMethod?: "phase_correlation" | "zncc";
+  sigmaLow?: number;
+  sigmaHigh?: number;
+  wbMode?: "auto" | "manual" | "none";
+  wbR?: number;
+  wbG?: number;
+  wbB?: number;
+  scnrEnabled?: boolean;
+  scnrAmount?: number;
+  saveFits?: boolean;
+}
+
+export interface DrizzleRgbResult {
+  png_path: string;
+  fits_path?: string | null;
+  previewUrl?: string;
+  dimensions: [number, number];
+  output_dims: [number, number];
+  input_dims: [number, number];
+  frame_count_r: number;
+  frame_count_g: number;
+  frame_count_b: number;
+  rejected_pixels: number;
+  scale: number;
+  elapsed_ms: number;
 }

@@ -2,6 +2,7 @@ use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::math::median::f32_cmp;
+use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
@@ -14,6 +15,7 @@ pub struct CalibrationMasters {
 pub struct ChannelInput {
     pub lights: Vec<Array2<f32>>,
     pub label: String,
+    pub dark_scales: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,12 +40,14 @@ impl Default for BatchStackConfig {
 #[derive(Debug, Clone)]
 pub struct BatchPipelineConfig {
     pub stack: BatchStackConfig,
+    pub align: bool,
 }
 
 impl Default for BatchPipelineConfig {
     fn default() -> Self {
         Self {
             stack: BatchStackConfig::default(),
+            align: true,
         }
     }
 }
@@ -75,6 +79,7 @@ pub struct BatchChannelStats {
 pub fn calibrate_light(
     light: &Array2<f32>,
     masters: &CalibrationMasters,
+    dark_scale: f32,
 ) -> Array2<f32> {
     let (rows, cols) = light.dim();
     let npix = rows * cols;
@@ -99,7 +104,7 @@ pub fn calibrate_light(
             }
             if dark_ok {
                 if let Some(d) = dark_slice {
-                    v -= d[i];
+                    v -= d[i] * dark_scale;
                 }
             }
             if flat_ok {
@@ -110,7 +115,7 @@ pub fn calibrate_light(
                     }
                 }
             }
-            if v < 0.0 { 0.0 } else { v }
+            v
         })
         .collect();
 
@@ -139,6 +144,21 @@ pub fn run_batch_pipeline(
                 ));
             }
         }
+        let master_dims = [
+            ("bias", masters.bias.as_ref().map(|m| m.dim())),
+            ("dark", masters.dark.as_ref().map(|m| m.dim())),
+            ("flat", masters.flat.as_ref().map(|m| m.dim())),
+        ];
+        for (name, dim) in master_dims {
+            if let Some(d) = dim {
+                if d != ref_dim {
+                    return Err(format!(
+                        "Master {} has shape {:?} but channel '{}' lights have {:?}. Calibration masters must match light dimensions.",
+                        name, d, ch.label, ref_dim
+                    ));
+                }
+            }
+        }
     }
 
     let mut pipeline_stats = BatchPipelineStats {
@@ -154,17 +174,66 @@ pub fn run_batch_pipeline(
         let calibrated: Vec<Array2<f32>> = channel
             .lights
             .par_iter()
-            .map(|l| calibrate_light(l, masters))
+            .enumerate()
+            .map(|(i, l)| {
+                let scale = channel.dark_scales.get(i).copied().unwrap_or(1.0);
+                calibrate_light(l, masters, scale)
+            })
             .collect();
 
-        let normalized = if config.stack.normalize_before_stack {
-            normalize_frames(&calibrated)
+        let registered = if config.align && calibrated.len() > 1 {
+            let (rows, cols) = calibrated[0].dim();
+            let reference = calibrated[0].clone();
+            let rest: Vec<Array2<f32>> = calibrated[1..]
+                .par_iter()
+                .map(|target| {
+                    let pc = crate::core::alignment::pair::align_pair(
+                        &reference,
+                        target,
+                        crate::types::compose::AlignMethod::PhaseCorrelation,
+                        rows,
+                        cols,
+                    );
+                    match pc {
+                        Ok(res) if res.method_used == "phase_correlation" => {
+                            if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
+                                target.clone()
+                            } else {
+                                res.aligned
+                            }
+                        }
+                        _ => {
+                            match crate::core::alignment::pair::align_pair(
+                                &reference,
+                                target,
+                                crate::types::compose::AlignMethod::Affine,
+                                rows,
+                                cols,
+                            ) {
+                                Ok(res) => res.aligned,
+                                Err(_) => target.clone(),
+                            }
+                        }
+                    }
+                })
+                .collect();
+            let mut frames = Vec::with_capacity(calibrated.len());
+            frames.push(reference);
+            frames.extend(rest);
+            frames
         } else {
             calibrated
         };
 
-        let (stacked, rejection_counts) =
+        let normalized = if config.stack.normalize_before_stack {
+            normalize_frames(&registered)
+        } else {
+            registered
+        };
+
+        let (mut stacked, rejection_counts) =
             sigma_clipped_mean_stack(&normalized, &config.stack);
+        stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
         let var: f64 = stacked
@@ -234,11 +303,7 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
             let g_n = normalize_channel(g);
             let b_n = normalize_channel(b);
             let l_n = normalize_channel(lum);
-            (
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 0),
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 1),
-                apply_luminance(&r_n, &g_n, &b_n, &l_n, 2),
-            )
+            apply_luminance_rgb(&r_n, &g_n, &b_n, &l_n)
         }
         _ => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
     };
@@ -261,7 +326,12 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
     Some(Array3::from_shape_vec((h, w, 3), pixels).unwrap())
 }
 
-fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Array2<f32>, ch: usize) -> Array2<f32> {
+fn apply_luminance_rgb(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    lum: &Array2<f32>,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
     let (h, w) = r.dim();
     let npix = h * w;
 
@@ -270,17 +340,28 @@ fn apply_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>, lum: &Arra
     let b_s = b.as_slice().unwrap();
     let l_s = lum.as_slice().unwrap();
 
-    let result: Vec<f32> = (0..npix)
-        .into_par_iter()
-        .map(|i| {
+    let mut out_r = vec![0.0f32; npix];
+    let mut out_g = vec![0.0f32; npix];
+    let mut out_b = vec![0.0f32; npix];
+
+    out_r
+        .par_iter_mut()
+        .zip(out_g.par_iter_mut())
+        .zip(out_b.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((or, og), ob))| {
             let rgb_lum = 0.2126 * r_s[i] + 0.7152 * g_s[i] + 0.0722 * b_s[i];
             let scale = if rgb_lum > 1e-10 { l_s[i] / rgb_lum } else { 1.0 };
-            let val = match ch { 0 => r_s[i], 1 => g_s[i], _ => b_s[i] };
-            (val * scale).clamp(0.0, 1.0)
-        })
-        .collect();
+            *or = (r_s[i] * scale).clamp(0.0, 1.0);
+            *og = (g_s[i] * scale).clamp(0.0, 1.0);
+            *ob = (b_s[i] * scale).clamp(0.0, 1.0);
+        });
 
-    Array2::from_shape_vec((h, w), result).unwrap()
+    (
+        Array2::from_shape_vec((h, w), out_r).unwrap(),
+        Array2::from_shape_vec((h, w), out_g).unwrap(),
+        Array2::from_shape_vec((h, w), out_b).unwrap(),
+    )
 }
 
 fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
@@ -299,15 +380,28 @@ fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
     }
 
     let inv_range = 1.0 / range;
-    ch.mapv(|v| ((v - min_val) * inv_range).clamp(0.0, 1.0))
+     ch.mapv(|v| {
+        if v.is_finite() {
+            ((v - min_val) * inv_range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    })
 }
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     frames.par_iter().map(|frame| {
-        let mean = frame.iter().map(|&v| v as f64).sum::<f64>() / frame.len() as f64;
-        if mean > 0.0 {
-            let inv_mean = 1.0 / mean as f32;
-            frame.mapv(|v| v * inv_mean)
+        let stride = (frame.len() / 65536).max(1);
+        let mut samples: Vec<f32> = frame
+            .iter()
+            .step_by(stride)
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        let (background, _) = sigma_clipped_stats(&mut samples, 3.0, 3);
+        if background > 0.0 {
+            let inv_bg = 1.0 / background as f32;
+            frame.mapv(|v| v * inv_bg)
         } else {
             frame.clone()
         }
@@ -337,7 +431,10 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
             vals.clear();
             let idx = base + x;
             for (i, slice) in frame_slices.iter().enumerate() {
-                vals.push((slice[idx], i));
+                let v = slice[idx];
+                if v.is_finite() {
+                    vals.push((v, i));
+                }
             }
 
             for _ in 0..config.max_iterations {
@@ -375,4 +472,28 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
         for (i, count) in local_rej.into_iter().enumerate() { rejection_counts[i] += count; }
     }
     (result, rejection_counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_with_stars(sky: f32, n_bright: usize) -> Array2<f32> {
+        let mut a = Array2::from_elem((40, 40), sky);
+        for i in 0..n_bright {
+            a[[i, i]] = 1000.0;
+        }
+        a
+    }
+
+    #[test]
+    fn normalize_uses_robust_background_not_mean() {
+        let a = frame_with_stars(10.0, 30);
+        let b = frame_with_stars(10.0, 0);
+        let out = normalize_frames(&[a, b]);
+        let sky_a = out[0][[39, 0]];
+        let sky_b = out[1][[39, 0]];
+        assert!((sky_a - sky_b).abs() < 0.05, "sky levels diverged: {} vs {}", sky_a, sky_b);
+        assert!((sky_a - 1.0).abs() < 0.1, "sky not normalized to ~1: {}", sky_a);
+    }
 }

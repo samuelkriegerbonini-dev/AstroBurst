@@ -8,8 +8,6 @@ interface RenderParams {
   pixels?: Float32Array;
   width?: number;
   height?: number;
-  dstWidth?: number;
-  dstHeight?: number;
   dataMin: number;
   dataMax: number;
   shadow: number;
@@ -20,7 +18,7 @@ interface RenderParams {
 type Callback = (result: RenderResult | null) => void;
 
 let _worker: Worker | null = null;
-let _pendingCallbacks = new Map<number, Callback>();
+const _pendingCallbacks = new Map<number, Callback>();
 let _nextId = 0;
 let _hasPixels = false;
 let _pixelsGeneration = 0;
@@ -48,6 +46,8 @@ function getStfWorker(): Worker {
       if (cb) {
         _pendingCallbacks.delete(id);
         cb({ bitmap, width, height });
+      } else if (bitmap) {
+        (bitmap as ImageBitmap).close();
       }
     }
   };
@@ -59,7 +59,7 @@ export function setWorkerPixels(
   width: number,
   height: number,
 ): Promise<void> {
-  const gen = ++_pixelsGeneration;
+  ++_pixelsGeneration;
   const promise = new Promise<void>((resolve) => {
     const worker = getStfWorker();
     const id = _nextId++;
@@ -89,51 +89,39 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
     const {
       pixels, width, height,
       dataMin, dataMax, shadow, midtone, highlight,
-      dstWidth, dstHeight,
     } = params;
 
     const useRetained = _hasPixels && !pixels;
 
-    if (dstWidth && dstHeight && (dstWidth !== (width || 0) || dstHeight !== (height || 0))) {
-      const msg: Record<string, unknown> = {
-        type: "downsampleAndRender",
-        id,
-        srcWidth: width,
-        srcHeight: height,
-        dstWidth,
-        dstHeight,
-        dataMin,
-        dataMax,
-        shadow,
-        midtone,
-        highlight,
-      };
-      if (!useRetained && pixels) {
-        msg.pixels = pixels;
-      }
-      worker.postMessage(msg);
-    } else {
-      const msg: Record<string, unknown> = {
-        type: "render",
-        id,
-        width,
-        height,
-        dataMin,
-        dataMax,
-        shadow,
-        midtone,
-        highlight,
-      };
-      if (!useRetained && pixels) {
-        msg.pixels = pixels;
-      }
-      worker.postMessage(msg);
+    const msg: Record<string, unknown> = {
+      type: "render",
+      id,
+      width,
+      height,
+      dataMin,
+      dataMax,
+      shadow,
+      midtone,
+      highlight,
+    };
+    if (!useRetained && pixels) {
+      msg.pixels = pixels;
     }
+    worker.postMessage(msg);
   });
 }
 
 export function cancelPendingRenders(): void {
   _pendingCallbacks.clear();
+}
+
+export function clearWorkerPixels(): void {
+  _hasPixels = false;
+  _pixelsGeneration++;
+  _pendingPixelsPromise = null;
+  if (_worker) {
+    _worker.postMessage({ type: "clearPixels" });
+  }
 }
 
 export function terminateStfWorker(): void {

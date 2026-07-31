@@ -133,14 +133,18 @@ pub fn render_stars(
 
     for star in stars {
         let (sx, sy, flux) = (star.x, star.y, star.flux);
-        let x0 = ((sx - psf_r as f64).floor() as i64).max(0) as usize;
-        let x1 = ((sx + psf_r as f64).ceil() as i64).min(w as i64 - 1) as usize;
-        let y0 = ((sy - psf_r as f64).floor() as i64).max(0) as usize;
-        let y1 = ((sy + psf_r as f64).ceil() as i64).min(h as i64 - 1) as usize;
+        let fx0 = (sx - psf_r as f64).floor() as i64;
+        let fx1 = (sx + psf_r as f64).ceil() as i64;
+        let fy0 = (sy - psf_r as f64).floor() as i64;
+        let fy1 = (sy + psf_r as f64).ceil() as i64;
+
+        if fx1 < 0 || fy1 < 0 || fx0 > w as i64 - 1 || fy0 > h as i64 - 1 {
+            continue;
+        }
 
         let mut psf_sum = 0.0;
-        for py in y0..=y1 {
-            for px in x0..=x1 {
+        for py in fy0..=fy1 {
+            for px in fx0..=fx1 {
                 psf_sum += psf.evaluate(px as f64 - sx, py as f64 - sy);
             }
         }
@@ -148,6 +152,11 @@ pub fn render_stars(
             continue;
         }
         let norm = flux / psf_sum;
+
+        let x0 = fx0.max(0) as usize;
+        let x1 = (fx1.min(w as i64 - 1)) as usize;
+        let y0 = fy0.max(0) as usize;
+        let y1 = (fy1.min(h as i64 - 1)) as usize;
         for py in y0..=y1 {
             for px in x0..=x1 {
                 image[[py, px]] += (psf.evaluate(px as f64 - sx, py as f64 - sy) * norm) as f32;

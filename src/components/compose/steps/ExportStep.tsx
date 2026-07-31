@@ -5,7 +5,7 @@ import { resolveRgbPaths } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgb } from "../../../services/export";
 import { restretchComposite } from "../../../services/compose";
 import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
-import { useCompositeContext } from "../../../context/CompositeContext";
+import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
 
 interface ExportStepProps {
@@ -30,14 +30,25 @@ function resolveHeaderSourcePath(state: WizardState): string | null {
   return r ?? g ?? b ?? null;
 }
 
+function buildHistory(state: WizardState): string[] {
+  const h: string[] = [];
+  if (state.blendPreset) h.push(`Blend: ${state.blendPreset}`);
+  if (state.compositeReady) {
+    h.push(`Stretch: ${state.stretchMode} (target bg ${state.targetBackground.toFixed(2)})`);
+    h.push(`White balance: ${state.wbMode}`);
+    if (state.scnrEnabled) h.push(`SCNR: ${state.scnrMethod} ${Math.round(state.scnrAmount * 100)}%`);
+  }
+  return h;
+}
+
 export default function ExportStep({ state }: ExportStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeContext();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
 
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
   const [bitpix, setBitpix] = useState(-32);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<{ file_size_bytes?: number; elapsed_ms?: number; bitpix?: number } | null>(null);
   const [error, setError] = useState("");
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
@@ -90,7 +101,7 @@ export default function ExportStep({ state }: ExportStepProps) {
             null,
             null,
             outputPath,
-            { bitpix },
+            { bitpix, history: buildHistory(state) },
           );
           setResult(res);
           setSavedPath(outputPath);
@@ -112,12 +123,12 @@ export default function ExportStep({ state }: ExportStepProps) {
         setSavedPath(outputPath);
       } else {
         const outputPath = `${dir}/astroburst_rgb_${ts}.fits`;
-        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix });
+        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix, history: buildHistory(state) });
         setResult(res);
         setSavedPath(outputPath);
       }
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -182,22 +193,31 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       const zip = new JSZip();
 
+      const missing: string[] = [];
       for (const f of filesToZip) {
         try {
           const data = await readFile(f.path);
           zip.file(f.name, data);
         } catch (err) {
           console.error("Failed to read:", f.path, err);
+          missing.push(f.name);
         }
+      }
+
+      if (missing.length === filesToZip.length) {
+        throw new Error(`ZIP failed — none of the ${filesToZip.length} files could be read`);
       }
 
       const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
       saveAs(blob, `astroburst-compose-${ts}.zip`);
 
+      if (missing.length > 0) {
+        setZipError(`ZIP created, but ${missing.length} of ${filesToZip.length} files could not be added: ${missing.join(", ")}`);
+      }
       setZipDone(true);
       setTimeout(() => setZipDone(false), 3000);
-    } catch (e: any) {
-      setZipError(e?.message ?? String(e));
+    } catch (e) {
+      setZipError(e instanceof Error ? e.message : String(e));
     } finally {
       setZipLoading(false);
     }

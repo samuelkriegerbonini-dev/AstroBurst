@@ -60,6 +60,7 @@ pub fn estimate_psf(
 
     let stats = compute_image_stats(image);
     let stars = detect_stars_for_psf(image, &stats, config);
+    let detected_total = stars.len();
 
     if stars.is_empty() {
         return Err("No stars detected in image".into());
@@ -97,7 +98,9 @@ pub fn estimate_psf(
 
     for star in &selected {
         if let Some(cutout) = extract_cutout(image, star.x, star.y, config.cutout_radius) {
-            let centered = subpixel_center(&cutout);
+            let bg = cutout_border_median(&cutout);
+            let cleaned = cutout.mapv(|v| (v - bg).max(0.0));
+            let centered = subpixel_center(&cleaned);
             let normalized = normalize_cutout(&centered);
             psf_sum += &normalized;
             count += 1;
@@ -128,7 +131,7 @@ pub fn estimate_psf(
         average_fwhm: avg_fwhm,
         average_ellipticity: avg_ellip,
         stars_used: selected.into_iter().cloned().collect(),
-        stars_rejected: candidates.len().saturating_sub(count),
+        stars_rejected: detected_total.saturating_sub(count),
         spread_pixels: spread,
     })
 }
@@ -157,34 +160,42 @@ struct LocalStats {
 
 fn compute_image_stats(image: &Array2<f32>) -> LocalStats {
     let slice = image.as_slice().unwrap_or(&[]);
-    let n = slice.len() as f64;
-    if n == 0.0 {
-        return LocalStats { _mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
-    }
 
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
-    let mut max_val = f32::NEG_INFINITY;
+    let mut vals: Vec<f32> = Vec::with_capacity(slice.len());
 
     for &v in slice {
+        if !v.is_finite() {
+            continue;
+        }
         let vf = v as f64;
         sum += vf;
         sum_sq += vf * vf;
-        if v > max_val {
-            max_val = v;
-        }
+        vals.push(v);
     }
 
+    if vals.is_empty() {
+        return LocalStats { _mean: 0.0, stddev: 0.0, max_val: 0.0, median: 0.0 };
+    }
+
+    let n = vals.len() as f64;
     let mean = sum / n;
     let var = (sum_sq / n) - mean * mean;
     let stddev = if var > 0.0 { var.sqrt() } else { 0.0 };
 
-    let mut vals: Vec<f32> = slice.to_vec();
     let mid = vals.len() / 2;
     vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = vals[mid] as f64;
 
-    LocalStats { _mean: mean, stddev, max_val: max_val as f64, median }
+    let k = 64.min(vals.len());
+    let kth_idx = vals.len() - k;
+    let (_, kth, _) = vals.select_nth_unstable_by(kth_idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_val = (*kth as f64).max(median);
+
+    LocalStats { _mean: mean, stddev, max_val, median }
 }
 
 fn detect_stars_for_psf(
@@ -193,10 +204,13 @@ fn detect_stars_for_psf(
     config: &PsfEstimationConfig,
 ) -> Vec<StarCandidate> {
     let (h, w) = image.dim();
+    let margin = config.edge_margin;
+    if h <= margin * 2 || w <= margin * 2 {
+        return Vec::new();
+    }
     let cx = w as f64 / 2.0;
     let cy = h as f64 / 2.0;
     let threshold = stats.median + 5.0 * stats.stddev;
-    let margin = config.edge_margin;
     let search_radius = 5i64;
 
     let mut stars = Vec::new();
@@ -205,7 +219,7 @@ fn detect_stars_for_psf(
     for y in margin..(h - margin) {
         for x in margin..(w - margin) {
             let val = image[[y, x]] as f64;
-            if val < threshold || visited[[y, x]] {
+            if !val.is_finite() || val < threshold || visited[[y, x]] {
                 continue;
             }
 
@@ -254,9 +268,11 @@ fn detect_stars_for_psf(
                 0.0
             };
 
-            let flux = aperture_flux(image, sub_x, sub_y, fwhm * 1.5);
-            let bg_flux = annulus_background(image, sub_x, sub_y, fwhm * 2.0, fwhm * 3.0);
-            let snr = if bg_flux > 0.0 { flux / bg_flux.sqrt() } else { flux };
+            let (flux_sum, n_aperture) = aperture_flux(image, sub_x, sub_y, fwhm * 1.5);
+            let (bg_mean, bg_sigma) = annulus_stats(image, sub_x, sub_y, fwhm * 2.0, fwhm * 3.0);
+            let flux = flux_sum - bg_mean * n_aperture as f64;
+            let noise = bg_sigma * (n_aperture as f64).sqrt();
+            let snr = if noise > 1e-12 { flux / noise } else { flux.max(0.0) };
 
             let dist = ((sub_x - cx).powi(2) + (sub_y - cy).powi(2)).sqrt();
 
@@ -280,6 +296,7 @@ fn detect_stars_for_psf(
 
 fn centroid_subpixel(image: &Array2<f32>, x: usize, y: usize, radius: usize) -> (f64, f64) {
     let (h, w) = image.dim();
+    let bg = estimate_local_bg(image, x, y, 10);
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
     let mut sum_w = 0.0f64;
@@ -290,7 +307,7 @@ fn centroid_subpixel(image: &Array2<f32>, x: usize, y: usize, radius: usize) -> 
             let ny = y as i64 + dy;
             let nx = x as i64 + dx;
             if ny >= 0 && ny < h as i64 && nx >= 0 && nx < w as i64 {
-                let val = image[[ny as usize, nx as usize]] as f64;
+                let val = (image[[ny as usize, nx as usize]] as f64 - bg).max(0.0);
                 sum_x += nx as f64 * val;
                 sum_y += ny as f64 * val;
                 sum_w += val;
@@ -354,9 +371,10 @@ fn measure_fwhm(image: &Array2<f32>, x: f64, y: f64) -> (f64, f64) {
         return (4.0, 4.0);
     }
 
-    let sigma_xx = m_xx / sum_w;
-    let sigma_yy = m_yy / sum_w;
-    let sigma_xy = m_xy / sum_w;
+    let half_max_truncation = 1.0 - std::f64::consts::LN_2;
+    let sigma_xx = m_xx / sum_w / half_max_truncation;
+    let sigma_yy = m_yy / sum_w / half_max_truncation;
+    let sigma_xy = m_xy / sum_w / half_max_truncation;
 
     let trace = sigma_xx + sigma_yy;
     let det = sigma_xx * sigma_yy - sigma_xy * sigma_xy;
@@ -441,10 +459,11 @@ fn estimate_local_bg(image: &Array2<f32>, ix: usize, iy: usize, radius: usize) -
     clipped.iter().sum::<f64>() / clipped.len() as f64
 }
 
-fn aperture_flux(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
+fn aperture_flux(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> (f64, u32) {
     let (h, w) = image.dim();
     let r2 = radius * radius;
     let mut flux = 0.0;
+    let mut count = 0u32;
 
     let y_min = (y - radius).floor().max(0.0) as usize;
     let y_max = ((y + radius).ceil() as usize).min(h.saturating_sub(1));
@@ -456,21 +475,25 @@ fn aperture_flux(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
             let dx = px as f64 - x;
             let dy = py as f64 - y;
             if dx * dx + dy * dy <= r2 {
-                flux += image[[py, px]] as f64;
+                let v = image[[py, px]] as f64;
+                if v.is_finite() {
+                    flux += v;
+                    count += 1;
+                }
             }
         }
     }
 
-    flux
+    (flux, count)
 }
 
-fn annulus_background(
+fn annulus_stats(
     image: &Array2<f32>,
     x: f64,
     y: f64,
     inner_r: f64,
     outer_r: f64,
-) -> f64 {
+) -> (f64, f64) {
     let (h, w) = image.dim();
     let ir2 = inner_r * inner_r;
     let or2 = outer_r * outer_r;
@@ -487,23 +510,54 @@ fn annulus_background(
             let dy = py as f64 - y;
             let d2 = dx * dx + dy * dy;
             if d2 >= ir2 && d2 <= or2 {
-                vals.push(image[[py, px]] as f64);
+                let v = image[[py, px]] as f64;
+                if v.is_finite() {
+                    vals.push(v);
+                }
             }
         }
     }
 
     if vals.is_empty() {
-        return 0.0;
+        return (0.0, 0.0);
     }
 
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = vals[vals.len() / 2];
+
     let lo = vals.len() / 4;
     let hi = (3 * vals.len() / 4).max(lo + 1).min(vals.len());
     let clipped = &vals[lo..hi];
-    if clipped.is_empty() {
+    let mean = if clipped.is_empty() {
+        median
+    } else {
+        clipped.iter().sum::<f64>() / clipped.len() as f64
+    };
+
+    let mut devs: Vec<f64> = vals.iter().map(|v| (v - median).abs()).collect();
+    devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let sigma = devs[devs.len() / 2] * 1.4826;
+
+    (mean, sigma)
+}
+
+fn cutout_border_median(cutout: &Array2<f64>) -> f64 {
+    let (h, w) = cutout.dim();
+    if h < 2 || w < 2 {
         return 0.0;
     }
-    clipped.iter().sum::<f64>() / clipped.len() as f64
+    let mut vals = Vec::with_capacity(2 * (h + w));
+    for x in 0..w {
+        vals.push(cutout[[0, x]]);
+        vals.push(cutout[[h - 1, x]]);
+    }
+    for y in 1..h - 1 {
+        vals.push(cutout[[y, 0]]);
+        vals.push(cutout[[y, w - 1]]);
+    }
+    let mid = vals.len() / 2;
+    vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals[mid]
 }
 
 fn score_star(star: &StarCandidate) -> f64 {

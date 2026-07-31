@@ -22,11 +22,26 @@ export function getFitsExtensions(path: string): Promise<FitsExtension[]> {
   return typedInvoke<FitsExtension[]>("get_fits_extensions", { path });
 }
 
-export function getHeaderByHdu(path: string, hduIndex: number): Promise<HeaderData> {
-  return typedInvoke<HeaderData>("get_header_by_hdu", { path, hduIndex });
+export interface HduRawHeader {
+  cards: [string, string][];
+  index: Record<string, string>;
+}
+
+export function getHeaderByHdu(path: string, hduIndex: number): Promise<HduRawHeader> {
+  return typedInvoke<HduRawHeader>("get_header_by_hdu", { path, hduIndex });
+}
+
+export interface NarrowbandFilterDetection {
+  path: string;
+  filter: string | null;
+  hubble_channel?: string | null;
+  confidence?: number;
+  matched_keyword?: string;
+  matched_value?: string;
 }
 
 export interface NarrowbandDetection {
+  filters: NarrowbandFilterDetection[];
   palette: {
     r_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;
     g_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;

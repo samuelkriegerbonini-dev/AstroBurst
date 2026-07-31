@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
-import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass } from "lucide-react";
+import { useState, useCallback, useEffect, useMemo, memo } from "react";
+import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag } from "lucide-react";
 import { plateSolve, getWcsInfo } from "../../services/astrometry";
 import type { WcsInfo } from "../../services/astrometry";
 import { getApiKey } from "../../services/config";
@@ -29,6 +29,14 @@ function formatDec(dec: number): string {
   return `${sign}${degrees}° ${arcmin}' ${arcsec.toFixed(1)}"`;
 }
 
+interface FieldAnnotation {
+  type: string;
+  names: string[];
+  pixelx: number;
+  pixely: number;
+  radius?: number | null;
+}
+
 interface SolveResult {
   center_ra: number;
   center_dec: number;
@@ -37,7 +45,10 @@ interface SolveResult {
   field_of_view_h_arcmin: number;
   fov_arcmin?: [number, number];
   orientation?: number;
+  annotations?: FieldAnnotation[];
 }
+
+const EMPTY_ANNOTATIONS: FieldAnnotation[] = [];
 
 interface PlateSolvePanelProps {
   stars?: Star[];
@@ -50,9 +61,10 @@ interface PlateSolvePanelProps {
   elapsed?: number;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   filePath?: string | null;
+  detectError?: string | null;
 }
 
-export default function PlateSolvePanel({
+function PlateSolvePanel({
                                           stars = [],
                                           isLoading = false,
                                           onDetect,
@@ -63,10 +75,12 @@ export default function PlateSolvePanel({
                                           elapsed = 0,
                                           overlayCanvasRef,
                                           filePath,
+                                          detectError = null,
                                         }: PlateSolvePanelProps) {
 
   const [sigma, setSigma] = useState(5.0);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [showAnnotations, setShowAnnotations] = useState(true);
   const [selectedStar, setSelectedStar] = useState<number | null>(null);
 
   const [solveLoading, setSolveLoading] = useState(false);
@@ -75,6 +89,8 @@ export default function PlateSolvePanel({
   const [hasApiKey, setHasApiKey] = useState(false);
   const [scaleLow, setScaleLow] = useState(0.1);
   const [scaleHigh, setScaleHigh] = useState(10.0);
+  const [scaleUnits, setScaleUnits] = useState<"arcsecperpix" | "arcminwidth" | "degwidth">("arcsecperpix");
+  const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
 
   useEffect(() => {
@@ -94,11 +110,16 @@ export default function PlateSolvePanel({
       .catch(() => setWcsInfo(null));
   }, [filePath]);
 
+  const annotations = solveResult?.annotations ?? EMPTY_ANNOTATIONS;
+
   useEffect(() => {
     const canvas = overlayCanvasRef?.current;
     if (!canvas) return;
 
-    if (!showOverlay || stars.length === 0) {
+    const drawStars = showOverlay && stars.length > 0;
+    const drawAnnotations = showAnnotations && annotations.length > 0;
+
+    if (!drawStars && !drawAnnotations) {
       canvas.style.display = "none";
       return;
     }
@@ -123,54 +144,83 @@ export default function PlateSolvePanel({
     const scaleX = W / (imageWidth || 1);
     const scaleY = H / (imageHeight || 1);
 
-    const maxFlux = stars[0].flux || 1;
+    if (drawStars) {
+      const maxFlux = stars[0].flux || 1;
 
-    stars.forEach((star, i) => {
-      const sx = star.x * scaleX;
-      const sy = star.y * scaleY;
-      const radius = Math.max(3, (star.fwhm || 3) * scaleX * 1.5);
-      const brightness = Math.min(1, 0.3 + (star.flux / maxFlux) * 0.7);
+      stars.forEach((star, i) => {
+        const sx = star.x * scaleX;
+        const sy = star.y * scaleY;
+        const radius = Math.max(3, (star.fwhm || 3) * scaleX * 1.5);
+        const brightness = Math.min(1, 0.3 + (star.flux / maxFlux) * 0.7);
 
-      let color: string;
-      if (star.snr > 50) color = `rgba(0, 255, 100, ${brightness})`;
-      else if (star.snr > 20) color = `rgba(255, 255, 0, ${brightness})`;
-      else color = `rgba(255, 100, 0, ${brightness})`;
+        let color: string;
+        if (star.snr > 50) color = `rgba(0, 255, 100, ${brightness})`;
+        else if (star.snr > 20) color = `rgba(255, 255, 0, ${brightness})`;
+        else color = `rgba(255, 100, 0, ${brightness})`;
 
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.stroke();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+        ctx.stroke();
 
-      if (i < 20) {
-        ctx.fillStyle = color;
-        ctx.font = "9px monospace";
-        ctx.fillText(`${i + 1}`, sx + radius + 2, sy - 2);
+        if (i < 20) {
+          ctx.fillStyle = color;
+          ctx.font = "9px monospace";
+          ctx.fillText(`${i + 1}`, sx + radius + 2, sy - 2);
+        }
+      });
+
+      if (selectedStar !== null && selectedStar < stars.length) {
+        const s = stars[selectedStar];
+        const sx = s.x * scaleX;
+        const sy = s.y * scaleY;
+        const radius = Math.max(6, (s.fwhm || 3) * scaleX * 2);
+
+        ctx.strokeStyle = "rgba(100, 200, 255, 1)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgba(100, 200, 255, 0.5)";
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(sx - radius * 2, sy);
+        ctx.lineTo(sx + radius * 2, sy);
+        ctx.moveTo(sx, sy - radius * 2);
+        ctx.lineTo(sx, sy + radius * 2);
+        ctx.stroke();
       }
-    });
-
-    if (selectedStar !== null && selectedStar < stars.length) {
-      const s = stars[selectedStar];
-      const sx = s.x * scaleX;
-      const sy = s.y * scaleY;
-      const radius = Math.max(6, (s.fwhm || 3) * scaleX * 2);
-
-      ctx.strokeStyle = "rgba(100, 200, 255, 1)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = "rgba(100, 200, 255, 0.5)";
-      ctx.lineWidth = 0.5;
-      ctx.beginPath();
-      ctx.moveTo(sx - radius * 2, sy);
-      ctx.lineTo(sx + radius * 2, sy);
-      ctx.moveTo(sx, sy - radius * 2);
-      ctx.lineTo(sx, sy + radius * 2);
-      ctx.stroke();
     }
-  }, [stars, showOverlay, selectedStar, imageWidth, imageHeight, overlayCanvasRef]);
+
+    if (drawAnnotations) {
+      ctx.lineWidth = 1.2;
+      ctx.font = "10px monospace";
+
+      for (const ann of annotations) {
+        const ax = ann.pixelx * scaleX;
+        const ay = ann.pixely * scaleY;
+        if (ax < -20 || ay < -20 || ax > W + 20 || ay > H + 20) continue;
+
+        const r = Math.max(10, (ann.radius ?? 12) * scaleX);
+
+        ctx.strokeStyle = "rgba(167, 139, 250, 0.85)";
+        ctx.beginPath();
+        ctx.arc(ax, ay, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const label = ann.names?.length ? ann.names.slice(0, 2).join(", ") : ann.type;
+        if (label) {
+          ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+          const tw = ctx.measureText(label).width;
+          ctx.fillRect(ax + r + 2, ay - 8, tw + 6, 13);
+          ctx.fillStyle = "rgba(196, 181, 253, 1)";
+          ctx.fillText(label, ax + r + 5, ay + 2);
+        }
+      }
+    }
+  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvasRef]);
 
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
@@ -185,7 +235,8 @@ export default function PlateSolvePanel({
       const result = await plateSolve(filePath, {
         scaleLower: scaleLow,
         scaleUpper: scaleHigh,
-        scaleUnits: "arcsecperpix",
+        scaleUnits,
+        downsampleFactor: downsample > 1 ? downsample : undefined,
       }) as SolveResult;
       setSolveResult(result);
       getWcsInfo(filePath)
@@ -196,21 +247,20 @@ export default function PlateSolvePanel({
     } finally {
       setSolveLoading(false);
     }
-  }, [filePath, scaleLow, scaleHigh]);
+  }, [filePath, scaleLow, scaleHigh, scaleUnits, downsample]);
 
-  const medianFwhm = stars.length > 0
-    ? (() => {
-      const sorted = [...stars].map((s) => s.fwhm).sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
-    })()
-    : null;
+  const medianFwhm = useMemo(() => {
+    if (stars.length === 0) return null;
+    const sorted = stars.map((s) => s.fwhm).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
+  }, [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
+      <div className="ab-panel overflow-hidden">
         <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
           <div className="flex items-center gap-2">
             <Crosshair size={12} className="text-cyan-400" />
@@ -259,6 +309,12 @@ export default function PlateSolvePanel({
               <><StarIcon size={12} /> Detect Stars</>
             )}
           </button>
+
+          {detectError && (
+            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
+              Star detection failed: {detectError}
+            </div>
+          )}
 
           {stars.length > 0 && (
             <div className="space-y-1.5">
@@ -321,7 +377,7 @@ export default function PlateSolvePanel({
         </div>
       </div>
 
-      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">
+      <div className="ab-panel overflow-hidden">
         <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
           <div className="flex items-center gap-2">
             <Compass size={12} className="text-emerald-400" />
@@ -329,9 +385,20 @@ export default function PlateSolvePanel({
               Plate Solve
             </span>
           </div>
-          {activeWcs && (
-            <Globe size={12} className="text-emerald-400/60" />
-          )}
+          <div className="flex items-center gap-2">
+            {annotations.length > 0 && (
+              <button
+                onClick={() => setShowAnnotations(!showAnnotations)}
+                className={`transition-colors ${showAnnotations ? "text-violet-400" : "text-zinc-600 hover:text-zinc-400"}`}
+                title={showAnnotations ? "Hide object labels" : "Show object labels"}
+              >
+                <Tag size={12} />
+              </button>
+            )}
+            {activeWcs && (
+              <Globe size={12} className="text-emerald-400/60" />
+            )}
+          </div>
         </div>
 
         <div className="px-3 py-2 space-y-2">
@@ -344,7 +411,7 @@ export default function PlateSolvePanel({
 
           <div className="flex gap-2">
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale low ("/px)</label>
+              <label className="text-[9px] text-zinc-500 uppercase">Scale low</label>
               <input
                 type="number"
                 min={0.01}
@@ -356,7 +423,7 @@ export default function PlateSolvePanel({
               />
             </div>
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale high ("/px)</label>
+              <label className="text-[9px] text-zinc-500 uppercase">Scale high</label>
               <input
                 type="number"
                 min={0.01}
@@ -366,6 +433,33 @@ export default function PlateSolvePanel({
                 onChange={(e) => setScaleHigh(parseFloat(e.target.value) || 10.0)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-emerald-500/50 w-full"
               />
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label className="text-[9px] text-zinc-500 uppercase">Scale units</label>
+              <select
+                value={scaleUnits}
+                onChange={(e) => setScaleUnits(e.target.value as typeof scaleUnits)}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+              >
+                <option value="arcsecperpix">arcsec/px</option>
+                <option value="arcminwidth">arcmin width</option>
+                <option value="degwidth">deg width</option>
+              </select>
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label className="text-[9px] text-zinc-500 uppercase">Downsample</label>
+              <select
+                value={downsample}
+                onChange={(e) => setDownsample(parseInt(e.target.value, 10))}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+              >
+                <option value={0}>Auto</option>
+                <option value={2}>2x</option>
+                <option value={4}>4x</option>
+              </select>
             </div>
           </div>
 
@@ -420,6 +514,14 @@ export default function PlateSolvePanel({
                   <div className="text-emerald-300 font-mono">{solveResult.orientation?.toFixed(2)}°</div>
                 </div>
               )}
+              {annotations.length > 0 && (
+                <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
+                  <div className="text-zinc-500">Objects Identified</div>
+                  <div className="text-violet-300 font-mono">
+                    {annotations.length} ({annotations.slice(0, 3).flatMap((a) => a.names?.slice(0, 1) ?? []).join(", ")}{annotations.length > 3 ? ", ..." : ""})
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -454,3 +556,5 @@ export default function PlateSolvePanel({
     </div>
   );
 }
+
+export default memo(PlateSolvePanel);

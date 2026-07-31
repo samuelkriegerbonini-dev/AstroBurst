@@ -2,16 +2,19 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 import { stackFrames } from "../../services/stacking";
+import type { StackResult } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { StackConfig } from "./StackingTab";
+import { resolveEffectivePath } from "../../hooks/useFileStore";
 
 interface StackingPanelProps {
   files: ProcessedFile[];
-  onResult?: (result: any) => void;
+  onResult?: (result: StackResult) => void;
   injectedPaths?: string[];
   stackConfig?: StackConfig;
   onStackConfigChange?: (config: Partial<StackConfig>) => void;
+  rejectedPaths?: string[];
 }
 
 const ICON = <Layers size={14} className="text-amber-400" />;
@@ -22,10 +25,11 @@ export default function StackingPanel({
   injectedPaths = [],
   stackConfig,
   onStackConfigChange,
+  rejectedPaths = [],
 }: StackingPanelProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isStacking, setIsStacking] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<StackResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
 
@@ -33,6 +37,7 @@ export default function StackingPanel({
   const sigmaHigh = stackConfig?.sigmaHigh ?? 3.0;
   const maxIterations = stackConfig?.maxIterations ?? 5;
   const align = stackConfig?.align ?? true;
+  const alignMethod = stackConfig?.alignMethod ?? "phase_correlation";
 
   useEffect(() => {
     if (injectedPaths.length === 0) return;
@@ -47,6 +52,15 @@ export default function StackingPanel({
       return merged;
     });
   }, [injectedPaths]);
+
+  const prevRejectedRef = useRef<string>("");
+  useEffect(() => {
+    const key = rejectedPaths.join("|");
+    if (key === prevRejectedRef.current) return;
+    prevRejectedRef.current = key;
+    if (rejectedPaths.length === 0) return;
+    setSelectedPaths((prev) => prev.filter((p) => !rejectedPaths.includes(p)));
+  }, [rejectedPaths]);
 
   const toggleFile = useCallback((path: string) => {
     setSelectedPaths((prev) =>
@@ -70,20 +84,21 @@ export default function StackingPanel({
     setError(null);
     setResult(null);
     try {
-      const res = await stackFrames(selectedPaths, await getOutputDir(), {
+      const res = await stackFrames(selectedPaths.map(resolveEffectivePath), await getOutputDir(), {
         sigmaLow,
         sigmaHigh,
         maxIterations,
         align,
+        alignMethod,
       });
       setResult(res);
       onResult?.(res);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsStacking(false);
     }
-  }, [selectedPaths, sigmaLow, sigmaHigh, maxIterations, align, onResult]);
+  }, [selectedPaths, sigmaLow, sigmaHigh, maxIterations, align, alignMethod, onResult]);
 
   const injectedOnly = injectedPaths.filter((p) => !files.some((f) => f.path === p));
 
@@ -123,13 +138,17 @@ export default function StackingPanel({
 
         {files.map((f) => {
           const isSelected = selectedPaths.includes(f.path);
+          const isRejected = rejectedPaths.includes(f.path);
           return (
-            <button key={f.id} onClick={() => toggleFile(f.path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}>
+            <button key={f.id} onClick={() => toggleFile(f.path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"} ${isRejected && !isSelected ? "opacity-50" : ""}`}>
               <GripVertical size={10} className="text-zinc-700 shrink-0" />
               <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${isSelected ? "bg-amber-500/20 border-amber-500" : "border-zinc-600"}`}>
                 {isSelected && <CheckCircle2 size={10} className="text-amber-400" />}
               </span>
               <span className="truncate">{f.name}</span>
+              {isRejected && (
+                <span className="ml-auto text-[9px] text-red-400/70 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
+              )}
             </button>
           );
         })}
@@ -141,6 +160,15 @@ export default function StackingPanel({
         <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaHigh: v })} />
         <Slider label="Max Iterations" value={maxIterations} min={1} max={20} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ maxIterations: v })} />
         <Toggle label="Auto-align before stacking" checked={align} accent="amber" onChange={(v) => onStackConfigChange?.({ align: v })} />
+        {align && (
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-zinc-400">Alignment method</label>
+            <select value={alignMethod} onChange={(e) => onStackConfigChange?.({ alignMethod: e.target.value })} className="ab-select">
+              <option value="phase_correlation">Phase Correlation (translation)</option>
+              <option value="affine">Star-based Affine (rotation)</option>
+            </select>
+          </div>
+        )}
       </div>
 
       <RunButton label={`Stack ${selectedPaths.length} Frames`} runningLabel="Stacking..." running={isStacking} disabled={selectedPaths.length < 2} accent="amber" onClick={handleStack} />
@@ -155,7 +183,7 @@ export default function StackingPanel({
           <ResultGrid columns={3} items={[
             { label: "Dimensions", value: result.dimensions ? `${result.dimensions[0]}×${result.dimensions[1]}` : "--" },
             { label: "Frames", value: result.frame_count },
-            { label: "Rejected", value: result.rejected_pixels > 0 ? result.rejected_pixels.toLocaleString() : "0" },
+            { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
           ]} />
         </div>
       )}

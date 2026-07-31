@@ -65,6 +65,40 @@ export function extractBackground(
   ]);
 }
 
+export interface BackgroundBatchResult {
+  results: { bin_id: string; cache_key: string; sample_count: number; axis?: string | null }[];
+  mode: string;
+  rms_residual: number;
+  dimensions: [number, number];
+  elapsed_ms: number;
+}
+
+export function extractBackgroundBatch(
+  paths: string[],
+  binIds: string[],
+  outputDir: string,
+  options: {
+    gridSize?: number;
+    polyDegree?: number;
+    sigmaClip?: number;
+    iterations?: number;
+    mode?: string;
+    referenceBin?: string | null;
+  } = {},
+): Promise<BackgroundBatchResult> {
+  return typedInvoke<BackgroundBatchResult>("extract_background_batch_cmd", {
+    paths,
+    binIds,
+    outputDir,
+    gridSize: options.gridSize ?? 8,
+    polyDegree: options.polyDegree ?? 3,
+    sigmaClip: options.sigmaClip ?? 2.5,
+    iterations: options.iterations ?? 3,
+    mode: options.mode ?? "subtract",
+    referenceBin: options.referenceBin ?? null,
+  });
+}
+
 export function waveletDenoise(
   path: string,
   outputDir?: string,
@@ -104,6 +138,100 @@ export function applyArcsinhStretch(path: string, outputDir?: string, factor = 5
   return withPreview<ArcsinhResult>("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
 }
 
+export interface DebayerResult {
+  png_path?: string;
+  previewUrl?: string;
+  pattern: string;
+  method: string;
+  r_path: string;
+  g_path: string;
+  b_path: string;
+  dimensions: [number, number];
+  elapsed_ms: number;
+}
+
+export interface DebayerBatchItem {
+  path: string;
+  pattern?: string;
+  r_path?: string;
+  g_path?: string;
+  b_path?: string;
+  dimensions?: [number, number];
+  error?: string;
+}
+
+export interface DebayerBatchResult {
+  results: DebayerBatchItem[];
+  succeeded: number;
+  failed: number;
+  method: string;
+  elapsed_ms: number;
+}
+
+export function debayerFits(
+  path: string,
+  outputDir?: string,
+  options: { method?: "bilinear" | "superpixel"; pattern?: string } = {},
+): Promise<DebayerResult> {
+  return withPreview<DebayerResult>("debayer_fits_cmd", outputDir, {
+    path,
+    method: options.method ?? "bilinear",
+    pattern: options.pattern ?? null,
+  });
+}
+
+export async function debayerBatch(
+  paths: string[],
+  outputDir?: string,
+  options: { method?: "bilinear" | "superpixel"; pattern?: string } = {},
+): Promise<DebayerBatchResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<DebayerBatchResult>("debayer_batch_cmd", {
+    paths,
+    outputDir: dir,
+    method: options.method ?? "bilinear",
+    pattern: options.pattern ?? null,
+  });
+}
+
+export interface GhsOptions {
+  stretchFactor: number;
+  localIntensity?: number;
+  symmetryPoint?: number;
+  shadowProtect?: number;
+  highlightProtect?: number;
+}
+
+export function applyGhsStretch(
+  path: string,
+  outputDir?: string,
+  options: GhsOptions = { stretchFactor: 2.0 },
+): Promise<ArcsinhResult> {
+  return withPreview<ArcsinhResult>("apply_ghs_stretch_cmd", outputDir, {
+    path,
+    stretchFactor: options.stretchFactor,
+    localIntensity: options.localIntensity ?? 0.0,
+    symmetryPoint: options.symmetryPoint ?? 0.05,
+    shadowProtect: options.shadowProtect ?? 0.0,
+    highlightProtect: options.highlightProtect ?? 1.0,
+  });
+}
+
+export async function ghsStretchComposite(
+  outputDir?: string,
+  options: GhsOptions = { stretchFactor: 2.0 },
+): Promise<ArcsinhResult> {
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<ArcsinhResult>("ghs_stretch_composite_cmd", {
+    outputDir: dir,
+    stretchFactor: options.stretchFactor,
+    localIntensity: options.localIntensity ?? 0.0,
+    symmetryPoint: options.symmetryPoint ?? 0.05,
+    shadowProtect: options.shadowProtect ?? 0.0,
+    highlightProtect: options.highlightProtect ?? 1.0,
+  });
+}
+
 export function maskedStretch(
   path: string,
   outputDir?: string,
@@ -114,6 +242,8 @@ export function maskedStretch(
     maskSoftness?: number;
     protectionAmount?: number;
     luminanceProtect?: boolean;
+    detectionSigma?: number;
+    maxEccentricity?: number;
   } = {},
 ): Promise<MaskedStretchResult> {
   return withPreview<MaskedStretchResult>("masked_stretch_cmd", outputDir, {
@@ -124,6 +254,8 @@ export function maskedStretch(
     maskSoftness: options.maskSoftness ?? 4.0,
     protectionAmount: options.protectionAmount ?? 0.85,
     luminanceProtect: options.luminanceProtect ?? true,
+    detectionSigma: options.detectionSigma ?? 8.0,
+    maxEccentricity: options.maxEccentricity ?? 0.85,
   });
 }
 
@@ -147,6 +279,9 @@ export async function maskedStretchComposite(
     maskSoftness?: number;
     protectionAmount?: number;
     luminanceProtect?: boolean;
+    sharedMask?: boolean;
+    detectionSigma?: number;
+    maxEccentricity?: number;
   } = {},
 ): Promise<MaskedStretchResult> {
   const dir = outputDir ?? await getOutputDir();
@@ -158,7 +293,67 @@ export async function maskedStretchComposite(
     maskSoftness: options.maskSoftness ?? 4.0,
     protectionAmount: options.protectionAmount ?? 0.85,
     luminanceProtect: options.luminanceProtect ?? true,
+    sharedMask: options.sharedMask ?? true,
+    detectionSigma: options.detectionSigma ?? 8.0,
+    maxEccentricity: options.maxEccentricity ?? 0.85,
   });
+}
+
+export interface StarRemovalResult {
+  png_path?: string;
+  fits_path?: string;
+  stars_png_path?: string;
+  stars_fits_path?: string;
+  stars_masked: number;
+  mask_coverage: number;
+  elapsed_ms: number;
+  dimensions: [number, number];
+  previewUrl?: string;
+  starsPreviewUrl?: string;
+}
+
+export interface StarRemovalOptions {
+  detectionSigma?: number;
+  maxEccentricity?: number;
+  growthFactor?: number;
+  softness?: number;
+  brightCeiling?: number;
+}
+
+function starRemovalArgs(options: StarRemovalOptions) {
+  return {
+    detectionSigma: options.detectionSigma ?? 4.0,
+    maxEccentricity: options.maxEccentricity ?? 0.9,
+    growthFactor: options.growthFactor ?? 3.0,
+    softness: options.softness ?? 6.0,
+    brightCeiling: options.brightCeiling ?? 0.95,
+  };
+}
+
+export function removeStars(
+  path: string,
+  outputDir?: string,
+  options: StarRemovalOptions = {},
+): Promise<StarRemovalResult> {
+  return withPreview<StarRemovalResult>("remove_stars_cmd", outputDir, {
+    path,
+    ...starRemovalArgs(options),
+  }, [
+    ["png_path", "previewUrl"],
+    ["stars_png_path", "starsPreviewUrl"],
+  ]);
+}
+
+export function removeStarsComposite(
+  outputDir?: string,
+  options: StarRemovalOptions = {},
+): Promise<StarRemovalResult> {
+  return withPreview<StarRemovalResult>("remove_stars_composite_cmd", outputDir, {
+    ...starRemovalArgs(options),
+  }, [
+    ["png_path", "previewUrl"],
+    ["stars_png_path", "starsPreviewUrl"],
+  ]);
 }
 
 export function spccCalibrate(
@@ -170,6 +365,7 @@ export function spccCalibrate(
     whiteReference?: string;
     minSnr?: number;
     maxStars?: number;
+    catalog?: "gaia" | "builtin";
   } = {},
 ): Promise<SpccResult> {
   return typedInvoke<SpccResult>("spcc_calibrate_cmd", {
@@ -180,5 +376,6 @@ export function spccCalibrate(
     whiteReference: options.whiteReference ?? "average_spiral",
     minSnr: options.minSnr ?? 20.0,
     maxStars: options.maxStars ?? 200,
+    catalog: options.catalog ?? "gaia",
   });
 }

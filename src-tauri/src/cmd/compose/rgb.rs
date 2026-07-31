@@ -5,15 +5,13 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
-use crate::core::compose::rgb::process_rgb;
-use crate::core::compose::lrgb::apply_lrgb;
+use crate::core::compose::lrgb::lrgb_combine_normalized;
 use crate::core::imaging::resample::resample_image;
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::{StfParams, apply_stf_f32};
+use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig, StfParams, apply_stf_f32};
 use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
-use crate::types::compose::{RgbComposeConfig, RgbComposeResult};
-use crate::types::constants::{RES_DIMENSIONS, RES_DIMENSION_INFO, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_OFFSET_B, RES_OFFSET_G, RES_PNG_PATH, RES_SCNR_APPLIED, RES_STATS_B, RES_STATS_G, RES_STATS_R, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, LRGB_APPLIED, RESAMPLED, STF_G, STF_R, STF_B, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B};
+use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, RES_CHANNEL, RES_UPDATED};
 
 pub(super) fn composite_png_path(output_dir: &str) -> String {
     if let Ok(entries) = std::fs::read_dir(output_dir) {
@@ -40,166 +38,67 @@ pub(super) fn load_entry(path: &Option<String>) -> anyhow::Result<Option<ImageEn
 }
 
 #[tauri::command]
-pub async fn compose_rgb_cmd(
-    l_path: Option<String>,
-    r_path: Option<String>,
-    g_path: Option<String>,
-    b_path: Option<String>,
+pub async fn lrgb_combine_composite_cmd(
+    l_path: String,
     output_dir: String,
-    auto_stretch: Option<bool>,
-    linked_stf: Option<bool>,
-    align: Option<bool>,
-    align_method: Option<String>,
-    wb_mode: Option<String>,
-    wb_r: Option<f64>,
-    wb_g: Option<f64>,
-    wb_b: Option<f64>,
-    scnr_enabled: Option<bool>,
-    scnr_method: Option<String>,
-    scnr_amount: Option<f64>,
-    dimension_tolerance: Option<usize>,
-    lrgb_lightness: Option<f64>,
-    lrgb_chrominance: Option<f64>,
+    lightness: Option<f64>,
+    chrominance: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let l_entry = load_entry(&l_path)?;
-        let r_entry = load_entry(&r_path)?;
-        let g_entry = load_entry(&g_path)?;
-        let b_entry = load_entry(&b_path)?;
+        let (er, eg, eb) = helpers::load_composite_rgb()
+            .map_err(|_| anyhow::anyhow!("Composite not in cache. Run Blend first."))?;
 
-        let r_ref = r_entry.as_ref().map(|e| e.arr());
-        let g_ref = g_entry.as_ref().map(|e| e.arr());
-        let b_ref = b_entry.as_ref().map(|e| e.arr());
-
-        let wb = helpers::parse_wb(wb_mode.as_deref(), wb_r, wb_g, wb_b);
-
-        let scnr_cfg = helpers::parse_scnr_config(
-            scnr_enabled,
-            scnr_method.as_deref(),
-            scnr_amount,
-            None,
-        );
-
-        let align_m = helpers::parse_align_method(align_method.as_deref());
-
-        let config = RgbComposeConfig {
-            white_balance: wb,
-            auto_stretch: auto_stretch.unwrap_or(true),
-            linked_stf: linked_stf.unwrap_or(false),
-            align: align.unwrap_or(true),
-            align_method: align_m,
-            scnr: scnr_cfg,
-            dimension_tolerance: dimension_tolerance.unwrap_or(100),
-            ..RgbComposeConfig::default()
-        };
-
-        let mut processed = process_rgb(
-            r_ref,
-            g_ref,
-            b_ref,
-            &config,
-        )?;
-
-        if let (Some(pre_r), Some(pre_g), Some(pre_b)) = (
-            processed.pre_stretch_r.take(),
-            processed.pre_stretch_g.take(),
-            processed.pre_stretch_b.take(),
-        ) {
-            let stats_r = processed.stats_wb_r.clone().unwrap_or_else(|| compute_image_stats(&pre_r));
-            let stats_g = processed.stats_wb_g.clone().unwrap_or_else(|| compute_image_stats(&pre_g));
-            let stats_b = processed.stats_wb_b.clone().unwrap_or_else(|| compute_image_stats(&pre_b));
-
-            helpers::insert_composite_and_orig(pre_r, pre_g, pre_b, stats_r, stats_g, stats_b);
-        }
-
-        let lrgb_applied = if let Some(l_entry_ref) = l_entry.as_ref() {
-            let lightness = lrgb_lightness.unwrap_or(1.0) as f32;
-            let chrominance = lrgb_chrominance.unwrap_or(1.0) as f32;
-
-            let l_data = l_entry_ref.arr();
-            let (lr, lc) = l_data.dim();
-            let l_matched = if lr != processed.rows || lc != processed.cols {
-                resample_image(l_data, processed.rows, processed.cols)?
-            } else {
-                l_data.to_owned()
-            };
-
-            let l_stretched = if config.auto_stretch {
-                use crate::core::imaging::stf::{auto_stf, analyze};
-                use crate::types::image::AutoStfConfig;
-                let (stats, _) = analyze(&l_matched);
-                let stf = auto_stf(&stats, &AutoStfConfig::default());
-                apply_stf_f32(&l_matched, &stf, &stats)
-            } else {
-                l_matched
-            };
-
-            apply_lrgb(
-                &l_stretched,
-                &mut processed.r,
-                &mut processed.g,
-                &mut processed.b,
-                lightness,
-                chrominance,
-            )?;
-            true
+        let l_entry = load_from_cache_or_disk(&l_path)?;
+        let (rows, cols) = er.arr().dim();
+        let l_data = l_entry.arr();
+        let l_matched = if l_data.dim() != (rows, cols) {
+            resample_image(l_data, rows, cols)?
         } else {
-            false
+            l_data.to_owned()
         };
 
-        let png_path = composite_png_path(&output_dir);
+        let lightness_w = (lightness.unwrap_or(1.0) as f32).clamp(0.0, 1.0);
+        let chrominance_w = (chrominance.unwrap_or(1.0) as f32).clamp(0.0, 1.0);
 
-        helpers::render_rgb_preview(
-            &processed.r,
-            &processed.g,
-            &processed.b,
-            &png_path,
-            MAX_PREVIEW_DIM,
+        let (r, g, b) = lrgb_combine_normalized(
+            &l_matched,
+            er.arr(),
+            eg.arr(),
+            eb.arr(),
+            lightness_w,
+            chrominance_w,
         )?;
 
-        let resampled = processed.dimension_info.as_ref().map_or(false, |d| d.resampled);
+        let stats_r = compute_image_stats(&r);
+        let stats_g = compute_image_stats(&g);
+        let stats_b = compute_image_stats(&b);
 
-        let result = RgbComposeResult {
-            png_path: png_path.clone(),
-            stf_r: processed.stf_r,
-            stf_g: processed.stf_g,
-            stf_b: processed.stf_b,
-            stats_r: processed.stats_r.clone(),
-            stats_g: processed.stats_g.clone(),
-            stats_b: processed.stats_b.clone(),
-            offset_g: processed.offset_g,
-            offset_b: processed.offset_b,
-            width: processed.cols,
-            height: processed.rows,
-            scnr_applied: processed.scnr_applied,
-            dimension_info: processed.dimension_info,
-        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let png_path = format!("{}/composite_lrgb_{}.png", output_dir, ts);
 
-        let elapsed = t0.elapsed().as_millis() as u64;
+        let stf_config = AutoStfConfig::default();
+        let (linked_stf, combined_stats) =
+            helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
+        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
+        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
+        helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
-        let stf_r_json = json!({RES_SHADOW: result.stf_r.shadow, RES_MIDTONE: result.stf_r.midtone, RES_HIGHLIGHT: result.stf_r.highlight});
-        let stf_g_json = json!({RES_SHADOW: result.stf_g.shadow, RES_MIDTONE: result.stf_g.midtone, RES_HIGHLIGHT: result.stf_g.highlight});
-        let stf_b_json = json!({RES_SHADOW: result.stf_b.shadow, RES_MIDTONE: result.stf_b.midtone, RES_HIGHLIGHT: result.stf_b.highlight});
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r), stats_r);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g), stats_g);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b), stats_b);
 
         Ok(json!({
-            RES_PNG_PATH: result.png_path,
-            RES_DIMENSIONS: [result.width, result.height],
-            RES_SCNR_APPLIED: result.scnr_applied,
-            RES_OFFSET_G: [result.offset_g.0, result.offset_g.1],
-            RES_OFFSET_B: [result.offset_b.0, result.offset_b.1],
-            RES_DIMENSION_INFO: result.dimension_info,
-            RESAMPLED: resampled,
-            LRGB_APPLIED: lrgb_applied,
-            STF_R: stf_r_json,
-            STF_G: stf_g_json,
-            STF_B: stf_b_json,
-            RES_STATS_R: { RES_MEDIAN: result.stats_r.median, RES_MEAN: result.stats_r.mean, RES_MIN: result.stats_r.min, RES_MAX: result.stats_r.max },
-            RES_STATS_G: { RES_MEDIAN: result.stats_g.median, RES_MEAN: result.stats_g.mean, RES_MIN: result.stats_g.min, RES_MAX: result.stats_g.max },
-            RES_STATS_B: { RES_MEDIAN: result.stats_b.median, RES_MEAN: result.stats_b.mean, RES_MIN: result.stats_b.min, RES_MAX: result.stats_b.max },
-            RES_ELAPSED_MS: elapsed,
+            RES_PNG_PATH: png_path,
+            LRGB_APPLIED: true,
+            RES_DIMENSIONS: [cols, rows],
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
 }
@@ -225,9 +124,35 @@ pub async fn restretch_composite_cmd(
         let stf_g = StfParams { shadow: shadow_g, midtone: midtone_g, highlight: highlight_g };
         let stf_b = StfParams { shadow: shadow_b, midtone: midtone_b, highlight: highlight_b };
 
-        let mut r_stretched = apply_stf_f32(entry_r.arr(), &stf_r, entry_r.stats());
-        let mut g_stretched = apply_stf_f32(entry_g.arr(), &stf_g, entry_g.stats());
-        let mut b_stretched = apply_stf_f32(entry_b.arr(), &stf_b, entry_b.stats());
+        let identical_params = shadow_r == shadow_g
+            && shadow_g == shadow_b
+            && midtone_r == midtone_g
+            && midtone_g == midtone_b
+            && highlight_r == highlight_g
+            && highlight_g == highlight_b;
+
+        let linked_stats = if identical_params {
+            Some(crate::core::imaging::stats::combine_channel_stats(
+                entry_r.stats(),
+                entry_g.stats(),
+                entry_b.stats(),
+            ))
+        } else {
+            None
+        };
+
+        let (mut r_stretched, mut g_stretched, mut b_stretched) = match &linked_stats {
+            Some(combined) => (
+                apply_stf_f32(entry_r.arr(), &stf_r, combined),
+                apply_stf_f32(entry_g.arr(), &stf_g, combined),
+                apply_stf_f32(entry_b.arr(), &stf_b, combined),
+            ),
+            None => (
+                apply_stf_f32(entry_r.arr(), &stf_r, entry_r.stats()),
+                apply_stf_f32(entry_g.arr(), &stf_g, entry_g.stats()),
+                apply_stf_f32(entry_b.arr(), &stf_b, entry_b.stats()),
+            ),
+        };
 
         if let Some(cfg) = helpers::parse_scnr_config(scnr_enabled, scnr_method.as_deref(), scnr_amount, None) {
             apply_scnr_inplace(&mut r_stretched, &mut g_stretched, &mut b_stretched, &cfg);
@@ -288,6 +213,6 @@ pub async fn update_composite_channel_cmd(
 
         GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
 
-        Ok(json!({ "channel": channel, "updated": true }))
+        Ok(json!({ RES_CHANNEL: channel, RES_UPDATED: true }))
     })
 }

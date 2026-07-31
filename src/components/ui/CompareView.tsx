@@ -62,21 +62,13 @@ function CompareView({
           className="absolute inset-0 w-full h-full object-contain"
           draggable={false}
         />
-        <div
-          className="absolute inset-0 overflow-hidden"
-          style={{ width: `${position}%` }}
-        >
-          <img
-            src={originalUrl}
-            alt={originalLabel}
-            className="absolute inset-0 w-full h-full object-contain"
-            style={{
-              width: containerRef.current ? `${containerRef.current.offsetWidth}px` : "100%",
-              maxWidth: "none",
-            }}
-            draggable={false}
-          />
-        </div>
+        <img
+          src={originalUrl}
+          alt={originalLabel}
+          className="absolute inset-0 w-full h-full object-contain"
+          style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}
+          draggable={false}
+        />
         <div
           className="ab-compare-divider"
           style={{ left: `${position}%` }}

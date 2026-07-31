@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, memo } from "react";
 import { Activity, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import { processCube, processCubeLazy } from "../../services/cube";
@@ -9,8 +9,9 @@ interface SpectroscopyPanelProps {
   wavelengths?: number[] | null;
   pixelCoord?: { x: number; y: number } | null;
   isLoading?: boolean;
-  cubeDims?: { width: number; height: number; frames: number; naxis3?: number } | null;
+  cubeDims?: { width: number; height: number; frames: number; naxis3?: number; spectral_classification?: { axis_unit?: string | null } | null } | null;
   elapsed?: number;
+  error?: string | null;
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
   onCollapsePreview?: (previewUrl: string) => void;
@@ -33,13 +34,14 @@ const CANVAS_H = 180;
 const PAD = { top: 10, bottom: 24, left: 50, right: 12 } as const;
 const N_GRID_Y = 4;
 
-export default function SpectroscopyPanel({
+function SpectroscopyPanel({
                                             spectrum = [],
                                             wavelengths = null,
                                             pixelCoord = null,
                                             isLoading = false,
                                             cubeDims = null,
                                             elapsed = 0,
+                                            error = null,
                                             filePath,
                                             onFramePreview,
                                             onCollapsePreview,
@@ -48,11 +50,11 @@ export default function SpectroscopyPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
-  const [collapseResult, setCollapseResult] = useState<any>(null);
+  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms?: number; elapsed?: number } | null>(null);
   const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
 
   const wlUnit = useMemo(() => {
-    const raw = (cubeDims as any)?.spectral_classification?.axis_unit as string | null;
+    const raw = cubeDims?.spectral_classification?.axis_unit ?? null;
     if (!raw) return null;
     return raw.trim().toUpperCase();
   }, [cubeDims]);
@@ -265,6 +267,11 @@ export default function SpectroscopyPanel({
           <Activity size={18} style={{ color: "var(--ab-violet)", opacity: 0.5 }} />
         </div>
         <p className="text-[11px] text-zinc-500">Click on the preview image to extract a spectrum</p>
+        {error && (
+          <p className="text-[10px] text-red-400/80 text-center px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
+            Spectrum extraction failed: {error}
+          </p>
+        )}
       </div>
     );
   }
@@ -400,3 +407,5 @@ function CollapseBtn({
     </button>
   );
 }
+
+export default memo(SpectroscopyPanel);

@@ -31,7 +31,6 @@ function HistogramPanel({
                           bins = [],
                           dataMin = 0,
                           dataMax = 1,
-                          autoStf,
                           shadow = 0,
                           midtone = 0.5,
                           highlight = 1,
@@ -410,12 +409,4 @@ function ManualInput({
   );
 }
 
-export default memo(HistogramPanel, (prev, next) =>
-  prev.shadow === next.shadow &&
-  prev.midtone === next.midtone &&
-  prev.highlight === next.highlight &&
-  prev.bins === next.bins &&
-  prev.dataMin === next.dataMin &&
-  prev.dataMax === next.dataMax &&
-  prev.stats === next.stats
-);
+export default memo(HistogramPanel);

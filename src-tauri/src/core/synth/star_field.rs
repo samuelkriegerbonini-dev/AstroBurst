@@ -77,7 +77,8 @@ pub fn king_cluster(cfg: &FieldConfig, core_radius: f64, tidal_radius: f64) -> V
         let profile = (1.0 / (1.0 + (r / core_radius).powi(2)).sqrt() - king_norm)
             .max(0.0)
             .powi(2);
-        if rng.gen::<f64>() < profile {
+        let accept = profile * (r / tidal_radius);
+        if rng.gen::<f64>() < accept {
             let theta = rng.gen::<f64>() * 2.0 * PI;
             let flux = power_law_flux(&mut rng, cfg.flux_min, cfg.flux_max);
             stars.push(Star {
@@ -103,8 +104,9 @@ pub fn exponential_disk(
     let cos_i = (inclination_deg * PI / 180.0).cos();
     (0..cfg.n_stars)
         .map(|_| {
-            let u: f64 = rng.gen::<f64>().min(1.0 - 1e-10);
-            let r = -scale_length * (1.0 - u).ln();
+            let u1: f64 = rng.gen::<f64>().max(1e-12);
+            let u2: f64 = rng.gen::<f64>().max(1e-12);
+            let r = -scale_length * (u1 * u2).ln();
             let theta = rng.gen::<f64>() * 2.0 * PI;
             let flux = power_law_flux(&mut rng, cfg.flux_min, cfg.flux_max);
             Star {

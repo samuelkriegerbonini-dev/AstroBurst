@@ -1,9 +1,9 @@
-import { normalizeTauriError, type TauriCommandError } from "../../shared/types/errors";
+import { normalizeTauriError } from "../../shared/types/errors";
 
 let _convertFileSrc: ((path: string) => string) | null = null;
 let _invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 
-export const isTauri = (): boolean => !!(window as any).__TAURI_INTERNALS__;
+export const isTauri = (): boolean => !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 
 async function ensureConvertFileSrc(): Promise<(path: string) => string> {
   if (_convertFileSrc) return _convertFileSrc;

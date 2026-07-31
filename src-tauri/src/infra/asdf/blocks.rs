@@ -132,11 +132,7 @@ impl BlockHeader {
             }
 
             #[cfg(feature = "asdf-full")]
-            Compression::Lz4 => {
-                let decompressed = lz4_flex::decompress(raw, expected)
-                    .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
-                Ok(decompressed)
-            }
+            Compression::Lz4 => decompress_lz4_asdf(raw, expected),
 
             #[cfg(not(feature = "asdf-full"))]
             Compression::Lz4 => {
@@ -146,4 +142,37 @@ impl BlockHeader {
             }
         }
     }
+}
+
+#[cfg(feature = "asdf-full")]
+fn decompress_lz4_asdf(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, AsdfError> {
+    let mut out = Vec::with_capacity(uncompressed_size);
+    let mut pos = 0;
+    while pos + 4 <= payload.len() && out.len() < uncompressed_size {
+        let chunk_len = u32::from_be_bytes([
+            payload[pos],
+            payload[pos + 1],
+            payload[pos + 2],
+            payload[pos + 3],
+        ]) as usize;
+        pos += 4;
+        let end = pos
+            .checked_add(chunk_len)
+            .ok_or_else(|| AsdfError::DecompressionFailed("lz4 length prefix overflow".into()))?;
+        if end > payload.len() {
+            return Err(AsdfError::DecompressionFailed(
+                "lz4 length prefix exceeds payload".into(),
+            ));
+        }
+        let chunk = lz4_flex::block::decompress_size_prepended(&payload[pos..end])
+            .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
+        out.extend_from_slice(&chunk);
+        pos = end;
+    }
+    if out.len() != uncompressed_size {
+        return Err(AsdfError::DecompressionFailed(
+            "lz4 output size mismatch".into(),
+        ));
+    }
+    Ok(out)
 }

@@ -1,28 +1,40 @@
 import { useState, useCallback, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { stackFrames } from "../../../services/stacking";
-import { analyzeSubframes, type SubframeMetrics, type SubframeAnalysisResult } from "../../../services/analysis";
+import { stackFrames, drizzleFrames } from "../../../services/stacking";
+import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton, Slider } from "../../ui";
+import { RunButton, Slider, Toggle } from "../../ui";
+import type { WizardAction } from "../../../context/ComposeWizardContext";
+import { resolveEffectivePath } from "../../../hooks/useFileStore";
 
 interface StackStepProps {
   state: WizardState;
-  dispatch: React.Dispatch<any>;
+  dispatch: React.Dispatch<WizardAction>;
   onStacked: (channelId: string, path: string) => void;
+}
+
+interface StackDisplayResult {
+  fits_path?: string;
+  frame_count?: number;
+  rejected_pixels?: number;
+  elapsed_ms?: number;
 }
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
   const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [results, setResults] = useState<Record<string, any>>({});
+  const [stackAllProgress, setStackAllProgress] = useState<{ current: number; total: number; label: string } | null>(null);
+  const [results, setResults] = useState<Record<string, StackDisplayResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
   const [analyzeErrors, setAnalyzeErrors] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, Record<string, boolean>>>({});
-  const [maxFwhm, setMaxFwhm] = useState(8.0);
-  const [maxEcc, setMaxEcc] = useState(0.7);
-  const [minSnr, setMinSnr] = useState(5.0);
-  const [minStars, setMinStars] = useState(5);
+  const [maxFwhm, _setMaxFwhm] = useState(8.0);
+  const [maxEcc, _setMaxEcc] = useState(0.7);
+  const [minSnr, _setMinSnr] = useState(5.0);
+  const [minStars, _setMinStars] = useState(5);
+  const [useDrizzle, setUseDrizzle] = useState(false);
+  const [drizzleScale, setDrizzleScale] = useState(2.0);
 
   const stackableBins = useMemo(
     () => state.bins.filter((b) => b.files.length > 1),
@@ -49,8 +61,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     try {
       const res = await analyzeSubframes(files, { maxFwhm, maxEccentricity: maxEcc, minSnr, minStars });
       dispatch({ type: "SET_SUBFRAME_RESULT", binId, result: res });
-    } catch (e: any) {
-      setAnalyzeErrors((prev) => ({ ...prev, [binId]: e?.message ?? String(e) }));
+    } catch (e) {
+      setAnalyzeErrors((prev) => ({ ...prev, [binId]: e instanceof Error ? e.message : String(e) }));
     } finally {
       setAnalyzing((prev) => ({ ...prev, [binId]: false }));
     }
@@ -84,7 +96,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   }, [state.subframeResults, overrides, dispatch]);
 
   const handleStack = useCallback(async (binId: string, allFiles: string[]) => {
-    const files = getEffectiveFiles(binId, allFiles);
+    const files = getEffectiveFiles(binId, allFiles)?.map(resolveEffectivePath);
     if (!files || files.length < 2) {
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files?.length ?? 0}` }));
       return;
@@ -92,29 +104,45 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     setLoading((prev) => ({ ...prev, [binId]: true }));
     setErrors((prev) => ({ ...prev, [binId]: "" }));
     try {
-      const result = await stackFrames(files, await getOutputDir(), {
-        sigmaLow: 3.0,
-        sigmaHigh: 3.0,
-        align: true,
-        name: `stacked_${binId}`,
-      });
+      const subResult = state.subframeResults[binId];
+      let weights: number[] | undefined;
+      if (subResult) {
+        const byPath = new Map(subResult.subframes.map((s) => [s.file_path, s.weight]));
+        weights = files.map((f) => byPath.get(f) ?? 1.0);
+      }
+      const result = useDrizzle
+        ? await drizzleFrames(files, await getOutputDir(), {
+            scale: drizzleScale,
+            align: true,
+            name: `stacked_${binId}`,
+          })
+        : await stackFrames(files, await getOutputDir(), {
+            sigmaLow: 3.0,
+            sigmaHigh: 3.0,
+            align: true,
+            name: `stacked_${binId}`,
+            weights,
+          });
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
       }
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error(`[AstroBurst] Stack failed for ${binId}:`, msg);
       setErrors((prev) => ({ ...prev, [binId]: msg }));
     } finally {
       setLoading((prev) => ({ ...prev, [binId]: false }));
     }
-  }, [onStacked, getEffectiveFiles]);
+  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
-    const promises = bins.map((bin) => handleStack(bin.id, bin.files));
-    await Promise.allSettled(promises);
+    for (let i = 0; i < bins.length; i++) {
+      setStackAllProgress({ current: i + 1, total: bins.length, label: bins[i].shortLabel });
+      await handleStack(bins[i].id, bins[i].files);
+    }
+    setStackAllProgress(null);
   }, [stackableBins, handleStack]);
 
   if (stackableBins.length === 0) {
@@ -138,13 +166,29 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         </span>
         <RunButton
           label="Stack All"
-          runningLabel="Stacking..."
+          runningLabel={stackAllProgress ? `Stacking ${stackAllProgress.label} — ${stackAllProgress.current}/${stackAllProgress.total}` : "Stacking..."}
           running={Object.values(loading).some(Boolean)}
           accent="blue"
           onClick={handleStackAll}
           small
         />
       </div>
+
+      <div className="flex items-center gap-3">
+        <Toggle label="Drizzle" checked={useDrizzle} accent="blue" onChange={setUseDrizzle} />
+        {useDrizzle && (
+          <div className="flex-1">
+            <Slider label="Scale" value={drizzleScale} min={1.5} max={3.0} step={0.5} accent="blue"
+                    format={(v) => `${v.toFixed(1)}x`} onChange={setDrizzleScale} />
+          </div>
+        )}
+      </div>
+
+      {useDrizzle && Object.keys(state.subframeResults).length > 0 && (
+        <p className="text-[9px] text-amber-400/70">
+          Drizzle ignores subframe quality weights — they apply only to sigma-clip stacking.
+        </p>
+      )}
 
       {stackableBins.map((bin) => {
         const isLoading = loading[bin.id];

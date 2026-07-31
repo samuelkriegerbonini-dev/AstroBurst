@@ -5,8 +5,9 @@ use crate::core::alignment::phase_correlation;
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::imaging::sampling::bicubic_sample;
 
-const MAX_STARS: usize = 120;
+const MAX_STARS: usize = 60;
 const TRIANGLE_TOLERANCE: f64 = 0.02;
+const TRIANGLE_TIE_MARGIN: f64 = 0.03;
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
 const RANSAC_ITERATIONS: usize = 2000;
@@ -47,7 +48,7 @@ fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
     ndarray::Zip::from(&mut result)
         .and(image)
         .par_for_each(|o, &v| {
-            *o = ((v as f64 - lo) * inv_range).clamp(0.0, 1.0) as f32;
+            *o = ((v as f64 - lo) * inv_range).max(0.0) as f32;
         });
     result
 }
@@ -99,6 +100,7 @@ pub struct AffineAlignResult {
     pub inliers: usize,
     pub residual_px: f64,
     pub method: AffineAlignMethod,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,9 +123,10 @@ impl std::fmt::Display for AffineAlignMethod {
 }
 
 struct TriangleDesc {
-    star_indices: [usize; 3],
+    sorted_vertices: [usize; 3],
     ratio_mid: f64,
     ratio_long: f64,
+    orientation: bool,
 }
 
 pub fn align_channel_affine(
@@ -143,8 +146,8 @@ pub fn align_channel_affine(
         ref_det.stars.len(), tgt_det.stars.len(), cols, rows
     );
 
-    let ref_stars = top_n_stars(&ref_det.stars, MAX_STARS);
-    let tgt_stars = top_n_stars(&tgt_det.stars, MAX_STARS);
+    let ref_stars = select_alignment_stars(&ref_det.stars, MAX_STARS, rows, cols);
+    let tgt_stars = select_alignment_stars(&tgt_det.stars, MAX_STARS, rows, cols);
 
     if ref_stars.len() < MIN_MATCHES_RIGID || tgt_stars.len() < MIN_MATCHES_RIGID {
         log::info!(
@@ -237,6 +240,11 @@ fn check_transform_sanity(result: &AffineAlignResult, rows: usize, cols: usize) 
         ));
     }
 
+    let det = t.a * t.d - t.b * t.c;
+    if det <= 0.0 {
+        return Err(format!("reflection (det={:.3}) rejected", det));
+    }
+
     Ok(())
 }
 
@@ -250,13 +258,14 @@ fn fallback_phase_correlation(
 
     let max_tx = cols as f64 * MAX_OFFSET_FRACTION;
     let max_ty = rows as f64 * MAX_OFFSET_FRACTION;
-    if pc.dx.abs() > max_tx || pc.dy.abs() > max_ty || pc.confidence < 1.5 {
+    if pc.dx.abs() > max_tx || pc.dy.abs() > max_ty || phase_correlation::is_low_confidence(pc.confidence) {
         return AffineAlignResult {
             transform: AffineTransform::identity(),
             matched_stars: 0,
             inliers: 0,
             residual_px: 0.0,
             method: AffineAlignMethod::Identity,
+            confidence: 0.0,
         };
     }
 
@@ -266,14 +275,45 @@ fn fallback_phase_correlation(
         inliers: 0,
         residual_px: 0.0,
         method: AffineAlignMethod::PhaseCorrelation,
+        confidence: pc.confidence,
     }
 }
 
-fn top_n_stars(stars: &[DetectedStar], n: usize) -> Vec<(f64, f64)> {
-    stars.iter()
-        .take(n)
-        .map(|s| (s.x, s.y))
-        .collect()
+fn select_alignment_stars(
+    stars: &[DetectedStar],
+    n: usize,
+    rows: usize,
+    cols: usize,
+) -> Vec<(f64, f64)> {
+    if stars.len() <= n {
+        return stars.iter().map(|s| (s.x, s.y)).collect();
+    }
+    const GRID: usize = 4;
+    let cell_w = (cols as f64 / GRID as f64).max(1.0);
+    let cell_h = (rows as f64 / GRID as f64).max(1.0);
+    let per_cell = (n / (GRID * GRID)).max(1);
+    let mut cell_counts = vec![0usize; GRID * GRID];
+    let mut selected: Vec<usize> = Vec::with_capacity(n);
+    let mut skipped: Vec<usize> = Vec::new();
+    for (idx, s) in stars.iter().enumerate() {
+        let gx = ((s.x / cell_w) as usize).min(GRID - 1);
+        let gy = ((s.y / cell_h) as usize).min(GRID - 1);
+        let cell = gy * GRID + gx;
+        if cell_counts[cell] < per_cell && selected.len() < n {
+            cell_counts[cell] += 1;
+            selected.push(idx);
+        } else {
+            skipped.push(idx);
+        }
+    }
+    for idx in skipped {
+        if selected.len() >= n {
+            break;
+        }
+        selected.push(idx);
+    }
+    selected.sort_unstable();
+    selected.into_iter().map(|i| (stars[i].x, stars[i].y)).collect()
 }
 
 fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
@@ -281,7 +321,7 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
     if n < 3 {
         return Vec::new();
     }
-    let limit = n.min(60);
+    let limit = n.min(MAX_STARS);
 
     let tris: Vec<TriangleDesc> = (0..limit)
         .into_par_iter()
@@ -303,10 +343,23 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
                     let ratio_mid = sides[1] / sides[0];
                     let ratio_long = sides[2] / sides[0];
 
+                    if (ratio_mid - 1.0).abs() < TRIANGLE_TIE_MARGIN
+                        || (ratio_long - ratio_mid).abs() < TRIANGLE_TIE_MARGIN
+                    {
+                        continue;
+                    }
+
+                    let sorted = sort_triangle_vertices(stars, &[i, j, k]);
+                    let (ax, ay) = stars[sorted[0]];
+                    let (bx, by) = stars[sorted[1]];
+                    let (cx, cy) = stars[sorted[2]];
+                    let orientation = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) >= 0.0;
+
                     local.push(TriangleDesc {
-                        star_indices: [i, j, k],
+                        sorted_vertices: sorted,
                         ratio_mid,
                         ratio_long,
+                        orientation,
                     });
                 }
             }
@@ -323,25 +376,45 @@ fn match_triangles(
     ref_tris: &[TriangleDesc],
     tgt_tris: &[TriangleDesc],
 ) -> Vec<(f64, f64, f64, f64)> {
+    let mut buckets: std::collections::HashMap<(i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, tt) in tgt_tris.iter().enumerate() {
+        let key = (
+            (tt.ratio_mid / TRIANGLE_TOLERANCE).floor() as i64,
+            (tt.ratio_long / TRIANGLE_TOLERANCE).floor() as i64,
+        );
+        buckets.entry(key).or_default().push(idx);
+    }
+
     let local_votes: Vec<std::collections::HashMap<(usize, usize), u32>> = ref_tris
         .par_iter()
         .map(|rt| {
             let mut votes = std::collections::HashMap::new();
-            for tt in tgt_tris {
-                let d_mid = (rt.ratio_mid - tt.ratio_mid).abs();
-                let d_long = (rt.ratio_long - tt.ratio_long).abs();
+            let km = (rt.ratio_mid / TRIANGLE_TOLERANCE).floor() as i64;
+            let kl = (rt.ratio_long / TRIANGLE_TOLERANCE).floor() as i64;
+            for dm in -1..=1 {
+                for dl in -1..=1 {
+                    let Some(indices) = buckets.get(&(km + dm, kl + dl)) else {
+                        continue;
+                    };
+                    for &tt_idx in indices {
+                        let tt = &tgt_tris[tt_idx];
+                        if rt.orientation != tt.orientation {
+                            continue;
+                        }
+                        let d_mid = (rt.ratio_mid - tt.ratio_mid).abs();
+                        let d_long = (rt.ratio_long - tt.ratio_long).abs();
 
-                if d_mid > TRIANGLE_TOLERANCE || d_long > TRIANGLE_TOLERANCE {
-                    continue;
-                }
+                        if d_mid > TRIANGLE_TOLERANCE || d_long > TRIANGLE_TOLERANCE {
+                            continue;
+                        }
 
-                let ref_sorted = sort_triangle_vertices(ref_stars, &rt.star_indices);
-                let tgt_sorted = sort_triangle_vertices(tgt_stars, &tt.star_indices);
-
-                for p in 0..3 {
-                    let ri = ref_sorted[p];
-                    let ti = tgt_sorted[p];
-                    *votes.entry((ri, ti)).or_insert(0) += 1;
+                        for p in 0..3 {
+                            let ri = rt.sorted_vertices[p];
+                            let ti = tt.sorted_vertices[p];
+                            *votes.entry((ri, ti)).or_insert(0) += 1;
+                        }
+                    }
                 }
             }
             votes
@@ -513,6 +586,7 @@ fn ransac_affine(
         inliers: best_inliers,
         residual_px: residual,
         method,
+        confidence: 1.0,
     })
 }
 
@@ -667,20 +741,23 @@ pub fn warp_image(
     out_cols: usize,
 ) -> Array2<f32> {
     let (src_rows, src_cols) = image.dim();
-    let slice = image.as_slice().expect("contiguous");
     let total = out_rows * out_cols;
-    let mut buf = vec![0.0f32; total];
+    let mut buf = vec![f32::NAN; total];
+
+    if src_rows == 0 || src_cols == 0 {
+        return Array2::from_shape_vec((out_rows, out_cols), buf).unwrap();
+    }
+
+    let slice = image.as_slice().expect("contiguous");
+    let max_x = src_cols as f64 - 0.5;
+    let max_y = src_rows as f64 - 0.5;
 
     buf.par_chunks_mut(out_cols)
         .enumerate()
         .for_each(|(y, row)| {
             for x in 0..out_cols {
                 let (sx, sy) = transform.map(x as f64, y as f64);
-                if sx >= 0.0
-                    && sy >= 0.0
-                    && sx < (src_cols - 1) as f64
-                    && sy < (src_rows - 1) as f64
-                {
+                if sx >= -0.5 && sy >= -0.5 && sx <= max_x && sy <= max_y {
                     row[x] = bicubic_sample(slice, src_rows, src_cols, sy, sx);
                 }
             }
@@ -805,7 +882,7 @@ mod tests {
         });
         let t = AffineTransform::translation(5.0, 3.0);
         let warped = warp_image(&img, &t, 100, 100);
-        assert!(warped[[53, 55]] > 500.0);
+        assert!(warped[[47, 45]] > 500.0);
         assert!(warped[[50, 50]] > 500.0 || warped[[53, 55]] > warped[[50, 50]]);
     }
 
@@ -828,6 +905,49 @@ mod tests {
         let img = Array2::from_elem((50, 50), 100.0f32);
         let t = AffineTransform::translation(1000.0, 1000.0);
         let warped = warp_image(&img, &t, 50, 50);
-        assert!((warped[[25, 25]] - 0.0).abs() < 1e-10);
+        assert!(warped[[25, 25]].is_nan());
+    }
+
+    #[test]
+    fn test_warp_identity_fills_edges() {
+        let img = Array2::from_shape_fn((20, 20), |(r, c)| (r * 20 + c) as f32);
+        let warped = warp_image(&img, &AffineTransform::identity(), 20, 20);
+        assert!(warped[[19, 19]].is_finite());
+        assert!(warped[[0, 19]].is_finite());
+        assert!(warped[[19, 0]].is_finite());
+    }
+
+    #[test]
+    fn test_warp_empty_source_is_all_nan() {
+        let img = Array2::<f32>::zeros((0, 0));
+        let warped = warp_image(&img, &AffineTransform::identity(), 5, 5);
+        assert!(warped.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn test_check_transform_sanity_rejects_reflection() {
+        let reflection = AffineTransform { a: 1.0, b: 0.0, tx: 0.0, c: 0.0, d: -1.0, ty: 0.0 };
+        let result = AffineAlignResult {
+            transform: reflection,
+            matched_stars: 10,
+            inliers: 10,
+            residual_px: 0.5,
+            method: AffineAlignMethod::Affine,
+            confidence: 1.0,
+        };
+        assert!(check_transform_sanity(&result, 100, 100).is_err());
+    }
+
+    #[test]
+    fn test_check_transform_sanity_accepts_identity() {
+        let result = AffineAlignResult {
+            transform: AffineTransform::identity(),
+            matched_stars: 10,
+            inliers: 10,
+            residual_px: 0.5,
+            method: AffineAlignMethod::Affine,
+            confidence: 1.0,
+        };
+        assert!(check_transform_sanity(&result, 100, 100).is_ok());
     }
 }

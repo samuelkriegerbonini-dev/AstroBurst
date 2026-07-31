@@ -26,7 +26,7 @@ export function useZipExport() {
         const file = doneFiles[i];
         const pngName = file.name.replace(/\.fits?$/i, ".png");
 
-        if ((window as any).__TAURI_INTERNALS__ && file.result?.png_path) {
+        if (window.__TAURI_INTERNALS__ && file.result?.png_path) {
           try {
             const { readFile } = await import("@tauri-apps/plugin-fs");
             const data = await readFile(file.result.png_path);

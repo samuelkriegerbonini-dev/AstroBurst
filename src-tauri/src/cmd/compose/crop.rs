@@ -8,6 +8,10 @@ use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_d
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::write_fits_mono;
+use crate::types::constants::{
+    RES_PATHS, RES_CACHE_KEYS, RES_DIMENSIONS, RES_CROP_TOP, RES_CROP_BOTTOM,
+    RES_CROP_LEFT, RES_CROP_RIGHT, RES_AUTO_DETECTED, RES_ELAPSED_MS,
+};
 
 const AUTO_THRESHOLD: f32 = 1e-6;
 
@@ -70,6 +74,25 @@ fn crop_array(arr: &Array2<f32>, top: usize, bottom: usize, left: usize, right: 
     arr.slice(ndarray::s![t..b, l..r]).to_owned()
 }
 
+fn manual_crop_bounds(
+    rows: usize,
+    cols: usize,
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let crop_top = top;
+    let crop_bottom = rows.saturating_sub(bottom);
+    let crop_left = left;
+    let crop_right = cols.saturating_sub(right);
+    if crop_bottom <= crop_top || crop_right <= crop_left {
+        None
+    } else {
+        Some((crop_top, crop_bottom, crop_left, crop_right))
+    }
+}
+
 #[tauri::command]
 pub async fn crop_channels_cmd(
     paths: Vec<String>,
@@ -122,7 +145,10 @@ pub async fn crop_channels_cmd(
             (max_top, min_bottom, max_left, min_right)
         } else {
             let (rows, cols) = entries[0].arr().dim();
-            (top, rows.saturating_sub(bottom), left, cols.saturating_sub(right))
+            match manual_crop_bounds(rows, cols, top, bottom, left, right) {
+                Some(bounds) => bounds,
+                None => anyhow::bail!("Crop region is empty (margins exceed image size)"),
+            }
         };
 
         let use_bin_ids = bin_ids.as_ref().map(|ids| ids.len() == paths.len()).unwrap_or(false);
@@ -183,15 +209,28 @@ pub async fn crop_channels_cmd(
         let actual_right = first_dim.1.saturating_sub(crop_right);
 
         Ok(json!({
-            "paths": out_paths,
-            "cache_keys": cache_keys,
-            "dimensions": [out_cols, out_rows],
-            "crop_top": actual_top,
-            "crop_bottom": actual_bottom,
-            "crop_left": actual_left,
-            "crop_right": actual_right,
-            "auto_detected": auto,
-            "elapsed_ms": elapsed,
+            RES_PATHS: out_paths,
+            RES_CACHE_KEYS: cache_keys,
+            RES_DIMENSIONS: [out_cols, out_rows],
+            RES_CROP_TOP: actual_top,
+            RES_CROP_BOTTOM: actual_bottom,
+            RES_CROP_LEFT: actual_left,
+            RES_CROP_RIGHT: actual_right,
+            RES_AUTO_DETECTED: auto,
+            RES_ELAPSED_MS: elapsed,
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manual_crop_bounds;
+
+    #[test]
+    fn manual_crop_rejects_excessive_margins() {
+        assert_eq!(manual_crop_bounds(100, 100, 10, 10, 10, 10), Some((10, 90, 10, 90)));
+        assert_eq!(manual_crop_bounds(100, 100, 60, 60, 0, 0), None);
+        assert_eq!(manual_crop_bounds(100, 100, 0, 0, 70, 70), None);
+        assert_eq!(manual_crop_bounds(100, 100, 50, 50, 0, 0), None);
+    }
 }

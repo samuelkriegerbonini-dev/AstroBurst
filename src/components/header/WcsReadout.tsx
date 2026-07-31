@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo, memo } from "react";
+import { useState, useEffect, memo } from "react";
 import { Globe } from "lucide-react";
-import { getWcsInfo } from "../../services/astrometry";
-import { pixelToWorld, type WcsParams, type CelestialCoord } from "../../utils/wcstransform";
+import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
+import type { WcsInfo } from "../../shared/types/astrometry";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -9,6 +9,11 @@ interface WcsReadoutProps {
   imageHeight: number;
   mouseX: number | null;
   mouseY: number | null;
+}
+
+interface CelestialCoord {
+  ra: number;
+  dec: number;
 }
 
 function formatRA(ra: number): string {
@@ -28,39 +33,64 @@ function formatDec(dec: number): string {
   return `${sign}${degrees}° ${arcmin}' ${arcsec.toFixed(1)}"`;
 }
 
-function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
+// The mouse-pixel store already throttles to one distinct-integer-pixel update
+// per animation frame; this debounce additionally caps how often a fast drag
+// round-trips to the WCS engine over IPC (the readout used to do this pix->sky
+// math synchronously in-process via src/utils/wcstransform.ts -- now retired in
+// favor of pixel_to_world_cmd, which gets the full wcs-rs projection coverage).
+const HOVER_DEBOUNCE_MS = 40;
+
+function WcsReadoutInner({ filePath, mouseX, mouseY }: WcsReadoutProps) {
   const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
-  const [wcsInfo, setWcsInfo] = useState<any>(null);
-  const [wcsParams, setWcsParams] = useState<WcsParams | null>(null);
+  const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
+  const [coord, setCoord] = useState<CelestialCoord | null>(null);
 
   useEffect(() => {
     if (!filePath) {
       setWcsAvailable(null);
       setWcsInfo(null);
-      setWcsParams(null);
+      setCoord(null);
       return;
     }
     let cancelled = false;
     getWcsInfo(filePath)
-      .then((info: any) => {
+      .then((info) => {
         if (cancelled) return;
         setWcsAvailable(true);
         setWcsInfo(info);
-        if (info.wcs_params) {
-          setWcsParams(info.wcs_params as WcsParams);
-        }
       })
       .catch(() => {
         if (cancelled) return;
         setWcsAvailable(false);
       });
-    return () => { cancelled = true; };
-  }, [filePath, getWcsInfo]);
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath]);
 
-  const coord: CelestialCoord | null = useMemo(() => {
-    if (!wcsParams || mouseX === null || mouseY === null) return null;
-    return pixelToWorld(wcsParams, mouseX, mouseY);
-  }, [wcsParams, mouseX, mouseY]);
+  useEffect(() => {
+    if (!filePath || !wcsAvailable || mouseX === null || mouseY === null) {
+      setCoord(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      pixelToWorld(filePath, [[mouseX, mouseY]])
+        .then((res) => {
+          if (cancelled) return;
+          const pt = res.points[0];
+          setCoord(pt ? { ra: pt[0], dec: pt[1] } : null);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setCoord(null);
+        });
+    }, HOVER_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [filePath, wcsAvailable, mouseX, mouseY]);
 
   if (!wcsAvailable || !wcsInfo) return null;
 

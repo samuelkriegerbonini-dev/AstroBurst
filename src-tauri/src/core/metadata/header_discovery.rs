@@ -3,13 +3,14 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::types::constants::FILTER_WAVELENGTHS_NM;
 use crate::types::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NarrowbandFilter {
     #[serde(rename = "Hα (656nm)")]
     Ha,
-    #[serde(rename = "[OIII] (502nm)")]
+    #[serde(rename = "[OIII] (501nm)")]
     Oiii,
     #[serde(rename = "[SII] (673nm)")]
     Sii,
@@ -21,7 +22,7 @@ impl std::fmt::Display for NarrowbandFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ha => write!(f, "Hα (656nm)"),
-            Self::Oiii => write!(f, "[OIII] (502nm)"),
+            Self::Oiii => write!(f, "[OIII] (501nm)"),
             Self::Sii => write!(f, "[SII] (673nm)"),
             Self::Unknown => write!(f, "Unknown"),
         }
@@ -87,19 +88,19 @@ static RE_SII: OnceLock<Regex> = OnceLock::new();
 
 fn re_ha() -> &'static Regex {
     RE_HA.get_or_init(|| {
-        Regex::new(r"(?i)(\bH[\-_]?(?:alpha|a)\b|656\s*(?:nm|\.?\d)|H_?α)").unwrap()
+        Regex::new(r"(?i)(\bH[\-_]?(?:alpha|a)\b|656\s*(?:nm|\.?\d)|H_?α|F656N\b)").unwrap()
     })
 }
 
 fn re_oiii() -> &'static Regex {
     RE_OIII.get_or_init(|| {
-        Regex::new(r"(?i)(\bO\s*III\b|\[?OIII\]?|502\s*(?:nm|\.?\d)|O3\b)").unwrap()
+        Regex::new(r"(?i)(\bO\s*III\b|\[?OIII\]?|500\.7|50[12]\s*(?:nm|\.?\d)|5007|F50[12]N\b|O3\b)").unwrap()
     })
 }
 
 fn re_sii() -> &'static Regex {
     RE_SII.get_or_init(|| {
-        Regex::new(r"(?i)(\bS\s*II\b|\[?SII\]?|673\s*(?:nm|\.?\d)|S2\b)").unwrap()
+        Regex::new(r"(?i)(\bS\s*II\b|\[?SII\]?|67[13]\s*(?:nm|\.?\d)|F673N\b|S2\b)").unwrap()
     })
 }
 
@@ -117,7 +118,7 @@ const DISCOVERY_KEYWORDS: &[&str] = &[
 
 const FILENAME_PATTERNS: &[(NarrowbandFilter, &[&str])] = &[
     (NarrowbandFilter::Ha, &["_HA", "_HALPHA", "-HA", "_H_ALPHA", "656"]),
-    (NarrowbandFilter::Oiii, &["_OIII", "-OIII", "_O3", "-O3", "502"]),
+    (NarrowbandFilter::Oiii, &["_OIII", "-OIII", "_O3", "-O3", "502", "5007"]),
     (NarrowbandFilter::Sii, &["_SII", "-SII", "_S2", "-S2", "673"]),
 ];
 
@@ -268,6 +269,29 @@ fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
     }
 }
 
+pub fn filter_to_wavelength_nm(filter: &str) -> Option<u32> {
+    let upper = filter.to_uppercase();
+    if let Some(nm) = lookup_filter_nm(upper.trim()) {
+        return Some(nm);
+    }
+    for token in upper.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() || token == "CLEAR" {
+            continue;
+        }
+        if let Some(nm) = lookup_filter_nm(token) {
+            return Some(nm);
+        }
+    }
+    None
+}
+
+fn lookup_filter_nm(key: &str) -> Option<u32> {
+    FILTER_WAVELENGTHS_NM
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, nm)| *nm)
+}
+
 pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
     suggest_palette_with_type(files, &PaletteType::default())
 }
@@ -305,15 +329,12 @@ pub fn suggest_palette_with_type(files: &[(String, HduHeader)], palette: &Palett
         slot: &mut Option<(Confidence, ChannelSuggestion)>,
         conf: Confidence,
         suggestion: ChannelSuggestion,
-        unmapped: &mut Vec<ChannelSuggestion>,
-    ) -> bool {
+    ) -> (bool, Option<ChannelSuggestion>) {
         if slot.as_ref().map_or(true, |(c, _)| conf < *c) {
-            if let Some((_, prev)) = slot.replace((conf, suggestion)) {
-                unmapped.push(prev);
-            }
-            true
+            let prev = slot.replace((conf, suggestion)).map(|(_, p)| p);
+            (true, prev)
         } else {
-            false
+            (false, None)
         }
     }
 
@@ -341,27 +362,27 @@ pub fn suggest_palette_with_type(files: &[(String, HduHeader)], palette: &Palett
 
             let conf = det.confidence;
             let mut assigned = false;
+            let mut displaced: Vec<ChannelSuggestion> = Vec::new();
 
             for ch in &channels {
                 let sug = suggestion.clone();
-                match ch {
-                    HubbleChannel::Red => {
-                        if try_assign(&mut r_file, conf, sug, &mut unmapped) {
-                            assigned = true;
-                        }
-                    }
-                    HubbleChannel::Green => {
-                        if try_assign(&mut g_file, conf, sug, &mut unmapped) {
-                            assigned = true;
-                        }
-                    }
-                    HubbleChannel::Blue => {
-                        if try_assign(&mut b_file, conf, sug, &mut unmapped) {
-                            assigned = true;
-                        }
+                let slot = match ch {
+                    HubbleChannel::Red => &mut r_file,
+                    HubbleChannel::Green => &mut g_file,
+                    HubbleChannel::Blue => &mut b_file,
+                };
+                let (ok, prev) = try_assign(slot, conf, sug);
+                if ok {
+                    assigned = true;
+                }
+                if let Some(p) = prev {
+                    if !displaced.iter().any(|d| d.file_path == p.file_path) {
+                        displaced.push(p);
                     }
                 }
             }
+
+            unmapped.extend(displaced);
 
             if !assigned {
                 unmapped.push(suggestion);
@@ -543,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_regex_patterns_ha() {
-        let patterns = ["Ha", "H-alpha", "Halpha", "H_alpha", "H_Alpha", "656nm", "656.3"];
+        let patterns = ["Ha", "H-alpha", "Halpha", "H_alpha", "H_Alpha", "656nm", "656.3", "F656N"];
         for p in patterns {
             assert!(re_ha().is_match(p), "Ha regex should match '{p}'");
         }
@@ -551,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_regex_patterns_oiii() {
-        let patterns = ["OIII", "[OIII]", "O III", "O3", "502nm"];
+        let patterns = ["OIII", "[OIII]", "O III", "O3", "502nm", "501nm", "500.7nm", "5007", "F502N", "F501N"];
         for p in patterns {
             assert!(re_oiii().is_match(p), "OIII regex should match '{p}'");
         }
@@ -559,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_regex_patterns_sii() {
-        let patterns = ["SII", "[SII]", "S II", "S2", "673nm"];
+        let patterns = ["SII", "[SII]", "S II", "S2", "673nm", "671nm", "673.1", "F673N"];
         for p in patterns {
             assert!(re_sii().is_match(p), "SII regex should match '{p}'");
         }
@@ -617,6 +638,46 @@ mod tests {
         assert!(p.g_file.is_none());
         assert!(p.b_file.is_none());
         assert_eq!(p.unmapped.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_named() {
+        assert_eq!(filter_to_wavelength_nm("F656N"), Some(656));
+        assert_eq!(filter_to_wavelength_nm("F501N"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("F502N"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("F673N"), Some(673));
+        assert_eq!(filter_to_wavelength_nm("F090W"), Some(900));
+        assert_eq!(filter_to_wavelength_nm("F187N"), Some(1870));
+        assert_eq!(filter_to_wavelength_nm("F200W"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F335M"), Some(3350));
+        assert_eq!(filter_to_wavelength_nm("F444W"), Some(4440));
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_normalization() {
+        assert_eq!(filter_to_wavelength_nm("f200w"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F200W-CLEAR"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("CLEAR;F200W"), Some(2000));
+        assert_eq!(filter_to_wavelength_nm("F164N+F150W2"), Some(1640));
+        assert_eq!(filter_to_wavelength_nm("  F090W  "), Some(900));
+    }
+
+    #[test]
+    fn test_filter_to_wavelength_aliases_and_unknown() {
+        assert_eq!(filter_to_wavelength_nm("Ha"), Some(656));
+        assert_eq!(filter_to_wavelength_nm("OIII"), Some(501));
+        assert_eq!(filter_to_wavelength_nm("SII"), Some(673));
+        assert_eq!(filter_to_wavelength_nm("Luminance"), None);
+        assert_eq!(filter_to_wavelength_nm(""), None);
+    }
+
+    #[test]
+    fn test_filter_wavelength_table_no_duplicate_keys() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for (k, _) in FILTER_WAVELENGTHS_NM {
+            assert!(seen.insert(*k), "duplicate filter key in table: {k}");
+        }
     }
 
     #[test]

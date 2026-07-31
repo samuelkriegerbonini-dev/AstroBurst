@@ -60,6 +60,16 @@ jobs:
         with:
           tauriScript: pnpm tauri
           args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || format('--target {0}', matrix.target) }}
+      - name: Create Flatpak tarball
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          BIN=$(find src-tauri/target -name 'astroburst' -type f -executable -path '*/release/*' | head -1)
+          if [ -n "$BIN" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            mkdir -p astroburst-${VERSION}
+            cp "$BIN" astroburst-${VERSION}/
+            tar czf astroburst-${VERSION}-linux-x86_64.tar.gz astroburst-${VERSION}
+          fi
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
@@ -72,6 +82,7 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.dmg
+            astroburst-*-linux-x86_64.tar.gz
 
   publish:
     needs: build

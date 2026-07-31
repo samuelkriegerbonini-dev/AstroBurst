@@ -35,7 +35,7 @@ export function useProgress(eventName: string) {
 
     (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlistenRef.current = await listen<ProgressPayload>(eventName, (event) => {
+      const unlisten = await listen<ProgressPayload>(eventName, (event) => {
         if (!mounted) return;
         const p = event.payload;
         setState({
@@ -46,6 +46,11 @@ export function useProgress(eventName: string) {
           active: p.stage !== "complete",
         });
       });
+      if (!mounted) {
+        unlisten();
+        return;
+      }
+      unlistenRef.current = unlisten;
     })();
 
     return () => {

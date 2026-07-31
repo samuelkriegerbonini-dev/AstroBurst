@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { Slider, ErrorAlert } from "../ui";
 import { calibrate } from "../../services/stacking";
+import type { CalibrateResult } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
@@ -10,7 +11,7 @@ import type { ProcessedFile } from "../../shared/types";
 interface CalibrationPanelProps {
   files: ProcessedFile[];
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  onCalibrationDone?: (result: any) => void;
+  onCalibrationDone?: (result: CalibrateResult) => void;
 }
 
 function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
@@ -28,7 +29,7 @@ function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
 export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibrationDone }: CalibrationPanelProps) {
   const [darkExposureRatio, setDarkExposureRatio] = useState(1.0);
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<CalibrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastAssignment, setLastAssignment] = useState<CalibAssignment | null>(null);
 
@@ -50,8 +51,8 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
       onCalibrationDone?.(res);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsCalibrating(false);
     }

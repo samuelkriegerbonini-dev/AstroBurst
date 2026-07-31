@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from "react";
 import { Scissors } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { cropChannels } from "../../../services/compose";
+import { cropChannels, type CropResult } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton } from "../../ui";
 
@@ -17,7 +17,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
   const [left, setLeft] = useState(0);
   const [right, setRight] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<CropResult | null>(null);
   const [error, setError] = useState("");
   const [skipped, setSkipped] = useState(false);
 
@@ -62,8 +62,8 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
         });
       }
       onCropped(cropped);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }

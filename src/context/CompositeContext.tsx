@@ -71,38 +71,63 @@ function reducer(state: CompositeState, action: CompositeAction): CompositeState
   }
 }
 
-interface CompositeContextValue {
+interface CompositePreviewValue {
   compositePreviewUrl: string | null;
-  setCompositePreviewUrl: (url: string | null) => void;
   isShowingComposite: boolean;
-  clearComposite: () => Promise<void>;
+}
 
+interface CompositeStfValue {
   compositeStfR: StfParams;
   compositeStfG: StfParams;
   compositeStfB: StfParams;
-  setCompositeStf: (r: StfParams, g: StfParams, b: StfParams) => void;
-
   compositeStfLinked: boolean;
-  setCompositeStfLinked: (linked: boolean) => void;
-
   compositeAutoStfR: StfParams | null;
   compositeAutoStfG: StfParams | null;
   compositeAutoStfB: StfParams | null;
-  setCompositeAutoStf: (r: StfParams, g: StfParams, b: StfParams) => void;
+}
 
+interface CompositeScnrValue {
   compositeScnr: ScnrState | null;
-  setCompositeScnr: (scnr: ScnrState | null) => void;
+}
 
+interface CompositeActionsValue {
+  setCompositePreviewUrl: (url: string | null) => void;
+  clearComposite: () => Promise<void>;
+  setCompositeStf: (r: StfParams, g: StfParams, b: StfParams) => void;
+  setCompositeStfLinked: (linked: boolean) => void;
+  setCompositeAutoStf: (r: StfParams, g: StfParams, b: StfParams) => void;
+  setCompositeScnr: (scnr: ScnrState | null) => void;
   initRgb: (previewUrl: string | null, stfR: StfParams, stfG: StfParams, stfB: StfParams) => void;
   resetComposite: () => void;
 }
 
-const CompositeCtx = createContext<CompositeContextValue | null>(null);
+export type CompositeContextValue = CompositePreviewValue & CompositeStfValue & CompositeScnrValue & CompositeActionsValue;
+
+const CompositePreviewCtx = createContext<CompositePreviewValue | null>(null);
+const CompositeStfCtx = createContext<CompositeStfValue | null>(null);
+const CompositeScnrCtx = createContext<CompositeScnrValue | null>(null);
+const CompositeActionsCtx = createContext<CompositeActionsValue | null>(null);
+
+function useCtx<T>(ctx: React.Context<T | null>, name: string): T {
+  const val = useContext(ctx);
+  if (!val) throw new Error(`${name} must be used within CompositeProvider`);
+  return val;
+}
+
+export const useCompositePreview = () => useCtx(CompositePreviewCtx, "useCompositePreview");
+export const useCompositeStf = () => useCtx(CompositeStfCtx, "useCompositeStf");
+export const useCompositeScnr = () => useCtx(CompositeScnrCtx, "useCompositeScnr");
+export const useCompositeActions = () => useCtx(CompositeActionsCtx, "useCompositeActions");
 
 export function useCompositeContext(): CompositeContextValue {
-  const val = useContext(CompositeCtx);
-  if (!val) throw new Error("useCompositeContext must be used within CompositeProvider");
-  return val;
+  const preview = useCompositePreview();
+  const stf = useCompositeStf();
+  const scnr = useCompositeScnr();
+  const actions = useCompositeActions();
+  return useMemo(
+    () => ({ ...preview, ...stf, ...scnr, ...actions }),
+    [preview, stf, scnr, actions],
+  );
 }
 
 interface Props {
@@ -145,41 +170,46 @@ export function CompositeProvider({ children }: Props) {
     dispatch({ type: "RESET" });
   }, []);
 
-  const value = useMemo<CompositeContextValue>(() => ({
+  const previewValue = useMemo<CompositePreviewValue>(() => ({
     compositePreviewUrl: state.previewUrl,
-    setCompositePreviewUrl,
     isShowingComposite: state.previewUrl !== null,
-    clearComposite,
+  }), [state.previewUrl]);
 
+  const stfValue = useMemo<CompositeStfValue>(() => ({
     compositeStfR: state.stf.r,
     compositeStfG: state.stf.g,
     compositeStfB: state.stf.b,
-    setCompositeStf,
-
     compositeStfLinked: state.linked,
-    setCompositeStfLinked,
-
     compositeAutoStfR: state.autoStf.r,
     compositeAutoStfG: state.autoStf.g,
     compositeAutoStfB: state.autoStf.b,
-    setCompositeAutoStf,
+  }), [state.stf, state.linked, state.autoStf]);
 
+  const scnrValue = useMemo<CompositeScnrValue>(() => ({
     compositeScnr: state.scnr,
-    setCompositeScnr,
+  }), [state.scnr]);
 
+  const actionsValue = useMemo<CompositeActionsValue>(() => ({
+    setCompositePreviewUrl,
+    clearComposite,
+    setCompositeStf,
+    setCompositeStfLinked,
+    setCompositeAutoStf,
+    setCompositeScnr,
     initRgb,
     resetComposite,
-  }), [
-    state.previewUrl, state.stf, state.autoStf, state.linked, state.scnr,
-    setCompositePreviewUrl, clearComposite, setCompositeStf,
-    setCompositeStfLinked, setCompositeAutoStf, setCompositeScnr,
-    initRgb, resetComposite,
-  ]);
+  }), [setCompositePreviewUrl, clearComposite, setCompositeStf, setCompositeStfLinked, setCompositeAutoStf, setCompositeScnr, initRgb, resetComposite]);
 
   return (
-    <CompositeCtx.Provider value={value}>
-      {children}
-    </CompositeCtx.Provider>
+    <CompositeActionsCtx.Provider value={actionsValue}>
+      <CompositePreviewCtx.Provider value={previewValue}>
+        <CompositeStfCtx.Provider value={stfValue}>
+          <CompositeScnrCtx.Provider value={scnrValue}>
+            {children}
+          </CompositeScnrCtx.Provider>
+        </CompositeStfCtx.Provider>
+      </CompositePreviewCtx.Provider>
+    </CompositeActionsCtx.Provider>
   );
 }
 

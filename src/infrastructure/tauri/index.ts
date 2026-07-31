@@ -10,13 +10,14 @@ async function resolveDir(explicit?: string): Promise<string> {
   return getOutputDir();
 }
 
-async function resolvePreview<T extends Record<string, any>>(
-  res: T,
+async function resolvePreview(
+  res: Record<string, unknown>,
   key: string = "png_path",
   urlKey: string = "previewUrl",
-): Promise<T> {
-  if ((res as any)[key]) (res as any)[urlKey] = await getPreviewUrl((res as any)[key]);
-  return res;
+): Promise<Record<string, string>> {
+  const path = res[key];
+  if (typeof path === "string" && path) return { [urlKey]: await getPreviewUrl(path) };
+  return {};
 }
 
 async function withDirInvoke<T>(
@@ -28,15 +29,18 @@ async function withDirInvoke<T>(
   return typedInvoke<T>(cmd, { outputDir: dir, ...args });
 }
 
-export async function withPreview<T extends Record<string, any>>(
+export async function withPreview<T extends object>(
   cmd: string,
   outputDir: string | undefined,
   args: Record<string, unknown> = {},
   previews: [string, string][] = [["png_path", "previewUrl"]],
 ): Promise<T> {
-  const res = await withDirInvoke<T>(cmd, outputDir, args);
-  for (const [key, urlKey] of previews) {
-    await resolvePreview(res, key, urlKey);
-  }
-  return res;
+  const res = await withDirInvoke<T & Record<string, unknown>>(cmd, outputDir, args);
+  // Resolve all preview URLs in parallel and return a NEW object instead of
+  // mutating the backend response in place (mutation breaks identity-based
+  // memoization and can expose partially-populated objects between awaits).
+  const resolved = await Promise.all(
+    previews.map(([key, urlKey]) => resolvePreview(res, key, urlKey)),
+  );
+  return Object.assign({}, res, ...resolved) as T;
 }

@@ -2,13 +2,16 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
-use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb};
+use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb, GhsParams};
 use crate::core::imaging::masked_stretch::{masked_stretch, masked_stretch_rgb_shared, MaskedStretchConfig};
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH,
     RES_STRETCH_FACTOR, RES_ITERATIONS_RUN, RES_STARS_MASKED,
     RES_MASK_COVERAGE, RES_FINAL_BACKGROUND, RES_CONVERGED,
     SUFFIX_MASKED_STRETCH,
+    RES_LOCAL_INTENSITY, RES_SYMMETRY_POINT, RES_SHADOW_PROTECT, RES_HIGHLIGHT_PROTECT,
+    RES_R, RES_G, RES_B, RES_MASK_MODE, CHANNELS,
+    MASK_MODE_SHARED, MASK_MODE_PER_CHANNEL,
 };
 
 #[tauri::command]
@@ -42,6 +45,116 @@ pub async fn apply_arcsinh_stretch_cmd(
     })
 }
 
+fn ghs_params_from_args(
+    stretch_factor: f64,
+    local_intensity: Option<f64>,
+    symmetry_point: Option<f64>,
+    shadow_protect: Option<f64>,
+    highlight_protect: Option<f64>,
+) -> GhsParams {
+    let sp = symmetry_point.unwrap_or(0.05).clamp(0.0, 1.0);
+    GhsParams {
+        d: stretch_factor.clamp(0.0, 50.0),
+        b: local_intensity.unwrap_or(0.0).clamp(-10.0, 15.0),
+        sp,
+        lp: shadow_protect.unwrap_or(0.0).clamp(0.0, sp),
+        hp: highlight_protect.unwrap_or(1.0).clamp(sp, 1.0),
+    }
+}
+
+#[tauri::command]
+pub async fn apply_ghs_stretch_cmd(
+    path: String,
+    output_dir: String,
+    stretch_factor: f64,
+    local_intensity: Option<f64>,
+    symmetry_point: Option<f64>,
+    shadow_protect: Option<f64>,
+    highlight_protect: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        resolve_output_dir(&output_dir)?;
+
+        let entry = load_from_cache_or_disk(&path)?;
+        let image = entry.arr();
+
+        let params = ghs_params_from_args(
+            stretch_factor,
+            local_intensity,
+            symmetry_point,
+            shadow_protect,
+            highlight_protect,
+        );
+
+        let t0 = std::time::Instant::now();
+        let stretched = ghs_stretch(image, &params);
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+        let ro = render_and_save(&stretched, &path, &output_dir, "ghs", true)?;
+        let (rows, cols) = ro.dims;
+
+        Ok(json!({
+            RES_PNG_PATH: ro.png_path,
+            RES_FITS_PATH: ro.fits_path,
+            RES_STRETCH_FACTOR: params.d,
+            RES_LOCAL_INTENSITY: params.b,
+            RES_SYMMETRY_POINT: params.sp,
+            RES_SHADOW_PROTECT: params.lp,
+            RES_HIGHLIGHT_PROTECT: params.hp,
+            RES_ELAPSED_MS: elapsed_ms,
+            RES_DIMENSIONS: [cols, rows],
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn ghs_stretch_composite_cmd(
+    output_dir: String,
+    stretch_factor: f64,
+    local_intensity: Option<f64>,
+    symmetry_point: Option<f64>,
+    shadow_protect: Option<f64>,
+    highlight_protect: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        resolve_output_dir(&output_dir)?;
+
+        let (er, eg, eb) = helpers::load_composite_rgb()?;
+
+        let params = ghs_params_from_args(
+            stretch_factor,
+            local_intensity,
+            symmetry_point,
+            shadow_protect,
+            highlight_protect,
+        );
+
+        let t0 = std::time::Instant::now();
+        let (r, g, b) = ghs_stretch_rgb(er.arr(), eg.arr(), eb.arr(), &params);
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+        let (rows, cols) = r.dim();
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let png_path = format!("{}/composite_ghs_{}.png", output_dir, ts);
+        helpers::render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+
+        Ok(json!({
+            RES_PNG_PATH: png_path,
+            RES_STRETCH_FACTOR: params.d,
+            RES_LOCAL_INTENSITY: params.b,
+            RES_SYMMETRY_POINT: params.sp,
+            RES_SHADOW_PROTECT: params.lp,
+            RES_HIGHLIGHT_PROTECT: params.hp,
+            RES_ELAPSED_MS: elapsed_ms,
+            RES_DIMENSIONS: [cols, rows],
+        }))
+    })
+}
+
 #[tauri::command]
 pub async fn masked_stretch_cmd(
     path: String,
@@ -52,6 +165,8 @@ pub async fn masked_stretch_cmd(
     mask_softness: Option<f64>,
     protection_amount: Option<f64>,
     luminance_protect: Option<bool>,
+    detection_sigma: Option<f64>,
+    max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
@@ -66,6 +181,8 @@ pub async fn masked_stretch_cmd(
             mask_softness: mask_softness.unwrap_or(4.0),
             protection_amount: protection_amount.unwrap_or(0.85),
             luminance_protect: luminance_protect.unwrap_or(true),
+            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
+            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
             ..MaskedStretchConfig::default()
         };
 
@@ -141,6 +258,8 @@ pub async fn masked_stretch_composite_cmd(
     protection_amount: Option<f64>,
     luminance_protect: Option<bool>,
     shared_mask: Option<bool>,
+    detection_sigma: Option<f64>,
+    max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
@@ -154,24 +273,26 @@ pub async fn masked_stretch_composite_cmd(
             mask_softness: mask_softness.unwrap_or(4.0),
             protection_amount: protection_amount.unwrap_or(0.85),
             luminance_protect: luminance_protect.unwrap_or(true),
+            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
+            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
             ..MaskedStretchConfig::default()
         };
 
         let t0 = std::time::Instant::now();
-        let use_shared = shared_mask.unwrap_or(false);
+        let use_shared = shared_mask.unwrap_or(true);
 
         let (r_img, g_img, b_img, per_channel, stars, coverage, mask_mode) = if use_shared {
             let result = masked_stretch_rgb_shared(er.arr(), eg.arr(), eb.arr(), &config)
                 .map_err(|e| anyhow::anyhow!(e))?;
             let pc = json!({
-                "r": channel_stats_json(&result.r),
-                "g": channel_stats_json(&result.g),
-                "b": channel_stats_json(&result.b),
+                RES_R: channel_stats_json(&result.r),
+                RES_G: channel_stats_json(&result.g),
+                RES_B: channel_stats_json(&result.b),
             });
             (
                 result.r.image, result.g.image, result.b.image,
                 pc, result.shared_stars_masked, result.shared_mask_coverage,
-                "shared_luminance",
+                MASK_MODE_SHARED,
             )
         } else {
             let (res_r, (res_g, res_b)) = rayon::join(
@@ -185,16 +306,16 @@ pub async fn masked_stretch_composite_cmd(
             let g = res_g.map_err(|e| anyhow::anyhow!(e))?;
             let b = res_b.map_err(|e| anyhow::anyhow!(e))?;
             let pc = json!({
-                "r": channel_stats_json(&r),
-                "g": channel_stats_json(&g),
-                "b": channel_stats_json(&b),
+                RES_R: channel_stats_json(&r),
+                RES_G: channel_stats_json(&g),
+                RES_B: channel_stats_json(&b),
             });
             let total_stars = r.stars_masked + g.stars_masked + b.stars_masked;
             let avg_coverage = (r.mask_coverage + g.mask_coverage + b.mask_coverage) / 3.0;
             (
                 r.image, g.image, b.image,
                 pc, total_stars, avg_coverage,
-                "per_channel",
+                MASK_MODE_PER_CHANNEL,
             )
         };
 
@@ -212,8 +333,8 @@ pub async fn masked_stretch_composite_cmd(
             RES_PNG_PATH: png_path,
             RES_STARS_MASKED: stars,
             RES_MASK_COVERAGE: coverage,
-            "channels": per_channel,
-            "mask_mode": mask_mode,
+            CHANNELS: per_channel,
+            RES_MASK_MODE: mask_mode,
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))

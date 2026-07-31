@@ -8,8 +8,8 @@ use crate::cmd::helpers;
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
 use crate::infra::cache::ImageEntry;
-use crate::infra::ipc::encode_with_header_downsampled;
-use crate::types::constants::{HISTOGRAM_BINS_DISPLAY, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_HEADER, RES_HISTOGRAM, RES_MAD, RES_MEAN, RES_MEDIAN, RES_PNG_PATH, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS};
+use crate::infra::ipc::{encode_rgb_with_header_downsampled, encode_with_header_downsampled};
+use crate::types::constants::{HISTOGRAM_BINS_DISPLAY, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_HEADER, RES_HISTOGRAM, RES_MAD, RES_MEAN, RES_MEDIAN, RES_PNG_PATH, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS, RES_IS_RGB, STF_R, STF_G, STF_B};
 use crate::types::image::StfParams;
 
 fn png_path_for(path: &str, output_dir: &str) -> String {
@@ -74,10 +74,10 @@ fn process_rgb_fits(
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         RES_STATS: helpers::stats_json_full(&stats_r),
         RES_STF: helpers::stf_json(&stf_r),
-        "is_rgb": true,
-        "stf_r": helpers::stf_json(&stf_r),
-        "stf_g": helpers::stf_json(&stf_g),
-        "stf_b": helpers::stf_json(&stf_b),
+        RES_IS_RGB: true,
+        STF_R: helpers::stf_json(&stf_r),
+        STF_G: helpers::stf_json(&stf_g),
+        STF_B: helpers::stf_json(&stf_b),
     });
 
     if let Some((display_bins, header_json)) = full_data {
@@ -176,6 +176,31 @@ pub async fn get_raw_pixels_preview(path: String, max_dim: Option<u32>) -> Resul
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
         let dim = max_dim.unwrap_or(2048) as usize;
         let data = encode_with_header_downsampled(&extract_image_resolved(&path)?.arr, dim)?;
+        Ok(Response::new(data))
+    })
+        .await
+        .map_err(|e| format!("{}", e))?
+        .map_err(|e| format!("{:#}", e))
+}
+
+#[tauri::command]
+pub async fn get_raw_rgb_pixels_preview(
+    path: Option<String>,
+    max_dim: Option<u32>,
+) -> Result<Response, String> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
+        let dim = max_dim.unwrap_or(2048) as usize;
+        let data = match path {
+            Some(p) => {
+                let rgb = try_extract_rgb_resolved(&p)?
+                    .ok_or_else(|| anyhow::anyhow!("Not an RGB image: {}", p))?;
+                encode_rgb_with_header_downsampled(&rgb.r, &rgb.g, &rgb.b, dim)?
+            }
+            None => {
+                let (r, g, b) = helpers::load_composite_rgb()?;
+                encode_rgb_with_header_downsampled(r.arr(), g.arr(), b.arr(), dim)?
+            }
+        };
         Ok(Response::new(data))
     })
         .await

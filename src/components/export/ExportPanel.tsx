@@ -1,9 +1,21 @@
 import { useState, useCallback, useEffect } from "react";
 import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon } from "lucide-react";
-import { Toggle, RunButton, ResultGrid, SectionHeader } from "../ui";
+import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
 import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export";
 import type { StfParams } from "../../shared/types";
+
+interface AlignedExportState {
+  channels?: AlignedChannelOut[];
+  elapsed_ms?: number;
+}
+
+interface AlignedChannelOut {
+  channel: string;
+  path?: string;
+  file_size_bytes?: number;
+  offset?: [number, number];
+}
 
 interface BitpixOption {
   value: number;
@@ -96,12 +108,13 @@ export default function ExportPanel({
   const [exportDone, setExportDone] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [alignedExporting, setAlignedExporting] = useState(false);
-  const [alignedResult, setAlignedResult] = useState<any>(null);
+  const [alignedResult, setAlignedResult] = useState<AlignedExportState | null>(null);
   const [alignedMethod, setAlignedMethod] = useState(alignMethod ?? "phase_correlation");
   const [pngBitDepth, setPngBitDepth] = useState(16);
   const [pngApplyStf, setPngApplyStf] = useState(false);
   const [pngExporting, setPngExporting] = useState(false);
   const [pngExported, setPngExported] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (alignMethod) setAlignedMethod(alignMethod);
@@ -110,6 +123,7 @@ export default function ExportPanel({
   const handleExport = useCallback(async () => {
     if (!filePath || !onExport) return;
 
+    setError(null);
     const dir = await getExportDir();
     const stem = filePath
       .split(/[/\\]/)
@@ -136,14 +150,17 @@ export default function ExportPanel({
       }, 8000);
     } catch (e) {
       console.error("Export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [filePath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, onExport]);
 
   const handleExportRgb = useCallback(async () => {
     if ((!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
     if (!onExportRgb) return;
+    setError(null);
     const dir = await getExportDir();
-    const outputPath = `${dir}/rgb_composite.fits`;
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const outputPath = `${dir}/rgb_composite_${ts}.fits`;
     try {
       await onExportRgb(
         rgbChannels?.r ?? null,
@@ -161,11 +178,13 @@ export default function ExportPanel({
       }, 8000);
     } catch (e) {
       console.error("RGB FITS export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [rgbChannels, copyWcs, copyMetadata, onExportRgb, compositeStf]);
 
   const handleExportAligned = useCallback(async () => {
     if (!rgbChannels) return;
+    setError(null);
     setAlignedExporting(true);
     setAlignedResult(null);
     try {
@@ -182,6 +201,7 @@ export default function ExportPanel({
       }
     } catch (e) {
       console.error("Aligned export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setAlignedExporting(false);
     }
@@ -189,6 +209,7 @@ export default function ExportPanel({
 
   const handleExportPng = useCallback(async () => {
     if (!filePath) return;
+    setError(null);
     setPngExporting(true);
     try {
       const dir = await getExportDir();
@@ -213,6 +234,7 @@ export default function ExportPanel({
       }, 8000);
     } catch (e) {
       console.error("PNG export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPngExporting(false);
     }
@@ -220,6 +242,7 @@ export default function ExportPanel({
 
   const handleExportRgbPng = useCallback(async () => {
     if (!rgbChannels && !compositeStf) return;
+    setError(null);
     setPngExporting(true);
     try {
       const dir = await getExportDir();
@@ -256,6 +279,7 @@ export default function ExportPanel({
       }, 8000);
     } catch (e) {
       console.error("RGB PNG export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPngExporting(false);
     }
@@ -266,7 +290,7 @@ export default function ExportPanel({
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
 
   return (
-    <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
+    <div className="flex flex-col gap-4 h-full overflow-y-auto">
       <SectionHeader icon={ICON} title="Export FITS" />
 
       <div className="flex flex-col gap-1.5">
@@ -368,7 +392,7 @@ export default function ExportPanel({
 
       {alignedResult?.channels && (
         <div className="flex flex-col gap-1 px-1">
-          {alignedResult.channels.map((ch: any) => (
+          {alignedResult.channels.map((ch) => (
             <div key={ch.channel} className="flex items-center justify-between text-[10px] text-zinc-400">
               <span className="text-teal-300">{ch.channel}</span>
               <span className="truncate ml-2">{ch.path?.split(/[/\\]/).pop()}</span>
@@ -378,6 +402,8 @@ export default function ExportPanel({
           <div className="text-[10px] text-zinc-600">{alignedResult.elapsed_ms} ms</div>
         </div>
       )}
+
+      <ErrorAlert message={error} />
 
       {savedPath && (
         <button

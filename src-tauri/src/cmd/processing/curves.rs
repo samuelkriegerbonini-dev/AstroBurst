@@ -15,6 +15,7 @@ use crate::types::constants::{
     RES_ELAPSED_MS, RES_LEVELS_APPLIED, RES_PNG_PATH,
     RES_SCNR_APPLIED, RES_STF_APPLIED, RES_STF,
     RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT,
+    RES_R, RES_G, RES_B,
 };
 use crate::types::image::{ScnrConfig, StfParams};
 
@@ -169,17 +170,17 @@ pub async fn apply_tone_composite_cmd(
             RES_CURVES_APPLIED: curves_applied,
             RES_SCNR_APPLIED: scnr_applied,
             RES_STF: {
-                "r": {
+                RES_R: {
                     RES_SHADOW: stf_r_params.shadow,
                     RES_MIDTONE: stf_r_params.midtone,
                     RES_HIGHLIGHT: stf_r_params.highlight,
                 },
-                "g": {
+                RES_G: {
                     RES_SHADOW: stf_g_params.shadow,
                     RES_MIDTONE: stf_g_params.midtone,
                     RES_HIGHLIGHT: stf_g_params.highlight,
                 },
-                "b": {
+                RES_B: {
                     RES_SHADOW: stf_b_params.shadow,
                     RES_MIDTONE: stf_b_params.midtone,
                     RES_HIGHLIGHT: stf_b_params.highlight,

@@ -6,11 +6,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResult {
     pub success: bool,
+    #[serde(rename = "center_ra")]
     pub ra_center: f64,
+    #[serde(rename = "center_dec")]
     pub dec_center: f64,
     pub orientation: f64,
+    #[serde(rename = "pixel_scale_arcsec")]
     pub pixel_scale: f64,
+    #[serde(rename = "field_of_view_w_arcmin")]
     pub field_w_arcmin: f64,
+    #[serde(rename = "field_of_view_h_arcmin")]
     pub field_h_arcmin: f64,
     pub index_name: String,
     pub stars_used: usize,
@@ -38,6 +43,7 @@ pub struct SolveConfig {
     pub radius_hint: Option<f64>,
     pub scale_low: Option<f64>,
     pub scale_high: Option<f64>,
+    pub scale_units: Option<String>,
     pub max_stars: Option<usize>,
 }
 
@@ -51,6 +57,7 @@ impl Default for SolveConfig {
             radius_hint: Some(10.0),
             scale_low: None,
             scale_high: None,
+            scale_units: None,
             max_stars: Some(100),
         }
     }

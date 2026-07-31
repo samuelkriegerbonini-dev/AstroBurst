@@ -118,11 +118,12 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
           <Slider label="Dering Threshold" value={params.deringThreshold} min={0} max={1} step={0.01} disabled={isRunning} accent="indigo" format={(v) => v.toFixed(2)} onChange={(v) => update("deringThreshold", v)} />
         )}
 
-        <Toggle label="Empirical PSF" checked={params.useEmpiricalPsf} disabled={isRunning} accent="violet" badge={psfKernel ? "ready" : null} onChange={(v) => update("useEmpiricalPsf", v)} />
+        <Toggle label="Empirical PSF" checked={params.useEmpiricalPsf} disabled={isRunning} accent="violet" onChange={(v) => update("useEmpiricalPsf", v)} />
 
-        {params.useEmpiricalPsf && !psfKernel && (
-          <div className="text-[10px] text-amber-400/80 bg-amber-900/20 border border-amber-800/20 rounded px-2.5 py-1.5">
-            Go to PSF tab first to estimate the PSF from stars, then come back here.
+        {params.useEmpiricalPsf && (
+          <div className="text-[10px] text-zinc-500 bg-zinc-900/50 rounded px-2.5 py-1.5">
+            The PSF is re-estimated from stars in the deconvolution input using default detection
+            parameters{psfKernel ? " — the kernel previewed in the PSF tab is not reused" : ""}.
           </div>
         )}
       </div>

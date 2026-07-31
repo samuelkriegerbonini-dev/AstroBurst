@@ -1,13 +1,13 @@
-import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositeActions } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
-import { detectNarrowbandFilters } from "../../services/header";
 import {
   nextEnabledStep,
   STEPS,
 } from "../../utils/wizard";
+import type { StfParams } from "../../shared/types";
 
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
@@ -17,7 +17,6 @@ const CropStep = lazy(() => import("./steps/CropStep"));
 const BackgroundStep = lazy(() => import("./steps/BackgroundStep"));
 const BlendStep = lazy(() => import("./steps/BlendStep"));
 const ColorBalanceStep = lazy(() => import("./steps/ColorBalanceStep"));
-const MaskStep = lazy(() => import("./steps/MaskStep"));
 const StretchStep = lazy(() => import("./steps/StretchStep"));
 const AdjustStep = lazy(() => import("./steps/AdjustStep"));
 const ExportStep = lazy(() => import("./steps/ExportStep"));
@@ -33,15 +32,6 @@ const COLOR_MAP: Record<string, { tab: string; dot: string }> = {
   purple: { tab: "bg-purple-600/20 text-purple-400 ring-1 ring-purple-500/30", dot: "bg-purple-400" },
   teal: { tab: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
-
-interface FilterDetection {
-  path: string;
-  filter: string | null;
-  hubble_channel?: string | null;
-  confidence?: number;
-  matched_keyword?: string;
-  matched_value?: string;
-}
 
 function MiniInfoBar() {
   const { file } = useFileContext();
@@ -96,33 +86,16 @@ export default function ComposeWizard() {
     setCompositePreviewUrl,
     setCompositeAutoStf,
     setCompositeStf,
-  } = useCompositeContext();
+  } = useCompositeActions();
   const {
     setActiveImagePath,
   } = useRenderContext();
 
-  const { narrowbandPalette } = useNarrowbandContext();
+  const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
 
   const { state, dispatch, activeStep, setActiveStep } = useComposeWizardContext();
-  const [filterDetections, setFilterDetections] = useState<FilterDetection[]>([]);
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const detectionKeyRef = useRef("");
-
-  useEffect(() => {
-    if (doneFiles.length < 2) return;
-    const paths = doneFiles.map((f) => f.path);
-    const key = paths.join("|");
-    if (key === detectionKeyRef.current) return;
-    detectionKeyRef.current = key;
-    detectNarrowbandFilters(paths)
-      .then((result: any) => {
-        if (result?.filters) {
-          setFilterDetections(result.filters);
-        }
-      })
-      .catch(() => {});
-  }, [doneFiles]);
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
   const totalFiles = useMemo(() => state.bins.reduce((a, b) => a + b.files.length, 0), [state.bins]);
@@ -146,7 +119,7 @@ export default function ComposeWizard() {
     setSuggestedStep(null);
   }, [setActiveStep]);
 
-  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: any, stfG?: any, stfB?: any, lumFitsPath?: string | null) => {
+  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams, lumFitsPath?: string | null) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -161,7 +134,7 @@ export default function ComposeWizard() {
     completeStep("blend");
   }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep, dispatch]);
 
-  const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: any; g: any; b: any }) => {
+  const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: StfParams; g: StfParams; b: StfParams }) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -262,21 +235,13 @@ export default function ComposeWizard() {
             }}
           />
         );
-      case "mask":
-        return (
-          <MaskStep
-            state={state}
-            onMask={(path) => dispatch({ type: "SET_MASK", path })}
-            onMaskParams={(growth, protection) => {
-              dispatch({ type: "SET_MASK_PARAMS", growth, protection });
-            }}
-          />
-        );
       case "stretch":
         return (
           <StretchStep
             state={state}
             onStretchChange={(mode, factor, target) => dispatch({ type: "SET_STRETCH", mode, factor, target })}
+            onMask={(path) => dispatch({ type: "SET_MASK", path })}
+            onMaskParams={(growth, protection) => dispatch({ type: "SET_MASK_PARAMS", growth, protection })}
             onResult={(url, stf) => {
               handleRestretchPreview(url, stf);
               completeStep("stretch");

@@ -1,11 +1,11 @@
 import { useState, useCallback, useMemo } from "react";
 import type { WizardState } from "../wizard";
-import { applyToneComposite, type CurvePoint } from "../../../services/tone";
+import { applyToneComposite, type CurvePoint, type ToneResult } from "../../../services/tone";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
-import { useCompositeContext } from "../../../context/CompositeContext";
+import { useCompositeStf } from "../../../context/CompositeContext";
 
 interface AdjustStepProps {
   state: WizardState;
@@ -37,9 +37,9 @@ function isIdentity(pts: CurvePoint[]): boolean {
 }
 
 export default function AdjustStep({ state, onResult }: AdjustStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeContext();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ToneResult | null>(null);
   const [error, setError] = useState("");
 
   const [curveMode, setCurveMode] = useState<CurveChannel>("linked");
@@ -93,8 +93,8 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
       } else if (res?.previewUrl) {
         onResult(res.previewUrl);
       }
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }

@@ -17,6 +17,7 @@ function HeadersTabInner() {
   const handleLoadHeader = useCallback(
     async (path: string) => {
       setHeaderLoading(true);
+      setHeaderData(null);
       try {
         const data = await getFullHeader(path);
         setHeaderData(data);
@@ -32,7 +33,12 @@ function HeadersTabInner() {
 
   const handleAssignChannel = useCallback(
     (channel: string, path: string) => {
-      setRgbChannels((prev: any) => ({ ...prev, [channel.toLowerCase()]: path }));
+      const key = channel.toLowerCase();
+      if (key !== "r" && key !== "g" && key !== "b") return;
+      setRgbChannels((prev) => ({
+        ...(prev ?? { r: null, g: null, b: null }),
+        [key]: path,
+      }));
     },
     [setRgbChannels],
   );
@@ -45,7 +51,7 @@ function HeadersTabInner() {
         </div>
       }
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 p-3">
         {file?.path && <HduSelectorPanel filePath={file.path} />}
 
         {file && (

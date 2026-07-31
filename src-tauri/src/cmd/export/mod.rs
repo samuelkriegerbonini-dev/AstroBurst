@@ -78,6 +78,7 @@ pub async fn export_fits_rgb(
     copy_wcs: Option<bool>,
     copy_metadata: Option<bool>,
     bitpix: Option<i32>,
+    history: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -135,9 +136,17 @@ pub async fn export_fits_rgb(
             (r_final, g_final, b_final, Some(r_resolved.header))
         };
 
-        let filtered = header_source
+        let mut filtered = header_source
             .as_ref()
             .and_then(|h| filter_header(h, do_wcs, do_meta));
+
+        if let Some(steps) = &history {
+            let h = filtered.get_or_insert_with(crate::types::header::HduHeader::empty);
+            for step in steps {
+                let line: String = step.chars().take(70).collect();
+                h.cards.push(("HISTORY".to_string(), line));
+            }
+        }
 
         write_fits_rgb_bitpix(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix)?;
 
@@ -179,6 +188,7 @@ pub async fn export_png(
             let sg = compute_image_stats(&rgb.g);
             let sb = compute_image_stats(&rgb.b);
 
+            let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
             let (r_out, g_out, b_out) = if do_stf {
                 let stf = StfParams {
                     shadow: shadow.unwrap_or(0.0),
@@ -186,17 +196,17 @@ pub async fn export_png(
                     highlight: highlight.unwrap_or(1.0),
                 };
                 (
-                    apply_stf_f32(&rgb.r, &stf, &sr),
-                    apply_stf_f32(&rgb.g, &stf, &sg),
-                    apply_stf_f32(&rgb.b, &stf, &sb),
+                    apply_stf_f32(&rgb.r, &stf, &combined),
+                    apply_stf_f32(&rgb.g, &stf, &combined),
+                    apply_stf_f32(&rgb.b, &stf, &combined),
                 )
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(&sr, &sg, &sb, &stf_config);
+                let (linked, _) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
                 (
-                    apply_stf_f32(&rgb.r, &linked, &sr),
-                    apply_stf_f32(&rgb.g, &linked, &sg),
-                    apply_stf_f32(&rgb.b, &linked, &sb),
+                    apply_stf_f32(&rgb.r, &linked, &combined),
+                    apply_stf_f32(&rgb.g, &linked, &combined),
+                    apply_stf_f32(&rgb.b, &linked, &combined),
                 )
             };
 
@@ -257,6 +267,13 @@ pub async fn export_png(
     })
 }
 
+fn explicit_stf_requested(do_stf: bool, mr: Option<f64>, mg: Option<f64>, mb: Option<f64>) -> bool {
+    do_stf
+        && [mr, mg, mb]
+            .iter()
+            .any(|m| m.map_or(false, |v| (v - 0.5).abs() > 1e-4))
+}
+
 #[tauri::command]
 pub async fn export_rgb_png(
     r_path: Option<String>,
@@ -285,10 +302,7 @@ pub async fn export_rgb_png(
         let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
 
         if let (Some(cr), Some(cg), Some(cb)) = (&cache_r, &cache_g, &cache_b) {
-            let has_explicit_stf = do_stf
-                && shadow_r.is_some()
-                && midtone_r.is_some()
-                && (midtone_r.unwrap() - 0.5).abs() > 1e-4;
+            let has_explicit_stf = explicit_stf_requested(do_stf, midtone_r, midtone_g, midtone_b);
 
             let (stf_r, stf_g, stf_b) = if has_explicit_stf {
                 (
@@ -310,17 +324,39 @@ pub async fn export_rgb_png(
                 )
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(cr.stats(), cg.stats(), cb.stats(), &stf_config);
-                (
-                    StfParams { shadow: linked.shadow, midtone: linked.midtone, highlight: linked.highlight },
-                    StfParams { shadow: linked.shadow, midtone: linked.midtone, highlight: linked.highlight },
-                    linked,
-                )
+                let (linked, _) = helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &stf_config);
+                (linked, linked, linked)
             };
 
-            let r_out = apply_stf_f32(cr.arr(), &stf_r, cr.stats());
-            let g_out = apply_stf_f32(cg.arr(), &stf_g, cg.stats());
-            let b_out = apply_stf_f32(cb.arr(), &stf_b, cb.stats());
+            let identical_params = stf_r.shadow == stf_g.shadow
+                && stf_g.shadow == stf_b.shadow
+                && stf_r.midtone == stf_g.midtone
+                && stf_g.midtone == stf_b.midtone
+                && stf_r.highlight == stf_g.highlight
+                && stf_g.highlight == stf_b.highlight;
+
+            let linked_stats = if identical_params {
+                Some(crate::core::imaging::stats::combine_channel_stats(
+                    cr.stats(),
+                    cg.stats(),
+                    cb.stats(),
+                ))
+            } else {
+                None
+            };
+
+            let (r_out, g_out, b_out) = match &linked_stats {
+                Some(combined) => (
+                    apply_stf_f32(cr.arr(), &stf_r, combined),
+                    apply_stf_f32(cg.arr(), &stf_g, combined),
+                    apply_stf_f32(cb.arr(), &stf_b, combined),
+                ),
+                None => (
+                    apply_stf_f32(cr.arr(), &stf_r, cr.stats()),
+                    apply_stf_f32(cg.arr(), &stf_g, cg.stats()),
+                    apply_stf_f32(cb.arr(), &stf_b, cb.stats()),
+                ),
+            };
             if depth == 16 {
                 render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
             } else {
@@ -338,19 +374,17 @@ pub async fn export_rgb_png(
             }));
         }
 
-        let r_entry = load_cached(
-            r_path.as_deref().ok_or_else(|| anyhow::anyhow!("R channel path required"))?
-        )?;
-        let g_entry = load_cached(
-            g_path.as_deref().ok_or_else(|| anyhow::anyhow!("G channel path required"))?
-        )?;
-        let b_entry = load_cached(
-            b_path.as_deref().ok_or_else(|| anyhow::anyhow!("B channel path required"))?
-        )?;
+        let r_entry = r_path.as_deref().map(load_cached).transpose()?;
+        let g_entry = g_path.as_deref().map(load_cached).transpose()?;
+        let b_entry = b_path.as_deref().map(load_cached).transpose()?;
 
-        let ra = r_entry.arr();
-        let ga = g_entry.arr();
-        let ba = b_entry.arr();
+        let any_entry = r_entry.as_ref().or(g_entry.as_ref()).or(b_entry.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("At least one channel path required"))?;
+        let zeros = ndarray::Array2::<f32>::zeros(any_entry.arr().dim());
+
+        let ra = r_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
+        let ga = g_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
+        let ba = b_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
 
         let has_explicit_stf = shadow_r.is_some() || shadow_g.is_some() || shadow_b.is_some();
 
@@ -363,18 +397,35 @@ pub async fn export_rgb_png(
                 let stf_r = StfParams { shadow: shadow_r.unwrap_or(0.0), midtone: midtone_r.unwrap_or(0.5), highlight: highlight_r.unwrap_or(1.0) };
                 let stf_g = StfParams { shadow: shadow_g.unwrap_or(0.0), midtone: midtone_g.unwrap_or(0.5), highlight: highlight_g.unwrap_or(1.0) };
                 let stf_b = StfParams { shadow: shadow_b.unwrap_or(0.0), midtone: midtone_b.unwrap_or(0.5), highlight: highlight_b.unwrap_or(1.0) };
-                (
-                    apply_stf_f32(r, &stf_r, &sr),
-                    apply_stf_f32(g, &stf_g, &sg),
-                    apply_stf_f32(b, &stf_b, &sb),
-                )
+
+                let identical_params = stf_r.shadow == stf_g.shadow
+                    && stf_g.shadow == stf_b.shadow
+                    && stf_r.midtone == stf_g.midtone
+                    && stf_g.midtone == stf_b.midtone
+                    && stf_r.highlight == stf_g.highlight
+                    && stf_g.highlight == stf_b.highlight;
+
+                if identical_params {
+                    let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
+                    (
+                        apply_stf_f32(r, &stf_r, &combined),
+                        apply_stf_f32(g, &stf_g, &combined),
+                        apply_stf_f32(b, &stf_b, &combined),
+                    )
+                } else {
+                    (
+                        apply_stf_f32(r, &stf_r, &sr),
+                        apply_stf_f32(g, &stf_g, &sg),
+                        apply_stf_f32(b, &stf_b, &sb),
+                    )
+                }
             } else {
                 let stf_config = AutoStfConfig::default();
-                let linked = helpers::compute_linked_stf(&sr, &sg, &sb, &stf_config);
+                let (linked, combined) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
                 (
-                    apply_stf_f32(r, &linked, &sr),
-                    apply_stf_f32(g, &linked, &sg),
-                    apply_stf_f32(b, &linked, &sb),
+                    apply_stf_f32(r, &linked, &combined),
+                    apply_stf_f32(g, &linked, &combined),
+                    apply_stf_f32(b, &linked, &combined),
                 )
             };
 
@@ -408,4 +459,19 @@ pub async fn export_rgb_png(
 
         stretch_and_render(ra, ga, ba)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::explicit_stf_requested;
+
+    #[test]
+    fn explicit_stf_honored_when_any_channel_deviates() {
+        assert!(explicit_stf_requested(true, Some(0.5), Some(0.3), Some(0.5)));
+        assert!(explicit_stf_requested(true, Some(0.2), Some(0.5), Some(0.5)));
+        assert!(explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.7)));
+        assert!(!explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.5)));
+        assert!(!explicit_stf_requested(false, Some(0.2), Some(0.3), Some(0.7)));
+        assert!(!explicit_stf_requested(true, None, None, None));
+    }
 }

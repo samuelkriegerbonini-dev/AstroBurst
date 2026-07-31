@@ -98,6 +98,8 @@ pub struct DrizzleRgbConfig {
     pub auto_stretch: bool,
     pub linked_stf: bool,
     pub scnr: Option<ScnrConfig>,
+    pub align: bool,
+    pub align_method: AlignMethod,
 }
 
 impl Default for DrizzleRgbConfig {
@@ -108,6 +110,8 @@ impl Default for DrizzleRgbConfig {
             auto_stretch: true,
             linked_stf: false,
             scnr: None,
+            align: true,
+            align_method: AlignMethod::PhaseCorrelation,
         }
     }
 }

@@ -6,14 +6,16 @@ const CalibrationPanel = lazy(() => import("./CalibrationPanel"));
 const StackingPanel = lazy(() => import("./StackingPanel"));
 const PipelinePanel = lazy(() => import("./PipelinePanel"));
 const SubframeSelectorPanel = lazy(() => import("./SubframeSelectorPanel"));
+const DrizzleRgbPanel = lazy(() => import("./DrizzleRgbPanel"));
 
-type StackSection = "calibrate" | "subframe" | "stack" | "pipeline";
+type StackSection = "calibrate" | "subframe" | "stack" | "pipeline" | "drizzle_rgb";
 
 const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "calibrate", label: "Calibrate", color: "violet" },
   { id: "subframe", label: "Subframes", color: "teal" },
   { id: "stack", label: "Stack", color: "amber" },
   { id: "pipeline", label: "Pipeline", color: "cyan" },
+  { id: "drizzle_rgb", label: "Drizzle RGB", color: "rose" },
 ];
 
 export interface StackConfig {
@@ -21,6 +23,7 @@ export interface StackConfig {
   sigmaHigh: number;
   maxIterations: number;
   align: boolean;
+  alignMethod?: string;
 }
 
 export interface CalibrationState {
@@ -36,6 +39,7 @@ const DEFAULT_STACK_CONFIG: StackConfig = {
   sigmaHigh: 3.0,
   maxIterations: 5,
   align: true,
+  alignMethod: "phase_correlation",
 };
 
 function StackingTabInner() {
@@ -53,6 +57,12 @@ function StackingTabInner() {
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_CONFIG);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
+  const [rejectedPaths, setRejectedPaths] = useState<string[]>([]);
+
+  const handleSubframeSelection = useCallback((_accepted: string[], rejected: string[]) => {
+    setRejectedPaths(rejected);
+    setActive("stack");
+  }, []);
 
   const handlePreviewUpdate = useCallback(
     (url: string | null | undefined) => {
@@ -64,19 +74,26 @@ function StackingTabInner() {
   );
 
   const handleCalibrationDone = useCallback(
-    (result: any) => {
+    (result: {
+      previewUrl?: string | null;
+      fits_path?: string;
+      has_bias?: boolean;
+      has_dark?: boolean;
+      has_flat?: boolean;
+    }) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fitsPath = result.fits_path;
         setCalibration({
           calibratedPath: result.previewUrl || null,
-          calibratedFitsPath: result.fits_path,
+          calibratedFitsPath: fitsPath,
           hasBias: result.has_bias || false,
           hasDark: result.has_dark || false,
           hasFlat: result.has_flat || false,
         });
         setInjectedPaths((prev) => {
-          if (prev.includes(result.fits_path)) return prev;
-          return [...prev, result.fits_path];
+          if (prev.includes(fitsPath)) return prev;
+          return [...prev, fitsPath];
         });
       }
     },
@@ -84,7 +101,7 @@ function StackingTabInner() {
   );
 
   const handleStackResult = useCallback(
-    (result: any) => {
+    (result: { previewUrl?: string | null }) => {
       handlePreviewUpdate(result?.previewUrl);
     },
     [handlePreviewUpdate],
@@ -112,7 +129,9 @@ function StackingTabInner() {
                       ? "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30"
                       : s.color === "teal"
                         ? "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30"
-                        : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
+                        : s.color === "rose"
+                          ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30"
+                          : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
                   : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
               }`}
             >
@@ -141,7 +160,7 @@ function StackingTabInner() {
             />
           </div>
           <div style={{ display: active === "subframe" ? "block" : "none" }}>
-            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} />
+            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} onSelectionChange={handleSubframeSelection} />
           </div>
           <div style={{ display: active === "stack" ? "block" : "none" }}>
             <StackingPanel
@@ -150,6 +169,7 @@ function StackingTabInner() {
               injectedPaths={injectedPaths}
               stackConfig={stackConfig}
               onStackConfigChange={handleStackConfigChange}
+              rejectedPaths={rejectedPaths}
             />
           </div>
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>
@@ -159,6 +179,9 @@ function StackingTabInner() {
               calibration={calibration}
               stackConfig={stackConfig}
             />
+          </div>
+          <div style={{ display: active === "drizzle_rgb" ? "block" : "none" }}>
+            <DrizzleRgbPanel files={doneFiles} onResult={handleStackResult} />
           </div>
         </div>
       </Suspense>

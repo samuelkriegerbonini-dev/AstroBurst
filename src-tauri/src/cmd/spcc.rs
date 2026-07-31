@@ -1,14 +1,10 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk};
+use crate::cmd::common::{blocking_cmd, load_cached_full, load_from_cache_or_disk};
 use crate::core::astrometry::spcc::{
     spcc_calibrate_rgb, SpccConfig, SpccCatalog, WhiteReference,
 };
-use crate::types::constants::{
-    RES_ELAPSED_MS, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR,
-    RES_STARS_MATCHED, RES_STARS_TOTAL, RES_AVG_COLOR_INDEX,
-    RES_WHITE_REF, RES_CATALOG_NAME,
-};
+use crate::types::constants::{RES_ELAPSED_MS, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, RES_STARS_MATCHED, RES_STARS_TOTAL, RES_AVG_COLOR_INDEX, RES_WHITE_REF, RES_CATALOG_NAME, IS_SYNTHETIC_CATALOG};
 
 #[tauri::command]
 pub async fn spcc_calibrate_cmd(
@@ -19,17 +15,15 @@ pub async fn spcc_calibrate_cmd(
     white_reference: Option<String>,
     min_snr: Option<f64>,
     max_stars: Option<usize>,
+    catalog: Option<String>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let r_entry = load_from_cache_or_disk(&r_path)?;
         let g_entry = load_from_cache_or_disk(&g_path)?;
         let b_entry = load_from_cache_or_disk(&b_path)?;
 
-        let header_source = if let Some(ref wp) = wcs_path {
-            load_from_cache_or_disk(wp)?
-        } else {
-            r_entry.clone()
-        };
+        let header_path = wcs_path.as_deref().unwrap_or(&r_path);
+        let header_source = load_cached_full(header_path)?;
 
         let header = header_source
             .header()
@@ -43,10 +37,15 @@ pub async fn spcc_calibrate_cmd(
             _ => WhiteReference::AverageSpiral,
         };
 
+        let cat = match catalog.as_deref() {
+            Some("builtin") | Some("synthetic") => SpccCatalog::BuiltinBpRp,
+            _ => SpccCatalog::GaiaDr3Tap,
+        };
+
         let config = SpccConfig {
             min_snr: min_snr.unwrap_or(20.0),
             max_stars: max_stars.unwrap_or(200),
-            catalog: SpccCatalog::BuiltinBpRp,
+            catalog: cat,
             white_reference: wr,
             ..SpccConfig::default()
         };
@@ -70,7 +69,7 @@ pub async fn spcc_calibrate_cmd(
             RES_AVG_COLOR_INDEX: result.avg_color_index,
             RES_WHITE_REF: result.white_ref_name,
             RES_CATALOG_NAME: result.catalog_name,
-            "is_synthetic_catalog": result.is_synthetic_catalog,
+            IS_SYNTHETIC_CATALOG: result.is_synthetic_catalog,
             RES_ELAPSED_MS: elapsed_ms,
         }))
     })

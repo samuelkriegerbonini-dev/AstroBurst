@@ -10,6 +10,13 @@ pub struct HduHeader {
 }
 
 impl HduHeader {
+    pub fn empty() -> Self {
+        Self {
+            cards: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.index.get(key).map(|s| s.as_str())
     }
@@ -35,6 +42,11 @@ impl HduHeader {
         self.set(key, format!("{:.14E}", value));
     }
 
+    pub fn remove(&mut self, key: &str) {
+        self.cards.retain(|(k, _)| k != key);
+        self.index.remove(key);
+    }
+
     pub fn data_byte_count(&self) -> usize {
         let naxis = self.get_i64("NAXIS").unwrap_or(0);
         if naxis == 0 {
@@ -46,22 +58,20 @@ impl HduHeader {
         for i in 1..=naxis {
             total *= self.get_i64(&format!("NAXIS{}", i)).unwrap_or(1) as usize;
         }
-        total * bytes_per_pixel
+        // General FITS data-unit size: GCOUNT * (PCOUNT + NAXIS1*...*NAXISn) * |BITPIX|/8.
+        // PCOUNT/GCOUNT default to 0/1 for plain image HDUs (no-op here), but for a
+        // BINTABLE extension PCOUNT is the heap (variable-length column data) byte
+        // count appended immediately after the fixed-width table -- required to
+        // correctly size compressed-image (ZIMAGE) extensions and any other HDU with
+        // variable-length array columns, or HDU scanning desyncs past them.
+        let pcount = self.get_i64("PCOUNT").unwrap_or(0).max(0) as usize;
+        let gcount = self.get_i64("GCOUNT").unwrap_or(1).max(1) as usize;
+        (total + pcount) * bytes_per_pixel * gcount
     }
 
     pub fn padded_data_bytes(&self) -> usize {
         let raw = self.data_byte_count();
-        ((raw + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE
-    }
-
-    pub fn header_blocks(&self) -> usize {
-        let total_cards = self.cards.len() + 1;
-        let cards_per_block = BLOCK_SIZE / 80;
-        (total_cards + cards_per_block - 1) / cards_per_block
-    }
-
-    pub fn data_offset(&self, header_start: usize) -> usize {
-        header_start + self.header_blocks() * BLOCK_SIZE
+        raw.div_ceil(BLOCK_SIZE) * BLOCK_SIZE
     }
 
     pub fn merge_with(&self, extension: &HduHeader) -> HduHeader {

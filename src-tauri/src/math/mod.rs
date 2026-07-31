@@ -16,4 +16,4 @@ pub use fft::{FftFloat, FftEngine2D};
 pub use complex::{safe_normalize, cross_power_spectrum};
 pub use window::{hann_periodic, hann_symmetric};
 pub use normalization::{NormStrategy, normalize_strategy};
-pub use subpixel::{SubpixelShift, unwrap_and_refine, quadratic_3pt};
+pub use subpixel::{SubpixelShift, unwrap_and_refine, quadratic_3pt, foroosh_3pt};

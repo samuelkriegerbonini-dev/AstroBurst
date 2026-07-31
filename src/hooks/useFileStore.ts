@@ -2,7 +2,7 @@ import { useSyncExternalStore, useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
 import { isCalibRefAsdf } from "../utils/validation";
-import type { ProcessedFile, QueueStats, AstroFile, ProcessResult } from "../shared/types";
+import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
 
 type Listener = () => void;
 
@@ -262,7 +262,7 @@ class FileStore {
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
   }
 
-  fileResampled(id: string, resampleResult: any) {
+  fileResampled(id: string, resampleResult: ResampleResult) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
 
@@ -275,8 +275,9 @@ class FileStore {
       } as ProcessResult,
     };
     this.state.fileMap.set(id, updated);
+    this.state.statsVersion++;
     this.bumpVersion();
-    this.scheduleFlush(NotifyChannel.All, id);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
   }
 
   selectFile(id: string) {
@@ -301,7 +302,6 @@ class FileStore {
     this._doneFilesCacheVersion = -1;
     this._allFilesCache = [];
     this._allFilesCacheVersion = -1;
-    this.fileListeners.clear();
     this.pendingFileIds.clear();
     this.pendingChannels = 0;
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);
@@ -309,6 +309,13 @@ class FileStore {
 }
 
 export const fileStore = new FileStore();
+
+export function resolveEffectivePath(path: string): string {
+  for (const f of fileStore.getFiles()) {
+    if (f.path === path) return f.result?.resampledPath ?? path;
+  }
+  return path;
+}
 
 export function useFileIds(): string[] {
   return useSyncExternalStore(fileStore.subscribeToList, fileStore.getFileIds);

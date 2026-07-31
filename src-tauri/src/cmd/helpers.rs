@@ -8,6 +8,7 @@ use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{AlignMethod, WhiteBalance};
 use crate::types::constants::{
+    ALIGN_METHOD_AFFINE, ALIGN_METHOD_PHASE,
     DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE,
     KERNEL_GAUSSIAN, KERNEL_LANCZOS, KERNEL_LANCZOS3,
     SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE,
@@ -58,15 +59,15 @@ pub(crate) fn parse_wb(
 
 pub(crate) fn parse_align_method(method: Option<&str>) -> AlignMethod {
     match method {
-        Some("affine") => AlignMethod::Affine,
+        Some(ALIGN_METHOD_AFFINE) => AlignMethod::Affine,
         _ => AlignMethod::PhaseCorrelation,
     }
 }
 
 pub(crate) fn align_method_str(method: AlignMethod) -> &'static str {
     match method {
-        AlignMethod::Affine => "affine",
-        AlignMethod::PhaseCorrelation => "phase_correlation",
+        AlignMethod::Affine => ALIGN_METHOD_AFFINE,
+        AlignMethod::PhaseCorrelation => ALIGN_METHOD_PHASE,
     }
 }
 pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
@@ -172,31 +173,13 @@ pub(crate) fn stf_json(stf: &StfParams) -> serde_json::Value {
     })
 }
 
-pub(crate) fn compute_linked_stf(
-    stats_r: &ImageStats,
-    stats_g: &ImageStats,
-    stats_b: &ImageStats,
-    config: &AutoStfConfig,
-) -> StfParams {
-    let (stf, _) = compute_linked_stf_with_stats(stats_r, stats_g, stats_b, config);
-    stf
-}
-
 pub(crate) fn compute_linked_stf_with_stats(
     stats_r: &ImageStats,
     stats_g: &ImageStats,
     stats_b: &ImageStats,
     config: &AutoStfConfig,
 ) -> (StfParams, ImageStats) {
-    let combined = ImageStats {
-        min: stats_r.min.min(stats_g.min).min(stats_b.min),
-        max: stats_r.max.max(stats_g.max).max(stats_b.max),
-        mean: (stats_r.mean + stats_g.mean + stats_b.mean) / 3.0,
-        median: (stats_r.median + stats_g.median + stats_b.median) / 3.0,
-        sigma: ((stats_r.sigma.powi(2) + stats_g.sigma.powi(2) + stats_b.sigma.powi(2)) / 3.0).sqrt(),
-        mad: (stats_r.mad + stats_g.mad + stats_b.mad) / 3.0,
-        valid_count: stats_r.valid_count,
-    };
+    let combined = crate::core::imaging::stats::combine_channel_stats(stats_r, stats_g, stats_b);
     let stf = auto_stf(&combined, config);
     (stf, combined)
 }
@@ -240,9 +223,9 @@ pub(crate) fn render_rgb_preview(
                 let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
                 let si = src_base + sx;
                 let o = dx * 3;
-                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
-                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0) as u8;
+                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
+                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
 

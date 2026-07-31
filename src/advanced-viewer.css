@@ -568,7 +568,7 @@
 }
 
 .ab-mfl-search-input::placeholder {
-  color: #3f3f46;
+  color: #71717a;
 }
 
 .ab-mfl-search-row {
@@ -837,10 +837,11 @@
 
 .ab-mfl-error-text {
   font-size: 10px;
-  color: rgba(239, 68, 68, 0.7);
+  color: rgba(239, 68, 68, 0.85);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  user-select: text;
 }
 
 .ab-mfl-active-bar {
@@ -933,7 +934,7 @@
   font-weight: 700;
   font-family: var(--ab-font-mono, monospace);
   letter-spacing: 0.05em;
-  color: #3f3f46;
+  color: #71717a;
   transition: all 0.15s ease;
   line-height: 1;
 }
@@ -1028,69 +1029,6 @@
   box-shadow: 0 0 12px rgba(20, 184, 166, 0.1);
 }
 
-/* ─── Side tab strip (right rail) ─── */
-
-.ab-side-tab {
-  position: relative;
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--ab-radius-sm);
-  border: none;
-  background: transparent;
-  color: #52525b;
-  cursor: pointer;
-  transition: all var(--ab-transition);
-}
-
-.ab-side-tab:hover {
-  color: #a1a1aa;
-  background: rgba(63, 63, 70, 0.3);
-}
-
-.ab-side-tab[data-active="true"] {
-  background: rgba(20, 184, 166, 0.12);
-  color: var(--ab-teal);
-  box-shadow: 0 0 10px rgba(20, 184, 166, 0.08);
-}
-
-.ab-side-tab[data-active="true"]:hover {
-  background: rgba(20, 184, 166, 0.18);
-}
-
-.ab-side-tab-indicator {
-  position: absolute;
-  left: 0;
-  top: 7px;
-  bottom: 7px;
-  width: 2px;
-  border-radius: 0 2px 2px 0;
-  background: var(--ab-teal);
-  box-shadow: 0 0 6px rgba(20, 184, 166, 0.3);
-}
-
-/* ─── Side panel close button ─── */
-
-.ab-side-panel-close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--ab-radius-sm);
-  border: none;
-  background: transparent;
-  color: #52525b;
-  cursor: pointer;
-  transition: all var(--ab-transition);
-}
-
-.ab-side-panel-close:hover {
-  background: rgba(239, 68, 68, 0.1);
-  color: #f87171;
-}
 
 /* ─── MetadataFileList: filter panel improvements ─── */
 

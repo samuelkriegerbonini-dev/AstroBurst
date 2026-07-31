@@ -15,12 +15,10 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
-  ImageOff,
   GripVertical,
   Filter,
   Timer,
   Aperture,
-  ChevronRight,
   Search,
   SlidersHorizontal,
   Pin,
@@ -154,6 +152,9 @@ function MetadataFileItem({ file, isSelected, onSelect }: MetadataFileItemProps)
 
   return (
     <div
+      id={`mfl-opt-${file.id}`}
+      role="option"
+      aria-selected={isSelected}
       className={`ab-mfl-item ${isSelected ? "ab-mfl-item-selected" : ""} ${isClickable ? "ab-mfl-item-clickable" : ""}`}
       onClick={handleClick}
       draggable={status === "done"}
@@ -272,7 +273,6 @@ function MetadataFileList({
                             isExporting = false,
                             zipProgress = 0,
                             downloaded = false,
-                            groupByInstrument = false,
                             productTypes = [],
                             customChips = [],
                             activeFilters = [],
@@ -302,16 +302,6 @@ function MetadataFileList({
     );
   }, [files, searchQuery]);
 
-  const groupedFiles = useMemo(() => {
-    if (!groupByInstrument) return null;
-    const groups: Record<string, MetadataFile[]> = {};
-    for (const f of filteredFiles) {
-      const key = f.metadata?.instrument ?? "Unknown";
-      (groups[key] ??= []).push(f);
-    }
-    return groups;
-  }, [filteredFiles, groupByInstrument]);
-
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -338,6 +328,27 @@ function MetadataFileList({
     () => filteredFiles.slice(startIdx, endIdx),
     [filteredFiles, startIdx, endIdx],
   );
+
+  const handleListKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const dir = e.key === "ArrowDown" ? 1 : -1;
+    const curIdx = filteredFiles.findIndex((f) => f.id === selectedId);
+    let idx = curIdx === -1 ? (dir === 1 ? -1 : filteredFiles.length) : curIdx;
+    for (;;) {
+      idx += dir;
+      if (idx < 0 || idx >= filteredFiles.length) return;
+      if (filteredFiles[idx].status === "done") break;
+    }
+    onSelect(filteredFiles[idx].id);
+    const el = scrollRef.current;
+    if (el) {
+      const top = idx * ITEM_HEIGHT;
+      const bottom = top + ITEM_HEIGHT;
+      if (top < el.scrollTop) el.scrollTop = top;
+      else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+    }
+  }, [filteredFiles, selectedId, onSelect]);
 
   const isFiltered = activeFilters.length > 0;
   const total = totalFiles ?? files.length;
@@ -395,6 +406,8 @@ function MetadataFileList({
         </div>
         <button
           onClick={onToggle}
+          title="Hide file panel"
+          aria-label="Hide file panel"
           className="p-1 rounded hover:bg-zinc-800 transition-colors text-zinc-600 hover:text-zinc-300"
         >
           <PanelLeftClose size={14} />
@@ -495,6 +508,11 @@ function MetadataFileList({
         ref={scrollRef}
         className="ab-mfl-scroll"
         onScroll={handleScroll}
+        tabIndex={0}
+        role="listbox"
+        aria-label="Processed files"
+        aria-activedescendant={selectedId ? `mfl-opt-${selectedId}` : undefined}
+        onKeyDown={handleListKeyDown}
       >
         <div style={{ height: filteredFiles.length * ITEM_HEIGHT, position: "relative" }}>
           <div style={{ position: "absolute", top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>

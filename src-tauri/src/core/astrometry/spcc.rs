@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::compute_image_stats;
+use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::header::HduHeader;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,10 +57,11 @@ pub struct SpccResult {
 }
 
 #[derive(Debug, Clone)]
-struct CatalogStar {
-    ra: f64,
-    dec: f64,
-    bp_rp: f64,
+pub(crate) struct CatalogStar {
+    pub(crate) ra: f64,
+    pub(crate) dec: f64,
+    pub(crate) bp_rp: f64,
+    pub(crate) gmag: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,8 +98,8 @@ pub fn spcc_calibrate_rgb(
                 && s.peak < sat_limit as f64
                 && s.x >= 10.0
                 && s.y >= 10.0
-                && s.x < (w - 10) as f64
-                && s.y < (h - 10) as f64
+                && s.x < w.saturating_sub(10) as f64
+                && s.y < h.saturating_sub(10) as f64
         })
         .collect();
 
@@ -123,7 +125,7 @@ pub fn spcc_calibrate_rgb(
             (generate_synthetic_catalog(&world_coords, &good_stars), true)
         }
         SpccCatalog::GaiaDr3Tap => {
-            match query_gaia_vizier(center.ra, center.dec, search_radius) {
+            match query_gaia_vizier(center.ra, center.dec, search_radius, 3) {
                 Ok(stars) => (stars, false),
                 Err(_) => (generate_synthetic_catalog(&world_coords, &good_stars), true),
             }
@@ -259,6 +261,7 @@ fn generate_synthetic_catalog(
                 ra: coord.ra,
                 dec: coord.dec,
                 bp_rp,
+                gmag: None,
             }
         })
         .collect()
@@ -270,8 +273,139 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
     (1.0 / norm_flux.sqrt() + fwhm_factor).clamp(-0.3, 4.0)
 }
 
-fn query_gaia_vizier(_ra_center: f64, _dec_center: f64, _radius_deg: f64) -> Result<Vec<CatalogStar>, String> {
-    Err("Gaia DR3 TAP requires 'vizier' feature. Using built-in Bp-Rp estimation.".into())
+#[cfg(not(feature = "vizier"))]
+pub(crate) fn query_gaia_vizier(
+    _ra_center: f64,
+    _dec_center: f64,
+    _radius_deg: f64,
+    _min_stars: usize,
+) -> Result<Vec<CatalogStar>, String> {
+    Err("Gaia DR3 query requires the 'vizier' feature. Using built-in Bp-Rp estimation.".into())
+}
+
+#[cfg(feature = "vizier")]
+pub(crate) fn query_gaia_vizier(
+    ra_center: f64,
+    dec_center: f64,
+    radius_deg: f64,
+    min_stars: usize,
+) -> Result<Vec<CatalogStar>, String> {
+    let radius = radius_deg.clamp(0.01, 5.0);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("HTTP client init failed: {}", e))?;
+
+    let response = client
+        .get("https://vizier.cds.unistra.fr/viz-bin/asu-tsv")
+        .query(&[
+            ("-source", "I/355/gaiadr3"),
+            ("-c", format!("{:.6} {:+.6}", ra_center, dec_center).as_str()),
+            ("-c.r", format!("{:.4}", radius).as_str()),
+            ("-c.u", "deg"),
+            ("-out", "RA_ICRS,DE_ICRS,BP-RP,Gmag"),
+            ("-out.max", "500"),
+            ("-sort", "Gmag"),
+            ("Gmag", "<17"),
+        ])
+        .send()
+        .map_err(|e| format!("VizieR request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("VizieR returned HTTP {}", response.status()));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| format!("VizieR response read failed: {}", e))?;
+
+    let stars = parse_vizier_tsv(&body);
+    if stars.len() < min_stars {
+        return Err(format!(
+            "VizieR returned only {} usable stars within {:.2} deg",
+            stars.len(),
+            radius
+        ));
+    }
+
+    log::info!(
+        "Gaia DR3 via VizieR: {} stars within {:.2} deg of ({:.4}, {:+.4})",
+        stars.len(),
+        radius,
+        ra_center,
+        dec_center
+    );
+
+    Ok(stars)
+}
+
+#[cfg_attr(not(feature = "vizier"), allow(dead_code))]
+fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
+    let mut col_ra: Option<usize> = None;
+    let mut col_dec: Option<usize> = None;
+    let mut col_color: Option<usize> = None;
+    let mut col_gmag: Option<usize> = None;
+    let mut in_data = false;
+    let mut out = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = trimmed.split('\t').map(|f| f.trim()).collect();
+
+        if !in_data {
+            let is_dashes = fields
+                .iter()
+                .all(|f| !f.is_empty() && f.chars().all(|c| c == '-'));
+            if is_dashes {
+                if col_ra.is_none() || col_dec.is_none() || col_color.is_none() {
+                    return out;
+                }
+                in_data = true;
+            } else if col_ra.is_none() {
+                col_ra = fields.iter().position(|f| *f == "RA_ICRS");
+                col_dec = fields.iter().position(|f| *f == "DE_ICRS");
+                col_color = fields.iter().position(|f| *f == "BP-RP");
+                col_gmag = fields.iter().position(|f| *f == "Gmag");
+            }
+            continue;
+        }
+
+        let (Some(ir), Some(id), Some(ic)) = (col_ra, col_dec, col_color) else {
+            break;
+        };
+        if fields.len() <= ir.max(id).max(ic) {
+            continue;
+        }
+
+        let (Ok(ra), Ok(dec), Ok(bp_rp)) = (
+            fields[ir].parse::<f64>(),
+            fields[id].parse::<f64>(),
+            fields[ic].parse::<f64>(),
+        ) else {
+            continue;
+        };
+
+        if !(ra.is_finite() && dec.is_finite() && bp_rp.is_finite()) {
+            continue;
+        }
+        if !(0.0..360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+            continue;
+        }
+
+        let gmag = col_gmag
+            .and_then(|ig| fields.get(ig))
+            .and_then(|f| f.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
+
+        out.push(CatalogStar { ra, dec, bp_rp, gmag });
+    }
+
+    out
 }
 
 fn cross_match_stars(
@@ -294,7 +428,9 @@ fn cross_match_stars(
         let mut best_cat: Option<&CatalogStar> = None;
 
         for cat in catalog {
-            let dra = (wc.ra - cat.ra) * wc.dec.to_radians().cos();
+            let mut dra = wc.ra - cat.ra;
+            if dra > 180.0 { dra -= 360.0; } else if dra < -180.0 { dra += 360.0; }
+            let dra = dra * wc.dec.to_radians().cos();
             let ddec = wc.dec - cat.dec;
             let d2 = dra * dra + ddec * ddec;
             if d2 < match_r2 && d2 < best_dist {
@@ -326,13 +462,13 @@ fn cross_match_stars(
 fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
     let (h, w) = image.dim();
     let r2 = radius * radius;
-    let inner_annulus = radius * 1.2;
-    let outer_annulus = radius * 1.8;
+    let inner_annulus = radius * 2.0;
+    let outer_annulus = radius * 3.5;
     let inner_r2 = inner_annulus * inner_annulus;
     let outer_r2 = outer_annulus * outer_annulus;
     let mut flux = 0.0f64;
-    let mut bg_sum = 0.0f64;
-    let mut bg_count = 0u32;
+    let mut aperture_count = 0u32;
+    let mut bg_vals: Vec<f32> = Vec::new();
 
     let y_min = (y - outer_annulus).floor().max(0.0) as usize;
     let y_max = ((y + outer_annulus).ceil() as usize).min(h.saturating_sub(1));
@@ -345,19 +481,21 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
             let dy = py as f64 - y;
             let d2 = dx * dx + dy * dy;
             let v = image[[py, px]] as f64;
+            if !v.is_finite() {
+                continue;
+            }
             if d2 <= r2 {
                 flux += v;
+                aperture_count += 1;
             } else if d2 >= inner_r2 && d2 <= outer_r2 {
-                bg_sum += v;
-                bg_count += 1;
+                bg_vals.push(v as f32);
             }
         }
     }
 
-    if bg_count > 0 {
-        let bg_per_pixel = bg_sum / bg_count as f64;
-        let aperture_area = std::f64::consts::PI * r2;
-        flux -= bg_per_pixel * aperture_area;
+    if !bg_vals.is_empty() && aperture_count > 0 {
+        let (bg_per_pixel, _) = sigma_clipped_stats(&mut bg_vals, 3.0, 3);
+        flux -= bg_per_pixel * aperture_count as f64;
     }
 
     flux.max(0.0)
@@ -372,8 +510,11 @@ fn compute_correction_factors(
     let mut sum_ratio_r = 0.0f64;
     let mut sum_ratio_g = 0.0f64;
     let mut sum_ratio_b = 0.0f64;
-    let mut sum_weight = 0.0f64;
+    let mut sum_weight_r = 0.0f64;
+    let mut sum_weight_g = 0.0f64;
+    let mut sum_weight_b = 0.0f64;
     let mut sum_ci = 0.0f64;
+    let mut ci_count = 0usize;
 
     for star in matched {
         let teff = bp_rp_to_teff(star.bp_rp);
@@ -397,28 +538,31 @@ fn compute_correction_factors(
 
         if mr > 1e-6 {
             sum_ratio_r += (er / mr) * weight;
+            sum_weight_r += weight;
         }
         if mg > 1e-6 {
             sum_ratio_g += (eg / mg) * weight;
+            sum_weight_g += weight;
         }
         if mb > 1e-6 {
             sum_ratio_b += (eb / mb) * weight;
+            sum_weight_b += weight;
         }
-        sum_weight += weight;
         sum_ci += star.bp_rp;
+        ci_count += 1;
     }
 
-    if sum_weight < 1e-10 || matched.is_empty() {
+    if sum_weight_r < 1e-10 || sum_weight_g < 1e-10 || sum_weight_b < 1e-10 {
         return (1.0, 1.0, 1.0, 0.0);
     }
 
-    let mut r_factor = sum_ratio_r / sum_weight;
-    let mut g_factor = sum_ratio_g / sum_weight;
-    let mut b_factor = sum_ratio_b / sum_weight;
+    let mut r_factor = sum_ratio_r / sum_weight_r;
+    let mut g_factor = sum_ratio_g / sum_weight_g;
+    let mut b_factor = sum_ratio_b / sum_weight_b;
 
-    r_factor *= wr_r;
-    g_factor *= wr_g;
-    b_factor *= wr_b;
+    r_factor /= wr_r.max(1e-10);
+    g_factor /= wr_g.max(1e-10);
+    b_factor /= wr_b.max(1e-10);
 
     let norm = g_factor;
     if norm > 1e-10 {
@@ -427,7 +571,76 @@ fn compute_correction_factors(
         b_factor /= norm;
     }
 
-    let avg_ci = sum_ci / matched.len() as f64;
+    let avg_ci = if ci_count > 0 { sum_ci / ci_count as f64 } else { 0.0 };
 
     (r_factor, g_factor, b_factor, avg_ci)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vizier_tsv_basic() {
+        let body = "#INFO VizieR result\n#Column list\nRA_ICRS\tDE_ICRS\tBP-RP\tGmag\ndeg\tdeg\tmag\tmag\n---------\t---------\t------\t----\n83.633083\t22.014472\t0.650\t8.5\n83.700000\t22.100000\t\t9.0\n84.000000\t21.900000\t1.234\t10.2\n";
+        let stars = parse_vizier_tsv(body);
+        assert_eq!(stars.len(), 2);
+        assert!((stars[0].ra - 83.633083).abs() < 1e-9);
+        assert!((stars[0].dec - 22.014472).abs() < 1e-9);
+        assert!((stars[0].bp_rp - 0.650).abs() < 1e-9);
+        assert!((stars[1].bp_rp - 1.234).abs() < 1e-9);
+        assert_eq!(stars[0].gmag, Some(8.5));
+        assert_eq!(stars[1].gmag, Some(10.2));
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_missing_columns() {
+        let body = "RA_ICRS\tDE_ICRS\tGmag\ndeg\tdeg\tmag\n----\t----\t----\n83.6\t22.0\t8.5\n";
+        let stars = parse_vizier_tsv(body);
+        assert!(stars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_rejects_out_of_range() {
+        let body = "RA_ICRS\tDE_ICRS\tBP-RP\n---\t---\t---\n400.0\t22.0\t0.5\n83.6\t95.0\t0.5\n83.6\t22.0\t0.5\n";
+        let stars = parse_vizier_tsv(body);
+        assert_eq!(stars.len(), 1);
+        assert!((stars[0].ra - 83.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_vizier_tsv_empty_response() {
+        assert!(parse_vizier_tsv("").is_empty());
+        assert!(parse_vizier_tsv("#nothing here\n#at all\n").is_empty());
+    }
+
+    #[test]
+    fn aperture_background_rejects_neighbor_contamination() {
+        let mut img = Array2::from_elem((60, 60), 100.0f32);
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                img[[(30 + dy) as usize, (30 + dx) as usize]] = 500.0;
+            }
+        }
+        let radius = 4.0;
+        let flux_clean = aperture_flux_f32(&img, 30.0, 30.0, radius);
+
+        let mut contaminated = img.clone();
+        for dy in 0..3usize {
+            for dx in 0..3usize {
+                contaminated[[30 + dy, 41 + dx]] = 5000.0;
+            }
+        }
+        let flux_contaminated = aperture_flux_f32(&contaminated, 30.0, 30.0, radius);
+
+        let rel = (flux_contaminated - flux_clean).abs() / flux_clean.max(1.0);
+        assert!(
+            rel < 0.05,
+            "neighbor in annulus shifted flux by {:.1}% (clean={}, contaminated={})",
+            rel * 100.0,
+            flux_clean,
+            flux_contaminated
+        );
+        assert!(flux_clean > 9000.0, "expected ~10000 net star flux, got {}", flux_clean);
+    }
 }

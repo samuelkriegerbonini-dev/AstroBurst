@@ -1,8 +1,7 @@
 use ndarray::Array2;
-use rayon::prelude::*;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig, StarMaskResult};
-use crate::core::imaging::stats::compute_image_stats;
+use crate::core::imaging::stats::is_valid_pixel;
 
 #[derive(Debug, Clone)]
 pub struct MaskedStretchConfig {
@@ -10,6 +9,8 @@ pub struct MaskedStretchConfig {
     pub target_background: f64,
     pub mask_growth: f64,
     pub mask_softness: f64,
+    pub detection_sigma: f64,
+    pub max_eccentricity: f64,
     pub luminance_protect: bool,
     pub luminance_ceiling: f64,
     pub protection_amount: f64,
@@ -23,6 +24,8 @@ impl Default for MaskedStretchConfig {
             target_background: 0.25,
             mask_growth: 2.5,
             mask_softness: 4.0,
+            detection_sigma: 8.0,
+            max_eccentricity: 0.85,
             luminance_protect: true,
             luminance_ceiling: 0.85,
             protection_amount: 0.85,
@@ -48,13 +51,16 @@ pub fn masked_stretch(
     let mask_config = StarMaskConfig {
         growth_factor: config.mask_growth,
         softness: config.mask_softness,
+        detection_sigma: config.detection_sigma,
+        max_eccentricity: config.max_eccentricity,
         luminance_protect: config.luminance_protect,
         luminance_ceiling: config.luminance_ceiling,
         ..StarMaskConfig::default()
     };
 
-    let mask_result = generate_star_mask(image, &mask_config)?;
-    masked_stretch_with_mask(image, &mask_result, config)
+    let normalized = normalize_to_01(image);
+    let mask_result = generate_star_mask(&normalized, &mask_config)?;
+    masked_stretch_with_mask(&normalized, &mask_result, config)
 }
 
 pub fn masked_stretch_with_mask(
@@ -165,37 +171,113 @@ pub fn masked_stretch_rgb_shared(
     let mask_config = StarMaskConfig {
         growth_factor: config.mask_growth,
         softness: config.mask_softness,
+        detection_sigma: config.detection_sigma,
+        max_eccentricity: config.max_eccentricity,
         luminance_protect: config.luminance_protect,
         luminance_ceiling: config.luminance_ceiling,
         ..StarMaskConfig::default()
     };
 
-    let shared_mask = generate_star_mask(&luminance, &mask_config)?;
+    let shared_mask = generate_star_mask(&normalize_to_01(&luminance), &mask_config)?;
+    let mask = &shared_mask.mask;
+    let protection = config.protection_amount as f32;
+    let target_bg = config.target_background;
 
-    let (res_r, (res_g, res_b)) = rayon::join(
-        || masked_stretch_with_mask(r, &shared_mask, config),
-        || rayon::join(
-            || masked_stretch_with_mask(g, &shared_mask, config),
-            || masked_stretch_with_mask(b, &shared_mask, config),
+    let (mut wr, mut wg, mut wb) = match shared_min_max(&[r, g, b]) {
+        Some((dmin, dmax)) => (
+            normalize_to_01_with(r, dmin, dmax),
+            normalize_to_01_with(g, dmin, dmax),
+            normalize_to_01_with(b, dmin, dmax),
         ),
-    );
+        None => (
+            Array2::zeros(r.dim()),
+            Array2::zeros(g.dim()),
+            Array2::zeros(b.dim()),
+        ),
+    };
+
+    let mut prev_bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+    let mut iterations_run = 0;
+    let mut converged = false;
+
+    for iter_idx in 0..config.iterations {
+        iterations_run = iter_idx + 1;
+
+        let bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+
+        let at_target = (bg - target_bg).abs() < config.convergence_threshold;
+        let stagnated = iter_idx > 0
+            && (bg - prev_bg).abs() < config.convergence_threshold * 0.1;
+
+        if at_target {
+            converged = true;
+            break;
+        }
+        if stagnated {
+            break;
+        }
+
+        let midtone = mtf_balance(bg, target_bg) as f32;
+        stretch_blend_inplace(&mut wr, mask, midtone, protection);
+        stretch_blend_inplace(&mut wg, mask, midtone, protection);
+        stretch_blend_inplace(&mut wb, mask, midtone, protection);
+
+        prev_bg = bg;
+    }
+
+    let final_bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+
+    clamp_inplace(&mut wr);
+    clamp_inplace(&mut wg);
+    clamp_inplace(&mut wb);
 
     Ok(MaskedStretchRgbResult {
         shared_mask_coverage: shared_mask.coverage_fraction,
         shared_stars_masked: shared_mask.stars_masked,
-        r: res_r?,
-        g: res_g?,
-        b: res_b?,
+        r: MaskedStretchResult {
+            image: wr,
+            iterations_run,
+            final_background: final_bg,
+            stars_masked: shared_mask.stars_masked,
+            mask_coverage: shared_mask.coverage_fraction,
+            converged,
+        },
+        g: MaskedStretchResult {
+            image: wg,
+            iterations_run,
+            final_background: final_bg,
+            stars_masked: shared_mask.stars_masked,
+            mask_coverage: shared_mask.coverage_fraction,
+            converged,
+        },
+        b: MaskedStretchResult {
+            image: wb,
+            iterations_run,
+            final_background: final_bg,
+            stars_masked: shared_mask.stars_masked,
+            mask_coverage: shared_mask.coverage_fraction,
+            converged,
+        },
     })
 }
 
 fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
-    let stats = compute_image_stats(image);
-    let range = (stats.max - stats.min) as f32;
-    if range < 1e-10 {
+    let mut dmin = f32::INFINITY;
+    let mut dmax = f32::NEG_INFINITY;
+    for &v in image.iter() {
+        if is_valid_pixel(v) {
+            if v < dmin {
+                dmin = v;
+            }
+            if v > dmax {
+                dmax = v;
+            }
+        }
+    }
+    let range = dmax - dmin;
+    if !range.is_finite() || range < 1e-10 {
         return Array2::zeros(image.dim());
     }
-    let dmin = stats.min as f32;
     let inv = 1.0 / range;
     let mut out = image.clone();
     out.par_mapv_inplace(|v| {
@@ -206,6 +288,53 @@ fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
         }
     });
     out
+}
+
+fn shared_min_max(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
+    let mut dmin = f32::INFINITY;
+    let mut dmax = f32::NEG_INFINITY;
+    for ch in channels {
+        for &v in ch.iter() {
+            if is_valid_pixel(v) {
+                if v < dmin {
+                    dmin = v;
+                }
+                if v > dmax {
+                    dmax = v;
+                }
+            }
+        }
+    }
+    let range = dmax - dmin;
+    if !range.is_finite() || range < 1e-10 {
+        None
+    } else {
+        Some((dmin, dmax))
+    }
+}
+
+fn normalize_to_01_with(image: &Array2<f32>, dmin: f32, dmax: f32) -> Array2<f32> {
+    let inv = 1.0 / (dmax - dmin);
+    let mut out = image.clone();
+    out.par_mapv_inplace(|v| {
+        if !v.is_finite() || v <= 0.0 {
+            0.0
+        } else {
+            ((v - dmin) * inv).clamp(0.0, 1.0)
+        }
+    });
+    out
+}
+
+fn stretch_blend_inplace(working: &mut Array2<f32>, mask: &Array2<f32>, midtone: f32, protection: f32) {
+    let unmasked = apply_mtf(working, midtone);
+    ndarray::Zip::from(&mut *working)
+        .and(&unmasked)
+        .and(mask)
+        .par_for_each(|dst, &stretched, &m| {
+            let blend = m * protection;
+            *dst = *dst * blend + stretched * (1.0 - blend);
+        });
 }
 
 fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>) -> f64 {
@@ -255,4 +384,55 @@ fn apply_mtf(data: &Array2<f32>, m: f32) -> Array2<f32> {
 
 fn clamp_inplace(data: &mut Array2<f32>) {
     data.par_mapv_inplace(|v| v.clamp(0.0, 1.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene(peak: f32) -> Array2<f32> {
+        Array2::from_shape_fn((24, 24), |(y, x)| {
+            let dy = y as f32 - 12.0;
+            let dx = x as f32 - 12.0;
+            0.05 + (-(dy * dy + dx * dx) / 2.0).exp() * peak
+        })
+    }
+
+    #[test]
+    fn shared_mask_stretch_produces_valid_rgb() {
+        let r = scene(3.0);
+        let g = scene(2.0);
+        let b = scene(1.0);
+        let result = masked_stretch_rgb_shared(&r, &g, &b, &MaskedStretchConfig::default()).unwrap();
+        for img in [&result.r.image, &result.g.image, &result.b.image] {
+            assert_eq!(img.dim(), (24, 24));
+            assert!(img.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+        }
+    }
+
+    fn tri_scene() -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+        let mk = |peak: f32| {
+            Array2::from_shape_fn((24, 24), |(y, x)| {
+                if y == 0 && x == 0 {
+                    0.0
+                } else {
+                    let dy = y as f32 - 12.0;
+                    let dx = x as f32 - 12.0;
+                    0.3 + (-(dy * dy + dx * dx) / 4.0).exp() * peak
+                }
+            })
+        };
+        (mk(1.0), mk(2.0), mk(4.0))
+    }
+
+    #[test]
+    fn shared_mask_preserves_neutral_background() {
+        let (r, g, b) = tri_scene();
+        let res = masked_stretch_rgb_shared(&r, &g, &b, &MaskedStretchConfig::default()).unwrap();
+        let rv = res.r.image[[1, 1]];
+        let gv = res.g.image[[1, 1]];
+        let bv = res.b.image[[1, 1]];
+        assert!((rv - gv).abs() < 1e-3, "R/G diverged at neutral bg: {} vs {}", rv, gv);
+        assert!((gv - bv).abs() < 1e-3, "G/B diverged at neutral bg: {} vs {}", gv, bv);
+    }
 }

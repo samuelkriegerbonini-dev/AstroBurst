@@ -12,9 +12,12 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
   const [currentFrame, setCurrentFrame] = useState(0);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const playingRef = useRef(false);
   const abortRef = useRef(0);
   const loadingRef = useRef(false);
+  const pendingIdxRef = useRef<number | null>(null);
+  const loadFrameRef = useRef<(idx: number) => void>(() => {});
   const sliderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -33,10 +36,14 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
   const loadFrame = useCallback(
     async (idx: number) => {
       if (idx < 0 || idx >= totalFrames) return;
-      if (loadingRef.current) return;
-      loadingRef.current = true;
       setCurrentFrame(idx);
+      if (loadingRef.current) {
+        pendingIdxRef.current = idx;
+        return;
+      }
+      loadingRef.current = true;
       setLoading(true);
+      setError(null);
       const seq = ++abortRef.current;
       try {
         const outputPath = `./output/cube_frame_${idx}.png`;
@@ -44,14 +51,19 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         if (abortRef.current !== seq) return;
         onFrameChange?.(result.output_path, idx);
       } catch (e) {
+        if (abortRef.current === seq) setError(e instanceof Error ? e.message : String(e));
         console.error("Frame load failed:", e);
       } finally {
-        if (abortRef.current === seq) setLoading(false);
         loadingRef.current = false;
+        if (abortRef.current === seq) setLoading(false);
+        const pending = pendingIdxRef.current;
+        pendingIdxRef.current = null;
+        if (pending !== null && pending !== idx) loadFrameRef.current(pending);
       }
     },
     [filePath, totalFrames, onFrameChange],
   );
+  loadFrameRef.current = loadFrame;
 
   const handleSlider = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -90,19 +102,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
       if (!playingRef.current) return;
       frame = (frame + 1) % totalFrames;
 
-      setCurrentFrame(frame);
-      setLoading(true);
-      const seq = ++abortRef.current;
-      try {
-        const outputPath = `./output/cube_frame_${frame}.png`;
-        const result = await getCubeFrame(filePath, frame, outputPath);
-        if (abortRef.current === seq) {
-          onFrameChange?.(result.output_path, frame);
-          setLoading(false);
-        }
-      } catch {
-        setLoading(false);
-      }
+      await loadFrame(frame);
 
       if (frame === totalFrames - 1) {
         playingRef.current = false;
@@ -116,7 +116,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
     };
 
     playNext();
-  }, [playing, currentFrame, totalFrames, filePath, onFrameChange]);
+  }, [playing, currentFrame, totalFrames, loadFrame]);
 
   if (totalFrames <= 1) return null;
 
@@ -146,6 +146,8 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         <button
           onClick={handlePrev}
           disabled={currentFrame === 0 || loading}
+          title="Previous frame"
+          aria-label="Previous frame"
           className="p-1.5 rounded-md transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <SkipBack size={14} />
@@ -153,7 +155,9 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         <button
           onClick={togglePlay}
           disabled={loading && !playing}
-          className="p-1.5 rounded-md transition-colors hover:bg-zinc-800"
+          title={playing ? "Pause playback" : "Play all frames"}
+          aria-label={playing ? "Pause playback" : "Play all frames"}
+          className="p-1.5 rounded-md transition-colors hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
           style={{ color: playing ? "#c084fc" : "#71717a" }}
         >
           {playing ? <Pause size={14} /> : <Play size={14} />}
@@ -161,11 +165,19 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         <button
           onClick={handleNext}
           disabled={currentFrame === totalFrames - 1 || loading}
+          title="Next frame"
+          aria-label="Next frame"
           className="p-1.5 rounded-md transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <SkipForward size={14} />
         </button>
       </div>
+
+      {error && (
+        <p className="text-[9px] text-red-400/80 mt-1.5 text-center truncate" title={error}>
+          Frame load failed: {error}
+        </p>
+      )}
     </div>
   );
 }

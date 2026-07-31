@@ -9,10 +9,16 @@ use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_BIN_EDGES, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
     RES_AUTO_STF, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, RES_ELAPSED_MS,
+    RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
+    RES_PHOTOMETRY, RES_SKY, RES_GAIA,
+    RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
+use crate::core::analysis::photometry::{measure_star, PhotometryConfig};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
+use crate::core::astrometry::spcc::query_gaia_vizier;
+use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::{compute_histogram_with_stats, downsample_histogram};
 use crate::core::imaging::stf::auto_stf;
 
@@ -150,7 +156,33 @@ pub async fn detect_stars_composite(
                 .map(|i| r_s[i] * 0.2126 + g_s[i] * 0.7152 + b_s[i] * 0.0722)
                 .collect()
         };
-        let lum = ndarray::Array2::from_shape_vec((rows, cols), lum_vec)
+
+        let mut lum_min = f32::INFINITY;
+        let mut lum_max = f32::NEG_INFINITY;
+        for &v in &lum_vec {
+            if v.is_finite() {
+                if v < lum_min { lum_min = v; }
+                if v > lum_max { lum_max = v; }
+            }
+        }
+
+        let range = lum_max - lum_min;
+        let normalized: Vec<f32> = if range > 1e-10 {
+            let inv = 1.0 / range;
+            if n > PAR_THRESHOLD {
+                lum_vec.par_iter()
+                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
+                    .collect()
+            } else {
+                lum_vec.iter()
+                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
+                    .collect()
+            }
+        } else {
+            vec![0.0; n]
+        };
+
+        let lum = ndarray::Array2::from_shape_vec((rows, cols), normalized)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut result = detect_stars_core(&lum, sigma);
@@ -160,6 +192,73 @@ pub async fn detect_stars_composite(
             obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
         }
         Ok(val)
+    })
+}
+
+#[tauri::command]
+pub async fn measure_photometry_cmd(
+    path: String,
+    x: f64,
+    y: f64,
+    aperture_radius: Option<f64>,
+    gaia_match: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        let entry = crate::cmd::common::load_cached_full(&path)
+            .or_else(|_| load_cached(&path))?;
+
+        let config = PhotometryConfig {
+            aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
+            image_max: Some(entry.stats().max),
+            ..PhotometryConfig::default()
+        };
+
+        let phot = measure_star(entry.arr(), x, y, &config)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let mut sky = serde_json::Value::Null;
+        let mut gaia = serde_json::Value::Null;
+
+        if let Some(header) = entry.header() {
+            if let Ok(wcs) = WcsTransform::from_header(header) {
+                let coord = wcs.pixel_to_world(phot.x, phot.y);
+                sky = json!({ RES_RA: coord.ra, RES_DEC: coord.dec });
+
+                if gaia_match.unwrap_or(true) {
+                    if let Ok(stars) = query_gaia_vizier(coord.ra, coord.dec, 0.01, 1) {
+                        let cos_dec = coord.dec.to_radians().cos();
+                        let mut best: Option<(f64, usize)> = None;
+                        for (i, s) in stars.iter().enumerate() {
+                            let mut dra = (coord.ra - s.ra).abs();
+                            if dra > 180.0 {
+                                dra = 360.0 - dra;
+                            }
+                            let sep = ((dra * cos_dec).powi(2) + (coord.dec - s.dec).powi(2))
+                                .sqrt()
+                                * 3600.0;
+                            if sep < 5.0 && best.map_or(true, |(bd, _)| sep < bd) {
+                                best = Some((sep, i));
+                            }
+                        }
+                        if let Some((sep, i)) = best {
+                            gaia = json!({
+                                RES_GMAG: stars[i].gmag,
+                                RES_BP_RP: stars[i].bp_rp,
+                                RES_SEPARATION_ARCSEC: sep,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+            RES_SKY: sky,
+            RES_GAIA: gaia,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
     })
 }
 
@@ -205,10 +304,10 @@ pub async fn analyze_subframes_cmd(
         let elapsed = t0.elapsed().as_millis() as u64;
 
         Ok(json!({
-            "subframes": metrics,
-            "total": metrics.len(),
-            "accepted": accepted,
-            "rejected": rejected,
+            RES_SUBFRAMES: metrics,
+            RES_TOTAL: metrics.len(),
+            RES_ACCEPTED: accepted,
+            RES_REJECTED: rejected,
             RES_ELAPSED_MS: elapsed,
         }))
     })

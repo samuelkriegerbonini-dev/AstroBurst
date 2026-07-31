@@ -1,4 +1,75 @@
-## [0.4.6] - 2025-04-06
+# Changelog
+
+
+
+        NOT REVISION YET AI GENERATE 
+All notable changes to AstroBurst will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Flatpak/Flathub submission (PR pending approval)
+- Export panel accessible from PreviewPanel bottom strip (Download icon, lazy-loaded ExportTab)
+- WCS engine replaced with the [wcs](https://github.com/cds-astro/wcs-rs) crate (wcs-rs + mapproj), expanding projection support from TAN/SIN/ARC/CAR to ~20 FITS projections (adds STG, ZEA, ZPN, AIR, AZP, SZP, CYP, CEA, MER, SFL, PAR, MOL, AIT, conic COP/COD/COE/COO, HPX) and proper CD/PC/CDELT matrix handling; `WcsTransform`'s public API is unchanged, SIP distortion is still applied by AstroBurst's own math (see Fixed)
+- New `pixel_to_world_cmd` Tauri command backing the cursor RA/Dec readout, replacing a duplicated client-side pixel<->sky implementation (`src/utils/wcstransform.ts`, now removed) with the same wcs-rs-backed engine used everywhere else
+
+### Fixed
+- WCS headers using the `PC` matrix convention (no `CD` keywords, e.g. ASDF/Roman-derived FITS) were silently mis-transformed: the old hand-rolled WCS math only ever read `CD1_1..CD2_2` or fell back to `CDELT`+`CROTA2`, ignoring `PC` entirely
+- Cross-checked against `mapproj` 0.4.0's own SIP polynomial evaluator, which has a confirmed bug (advances polynomial powers by repeated squaring instead of by degree) that silently produces wildly wrong sky coordinates for any SIP-distorted header; AstroBurst's WCS wrapper strips the `-SIP` CTYPE suffix before constructing the wcs-rs engine so its broken SIP path never runs, and applies/inverts SIP with its own (previously existing, still correct) math instead
+
+#### Export Pipeline (3 critical fixes)
+- `export_rgb_png` cache hit branch applied auto-STF even when `applyStfStretch = false`, corrupting linear exports; now renders raw linear data directly via `render_rgb` / `render_rgb_16bit`
+- `"__composite__"` sentinel string was sent as a real file path to the backend, causing silent failures or crashes on cache miss; frontend now sends `null` paths for composite mode
+- FITS composite export dropped WCS headers (CRPIX, CRVAL, CD matrix) when channel paths resolved to null; backend now resolves header from the first available source path in cache
+
+#### Star Detection
+- `detect_stars` NaN guard: `v.is_finite() && v > 1e-7` protects against zero-padded alignment borders
+- Early return for degenerate images (`rows < 3 || cols < 3`)
+- `peak_val.max(v)` replaces manual comparison
+- Sort comparator uses `unwrap_or(std::cmp::Ordering::Equal)` to prevent NaN panic
+
+#### Subframe Selector
+- `SubframeSelectorPanel` receives `string[]` (file paths) instead of `ProcessedFile[]`, fixing TypeScript type mismatch
+
+#### ComposeWizard State
+- `calibrate_and_scnr_cmd` and `reset_wb_cmd` now render preview with auto-STF via `render_rgb_preview_with_stf`, eliminating washed-out/near-black previews after WB operations
+- `apply_tone_composite_cmd` reads from `COMPOSITE_KEY` and renders preview only (no cache write), preserving linear calibrated data
+
+### Changed
+- ExportStep detects STF identity (`Math.abs(midtone - 0.5) > 1e-4`) before composite PNG export; sends `applyStfStretch: false` when identity, activating backend auto-stretch
+
+## [0.5.5] - 2026-06-26
+
+### Added
+- **WebGPU RGB preview**: GPU-only `GpuRgbRenderer` renders full RGB composites from three `r32float` textures with per-channel STF in the WGSL shader (MTF identical to the mono shader, CPU worker, and Rust backend). Routed through PreviewTab/PreviewPanel; falls back to the PNG composite when WebGPU is unavailable, no adapter is found, or the device is lost.
+- **Live per-channel RGB STF** (`RgbStfPanel`, Analysis tab): per-channel shadow/midtone restretch the GPU composite live with no backend round-trip; the mono STF slider skips its backend render while a GPU preview is active.
+- Backend command `get_raw_rgb_pixels_preview(path?, max_dim)`: linear 3-channel float preview with per-channel min/max, from a native RGB FITS or the composite cache (planar R|G|B with a 32-byte header). Shared `encode_channel_preview` factored out of the mono encoder (byte-identical).
+- **Canonical filter→wavelength table** (`FILTER_WAVELENGTHS_NM` + `filter_to_wavelength_nm` in `types/constants.rs`, mirrored by `utils/filterWavelengths.ts`): normalizes CLEAR / separators / dual filters, replacing the two duplicated JWST tables.
+- **Dynamic channel Auto-Map** (Compose ▸ Channels): each non-narrowband/non-RGB filter gets its own wavelength-labelled channel (e.g. NIRCam F090W–F444W → five distinct channels), grouped by nm.
+- **Auto (λ) blend**: spreads any number of channels across R/G/B by wavelength; auto-applies once for untouched broadband stacks, never overriding a palette or manual weights.
+
+### Changed
+- Compose tool moved from the right tool strip to the left strip.
+- Preview downsample replaced nearest-neighbor with a contrast-weighted hybrid (mean↔max) area kernel that preserves faint point sources while anti-aliasing the background.
+- `parseRawPixelBuffer` accepts an `ArrayBufferView`, validates length, and stays zero-copy in the normal case.
+- The GPU/CPU toggle surfaces the fallback reason (no WebGPU / no adapter / init failed / device lost / GPU error) via tooltip.
+
+### Fixed
+- **STF GPU/CPU parity**: the CPU fallback worker no longer hard-zeros `raw ≤ 1e-7` (was blacking out background-subtracted pixels the GPU shader maps to gray); epsilons aligned to 1e-8 so GPU and CPU render identically.
+- **Preview normalization**: `data_min`/`data_max` now describe the full image (shared `scan_extrema`) instead of the nearest-neighbor decimated subset, so the live preview matches the canonical PNG.
+- **File switch in GPU mode**: `loadRawPixels` gained a force flag so switching files no longer leaves stale previous-file pixels blocking the fetch.
+- **Device loss / uncaptured errors**: `GpuSingleton` exposes `onGpuLost` + an uncaptured-error handler; `GpuRenderer` drops the dead device's resources and falls back to the CPU worker instead of a permanently blank canvas.
+- **Texture-limit guard**: an oversized image degrades to the CPU worker instead of an unobserved validation error and a blank canvas.
+- **Uniforms**: reused scratch buffer + skip-when-unchanged guard (no per-frame allocation; cache invalidated on uniformBuffer recreation).
+- Fixed OIII / Hα / SII filter-regex false positives.
+
+### Removed
+- Orphaned ZNCC WebGPU shader (`zncc_align.wgsl`) and its CONTRIBUTING reference; the unreachable client-side downsample worker; unused imports.
+
+## [0.4.6] - 2026-04-06
 
 ### Added
 
@@ -130,3 +201,119 @@
 - DeepZoomViewer `generateTiles` removed from useCallback deps (stable module import)
 
 [0.4.5]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.2...v0.4.5
+
+
+## [0.4.2] - 2026-03-27
+
+### Fixed
+- Drizzle finalize: MAD constant hardcoded as `1.4826` instead of shared `MAD_TO_SIGMA`; divergence risk with sigma clipping
+- Composite cache keys duplicated as string literals in `cmd/image.rs`; moved to `types/constants.rs`
+- `compose_rgb_cmd` STF JSON keys hardcoded instead of using `RES_SHADOW/MIDTONE/HIGHLIGHT` constants
+
+[0.4.2]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.1...v0.4.2
+
+
+## [0.4.1] - 2026-03-25
+
+### Fixed
+
+#### Numerical
+- Median/MAD: NaN values sort to end via `partial_cmp().unwrap_or(Ordering::Equal)`
+- FFT power spectrum: Hann window applied before FFT; DC component excluded from magnitude
+- Phase correlation: confidence score uses peak/mean ratio of cross-power spectrum
+- Richardson-Lucy: Tikhonov regularization denominator uses `max(otf_mag_sq, lambda)` instead of `otf_mag_sq + lambda`
+- Polynomial background: Vandermonde basis uses `(x - mean) / std` instead of raw pixel coordinates
+
+#### Performance
+- Batch processing: `par_iter` for concurrent file processing
+- FFT analysis: transpose + Zip parallel for row-major layout
+- Cache: Arc zero-copy for image data sharing
+- Base64: uses engine v0.22 API (`STANDARD.encode`)
+- Sigma clipping: first iteration uses median/MAD (Stetson 1987), subsequent use mean/stddev
+
+#### Code Quality
+- 310 constants in `types/constants.rs` replacing all hardcoded string keys
+- Command count increased from 22 to 37
+- Architecture diagram updated to reflect new domain modules
+
+[0.4.1]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.0...v0.4.1
+
+
+## [0.4.0] - 2026-03-22
+
+### Added
+- Star-based affine alignment (triangle asterism matching + RANSAC, 500 iterations)
+- Stability-based auto white balance (lowest MAD/median channel as reference)
+- SCNR luminance redistribution (ITU-R BT.709 weights to R and B)
+- ComposeWizard 10-step pipeline (Channels, Stack, BG, Align, Blend, Color, Mask, Stretch, Adjust, Export)
+- Masked stretch with star protection (iterative MTF, configurable growth/softness)
+- SPCC spectrophotometric color calibration with optional Gaia DR3 TAP
+- Synthetic FITS generator (star field, PSF, CCD noise model, vignetting)
+- Live composite STF re-stretch (per-channel without re-composing)
+- Narrowband palette presets (SHO, HOO, Foraxx, Dynamic HOO, Hubble Legacy)
+- PSF enhancement: moment-based FWHM with subpixel peak estimation (quadratic 2D Hessian)
+
+### Changed
+- Alignment default: FFT phase correlation (sub-pixel, O(n log n)) with automatic affine fallback
+- Frontend refactored into 12 domain services with shared UI primitives
+- useBackend.ts split into 11 services/ + infrastructure/tauri/ layer
+- PreviewPanel layout: unified sidebar left + bottom panel
+
+[0.4.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.3.0...v0.4.0
+
+
+## [0.3.0] - 2026-03-14
+
+### Added
+- Richardson-Lucy deconvolution (FFT-based, Tikhonov regularization)
+- Polynomial background extraction with sigma-clipped grid sampling
+- Wavelet denoise (a trous algorithm)
+- ASDF format support (first non-Python implementation)
+- Roman Space Telescope data model traversal with gWCS extraction
+- zlib/bzip2/lz4 decompression for ASDF binary blocks
+- FFT phase correlation alignment (40x speedup over ZNCC)
+- Smart pipeline: auto-detects 2D/3D data
+- Dimension-tolerant stacking with crop-to-intersection
+- Auto-resample for mixed SW/LW NIRCam data
+- IntelliJ-style panel layout
+
+[0.3.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.2.0...v0.3.0
+
+
+## [0.2.0] - 2026-03-07
+
+### Added
+- Multi-extension FITS with auto SCI HDU selection
+- Drizzle stacking with flat contiguous accumulator (Square/Gaussian/Lanczos3)
+- Drizzle RGB pipeline for multi-channel composition
+- Hubble palette auto-mapping from FITS headers
+- AdvancedImageViewer with zoom presets and pan
+- Binary IPC for GPU pixels (16-byte header + raw f32, zero JSON/base64)
+
+[0.2.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.1.0...v0.2.0
+
+
+## [0.1.0] - 2026-02-28
+
+### Added
+- FITS I/O with memory-mapped extraction and ZIP transparency
+- Batch processing with Rayon thread pool
+- Asinh stretch and STF (Screen Transfer Function)
+- Bias/Dark/Flat calibration pipeline
+- Sigma-clipped stacking with configurable thresholds
+- RGB composition with white balance (auto/manual/none) and SCNR
+- 512-bin histogram with median, mean, sigma, MAD
+- Star detection with PSF-fitting (flux, FWHM, SNR)
+- FITS header summary table
+- WCS transforms (pixel <-> world coordinates)
+- Plate solving via astrometry.net API
+- IFU/datacube processing with spectrum extraction
+- WebGPU compute shader rendering with Canvas 2D fallback
+- Deep zoom tile pyramid for large images
+- Zero-copy binary IPC via Tauri Response
+- FITS export with WCS/metadata preservation
+- Cross-correlation auto-alignment
+
+[0.1.0]: https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/tag/v0.1.0
+
+[Unreleased]: https://github.com/samuelkriegerbonini-dev/AstroBurst/compare/v0.4.6...HEAD

@@ -1,4 +1,4 @@
-use crate::math::median::{exact_median_mut, exact_mad_mut};
+use crate::math::median::{exact_median_mut, exact_mad_mut, f32_cmp};
 use crate::types::image::{Histogram, ImageStats};
 use crate::types::constants::{PADDING_THRESHOLD, MAD_TO_SIGMA, HISTOGRAM_BINS};
 use ndarray::Array2;
@@ -10,6 +10,16 @@ const HIST_BINS: usize = 65536;
 #[inline]
 pub fn is_valid_pixel(v: f32) -> bool {
     v.is_finite() && v > PADDING_THRESHOLD
+}
+
+pub fn percentile(values: &mut [f32], pct: f64) -> f32 {
+    let n = values.len();
+    if n == 0 {
+        return f32::NAN;
+    }
+    let idx = ((n as f64 * pct) as usize).min(n - 1);
+    let (_, kth, _) = values.select_nth_unstable_by(idx, f32_cmp);
+    *kth
 }
 
 pub fn compute_image_stats(data: &Array2<f32>) -> ImageStats {
@@ -38,6 +48,18 @@ pub fn compute_image_stats_with_known_range(
     }
 
     compute_stats_hist_core(slice, known_min, known_max)
+}
+
+pub fn combine_channel_stats(a: &ImageStats, b: &ImageStats, c: &ImageStats) -> ImageStats {
+    ImageStats {
+        min: a.min.min(b.min).min(c.min),
+        max: a.max.max(b.max).max(c.max),
+        mean: (a.mean + b.mean + c.mean) / 3.0,
+        median: (a.median + b.median + c.median) / 3.0,
+        sigma: ((a.sigma.powi(2) + b.sigma.powi(2) + c.sigma.powi(2)) / 3.0).sqrt(),
+        mad: (a.mad + b.mad + c.mad) / 3.0,
+        valid_count: a.valid_count.max(b.valid_count).max(c.valid_count),
+    }
 }
 
 fn compute_image_stats_exact(slice: &[f32]) -> ImageStats {
@@ -375,7 +397,7 @@ pub fn compute_histogram_with_stats(data: &Array2<f32>, stats: &ImageStats) -> H
     build_histogram(slice, HISTOGRAM_BINS, stats.min, stats.max)
 }
 
-fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogram {
+pub fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogram {
     let range = dmax - dmin;
     if range < 1e-10 {
         return Histogram {
@@ -388,11 +410,10 @@ fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogra
 
     let inv_bin_width = bins as f64 / range;
 
-    let initial = vec![0u32; bins];
     let last = bins - 1;
     let histogram = slice
         .par_chunks(CHUNK_SIZE)
-        .fold_with(initial.clone(), |mut local_bins, chunk| {
+        .fold(|| vec![0u32; bins], |mut local_bins, chunk| {
             for &v in chunk {
                 if is_valid_pixel(v) {
                     let idx = ((v as f64 - dmin) * inv_bin_width) as usize;
@@ -407,7 +428,7 @@ fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogra
             }
             a
         })
-        .unwrap_or(initial);
+        .unwrap_or_else(|| vec![0u32; bins]);
 
     let step = range / bins as f64;
     let bin_edges: Vec<f64> = (0..=bins).map(|i| dmin + i as f64 * step).collect();
@@ -441,4 +462,28 @@ pub fn downsample_histogram(hist: &Histogram, target_bins: usize) -> Vec<u32> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_nearest_rank_no_interpolation() {
+        let base: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let mut v = base.clone();
+        assert_eq!(percentile(&mut v, 0.5), 5.0);
+        let mut v = base.clone();
+        assert_eq!(percentile(&mut v, 0.0), 0.0);
+        let mut v = base.clone();
+        assert_eq!(percentile(&mut v, 1.0), 9.0);
+        let mut v = base.clone();
+        assert_eq!(percentile(&mut v, 0.16), 1.0);
+    }
+
+    #[test]
+    fn percentile_empty_is_nan() {
+        let mut v: Vec<f32> = vec![];
+        assert!(percentile(&mut v, 0.5).is_nan());
+    }
 }

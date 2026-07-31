@@ -92,7 +92,7 @@ pub async fn get_cube_spectrum(
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let cube = LazyCube::open(&path)?;
-        let spectrum = cube.extract_spectrum_at(x, y)?;
+        let spectrum = cube.extract_spectrum_at(y, x)?;
         let wavelengths = build_wavelength_axis(&cube.header);
         let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
         Ok(json!({

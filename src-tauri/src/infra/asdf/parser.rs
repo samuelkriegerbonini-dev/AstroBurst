@@ -1,10 +1,10 @@
-use std::io::{BufRead, BufReader};
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde_yaml::Value;
 
-use super::blocks::{BlockHeader, BlockData};
+use super::blocks::{BlockData, BlockHeader};
 
 const ASDF_MAGIC: &str = "#ASDF";
 const YAML_DOC_END: &str = "...";
@@ -92,8 +92,8 @@ impl AsdfFile {
             return Err(AsdfError::NoYamlTree);
         }
 
-        let tree: Value = serde_yaml::from_str(&yaml_content)
-            .map_err(|e| AsdfError::YamlParse(e.to_string()))?;
+        let tree: Value =
+            serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))?;
 
         Ok(tree)
     }
@@ -121,12 +121,17 @@ impl AsdfFile {
 
             let (header, header_end) = BlockHeader::parse(&buf[offset..])?;
             let data_start = offset + header_end;
-            let data_end = data_start + header.allocated_size as usize;
+            let data_end = data_start
+                .checked_add(header.allocated_size as usize)
+                .ok_or(AsdfError::BlockTruncated)?;
 
             if data_end > buf.len() {
                 return Err(AsdfError::BlockTruncated);
             }
 
+            if header.used_size > header.allocated_size {
+                return Err(AsdfError::BlockTruncated);
+            }
             let raw = &buf[data_start..data_start + header.used_size as usize];
             let decompressed = header.decompress(raw)?;
 
@@ -141,7 +146,6 @@ impl AsdfFile {
 
         Ok(blocks)
     }
-
 }
 
 fn skip_padding(buf: &[u8], mut offset: usize) -> usize {
@@ -163,6 +167,9 @@ pub enum AsdfError {
     DecompressionFailed(String),
     InvalidDtype(String),
     MissingField(String),
+    BlockOutOfRange(usize),
+    ShapeMismatch { got: usize, expected: usize },
+    UnsupportedRank(usize),
 }
 
 impl From<std::io::Error> for AsdfError {
@@ -184,6 +191,15 @@ impl std::fmt::Display for AsdfError {
             AsdfError::DecompressionFailed(e) => write!(f, "Decompression failed: {}", e),
             AsdfError::InvalidDtype(d) => write!(f, "Invalid dtype: {}", d),
             AsdfError::MissingField(field) => write!(f, "Missing field: {}", field),
+            AsdfError::BlockOutOfRange(i) => write!(f, "Block index out of range: {}", i),
+            AsdfError::ShapeMismatch { got, expected } => {
+                write!(
+                    f,
+                    "Array element count mismatch: got {} expected {}",
+                    got, expected
+                )
+            }
+            AsdfError::UnsupportedRank(n) => write!(f, "Unsupported array rank: {}", n),
         }
     }
 }

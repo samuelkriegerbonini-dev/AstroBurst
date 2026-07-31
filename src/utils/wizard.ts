@@ -53,7 +53,7 @@ export interface WizardState {
   segmPath: string | null;
   maskGrowth: number;
   maskProtection: number;
-  stretchMode: "masked" | "arcsinh" | "auto_stf";
+  stretchMode: "masked" | "arcsinh" | "ghs" | "auto_stf";
   stretchFactor: number;
   targetBackground: number;
   scnrEnabled: boolean;
@@ -70,7 +70,7 @@ export interface WizardState {
 
 export const DEFAULT_BINS: FrequencyBin[] = [
   { id: "ha", label: "Hα (656nm)", shortLabel: "Hα", wavelength: 656, color: "#ef4444", files: [] },
-  { id: "oiii", label: "OIII (502nm)", shortLabel: "OIII", wavelength: 502, color: "#3b82f6", files: [] },
+  { id: "oiii", label: "OIII (501nm)", shortLabel: "OIII", wavelength: 501, color: "#3b82f6", files: [] },
   { id: "sii", label: "SII (673nm)", shortLabel: "SII", wavelength: 673, color: "#f97316", files: [] },
   { id: "r", label: "Red", shortLabel: "R", color: "#dc2626", files: [] },
   { id: "g", label: "Green", shortLabel: "G", color: "#16a34a", files: [] },
@@ -186,7 +186,7 @@ const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
 
 const NB_PRESETS = new Set(["sho", "hoo", "dynamic_hoo", "foraxx", "hubble_legacy"]);
 
-const NB_FILTERS = new Set(["Hα (656nm)", "[OIII] (502nm)", "[SII] (673nm)"]);
+const NB_FILTERS = new Set(["Hα (656nm)", "[OIII] (501nm)", "[SII] (673nm)"]);
 
 export interface FilterDetectionRef {
   path: string;
@@ -285,13 +285,6 @@ export const STEPS: StepDef[] = [
     enabled: (s) => s.compositeReady || filledCount(s) >= 2,
   },
   {
-    id: "mask",
-    label: "Star Mask",
-    shortLabel: "Mask",
-    color: "rose",
-    enabled: (s) => totalFilesCount(s) > 0,
-  },
-  {
     id: "stretch",
     label: "Stretch",
     shortLabel: "Stretch",
@@ -361,23 +354,40 @@ export function nextEnabledStep(
   return null;
 }
 
-export function resolveChannelPath(state: WizardState, binId: string): string | null {
-  if (state.backgroundPaths[binId]) return state.backgroundPaths[binId];
-  if (state.croppedPaths[binId]) return state.croppedPaths[binId];
-  if (state.alignedPaths[binId]) return state.alignedPaths[binId];
-  if (state.stackedPaths[binId]) return state.stackedPaths[binId];
+export type PipelineStage = "background" | "cropped" | "aligned" | "stacked";
+
+const STAGE_ORDER: PipelineStage[] = ["background", "cropped", "aligned", "stacked"];
+
+function stagePath(state: WizardState, binId: string, stage: PipelineStage): string | undefined {
+  switch (stage) {
+    case "background": return state.backgroundPaths[binId];
+    case "cropped": return state.croppedPaths[binId];
+    case "aligned": return state.alignedPaths[binId];
+    case "stacked": return state.stackedPaths[binId];
+  }
+}
+
+export function resolveChannelPath(
+  state: WizardState,
+  binId: string,
+  upTo: PipelineStage = "background",
+): string | null {
+  for (let i = STAGE_ORDER.indexOf(upTo); i < STAGE_ORDER.length; i++) {
+    const p = stagePath(state, binId, STAGE_ORDER[i]);
+    if (p) return p;
+  }
   const bin = state.bins.find((b) => b.id === binId);
   if (bin && bin.files.length > 0) return bin.files[0];
   return null;
 }
 
-export function resolveAnyChannelPath(state: WizardState): string | null {
+export function resolveAnyChannelPath(
+  state: WizardState,
+  upTo: PipelineStage = "background",
+): string | null {
   for (const bin of state.bins) {
-    if (state.backgroundPaths[bin.id]) return state.backgroundPaths[bin.id];
-    if (state.croppedPaths[bin.id]) return state.croppedPaths[bin.id];
-    if (state.alignedPaths[bin.id]) return state.alignedPaths[bin.id];
-    if (state.stackedPaths[bin.id]) return state.stackedPaths[bin.id];
-    if (bin.files.length > 0) return bin.files[0];
+    const p = resolveChannelPath(state, bin.id, upTo);
+    if (p) return p;
   }
   return null;
 }
@@ -406,5 +416,16 @@ export function resolveRgbPaths(state: WizardState): { r: string | null; g: stri
   let b = findBest(bCandidates);
   if (!b) b = findBest(bCandidates, true);
 
-  return { r, g, b };
+  const fillFromUnused = (): string | null => {
+    const bin = activeBins.find((bn) => !usedIds.has(bn.id));
+    if (!bin) return null;
+    usedIds.add(bin.id);
+    return resolveChannelPath(state, bin.id);
+  };
+
+  return {
+    r: r ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+    g: g ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+    b: b ?? fillFromUnused() ?? resolveAnyChannelPath(state),
+  };
 }

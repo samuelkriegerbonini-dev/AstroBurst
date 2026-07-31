@@ -15,23 +15,57 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const dragRef = useRef<{ dragging: boolean; startX: number; startY: number; origTx: number; origTy: number }>({
     dragging: false, startX: 0, startY: 0, origTx: 0, origTy: 0,
   });
+  const naturalRef = useRef<{ w: number; h: number } | null>(null);
+  const userInteractedRef = useRef(false);
 
-  const resetView = useCallback(() => {
-    setScale(1);
-    setTranslate({ x: 0, y: 0 });
+  const applyFit = useCallback(() => {
+    const container = containerRef.current;
+    const nat = naturalRef.current;
+    if (!container || !nat || nat.w === 0 || nat.h === 0) return;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (cw === 0 || ch === 0) return;
+    const fit = Math.min(cw / nat.w, ch / nat.h, 1);
+    setScale(fit);
+    setTranslate({ x: (cw - nat.w * fit) / 2, y: (ch - nat.h * fit) / 2 });
   }, []);
 
+  const resetView = useCallback(() => {
+    userInteractedRef.current = false;
+    applyFit();
+  }, [applyFit]);
+
   useEffect(() => {
-    resetView();
-  }, [src, resetView]);
+    userInteractedRef.current = false;
+  }, [src]);
+
+  const handleImgLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      naturalRef.current = { w: img.naturalWidth, h: img.naturalHeight };
+      if (!userInteractedRef.current) applyFit();
+    }
+  }, [applyFit]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver(() => {
+      if (!userInteractedRef.current) applyFit();
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [applyFit]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const container = containerRef.current;
     if (!container) return;
+    userInteractedRef.current = true;
 
     const rect = container.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -54,7 +88,9 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    userInteractedRef.current = true;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    setIsPanning(true);
     dragRef.current = {
       dragging: true,
       startX: e.clientX,
@@ -75,6 +111,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
 
   const handlePointerUp = useCallback(() => {
     dragRef.current.dragging = false;
+    setIsPanning(false);
   }, []);
 
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -87,6 +124,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     if (scale > 1.05) {
       resetView();
     } else {
+      userInteractedRef.current = true;
       const next = 3;
       const ratio = next / scale;
       setTranslate((t) => ({
@@ -97,13 +135,25 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     }
   }, [scale, resetView]);
 
-  const zoomIn = useCallback(() => {
-    setScale((s) => Math.min(ZOOM_MAX, s * 1.5));
+  const zoomAt = useCallback((factor: number) => {
+    const container = containerRef.current;
+    if (!container) return;
+    userInteractedRef.current = true;
+    const cx = container.clientWidth / 2;
+    const cy = container.clientHeight / 2;
+    setScale((prev) => {
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev * factor));
+      const ratio = next / prev;
+      setTranslate((t) => ({
+        x: cx - ratio * (cx - t.x),
+        y: cy - ratio * (cy - t.y),
+      }));
+      return next;
+    });
   }, []);
 
-  const zoomOut = useCallback(() => {
-    setScale((s) => Math.max(ZOOM_MIN, s / 1.5));
-  }, []);
+  const zoomIn = useCallback(() => zoomAt(1.5), [zoomAt]);
+  const zoomOut = useCallback(() => zoomAt(1 / 1.5), [zoomAt]);
 
   const zoomPct = `${Math.round(scale * 100)}%`;
 
@@ -111,7 +161,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     <div
       ref={containerRef}
       className={`relative overflow-hidden ${className}`}
-      style={{ cursor: dragRef.current.dragging ? "grabbing" : "grab" }}
+      style={{ cursor: isPanning ? "grabbing" : "grab" }}
       onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -130,6 +180,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
           alt={alt}
           className="block max-w-none"
           draggable={false}
+          onLoad={handleImgLoad}
           style={{ imageRendering: scale >= 2 ? "pixelated" : "auto" }}
         />
       </div>
@@ -138,7 +189,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
         {[
           { icon: ZoomIn, action: zoomIn, title: "Zoom in" },
           { icon: ZoomOut, action: zoomOut, title: "Zoom out" },
-          { icon: Home, action: resetView, title: "Reset view" },
+          { icon: Home, action: resetView, title: "Fit to window" },
         ].map(({ icon: Icon, action, title }) => (
           <button
             key={title}

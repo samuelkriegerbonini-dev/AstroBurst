@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect, memo } from "react";
+import { useRef, useState, useCallback, memo } from "react";
 
 export interface CurvePoint {
   x: number;

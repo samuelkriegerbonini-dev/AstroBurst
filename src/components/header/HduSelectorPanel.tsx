@@ -1,19 +1,14 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { Database, ChevronRight, FileText, Search, X, Copy, Check } from "lucide-react";
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
+import type { FitsExtension } from "../../services/header";
 
 interface HduSelectorPanelProps {
   filePath: string;
-  onSelectHdu?: (hduIndex: number, header: any) => void;
+  onSelectHdu?: (hduIndex: number, header: Record<string, string>) => void;
 }
 
-interface HduInfo {
-  index: number;
-  name: string;
-  type: string;
-  naxis: number[];
-  bitpix: number;
-}
+type HduInfo = FitsExtension;
 
 const TYPE_STYLES: Record<string, { bg: string; border: string; text: string }> = {
   IMAGE: { bg: "rgba(59,130,246,0.1)", border: "rgba(59,130,246,0.25)", text: "#93c5fd" },
@@ -28,10 +23,13 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
   const [extensions, setExtensions] = useState<HduInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [hduHeader, setHduHeader] = useState<Record<string, any> | null>(null);
+  const [hduHeader, setHduHeader] = useState<Record<string, string> | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
   const [hduSearch, setHduSearch] = useState("");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [extensionsError, setExtensionsError] = useState<string | null>(null);
+  const [headerError, setHeaderError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     if (!filePath) return;
@@ -40,15 +38,20 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
     setSelectedIdx(null);
     setHduHeader(null);
     setHduSearch("");
+    setExtensionsError(null);
+    setHeaderError(null);
 
     getFitsExtensions(filePath)
-      .then((result: any) => {
-        const exts = result?.extensions || result || [];
+      .then((result: FitsExtension[] | { extensions?: FitsExtension[] }) => {
+        const exts = Array.isArray(result) ? result : (result?.extensions ?? []);
         setExtensions(Array.isArray(exts) ? exts : []);
       })
-      .catch((err: any) => console.error("Failed to load FITS extensions:", err))
+      .catch((err) => {
+        console.error("Failed to load FITS extensions:", err);
+        setExtensionsError(err instanceof Error ? err.message : String(err));
+      })
       .finally(() => setLoading(false));
-  }, [filePath]);
+  }, [filePath, loadAttempt]);
 
   const handleSelectHdu = useCallback(
     async (idx: number) => {
@@ -56,12 +59,14 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
       setHeaderLoading(true);
       setHduHeader(null);
       setHduSearch("");
+      setHeaderError(null);
       try {
         const header = await getHeaderByHdu(filePath, idx);
-        setHduHeader(header);
-        onSelectHdu?.(idx, header);
+        setHduHeader(header.index);
+        onSelectHdu?.(idx, header.index);
       } catch (err) {
         console.error("Failed to load HDU header:", err);
+        setHeaderError(err instanceof Error ? err.message : String(err));
       } finally {
         setHeaderLoading(false);
       }
@@ -96,6 +101,33 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
     );
   }
 
+  if (extensionsError) {
+    return (
+      <div className="ab-panel overflow-hidden">
+        <div className="ab-panel-header">
+          <div className="flex items-center gap-2">
+            <Database size={12} style={{ color: "var(--ab-rose)" }} />
+            <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
+              FITS Extensions
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-col items-center gap-2 py-4 px-3">
+          <p className="text-[10px] text-red-400/80 text-center select-text">
+            Failed to read extensions: {extensionsError}
+          </p>
+          <button
+            onClick={() => setLoadAttempt((a) => a + 1)}
+            className="text-[10px] px-2 py-1 rounded transition-colors"
+            style={{ color: "var(--ab-rose)", border: "1px solid rgba(244,63,94,0.25)", background: "rgba(244,63,94,0.06)" }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (extensions.length <= 1) return null;
 
   return (
@@ -117,7 +149,7 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
           const idx = ext.index ?? i;
           const isSelected = selectedIdx === idx;
           const dims = ext.naxis?.length > 0 ? ext.naxis.join(" × ") : "";
-          const typeLabel = ext.type || (i === 0 ? "PRIMARY" : "EXT");
+          const typeLabel = ext.ext_type || (i === 0 ? "PRIMARY" : "EXT");
           const ts = TYPE_STYLES[typeLabel] || DEFAULT_TYPE_STYLE;
 
           return (
@@ -169,6 +201,21 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
             className="w-4 h-4 rounded-full animate-spin"
             style={{ border: "2px solid transparent", borderTopColor: "var(--ab-rose)", borderRightColor: "rgba(244,63,94,0.3)" }}
           />
+        </div>
+      )}
+
+      {headerError && !headerLoading && (
+        <div className="flex items-center gap-2 px-3 py-2" style={{ borderTop: "1px solid var(--ab-border)" }}>
+          <p className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={headerError}>
+            Failed to read HDU header: {headerError}
+          </p>
+          <button
+            onClick={() => { if (selectedIdx !== null) handleSelectHdu(selectedIdx); }}
+            className="text-[10px] shrink-0 px-2 py-0.5 rounded transition-colors"
+            style={{ color: "var(--ab-rose)", border: "1px solid rgba(244,63,94,0.25)", background: "rgba(244,63,94,0.06)" }}
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -227,7 +274,7 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
                 </span>
                 <button
                   onClick={() => handleCopyKey(key, String(val))}
-                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
                 >
                   {copiedKey === key
                     ? <Check size={9} style={{ color: "var(--ab-emerald)" }} />

@@ -1,7 +1,7 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
 import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
-import { useCompositeContext } from "../../context/CompositeContext";
+import { useCompositePreview, useCompositeStf, useCompositeScnr, useCompositeActions } from "../../context/CompositeContext";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri/client";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -12,10 +12,12 @@ const WaveletPanel = lazy(() => import("./WaveletPanel"));
 const PsfPanel = lazy(() => import("./PsfPanel"));
 const ArcsinhStretchPanel = lazy(() => import("./ArcsinhStretchPanel"));
 const MaskedStretchPanel = lazy(() => import("./MaskedStretchPanel"));
+const DebayerPanel = lazy(() => import("./DebayerPanel"));
 
-type ProcessingSection = "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
+type ProcessingSection = "debayer" | "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
+  { id: "debayer", label: "Debayer", color: "orange" },
   { id: "background", label: "Background", color: "emerald" },
   { id: "denoise", label: "Denoise", color: "sky" },
   { id: "psf", label: "PSF", color: "violet" },
@@ -31,6 +33,12 @@ export interface ProcessingChain {
   psfKernel: number[][] | null;
   stretchFits: string | null;
   maskedStretchFits: string | null;
+}
+
+interface StepDoneResult {
+  previewUrl?: string;
+  corrected_fits?: string;
+  fits_path?: string;
 }
 
 function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
@@ -59,6 +67,7 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
 }
 
 const COLOR_MAP: Record<string, { active: string; dot: string }> = {
+  orange: { active: "bg-orange-600/20 text-orange-400 ring-1 ring-orange-500/30", dot: "bg-orange-400" },
   emerald: { active: "bg-emerald-600/20 text-emerald-400 ring-1 ring-emerald-500/30", dot: "bg-emerald-400" },
   sky: { active: "bg-sky-600/20 text-sky-400 ring-1 ring-sky-500/30", dot: "bg-sky-400" },
   violet: { active: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30", dot: "bg-violet-400" },
@@ -70,8 +79,10 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 function ProcessingTabInner() {
   const { file } = useFileContext();
   const { setRenderedPreviewUrl } = useRenderContext();
-  const { compositePreviewUrl, setCompositePreviewUrl,
-    compositeStfR, compositeStfG, compositeStfB, compositeScnr } = useCompositeContext();
+  const { compositePreviewUrl } = useCompositePreview();
+  const { setCompositePreviewUrl } = useCompositeActions();
+  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
+  const { compositeScnr } = useCompositeScnr();
   const { rgbChannels } = useRgbContext();
   const [active, setActive] = useState<ProcessingSection>("background");
 
@@ -84,6 +95,7 @@ function ProcessingTabInner() {
     maskedStretchFits: null,
   });
 
+  const [compositeSyncError, setCompositeSyncError] = useState<string | null>(null);
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
@@ -118,8 +130,10 @@ function ProcessingTabInner() {
         const url = await getPreviewUrl(result.png_path);
         setCompositePreviewUrl(url);
       }
+      setCompositeSyncError(null);
     } catch (e) {
       console.error("[AstroBurst] Composite channel sync failed:", e);
+      setCompositeSyncError(e instanceof Error ? e.message : String(e));
     }
   }, [setCompositePreviewUrl]);
 
@@ -133,48 +147,51 @@ function ProcessingTabInner() {
   );
 
   const handleBackgroundDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.corrected_fits) {
+        const fits = result.corrected_fits;
         setChain((prev) => ({
           ...prev,
-          backgroundFits: result.corrected_fits,
+          backgroundFits: fits,
           denoiseFits: null,
           deconvFits: null,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.corrected_fits, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDenoiseDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          denoiseFits: result.fits_path,
+          denoiseFits: fits,
           deconvFits: null,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleDeconvDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          deconvFits: result.fits_path,
+          deconvFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
@@ -185,30 +202,32 @@ function ProcessingTabInner() {
   }, []);
 
   const handleStretchDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          stretchFits: result.fits_path,
+          stretchFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
   );
 
   const handleMaskedStretchDone = useCallback(
-    (result: any) => {
+    (result: StepDoneResult) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
+        const fits = result.fits_path;
         setChain((prev) => ({
           ...prev,
-          maskedStretchFits: result.fits_path,
+          maskedStretchFits: fits,
         }));
         const ch = findChannel(file?.path);
-        if (ch) syncComposite(result.fits_path, ch);
+        if (ch) syncComposite(fits, ch);
       }
     },
     [handlePreviewUpdate, file?.path, findChannel, syncComposite],
@@ -217,6 +236,13 @@ function ProcessingTabInner() {
   const handleResetChain = useCallback(() => {
     setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null });
   }, []);
+
+  const chainFileIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (chainFileIdRef.current === (file?.id ?? null)) return;
+    chainFileIdRef.current = file?.id ?? null;
+    handleResetChain();
+  }, [file?.id, handleResetChain]);
 
   const backgroundInput = file;
 
@@ -293,6 +319,21 @@ function ProcessingTabInner() {
         originalName={file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original"}
       />
 
+      {compositeSyncError && (
+        <div className="flex items-center gap-2 mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
+          <span className="flex-1 truncate" title={compositeSyncError}>
+            Composite not updated: {compositeSyncError} — re-run Blend to sync
+          </span>
+          <button
+            onClick={() => setCompositeSyncError(null)}
+            className="shrink-0 text-amber-500/70 hover:text-amber-300 transition-colors"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <Suspense
         fallback={
           <div className="flex items-center justify-center py-12">
@@ -301,6 +342,13 @@ function ProcessingTabInner() {
         }
       >
         <div className="flex-1 overflow-y-auto">
+          <div style={{ display: active === "debayer" ? "block" : "none" }}>
+            <DebayerPanel
+              selectedFile={file}
+              outputDir={resolvedDir}
+              onPreviewUpdate={handlePreviewUpdate}
+            />
+          </div>
           <div style={{ display: active === "background" ? "block" : "none" }}>
             <BackgroundPanel
               selectedFile={backgroundInput}

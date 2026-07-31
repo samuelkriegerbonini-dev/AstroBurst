@@ -1,5 +1,5 @@
 export type { AstroFile, ProcessedFile, ProcessResult, StfParams, ResampleResult } from "./fits.types";
-export type { HistogramData, FftData, RawPixelData } from "./analysis";
+export type { HistogramData, FftData, RawPixelData, RawRgbChannel, RawRgbPixelData } from "./analysis";
 export type { HeaderData } from "./header";
 export type { QueueStats, FileStatus } from "./queue";
 export type { TauriCommandError } from "./errors";

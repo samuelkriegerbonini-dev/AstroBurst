@@ -68,7 +68,7 @@ pub fn apply_noise(image: &Array2<f32>, params: &NoiseParams) -> Array2<f32> {
     for y in 0..h {
         for x in 0..w {
             let flux = image[[y, x]] as f64;
-            let signal_e = (flux + params.sky_background) * params.gain * params.exposure_time
+            let signal_e = (flux + params.sky_background) * params.exposure_time
                 + params.dark_current * params.exposure_time;
             let photon_e = poisson_sample(&mut rng, signal_e.max(0.0));
             let read_e = normal.sample(&mut rng);
@@ -98,14 +98,11 @@ pub fn generate_flat_field(width: u32, height: u32, seed: u64, vignette_strength
     flat
 }
 
-pub fn apply_flat_field(image: &mut Array2<f32>, flat: &Array2<f32>) {
+pub fn apply_vignette(image: &mut Array2<f32>, flat: &Array2<f32>) {
     let (h, w) = image.dim();
     for y in 0..h {
         for x in 0..w {
-            let f = flat[[y, x]];
-            if f > 1e-6 {
-                image[[y, x]] /= f;
-            }
+            image[[y, x]] *= flat[[y, x]];
         }
     }
 }

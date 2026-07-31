@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config";
 import type { AppConfig } from "../services/config";
@@ -15,6 +15,7 @@ export default function ConfigPanel() {
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const [cfg, keyResult] = await Promise.all([getConfig(), getApiKey()]);
       setConfig(cfg);
@@ -39,6 +40,7 @@ export default function ConfigPanel() {
     if (!apiKey.trim()) return;
     setSaving(true);
     setSaveStatus("idle");
+    setError(null);
     try {
       await saveApiKey(apiKey.trim(), "astrometry");
       setApiKeyMasked(apiKey.slice(0, 4) + "..." + apiKey.slice(-4));
@@ -53,14 +55,26 @@ export default function ConfigPanel() {
     }
   }, [apiKey]);
 
+  const pendingSavesRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const reqSeqRef = useRef(0);
+
   const handleUpdateField = useCallback(
-    async (field: string, value: unknown) => {
-      try {
-        const updated = await updateConfig(field, value);
-        setConfig(updated);
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+    (field: string, value: unknown) => {
+      setError(null);
+      setConfig((prev) => (prev ? { ...prev, [field]: value } : prev));
+      const timers = pendingSavesRef.current;
+      const existing = timers.get(field);
+      if (existing) clearTimeout(existing);
+      timers.set(field, setTimeout(async () => {
+        timers.delete(field);
+        const seq = ++reqSeqRef.current;
+        try {
+          const updated = await updateConfig(field, value);
+          if (seq === reqSeqRef.current && timers.size === 0) setConfig(updated);
+        } catch (e: unknown) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }, 300));
     },
     [],
   );
@@ -90,6 +104,7 @@ export default function ConfigPanel() {
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleSaveApiKey(); }}
             placeholder={apiKeyMasked ? "Enter new key to replace..." : "Paste your API key..."}
             className="flex-1 bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 outline-none focus:border-teal-500/50 placeholder:text-zinc-600"
           />

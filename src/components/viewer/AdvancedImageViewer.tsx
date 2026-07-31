@@ -35,6 +35,7 @@ interface AdvancedImageViewerProps {
   processed?: ViewerImage | null;
   pixelValue?: { x: number; y: number; value: number } | null;
   onMousePixel?: (x: number, y: number) => void;
+  onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   className?: string;
@@ -45,6 +46,7 @@ function AdvancedImageViewer({
   processed,
   pixelValue,
   onMousePixel,
+  onPixelClick,
   onMouseLeave,
   overlayCanvasRef,
   className = "",
@@ -59,6 +61,7 @@ function AdvancedImageViewer({
   const isPanningRef = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const compareDragging = useRef(false);
+  const clickStart = useRef<{ x: number; y: number } | null>(null);
 
   const activeImage = processed ?? original;
   const hasComparison = !!original && !!processed;
@@ -77,8 +80,11 @@ function AdvancedImageViewer({
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      if (compareMode && Math.abs(e.nativeEvent.offsetX - (containerRef.current?.clientWidth ?? 0) * comparePos / 100) < 12) {
+      clickStart.current = { x: e.clientX, y: e.clientY };
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (compareMode && rect && Math.abs((e.clientX - rect.left) - rect.width * comparePos / 100) < 12) {
         compareDragging.current = true;
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
         return;
       }
       if (e.button === 1 || (e.button === 0 && cursorMode === "pan")) {
@@ -126,15 +132,47 @@ function AdvancedImageViewer({
     compareDragging.current = false;
   }, []);
 
-  const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (cursorMode !== "crosshair" || !onPixelClick || !hasRenderDims) return;
+      const start = clickStart.current;
+      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const fitsW = activeImage?.width ?? renderW;
+      const fitsH = activeImage?.height ?? renderH;
+      const coord = screenToImagePixel(
+        e.clientX, e.clientY, rect, transformRef.current,
+        renderW, renderH, fitsW, fitsH,
+      );
+      if (coord) onPixelClick(coord.x, coord.y);
+    },
+    [cursorMode, onPixelClick, hasRenderDims, activeImage, renderW, renderH, transformRef],
+  );
+
+  const handleNaturalSize = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw > 0 && nh > 0) {
-      setImgNatural({ w: nw, h: nh });
-      mainRetry.onLoad();
+    if (nw > 0 && nh > 0) setImgNatural({ w: nw, h: nh });
+  }, []);
+
+  const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    handleNaturalSize(e);
+    mainRetry.onLoad();
+  }, [handleNaturalSize, mainRetry.onLoad]);
+
+  const compareActive = compareMode && hasComparison;
+  const viewerError = compareActive ? (procRetry.error || origRetry.error) : mainRetry.error;
+  const viewerLoading = compareActive ? (procRetry.loading || origRetry.loading) : mainRetry.loading;
+  const handleRetry = useCallback(() => {
+    if (compareMode) {
+      if (procRetry.error) procRetry.retry();
+      if (origRetry.error) origRetry.retry();
+      return;
     }
-  }, [mainRetry.onLoad]);
+    mainRetry.retry();
+  }, [compareMode, procRetry, origRetry, mainRetry]);
 
   const imgStyle: React.CSSProperties = {
     transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
@@ -219,29 +257,30 @@ function AdvancedImageViewer({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={() => { handlePointerUp(); onMouseLeave?.(); }}
+        onClick={handleClick}
         style={{ cursor: isPanning ? "grabbing" : cursorMode === "pan" ? "grab" : "crosshair" }}
       >
-        {mainRetry.loading && !hasRenderDims && !mainRetry.error && (
+        {viewerLoading && !hasRenderDims && !viewerError && (
           <div className="ab-viewer-loading-overlay">
             <Loader2 size={24} className="animate-spin" style={{ color: "var(--ab-teal)", opacity: 0.5 }} />
           </div>
         )}
 
-        {mainRetry.error && (
+        {viewerError && (
           <div className="ab-viewer-error-overlay">
             <ImageOff size={28} strokeWidth={1.5} className="text-zinc-600" />
             <span className="text-xs text-zinc-500 mt-2">Preview failed to load</span>
-            <button onClick={mainRetry.retry} className="ab-viewer-retry-btn">
+            <button onClick={handleRetry} className="ab-viewer-retry-btn">
               <RefreshCw size={12} /> Retry
             </button>
           </div>
         )}
 
-        {!mainRetry.error && compareMode && original && processed ? (
+        {!viewerError && compareActive && original && processed ? (
           <>
             <div style={{ ...imgStyle, zIndex: 1 }}>
               <img src={procRetry.src ?? ""} alt={processed.label} draggable={false}
-                onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />
+                onLoad={(e) => { handleNaturalSize(e); procRetry.onLoad(); }} onError={procRetry.onError} style={{ display: "block" }} />
               {overlayCanvasRef && (
                 <canvas ref={overlayCanvasRef}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
@@ -249,7 +288,8 @@ function AdvancedImageViewer({
             </div>
             <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
-                <img src={origRetry.src ?? ""} alt={original.label} draggable={false} style={{ display: "block" }} />
+                <img src={origRetry.src ?? ""} alt={original.label} draggable={false}
+                  onLoad={origRetry.onLoad} onError={origRetry.onError} style={{ display: "block" }} />
               </div>
             </div>
             <div className="ab-viewer-compare-line" style={{ left: `${comparePos}%`, zIndex: 3 }}>
@@ -262,7 +302,7 @@ function AdvancedImageViewer({
             <div className="ab-viewer-compare-label-left" style={{ zIndex: 4 }}>{original.label}</div>
             <div className="ab-viewer-compare-label-right" style={{ zIndex: 4 }}>{processed.label}</div>
           </>
-        ) : !mainRetry.error ? (
+        ) : !viewerError ? (
           <div style={imgStyle}>
             <img src={mainRetry.src ?? ""} alt={activeImage.label} draggable={false}
               onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />

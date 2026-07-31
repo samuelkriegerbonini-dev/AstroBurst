@@ -1,21 +1,20 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw, Info as InfoIcon, BarChart3, FileText, PackageOpen, FolderOpen } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
-import SidebarPanels from "./components/file/SidebarPanels";
-import type { LeftTabId } from "./components/file/SidebarPanels";
-import PreviewPanel from "./components/PreviewPanel";
+import PreviewPanel, { type ToolId } from "./components/PreviewPanel";
+import { InfoPanel } from "./components/file/SidebarPanels";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
+import { registerFileIngest } from "./hooks/useFileIngest";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
-import { useTimer } from "./hooks/useTimer";
 import { useZipExport } from "./hooks/useZipExport";
 import { isValidFitsFile } from "./utils/validation";
 import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters } from "./hooks/useProductFilter";
@@ -26,7 +25,6 @@ import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
-// @ts-ignore
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
@@ -36,23 +34,25 @@ type ViewState = "empty" | "processing" | "complete";
 
 const MemoizedPreviewPanel = memo(PreviewPanel);
 
-const SIDEBAR_MIN = 42;
 const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MAX = 480;
 
-const LEFT_TABS: { id: LeftTabId; label: string; icon: typeof InfoIcon }[] = [
+const LEFT_TABS: { id: "files"; label: string; icon: typeof FolderOpen }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
-  { id: "analysis", label: "Analysis", icon: BarChart3 },
-  { id: "headers", label: "Headers", icon: FileText },
-  { id: "export", label: "Export", icon: PackageOpen },
 ];
 
-function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFile | undefined): MetadataFile[] {
+function toMetadataFiles(
+  fileIds: string[],
+  getFile: (id: string) => ProcessedFile | undefined,
+  cache: WeakMap<ProcessedFile, MetadataFile>,
+): MetadataFile[] {
   return fileIds.map((id) => {
     const f = getFile(id);
     if (!f) return { id, name: "Unknown", path: "", size: 0, status: "queued" as const };
+    const hit = cache.get(f);
+    if (hit) return hit;
     const header = f.result?.header;
-    return {
+    const built: MetadataFile = {
       id: f.id,
       name: f.name,
       path: f.path,
@@ -73,6 +73,8 @@ function toMetadataFiles(fileIds: string[], getFile: (id: string) => ProcessedFi
       dimensions: f.result?.dimensions,
       elapsed_ms: f.result?.elapsed_ms,
     };
+    cache.set(f, built);
+    return built;
   });
 }
 
@@ -90,16 +92,19 @@ export default function App() {
   const sidebarElRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
-  const [leftTab, setLeftTab] = useState<LeftTabId>("files");
+  const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
+  const handleToggleTool = useCallback((toolId: ToolId) => {
+    setActiveTool((prev) => (prev === toolId ? null : toolId));
+  }, []);
+  const [infoOpen, setInfoOpen] = useState(false);
 
-  const { addFiles, startProcessing, scheduleProcessing, reset } = useFileQueue();
+  const { addFiles, startProcessing, scheduleProcessing, reset, isResampling, resampleProgress } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
   const fileIds = useFileIds();
   const selectedId = useSelectedId();
   const selectedFile = useSelectedFile();
   const allDoneFiles = useDoneFiles();
 
-  const timer = useTimer();
   const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
 
   const activeFilters = useActiveFilters();
@@ -126,9 +131,11 @@ export default function App() {
 
   useEffect(() => {
     if (view === "processing" && stats.total > 0 && !isProcessing && !isComplete) {
-      startProcessing(() => timer.start(), () => timer.stop());
+      startProcessing();
     }
-  }, [view, stats.total, isProcessing, isComplete, startProcessing, timer]);
+  }, [view, stats.total, isProcessing, isComplete, startProcessing]);
+
+  useEffect(() => registerFileIngest(handleFilesAdded), [handleFilesAdded]);
 
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
@@ -143,7 +150,7 @@ export default function App() {
     if (isTauri()) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
-        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "asdf"] }] });
+        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "asdf", "zip"] }] });
         if (result) {
           const paths = Array.isArray(result) ? result : [result];
           handleFilesAdded(paths.map((p: string) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
@@ -151,14 +158,38 @@ export default function App() {
       } catch (err) { console.error("[AstroBurst] File dialog error:", err); }
     } else {
       const input = document.createElement("input");
-      input.type = "file"; input.multiple = true; input.accept = ".fits,.fit,.fts,.asdf";
-      input.onchange = (e: any) => {
-        const list = Array.from(e.target.files as FileList).filter((f) => isValidFitsFile(f.name)).map((f) => ({ name: f.name, path: f.name, size: f.size }));
+      input.type = "file"; input.multiple = true; input.accept = ".fits,.fit,.fts,.asdf,.zip";
+      input.onchange = (e: Event) => {
+        const files = (e.target as HTMLInputElement).files;
+        if (!files) return;
+        const list = Array.from(files).filter((f) => isValidFitsFile(f.name)).map((f) => ({ name: f.name, path: f.name, size: f.size }));
         if (list.length > 0) handleFilesAdded(list);
       };
       input.click();
     }
   }, [handleFilesAdded]);
+
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
+        e.preventDefault();
+        handleBrowseFiles();
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target?.isContentEditable ?? false);
+      if (inInput) return;
+      if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((p) => !p);
+        return;
+      }
+      if (e.key === "Escape") setShortcutsOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleBrowseFiles]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!isTauri()) { handleBrowseFiles(); return; }
@@ -183,12 +214,25 @@ export default function App() {
 
   const handleNewBatch = useCallback(() => {
     reset();
-    timer.reset();
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);
-    setLeftTab("files");
-  }, [reset, timer, resetProductFilter]);
+    setActiveTool("compose");
+    setInfoOpen(false);
+  }, [reset, resetProductFilter]);
+
+  const [confirmNewBatch, setConfirmNewBatch] = useState(false);
+  const confirmNewBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleNewBatchClick = useCallback(() => {
+    if (stats.done === 0 || confirmNewBatch) {
+      if (confirmNewBatchTimerRef.current) clearTimeout(confirmNewBatchTimerRef.current);
+      setConfirmNewBatch(false);
+      handleNewBatch();
+      return;
+    }
+    setConfirmNewBatch(true);
+    confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
+  }, [stats.done, confirmNewBatch, handleNewBatch]);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -199,14 +243,15 @@ export default function App() {
   }, [exportZip]);
 
   const storeVersion = useSyncExternalStore(fileStore.subscribe, fileStore.getVersion);
+  const metaCacheRef = useRef<WeakMap<ProcessedFile, MetadataFile>>(new WeakMap());
   const metadataFiles = useMemo(
-    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id)),
+    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id), metaCacheRef.current),
     [fileIds, storeVersion],
   );
 
   const productTypes = useMemo(
-    () => detectProductTypes(metadataFiles.map((f) => f.name)),
-    [metadataFiles],
+    () => detectProductTypes(fileIds.map((id) => fileStore.getFile(id)?.name ?? "")),
+    [fileIds],
   );
 
   const filteredMetadataFiles = useMemo(() => {
@@ -238,6 +283,7 @@ export default function App() {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     const el = sidebarElRef.current;
+    if (el) el.style.transition = "none";
     const onMove = (ev: MouseEvent) => {
       if (!sidebarResizing.current) return;
       const next = Math.max(180, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
@@ -248,6 +294,7 @@ export default function App() {
       sidebarResizing.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      if (el) el.style.transition = "";
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       forceSidebarRender((c) => c + 1);
@@ -260,6 +307,39 @@ export default function App() {
     <ErrorBoundary>
       <div className="relative h-screen w-full text-zinc-100 overflow-hidden" style={{ background: "var(--ab-deep)" }}>
         {showConfetti && <Confetti show />}
+        {shortcutsOpen && (
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={() => setShortcutsOpen(false)}
+          >
+            <div
+              className="rounded-lg p-4 min-w-[300px] animate-fade-in"
+              style={{ background: "rgba(8,8,18,0.97)", border: "1px solid rgba(20,184,166,0.2)", boxShadow: "0 8px 30px rgba(0,0,0,0.55)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
+                <button onClick={() => setShortcutsOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <X size={12} />
+                </button>
+              </div>
+              <div className="flex flex-col gap-1.5 text-[11px]">
+                {[
+                  { keys: navigator.platform?.toLowerCase().includes("mac") ? "⌘O" : "Ctrl+O", desc: "Open FITS files" },
+                  { keys: "↑ / ↓", desc: "Navigate file list (when focused)" },
+                  { keys: "Enter", desc: "Select focused file" },
+                  { keys: "?", desc: "Toggle this help" },
+                  { keys: "Esc", desc: "Close overlays" },
+                ].map((s) => (
+                  <div key={s.keys} className="flex items-center justify-between gap-6">
+                    <span className="text-zinc-400">{s.desc}</span>
+                    <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-300">{s.keys}</kbd>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         <div
           className="fixed inset-0 z-0 opacity-40 pointer-events-none"
           style={{
@@ -291,28 +371,25 @@ export default function App() {
                             borderBottom: "1px solid rgba(20,184,166,0.1)",
                           }}
                         >
-                          <StatsBar stats={stats} elapsed={timer.elapsed} formatted={timer.formatted} isComplete={isComplete} />
+                          <StatsBar stats={stats} isProcessing={isProcessing} isComplete={isComplete} />
                           <GlobalProgress progress={progress} isComplete={isComplete} />
+                          {isResampling && (
+                            <div className="flex items-center gap-2 text-[10px] font-mono" style={{ color: "rgba(56,189,248,0.75)" }}>
+                              <span className="w-2 h-2 rounded-full animate-spin" style={{ border: "1.5px solid transparent", borderTopColor: "rgba(56,189,248,0.75)" }} />
+                              Matching resolutions… {resampleProgress}%
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex-1 flex overflow-hidden min-h-0">
                           <div className="ab-left-strip shrink-0">
                             {LEFT_TABS.map((tab) => {
                               const Icon = tab.icon;
-                              const isActive = leftTab === tab.id;
                               return (
                                 <button
                                   key={tab.id}
-                                  onClick={() => {
-                                    if (tab.id === "files") {
-                                      if (leftTab === "files") setSidebarOpen((p) => !p);
-                                      else { setLeftTab("files"); setSidebarOpen(true); }
-                                    } else {
-                                      if (leftTab === tab.id && sidebarOpen) setSidebarOpen(false);
-                                      else { setLeftTab(tab.id); setSidebarOpen(true); }
-                                    }
-                                  }}
-                                  className={`ab-left-strip-btn ${isActive && sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
+                                  onClick={() => setSidebarOpen((p) => !p)}
+                                  className={`ab-left-strip-btn ${sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
                                   title={tab.label}
                                 >
                                   <Icon size={14} />
@@ -320,6 +397,23 @@ export default function App() {
                                 </button>
                               );
                             })}
+                            <div className="my-1 mx-2 h-px" style={{ background: "rgba(20,184,166,0.12)" }} />
+                            <button
+                              onClick={() => handleToggleTool("compose")}
+                              className={`ab-left-strip-btn ${activeTool === "compose" ? "ab-left-strip-btn-active" : ""}`}
+                              title="Compose"
+                            >
+                              <Layers size={14} />
+                              <span>Comp</span>
+                            </button>
+                            <button
+                              onClick={() => setInfoOpen((p) => !p)}
+                              className={`ab-left-strip-btn ${infoOpen ? "ab-left-strip-btn-active" : ""}`}
+                              title="Info"
+                            >
+                              <InfoIcon size={14} />
+                              <span>Info</span>
+                            </button>
                           </div>
 
                           {sidebarOpen && (
@@ -328,36 +422,32 @@ export default function App() {
                               className="shrink-0 flex flex-col overflow-hidden"
                               style={{
                                 width: sidebarWidthRef.current,
-                                transition: sidebarResizing.current ? "none" : "width 0.15s ease-out",
+                                transition: "width 0.15s ease-out",
                                 borderRight: "1px solid rgba(20,184,166,0.08)",
                                 background: "rgba(5,5,16,0.55)",
                               }}
                             >
-                              {leftTab === "files" ? (
-                                <MetadataFileList
-                                  files={filteredMetadataFiles}
-                                  totalFiles={metadataFiles.length}
-                                  selectedId={selectedId}
-                                  onSelect={handleSelectFile}
-                                  onExportZip={handleExportZip}
-                                  collapsed={false}
-                                  onToggle={() => setSidebarOpen((p) => !p)}
-                                  isExporting={isExporting}
-                                  zipProgress={zipProgress}
-                                  downloaded={downloaded}
-                                  productTypes={productTypes}
-                                  customChips={filterState.customChips}
-                                  activeFilters={activeFilters}
-                                  filterMode={filterMode}
-                                  onToggleFilter={toggleFilter}
-                                  onToggleMode={toggleMode}
-                                  onClearFilters={clearAll}
-                                  onAddCustomChip={addCustomChip}
-                                  onRemoveCustomChip={removeCustomChip}
-                                />
-                              ) : (
-                                <SidebarPanels activeTab={leftTab} />
-                              )}
+                              <MetadataFileList
+                                files={filteredMetadataFiles}
+                                totalFiles={metadataFiles.length}
+                                selectedId={selectedId}
+                                onSelect={handleSelectFile}
+                                onExportZip={handleExportZip}
+                                collapsed={false}
+                                onToggle={() => setSidebarOpen((p) => !p)}
+                                isExporting={isExporting}
+                                zipProgress={zipProgress}
+                                downloaded={downloaded}
+                                productTypes={productTypes}
+                                customChips={filterState.customChips}
+                                activeFilters={activeFilters}
+                                filterMode={filterMode}
+                                onToggleFilter={toggleFilter}
+                                onToggleMode={toggleMode}
+                                onClearFilters={clearAll}
+                                onAddCustomChip={addCustomChip}
+                                onRemoveCustomChip={removeCustomChip}
+                              />
                             </div>
                           )}
 
@@ -366,7 +456,7 @@ export default function App() {
                           )}
 
                           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                            <MemoizedPreviewPanel />
+                            <MemoizedPreviewPanel activeTool={activeTool} />
                           </div>
                         </div>
 
@@ -378,16 +468,19 @@ export default function App() {
                             <div className="flex items-center gap-2.5 pointer-events-auto select-none">
                               <AstroLogo size={22} showText={false} className="opacity-40" />
                               <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
-                              <span className="text-[8px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.25)" }}>{APP_VERSION}</span>
+                              <span className="text-[9px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.55)" }}>{APP_VERSION}</span>
                             </div>
                             <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
                             {isComplete ? (
                               <button
-                                onClick={handleNewBatch}
+                                onClick={handleNewBatchClick}
                                 className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                                style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
+                                style={confirmNewBatch
+                                  ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "#fbbf24" }
+                                  : { background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
                               >
-                                <RotateCcw size={10} /> New Batch
+                                <RotateCcw size={10} />
+                                {confirmNewBatch ? `Discard ${stats.done} processed file${stats.done === 1 ? "" : "s"}?` : "New Batch"}
                               </button>
                             ) : (
                               <button
@@ -400,6 +493,34 @@ export default function App() {
                             )}
                           </div>
                         </div>
+
+                        {infoOpen && (
+                          <div
+                            className="fixed z-50 rounded-lg overflow-hidden flex flex-col animate-fade-in"
+                            style={{
+                              left: 60,
+                              bottom: 88,
+                              width: 300,
+                              maxHeight: "50vh",
+                              border: "1px solid rgba(20,184,166,0.2)",
+                              background: "rgba(8,8,18,0.97)",
+                              boxShadow: "0 8px 30px rgba(0,0,0,0.55)",
+                              backdropFilter: "blur(8px)",
+                            }}
+                          >
+                            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
+                              <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
+                                <InfoIcon size={12} style={{ color: "var(--ab-teal)" }} /> Info
+                              </span>
+                              <button onClick={() => setInfoOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                                <X size={12} />
+                              </button>
+                            </div>
+                            <div className="overflow-y-auto min-h-0">
+                              <InfoPanel />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </PreviewProvider>
                   </ComposeWizardProvider>

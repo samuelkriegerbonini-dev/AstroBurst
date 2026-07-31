@@ -63,20 +63,71 @@ pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -
         catmull_rom(fx - 1.0),
         catmull_rom(fx - 2.0),
     ];
+    let wy = [
+        catmull_rom(fy + 1.0),
+        catmull_rom(fy),
+        catmull_rom(fy - 1.0),
+        catmull_rom(fy - 2.0),
+    ];
 
     let mut val = 0.0f64;
+    let mut support_finite = true;
     for j in 0..4i64 {
         let r = clamp_index(iy + j - 1, rows);
         let row_off = r * cols;
         let mut row_val = 0.0f64;
         for i in 0..4i64 {
             let c = clamp_index(ix + i - 1, cols);
-            row_val += slice[row_off + c] as f64 * wx[i as usize];
+            let sample = slice[row_off + c] as f64;
+            support_finite &= sample.is_finite();
+            row_val += sample * wx[i as usize];
         }
-        val += row_val * catmull_rom(fy - (j - 1) as f64);
+        val += row_val * wy[j as usize];
     }
 
-    val as f32
+    if support_finite {
+        return val as f32;
+    }
+
+    bilinear_finite(slice, rows, cols, iy, ix, fx, fy)
+}
+
+#[inline]
+fn bilinear_finite(
+    slice: &[f32],
+    rows: usize,
+    cols: usize,
+    iy: i64,
+    ix: i64,
+    fx: f64,
+    fy: f64,
+) -> f32 {
+    let r0 = clamp_index(iy, rows);
+    let r1 = clamp_index(iy + 1, rows);
+    let c0 = clamp_index(ix, cols);
+    let c1 = clamp_index(ix + 1, cols);
+
+    let taps = [
+        (slice[r0 * cols + c0] as f64, (1.0 - fx) * (1.0 - fy)),
+        (slice[r0 * cols + c1] as f64, fx * (1.0 - fy)),
+        (slice[r1 * cols + c0] as f64, (1.0 - fx) * fy),
+        (slice[r1 * cols + c1] as f64, fx * fy),
+    ];
+
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (value, weight) in taps {
+        if value.is_finite() {
+            num += value * weight;
+            den += weight;
+        }
+    }
+
+    if den > 0.0 {
+        (num / den) as f32
+    } else {
+        f32::NAN
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +190,37 @@ mod tests {
         let data = vec![42.0f32; 64];
         let v = bicubic_sample(&data, 8, 8, 3.5, 4.7);
         assert!((v - 42.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_bicubic_single_nan_does_not_poison_neighborhood() {
+        let mut data = vec![100.0f32; 64];
+        data[4 * 8 + 4] = f32::NAN;
+        let v = bicubic_sample(&data, 8, 8, 2.5, 2.5);
+        assert!(v.is_finite(), "a distant NaN must not poison the sample");
+        assert!((v - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_bicubic_nan_in_support_falls_back_to_finite_bilinear() {
+        let mut data = vec![100.0f32; 64];
+        data[3 * 8 + 3] = f32::NAN;
+        let v = bicubic_sample(&data, 8, 8, 3.5, 3.5);
+        assert!(v.is_finite(), "fallback must skip the NaN tap, got {}", v);
+        assert!((v - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_bicubic_all_nan_support_returns_nan() {
+        let data = vec![f32::NAN; 64];
+        let v = bicubic_sample(&data, 8, 8, 3.5, 4.5);
+        assert!(v.is_nan());
+    }
+
+    #[test]
+    fn test_bicubic_finite_image_unchanged_by_nan_path() {
+        let data: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let v = bicubic_sample(&data, 10, 10, 3.0, 4.0);
+        assert!((v - 34.0).abs() < 1e-3);
     }
 }

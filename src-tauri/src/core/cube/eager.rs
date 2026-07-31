@@ -195,9 +195,12 @@ pub fn compute_global_stats(cube: &Array3<f32>) -> GlobalCubeStats {
     });
     let sigma = (deviations[dev_mid] * MAD_TO_SIGMA as f32).max(1e-10);
 
-    finite.sort_unstable_by(|a, b| f32_cmp(a, b));
-    let low = finite[(n as f64 * 0.01) as usize];
-    let high = finite[((n as f64 * 0.999) as usize).min(n - 1)];
+    let low_idx = (n as f64 * 0.01) as usize;
+    let high_idx = ((n as f64 * 0.999) as usize).min(n - 1);
+    finite.select_nth_unstable_by(low_idx, |a, b| f32_cmp(a, b));
+    let low = finite[low_idx];
+    finite.select_nth_unstable_by(high_idx, |a, b| f32_cmp(a, b));
+    let high = finite[high_idx];
 
     GlobalCubeStats {
         median,

@@ -80,8 +80,8 @@ export function useFileQueue() {
       try {
         const result = await processFitsFull(file.path);
         fileStore.fileDone(file.id, result);
-      } catch (err: any) {
-        const msg = err?.message || String(err);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         const isRetriable = !msg.includes("Calibration reference file")
           && !msg.includes("No such file")
           && !msg.includes("not found")
@@ -91,7 +91,7 @@ export function useFileQueue() {
           try {
             const result = await processFits(file.path);
             let header = null;
-            try { header = await getHeader(file.path); } catch {}
+            try { header = await getHeader(file.path); } catch (e) { console.warn(`[AstroBurst] Header fetch failed for ${file.path}:`, e); }
             fileStore.fileDone(file.id, { ...result, header });
             return;
           } catch {}
@@ -119,7 +119,9 @@ export function useFileQueue() {
       try {
         const result = await resampleFits(file.path, targetGroup.width, targetGroup.height);
         fileStore.fileResampled(file.id, result);
-      } catch {}
+      } catch (e) {
+        console.error(`[AstroBurst] Auto-resample failed for ${file.path}; stacking/blend may fail later:`, e);
+      }
       completed++;
       setResampleProgress(Math.round((completed / filesToResample.length) * 100));
       await yieldToUI();
@@ -147,44 +149,50 @@ export function useFileQueue() {
 
       await yieldToUI();
 
-      let hasWork = true;
-      while (hasWork) {
-        pendingKickRef.current = false;
-        const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
-        if (queue.length === 0) {
-          if (pendingKickRef.current) continue;
-          break;
+      for (;;) {
+        let hasWork = true;
+        while (hasWork) {
+          pendingKickRef.current = false;
+          const queue = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+          if (queue.length === 0) {
+            if (pendingKickRef.current) continue;
+            break;
+          }
+
+          let idx = 0;
+          let processedSinceYield = 0;
+          const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
+
+          const runNext = async (): Promise<void> => {
+            let file: ProcessedFile | null;
+            while ((file = getNext()) !== null) {
+              await processOneFile(file);
+              processedSinceYield++;
+              if (processedSinceYield >= YIELD_INTERVAL) {
+                processedSinceYield = 0;
+                await yieldToUI();
+              }
+            }
+          };
+
+          const workers = Array.from(
+            { length: Math.min(CONCURRENCY, queue.length) },
+            () => runNext(),
+          );
+          await Promise.all(workers);
+
+          const remaining = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+          hasWork = remaining.length > 0 || pendingKickRef.current;
         }
 
-        let idx = 0;
-        let processedSinceYield = 0;
-        const getNext = (): ProcessedFile | null => (idx >= queue.length ? null : queue[idx++]);
+        await runAutoResample();
 
-        const runNext = async (): Promise<void> => {
-          let file: ProcessedFile | null;
-          while ((file = getNext()) !== null) {
-            await processOneFile(file);
-            processedSinceYield++;
-            if (processedSinceYield >= YIELD_INTERVAL) {
-              processedSinceYield = 0;
-              await yieldToUI();
-            }
-          }
-        };
-
-        const workers = Array.from(
-          { length: Math.min(CONCURRENCY, queue.length) },
-          () => runNext(),
-        );
-        await Promise.all(workers);
-
-        const remaining = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
-        hasWork = remaining.length > 0 || pendingKickRef.current;
+        const queuedAfter = fileStore.getFiles().filter((f) => f.status === FILE_STATUS.QUEUED);
+        if (queuedAfter.length === 0) break;
       }
 
       processingRef.current = false;
       fileStore.setProcessing(false);
-      await runAutoResample();
 
       if (onComplete) onComplete();
     },

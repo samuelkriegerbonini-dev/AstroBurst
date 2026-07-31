@@ -46,17 +46,34 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       const completed: Record<string, boolean> = hasFiles
         ? { channels: true }
         : {};
-      return { ...state, bins: action.bins, completedSteps: completed };
+      const changedIds = new Set<string>();
+      const oldFilesById = new Map(state.bins.map((b) => [b.id, b.files.join("|")]));
+      for (const b of action.bins) {
+        const prev = oldFilesById.get(b.id);
+        if (prev === undefined ? b.files.length > 0 : prev !== b.files.join("|")) changedIds.add(b.id);
+      }
+      for (const b of state.bins) {
+        if (b.files.length > 0 && !action.bins.some((n) => n.id === b.id)) changedIds.add(b.id);
+      }
+      if (changedIds.size === 0) {
+        return { ...state, bins: action.bins, completedSteps: completed };
+      }
+      const stackedPaths = { ...state.stackedPaths };
+      for (const id of changedIds) delete stackedPaths[id];
+      const downstream = invalidateDownstream(state, "channels");
+      return { ...state, ...downstream, bins: action.bins, stackedPaths, completedSteps: completed };
     }
     case "SET_BLEND_WEIGHTS":
       return { ...state, blendWeights: action.weights, blendPreset: action.preset };
     case "SET_WB":
       return { ...state, wbMode: action.mode, wbR: action.r ?? state.wbR, wbG: action.g ?? state.wbG, wbB: action.b ?? state.wbB };
     case "SET_STACKED": {
-      return { ...state, stackedPaths: { ...state.stackedPaths, [action.channelId]: action.path } };
+      const downstream = invalidateDownstream(state, "stack");
+      return { ...state, ...downstream, stackedPaths: { ...state.stackedPaths, [action.channelId]: action.path } };
     }
     case "SET_BACKGROUND": {
-      return { ...state, backgroundPaths: { ...state.backgroundPaths, [action.channelId]: action.path } };
+      const downstream = invalidateDownstream(state, "background");
+      return { ...state, ...downstream, backgroundPaths: { ...state.backgroundPaths, [action.channelId]: action.path } };
     }
     case "SET_ALIGNED": {
       const downstream = invalidateDownstream(state, "align");

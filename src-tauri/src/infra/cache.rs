@@ -71,7 +71,7 @@ impl LruInner {
 
     fn entry_bytes(entry: &Arc<CachedImage>) -> usize {
         let (rows, cols) = entry.arr.dim();
-        rows * cols * std::mem::size_of::<f32>()
+        rows.saturating_mul(cols).saturating_mul(std::mem::size_of::<f32>())
     }
 
     fn next_gen(&self) -> u64 {
@@ -91,9 +91,9 @@ impl LruInner {
         key.starts_with("__composite") || key.starts_with("__wizard_ch_") || key == "__star_mask"
     }
 
-    fn evict_lru(&mut self) {
+    fn evict_lru(&mut self) -> bool {
         if self.map.is_empty() {
-            return;
+            return false;
         }
         let victim = self
             .map
@@ -103,27 +103,36 @@ impl LruInner {
             .map(|(k, _)| k.clone());
         if let Some(key) = victim {
             if let Some(removed) = self.map.remove(&key) {
-                self.current_bytes -= removed.byte_size;
+                self.current_bytes = self.current_bytes.saturating_sub(removed.byte_size);
+                return true;
             }
         }
+        false
     }
 
     fn put(&mut self, key: String, value: Arc<CachedImage>) {
         let new_bytes = Self::entry_bytes(&value);
 
         if let Some(old) = self.map.remove(&key) {
-            self.current_bytes -= old.byte_size;
+            self.current_bytes = self.current_bytes.saturating_sub(old.byte_size);
         }
 
         while (self.current_bytes + new_bytes > self.max_bytes
             || self.map.len() >= self.max_entries)
             && !self.map.is_empty()
         {
-            self.evict_lru();
+            if !self.evict_lru() {
+                log::warn!(
+                    "ImageCache: all remaining entries are pinned ({} entries, {} bytes); skipping eviction",
+                    self.map.len(),
+                    self.current_bytes,
+                );
+                break;
+            }
         }
 
         let gen = self.next_gen();
-        self.current_bytes += new_bytes;
+        self.current_bytes = self.current_bytes.saturating_add(new_bytes);
         self.map.insert(
             key,
             LruEntry {
@@ -417,6 +426,24 @@ mod tests {
         cache.invalidate("a");
         assert_eq!(cache.len(), 0);
         assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn test_pinned_only_does_not_infinite_loop() {
+        let cache = ImageCache::new(2, usize::MAX);
+        cache
+            .get_or_load("__composite_r", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        cache
+            .get_or_load("__composite_g", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        cache
+            .get_or_load("__composite_b", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        assert_eq!(cache.len(), 3);
+        assert!(cache.get("__composite_r").is_some());
+        assert!(cache.get("__composite_g").is_some());
+        assert!(cache.get("__composite_b").is_some());
     }
 
     #[test]

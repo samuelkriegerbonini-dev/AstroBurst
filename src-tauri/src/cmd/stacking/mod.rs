@@ -3,4 +3,5 @@ mod drizzle;
 mod pipeline;
 
 pub use combine::*;
+pub use drizzle::*;
 pub use pipeline::*;
