@@ -377,7 +377,7 @@ function MetadataFileList({
         >
           <PanelLeftOpen size={16} />
         </button>
-        <div className="w-px flex-1" style={{ background: "rgba(20,184,166,0.08)" }} />
+        <div className="w-px flex-1" style={{ background: "var(--ab-border)" }} />
         <div className="flex flex-col items-center gap-1">
           <FolderOpen size={14} className="text-zinc-600" />
           <span

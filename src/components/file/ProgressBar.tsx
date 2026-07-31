@@ -40,14 +40,14 @@ function ProgressBar({
 
   if (indeterminate) {
     return (
-      <div className={`${height} w-full rounded-full overflow-hidden ${className}`} style={{ background: "rgba(20,184,166,0.08)" }}>
+      <div className={`${height} w-full rounded-full overflow-hidden ${className}`} style={{ background: "rgba(255,255,255,0.06)" }}>
         <div className={`h-full w-1/3 cosmic-progress rounded-full animate-shimmer`} />
       </div>
     );
   }
 
   return (
-    <div className={`${height} w-full rounded-full overflow-hidden ${className}`} style={{ background: "rgba(20,184,166,0.08)" }}>
+    <div className={`${height} w-full rounded-full overflow-hidden ${className}`} style={{ background: "rgba(255,255,255,0.06)" }}>
       <div
         className={`h-full w-full ${colorClass} rounded-full ${glowClass}`}
         style={{

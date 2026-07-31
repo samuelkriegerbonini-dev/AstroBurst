@@ -42,7 +42,7 @@ function MiniInfoBar() {
   return (
     <div
       className="flex items-center gap-3 px-3 py-1 text-[9px] font-mono overflow-x-auto scrollbar-hide shrink-0"
-      style={{ borderBottom: "1px solid rgba(20,184,166,0.06)", background: "rgba(20,184,166,0.02)" }}
+      style={{ borderBottom: "1px solid var(--ab-border)", background: "rgba(255,255,255,0.02)" }}
     >
       {file.result?.dimensions && (
         <span className="text-zinc-500 shrink-0">
@@ -54,7 +54,7 @@ function MiniInfoBar() {
           <span className="text-zinc-600 shrink-0">
             mean={histData.mean?.toFixed(2)} median={histData.median?.toFixed(2)} &sigma;={histData.sigma?.toFixed(2)}
           </span>
-          <span style={{ color: "rgba(20,184,166,0.2)" }}>|</span>
+          <span style={{ color: "var(--ab-border-strong)" }}>|</span>
           <span className="shrink-0">
             <span style={{ color: "rgba(239,68,68,0.5)" }}>S={stfParams.shadow.toFixed(4)}</span>
             {" "}
@@ -66,7 +66,7 @@ function MiniInfoBar() {
       )}
       {file.result?.header && (
         <>
-          <span style={{ color: "rgba(20,184,166,0.2)" }}>|</span>
+          <span style={{ color: "var(--ab-border-strong)" }}>|</span>
           <span className="text-zinc-600 truncate shrink-0">
             {[
               file.result.header.TELESCOP,

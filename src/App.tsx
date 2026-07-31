@@ -1,5 +1,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
-import { Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X } from "lucide-react";
+import {
+  Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X, Search,
+  FileText, BarChart3, Sparkles, Layers2, FlaskConical, Download, Settings, PanelLeftClose,
+} from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
@@ -25,6 +28,9 @@ import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
+import { loadLayout, saveLayout } from "./utils/layout";
+import CommandPalette, { type PaletteAction, type PaletteFile } from "./components/CommandPalette";
+import { useRightTool, rightToolStore, RIGHT_TOOLS, type RightToolId } from "./hooks/useRightTool";
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
@@ -35,11 +41,22 @@ type ViewState = "empty" | "processing" | "complete";
 const MemoizedPreviewPanel = memo(PreviewPanel);
 
 const SIDEBAR_DEFAULT = 300;
+const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 480;
 
 const LEFT_TABS: { id: "files"; label: string; icon: typeof FolderOpen }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
 ];
+
+const TOOL_ICONS: Record<RightToolId, typeof FileText> = {
+  headers: FileText,
+  analysis: BarChart3,
+  processing: Sparkles,
+  stacking: Layers2,
+  synth: FlaskConical,
+  export: Download,
+  config: Settings,
+};
 
 function toMetadataFiles(
   fileIds: string[],
@@ -85,11 +102,12 @@ export default function App() {
   const prevCompleteRef = useRef(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT);
+  const sidebarWidthRef = useRef(loadLayout("sidebarW", SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX));
   const sidebarResizing = useRef(false);
   const sidebarStartX = useRef(0);
   const sidebarStartW = useRef(0);
   const sidebarElRef = useRef<HTMLDivElement>(null);
+  const sidebarInnerRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
   const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
@@ -170,6 +188,8 @@ export default function App() {
   }, [handleFilesAdded]);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const lastShiftUp = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
@@ -177,6 +197,12 @@ export default function App() {
         handleBrowseFiles();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPaletteOpen((p) => !p);
+        return;
+      }
+      if (e.key !== "Shift") lastShiftUp.current = 0;
       const target = e.target as HTMLElement | null;
       const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target?.isContentEditable ?? false);
       if (inInput) return;
@@ -185,10 +211,27 @@ export default function App() {
         setShortcutsOpen((p) => !p);
         return;
       }
-      if (e.key === "Escape") setShortcutsOpen(false);
+      if (e.key === "Escape") {
+        setShortcutsOpen(false);
+        setPaletteOpen(false);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== "Shift") return;
+      const now = Date.now();
+      if (now - lastShiftUp.current < 350) {
+        lastShiftUp.current = 0;
+        setPaletteOpen((p) => !p);
+      } else {
+        lastShiftUp.current = now;
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [handleBrowseFiles]);
 
   const handleSelectFolder = useCallback(async () => {
@@ -282,19 +325,25 @@ export default function App() {
     sidebarStartW.current = sidebarWidthRef.current;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
+    const handle = e.currentTarget as HTMLElement;
+    handle.dataset.dragging = "true";
     const el = sidebarElRef.current;
+    const inner = sidebarInnerRef.current;
     if (el) el.style.transition = "none";
     const onMove = (ev: MouseEvent) => {
       if (!sidebarResizing.current) return;
-      const next = Math.max(180, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
+      const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
       sidebarWidthRef.current = next;
       if (el) el.style.width = `${next}px`;
+      if (inner) inner.style.width = `${next}px`;
     };
     const onUp = () => {
       sidebarResizing.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      delete handle.dataset.dragging;
       if (el) el.style.transition = "";
+      saveLayout("sidebarW", sidebarWidthRef.current);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       forceSidebarRender((c) => c + 1);
@@ -303,10 +352,62 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   }, [sidebarOpen]);
 
+  const handleSidebarResizeReset = useCallback(() => {
+    sidebarWidthRef.current = SIDEBAR_DEFAULT;
+    saveLayout("sidebarW", SIDEBAR_DEFAULT);
+    const el = sidebarElRef.current;
+    if (el) el.style.width = `${SIDEBAR_DEFAULT}px`;
+    const inner = sidebarInnerRef.current;
+    if (inner) inner.style.width = `${SIDEBAR_DEFAULT}px`;
+    forceSidebarRender((c) => c + 1);
+  }, []);
+
+  const rightTool = useRightTool();
+  const paletteActions = useMemo<PaletteAction[]>(() => {
+    const acts: PaletteAction[] = [
+      { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
+      { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
+    ];
+    if (view !== "empty") {
+      acts.push(
+        { id: "toggle-sidebar", label: sidebarOpen ? "Hide Files Panel" : "Show Files Panel", icon: PanelLeftClose, run: () => setSidebarOpen((p) => !p) },
+        { id: "toggle-compose", label: activeTool === "compose" ? "Hide Compose Panel" : "Show Compose Panel", icon: Layers, run: () => handleToggleTool("compose") },
+      );
+      for (const t of RIGHT_TOOLS) {
+        acts.push({
+          id: `tool-${t.id}`,
+          label: rightTool === t.id ? `Hide ${t.label} Panel` : `Open ${t.label} Panel`,
+          hint: "Tool",
+          icon: TOOL_ICONS[t.id],
+          run: () => rightToolStore.toggle(t.id),
+        });
+      }
+      if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: handleExportZip });
+      if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", icon: RotateCcw, run: handleNewBatch });
+    }
+    acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
+    return acts;
+  }, [view, sidebarOpen, activeTool, rightTool, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleToggleTool, handleExportZip, handleNewBatch]);
+
+  const paletteFiles = useMemo<PaletteFile[]>(
+    () => filteredMetadataFiles
+      .filter((f) => f.status === "done")
+      .map((f) => ({ id: f.id, name: f.name, filter: f.metadata?.filter })),
+    [filteredMetadataFiles],
+  );
+
   return (
     <ErrorBoundary>
       <div className="relative h-screen w-full text-zinc-100 overflow-hidden" style={{ background: "var(--ab-deep)" }}>
         {showConfetti && <Confetti show />}
+        <CommandPalette
+          open={paletteOpen}
+          onClose={() => setPaletteOpen(false)}
+          actions={paletteActions}
+          files={paletteFiles}
+          selectedId={selectedId}
+          onSelectFile={handleSelectFile}
+        />
         {shortcutsOpen && (
           <div
             className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm"
@@ -314,7 +415,7 @@ export default function App() {
           >
             <div
               className="rounded-lg p-4 min-w-[300px] animate-fade-in"
-              style={{ background: "rgba(8,8,18,0.97)", border: "1px solid rgba(20,184,166,0.2)", boxShadow: "0 8px 30px rgba(0,0,0,0.55)" }}
+              style={{ background: "rgba(8,8,18,0.97)", border: "1px solid var(--ab-border-strong)", boxShadow: "0 8px 30px rgba(0,0,0,0.55)" }}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-3">
@@ -326,6 +427,8 @@ export default function App() {
               <div className="flex flex-col gap-1.5 text-[11px]">
                 {[
                   { keys: navigator.platform?.toLowerCase().includes("mac") ? "⌘O" : "Ctrl+O", desc: "Open FITS files" },
+                  { keys: navigator.platform?.toLowerCase().includes("mac") ? "⌘K" : "Ctrl+K", desc: "Search everywhere" },
+                  { keys: "Shift Shift", desc: "Search everywhere" },
                   { keys: "↑ / ↓", desc: "Navigate file list (when focused)" },
                   { keys: "Enter", desc: "Select focused file" },
                   { keys: "?", desc: "Toggle this help" },
@@ -367,8 +470,8 @@ export default function App() {
                         <div
                           className="px-4 py-2 shrink-0 space-y-1.5"
                           style={{
-                            background: "linear-gradient(90deg, rgba(20,184,166,0.03) 0%, rgba(5,5,16,0.65) 50%, rgba(59,130,246,0.03) 100%)",
-                            borderBottom: "1px solid rgba(20,184,166,0.1)",
+                            background: "rgba(5,5,16,0.65)",
+                            borderBottom: "1px solid var(--ab-border)",
                           }}
                         >
                           <StatsBar stats={stats} isProcessing={isProcessing} isComplete={isComplete} />
@@ -397,7 +500,7 @@ export default function App() {
                                 </button>
                               );
                             })}
-                            <div className="my-1 mx-2 h-px" style={{ background: "rgba(20,184,166,0.12)" }} />
+                            <div className="my-1 mx-2 h-px" style={{ background: "var(--ab-border)" }} />
                             <button
                               onClick={() => handleToggleTool("compose")}
                               className={`ab-left-strip-btn ${activeTool === "compose" ? "ab-left-strip-btn-active" : ""}`}
@@ -416,14 +519,19 @@ export default function App() {
                             </button>
                           </div>
 
-                          {sidebarOpen && (
+                          <div
+                            ref={sidebarElRef}
+                            className="shrink-0 relative overflow-hidden ab-panel-anim-w"
+                            style={{ width: sidebarOpen ? sidebarWidthRef.current : 0 }}
+                            aria-hidden={!sidebarOpen}
+                          >
                             <div
-                              ref={sidebarElRef}
-                              className="shrink-0 flex flex-col overflow-hidden"
+                              ref={sidebarInnerRef}
+                              inert={!sidebarOpen}
+                              className="absolute inset-y-0 right-0 flex flex-col overflow-hidden"
                               style={{
                                 width: sidebarWidthRef.current,
-                                transition: "width 0.15s ease-out",
-                                borderRight: "1px solid rgba(20,184,166,0.08)",
+                                borderRight: "1px solid var(--ab-border)",
                                 background: "rgba(5,5,16,0.55)",
                               }}
                             >
@@ -449,10 +557,15 @@ export default function App() {
                                 onRemoveCustomChip={removeCustomChip}
                               />
                             </div>
-                          )}
+                          </div>
 
                           {sidebarOpen && (
-                            <div className="ab-resize-handle" onMouseDown={handleSidebarResizeStart} />
+                            <div
+                              className="ab-resize-handle"
+                              onMouseDown={handleSidebarResizeStart}
+                              onDoubleClick={handleSidebarResizeReset}
+                              title="Drag to resize — double-click to reset"
+                            />
                           )}
 
                           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
@@ -462,7 +575,7 @@ export default function App() {
 
                         <div
                           className="px-4 py-1.5 flex items-center justify-between shrink-0"
-                          style={{ borderTop: "1px solid rgba(20,184,166,0.06)", background: "rgba(5,5,16,0.6)" }}
+                          style={{ borderTop: "1px solid var(--ab-border)", background: "rgba(5,5,16,0.6)" }}
                         >
                           <div className="flex items-center gap-3">
                             <div className="flex items-center gap-2.5 pointer-events-auto select-none">
@@ -470,14 +583,14 @@ export default function App() {
                               <span className="text-[10px] font-bold tracking-[0.25em] uppercase cosmic-text" style={{ opacity: 0.6 }}>AstroBurst</span>
                               <span className="text-[9px] font-mono uppercase" style={{ color: "rgba(20,184,166,0.55)" }}>{APP_VERSION}</span>
                             </div>
-                            <div className="w-px h-3" style={{ background: "rgba(20,184,166,0.08)" }} />
+                            <div className="w-px h-3" style={{ background: "var(--ab-border)" }} />
                             {isComplete ? (
                               <button
                                 onClick={handleNewBatchClick}
                                 className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
                                 style={confirmNewBatch
                                   ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "#fbbf24" }
-                                  : { background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.15)", color: "#a1a1aa" }}
+                                  : { background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
                               >
                                 <RotateCcw size={10} />
                                 {confirmNewBatch ? `Discard ${stats.done} processed file${stats.done === 1 ? "" : "s"}?` : "New Batch"}
@@ -486,11 +599,31 @@ export default function App() {
                               <button
                                 onClick={handleBrowseFiles}
                                 className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                                style={{ background: "rgba(20,184,166,0.06)", border: "1px solid rgba(20,184,166,0.1)", color: "#a1a1aa" }}
+                                style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
                               >
                                 <Plus size={11} /> Add FITS
                               </button>
                             )}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => setPaletteOpen(true)}
+                              title="Search everywhere (Ctrl+K or double Shift)"
+                              className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] transition-colors text-zinc-500 hover:text-zinc-300"
+                              style={{ background: "transparent", border: "none" }}
+                            >
+                              <Search size={10} />
+                              Search
+                              <kbd className="ab-cmdp-kbd">Ctrl+K</kbd>
+                            </button>
+                            <button
+                              onClick={() => setShortcutsOpen(true)}
+                              title="Keyboard shortcuts (?)"
+                              className="px-2 py-1 rounded text-[10px] transition-colors text-zinc-500 hover:text-zinc-300"
+                              style={{ background: "transparent", border: "none" }}
+                            >
+                              <kbd className="ab-cmdp-kbd">?</kbd>
+                            </button>
                           </div>
                         </div>
 
@@ -502,13 +635,13 @@ export default function App() {
                               bottom: 88,
                               width: 300,
                               maxHeight: "50vh",
-                              border: "1px solid rgba(20,184,166,0.2)",
+                              border: "1px solid var(--ab-border-strong)",
                               background: "rgba(8,8,18,0.97)",
                               boxShadow: "0 8px 30px rgba(0,0,0,0.55)",
                               backdropFilter: "blur(8px)",
                             }}
                           >
-                            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
+                            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid var(--ab-border)" }}>
                               <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
                                 <InfoIcon size={12} style={{ color: "var(--ab-teal)" }} /> Info
                               </span>

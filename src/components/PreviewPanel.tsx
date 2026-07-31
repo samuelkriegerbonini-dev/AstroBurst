@@ -12,6 +12,9 @@ import { useMousePixelActions, setMousePixel, emitPixelClick, usePixelClick } fr
 import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum } from "../hooks/useSpectrumStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { useProgress } from "../hooks/useProgress";
+import { loadLayout, saveLayout } from "../utils/layout";
+import { useRightTool, rightToolStore } from "../hooks/useRightTool";
+import type { ToolId, RightToolId } from "../hooks/useRightTool";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
 const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
@@ -23,8 +26,7 @@ const ExportTab = lazy(() => import("./export/ExportTab"));
 const AnalysisTab = lazy(() => import("./analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("./header/HeadersTab"));
 
-export type ToolId = "compose" | "processing" | "stacking" | "synth" | "config" | "export" | "headers" | "analysis";
-export type RightToolId = Exclude<ToolId, "compose">;
+export type { ToolId, RightToolId };
 
 interface ToolDef {
   id: RightToolId;
@@ -50,6 +52,10 @@ const BOTTOM_STRIP_TOOLS: ToolDef[] = [
 const BOTTOM_MIN = 140;
 const BOTTOM_MAX = 600;
 const BOTTOM_DEFAULT = 280;
+
+const RIGHT_MIN = 280;
+const RIGHT_MAX = 640;
+const RIGHT_DEFAULT = 380;
 
 const gpuSupported = typeof navigator !== "undefined" && !!navigator.gpu;
 
@@ -112,10 +118,28 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const [gpuProbing, setGpuProbing] = useState(true);
   const [gpuReason, setGpuReason] = useState<string | null>(null);
   const [, forceRender] = useState(0);
-  const [rightTool, setRightTool] = useState<RightToolId | null>(null);
+  const rightTool = useRightTool();
   const toggleRightTool = useCallback((id: RightToolId) => {
-    setRightTool((prev) => (prev === id ? null : id));
+    rightToolStore.toggle(id);
   }, []);
+
+  const [rightMounted, setRightMounted] = useState(false);
+  const lastToolRef = useRef<RightToolId | null>(null);
+  if (rightTool) lastToolRef.current = rightTool;
+  const displayTool = rightTool ?? lastToolRef.current;
+  useEffect(() => { if (rightTool) setRightMounted(true); }, [rightTool]);
+  const handleRightTransitionEnd = useCallback((e: React.TransitionEvent) => {
+    if (e.target !== e.currentTarget || e.propertyName !== "width") return;
+    if (!rightTool) setRightMounted(false);
+  }, [rightTool]);
+
+  const bottomOpen = activeTool === "compose";
+  const [bottomMounted, setBottomMounted] = useState(false);
+  useEffect(() => { if (bottomOpen) setBottomMounted(true); }, [bottomOpen]);
+  const handleBottomTransitionEnd = useCallback((e: React.TransitionEvent) => {
+    if (e.target !== e.currentTarget || e.propertyName !== "height") return;
+    if (!bottomOpen) setBottomMounted(false);
+  }, [bottomOpen]);
 
   const prevFileIdRef = useRef<string | null>(null);
   const prevCompositeUrlRef = useRef<string | null>(null);
@@ -128,11 +152,19 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const isFileRgbView = isRgbView && !!file?.result?.is_rgb && compositePreviewUrl === (file?.result?.previewUrl ?? null);
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
 
-  const bottomHeightRef = useRef(BOTTOM_DEFAULT);
+  const bottomHeightRef = useRef(loadLayout("bottomH", BOTTOM_DEFAULT, BOTTOM_MIN, BOTTOM_MAX));
   const bottomElRef = useRef<HTMLDivElement>(null);
+  const bottomOuterRef = useRef<HTMLDivElement>(null);
   const bResizing = useRef(false);
   const bStartY = useRef(0);
   const bStartH = useRef(0);
+
+  const rightWidthRef = useRef(loadLayout("rightW", RIGHT_DEFAULT, RIGHT_MIN, RIGHT_MAX));
+  const rightElRef = useRef<HTMLDivElement>(null);
+  const rightOuterRef = useRef<HTMLDivElement>(null);
+  const rResizing = useRef(false);
+  const rStartX = useRef(0);
+  const rStartW = useRef(0);
 
   useEffect(() => { probeGpu().then(() => { setGpuAvailable(isGpuAvailable() === true); setGpuReason(getGpuReason()); setGpuProbing(false); }); }, []);
 
@@ -286,23 +318,85 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     bStartH.current = bottomHeightRef.current;
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
+    const handle = e.currentTarget as HTMLElement;
+    handle.dataset.dragging = "true";
     const el = bottomElRef.current;
+    const outer = bottomOuterRef.current;
+    if (outer) outer.style.transition = "none";
     const onMove = (ev: MouseEvent) => {
       if (!bResizing.current) return;
       const next = Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, bStartH.current - (ev.clientY - bStartY.current)));
       bottomHeightRef.current = next;
       if (el) el.style.height = `${next}px`;
+      if (outer) outer.style.height = `${next}px`;
     };
     const onUp = () => {
       bResizing.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      delete handle.dataset.dragging;
+      if (outer) outer.style.transition = "";
+      saveLayout("bottomH", bottomHeightRef.current);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       forceRender((c) => c + 1);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  }, []);
+
+  const handleBottomReset = useCallback(() => {
+    bottomHeightRef.current = BOTTOM_DEFAULT;
+    saveLayout("bottomH", BOTTOM_DEFAULT);
+    const el = bottomElRef.current;
+    if (el) el.style.height = `${BOTTOM_DEFAULT}px`;
+    const outer = bottomOuterRef.current;
+    if (outer) outer.style.height = `${BOTTOM_DEFAULT}px`;
+    forceRender((c) => c + 1);
+  }, []);
+
+  const handleRightResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    rResizing.current = true;
+    rStartX.current = e.clientX;
+    rStartW.current = rightWidthRef.current;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const handle = e.currentTarget as HTMLElement;
+    handle.dataset.dragging = "true";
+    const el = rightElRef.current;
+    const outer = rightOuterRef.current;
+    if (outer) outer.style.transition = "none";
+    const onMove = (ev: MouseEvent) => {
+      if (!rResizing.current) return;
+      const next = Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, rStartW.current - (ev.clientX - rStartX.current)));
+      rightWidthRef.current = next;
+      if (el) el.style.width = `min(${next}px, 60vw)`;
+      if (outer) outer.style.width = `min(${next}px, 60vw)`;
+    };
+    const onUp = () => {
+      rResizing.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      delete handle.dataset.dragging;
+      if (outer) outer.style.transition = "";
+      saveLayout("rightW", rightWidthRef.current);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      forceRender((c) => c + 1);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
+  const handleRightReset = useCallback(() => {
+    rightWidthRef.current = RIGHT_DEFAULT;
+    saveLayout("rightW", RIGHT_DEFAULT);
+    const el = rightElRef.current;
+    if (el) el.style.width = `min(${RIGHT_DEFAULT}px, 60vw)`;
+    const outer = rightOuterRef.current;
+    if (outer) outer.style.width = `min(${RIGHT_DEFAULT}px, 60vw)`;
+    forceRender((c) => c + 1);
   }, []);
 
   const originalImage = useMemo(() => {
@@ -323,7 +417,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     <div className="flex h-full overflow-hidden">
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
-        <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "linear-gradient(90deg, rgba(20,184,166,0.04) 0%, rgba(5,5,16,0.6) 50%, rgba(59,130,246,0.04) 100%)", borderBottom: "1px solid rgba(20,184,166,0.12)" }}>
+        <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "rgba(5,5,16,0.6)", borderBottom: "1px solid var(--ab-border)" }}>
           <div className="flex items-center gap-2 shrink-0">
             <Image size={12} style={{ color: "var(--ab-teal)" }} />
             <span className="text-[11px] font-medium text-zinc-300">Preview</span>
@@ -374,33 +468,75 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
           )}
         </div>
 
-        {file && activeTool === "compose" && (
+        {file && (
           <>
-            <div className="ab-resize-handle-h" onMouseDown={handleBottomResize} />
+            {bottomOpen && (
+              <div
+                className="ab-resize-handle-h"
+                onMouseDown={handleBottomResize}
+                onDoubleClick={handleBottomReset}
+                title="Drag to resize — double-click to reset"
+              />
+            )}
             <div
-              ref={bottomElRef}
-              className="ab-bottom-panel"
-              style={{ height: bottomHeightRef.current }}
+              ref={bottomOuterRef}
+              className="shrink-0 relative overflow-hidden ab-panel-anim-h"
+              style={{ height: bottomOpen ? bottomHeightRef.current : 0 }}
+              onTransitionEnd={handleBottomTransitionEnd}
+              aria-hidden={!bottomOpen}
             >
-              <Suspense fallback={<TabSpinner />}>
-                <ComposeWizard />
-              </Suspense>
+              <div
+                ref={bottomElRef}
+                inert={!bottomOpen}
+                className="ab-bottom-panel absolute inset-x-0 bottom-0"
+                style={{ height: bottomHeightRef.current }}
+              >
+                {(bottomOpen || bottomMounted) && (
+                  <Suspense fallback={<TabSpinner />}>
+                    <ComposeWizard />
+                  </Suspense>
+                )}
+              </div>
             </div>
           </>
         )}
       </div>
 
-      {file && rightTool && (
-        <div
-          className="shrink-0 flex flex-col overflow-hidden"
-          style={{ width: "min(380px, 42vw)", borderLeft: "1px solid rgba(20,184,166,0.08)", background: "rgba(5,5,16,0.55)" }}
-        >
-          <div className="flex-1 overflow-y-auto min-h-0">
-            <Suspense fallback={<TabSpinner />}>
-              <RightToolContent toolId={rightTool} starOverlayRef={starOverlayRef} />
-            </Suspense>
+      {file && (
+        <>
+          {rightTool && (
+            <div
+              className="ab-resize-handle"
+              onMouseDown={handleRightResize}
+              onDoubleClick={handleRightReset}
+              title="Drag to resize — double-click to reset"
+            />
+          )}
+          <div
+            ref={rightOuterRef}
+            className="shrink-0 relative overflow-hidden ab-panel-anim-w"
+            style={{ width: rightTool ? `min(${rightWidthRef.current}px, 60vw)` : 0 }}
+            onTransitionEnd={handleRightTransitionEnd}
+            aria-hidden={!rightTool}
+          >
+            <div
+              ref={rightElRef}
+              inert={!rightTool}
+              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden"
+              style={{ width: `min(${rightWidthRef.current}px, 60vw)`, borderLeft: "1px solid var(--ab-border)", background: "rgba(5,5,16,0.55)" }}
+            >
+              <div className="flex-1 overflow-y-auto min-h-0">
+                {(rightTool || rightMounted) && displayTool && (
+                  <div key={displayTool} className="ab-tool-fade">
+                    <Suspense fallback={<TabSpinner />}>
+                      <RightToolContent toolId={displayTool} starOverlayRef={starOverlayRef} />
+                    </Suspense>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       {file && (

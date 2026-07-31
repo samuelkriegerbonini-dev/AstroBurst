@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Search Everywhere** command palette (`Ctrl+K` / double `Shift`, IntelliJ-style): fuzzy search over processed files, tool panels (Headers/Analysis/Processing/Stacking/Synth/Export/Settings), and actions (open files/folder, toggle panels, ZIP export, new batch); full keyboard navigation, status-bar entry point
+- Right tool panel is now resizable (280–640px); all splitter positions (sidebar, right panel, compose panel height) persist across sessions via `localStorage` (`src/utils/layout.ts`)
+- IntelliJ-style splitters: zero-width in layout with a 7px grab area, accent highlight on hover (delayed) and while dragging, double-click resets to the default size
+- Tool windows (Files sidebar, right tool panel, Compose bottom panel) animate open/close (200ms slide, content anchored to its edge); hidden panels are `inert` and unmount after the transition; tool switches cross-fade
+- `prefers-reduced-motion` support: all animations/transitions collapse to instants
 - Flatpak/Flathub submission (PR pending approval)
 - Export panel accessible from PreviewPanel bottom strip (Download icon, lazy-loaded ExportTab)
 - WCS engine replaced with the [wcs](https://github.com/cds-astro/wcs-rs) crate (wcs-rs + mapproj), expanding projection support from TAN/SIN/ARC/CAR to ~20 FITS projections (adds STG, ZEA, ZPN, AIR, AZP, SZP, CYP, CEA, MER, SFL, PAR, MOL, AIT, conic COP/COD/COE/COO, HPX) and proper CD/PC/CDELT matrix handling; `WcsTransform`'s public API is unchanged, SIP distortion is still applied by AstroBurst's own math (see Fixed)
@@ -39,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apply_tone_composite_cmd` reads from `COMPOSITE_KEY` and renders preview only (no cache write), preserving linear calibrated data
 
 ### Changed
+- **IntelliJ-style neutral chrome**: structural borders, separators, panel headers, scrollbars and progress tracks moved from teal-tinted literals to neutral semantic tokens (`--ab-border`, `--ab-bg-hover`, `--ab-bg-active`, `--ab-text-1..4`); the teal accent is now reserved for interactive states (active tool, selection, focus, actions)
+- Flat headers: preview/app header gradients replaced with flat panel surfaces; strip buttons use a neutral active background with accent-colored icon/label
 - ExportStep detects STF identity (`Math.abs(midtone - 0.5) > 1e-4`) before composite PNG export; sends `applyStfStretch: false` when identity, activating backend auto-stretch
 
 ## [0.5.5] - 2026-06-26

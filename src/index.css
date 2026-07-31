@@ -21,9 +21,27 @@
   --ab-green: #10b981;
   --ab-deep: #050510;
   --ab-surface: rgba(12, 12, 28, 0.7);
-  --ab-border: rgba(20, 184, 166, 0.1);
-  --ab-border-strong: rgba(20, 184, 166, 0.2);
   --ab-glow-teal: rgba(20, 184, 166, 0.35);
+
+  /* ── IntelliJ-style neutral chrome ──
+     Structural separators/surfaces are neutral; the teal accent is
+     reserved for interactive states (active, selected, focus). */
+  --ab-border: rgba(255, 255, 255, 0.07);
+  --ab-border-strong: rgba(255, 255, 255, 0.13);
+  --ab-bg-panel: rgba(8, 9, 18, 0.72);
+  --ab-bg-raised: rgba(18, 19, 30, 0.85);
+  --ab-bg-hover: rgba(255, 255, 255, 0.05);
+  --ab-bg-active: rgba(255, 255, 255, 0.09);
+
+  --ab-accent: var(--ab-teal);
+  --ab-accent-bg: rgba(20, 184, 166, 0.1);
+  --ab-accent-bg-strong: rgba(20, 184, 166, 0.18);
+  --ab-accent-border: rgba(20, 184, 166, 0.35);
+
+  --ab-text-1: #e3e5e8;
+  --ab-text-2: #a8abb3;
+  --ab-text-3: #71717a;
+  --ab-text-4: #52525b;
 
   --ab-emerald: #10b981;
   --ab-sky: #0ea5e9;
@@ -36,7 +54,9 @@
   --ab-radius-md: 8px;
   --ab-radius-lg: 12px;
 
-  --ab-transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ab-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ab-transition: 150ms var(--ab-ease);
+  --ab-panel-transition: 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 * {
@@ -96,13 +116,13 @@ img,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(20, 184, 166, 0.4);
+  background: rgba(255, 255, 255, 0.14);
   border-radius: 3px;
   transition: background var(--ab-transition);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(20, 184, 166, 0.6);
+  background: rgba(255, 255, 255, 0.26);
 }
 
 ::-webkit-scrollbar-corner {
@@ -494,7 +514,7 @@ img,
   justify-content: space-between;
   padding: 6px 12px;
   border-bottom: 1px solid var(--ab-border);
-  background: rgba(20, 184, 166, 0.02);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 /* ─── Compose step pills ─── */
@@ -680,30 +700,82 @@ img,
   transform: scale(0.98);
 }
 
-/* ─── Resize handles ─── */
+/* ─── Resize handles (IntelliJ-style splitters) ───
+   Zero-width in layout; a 7px invisible hit area straddles the adjacent
+   1px border, and a 3px accent line fades in on hover (delayed, like
+   IDE splitters) or instantly while dragging. */
 
-.ab-resize-handle {
-  width: 3px;
+.ab-resize-handle,
+.ab-resize-handle-h {
+  position: relative;
   flex-shrink: 0;
-  cursor: col-resize;
   background: transparent;
-  transition: background var(--ab-transition);
+  z-index: 20;
 }
 
-.ab-resize-handle:hover {
-  background: rgba(20, 184, 166, 0.3);
+.ab-resize-handle {
+  width: 0;
+  cursor: col-resize;
 }
 
 .ab-resize-handle-h {
-  height: 3px;
-  flex-shrink: 0;
+  height: 0;
   cursor: row-resize;
-  background: transparent;
-  transition: background var(--ab-transition);
 }
 
-.ab-resize-handle-h:hover {
-  background: rgba(20, 184, 166, 0.3);
+.ab-resize-handle::before,
+.ab-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.ab-resize-handle::before {
+  left: -3px;
+  right: -4px;
+}
+
+.ab-resize-handle::after {
+  left: -2px;
+  right: -1px;
+  background: var(--ab-accent);
+  opacity: 0;
+  transition: opacity 120ms var(--ab-ease) 150ms;
+  pointer-events: none;
+}
+
+.ab-resize-handle-h::before,
+.ab-resize-handle-h::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.ab-resize-handle-h::before {
+  top: -3px;
+  bottom: -4px;
+}
+
+.ab-resize-handle-h::after {
+  top: -2px;
+  bottom: -1px;
+  background: var(--ab-accent);
+  opacity: 0;
+  transition: opacity 120ms var(--ab-ease) 150ms;
+  pointer-events: none;
+}
+
+.ab-resize-handle:hover::after,
+.ab-resize-handle-h:hover::after {
+  opacity: 0.4;
+}
+
+.ab-resize-handle[data-dragging="true"]::after,
+.ab-resize-handle-h[data-dragging="true"]::after {
+  opacity: 0.75;
+  transition-delay: 0ms;
 }
 
 /* ─── Select dropdown ─── */
@@ -734,7 +806,7 @@ img,
 .ab-compose-progress {
   height: 20px;
   background: rgba(5, 5, 16, 0.5);
-  border-bottom: 1px solid rgba(20, 184, 166, 0.06);
+  border-bottom: 1px solid var(--ab-border);
   position: relative;
   overflow: hidden;
 }
@@ -775,7 +847,7 @@ img,
   align-items: center;
   gap: 2px;
   padding: 4px 0;
-  border-left: 1px solid rgba(20, 184, 166, 0.1);
+  border-left: 1px solid var(--ab-border);
   background: rgba(5, 5, 16, 0.5);
 }
 
@@ -804,9 +876,8 @@ img,
 }
 
 .ab-tool-strip-btn-active {
-  color: var(--strip-accent, var(--ab-teal));
-  background: rgba(20, 184, 166, 0.08);
-  border-color: rgba(20, 184, 166, 0.2);
+  color: var(--strip-accent, var(--ab-accent));
+  background: var(--ab-bg-active);
 }
 
 /* ─── Bottom panel ─── */
@@ -815,7 +886,7 @@ img,
   flex-shrink: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  border-top: 1px solid rgba(20, 184, 166, 0.1);
+  border-top: 1px solid var(--ab-border);
   background: linear-gradient(180deg, rgba(5, 5, 16, 0.85) 0%, rgba(5, 5, 16, 0.95) 100%);
 }
 
@@ -829,7 +900,7 @@ img,
   align-items: center;
   gap: 2px;
   padding: 4px 0;
-  border-right: 1px solid rgba(20, 184, 166, 0.08);
+  border-right: 1px solid var(--ab-border);
   background: rgba(5, 5, 16, 0.6);
 }
 
@@ -857,8 +928,164 @@ img,
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* ─── Command palette (Search Everywhere) ─── */
+
+.ab-cmdp-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+}
+
+.ab-cmdp {
+  width: 560px;
+  max-width: 92vw;
+  background: rgba(10, 10, 22, 0.98);
+  border: 1px solid var(--ab-border-strong);
+  border-radius: var(--ab-radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  animation: cmdp-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+@keyframes cmdp-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.ab-cmdp-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--ab-border);
+}
+
+.ab-cmdp-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--ab-text-1);
+}
+
+.ab-cmdp-input::placeholder {
+  color: var(--ab-text-4);
+}
+
+.ab-cmdp-list {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.ab-cmdp-section {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ab-text-4);
+  padding: 6px 10px 2px;
+}
+
+.ab-cmdp-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--ab-radius-sm);
+  background: none;
+  border: none;
+  color: var(--ab-text-2);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ab-cmdp-item[data-active="true"] {
+  background: var(--ab-bg-active);
+  color: var(--ab-text-1);
+}
+
+.ab-cmdp-item-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ab-cmdp-current {
+  color: var(--ab-accent);
+  font-size: 10px;
+}
+
+.ab-cmdp-hint {
+  font-size: 9px;
+  font-family: "JetBrains Mono", monospace;
+  color: var(--ab-text-4);
+  flex-shrink: 0;
+}
+
+.ab-cmdp-footer {
+  display: flex;
+  gap: 14px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--ab-border);
+  font-size: 10px;
+  color: var(--ab-text-4);
+}
+
+.ab-cmdp-kbd {
+  font-size: 9px;
+  font-family: "JetBrains Mono", monospace;
+  color: var(--ab-text-3);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--ab-border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* ─── Tool window animation ─── */
+
+.ab-panel-anim-w {
+  transition: width 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ab-panel-anim-h {
+  transition: height 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.ab-tool-fade {
+  animation: tool-fade 130ms ease-out both;
+}
+
+@keyframes tool-fade {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ─── Reduced motion ─── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 .ab-left-strip-btn-active {
-  color: var(--ab-teal);
-  background: rgba(20, 184, 166, 0.08);
-  border-color: rgba(20, 184, 166, 0.2);
+  color: var(--ab-accent);
+  background: var(--ab-bg-active);
 }

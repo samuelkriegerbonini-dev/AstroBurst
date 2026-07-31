@@ -26,15 +26,15 @@ function StatsBar({ stats, isProcessing, isComplete }: StatsBarProps) {
     <div className="flex items-center justify-between text-[11px]">
       <div className="flex items-center gap-2.5 text-zinc-400 font-mono">
         <span>{stats.total} files</span>
-        <span style={{ color: "rgba(20,184,166,0.25)" }}>|</span>
+        <span style={{ color: "var(--ab-border-strong)" }}>|</span>
         <span style={{ color: "var(--ab-green)" }}>{stats.done} done</span>
         {stats.failed > 0 && (
           <>
-            <span style={{ color: "rgba(20,184,166,0.25)" }}>|</span>
+            <span style={{ color: "var(--ab-border-strong)" }}>|</span>
             <span className="text-red-400">{stats.failed} err</span>
           </>
         )}
-        <span style={{ color: "rgba(20,184,166,0.25)" }}>|</span>
+        <span style={{ color: "var(--ab-border-strong)" }}>|</span>
         <span className="text-zinc-300">{timer.formatted}</span>
       </div>
 
