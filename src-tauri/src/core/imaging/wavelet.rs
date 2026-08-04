@@ -171,11 +171,12 @@ fn atrous_smooth_buffers(
 }
 
 fn estimate_noise_sigma(finest_scale: &[f32]) -> f64 {
-    let mut abs_vals: Vec<f32> = finest_scale
-        .iter()
-        .filter(|v| v.is_finite())
-        .map(|v| v.abs())
-        .collect();
+    let mut abs_vals: Vec<f32> = Vec::with_capacity(finest_scale.len());
+    for &v in finest_scale {
+        if v.is_finite() {
+            abs_vals.push(v.abs());
+        }
+    }
 
     if abs_vals.is_empty() {
         return 0.0;

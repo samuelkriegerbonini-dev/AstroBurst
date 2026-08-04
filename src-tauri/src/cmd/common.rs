@@ -8,7 +8,7 @@ use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::extract_image_mmap;
+use crate::infra::fits::reader::{extract_header_mmap, extract_image_mmap};
 use crate::infra::render::grayscale::{render_grayscale, save_stf_png};
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
@@ -131,8 +131,15 @@ pub(crate) fn load_cached_full(path: &str) -> Result<ImageEntry> {
             return Ok(entry);
         }
         if let Ok(upgraded) = GLOBAL_IMAGE_CACHE.upgrade_header(path, || {
-            let resolved = extract_image_resolved(path)?;
-            Ok(resolved.header)
+            let p = std::path::Path::new(path);
+            if crate::infra::asdf::converter::is_asdf_file(p) {
+                let resolved = extract_image_resolved(path)?;
+                Ok(resolved.header)
+            } else {
+                let (fits_path, _tmp) = resolve_single_image(path)?;
+                let file = File::open(&fits_path)?;
+                Ok(extract_header_mmap(&file)?)
+            }
         }) {
             return Ok(upgraded);
         }
@@ -147,6 +154,23 @@ pub(crate) fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
     let resolved = extract_image_resolved(path)?;
     let stats = compute_image_stats(&resolved.arr);
     GLOBAL_IMAGE_CACHE.get_or_load(path, || Ok((resolved.arr, stats)))
+}
+
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+static PREVIEW_STAMPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, FileStamp>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
+    if let Ok(m) = std::fs::metadata(path) {
+        let stamp: FileStamp = (m.len(), m.modified().ok());
+        let mut stamps = PREVIEW_STAMPS.lock().unwrap();
+        if stamps.get(path) != Some(&stamp) {
+            GLOBAL_IMAGE_CACHE.invalidate(path);
+            stamps.insert(path.to_string(), stamp);
+        }
+    }
+    load_from_cache_or_disk(path)
 }
 
 fn downsample_nn<const BPP: usize>(

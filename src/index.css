@@ -5,13 +5,6 @@
 @theme {
   --font-sans: "Inter", sans-serif;
   --font-mono: "JetBrains Mono", monospace;
-  --animate-slow-zoom: slow-zoom 20s linear infinite;
-
-  @keyframes slow-zoom {
-    0% { transform: scale(1); }
-    50% { transform: scale(1.1); }
-    100% { transform: scale(1); }
-  }
 }
 
 :root {
@@ -131,11 +124,6 @@ img,
 
 /* ─── Keyframes ─── */
 
-@keyframes dash-offset {
-  0% { stroke-dashoffset: 0; }
-  100% { stroke-dashoffset: -20; }
-}
-
 @keyframes shimmer {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
@@ -151,16 +139,6 @@ img,
   100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
 }
 
-@keyframes cosmic-border {
-  0%, 100% { border-color: rgba(20, 184, 166, 0.15); }
-  50% { border-color: rgba(20, 184, 166, 0.3); }
-}
-
-@keyframes cosmic-shimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
-}
-
 @keyframes float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
@@ -173,8 +151,14 @@ img,
 
 /* ─── Animation utilities ─── */
 
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
 .animate-shimmer { animation: shimmer 1.5s infinite; }
 .animate-fade-in { animation: fade-in 0.3s ease-out both; }
+.animate-scale-in { animation: scale-in 0.15s ease-out both; }
 .animate-float { animation: float 4s ease-in-out infinite; }
 .animate-glow-pulse { animation: glow-pulse 3s ease-in-out infinite; }
 .confetti-particle { animation: confetti-fall 2s ease-out forwards; }
@@ -189,9 +173,7 @@ img,
 }
 
 .cosmic-progress {
-  background: linear-gradient(90deg, var(--ab-teal), var(--ab-cyan), var(--ab-blue), var(--ab-teal));
-  background-size: 200% 100%;
-  animation: cosmic-shimmer 3s linear infinite;
+  background: linear-gradient(90deg, var(--ab-teal), var(--ab-cyan), var(--ab-blue));
 }
 
 /* ─── Shared UI: Slider ─── */
@@ -361,7 +343,7 @@ img,
   font-weight: 500;
   border: none;
   cursor: pointer;
-  transition: all var(--ab-transition);
+  transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
   position: relative;
   overflow: hidden;
 }
@@ -462,7 +444,6 @@ img,
   font-weight: 500;
   color: rgba(255, 255, 255, 0.5);
   background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(4px);
   padding: 2px 8px;
   border-radius: var(--ab-radius-sm);
   pointer-events: none;
@@ -502,10 +483,9 @@ img,
 /* ─── Glass panel surfaces ─── */
 
 .ab-panel {
-  background: var(--ab-surface);
+  background: rgba(12, 12, 28, 0.88);
   border: 1px solid var(--ab-border);
   border-radius: var(--ab-radius-lg);
-  backdrop-filter: blur(8px);
 }
 
 .ab-panel-header {
@@ -527,7 +507,7 @@ img,
   border-radius: 6px;
   font-size: 10px;
   font-weight: 500;
-  transition: all 150ms ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, opacity 150ms ease, transform 150ms ease, filter 150ms ease;
   white-space: nowrap;
   cursor: pointer;
   background: none;
@@ -553,8 +533,18 @@ img,
 }
 
 .ab-step-suggested {
-  box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.3), 0 0 12px rgba(20, 184, 166, 0.15);
+  box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.3), 0 0 8px rgba(20, 184, 166, 0.1);
+}
+
+.ab-step-suggested::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.4), 0 0 16px rgba(20, 184, 166, 0.2);
+  opacity: 0;
   animation: ab-step-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
 }
 
 .ab-step-arrow {
@@ -564,8 +554,8 @@ img,
 }
 
 @keyframes ab-step-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.3), 0 0 8px rgba(20, 184, 166, 0.1); }
-  50% { box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.4), 0 0 16px rgba(20, 184, 166, 0.2); }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
 }
 
 @keyframes ab-arrow-bounce {
@@ -580,7 +570,7 @@ img,
   border-radius: var(--ab-radius-sm);
   font-size: 11px;
   font-weight: 500;
-  transition: all 150ms ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, opacity 150ms ease, transform 150ms ease, filter 150ms ease;
   position: relative;
   cursor: pointer;
   border: none;
@@ -604,7 +594,7 @@ img,
   border-radius: var(--ab-radius-sm);
   font-size: 12px;
   font-weight: 500;
-  transition: all var(--ab-transition);
+  transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
   color: #71717a;
   cursor: pointer;
   background: none;
@@ -623,7 +613,7 @@ img,
   border: 2px dashed rgba(63, 63, 70, 0.5);
   border-radius: 16px;
   padding: 48px 64px;
-  transition: all 0.3s ease;
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease, transform 0.3s ease, filter 0.3s ease;
   position: relative;
 }
 
@@ -661,7 +651,7 @@ img,
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--ab-transition);
+  transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
   box-shadow: 0 2px 12px rgba(59, 130, 246, 0.25);
 }
 
@@ -687,7 +677,7 @@ img,
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--ab-transition);
+  transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
 }
 
 .ab-btn-secondary:hover {
@@ -862,7 +852,7 @@ img,
   font-size: 9px;
   color: #8b8b94;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease, filter 0.15s ease;
   border: 1px solid transparent;
   background: transparent;
   width: 38px;
@@ -915,7 +905,7 @@ img,
   font-size: 9px;
   color: #8b8b94;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease, filter 0.15s ease;
   border: 1px solid transparent;
   background: transparent;
   width: 38px;
@@ -939,7 +929,6 @@ img,
   justify-content: center;
   padding-top: 12vh;
   background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(3px);
 }
 
 .ab-cmdp {

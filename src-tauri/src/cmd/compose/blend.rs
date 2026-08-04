@@ -267,8 +267,8 @@ pub async fn align_channels_cmd(
         let ref_key = if use_bin_ids {
             let bid = &bin_ids.as_ref().unwrap()[0];
             let k = crate::types::constants::wizard_aligned_key(bid);
-            let stats = compute_image_stats(ref_arr);
-            GLOBAL_IMAGE_CACHE.insert_synthetic(&k, std::sync::Arc::new(ref_arr.to_owned()), stats);
+            let stats = entries[0].stats().clone();
+            GLOBAL_IMAGE_CACHE.insert_synthetic(&k, entries[0].data_arc(), stats);
             k
         } else {
             String::new()

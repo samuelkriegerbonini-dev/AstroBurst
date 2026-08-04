@@ -148,13 +148,19 @@ fn write_f64_slice_as_be(writer: &mut BufWriter<File>, data: &[f32]) -> Result<(
 }
 
 fn compute_bzero_bscale(data: &[f32]) -> (f64, f64) {
+    compute_bzero_bscale_slices(&[data])
+}
+
+fn compute_bzero_bscale_slices(slices: &[&[f32]]) -> (f64, f64) {
     let mut dmin = f64::INFINITY;
     let mut dmax = f64::NEG_INFINITY;
-    for &v in data {
-        let v = v as f64;
-        if v.is_finite() {
-            if v < dmin { dmin = v; }
-            if v > dmax { dmax = v; }
+    for data in slices {
+        for &v in *data {
+            let v = v as f64;
+            if v.is_finite() {
+                if v < dmin { dmin = v; }
+                if v > dmax { dmax = v; }
+            }
         }
     }
     if !dmin.is_finite() || !dmax.is_finite() || (dmax - dmin).abs() < 1e-30 {
@@ -389,11 +395,7 @@ pub fn write_fits_rgb_bitpix(
         let r_sl = r.as_slice().unwrap_or(&[]);
         let g_sl = g.as_slice().unwrap_or(&[]);
         let b_sl = b.as_slice().unwrap_or(&[]);
-        let mut combined = Vec::with_capacity(r_sl.len() + g_sl.len() + b_sl.len());
-        combined.extend_from_slice(r_sl);
-        combined.extend_from_slice(g_sl);
-        combined.extend_from_slice(b_sl);
-        compute_bzero_bscale(&combined)
+        compute_bzero_bscale_slices(&[r_sl, g_sl, b_sl])
     } else {
         (0.0, 1.0)
     };

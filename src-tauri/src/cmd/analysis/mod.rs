@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use crate::cmd::common::{blocking_cmd, load_cached};
 use crate::types::constants::{
-    HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_BIN_EDGES, RES_MIN, RES_MAX,
+    HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
     RES_AUTO_STF, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, RES_ELAPSED_MS,
     RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
@@ -38,7 +38,6 @@ pub async fn compute_histogram(path: String) -> Result<serde_json::Value, String
         Ok(json!({
             RES_BINS: display_bins,
             RES_BIN_COUNT: display_bins.len(),
-            RES_BIN_EDGES: hist.bin_edges,
             RES_MIN: hist.min,
             RES_MAX: hist.max,
             RES_DATA_MIN: stats.min,

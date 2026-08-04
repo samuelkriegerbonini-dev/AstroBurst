@@ -96,7 +96,7 @@ pub async fn export_fits_rgb(
                 .and_then(|p| extract_image_resolved(p).ok())
                 .map(|r| r.header)
                 .or_else(|| cr.header().cloned());
-            (cr.arr().to_owned(), cg.arr().to_owned(), cb.arr().to_owned(), r_hdr)
+            (cr.data_arc(), cg.data_arc(), cb.data_arc(), r_hdr)
         } else {
             let r_resolved = extract_image_resolved(
                 r_path.as_deref().ok_or_else(|| anyhow::anyhow!("R channel path required"))?
@@ -133,7 +133,12 @@ pub async fn export_fits_rgb(
                 r_resolved.arr
             };
 
-            (r_final, g_final, b_final, Some(r_resolved.header))
+            (
+                std::sync::Arc::new(r_final),
+                std::sync::Arc::new(g_final),
+                std::sync::Arc::new(b_final),
+                Some(r_resolved.header),
+            )
         };
 
         let mut filtered = header_source

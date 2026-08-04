@@ -159,43 +159,46 @@ fn encode_channel_preview(arr: &Array2<f32>, max_dim: usize) -> Result<ChannelPr
     let dst_cols = ((cols as f64) * scale).round().max(1.0) as usize;
 
     let npix = dst_rows * dst_cols;
-    let mut pixel_bytes = Vec::with_capacity(npix * 4);
+    let mut pixel_bytes = vec![0u8; npix * 4];
 
     const PEAK_SIGNIFICANCE: f32 = 3.0;
     let s = (PEAK_SIGNIFICANCE * scan.sigma() as f32).max(0.0);
 
-    for dy in 0..dst_rows {
-        let sy0 = dy * rows / dst_rows;
-        let sy1 = (((dy + 1) * rows) / dst_rows).max(sy0 + 1).min(rows);
-        for dx in 0..dst_cols {
-            let sx0 = dx * cols / dst_cols;
-            let sx1 = (((dx + 1) * cols) / dst_cols).max(sx0 + 1).min(cols);
+    pixel_bytes
+        .par_chunks_mut(dst_cols * 4)
+        .enumerate()
+        .for_each(|(dy, out_row)| {
+            let sy0 = dy * rows / dst_rows;
+            let sy1 = (((dy + 1) * rows) / dst_rows).max(sy0 + 1).min(rows);
+            for dx in 0..dst_cols {
+                let sx0 = dx * cols / dst_cols;
+                let sx1 = (((dx + 1) * cols) / dst_cols).max(sx0 + 1).min(cols);
 
-            let mut sum = 0.0f64;
-            let mut count = 0u32;
-            let mut cell_max = f32::MIN;
-            for yy in sy0..sy1 {
-                let row = yy * cols;
-                for xx in sx0..sx1 {
-                    let v = slice[row + xx];
-                    if v.is_finite() {
-                        sum += v as f64;
-                        count += 1;
-                        if v > cell_max { cell_max = v; }
+                let mut sum = 0.0f64;
+                let mut count = 0u32;
+                let mut cell_max = f32::MIN;
+                for yy in sy0..sy1 {
+                    let row = yy * cols;
+                    for xx in sx0..sx1 {
+                        let v = slice[row + xx];
+                        if v.is_finite() {
+                            sum += v as f64;
+                            count += 1;
+                            if v > cell_max { cell_max = v; }
+                        }
                     }
                 }
-            }
 
-            let out = if count == 0 {
-                0.0f32
-            } else {
-                let mean = (sum / count as f64) as f32;
-                let d = cell_max - mean;
-                if d > 0.0 { mean + d * (d / (d + s)) } else { mean }
-            };
-            pixel_bytes.extend_from_slice(&out.to_le_bytes());
-        }
-    }
+                let out = if count == 0 {
+                    0.0f32
+                } else {
+                    let mean = (sum / count as f64) as f32;
+                    let d = cell_max - mean;
+                    if d > 0.0 { mean + d * (d / (d + s)) } else { mean }
+                };
+                out_row[dx * 4..dx * 4 + 4].copy_from_slice(&out.to_le_bytes());
+            }
+        });
 
     Ok(ChannelPreview {
         data_min,

@@ -162,7 +162,12 @@ unsafe fn normalize_chunk_avx2(
 pub fn asinh_normalize_simd(data: &Array2<f32>) -> Array2<f32> {
     use super::median::{f32_cmp, median_f32_mut};
 
-    let mut finite: Vec<f32> = data.iter().filter(|v| is_valid(**v)).copied().collect();
+    let mut finite: Vec<f32> = Vec::with_capacity(data.len());
+    for &v in data.iter() {
+        if is_valid(v) {
+            finite.push(v);
+        }
+    }
 
     if finite.is_empty() {
         return data.clone();

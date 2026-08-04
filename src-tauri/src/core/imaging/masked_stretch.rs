@@ -1,7 +1,10 @@
 use ndarray::Array2;
+use rayon::prelude::*;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig, StarMaskResult};
 use crate::core::imaging::stats::is_valid_pixel;
+
+const MINMAX_CHUNK: usize = 1 << 16;
 
 #[derive(Debug, Clone)]
 pub struct MaskedStretchConfig {
@@ -73,14 +76,16 @@ pub fn masked_stretch_with_mask(
     let mask = &mask_result.mask;
     let target_bg = config.target_background;
 
-    let mut prev_bg = compute_masked_median(&working, mask);
+    let mut bg_buf: Vec<f32> = Vec::new();
+    let mut scratch = Array2::zeros(working.dim());
+    let mut prev_bg = compute_masked_median(&working, mask, &mut bg_buf);
     let mut iterations_run = 0;
     let mut converged = false;
 
     for iter_idx in 0..config.iterations {
         iterations_run = iter_idx + 1;
 
-        let bg = compute_masked_median(&working, mask);
+        let bg = compute_masked_median(&working, mask, &mut bg_buf);
 
         let at_target = (bg - target_bg).abs() < config.convergence_threshold;
         let stagnated = iter_idx > 0
@@ -96,20 +101,12 @@ pub fn masked_stretch_with_mask(
         }
 
         let midtone = mtf_balance(bg, target_bg);
-        let unmasked = apply_mtf(&working, midtone as f32);
-
-        ndarray::Zip::from(&mut working)
-            .and(&unmasked)
-            .and(mask)
-            .par_for_each(|dst, &stretched, &m| {
-                let blend = m * protection;
-                *dst = *dst * blend + stretched * (1.0 - blend);
-            });
+        stretch_blend_with_scratch(&mut working, mask, midtone as f32, protection, &mut scratch);
 
         prev_bg = bg;
     }
 
-    let final_bg = compute_masked_median(&working, mask);
+    let final_bg = compute_masked_median(&working, mask, &mut bg_buf);
 
     clamp_inplace(&mut working);
 
@@ -131,6 +128,24 @@ pub struct MaskedStretchRgbResult {
     pub shared_stars_masked: usize,
 }
 
+fn compute_luminance_into(
+    out: &mut Array2<f32>,
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+) {
+    ndarray::Zip::from(out)
+        .and(r)
+        .and(g)
+        .and(b)
+        .par_for_each(|o, &rv, &gv, &bv| {
+            let rn = if rv.is_finite() { rv } else { 0.0 };
+            let gn = if gv.is_finite() { gv } else { 0.0 };
+            let bn = if bv.is_finite() { bv } else { 0.0 };
+            *o = 0.2126 * rn + 0.7152 * gn + 0.0722 * bn;
+        });
+}
+
 fn compute_luminance(
     r: &Array2<f32>,
     g: &Array2<f32>,
@@ -147,16 +162,7 @@ fn compute_luminance(
     }
 
     let mut out = Array2::zeros(dim);
-    ndarray::Zip::from(&mut out)
-        .and(r)
-        .and(g)
-        .and(b)
-        .par_for_each(|o, &rv, &gv, &bv| {
-            let rn = if rv.is_finite() { rv } else { 0.0 };
-            let gn = if gv.is_finite() { gv } else { 0.0 };
-            let bn = if bv.is_finite() { bv } else { 0.0 };
-            *o = 0.2126 * rn + 0.7152 * gn + 0.0722 * bn;
-        });
+    compute_luminance_into(&mut out, r, g, b);
     Ok(out)
 }
 
@@ -196,14 +202,20 @@ pub fn masked_stretch_rgb_shared(
         ),
     };
 
-    let mut prev_bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+    let mut bg_buf: Vec<f32> = Vec::new();
+    let mut lum = Array2::zeros(wr.dim());
+    let mut scratch = Array2::zeros(wr.dim());
+
+    compute_luminance_into(&mut lum, &wr, &wg, &wb);
+    let mut prev_bg = compute_masked_median(&lum, mask, &mut bg_buf);
     let mut iterations_run = 0;
     let mut converged = false;
 
     for iter_idx in 0..config.iterations {
         iterations_run = iter_idx + 1;
 
-        let bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+        compute_luminance_into(&mut lum, &wr, &wg, &wb);
+        let bg = compute_masked_median(&lum, mask, &mut bg_buf);
 
         let at_target = (bg - target_bg).abs() < config.convergence_threshold;
         let stagnated = iter_idx > 0
@@ -218,14 +230,15 @@ pub fn masked_stretch_rgb_shared(
         }
 
         let midtone = mtf_balance(bg, target_bg) as f32;
-        stretch_blend_inplace(&mut wr, mask, midtone, protection);
-        stretch_blend_inplace(&mut wg, mask, midtone, protection);
-        stretch_blend_inplace(&mut wb, mask, midtone, protection);
+        stretch_blend_with_scratch(&mut wr, mask, midtone, protection, &mut scratch);
+        stretch_blend_with_scratch(&mut wg, mask, midtone, protection, &mut scratch);
+        stretch_blend_with_scratch(&mut wb, mask, midtone, protection, &mut scratch);
 
         prev_bg = bg;
     }
 
-    let final_bg = compute_masked_median(&compute_luminance(&wr, &wg, &wb)?, mask);
+    compute_luminance_into(&mut lum, &wr, &wg, &wb);
+    let final_bg = compute_masked_median(&lum, mask, &mut bg_buf);
 
     clamp_inplace(&mut wr);
     clamp_inplace(&mut wg);
@@ -261,49 +274,73 @@ pub fn masked_stretch_rgb_shared(
     })
 }
 
-fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
-    let mut dmin = f32::INFINITY;
-    let mut dmax = f32::NEG_INFINITY;
-    for &v in image.iter() {
-        if is_valid_pixel(v) {
-            if v < dmin {
-                dmin = v;
+fn valid_min_max_slice(slice: &[f32], mut dmin: f32, mut dmax: f32) -> (f32, f32) {
+    let pairs: Vec<(f32, f32)> = slice
+        .par_chunks(MINMAX_CHUNK)
+        .map(|chunk| {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for &v in chunk {
+                if is_valid_pixel(v) {
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                }
             }
-            if v > dmax {
-                dmax = v;
-            }
+            (mn, mx)
+        })
+        .collect();
+    for (mn, mx) in pairs {
+        if mn < dmin {
+            dmin = mn;
+        }
+        if mx > dmax {
+            dmax = mx;
         }
     }
+    (dmin, dmax)
+}
+
+fn valid_min_max(image: &Array2<f32>, dmin: f32, dmax: f32) -> (f32, f32) {
+    match image.as_slice() {
+        Some(s) => valid_min_max_slice(s, dmin, dmax),
+        None => {
+            let mut mn = dmin;
+            let mut mx = dmax;
+            for &v in image.iter() {
+                if is_valid_pixel(v) {
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                }
+            }
+            (mn, mx)
+        }
+    }
+}
+
+fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
+    let (dmin, dmax) = valid_min_max(image, f32::INFINITY, f32::NEG_INFINITY);
     let range = dmax - dmin;
     if !range.is_finite() || range < 1e-10 {
         return Array2::zeros(image.dim());
     }
-    let inv = 1.0 / range;
-    let mut out = image.clone();
-    out.par_mapv_inplace(|v| {
-        if !v.is_finite() || v <= 0.0 {
-            0.0
-        } else {
-            ((v - dmin) * inv).clamp(0.0, 1.0)
-        }
-    });
-    out
+    normalize_to_01_with(image, dmin, dmax)
 }
 
 fn shared_min_max(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
     let mut dmin = f32::INFINITY;
     let mut dmax = f32::NEG_INFINITY;
     for ch in channels {
-        for &v in ch.iter() {
-            if is_valid_pixel(v) {
-                if v < dmin {
-                    dmin = v;
-                }
-                if v > dmax {
-                    dmax = v;
-                }
-            }
-        }
+        let (mn, mx) = valid_min_max(ch, dmin, dmax);
+        dmin = mn;
+        dmax = mx;
     }
     let range = dmax - dmin;
     if !range.is_finite() || range < 1e-10 {
@@ -315,21 +352,29 @@ fn shared_min_max(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
 
 fn normalize_to_01_with(image: &Array2<f32>, dmin: f32, dmax: f32) -> Array2<f32> {
     let inv = 1.0 / (dmax - dmin);
-    let mut out = image.clone();
-    out.par_mapv_inplace(|v| {
-        if !v.is_finite() || v <= 0.0 {
-            0.0
-        } else {
-            ((v - dmin) * inv).clamp(0.0, 1.0)
-        }
-    });
+    let mut out = Array2::zeros(image.dim());
+    ndarray::Zip::from(&mut out)
+        .and(image)
+        .par_for_each(|o, &v| {
+            *o = if !v.is_finite() || v <= 0.0 {
+                0.0
+            } else {
+                ((v - dmin) * inv).clamp(0.0, 1.0)
+            };
+        });
     out
 }
 
-fn stretch_blend_inplace(working: &mut Array2<f32>, mask: &Array2<f32>, midtone: f32, protection: f32) {
-    let unmasked = apply_mtf(working, midtone);
-    ndarray::Zip::from(&mut *working)
-        .and(&unmasked)
+fn stretch_blend_with_scratch(
+    working: &mut Array2<f32>,
+    mask: &Array2<f32>,
+    midtone: f32,
+    protection: f32,
+    scratch: &mut Array2<f32>,
+) {
+    apply_mtf_into(working, midtone, scratch);
+    ndarray::Zip::from(working)
+        .and(&*scratch)
         .and(mask)
         .par_for_each(|dst, &stretched, &m| {
             let blend = m * protection;
@@ -337,15 +382,37 @@ fn stretch_blend_inplace(working: &mut Array2<f32>, mask: &Array2<f32>, midtone:
         });
 }
 
-fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>) -> f64 {
-    let mut bg_vals: Vec<f32> = Vec::new();
-    ndarray::Zip::from(image)
-        .and(mask)
-        .for_each(|&v, &m| {
-            if m < 0.5 && v.is_finite() && v > 0.0 {
-                bg_vals.push(v);
+fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>, bg_vals: &mut Vec<f32>) -> f64 {
+    bg_vals.clear();
+    match (image.as_slice(), mask.as_slice()) {
+        (Some(img), Some(msk)) => {
+            let chunks: Vec<Vec<f32>> = img
+                .par_chunks(MINMAX_CHUNK)
+                .zip(msk.par_chunks(MINMAX_CHUNK))
+                .map(|(ic, mc)| {
+                    let mut local = Vec::with_capacity(ic.len());
+                    for (i, &v) in ic.iter().enumerate() {
+                        if mc[i] < 0.5 && v.is_finite() && v > 0.0 {
+                            local.push(v);
+                        }
+                    }
+                    local
+                })
+                .collect();
+            let total: usize = chunks.iter().map(|c| c.len()).sum();
+            bg_vals.reserve(total);
+            for c in &chunks {
+                bg_vals.extend_from_slice(c);
             }
-        });
+        }
+        _ => {
+            ndarray::Zip::from(image).and(mask).for_each(|&v, &m| {
+                if m < 0.5 && v.is_finite() && v > 0.0 {
+                    bg_vals.push(v);
+                }
+            });
+        }
+    }
 
     if bg_vals.is_empty() {
         return 0.0;
@@ -364,22 +431,23 @@ fn mtf_balance(median: f64, target: f64) -> f64 {
     (median * (target - 1.0) / denom).clamp(0.0001, 0.9999)
 }
 
-fn apply_mtf(data: &Array2<f32>, m: f32) -> Array2<f32> {
-    let mut out = data.clone();
-    out.par_mapv_inplace(|x| {
-        if x <= 0.0 {
-            return 0.0;
-        }
-        if x >= 1.0 {
-            return 1.0;
-        }
-        let denom = (2.0 * m - 1.0) * x - m;
-        if denom.abs() < 1e-10 {
-            return x;
-        }
-        ((m - 1.0) * x / denom).clamp(0.0, 1.0)
-    });
-    out
+fn apply_mtf_into(data: &Array2<f32>, m: f32, out: &mut Array2<f32>) {
+    ndarray::Zip::from(out)
+        .and(data)
+        .par_for_each(|o, &x| {
+            *o = if x <= 0.0 {
+                0.0
+            } else if x >= 1.0 {
+                1.0
+            } else {
+                let denom = (2.0 * m - 1.0) * x - m;
+                if denom.abs() < 1e-10 {
+                    x
+                } else {
+                    ((m - 1.0) * x / denom).clamp(0.0, 1.0)
+                }
+            };
+        });
 }
 
 fn clamp_inplace(data: &mut Array2<f32>) {

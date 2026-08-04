@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
-import { useDoneFilesContext, useRenderContext, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useRenderActions, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
 import { useCompositeActions } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
@@ -89,7 +89,7 @@ export default function ComposeWizard() {
   } = useCompositeActions();
   const {
     setActiveImagePath,
-  } = useRenderContext();
+  } = useRenderActions();
 
   const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
 

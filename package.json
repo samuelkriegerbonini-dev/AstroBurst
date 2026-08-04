@@ -20,7 +20,6 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "clsx": "^2.1.1",
     "file-saver": "^2.0.5",
-    "framer-motion": "^12.0.0",
     "jszip": "^3.10.1",
     "lucide-react": "^1.7.0",
     "openseadragon": "^5.0.1",

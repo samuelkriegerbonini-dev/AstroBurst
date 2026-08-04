@@ -3,11 +3,12 @@ import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
+import { getPreviewUrl } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
 import { useCompositePreview } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
-import type { StarDetectionResult } from "../../shared/types/processing";
+import type { StarDetectionResult } from "../../shared/types";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
@@ -152,6 +153,21 @@ function AnalysisTabInner({
     [setRenderedPreviewUrl],
   );
 
+  const frameSeqRef = useRef(0);
+  const handleFramePreview = useCallback(
+    async (outputPath: string) => {
+      const seq = ++frameSeqRef.current;
+      try {
+        const url = await getPreviewUrl(outputPath);
+        if (frameSeqRef.current !== seq) return;
+        setRenderedPreviewUrl(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`);
+      } catch (e) {
+        console.error("Frame preview failed:", e);
+      }
+    },
+    [setRenderedPreviewUrl],
+  );
+
   const histStats = useMemo(
     () =>
       histData
@@ -214,6 +230,7 @@ function AnalysisTabInner({
             error={specError}
             filePath={effectivePath}
             onCollapsePreview={handleCollapsePreview}
+            onFramePreview={handleFramePreview}
           />
         )}
 

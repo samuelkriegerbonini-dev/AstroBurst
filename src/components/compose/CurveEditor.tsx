@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, memo } from "react";
+import { useRef, useState, useCallback, useMemo, memo } from "react";
 
 export interface CurvePoint {
   x: number;
@@ -22,8 +22,8 @@ function clamp(v: number, lo = 0, hi = 1) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-function catmullRomSpline(pts: CurvePoint[], steps = 64): string {
-  if (pts.length < 2) return "";
+function catmullRomSpline(pts: CurvePoint[], steps = 64): CurvePoint[] {
+  if (pts.length < 2) return [];
   const sorted = [...pts].sort((a, b) => a.x - b.x);
   const n = sorted.length;
 
@@ -33,7 +33,7 @@ function catmullRomSpline(pts: CurvePoint[], steps = 64): string {
     { x: sorted[n - 1].x + (sorted[n - 1].x - sorted[n - 2].x), y: sorted[n - 1].y + (sorted[n - 1].y - sorted[n - 2].y) },
   ];
 
-  const path: string[] = [];
+  const samples: CurvePoint[] = [];
   for (let seg = 1; seg < extended.length - 2; seg++) {
     const p0 = extended[seg - 1];
     const p1 = extended[seg];
@@ -50,12 +50,10 @@ function catmullRomSpline(pts: CurvePoint[], steps = 64): string {
       const y =
         0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
 
-      const cx = clamp(x);
-      const cy = clamp(y);
-      path.push(seg === 1 && s === 0 ? `M ${cx} ${cy}` : `L ${cx} ${cy}`);
+      samples.push({ x: clamp(x), y: clamp(y) });
     }
   }
-  return path.join(" ");
+  return samples;
 }
 
 function CurveEditorInner({ points, onChange, color = "#14b8a6", label, width = 200, height = 200 }: CurveEditorProps) {
@@ -119,16 +117,17 @@ function CurveEditorInner({ points, onChange, color = "#14b8a6", label, width = 
     onChange(next);
   }, [points, onChange]);
 
-  const splinePath = catmullRomSpline(points);
-  const svgPath = splinePath
-    .replace(/M ([\d.]+) ([\d.]+)/g, (_, x, y) => {
-      const sv = toSvg({ x: parseFloat(x), y: parseFloat(y) });
-      return `M ${sv.x} ${sv.y}`;
-    })
-    .replace(/L ([\d.]+) ([\d.]+)/g, (_, x, y) => {
-      const sv = toSvg({ x: parseFloat(x), y: parseFloat(y) });
-      return `L ${sv.x} ${sv.y}`;
-    });
+  const svgPath = useMemo(() => {
+    const samples = catmullRomSpline(points);
+    if (samples.length === 0) return "";
+    const parts: string[] = new Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const x = PAD + samples[i].x * w;
+      const y = PAD + (1 - samples[i].y) * h;
+      parts[i] = `${i === 0 ? "M" : "L"} ${x} ${y}`;
+    }
+    return parts.join(" ");
+  }, [points, w, h]);
 
   const gridLines = [];
   for (let i = 1; i < GRID_LINES; i++) {

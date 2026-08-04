@@ -61,29 +61,53 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     return () => ro.disconnect();
   }, [applyFit]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const wheelRafRef = useRef<number | null>(null);
+  const pendingWheelRef = useRef<{ factor: number; clientX: number; clientY: number } | null>(null);
+
+  const handleWheelNative = useCallback((e: WheelEvent) => {
     e.preventDefault();
-    const container = containerRef.current;
-    if (!container) return;
     userInteractedRef.current = true;
-
-    const rect = container.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
-    setScale((prev) => {
-      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev * factor));
-      const ratio = next / prev;
-
-      setTranslate((t) => ({
-        x: mx - ratio * (mx - t.x),
-        y: my - ratio * (my - t.y),
-      }));
-
-      return next;
+    const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+    const prev = pendingWheelRef.current;
+    pendingWheelRef.current = {
+      factor: (prev?.factor ?? 1) * factor,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
+    if (wheelRafRef.current !== null) return;
+    wheelRafRef.current = requestAnimationFrame(() => {
+      wheelRafRef.current = null;
+      const pending = pendingWheelRef.current;
+      pendingWheelRef.current = null;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!pending || !rect) return;
+      const mx = pending.clientX - rect.left;
+      const my = pending.clientY - rect.top;
+      setScale((prevScale) => {
+        const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevScale * pending.factor));
+        const ratio = next / prevScale;
+        setTranslate((t) => ({
+          x: mx - ratio * (mx - t.x),
+          y: my - ratio * (my - t.y),
+        }));
+        return next;
+      });
     });
   }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", handleWheelNative, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", handleWheelNative);
+      if (wheelRafRef.current !== null) {
+        cancelAnimationFrame(wheelRafRef.current);
+        wheelRafRef.current = null;
+        pendingWheelRef.current = null;
+      }
+    };
+  }, [handleWheelNative]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -162,7 +186,6 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
       ref={containerRef}
       className={`relative overflow-hidden ${className}`}
       style={{ cursor: isPanning ? "grabbing" : "grab" }}
-      onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}

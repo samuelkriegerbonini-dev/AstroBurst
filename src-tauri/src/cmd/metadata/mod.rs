@@ -6,7 +6,7 @@ use crate::cmd::common::{blocking_cmd, load_cached_full};
 use crate::core::metadata::header_discovery::{detect_filter, suggest_palette, suggest_palette_with_type, PaletteType};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::{extract_image_mmap, list_extensions, extract_image_mmap_by_index};
+use crate::infra::fits::reader::{extract_header_mmap, list_extensions, extract_image_mmap_by_index};
 use crate::types::constants::{
     RES_BITPIX, RES_CARDS, RES_CATEGORIES, RES_CONFIDENCE, RES_EXTENSIONS,
     RES_EXTNAME, RES_FILE_NAME, RES_FILE_PATH, RES_FILENAME_HINT, RES_FILTER,
@@ -30,8 +30,7 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
         if let Ok(entry) = GLOBAL_IMAGE_CACHE.upgrade_header(&path, || {
             let (fits_path, _tmp) = resolve_single_image(&path)?;
             let file = File::open(&fits_path)?;
-            let result = extract_image_mmap(&file)?;
-            Ok(result.header)
+            Ok(extract_header_mmap(&file)?)
         }) {
             if let Some(header) = entry.header() {
                 return Ok(serde_json::to_value(&header.index)?);
@@ -45,8 +44,8 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
 
         let (fits_path, _tmp) = resolve_single_image(&path)?;
         let file = File::open(&fits_path)?;
-        let result = extract_image_mmap(&file)?;
-        Ok(serde_json::to_value(&result.header.index)?)
+        let header = extract_header_mmap(&file)?;
+        Ok(serde_json::to_value(&header.index)?)
     })
 }
 
@@ -63,7 +62,7 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
                     None => {
                         let (fits_path, _tmp) = resolve_single_image(&path)?;
                         let file = File::open(&fits_path)?;
-                        extract_image_mmap(&file)?.header
+                        extract_header_mmap(&file)?
                     }
                 }
             }
@@ -74,7 +73,7 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
                 None => {
                     let (fits_path, _tmp) = resolve_single_image(&path)?;
                     let file = File::open(&fits_path)?;
-                    extract_image_mmap(&file)?.header
+                    extract_header_mmap(&file)?
                 }
             }
         };
@@ -206,8 +205,8 @@ pub async fn detect_narrowband_filters(paths: Vec<String>, palette: Option<Strin
         for p in &paths {
             let (fits_path, _tmp) = resolve_single_image(p)?;
             let file = File::open(&fits_path)?;
-            let result = extract_image_mmap(&file)?;
-            file_headers.push((p.clone(), result.header));
+            let header = extract_header_mmap(&file)?;
+            file_headers.push((p.clone(), header));
         }
 
         let mut filters = Vec::new();

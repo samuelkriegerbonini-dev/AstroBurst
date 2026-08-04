@@ -75,6 +75,11 @@ interface RenderContextValue {
   setActiveImagePath: (path: string | null) => void;
 }
 
+interface RenderActionsContextValue {
+  setRenderedPreviewUrl: (url: string | null) => void;
+  setActiveImagePath: (path: string | null) => void;
+}
+
 interface StarOverlayContextValue {
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
 }
@@ -103,6 +108,7 @@ const HistCtx = createContext<HistContextValue | null>(null);
 const CubeCtx = createContext<CubeContextValue | null>(null);
 const RgbCtx = createContext<RgbContextValue | null>(null);
 const RenderCtx = createContext<RenderContextValue | null>(null);
+const RenderActionsCtx = createContext<RenderActionsContextValue | null>(null);
 const StarOverlayCtx = createContext<StarOverlayContextValue | null>(null);
 const RawPixelsCtx = createContext<RawPixelsContextValue | null>(null);
 const NarrowbandCtx = createContext<NarrowbandContextValue | null>(null);
@@ -119,6 +125,7 @@ export const useHistContext = () => useCtx(HistCtx, "useHistContext");
 export const useCubeContext = () => useCtx(CubeCtx, "useCubeContext");
 export const useRgbContext = () => useCtx(RgbCtx, "useRgbContext");
 export const useRenderContext = () => useCtx(RenderCtx, "useRenderContext");
+export const useRenderActions = () => useCtx(RenderActionsCtx, "useRenderActions");
 export const useStarOverlayContext = () => useCtx(StarOverlayCtx, "useStarOverlayContext");
 export const useRawPixelsContext = () => useCtx(RawPixelsCtx, "useRawPixelsContext");
 export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandContext");
@@ -432,6 +439,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath],
   );
 
+  const renderActionsValue = useMemo<RenderActionsContextValue>(
+    () => ({ setRenderedPreviewUrl, setActiveImagePath }),
+    [setRenderedPreviewUrl, setActiveImagePath],
+  );
+
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
     () => ({
       rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
@@ -460,6 +472,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
           <CubeCtx.Provider value={cubeValue}>
             <RgbCtx.Provider value={rgbValue}>
               <RenderCtx.Provider value={renderValue}>
+                <RenderActionsCtx.Provider value={renderActionsValue}>
                 <RawPixelsCtx.Provider value={rawPixelsValue}>
                   <NarrowbandCtx.Provider value={narrowbandValue}>
                     <StarOverlayCtx.Provider value={starOverlayValue}>
@@ -467,6 +480,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
                     </StarOverlayCtx.Provider>
                   </NarrowbandCtx.Provider>
                 </RawPixelsCtx.Provider>
+                </RenderActionsCtx.Provider>
               </RenderCtx.Provider>
             </RgbCtx.Provider>
           </CubeCtx.Provider>

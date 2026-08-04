@@ -1,12 +1,37 @@
 use ndarray::{Array2, Zip};
+use rayon::prelude::*;
 
 fn finite_min_max(data: &Array2<f32>) -> (f32, f32) {
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
-    for &v in data.iter() {
-        if v.is_finite() {
-            if v < mn { mn = v; }
-            if v > mx { mx = v; }
+    match data.as_slice() {
+        Some(s) => {
+            let pairs: Vec<(f32, f32)> = s
+                .par_chunks(1 << 16)
+                .map(|chunk| {
+                    let mut cmn = f32::INFINITY;
+                    let mut cmx = f32::NEG_INFINITY;
+                    for &v in chunk {
+                        if v.is_finite() {
+                            if v < cmn { cmn = v; }
+                            if v > cmx { cmx = v; }
+                        }
+                    }
+                    (cmn, cmx)
+                })
+                .collect();
+            for (cmn, cmx) in pairs {
+                if cmn < mn { mn = cmn; }
+                if cmx > mx { mx = cmx; }
+            }
+        }
+        None => {
+            for &v in data.iter() {
+                if v.is_finite() {
+                    if v < mn { mn = v; }
+                    if v > mx { mx = v; }
+                }
+            }
         }
     }
     if mn <= mx { (mn, mx) } else { (0.0, 1.0) }

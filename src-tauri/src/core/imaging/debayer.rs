@@ -81,9 +81,9 @@ pub fn debayer_bilinear(
     let cell = pattern.cell();
     let src = img.as_slice().expect("contiguous");
 
-    let mut r = vec![f32::NAN; h * w];
-    let mut g = vec![f32::NAN; h * w];
-    let mut b = vec![f32::NAN; h * w];
+    let mut r = vec![0.0f32; h * w];
+    let mut g = vec![0.0f32; h * w];
+    let mut b = vec![0.0f32; h * w];
 
     r.par_chunks_mut(w)
         .zip(g.par_chunks_mut(w))
@@ -149,9 +149,9 @@ pub fn debayer_superpixel(
     let cell = pattern.cell();
     let src = img.as_slice().expect("contiguous");
 
-    let mut r = vec![f32::NAN; oh * ow];
-    let mut g = vec![f32::NAN; oh * ow];
-    let mut b = vec![f32::NAN; oh * ow];
+    let mut r = vec![0.0f32; oh * ow];
+    let mut g = vec![0.0f32; oh * ow];
+    let mut b = vec![0.0f32; oh * ow];
 
     r.par_chunks_mut(ow)
         .zip(g.par_chunks_mut(ow))

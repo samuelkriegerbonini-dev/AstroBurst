@@ -10,7 +10,8 @@ interface SliderProps {
   disabled?: boolean;
   accent?: string;
   format?: (v: number) => string;
-  onChange: (v: number) => void;
+  onChange?: (v: number) => void;
+  onCommit?: (v: number) => void;
   hint?: string;
 }
 
@@ -27,12 +28,18 @@ function Slider({
   accent = "teal",
   format,
   onChange,
+  onCommit,
   hint,
 }: SliderProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const editStartText = useRef("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const rangeRef = useRef<HTMLInputElement>(null);
+  const [dragValue, setDragValue] = useState<number | null>(null);
+  const dragValueRef = useRef<number | null>(null);
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
 
   const isLog = scale === "log" && min > 0 && max > min;
   const logRange = isLog ? Math.log(max / min) : 1;
@@ -45,13 +52,32 @@ function Slider({
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const raw = parseFloat(e.target.value);
-      onChange(isLog ? fromPos(raw) : raw);
+      const v = isLog ? fromPos(raw) : raw;
+      if (onCommitRef.current) {
+        dragValueRef.current = v;
+        setDragValue(v);
+      }
+      onChange?.(v);
     },
     [onChange, isLog, fromPos],
   );
 
-  const display = format ? format(value) : String(value);
-  const pct = isLog ? toPos(value) * 100 : ((value - min) / (max - min)) * 100;
+  useEffect(() => {
+    const el = rangeRef.current;
+    if (!el) return;
+    const fire = () => {
+      const v = dragValueRef.current;
+      dragValueRef.current = null;
+      setDragValue(null);
+      if (v !== null) onCommitRef.current?.(v);
+    };
+    el.addEventListener("change", fire);
+    return () => el.removeEventListener("change", fire);
+  }, []);
+
+  const effective = dragValue ?? value;
+  const display = format ? format(effective) : String(effective);
+  const pct = isLog ? toPos(effective) * 100 : ((effective - min) / (max - min)) * 100;
 
   const handleValueClick = useCallback(() => {
     if (disabled) return;
@@ -66,9 +92,9 @@ function Slider({
     const parsed = parseFloat(editText);
     if (!isNaN(parsed)) {
       const clamped = Math.max(min, Math.min(max, parsed));
-      onChange(clamped);
+      (onCommit ?? onChange)?.(clamped);
     }
-  }, [editText, min, max, onChange]);
+  }, [editText, min, max, onChange, onCommit]);
 
   const handleEditKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
@@ -109,11 +135,12 @@ function Slider({
         )}
       </div>
       <input
+        ref={rangeRef}
         type="range"
         min={isLog ? 0 : min}
         max={isLog ? 1 : max}
         step={isLog ? 1 / LOG_STEPS : step}
-        value={isLog ? toPos(value) : value}
+        value={isLog ? toPos(effective) : effective}
         onChange={handleChange}
         disabled={disabled}
         className="ab-slider"

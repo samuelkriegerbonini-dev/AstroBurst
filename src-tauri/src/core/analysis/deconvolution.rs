@@ -83,7 +83,7 @@ impl FftConvolver {
         buf
     }
 
-    fn convolve_with(&mut self, image: &Array2<f32>, transpose_psf: bool) -> Array2<f32> {
+    fn convolve_with_into(&mut self, image: &Array2<f32>, transpose_psf: bool, out: &mut Array2<f32>) {
         let rows = self.rows;
         let cols = self.cols;
         let fft_cols = self.engine.fft_cols;
@@ -129,9 +129,7 @@ impl FftConvolver {
         engine.inverse_2d_with_scratch(io_buf, scratch);
 
         let io_ref: &[Complex<f32>] = io_buf;
-        let mut result = Array2::<f32>::zeros((rows, cols));
-        result
-            .as_slice_mut()
+        out.as_slice_mut()
             .expect("contiguous")
             .par_chunks_mut(cols)
             .enumerate()
@@ -141,16 +139,14 @@ impl FftConvolver {
                     out_row[x] = io_ref[base + x].re;
                 }
             });
-
-        result
     }
 
-    fn convolve_psf(&mut self, image: &Array2<f32>) -> Array2<f32> {
-        self.convolve_with(image, false)
+    fn convolve_psf_into(&mut self, image: &Array2<f32>, out: &mut Array2<f32>) {
+        self.convolve_with_into(image, false, out)
     }
 
-    fn convolve_psf_transpose(&mut self, image: &Array2<f32>) -> Array2<f32> {
-        self.convolve_with(image, true)
+    fn convolve_psf_transpose_into(&mut self, image: &Array2<f32>, out: &mut Array2<f32>) {
+        self.convolve_with_into(image, true, out)
     }
 }
 
@@ -182,14 +178,26 @@ pub fn richardson_lucy(
 
     let mut convolver = FftConvolver::new(rows, cols, psf);
 
-    let image_max = image
-        .iter()
-        .fold(0.0f32, |a, &b| if b.is_finite() { a.max(b) } else { a });
+    let image_max = match image.as_slice() {
+        Some(s) => s
+            .par_chunks(1 << 16)
+            .map(|c| c.iter().fold(0.0f32, |a, &b| if b.is_finite() { a.max(b) } else { a }))
+            .collect::<Vec<f32>>()
+            .into_iter()
+            .fold(0.0f32, |a, b| a.max(b)),
+        None => image
+            .iter()
+            .fold(0.0f32, |a, &b| if b.is_finite() { a.max(b) } else { a }),
+    };
     let inv_image_max = if image_max > 0.0 { 1.0 / image_max } else { 1.0 };
 
     let convergence_threshold = 1e-6;
     let mut last_convergence = f64::MAX;
     let mut iterations_run = 0;
+
+    let mut convolved = Array2::<f32>::zeros((rows, cols));
+    let mut ratio = Array2::<f32>::zeros((rows, cols));
+    let mut correction = Array2::<f32>::zeros((rows, cols));
 
     for iter in 0..config.iterations {
         if let Some(p) = progress {
@@ -198,16 +206,17 @@ pub fn richardson_lucy(
             }
         }
 
-        let convolved = convolver.convolve_psf(&estimate);
+        convolver.convolve_psf_into(&estimate, &mut convolved);
 
         let epsilon = 1e-6f32;
         let lambda = config.regularization as f32;
 
-        let ratio = Zip::from(&convolved)
+        Zip::from(&mut ratio)
+            .and(&convolved)
             .and(image)
-            .map_collect(|&c, &img| img / (c + epsilon));
+            .par_for_each(|r, &c, &img| *r = img / (c + epsilon));
 
-        let correction = convolver.convolve_psf_transpose(&ratio);
+        convolver.convolve_psf_transpose_into(&ratio, &mut correction);
 
         let sum_sq_delta: f64 = estimate
             .as_slice_mut()
@@ -309,7 +318,8 @@ mod tests {
 
         let image = Array2::from_shape_fn((rows, cols), |(y, x)| (y * cols + x) as f32);
         let mut convolver = FftConvolver::new(rows, cols, &psf);
-        let result = convolver.convolve_psf(&image);
+        let mut result = Array2::<f32>::zeros((rows, cols));
+        convolver.convolve_psf_into(&image, &mut result);
 
         for y in 1..rows - 1 {
             for x in 1..cols - 1 {

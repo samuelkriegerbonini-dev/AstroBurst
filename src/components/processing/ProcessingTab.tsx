@@ -1,6 +1,6 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
-import { useFileContext, useRenderContext, useRgbContext } from "../../context/PreviewContext";
+import { useFileContext, useRenderActions, useRgbContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeScnr, useCompositeActions } from "../../context/CompositeContext";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri/client";
@@ -78,7 +78,7 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 
 function ProcessingTabInner() {
   const { file } = useFileContext();
-  const { setRenderedPreviewUrl } = useRenderContext();
+  const { setRenderedPreviewUrl } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
   const { setCompositePreviewUrl } = useCompositeActions();
   const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();

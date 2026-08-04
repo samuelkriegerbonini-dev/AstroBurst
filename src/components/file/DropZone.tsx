@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Upload, AlertTriangle, X } from "lucide-react";
 import { isValidFitsFile, isCalibRefAsdf } from "../../utils/validation";
-import { AnimatePresence, motion } from "framer-motion";
 import { isTauri } from "../../infrastructure/tauri";
 import type { AstroFile } from "../../shared/types";
 
@@ -153,41 +152,23 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
     <div className="relative w-full h-full">
       {children}
 
-      <AnimatePresence>
-        {isDragOver && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm"
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="flex flex-col items-center gap-4 border-2 border-dashed border-blue-500 rounded-2xl px-20 py-16 bg-blue-500/5"
-            >
-              <Upload size={48} className="text-blue-400" />
-              <p className="text-xl font-semibold text-zinc-100">
-                Drop anywhere
-              </p>
-              <p className="text-zinc-500 text-sm">
-                Release to add .fits / .asdf / .zip files
-              </p>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {isDragOver && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-950/80 animate-fade-in">
+          <div className="flex flex-col items-center gap-4 border-2 border-dashed border-blue-500 rounded-2xl px-20 py-16 bg-blue-500/5 animate-scale-in">
+            <Upload size={48} className="text-blue-400" />
+            <p className="text-xl font-semibold text-zinc-100">
+              Drop anywhere
+            </p>
+            <p className="text-zinc-500 text-sm">
+              Release to add .fits / .asdf / .zip files
+            </p>
+          </div>
+        </div>
+      )}
 
-      <AnimatePresence>
-        {rejected && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 10 }}
-            transition={{ duration: 0.15 }}
-            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-2 px-3 py-2 rounded-lg text-xs shadow-lg"
+      {rejected && (
+          <div
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-2 px-3 py-2 rounded-lg text-xs shadow-lg animate-fade-in"
             style={{ background: "rgba(24,17,4,0.96)", border: "1px solid rgba(245,158,11,0.3)", color: "#fbbf24" }}
           >
             <AlertTriangle size={13} className="shrink-0" />
@@ -204,9 +185,8 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
             >
               <X size={12} />
             </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+      )}
     </div>
   );
 }

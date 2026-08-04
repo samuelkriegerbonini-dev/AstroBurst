@@ -72,7 +72,6 @@ pub const RES_HIGHLIGHT: &str = "highlight";
 pub const RES_HISTOGRAM: &str = "histogram";
 pub const RES_BINS: &str = "bins";
 pub const RES_BIN_COUNT: &str = "bin_count";
-pub const RES_BIN_EDGES: &str = "bin_edges";
 
 pub const RES_PIXELS_B64: &str = "pixels_b64";
 

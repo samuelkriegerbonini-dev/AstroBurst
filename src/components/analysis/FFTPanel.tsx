@@ -74,7 +74,10 @@ function FFTPanel({ filePath, computeFftSpectrum }: FFTPanelProps) {
       const y = ((e.clientY - rect.top) / rect.height) * fftData.height;
       const fx = (x - fftData.width / 2) / fftData.width;
       const fy = (y - fftData.height / 2) / fftData.height;
-      setHoveredCoord({ fx: fx.toFixed(3), fy: fy.toFixed(3) });
+      const next = { fx: fx.toFixed(3), fy: fy.toFixed(3) };
+      setHoveredCoord((prev) =>
+        prev && prev.fx === next.fx && prev.fy === next.fy ? prev : next,
+      );
     },
     [fftData],
   );

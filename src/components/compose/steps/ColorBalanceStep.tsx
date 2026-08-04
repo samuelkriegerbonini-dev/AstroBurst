@@ -219,11 +219,11 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
             </div>
           )}
           <Slider label="R" value={localR} min={sliderMin} max={sliderMax} step={0.01} accent="red"
-                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("r", v)} />
+                  format={(v) => v.toFixed(2)} onCommit={(v) => handleManualChange("r", v)} />
           <Slider label="G" value={localG} min={sliderMin} max={sliderMax} step={0.01} accent="green"
-                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("g", v)} />
+                  format={(v) => v.toFixed(2)} onCommit={(v) => handleManualChange("g", v)} />
           <Slider label="B" value={localB} min={sliderMin} max={sliderMax} step={0.01} accent="blue"
-                  format={(v) => v.toFixed(2)} onChange={(v) => handleManualChange("b", v)} />
+                  format={(v) => v.toFixed(2)} onCommit={(v) => handleManualChange("b", v)} />
         </div>
       )}
 
@@ -287,7 +287,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
             step={0.05}
             accent="cyan"
             format={(v) => `${(v * 100).toFixed(0)}%`}
-            onChange={handleAmountChange}
+            onCommit={handleAmountChange}
           />
           <Toggle
             label="Preserve Brightness (redistributes to R/B)"

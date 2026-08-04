@@ -19,9 +19,9 @@ const MAX_UPLOAD_DIM: usize = 2048;
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let (fits_path, _tmp) = resolve_single_image(path)?;
     let file = File::open(&fits_path)?;
-    let result = extract_image_mmap(&file)?;
-    let wcs = WcsTransform::from_header(&result.header)?;
-    Ok((result.header, wcs))
+    let header = extract_header_mmap(&file)?;
+    let wcs = WcsTransform::from_header(&header)?;
+    Ok((header, wcs))
 }
 
 /// Header-only variant of `load_header_and_wcs` for `pixel_to_world_cmd`, which
@@ -33,6 +33,37 @@ fn load_wcs_only(path: &str) -> anyhow::Result<WcsTransform> {
     let file = File::open(&fits_path)?;
     let header = extract_header_mmap(&file)?;
     WcsTransform::from_header(&header)
+}
+
+type WcsStamp = (u64, Option<std::time::SystemTime>);
+
+static WCS_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (WcsStamp, std::sync::Arc<WcsTransform>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn load_wcs_cached(path: &str) -> anyhow::Result<std::sync::Arc<WcsTransform>> {
+    let stamp: Option<WcsStamp> = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+
+    if let Some(st) = &stamp {
+        let cache = WCS_CACHE.lock().unwrap();
+        if let Some((cached_stamp, wcs)) = cache.get(path) {
+            if cached_stamp == st {
+                return Ok(std::sync::Arc::clone(wcs));
+            }
+        }
+    }
+
+    let wcs = std::sync::Arc::new(load_wcs_only(path)?);
+
+    if let Some(st) = stamp {
+        let mut cache = WCS_CACHE.lock().unwrap();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(path.to_string(), (st, std::sync::Arc::clone(&wcs)));
+    }
+
+    Ok(wcs)
 }
 
 fn resolve_api_key(provided: Option<String>) -> Option<String> {
@@ -264,7 +295,7 @@ pub async fn pixel_to_world_cmd(
     points: Vec<(f64, f64)>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let wcs = load_wcs_only(&path)?;
+        let wcs = load_wcs_cached(&path)?;
         let coords = wcs.pixel_to_world_batch(&points);
         let out: Vec<serde_json::Value> = coords
             .into_iter()

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
@@ -32,7 +32,7 @@ pub struct LruFrameCache {
 }
 
 struct CacheEntry {
-    frame: Array2<f32>,
+    frame: Arc<Array2<f32>>,
     last_access: u64,
 }
 
@@ -45,17 +45,17 @@ impl LruFrameCache {
         }
     }
 
-    pub fn get(&mut self, frame_idx: usize) -> Option<Array2<f32>> {
+    pub fn get(&mut self, frame_idx: usize) -> Option<Arc<Array2<f32>>> {
         if let Some(entry) = self.entries.get_mut(&frame_idx) {
             self.access_counter += 1;
             entry.last_access = self.access_counter;
-            Some(entry.frame.clone())
+            Some(Arc::clone(&entry.frame))
         } else {
             None
         }
     }
 
-    pub fn insert(&mut self, frame_idx: usize, frame: Array2<f32>) {
+    pub fn insert(&mut self, frame_idx: usize, frame: Arc<Array2<f32>>) {
         if self.entries.len() >= self.max_entries && !self.entries.contains_key(&frame_idx) {
             if let Some((&evict_key, _)) = self
                 .entries
@@ -207,7 +207,7 @@ impl LazyCube {
         bail!("No 3D data block found in FITS file")
     }
 
-    pub fn get_frame(&self, z: usize) -> Result<Array2<f32>> {
+    pub fn get_frame(&self, z: usize) -> Result<Arc<Array2<f32>>> {
         if z >= self.geometry.naxis3 {
             bail!("Frame index {} out of range (depth={})", z, self.geometry.naxis3);
         }
@@ -219,21 +219,28 @@ impl LazyCube {
             }
         }
 
+        let frame = Arc::new(self.frame_uncached(z)?);
+
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(z, Arc::clone(&frame));
+        }
+
+        Ok(frame)
+    }
+
+    pub fn frame_uncached(&self, z: usize) -> Result<Array2<f32>> {
+        if z >= self.geometry.naxis3 {
+            bail!("Frame index {} out of range (depth={})", z, self.geometry.naxis3);
+        }
         let g = &self.geometry;
         let start = g.data_offset + z * g.frame_bytes;
         let end = start + g.frame_bytes;
         let raw = &self.mmap[start..end];
 
         let pixels = decode_pixels(raw, g.bitpix, g.bscale, g.bzero);
-        let frame = Array2::from_shape_vec((g.naxis2, g.naxis1), pixels)
-            .context("Failed to reshape frame pixels")?;
-
-        {
-            let mut cache = self.cache.lock().unwrap();
-            cache.insert(z, frame.clone());
-        }
-
-        Ok(frame)
+        Array2::from_shape_vec((g.naxis2, g.naxis1), pixels)
+            .context("Failed to reshape frame pixels")
     }
 
     fn decode_frame_nocache(&self, z: usize) -> Vec<f32> {
@@ -454,7 +461,7 @@ pub fn process_cube_lazy(
     let mut frame_count = 0;
 
     for z in (0..depth).step_by(step) {
-        let frame = lazy.get_frame(z)?;
+        let frame = lazy.frame_uncached(z)?;
         let normalized = normalize_frame_with_stats(&frame, &stats);
         let path = format!("{}/frame_{:04}.png", frames_dir, frame_count);
         crate::infra::render::render_grayscale(&normalized, &path)?;
@@ -483,9 +490,9 @@ mod tests {
         let frame2 = Array2::<f32>::ones((3, 3));
         let frame3 = Array2::<f32>::from_elem((3, 3), 2.0);
 
-        cache.insert(0, frame1);
-        cache.insert(1, frame2);
-        cache.insert(2, frame3);
+        cache.insert(0, Arc::new(frame1));
+        cache.insert(1, Arc::new(frame2));
+        cache.insert(2, Arc::new(frame3));
 
         assert!(cache.get(0).is_none());
         assert!(cache.get(1).is_some());

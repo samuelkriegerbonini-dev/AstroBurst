@@ -1,9 +1,10 @@
 use serde_json::json;
 
 use crate::cmd::common::blocking_cmd;
+use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::eager::classify_spectral_cube;
 use crate::core::cube::eager::{process_cube, build_wavelength_axis};
-use crate::core::cube::lazy::{process_cube_lazy, LazyCube};
+use crate::core::cube::lazy::process_cube_lazy;
 use crate::types::constants::{
     RES_BITPIX, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT,
     RES_OUTPUT_PATH, RES_SPECTRUM, RES_WIDTH,
@@ -38,7 +39,7 @@ pub async fn process_cube_lazy_cmd(
 #[tauri::command]
 pub async fn get_cube_info(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let cube = LazyCube::open(&path)?;
+        let cube = GLOBAL_CUBE_CACHE.get_or_open(&path)?;
         let geo = &cube.geometry;
         let classification = classify_spectral_cube(&cube.header, geo.naxis3);
         let wavelengths = build_wavelength_axis(&cube.header);
@@ -67,7 +68,7 @@ pub async fn get_cube_frame(
     output_fits: Option<String>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let cube = LazyCube::open(&path)?;
+        let cube = GLOBAL_CUBE_CACHE.get_or_open(&path)?;
         let frame = cube.get_frame(frame_index)?;
         crate::infra::render::grayscale::render_grayscale(&frame, &output_path)?;
         let fits_path = if let Some(fp) = &output_fits {
@@ -91,7 +92,7 @@ pub async fn get_cube_spectrum(
     y: usize,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let cube = LazyCube::open(&path)?;
+        let cube = GLOBAL_CUBE_CACHE.get_or_open(&path)?;
         let spectrum = cube.extract_spectrum_at(y, x)?;
         let wavelengths = build_wavelength_axis(&cube.header);
         let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);

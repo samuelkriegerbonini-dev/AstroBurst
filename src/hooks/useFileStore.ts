@@ -181,9 +181,9 @@ class FileStore {
     });
 
     for (const f of newFiles) {
-      this.state.fileIds.push(f.id);
       this.state.fileMap.set(f.id, f);
     }
+    this.state.fileIds = [...this.state.fileIds, ...newFiles.map((f) => f.id)];
 
     this.state.stats = {
       ...this.state.stats,

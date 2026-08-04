@@ -277,6 +277,8 @@ export default function App() {
     confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
   }, [stats.done, confirmNewBatch, handleNewBatch]);
 
+  const handleSidebarToggle = useCallback(() => setSidebarOpen((p) => !p), []);
+
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
   }, []);
@@ -443,13 +445,23 @@ export default function App() {
             </div>
           </div>
         )}
-        <div
-          className="fixed inset-0 z-0 opacity-40 pointer-events-none"
-          style={{
-            backgroundImage: showBg ? `url(${nebulaImg})` : "none", backgroundSize: "cover", backgroundPosition: "center",
-            filter: view !== "empty" ? "blur(8px) brightness(0.3)" : "none", transition: "filter 0.6s ease",
-          }}
-        />
+        <div className="fixed inset-0 z-0 pointer-events-none">
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage: showBg ? `url(${nebulaImg})` : "none", backgroundSize: "cover", backgroundPosition: "center",
+              opacity: view === "empty" ? 0.4 : 0, transition: "opacity 0.6s ease",
+            }}
+          />
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage: showBg ? `url(${nebulaImg})` : "none", backgroundSize: "cover", backgroundPosition: "center",
+              filter: "blur(8px) brightness(0.3)",
+              opacity: view !== "empty" ? 0.4 : 0, transition: "opacity 0.6s ease",
+            }}
+          />
+        </div>
         {loading ? (
           <div className="relative z-50 h-screen flex flex-col items-center justify-center animate-fade-in" style={{ background: "var(--ab-deep)" }}>
             <AstroLogo size={80} showText={false} className="animate-pulse" />
@@ -542,7 +554,7 @@ export default function App() {
                                 onSelect={handleSelectFile}
                                 onExportZip={handleExportZip}
                                 collapsed={false}
-                                onToggle={() => setSidebarOpen((p) => !p)}
+                                onToggle={handleSidebarToggle}
                                 isExporting={isExporting}
                                 zipProgress={zipProgress}
                                 downloaded={downloaded}

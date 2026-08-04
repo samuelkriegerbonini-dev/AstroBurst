@@ -618,13 +618,13 @@ fn apply_correction(
 ) -> Array2<f32> {
     let (rows, cols) = image.dim();
 
-    let mut finite_vals: Vec<f32> = model
-        .as_slice()
-        .unwrap()
-        .iter()
-        .filter(|v| v.is_finite() && **v > 0.0)
-        .copied()
-        .collect();
+    let model_slice = model.as_slice().unwrap();
+    let mut finite_vals: Vec<f32> = Vec::with_capacity(model_slice.len());
+    for &v in model_slice {
+        if v.is_finite() && v > 0.0 {
+            finite_vals.push(v);
+        }
+    }
     let model_median = if finite_vals.is_empty() {
         0.0f32
     } else {

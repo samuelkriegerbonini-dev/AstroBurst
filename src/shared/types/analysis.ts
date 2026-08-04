@@ -12,7 +12,6 @@ export interface HistogramData {
   total_pixels: number;
   auto_stf: StfParams;
   elapsed_ms?: number;
-  bin_edges: number[];
 }
 
 export interface RawPixelData {

@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, memo } from "react";
 import { Slider, Toggle } from "../ui";
 import { useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
@@ -13,7 +13,7 @@ const HIST_RGB = [
   { key: "__composite_b", color: "#3b82f6" },
 ];
 
-export default function RgbStfPanel() {
+function RgbStfPanel() {
   const {
     compositeStfR, compositeStfG, compositeStfB,
     compositeStfLinked,
@@ -106,3 +106,5 @@ export default function RgbStfPanel() {
     </div>
   );
 }
+
+export default memo(RgbStfPanel);

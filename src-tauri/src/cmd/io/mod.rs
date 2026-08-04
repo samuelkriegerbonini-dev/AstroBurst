@@ -3,7 +3,7 @@ use std::time::Instant;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_cached_full, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full, load_preview_validated, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
@@ -175,12 +175,69 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
 pub async fn get_raw_pixels_preview(path: String, max_dim: Option<u32>) -> Result<Response, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
         let dim = max_dim.unwrap_or(2048) as usize;
-        let data = encode_with_header_downsampled(&extract_image_resolved(&path)?.arr, dim)?;
+        let entry = load_preview_validated(&path)?;
+        let data = encode_with_header_downsampled(entry.arr(), dim)?;
         Ok(Response::new(data))
     })
         .await
         .map_err(|e| format!("{}", e))?
         .map_err(|e| format!("{:#}", e))
+}
+
+type RgbStamp = (u64, Option<std::time::SystemTime>);
+
+struct RgbPreviewEntry {
+    path: String,
+    stamp: RgbStamp,
+    r: std::sync::Arc<ndarray::Array2<f32>>,
+    g: std::sync::Arc<ndarray::Array2<f32>>,
+    b: std::sync::Arc<ndarray::Array2<f32>>,
+}
+
+static RGB_PREVIEW_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<RgbPreviewEntry>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+const RGB_PREVIEW_CACHE_MAX_BYTES: usize = 512 << 20;
+
+fn load_rgb_preview_cached(
+    p: &str,
+) -> anyhow::Result<(
+    std::sync::Arc<ndarray::Array2<f32>>,
+    std::sync::Arc<ndarray::Array2<f32>>,
+    std::sync::Arc<ndarray::Array2<f32>>,
+)> {
+    let stamp: Option<RgbStamp> = std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+
+    if let Some(st) = &stamp {
+        let guard = RGB_PREVIEW_CACHE.lock().unwrap();
+        if let Some(e) = guard.as_ref() {
+            if e.path == p && &e.stamp == st {
+                return Ok((e.r.clone(), e.g.clone(), e.b.clone()));
+            }
+        }
+    }
+
+    let rgb = try_extract_rgb_resolved(p)?
+        .ok_or_else(|| anyhow::anyhow!("Not an RGB image: {}", p))?;
+    let r = std::sync::Arc::new(rgb.r);
+    let g = std::sync::Arc::new(rgb.g);
+    let b = std::sync::Arc::new(rgb.b);
+
+    if let Some(st) = stamp {
+        let total = (r.len() + g.len() + b.len()) * 4;
+        if total <= RGB_PREVIEW_CACHE_MAX_BYTES {
+            let mut guard = RGB_PREVIEW_CACHE.lock().unwrap();
+            *guard = Some(RgbPreviewEntry {
+                path: p.to_string(),
+                stamp: st,
+                r: r.clone(),
+                g: g.clone(),
+                b: b.clone(),
+            });
+        }
+    }
+
+    Ok((r, g, b))
 }
 
 #[tauri::command]
@@ -192,9 +249,8 @@ pub async fn get_raw_rgb_pixels_preview(
         let dim = max_dim.unwrap_or(2048) as usize;
         let data = match path {
             Some(p) => {
-                let rgb = try_extract_rgb_resolved(&p)?
-                    .ok_or_else(|| anyhow::anyhow!("Not an RGB image: {}", p))?;
-                encode_rgb_with_header_downsampled(&rgb.r, &rgb.g, &rgb.b, dim)?
+                let (r, g, b) = load_rgb_preview_cached(&p)?;
+                encode_rgb_with_header_downsampled(&r, &g, &b, dim)?
             }
             None => {
                 let (r, g, b) = helpers::load_composite_rgb()?;

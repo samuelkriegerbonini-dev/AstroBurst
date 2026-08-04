@@ -19,6 +19,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
   const pendingIdxRef = useRef<number | null>(null);
   const loadFrameRef = useRef<(idx: number) => void>(() => {});
   const sliderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const frameCacheRef = useRef(new Map<number, string>());
 
   useEffect(() => {
     return () => {
@@ -31,12 +32,18 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
     setCurrentFrame(0);
     setPlaying(false);
     playingRef.current = false;
+    frameCacheRef.current.clear();
   }, [filePath]);
 
   const loadFrame = useCallback(
     async (idx: number) => {
       if (idx < 0 || idx >= totalFrames) return;
       setCurrentFrame(idx);
+      const cached = frameCacheRef.current.get(idx);
+      if (cached) {
+        onFrameChange?.(cached, idx);
+        return;
+      }
       if (loadingRef.current) {
         pendingIdxRef.current = idx;
         return;
@@ -49,6 +56,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         const outputPath = `./output/cube_frame_${idx}.png`;
         const result = await getCubeFrame(filePath, idx, outputPath);
         if (abortRef.current !== seq) return;
+        frameCacheRef.current.set(idx, result.output_path);
         onFrameChange?.(result.output_path, idx);
       } catch (e) {
         if (abortRef.current === seq) setError(e instanceof Error ? e.message : String(e));

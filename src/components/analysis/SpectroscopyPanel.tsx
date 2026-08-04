@@ -47,6 +47,7 @@ function SpectroscopyPanel({
                                             onCollapsePreview,
                                           }: SpectroscopyPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
@@ -104,7 +105,7 @@ function SpectroscopyPanel({
     };
   }, [spectrum, wavelengths, wlConversion]);
 
-  const draw = useCallback(() => {
+  const drawPlot = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || spectrum.length === 0) return;
 
@@ -114,6 +115,11 @@ function SpectroscopyPanel({
     const H = CANVAS_H;
     canvas.width = W;
     canvas.height = H;
+    const overlay = overlayRef.current;
+    if (overlay) {
+      overlay.width = W;
+      overlay.height = H;
+    }
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -158,45 +164,6 @@ function SpectroscopyPanel({
     }
     ctx.stroke();
 
-    if (hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < n) {
-      const x = hasWl ? wavelengths![hoveredIdx] * cf : hoveredIdx;
-      const y = spectrum[hoveredIdx];
-      if (Number.isFinite(y)) {
-        const cx = toX(x);
-        const cy = toY(y);
-
-        ctx.strokeStyle = "rgba(255,255,255,0.3)";
-        ctx.lineWidth = 0.5;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.moveTo(cx, PAD.top);
-        ctx.lineTo(cx, H - PAD.bottom);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(PAD.left, cy);
-        ctx.lineTo(W - PAD.right, cy);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        ctx.fillStyle = "#eab308";
-        ctx.beginPath();
-        ctx.arc(cx, cy, 4, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.font = "10px 'JetBrains Mono', monospace";
-        const label = hasWl
-          ? `${x.toFixed(4)} ${wlConversion.label} \u2192 ${y.toFixed(2)}`
-          : `ch ${x} \u2192 ${y.toFixed(2)}`;
-        const tw = ctx.measureText(label).width;
-        const tx = Math.min(cx + 8, W - tw - 8);
-        const ty = Math.max(cy - 8, 16);
-        ctx.fillStyle = "rgba(0,0,0,0.75)";
-        ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
-        ctx.fillStyle = "#fafafa";
-        ctx.fillText(label, tx, ty);
-      }
-    }
-
     ctx.font = "9px 'JetBrains Mono', monospace";
     ctx.fillStyle = "#71717a";
     ctx.textAlign = "right";
@@ -209,17 +176,75 @@ function SpectroscopyPanel({
     ctx.textAlign = "center";
     ctx.fillStyle = "#52525b";
     ctx.fillText(xLabel, W / 2, H - 4);
+  }, [spectrum, wavelengths, plotParams, wlConversion]);
+
+  const drawOverlay = useCallback(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const ctx = overlay.getContext("2d");
+    if (!ctx) return;
+    const W = overlay.width;
+    const H = overlay.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const n = spectrum.length;
+    if (hoveredIdx === null || hoveredIdx < 0 || hoveredIdx >= n || W === 0) return;
+
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top - PAD.bottom;
+    const { xMin, xMax, yMin, yMax, hasWl } = plotParams;
+    const xRange = Math.max(xMax - xMin, 1e-10);
+    const yRange = Math.max(yMax - yMin, 1e-10);
+    const cf = wlConversion.factor;
+
+    const x = hasWl ? wavelengths![hoveredIdx] * cf : hoveredIdx;
+    const y = spectrum[hoveredIdx];
+    if (!Number.isFinite(y)) return;
+    const cx = PAD.left + ((x - xMin) / xRange) * plotW;
+    const cy = PAD.top + plotH - ((y - yMin) / yRange) * plotH;
+
+    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(cx, PAD.top);
+    ctx.lineTo(cx, H - PAD.bottom);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(PAD.left, cy);
+    ctx.lineTo(W - PAD.right, cy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = "#eab308";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    const label = hasWl
+      ? `${x.toFixed(4)} ${wlConversion.label} → ${y.toFixed(2)}`
+      : `ch ${x} → ${y.toFixed(2)}`;
+    const tw = ctx.measureText(label).width;
+    const tx = Math.min(cx + 8, W - tw - 8);
+    const ty = Math.max(cy - 8, 16);
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
+    ctx.fillStyle = "#fafafa";
+    ctx.fillText(label, tx, ty);
   }, [spectrum, wavelengths, plotParams, hoveredIdx, wlConversion]);
 
-  useEffect(() => { draw(); }, [draw]);
+  useEffect(() => { drawPlot(); }, [drawPlot]);
+
+  useEffect(() => { drawOverlay(); }, [drawOverlay]);
 
   useEffect(() => {
     const c = containerRef.current;
     if (!c) return;
-    const ro = new ResizeObserver(() => draw());
+    const ro = new ResizeObserver(() => { drawPlot(); drawOverlay(); });
     ro.observe(c);
     return () => ro.disconnect();
-  }, [draw]);
+  }, [drawPlot, drawOverlay]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -316,14 +341,22 @@ function SpectroscopyPanel({
             />
           </div>
         ) : (
-          <canvas
-            ref={canvasRef}
-            height={CANVAS_H}
-            className="w-full rounded-md cursor-crosshair"
-            style={{ height: CANVAS_H }}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={handleMouseLeave}
-          />
+          <div className="relative" style={{ height: CANVAS_H }}>
+            <canvas
+              ref={canvasRef}
+              height={CANVAS_H}
+              className="w-full rounded-md cursor-crosshair"
+              style={{ height: CANVAS_H }}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
+            />
+            <canvas
+              ref={overlayRef}
+              height={CANVAS_H}
+              className="absolute inset-0 w-full pointer-events-none"
+              style={{ height: CANVAS_H }}
+            />
+          </div>
         )}
       </div>
 

@@ -315,11 +315,11 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       {state.stretchMode === "masked" && (
         <div className="flex flex-col gap-2">
           <Slider label="Target Background" value={state.targetBackground} min={0.05} max={0.5} step={0.01} accent="amber"
-                  format={(v) => v.toFixed(2)} onChange={handleTargetChange} />
+                  format={(v) => v.toFixed(2)} onCommit={handleTargetChange} />
           <Slider label="Mask Growth" value={state.maskGrowth} min={0.5} max={10.0} step={0.1} accent="rose"
-                  format={(v) => `${v.toFixed(1)}x FWHM`} onChange={(v) => onMaskParams(v, state.maskProtection)} />
+                  format={(v) => `${v.toFixed(1)}x FWHM`} onCommit={(v) => onMaskParams(v, state.maskProtection)} />
           <Slider label="Star Protection" value={state.maskProtection} min={0.0} max={1.0} step={0.01} accent="rose"
-                  format={(v) => `${(v * 100).toFixed(0)}%`} onChange={(v) => onMaskParams(state.maskGrowth, v)} />
+                  format={(v) => `${(v * 100).toFixed(0)}%`} onCommit={(v) => onMaskParams(state.maskGrowth, v)} />
           <Slider label="Detection Sigma" value={detectionSigma} min={3} max={15} step={0.5} accent="rose"
                   format={(v) => `${v.toFixed(1)}σ`} onChange={setDetectionSigma}
                   hint="higher = only strong stars masked" />
@@ -344,7 +344,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
       {state.stretchMode === "arcsinh" && (
         <Slider label="Stretch Factor" value={state.stretchFactor} min={1} max={500} step={1} accent="amber"
-                format={(v) => `${v}`} onChange={handleFactorChange} />
+                format={(v) => `${v}`} onCommit={handleFactorChange} />
       )}
 
       {state.stretchMode === "ghs" && (
