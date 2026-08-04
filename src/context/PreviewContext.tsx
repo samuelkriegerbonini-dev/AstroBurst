@@ -203,7 +203,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       const creatingId = file?.id ?? null;
       if (prevFileIdRef.current !== creatingId) return;
       setRenderedPreviewUrlRaw(url);
-      if (url && creatingId) setPreviewCache(creatingId, url);
+      if (url && creatingId && !url.includes("cube_frame_")) setPreviewCache(creatingId, url);
     },
     [file?.id],
   );

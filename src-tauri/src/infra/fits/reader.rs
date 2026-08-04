@@ -10,15 +10,7 @@ use crate::types::HduHeader;
 use crate::types::constants::BLOCK_SIZE;
 
 use super::compress;
-
-pub fn create_mmap(file: &File) -> Result<Mmap> {
-    let mmap = unsafe { MmapOptions::new().map(file).context("mmap failed")? };
-    #[cfg(unix)]
-    {
-        let _ = mmap.advise(memmap2::Advice::Sequential);
-    }
-    Ok(mmap)
-}
+use super::file_bytes::read_file_bytes;
 
 pub fn create_mmap_random(file: &File) -> Result<Mmap> {
     let mmap = unsafe { MmapOptions::new().map(file).context("mmap random failed")? };
@@ -282,10 +274,65 @@ struct ScannedHdu {
     is_compressed: bool,
 }
 
+fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
+    let h = &parsed.header;
+
+    let extname = h.get("EXTNAME").map(|s| s.to_string());
+    let extver = h.get_i64("EXTVER");
+    let is_image_hdu = h
+        .get("XTENSION")
+        .is_none_or(|x| x.trim().eq_ignore_ascii_case("IMAGE"));
+    let is_compressed = compress::is_compressed_image_hdu(h);
+
+    // For a compressed-image BINTABLE, the Z-prefixed keywords (ZNAXIS,
+    // ZNAXISn, ZBITPIX) describe the *decompressed* image shape; NAXIS/
+    // NAXISn/BITPIX describe the BINTABLE storage itself (row bytes, row
+    // count, BITPIX=8) and are irrelevant to callers picking an image HDU.
+    // v1 scope: only 2D (ZNAXIS=2) compressed images are selectable --
+    // 3D compressed cubes fall through as has_data=false rather than
+    // being mis-selected into the plain-image/cube/RGB byte-slicing paths.
+    let (naxis, naxis1, naxis2, naxis3, bitpix, has_data) = if is_compressed {
+        let shape = compress::read_compressed_shape(h);
+        let has_data = (shape.znaxis == 2 || (shape.znaxis == 3 && shape.znaxis3 >= 1))
+            && shape.znaxis1 > 1
+            && shape.znaxis2 > 1;
+        let naxis3 = if shape.znaxis == 3 { shape.znaxis3 } else { 0 };
+        (shape.znaxis, shape.znaxis1, shape.znaxis2, naxis3, shape.zbitpix, has_data)
+    } else {
+        let naxis = h.get_i64("NAXIS").unwrap_or(0);
+        let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
+        let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
+        let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
+        let bitpix = h.get_i64("BITPIX").unwrap_or(0);
+        let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
+        (naxis, naxis1, naxis2, naxis3, bitpix, has_data)
+    };
+
+    ScannedHdu {
+        info: HduInfo {
+            index: idx,
+            extname,
+            extver,
+            naxis,
+            naxis1,
+            naxis2,
+            naxis3,
+            bitpix,
+            has_data,
+            header_start: parsed.header_start,
+            data_start: parsed.data_start,
+        },
+        header: parsed.header,
+        is_compressed,
+    }
+}
+
 fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
+    if mmap.is_empty() {
+        bail!("File is empty (0 bytes) — the download or copy may have failed");
+    }
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
-    let mut idx: usize = 0;
 
     while offset < mmap.len() {
         if offset + BLOCK_SIZE > mmap.len() {
@@ -300,57 +347,70 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
             Err(_) if !hdus.is_empty() => break,
             Err(e) => return Err(e),
         };
-        let h = &parsed.header;
-
-        let extname = h.get("EXTNAME").map(|s| s.to_string());
-        let extver = h.get_i64("EXTVER");
-        let is_image_hdu = h
-            .get("XTENSION")
-            .is_none_or(|x| x.trim().eq_ignore_ascii_case("IMAGE"));
-        let is_compressed = compress::is_compressed_image_hdu(h);
-
-        // For a compressed-image BINTABLE, the Z-prefixed keywords (ZNAXIS,
-        // ZNAXISn, ZBITPIX) describe the *decompressed* image shape; NAXIS/
-        // NAXISn/BITPIX describe the BINTABLE storage itself (row bytes, row
-        // count, BITPIX=8) and are irrelevant to callers picking an image HDU.
-        // v1 scope: only 2D (ZNAXIS=2) compressed images are selectable --
-        // 3D compressed cubes fall through as has_data=false rather than
-        // being mis-selected into the plain-image/cube/RGB byte-slicing paths.
-        let (naxis, naxis1, naxis2, naxis3, bitpix, has_data) = if is_compressed {
-            let shape = compress::read_compressed_shape(h);
-            let has_data =
-                shape.znaxis == 2 && shape.znaxis1 > 1 && shape.znaxis2 > 1;
-            (shape.znaxis, shape.znaxis1, shape.znaxis2, 0, shape.zbitpix, has_data)
-        } else {
-            let naxis = h.get_i64("NAXIS").unwrap_or(0);
-            let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
-            let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
-            let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
-            let bitpix = h.get_i64("BITPIX").unwrap_or(0);
-            let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
-            (naxis, naxis1, naxis2, naxis3, bitpix, has_data)
-        };
-
-        hdus.push(ScannedHdu {
-            info: HduInfo {
-                index: idx,
-                extname,
-                extver,
-                naxis,
-                naxis1,
-                naxis2,
-                naxis3,
-                bitpix,
-                has_data,
-                header_start: parsed.header_start,
-                data_start: parsed.data_start,
-            },
-            header: parsed.header,
-            is_compressed,
-        });
 
         offset = parsed.next_hdu_offset;
-        idx += 1;
+        let idx = hdus.len();
+        hdus.push(build_scanned_hdu(parsed, idx));
+    }
+
+    Ok(hdus)
+}
+
+pub(crate) fn read_header_blocks(file: &File, offset: usize) -> Result<ParsedHdu> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = file;
+    f.seek(SeekFrom::Start(offset as u64))
+        .with_context(|| format!("seek to header at offset {offset} failed"))?;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(BLOCK_SIZE);
+    'blocks: loop {
+        let start = buf.len();
+        buf.resize(start + BLOCK_SIZE, 0);
+        f.read_exact(&mut buf[start..]).with_context(|| {
+            format!("Unexpected end of file while reading header at offset {offset}")
+        })?;
+        for card in buf[start..].chunks_exact(80) {
+            if String::from_utf8_lossy(&card[0..8]).trim() == "END" {
+                break 'blocks;
+            }
+        }
+    }
+
+    let parsed = parse_header_at(&buf, 0)?;
+    Ok(ParsedHdu {
+        header: parsed.header,
+        header_start: offset,
+        data_start: offset + parsed.data_start,
+        next_hdu_offset: offset + parsed.next_hdu_offset,
+    })
+}
+
+fn scan_hdu_headers(file: &File) -> Result<Vec<ScannedHdu>> {
+    let file_len = file.metadata().context("stat failed")?.len() as usize;
+    if file_len == 0 {
+        bail!("File is empty (0 bytes) — the download or copy may have failed");
+    }
+    let mut hdus = Vec::new();
+    let mut offset: usize = 0;
+
+    while offset < file_len {
+        if offset + BLOCK_SIZE > file_len {
+            if hdus.is_empty() {
+                bail!("FITS file too small to contain a valid header");
+            }
+            break;
+        }
+
+        let parsed = match read_header_blocks(file, offset) {
+            Ok(p) => p,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
+
+        offset = parsed.next_hdu_offset;
+        let idx = hdus.len();
+        hdus.push(build_scanned_hdu(parsed, idx));
     }
 
     Ok(hdus)
@@ -400,7 +460,11 @@ fn extract_image_from_hdu(
     hdu: &ScannedHdu,
 ) -> Result<Array2<f32>> {
     if hdu.is_compressed {
-        return compress::decode_compressed_image(mmap, &hdu.header, hdu.info.data_start);
+        let mut planes = compress::decode_compressed_planes(mmap, &hdu.header, hdu.info.data_start)?;
+        if planes.is_empty() {
+            bail!("Compressed image HDU decoded to zero planes");
+        }
+        return Ok(planes.swap_remove(0));
     }
 
     let h = &hdu.header;
@@ -465,7 +529,7 @@ pub struct MmapRgbResult {
 }
 
 pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
-    let mmap = create_mmap(file)?;
+    let mmap = read_file_bytes(file)?;
     let hdus = scan_all_hdus(&mmap)?;
 
     if hdus.is_empty() {
@@ -505,8 +569,7 @@ pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
 /// header (e.g. a WCS lookup driven by mouse movement, where re-decoding the
 /// whole image on every call would be far too slow).
 pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
-    let mmap = create_mmap(file)?;
-    let hdus = scan_all_hdus(&mmap)?;
+    let hdus = scan_hdu_headers(file)?;
 
     if hdus.is_empty() {
         bail!("No HDUs found in FITS file");
@@ -519,7 +582,7 @@ pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
 }
 
 pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<MmapImageResult> {
-    let mmap = create_mmap(file)?;
+    let mmap = read_file_bytes(file)?;
     let hdus = scan_all_hdus(&mmap)?;
 
     if hdu_index >= hdus.len() {
@@ -555,7 +618,7 @@ pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<Mmap
 }
 
 pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
-    let mmap = create_mmap(file)?;
+    let mmap = read_file_bytes(file)?;
     let hdus = scan_all_hdus(&mmap)?;
 
     if hdus.is_empty() {
@@ -569,38 +632,50 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
 
     let hdu = &hdus[selected_idx];
     let h = &hdu.header;
-    let naxis = h.get_i64("NAXIS").unwrap_or(0);
-    let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
+    let naxis = hdu.info.naxis;
+    let naxis3 = hdu.info.naxis3;
 
     if naxis != 3 || naxis3 < 3 || naxis3 > 4 {
         return Ok(None);
     }
 
-    let naxis1 = h.get_i64("NAXIS1").unwrap_or(0) as usize;
-    let naxis2 = h.get_i64("NAXIS2").unwrap_or(0) as usize;
-    let bitpix = h.get_i64("BITPIX").context("Missing BITPIX in RGB HDU")?;
-    let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-    let plane_size = naxis1 * naxis2 * bytes_per_pixel;
-    let total_size = plane_size * naxis3 as usize;
-    let (bzero, bscale) = scaling(h);
+    let (r, g, b) = if hdu.is_compressed {
+        let mut planes = compress::decode_compressed_planes(&mmap, h, hdu.info.data_start)?;
+        if planes.len() < 3 {
+            bail!("Compressed RGB HDU decoded {} planes, expected at least 3", planes.len());
+        }
+        let b = planes.swap_remove(2);
+        let g = planes.swap_remove(1);
+        let r = planes.swap_remove(0);
+        (r, g, b)
+    } else {
+        let naxis1 = h.get_i64("NAXIS1").unwrap_or(0) as usize;
+        let naxis2 = h.get_i64("NAXIS2").unwrap_or(0) as usize;
+        let bitpix = h.get_i64("BITPIX").context("Missing BITPIX in RGB HDU")?;
+        let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
+        let plane_size = naxis1 * naxis2 * bytes_per_pixel;
+        let total_size = plane_size * naxis3 as usize;
+        let (bzero, bscale) = scaling(h);
 
-    let data_end = hdu.info.data_start + total_size;
-    if data_end > mmap.len() {
-        bail!("RGB data exceeds file size");
-    }
+        let data_end = hdu.info.data_start + total_size;
+        if data_end > mmap.len() {
+            bail!("RGB data exceeds file size");
+        }
 
-    let base = hdu.info.data_start;
-    let blank = blank_value(h);
-    let r_pixels = decode_pixels_blank(&mmap[base..base + plane_size], bitpix, bscale, bzero, blank);
-    let g_pixels = decode_pixels_blank(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero, blank);
-    let b_pixels = decode_pixels_blank(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero, blank);
+        let base = hdu.info.data_start;
+        let blank = blank_value(h);
+        let r_pixels = decode_pixels_blank(&mmap[base..base + plane_size], bitpix, bscale, bzero, blank);
+        let g_pixels = decode_pixels_blank(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero, blank);
+        let b_pixels = decode_pixels_blank(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero, blank);
 
-    let r = Array2::from_shape_vec((naxis2, naxis1), r_pixels)
-        .context("Failed to reshape R channel")?;
-    let g = Array2::from_shape_vec((naxis2, naxis1), g_pixels)
-        .context("Failed to reshape G channel")?;
-    let b = Array2::from_shape_vec((naxis2, naxis1), b_pixels)
-        .context("Failed to reshape B channel")?;
+        let r = Array2::from_shape_vec((naxis2, naxis1), r_pixels)
+            .context("Failed to reshape R channel")?;
+        let g = Array2::from_shape_vec((naxis2, naxis1), g_pixels)
+            .context("Failed to reshape G channel")?;
+        let b = Array2::from_shape_vec((naxis2, naxis1), b_pixels)
+            .context("Failed to reshape B channel")?;
+        (r, g, b)
+    };
 
     let header = build_merged_header(&hdus, selected_idx);
     let is_mef = hdus.len() > 1;
@@ -628,13 +703,20 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
 }
 
 pub fn list_extensions(file: &File) -> Result<Vec<HduInfo>> {
-    let mmap = create_mmap(file)?;
-    let hdus = scan_all_hdus(&mmap)?;
+    let hdus = scan_hdu_headers(file)?;
     Ok(hdus.into_iter().map(|h| h.info).collect())
 }
 
+pub fn extract_header_by_index(file: &File, hdu_index: usize) -> Result<HduHeader> {
+    let mut hdus = scan_hdu_headers(file)?;
+    if hdu_index >= hdus.len() {
+        bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
+    }
+    Ok(hdus.swap_remove(hdu_index).header)
+}
+
 pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
-    let mmap = create_mmap(file)?;
+    let mmap = read_file_bytes(file)?;
     let mut offset: usize = 0;
 
     while offset + BLOCK_SIZE <= mmap.len() {
@@ -690,8 +772,7 @@ pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
 pub fn read_primary_header(path: &str) -> Result<HduHeader> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open {}", path))?;
-    let mmap = create_mmap(&file)?;
-    Ok(parse_header_at(&mmap, 0)?.header)
+    Ok(read_header_blocks(&file, 0)?.header)
 }
 
 #[cfg(test)]
@@ -863,5 +944,42 @@ mod tests {
         assert_eq!(compressed.naxis1, 37);
         assert_eq!(compressed.naxis2, 23);
         assert_eq!(compressed.bitpix, 16);
+    }
+
+    #[test]
+    fn seek_scanner_matches_full_scan_on_every_fixture() {
+        let dir = match compressed_fixtures_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "fits") {
+                continue;
+            }
+            let file = File::open(&path).unwrap();
+            let bytes = read_file_bytes(&file).unwrap();
+            let full = scan_all_hdus(&bytes).unwrap();
+            let seek = scan_hdu_headers(&file).unwrap();
+
+            assert_eq!(full.len(), seek.len(), "{path:?}: HDU count");
+            for (f, s) in full.iter().zip(seek.iter()) {
+                assert_eq!(f.info.index, s.info.index, "{path:?}");
+                assert_eq!(f.info.extname, s.info.extname, "{path:?}");
+                assert_eq!(f.info.naxis, s.info.naxis, "{path:?}");
+                assert_eq!(f.info.naxis1, s.info.naxis1, "{path:?}");
+                assert_eq!(f.info.naxis2, s.info.naxis2, "{path:?}");
+                assert_eq!(f.info.naxis3, s.info.naxis3, "{path:?}");
+                assert_eq!(f.info.bitpix, s.info.bitpix, "{path:?}");
+                assert_eq!(f.info.has_data, s.info.has_data, "{path:?}");
+                assert_eq!(f.info.header_start, s.info.header_start, "{path:?}");
+                assert_eq!(f.info.data_start, s.info.data_start, "{path:?}");
+                assert_eq!(f.is_compressed, s.is_compressed, "{path:?}");
+                assert_eq!(f.header.cards, s.header.cards, "{path:?}");
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no fixtures found to check");
     }
 }

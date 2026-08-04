@@ -27,20 +27,23 @@ pub struct CubeGeometry {
 
 pub struct LruFrameCache {
     entries: HashMap<usize, CacheEntry>,
-    max_entries: usize,
+    max_bytes: usize,
+    current_bytes: usize,
     access_counter: u64,
 }
 
 struct CacheEntry {
     frame: Arc<Array2<f32>>,
+    bytes: usize,
     last_access: u64,
 }
 
 impl LruFrameCache {
-    pub fn new(max_entries: usize) -> Self {
+    pub fn new(max_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            max_entries,
+            max_bytes,
+            current_bytes: 0,
             access_counter: 0,
         }
     }
@@ -56,20 +59,35 @@ impl LruFrameCache {
     }
 
     pub fn insert(&mut self, frame_idx: usize, frame: Arc<Array2<f32>>) {
-        if self.entries.len() >= self.max_entries && !self.entries.contains_key(&frame_idx) {
-            if let Some((&evict_key, _)) = self
+        let bytes = frame.len() * std::mem::size_of::<f32>();
+        if bytes > self.max_bytes {
+            return;
+        }
+        if let Some(old) = self.entries.remove(&frame_idx) {
+            self.current_bytes -= old.bytes;
+        }
+        while self.current_bytes + bytes > self.max_bytes {
+            let victim = self
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_access)
-            {
-                self.entries.remove(&evict_key);
+                .map(|(&k, _)| k);
+            match victim {
+                Some(k) => {
+                    if let Some(old) = self.entries.remove(&k) {
+                        self.current_bytes -= old.bytes;
+                    }
+                }
+                None => break,
             }
         }
         self.access_counter += 1;
+        self.current_bytes += bytes;
         self.entries.insert(
             frame_idx,
             CacheEntry {
                 frame,
+                bytes,
                 last_access: self.access_counter,
             },
         );
@@ -77,6 +95,7 @@ impl LruFrameCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.current_bytes = 0;
         self.access_counter = 0;
     }
 }
@@ -109,7 +128,7 @@ pub struct LazyCubeResult {
     pub wavelengths: Option<Vec<f64>>,
 }
 
-const DEFAULT_CACHE_SIZE: usize = 64;
+const DEFAULT_CACHE_BYTES: usize = 256 << 20;
 const BATCH_SIZE: usize = 32;
 
 pub struct LazyCube {
@@ -138,10 +157,10 @@ fn checked_cube_bytes(
 
 impl LazyCube {
     pub fn open(path: &str) -> Result<Self> {
-        Self::open_with_cache(path, DEFAULT_CACHE_SIZE)
+        Self::open_with_cache(path, DEFAULT_CACHE_BYTES)
     }
 
-    pub fn open_with_cache(path: &str, cache_frames: usize) -> Result<Self> {
+    pub fn open_with_cache(path: &str, cache_bytes: usize) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open FITS file {}", path))?;
         let mmap = create_mmap_random(&file)
@@ -197,7 +216,7 @@ impl LazyCube {
 
                 return Ok(LazyCube {
                     _file: file, mmap, header, geometry,
-                    cache: Mutex::new(LruFrameCache::new(cache_frames)),
+                    cache: Mutex::new(LruFrameCache::new(cache_bytes)),
                 });
             }
 
@@ -485,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache() {
-        let mut cache = LruFrameCache::new(2);
+        let mut cache = LruFrameCache::new(72);
         let frame1 = Array2::<f32>::zeros((3, 3));
         let frame2 = Array2::<f32>::ones((3, 3));
         let frame3 = Array2::<f32>::from_elem((3, 3), 2.0);

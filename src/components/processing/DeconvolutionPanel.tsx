@@ -84,9 +84,11 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
       onPreviewUpdate?.(res?.previewUrl);
       onProcessingDone?.(res);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) setError(msg);
     } finally {
       setIsRunning(false);
+      progress.reset();
     }
   }, [selectedFile, outputDir, params, progress, onPreviewUpdate, onProcessingDone]);
 

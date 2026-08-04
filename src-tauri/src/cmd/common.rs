@@ -122,7 +122,12 @@ fn load_image_stats_header(path: &str) -> Result<(Array2<f32>, ImageStats, HduHe
 }
 
 pub(crate) fn load_cached(path: &str) -> Result<ImageEntry> {
-    GLOBAL_IMAGE_CACHE.get_or_load(path, || load_image_and_stats(path))
+    let had = GLOBAL_IMAGE_CACHE.get(path).is_some();
+    let entry = GLOBAL_IMAGE_CACHE.get_or_load(path, || load_image_and_stats(path))?;
+    if !had {
+        record_preview_stamp(path);
+    }
+    Ok(entry)
 }
 
 pub(crate) fn load_cached_full(path: &str) -> Result<ImageEntry> {
@@ -153,7 +158,9 @@ pub(crate) fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
     }
     let resolved = extract_image_resolved(path)?;
     let stats = compute_image_stats(&resolved.arr);
-    GLOBAL_IMAGE_CACHE.get_or_load(path, || Ok((resolved.arr, stats)))
+    let entry = GLOBAL_IMAGE_CACHE.get_or_load(path, || Ok((resolved.arr, stats)))?;
+    record_preview_stamp(path);
+    Ok(entry)
 }
 
 type FileStamp = (u64, Option<std::time::SystemTime>);
@@ -161,13 +168,30 @@ type FileStamp = (u64, Option<std::time::SystemTime>);
 static PREVIEW_STAMPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, FileStamp>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+pub(crate) fn record_preview_stamp(path: &str) {
+    if let Ok(m) = std::fs::metadata(path) {
+        let stamp: FileStamp = (m.len(), m.modified().ok());
+        let mut stamps = PREVIEW_STAMPS.lock().unwrap();
+        if stamps.len() > 1024 {
+            stamps.clear();
+        }
+        stamps.insert(path.to_string(), stamp);
+    }
+}
+
 pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
     if let Ok(m) = std::fs::metadata(path) {
         let stamp: FileStamp = (m.len(), m.modified().ok());
         let mut stamps = PREVIEW_STAMPS.lock().unwrap();
-        if stamps.get(path) != Some(&stamp) {
-            GLOBAL_IMAGE_CACHE.invalidate(path);
-            stamps.insert(path.to_string(), stamp);
+        match stamps.get(path) {
+            Some(s) if *s == stamp => {}
+            Some(_) => {
+                GLOBAL_IMAGE_CACHE.invalidate(path);
+                stamps.insert(path.to_string(), stamp);
+            }
+            None => {
+                stamps.insert(path.to_string(), stamp);
+            }
         }
     }
     load_from_cache_or_disk(path)

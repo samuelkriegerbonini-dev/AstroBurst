@@ -129,9 +129,8 @@ function PlateSolvePanel({
     const parent = canvas.parentElement;
     if (!parent) return;
 
-    const rect = parent.getBoundingClientRect();
-    const W = Math.floor(rect.width);
-    const H = Math.floor(rect.height);
+    const W = Math.min(parent.clientWidth, 8192);
+    const H = Math.min(parent.clientHeight, 8192);
     if (W === 0 || H === 0) return;
 
     canvas.width = W;

@@ -7,10 +7,19 @@ use crate::cmd::helpers;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{apply_stf_f32, AutoStfConfig, StfParams};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
-use crate::infra::fits::writer::{filter_header, write_fits_mono_bitpix, write_fits_rgb_bitpix};
+use crate::infra::fits::writer::{
+    filter_header, write_fits_mono_bitpix, write_fits_mono_rice, write_fits_rgb_bitpix,
+    write_fits_rgb_rice,
+};
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COPY_METADATA, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_OUTPUT_PATH};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_OUTPUT_PATH, RES_QUANTIZE_LEVEL};
+
+const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
+
+fn wants_rice_compression(compress: &Option<String>) -> bool {
+    compress.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("rice"))
+}
 
 #[tauri::command]
 pub async fn export_fits(
@@ -23,6 +32,8 @@ pub async fn export_fits(
     copy_wcs: Option<bool>,
     copy_metadata: Option<bool>,
     bitpix: Option<i32>,
+    compress: Option<String>,
+    quantize_level: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -30,6 +41,8 @@ pub async fn export_fits(
         let do_wcs = copy_wcs.unwrap_or(true);
         let do_meta = copy_metadata.unwrap_or(true);
         let target_bitpix = bitpix.unwrap_or(-32);
+        let use_rice = wants_rice_compression(&compress);
+        let qlevel = quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL);
 
         let resolved = extract_image_resolved(&path)?;
         let filtered = filter_header(&resolved.header, do_wcs, do_meta);
@@ -51,7 +64,12 @@ pub async fn export_fits(
             source_ref
         };
 
-        write_fits_mono_bitpix(&output_path, write_ref, filtered.as_ref(), target_bitpix)?;
+        crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
+        if use_rice {
+            write_fits_mono_rice(&output_path, write_ref, filtered.as_ref(), target_bitpix, qlevel)?;
+        } else {
+            write_fits_mono_bitpix(&output_path, write_ref, filtered.as_ref(), target_bitpix)?;
+        }
 
         let file_size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -64,6 +82,8 @@ pub async fn export_fits(
             COPY_WCS: do_wcs,
             RES_COPY_METADATA: do_meta,
             RES_FILE_SIZE_BYTES: file_size,
+            RES_COMPRESS: if use_rice { "rice" } else { "none" },
+            RES_QUANTIZE_LEVEL: qlevel,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
@@ -79,12 +99,16 @@ pub async fn export_fits_rgb(
     copy_metadata: Option<bool>,
     bitpix: Option<i32>,
     history: Option<Vec<String>>,
+    compress: Option<String>,
+    quantize_level: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         let do_wcs = copy_wcs.unwrap_or(true);
         let do_meta = copy_metadata.unwrap_or(true);
         let target_bitpix = bitpix.unwrap_or(-32);
+        let use_rice = wants_rice_compression(&compress);
+        let qlevel = quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL);
 
         let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
         let cache_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G);
@@ -153,7 +177,12 @@ pub async fn export_fits_rgb(
             }
         }
 
-        write_fits_rgb_bitpix(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix)?;
+        crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
+        if use_rice {
+            write_fits_rgb_rice(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix, qlevel)?;
+        } else {
+            write_fits_rgb_bitpix(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix)?;
+        }
 
         let file_size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -168,6 +197,8 @@ pub async fn export_fits_rgb(
             RES_COPY_METADATA: do_meta,
             RES_FILE_SIZE_BYTES: file_size,
             RES_DIMENSIONS: [cols, rows],
+            RES_COMPRESS: if use_rice { "rice" } else { "none" },
+            RES_QUANTIZE_LEVEL: qlevel,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })

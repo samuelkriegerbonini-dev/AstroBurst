@@ -80,7 +80,7 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
             // high-entropy: pixels coded verbatim (no Rice split)
             while i < imax {
                 let mut k = bbits as i32 - nbits;
-                let mut diff: u32 = b << k;
+                let mut diff: u32 = if k >= 32 { 0 } else { b << k };
                 k -= 8;
                 while k >= 0 {
                     b = data[pos] as u32;
@@ -147,7 +147,7 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
     }
 }
 
-fn sign_extend(v: u32, bits: u32) -> i64 {
+pub(crate) fn sign_extend(v: u32, bits: u32) -> i64 {
     if bits >= 32 {
         return v as i32 as i64;
     }

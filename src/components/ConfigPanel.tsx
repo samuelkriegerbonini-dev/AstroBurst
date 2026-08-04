@@ -63,6 +63,7 @@ export default function ConfigPanel() {
   const [storageInfo, setStorageInfo] = useState<OutputDirInfo | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
   const [cleanResult, setCleanResult] = useState<string | null>(null);
+  const [cleanArmed, setCleanArmed] = useState(false);
 
   const refreshStorage = useCallback(async () => {
     setStorageBusy(true);
@@ -81,19 +82,29 @@ export default function ConfigPanel() {
   }, [refreshStorage]);
 
   const handleCleanup = useCallback(async () => {
+    if (!cleanArmed) {
+      setCleanArmed(true);
+      setCleanResult(null);
+      return;
+    }
+    setCleanArmed(false);
     setStorageBusy(true);
     setCleanResult(null);
     try {
       const dir = await getOutputDir();
       const res = await cleanupOutput(dir);
       setStorageInfo({ output_dir: res.output_dir, total_size: res.total_size, file_count: res.file_count });
-      setCleanResult(`${res.cleaned_files} files removed (${formatMb(res.cleaned_bytes)})`);
+      setCleanResult(
+        res.cleaned_files > 0
+          ? `${res.cleaned_files} files removed (${formatMb(res.cleaned_bytes)})`
+          : "Nothing removed — output is under the size cap",
+      );
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setStorageBusy(false);
     }
-  }, []);
+  }, [cleanArmed]);
 
   const pendingSavesRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const reqSeqRef = useRef(0);
@@ -296,16 +307,17 @@ export default function ConfigPanel() {
           </div>
           <button
             onClick={handleCleanup}
+            onBlur={() => setCleanArmed(false)}
             disabled={storageBusy}
             className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
             style={{
-              background: "rgba(244,63,94,0.1)",
-              color: "#fda4af",
-              border: "1px solid rgba(244,63,94,0.2)",
+              background: cleanArmed ? "rgba(244,63,94,0.25)" : "rgba(244,63,94,0.1)",
+              color: cleanArmed ? "#fecdd3" : "#fda4af",
+              border: cleanArmed ? "1px solid rgba(244,63,94,0.5)" : "1px solid rgba(244,63,94,0.2)",
             }}
           >
             <Trash2 size={12} />
-            Clean up
+            {cleanArmed ? "Confirm — deletes oldest results" : "Clean up"}
           </button>
         </div>
       </div>

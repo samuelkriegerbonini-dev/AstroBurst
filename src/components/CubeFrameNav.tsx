@@ -41,6 +41,9 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
       setCurrentFrame(idx);
       const cached = frameCacheRef.current.get(idx);
       if (cached) {
+        abortRef.current++;
+        pendingIdxRef.current = null;
+        setLoading(false);
         onFrameChange?.(cached, idx);
         return;
       }
@@ -53,7 +56,9 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
       setError(null);
       const seq = ++abortRef.current;
       try {
-        const outputPath = `./output/cube_frame_${idx}.png`;
+        let hash = 5381;
+        for (let i = 0; i < filePath.length; i++) hash = ((hash << 5) + hash + filePath.charCodeAt(i)) | 0;
+        const outputPath = `./output/cube_frame_${(hash >>> 0).toString(36)}_${idx}.png`;
         const result = await getCubeFrame(filePath, idx, outputPath);
         if (abortRef.current !== seq) return;
         frameCacheRef.current.set(idx, result.output_path);

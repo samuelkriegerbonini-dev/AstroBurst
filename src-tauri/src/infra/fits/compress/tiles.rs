@@ -4,9 +4,10 @@
 //!
 //! Reference: https://fits.gsfc.nasa.gov/registry/tilecompression.html
 //!
-//! Scope (v1): 2D (ZNAXIS=2) compressed images only, ZCMPTYPE in
-//! {RICE_1, GZIP_1, GZIP_2, NOCOMPRESS}, global or per-tile (ZSCALE/ZZERO)
-//! float requantization. Not yet supported: 3D compressed cubes, PLIO_1,
+//! Scope: 2D (ZNAXIS=2) compressed images, and plane-aligned 3D (ZNAXIS=3,
+//! ZTILE3=1) compressed cubes, ZCMPTYPE in {RICE_1, GZIP_1, GZIP_2,
+//! NOCOMPRESS}, global or per-tile (ZSCALE/ZZERO) float requantization.
+//! Not yet supported: non-plane-aligned 3D tiling (ZTILE3>1), PLIO_1,
 //! HCOMPRESS_1, NULL_PIXEL_MASK (per-pixel null bitmap), per-tile ZBLANK
 //! column (only a scalar header BLANK/ZBLANK is honored).
 
@@ -39,6 +40,7 @@ pub struct CompressedImageShape {
     pub znaxis: i64,
     pub znaxis1: i64,
     pub znaxis2: i64,
+    pub znaxis3: i64,
     pub zbitpix: i64,
 }
 
@@ -47,6 +49,7 @@ pub fn read_compressed_shape(header: &HduHeader) -> CompressedImageShape {
         znaxis: header.get_i64("ZNAXIS").unwrap_or(0),
         znaxis1: header.get_i64("ZNAXIS1").unwrap_or(0),
         znaxis2: header.get_i64("ZNAXIS2").unwrap_or(0),
+        znaxis3: header.get_i64("ZNAXIS3").unwrap_or(0),
         zbitpix: header.get_i64("ZBITPIX").unwrap_or(0),
     }
 }
@@ -233,17 +236,21 @@ fn find_zval(header: &HduHeader, name: &str, default: i64) -> i64 {
 struct TileGeometry {
     znaxis1: usize,
     znaxis2: usize,
+    znaxis3: usize,
     ztile1: usize,
     ztile2: usize,
+    #[allow(dead_code)]
+    ztile3: usize,
     tiles_x: usize,
     tiles_y: usize,
+    tiles_z: usize,
     zbitpix: i64,
 }
 
 fn parse_tile_geometry(header: &HduHeader) -> Result<TileGeometry> {
     let znaxis = header.get_i64("ZNAXIS").unwrap_or(0);
-    if znaxis != 2 {
-        bail!("Compressed images with ZNAXIS={znaxis} are not yet supported (only 2D)");
+    if znaxis != 2 && znaxis != 3 {
+        bail!("Compressed images with ZNAXIS={znaxis} are not supported (only 2D or 3D)");
     }
     let znaxis1 = header.get_i64("ZNAXIS1").context("Missing ZNAXIS1")? as usize;
     let znaxis2 = header.get_i64("ZNAXIS2").context("Missing ZNAXIS2")? as usize;
@@ -251,13 +258,30 @@ fn parse_tile_geometry(header: &HduHeader) -> Result<TileGeometry> {
     let ztile2 = header.get_i64("ZTILE2").unwrap_or(1).max(1) as usize;
     let zbitpix = header.get_i64("ZBITPIX").context("Missing ZBITPIX")?;
 
+    let (znaxis3, ztile3) = if znaxis == 3 {
+        let znaxis3 = header.get_i64("ZNAXIS3").context("Missing ZNAXIS3")? as usize;
+        let ztile3 = header.get_i64("ZTILE3").unwrap_or(1).max(1) as usize;
+        if ztile3 != 1 {
+            bail!(
+                "Compressed 3D cubes with ZTILE3={ztile3} are not supported \
+                 (only plane-aligned ZTILE3=1 cubes)"
+            );
+        }
+        (znaxis3, ztile3)
+    } else {
+        (1, 1)
+    };
+
     Ok(TileGeometry {
         znaxis1,
         znaxis2,
+        znaxis3,
         ztile1,
         ztile2,
+        ztile3,
         tiles_x: znaxis1.div_ceil(ztile1),
         tiles_y: znaxis2.div_ceil(ztile2),
+        tiles_z: znaxis3.div_ceil(ztile3),
         zbitpix,
     })
 }
@@ -294,7 +318,29 @@ struct TileCodecCtx<'a> {
     /// GZIP_COMPRESSED_DATA holding the literal physical float bytes, with
     /// ZSCALE/ZZERO for that row left at a meaningless 0.0/0.0).
     tile_quant: Option<(f64, f64)>,
+    dither: Option<(i32, usize)>,
     blank: Option<i64>,
+}
+
+fn scale_ints_dither(
+    values: &[i64],
+    bscale: f64,
+    bzero: f64,
+    blank: Option<i64>,
+    seed: i32,
+    tile_index: usize,
+) -> Vec<f32> {
+    let mut dither = super::quantize::TileDither::new(seed, tile_index);
+    values
+        .iter()
+        .map(|&v| {
+            let r = dither.next();
+            match blank {
+                Some(b) if v == b => f32::NAN,
+                _ => ((v as f64 - r + 0.5) * bscale + bzero) as f32,
+            }
+        })
+        .collect()
 }
 
 fn decode_one_tile(
@@ -311,7 +357,19 @@ fn decode_one_tile(
                 if nbytes == 0 {
                     return Ok(None);
                 }
-                let start = layout.heap_base + rel;
+                let start = layout
+                    .heap_base
+                    .checked_add(rel)
+                    .filter(|&s| s.checked_add(nbytes).is_some_and(|end| end <= mmap.len()))
+                    .with_context(|| {
+                        format!(
+                            "Compressed tile heap range [{}+{}, +{}) exceeds file size {} (truncated file?)",
+                            layout.heap_base,
+                            rel,
+                            nbytes,
+                            mmap.len()
+                        )
+                    })?;
                 Ok(Some(&mmap[start..start + nbytes]))
             }
             None => Ok(None),
@@ -364,9 +422,17 @@ fn decode_one_tile(
                 signed,
             };
             let ints = rice_decode(raw, nx, &params);
-            Ok(scale_ints(&ints, bscale, bzero, ctx.blank))
+            match ctx.dither {
+                Some((seed, tile_index)) if ctx.tile_quant.is_some() => {
+                    Ok(scale_ints_dither(&ints, bscale, bzero, ctx.blank, seed, tile_index))
+                }
+                _ => Ok(scale_ints(&ints, bscale, bzero, ctx.blank)),
+            }
         }
         "GZIP_1" | "GZIP_2" => {
+            if ctx.dither.is_some() && ctx.tile_quant.is_some() {
+                bail!("SUBTRACTIVE_DITHER_1 with GZIP-compressed tiles is not supported");
+            }
             let bytepix = (ctx.zbitpix.unsigned_abs() / 8) as usize;
             let decompressed = gzip_decode(raw, bytepix, ctx.zcmptype == "GZIP_2")?;
             Ok(super::super::reader::decode_pixels_blank(
@@ -377,13 +443,18 @@ fn decode_one_tile(
                 ctx.blank,
             ))
         }
-        "NOCOMPRESS" => Ok(super::super::reader::decode_pixels_blank(
-            raw,
-            ctx.zbitpix,
-            bscale,
-            bzero,
-            ctx.blank,
-        )),
+        "NOCOMPRESS" => {
+            if ctx.dither.is_some() && ctx.tile_quant.is_some() {
+                bail!("SUBTRACTIVE_DITHER_1 with NOCOMPRESS tiles is not supported");
+            }
+            Ok(super::super::reader::decode_pixels_blank(
+                raw,
+                ctx.zbitpix,
+                bscale,
+                bzero,
+                ctx.blank,
+            ))
+        }
         other => {
             bail!("Unsupported ZCMPTYPE '{other}' (only RICE_1/GZIP_1/GZIP_2/NOCOMPRESS supported)")
         }
@@ -398,6 +469,22 @@ pub fn decode_compressed_image(
     header: &HduHeader,
     data_start: usize,
 ) -> Result<Array2<f32>> {
+    let mut planes = decode_compressed_planes(mmap, header, data_start)?;
+    if planes.len() != 1 {
+        bail!(
+            "decode_compressed_image expects a single-plane (ZNAXIS=2) compressed \
+             image, found {} planes -- use decode_compressed_planes for cubes",
+            planes.len()
+        );
+    }
+    Ok(planes.remove(0))
+}
+
+pub fn decode_compressed_planes(
+    mmap: &[u8],
+    header: &HduHeader,
+    data_start: usize,
+) -> Result<Vec<Array2<f32>>> {
     let geom = parse_tile_geometry(header)?;
     let layout = build_bintable_layout(header, data_start)?;
 
@@ -414,6 +501,26 @@ pub fn decode_compressed_image(
     let global_bscale = header.get_f64("BSCALE").unwrap_or(1.0);
     let global_blank = header.get_i64("ZBLANK").or_else(|| header.get_i64("BLANK"));
 
+    let dither_seed: Option<i32> = if is_quantized {
+        let zq = header
+            .get("ZQUANTIZ")
+            .map(|s| s.trim().to_uppercase())
+            .unwrap_or_default();
+        if zq.contains("SUBTRACTIVE_DITHER_2") {
+            bail!("ZQUANTIZ SUBTRACTIVE_DITHER_2 is not supported");
+        } else if zq.contains("SUBTRACTIVE_DITHER_1") {
+            Some(
+                header
+                    .get_i64("ZDITHER0")
+                    .context("Missing ZDITHER0 for SUBTRACTIVE_DITHER_1")? as i32,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let default_bytepix = match geom.zbitpix.unsigned_abs() {
         8 => 1,
         16 => 2,
@@ -424,12 +531,14 @@ pub fn decode_compressed_image(
     let rice_bytepix = find_zval(header, "BYTEPIX", default_bytepix).max(1) as u32;
 
     let n_tiles = layout.n_rows;
-    if n_tiles != geom.tiles_x * geom.tiles_y {
+    let plane_tiles = geom.tiles_x * geom.tiles_y;
+    if n_tiles != plane_tiles * geom.tiles_z {
         bail!(
-            "BINTABLE row count {} does not match ZTILE geometry {}x{} tiles",
+            "BINTABLE row count {} does not match ZTILE geometry {}x{}x{} tiles",
             n_tiles,
             geom.tiles_x,
-            geom.tiles_y
+            geom.tiles_y,
+            geom.tiles_z
         );
     }
 
@@ -439,8 +548,10 @@ pub fn decode_compressed_image(
     let tiles: Vec<Result<DecodedTile>> = (0..n_tiles)
         .into_par_iter()
         .map(|row| -> Result<DecodedTile> {
-            let tx = row % geom.tiles_x;
-            let ty = row / geom.tiles_x;
+            let tz = row / plane_tiles;
+            let rem = row % plane_tiles;
+            let tx = rem % geom.tiles_x;
+            let ty = rem / geom.tiles_x;
             let x0 = tx * geom.ztile1;
             let y0 = ty * geom.ztile2;
             let tile_w = geom.ztile1.min(geom.znaxis1 - x0);
@@ -448,7 +559,19 @@ pub fn decode_compressed_image(
             let nx = tile_w * tile_h;
 
             let row_start = data_start + row * layout.row_width;
-            let row_bytes = &mmap[row_start..row_start + layout.row_width];
+            let row_end = row_start
+                .checked_add(layout.row_width)
+                .filter(|&end| end <= mmap.len())
+                .with_context(|| {
+                    format!(
+                        "Compressed tile row {} at [{}, +{}) exceeds file size {} (truncated file?)",
+                        row,
+                        row_start,
+                        layout.row_width,
+                        mmap.len()
+                    )
+                })?;
+            let row_bytes = &mmap[row_start..row_end];
 
             let tile_quant = if is_quantized {
                 Some((
@@ -467,6 +590,7 @@ pub fn decode_compressed_image(
                 global_bscale,
                 global_bzero,
                 tile_quant,
+                dither: dither_seed.map(|s| (s, row)),
                 blank: global_blank,
             };
             let pixels = decode_one_tile(mmap, row_bytes, &layout, nx, &ctx)?;
@@ -475,13 +599,16 @@ pub fn decode_compressed_image(
                 bail!("tile {row} decoded {} pixels, expected {nx}", pixels.len());
             }
 
-            Ok(DecodedTile { x0, y0, w: tile_w, h: tile_h, pixels })
+            Ok(DecodedTile { tz, x0, y0, w: tile_w, h: tile_h, pixels })
         })
         .collect();
 
-    let mut image = Array2::<f32>::from_elem((geom.znaxis2, geom.znaxis1), f32::NAN);
+    let mut images: Vec<Array2<f32>> = (0..geom.znaxis3)
+        .map(|_| Array2::<f32>::from_elem((geom.znaxis2, geom.znaxis1), f32::NAN))
+        .collect();
     for tile in tiles {
         let tile = tile?;
+        let image = &mut images[tile.tz];
         for yy in 0..tile.h {
             let row_offset = yy * tile.w;
             for xx in 0..tile.w {
@@ -490,10 +617,11 @@ pub fn decode_compressed_image(
         }
     }
 
-    Ok(image)
+    Ok(images)
 }
 
 struct DecodedTile {
+    tz: usize,
     x0: usize,
     y0: usize,
     w: usize,

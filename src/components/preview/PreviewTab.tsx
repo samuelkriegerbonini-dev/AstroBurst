@@ -220,7 +220,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     );
   }
 
-  if (useGpu && rawPixels) {
+  const cubeFrameActive = isCube && !!renderedPreviewUrl && renderedPreviewUrl.includes("cube_frame_");
+
+  if (useGpu && rawPixels && !cubeFrameActive) {
     return (
       <div className="flex flex-col h-full">
         <div className="relative flex-1 min-h-0">

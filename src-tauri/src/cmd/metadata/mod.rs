@@ -6,7 +6,7 @@ use crate::cmd::common::{blocking_cmd, load_cached_full};
 use crate::core::metadata::header_discovery::{detect_filter, suggest_palette, suggest_palette_with_type, PaletteType};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::{extract_header_mmap, list_extensions, extract_image_mmap_by_index};
+use crate::infra::fits::reader::{extract_header_mmap, list_extensions};
 use crate::types::constants::{
     RES_BITPIX, RES_CARDS, RES_CATEGORIES, RES_CONFIDENCE, RES_EXTENSIONS,
     RES_EXTNAME, RES_FILE_NAME, RES_FILE_PATH, RES_FILENAME_HINT, RES_FILTER,
@@ -187,8 +187,8 @@ pub async fn get_header_by_hdu(path: String, hdu_index: usize) -> Result<serde_j
     blocking_cmd!({
         let (fits_path, _tmp) = resolve_single_image(&path)?;
         let file = File::open(&fits_path)?;
-        let result = extract_image_mmap_by_index(&file, hdu_index)?;
-        Ok(serde_json::to_value(&result.header)?)
+        let header = crate::infra::fits::reader::extract_header_by_index(&file, hdu_index)?;
+        Ok(serde_json::to_value(&header)?)
     })
 }
 

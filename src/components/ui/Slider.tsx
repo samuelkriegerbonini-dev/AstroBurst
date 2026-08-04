@@ -82,9 +82,10 @@ function Slider({
   const handleValueClick = useCallback(() => {
     if (disabled) return;
     setEditing(true);
-    setEditText(display);
-    editStartText.current = display;
-  }, [disabled, display]);
+    const raw = Number.isInteger(effective) ? String(effective) : String(Number(effective.toFixed(6)));
+    setEditText(raw);
+    editStartText.current = raw;
+  }, [disabled, effective]);
 
   const commitEdit = useCallback(() => {
     setEditing(false);

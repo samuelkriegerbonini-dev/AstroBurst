@@ -1119,4 +1119,35 @@ mod tests {
         eprintln!("pixel_scale_arcsec = {}", wcs.pixel_scale_arcsec());
         eprintln!("raw_params = {:?}", wcs.raw_params());
     }
+
+    #[test]
+    fn test_known_mapproj_bug_rotated_cd_matrix_roundtrip_error() {
+        let h = make_header(&[
+            ("NAXIS1", "1600"),
+            ("NAXIS2", "1600"),
+            ("CRPIX1", "386.5"),
+            ("CRPIX2", "396."),
+            ("CRVAL1", "274.71149247724"),
+            ("CRVAL2", "-13.816384007184"),
+            ("CD1_1", "1.878013E-5"),
+            ("CD1_2", "-2.031193E-5"),
+            ("CD2_1", "-2.029358E-5"),
+            ("CD2_2", "-1.879711E-5"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ]);
+        let wcs = WcsTransform::from_header(&h).unwrap();
+
+        let mut max_err = 0.0_f64;
+        for &(x, y) in &[(3.0, 3.0), (100.0, 100.0), (800.0, 800.0)] {
+            let coord = wcs.pixel_to_world(x, y);
+            let (px, py) = wcs.world_to_pixel(coord.ra, coord.dec);
+            max_err = max_err.max((px - x).abs()).max((py - y).abs());
+        }
+        assert!(
+            (0.01..1.0).contains(&max_err),
+            "expected the known ~0.1-0.4px mapproj bug, got {max_err} -- if this is now \
+             ~1e-9, mapproj fixed the bug; tighten this test and update wcs-rs-sip-fix.md"
+        );
+    }
 }

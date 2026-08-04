@@ -202,6 +202,8 @@ pub const ALIGN_METHOD: &str = "align_method";
 pub const COPY_WCS: &str = "copy_wcs";
 
 pub const RES_FILE_SIZE_BYTES: &str = "file_size_bytes";
+pub const RES_COMPRESS: &str = "compress";
+pub const RES_QUANTIZE_LEVEL: &str = "quantize_level";
 pub const RES_APPLY_STF: &str = "apply_stf";
 pub const RES_COPY_METADATA: &str = "copy_metadata";
 pub const RES_BIT_DEPTH: &str = "bit_depth";
