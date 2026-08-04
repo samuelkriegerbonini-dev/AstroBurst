@@ -51,7 +51,7 @@ pub fn encode_png_rgb8(rgb: &[u8], width: usize, height: usize) -> anyhow::Resul
     let mut buf = Vec::with_capacity(width * height * 3);
     let encoder = PngEncoder::new_with_quality(
         std::io::Cursor::new(&mut buf),
-        image::codecs::png::CompressionType::Default,
+        image::codecs::png::CompressionType::Fast,
         image::codecs::png::FilterType::Sub,
     );
     encoder.write_image(rgb, width as u32, height as u32, ColorType::Rgb8.into())?;

@@ -45,7 +45,7 @@ function Slider({
   const logRange = isLog ? Math.log(max / min) : 1;
   const toPos = useCallback(
     (v: number) => Math.log(Math.max(min, Math.min(max, v)) / min) / logRange,
-    [isLog, min, max, logRange],
+    [min, max, logRange],
   );
   const fromPos = useCallback((p: number) => min * Math.exp(p * logRange), [min, logRange]);
 

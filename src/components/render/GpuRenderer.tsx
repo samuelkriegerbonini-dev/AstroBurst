@@ -274,15 +274,15 @@ export default function GpuRenderer({
   }, [gpuReady, rawData, renderCPUWorker, renderGPU, gpuGen]);
 
   if (!gpuReady) {
-    return <div className={`animate-pulse bg-zinc-800/50 ${className}`} style={{ aspectRatio: width / height }} />;
+    return <div className={`animate-pulse bg-zinc-800/50 w-full h-full ${className}`} />;
   }
 
   return (
     <canvas
       key={fallbackRef.current ? "cpu-canvas" : "gpu-canvas"}
       ref={canvasRef}
-      className={`max-w-full h-auto ${className}`}
-      style={{ imageRendering: "pixelated" }}
+      className={className}
+      style={{ display: "block" }}
     />
   );
 }

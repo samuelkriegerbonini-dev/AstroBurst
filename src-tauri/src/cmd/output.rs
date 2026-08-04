@@ -143,3 +143,8 @@ pub async fn cleanup_output_cmd(
         }))
     })
 }
+
+#[tauri::command]
+pub async fn cancel_progress_cmd(event: String) -> Result<bool, String> {
+    Ok(crate::infra::progress::cancel_event(&event))
+}

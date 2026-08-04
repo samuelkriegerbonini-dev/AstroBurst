@@ -178,6 +178,7 @@ pub fn run() {
             cmd::synth::generate_synth_stack_cmd,
             cmd::output::get_output_dir_info,
             cmd::output::cleanup_output_cmd,
+            cmd::output::cancel_progress_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

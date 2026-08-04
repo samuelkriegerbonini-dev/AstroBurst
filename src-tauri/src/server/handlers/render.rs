@@ -21,7 +21,7 @@ fn encode_png_l8(pixels: &[u8], width: usize, height: usize) -> anyhow::Result<V
     let mut buf = Vec::with_capacity(width * height);
     let encoder = PngEncoder::new_with_quality(
         std::io::Cursor::new(&mut buf),
-        image::codecs::png::CompressionType::Default,
+        image::codecs::png::CompressionType::Fast,
         image::codecs::png::FilterType::Sub,
     );
     encoder.write_image(pixels, width as u32, height as u32, ColorType::L8.into())?;

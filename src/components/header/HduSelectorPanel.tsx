@@ -42,9 +42,8 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
     setHeaderError(null);
 
     getFitsExtensions(filePath)
-      .then((result: FitsExtension[] | { extensions?: FitsExtension[] }) => {
-        const exts = Array.isArray(result) ? result : (result?.extensions ?? []);
-        setExtensions(Array.isArray(exts) ? exts : []);
+      .then((result) => {
+        setExtensions(result?.extensions ?? []);
       })
       .catch((err) => {
         console.error("Failed to load FITS extensions:", err);
@@ -148,8 +147,11 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
         {extensions.map((ext, i) => {
           const idx = ext.index ?? i;
           const isSelected = selectedIdx === idx;
-          const dims = ext.naxis?.length > 0 ? ext.naxis.join(" × ") : "";
-          const typeLabel = ext.ext_type || (i === 0 ? "PRIMARY" : "EXT");
+          const dimParts = [ext.naxis1, ext.naxis2, ext.naxis3]
+            .slice(0, Math.max(0, ext.naxis))
+            .filter((d) => d > 0);
+          const dims = dimParts.length > 0 ? dimParts.join(" × ") : "";
+          const typeLabel = idx === 0 ? "PRIMARY" : ext.has_data ? "IMAGE" : "EXT";
           const ts = TYPE_STYLES[typeLabel] || DEFAULT_TYPE_STYLE;
 
           return (
@@ -183,7 +185,7 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
                 className="text-[11px] truncate flex-1"
                 style={{ color: isSelected ? "#e4e4e7" : "#71717a" }}
               >
-                {ext.name || "(unnamed)"}
+                {ext.extname || "(unnamed)"}
               </span>
               {dims && (
                 <span className="text-[10px] font-mono shrink-0" style={{ color: "#52525b" }}>

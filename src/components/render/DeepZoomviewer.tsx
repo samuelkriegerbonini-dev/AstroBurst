@@ -232,6 +232,7 @@ function DeepZoomViewer({
       destroyed = true;
       destroyViewer();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, imageWidth, imageHeight, tileSize, outputDir, renderedPreviewUrl, destroyViewer]);
 
   useEffect(() => {

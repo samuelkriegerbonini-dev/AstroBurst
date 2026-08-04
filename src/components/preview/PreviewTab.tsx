@@ -5,6 +5,7 @@ import { useCompositePreview, useCompositeStf, useCompositeActions } from "../..
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 
 import ZoomPanView from "../ui/ZoomPanView";
+import GpuViewport from "../render/GpuViewport";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
 const GpuRgbRenderer = lazy(() => import("../render/GpuRgbRenderer"));
@@ -92,8 +93,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   }, [file?.id, renderedPreviewUrl]);
 
   useEffect(() => {
+    const r = retryRef.current;
     return () => {
-      if (retryRef.current.timer) clearTimeout(retryRef.current.timer);
+      if (r.timer) clearTimeout(r.timer);
     };
   }, []);
 
@@ -195,15 +197,16 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
           </div>
         )}
         {useGpu && rgbRawPixels ? (
-          <div className="relative flex-1 min-h-0 flex items-center justify-center">
+          <div className="relative flex-1 min-h-0">
             <Suspense fallback={<Loader2 size={20} className="animate-spin text-zinc-600" />}>
-              <GpuRgbRenderer
-                rgb={rgbRawPixels}
-                stfR={compositeStfR}
-                stfG={compositeStfG}
-                stfB={compositeStfB}
-                className="max-w-full max-h-full object-contain"
-              />
+              <GpuViewport renderW={rgbRawPixels.width} renderH={rgbRawPixels.height}>
+                <GpuRgbRenderer
+                  rgb={rgbRawPixels}
+                  stfR={compositeStfR}
+                  stfG={compositeStfG}
+                  stfB={compositeStfB}
+                />
+              </GpuViewport>
             </Suspense>
           </div>
         ) : (
@@ -220,24 +223,33 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   if (useGpu && rawPixels) {
     return (
       <div className="flex flex-col h-full">
-        <div
-          className={`relative flex-1 min-h-0 flex items-center justify-center ${isCube ? "cursor-crosshair" : ""}`}
-          onClick={isCube ? onImageClick : undefined}
-        >
+        <div className="relative flex-1 min-h-0">
           <Suspense fallback={<Loader2 size={20} className="animate-spin text-zinc-600" />}>
-            <GpuRenderer
-              rawData={rawPixels.data}
-              width={rawPixels.width}
-              height={rawPixels.height}
-              dataMin={rawPixels.min}
-              dataMax={rawPixels.max}
-              shadow={stfParams.shadow}
-              midtone={stfParams.midtone}
-              highlight={stfParams.highlight}
-              className="max-w-full max-h-full object-contain"
-            />
+            <GpuViewport
+              renderW={rawPixels.width}
+              renderH={rawPixels.height}
+              fitsW={file?.result?.dimensions?.[0]}
+              fitsH={file?.result?.dimensions?.[1]}
+              overlayCanvasRef={starOverlayRef}
+              onCanvasClick={isCube ? onImageClick : undefined}
+            >
+              <GpuRenderer
+                rawData={rawPixels.data}
+                width={rawPixels.width}
+                height={rawPixels.height}
+                dataMin={rawPixels.min}
+                dataMax={rawPixels.max}
+                shadow={stfParams.shadow}
+                midtone={stfParams.midtone}
+                highlight={stfParams.highlight}
+              />
+            </GpuViewport>
           </Suspense>
-          <Overlay starOverlayRef={starOverlayRef} isCube={isCube} />
+          {isCube && (
+            <div className="absolute bottom-2 right-2 bg-black/60 text-[10px] text-purple-300 px-2 py-1 rounded pointer-events-none">
+              Click to extract spectrum
+            </div>
+          )}
         </div>
       </div>
     );

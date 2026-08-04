@@ -157,10 +157,11 @@ function AdvancedImageViewer({
     if (nw > 0 && nh > 0) setImgNatural({ w: nw, h: nh });
   }, []);
 
+  const { onLoad: mainRetryOnLoad } = mainRetry;
   const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     handleNaturalSize(e);
-    mainRetry.onLoad();
-  }, [handleNaturalSize, mainRetry.onLoad]);
+    mainRetryOnLoad();
+  }, [handleNaturalSize, mainRetryOnLoad]);
 
   const compareActive = compareMode && hasComparison;
   const viewerError = compareActive ? (procRetry.error || origRetry.error) : mainRetry.error;

@@ -59,6 +59,7 @@ export function drizzleRgbStack(
     wbB: options.wbB ?? null,
     scnrEnabled: options.scnrEnabled ?? null,
     scnrAmount: options.scnrAmount ?? null,
+    scnrMethod: options.scnrMethod ?? null,
     saveFits: options.saveFits ?? false,
   });
 }

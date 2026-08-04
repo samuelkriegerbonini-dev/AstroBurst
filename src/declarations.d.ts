@@ -54,6 +54,7 @@ declare module "lucide-react" {
   export const Globe: Icon;
   export const Grid3X3: Icon;
   export const GripVertical: Icon;
+  export const HardDrive: Icon;
   export const Home: Icon;
   export const Image: Icon;
   export const ImageIcon: Icon;
@@ -93,6 +94,7 @@ declare module "lucide-react" {
   export const Tag: Icon;
   export const Telescope: Icon;
   export const Timer: Icon;
+  export const Trash2: Icon;
   export const Unlink: Icon;
   export const Upload: Icon;
   export const Wand2: Icon;

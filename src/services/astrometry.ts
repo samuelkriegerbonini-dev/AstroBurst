@@ -4,14 +4,13 @@ import type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/t
 export type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/types/astrometry";
 
 export interface PlateSolveResult {
+  success: boolean;
   center_ra: number;
   center_dec: number;
+  orientation: number;
   pixel_scale_arcsec: number;
   field_of_view_w_arcmin: number;
   field_of_view_h_arcmin: number;
-  fov_arcmin: [number, number];
-  naxis1: number;
-  naxis2: number;
 }
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {

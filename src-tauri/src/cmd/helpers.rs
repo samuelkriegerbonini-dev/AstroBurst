@@ -233,7 +233,7 @@ pub(crate) fn render_rgb_preview(
     let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
         buf_writer,
-        image::codecs::png::CompressionType::Default,
+        image::codecs::png::CompressionType::Fast,
         image::codecs::png::FilterType::Sub,
     );
     use image::ImageEncoder;
@@ -293,7 +293,7 @@ pub(crate) fn render_rgb_preview_with_stf(
     let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
         buf_writer,
-        image::codecs::png::CompressionType::Default,
+        image::codecs::png::CompressionType::Fast,
         image::codecs::png::FilterType::Sub,
     );
     use image::ImageEncoder;

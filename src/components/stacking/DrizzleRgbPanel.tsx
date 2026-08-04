@@ -54,6 +54,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
   const [wbR, setWbR] = useState(1.0);
   const [wbG, setWbG] = useState(1.0);
   const [wbB, setWbB] = useState(1.0);
+  const [scnrEnabled, setScnrEnabled] = useState(false);
+  const [scnrAmount, setScnrAmount] = useState(0.8);
+  const [scnrMethod, setScnrMethod] = useState<"average" | "maximum">("average");
   const [saveFits, setSaveFits] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<DrizzleRgbResult | null>(null);
@@ -121,6 +124,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           wbR: wbMode === "manual" ? wbR : undefined,
           wbG: wbMode === "manual" ? wbG : undefined,
           wbB: wbMode === "manual" ? wbB : undefined,
+          scnrEnabled,
+          scnrAmount: scnrEnabled ? scnrAmount : undefined,
+          scnrMethod: scnrEnabled ? scnrMethod : undefined,
           saveFits,
         },
       );
@@ -131,7 +137,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
     } finally {
       setIsRunning(false);
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, saveFits, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -273,6 +279,25 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
               </div>
             ))}
           </div>
+        )}
+        <Toggle label="SCNR green removal" checked={scnrEnabled} accent="rose" onChange={setScnrEnabled} />
+        {scnrEnabled && (
+          <>
+            <Slider label="SCNR amount" value={scnrAmount} min={0} max={1} step={0.05} accent="rose"
+                    format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setScnrAmount} />
+            <div className="flex items-center justify-between">
+              <label className="text-xs text-zinc-400">SCNR method</label>
+              <select
+                value={scnrMethod}
+                onChange={(e) => setScnrMethod(e.target.value as "average" | "maximum")}
+                className="ab-select"
+                disabled={isRunning}
+              >
+                <option value="average">Average neutral</option>
+                <option value="maximum">Maximum neutral</option>
+              </select>
+            </div>
+          </>
         )}
         <Toggle label="Save FITS alongside PNG" checked={saveFits} accent="rose" onChange={setSaveFits} />
       </div>

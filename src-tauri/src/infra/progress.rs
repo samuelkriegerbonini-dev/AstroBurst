@@ -34,12 +34,32 @@ pub struct ProgressHandle {
 pub struct ProgressHandle;
 
 #[cfg(feature = "tauri")]
+static CANCEL_FLAGS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "tauri")]
+pub fn cancel_event(event: &str) -> bool {
+    match CANCEL_FLAGS.lock().unwrap().get(event) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(feature = "tauri")]
 impl ProgressHandle {
     pub fn new(app: &tauri::AppHandle, event: &str, total: u64) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        CANCEL_FLAGS
+            .lock()
+            .unwrap()
+            .insert(event.to_string(), Arc::clone(&cancelled));
         Self {
             current: Arc::new(AtomicU64::new(0)),
             total: Arc::new(AtomicU64::new(total)),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled,
             app_handle: app.clone(),
             event_name: event.to_string(),
             last_emit: Arc::new(Mutex::new(Instant::now())),

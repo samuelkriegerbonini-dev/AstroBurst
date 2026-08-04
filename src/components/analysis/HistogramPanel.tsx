@@ -167,9 +167,12 @@ function HistogramPanel({
     });
   }, []);
 
+  const drawOverlayRef = useRef(drawOverlay);
+  drawOverlayRef.current = drawOverlay;
+
   useEffect(() => {
     drawBars();
-    drawOverlay();
+    drawOverlayRef.current();
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);

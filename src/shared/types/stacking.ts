@@ -34,6 +34,7 @@ export interface PipelineRequest {
   sigma_low?: number;
   sigma_high?: number;
   normalize?: boolean;
+  align?: boolean;
 }
 
 export interface PipelineChannelStats {
@@ -96,6 +97,7 @@ export interface DrizzleRgbOptions {
   wbB?: number;
   scnrEnabled?: boolean;
   scnrAmount?: number;
+  scnrMethod?: "average" | "maximum";
   saveFits?: boolean;
 }
 

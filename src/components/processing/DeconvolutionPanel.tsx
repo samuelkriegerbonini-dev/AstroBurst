@@ -1,5 +1,7 @@
 import { useState, useCallback } from "react";
+import { X } from "lucide-react";
 import { deconvolveRL } from "../../services/processing";
+import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
@@ -137,7 +139,17 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{progress.stage}</span>
-            <span>{progress.percent}%</span>
+            <span className="flex items-center gap-2">
+              {progress.percent}%
+              <button
+                onClick={() => { cancelProgress("deconv-progress").catch(() => {}); }}
+                title="Cancel deconvolution"
+                aria-label="Cancel deconvolution"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
           </div>
         </div>
       )}

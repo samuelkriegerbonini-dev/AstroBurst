@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Image, Cpu, Zap, Sparkles, Loader2,
-  Layers2, FlaskConical, Settings, Download, FileText, BarChart3,
+  Layers2, FlaskConical, Settings, Download, FileText, BarChart3, X,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
+import { cancelProgress } from "../services/progress";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
 import { useCompositePreview, useCompositeActions } from "../context/CompositeContext";
@@ -93,7 +94,17 @@ function ProgressBarInner() {
   return (
     <div className="ab-compose-progress shrink-0">
       <div className="ab-compose-progress-bar" style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress.percent)) / 100})` }} />
-      <span className="ab-compose-progress-label">{progress.stage} {progress.percent > 0 ? `${progress.percent}%` : ""}</span>
+      <span className="ab-compose-progress-label flex items-center gap-1.5">
+        {progress.stage} {progress.percent > 0 ? `${progress.percent}%` : ""}
+        <button
+          onClick={() => { cancelProgress("compose-progress").catch(() => {}); progress.reset(); }}
+          title="Cancel"
+          aria-label="Cancel operation"
+          className="text-zinc-500 hover:text-red-400 transition-colors pointer-events-auto"
+        >
+          <X size={10} />
+        </button>
+      </span>
     </div>
   );
 }

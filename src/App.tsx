@@ -291,6 +291,7 @@ export default function App() {
   const metaCacheRef = useRef<WeakMap<ProcessedFile, MetadataFile>>(new WeakMap());
   const metadataFiles = useMemo(
     () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id), metaCacheRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [fileIds, storeVersion],
   );
 

@@ -197,7 +197,7 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
   }, [gpuReady, gpuOk, renderGPU]);
 
   if (!gpuReady) {
-    return <div className={`animate-pulse bg-zinc-800/50 ${className}`} style={{ aspectRatio: rgb.width / rgb.height }} />;
+    return <div className={`animate-pulse bg-zinc-800/50 w-full h-full ${className}`} />;
   }
 
   if (!gpuOk) {
@@ -207,8 +207,8 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
   return (
     <canvas
       ref={canvasRef}
-      className={`max-w-full h-auto ${className}`}
-      style={{ imageRendering: "pixelated" }}
+      className={className}
+      style={{ display: "block" }}
     />
   );
 }

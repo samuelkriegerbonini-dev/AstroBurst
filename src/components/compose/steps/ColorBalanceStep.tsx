@@ -53,6 +53,9 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     }
   }, [state.compositeReady, narrowband, state.scnrEnabled, onScnrChange]);
 
+  const onWbChangeRef = useRef(onWbChange);
+  onWbChangeRef.current = onWbChange;
+
   useEffect(() => {
     if (state.wbMode !== "auto" || !state.compositeReady) return;
     let cancelled = false;
@@ -68,7 +71,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         setLocalG(g);
         setLocalB(b);
         setRefChannel(res.ref_channel ?? null);
-        onWbChange("auto", r, g, b);
+        onWbChangeRef.current("auto", r, g, b);
       })
       .catch((e) => {
         if (cancelled) return;

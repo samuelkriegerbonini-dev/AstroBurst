@@ -404,6 +404,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         })
         .catch(() => {});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file?.id]);
 
   const fileValue = useMemo<FileContextValue>(

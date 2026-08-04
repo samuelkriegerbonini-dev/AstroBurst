@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use crate::math::simd::find_minmax_simd;
 use crate::types::constants::PADDING_THRESHOLD;
 
-pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
+fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usize, usize)> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
     let (min, max) = find_minmax_simd(slice);
@@ -25,7 +25,17 @@ pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
         })
         .collect();
 
-    write_png_l8(&pixels, cols, rows, path)
+    Ok((pixels, cols, rows))
+}
+
+pub fn render_grayscale(data: &Array2<f32>, path: &str) -> Result<()> {
+    let (pixels, cols, rows) = quantize_grayscale_l8(data)?;
+    write_png_l8(&pixels, cols, rows, path, image::codecs::png::CompressionType::Fast)
+}
+
+pub fn render_grayscale_hq(data: &Array2<f32>, path: &str) -> Result<()> {
+    let (pixels, cols, rows) = quantize_grayscale_l8(data)?;
+    write_png_l8(&pixels, cols, rows, path, image::codecs::png::CompressionType::Default)
 }
 
 pub fn render_grayscale_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
@@ -48,7 +58,7 @@ pub fn render_grayscale_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
             out.copy_from_slice(&q.to_ne_bytes());
         });
 
-    write_png_l16(&pixels, cols, rows, path)
+    write_png_l16(&pixels, cols, rows, path, image::codecs::png::CompressionType::Default)
 }
 
 pub fn render_stretched_8bit(data: &Array2<f32>, path: &str) -> Result<()> {
@@ -60,7 +70,7 @@ pub fn render_stretched_8bit(data: &Array2<f32>, path: &str) -> Result<()> {
         .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
         .collect();
 
-    write_png_l8(&pixels, cols, rows, path)
+    write_png_l8(&pixels, cols, rows, path, image::codecs::png::CompressionType::Default)
 }
 
 pub fn render_stretched_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
@@ -76,19 +86,25 @@ pub fn render_stretched_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
             out.copy_from_slice(&q.to_ne_bytes());
         });
 
-    write_png_l16(&pixels, cols, rows, path)
+    write_png_l16(&pixels, cols, rows, path, image::codecs::png::CompressionType::Default)
 }
 
 pub fn save_stf_png(pixels: Vec<u8>, width: usize, height: usize, path: &str) -> Result<()> {
-    write_png_l8(&pixels, width, height, path)
+    write_png_l8(&pixels, width, height, path, image::codecs::png::CompressionType::Fast)
 }
 
-fn write_png_l8(pixels: &[u8], width: usize, height: usize, path: &str) -> Result<()> {
+fn write_png_l8(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    path: &str,
+    compression: image::codecs::png::CompressionType,
+) -> Result<()> {
     let file = std::fs::File::create(path).context("Failed to create output file")?;
     let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
     let encoder = PngEncoder::new_with_quality(
         buf_writer,
-        image::codecs::png::CompressionType::Default,
+        compression,
         image::codecs::png::FilterType::Sub,
     );
     encoder
@@ -97,12 +113,18 @@ fn write_png_l8(pixels: &[u8], width: usize, height: usize, path: &str) -> Resul
     Ok(())
 }
 
-fn write_png_l16(ne_bytes: &[u8], width: usize, height: usize, path: &str) -> Result<()> {
+fn write_png_l16(
+    ne_bytes: &[u8],
+    width: usize,
+    height: usize,
+    path: &str,
+    compression: image::codecs::png::CompressionType,
+) -> Result<()> {
     let file = std::fs::File::create(path).context("Failed to create output file")?;
     let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
     let encoder = PngEncoder::new_with_quality(
         buf_writer,
-        image::codecs::png::CompressionType::Default,
+        compression,
         image::codecs::png::FilterType::Sub,
     );
     encoder

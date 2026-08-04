@@ -168,12 +168,16 @@ function AnalysisTabInner({
     [setRenderedPreviewUrl],
   );
 
+  const hasHist = histData !== null;
+  const histMedian = histData?.median;
+  const histMean = histData?.mean;
+  const histSigma = histData?.sigma;
   const histStats = useMemo(
     () =>
-      histData
-        ? { median: histData.median, mean: histData.mean, sigma: histData.sigma }
+      hasHist
+        ? { median: histMedian as number, mean: histMean as number, sigma: histSigma as number }
         : null,
-    [histData?.median, histData?.mean, histData?.sigma],
+    [hasHist, histMedian, histMean, histSigma],
   );
 
   const stars = starResult?.stars || EMPTY_STARS;

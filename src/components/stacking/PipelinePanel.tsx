@@ -63,6 +63,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   const [sigmaLow, setSigmaLow] = useState(2.5);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [normalize, setNormalize] = useState(true);
+  const [align, setAlign] = useState(true);
   const [activePreview, setActivePreview] = useState<string | null>(null);
 
   const rgbCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -124,6 +125,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         sigma_low: sigmaLow,
         sigma_high: sigmaHigh,
         normalize,
+        align,
       }) as PipelineResponse;
       setResult(res);
       setActivePreview(res.rgb_preview ? "RGB" : res.channel_previews[0]?.label ?? null);
@@ -233,6 +235,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
         <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
         <Toggle label="Normalize before stack" checked={normalize} accent="sky" onChange={setNormalize} />
+        <Toggle label="Align frames before stack" checked={align} accent="sky" onChange={setAlign} />
       </div>
 
       <RunButton

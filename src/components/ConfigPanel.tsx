@@ -1,7 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
-import { getConfig, updateConfig, saveApiKey, getApiKey } from "../services/config";
-import type { AppConfig } from "../services/config";
+import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw, HardDrive, Trash2 } from "lucide-react";
+import { getConfig, updateConfig, saveApiKey, getApiKey, getOutputDirInfo, cleanupOutput } from "../services/config";
+import type { AppConfig, OutputDirInfo } from "../services/config";
+import { getOutputDir } from "../infrastructure/tauri";
+
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export default function ConfigPanel() {
 
@@ -54,6 +59,41 @@ export default function ConfigPanel() {
       setSaving(false);
     }
   }, [apiKey]);
+
+  const [storageInfo, setStorageInfo] = useState<OutputDirInfo | null>(null);
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [cleanResult, setCleanResult] = useState<string | null>(null);
+
+  const refreshStorage = useCallback(async () => {
+    setStorageBusy(true);
+    try {
+      const dir = await getOutputDir();
+      setStorageInfo(await getOutputDirInfo(dir));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStorageBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshStorage();
+  }, [refreshStorage]);
+
+  const handleCleanup = useCallback(async () => {
+    setStorageBusy(true);
+    setCleanResult(null);
+    try {
+      const dir = await getOutputDir();
+      const res = await cleanupOutput(dir);
+      setStorageInfo({ output_dir: res.output_dir, total_size: res.total_size, file_count: res.file_count });
+      setCleanResult(`${res.cleaned_files} files removed (${formatMb(res.cleaned_bytes)})`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStorageBusy(false);
+    }
+  }, []);
 
   const pendingSavesRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const reqSeqRef = useRef(0);
@@ -225,6 +265,50 @@ export default function ConfigPanel() {
           </div>
         </>
       )}
+
+      <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-xs font-semibold text-teal-400 uppercase tracking-wider flex items-center gap-1.5">
+            <HardDrive size={12} />
+            Output Storage
+          </h4>
+          <button
+            onClick={refreshStorage}
+            disabled={storageBusy}
+            className="text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-30"
+            title="Refresh storage info"
+            aria-label="Refresh storage info"
+          >
+            <RefreshCw size={12} className={storageBusy ? "animate-spin" : ""} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <span className="text-xs text-zinc-300 font-mono">
+              {storageInfo ? `${formatMb(storageInfo.total_size)} · ${storageInfo.file_count} files` : "--"}
+            </span>
+            {storageInfo && (
+              <span className="text-[10px] text-zinc-600 font-mono truncate" title={storageInfo.output_dir}>
+                {storageInfo.output_dir}
+              </span>
+            )}
+            {cleanResult && <span className="text-[10px] text-emerald-400/80">{cleanResult}</span>}
+          </div>
+          <button
+            onClick={handleCleanup}
+            disabled={storageBusy}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+            style={{
+              background: "rgba(244,63,94,0.1)",
+              color: "#fda4af",
+              border: "1px solid rgba(244,63,94,0.2)",
+            }}
+          >
+            <Trash2 size={12} />
+            Clean up
+          </button>
+        </div>
+      </div>
 
       <button
         onClick={loadConfig}

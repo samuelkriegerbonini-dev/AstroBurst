@@ -8,7 +8,7 @@ use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{apply_stf_f32, AutoStfConfig, StfParams};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::{filter_header, write_fits_mono_bitpix, write_fits_rgb_bitpix};
-use crate::infra::render::grayscale::{render_grayscale, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
+use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
 use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COPY_METADATA, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_OUTPUT_PATH};
 
@@ -252,7 +252,7 @@ pub async fn export_png(
         } else if depth == 16 {
             render_grayscale_16bit(&resolved.arr, &output_path)?;
         } else {
-            render_grayscale(&resolved.arr, &output_path)?;
+            render_grayscale_hq(&resolved.arr, &output_path)?;
         }
 
         let file_size = std::fs::metadata(&output_path)

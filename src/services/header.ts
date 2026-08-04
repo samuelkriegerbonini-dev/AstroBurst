@@ -11,15 +11,17 @@ export function getFullHeader(path: string): Promise<HeaderData> {
 
 export interface FitsExtension {
   index: number;
-  name: string;
-  ext_type: string;
-  naxis: number[];
+  extname: string | null;
+  naxis: number;
+  naxis1: number;
+  naxis2: number;
+  naxis3: number;
   bitpix: number;
-  card_count: number;
+  has_data: boolean;
 }
 
-export function getFitsExtensions(path: string): Promise<FitsExtension[]> {
-  return typedInvoke<FitsExtension[]>("get_fits_extensions", { path });
+export function getFitsExtensions(path: string): Promise<{ extensions: FitsExtension[] }> {
+  return typedInvoke<{ extensions: FitsExtension[] }>("get_fits_extensions", { path });
 }
 
 export interface HduRawHeader {
