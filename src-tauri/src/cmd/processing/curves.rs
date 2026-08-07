@@ -74,50 +74,64 @@ pub async fn apply_tone_composite_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let src_r = helpers::load_composite_channel(COMPOSITE_KEY_R)?;
-        let src_g = helpers::load_composite_channel(COMPOSITE_KEY_G)?;
-        let src_b = helpers::load_composite_channel(COMPOSITE_KEY_B)?;
+        let (mut r_img, mut g_img, mut b_img, stf_applied, stf_r_params, stf_g_params, stf_b_params) =
+            if let Some((er, eg, eb)) = helpers::load_composite_stretched() {
+                (
+                    er.arr().to_owned(),
+                    eg.arr().to_owned(),
+                    eb.arr().to_owned(),
+                    false,
+                    StfParams::default(),
+                    StfParams::default(),
+                    StfParams::default(),
+                )
+            } else {
+                let src_r = helpers::load_composite_channel(COMPOSITE_KEY_R)?;
+                let src_g = helpers::load_composite_channel(COMPOSITE_KEY_G)?;
+                let src_b = helpers::load_composite_channel(COMPOSITE_KEY_B)?;
 
-        let (rows, cols) = src_r.arr().dim();
+                let stats_r = src_r.stats().clone();
+                let stats_g = src_g.stats().clone();
+                let stats_b = src_b.stats().clone();
 
-        let stats_r = src_r.stats().clone();
-        let stats_g = src_g.stats().clone();
-        let stats_b = src_b.stats().clone();
+                let stf_config = AutoStfConfig::default();
+                let linked = linked_stf.unwrap_or(false);
 
-        let stf_config = AutoStfConfig::default();
-        let linked = linked_stf.unwrap_or(false);
+                let (auto_r, auto_g, auto_b, norm_r, norm_g, norm_b) = if linked {
+                    let (p, combined) = helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
+                    (p, p, p, combined.clone(), combined.clone(), combined)
+                } else {
+                    (
+                        auto_stf(&stats_r, &stf_config),
+                        auto_stf(&stats_g, &stf_config),
+                        auto_stf(&stats_b, &stf_config),
+                        stats_r.clone(),
+                        stats_g.clone(),
+                        stats_b.clone(),
+                    )
+                };
 
-        let (auto_r, auto_g, auto_b, norm_r, norm_g, norm_b) = if linked {
-            let (p, combined) = helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
-            (p, p, p, combined.clone(), combined.clone(), combined)
-        } else {
-            (
-                auto_stf(&stats_r, &stf_config),
-                auto_stf(&stats_g, &stf_config),
-                auto_stf(&stats_b, &stf_config),
-                stats_r.clone(),
-                stats_g.clone(),
-                stats_b.clone(),
-            )
-        };
+                let stf_r_params = stf_r
+                    .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
+                    .unwrap_or(auto_r);
+                let stf_g_params = stf_g
+                    .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
+                    .unwrap_or(auto_g);
+                let stf_b_params = stf_b
+                    .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
+                    .unwrap_or(auto_b);
 
-        let stf_r_params = stf_r
-            .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
-            .unwrap_or(auto_r);
-        let stf_g_params = stf_g
-            .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
-            .unwrap_or(auto_g);
-        let stf_b_params = stf_b
-            .map(|a| StfParams { shadow: a[0], midtone: a[1], highlight: a[2] })
-            .unwrap_or(auto_b);
+                let (r_img, (g_img, b_img)) = rayon::join(
+                    || apply_stf_f32(src_r.arr(), &stf_r_params, &norm_r),
+                    || rayon::join(
+                        || apply_stf_f32(src_g.arr(), &stf_g_params, &norm_g),
+                        || apply_stf_f32(src_b.arr(), &stf_b_params, &norm_b),
+                    ),
+                );
+                (r_img, g_img, b_img, true, stf_r_params, stf_g_params, stf_b_params)
+            };
 
-        let (mut r_img, (mut g_img, mut b_img)) = rayon::join(
-            || apply_stf_f32(src_r.arr(), &stf_r_params, &norm_r),
-            || rayon::join(
-                || apply_stf_f32(src_g.arr(), &stf_g_params, &norm_g),
-                || apply_stf_f32(src_b.arr(), &stf_b_params, &norm_b),
-            ),
-        );
+        let (rows, cols) = r_img.dim();
 
         let lr = levels_r.as_ref().map(LevelsParams::from).unwrap_or_default();
         let lg = levels_g.as_ref().map(LevelsParams::from).unwrap_or_default();
@@ -160,12 +174,13 @@ pub async fn apply_tone_composite_cmd(
             .unwrap_or(0);
         let png_path = format!("{}/composite_tone_{}.png", output_dir, ts);
         helpers::render_rgb_preview(&r_img, &g_img, &b_img, &png_path, MAX_PREVIEW_DIM)?;
+        helpers::insert_composite_toned(r_img, g_img, b_img);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
             RES_DIMENSIONS: [cols, rows],
             RES_COMPOSITE_DIMS: [cols, rows],
-            RES_STF_APPLIED: true,
+            RES_STF_APPLIED: stf_applied,
             RES_LEVELS_APPLIED: levels_applied,
             RES_CURVES_APPLIED: curves_applied,
             RES_SCNR_APPLIED: scnr_applied,

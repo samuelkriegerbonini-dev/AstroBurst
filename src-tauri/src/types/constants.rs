@@ -193,6 +193,14 @@ pub const COMPOSITE_ORIG_R: &str = "__composite_orig_r";
 pub const COMPOSITE_ORIG_G: &str = "__composite_orig_g";
 pub const COMPOSITE_ORIG_B: &str = "__composite_orig_b";
 
+pub const COMPOSITE_STRETCHED_R: &str = "__composite_stretched_r";
+pub const COMPOSITE_STRETCHED_G: &str = "__composite_stretched_g";
+pub const COMPOSITE_STRETCHED_B: &str = "__composite_stretched_b";
+
+pub const COMPOSITE_TONED_R: &str = "__composite_toned_r";
+pub const COMPOSITE_TONED_G: &str = "__composite_toned_g";
+pub const COMPOSITE_TONED_B: &str = "__composite_toned_b";
+
 pub const STF_R: &str = "stf_r";
 pub const STF_G: &str = "stf_g";
 pub const STF_B: &str = "stf_b";

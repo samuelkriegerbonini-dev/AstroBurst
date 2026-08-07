@@ -4,6 +4,7 @@ use anyhow::Context;
 use ndarray::Array2;
 use serde_json::json;
 
+use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{AlignMethod, WhiteBalance};
@@ -14,6 +15,8 @@ use crate::types::constants::{
     SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE,
     COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B,
     COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B,
+    COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B,
+    COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B,
     RES_MIN, RES_MAX, RES_MEAN, RES_SIGMA, RES_MEDIAN, RES_MAD,
     RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT,
 };
@@ -120,6 +123,7 @@ pub(crate) fn insert_composite_rgb(
     stats_g: ImageStats,
     stats_b: ImageStats,
 ) {
+    clear_composite_derived();
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r), stats_r);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g), stats_g);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b), stats_b);
@@ -133,6 +137,7 @@ pub(crate) fn insert_composite_and_orig(
     stats_g: ImageStats,
     stats_b: ImageStats,
 ) {
+    clear_composite_derived();
     let arc_r = Arc::new(r);
     let arc_g = Arc::new(g);
     let arc_b = Arc::new(b);
@@ -142,6 +147,60 @@ pub(crate) fn insert_composite_and_orig(
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, arc_r, stats_r);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, arc_g, stats_g);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, arc_b, stats_b);
+}
+
+fn insert_triplet(keys: [&str; 3], r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+    let (stats_r, (stats_g, stats_b)) = rayon::join(
+        || compute_image_stats(&r),
+        || rayon::join(
+            || compute_image_stats(&g),
+            || compute_image_stats(&b),
+        ),
+    );
+    GLOBAL_IMAGE_CACHE.insert_synthetic(keys[0], Arc::new(r), stats_r);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(keys[1], Arc::new(g), stats_g);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(keys[2], Arc::new(b), stats_b);
+}
+
+fn load_triplet(keys: [&str; 3]) -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
+    let r = GLOBAL_IMAGE_CACHE.get(keys[0])?;
+    let g = GLOBAL_IMAGE_CACHE.get(keys[1])?;
+    let b = GLOBAL_IMAGE_CACHE.get(keys[2])?;
+    Some((r, g, b))
+}
+
+pub(crate) fn insert_composite_stretched(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+    clear_composite_toned();
+    insert_triplet([COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B], r, g, b);
+}
+
+pub(crate) fn load_composite_stretched() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
+    load_triplet([COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B])
+}
+
+pub(crate) fn clear_composite_stretched() {
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_R);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_G);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_B);
+}
+
+pub(crate) fn insert_composite_toned(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+    insert_triplet([COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B], r, g, b);
+}
+
+pub(crate) fn load_composite_toned() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
+    load_triplet([COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B])
+}
+
+pub(crate) fn clear_composite_toned() {
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_R);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_G);
+    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_B);
+}
+
+pub(crate) fn clear_composite_derived() {
+    clear_composite_stretched();
+    clear_composite_toned();
 }
 
 pub(crate) fn stats_json(stats: &ImageStats) -> serde_json::Value {

@@ -3,7 +3,6 @@ import { Download, Loader2, Check, FolderOpen, Archive } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveRgbPaths } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgb } from "../../../services/export";
-import { restretchComposite } from "../../../services/compose";
 import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
@@ -171,16 +170,25 @@ export default function ExportStep({ state }: ExportStepProps) {
       }
 
       if (state.compositeReady) {
-        const res = await restretchComposite(
-          dir,
-          compositeStfR,
-          compositeStfG,
-          compositeStfB
-        );
-
-        if (res?.png_path) {
-          filesToZip.push({ name: "composite_rgb.png", path: res.png_path });
-        }
+        const path = `${dir}/composite_rgb_${ts}.png`;
+        const hasExplicitStf =
+          Math.abs(compositeStfR.midtone - 0.5) > 1e-4 ||
+          Math.abs(compositeStfG.midtone - 0.5) > 1e-4 ||
+          Math.abs(compositeStfB.midtone - 0.5) > 1e-4;
+        await exportRgbPng(null, null, null, path, {
+          bitDepth: 16,
+          applyStfStretch: hasExplicitStf,
+          shadowR: hasExplicitStf ? compositeStfR.shadow : undefined,
+          midtoneR: hasExplicitStf ? compositeStfR.midtone : undefined,
+          highlightR: hasExplicitStf ? compositeStfR.highlight : undefined,
+          shadowG: hasExplicitStf ? compositeStfG.shadow : undefined,
+          midtoneG: hasExplicitStf ? compositeStfG.midtone : undefined,
+          highlightG: hasExplicitStf ? compositeStfG.highlight : undefined,
+          shadowB: hasExplicitStf ? compositeStfB.shadow : undefined,
+          midtoneB: hasExplicitStf ? compositeStfB.midtone : undefined,
+          highlightB: hasExplicitStf ? compositeStfB.highlight : undefined,
+        });
+        filesToZip.push({ name: "composite_rgb.png", path });
       }
 
       if (filesToZip.length === 0) {
@@ -230,7 +238,7 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       {state.compositeReady && (
         <div className="text-[10px] text-emerald-400/70 bg-emerald-500/5 border border-emerald-500/10 rounded-md px-2 py-1.5">
-          Exporting calibrated composite (WB + SCNR applied, linear). PNG applies STF stretch.
+          PNG exports the composite as processed (stretch + curves when applied, else STF). FITS stays linear (WB + SCNR only).
         </div>
       )}
 

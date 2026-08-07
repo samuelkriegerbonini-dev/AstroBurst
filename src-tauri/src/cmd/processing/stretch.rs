@@ -141,6 +141,7 @@ pub async fn ghs_stretch_composite_cmd(
             .unwrap_or(0);
         let png_path = format!("{}/composite_ghs_{}.png", output_dir, ts);
         helpers::render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+        helpers::insert_composite_stretched(r, g, b);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -230,6 +231,7 @@ pub async fn arcsinh_stretch_composite_cmd(
             .unwrap_or(0);
         let png_path = format!("{}/composite_arcsinh_{}.png", output_dir, ts);
         helpers::render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
+        helpers::insert_composite_stretched(r, g, b);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -328,6 +330,7 @@ pub async fn masked_stretch_composite_cmd(
             .unwrap_or(0);
         let png_path = format!("{}/composite_masked_{}.png", output_dir, ts);
         helpers::render_rgb_preview(&r_img, &g_img, &b_img, &png_path, MAX_PREVIEW_DIM)?;
+        helpers::insert_composite_stretched(r_img, g_img, b_img);
 
         Ok(json!({
             RES_PNG_PATH: png_path,

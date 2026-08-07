@@ -333,6 +333,24 @@ pub async fn export_rgb_png(
         let depth = bit_depth.unwrap_or(16);
         let do_stf = apply_stf_stretch.unwrap_or(false);
 
+        if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
+            if depth == 16 {
+                render_rgb_16bit(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
+            } else {
+                render_rgb(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
+            }
+            let (rows, cols) = tr.arr().dim();
+            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+            return Ok(json!({
+                RES_OUTPUT_PATH: output_path,
+                RES_BIT_DEPTH: depth,
+                RES_APPLY_STF: false,
+                RES_FILE_SIZE_BYTES: file_size,
+                RES_DIMENSIONS: [cols, rows],
+                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            }));
+        }
+
         let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
         let cache_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G);
         let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);

@@ -188,7 +188,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
         if (!state.compositeReady) {
           throw new Error("Run Blend first — Auto STF re-stretch operates on the blended composite");
         }
-        res = await restretchComposite(dir, stfR, stfG, stfB);
+        res = await restretchComposite(dir, stfR, stfG, stfB, undefined, true);
         if (res?.png_path) {
           const url = await getPreviewUrl(res.png_path);
           onResult(url, stfBundle);

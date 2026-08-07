@@ -90,9 +90,7 @@ pub async fn lrgb_combine_composite_cmd(
         let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r), stats_r);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g), stats_g);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b), stats_b);
+        helpers::insert_composite_rgb(r, g, b, stats_r, stats_g, stats_b);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -112,6 +110,7 @@ pub async fn restretch_composite_cmd(
     scnr_enabled: Option<bool>,
     scnr_method: Option<String>,
     scnr_amount: Option<f64>,
+    cache_result: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -160,6 +159,9 @@ pub async fn restretch_composite_cmd(
 
         let png_path = composite_png_path(&output_dir);
         helpers::render_rgb_preview(&r_stretched, &g_stretched, &b_stretched, &png_path, MAX_PREVIEW_DIM)?;
+        if cache_result.unwrap_or(false) {
+            helpers::insert_composite_stretched(r_stretched, g_stretched, b_stretched);
+        }
 
         Ok(json!({ RES_PNG_PATH: png_path, RES_ELAPSED_MS: t0.elapsed().as_millis() as u64 }))
     })
@@ -173,6 +175,7 @@ pub async fn clear_composite_cache_cmd() -> Result<(), String> {
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_R);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_G);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_B);
+    helpers::clear_composite_derived();
     Ok(())
 }
 
@@ -212,6 +215,7 @@ pub async fn update_composite_channel_cmd(
         };
 
         GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
+        helpers::clear_composite_derived();
 
         Ok(json!({ RES_CHANNEL: channel, RES_UPDATED: true }))
     })

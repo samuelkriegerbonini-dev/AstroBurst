@@ -144,6 +144,7 @@ pub async fn remove_stars_composite_cmd(
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(result.r.starless), stats_r);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(result.g.starless), stats_g);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(result.b.starless), stats_b);
+        helpers::clear_composite_derived();
 
         Ok(json!({
             RES_PNG_PATH: png_path,

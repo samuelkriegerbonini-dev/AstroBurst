@@ -27,6 +27,7 @@ export function restretchComposite(
   stfG: StfParams,
   stfB: StfParams,
   scnr?: ScnrOptions,
+  cacheResult?: boolean,
 ): Promise<RestretchResult> {
   return typedInvoke<RestretchResult>("restretch_composite_cmd", {
     outputDir,
@@ -42,6 +43,7 @@ export function restretchComposite(
     scnrEnabled: scnr?.enabled ?? false,
     scnrMethod: scnr?.method,
     scnrAmount: scnr?.amount,
+    cacheResult: cacheResult ?? false,
   });
 }
 

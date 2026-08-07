@@ -77,6 +77,7 @@ pub async fn reset_wb_cmd(
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, arc_r, stats_r);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, arc_g, stats_g);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, arc_b, stats_b);
+        helpers::clear_composite_derived();
 
         let elapsed = t0.elapsed().as_millis() as u64;
 
