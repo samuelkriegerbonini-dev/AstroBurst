@@ -3,7 +3,7 @@ use std::fs::File;
 use serde_json::json;
 
 use crate::cmd::common::blocking_cmd;
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::{extract_header_mmap, extract_image_mmap};
@@ -24,10 +24,6 @@ fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduH
     Ok((header, wcs))
 }
 
-/// Header-only variant of `load_header_and_wcs` for `pixel_to_world_cmd`, which
-/// is driven by mouse movement (potentially dozens of calls per second while
-/// dragging) -- `extract_image_mmap` decodes/decompresses the full pixel array,
-/// far too expensive to redo on every hover; `extract_header_mmap` skips that.
 fn load_wcs_only(path: &str) -> anyhow::Result<WcsTransform> {
     let (fits_path, _tmp) = resolve_single_image(path)?;
     let file = File::open(&fits_path)?;
@@ -309,4 +305,213 @@ pub async fn pixel_to_world_cmd(
             .collect();
         Ok(json!({ "points": out }))
     })
+}
+
+struct SkyFootprint {
+    center_ra: f64,
+    center_dec: f64,
+    corners: [(f64, f64); 4],
+    fov_w_arcmin: f64,
+    fov_h_arcmin: f64,
+}
+
+fn sky_footprint(path: &str) -> anyhow::Result<SkyFootprint> {
+    let (header, wcs) = load_header_and_wcs(path)?;
+    let n1 = header.get_i64(HEADER_NAXIS1).unwrap_or(0);
+    let n2 = header.get_i64(HEADER_NAXIS2).unwrap_or(0);
+    if n1 <= 0 || n2 <= 0 {
+        anyhow::bail!("Missing NAXIS1/NAXIS2 in header");
+    }
+    let (w, h) = (n1 as f64, n2 as f64);
+    let pts = [
+        (0.0, 0.0),
+        (w - 1.0, 0.0),
+        (w - 1.0, h - 1.0),
+        (0.0, h - 1.0),
+    ];
+    let mut corners = [(0.0f64, 0.0f64); 4];
+    for (i, &(x, y)) in pts.iter().enumerate() {
+        let c = wcs.pixel_to_world(x, y);
+        if !c.ra.is_finite() || !c.dec.is_finite() {
+            anyhow::bail!("Image corner does not project to a valid sky position");
+        }
+        corners[i] = (c.ra, c.dec);
+    }
+    let center = wcs.pixel_to_world(w / 2.0, h / 2.0);
+    if !center.ra.is_finite() || !center.dec.is_finite() {
+        anyhow::bail!("Image center does not project to a valid sky position");
+    }
+    let (fov_w, fov_h) = wcs.field_of_view(n1 as usize, n2 as usize);
+    Ok(SkyFootprint {
+        center_ra: center.ra,
+        center_dec: center.dec,
+        corners,
+        fov_w_arcmin: fov_w,
+        fov_h_arcmin: fov_h,
+    })
+}
+
+fn wrap180(d: f64) -> f64 {
+    (d + 180.0).rem_euclid(360.0) - 180.0
+}
+
+fn footprint_overlap_fraction(a: &SkyFootprint, b: &SkyFootprint) -> f64 {
+    let ra0 = a.center_ra;
+    let dec0 = a.center_dec;
+    let cosd = dec0.to_radians().cos().max(1e-6);
+
+    let bbox = |fp: &SkyFootprint| {
+        let mut xmin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        for &(ra, dec) in &fp.corners {
+            let x = wrap180(ra - ra0) * cosd;
+            let y = dec - dec0;
+            xmin = xmin.min(x);
+            xmax = xmax.max(x);
+            ymin = ymin.min(y);
+            ymax = ymax.max(y);
+        }
+        (xmin, xmax, ymin, ymax)
+    };
+
+    let (ax1, ax2, ay1, ay2) = bbox(a);
+    let (bx1, bx2, by1, by2) = bbox(b);
+
+    let ix = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+    let iy = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+    let area_a = (ax2 - ax1) * (ay2 - ay1);
+    let area_b = (bx2 - bx1) * (by2 - by1);
+    let min_area = area_a.min(area_b);
+    if min_area <= 0.0 {
+        return 0.0;
+    }
+    (ix * iy) / min_area
+}
+
+#[tauri::command]
+pub async fn check_pointing_overlap_cmd(
+    paths: Vec<String>,
+    threshold: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let threshold = threshold.unwrap_or(0.05).clamp(0.0, 1.0);
+
+        let footprints: Vec<(String, Result<SkyFootprint, String>)> = paths
+            .iter()
+            .map(|p| (p.clone(), sky_footprint(p).map_err(|e| format!("{:#}", e))))
+            .collect();
+
+        let files: Vec<serde_json::Value> = footprints
+            .iter()
+            .map(|(p, r)| match r {
+                Ok(fp) => json!({
+                    "path": p,
+                    "has_wcs": true,
+                    "center_ra": fp.center_ra,
+                    "center_dec": fp.center_dec,
+                    "fov_w_arcmin": fp.fov_w_arcmin,
+                    "fov_h_arcmin": fp.fov_h_arcmin,
+                }),
+                Err(e) => json!({ "path": p, "has_wcs": false, "error": e }),
+            })
+            .collect();
+
+        let mut pairs = Vec::new();
+        let mut any_disjoint = false;
+        for i in 0..footprints.len() {
+            for j in (i + 1)..footprints.len() {
+                match (&footprints[i].1, &footprints[j].1) {
+                    (Ok(fa), Ok(fb)) => {
+                        let fraction = footprint_overlap_fraction(fa, fb);
+                        if fraction < threshold {
+                            any_disjoint = true;
+                            let sep = angular_separation(
+                                fa.center_ra, fa.center_dec,
+                                fb.center_ra, fb.center_dec,
+                            ) * 60.0;
+                            pairs.push(json!({
+                                "a": footprints[i].0,
+                                "b": footprints[j].0,
+                                "status": "disjoint",
+                                "fraction": fraction,
+                                "separation_arcmin": sep,
+                            }));
+                        }
+                    }
+                    _ => {
+                        pairs.push(json!({
+                            "a": footprints[i].0,
+                            "b": footprints[j].0,
+                            "status": "unknown",
+                            "fraction": serde_json::Value::Null,
+                            "separation_arcmin": serde_json::Value::Null,
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "files": files,
+            "pairs": pairs,
+            "any_disjoint": any_disjoint,
+            "threshold": threshold,
+        }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{footprint_overlap_fraction, wrap180, SkyFootprint};
+
+    fn footprint(ra: f64, dec: f64, size_deg: f64) -> SkyFootprint {
+        let half = size_deg / 2.0;
+        let cosd = dec.to_radians().cos().max(1e-6);
+        let dra = half / cosd;
+        SkyFootprint {
+            center_ra: ra,
+            center_dec: dec,
+            corners: [
+                (ra - dra, dec - half),
+                (ra + dra, dec - half),
+                (ra + dra, dec + half),
+                (ra - dra, dec + half),
+            ],
+            fov_w_arcmin: size_deg * 60.0,
+            fov_h_arcmin: size_deg * 60.0,
+        }
+    }
+
+    #[test]
+    fn identical_footprints_fully_overlap() {
+        let a = footprint(10.0, 5.0, 0.1);
+        let b = footprint(10.0, 5.0, 0.1);
+        assert!((footprint_overlap_fraction(&a, &b) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn disjoint_pointings_have_zero_overlap() {
+        let a = footprint(6.95, 1.65, 0.04);
+        let b = footprint(7.40, 1.81, 0.04);
+        assert_eq!(footprint_overlap_fraction(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn ra_wraparound_is_handled() {
+        let a = footprint(359.95, 0.0, 0.2);
+        let b = footprint(0.05, 0.0, 0.2);
+        let f = footprint_overlap_fraction(&a, &b);
+        assert!(f > 0.4, "expected overlap across RA=0, got {}", f);
+        assert!((wrap180(359.8) + 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn high_declination_neighbors_overlap_partially() {
+        let a = footprint(100.0, 80.0, 0.2);
+        let b = footprint(100.0 + 0.1 / 80.0f64.to_radians().cos(), 80.0, 0.2);
+        let f = footprint_overlap_fraction(&a, &b);
+        assert!(f > 0.3 && f < 0.7, "expected partial overlap, got {}", f);
+    }
 }

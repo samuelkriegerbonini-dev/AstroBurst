@@ -5,6 +5,7 @@ import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
 import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState, resolveChannelPath} from "../../../utils/wizard";
+import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 
 const CANONICAL_WAVELENGTH: Record<string, number> = {
   sii: 673, ha: 656, nii: 658, oiii: 501,
@@ -185,6 +186,15 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     () => filledBins.filter((b) => channelStages[b.id] === "stacked" || channelStages[b.id] === "raw"),
     [filledBins, channelStages],
   );
+
+  const resolvedPaths = useMemo(() => {
+    if (filledBins.length < 2) return [];
+    const paths = filledBins
+      .map((b) => resolveChannelPath(state, b.id))
+      .filter((p): p is string => !!p);
+    return Array.from(new Set(paths)).sort();
+  }, [filledBins, state]);
+  const { disjointPairs } = usePointingOverlap(resolvedPaths);
 
   const handleRunBlend = useCallback(async () => {
     setLoading(true);
@@ -369,6 +379,17 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
           <span>
             {unalignedBins.map((b) => b.shortLabel).join(", ")} {unalignedBins.length === 1 ? "was" : "were"} never
             aligned — blending unregistered channels can cause color fringing. Run Align first.
+          </span>
+        </div>
+      )}
+
+      {disjointPairs.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>
+            The selected channels cover disjoint sky regions
+            {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
+            — the blend will have no common signal. Check the channel assignment in step 1.
           </span>
         </div>
       )}

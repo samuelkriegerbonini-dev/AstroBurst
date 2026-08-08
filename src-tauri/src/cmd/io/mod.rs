@@ -253,8 +253,19 @@ pub async fn get_raw_rgb_pixels_preview(
                 encode_rgb_with_header_downsampled(&r, &g, &b, dim)?
             }
             None => {
-                let (r, g, b) = helpers::load_composite_rgb()?;
-                encode_rgb_with_header_downsampled(r.arr(), g.arr(), b.arr(), dim)?
+                let derived = helpers::load_composite_toned()
+                    .or_else(helpers::load_composite_stretched);
+                match derived {
+                    Some((r, g, b)) => {
+                        crate::infra::ipc::encode_rgb_with_header_downsampled_flagged(
+                            r.arr(), g.arr(), b.arr(), dim, 1,
+                        )?
+                    }
+                    None => {
+                        let (r, g, b) = helpers::load_composite_rgb()?;
+                        encode_rgb_with_header_downsampled(r.arr(), g.arr(), b.arr(), dim)?
+                    }
+                }
             }
         };
         Ok(Response::new(data))

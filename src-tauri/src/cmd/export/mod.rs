@@ -333,99 +333,108 @@ pub async fn export_rgb_png(
         let depth = bit_depth.unwrap_or(16);
         let do_stf = apply_stf_stretch.unwrap_or(false);
 
-        if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
-            if depth == 16 {
-                render_rgb_16bit(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
-            } else {
-                render_rgb(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
+        let real_path_count = [r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]
+            .iter()
+            .flatten()
+            .filter(|p| !p.starts_with("__"))
+            .count();
+        let single_channel_export = real_path_count == 1;
+
+        if !single_channel_export {
+                if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
+                if depth == 16 {
+                    render_rgb_16bit(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
+                } else {
+                    render_rgb(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
+                }
+                let (rows, cols) = tr.arr().dim();
+                let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(json!({
+                    RES_OUTPUT_PATH: output_path,
+                    RES_BIT_DEPTH: depth,
+                    RES_APPLY_STF: false,
+                    RES_FILE_SIZE_BYTES: file_size,
+                    RES_DIMENSIONS: [cols, rows],
+                    RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+                }));
             }
-            let (rows, cols) = tr.arr().dim();
-            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-            return Ok(json!({
-                RES_OUTPUT_PATH: output_path,
-                RES_BIT_DEPTH: depth,
-                RES_APPLY_STF: false,
-                RES_FILE_SIZE_BYTES: file_size,
-                RES_DIMENSIONS: [cols, rows],
-                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            }));
-        }
 
-        let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
-        let cache_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G);
-        let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
+            let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
+            let cache_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G);
+            let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
 
-        if let (Some(cr), Some(cg), Some(cb)) = (&cache_r, &cache_g, &cache_b) {
-            let has_explicit_stf = explicit_stf_requested(do_stf, midtone_r, midtone_g, midtone_b);
+            if let (Some(cr), Some(cg), Some(cb)) = (&cache_r, &cache_g, &cache_b) {
+                let has_explicit_stf = explicit_stf_requested(do_stf, midtone_r, midtone_g, midtone_b);
 
-            let (stf_r, stf_g, stf_b) = if has_explicit_stf {
-                (
-                    StfParams {
-                        shadow: shadow_r.unwrap_or(0.0),
-                        midtone: midtone_r.unwrap_or(0.5),
-                        highlight: highlight_r.unwrap_or(1.0),
-                    },
-                    StfParams {
-                        shadow: shadow_g.unwrap_or(0.0),
-                        midtone: midtone_g.unwrap_or(0.5),
-                        highlight: highlight_g.unwrap_or(1.0),
-                    },
-                    StfParams {
-                        shadow: shadow_b.unwrap_or(0.0),
-                        midtone: midtone_b.unwrap_or(0.5),
-                        highlight: highlight_b.unwrap_or(1.0),
-                    },
-                )
-            } else {
-                let stf_config = AutoStfConfig::default();
-                let (linked, _) = helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &stf_config);
-                (linked, linked, linked)
-            };
+                let (stf_r, stf_g, stf_b) = if has_explicit_stf {
+                    (
+                        StfParams {
+                            shadow: shadow_r.unwrap_or(0.0),
+                            midtone: midtone_r.unwrap_or(0.5),
+                            highlight: highlight_r.unwrap_or(1.0),
+                        },
+                        StfParams {
+                            shadow: shadow_g.unwrap_or(0.0),
+                            midtone: midtone_g.unwrap_or(0.5),
+                            highlight: highlight_g.unwrap_or(1.0),
+                        },
+                        StfParams {
+                            shadow: shadow_b.unwrap_or(0.0),
+                            midtone: midtone_b.unwrap_or(0.5),
+                            highlight: highlight_b.unwrap_or(1.0),
+                        },
+                    )
+                } else {
+                    let stf_config = AutoStfConfig::default();
+                    let (linked, _) = helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &stf_config);
+                    (linked, linked, linked)
+                };
 
-            let identical_params = stf_r.shadow == stf_g.shadow
-                && stf_g.shadow == stf_b.shadow
-                && stf_r.midtone == stf_g.midtone
-                && stf_g.midtone == stf_b.midtone
-                && stf_r.highlight == stf_g.highlight
-                && stf_g.highlight == stf_b.highlight;
+                let identical_params = stf_r.shadow == stf_g.shadow
+                    && stf_g.shadow == stf_b.shadow
+                    && stf_r.midtone == stf_g.midtone
+                    && stf_g.midtone == stf_b.midtone
+                    && stf_r.highlight == stf_g.highlight
+                    && stf_g.highlight == stf_b.highlight;
 
-            let linked_stats = if identical_params {
-                Some(crate::core::imaging::stats::combine_channel_stats(
-                    cr.stats(),
-                    cg.stats(),
-                    cb.stats(),
-                ))
-            } else {
-                None
-            };
+                let linked_stats = if identical_params {
+                    Some(crate::core::imaging::stats::combine_channel_stats(
+                        cr.stats(),
+                        cg.stats(),
+                        cb.stats(),
+                    ))
+                } else {
+                    None
+                };
 
-            let (r_out, g_out, b_out) = match &linked_stats {
-                Some(combined) => (
-                    apply_stf_f32(cr.arr(), &stf_r, combined),
-                    apply_stf_f32(cg.arr(), &stf_g, combined),
-                    apply_stf_f32(cb.arr(), &stf_b, combined),
-                ),
-                None => (
-                    apply_stf_f32(cr.arr(), &stf_r, cr.stats()),
-                    apply_stf_f32(cg.arr(), &stf_g, cg.stats()),
-                    apply_stf_f32(cb.arr(), &stf_b, cb.stats()),
-                ),
-            };
-            if depth == 16 {
-                render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
-            } else {
-                render_rgb(&r_out, &g_out, &b_out, &output_path)?;
+                let (r_out, g_out, b_out) = match &linked_stats {
+                    Some(combined) => (
+                        apply_stf_f32(cr.arr(), &stf_r, combined),
+                        apply_stf_f32(cg.arr(), &stf_g, combined),
+                        apply_stf_f32(cb.arr(), &stf_b, combined),
+                    ),
+                    None => (
+                        apply_stf_f32(cr.arr(), &stf_r, cr.stats()),
+                        apply_stf_f32(cg.arr(), &stf_g, cg.stats()),
+                        apply_stf_f32(cb.arr(), &stf_b, cb.stats()),
+                    ),
+                };
+                if depth == 16 {
+                    render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
+                } else {
+                    render_rgb(&r_out, &g_out, &b_out, &output_path)?;
+                }
+                let (rows, cols) = cr.arr().dim();
+                let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(json!({
+                    RES_OUTPUT_PATH: output_path,
+                    RES_BIT_DEPTH: depth,
+                    RES_APPLY_STF: do_stf,
+                    RES_FILE_SIZE_BYTES: file_size,
+                    RES_DIMENSIONS: [cols, rows],
+                    RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+                }));
             }
-            let (rows, cols) = cr.arr().dim();
-            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-            return Ok(json!({
-                RES_OUTPUT_PATH: output_path,
-                RES_BIT_DEPTH: depth,
-                RES_APPLY_STF: do_stf,
-                RES_FILE_SIZE_BYTES: file_size,
-                RES_DIMENSIONS: [cols, rows],
-                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            }));
         }
 
         let r_entry = r_path.as_deref().map(load_cached).transpose()?;

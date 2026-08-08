@@ -227,6 +227,16 @@ pub fn encode_rgb_with_header_downsampled(
     b: &Array2<f32>,
     max_dim: usize,
 ) -> Result<Vec<u8>> {
+    encode_rgb_with_header_downsampled_flagged(r, g, b, max_dim, 0)
+}
+
+pub fn encode_rgb_with_header_downsampled_flagged(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    max_dim: usize,
+    source_flag: u8,
+) -> Result<Vec<u8>> {
     if r.dim() != g.dim() || r.dim() != b.dim() {
         anyhow::bail!(
             "RGB channels have mismatched dimensions: r={:?} g={:?} b={:?}",
@@ -249,7 +259,7 @@ pub fn encode_rgb_with_header_downsampled(
         );
     }
 
-    let mut output = Vec::with_capacity(32 + rc.pixels.len() * 3);
+    let mut output = Vec::with_capacity(33 + rc.pixels.len() * 3);
     output.extend_from_slice(&rc.width.to_le_bytes());
     output.extend_from_slice(&rc.height.to_le_bytes());
     output.extend_from_slice(&rc.data_min.to_le_bytes());
@@ -261,6 +271,7 @@ pub fn encode_rgb_with_header_downsampled(
     output.extend_from_slice(&rc.pixels);
     output.extend_from_slice(&gc.pixels);
     output.extend_from_slice(&bc.pixels);
+    output.push(source_flag);
     Ok(output)
 }
 
@@ -412,7 +423,8 @@ mod tests {
         let b = Array2::from_shape_fn((4, 4), |(y, x)| -50.0 + (y * 4 + x) as f32);
         let data = encode_rgb_with_header_downsampled(&r, &g, &b, 64).unwrap();
 
-        assert_eq!(data.len(), 32 + 3 * 16 * 4);
+        assert_eq!(data.len(), 32 + 3 * 16 * 4 + 1);
+        assert_eq!(data[data.len() - 1], 0);
 
         let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
@@ -444,7 +456,7 @@ mod tests {
         let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         assert_eq!((w, h), (500, 500));
-        assert_eq!(data.len(), 32 + 3 * 500 * 500 * 4);
+        assert_eq!(data.len(), 32 + 3 * 500 * 500 * 4 + 1);
     }
 
     #[test]

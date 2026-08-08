@@ -44,6 +44,7 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   if (bytes.length < expected) {
     throw new Error(`raw rgb pixels: expected ${expected} bytes, got ${bytes.length}`);
   }
+  const displayReferred = bytes.length > expected && bytes[expected] === 1;
 
   const channel = (blockIndex: number, min: number, max: number) => {
     const start = bytes.byteOffset + 32 + blockIndex * blockBytes;
@@ -57,6 +58,7 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   return {
     width,
     height,
+    displayReferred,
     r: channel(0, rMin, rMax),
     g: channel(1, gMin, gMax),
     b: channel(2, bMin, bMax),

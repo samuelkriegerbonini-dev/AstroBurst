@@ -31,6 +31,7 @@ export interface RawRgbChannel {
 export interface RawRgbPixelData {
   width: number;
   height: number;
+  displayReferred?: boolean;
   r: RawRgbChannel;
   g: RawRgbChannel;
   b: RawRgbChannel;

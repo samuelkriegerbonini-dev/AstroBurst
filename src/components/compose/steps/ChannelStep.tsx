@@ -1,9 +1,10 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { Wand2, FolderOpen, ChevronDown, X, Sparkles } from "lucide-react";
+import { Wand2, FolderOpen, ChevronDown, X, Sparkles, AlertTriangle } from "lucide-react";
 import type { ProcessedFile } from "../../../shared/types";
 import { ingestFiles } from "../../../hooks/useFileIngest";
 import {DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
 import { filterCodeAndWavelengthNm } from "../../../utils/filterWavelengths";
+import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 
 interface NarrowbandPalette {
   palette_name: string;
@@ -211,6 +212,13 @@ export default function ChannelStep({
     () => doneFiles.filter((f) => !assignedSet.has(f.path)),
     [doneFiles, assignedSet],
   );
+
+  const overlapPaths = useMemo(() => {
+    const filled = state.bins.filter((b) => b.files.length > 0);
+    if (filled.length < 2) return [];
+    return Array.from(new Set(filled.flatMap((b) => b.files))).sort();
+  }, [state.bins]);
+  const { disjointPairs } = usePointingOverlap(overlapPaths);
 
   const handleAutoMap = useCallback(() => {
     const next = state.bins.map((b) => ({ ...b, files: [...b.files] }));
@@ -528,6 +536,19 @@ export default function ChannelStep({
           );
         })}
       </div>
+
+      {disjointPairs.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>
+            {disjointPairs.slice(0, 3).map((p) => `${shortName(p.a)} × ${shortName(p.b)}`).join(", ")}
+            {disjointPairs.length > 3 ? ` and ${disjointPairs.length - 3} more pair(s)` : ""}
+            {" "}point at different sky regions
+            {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
+            {" "}— their WCS footprints do not overlap, so blending them produces a patchwork with no common signal. Check the channel assignment.
+          </span>
+        </div>
+      )}
 
       <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-800/30">
         <input value={customLabel} onChange={(e) => setCustomLabel(e.target.value)}

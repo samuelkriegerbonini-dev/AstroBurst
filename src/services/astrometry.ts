@@ -1,7 +1,7 @@
 import { typedInvoke } from "../infrastructure/tauri";
-import type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/types/astrometry";
+import type { WcsInfo, PlateSolveOptions, PixelToWorldResult, PointingOverlapResult } from "../shared/types/astrometry";
 
-export type { WcsInfo, PlateSolveOptions, PixelToWorldResult } from "../shared/types/astrometry";
+export type { WcsInfo, PlateSolveOptions, PixelToWorldResult, PointingOverlapResult } from "../shared/types/astrometry";
 
 export interface PlateSolveResult {
   success: boolean;
@@ -31,8 +31,13 @@ export function getWcsInfo(path: string): Promise<WcsInfo> {
   return typedInvoke<WcsInfo>("get_wcs_info", { path });
 }
 
-/** Batched 0-based pixel -> (ra, dec) via the wcs-rs-backed engine (replaces the
- * old client-side `src/utils/wcstransform.ts`, which only covered TAN/SIN/ARC/CAR). */
+export function checkPointingOverlap(paths: string[], threshold?: number): Promise<PointingOverlapResult> {
+  return typedInvoke<PointingOverlapResult>("check_pointing_overlap_cmd", {
+    paths,
+    threshold: threshold ?? null,
+  });
+}
+
 export function pixelToWorld(path: string, points: [number, number][]): Promise<PixelToWorldResult> {
   return typedInvoke<PixelToWorldResult>("pixel_to_world_cmd", { path, points });
 }

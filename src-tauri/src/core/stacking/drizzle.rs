@@ -9,8 +9,6 @@ pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, 
 use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
 use crate::core::imaging::boundary::clamp_index;
-use crate::math::median::median_f32_mut;
-use crate::types::constants::MAD_TO_SIGMA;
 
 fn drizzle_support(scale: f64, pixfrac: f64, kernel: DrizzleKernel) -> (f64, f64, f64) {
     let half = pixfrac * scale * 0.5;
@@ -101,45 +99,25 @@ fn frame_contributions(
 }
 
 struct DrizzleAccumulator {
-    storage: Vec<f32>,
-    sample_weights: Vec<f32>,
-    slot_starts: Vec<usize>,
-    fill: Vec<u32>,
-    weights: Vec<f64>,
-    out_rows: usize,
+    vsum: Vec<f64>,
+    wsum: Vec<f64>,
     out_cols: usize,
 }
 
 impl DrizzleAccumulator {
-    fn new(out_rows: usize, out_cols: usize, counts: &[u32]) -> Self {
+    fn new(out_rows: usize, out_cols: usize) -> Self {
         let n = out_rows * out_cols;
-        let mut slot_starts = Vec::with_capacity(n + 1);
-        let mut total = 0usize;
-        slot_starts.push(0);
-        for &c in counts {
-            total += c as usize;
-            slot_starts.push(total);
-        }
         Self {
-            storage: vec![0.0f32; total],
-            sample_weights: vec![0.0f32; total],
-            slot_starts,
-            fill: vec![0u32; n],
-            weights: vec![0.0; n],
-            out_rows,
+            vsum: vec![0.0; n],
+            wsum: vec![0.0; n],
             out_cols,
         }
     }
 
     #[inline]
     fn push(&mut self, idx: usize, val: f32, w: f64) {
-        let slot = self.slot_starts[idx] + self.fill[idx] as usize;
-        if slot < self.slot_starts[idx + 1] {
-            self.storage[slot] = val;
-            self.sample_weights[slot] = w as f32;
-            self.fill[idx] += 1;
-            self.weights[idx] += w;
-        }
+        self.vsum[idx] += val as f64 * w;
+        self.wsum[idx] += w;
     }
 
     fn drizzle_frame(
@@ -165,90 +143,15 @@ impl DrizzleAccumulator {
         }
     }
 
-    fn finalize(
-        &self,
-        sigma_low: f32,
-        sigma_high: f32,
-        sigma_iterations: usize,
-    ) -> (Vec<f32>, Vec<f32>, u64) {
-        let n = self.out_rows * self.out_cols;
-
-        let results: Vec<(f32, f32, u64)> = (0..n)
-            .into_par_iter()
-            .map_init(
-                || (Vec::new(), Vec::new(), Vec::new()),
-                |(active, vals, devs): &mut (Vec<(f32, f32)>, Vec<f32>, Vec<f32>), i| {
-                    let count = self.fill[i] as usize;
-                    if count == 0 {
-                        return (0.0, 0.0, 0);
-                    }
-                    let base = self.slot_starts[i];
-                    if count == 1 {
-                        return (self.storage[base], self.weights[i] as f32, 0);
-                    }
-
-                    active.clear();
-                    active.extend(
-                        (0..count).map(|k| (self.storage[base + k], self.sample_weights[base + k])),
-                    );
-                    let mut rejected = 0u64;
-
-                    for _ in 0..sigma_iterations {
-                        if active.len() < 3 {
-                            break;
-                        }
-
-                        vals.clear();
-                        vals.extend(active.iter().map(|(v, _)| *v));
-                        let median = median_f32_mut(vals);
-                        devs.clear();
-                        devs.extend(vals.iter().map(|v| (v - median).abs()));
-                        let mad = median_f32_mut(devs);
-                        let sigma = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
-
-                        let before = active.len();
-                        active.retain(|&(v, _)| {
-                            let dev = v - median;
-                            dev >= -sigma_low * sigma && dev <= sigma_high * sigma
-                        });
-                        let removed = before - active.len();
-                        rejected += removed as u64;
-                        if removed == 0 {
-                            break;
-                        }
-                    }
-
-                    let (mut vsum, mut wsum) = (0.0f64, 0.0f64);
-                    if active.is_empty() {
-                        for k in 0..count {
-                            let w = self.sample_weights[base + k] as f64;
-                            vsum += self.storage[base + k] as f64 * w;
-                            wsum += w;
-                        }
-                    } else {
-                        for &(v, w) in active.iter() {
-                            vsum += v as f64 * w as f64;
-                            wsum += w as f64;
-                        }
-                    }
-
-                    let mean = if wsum > 1e-6 { (vsum / wsum) as f32 } else { 0.0 };
-                    (mean, wsum.max(0.0) as f32, rejected)
-                },
-            )
+    fn finalize(&self) -> (Vec<f32>, Vec<f32>) {
+        let img_data: Vec<f32> = self
+            .vsum
+            .par_iter()
+            .zip(self.wsum.par_iter())
+            .map(|(&v, &w)| if w > 1e-6 { (v / w) as f32 } else { 0.0 })
             .collect();
-
-        let mut img_data = Vec::with_capacity(n);
-        let mut wgt_data = Vec::with_capacity(n);
-        let mut total_rejected = 0u64;
-
-        for (val, wgt, rej) in results {
-            img_data.push(val);
-            wgt_data.push(wgt);
-            total_rejected += rej;
-        }
-
-        (img_data, wgt_data, total_rejected)
+        let wgt_data: Vec<f32> = self.wsum.iter().map(|&w| w.max(0.0) as f32).collect();
+        (img_data, wgt_data)
     }
 }
 
@@ -392,28 +295,13 @@ pub fn drizzle_stack(
 
     let mut img_data = vec![0.0f32; out_rows * out_cols];
     let mut wgt_data = vec![0.0f32; out_rows * out_cols];
-    let mut rejected_pixels = 0u64;
+    let rejected_pixels = 0u64;
 
     for band_start in (0..out_rows).step_by(band_rows) {
         let band_end = (band_start + band_rows).min(out_rows);
         let band_n = (band_end - band_start) * out_cols;
 
-        let mut counts = vec![0u32; band_n];
-        for (i, img) in frames.iter().enumerate() {
-            let (dx, dy) = offsets[i];
-            let rows = frame_contributions(
-                img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel, out_rows, out_cols,
-                band_start, band_end,
-            );
-            for contribs in rows {
-                for (idx, _, _) in contribs {
-                    counts[idx] += 1;
-                }
-            }
-        }
-
-        let mut accumulator = DrizzleAccumulator::new(band_end - band_start, out_cols, &counts);
-        drop(counts);
+        let mut accumulator = DrizzleAccumulator::new(band_end - band_start, out_cols);
 
         for (i, img) in frames.iter().enumerate() {
             let (dx, dy) = offsets[i];
@@ -423,15 +311,10 @@ pub fn drizzle_stack(
             );
         }
 
-        let (band_img, band_wgt, band_rej) = accumulator.finalize(
-            config.sigma_low,
-            config.sigma_high,
-            config.sigma_iterations,
-        );
+        let (band_img, band_wgt) = accumulator.finalize();
         let off = band_start * out_cols;
         img_data[off..off + band_n].copy_from_slice(&band_img);
         wgt_data[off..off + band_n].copy_from_slice(&band_wgt);
-        rejected_pixels += band_rej;
     }
 
     let image = Array2::from_shape_vec((out_rows, out_cols), img_data)
@@ -449,4 +332,66 @@ pub fn drizzle_stack(
         offsets,
         rejected_pixels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(scale: f64) -> DrizzleConfig {
+        DrizzleConfig {
+            scale,
+            pixfrac: 0.7,
+            kernel: DrizzleKernel::Square,
+            align: false,
+            ..DrizzleConfig::default()
+        }
+    }
+
+    #[test]
+    fn uniform_frames_yield_weighted_mean_identity() {
+        let frames = vec![
+            Array2::from_elem((32, 32), 5.0f32),
+            Array2::from_elem((32, 32), 5.0f32),
+            Array2::from_elem((32, 32), 5.0f32),
+        ];
+        let result = drizzle_stack(&frames, &config(2.0)).unwrap();
+        assert_eq!(result.rejected_pixels, 0);
+        for (&v, &w) in result.image.iter().zip(result.weight_map.iter()) {
+            if w > 1e-6 {
+                assert!((v - 5.0).abs() < 1e-4, "pixel {} != 5.0 (w={})", v, w);
+            }
+        }
+    }
+
+    #[test]
+    fn two_constant_frames_average_in_overlap() {
+        let frames = vec![
+            Array2::from_elem((24, 24), 2.0f32),
+            Array2::from_elem((24, 24), 6.0f32),
+        ];
+        let result = drizzle_stack(&frames, &config(1.0)).unwrap();
+        assert_eq!(result.rejected_pixels, 0);
+        let center = result.image[[12, 12]];
+        assert!((center - 4.0).abs() < 1e-4, "center {} != 4.0", center);
+    }
+
+    #[test]
+    fn sigma_params_are_inert() {
+        let frames = vec![
+            Array2::from_elem((16, 16), 1.0f32),
+            Array2::from_elem((16, 16), 100.0f32),
+        ];
+        let mut a = config(2.0);
+        a.sigma_low = 0.5;
+        a.sigma_high = 0.5;
+        let mut b = config(2.0);
+        b.sigma_low = 10.0;
+        b.sigma_high = 10.0;
+        let ra = drizzle_stack(&frames, &a).unwrap();
+        let rb = drizzle_stack(&frames, &b).unwrap();
+        assert_eq!(ra.image, rb.image);
+        assert_eq!(ra.rejected_pixels, 0);
+        assert_eq!(rb.rejected_pixels, 0);
+    }
 }

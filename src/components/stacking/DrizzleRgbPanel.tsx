@@ -48,8 +48,6 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
   const [kernel, setKernel] = useState<"square" | "gaussian" | "lanczos3">("square");
   const [align, setAlign] = useState(true);
   const [alignmentMethod, setAlignmentMethod] = useState<"phase_correlation" | "zncc">("phase_correlation");
-  const [sigmaLow, setSigmaLow] = useState(3.0);
-  const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [wbMode, setWbMode] = useState<"auto" | "manual" | "none">("auto");
   const [wbR, setWbR] = useState(1.0);
   const [wbG, setWbG] = useState(1.0);
@@ -118,8 +116,6 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           kernel,
           align,
           alignmentMethod: align ? alignmentMethod : undefined,
-          sigmaLow,
-          sigmaHigh,
           wbMode,
           wbR: wbMode === "manual" ? wbR : undefined,
           wbG: wbMode === "manual" ? wbG : undefined,
@@ -137,7 +133,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
     } finally {
       setIsRunning(false);
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -228,8 +224,6 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             ))}
           </select>
         </div>
-        <Slider label="Sigma low" value={sigmaLow} min={0} max={6} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
-        <Slider label="Sigma high" value={sigmaHigh} min={0} max={6} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
         <Toggle label="Align frames and channels" checked={align} accent="rose" onChange={setAlign} />
         {align && (
           <div className="flex items-center justify-between">
@@ -321,7 +315,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           <ResultGrid columns={3} items={[
             { label: "Output", value: result.output_dims ? `${result.output_dims[1]}×${result.output_dims[0]}` : "--" },
             { label: "Scale", value: result.scale ? `${result.scale.toFixed(1)}x` : "--" },
-            { label: "Rejected", value: result.rejected_pixels?.toLocaleString() ?? "0" },
+            { label: "Kernel", value: kernel },
             { label: "R frames", value: result.frame_count_r },
             { label: "G frames", value: result.frame_count_g },
             { label: "B frames", value: result.frame_count_b },

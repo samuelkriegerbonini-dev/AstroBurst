@@ -168,6 +168,7 @@ pub fn run() {
             cmd::astrometry::plate_solve_cmd,
             cmd::astrometry::get_wcs_info,
             cmd::astrometry::pixel_to_world_cmd,
+            cmd::astrometry::check_pointing_overlap_cmd,
             cmd::psf::estimate_psf_cmd,
             cmd::spcc::spcc_calibrate_cmd,
             cmd::config::get_config,

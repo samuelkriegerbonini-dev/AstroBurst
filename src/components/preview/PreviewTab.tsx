@@ -20,6 +20,7 @@ interface PreviewTabProps {
 
 const MAX_RETRIES = 2;
 const RETRY_DELAYS = [300, 800] as const;
+const IDENTITY_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 const Overlay = memo(function Overlay({
                                         starOverlayRef,
@@ -124,6 +125,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
 
   if (compositePreviewUrl) {
     const rgbOnGpu = useGpu && !!rgbRawPixels;
+    const displayReferred = !!rgbRawPixels?.displayReferred;
     const stfRow = (label: string, color: string, stf: StfParams, ch: "r" | "g" | "b") => (
       <div key={label} className="flex items-center gap-2">
         <span className="text-[9px] font-mono w-7 shrink-0" style={{ color }}>{label}</span>
@@ -148,7 +150,15 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-violet-900/30 border-b border-violet-600/20">
           <span className="text-[10px] text-violet-300">RGB Composite{rgbOnGpu ? " · GPU" : ""}</span>
-          {rgbOnGpu && (
+          {rgbOnGpu && displayReferred && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-emerald-300/90 bg-emerald-600/15"
+              title="Showing the processed composite (stretch/curves applied). STF is baked in."
+            >
+              processed
+            </span>
+          )}
+          {rgbOnGpu && !displayReferred && (
             <button
               onClick={() => setStfOpen((v) => !v)}
               title={stfOpen ? "Hide live STF controls" : "Adjust per-channel STF live"}
@@ -166,7 +176,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
             <X size={10} />
           </button>
         </div>
-        {rgbOnGpu && stfOpen && (
+        {rgbOnGpu && stfOpen && !displayReferred && (
           <div className="flex flex-col gap-1 px-3 py-2 border-b border-violet-600/15" style={{ background: "rgba(46,16,101,0.25)" }}>
             <div className="flex items-center justify-between">
               <button
@@ -202,9 +212,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               <GpuViewport renderW={rgbRawPixels.width} renderH={rgbRawPixels.height}>
                 <GpuRgbRenderer
                   rgb={rgbRawPixels}
-                  stfR={compositeStfR}
-                  stfG={compositeStfG}
-                  stfB={compositeStfB}
+                  stfR={displayReferred ? IDENTITY_STF : compositeStfR}
+                  stfG={displayReferred ? IDENTITY_STF : compositeStfG}
+                  stfB={displayReferred ? IDENTITY_STF : compositeStfB}
                 />
               </GpuViewport>
             </Suspense>
