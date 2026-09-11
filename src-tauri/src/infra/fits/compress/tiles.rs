@@ -343,6 +343,41 @@ fn scale_ints_dither(
         .collect()
 }
 
+fn scale_quantized_ints(
+    bytes: &[u8],
+    nx: usize,
+    bscale: f64,
+    bzero: f64,
+    ctx: &TileCodecCtx,
+) -> Result<Vec<f32>> {
+    if nx == 0 || !bytes.len().is_multiple_of(nx) {
+        bail!("quantized tile holds {} bytes for {nx} pixels", bytes.len());
+    }
+    let width = bytes.len() / nx;
+    let ints: Vec<i64> = match width {
+        1 => bytes.iter().map(|&b| b as i64).collect(),
+        2 => bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes([c[0], c[1]]) as i64)
+            .collect(),
+        4 => bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]) as i64)
+            .collect(),
+        8 => bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect(),
+        other => bail!("unsupported quantized tile element width {other}"),
+    };
+    Ok(match ctx.dither {
+        Some((seed, tile_index)) => {
+            scale_ints_dither(&ints, bscale, bzero, ctx.blank, seed, tile_index)
+        }
+        None => scale_ints(&ints, bscale, bzero, ctx.blank),
+    })
+}
+
 fn decode_one_tile(
     mmap: &[u8],
     row_bytes: &[u8],
@@ -421,7 +456,7 @@ fn decode_one_tile(
                 bytepix: ctx.rice_bytepix,
                 signed,
             };
-            let ints = rice_decode(raw, nx, &params);
+            let ints = rice_decode(raw, nx, &params)?;
             match ctx.dither {
                 Some((seed, tile_index)) if ctx.tile_quant.is_some() => {
                     Ok(scale_ints_dither(&ints, bscale, bzero, ctx.blank, seed, tile_index))
@@ -430,8 +465,15 @@ fn decode_one_tile(
             }
         }
         "GZIP_1" | "GZIP_2" => {
-            if ctx.dither.is_some() && ctx.tile_quant.is_some() {
-                bail!("SUBTRACTIVE_DITHER_1 with GZIP-compressed tiles is not supported");
+            if ctx.tile_quant.is_some() {
+                let decompressed = gzip_decode(raw, 1, false)?;
+                let width = decompressed.len().checked_div(nx).unwrap_or(0);
+                let bytes = if ctx.zcmptype == "GZIP_2" && width > 1 && decompressed.len() % nx == 0 {
+                    super::gzip::unshuffle_bytes(&decompressed, width)
+                } else {
+                    decompressed
+                };
+                return scale_quantized_ints(&bytes, nx, bscale, bzero, ctx);
             }
             let bytepix = (ctx.zbitpix.unsigned_abs() / 8) as usize;
             let decompressed = gzip_decode(raw, bytepix, ctx.zcmptype == "GZIP_2")?;
@@ -444,8 +486,8 @@ fn decode_one_tile(
             ))
         }
         "NOCOMPRESS" => {
-            if ctx.dither.is_some() && ctx.tile_quant.is_some() {
-                bail!("SUBTRACTIVE_DITHER_1 with NOCOMPRESS tiles is not supported");
+            if ctx.tile_quant.is_some() {
+                return scale_quantized_ints(raw, nx, bscale, bzero, ctx);
             }
             Ok(super::super::reader::decode_pixels_blank(
                 raw,
@@ -524,7 +566,7 @@ pub fn decode_compressed_planes(
     let default_bytepix = match geom.zbitpix.unsigned_abs() {
         8 => 1,
         16 => 2,
-        32 => 4,
+        32 | 64 => 4,
         other => bail!("Unsupported ZBITPIX {other}"),
     };
     let blocksize = find_zval(header, "BLOCKSIZE", 32).max(1) as u32;
@@ -627,4 +669,263 @@ struct DecodedTile {
     w: usize,
     h: usize,
     pixels: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::gzip::gzip2_encode;
+    use super::super::quantize::NULL_VALUE;
+    use super::super::rice_encode::rice_encode;
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    fn make_header(pairs: &[(&str, &str)]) -> HduHeader {
+        let mut index = HashMap::new();
+        let mut cards = Vec::new();
+        for &(k, v) in pairs {
+            index.insert(k.to_string(), v.to_string());
+            cards.push((k.to_string(), v.to_string()));
+        }
+        HduHeader { cards, index }
+    }
+
+    fn gzip1(raw: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn be_i32(values: &[i32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    fn be_i16(values: &[i16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    struct SingleTile<'a> {
+        zcmptype: &'a str,
+        zbitpix: i64,
+        npix: usize,
+        heap: Vec<u8>,
+        quant: Option<(f64, f64, &'a str)>,
+    }
+
+    fn single_tile_hdu(t: &SingleTile) -> (Vec<u8>, HduHeader) {
+        let row_width: usize = if t.quant.is_some() { 24 } else { 8 };
+        let mut mmap = Vec::new();
+        mmap.extend_from_slice(&(t.heap.len() as i32).to_be_bytes());
+        mmap.extend_from_slice(&0i32.to_be_bytes());
+        if let Some((zscale, zzero, _)) = t.quant {
+            mmap.extend_from_slice(&zscale.to_be_bytes());
+            mmap.extend_from_slice(&zzero.to_be_bytes());
+        }
+        assert_eq!(mmap.len(), row_width);
+        mmap.extend_from_slice(&t.heap);
+
+        let npix = t.npix.to_string();
+        let zbitpix = t.zbitpix.to_string();
+        let naxis1 = row_width.to_string();
+        let tfields = if t.quant.is_some() { "3" } else { "1" };
+        let mut pairs: Vec<(&str, &str)> = vec![
+            ("XTENSION", "BINTABLE"),
+            ("BITPIX", "8"),
+            ("NAXIS", "2"),
+            ("NAXIS1", &naxis1),
+            ("NAXIS2", "1"),
+            ("TFIELDS", tfields),
+            ("TTYPE1", "COMPRESSED_DATA"),
+            ("TFORM1", "1PB(0)"),
+            ("ZIMAGE", "T"),
+            ("ZCMPTYPE", t.zcmptype),
+            ("ZBITPIX", &zbitpix),
+            ("ZNAXIS", "2"),
+            ("ZNAXIS1", &npix),
+            ("ZNAXIS2", "1"),
+            ("ZTILE1", &npix),
+            ("ZTILE2", "1"),
+        ];
+        if let Some((_, _, zquantiz)) = t.quant {
+            pairs.extend([
+                ("TTYPE2", "ZSCALE"),
+                ("TFORM2", "1D"),
+                ("TTYPE3", "ZZERO"),
+                ("TFORM3", "1D"),
+                ("ZQUANTIZ", zquantiz),
+                ("ZDITHER0", "1"),
+                ("ZBLANK", "-2147483647"),
+            ]);
+        }
+        (mmap, make_header(&pairs))
+    }
+
+    fn decode_single_tile(t: &SingleTile) -> Result<Vec<f32>> {
+        let (mmap, header) = single_tile_hdu(t);
+        let image = decode_compressed_image(&mmap, &header, 0)?;
+        Ok(image.iter().copied().collect())
+    }
+
+    const QUANT_INTS: [i32; 6] = [0, 1, 2, -3, 40, NULL_VALUE as i32];
+    const QUANT_EXPECTED: [f32; 5] = [100.0, 100.5, 101.0, 98.5, 120.0];
+
+    fn assert_quantized_no_dither(pixels: &[f32]) {
+        assert_eq!(pixels.len(), QUANT_INTS.len());
+        assert_eq!(&pixels[..5], &QUANT_EXPECTED[..]);
+        assert!(pixels[5].is_nan(), "ZBLANK pixel must decode to NaN, got {}", pixels[5]);
+    }
+
+    #[test]
+    fn gzip2_lossless_float64_tile_decodes() {
+        let values = [1.5f64, -2.25, 1e10, 0.0, 3.0];
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_2",
+            zbitpix: -64,
+            npix: values.len(),
+            heap: gzip2_encode(&raw, 8),
+            quant: None,
+        })
+        .unwrap();
+        let expected: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn gzip1_lossless_int64_tile_decodes() {
+        let values = [7i64, -8, 1 << 40, 0];
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_1",
+            zbitpix: 64,
+            npix: values.len(),
+            heap: gzip1(&raw),
+            quant: None,
+        })
+        .unwrap();
+        let expected: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn gzip1_quantized_tile_payload_is_int32() {
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_1",
+            zbitpix: -32,
+            npix: QUANT_INTS.len(),
+            heap: gzip1(&be_i32(&QUANT_INTS)),
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .unwrap();
+        assert_quantized_no_dither(&pixels);
+    }
+
+    #[test]
+    fn nocompress_quantized_tile_payload_is_int32() {
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "NOCOMPRESS",
+            zbitpix: -32,
+            npix: QUANT_INTS.len(),
+            heap: be_i32(&QUANT_INTS),
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .unwrap();
+        assert_quantized_no_dither(&pixels);
+    }
+
+    const QUANT_INTS_I16: [i16; 5] = [0, 1, 2, -3, 40];
+
+    #[test]
+    fn gzip1_quantized_tile_int16_payload() {
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_1",
+            zbitpix: -32,
+            npix: QUANT_INTS_I16.len(),
+            heap: gzip1(&be_i16(&QUANT_INTS_I16)),
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .unwrap();
+        assert_eq!(pixels, QUANT_EXPECTED.to_vec());
+    }
+
+    #[test]
+    fn gzip2_quantized_tile_int16_payload() {
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_2",
+            zbitpix: -32,
+            npix: QUANT_INTS_I16.len(),
+            heap: gzip2_encode(&be_i16(&QUANT_INTS_I16), 2),
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .unwrap();
+        assert_eq!(pixels, QUANT_EXPECTED.to_vec());
+    }
+
+    #[test]
+    fn quantized_tile_with_bad_byte_count_is_an_error() {
+        let err = decode_single_tile(&SingleTile {
+            zcmptype: "NOCOMPRESS",
+            zbitpix: -32,
+            npix: 6,
+            heap: vec![1u8; 7],
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .expect_err("7 bytes for 6 pixels must be reported as an error");
+        assert!(err.to_string().contains("quantized tile holds 7 bytes for 6 pixels"), "{err}");
+    }
+
+    #[test]
+    fn gzip2_quantized_tile_applies_subtractive_dither() {
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_2",
+            zbitpix: -64,
+            npix: QUANT_INTS.len(),
+            heap: gzip2_encode(&be_i32(&QUANT_INTS), 4),
+            quant: Some((0.5, 100.0, "SUBTRACTIVE_DITHER_1")),
+        })
+        .unwrap();
+        let ints: Vec<i64> = QUANT_INTS.iter().map(|&v| v as i64).collect();
+        let expected = scale_ints_dither(&ints, 0.5, 100.0, Some(NULL_VALUE), 1, 0);
+        assert_eq!(pixels.len(), expected.len());
+        for (i, (got, want)) in pixels.iter().zip(expected.iter()).enumerate() {
+            if want.is_nan() {
+                assert!(got.is_nan(), "pixel {i}: expected NaN, got {got}");
+            } else {
+                assert_eq!(got, want, "pixel {i}");
+                assert!((got - QUANT_EXPECTED[i]).abs() <= 0.25 + 1e-6, "pixel {i}: {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn rice_quantized_float64_tile_defaults_to_bytepix_4() {
+        let ints: Vec<i64> = QUANT_INTS.iter().map(|&v| v as i64).collect();
+        let params = RiceParams { blocksize: 32, bytepix: 4, signed: true };
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "RICE_1",
+            zbitpix: -64,
+            npix: QUANT_INTS.len(),
+            heap: rice_encode(&ints, &params),
+            quant: Some((0.5, 100.0, "NO_DITHER")),
+        })
+        .unwrap();
+        assert_quantized_no_dither(&pixels);
+    }
+
+    #[test]
+    fn truncated_rice_tile_is_an_error_not_a_panic() {
+        let ints: Vec<i64> = (0..64).map(|i| (i * 37 % 101) - 50).collect();
+        let params = RiceParams { blocksize: 32, bytepix: 2, signed: true };
+        let encoded = rice_encode(&ints, &params);
+        let err = decode_single_tile(&SingleTile {
+            zcmptype: "RICE_1",
+            zbitpix: 16,
+            npix: ints.len(),
+            heap: encoded[..encoded.len() / 2].to_vec(),
+            quant: None,
+        })
+        .expect_err("half a Rice stream must be reported as an error");
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
 }

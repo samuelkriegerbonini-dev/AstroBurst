@@ -151,9 +151,14 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
       u = new Float32Array(20);
       uniformScratchRef.current = u;
     }
-    u[0] = rgb.r.min; u[1] = rgb.r.max; u[2] = stfR.shadow; u[3] = stfR.midtone;
-    u[4] = rgb.g.min; u[5] = rgb.g.max; u[6] = stfG.shadow; u[7] = stfG.midtone;
-    u[8] = rgb.b.min; u[9] = rgb.b.max; u[10] = stfB.shadow; u[11] = stfB.midtone;
+    const linked = stfR.shadow === stfG.shadow && stfG.shadow === stfB.shadow
+      && stfR.midtone === stfG.midtone && stfG.midtone === stfB.midtone
+      && stfR.highlight === stfG.highlight && stfG.highlight === stfB.highlight;
+    const linkedMin = Math.min(rgb.r.min, rgb.g.min, rgb.b.min);
+    const linkedMax = Math.max(rgb.r.max, rgb.g.max, rgb.b.max);
+    u[0] = linked ? linkedMin : rgb.r.min; u[1] = linked ? linkedMax : rgb.r.max; u[2] = stfR.shadow; u[3] = stfR.midtone;
+    u[4] = linked ? linkedMin : rgb.g.min; u[5] = linked ? linkedMax : rgb.g.max; u[6] = stfG.shadow; u[7] = stfG.midtone;
+    u[8] = linked ? linkedMin : rgb.b.min; u[9] = linked ? linkedMax : rgb.b.max; u[10] = stfB.shadow; u[11] = stfB.midtone;
     u[12] = stfR.highlight; u[13] = stfG.highlight; u[14] = stfB.highlight; u[15] = 0;
     u[16] = w; u[17] = h; u[18] = 0; u[19] = 0;
 

@@ -8,7 +8,7 @@ use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::types::header::HduHeader;
 use ndarray::Array2;
 
-use super::images::register_and_respond;
+use super::images::{load_replacing, register_and_respond};
 use super::region::RegionSpec;
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -29,6 +29,7 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug)]
 struct CutoutRect {
     x0: i64,
     y0: i64,
@@ -41,6 +42,7 @@ fn resolve_cutout_rect(
     img_w: usize,
     img_h: usize,
     wcs: Option<&WcsTransform>,
+    max_bytes: usize,
 ) -> Result<CutoutRect> {
     let (x0, y0, width, height) = match region {
         RegionSpec::Pixel { x, y, width, height, .. } => (*x, *y, *width, *height),
@@ -83,20 +85,35 @@ fn resolve_cutout_rect(
         });
     }
 
+    let bytes = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()));
+    let representable = i64::try_from(width).ok().and_then(|w| x0.checked_add(w)).is_some()
+        && i64::try_from(height).ok().and_then(|h| y0.checked_add(h)).is_some();
+    if !matches!(bytes, Some(b) if b <= max_bytes) || !representable {
+        return Err(AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: format!(
+                "cutout {width}x{height} px at ({x0}, {y0}) exceeds the session memory budget of {max_bytes} bytes"
+            ),
+            hint: Some(format!("image extent is 0..{img_w} x 0..{img_h} px")),
+        });
+    }
+
     Ok(CutoutRect { x0, y0, width, height })
 }
 
 fn fraction_on_image(rect: &CutoutRect, img_w: usize, img_h: usize) -> f64 {
-    let x1 = rect.x0 + rect.width as i64;
-    let y1 = rect.y0 + rect.height as i64;
-    let on_w = (x1.min(img_w as i64) - rect.x0.max(0)).max(0) as usize;
-    let on_h = (y1.min(img_h as i64) - rect.y0.max(0)).max(0) as usize;
-    (on_w * on_h) as f64 / (rect.width * rect.height) as f64
+    let x1 = rect.x0 as f64 + rect.width as f64;
+    let y1 = rect.y0 as f64 + rect.height as f64;
+    let on_w = (x1.min(img_w as f64) - (rect.x0.max(0) as f64)).max(0.0);
+    let on_h = (y1.min(img_h as f64) - (rect.y0.max(0) as f64)).max(0.0);
+    (on_w * on_h) / (rect.width as f64 * rect.height as f64)
 }
 
 pub async fn cutout(
     SessionExtractor(session): SessionExtractor,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(params): Json<CutoutParams>,
 ) -> Result<Json<Value>> {
     let target = target_ref(&session, params.image_ref).await?;
@@ -110,7 +127,13 @@ pub async fn cutout(
     let wcs = entry
         .header()
         .and_then(|h| WcsTransform::from_header(h).ok());
-    let rect = resolve_cutout_rect(&params.region, img_w, img_h, wcs.as_ref())?;
+    let rect = resolve_cutout_rect(
+        &params.region,
+        img_w,
+        img_h,
+        wcs.as_ref(),
+        state.config.cache_max_bytes,
+    )?;
     let fraction = fraction_on_image(&rect, img_w, img_h);
 
     let header = if params.preserve_wcs {
@@ -129,7 +152,7 @@ pub async fn cutout(
     let sess = session.clone();
     let ref_for_load = image_ref.clone();
     let cutout_entry = tokio::task::spawn_blocking(move || {
-        sess.cache.get_or_load_full(&ref_for_load, || {
+        load_replacing(&sess.cache, &ref_for_load, || {
             let mut out = Array2::<f32>::from_elem((height, width), f32::NAN);
             for oy in 0..height {
                 let sy = y0 + oy as i64;
@@ -190,4 +213,58 @@ fn shifted_header(parent: Option<&HduHeader>, rect: &CutoutRect) -> HduHeader {
     hdr.set("NAXIS1", rect.width.to_string());
     hdr.set("NAXIS2", rect.height.to_string());
     hdr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUDGET: usize = 2 * 1024 * 1024 * 1024;
+
+    fn code_of(e: &AppError) -> Option<&'static str> {
+        match e {
+            AppError::BadRequestWithHint { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    fn pixel(x: i64, y: i64, width: usize, height: usize) -> RegionSpec {
+        RegionSpec::Pixel { x, y, width, height, clip: None }
+    }
+
+    #[test]
+    fn cutout_larger_than_the_memory_budget_is_rejected() {
+        let err = resolve_cutout_rect(&pixel(0, 0, 100_000, 100_000), 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let err = resolve_cutout_rect(&pixel(0, 0, 1 << 40, 1 << 40), 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let err = resolve_cutout_rect(&pixel(0, 0, usize::MAX, 1), 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let err = resolve_cutout_rect(&pixel(i64::MAX, 0, 4, 4), 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let err = resolve_cutout_rect(&pixel(0, 0, 4, 4), 8, 8, None, 63).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+    }
+
+    #[test]
+    fn cutout_within_budget_keeps_nan_padding_semantics() {
+        let r = resolve_cutout_rect(&pixel(6, 6, 4, 4), 8, 8, None, BUDGET).unwrap();
+        assert_eq!((r.x0, r.y0, r.width, r.height), (6, 6, 4, 4));
+        assert!((fraction_on_image(&r, 8, 8) - 0.25).abs() < 1e-12);
+
+        let r = resolve_cutout_rect(&pixel(-2, -2, 4, 4), 8, 8, None, 64).unwrap();
+        assert!((fraction_on_image(&r, 8, 8) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fraction_on_image_does_not_overflow_for_huge_rects() {
+        let rect = CutoutRect { x0: 0, y0: 0, width: 1 << 40, height: 1 << 40 };
+        let f = fraction_on_image(&rect, 8, 8);
+        assert!(f.is_finite());
+        assert!(f > 0.0 && f < 1e-20);
+    }
 }

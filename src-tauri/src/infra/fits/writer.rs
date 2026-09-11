@@ -245,11 +245,21 @@ fn is_fits_numeric(value: &str) -> bool {
     value == "T" || value == "F" || value.parse::<f64>().is_ok()
 }
 
+fn is_fits_keyword(key: &str) -> bool {
+    key.len() <= 8
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 fn push_header_card(out: &mut Vec<u8>, key: &str, value: &str) {
+    if !is_fits_keyword(key) {
+        return;
+    }
     let mut card = [b' '; 80];
     let kb = key.as_bytes();
-    let klen = kb.len().min(8);
-    card[..klen].copy_from_slice(&kb[..klen]);
+    let klen = kb.len();
+    card[..klen].copy_from_slice(kb);
 
     if matches!(key, "COMMENT" | "HISTORY" | "") {
         let tb = truncate_str_bytes(value, 72);
@@ -1008,6 +1018,16 @@ mod tests {
             "\u{00b5} Cephei \u{00c5}\u{00c5}\u{00c5}\u{00c5} a long value beyond eighty bytes \u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5} extra tail",
         );
         assert_eq!(buf.len(), 80);
+    }
+
+    #[test]
+    fn header_card_skips_non_fits_keywords() {
+        let mut buf = Vec::new();
+        push_header_card(&mut buf, "META_INSTRUMENT_NAME", "WFI");
+        push_header_card(&mut buf, "meta.exposure.type", "WFI_IMAGE");
+        push_header_card(&mut buf, "ROMAN_ME", "x");
+        assert_eq!(buf.len(), 80);
+        assert_eq!(&buf[0..8], b"ROMAN_ME");
     }
 
     #[test]

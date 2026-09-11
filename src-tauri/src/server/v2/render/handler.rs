@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use ndarray::{s, Array2};
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -250,6 +251,52 @@ fn colormap_name(cmap: Colormap) -> &'static str {
     }
 }
 
+fn normalize_and_stretch(
+    data: &[f32],
+    vmin: f64,
+    vmax: f64,
+    stretch_kind: StretchKind,
+    asinh_a: f64,
+    power: f64,
+    invert: bool,
+) -> (Vec<f32>, u64, u64, u64) {
+    let range = vmax - vmin;
+    let norm: Vec<f32> = data
+        .par_iter()
+        .map(|&v| {
+            if !v.is_finite() {
+                return f32::NAN;
+            }
+            let vd = v as f64;
+            let n = if range > 0.0 {
+                (((vd - vmin) / range) as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let s = apply_stretch(n, stretch_kind, asinh_a, power);
+            if invert {
+                1.0 - s
+            } else {
+                s
+            }
+        })
+        .collect();
+    let (valid, below, above) = data
+        .par_iter()
+        .fold(
+            || (0u64, 0u64, 0u64),
+            |(va, be, ab), &v| {
+                if !v.is_finite() {
+                    return (va, be, ab);
+                }
+                let vd = v as f64;
+                (va + 1, be + (vd <= vmin) as u64, ab + (vd >= vmax) as u64)
+            },
+        )
+        .reduce(|| (0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    (norm, valid, below, above)
+}
+
 pub async fn render(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<RenderParams>,
@@ -320,39 +367,12 @@ pub async fn render(
         let (disp_rows, disp_cols) = display.dim();
 
         let (vmin, vmax) = resolve_scale(&display, &alg_c, &scale)?;
-        let range = vmax - vmin;
 
         let data = display
             .as_slice()
             .expect("display array is standard-layout after area_downsample/to_owned");
-        let mut norm = Vec::with_capacity(data.len());
-        let mut valid: u64 = 0;
-        let mut below: u64 = 0;
-        let mut above: u64 = 0;
-        for &v in data {
-            if v.is_finite() {
-                valid += 1;
-                let vd = v as f64;
-                if vd <= vmin {
-                    below += 1;
-                }
-                if vd >= vmax {
-                    above += 1;
-                }
-                let n = if range > 0.0 {
-                    (((vd - vmin) / range) as f32).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let mut s = apply_stretch(n, stretch_kind, asinh_a, power);
-                if invert {
-                    s = 1.0 - s;
-                }
-                norm.push(s);
-            } else {
-                norm.push(f32::NAN);
-            }
-        }
+        let (norm, valid, below, above) =
+            normalize_and_stretch(data, vmin, vmax, stretch_kind, asinh_a, power, invert);
 
         let mut rgb = apply_colormap(&norm, cmap);
         draw_overlays(&mut rgb, disp_cols, disp_rows, &resolved_c, factor, &overlays);
@@ -393,4 +413,112 @@ pub async fn render(
         png,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sequential_reference(
+        data: &[f32],
+        vmin: f64,
+        vmax: f64,
+        kind: StretchKind,
+        asinh_a: f64,
+        power: f64,
+        invert: bool,
+    ) -> (Vec<f32>, u64, u64, u64) {
+        let range = vmax - vmin;
+        let mut norm = Vec::with_capacity(data.len());
+        let (mut valid, mut below, mut above) = (0u64, 0u64, 0u64);
+        for &v in data {
+            if v.is_finite() {
+                valid += 1;
+                let vd = v as f64;
+                if vd <= vmin {
+                    below += 1;
+                }
+                if vd >= vmax {
+                    above += 1;
+                }
+                let n = if range > 0.0 {
+                    (((vd - vmin) / range) as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let mut s = apply_stretch(n, kind, asinh_a, power);
+                if invert {
+                    s = 1.0 - s;
+                }
+                norm.push(s);
+            } else {
+                norm.push(f32::NAN);
+            }
+        }
+        (norm, valid, below, above)
+    }
+
+    fn sample_data() -> Vec<f32> {
+        let mut data: Vec<f32> = (0..20_000)
+            .map(|i| ((i * 7919) % 1013) as f32 * 0.37 - 50.0)
+            .collect();
+        data[3] = f32::NAN;
+        data[17] = f32::INFINITY;
+        data[18] = f32::NEG_INFINITY;
+        data[100] = 10.0;
+        data[101] = 200.0;
+        data
+    }
+
+    #[test]
+    fn normalize_and_stretch_matches_sequential_reference_bitwise() {
+        let data = sample_data();
+        let kinds = [
+            StretchKind::Linear,
+            StretchKind::Log,
+            StretchKind::Sqrt,
+            StretchKind::Asinh,
+            StretchKind::Power,
+        ];
+        for kind in kinds {
+            for invert in [false, true] {
+                for (vmin, vmax) in [(10.0, 200.0), (0.0, 0.0), (-20.0, 150.5)] {
+                    let got = normalize_and_stretch(&data, vmin, vmax, kind, 0.05, 1.5, invert);
+                    let want = sequential_reference(&data, vmin, vmax, kind, 0.05, 1.5, invert);
+                    assert_eq!(got.0.len(), want.0.len());
+                    for (i, (g, w)) in got.0.iter().zip(want.0.iter()).enumerate() {
+                        assert_eq!(
+                            g.to_bits(),
+                            w.to_bits(),
+                            "pixel {i} differs for {kind:?} invert={invert} vmin={vmin} vmax={vmax}"
+                        );
+                    }
+                    assert_eq!((got.1, got.2, got.3), (want.1, want.2, want.3));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_and_stretch_counts_valid_and_clipped_pixels() {
+        let data = [f32::NAN, 1.0, 5.0, 5.0, 10.0, 12.0, f32::INFINITY, 3.0];
+        let (norm, valid, below, above) =
+            normalize_and_stretch(&data, 5.0, 10.0, StretchKind::Linear, 0.1, 2.0, false);
+        assert_eq!(valid, 6);
+        assert_eq!(below, 4);
+        assert_eq!(above, 2);
+        assert!(norm[0].is_nan());
+        assert!(norm[6].is_nan());
+        assert_eq!(norm[1], 0.0);
+        assert_eq!(norm[4], 1.0);
+        assert_eq!(norm[5], 1.0);
+    }
+
+    #[test]
+    fn normalize_and_stretch_empty_input() {
+        let (norm, valid, below, above) =
+            normalize_and_stretch(&[], 0.0, 1.0, StretchKind::Asinh, 0.1, 2.0, true);
+        assert!(norm.is_empty());
+        assert_eq!((valid, below, above), (0, 0, 0));
+    }
 }

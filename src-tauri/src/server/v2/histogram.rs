@@ -1,11 +1,14 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
 use axum::Json;
 use ndarray::{s, Array2};
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
-use astroburst_lib::core::imaging::stats::{build_histogram, is_valid_pixel, percentile};
+use astroburst_lib::core::imaging::stats::percentile;
+use astroburst_lib::types::constants::HISTOGRAM_BINS;
+use astroburst_lib::types::image::Histogram;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -15,6 +18,64 @@ use super::region::{resolve_region, RegionSpec, ResolvedRegion};
 
 const AUTO_LO_PCT: f64 = 0.001;
 const AUTO_HI_PCT: f64 = 0.999;
+const HIST_CHUNK: usize = 65536;
+
+fn check_bins(bins: usize) -> Result<()> {
+    if bins == 0 || bins > HISTOGRAM_BINS {
+        return Err(AppError::BadRequestWithHint {
+            code: "bad_request",
+            message: format!("bins must be between 1 and {HISTOGRAM_BINS}, got {bins}"),
+            hint: Some("256 is the default".into()),
+        });
+    }
+    Ok(())
+}
+
+fn finite_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogram {
+    let range = dmax - dmin;
+    if range < 1e-10 {
+        return Histogram {
+            bins: vec![0u32; bins],
+            bin_edges: vec![dmin; bins + 1],
+            min: dmin,
+            max: dmax,
+        };
+    }
+
+    let inv_bin_width = bins as f64 / range;
+    let last = bins - 1;
+    let counts = slice
+        .par_chunks(HIST_CHUNK)
+        .fold(
+            || vec![0u32; bins],
+            |mut local, chunk| {
+                for &v in chunk {
+                    if v.is_finite() {
+                        let idx = ((v as f64 - dmin) * inv_bin_width) as usize;
+                        local[idx.min(last)] += 1;
+                    }
+                }
+                local
+            },
+        )
+        .reduce_with(|mut a, b| {
+            for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                *ai += bi;
+            }
+            a
+        })
+        .unwrap_or_else(|| vec![0u32; bins]);
+
+    let step = range / bins as f64;
+    let bin_edges: Vec<f64> = (0..=bins).map(|i| dmin + i as f64 * step).collect();
+
+    Histogram {
+        bins: counts,
+        bin_edges,
+        min: dmin,
+        max: dmax,
+    }
+}
 
 #[derive(Deserialize)]
 pub struct HistogramParams {
@@ -62,13 +123,7 @@ pub async fn histogram(
             hint: Some("omit render_png and plot the returned bins/bin_edges yourself".into()),
         });
     }
-    if params.bins == 0 {
-        return Err(AppError::BadRequestWithHint {
-            code: "bad_request",
-            message: "bins must be > 0".into(),
-            hint: None,
-        });
-    }
+    check_bins(params.bins)?;
 
     let target = target_ref(&session, params.image_ref).await?;
     let entry = session
@@ -100,7 +155,7 @@ pub async fn histogram(
     let (dmin, dmax, range_source) = match params.range {
         Some([lo, hi]) => (lo, hi, "explicit"),
         None => {
-            let mut valid: Vec<f32> = slice.iter().copied().filter(|&v| is_valid_pixel(v)).collect();
+            let mut valid: Vec<f32> = slice.iter().copied().filter(|v| v.is_finite()).collect();
             if valid.is_empty() {
                 (0.0, 0.0, "auto")
             } else {
@@ -111,7 +166,7 @@ pub async fn histogram(
         }
     };
 
-    let hist = build_histogram(slice, params.bins, dmin, dmax);
+    let hist = finite_histogram(slice, params.bins, dmin, dmax);
 
     let mode = hist
         .bins
@@ -142,4 +197,55 @@ pub async fn histogram(
         "range_source": range_source,
         "mode": mode,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use astroburst_lib::core::imaging::stats::build_histogram;
+
+    fn code_of(e: &AppError) -> Option<&'static str> {
+        match e {
+            AppError::BadRequestWithHint { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn bins_outside_1_to_max_are_rejected_before_allocation() {
+        for bins in [0usize, HISTOGRAM_BINS + 1, 10_000_000_000, 1 << 62, usize::MAX] {
+            let err = check_bins(bins).unwrap_err();
+            assert_eq!(code_of(&err), Some("bad_request"), "bins {bins}");
+        }
+        assert!(check_bins(1).is_ok());
+        assert!(check_bins(256).is_ok());
+        assert!(check_bins(HISTOGRAM_BINS).is_ok());
+    }
+
+    #[test]
+    fn finite_histogram_counts_zero_and_negative_pixels() {
+        let data = [-5.0f32, -1.0, 0.0, 2.0, 6.0, f32::NAN, f32::INFINITY];
+        let hist = finite_histogram(&data, 4, -10.0, 10.0);
+        assert_eq!(hist.bins, vec![0, 2, 2, 1]);
+        assert_eq!(hist.bins.iter().sum::<u32>(), 5);
+        assert_eq!(hist.bin_edges, vec![-10.0, -5.0, 0.0, 5.0, 10.0]);
+
+        let legacy = build_histogram(&data, 4, -10.0, 10.0);
+        assert_eq!(legacy.bins.iter().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn finite_histogram_matches_core_binning_for_positive_data() {
+        let data: Vec<f32> = (1..=16).map(|i| i as f32).collect();
+        let ours = finite_histogram(&data, 8, 1.0, 16.0);
+        let core = build_histogram(&data, 8, 1.0, 16.0);
+        assert_eq!(ours.bins, core.bins);
+        assert_eq!(ours.bin_edges, core.bin_edges);
+        assert_eq!(ours.min, core.min);
+        assert_eq!(ours.max, core.max);
+
+        let flat = finite_histogram(&data, 3, 2.0, 2.0);
+        assert_eq!(flat.bins, vec![0, 0, 0]);
+        assert_eq!(flat.bin_edges.len(), 4);
+    }
 }

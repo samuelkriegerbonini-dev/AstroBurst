@@ -110,6 +110,10 @@ impl LruInner {
         false
     }
 
+    fn unpinned_len(&self) -> usize {
+        self.map.keys().filter(|k| !Self::is_pinned(k)).count()
+    }
+
     fn put(&mut self, key: String, value: Arc<CachedImage>) {
         let new_bytes = Self::entry_bytes(&value);
 
@@ -118,7 +122,7 @@ impl LruInner {
         }
 
         while (self.current_bytes + new_bytes > self.max_bytes
-            || self.map.len() >= self.max_entries)
+            || self.unpinned_len() >= self.max_entries)
             && !self.map.is_empty()
         {
             if !self.evict_lru() {
@@ -146,6 +150,18 @@ impl LruInner {
     fn remove(&mut self, key: &str) {
         if let Some(removed) = self.map.remove(key) {
             self.current_bytes -= removed.byte_size;
+        }
+    }
+
+    fn remove_prefix(&mut self, prefix: &str) {
+        let keys: Vec<String> = self
+            .map
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in keys {
+            self.remove(&k);
         }
     }
 
@@ -178,6 +194,10 @@ impl ImageCache {
     pub fn get(&self, path: &str) -> Option<ImageEntry> {
         let cache = self.inner.read().unwrap();
         cache.get_readonly(path).map(|inner| ImageEntry { inner })
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.inner.read().unwrap().map.contains_key(key)
     }
 
     pub fn get_or_load<F>(&self, path: &str, loader: F) -> Result<ImageEntry>
@@ -287,6 +307,11 @@ impl ImageCache {
         self.invalidate(key);
     }
 
+    pub fn remove_prefix(&self, prefix: &str) {
+        let mut cache = self.inner.write().unwrap();
+        cache.remove_prefix(prefix);
+    }
+
     pub fn clear(&self) {
         let mut cache = self.inner.write().unwrap();
         cache.clear();
@@ -394,6 +419,32 @@ mod tests {
     }
 
     #[test]
+    fn test_contains_is_non_touching() {
+        let cache = ImageCache::new(2, usize::MAX);
+
+        cache
+            .get_or_load("a", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        cache
+            .get_or_load("b", || Ok(make_test_entry(20, 20)))
+            .unwrap();
+        assert!(cache.contains("a"));
+        assert!(cache.contains("b"));
+        assert!(!cache.contains("z"));
+
+        for _ in 0..5 {
+            assert!(cache.contains("a"));
+        }
+
+        cache
+            .get_or_load("c", || Ok(make_test_entry(30, 30)))
+            .unwrap();
+        assert!(!cache.contains("a"));
+        assert!(cache.contains("b"));
+        assert!(cache.contains("c"));
+    }
+
+    #[test]
     fn test_arc_zero_copy() {
         let cache = ImageCache::new(4, usize::MAX);
         cache
@@ -444,6 +495,55 @@ mod tests {
         assert!(cache.get("__composite_r").is_some());
         assert!(cache.get("__composite_g").is_some());
         assert!(cache.get("__composite_b").is_some());
+    }
+
+    #[test]
+    fn test_pinned_entries_do_not_consume_regular_slots() {
+        let cache = ImageCache::new(2, usize::MAX);
+        let (arr, stats) = make_test_entry(10, 10);
+        cache.insert_synthetic("__wizard_ch_ha_aligned", Arc::new(arr.clone()), stats.clone());
+        cache.insert_synthetic("__wizard_ch_oiii_aligned", Arc::new(arr.clone()), stats.clone());
+        cache.insert_synthetic("__wizard_ch_sii_aligned", Arc::new(arr), stats);
+
+        cache
+            .get_or_load("a.fits", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        cache
+            .get_or_load("b.fits", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        assert!(cache.get("a.fits").is_some());
+        assert!(cache.get("b.fits").is_some());
+
+        cache
+            .get_or_load("c.fits", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        assert!(cache.get("a.fits").is_none());
+        assert!(cache.get("b.fits").is_some());
+        assert!(cache.get("c.fits").is_some());
+        assert_eq!(cache.len(), 5);
+    }
+
+    #[test]
+    fn test_remove_prefix_releases_pinned_bytes() {
+        let cache = ImageCache::new(8, usize::MAX);
+        let (arr, stats) = make_test_entry(10, 10);
+        cache.insert_synthetic("__wizard_ch_ha_aligned", Arc::new(arr.clone()), stats.clone());
+        cache.insert_synthetic("__wizard_ch_ha_cropped", Arc::new(arr.clone()), stats.clone());
+        cache.insert_synthetic("__composite_r", Arc::new(arr), stats);
+        cache
+            .get_or_load("a.fits", || Ok(make_test_entry(10, 10)))
+            .unwrap();
+        assert_eq!(cache.len(), 4);
+        assert_eq!(cache.memory_estimate_bytes(), 4 * 10 * 10 * 4);
+
+        cache.remove_prefix("__wizard_ch_");
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.memory_estimate_bytes(), 2 * 10 * 10 * 4);
+        assert!(cache.get("__wizard_ch_ha_aligned").is_none());
+        assert!(cache.get("__wizard_ch_ha_cropped").is_none());
+        assert!(cache.get("__composite_r").is_some());
+        assert!(cache.get("a.fits").is_some());
     }
 
     #[test]

@@ -2,17 +2,20 @@
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
+use ndarray::Array2;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::calibration::{drizzle_from_paths, stack_from_paths};
+use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::types::compose::AlignMethod;
 use astroburst_lib::types::stacking::{DrizzleConfig, DrizzleKernel, StackConfig};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::job::{new_job, SseEvent};
+use crate::job::{new_job, Job, SseEvent};
 use crate::state::AppState;
 
 fn parse_kernel(s: Option<&str>) -> DrizzleKernel {
@@ -20,6 +23,34 @@ fn parse_kernel(s: Option<&str>) -> DrizzleKernel {
         Some("gaussian") => DrizzleKernel::Gaussian,
         Some("lanczos3") | Some("lanczos") => DrizzleKernel::Lanczos3,
         _ => DrizzleKernel::Square,
+    }
+}
+
+fn publish_result(
+    job: &Job,
+    tx: &mpsc::Sender<SseEvent>,
+    cache: &ImageCache,
+    slot: &str,
+    outcome: anyhow::Result<Array2<f32>>,
+) {
+    if job.cancel.is_cancelled() {
+        return;
+    }
+    match outcome {
+        Ok(image) => {
+            job.set_pct(90);
+            tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
+
+            let stats = compute_image_stats(&image);
+            cache.insert_synthetic(slot, Arc::new(image), stats);
+
+            job.set_done();
+            tx.blocking_send(SseEvent::Complete).ok();
+        }
+        Err(e) => {
+            job.set_error();
+            tx.blocking_send(SseEvent::Error { message: format!("{:#}", e) }).ok();
+        }
     }
 }
 
@@ -89,22 +120,8 @@ pub async fn stack(
 
         tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
 
-        match stack_from_paths(&paths, &config, None) {
-            Ok(result) => {
-                job.set_pct(90);
-                tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
-
-                let stats = compute_image_stats(&result.image);
-                cache.insert_synthetic(&slot, Arc::new(result.image), stats);
-
-                job.set_done();
-                tx.blocking_send(SseEvent::Complete).ok();
-            }
-            Err(e) => {
-                job.set_error();
-                tx.blocking_send(SseEvent::Error { message: format!("{:#}", e) }).ok();
-            }
-        }
+        let outcome = stack_from_paths(&paths, &config, None).map(|r| r.image);
+        publish_result(&job, &tx, &cache, &slot, outcome);
     });
 
     Ok((
@@ -153,26 +170,83 @@ pub async fn drizzle(
 
         tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
 
-        match drizzle_from_paths(&paths, &config, None) {
-            Ok(result) => {
-                job.set_pct(90);
-                tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
-
-                let stats = compute_image_stats(&result.image);
-                cache.insert_synthetic(&slot, Arc::new(result.image), stats);
-
-                job.set_done();
-                tx.blocking_send(SseEvent::Complete).ok();
-            }
-            Err(e) => {
-                job.set_error();
-                tx.blocking_send(SseEvent::Error { message: format!("{:#}", e) }).ok();
-            }
-        }
+        let outcome = drizzle_from_paths(&paths, &config, None).map(|r| r.image);
+        publish_result(&job, &tx, &cache, &slot, outcome);
     });
 
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "job_id": job_id, "status": "running", "slot": result_slot })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::job::JobStatus;
+
+    fn setup() -> (Arc<Job>, mpsc::Sender<SseEvent>, mpsc::Receiver<SseEvent>, ImageCache) {
+        let (job, tx) = new_job("stack");
+        let rx = job.rx.lock().unwrap().take().unwrap();
+        (job, tx, rx, ImageCache::new(4, 1 << 20))
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<SseEvent>) -> Vec<SseEvent> {
+        let mut out = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            out.push(evt);
+        }
+        out
+    }
+
+    #[test]
+    fn cancelled_job_ignores_ok_result() {
+        let (job, tx, mut rx, cache) = setup();
+        job.cancel.cancel();
+        job.set_cancelled();
+
+        publish_result(&job, &tx, &cache, "stacked", Ok(Array2::<f32>::zeros((4, 4))));
+
+        assert_eq!(job.current_status(), JobStatus::Cancelled);
+        assert_ne!(job.pct.load(Ordering::Relaxed), 100);
+        assert!(cache.get("stacked").is_none());
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn cancelled_job_ignores_error_result() {
+        let (job, tx, mut rx, cache) = setup();
+        job.cancel.cancel();
+        job.set_cancelled();
+
+        publish_result(&job, &tx, &cache, "stacked", Err(anyhow::anyhow!("boom")));
+
+        assert_eq!(job.current_status(), JobStatus::Cancelled);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn running_job_stores_result_and_completes() {
+        let (job, tx, mut rx, cache) = setup();
+
+        publish_result(&job, &tx, &cache, "stacked", Ok(Array2::<f32>::ones((4, 4))));
+
+        assert_eq!(job.current_status(), JobStatus::Done);
+        assert_eq!(job.pct.load(Ordering::Relaxed), 100);
+        assert!(cache.get("stacked").is_some());
+        assert!(matches!(drain(&mut rx).last(), Some(SseEvent::Complete)));
+    }
+
+    #[test]
+    fn running_job_reports_error() {
+        let (job, tx, mut rx, cache) = setup();
+
+        publish_result(&job, &tx, &cache, "stacked", Err(anyhow::anyhow!("boom")));
+
+        assert_eq!(job.current_status(), JobStatus::Error);
+        assert!(cache.get("stacked").is_none());
+        assert!(matches!(drain(&mut rx).last(), Some(SseEvent::Error { .. })));
+    }
 }

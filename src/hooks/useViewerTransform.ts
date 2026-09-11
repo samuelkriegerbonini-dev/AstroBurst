@@ -54,17 +54,18 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   const zoomTo = useCallback((newScale: number, centerX?: number, centerY?: number) => {
     userInteractedRef.current = true;
     setTransformState((prev) => {
+      const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newScale));
       const container = containerRef.current;
-      if (!container) return { ...prev, scale: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newScale)) };
+      if (!container) return { ...prev, scale: clamped };
       const rect = container.getBoundingClientRect();
       const cx = centerX ?? rect.width / 2;
       const cy = centerY ?? rect.height / 2;
-      const ratio = newScale / prev.scale;
-      return clamp({
-        scale: newScale,
+      const ratio = clamped / prev.scale;
+      return {
+        scale: clamped,
         x: cx - (cx - prev.x) * ratio,
         y: cy - (cy - prev.y) * ratio,
-      });
+      };
     });
   }, [containerRef]);
 

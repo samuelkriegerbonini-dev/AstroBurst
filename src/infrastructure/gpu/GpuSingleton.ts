@@ -124,7 +124,6 @@ fn is_nan_bits(v: f32) -> bool {
     return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
 }
 
-// c = (data_min, data_max, shadow, midtone); applies the same normalize + STF as the mono shader.
 fn stf_channel(c: vec4<f32>, high: f32, val: f32) -> f32 {
     if (is_nan_bits(val)) { return 0.0; }
     let norm = (val - c.x) / max(c.y - c.x, 1e-8);
@@ -205,6 +204,7 @@ export function getGpuSingleton(): Promise<GpuResources | null> {
       if (!adapter) {
         _gpuAvailable = false;
         _gpuReason = "No compatible GPU adapter found";
+        if (generation === _gpuGeneration) _gpuInitPromise = null;
         return null;
       }
       const device = await adapter.requestDevice();
@@ -252,6 +252,7 @@ export function getGpuSingleton(): Promise<GpuResources | null> {
     } catch {
       _gpuAvailable = false;
       _gpuReason = "GPU initialization failed";
+      if (generation === _gpuGeneration) _gpuInitPromise = null;
       return null;
     }
   })();

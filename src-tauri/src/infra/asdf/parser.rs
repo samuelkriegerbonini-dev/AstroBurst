@@ -1,155 +1,216 @@
+use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+use memmap2::Mmap;
 use serde_yaml::Value;
 
-use super::blocks::{BlockData, BlockHeader};
+use super::blocks::{BlockHeader, BlockRef};
 
-const ASDF_MAGIC: &str = "#ASDF";
-const YAML_DOC_END: &str = "...";
+const ASDF_MAGIC: &[u8] = b"#ASDF";
+const BLOCK_INDEX_MAGIC: &[u8] = b"#ASDF BLOCK INDEX";
+const STREAMED_FLAG: u32 = 0x1;
+
+enum Backing {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl Backing {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Backing::Mapped(m) => &m[..],
+            Backing::Owned(v) => v.as_slice(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Backing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Backing({} bytes)", self.as_slice().len())
+    }
+}
 
 #[derive(Debug)]
 pub struct AsdfFile {
     pub version: String,
     pub standard_version: Option<String>,
     pub tree: Value,
-    pub blocks: Vec<BlockData>,
+    pub blocks: Vec<BlockRef>,
+    backing: Backing,
 }
 
 impl AsdfFile {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, AsdfError> {
         let file = File::open(path.as_ref())?;
-        let mut reader = BufReader::new(file);
+        if file.metadata()?.len() == 0 {
+            return Err(AsdfError::InvalidMagic);
+        }
+        let mmap = unsafe { Mmap::map(&file)? };
+        Self::parse(Backing::Mapped(mmap))
+    }
 
-        let (version, standard_version) = Self::read_preamble(&mut reader)?;
-        let tree = Self::read_yaml_tree(&mut reader)?;
-        let blocks = Self::read_blocks(&mut reader)?;
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AsdfError> {
+        Self::parse(Backing::Owned(bytes))
+    }
 
+    fn parse(backing: Backing) -> Result<Self, AsdfError> {
+        let bytes = backing.as_slice();
+        if !bytes.starts_with(ASDF_MAGIC) {
+            return Err(AsdfError::InvalidMagic);
+        }
+        let (yaml_end, blocks_start) = find_tree_end(bytes);
+        let text = std::str::from_utf8(&bytes[..yaml_end])
+            .map_err(|e| AsdfError::YamlParse(e.to_string()))?;
+        let (version, standard_version, tree) = parse_header_and_tree(text)?;
+        let blocks = read_blocks(bytes, blocks_start)?;
         Ok(Self {
             version,
             standard_version,
             tree,
             blocks,
+            backing,
         })
     }
 
-    fn read_preamble<R: BufRead>(reader: &mut R) -> Result<(String, Option<String>), AsdfError> {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-
-        if !line.starts_with(ASDF_MAGIC) {
-            return Err(AsdfError::InvalidMagic);
-        }
-
-        let version = line
-            .trim()
-            .strip_prefix("#ASDF ")
-            .unwrap_or("1.0.0")
-            .to_string();
-
-        let mut standard_version = None;
-        let mut peek_line = String::new();
-        let bytes_read = reader.read_line(&mut peek_line)?;
-
-        if bytes_read > 0 && peek_line.starts_with("#ASDF_STANDARD") {
-            standard_version = peek_line
-                .trim()
-                .strip_prefix("#ASDF_STANDARD ")
-                .map(|s| s.to_string());
-        }
-
-        Ok((version, standard_version))
-    }
-
-    fn read_yaml_tree<R: BufRead>(reader: &mut R) -> Result<Value, AsdfError> {
-        let mut yaml_content = String::new();
-        let mut in_document = false;
-
-        for line_result in reader.by_ref().lines() {
-            let line = line_result?;
-
-            if line.starts_with("---") {
-                in_document = true;
-                continue;
-            }
-
-            if line == YAML_DOC_END {
-                break;
-            }
-
-            if line.starts_with("%YAML") || line.starts_with("%TAG") || line.starts_with('#') {
-                continue;
-            }
-
-            if in_document {
-                yaml_content.push_str(&line);
-                yaml_content.push('\n');
-            }
-        }
-
-        if yaml_content.is_empty() {
-            return Err(AsdfError::NoYamlTree);
-        }
-
-        let tree: Value =
-            serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))?;
-
-        Ok(tree)
-    }
-
-    fn read_blocks<R: BufRead>(reader: &mut R) -> Result<Vec<BlockData>, AsdfError> {
-        let mut blocks = Vec::new();
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-
-        let mut offset = 0;
-        while offset < buf.len() {
-            offset = skip_padding(&buf, offset);
-
-            if offset + 4 > buf.len() {
-                break;
-            }
-
-            if &buf[offset..offset + 4] != BlockHeader::MAGIC {
-                if blocks.is_empty() {
-                    offset += 1;
-                    continue;
-                }
-                break;
-            }
-
-            let (header, header_end) = BlockHeader::parse(&buf[offset..])?;
-            let data_start = offset + header_end;
-            let data_end = data_start
-                .checked_add(header.allocated_size as usize)
-                .ok_or(AsdfError::BlockTruncated)?;
-
-            if data_end > buf.len() {
-                return Err(AsdfError::BlockTruncated);
-            }
-
-            if header.used_size > header.allocated_size {
-                return Err(AsdfError::BlockTruncated);
-            }
-            let raw = &buf[data_start..data_start + header.used_size as usize];
-            let decompressed = header.decompress(raw)?;
-
-            blocks.push(BlockData {
-                index: blocks.len(),
-                data: decompressed,
-                original_size: header.data_size as usize,
-            });
-
-            offset = data_end;
-        }
-
-        Ok(blocks)
+    pub fn block_data(&self, index: usize) -> Result<Cow<'_, [u8]>, AsdfError> {
+        let block = self
+            .blocks
+            .get(index)
+            .ok_or(AsdfError::BlockOutOfRange(index))?;
+        let bytes = self.backing.as_slice();
+        let raw = &bytes[block.data_start..block.data_start + block.used_size];
+        block.header.decompress(raw)
     }
 }
 
+fn find_tree_end(bytes: &[u8]) -> (usize, usize) {
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if bytes[i] == b'\n' && &bytes[i + 1..i + 4] == b"..." {
+            let after = i + 4;
+            if after == bytes.len() {
+                return (i + 1, after);
+            }
+            if bytes[after] == b'\n' {
+                return (i + 1, after + 1);
+            }
+            if bytes[after] == b'\r' && after + 1 < bytes.len() && bytes[after + 1] == b'\n' {
+                return (i + 1, after + 2);
+            }
+            if bytes[after] == b'\r' && after + 1 == bytes.len() {
+                return (i + 1, after + 1);
+            }
+        }
+        i += 1;
+    }
+    let first_block = find_bytes(bytes, BlockHeader::MAGIC, 0).unwrap_or(bytes.len());
+    (first_block, first_block)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (from..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+fn parse_header_and_tree(text: &str) -> Result<(String, Option<String>, Value), AsdfError> {
+    let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
+    let first = lines.next().unwrap_or("");
+    let version = first
+        .trim()
+        .strip_prefix("#ASDF ")
+        .unwrap_or("1.0.0")
+        .to_string();
+
+    let mut standard_version = None;
+    let mut yaml_content = String::new();
+    let mut in_document = false;
+
+    for line in lines {
+        if let Some(v) = line.trim().strip_prefix("#ASDF_STANDARD ") {
+            standard_version = Some(v.to_string());
+            continue;
+        }
+        if line.starts_with("---") {
+            in_document = true;
+            continue;
+        }
+        if line == "..." {
+            break;
+        }
+        if line.starts_with("%YAML") || line.starts_with("%TAG") || line.starts_with('#') {
+            continue;
+        }
+        if in_document {
+            yaml_content.push_str(line);
+            yaml_content.push('\n');
+        }
+    }
+
+    if yaml_content.trim().is_empty() {
+        return Err(AsdfError::NoYamlTree);
+    }
+
+    let tree: Value =
+        serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))?;
+    Ok((version, standard_version, tree))
+}
+
+fn read_blocks(buf: &[u8], start: usize) -> Result<Vec<BlockRef>, AsdfError> {
+    let mut blocks = Vec::new();
+    let mut offset = start;
+    while offset < buf.len() {
+        offset = skip_padding(buf, offset);
+        if offset + 4 > buf.len() {
+            break;
+        }
+        if buf[offset..].starts_with(BLOCK_INDEX_MAGIC) {
+            break;
+        }
+        if &buf[offset..offset + 4] != BlockHeader::MAGIC {
+            if blocks.is_empty() {
+                offset += 1;
+                continue;
+            }
+            break;
+        }
+
+        let (header, header_end) = BlockHeader::parse(&buf[offset..])?;
+        let data_start = offset + header_end;
+
+        if header.flags & STREAMED_FLAG != 0 {
+            let used = buf.len() - data_start;
+            blocks.push(BlockRef {
+                index: blocks.len(),
+                header,
+                data_start,
+                used_size: used,
+            });
+            break;
+        }
+
+        let data_end = data_start
+            .checked_add(header.allocated_size as usize)
+            .ok_or(AsdfError::BlockTruncated)?;
+        if data_end > buf.len() || header.used_size > header.allocated_size {
+            return Err(AsdfError::BlockTruncated);
+        }
+        let used_size = header.used_size as usize;
+        blocks.push(BlockRef {
+            index: blocks.len(),
+            header,
+            data_start,
+            used_size,
+        });
+        offset = data_end;
+    }
+    Ok(blocks)
+}
+
 fn skip_padding(buf: &[u8], mut offset: usize) -> usize {
-    while offset < buf.len() && buf[offset] == 0 {
+    while offset < buf.len() && (buf[offset] == 0 || buf[offset] == b' ' || buf[offset] == b'\n' || buf[offset] == b'\r') {
         offset += 1;
     }
     offset
@@ -168,6 +229,7 @@ pub enum AsdfError {
     InvalidDtype(String),
     MissingField(String),
     BlockOutOfRange(usize),
+    ExternalBlock(String),
     ShapeMismatch { got: usize, expected: usize },
     UnsupportedRank(usize),
 }
@@ -192,6 +254,11 @@ impl std::fmt::Display for AsdfError {
             AsdfError::InvalidDtype(d) => write!(f, "Invalid dtype: {}", d),
             AsdfError::MissingField(field) => write!(f, "Missing field: {}", field),
             AsdfError::BlockOutOfRange(i) => write!(f, "Block index out of range: {}", i),
+            AsdfError::ExternalBlock(uri) => write!(
+                f,
+                "External (exploded) ASDF blocks are not supported: {}",
+                uri
+            ),
             AsdfError::ShapeMismatch { got, expected } => {
                 write!(
                     f,

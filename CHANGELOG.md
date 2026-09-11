@@ -48,6 +48,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flat headers: preview/app header gradients replaced with flat panel surfaces; strip buttons use a neutral active background with accent-colored icon/label
 - ExportStep detects STF identity (`Math.abs(midtone - 0.5) > 1e-4`) before composite PNG export; sends `applyStfStretch: false` when identity, activating backend auto-stretch
 
+## [0.5.8] - 2026-09-11
+
+Code audit of the math, GPU flow, image-processing and performance paths (21 module groups, every finding reproduced by hand before being fixed), plus a validation of the ASDF reader against the ASDF Standard 1.5/1.6.
+
+### Fixed
+
+#### Math / processing core
+- Drizzle Lanczos3 kernel was evaluated in output-pixel units, so at scale 3 (and any integer scale with zero offsets) 8/9 of the output pixels received zero weight and rendered as holes; the kernel argument and support now scale with the output grid
+- Sigma-clip combine and the batch pipeline stack used a 1e-10 sigma floor when the MAD is 0 (more than half the samples tied), rejecting every value that differed from the median; they now fall back to the mean absolute deviation and skip rejection when the scale is truly zero
+- Star removal applied the soft star mask twice (push-pull fill already blends by the mask), leaving `m - m^2` of the star flux in the starless image at every mask edge
+- GHS stretch with D = 0 returned the raw, un-normalized data instead of the normalized identity, producing a white preview and export after the composite was cached
+- Wavelet reconstruction clamped negative pixels to 0 and rewrote NaN as 0
+- Phase-correlation refinement discarded a confident coarse shift whenever the fixed centre crop was featureless (result fell back to identity/noise); the coarse estimate is now kept when the refine pass has no signal
+- Star detection deblended every saturated flat-top star into several detections; equal-valued adjacent maxima now collapse to a single seed
+- SPCC aborted the app (index out of bounds) when the R/G/B channel images differed in size; it now returns an error
+- Cube frame previews rendered every pixel at or below the median as pure black; the asinh normalization now maps the full stretch into (0, 1]
+- Viewer zoom-to-level computed the anchor translation with the unclamped scale, so the image drifted at the zoom limits
+
+#### GPU / preview flow
+- IPC preview extrema were computed over all finite pixels while the auto-STF parameters came from padding-aware statistics, so the GPU/CPU-worker render and the canonical PNG disagreed; both now use the same validity rule
+- NaN/invalid pixels were rewritten to 0.0 before upload and rendered gray instead of black on the GPU and in the worker
+- Linked STF on the GPU normalized each channel by its own range while the Rust linked STF uses the combined range; the uniform buffer now carries the combined range when the three channel STFs are identical
+- Display-referred (toned/stretched) RGB previews were re-normalized per channel by their min/max instead of clamped to [0, 1]
+- A failed WebGPU init (no adapter, device creation error) was cached for the whole session; the retry path now re-probes
+- `render_rgb_preview` fell back to a PNG with default compression for any image up to 4096 px on the interactive restretch path
+- Plate-solve star/annotation overlay was scaled to the container box instead of the letterboxed image
+- Mono tile pyramid applied a second percentile stretch on top of the auto-STF
+- Linear grayscale exports zeroed every pixel at or below 1e-7 while the min/max included negatives
+
+#### Image I/O
+- Quantized GZIP_1/GZIP_2 tiles (integer payload) were decoded as raw f32 bit patterns; the integer width is now inferred from the tile byte count
+- ZBITPIX ±64 was rejected for every codec, including GZIP_2 files written by AstroBurst itself
+- Rice decoder indexed the compressed stream unchecked and panicked on short or corrupt tiles; it now returns an error
+- Constant tiles quantized with scale 1 under SUBTRACTIVE_DITHER_1 gained ±0.5 noise on decode; constant rows are now stored losslessly
+- Header cards with keys longer than 8 characters (ASDF metadata) were truncated into colliding, malformed FITS cards on export; non-FITS keys are skipped
+- RGB export ignored the caller's channel paths whenever a composite was cached; wizard cache keys now count as real channel sources, so per-channel ZIP exports no longer return the composite three times
+- SPCC channel lookup in the colour-balance step always resolved the narrowband bins, never R/G/B
+
+#### ASDF reader (validated against the ASDF Standard)
+- Blocks are now memory-mapped and decompressed lazily: only the block referenced by the selected array is decoded (Roman L2 files carry six or more full-frame arrays), and uncompressed contiguous arrays are borrowed instead of copied three times
+- `#ASDF BLOCK INDEX` trailer, CRLF line endings, space padding after the tree, `header_size` larger than 48 and `allocated_size` padding are handled per spec
+- STREAMED blocks (flag 0x1) and `shape: ['*', …]` are supported
+- Negative strides (flipped views) were silently ignored and the array read as contiguous
+- External (exploded) block references fail with an explicit error instead of silently loading no image; inline `data:` arrays are decoded
+- gWCS chains under `roman.meta.wcs` are resolved; the gWCS `Shift` offset is converted from 0-based gwcs pixels to 1-based FITS CRPIX
+- YAML-tagged metadata subtrees (most Roman/JWST `meta` entries) are flattened into the header instead of being dropped; header card order is deterministic
+- An ASDF without an image array now reports an error so the companion-FITS fallback runs
+- Allocation sizes from untrusted block headers and shapes are bounded
+
+#### Headless server
+- Region, histogram, cutout and pixel endpoints validated their inputs after arithmetic that could wrap or allocate unbounded memory; bins, cutout size and box parity are now checked up front
+- Statistics and histograms silently discarded every pixel ≤ 1e-7, giving wrong results for bias-subtracted or difference images
+- Binning by a non-divisible factor averaged overlapping windows; it now crops to whole blocks
+- Viewport auto-STF derived from crop statistics was applied with global normalization, rendering the crop black or saturated
+- Re-opening an image under an existing `name` returned the stale cached array while overwriting its metadata
+- Per-session LRU eviction is now reflected in `meta`, `list_images` and `active_ref`
+- Job cancellation is observed by workers before results are published and terminal state transitions are atomic, so a late worker cannot overwrite `cancelled` (the compute slot is still held until the running stage finishes)
+- Render path stretch/clip counting runs in parallel
+
+### Changed
+- Batch stacking pipeline loads and stacks one channel at a time and returns 2048 px previews instead of full-resolution base64 masters
+- Drizzle scatters contributions directly into per-band accumulators in parallel instead of materialising every contribution as a tuple; frames that need no cropping are borrowed instead of cloned
+- Cube global statistics sample at most 32 frames with a pixel stride bounded to ~8M samples
+- Composite RGB preview from the calibration pipeline uses a shared robust stretch instead of a per-channel min/max
+- Wizard cache entries are cleared when alignment re-runs, so pinned `__wizard_ch_` entries no longer bypass the byte budget
+- Version 0.5.8
+
 ## [0.5.5] - 2026-06-26
 
 ### Added

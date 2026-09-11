@@ -2,14 +2,21 @@ use serde_yaml::Value;
 
 use super::parser::AsdfError;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArraySource {
+    Block(usize),
+    Inline(Vec<f32>),
+}
+
 #[derive(Debug, Clone)]
 pub struct NdArrayMeta {
-    pub source: usize,
+    pub source: ArraySource,
     pub shape: Vec<usize>,
+    pub streamed_first_dim: bool,
     pub dtype: DType,
     pub byteorder: ByteOrder,
     pub offset: usize,
-    pub strides: Option<Vec<usize>>,
+    pub strides: Option<Vec<isize>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,15 +60,28 @@ fn field_usize_or(node: &Value, key: &str, default: usize) -> usize {
     field_usize(node, key).unwrap_or(default)
 }
 
-fn collect_usize(seq: &[Value]) -> Vec<usize> {
-    seq.iter()
-        .filter_map(|v| v.as_u64().map(|n| n as usize))
-        .collect()
+fn parse_shape(seq: &[Value]) -> Result<(Vec<usize>, bool), AsdfError> {
+    let mut shape = Vec::with_capacity(seq.len());
+    let mut streamed = false;
+    for (i, v) in seq.iter().enumerate() {
+        if let Some(n) = v.as_u64() {
+            shape.push(n as usize);
+        } else if i == 0 && v.as_str() == Some("*") {
+            streamed = true;
+            shape.push(0);
+        } else {
+            return Err(AsdfError::MissingField("shape".into()));
+        }
+    }
+    Ok((shape, streamed))
 }
 
-fn parse_strides(node: &Value, rank: usize) -> Option<Vec<usize>> {
+fn parse_strides(node: &Value, rank: usize) -> Option<Vec<isize>> {
     let seq = node.get("strides")?.as_sequence()?;
-    let parsed = collect_usize(seq);
+    let parsed: Vec<isize> = seq
+        .iter()
+        .filter_map(|v| v.as_i64().map(|n| n as isize))
+        .collect();
     (parsed.len() == seq.len() && parsed.len() == rank).then_some(parsed)
 }
 
@@ -77,6 +97,55 @@ fn split_byteorder_prefix(s: &str) -> (ByteOrder, &str) {
         Some(b'>') => (ByteOrder::Big, &s[1..]),
         Some(b'<') | Some(b'=') | Some(b'|') => (ByteOrder::Little, &s[1..]),
         _ => (ByteOrder::Little, s),
+    }
+}
+
+pub(crate) fn untag(value: &Value) -> &Value {
+    match value {
+        Value::Tagged(tagged) => untag(&tagged.value),
+        other => other,
+    }
+}
+
+fn flatten_inline(node: &Value, out: &mut Vec<f32>, dims: &mut Vec<usize>, depth: usize) -> bool {
+    match untag(node) {
+        Value::Sequence(seq) => {
+            if dims.len() == depth {
+                dims.push(seq.len());
+            } else if dims[depth] != seq.len() {
+                return false;
+            }
+            seq.iter()
+                .all(|child| flatten_inline(child, out, dims, depth + 1))
+        }
+        Value::Number(n) => {
+            out.push(n.as_f64().unwrap_or(f64::NAN) as f32);
+            true
+        }
+        Value::Bool(b) => {
+            out.push(u8::from(*b) as f32);
+            true
+        }
+        Value::Null => {
+            out.push(f32::NAN);
+            true
+        }
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "nan" | ".nan" => {
+                out.push(f32::NAN);
+                true
+            }
+            "inf" | ".inf" | "+inf" => {
+                out.push(f32::INFINITY);
+                true
+            }
+            "-inf" | "-.inf" => {
+                out.push(f32::NEG_INFINITY);
+                true
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -124,14 +193,29 @@ impl ByteOrder {
 
 impl NdArrayMeta {
     pub fn from_yaml(node: &Value) -> Result<Self, AsdfError> {
-        let source =
-            field_usize(node, "source").ok_or_else(|| AsdfError::MissingField("source".into()))?;
+        if let Some(inline) = node.get("data") {
+            return Self::from_inline(node, inline);
+        }
 
-        let shape = node
+        let source_node = node
+            .get("source")
+            .ok_or_else(|| AsdfError::MissingField("source".into()))?;
+        let source = match source_node.as_u64() {
+            Some(n) => ArraySource::Block(n as usize),
+            None => {
+                let uri = source_node
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{:?}", source_node));
+                return Err(AsdfError::ExternalBlock(uri));
+            }
+        };
+
+        let (shape, streamed_first_dim) = node
             .get("shape")
             .and_then(|v| v.as_sequence())
-            .map(|seq| collect_usize(seq))
-            .ok_or_else(|| AsdfError::MissingField("shape".into()))?;
+            .map(|seq| parse_shape(seq))
+            .ok_or_else(|| AsdfError::MissingField("shape".into()))??;
 
         let dtype_str = node
             .get("datatype")
@@ -146,11 +230,53 @@ impl NdArrayMeta {
         Ok(Self {
             source,
             shape,
+            streamed_first_dim,
             dtype,
             byteorder,
             offset,
             strides,
         })
+    }
+
+    fn from_inline(node: &Value, inline: &Value) -> Result<Self, AsdfError> {
+        let mut values = Vec::new();
+        let mut dims = Vec::new();
+        if !flatten_inline(inline, &mut values, &mut dims, 0) {
+            return Err(AsdfError::InvalidDtype("inline data".into()));
+        }
+        let shape = node
+            .get("shape")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| parse_shape(seq).map(|(s, _)| s))
+            .transpose()?
+            .unwrap_or(dims);
+        let dtype = node
+            .get("datatype")
+            .and_then(|v| v.as_str())
+            .map(DType::parse)
+            .transpose()?
+            .map(|(d, _)| d)
+            .unwrap_or(DType::Float32);
+        Ok(Self {
+            source: ArraySource::Inline(values),
+            shape,
+            streamed_first_dim: false,
+            dtype,
+            byteorder: ByteOrder::Little,
+            offset: 0,
+            strides: None,
+        })
+    }
+
+    pub fn resolve_streamed_shape(&mut self, block_len: usize) {
+        if !self.streamed_first_dim || self.shape.is_empty() {
+            return;
+        }
+        let rest: usize = self.shape[1..].iter().product::<usize>().max(1);
+        let elem = self.byte_size_per_element().max(1);
+        let usable = block_len.saturating_sub(self.offset);
+        self.shape[0] = usable / (rest * elem);
+        self.streamed_first_dim = false;
     }
 
     pub fn byte_size_per_element(&self) -> usize {
@@ -165,17 +291,17 @@ impl NdArrayMeta {
         self.shape.iter().product()
     }
 
-    pub fn contiguous_strides(shape: &[usize], element_size: usize) -> Vec<usize> {
-        let mut strides = vec![element_size; shape.len()];
-        let mut acc = element_size;
+    pub fn contiguous_strides(shape: &[usize], element_size: usize) -> Vec<isize> {
+        let mut strides = vec![element_size as isize; shape.len()];
+        let mut acc = element_size as isize;
         for axis in (0..shape.len()).rev() {
             strides[axis] = acc;
-            acc = acc.saturating_mul(shape[axis]);
+            acc = acc.saturating_mul(shape[axis] as isize);
         }
         strides
     }
 
-    pub fn effective_strides(&self) -> Vec<usize> {
+    pub fn effective_strides(&self) -> Vec<isize> {
         match &self.strides {
             Some(s) if s.len() == self.shape.len() => s.clone(),
             _ => Self::contiguous_strides(&self.shape, self.byte_size_per_element()),
@@ -185,7 +311,7 @@ impl NdArrayMeta {
     pub fn is_contiguous(&self) -> bool {
         self.offset == 0
             && self.effective_strides()
-            == Self::contiguous_strides(&self.shape, self.byte_size_per_element())
+                == Self::contiguous_strides(&self.shape, self.byte_size_per_element())
     }
 }
 
@@ -212,10 +338,12 @@ const GWCS_HANDLERS: &[(&[&str], GwcsHandler)] = &[
     ),
 ];
 
+const GWCS_PIXEL_ORIGIN_TO_FITS: f64 = 1.0;
+
 impl GwcsParams {
     fn new() -> Self {
         Self {
-            crpix: [0.0, 0.0],
+            crpix: [1.0, 1.0],
             crval: [0.0, 0.0],
             cdelt: [1.0, 1.0],
             pc: [[1.0, 0.0], [0.0, 1.0]],
@@ -249,7 +377,7 @@ impl GwcsParams {
                 &mut self.crpix,
                 &mut self.shift_axis,
                 &mut self.recognized,
-                -offset,
+                -offset + GWCS_PIXEL_ORIGIN_TO_FITS,
             );
         }
     }
@@ -295,11 +423,23 @@ impl GwcsParams {
 }
 
 impl WcsInfo {
-    pub fn from_yaml(tree: &Value) -> Option<Self> {
-        let wcs = tree
-            .get("wcs")
-            .or_else(|| tree.get("meta").and_then(|m| m.get("wcs")))?;
+    fn wcs_nodes(tree: &Value) -> impl Iterator<Item = &Value> {
+        [
+            tree.get("wcs"),
+            tree.get("meta").and_then(|m| m.get("wcs")),
+            tree.get("roman")
+                .and_then(|r| r.get("meta"))
+                .and_then(|m| m.get("wcs")),
+        ]
+        .into_iter()
+        .flatten()
+    }
 
+    pub fn from_yaml(tree: &Value) -> Option<Self> {
+        Self::wcs_nodes(tree).find_map(Self::from_fits_like)
+    }
+
+    fn from_fits_like(wcs: &Value) -> Option<Self> {
         let crpix = Self::extract_pair(wcs, "crpix")?;
         let crval = Self::extract_pair(wcs, "crval")?;
         let cdelt = Self::extract_pair(wcs, "cdelt").unwrap_or([1.0, 1.0]);
@@ -320,11 +460,11 @@ impl WcsInfo {
     }
 
     pub fn from_gwcs(tree: &Value) -> Option<Self> {
-        let gwcs = tree.get("gwcs").or_else(|| {
-            tree.get("meta")
-                .and_then(|m| m.get("wcs"))
-                .filter(|w| w.get("steps").is_some())
-        })?;
+        let gwcs = tree
+            .get("gwcs")
+            .into_iter()
+            .chain(Self::wcs_nodes(tree))
+            .find(|w| w.get("steps").is_some())?;
 
         let steps = gwcs.get("steps")?.as_sequence()?;
 
@@ -419,44 +559,35 @@ impl WcsInfo {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_complex64_byte_size() {
-        let meta = NdArrayMeta {
-            source: 0,
-            shape: vec![100, 100],
-            dtype: DType::Complex64,
-            byteorder: ByteOrder::Little,
+    fn block_meta(shape: Vec<usize>, dtype: DType, byteorder: ByteOrder) -> NdArrayMeta {
+        NdArrayMeta {
+            source: ArraySource::Block(0),
+            shape,
+            streamed_first_dim: false,
+            dtype,
+            byteorder,
             offset: 0,
             strides: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_complex64_byte_size() {
+        let meta = block_meta(vec![100, 100], DType::Complex64, ByteOrder::Little);
         assert_eq!(meta.byte_size_per_element(), 8);
         assert_eq!(meta.expected_byte_size(), 100 * 100 * 8);
     }
 
     #[test]
     fn test_float32_byte_size() {
-        let meta = NdArrayMeta {
-            source: 0,
-            shape: vec![50, 50],
-            dtype: DType::Float32,
-            byteorder: ByteOrder::Big,
-            offset: 0,
-            strides: None,
-        };
+        let meta = block_meta(vec![50, 50], DType::Float32, ByteOrder::Big);
         assert_eq!(meta.byte_size_per_element(), 4);
         assert_eq!(meta.expected_byte_size(), 50 * 50 * 4);
     }
 
     #[test]
     fn test_float64_byte_size() {
-        let meta = NdArrayMeta {
-            source: 0,
-            shape: vec![10, 20],
-            dtype: DType::Float64,
-            byteorder: ByteOrder::Little,
-            offset: 0,
-            strides: None,
-        };
+        let meta = block_meta(vec![10, 20], DType::Float64, ByteOrder::Little);
         assert_eq!(meta.byte_size_per_element(), 8);
         assert_eq!(meta.expected_byte_size(), 10 * 20 * 8);
     }
@@ -481,14 +612,7 @@ mod tests {
         for (name, expected, size) in cases {
             let (dtype, _) = DType::parse(name).unwrap();
             assert_eq!(dtype, expected, "dtype mismatch for {}", name);
-            let meta = NdArrayMeta {
-                source: 0,
-                shape: vec![1],
-                dtype,
-                byteorder: ByteOrder::Little,
-                offset: 0,
-                strides: None,
-            };
+            let meta = block_meta(vec![1], dtype, ByteOrder::Little);
             assert_eq!(
                 meta.byte_size_per_element(),
                 size,
@@ -521,7 +645,7 @@ mod tests {
             NdArrayMeta::contiguous_strides(&[2, 2, 2, 2], 4),
             vec![32, 16, 8, 4]
         );
-        assert_eq!(NdArrayMeta::contiguous_strides(&[], 8), Vec::<usize>::new());
+        assert_eq!(NdArrayMeta::contiguous_strides(&[], 8), Vec::<isize>::new());
     }
 
     #[test]
@@ -550,6 +674,17 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_strides_parsed() {
+        let node: Value = serde_yaml::from_str(
+            "source: 0\nshape: [2, 3]\ndatatype: float32\nbyteorder: little\nstrides: [-12, 4]\noffset: 12\n",
+        )
+        .unwrap();
+        let meta = NdArrayMeta::from_yaml(&node).unwrap();
+        assert_eq!(meta.strides, Some(vec![-12, 4]));
+        assert!(!meta.is_contiguous());
+    }
+
+    #[test]
     fn test_strides_wrong_length_ignored() {
         let node: Value = serde_yaml::from_str(
             "source: 0\nshape: [4, 4]\ndatatype: float32\nbyteorder: little\nstrides: [4]\n",
@@ -558,6 +693,45 @@ mod tests {
         let meta = NdArrayMeta::from_yaml(&node).unwrap();
         assert_eq!(meta.strides, None);
         assert_eq!(meta.effective_strides(), vec![16, 4]);
+    }
+
+    #[test]
+    fn test_streamed_shape_wildcard() {
+        let node: Value =
+            serde_yaml::from_str("source: 0\nshape: ['*', 4]\ndatatype: float32\nbyteorder: little\n")
+                .unwrap();
+        let mut meta = NdArrayMeta::from_yaml(&node).unwrap();
+        assert!(meta.streamed_first_dim);
+        meta.resolve_streamed_shape(3 * 4 * 4);
+        assert_eq!(meta.shape, vec![3, 4]);
+        assert!(!meta.streamed_first_dim);
+    }
+
+    #[test]
+    fn test_external_source_is_loud_error() {
+        let node: Value =
+            serde_yaml::from_str("source: external0.asdf\nshape: [4]\ndatatype: float32\n").unwrap();
+        match NdArrayMeta::from_yaml(&node) {
+            Err(AsdfError::ExternalBlock(uri)) => assert_eq!(uri, "external0.asdf"),
+            other => panic!("expected ExternalBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_inline_data_parsed() {
+        let node: Value = serde_yaml::from_str("data: [[1, 2, 3], [4, 5, 6]]\n").unwrap();
+        let meta = NdArrayMeta::from_yaml(&node).unwrap();
+        assert_eq!(meta.shape, vec![2, 3]);
+        match meta.source {
+            ArraySource::Inline(v) => assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            other => panic!("expected inline, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_inline_ragged_rejected() {
+        let node: Value = serde_yaml::from_str("data: [[1, 2, 3], [4, 5]]\n").unwrap();
+        assert!(NdArrayMeta::from_yaml(&node).is_err());
     }
 
     #[test]
@@ -583,7 +757,7 @@ meta:
 "#;
         let tree: Value = serde_yaml::from_str(yaml).unwrap();
         let wcs = WcsInfo::from_gwcs(&tree).expect("gwcs chain parsed");
-        assert_eq!(wcs.crpix, [1024.5, 1020.5]);
+        assert_eq!(wcs.crpix, [1025.5, 1021.5]);
         assert_eq!(wcs.cdelt, [0.0001, 0.0002]);
         assert_eq!(wcs.pc, [[1.1, 0.2], [0.3, 1.2]]);
         assert_eq!(wcs.crval, [202.4695, 47.1953]);
@@ -603,10 +777,30 @@ meta:
 "#;
         let tree: Value = serde_yaml::from_str(yaml).unwrap();
         let wcs = WcsInfo::from_gwcs(&tree).expect("gwcs field fallback parsed");
-        assert_eq!(wcs.crpix, [5.0, 7.0]);
+        assert_eq!(wcs.crpix, [6.0, 8.0]);
         assert_eq!(wcs.pc, [[2.0, 0.0], [0.0, 3.0]]);
         assert_eq!(wcs.crval, [0.0, 0.0]);
         assert_eq!(wcs.cdelt, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_gwcs_under_roman_meta() {
+        let yaml = r#"
+roman:
+  meta:
+    wcs:
+      steps:
+        - transform: {transform_type: Shift, offset: -2043.5}
+        - transform: {transform_type: Shift, offset: -2043.5}
+        - transform: {transform_type: Scale, factor: 0.00003}
+        - transform: {transform_type: Scale, factor: 0.00003}
+        - frame: {name: world}
+"#;
+        let tree: Value = serde_yaml::from_str(yaml).unwrap();
+        assert!(WcsInfo::from_yaml(&tree).is_none());
+        let wcs = WcsInfo::from_gwcs(&tree).expect("roman.meta.wcs resolved");
+        assert_eq!(wcs.crpix, [2044.5, 2044.5]);
+        assert_eq!(wcs.cdelt, [0.00003, 0.00003]);
     }
 
     #[test]

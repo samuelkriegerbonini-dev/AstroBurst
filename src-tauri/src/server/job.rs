@@ -69,15 +69,28 @@ impl Job {
         self.pct.store(pct, Ordering::Release);
     }
 
+    fn finish_from_running(&self, next: JobStatus) -> bool {
+        self.status
+            .compare_exchange(
+                JobStatus::Running as u8,
+                next as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
     pub fn set_done(&self) {
-        self.status.store(JobStatus::Done as u8, Ordering::Release);
-        self.pct.store(100, Ordering::Release);
-        *self.completed_at.lock().unwrap() = Some(now_ms());
+        if self.finish_from_running(JobStatus::Done) {
+            self.pct.store(100, Ordering::Release);
+            *self.completed_at.lock().unwrap() = Some(now_ms());
+        }
     }
 
     pub fn set_error(&self) {
-        self.status.store(JobStatus::Error as u8, Ordering::Release);
-        *self.completed_at.lock().unwrap() = Some(now_ms());
+        if self.finish_from_running(JobStatus::Error) {
+            *self.completed_at.lock().unwrap() = Some(now_ms());
+        }
     }
 
     pub fn set_cancelled(&self) {
@@ -97,4 +110,30 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn late_worker_cannot_overwrite_cancelled() {
+        let (job, _tx) = new_job("stack");
+        job.set_cancelled();
+        job.set_done();
+        assert_eq!(job.current_status() as u8, JobStatus::Cancelled as u8);
+        job.set_error();
+        assert_eq!(job.current_status() as u8, JobStatus::Cancelled as u8);
+    }
+
+    #[test]
+    fn running_job_finishes_once() {
+        let (job, _tx) = new_job("stack");
+        assert!(job.is_running());
+        job.set_done();
+        assert_eq!(job.current_status() as u8, JobStatus::Done as u8);
+        assert_eq!(job.pct.load(Ordering::Acquire), 100);
+        job.set_error();
+        assert_eq!(job.current_status() as u8, JobStatus::Done as u8);
+    }
 }

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Read;
 
 use super::parser::AsdfError;
@@ -19,13 +20,24 @@ pub enum Compression {
     Zlib,
     Bzip2,
     Lz4,
+    Unknown(String),
 }
 
 #[derive(Debug)]
-pub struct BlockData {
+pub struct BlockRef {
     pub index: usize,
-    pub data: Vec<u8>,
-    pub original_size: usize,
+    pub header: BlockHeader,
+    pub data_start: usize,
+    pub used_size: usize,
+}
+
+impl BlockRef {
+    pub fn original_size(&self) -> usize {
+        match self.header.compression {
+            Compression::None => self.used_size,
+            _ => self.header.data_size as usize,
+        }
+    }
 }
 
 impl BlockHeader {
@@ -49,18 +61,10 @@ impl BlockHeader {
         }
 
         let flags = u32::from_be_bytes([h[0], h[1], h[2], h[3]]);
-
-        let compression = Self::parse_compression(&h[4..8])?;
-
-        let allocated_size = u64::from_be_bytes([
-            h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15],
-        ]);
-        let used_size = u64::from_be_bytes([
-            h[16], h[17], h[18], h[19], h[20], h[21], h[22], h[23],
-        ]);
-        let data_size = u64::from_be_bytes([
-            h[24], h[25], h[26], h[27], h[28], h[29], h[30], h[31],
-        ]);
+        let compression = Self::parse_compression(&h[4..8]);
+        let allocated_size = u64::from_be_bytes(h[8..16].try_into().expect("8 bytes"));
+        let used_size = u64::from_be_bytes(h[16..24].try_into().expect("8 bytes"));
+        let data_size = u64::from_be_bytes(h[24..32].try_into().expect("8 bytes"));
 
         let mut checksum = [0u8; 16];
         checksum.copy_from_slice(&h[32..48]);
@@ -79,74 +83,62 @@ impl BlockHeader {
         ))
     }
 
-    fn parse_compression(bytes: &[u8]) -> Result<Compression, AsdfError> {
-        match bytes {
-            [0, 0, 0, 0] => Ok(Compression::None),
-            _ => {
-                let s: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
-                if s.is_empty() {
-                    return Ok(Compression::None);
-                }
-                match s.as_slice() {
-                    b"zlib" => Ok(Compression::Zlib),
-                    b"bzp2" => Ok(Compression::Bzip2),
-                    b"lz4" => Ok(Compression::Lz4),
-                    other => {
-                        let name = String::from_utf8_lossy(other).to_string();
-                        Err(AsdfError::UnsupportedCompression(name))
-                    }
-                }
-            }
+    fn parse_compression(bytes: &[u8]) -> Compression {
+        let s: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0).collect();
+        match s.as_slice() {
+            [] => Compression::None,
+            b"zlib" => Compression::Zlib,
+            b"bzp2" => Compression::Bzip2,
+            b"lz4" => Compression::Lz4,
+            other => Compression::Unknown(String::from_utf8_lossy(other).to_string()),
         }
     }
 
-    pub fn decompress(&self, raw: &[u8]) -> Result<Vec<u8>, AsdfError> {
+    pub fn decompress<'a>(&self, raw: &'a [u8]) -> Result<Cow<'a, [u8]>, AsdfError> {
         let expected = self.data_size as usize;
-        match self.compression {
-            Compression::None => Ok(raw.to_vec()),
+        match &self.compression {
+            Compression::None => Ok(Cow::Borrowed(raw)),
 
             Compression::Zlib => {
                 let mut decoder = flate2::read::ZlibDecoder::new(raw);
-                let mut out = Vec::with_capacity(expected);
+                let mut out = Vec::new();
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
-                Ok(out)
+                Ok(Cow::Owned(out))
             }
 
             #[cfg(feature = "asdf-full")]
             Compression::Bzip2 => {
                 let mut decoder = bzip2::read::BzDecoder::new(raw);
-                let mut out = Vec::with_capacity(expected);
+                let mut out = Vec::new();
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|e| AsdfError::DecompressionFailed(e.to_string()))?;
-                Ok(out)
+                Ok(Cow::Owned(out))
             }
 
             #[cfg(not(feature = "asdf-full"))]
-            Compression::Bzip2 => {
-                Err(AsdfError::UnsupportedCompression(
-                    "bzip2 (enable 'asdf-full' feature)".into(),
-                ))
-            }
+            Compression::Bzip2 => Err(AsdfError::UnsupportedCompression(
+                "bzip2 (enable 'asdf-full' feature)".into(),
+            )),
 
             #[cfg(feature = "asdf-full")]
-            Compression::Lz4 => decompress_lz4_asdf(raw, expected),
+            Compression::Lz4 => decompress_lz4_asdf(raw, expected).map(Cow::Owned),
 
             #[cfg(not(feature = "asdf-full"))]
-            Compression::Lz4 => {
-                Err(AsdfError::UnsupportedCompression(
-                    "lz4 (enable 'asdf-full' feature)".into(),
-                ))
-            }
+            Compression::Lz4 => Err(AsdfError::UnsupportedCompression(
+                "lz4 (enable 'asdf-full' feature)".into(),
+            )),
+
+            Compression::Unknown(name) => Err(AsdfError::UnsupportedCompression(name.clone())),
         }
     }
 }
 
 #[cfg(feature = "asdf-full")]
 fn decompress_lz4_asdf(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, AsdfError> {
-    let mut out = Vec::with_capacity(uncompressed_size);
+    let mut out = Vec::new();
     let mut pos = 0;
     while pos + 4 <= payload.len() && out.len() < uncompressed_size {
         let chunk_len = u32::from_be_bytes([

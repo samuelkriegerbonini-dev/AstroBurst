@@ -34,16 +34,9 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
 
   const defaultsSet = useRef(false);
 
-  const rgbBins = useMemo(() => {
-    const r = state.bins.find((b) => b.id === "r" || b.id === "ha");
-    const g = state.bins.find((b) => b.id === "g" || b.id === "oiii");
-    const bBin = state.bins.find((b) => b.id === "b" || b.id === "sii");
-    return { r, g, b: bBin };
-  }, [state.bins]);
-
-  const rPath = resolveChannelPath(state, rgbBins.r?.id ?? "");
-  const gPath = resolveChannelPath(state, rgbBins.g?.id ?? "");
-  const bPath = resolveChannelPath(state, rgbBins.b?.id ?? "");
+  const rPath = resolveChannelPath(state, "r") ?? resolveChannelPath(state, "ha");
+  const gPath = resolveChannelPath(state, "g") ?? resolveChannelPath(state, "oiii");
+  const bPath = resolveChannelPath(state, "b") ?? resolveChannelPath(state, "sii");
 
   useEffect(() => {
     if (defaultsSet.current || !state.compositeReady) return;

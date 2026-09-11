@@ -28,15 +28,24 @@ fn nonzero_count(b: u8) -> u32 {
     }
 }
 
-/// Decode `nx` pixels from one Rice-coded tile's compressed byte stream.
-/// Returns pixel values as i64 (sign-extended per `params.signed`), i.e. the
-/// raw stored integers *before* BSCALE/BZERO or ZSCALE/ZZERO are applied.
-pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
+
+pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> anyhow::Result<Vec<i64>> {
     let (fsbits, fsmax, init_bytes, width_bits): (u32, u32, usize, u32) = match params.bytepix {
         1 => (3, 6, 1, 8),
         2 => (4, 14, 2, 16),
         4 => (5, 25, 4, 32),
-        other => panic!("unsupported Rice BYTEPIX {other}"),
+        other => anyhow::bail!("unsupported Rice BYTEPIX {other} (expected 1, 2 or 4)"),
+    };
+    let next = |pos: &mut usize| -> anyhow::Result<u32> {
+        let v = *data.get(*pos).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Rice stream truncated at byte {} of {} (expected {nx} pixels)",
+                *pos,
+                data.len()
+            )
+        })?;
+        *pos += 1;
+        Ok(v as u32)
     };
     let bbits = 1u32 << fsbits;
     let trunc_mask: u32 = if width_bits >= 32 {
@@ -48,12 +57,10 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
     let mut pos = 0usize;
     let mut lastpix: u32 = 0;
     for _ in 0..init_bytes {
-        lastpix = (lastpix << 8) | data[pos] as u32;
-        pos += 1;
+        lastpix = (lastpix << 8) | next(&mut pos)?;
     }
 
-    let mut b: u32 = data[pos] as u32;
-    pos += 1;
+    let mut b: u32 = next(&mut pos)?;
     let mut nbits: i32 = 8;
 
     let mut out: Vec<u32> = Vec::with_capacity(nx);
@@ -61,8 +68,7 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
     while i < nx {
         nbits -= fsbits as i32;
         while nbits < 0 {
-            b = (b << 8) | data[pos] as u32;
-            pos += 1;
+            b = (b << 8) | next(&mut pos)?;
             nbits += 8;
         }
         let fs: i32 = (b >> nbits as u32) as i32 - 1;
@@ -71,26 +77,22 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
         let imax = (i + params.blocksize as usize).min(nx);
 
         if fs < 0 {
-            // low-entropy: all-zero differences within this block
             while i < imax {
                 out.push(lastpix);
                 i += 1;
             }
         } else if fs as u32 == fsmax {
-            // high-entropy: pixels coded verbatim (no Rice split)
             while i < imax {
                 let mut k = bbits as i32 - nbits;
                 let mut diff: u32 = if k >= 32 { 0 } else { b << k };
                 k -= 8;
                 while k >= 0 {
-                    b = data[pos] as u32;
-                    pos += 1;
+                    b = next(&mut pos)?;
                     diff |= b << k;
                     k -= 8;
                 }
                 if nbits > 0 {
-                    b = data[pos] as u32;
-                    pos += 1;
+                    b = next(&mut pos)?;
                     diff |= b >> (-k);
                     b &= (1u32 << nbits as u32) - 1;
                 } else {
@@ -111,16 +113,14 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
             while i < imax {
                 while b == 0 {
                     nbits += 8;
-                    b = data[pos] as u32;
-                    pos += 1;
+                    b = next(&mut pos)?;
                 }
                 let nzero = nbits - nonzero_count(b as u8) as i32;
                 nbits -= nzero + 1;
                 b ^= 1u32 << nbits as u32;
                 nbits -= fs as i32;
                 while nbits < 0 {
-                    b = (b << 8) | data[pos] as u32;
-                    pos += 1;
+                    b = (b << 8) | next(&mut pos)?;
                     nbits += 8;
                 }
                 let mut diff = (nzero as u32) << fs | (b >> nbits as u32);
@@ -139,11 +139,12 @@ pub fn rice_decode(data: &[u8], nx: usize, params: &RiceParams) -> Vec<i64> {
     }
 
     if params.signed {
-        out.into_iter()
+        Ok(out
+            .into_iter()
             .map(|v| sign_extend(v, width_bits))
-            .collect()
+            .collect())
     } else {
-        out.into_iter().map(|v| v as i64).collect()
+        Ok(out.into_iter().map(|v| v as i64).collect())
     }
 }
 
@@ -159,34 +160,50 @@ pub(crate) fn sign_extend(v: u32, bits: u32) -> i64 {
 mod tests {
     use super::*;
 
-    // Regression fixtures generated via `uv run --with astropy` against real
-    // RICE_1-compressed FITS files; the compressed byte streams and expected
-    // decoded pixels below are copied verbatim from that ground truth so this
-    // test doesn't depend on astropy being available at build/test time.
 
     #[test]
     fn matches_astropy_i16_single_row() {
-        // rice_i16_tiny fixture: [5, 5, 5, 5, 100, -100, 0, 7], BLOCKSIZE=32, BYTEPIX=2.
-        // Bytes captured directly from an astropy CompImageHDU(compression_type="RICE_1")
-        // output via `uv run --with astropy` -- not hand-encoded.
         let tile: &[u8] = &[0, 5, 120, 16, 32, 64, 63, 1, 60, 72, 156];
         let params = RiceParams {
             blocksize: 32,
             bytepix: 2,
             signed: true,
         };
-        let decoded = rice_decode(tile, 8, &params);
+        let decoded = rice_decode(tile, 8, &params).unwrap();
         assert_eq!(decoded, vec![5, 5, 5, 5, 100, -100, 0, 7]);
     }
 
     #[test]
+    fn truncated_stream_is_an_error_not_a_panic() {
+        let tile: &[u8] = &[0, 5, 120, 16, 32, 64, 63, 1, 60, 72, 156];
+        let params = RiceParams {
+            blocksize: 32,
+            bytepix: 2,
+            signed: true,
+        };
+        for cut in 0..tile.len() {
+            let result = rice_decode(&tile[..cut], 8, &params);
+            let err = match result {
+                Ok(decoded) => panic!("stream cut at byte {cut} decoded {decoded:?} instead of failing"),
+                Err(e) => e,
+            };
+            assert!(err.to_string().contains("truncated"), "{err}");
+        }
+        let err = rice_decode(&[0, 0, 0, 0], 8, &RiceParams { blocksize: 32, bytepix: 4, signed: true })
+            .expect_err("4-byte tile with BYTEPIX=4 has no code bits");
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn unsupported_bytepix_is_an_error_not_a_panic() {
+        let err = rice_decode(&[0; 16], 4, &RiceParams { blocksize: 32, bytepix: 8, signed: true })
+            .expect_err("BYTEPIX=8 is not decodable");
+        assert!(err.to_string().contains("BYTEPIX 8"), "{err}");
+    }
+
+    #[test]
     fn byte_width_stays_unsigned() {
-        // A byte tile whose difference stream saturates at 255 must stay in 0..255,
-        // not get reinterpreted as a signed -128..127 value (the bug found during
-        // prototyping: sign-extension must be gated on BITPIX==8 being unsigned).
-        // Bytes + expected values captured from a real astropy RICE_1 uint8 fixture
-        // (row containing a deliberate 255-saturation run).
-        let tile: &[u8] = &[
+       let tile: &[u8] = &[
             31, 176, 35, 241, 204, 143, 194, 16, 3, 204, 148, 195, 167, 140, 200, 212, 136, 143,
             29, 24, 25, 10, 90, 211, 203, 77, 158, 139, 149, 40, 45, 206, 176,
         ];
@@ -195,7 +212,7 @@ mod tests {
             bytepix: 1,
             signed: false,
         };
-        let decoded = rice_decode(tile, 40, &params);
+        let decoded = rice_decode(tile, 40, &params).unwrap();
         let expected: Vec<i64> = vec![
             31, 14, 6, 36, 31, 255, 255, 255, 255, 54, 41, 59, 63, 48, 71, 50, 51, 72, 73, 56, 87,
             64, 92, 63, 97, 100, 103, 101, 96, 109, 95, 118, 112, 111, 116, 121, 103, 110, 117,

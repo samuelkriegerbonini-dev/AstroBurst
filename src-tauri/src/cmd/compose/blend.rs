@@ -261,6 +261,9 @@ pub async fn align_channels_cmd(
         let method = helpers::parse_align_method(align_method.as_deref());
 
         let use_bin_ids = bin_ids.as_ref().map(|ids| ids.len() == paths.len()).unwrap_or(false);
+        if use_bin_ids {
+            GLOBAL_IMAGE_CACHE.remove_prefix(crate::types::constants::WIZARD_CACHE_PREFIX);
+        }
 
         let mut channel_results = Vec::new();
 

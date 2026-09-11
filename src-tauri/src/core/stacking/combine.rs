@@ -11,6 +11,17 @@ use crate::types::constants::MAD_TO_SIGMA;
 
 use crate::core::stacking::align;
 
+const MEAN_ABS_DEV_TO_SIGMA: f64 = 1.2533141;
+
+fn scale_from_deviations(mad: f32, abs_devs: &[f32]) -> f32 {
+    let robust = mad as f64 * MAD_TO_SIGMA;
+    if robust > 0.0 {
+        return robust as f32;
+    }
+    let mean_abs = abs_devs.iter().map(|d| *d as f64).sum::<f64>() / abs_devs.len().max(1) as f64;
+    (mean_abs * MEAN_ABS_DEV_TO_SIGMA) as f32
+}
+
 pub fn sigma_clip_combine(
     values: &mut Vec<f32>,
     sigma_low: f32,
@@ -55,8 +66,7 @@ fn sigma_clip_combine_with(
             let dmid = scratch.len() / 2;
             scratch.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
             let mad = scratch[dmid];
-            let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
-            (med, sig)
+            (med, scale_from_deviations(mad, &scratch[..len]))
         } else {
             let n = len as f64;
             let mean = values[..len].iter().map(|v| *v as f64).sum::<f64>() / n;
@@ -68,10 +78,13 @@ fn sigma_clip_combine_with(
                 })
                 .sum::<f64>()
                 / (n - 1.0).max(1.0);
-            (mean as f32, variance.sqrt().max(1e-10) as f32)
+            (mean as f32, variance.sqrt() as f32)
         };
 
         last_center = center;
+        if sigma <= 0.0 {
+            break;
+        }
 
         let lo = -sigma_low * sigma;
         let hi = sigma_high * sigma;
@@ -145,8 +158,7 @@ fn sigma_clip_combine_weighted_with(
             let dmid = scratch.len() / 2;
             scratch.select_nth_unstable_by(dmid, |a, b| f32_cmp(a, b));
             let mad = scratch[dmid];
-            let sig = (mad as f64 * MAD_TO_SIGMA).max(1e-10) as f32;
-            (med, sig)
+            (med, scale_from_deviations(mad, &scratch[..len]))
         } else {
             let nf = len as f64;
             let mean = vals[..len].iter().map(|p| p.0 as f64).sum::<f64>() / nf;
@@ -158,10 +170,13 @@ fn sigma_clip_combine_weighted_with(
                 })
                 .sum::<f64>()
                 / (nf - 1.0).max(1.0);
-            (mean as f32, variance.sqrt().max(1e-10) as f32)
+            (mean as f32, variance.sqrt() as f32)
         };
 
         last_center = center;
+        if sigma <= 0.0 {
+            break;
+        }
 
         let lo = -sigma_low * sigma;
         let hi = sigma_high * sigma;
@@ -358,6 +373,49 @@ mod tests {
         let (mean, rejected) = sigma_clip_combine(&mut vals, 2.0, 2.0, 5);
         assert!((mean - 100.0).abs() < 1.0);
         assert!(rejected >= 1);
+    }
+
+    #[test]
+    fn test_sigma_clip_zero_mad_keeps_small_deviations() {
+        let mut vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 999.0];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(rejected, 0);
+        assert!((mean - 1000.0).abs() < 1e-4);
+
+        let mut vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 1002.0];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(rejected, 0);
+        assert!((mean - 1000.6).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_sigma_clip_zero_mad_still_rejects_outlier() {
+        let mut vals = vec![100.0, 100.0, 100.0, 50000.0, 100.0];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(rejected, 1);
+        assert!((mean - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_sigma_clip_all_equal_rejects_nothing() {
+        let mut vals = vec![7.0; 6];
+        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(rejected, 0);
+        assert_eq!(mean, 7.0);
+    }
+
+    #[test]
+    fn weighted_combine_zero_mad_keeps_small_deviations() {
+        let mut vals = vec![
+            (1000.0f32, 1.0f32),
+            (1000.0f32, 1.0f32),
+            (1000.0f32, 1.0f32),
+            (1001.0f32, 1.0f32),
+            (999.0f32, 1.0f32),
+        ];
+        let (mean, rejected) = sigma_clip_combine_weighted(&mut vals, 3.0, 3.0, 5);
+        assert_eq!(rejected, 0);
+        assert!((mean - 1000.0).abs() < 1e-4);
     }
 
     #[test]

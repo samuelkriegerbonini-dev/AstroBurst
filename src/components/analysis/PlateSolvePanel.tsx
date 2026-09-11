@@ -140,16 +140,19 @@ function PlateSolvePanel({
     if (!ctx) return;
     ctx.clearRect(0, 0, W, H);
 
-    const scaleX = W / (imageWidth || 1);
-    const scaleY = H / (imageHeight || 1);
+    const iw = imageWidth || 1;
+    const ih = imageHeight || 1;
+    const scale = Math.min(W / iw, H / ih);
+    const ox = (W - iw * scale) / 2;
+    const oy = (H - ih * scale) / 2;
 
     if (drawStars) {
       const maxFlux = stars[0].flux || 1;
 
       stars.forEach((star, i) => {
-        const sx = star.x * scaleX;
-        const sy = star.y * scaleY;
-        const radius = Math.max(3, (star.fwhm || 3) * scaleX * 1.5);
+        const sx = ox + star.x * scale;
+        const sy = oy + star.y * scale;
+        const radius = Math.max(3, (star.fwhm || 3) * scale * 1.5);
         const brightness = Math.min(1, 0.3 + (star.flux / maxFlux) * 0.7);
 
         let color: string;
@@ -172,9 +175,9 @@ function PlateSolvePanel({
 
       if (selectedStar !== null && selectedStar < stars.length) {
         const s = stars[selectedStar];
-        const sx = s.x * scaleX;
-        const sy = s.y * scaleY;
-        const radius = Math.max(6, (s.fwhm || 3) * scaleX * 2);
+        const sx = ox + s.x * scale;
+        const sy = oy + s.y * scale;
+        const radius = Math.max(6, (s.fwhm || 3) * scale * 2);
 
         ctx.strokeStyle = "rgba(100, 200, 255, 1)";
         ctx.lineWidth = 2;
@@ -198,11 +201,11 @@ function PlateSolvePanel({
       ctx.font = "10px monospace";
 
       for (const ann of annotations) {
-        const ax = ann.pixelx * scaleX;
-        const ay = ann.pixely * scaleY;
+        const ax = ox + ann.pixelx * scale;
+        const ay = oy + ann.pixely * scale;
         if (ax < -20 || ay < -20 || ax > W + 20 || ay > H + 20) continue;
 
-        const r = Math.max(10, (ann.radius ?? 12) * scaleX);
+        const r = Math.max(10, (ann.radius ?? 12) * scale);
 
         ctx.strokeStyle = "rgba(167, 139, 250, 0.85)";
         ctx.beginPath();

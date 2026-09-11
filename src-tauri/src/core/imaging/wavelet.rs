@@ -111,7 +111,7 @@ pub fn wavelet_denoise(
             for scale in &scales {
                 sum += scale[i];
             }
-            *v = if sum.is_finite() && sum >= 0.0 { sum } else { 0.0 };
+            *v = sum;
         });
 
     if let Some(p) = progress {
@@ -329,6 +329,30 @@ mod tests {
             .collect();
         let sigma = estimate_noise_sigma(&noise);
         assert!(sigma > 0.0 && sigma < 2.0, "Sigma estimate: {}", sigma);
+    }
+
+    #[test]
+    fn test_reconstruction_preserves_negative_and_nan() {
+        let mut image = Array2::from_elem((64, 64), -0.5f32);
+        image[[0, 0]] = f32::NAN;
+
+        let config = WaveletConfig {
+            num_scales: 3,
+            thresholds: vec![0.0, 0.0, 0.0],
+            linear_denoise: true,
+        };
+
+        let result = wavelet_denoise(&image, &config, None).unwrap();
+        assert!(result.denoised[[0, 0]].is_nan());
+        for y in 4..60 {
+            for x in 4..60 {
+                assert!(
+                    (result.denoised[[y, x]] + 0.5).abs() < 1e-4,
+                    "Negative pixel at ({},{}) was rectified: {}",
+                    y, x, result.denoised[[y, x]]
+                );
+            }
+        }
     }
 
     #[test]

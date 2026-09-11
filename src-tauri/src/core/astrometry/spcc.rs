@@ -79,6 +79,15 @@ pub fn spcc_calibrate_rgb(
     header: &HduHeader,
     config: &SpccConfig,
 ) -> Result<SpccResult, String> {
+    if g_image.dim() != r_image.dim() || b_image.dim() != r_image.dim() {
+        return Err(format!(
+            "Channel size mismatch: R {:?}, G {:?}, B {:?}",
+            r_image.dim(),
+            g_image.dim(),
+            b_image.dim()
+        ));
+    }
+
     let wcs = WcsTransform::from_header(header)
         .map_err(|e| format!("WCS not available: {}. Run Plate Solve first.", e))?;
 
@@ -642,5 +651,38 @@ mod tests {
             flux_contaminated
         );
         assert!(flux_clean > 9000.0, "expected ~10000 net star flux, got {}", flux_clean);
+    }
+
+    #[test]
+    fn spcc_calibrate_rgb_rejects_channel_size_mismatch() {
+        let mut header = HduHeader::empty();
+        for (k, v) in [
+            ("NAXIS1", "64"),
+            ("NAXIS2", "64"),
+            ("CRPIX1", "32"),
+            ("CRPIX2", "32"),
+            ("CRVAL1", "180.0"),
+            ("CRVAL2", "45.0"),
+            ("CDELT1", "-0.001"),
+            ("CDELT2", "0.001"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ] {
+            header.set(k, v.to_string());
+        }
+        let r = Array2::from_elem((64, 64), 0.1f32);
+        let g = Array2::from_elem((32, 32), 0.1f32);
+        let b = Array2::from_elem((64, 64), 0.1f32);
+        let config = SpccConfig::default();
+
+        let err = spcc_calibrate_rgb(&r, &g, &b, &header, &config)
+            .expect_err("mismatched G channel must be rejected");
+        assert!(err.contains("size mismatch"), "unexpected error: {}", err);
+        assert!(err.contains("(32, 32)"), "unexpected error: {}", err);
+
+        let b_small = Array2::from_elem((64, 32), 0.1f32);
+        let err = spcc_calibrate_rgb(&r, &r, &b_small, &header, &config)
+            .expect_err("mismatched B channel must be rejected");
+        assert!(err.contains("size mismatch"), "unexpected error: {}", err);
     }
 }

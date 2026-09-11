@@ -576,6 +576,78 @@ async fn v2_keepalive_ok_and_status_reports_active_ref() {
     assert_eq!(json["image_count"], 1);
 }
 
+#[tokio::test]
+async fn v2_list_and_status_drop_refs_evicted_by_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = (0..3)
+        .map(|i| {
+            let p = dir.path().join(format!("e{i}.fits"));
+            v2_fixtures::write_wcs_fits(&p, 4, 4);
+            p
+        })
+        .collect();
+
+    let cfg = ServerConfig {
+        cache_max_entries: 2,
+        ..ServerConfig::default()
+    };
+    let state = AppState::new(Arc::new(cfg.clone()));
+    state
+        .sessions
+        .insert("s-evict".into(), Session::new("s-evict".into(), &cfg));
+
+    for p in &paths {
+        let resp = post_json(
+            build_router(state.clone()),
+            "/v2/sessions/s-evict/open",
+            &format!(r#"{{"path":{}}}"#, serde_json::to_string(p.to_str().unwrap()).unwrap()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/sessions/s-evict/images")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["count"], 2);
+    assert_eq!(json["active_ref"], "img_2");
+    let refs: Vec<&str> = json["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["image_ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, vec!["img_1", "img_2"]);
+
+    let resp = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/sessions/s-evict")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["image_count"], 2);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-evict/stats",
+        r#"{"ref":"img_0"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 async fn seed_wcs_session(id: &str) -> (AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let fits = dir.path().join("wcs.fits");

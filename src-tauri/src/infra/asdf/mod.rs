@@ -4,5 +4,5 @@ pub mod tree;
 pub mod converter;
 
 pub use parser::AsdfFile;
-pub use blocks::BlockData;
+pub use blocks::BlockRef;
 pub use converter::AsdfImage;

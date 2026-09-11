@@ -368,16 +368,12 @@ pub fn ghs_stretch_with_stats(
     dmax: f32,
     params: &GhsParams,
 ) -> Array2<f32> {
-    let coeffs = match GhsCoeffs::new(params) {
-        Some(c) => c,
-        None => return data.clone(),
-    };
-
     let range = dmax - dmin;
     if range < 1e-10 {
         return Array2::zeros(data.raw_dim());
     }
     let inv_range = 1.0 / range;
+    let coeffs = GhsCoeffs::new(params);
 
     let mut result = Array2::zeros(data.raw_dim());
     Zip::from(&mut result)
@@ -387,7 +383,10 @@ pub fn ghs_stretch_with_stats(
                 *out = 0.0;
             } else {
                 let norm = (((val - dmin) * inv_range) as f64).clamp(0.0, 1.0);
-                *out = coeffs.apply(norm) as f32;
+                *out = match &coeffs {
+                    Some(c) => c.apply(norm) as f32,
+                    None => norm as f32,
+                };
             }
         });
 
@@ -597,10 +596,24 @@ mod tests {
 
     #[test]
     fn test_ghs_zero_d_identity() {
-        let data = Array2::from_shape_vec((2, 2), vec![0.1, 0.5, 0.8, 1.0]).unwrap();
+        let data = Array2::from_shape_vec((2, 2), vec![0.0, 0.5, 0.8, 1.0]).unwrap();
         let params = GhsParams { d: 0.0, ..GhsParams::default() };
         let result = ghs_stretch(&data, &params);
         assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_ghs_zero_d_normalizes_native_units() {
+        let data = Array2::from_shape_vec((1, 3), vec![12.0, 800.0, 40000.0]).unwrap();
+        let params = GhsParams { d: 0.0, ..GhsParams::default() };
+        let result = ghs_stretch(&data, &params);
+        assert!(result[[0, 0]].abs() < 1e-6);
+        assert!((result[[0, 1]] - (788.0 / 39988.0)).abs() < 1e-6);
+        assert!((result[[0, 2]] - 1.0).abs() < 1e-6);
+        let nan_data = Array2::from_shape_vec((1, 2), vec![f32::NAN, 5.0]).unwrap();
+        let nan_result = ghs_stretch_with_stats(&nan_data, 0.0, 10.0, &params);
+        assert_eq!(nan_result[[0, 0]], 0.0);
+        assert!((nan_result[[0, 1]] - 0.5).abs() < 1e-6);
     }
 
     #[test]

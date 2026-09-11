@@ -5,7 +5,6 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::math::simd::find_minmax_simd;
-use crate::types::constants::PADDING_THRESHOLD;
 
 fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usize, usize)> {
     let (rows, cols) = data.dim();
@@ -17,7 +16,7 @@ fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usize, usize)> 
     let pixels: Vec<u8> = slice
         .par_iter()
         .map(|&v| {
-            if v.is_finite() && v > PADDING_THRESHOLD {
+            if v.is_finite() {
                 ((v - min) * inv_range).round().clamp(0.0, 255.0) as u8
             } else {
                 0
@@ -50,7 +49,7 @@ pub fn render_grayscale_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
         .par_chunks_exact_mut(2)
         .zip(slice.par_iter())
         .for_each(|(out, &v)| {
-            let q = if v.is_finite() && v > PADDING_THRESHOLD {
+            let q = if v.is_finite() {
                 ((v - min) * inv_range).round().clamp(0.0, 65535.0) as u16
             } else {
                 0
@@ -182,6 +181,45 @@ mod tests {
             let got = decoded.get_pixel(x as u32, y as u32).0[0];
             assert_eq!(got, expected, "pixel ({},{})", y, x);
         }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_linear_export_maps_negative_and_zero_continuously() {
+        use ndarray::Array2;
+
+        let dir = std::env::temp_dir().join("astroburst_linear_neg_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let img16 = Array2::from_shape_vec((1, 5), vec![-32768.0f32, -16384.0, 0.0, 16383.0, 32767.0]).unwrap();
+        let path16 = dir.join("neg16.png");
+        super::render_grayscale_16bit(&img16, path16.to_str().unwrap()).unwrap();
+        let decoded16 = image::open(&path16).unwrap().into_luma16();
+        assert_eq!(decoded16.as_raw().as_slice(), &[0u16, 16384, 32768, 49151, 65535]);
+
+        let img8 = Array2::from_shape_vec((1, 5), vec![-255.0f32, -127.0, 0.0, 128.0, 255.0]).unwrap();
+        let path8 = dir.join("neg8.png");
+        super::render_grayscale_hq(&img8, path8.to_str().unwrap()).unwrap();
+        let decoded8 = image::open(&path8).unwrap().into_luma8();
+        assert_eq!(decoded8.as_raw().as_slice(), &[0u8, 64, 128, 192, 255]);
+
+        let _ = std::fs::remove_file(path16);
+        let _ = std::fs::remove_file(path8);
+    }
+
+    #[test]
+    fn test_linear_export_all_nonpositive_spans_full_range() {
+        use ndarray::Array2;
+
+        let img = Array2::from_shape_vec((1, 3), vec![-65535.0f32, -32768.0, 0.0]).unwrap();
+        let dir = std::env::temp_dir().join("astroburst_linear_nonpos_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nonpos16.png");
+
+        super::render_grayscale_16bit(&img, path.to_str().unwrap()).unwrap();
+        let decoded = image::open(&path).unwrap().into_luma16();
+        assert_eq!(decoded.as_raw().as_slice(), &[0u16, 32767, 65535]);
 
         let _ = std::fs::remove_file(path);
     }

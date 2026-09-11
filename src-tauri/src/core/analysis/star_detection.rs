@@ -124,6 +124,39 @@ fn deblend_component(
         }
     }
 
+    let mut merged: Vec<(usize, usize, f64)> = Vec::with_capacity(maxima.len());
+    let mut used = vec![false; maxima.len()];
+    for i in 0..maxima.len() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        let mut group = vec![i];
+        let mut head = 0;
+        while head < group.len() {
+            let (gr, gc, gv) = maxima[group[head]];
+            head += 1;
+            for j in 0..maxima.len() {
+                if used[j] {
+                    continue;
+                }
+                let (jr, jc, jv) = maxima[j];
+                if jv == gv
+                    && (jr as i32 - gr as i32).abs() <= 1
+                    && (jc as i32 - gc as i32).abs() <= 1
+                {
+                    used[j] = true;
+                    group.push(j);
+                }
+            }
+        }
+        let n = group.len() as f64;
+        let sr = group.iter().map(|&k| maxima[k].0 as f64).sum::<f64>() / n;
+        let sc = group.iter().map(|&k| maxima[k].1 as f64).sum::<f64>() / n;
+        merged.push((sr.round() as usize, sc.round() as usize, maxima[i].2));
+    }
+    let mut maxima = merged;
+
     if maxima.len() <= 1 {
         return vec![component.to_vec()];
     }
@@ -424,6 +457,74 @@ mod tests {
         let img = Array2::from_elem((100, 100), 50.0f32);
         let result = detect_stars(&img, 5.0);
         assert!(result.stars.is_empty(), "Flat image should have no detections");
+    }
+
+    fn add_gaussian(img: &mut Array2<f32>, sy: usize, sx: usize, peak: f64, sigma: f64, clip: f32) {
+        let (rows, cols) = img.dim();
+        for dy in -8i32..=8 {
+            for dx in -8i32..=8 {
+                let r = sy as i32 + dy;
+                let c = sx as i32 + dx;
+                if r < 0 || c < 0 || r >= rows as i32 || c >= cols as i32 {
+                    continue;
+                }
+                let d2 = (dx * dx + dy * dy) as f64;
+                let val = peak * (-d2 / (2.0 * sigma * sigma)).exp();
+                let cell = &mut img[[r as usize, c as usize]];
+                *cell = (*cell + val as f32).min(clip);
+            }
+        }
+    }
+
+    fn component_above(img: &Array2<f32>, threshold: f32) -> Vec<(usize, usize)> {
+        let (rows, cols) = img.dim();
+        let mut out = Vec::new();
+        for r in 0..rows {
+            for c in 0..cols {
+                if img[[r, c]] > threshold {
+                    out.push((r, c));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_deblend_keeps_saturated_plateau_whole() {
+        let mut img = Array2::from_elem((41, 41), 100.0f32);
+        add_gaussian(&mut img, 20, 20, 20000.0, 3.0, 5000.0);
+        let component = component_above(&img, 150.0);
+        let plateau = component.iter().filter(|&&(r, c)| img[[r, c]] >= 5000.0).count();
+        assert!(plateau > 20, "expected a wide plateau, got {plateau} pixels");
+        let subs = deblend_component(&img, &component, 100.0);
+        assert_eq!(subs.len(), 1, "saturated star split into {} parts", subs.len());
+        assert_eq!(subs[0].len(), component.len());
+    }
+
+    #[test]
+    fn test_deblend_still_splits_two_distinct_peaks() {
+        let mut img = Array2::from_elem((41, 41), 100.0f32);
+        add_gaussian(&mut img, 20, 13, 5000.0, 2.0, f32::MAX);
+        add_gaussian(&mut img, 20, 27, 5000.0, 2.0, f32::MAX);
+        let component = component_above(&img, 150.0);
+        let subs = deblend_component(&img, &component, 100.0);
+        assert_eq!(subs.len(), 2, "two separated peaks should yield 2 parts, got {}", subs.len());
+    }
+
+    #[test]
+    fn test_detect_stars_saturated_star_is_single_detection() {
+        let mut img = make_test_image(300, 300);
+        add_gaussian(&mut img, 150, 60, 20000.0, 3.0, 5000.0);
+        let result = detect_stars(&img, 5.0);
+        let near: Vec<&DetectedStar> = result
+            .stars
+            .iter()
+            .filter(|s| (s.x - 60.0).abs() < 10.0 && (s.y - 150.0).abs() < 10.0)
+            .collect();
+        assert_eq!(near.len(), 1, "saturated star produced {} detections", near.len());
+        assert!((near[0].x - 60.0).abs() < 1.0, "X centroid off: {}", near[0].x);
+        assert!((near[0].y - 150.0).abs() < 1.0, "Y centroid off: {}", near[0].y);
+        assert!(near[0].eccentricity < 0.3, "eccentricity too high: {}", near[0].eccentricity);
     }
 
     #[test]

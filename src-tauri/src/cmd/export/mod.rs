@@ -21,6 +21,22 @@ fn wants_rice_compression(compress: &Option<String>) -> bool {
     compress.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("rice"))
 }
 
+fn count_real_paths(paths: [Option<&str>; 3]) -> usize {
+    paths
+        .iter()
+        .flatten()
+        .filter(|p| !p.starts_with("__") || p.starts_with(crate::types::constants::WIZARD_CACHE_PREFIX))
+        .count()
+}
+
+fn fits_rgb_uses_composite(paths: [Option<&str>; 3]) -> bool {
+    count_real_paths(paths) <= 1
+}
+
+fn png_rgb_uses_composite(paths: [Option<&str>; 3]) -> bool {
+    count_real_paths(paths) == 0
+}
+
 #[tauri::command]
 pub async fn export_fits(
     path: String,
@@ -110,11 +126,20 @@ pub async fn export_fits_rgb(
         let use_rice = wants_rice_compression(&compress);
         let qlevel = quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL);
 
-        let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
-        let cache_g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G);
-        let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
+        let composite = if fits_rgb_uses_composite([r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]) {
+            match (
+                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R),
+                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G),
+                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B),
+            ) {
+                (Some(cr), Some(cg), Some(cb)) => Some((cr, cg, cb)),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
-        let (r_arr, g_arr, b_arr, header_source) = if let (Some(cr), Some(cg), Some(cb)) = (cache_r, cache_g, cache_b) {
+        let (r_arr, g_arr, b_arr, header_source) = if let Some((cr, cg, cb)) = composite {
             let r_hdr = r_path.as_deref()
                 .filter(|p| !p.starts_with("__"))
                 .and_then(|p| extract_image_resolved(p).ok())
@@ -333,14 +358,7 @@ pub async fn export_rgb_png(
         let depth = bit_depth.unwrap_or(16);
         let do_stf = apply_stf_stretch.unwrap_or(false);
 
-        let real_path_count = [r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]
-            .iter()
-            .flatten()
-            .filter(|p| !p.starts_with("__"))
-            .count();
-        let single_channel_export = real_path_count == 1;
-
-        if !single_channel_export {
+        if png_rgb_uses_composite([r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]) {
                 if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
                 if depth == 16 {
                     render_rgb_16bit(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
@@ -526,7 +544,41 @@ pub async fn export_rgb_png(
 
 #[cfg(test)]
 mod tests {
-    use super::explicit_stf_requested;
+    use super::{explicit_stf_requested, fits_rgb_uses_composite, png_rgb_uses_composite};
+
+    #[test]
+    fn fits_rgb_composite_only_when_at_most_one_real_path() {
+        let a = Some("C:/data/r.fits");
+        let b = Some("C:/data/g.fits");
+        let c = Some("C:/data/b.fits");
+        assert!(fits_rgb_uses_composite([None, None, None]));
+        assert!(fits_rgb_uses_composite([a, None, None]));
+        assert!(fits_rgb_uses_composite([Some("__wizard_ch_r_aligned"), None, None]));
+        assert!(fits_rgb_uses_composite([Some("__composite_r"), Some("__composite_g"), Some("__composite_b")]));
+        assert!(!fits_rgb_uses_composite([Some("__wizard_ch_r_aligned"), Some("__wizard_ch_g_aligned"), Some("__wizard_ch_b_aligned")]));
+        assert!(!fits_rgb_uses_composite([a, Some("__wizard_ch_g_aligned"), None]));
+        assert!(!fits_rgb_uses_composite([a, b, None]));
+        assert!(!fits_rgb_uses_composite([a, b, c]));
+    }
+
+    #[test]
+    fn png_single_wizard_channel_is_not_composite() {
+        assert!(!png_rgb_uses_composite([Some("__wizard_ch_r_aligned"), None, None]));
+        assert!(!png_rgb_uses_composite([None, Some("__wizard_ch_g_cropped"), None]));
+        assert!(png_rgb_uses_composite([Some("__composite_r"), Some("__composite_g"), None]));
+    }
+
+    #[test]
+    fn png_rgb_composite_only_when_no_real_path() {
+        let a = Some("C:/data/r.fits");
+        let b = Some("C:/data/g.fits");
+        let c = Some("C:/data/b.fits");
+        assert!(png_rgb_uses_composite([None, None, None]));
+        assert!(png_rgb_uses_composite([Some("__composite_r"), None, None]));
+        assert!(!png_rgb_uses_composite([a, None, None]));
+        assert!(!png_rgb_uses_composite([a, b, None]));
+        assert!(!png_rgb_uses_composite([a, b, c]));
+    }
 
     #[test]
     fn explicit_stf_honored_when_any_channel_deviates() {

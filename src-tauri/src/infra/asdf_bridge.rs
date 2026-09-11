@@ -1,31 +1,30 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Result};
+use anyhow::Result;
 
-use crate::infra::asdf::converter::{AsdfImage, is_asdf_file};
-use crate::infra::fits::reader::{MmapImageResult, HduInfo};
+use crate::infra::asdf::converter::{is_asdf_file, AsdfImage};
+use crate::infra::fits::reader::{HduInfo, MmapImageResult};
 use crate::types::HduHeader;
 
 pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
     let asdf_img = AsdfImage::load(path)
         .map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
 
-    let arr = asdf_img.to_array2();
     let has_image = asdf_img.has_image();
-    let naxis_str = if has_image { "2" } else { "0" };
+    if !has_image {
+        anyhow::bail!("ASDF load failed: Missing field: data array");
+    }
+    let (width, height) = (asdf_img.width, asdf_img.height);
+    let naxis_str = "2";
 
     let mut cards = Vec::new();
     let mut index = HashMap::new();
 
-    index.insert("NAXIS".into(), naxis_str.into());
-    index.insert("NAXIS1".into(), asdf_img.width.to_string());
-    index.insert("NAXIS2".into(), asdf_img.height.to_string());
-    index.insert("BITPIX".into(), "-32".into());
-    cards.push(("NAXIS".into(), naxis_str.into()));
-    cards.push(("NAXIS1".into(), asdf_img.width.to_string()));
-    cards.push(("NAXIS2".into(), asdf_img.height.to_string()));
-    cards.push(("BITPIX".into(), "-32".into()));
+    push_card(&mut cards, &mut index, "NAXIS", naxis_str.into());
+    push_card(&mut cards, &mut index, "NAXIS1", width.to_string());
+    push_card(&mut cards, &mut index, "NAXIS2", height.to_string());
+    push_card(&mut cards, &mut index, "BITPIX", "-32".into());
 
     if let Some(ref wcs) = asdf_img.wcs {
         let wcs_entries = [
@@ -44,13 +43,14 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
             ("CUNIT1", wcs.cunit[0].clone()),
             ("CUNIT2", wcs.cunit[1].clone()),
         ];
-        for (k, v) in &wcs_entries {
-            cards.push((k.to_string(), v.clone()));
-            index.insert(k.to_string(), v.clone());
+        for (k, v) in wcs_entries {
+            push_card(&mut cards, &mut index, k, v);
         }
     }
 
-    for (k, v) in &asdf_img.metadata {
+    let mut extra: Vec<(&String, &String)> = asdf_img.metadata.iter().collect();
+    extra.sort();
+    for (k, v) in extra {
         let fits_key = k
             .replace('.', "_")
             .chars()
@@ -58,13 +58,11 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
             .collect::<String>()
             .to_uppercase();
         if !index.contains_key(&fits_key) {
-            cards.push((fits_key.clone(), v.clone()));
-            index.insert(fits_key, v.clone());
+            push_card(&mut cards, &mut index, &fits_key, v.clone());
         }
     }
 
-    cards.push(("ASDF_SRC".into(), "true".into()));
-    index.insert("ASDF_SRC".into(), "true".into());
+    push_card(&mut cards, &mut index, "ASDF_SRC", "true".into());
 
     let header = HduHeader { cards, index };
 
@@ -73,8 +71,8 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
         extname: Some("SCI".into()),
         extver: Some(1),
         naxis: if has_image { 2 } else { 0 },
-        naxis1: asdf_img.width as i64,
-        naxis2: asdf_img.height as i64,
+        naxis1: width as i64,
+        naxis2: height as i64,
         naxis3: 0,
         bitpix: -32,
         has_data: has_image,
@@ -84,12 +82,22 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
 
     Ok(MmapImageResult {
         header,
-        image: arr,
+        image: asdf_img.into_array2(),
         is_mef: false,
         selected_extension: Some("SCI".into()),
         extension_count: 1,
         extensions: vec![info],
     })
+}
+
+fn push_card(
+    cards: &mut Vec<(String, String)>,
+    index: &mut HashMap<String, String>,
+    key: &str,
+    value: String,
+) {
+    index.insert(key.to_string(), value.clone());
+    cards.push((key.to_string(), value));
 }
 
 pub fn is_asdf_path(path: &Path) -> bool {

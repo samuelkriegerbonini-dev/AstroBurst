@@ -196,16 +196,14 @@ pub fn remove_stars_with_mask(
         .and(&mut stars)
         .and(image)
         .and(&filled)
-        .and(mask)
-        .par_for_each(|sl, st, &img, &fill, &m| {
+        .par_for_each(|sl, st, &img, &fill| {
             if !img.is_finite() {
                 *sl = img;
                 *st = 0.0;
                 return;
             }
-            let blended = img * (1.0 - m) + fill * m;
-            *sl = blended;
-            *st = (img - blended).max(0.0);
+            *sl = fill;
+            *st = (img - fill).max(0.0);
         });
 
     Ok(StarRemovalResult {
@@ -374,6 +372,27 @@ mod tests {
         assert_eq!(res.r.starless, res.g.starless);
         assert_eq!(res.g.starless, res.b.starless);
         assert!(res.stars_removed >= 3);
+    }
+
+    #[test]
+    fn soft_mask_edge_blends_once() {
+        let mut img = Array2::from_elem((64, 64), 0.1f32);
+        img[[32, 32]] = 1.0;
+        let mut mask = Array2::zeros((64, 64));
+        mask[[32, 32]] = 0.5f32;
+        let validity = mask.mapv(|m: f32| 1.0 - m);
+        let filled = pushpull_fill(&img, &validity);
+        let res = remove_stars_with_mask(&img, &mask, 1, 0.0).unwrap();
+        let sl = res.starless[[32, 32]];
+        assert!(
+            (sl - filled[[32, 32]]).abs() < 1e-6,
+            "starless {} differs from single-blend fill {}",
+            sl,
+            filled[[32, 32]]
+        );
+        assert!(sl < 0.65, "star edge blended twice: {}", sl);
+        assert!((res.stars[[32, 32]] - (1.0 - sl)).abs() < 1e-6);
+        assert!((res.starless[[5, 5]] - 0.1).abs() < 1e-6);
     }
 
     #[test]

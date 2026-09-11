@@ -59,9 +59,9 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
     width,
     height,
     displayReferred,
-    r: channel(0, rMin, rMax),
-    g: channel(1, gMin, gMax),
-    b: channel(2, bMin, bMax),
+    r: channel(0, displayReferred ? 0 : rMin, displayReferred ? 1 : rMax),
+    g: channel(1, displayReferred ? 0 : gMin, displayReferred ? 1 : gMax),
+    b: channel(2, displayReferred ? 0 : bMin, displayReferred ? 1 : bMax),
   };
 }
 

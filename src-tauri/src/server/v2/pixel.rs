@@ -13,6 +13,17 @@ fn default_box() -> u32 {
     1
 }
 
+fn box_half(box_size: u32) -> Result<i64> {
+    if box_size.is_multiple_of(2) {
+        return Err(AppError::BadRequestWithHint {
+            code: "bad_request",
+            message: format!("box must be an odd positive integer, got {box_size}"),
+            hint: Some("use 1, 3, 5, ... so the box x box window is centred on the pixel".into()),
+        });
+    }
+    Ok((box_size / 2) as i64)
+}
+
 #[derive(Deserialize)]
 pub struct PixelParams {
     pub x: f64,
@@ -70,7 +81,7 @@ pub async fn pixel(
 
     let value = arr[[cy as usize, cx as usize]];
 
-    let half = (params.box_size / 2) as i64;
+    let half = box_half(params.box_size)?;
     let x0 = (cx - half).max(0);
     let x1 = (cx + half).min(cols as i64 - 1);
     let y0 = (cy - half).max(0);
@@ -125,4 +136,32 @@ pub async fn pixel(
         },
         "sky": sky,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code_of(e: &AppError) -> Option<&'static str> {
+        match e {
+            AppError::BadRequestWithHint { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn even_box_sizes_are_rejected_instead_of_silently_widening() {
+        for even in [0u32, 2, 4, 10] {
+            let err = box_half(even).unwrap_err();
+            assert_eq!(code_of(&err), Some("bad_request"), "box {even}");
+        }
+    }
+
+    #[test]
+    fn odd_box_sizes_give_a_centred_window() {
+        assert_eq!(box_half(1).unwrap(), 0);
+        assert_eq!(box_half(3).unwrap(), 1);
+        assert_eq!(box_half(5).unwrap(), 2);
+        assert_eq!(box_half(21).unwrap(), 10);
+    }
 }

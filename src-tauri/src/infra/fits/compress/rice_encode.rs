@@ -143,7 +143,7 @@ mod tests {
 
     fn roundtrip(pixels: &[i64], params: &RiceParams) {
         let encoded = rice_encode(pixels, params);
-        let decoded = rice_decode(&encoded, pixels.len(), params);
+        let decoded = rice_decode(&encoded, pixels.len(), params).unwrap();
         assert_eq!(decoded, pixels, "round-trip mismatch for {pixels:?}");
     }
 

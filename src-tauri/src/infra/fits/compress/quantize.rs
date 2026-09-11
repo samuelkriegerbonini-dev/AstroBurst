@@ -133,15 +133,6 @@ pub fn quantize_tile(
     }
 
     let has_nan = pixels.iter().any(|v| !v.is_finite());
-    let all_equal = !has_nan && pixels.windows(2).all(|w| w[0] == w[1]);
-
-    if all_equal {
-        return QuantizeResult::Ints {
-            values: vec![0; nx],
-            quant: TileQuant { scale: 1.0, zero: pixels[0] as f64 },
-            has_null: false,
-        };
-    }
 
     let Some((minval, maxval, stdev)) = estimate_noise(pixels) else {
         return QuantizeResult::Overflow;
@@ -207,16 +198,20 @@ mod tests {
     }
 
     #[test]
-    fn constant_tile_is_lossless_zero() {
-        let pixels = vec![3.5f32; 40];
-        match quantize_tile(&pixels, 16.0, 1, 0) {
-            QuantizeResult::Ints { values, quant, has_null } => {
-                assert!(values.iter().all(|&v| v == 0));
-                assert_eq!(quant.zero, 3.5);
-                assert!(!has_null);
-            }
-            QuantizeResult::Overflow => panic!("expected constant tile to quantize"),
+    fn constant_tile_falls_back_to_lossless_storage() {
+        for value in [3.5f32, 0.0, 65535.0] {
+            let pixels = vec![value; 40];
+            assert!(
+                matches!(quantize_tile(&pixels, 16.0, 1, 0), QuantizeResult::Overflow),
+                "constant tile of {value} must not be quantized (dithered decode would add noise)"
+            );
         }
+    }
+
+    #[test]
+    fn short_constant_tile_falls_back_to_lossless_storage() {
+        let pixels = vec![7.0f32; 4];
+        assert!(matches!(quantize_tile(&pixels, 16.0, 1, 0), QuantizeResult::Overflow));
     }
 
     #[test]

@@ -95,6 +95,16 @@ pub(crate) fn spec_to_rect(
         });
     }
 
+    let representable = i64::try_from(w).ok().and_then(|v| x0.checked_add(v)).is_some()
+        && i64::try_from(h).ok().and_then(|v| y0.checked_add(v)).is_some();
+    if !representable {
+        return Err(AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: format!("region [x={x0}, y={y0}, w={w}, h={h}] does not fit the image"),
+            hint: Some(format!("image extent is 0..{img_w} x 0..{img_h} px")),
+        });
+    }
+
     Ok((x0, y0, w, h))
 }
 
@@ -270,6 +280,34 @@ mod tests {
     #[test]
     fn zero_size_region_is_rejected() {
         let spec = RegionSpec::Pixel { x: 0, y: 0, width: 0, height: 10, clip: Some(true) };
+        let err = resolve_region(&spec, 100, 100, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+    }
+
+    #[test]
+    fn huge_width_is_rejected_instead_of_wrapping_past_the_bounds_check() {
+        for width in [1usize << 63, usize::MAX] {
+            let spec = RegionSpec::Pixel { x: 0, y: 0, width, height: 1, clip: None };
+            let err = resolve_region(&spec, 100, 100, None).unwrap_err();
+            assert_eq!(code_of(&err), Some("region_out_of_bounds"), "width {width}");
+            let spec = RegionSpec::Pixel { x: 0, y: 0, width, height: 1, clip: Some(true) };
+            let err = resolve_region(&spec, 100, 100, None).unwrap_err();
+            assert_eq!(code_of(&err), Some("region_out_of_bounds"), "clip width {width}");
+        }
+        let spec = RegionSpec::Pixel { x: 0, y: 0, width: 1, height: 1 << 63, clip: None };
+        let err = resolve_region(&spec, 100, 100, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+    }
+
+    #[test]
+    fn origin_near_i64_max_is_rejected_in_both_resolvers() {
+        let spec = RegionSpec::Pixel { x: i64::MAX, y: 0, width: 1, height: 1, clip: None };
+        let err = resolve_region(&spec, 100, 100, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+        let err = resolve_region_clamped(&spec, 100, 100, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let spec = RegionSpec::Pixel { x: 0, y: i64::MAX, width: 1, height: 1, clip: Some(true) };
         let err = resolve_region(&spec, 100, 100, None).unwrap_err();
         assert_eq!(code_of(&err), Some("region_out_of_bounds"));
     }

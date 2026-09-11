@@ -131,6 +131,17 @@ pub async fn auto_render(
         .into_response())
 }
 
+fn viewport_pixels(crop: &Array2<f32>, explicit: Option<StfParams>, global_stats: &ImageStats) -> Vec<u8> {
+    match explicit {
+        Some(stf) => apply_stf(crop, &stf, global_stats),
+        None => {
+            let crop_stats = astroburst_lib::core::imaging::stats::compute_image_stats(crop);
+            let stf = auto_stf(&crop_stats, &AutoStfConfig::default());
+            apply_stf(crop, &stf, &crop_stats)
+        }
+    }
+}
+
 pub async fn viewport(
     SessionExtractor(session): SessionExtractor,
     State(_state): State<AppState>,
@@ -162,15 +173,12 @@ pub async fn viewport(
 
         let crop: Array2<f32> = arr.slice(ndarray::s![y..y_end, x..x_end]).to_owned();
 
-        let stf = match (shadow, midtone, highlight) {
-            (Some(s), Some(m), Some(hi)) => StfParams { shadow: s, midtone: m, highlight: hi },
-            _ => {
-                let crop_stats = astroburst_lib::core::imaging::stats::compute_image_stats(&crop);
-                auto_stf(&crop_stats, &AutoStfConfig::default())
-            }
+        let explicit = match (shadow, midtone, highlight) {
+            (Some(s), Some(m), Some(hi)) => Some(StfParams { shadow: s, midtone: m, highlight: hi }),
+            _ => None,
         };
 
-        let pixels = apply_stf(&crop, &stf, &global_stats);
+        let pixels = viewport_pixels(&crop, explicit, &global_stats);
         let (ch, cw) = crop.dim();
         encode_png_l8(&pixels, cw, ch)
     })
@@ -179,4 +187,56 @@ pub async fn viewport(
     .map_err(AppError::Internal)?;
 
     Ok(png_response(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use astroburst_lib::core::imaging::stats::compute_image_stats;
+
+    fn full_image() -> Array2<f32> {
+        let mut arr = Array2::from_shape_fn((64, 64), |(i, j)| 1000.0 + ((i * 7 + j * 13) % 50) as f32);
+        arr[[0, 0]] = 65535.0;
+        arr
+    }
+
+    fn crop_of(full: &Array2<f32>) -> Array2<f32> {
+        full.slice(ndarray::s![8..40, 8..40]).to_owned()
+    }
+
+    fn median_byte(pixels: &[u8]) -> u8 {
+        let mut v = pixels.to_vec();
+        v.sort_unstable();
+        v[v.len() / 2]
+    }
+
+    #[test]
+    fn auto_viewport_stretch_uses_crop_normalisation() {
+        let full = full_image();
+        let global_stats = compute_image_stats(&full);
+        let crop = crop_of(&full);
+
+        let pixels = viewport_pixels(&crop, None, &global_stats);
+
+        let target = (AutoStfConfig::default().target_bg * 255.0).round() as i32;
+        let med = median_byte(&pixels) as i32;
+        assert!((med - target).abs() <= 3, "median byte {med}, expected about {target}");
+    }
+
+    #[test]
+    fn explicit_viewport_params_use_global_normalisation() {
+        let full = full_image();
+        let global_stats = compute_image_stats(&full);
+        let crop = crop_of(&full);
+        let stf = auto_stf(&global_stats, &AutoStfConfig::default());
+
+        let pixels = viewport_pixels(&crop, Some(stf), &global_stats);
+        let full_pixels = apply_stf(&full, &stf, &global_stats);
+        let fp = &full_pixels;
+        let expected: Vec<u8> = (8..40)
+            .flat_map(|i| (8..40).map(move |j| fp[i * 64 + j]))
+            .collect();
+
+        assert_eq!(pixels, expected);
+    }
 }

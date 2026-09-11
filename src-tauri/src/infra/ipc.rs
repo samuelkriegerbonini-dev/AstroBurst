@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::stats::is_valid_pixel;
+
 pub struct RawPixelBuffer {
     pub bytes: Vec<u8>,
     pub width: u32,
@@ -58,8 +60,10 @@ fn scan_extrema(slice: &[f32]) -> ScanResult {
             let mut local = ScanResult::identity();
             for &v in chunk {
                 if v.is_finite() {
-                    if v < local.min { local.min = v; }
-                    if v > local.max { local.max = v; }
+                    if is_valid_pixel(v) {
+                        if v < local.min { local.min = v; }
+                        if v > local.max { local.max = v; }
+                    }
                     local.sum += v as f64;
                     local.sum_sq += (v as f64) * (v as f64);
                     local.count += 1;
@@ -87,7 +91,7 @@ pub fn encode_f32_buffer(arr: &Array2<f32>) -> Result<RawPixelBuffer> {
     let bytes = if scan.has_non_finite {
         let mut buf = Vec::with_capacity(byte_len);
         for &v in slice {
-            let clean = if v.is_finite() { v } else { 0.0f32 };
+            let clean = if v.is_finite() { v } else { f32::NAN };
             buf.extend_from_slice(&clean.to_le_bytes());
         }
         buf
@@ -190,7 +194,7 @@ fn encode_channel_preview(arr: &Array2<f32>, max_dim: usize) -> Result<ChannelPr
                 }
 
                 let out = if count == 0 {
-                    0.0f32
+                    f32::NAN
                 } else {
                     let mean = (sum / count as f64) as f32;
                     let d = cell_max - mean;
@@ -332,7 +336,64 @@ mod tests {
 
         let first =
             f32::from_le_bytes([buf.bytes[0], buf.bytes[1], buf.bytes[2], buf.bytes[3]]);
-        assert_eq!(first, 0.0);
+        assert!(first.is_nan());
+        let second =
+            f32::from_le_bytes([buf.bytes[4], buf.bytes[5], buf.bytes[6], buf.bytes[7]]);
+        assert!(second.is_nan());
+        let third =
+            f32::from_le_bytes([buf.bytes[8], buf.bytes[9], buf.bytes[10], buf.bytes[11]]);
+        assert_eq!(third, 1.0);
+        assert_eq!(buf.data_min, 1.0);
+        assert_eq!(buf.data_max, 1.0);
+    }
+
+    #[test]
+    fn test_extrema_match_valid_pixel_stats() {
+        let mut raw = vec![10.0f32; 16];
+        raw[0] = 0.0;
+        raw[1] = -120.0;
+        raw[2] = 0.5;
+        raw[3] = 5000.0;
+        raw[4] = f32::NAN;
+        let arr = Array2::from_shape_vec((4, 4), raw).unwrap();
+        let buf = encode_f32_buffer(&arr).unwrap();
+
+        let stats = crate::core::imaging::stats::compute_image_stats(&arr);
+        assert_eq!(buf.data_min as f64, stats.min);
+        assert_eq!(buf.data_max as f64, stats.max);
+        assert_eq!(buf.data_min, 0.5);
+        assert_eq!(buf.data_max, 5000.0);
+
+        let second =
+            f32::from_le_bytes([buf.bytes[4], buf.bytes[5], buf.bytes[6], buf.bytes[7]]);
+        assert_eq!(second, -120.0);
+    }
+
+    #[test]
+    fn test_extrema_fallback_when_no_valid_pixels() {
+        let arr = Array2::from_shape_fn((4, 4), |_| -1.0f32);
+        let buf = encode_f32_buffer(&arr).unwrap();
+        assert_eq!(buf.data_min, 0.0);
+        assert_eq!(buf.data_max, 1.0);
+    }
+
+    #[test]
+    fn test_downsample_empty_cell_is_nan() {
+        let mut arr = Array2::from_shape_fn((4, 4), |_| 10.0f32);
+        arr[[0, 0]] = f32::NAN;
+        arr[[0, 1]] = f32::NAN;
+        arr[[1, 0]] = f32::INFINITY;
+        arr[[1, 1]] = f32::NEG_INFINITY;
+        let data = encode_with_header_downsampled(&arr, 2).unwrap();
+
+        let px = |i: usize| {
+            let off = 16 + i * 4;
+            f32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+        };
+        assert!(px(0).is_nan());
+        assert_eq!(px(3), 10.0);
+        assert_eq!(f32::from_le_bytes([data[8], data[9], data[10], data[11]]), 10.0);
+        assert_eq!(f32::from_le_bytes([data[12], data[13], data[14], data[15]]), 10.0);
     }
 
     #[test]
@@ -379,7 +440,7 @@ mod tests {
 
         let data_min = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let data_max = f32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        assert_eq!(data_min, -7.0);
+        assert_eq!(data_min, 1.0);
         assert_eq!(data_max, 999.0);
     }
 
@@ -430,12 +491,12 @@ mod tests {
         let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         assert_eq!((w, h), (4, 4));
 
-        assert_eq!(rgb_header_f32(&data, 8), 0.0);
+        assert_eq!(rgb_header_f32(&data, 8), 1.0);
         assert_eq!(rgb_header_f32(&data, 12), 15.0);
         assert_eq!(rgb_header_f32(&data, 16), 100.0);
         assert_eq!(rgb_header_f32(&data, 20), 115.0);
-        assert_eq!(rgb_header_f32(&data, 24), -50.0);
-        assert_eq!(rgb_header_f32(&data, 28), -35.0);
+        assert_eq!(rgb_header_f32(&data, 24), 0.0);
+        assert_eq!(rgb_header_f32(&data, 28), 1.0);
 
         let (r_base, g_base, b_base) = (32, 32 + 64, 32 + 128);
         assert_eq!(rgb_px(&data, r_base, 0), 0.0);
@@ -474,11 +535,11 @@ mod tests {
         let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         assert_eq!((w, h), (2, 2));
 
-        assert_eq!(rgb_header_f32(&data, 8), -7.0);
+        assert_eq!(rgb_header_f32(&data, 8), 1.0);
         assert_eq!(rgb_header_f32(&data, 12), 999.0);
         assert_eq!(rgb_header_f32(&data, 16), 5.0);
         assert_eq!(rgb_header_f32(&data, 20), 5.0);
-        assert_eq!(rgb_header_f32(&data, 24), -3.0);
+        assert_eq!(rgb_header_f32(&data, 24), 2.0);
         assert_eq!(rgb_header_f32(&data, 28), 2.0);
     }
 
@@ -493,7 +554,9 @@ mod tests {
 
         assert_eq!(rgb_header_f32(&data, 8), 1.0);
         assert_eq!(rgb_header_f32(&data, 12), 1.0);
-        assert_eq!(rgb_px(&data, 32, 0), 0.0);
+        assert!(rgb_px(&data, 32, 0).is_nan());
+        assert_eq!(rgb_px(&data, 32, 1), 1.0);
+        assert_eq!(rgb_px(&data, 32 + 64, 0), 2.0);
     }
 
     #[test]

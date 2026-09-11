@@ -103,17 +103,7 @@ impl LruFrameCache {
 pub use crate::core::cube::eager::GlobalCubeStats;
 
 pub fn normalize_frame_with_stats(data: &Array2<f32>, stats: &GlobalCubeStats) -> Array2<f32> {
-    let alpha: f32 = 10.0;
-    let inv_sigma_alpha = alpha / stats.sigma;
-
-    data.mapv(|v| {
-        if !v.is_finite() {
-            return 0.0;
-        }
-        let clamped = v.clamp(stats.low, stats.high);
-        let scaled = inv_sigma_alpha * (clamped - stats.median);
-        scaled.asinh()
-    })
+    crate::core::cube::eager::normalize_with_global(data, stats)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -130,6 +120,16 @@ pub struct LazyCubeResult {
 
 const DEFAULT_CACHE_BYTES: usize = 256 << 20;
 const BATCH_SIZE: usize = 32;
+const STATS_SAMPLE_FRAMES: usize = 32;
+const STATS_TARGET_SAMPLES: usize = 4_000_000;
+
+fn stats_sample_plan(naxis3: usize, npix: usize) -> (usize, usize) {
+    let sample_frames = STATS_SAMPLE_FRAMES.min(naxis3).max(1);
+    let step = naxis3.div_ceil(sample_frames);
+    let frames = (0..naxis3).step_by(step.max(1)).count();
+    let stride = ((frames * npix) / STATS_TARGET_SAMPLES).max(1);
+    (step.max(1), stride)
+}
 
 pub struct LazyCube {
     _file: File,
@@ -396,19 +396,23 @@ impl LazyCube {
     pub fn compute_global_stats_streaming(&self) -> Result<GlobalCubeStats> {
         let g = &self.geometry;
 
-        let sample_frames = 32.min(g.naxis3);
-        let step = if g.naxis3 > sample_frames { g.naxis3 / sample_frames } else { 1 };
+        let (step, stride) = stats_sample_plan(g.naxis3, g.naxis1 * g.naxis2);
 
         let indices: Vec<usize> = (0..g.naxis3).step_by(step).collect();
         let frame_samples: Vec<Vec<f32>> = indices
             .par_iter()
             .map(|&z| {
                 let pixels = self.decode_frame_nocache(z);
-                pixels.into_iter().filter(|v| v.is_finite() && *v != 0.0).collect()
+                pixels
+                    .into_iter()
+                    .step_by(stride)
+                    .filter(|v| v.is_finite() && *v != 0.0)
+                    .collect()
             })
             .collect();
 
-        let mut sampled: Vec<f32> = Vec::new();
+        let total: usize = frame_samples.iter().map(Vec::len).sum();
+        let mut sampled: Vec<f32> = Vec::with_capacity(total);
         for chunk in frame_samples {
             sampled.extend(chunk);
         }
@@ -531,7 +535,72 @@ mod tests {
         assert_eq!(normalized.dim(), (2, 2));
         for &v in normalized.iter() {
             assert!(v.is_finite());
+            assert!(v > crate::types::constants::PADDING_THRESHOLD && v <= 1.0, "{}", v);
         }
+        assert!(normalized[[0, 0]] < normalized[[0, 1]]);
+        assert!(normalized[[0, 1]] < normalized[[1, 0]]);
+        assert!(normalized[[1, 0]] < normalized[[1, 1]]);
+    }
+
+    #[test]
+    fn stats_sample_plan_bounds_frames_and_samples() {
+        for naxis3 in 2..300usize {
+            let (step, stride) = stats_sample_plan(naxis3, 100);
+            let frames = (0..naxis3).step_by(step).count();
+            assert!(frames >= 1 && frames <= STATS_SAMPLE_FRAMES, "naxis3={} frames={}", naxis3, frames);
+            assert_eq!(stride, 1);
+        }
+
+        let npix = 4096 * 4096;
+        let (step, stride) = stats_sample_plan(40, npix);
+        let frames = (0..40).step_by(step).count();
+        assert_eq!(frames, 20);
+        let samples = frames * ((npix + stride - 1) / stride);
+        assert!(samples <= 2 * STATS_TARGET_SAMPLES, "samples={}", samples);
+        assert!(samples >= STATS_TARGET_SAMPLES / 2, "samples={}", samples);
+
+        let (step, stride) = stats_sample_plan(0, npix);
+        assert_eq!((step, stride), (1, 1));
+    }
+
+    fn write_synthetic_cube(path: &std::path::Path, naxis1: usize, naxis2: usize, naxis3: usize) {
+        use std::io::Write;
+        let mut header = String::new();
+        for card in [
+            "SIMPLE  =                    T".to_string(),
+            "BITPIX  =                  -32".to_string(),
+            "NAXIS   =                    3".to_string(),
+            format!("NAXIS1  = {:>20}", naxis1),
+            format!("NAXIS2  = {:>20}", naxis2),
+            format!("NAXIS3  = {:>20}", naxis3),
+            "END".to_string(),
+        ] {
+            header.push_str(&format!("{:<80}", card));
+        }
+        let mut bytes = header.into_bytes();
+        bytes.resize(2880, b' ');
+        for z in 0..naxis3 {
+            for _ in 0..(naxis1 * naxis2) {
+                bytes.extend_from_slice(&((z + 1) as f32).to_be_bytes());
+            }
+        }
+        let padded = (bytes.len() + 2879) / 2880 * 2880;
+        bytes.resize(padded, 0);
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&bytes).unwrap();
+    }
+
+    #[test]
+    fn global_stats_streaming_samples_at_most_32_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube40.fits");
+        write_synthetic_cube(&path, 4, 4, 40);
+        let lazy = LazyCube::open(path.to_str().unwrap()).unwrap();
+
+        let stats = lazy.compute_global_stats_streaming().unwrap();
+        assert_eq!(stats.median, 21.0);
+        assert_eq!(stats.low, 1.0);
+        assert_eq!(stats.high, 39.0);
     }
 
     #[test]

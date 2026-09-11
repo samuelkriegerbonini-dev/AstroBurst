@@ -36,6 +36,7 @@ fn process_rgb_fits(
     t0: Instant,
     full: bool,
 ) -> anyhow::Result<Option<serde_json::Value>> {
+    let stamp = rgb_stamp(path);
     let rgb = match try_extract_rgb_resolved(path)? {
         Some(r) => r,
         None => return Ok(None),
@@ -67,6 +68,7 @@ fn process_rgb_fits(
     };
 
     helpers::insert_composite_and_orig(rgb.r, rgb.g, rgb.b, stats_r.clone(), stats_g, stats_b);
+    prime_rgb_preview_cache(path, stamp);
 
     let mut result = json!({
         RES_PNG_PATH: png_path,
@@ -199,6 +201,28 @@ static RGB_PREVIEW_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<RgbPreview
 
 const RGB_PREVIEW_CACHE_MAX_BYTES: usize = 512 << 20;
 
+fn rgb_stamp(p: &str) -> Option<RgbStamp> {
+    std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+fn prime_rgb_preview_cache(path: &str, stamp: Option<RgbStamp>) {
+    let Some(stamp) = stamp else { return };
+    let Ok((r, g, b)) = helpers::load_composite_orig_rgb() else { return };
+    let (r, g, b) = (r.data_arc(), g.data_arc(), b.data_arc());
+    let total = (r.len() + g.len() + b.len()) * 4;
+    if total > RGB_PREVIEW_CACHE_MAX_BYTES {
+        return;
+    }
+    let mut guard = RGB_PREVIEW_CACHE.lock().unwrap();
+    *guard = Some(RgbPreviewEntry {
+        path: path.to_string(),
+        stamp,
+        r,
+        g,
+        b,
+    });
+}
+
 fn load_rgb_preview_cached(
     p: &str,
 ) -> anyhow::Result<(
@@ -206,7 +230,7 @@ fn load_rgb_preview_cached(
     std::sync::Arc<ndarray::Array2<f32>>,
     std::sync::Arc<ndarray::Array2<f32>>,
 )> {
-    let stamp: Option<RgbStamp> = std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+    let stamp = rgb_stamp(p);
 
     if let Some(st) = &stamp {
         let guard = RGB_PREVIEW_CACHE.lock().unwrap();
@@ -273,4 +297,43 @@ pub async fn get_raw_rgb_pixels_preview(
         .await
         .map_err(|e| format!("{}", e))?
         .map_err(|e| format!("{:#}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_rgb_preview_cached, process_rgb_fits, RGB_PREVIEW_CACHE};
+    use crate::infra::fits::writer::write_fits_rgb;
+    use ndarray::Array2;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    #[test]
+    fn process_rgb_fits_primes_preview_cache_with_shared_planes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rgb_prime.fits");
+        let path_str = path.to_str().unwrap().to_string();
+        let r = Array2::from_shape_fn((4, 5), |(y, x)| (y * 5 + x) as f32);
+        let g = r.mapv(|v| v + 100.0);
+        let b = r.mapv(|v| v + 200.0);
+        write_fits_rgb(&path_str, &r, &g, &b, None).unwrap();
+
+        let out_dir = dir.path().to_str().unwrap();
+        let result = process_rgb_fits(&path_str, out_dir, Instant::now(), false).unwrap();
+        assert!(result.is_some());
+
+        let primed = {
+            let guard = RGB_PREVIEW_CACHE.lock().unwrap();
+            let e = guard.as_ref().expect("RGB_PREVIEW_CACHE should be primed after process_rgb_fits");
+            assert_eq!(e.path, path_str);
+            (e.r.clone(), e.g.clone(), e.b.clone())
+        };
+
+        let (cr, cg, cb) = load_rgb_preview_cached(&path_str).unwrap();
+        assert!(Arc::ptr_eq(&primed.0, &cr));
+        assert!(Arc::ptr_eq(&primed.1, &cg));
+        assert!(Arc::ptr_eq(&primed.2, &cb));
+        assert_eq!(cr.as_ref(), &r);
+        assert_eq!(cg.as_ref(), &g);
+        assert_eq!(cb.as_ref(), &b);
+    }
 }

@@ -213,6 +213,9 @@ pub fn compute_global_stats(cube: &Array3<f32>) -> GlobalCubeStats {
 pub fn normalize_with_global(data: &Array2<f32>, g: &GlobalCubeStats) -> Array2<f32> {
     let alpha: f32 = 10.0;
     let inv_sigma_alpha = alpha / g.sigma;
+    let lo = (inv_sigma_alpha * (g.low - g.median)).asinh();
+    let hi = (inv_sigma_alpha * (g.high - g.median)).asinh();
+    let inv = 1.0 / (hi - lo).max(1e-6);
 
     data.mapv(|v| {
         if !v.is_finite() {
@@ -220,7 +223,7 @@ pub fn normalize_with_global(data: &Array2<f32>, g: &GlobalCubeStats) -> Array2<
         }
         let clamped = v.clamp(g.low, g.high);
         let scaled = inv_sigma_alpha * (clamped - g.median);
-        scaled.asinh()
+        ((scaled.asinh() - lo) * inv).clamp(1e-6, 1.0)
     })
 }
 
@@ -314,4 +317,42 @@ pub fn process_cube(
         center_spectrum: spectrum,
         wavelengths,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::constants::PADDING_THRESHOLD;
+
+    #[test]
+    fn normalize_with_global_keeps_pixels_below_median_visible() {
+        let g = GlobalCubeStats { median: 100.0, sigma: 5.0, low: 88.0, high: 600.0 };
+        let data = Array2::from_shape_vec(
+            (2, 3),
+            vec![88.0, 99.0, 100.0, 100.01, 600.0, f32::NAN],
+        )
+        .unwrap();
+        let out = normalize_with_global(&data, &g);
+
+        assert_eq!(out[[1, 2]], 0.0);
+        for &v in out.iter().take(5) {
+            assert!(v > PADDING_THRESHOLD && v <= 1.0, "{}", v);
+        }
+        assert!(out[[0, 0]] < out[[0, 1]]);
+        assert!(out[[0, 1]] < out[[0, 2]]);
+        assert!(out[[0, 2]] < out[[1, 0]]);
+        assert!(out[[1, 0]] < out[[1, 1]]);
+        assert!((out[[1, 1]] - 1.0).abs() < 1e-6);
+        assert!(out[[0, 2]] > 0.3 && out[[0, 2]] < 0.4, "{}", out[[0, 2]]);
+    }
+
+    #[test]
+    fn normalize_with_global_degenerate_range_stays_finite() {
+        let g = GlobalCubeStats { median: 5.0, sigma: 1e-10, low: 5.0, high: 5.0 };
+        let data = Array2::from_shape_vec((1, 2), vec![5.0, 7.0]).unwrap();
+        let out = normalize_with_global(&data, &g);
+        for &v in out.iter() {
+            assert!(v.is_finite() && v > PADDING_THRESHOLD && v <= 1.0, "{}", v);
+        }
+    }
 }

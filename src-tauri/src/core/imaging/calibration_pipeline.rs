@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use crate::math::median::f32_cmp;
 use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
+use crate::core::imaging::stats::percentile;
+use crate::core::imaging::stretch::{arcsinh_stretch_rgb_with_stats, arcsinh_stretch_with_stats};
+
+const MEANAD_TO_SIGMA: f64 = 1.2533;
+const PREVIEW_STRETCH_FACTOR: f32 = 20.0;
+
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
     pub dark: Option<Array2<f32>>,
@@ -275,9 +281,11 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
     if g.dim() != (h, w) || b.dim() != (h, w) {
         let min_h = h.min(g.dim().0).min(b.dim().0);
         let min_w = w.min(g.dim().1).min(b.dim().1);
-        let r_n = normalize_channel(&r.slice(ndarray::s![..min_h, ..min_w]).to_owned());
-        let g_n = normalize_channel(&g.slice(ndarray::s![..min_h, ..min_w]).to_owned());
-        let b_n = normalize_channel(&b.slice(ndarray::s![..min_h, ..min_w]).to_owned());
+        let (r_n, g_n, b_n) = stretch_rgb_shared(
+            &r.slice(ndarray::s![..min_h, ..min_w]).to_owned(),
+            &g.slice(ndarray::s![..min_h, ..min_w]).to_owned(),
+            &b.slice(ndarray::s![..min_h, ..min_w]).to_owned(),
+        );
 
         let rs = r_n.as_slice().unwrap();
         let gs = g_n.as_slice().unwrap();
@@ -299,13 +307,11 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
 
     let (r_norm, g_norm, b_norm) = match find("L") {
         Some(lum) if lum.dim() == (h, w) => {
-            let r_n = normalize_channel(r);
-            let g_n = normalize_channel(g);
-            let b_n = normalize_channel(b);
-            let l_n = normalize_channel(lum);
+            let (r_n, g_n, b_n) = stretch_rgb_shared(r, g, b);
+            let l_n = stretch_mono_robust(lum);
             apply_luminance_rgb(&r_n, &g_n, &b_n, &l_n)
         }
-        _ => (normalize_channel(r), normalize_channel(g), normalize_channel(b)),
+        _ => stretch_rgb_shared(r, g, b),
     };
 
     let rs = r_norm.as_slice().unwrap();
@@ -364,29 +370,49 @@ fn apply_luminance_rgb(
     )
 }
 
-fn normalize_channel(ch: &Array2<f32>) -> Array2<f32> {
-    let slice = ch.as_slice().unwrap();
-    let mut min_val = f32::INFINITY;
-    let mut max_val = f32::NEG_INFINITY;
-
-    for &v in slice {
-        if v < min_val { min_val = v; }
-        if v > max_val { max_val = v; }
+fn robust_stretch_bounds(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
+    let mut samples: Vec<f32> = Vec::new();
+    for ch in channels {
+        let stride = (ch.len() / 65536).max(1);
+        samples.extend(ch.iter().step_by(stride).copied().filter(|v| v.is_finite()));
     }
-
-    let range = max_val - min_val;
-    if range < 1e-10 {
-        return Array2::zeros(ch.dim());
+    if samples.is_empty() {
+        return None;
     }
+    let hi_pct = percentile(&mut samples, 0.999);
+    let max_val = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (bg, sigma) = sigma_clipped_stats(&mut samples, 3.0, 3);
+    let lo = (bg - 2.0 * sigma) as f32;
+    let hi = if hi_pct > lo { hi_pct } else { max_val };
+    let range = hi - lo;
+    if !range.is_finite() || range < 1e-10 {
+        return None;
+    }
+    Some((lo, hi))
+}
 
-    let inv_range = 1.0 / range;
-     ch.mapv(|v| {
-        if v.is_finite() {
-            ((v - min_val) * inv_range).clamp(0.0, 1.0)
-        } else {
-            0.0
+fn stretch_rgb_shared(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+    match robust_stretch_bounds(&[r, g, b]) {
+        Some((lo, hi)) => {
+            arcsinh_stretch_rgb_with_stats(r, g, b, Some(lo), Some(hi), PREVIEW_STRETCH_FACTOR, 1.0)
         }
-    })
+        None => (
+            Array2::zeros(r.dim()),
+            Array2::zeros(g.dim()),
+            Array2::zeros(b.dim()),
+        ),
+    }
+}
+
+fn stretch_mono_robust(ch: &Array2<f32>) -> Array2<f32> {
+    match robust_stretch_bounds(&[ch]) {
+        Some((lo, hi)) => arcsinh_stretch_with_stats(ch, lo, hi, PREVIEW_STRETCH_FACTOR, 1.0),
+        None => Array2::zeros(ch.dim()),
+    }
 }
 
 fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
@@ -449,7 +475,15 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
                 scratch.iter_mut().for_each(|v| *v = (*v - median).abs());
                 let mad_mid = scratch.len() / 2;
                 scratch.select_nth_unstable_by(mad_mid, |a, b| f32_cmp(a, b));
-                let sigma = (scratch[mad_mid] as f64 * MAD_TO_SIGMA) as f32;
+                let mad_sigma = scratch[mad_mid] as f64 * MAD_TO_SIGMA;
+                let sigma = if mad_sigma > 1e-10 {
+                    mad_sigma as f32
+                } else {
+                    let mean_abs = vals.iter()
+                        .map(|(v, _)| (*v as f64 - median as f64).abs())
+                        .sum::<f64>() / vals.len() as f64;
+                    (mean_abs * MEANAD_TO_SIGMA) as f32
+                };
 
                 if sigma < 1e-10 { break; }
                 let before = vals.len();
@@ -495,5 +529,60 @@ mod tests {
         let sky_b = out[1][[39, 0]];
         assert!((sky_a - sky_b).abs() < 0.05, "sky levels diverged: {} vs {}", sky_a, sky_b);
         assert!((sky_a - 1.0).abs() < 0.1, "sky not normalized to ~1: {}", sky_a);
+    }
+
+    fn master_with_nebula(sky: f32, nebula: f32, star: f32) -> Array2<f32> {
+        let mut a = Array2::from_elem((40, 40), sky);
+        for y in 10..14 {
+            for x in 10..14 {
+                a[[y, x]] = nebula;
+            }
+        }
+        a[[30, 30]] = star;
+        a
+    }
+
+    #[test]
+    fn rgb_preview_uses_shared_robust_stretch() {
+        let masters = vec![
+            ("R".to_string(), master_with_nebula(1.0, 2.0, 131.0)),
+            ("G".to_string(), master_with_nebula(1.0, 2.0, 262.0)),
+            ("B".to_string(), master_with_nebula(1.0, 2.0, 50.0)),
+        ];
+        let rgb = compose_rgb_from_masters(&masters).expect("rgb composed");
+        let nr = rgb[[11, 11, 0]];
+        let ng = rgb[[11, 11, 1]];
+        assert!(nr > 0.2, "nebula R too dark: {}", nr);
+        assert!(ng > 0.2, "nebula G too dark: {}", ng);
+        assert!(
+            (nr - ng).abs() < 0.05 * nr.max(ng),
+            "channel balance lost: R={} G={}",
+            nr,
+            ng
+        );
+        assert!(rgb[[0, 0, 0]] < nr, "sky not below nebula");
+        assert!(rgb[[30, 30, 0]] >= nr, "star not at or above nebula");
+    }
+
+    fn frames_1x1(values: &[f32]) -> Vec<Array2<f32>> {
+        values.iter().map(|&v| Array2::from_elem((1, 1), v)).collect()
+    }
+
+    #[test]
+    fn sigma_clip_rejects_lone_outlier_over_tied_background() {
+        let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 1000.0, 60000.0]);
+        let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
+        let (stacked, rejections) = sigma_clipped_mean_stack(&frames, &config);
+        assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
+        assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn sigma_clip_keeps_quantized_noise_around_tied_background() {
+        let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 999.0, 1001.0]);
+        let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
+        let (stacked, rejections) = sigma_clipped_mean_stack(&frames, &config);
+        assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3);
+        assert_eq!(rejections, vec![0, 0, 0, 0, 0]);
     }
 }

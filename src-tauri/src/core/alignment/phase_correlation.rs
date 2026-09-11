@@ -83,6 +83,13 @@ pub fn phase_correlate(
     }
 
     let refine = correlate_single(&ref_crop, &tgt_crop);
+    if is_low_confidence(refine.confidence) && !is_low_confidence(coarse.confidence) {
+        return PhaseCorrelationResult {
+            dx: coarse_dx,
+            dy: coarse_dy,
+            confidence: coarse.confidence,
+        };
+    }
     PhaseCorrelationResult {
         dx: (tgt_x0 as f64 - ref_x0 as f64) + refine.dx,
         dy: (tgt_y0 as f64 - ref_y0 as f64) + refine.dy,
@@ -358,6 +365,55 @@ mod tests {
         let res = phase_correlate(&r, &r);
         eprintln!("LARGE identical: dy={} dx={} conf={}", res.dy, res.dx, res.confidence);
         assert!(res.dy.abs() < 2.0 && res.dx.abs() < 2.0, "dy={} dx={}", res.dy, res.dx);
+    }
+
+    fn make_corner_object_frame(rows: usize, cols: usize) -> Array2<f32> {
+        let y_start = 120usize;
+        let x_start = 1250usize;
+        let size = 192usize;
+        let stars: [(f32, f32, f32); 6] = [
+            (30.0, 40.0, 1000.0),
+            (75.0, 120.0, 800.0),
+            (140.0, 60.0, 1200.0),
+            (100.0, 165.0, 900.0),
+            (165.0, 130.0, 700.0),
+            (50.0, 90.0, 1100.0),
+        ];
+        Array2::from_shape_fn((rows, cols), |(y, x)| {
+            if y < y_start || y >= y_start + size || x < x_start || x >= x_start + size {
+                return 0.0;
+            }
+            let py = (y - y_start) as f32;
+            let px = (x - x_start) as f32;
+            let mut v = 50.0 + (py * 0.05).sin() * (px * 0.04).cos() * 100.0;
+            for &(sy, sx, amp) in &stars {
+                let d2 = (py - sy) * (py - sy) + (px - sx) * (px - sx);
+                v += amp * (-d2 / (2.0 * 36.0)).exp();
+            }
+            v
+        })
+    }
+
+    #[test]
+    fn test_large_frame_featureless_centre_keeps_coarse_result() {
+        let img = make_corner_object_frame(1200, 1600);
+        let shifted = shift_array(&img, 12, -9);
+        let result = phase_correlate(&img, &shifted);
+        assert!(
+            !is_low_confidence(result.confidence),
+            "confidence={} should be kept from the coarse pass",
+            result.confidence
+        );
+        assert!(
+            (result.dy - 12.0).abs() < 4.0,
+            "dy={} expected 12",
+            result.dy
+        );
+        assert!(
+            (result.dx - (-9.0)).abs() < 4.0,
+            "dx={} expected -9",
+            result.dx
+        );
     }
 
     #[test]

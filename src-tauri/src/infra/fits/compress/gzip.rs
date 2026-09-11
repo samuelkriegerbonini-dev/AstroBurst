@@ -34,7 +34,7 @@ pub fn gzip_decode(data: &[u8], bytepix: usize, is_gzip2: bool) -> Result<Vec<u8
 /// GZIP_2 stores bytes "planed": all pixels' byte 0 first, then all byte 1,
 /// etc. (i.e. a transpose of the natural [pixel][byte] layout). Undo it back
 /// to [pixel][byte] order.
-fn unshuffle_bytes(planed: &[u8], bytepix: usize) -> Vec<u8> {
+pub(crate) fn unshuffle_bytes(planed: &[u8], bytepix: usize) -> Vec<u8> {
     let n = planed.len() / bytepix;
     let mut out = vec![0u8; planed.len()];
     for plane in 0..bytepix {

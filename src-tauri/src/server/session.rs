@@ -79,6 +79,22 @@ impl Session {
     pub fn has_active_jobs(&self) -> bool {
         self.jobs.iter().any(|e| e.value().is_running())
     }
+
+    pub fn prune_evicted_meta(&self) {
+        self.v2.meta.retain(|k, _| self.cache.contains(k));
+    }
+
+    pub async fn reconcile_active_ref(&self) -> Option<String> {
+        self.prune_evicted_meta();
+        let mut active = self.v2.active_ref.write().await;
+        if active
+            .as_deref()
+            .is_some_and(|r| !self.v2.meta.contains_key(r))
+        {
+            *active = None;
+        }
+        active.clone()
+    }
 }
 
 pub struct SessionManager {
@@ -130,5 +146,61 @@ impl SessionManager {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use astroburst_lib::types::ImageStats;
+    use ndarray::Array2;
+
+    use super::*;
+
+    fn meta_for(image_ref: &str) -> ImageMeta {
+        ImageMeta {
+            image_ref: image_ref.to_string(),
+            source: None,
+            hdu: None,
+            width: 4,
+            height: 4,
+            wcs_present: false,
+            extname: None,
+        }
+    }
+
+    fn insert(session: &Session, image_ref: &str) {
+        session.cache.insert_synthetic(
+            image_ref,
+            Arc::new(Array2::<f32>::zeros((4, 4))),
+            ImageStats::default(),
+        );
+        session.v2.meta.insert(image_ref.to_string(), meta_for(image_ref));
+    }
+
+    #[tokio::test]
+    async fn reconcile_drops_evicted_meta_and_stale_active_ref() {
+        let cfg = ServerConfig {
+            cache_max_entries: 1,
+            ..ServerConfig::default()
+        };
+        let session = Session::new("s".into(), &cfg);
+
+        insert(&session, "img_0");
+        *session.v2.active_ref.write().await = Some("img_0".into());
+        insert(&session, "img_1");
+
+        assert!(session.cache.get("img_0").is_none());
+        assert_eq!(session.reconcile_active_ref().await, None);
+        assert!(!session.v2.meta.contains_key("img_0"));
+        assert!(session.v2.meta.contains_key("img_1"));
+        assert_eq!(session.v2.meta.len(), 1);
+
+        *session.v2.active_ref.write().await = Some("img_1".into());
+        assert_eq!(
+            session.reconcile_active_ref().await,
+            Some("img_1".to_string())
+        );
     }
 }

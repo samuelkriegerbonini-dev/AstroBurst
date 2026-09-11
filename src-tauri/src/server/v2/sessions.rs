@@ -7,7 +7,7 @@ use crate::extractors::SessionExtractor;
 use crate::state::AppState;
 
 pub async fn status(SessionExtractor(session): SessionExtractor) -> Result<Json<Value>> {
-    let active = session.v2.active_ref.read().await.clone();
+    let active = session.reconcile_active_ref().await;
     Ok(Json(json!({
         "session_id": session.id,
         "active_ref": active,

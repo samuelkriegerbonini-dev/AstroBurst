@@ -3,6 +3,7 @@ import { Download, Loader2, Check, FolderOpen, Archive } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveRgbPaths } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgb } from "../../../services/export";
+import { clearCompositeCache } from "../../../services/compose";
 import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
@@ -114,6 +115,8 @@ export default function ExportStep({ state }: ExportStepProps) {
       if (!r && !g && !b) {
         throw new Error("No channel paths resolved for export");
       }
+
+      await clearCompositeCache().catch(() => {});
 
       if (format === "png") {
         const outputPath = `${dir}/astroburst_rgb_${ts}.png`;

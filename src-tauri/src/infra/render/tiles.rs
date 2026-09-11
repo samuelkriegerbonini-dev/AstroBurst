@@ -5,8 +5,6 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::math::simd::find_minmax_simd;
-
 #[derive(Debug, Clone)]
 pub struct TileParams {
     pub tile_size: usize,
@@ -146,35 +144,6 @@ fn compute_num_levels(width: usize, height: usize, tile_size: usize) -> usize {
     levels.max(1)
 }
 
-fn percentile_bounds(slice: &[f32], low_pct: f64, high_pct: f64) -> (f32, f32) {
-    let mut valid: Vec<f32> = slice
-        .par_iter()
-        .copied()
-        .filter(|v| v.is_finite() && *v > 1e-7)
-        .collect();
-
-    if valid.is_empty() {
-        let (gmin, gmax) = find_minmax_simd(slice);
-        return (gmin, gmax);
-    }
-
-    let n = valid.len();
-    let hi_idx = ((n as f64 * high_pct) as usize).min(n - 1);
-    let lo_idx = ((n as f64 * low_pct) as usize).min(n - 1);
-
-    let (_, hi_val, _) = valid.select_nth_unstable_by(hi_idx, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let hi = *hi_val;
-
-    let (_, lo_val, _) = valid.select_nth_unstable_by(lo_idx, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let lo = *lo_val;
-
-    (lo, hi)
-}
-
 pub fn generate_tile_pyramid(
     normalized: &Array2<f32>,
     output_dir: &str,
@@ -184,8 +153,7 @@ pub fn generate_tile_pyramid(
     let tile_size = params.tile_size;
     let num_levels = compute_num_levels(orig_cols, orig_rows, tile_size);
 
-    let slice = normalized.as_slice().expect("Array2 must be contiguous");
-    let (global_min, global_max) = percentile_bounds(slice, 0.001, 0.999);
+    let (global_min, global_max) = (0.0f32, 1.0f32);
 
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create tile output dir {}", output_dir))?;
@@ -555,5 +523,27 @@ mod tests {
         assert!(Path::new(&format!("{}/1/1_1.png", dir)).exists());
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_mono_tiles_map_stf_unit_range_directly() {
+        let mut data = Array2::from_elem((256, 256), 0.25f32);
+        data[[3, 5]] = 1.0;
+        data[[7, 9]] = f32::NAN;
+
+        let dir = std::env::temp_dir().join("astroburst_mono_tile_unit_range");
+        let _ = fs::remove_dir_all(&dir);
+        let dir_str = dir.to_str().unwrap();
+
+        let params = TileParams { tile_size: 256 };
+        let pyramid = generate_tile_pyramid(&data, dir_str, &params).unwrap();
+        assert_eq!(pyramid.levels.len(), 1);
+
+        let tile = image::open(format!("{}/0/0_0.png", dir_str)).unwrap().into_luma8();
+        assert_eq!(tile.get_pixel(0, 0).0[0], 64);
+        assert_eq!(tile.get_pixel(5, 3).0[0], 255);
+        assert_eq!(tile.get_pixel(9, 7).0[0], 0);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

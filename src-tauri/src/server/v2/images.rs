@@ -9,7 +9,7 @@ use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::infra::asdf::converter::is_asdf_file;
 use astroburst_lib::infra::asdf_bridge::extract_image_from_asdf;
-use astroburst_lib::infra::cache::ImageEntry;
+use astroburst_lib::infra::cache::{ImageCache, ImageEntry};
 use astroburst_lib::infra::fits::dispatcher::resolve_single_image;
 use astroburst_lib::infra::fits::reader::{extract_image_mmap, extract_image_mmap_by_index};
 use astroburst_lib::types::header::HduHeader;
@@ -60,6 +60,19 @@ fn load_by_index(path: &str, hdu: usize) -> anyhow::Result<(Array2<f32>, ImageSt
     Ok((r.image, stats, r.header))
 }
 
+pub(crate) fn load_replacing<F>(
+    cache: &ImageCache,
+    image_ref: &str,
+    loader: F,
+) -> anyhow::Result<ImageEntry>
+where
+    F: FnOnce() -> anyhow::Result<(Array2<f32>, ImageStats, HduHeader)>,
+{
+    let loaded = loader()?;
+    cache.invalidate(image_ref);
+    cache.get_or_load_full(image_ref, || Ok(loaded))
+}
+
 fn stats_json(s: &ImageStats) -> Value {
     json!({
         "min": s.min, "max": s.max, "median": s.median,
@@ -97,6 +110,7 @@ pub(crate) fn register_and_respond(
         extname: extname.clone(),
     };
     session.v2.meta.insert(image_ref.clone(), meta);
+    session.prune_evicted_meta();
 
     json!({
         "ref": image_ref,
@@ -125,7 +139,7 @@ pub async fn open(
     let sess = session.clone();
     let ref_for_load = image_ref.clone();
     let entry = tokio::task::spawn_blocking(move || {
-        sess.cache.get_or_load_full(&ref_for_load, || match hdu {
+        load_replacing(&sess.cache, &ref_for_load, || match hdu {
             Some(i) => load_by_index(&path, i),
             None => load_auto(&path),
         })
@@ -167,8 +181,7 @@ pub async fn switch_hdu(
     let sess = session.clone();
     let ref_for_load = image_ref.clone();
     let entry = tokio::task::spawn_blocking(move || {
-        sess.cache
-            .get_or_load_full(&ref_for_load, || load_by_index(&path, hdu))
+        load_replacing(&sess.cache, &ref_for_load, || load_by_index(&path, hdu))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
@@ -182,7 +195,7 @@ pub async fn switch_hdu(
 pub async fn list_images(
     SessionExtractor(session): SessionExtractor,
 ) -> Result<Json<Value>> {
-    let active = session.v2.active_ref.read().await.clone();
+    let active = session.reconcile_active_ref().await;
     let mut images: Vec<ImageMeta> = session
         .v2
         .meta
@@ -196,4 +209,44 @@ pub async fn list_images(
         "count": images.len(),
         "images": images,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(rows: usize, cols: usize, fill: f32) -> (Array2<f32>, ImageStats, HduHeader) {
+        let arr = Array2::from_elem((rows, cols), fill);
+        let stats = compute_image_stats(&arr);
+        (arr, stats, HduHeader::empty())
+    }
+
+    #[test]
+    fn load_replacing_replaces_an_existing_ref_instead_of_returning_the_stale_entry() {
+        let cache = ImageCache::new(4, usize::MAX);
+
+        let first = load_replacing(&cache, "x", || Ok(image(8, 8, 1.0))).unwrap();
+        assert_eq!(first.arr().dim(), (8, 8));
+
+        let stale = cache.get_or_load_full("x", || Ok(image(6, 6, 2.0))).unwrap();
+        assert_eq!(stale.arr().dim(), (8, 8));
+
+        let second = load_replacing(&cache, "x", || Ok(image(6, 6, 2.0))).unwrap();
+        assert_eq!(second.arr().dim(), (6, 6));
+        assert_eq!(second.arr()[[0, 0]], 2.0);
+        assert_eq!(cache.get("x").unwrap().arr().dim(), (6, 6));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn load_replacing_keeps_the_old_entry_when_the_new_load_fails() {
+        let cache = ImageCache::new(4, usize::MAX);
+        load_replacing(&cache, "x", || Ok(image(8, 8, 1.0))).unwrap();
+
+        let err = load_replacing(&cache, "x", || anyhow::bail!("no such file"))
+            .err()
+            .expect("failed load must surface the loader error");
+        assert!(err.to_string().contains("no such file"));
+        assert_eq!(cache.get("x").unwrap().arr().dim(), (8, 8));
+    }
 }

@@ -2,8 +2,10 @@
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
+use ndarray::Array2;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use astroburst_lib::core::imaging::calibration_pipeline::{
     BatchPipelineConfig, BatchStackConfig, CalibrationMasters, ChannelInput,
@@ -13,12 +15,43 @@ use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat,
 };
+use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::{load_fits_image, read_primary_header};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::job::{new_job, SseEvent};
+use crate::job::{new_job, Job, SseEvent};
 use crate::state::AppState;
+
+fn fail(job: &Job, tx: &mpsc::Sender<SseEvent>, message: String) {
+    if job.cancel.is_cancelled() {
+        return;
+    }
+    job.set_error();
+    tx.blocking_send(SseEvent::Error { message }).ok();
+}
+
+fn store_channels(
+    job: &Job,
+    tx: &mpsc::Sender<SseEvent>,
+    cache: &ImageCache,
+    channels: &[(String, Array2<f32>)],
+    slot_names: &[String],
+) {
+    if job.cancel.is_cancelled() {
+        return;
+    }
+    tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
+
+    for ((label, arr), slot) in channels.iter().zip(slot_names) {
+        let stats = compute_image_stats(arr);
+        cache.insert_synthetic(slot, Arc::new(arr.clone()), stats);
+        log::debug!("pipeline: stored channel '{}' → slot '{}'", label, slot);
+    }
+
+    job.set_done();
+    tx.blocking_send(SseEvent::Complete).ok();
+}
 
 #[derive(Deserialize)]
 pub struct ChannelSpec {
@@ -130,8 +163,7 @@ pub async fn run(
             match create_master_bias(&bias_paths) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    job.set_error();
-                    tx.blocking_send(SseEvent::Error { message: format!("bias: {:#}", e) }).ok();
+                    fail(&job, &tx, format!("bias: {:#}", e));
                     return;
                 }
             }
@@ -143,8 +175,7 @@ pub async fn run(
             match create_master_dark(&dark_paths, master_bias.as_ref()) {
                 Ok(d) => Some(d),
                 Err(e) => {
-                    job.set_error();
-                    tx.blocking_send(SseEvent::Error { message: format!("dark: {:#}", e) }).ok();
+                    fail(&job, &tx, format!("dark: {:#}", e));
                     return;
                 }
             }
@@ -156,8 +187,7 @@ pub async fn run(
             match create_master_flat(&flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&dark_paths)) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    job.set_error();
-                    tx.blocking_send(SseEvent::Error { message: format!("flat: {:#}", e) }).ok();
+                    fail(&job, &tx, format!("flat: {:#}", e));
                     return;
                 }
             }
@@ -171,6 +201,9 @@ pub async fn run(
 
         let masters = CalibrationMasters { dark: master_dark, flat: master_flat, bias: master_bias };
 
+        if job.cancel.is_cancelled() {
+            return;
+        }
         tx.blocking_send(SseEvent::Progress { pct: 15, stage: "loading lights".into() }).ok();
 
         let channel_inputs: Vec<ChannelInput> = {
@@ -179,10 +212,7 @@ pub async fn run(
                 let lights = match load_batch(&ch.paths) {
                     Ok(l) => l,
                     Err(e) => {
-                        job.set_error();
-                        tx.blocking_send(SseEvent::Error {
-                            message: format!("channel '{}': {:#}", ch.label, e),
-                        }).ok();
+                        fail(&job, &tx, format!("channel '{}': {:#}", ch.label, e));
                         return;
                     }
                 };
@@ -192,27 +222,20 @@ pub async fn run(
             out
         };
 
+        if job.cancel.is_cancelled() {
+            return;
+        }
         tx.blocking_send(SseEvent::Progress { pct: 25, stage: "stacking".into() }).ok();
 
         let pipeline_result = match run_batch_pipeline(channel_inputs, &masters, &config) {
             Ok(r) => r,
             Err(e) => {
-                job.set_error();
-                tx.blocking_send(SseEvent::Error { message: e }).ok();
+                fail(&job, &tx, e);
                 return;
             }
         };
 
-        tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
-
-        for ((label, arr), slot) in pipeline_result.master_channels.iter().zip(&slot_names) {
-            let stats = compute_image_stats(arr);
-            cache.insert_synthetic(slot, Arc::new(arr.clone()), stats);
-            log::debug!("pipeline: stored channel '{}' → slot '{}'", label, slot);
-        }
-
-        job.set_done();
-        tx.blocking_send(SseEvent::Complete).ok();
+        store_channels(&job, &tx, &cache, &pipeline_result.master_channels, &slot_names);
     });
 
     Ok((
@@ -223,4 +246,82 @@ pub async fn run(
             "slots": slot_names_resp,
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::job::JobStatus;
+
+    fn setup() -> (Arc<Job>, mpsc::Sender<SseEvent>, mpsc::Receiver<SseEvent>, ImageCache) {
+        let (job, tx) = new_job("pipeline");
+        let rx = job.rx.lock().unwrap().take().unwrap();
+        (job, tx, rx, ImageCache::new(4, 1 << 20))
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<SseEvent>) -> Vec<SseEvent> {
+        let mut out = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            out.push(evt);
+        }
+        out
+    }
+
+    fn channels() -> Vec<(String, Array2<f32>)> {
+        vec![
+            ("R".to_string(), Array2::<f32>::ones((4, 4))),
+            ("G".to_string(), Array2::<f32>::ones((4, 4))),
+        ]
+    }
+
+    #[test]
+    fn cancelled_job_does_not_store_channels() {
+        let (job, tx, mut rx, cache) = setup();
+        job.cancel.cancel();
+        job.set_cancelled();
+
+        store_channels(&job, &tx, &cache, &channels(), &["p_R".to_string(), "p_G".to_string()]);
+
+        assert_eq!(job.current_status(), JobStatus::Cancelled);
+        assert_ne!(job.pct.load(Ordering::Relaxed), 100);
+        assert!(cache.get("p_R").is_none());
+        assert!(cache.get("p_G").is_none());
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn cancelled_job_ignores_failure() {
+        let (job, tx, mut rx, _cache) = setup();
+        job.cancel.cancel();
+        job.set_cancelled();
+
+        fail(&job, &tx, "bias: boom".into());
+
+        assert_eq!(job.current_status(), JobStatus::Cancelled);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn running_job_stores_channels_and_completes() {
+        let (job, tx, mut rx, cache) = setup();
+
+        store_channels(&job, &tx, &cache, &channels(), &["p_R".to_string(), "p_G".to_string()]);
+
+        assert_eq!(job.current_status(), JobStatus::Done);
+        assert!(cache.get("p_R").is_some());
+        assert!(cache.get("p_G").is_some());
+        assert!(matches!(drain(&mut rx).last(), Some(SseEvent::Complete)));
+    }
+
+    #[test]
+    fn running_job_reports_failure() {
+        let (job, tx, mut rx, _cache) = setup();
+
+        fail(&job, &tx, "dark: boom".into());
+
+        assert_eq!(job.current_status(), JobStatus::Error);
+        assert!(matches!(drain(&mut rx).last(), Some(SseEvent::Error { .. })));
+    }
 }

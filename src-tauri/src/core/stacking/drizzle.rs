@@ -16,12 +16,14 @@ fn drizzle_support(scale: f64, pixfrac: f64, kernel: DrizzleKernel) -> (f64, f64
     let support = match kernel {
         DrizzleKernel::Square => half,
         DrizzleKernel::Gaussian => sigma * 3.0,
-        DrizzleKernel::Lanczos3 => 3.0,
+        DrizzleKernel::Lanczos3 => 3.0 * scale,
     };
     (half, sigma, support)
 }
 
-fn frame_contributions(
+#[allow(clippy::too_many_arguments)]
+fn scatter_frame(
+    acc: &mut DrizzleAccumulator,
     frame: &Array2<f32>,
     dx: f64,
     dy: f64,
@@ -32,7 +34,7 @@ fn frame_contributions(
     out_cols: usize,
     band_start: usize,
     band_end: usize,
-) -> Vec<Vec<(usize, f32, f64)>> {
+) {
     let (in_rows, in_cols) = frame.dim();
     let src = frame.as_slice().expect("contiguous");
 
@@ -43,59 +45,54 @@ fn frame_contributions(
     let iy_lo = if iy_lo_f < 0.0 { 0 } else { (iy_lo_f.floor() as usize).min(in_rows) };
     let iy_hi = if iy_hi_f < 0.0 { 0 } else { (iy_hi_f.ceil() as usize).min(in_rows) };
 
-    (iy_lo..iy_hi)
-        .into_par_iter()
-        .map(|iy| {
-            let mut contribs = Vec::new();
-            let row_base = iy * in_cols;
-            for ix in 0..in_cols {
-                let val = src[row_base + ix];
-                if !val.is_finite() {
-                    continue;
-                }
+    for iy in iy_lo..iy_hi {
+        let row_base = iy * in_cols;
+        for ix in 0..in_cols {
+            let val = src[row_base + ix];
+            if !val.is_finite() {
+                continue;
+            }
 
-                let cx = (ix as f64 + 0.5 + dx) * scale;
-                let cy = (iy as f64 + 0.5 + dy) * scale;
+            let cx = (ix as f64 + 0.5 + dx) * scale;
+            let cy = (iy as f64 + 0.5 + dy) * scale;
 
-                let ox_min = clamp_index((cx - support).floor() as i64, out_cols);
-                let ox_max = clamp_index((cx + support).ceil() as i64, out_cols);
-                let oy_min = clamp_index((cy - support).floor() as i64, out_rows).max(band_start);
-                let oy_max = clamp_index((cy + support).ceil() as i64, out_rows).min(band_end - 1);
-                if oy_min > oy_max {
-                    continue;
-                }
+            let ox_min = clamp_index((cx - support).floor() as i64, out_cols);
+            let ox_max = clamp_index((cx + support).ceil() as i64, out_cols);
+            let oy_min = clamp_index((cy - support).floor() as i64, out_rows).max(band_start);
+            let oy_max = clamp_index((cy + support).ceil() as i64, out_rows).min(band_end - 1);
+            if oy_min > oy_max {
+                continue;
+            }
 
-                for oy in oy_min..=oy_max {
-                    for ox in ox_min..=ox_max {
-                        let w = match kernel {
-                            DrizzleKernel::Square => {
-                                overlap_area(
-                                    cx - half, cy - half, cx + half, cy + half,
-                                    ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
-                                )
-                            }
-                            DrizzleKernel::Gaussian => {
-                                let dist2 = (ox as f64 + 0.5 - cx).powi(2)
-                                    + (oy as f64 + 0.5 - cy).powi(2);
-                                (-dist2 / (2.0 * sigma * sigma)).exp()
-                            }
-                            DrizzleKernel::Lanczos3 => {
-                                let ddx = (ox as f64 + 0.5 - cx).abs();
-                                let ddy = (oy as f64 + 0.5 - cy).abs();
-                                lanczos3(ddx) * lanczos3(ddy)
-                            }
-                        };
-
-                        if w.abs() > 1e-4 {
-                            let idx = (oy - band_start) * out_cols + ox;
-                            contribs.push((idx, val, w));
+            for oy in oy_min..=oy_max {
+                for ox in ox_min..=ox_max {
+                    let w = match kernel {
+                        DrizzleKernel::Square => {
+                            overlap_area(
+                                cx - half, cy - half, cx + half, cy + half,
+                                ox as f64, oy as f64, ox as f64 + 1.0, oy as f64 + 1.0,
+                            )
                         }
+                        DrizzleKernel::Gaussian => {
+                            let dist2 = (ox as f64 + 0.5 - cx).powi(2)
+                                + (oy as f64 + 0.5 - cy).powi(2);
+                            (-dist2 / (2.0 * sigma * sigma)).exp()
+                        }
+                        DrizzleKernel::Lanczos3 => {
+                            let ddx = (ox as f64 + 0.5 - cx).abs() / scale;
+                            let ddy = (oy as f64 + 0.5 - cy).abs() / scale;
+                            lanczos3(ddx) * lanczos3(ddy)
+                        }
+                    };
+
+                    if w.abs() > 1e-4 {
+                        let idx = (oy - band_start) * out_cols + ox;
+                        acc.push(idx, val, w);
                     }
                 }
             }
-            contribs
-        })
-        .collect()
+        }
+    }
 }
 
 struct DrizzleAccumulator {
@@ -132,26 +129,20 @@ impl DrizzleAccumulator {
         band_start: usize,
         band_end: usize,
     ) {
-        let rows = frame_contributions(
-            frame, dx, dy, scale, pixfrac, kernel, full_out_rows, self.out_cols,
+        let out_cols = self.out_cols;
+        scatter_frame(
+            self, frame, dx, dy, scale, pixfrac, kernel, full_out_rows, out_cols,
             band_start, band_end,
         );
-        for contribs in rows {
-            for (idx, val, w) in contribs {
-                self.push(idx, val, w);
-            }
-        }
     }
 
-    fn finalize(&self) -> (Vec<f32>, Vec<f32>) {
-        let img_data: Vec<f32> = self
-            .vsum
-            .par_iter()
-            .zip(self.wsum.par_iter())
-            .map(|(&v, &w)| if w > 1e-6 { (v / w) as f32 } else { 0.0 })
-            .collect();
-        let wgt_data: Vec<f32> = self.wsum.iter().map(|&w| w.max(0.0) as f32).collect();
-        (img_data, wgt_data)
+    fn finalize_into(&self, img: &mut [f32], wgt: &mut [f32]) {
+        for ((&v, &w), out) in self.vsum.iter().zip(self.wsum.iter()).zip(img.iter_mut()) {
+            *out = if w > 1e-6 { (v / w) as f32 } else { 0.0 };
+        }
+        for (&w, out) in self.wsum.iter().zip(wgt.iter_mut()) {
+            *out = w.max(0.0) as f32;
+        }
     }
 }
 
@@ -176,6 +167,13 @@ fn lanczos3(x: f64) -> f64 {
     let pi_x = std::f64::consts::PI * x;
     let pi_x_3 = pi_x / 3.0;
     (pi_x.sin() / pi_x) * (pi_x_3.sin() / pi_x_3)
+}
+
+fn drizzle_band_rows(out_rows: usize, threads: usize) -> usize {
+    let max_rows = out_rows.max(1);
+    out_rows
+        .div_ceil(4 * threads.max(1))
+        .clamp(64.min(max_rows), max_rows)
 }
 
 pub fn drizzle_stack(
@@ -208,28 +206,24 @@ pub fn drizzle_stack(
     let in_rows = min_rows;
     let in_cols = min_cols;
 
-    let needs_crop = row_diff > 0 || col_diff > 0;
-    let cropped: Vec<Array2<f32>>;
-    let images_ref: Vec<&Array2<f32>> = if needs_crop {
-        cropped = images.iter().map(|img| {
+    let images_ref: Vec<Cow<Array2<f32>>> = images
+        .iter()
+        .map(|img| {
             let (r, c) = img.dim();
             if r == in_rows && c == in_cols {
-                img.clone()
+                Cow::Borrowed(img)
             } else {
-                img.slice(ndarray::s![..in_rows, ..in_cols]).to_owned()
+                Cow::Owned(img.slice(ndarray::s![..in_rows, ..in_cols]).to_owned())
             }
-        }).collect();
-        cropped.iter().collect()
-    } else {
-        images.iter().collect()
-    };
+        })
+        .collect();
 
     let scale = config.scale.clamp(1.0, 4.0);
     let pixfrac = config.pixfrac.clamp(0.1, 1.0);
     let out_rows = (in_rows as f64 * scale).ceil() as usize;
     let out_cols = (in_cols as f64 * scale).ceil() as usize;
 
-    let reference = images_ref[0];
+    let reference: &Array2<f32> = images_ref[0].as_ref();
     let mut offsets: Vec<(f64, f64)> = Vec::with_capacity(images_ref.len());
     offsets.push((0.0, 0.0));
     let mut frames: Vec<Cow<Array2<f32>>> = Vec::with_capacity(images_ref.len());
@@ -241,6 +235,7 @@ pub fn drizzle_stack(
                 let aligned: Vec<(f64, f64, Option<Array2<f32>>)> = images_ref[1..]
                     .par_iter()
                     .map(|target| {
+                        let target = target.as_ref();
                         let pc = phase_correlation::phase_correlate(reference, target);
                         if phase_correlation::is_low_confidence(pc.confidence) {
                             let result = affine::align_channel_affine(reference, target);
@@ -255,7 +250,7 @@ pub fn drizzle_stack(
                     offsets.push((dx, dy));
                     match warped {
                         Some(w) => frames.push(Cow::Owned(w)),
-                        None => frames.push(Cow::Borrowed(images_ref[1 + i])),
+                        None => frames.push(Cow::Borrowed(images_ref[1 + i].as_ref())),
                     }
                 }
             }
@@ -263,6 +258,7 @@ pub fn drizzle_stack(
                 let warped: Vec<Array2<f32>> = images_ref[1..]
                     .par_iter()
                     .map(|target| {
+                        let target = target.as_ref();
                         let result = affine::align_channel_affine(reference, target);
                         affine::warp_image(target, &result.transform, in_rows, in_cols)
                     })
@@ -276,46 +272,34 @@ pub fn drizzle_stack(
     } else {
         for target in &images_ref[1..] {
             offsets.push((0.0, 0.0));
-            frames.push(Cow::Borrowed(*target));
+            frames.push(Cow::Borrowed(target.as_ref()));
         }
     }
 
-    let (_, sigma, _) = drizzle_support(scale, pixfrac, config.kernel);
-    let cells = |s: f64| ((2.0 * s).ceil() + 1.0).max(1.0);
-    let cpp = match config.kernel {
-        DrizzleKernel::Square => cells(pixfrac * scale * 0.5).powi(2),
-        DrizzleKernel::Gaussian => cells(sigma * 3.0).powi(2),
-        DrizzleKernel::Lanczos3 => 49.0,
-    };
-    const TARGET_BAND_CONTRIBS: f64 = 32_000_000.0;
-    let contribs_per_out_row =
-        (frames.len() as f64) * (in_cols as f64) * cpp / scale.max(1.0);
-    let band_rows = ((TARGET_BAND_CONTRIBS / contribs_per_out_row.max(1.0)).floor() as usize)
-        .clamp(16, out_rows.max(16));
+    let band_rows = drizzle_band_rows(out_rows, rayon::current_num_threads());
 
     let mut img_data = vec![0.0f32; out_rows * out_cols];
     let mut wgt_data = vec![0.0f32; out_rows * out_cols];
     let rejected_pixels = 0u64;
 
-    for band_start in (0..out_rows).step_by(band_rows) {
-        let band_end = (band_start + band_rows).min(out_rows);
-        let band_n = (band_end - band_start) * out_cols;
-
-        let mut accumulator = DrizzleAccumulator::new(band_end - band_start, out_cols);
-
-        for (i, img) in frames.iter().enumerate() {
-            let (dx, dy) = offsets[i];
-            accumulator.drizzle_frame(
-                img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel,
-                out_rows, band_start, band_end,
-            );
-        }
-
-        let (band_img, band_wgt) = accumulator.finalize();
-        let off = band_start * out_cols;
-        img_data[off..off + band_n].copy_from_slice(&band_img);
-        wgt_data[off..off + band_n].copy_from_slice(&band_wgt);
-    }
+    let chunk = (band_rows * out_cols).max(1);
+    img_data
+        .par_chunks_mut(chunk)
+        .zip(wgt_data.par_chunks_mut(chunk))
+        .enumerate()
+        .for_each(|(b, (img_chunk, wgt_chunk))| {
+            let band_start = b * band_rows;
+            let band_end = (band_start + band_rows).min(out_rows);
+            let mut accumulator = DrizzleAccumulator::new(band_end - band_start, out_cols);
+            for (i, img) in frames.iter().enumerate() {
+                let (dx, dy) = offsets[i];
+                accumulator.drizzle_frame(
+                    img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel,
+                    out_rows, band_start, band_end,
+                );
+            }
+            accumulator.finalize_into(img_chunk, wgt_chunk);
+        });
 
     let image = Array2::from_shape_vec((out_rows, out_cols), img_data)
         .expect("drizzle output shape");
@@ -393,5 +377,67 @@ mod tests {
         assert_eq!(ra.image, rb.image);
         assert_eq!(ra.rejected_pixels, 0);
         assert_eq!(rb.rejected_pixels, 0);
+    }
+
+    #[test]
+    fn lanczos3_at_integer_scale_three_leaves_no_holes() {
+        let frames = vec![
+            Array2::from_elem((24, 24), 5.0f32),
+            Array2::from_elem((24, 24), 5.0f32),
+        ];
+        let mut cfg = config(3.0);
+        cfg.kernel = DrizzleKernel::Lanczos3;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        assert_eq!(result.output_dims, (72, 72));
+        for ((oy, ox), &w) in result.weight_map.indexed_iter() {
+            assert!(w > 1e-6, "zero weight at ({}, {})", oy, ox);
+            let v = result.image[[oy, ox]];
+            assert!((v - 5.0).abs() < 1e-3, "pixel ({}, {}) = {} != 5.0", oy, ox, v);
+        }
+    }
+
+    #[test]
+    fn mixed_frame_dims_are_cropped_to_smallest() {
+        let frames = vec![
+            Array2::from_elem((24, 24), 2.0f32),
+            Array2::from_elem((25, 24), 6.0f32),
+            Array2::from_elem((24, 25), 6.0f32),
+        ];
+        let mut cfg = config(1.0);
+        cfg.pixfrac = 1.0;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        assert_eq!(result.input_dims, (24, 24));
+        assert_eq!(result.frame_count, 3);
+        for &v in result.image.iter() {
+            assert!((v - 14.0 / 3.0).abs() < 1e-4, "pixel {} != 14/3", v);
+        }
+    }
+
+    #[test]
+    fn band_rows_follow_thread_count_within_bounds() {
+        assert_eq!(drizzle_band_rows(0, 8), 1);
+        assert_eq!(drizzle_band_rows(48, 8), 48);
+        assert_eq!(drizzle_band_rows(200, 1), 64);
+        assert_eq!(drizzle_band_rows(200, 16), 64);
+        assert_eq!(drizzle_band_rows(8000, 8), 250);
+        assert_eq!(drizzle_band_rows(8000, 1), 2000);
+    }
+
+    #[test]
+    fn multi_band_output_matches_input_gradient_exactly() {
+        let rows = 100;
+        let cols = 30;
+        let gradient = Array2::from_shape_fn((rows, cols), |(y, x)| (y * cols + x) as f32);
+        let frames = vec![gradient.clone(), gradient.clone()];
+        let mut cfg = config(2.0);
+        cfg.pixfrac = 1.0;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        assert_eq!(result.output_dims, (200, 60));
+        assert!(drizzle_band_rows(200, rayon::current_num_threads()) < 200);
+        for ((oy, ox), &v) in result.image.indexed_iter() {
+            let expected = gradient[[oy / 2, ox / 2]];
+            assert!((v - expected).abs() < 1e-3, "pixel ({}, {}) = {} != {}", oy, ox, v, expected);
+            assert!((result.weight_map[[oy, ox]] - 2.0).abs() < 1e-6);
+        }
     }
 }
