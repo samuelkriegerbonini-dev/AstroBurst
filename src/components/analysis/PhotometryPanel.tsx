@@ -3,6 +3,7 @@ import { Crosshair, Loader2, Star as StarIcon } from "lucide-react";
 import { measurePhotometry } from "../../services/analysis";
 import type { PhotometryMeasurement } from "../../services/analysis";
 import { usePixelClick } from "../../hooks/useMousePixelStore";
+import { useDqContext } from "../../context/PreviewContext";
 import { Toggle } from "../ui";
 
 interface PhotometryPanelProps {
@@ -21,6 +22,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [history, setHistory] = useState<PhotometryMeasurement[]>([]);
   const [error, setError] = useState<string | null>(null);
   const click = usePixelClick();
+  const { excludeDq } = useDqContext();
   const lastSeqRef = useRef(0);
   const busyRef = useRef(false);
 
@@ -31,7 +33,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
       setIsMeasuring(true);
       setError(null);
       try {
-        const res = await measurePhotometry(filePath, x, y, { gaiaMatch });
+        const res = await measurePhotometry(filePath, x, y, { gaiaMatch, excludeDq });
         setResult(res);
         setHistory((prev) => [res, ...prev].slice(0, 4));
       } catch (e: unknown) {
@@ -41,7 +43,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
         setIsMeasuring(false);
       }
     },
-    [filePath, gaiaMatch],
+    [filePath, gaiaMatch, excludeDq],
   );
 
   useEffect(() => {

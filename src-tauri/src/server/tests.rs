@@ -307,6 +307,21 @@ mod v2_fixtures {
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
 
+    pub fn write_bunit_fits(path: &std::path::Path, w: usize, h: usize, bunit: &str) {
+        let mut cards: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+            ("BUNIT", format!("'{bunit}'")),
+        ];
+        cards.extend(wcs_cards());
+        let mut buf = header_block(&cards);
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
     pub fn write_pixels_fits(path: &std::path::Path, w: usize, h: usize, pixels: &[f32]) {
         assert_eq!(pixels.len(), w * h, "pixel count must equal w*h");
         let cards: Vec<(&str, String)> = vec![
@@ -350,6 +365,63 @@ mod v2_fixtures {
         buf.extend_from_slice(&data_block(&ramp(w0, h0)));
         buf.extend_from_slice(&header_block(&ext));
         buf.extend_from_slice(&data_block(&ramp(w1, h1)));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
+    fn data_block_i32(pixels: &[i32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in pixels {
+            out.extend_from_slice(&p.to_be_bytes());
+        }
+        while out.len() % BLOCK != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn image_ext(name: &str, bitpix: &str, w: usize, h: usize, extra: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+        let mut cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", bitpix.into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", format!("'{name:<8}'")),
+            ("EXTVER", "1".into()),
+        ];
+        cards.extend(extra.iter().cloned());
+        cards
+    }
+
+    pub const DQ_FLAGGED_PIXEL: (usize, usize) = (1, 0);
+    pub const DQ_HIGH_PIXEL: (usize, usize) = (2, 1);
+
+    pub fn write_mef_with_dq(path: &std::path::Path, w: usize, h: usize) {
+        let mut primary: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "0".into()),
+            ("EXTEND", "T".into()),
+        ];
+        primary.extend(wcs_cards());
+
+        let sci = image_ext("SCI", "-32", w, h, &[("BUNIT", "'MJy/sr'".into())]);
+        let err = image_ext("ERR", "-32", w, h, &[("BUNIT", "'MJy/sr'".into())]);
+        let dq = image_ext("DQ", "32", w, h, &[("BZERO", "2147483648".into()), ("BSCALE", "1".into())]);
+
+        let mut dq_pixels = vec![-2147483648i32; w * h];
+        dq_pixels[DQ_FLAGGED_PIXEL.1 * w + DQ_FLAGGED_PIXEL.0] = 3 - 2147483647 - 1;
+        dq_pixels[DQ_HIGH_PIXEL.1 * w + DQ_HIGH_PIXEL.0] = 1;
+
+        let mut buf = header_block(&primary);
+        buf.extend_from_slice(&header_block(&sci));
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        buf.extend_from_slice(&header_block(&err));
+        buf.extend_from_slice(&data_block(&ramp(w, h).iter().map(|v| v * 0.5).collect::<Vec<f32>>()));
+        buf.extend_from_slice(&header_block(&dq));
+        buf.extend_from_slice(&data_block_i32(&dq_pixels));
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
 }
@@ -511,6 +583,118 @@ async fn v2_hdu_switch_creates_new_ref_and_keeps_original() {
         .unwrap();
     assert_eq!(img0["width"], 8);
     assert_eq!(img0["height"], 8);
+}
+
+async fn open_dq_mef(id: &str, hdu: usize) -> (AppState, tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("dq_mef.fits");
+    v2_fixtures::write_mef_with_dq(&fits, 4, 4);
+    let path = fits.to_str().unwrap().to_string();
+
+    let state = AppState::new(cfg());
+    seed_session(&state, id);
+    let resp = post_json(
+        build_router(state.clone()),
+        &format!("/v2/sessions/{id}/open"),
+        &format!(r#"{{"path":{},"hdu":{hdu}}}"#, serde_json::to_string(&path).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    (state, dir, path)
+}
+
+#[tokio::test]
+async fn v2_open_reports_plane_ref_and_is_dq() {
+    let (state, _dir, path) = open_dq_mef("s-plane", 1).await;
+    let resp = get_uri(build_router(state.clone()), "/v2/sessions/s-plane/images").await;
+    let json = body_json(resp).await;
+    let img = &json["images"][0];
+    assert_eq!(img["plane_ref"], format!("{path}#hdu=1"));
+    assert_eq!(img["is_dq"], false);
+    assert!(img["array"].is_null());
+    assert_eq!(img["hdu"], 1);
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-plane/hdu", r#"{"hdu":3}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["is_dq"], true);
+    assert_eq!(json["plane_ref"], format!("{path}#hdu=3"));
+    assert_eq!(json["extname"], "DQ");
+}
+
+#[tokio::test]
+async fn v2_hdu_switch_with_array_on_fits_is_bad_request() {
+    let (state, _dir, _path) = open_dq_mef("s-arr", 1).await;
+    let resp = post_json(build_router(state), "/v2/sessions/s-arr/hdu", r#"{"array":"dq"}"#).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
+    assert!(json["error"]["message"].as_str().unwrap().contains("no ASDF arrays"));
+}
+
+#[tokio::test]
+async fn v2_open_with_both_hdu_and_array_is_bad_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("both.fits");
+    v2_fixtures::write_mef_with_dq(&fits, 4, 4);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-both");
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-both/open",
+        &format!(r#"{{"path":{},"hdu":1,"array":"dq"}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["message"], "provide exactly one of hdu or array");
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-both/hdu", r#"{}"#).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn v2_pixel_reports_dq_and_err_companions() {
+    let (state, _dir, _path) = open_dq_mef("s-dqpx", 1).await;
+    let (x, y) = v2_fixtures::DQ_FLAGGED_PIXEL;
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-dqpx/pixel",
+        &format!(r#"{{"x":{x},"y":{y},"box":1}}"#),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["dq"]["text"], "3: DO_NOT_USE | SATURATED");
+    assert_eq!(json["dq"]["bits"], 3);
+    assert_eq!(json["dq"]["table"], "unknown");
+    assert_eq!(json["dq"]["names"], serde_json::json!(["DO_NOT_USE", "SATURATED"]));
+    assert!((json["err"]["value"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    assert_eq!(json["err"]["unit"], "MJy/sr");
+    assert_eq!(json["unit"], "MJy/sr");
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-dqpx/pixel", r#"{"x":0,"y":0,"box":1}"#).await;
+    let json = body_json(resp).await;
+    assert_eq!(json["dq"]["text"], "0: GOOD");
+    assert_eq!(json["err"]["value"], 0.0);
+}
+
+#[tokio::test]
+async fn v2_pixel_on_dq_ref_reports_high_bits() {
+    let (state, _dir, _path) = open_dq_mef("s-dqself", 3).await;
+    let (x, y) = v2_fixtures::DQ_HIGH_PIXEL;
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-dqself/pixel",
+        &format!(r#"{{"x":{x},"y":{y},"box":1}}"#),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["dq"]["bits"], 2147483649u64);
+    assert_eq!(json["dq"]["value"], 2147483649u64);
+    assert_eq!(json["dq"]["text"], "2147483649: DO_NOT_USE | REFERENCE_PIXEL");
+    assert!((json["value"].as_f64().unwrap() - 2147483649.0).abs() < 300.0);
 }
 
 #[tokio::test]
@@ -685,6 +869,54 @@ async fn v2_pix2sky_converts_batch_and_reports_on_image() {
 
     let r1 = &json["results"][1];
     assert_eq!(r1["on_image"], false);
+    assert_eq!(json["frame"], "icrs");
+}
+
+#[tokio::test]
+async fn v2_pix2sky_galactic_frame_converts_from_icrs() {
+    use astroburst_lib::core::astrometry::frames::icrs_to_galactic;
+
+    let (state, _dir) = seed_wcs_session("s-p2s-gal").await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-p2s-gal/wcs/pix2sky",
+        r#"{"points":[[3,3],[5,1]]}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let icrs = body_json(resp).await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-p2s-gal/wcs/pix2sky",
+        r#"{"points":[[3,3],[5,1]],"frame":"galactic"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let gal = body_json(resp).await;
+    assert_eq!(gal["frame"], "galactic");
+    assert_eq!(gal["count"], 2);
+    for i in 0..2 {
+        let (l, b) = icrs_to_galactic(
+            icrs["results"][i]["ra"].as_f64().unwrap(),
+            icrs["results"][i]["dec"].as_f64().unwrap(),
+        );
+        assert!((gal["results"][i]["ra"].as_f64().unwrap() - l).abs() < 1e-9, "point {i}");
+        assert!((gal["results"][i]["dec"].as_f64().unwrap() - b).abs() < 1e-9, "point {i}");
+        assert_eq!(gal["results"][i]["on_image"], true);
+    }
+    assert!((gal["results"][0]["ra"].as_f64().unwrap() - icrs["results"][0]["ra"].as_f64().unwrap()).abs() > 1.0);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-p2s-gal/wcs/pix2sky",
+        r#"{"points":[[3,3]],"frame":"supergalactic"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
 }
 
 #[tokio::test]
@@ -1066,11 +1298,65 @@ async fn v2_pixel_value_and_box_stats_and_sky() {
     assert!((nb["min"].as_f64().unwrap() - 9.0).abs() < 1e-6);
     assert!((nb["max"].as_f64().unwrap() - 45.0).abs() < 1e-6);
     assert!((nb["mean"].as_f64().unwrap() - 27.0).abs() < 1e-6);
+    assert!((nb["median"].as_f64().unwrap() - 27.0).abs() < 1e-6);
     assert_eq!(nb["n_pixels"], 25);
     assert_eq!(nb["n_nan"], 0);
+    assert!(json["unit"].is_null(), "fixture without BUNIT must report null unit");
+    assert_eq!(json["ref"], "img_0");
+    assert_eq!(json["box"], 5);
 
     assert!((json["sky"]["ra"].as_f64().unwrap() - 150.0).abs() < 1e-6);
     assert!((json["sky"]["dec"].as_f64().unwrap() - 2.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn v2_pixel_reports_bunit_and_median() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("bunit.fits");
+    v2_fixtures::write_bunit_fits(&fits, 8, 8, "MJy/sr  ");
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-px-unit");
+    post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-px-unit/open",
+        &format!(r#"{{"path":{}}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap()),
+    )
+    .await;
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-px-unit/pixel",
+        r#"{"x":3.7,"y":3.2,"box":3}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["unit"], "MJy/sr");
+    assert_eq!(json["x"], 3);
+    assert_eq!(json["y"], 3);
+    assert!((json["value"].as_f64().unwrap() - 27.0).abs() < 1e-6);
+    let nb = &json["neighborhood"];
+    assert_eq!(nb["n_pixels"], 9);
+    assert!((nb["median"].as_f64().unwrap() - 27.0).abs() < 1e-6);
+    assert!((nb["min"].as_f64().unwrap() - 18.0).abs() < 1e-6);
+    assert!((nb["max"].as_f64().unwrap() - 36.0).abs() < 1e-6);
+    assert!(json["sky"]["ra"].is_number());
+}
+
+#[tokio::test]
+async fn v2_pixel_even_box_is_bad_request() {
+    let (state, _dir) = seed_wcs_session("s-px-even").await;
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-px-even/pixel",
+        r#"{"x":3,"y":3,"box":4}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
 }
 
 #[tokio::test]
@@ -1678,10 +1964,12 @@ async fn v2_render_unknown_colormap_and_stretch_are_bad_request() {
     let resp = post_json(
         build_router(state.clone()),
         "/v2/sessions/s-re/render",
-        r#"{"colormap":"heat"}"#,
+        r#"{"colormap":"bone"}"#,
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
 
     let resp = post_json(
         build_router(state.clone()),
@@ -1698,4 +1986,86 @@ async fn v2_render_unknown_colormap_and_stretch_are_bad_request() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn v2_render_every_colormap_is_accepted_and_inferno_is_colored() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-rc", "img_0", render_ramp_8x8());
+
+    for name in ["gray", "grey", "viridis", "inferno", "magma", "plasma", "cividis", "heat", "cool", "rainbow"] {
+        let body = format!(r#"{{"scale":{{"algorithm":"minmax","stretch":"linear"}},"colormap":"{name}"}}"#);
+        let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rc/render", &body).await;
+        assert_eq!(resp.status(), StatusCode::OK, "colormap {name}");
+    }
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rc/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear"},"colormap":"inferno"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["colormap"], "inferno");
+    let img = decode_rgb(&body_bytes(resp).await);
+    for (x, y) in [(0u32, 0u32), (7, 0), (0, 7), (7, 7)] {
+        let p = img.get_pixel(x, y).0;
+        assert!(p[0] != p[1] || p[1] != p[2], "corner ({x},{y}) should not be gray: {p:?}");
+    }
+    assert_eq!(img.get_pixel(0, 0).0, [0, 0, 4]);
+    assert_eq!(img.get_pixel(7, 7).0, [252, 255, 164]);
+}
+
+#[tokio::test]
+async fn v2_render_user_and_manual_both_resolve_and_echo_user() {
+    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![0.0f32, 1.0, 2.0, 3.0]).unwrap();
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-ru", "img_0", arr);
+
+    let mut outputs = Vec::new();
+    for alg in ["user", "manual"] {
+        let body = format!(
+            r#"{{"scale":{{"algorithm":"{alg}","vmin":0,"vmax":3,"stretch":"linear"}},"colormap":"gray"}}"#
+        );
+        let resp = post_json(build_router(state.clone()), "/v2/sessions/s-ru/render", &body).await;
+        assert_eq!(resp.status(), StatusCode::OK, "alg {alg}");
+        let hdr = resolved_header(&resp);
+        assert_eq!(hdr["scale_algorithm"], "user", "alg {alg}");
+        assert_eq!(hdr["vmin"], 0.0);
+        assert_eq!(hdr["vmax"], 3.0);
+        outputs.push(body_bytes(resp).await);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-ru/render",
+        r#"{"scale":{"algorithm":"user","stretch":"linear"}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["scale_algorithm"], "user");
+    assert_eq!(hdr["vmin"], 0.0);
+    assert_eq!(hdr["vmax"], 3.0);
+}
+
+#[tokio::test]
+async fn v2_render_invert_cmap_flips_gray_endpoints() {
+    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![0.0f32, 1.0, 2.0, 3.0]).unwrap();
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-ri", "img_0", arr);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-ri/render",
+        r#"{"scale":{"algorithm":"user","vmin":0,"vmax":3,"stretch":"linear"},"colormap":"gray","invert_cmap":true}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255]);
+    assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0]);
+    assert_eq!(img.get_pixel(1, 0).0, [170, 170, 170]);
 }

@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod config;
 pub mod fits;
+pub mod image_source;
 pub mod ipc;
 pub mod progress;
 pub mod render;

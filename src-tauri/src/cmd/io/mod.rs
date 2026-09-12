@@ -3,21 +3,17 @@ use std::time::Instant;
 use serde_json::json;
 use tauri::ipc::Response;
 
-use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full, load_preview_validated, resolve_output_dir, save_preview_png, try_extract_rgb_resolved, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, image_ref, load_cached, load_cached_full, load_preview_validated, output_stem, plane_info_json, resolve_output_dir, save_preview_png, source_path, try_extract_rgb_resolved, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::{apply_stf, apply_stf_f32, auto_stf, AutoStfConfig};
 use crate::infra::cache::ImageEntry;
 use crate::infra::ipc::{encode_rgb_with_header_downsampled, encode_with_header_downsampled};
-use crate::types::constants::{HISTOGRAM_BINS_DISPLAY, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_HEADER, RES_HISTOGRAM, RES_MAD, RES_MEAN, RES_MEDIAN, RES_PNG_PATH, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS, RES_IS_RGB, STF_R, STF_G, STF_B};
+use crate::types::constants::{HISTOGRAM_BINS_DISPLAY, RES_AUTO_STF, RES_BINS, RES_BIN_COUNT, RES_DATA_MAX, RES_DATA_MIN, RES_DIMENSIONS, RES_ELAPSED_MS, RES_HEADER, RES_HISTOGRAM, RES_IMAGE_REF, RES_MAD, RES_MEAN, RES_MEDIAN, RES_PLANE, RES_PNG_PATH, RES_SIGMA, RES_STATS, RES_STF, RES_TOTAL_PIXELS, RES_IS_RGB, STF_R, STF_G, STF_B};
 use crate::types::image::StfParams;
 
 fn png_path_for(path: &str, output_dir: &str) -> String {
-    let stem = std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    format!("{}/{}.png", output_dir, stem)
+    format!("{}/{}.png", output_dir, output_stem(path))
 }
 
 fn render_to_png(cached: &ImageEntry, png_path: &str) -> anyhow::Result<(StfParams, usize, usize)> {
@@ -116,6 +112,7 @@ pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json
         let cached = load_cached(&path)?;
         let png_path = png_path_for(&path, &output_dir);
         let (stf_params, rows, cols) = render_to_png(&cached, &png_path)?;
+        let plane = plane_json_for(&path, &cached);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -123,8 +120,20 @@ pub async fn process_fits(path: String, output_dir: String) -> Result<serde_json
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
             RES_STATS: helpers::stats_json(cached.stats()),
             RES_STF: helpers::stf_json(&stf_params),
+            RES_IMAGE_REF: image_ref(&path).cache_key(),
+            RES_PLANE: plane,
         }))
     })
+}
+
+fn plane_json_for(path: &str, cached: &ImageEntry) -> serde_json::Value {
+    match plane_info_json(path, cached) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("plane info unavailable for {}: {:#}", path, e);
+            serde_json::Value::Null
+        }
+    }
 }
 
 #[tauri::command]
@@ -149,6 +158,7 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
             Some(h) => serde_json::to_value(&h.index)?,
             None => json!(null),
         };
+        let plane = plane_json_for(&path, &cached);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -157,6 +167,8 @@ pub async fn process_fits_full(path: String, output_dir: String) -> Result<serde
             RES_STATS: helpers::stats_json_full(stats),
             RES_STF: helpers::stf_json(&stf_params),
             RES_HEADER: header_json,
+            RES_IMAGE_REF: image_ref(&path).cache_key(),
+            RES_PLANE: plane,
             RES_HISTOGRAM: {
                 RES_BINS: display_bins,
                 RES_BIN_COUNT: display_bins.len(),
@@ -202,7 +214,7 @@ static RGB_PREVIEW_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<RgbPreview
 const RGB_PREVIEW_CACHE_MAX_BYTES: usize = 512 << 20;
 
 fn rgb_stamp(p: &str) -> Option<RgbStamp> {
-    std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
+    std::fs::metadata(source_path(p)).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
 fn prime_rgb_preview_cache(path: &str, stamp: Option<RgbStamp>) {
@@ -301,11 +313,18 @@ pub async fn get_raw_rgb_pixels_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_rgb_preview_cached, process_rgb_fits, RGB_PREVIEW_CACHE};
+    use super::{load_rgb_preview_cached, png_path_for, process_rgb_fits, RGB_PREVIEW_CACHE};
     use crate::infra::fits::writer::write_fits_rgb;
     use ndarray::Array2;
     use std::sync::Arc;
     use std::time::Instant;
+
+    #[test]
+    fn png_path_for_uses_plane_aware_stem() {
+        assert!(png_path_for("C:/x/a.fits#hdu=3", "out").ends_with("a_hdu3.png"));
+        assert_eq!(png_path_for("C:/x/a.fits", "out"), "out/a.png");
+        assert_eq!(png_path_for("C:/x/r.asdf#array=roman.dq", "out"), "out/r_roman_dq.png");
+    }
 
     #[test]
     fn process_rgb_fits_primes_preview_cache_with_shared_planes() {

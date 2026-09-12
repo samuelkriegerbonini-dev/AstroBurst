@@ -1,5 +1,22 @@
 import type { FileStatus } from "./queue";
 import type { HistogramData } from "./analysis";
+import type { DqTableName } from "./dq";
+
+export type PlaneKind = "hdu" | "array";
+
+export interface PlaneInfo {
+  kind: PlaneKind;
+  index: number | null;
+  key: string | null;
+  extname: string | null;
+  extver: number | null;
+  is_dq: boolean;
+  is_err: boolean;
+  dq_ref: string | null;
+  err_ref: string | null;
+  source_path: string;
+  dq_table: DqTableName | null;
+}
 
 export interface StfParams {
   shadow: number;
@@ -53,12 +70,16 @@ export interface ProcessResult {
   stf_r?: StfParams | null;
   stf_g?: StfParams | null;
   stf_b?: StfParams | null;
+  image_ref?: string;
+  plane?: PlaneInfo | null;
 }
 
 export interface ProcessedFile {
   id: string;
   name: string;
   path: string;
+  sourcePath: string;
+  imageRef: string | null;
   size: number;
   status: FileStatus;
   result: ProcessResult | null;

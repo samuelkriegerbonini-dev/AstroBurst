@@ -1,11 +1,13 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
 import { Image, Loader2, X, SlidersHorizontal, RotateCcw } from "lucide-react";
-import { useFileContext, useHistContext, useCubeContext, useRenderContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useCubeContext, useRenderContext, useDisplayContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
+import { GRAY_LUT_RGBA, toDisplayTransfer } from "../../utils/displayTransfer";
 
 import ZoomPanView from "../ui/ZoomPanView";
 import GpuViewport from "../render/GpuViewport";
+import DisplayControls from "./DisplayControls";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
 const GpuRgbRenderer = lazy(() => import("../render/GpuRgbRenderer"));
@@ -16,6 +18,7 @@ interface PreviewTabProps {
   rgbRawPixels?: RawRgbPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLElement>) => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }
 
 const MAX_RETRIES = 2;
@@ -24,9 +27,11 @@ const IDENTITY_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 const Overlay = memo(function Overlay({
                                         starOverlayRef,
+                                        dqCanvasRef,
                                         isCube,
                                       }: {
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   isCube: boolean;
 }) {
   return (
@@ -36,6 +41,13 @@ const Overlay = memo(function Overlay({
         className="absolute inset-0 w-full h-full pointer-events-none"
         style={{ display: "none" }}
       />
+      {dqCanvasRef && (
+        <canvas
+          ref={dqCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          style={{ display: "none" }}
+        />
+      )}
       {isCube && (
         <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-sm text-[10px] text-purple-300 px-2 py-1 rounded">
           Click to extract spectrum
@@ -45,7 +57,7 @@ const Overlay = memo(function Overlay({
   );
 });
 
-function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOverlayRef }: PreviewTabProps) {
+function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { isCube } = useCubeContext();
@@ -57,6 +69,14 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
   } = useCompositeStf();
   const [stfOpen, setStfOpen] = useState(false);
+  const { display, limits, lut } = useDisplayContext();
+
+  const transfer = useMemo(() => {
+    const dataLimits = { vmin: rawPixels?.min ?? 0, vmax: rawPixels?.max ?? 1 };
+    const resolved = display.stretch === "mtf" ? dataLimits : (limits ?? dataLimits);
+    return toDisplayTransfer(display, stfParams, resolved);
+  }, [display, stfParams, limits, rawPixels?.min, rawPixels?.max]);
+  const lutBytes = lut ?? GRAY_LUT_RGBA;
 
   const updateStf = useCallback((ch: "r" | "g" | "b", param: keyof StfParams, val: number) => {
     if (compositeStfLinked) {
@@ -235,6 +255,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   if (useGpu && rawPixels && !cubeFrameActive) {
     return (
       <div className="flex flex-col h-full">
+        <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} />
         <div className="relative flex-1 min-h-0">
           <Suspense fallback={<Loader2 size={20} className="animate-spin text-zinc-600" />}>
             <GpuViewport
@@ -243,17 +264,15 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               fitsW={file?.result?.dimensions?.[0]}
               fitsH={file?.result?.dimensions?.[1]}
               overlayCanvasRef={starOverlayRef}
+              dqCanvasRef={dqCanvasRef}
               onCanvasClick={isCube ? onImageClick : undefined}
             >
               <GpuRenderer
                 rawData={rawPixels.data}
                 width={rawPixels.width}
                 height={rawPixels.height}
-                dataMin={rawPixels.min}
-                dataMax={rawPixels.max}
-                shadow={stfParams.shadow}
-                midtone={stfParams.midtone}
-                highlight={stfParams.highlight}
+                transfer={transfer}
+                lut={lutBytes}
               />
             </GpuViewport>
           </Suspense>
@@ -280,7 +299,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
             loading="eager"
             decoding="async"
           />
-          <Overlay starOverlayRef={starOverlayRef} isCube={isCube} />
+          <Overlay starOverlayRef={starOverlayRef} dqCanvasRef={dqCanvasRef} isCube={isCube} />
         </div>
       </div>
     );

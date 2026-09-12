@@ -4,24 +4,24 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::pixel_probe::{
+    data_unit, probe_companions, probe_json_with_companions, probe_pixel, CompanionProbe,
+    ProbeError,
+};
+use astroburst_lib::infra::cache::ImageEntry;
+use astroburst_lib::infra::image_source::{load_companions_into, LoadedCompanions};
 
+use super::images::load_ref;
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
-fn default_box() -> u32 {
-    1
+fn load_session_companions(session: &Session, entry: &ImageEntry) -> LoadedCompanions {
+    load_companions_into(&session.cache, entry, load_ref)
 }
 
-fn box_half(box_size: u32) -> Result<i64> {
-    if box_size.is_multiple_of(2) {
-        return Err(AppError::BadRequestWithHint {
-            code: "bad_request",
-            message: format!("box must be an odd positive integer, got {box_size}"),
-            hint: Some("use 1, 3, 5, ... so the box x box window is centred on the pixel".into()),
-        });
-    }
-    Ok((box_size / 2) as i64)
+fn default_box() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -49,6 +49,21 @@ async fn target_ref(session: &Session, explicit: Option<String>) -> Result<Strin
     }
 }
 
+fn probe_error(err: ProbeError) -> AppError {
+    match err {
+        ProbeError::OutOfBounds { cols, rows, .. } => AppError::BadRequestWithHint {
+            code: "pixel_out_of_bounds",
+            message: err.to_string(),
+            hint: Some(format!("x must be in [0, {cols}) and y in [0, {rows})")),
+        },
+        ProbeError::EvenBox(_) => AppError::BadRequestWithHint {
+            code: "bad_request",
+            message: err.to_string(),
+            hint: Some("use 1, 3, 5, ... so the box x box window is centred on the pixel".into()),
+        },
+    }
+}
+
 pub async fn pixel(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<PixelParams>,
@@ -59,58 +74,9 @@ pub async fn pixel(
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
-    let arr = entry.arr();
-    let (rows, cols) = arr.dim();
 
-    let cx = params.x.floor() as i64;
-    let cy = params.y.floor() as i64;
-
-    if cx < 0 || cy < 0 || cx >= cols as i64 || cy >= rows as i64 {
-        return Err(AppError::BadRequestWithHint {
-            code: "pixel_out_of_bounds",
-            message: format!(
-                "pixel ({}, {}) is outside the image extent {}×{}",
-                params.x, params.y, cols, rows
-            ),
-            hint: Some(format!(
-                "x must be in [0, {}) and y in [0, {})",
-                cols, rows
-            )),
-        });
-    }
-
-    let value = arr[[cy as usize, cx as usize]];
-
-    let half = box_half(params.box_size)?;
-    let x0 = (cx - half).max(0);
-    let x1 = (cx + half).min(cols as i64 - 1);
-    let y0 = (cy - half).max(0);
-    let y1 = (cy + half).min(rows as i64 - 1);
-
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut sum = 0.0f64;
-    let mut n_finite: u64 = 0;
-    let mut n_nan: u64 = 0;
-    for yy in y0..=y1 {
-        for xx in x0..=x1 {
-            let v = arr[[yy as usize, xx as usize]] as f64;
-            if v.is_finite() {
-                min = min.min(v);
-                max = max.max(v);
-                sum += v;
-                n_finite += 1;
-            } else {
-                n_nan += 1;
-            }
-        }
-    }
-
-    let (min_v, max_v, mean_v) = if n_finite > 0 {
-        (json!(min), json!(max), json!(sum / n_finite as f64))
-    } else {
-        (Value::Null, Value::Null, Value::Null)
-    };
+    let probe = probe_pixel(entry.arr(), params.x, params.y, params.box_size).map_err(probe_error)?;
+    let unit = entry.header().and_then(data_unit);
 
     let sky = entry
         .header()
@@ -121,47 +87,57 @@ pub async fn pixel(
         })
         .unwrap_or(Value::Null);
 
-    Ok(Json(json!({
-        "ref": target,
-        "x": params.x,
-        "y": params.y,
-        "value": if (value as f64).is_finite() { json!(value) } else { Value::Null },
-        "box": params.box_size,
-        "neighborhood": {
-            "min": min_v,
-            "max": max_v,
-            "mean": mean_v,
-            "n_pixels": n_finite,
-            "n_nan": n_nan,
-        },
-        "sky": sky,
-    })))
+    let (companions, err_unit) = if entry.companions().is_some() {
+        let sess = session.clone();
+        let active = entry.clone();
+        let (px, py) = (probe.x, probe.y);
+        tokio::task::spawn_blocking(move || {
+            let comps = load_session_companions(&sess, &active);
+            let dq = comps
+                .dq
+                .as_ref()
+                .and_then(|(e, table)| e.int_plane().map(|p| (p, *table)));
+            let err_unit = comps.err.as_ref().and_then(|e| e.header().and_then(data_unit));
+            let probe = probe_companions(dq, comps.err.as_ref().map(|e| e.arr()), px, py);
+            (probe, err_unit)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
+    } else {
+        (CompanionProbe { dq: None, err: None }, None)
+    };
+
+    let mut body = probe_json_with_companions(&probe, unit.as_deref(), err_unit.as_deref(), &companions);
+    body["ref"] = json!(target);
+    body["sky"] = sky;
+    Ok(Json(body))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn code_of(e: &AppError) -> Option<&'static str> {
+    fn parts(e: AppError) -> (&'static str, String, Option<String>) {
         match e {
-            AppError::BadRequestWithHint { code, .. } => Some(code),
-            _ => None,
+            AppError::BadRequestWithHint { code, message, hint } => (code, message, hint),
+            other => panic!("expected BadRequestWithHint, got {other:?}"),
         }
     }
 
     #[test]
-    fn even_box_sizes_are_rejected_instead_of_silently_widening() {
-        for even in [0u32, 2, 4, 10] {
-            let err = box_half(even).unwrap_err();
-            assert_eq!(code_of(&err), Some("bad_request"), "box {even}");
-        }
+    fn out_of_bounds_maps_to_pixel_out_of_bounds_with_extent_hint() {
+        let err = ProbeError::OutOfBounds { x: 100.0, y: 100.0, cols: 8, rows: 8 };
+        let (code, message, hint) = parts(probe_error(err));
+        assert_eq!(code, "pixel_out_of_bounds");
+        assert!(message.contains("(100, 100)"), "{message}");
+        assert_eq!(hint.as_deref(), Some("x must be in [0, 8) and y in [0, 8)"));
     }
 
     #[test]
-    fn odd_box_sizes_give_a_centred_window() {
-        assert_eq!(box_half(1).unwrap(), 0);
-        assert_eq!(box_half(3).unwrap(), 1);
-        assert_eq!(box_half(5).unwrap(), 2);
-        assert_eq!(box_half(21).unwrap(), 10);
+    fn even_box_maps_to_bad_request() {
+        let (code, message, hint) = parts(probe_error(ProbeError::EvenBox(4)));
+        assert_eq!(code, "bad_request");
+        assert!(message.contains("got 4"), "{message}");
+        assert!(hint.unwrap().contains("1, 3, 5"));
     }
 }

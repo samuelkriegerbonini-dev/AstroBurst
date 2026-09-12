@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::sampling::{cell_range, preview_dims};
 use crate::core::imaging::stats::is_valid_pixel;
+use crate::types::constants::DQ_MASK_HEADER_BYTES;
 
 pub struct RawPixelBuffer {
     pub bytes: Vec<u8>,
@@ -158,9 +160,7 @@ fn encode_channel_preview(arr: &Array2<f32>, max_dim: usize) -> Result<ChannelPr
     let data_min = if scan.min > scan.max { 0.0 } else { scan.min };
     let data_max = if scan.min > scan.max { 1.0 } else { scan.max };
 
-    let scale = max_dim as f64 / (rows.max(cols) as f64);
-    let dst_rows = ((rows as f64) * scale).round().max(1.0) as usize;
-    let dst_cols = ((cols as f64) * scale).round().max(1.0) as usize;
+    let (dst_rows, dst_cols) = preview_dims(rows, cols, max_dim);
 
     let npix = dst_rows * dst_cols;
     let mut pixel_bytes = vec![0u8; npix * 4];
@@ -172,11 +172,9 @@ fn encode_channel_preview(arr: &Array2<f32>, max_dim: usize) -> Result<ChannelPr
         .par_chunks_mut(dst_cols * 4)
         .enumerate()
         .for_each(|(dy, out_row)| {
-            let sy0 = dy * rows / dst_rows;
-            let sy1 = (((dy + 1) * rows) / dst_rows).max(sy0 + 1).min(rows);
+            let (sy0, sy1) = cell_range(dy, rows, dst_rows);
             for dx in 0..dst_cols {
-                let sx0 = dx * cols / dst_cols;
-                let sx1 = (((dx + 1) * cols) / dst_cols).max(sx0 + 1).min(cols);
+                let (sx0, sx1) = cell_range(dx, cols, dst_cols);
 
                 let mut sum = 0.0f64;
                 let mut count = 0u32;
@@ -232,6 +230,16 @@ pub fn encode_rgb_with_header_downsampled(
     max_dim: usize,
 ) -> Result<Vec<u8>> {
     encode_rgb_with_header_downsampled_flagged(r, g, b, max_dim, 0)
+}
+
+pub fn encode_mask_with_header(cells: &[u8], width: u32, height: u32, mask: u32, table_id: u32) -> Vec<u8> {
+    let mut output = Vec::with_capacity(DQ_MASK_HEADER_BYTES + cells.len());
+    output.extend_from_slice(&width.to_le_bytes());
+    output.extend_from_slice(&height.to_le_bytes());
+    output.extend_from_slice(&mask.to_le_bytes());
+    output.extend_from_slice(&table_id.to_le_bytes());
+    output.extend_from_slice(cells);
+    output
 }
 
 pub fn encode_rgb_with_header_downsampled_flagged(
@@ -565,5 +573,29 @@ mod tests {
         let g = Array2::from_shape_fn((4, 4), |_| 1.0f32);
         let b = Array2::from_shape_fn((3, 3), |_| 1.0f32);
         assert!(encode_rgb_with_header_downsampled(&r, &g, &b, 64).is_err());
+    }
+
+    #[test]
+    fn test_encode_mask_with_header_layout() {
+        let cells = [1u8, 0, 0, 1, 1, 0];
+        let data = encode_mask_with_header(&cells, 3, 2, 7, 0xFFFF_FFFF);
+        assert_eq!(data.len(), 16 + 6);
+        assert_eq!(u32::from_le_bytes([data[0], data[1], data[2], data[3]]), 3);
+        assert_eq!(u32::from_le_bytes([data[4], data[5], data[6], data[7]]), 2);
+        assert_eq!(u32::from_le_bytes([data[8], data[9], data[10], data[11]]), 7);
+        assert_eq!(u32::from_le_bytes([data[12], data[13], data[14], data[15]]), 0xFFFF_FFFF);
+        assert_eq!(&data[16..], &cells);
+        let empty = encode_mask_with_header(&[], 0, 0, 1, 2);
+        assert_eq!(empty.len(), 16);
+    }
+
+    #[test]
+    fn test_downsampled_grid_matches_preview_dims() {
+        let arr = Array2::from_shape_fn((3000, 1000), |(r, c)| (r + c) as f32);
+        let data = encode_with_header_downsampled(&arr, 2048).unwrap();
+        let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        assert_eq!((h, w), preview_dims(3000, 1000, 2048));
+        assert_eq!((h, w), (2048, 683));
     }
 }

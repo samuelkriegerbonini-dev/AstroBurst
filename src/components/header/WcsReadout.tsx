@@ -1,7 +1,8 @@
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useCallback, memo } from "react";
 import { Globe } from "lucide-react";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
-import type { WcsInfo } from "../../shared/types/astrometry";
+import type { WcsInfo, SkyFrame } from "../../shared/types/astrometry";
+import { formatLat, formatLon, frameAxisLabels, frameLonInHours, type CoordFormat } from "../../utils/coordFormat";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -11,39 +12,55 @@ interface WcsReadoutProps {
   mouseY: number | null;
 }
 
-interface CelestialCoord {
-  ra: number;
-  dec: number;
+interface ReadoutPreference {
+  frame: SkyFrame;
+  format: CoordFormat;
 }
 
-function formatRA(ra: number): string {
-  const h = ra / 15;
-  const hours = Math.floor(h);
-  const minutes = Math.floor((h - hours) * 60);
-  const seconds = ((h - hours) * 60 - minutes) * 60;
-  return `${hours}h ${minutes}m ${seconds.toFixed(2)}s`;
-}
-
-function formatDec(dec: number): string {
-  const sign = dec >= 0 ? "+" : "-";
-  const abs = Math.abs(dec);
-  const degrees = Math.floor(abs);
-  const arcmin = Math.floor((abs - degrees) * 60);
-  const arcsec = ((abs - degrees) * 60 - arcmin) * 60;
-  return `${sign}${degrees}° ${arcmin}' ${arcsec.toFixed(1)}"`;
-}
-
-// The mouse-pixel store already throttles to one distinct-integer-pixel update
-// per animation frame; this debounce additionally caps how often a fast drag
-// round-trips to the WCS engine over IPC (the readout used to do this pix->sky
-// math synchronously in-process via src/utils/wcstransform.ts -- now retired in
-// favor of pixel_to_world_cmd, which gets the full wcs-rs projection coverage).
+const READOUT_STORAGE_KEY = "astroburst.readout.v1";
+const DEFAULT_READOUT: ReadoutPreference = { frame: "icrs", format: "sexagesimal" };
+const FRAMES: readonly SkyFrame[] = ["icrs", "fk5", "galactic", "ecliptic"];
+const FORMATS: readonly CoordFormat[] = ["sexagesimal", "decimal"];
 const HOVER_DEBOUNCE_MS = 40;
 
-function WcsReadoutInner({ filePath, mouseX, mouseY }: WcsReadoutProps) {
+const SELECT_CLASS =
+  "bg-transparent border border-zinc-800 rounded px-0.5 text-[9px] text-zinc-400 focus:outline-none focus:border-zinc-600";
+
+function loadReadoutPreference(): ReadoutPreference {
+  try {
+    const text = window.localStorage.getItem(READOUT_STORAGE_KEY);
+    if (!text) return DEFAULT_READOUT;
+    const raw = JSON.parse(text) as Partial<ReadoutPreference>;
+    return {
+      frame: FRAMES.find((f) => f === raw.frame) ?? DEFAULT_READOUT.frame,
+      format: FORMATS.find((f) => f === raw.format) ?? DEFAULT_READOUT.format,
+    };
+  } catch {
+    return DEFAULT_READOUT;
+  }
+}
+
+function saveReadoutPreference(pref: ReadoutPreference): void {
+  try {
+    window.localStorage.setItem(READOUT_STORAGE_KEY, JSON.stringify(pref));
+  } catch {
+  }
+}
+
+function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
   const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
-  const [coord, setCoord] = useState<CelestialCoord | null>(null);
+  const [coord, setCoord] = useState<[number, number] | null>(null);
+  const [center, setCenter] = useState<[number, number] | null>(null);
+  const [pref, setPref] = useState<ReadoutPreference>(loadReadoutPreference);
+
+  const updatePref = useCallback((patch: Partial<ReadoutPreference>) => {
+    setPref((prev) => {
+      const next = { ...prev, ...patch };
+      saveReadoutPreference(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!filePath) {
@@ -69,17 +86,40 @@ function WcsReadoutInner({ filePath, mouseX, mouseY }: WcsReadoutProps) {
   }, [filePath]);
 
   useEffect(() => {
+    if (!filePath || !wcsAvailable || !wcsInfo) {
+      setCenter(null);
+      return;
+    }
+    if (pref.frame === "icrs") {
+      setCenter([wcsInfo.center_ra, wcsInfo.center_dec]);
+      return;
+    }
+    let cancelled = false;
+    pixelToWorld(filePath, [[imageWidth / 2, imageHeight / 2]], pref.frame)
+      .then((res) => {
+        if (cancelled) return;
+        setCenter(res.points[0] ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCenter(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, wcsAvailable, wcsInfo, pref.frame, imageWidth, imageHeight]);
+
+  useEffect(() => {
     if (!filePath || !wcsAvailable || mouseX === null || mouseY === null) {
       setCoord(null);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      pixelToWorld(filePath, [[mouseX, mouseY]])
+      pixelToWorld(filePath, [[mouseX, mouseY]], pref.frame)
         .then((res) => {
           if (cancelled) return;
-          const pt = res.points[0];
-          setCoord(pt ? { ra: pt[0], dec: pt[1] } : null);
+          setCoord(res.points[0] ?? null);
         })
         .catch(() => {
           if (cancelled) return;
@@ -90,35 +130,55 @@ function WcsReadoutInner({ filePath, mouseX, mouseY }: WcsReadoutProps) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [filePath, wcsAvailable, mouseX, mouseY]);
+  }, [filePath, wcsAvailable, mouseX, mouseY, pref.frame]);
 
   if (!wcsAvailable || !wcsInfo) return null;
 
+  const [lonLabel, latLabel] = frameAxisLabels(pref.frame);
+  const hours = frameLonInHours(pref.frame);
+  const shown = coord ?? center;
+
   return (
-    <div
-      className="flex items-center gap-3 text-[10px] font-mono"
-      style={{ color: "rgba(52,211,153,0.6)" }}
-    >
-      <Globe size={10} />
-      {wcsInfo.pixel_scale_arcsec && (
-        <span>{wcsInfo.pixel_scale_arcsec.toFixed(2)}"/px</span>
-      )}
-      {coord ? (
-        <>
-          <span>RA {formatRA(coord.ra)}</span>
-          <span>Dec {formatDec(coord.dec)}</span>
-        </>
-      ) : wcsInfo.center_ra !== undefined ? (
-        <>
-          <span>RA {formatRA(wcsInfo.center_ra)}</span>
-          <span>Dec {formatDec(wcsInfo.center_dec)}</span>
-        </>
-      ) : null}
-      {mouseX !== null && mouseY !== null && (
-        <span className="text-zinc-600">
-          px({mouseX},{mouseY})
-        </span>
-      )}
+    <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "rgba(52,211,153,0.6)" }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Globe size={10} />
+        <select
+          className={SELECT_CLASS}
+          value={pref.frame}
+          onChange={(e) => updatePref({ frame: e.target.value as SkyFrame })}
+          title="Coordinate frame"
+        >
+          {FRAMES.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+        <select
+          className={SELECT_CLASS}
+          value={pref.format}
+          onChange={(e) => updatePref({ format: e.target.value as CoordFormat })}
+          title="Coordinate format"
+        >
+          {FORMATS.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+        {wcsInfo.pixel_scale_arcsec && (
+          <span>{wcsInfo.pixel_scale_arcsec.toFixed(2)}"/px</span>
+        )}
+      </div>
+      <div className="flex items-center gap-3 flex-wrap">
+        {shown ? (
+          <>
+            <span>{lonLabel} {formatLon(shown[0], { hours, format: pref.format })}</span>
+            <span>{latLabel} {formatLat(shown[1], { format: pref.format })}</span>
+          </>
+        ) : null}
+        {mouseX !== null && mouseY !== null && (
+          <span className="text-zinc-600">
+            px({mouseX},{mouseY})
+          </span>
+        )}
+      </div>
     </div>
   );
 }

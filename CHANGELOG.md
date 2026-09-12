@@ -1,8 +1,4 @@
 # Changelog
-
-
-
-        NOT REVISION YET AI GENERATE 
 All notable changes to AstroBurst will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -11,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Phase 0+1 (viewer maturity)**
+  - Display controls: scale modes (`mtf`, `linear`, `log`, `sqrt`, `asinh`, `power`), limit modes (`minmax`, `zscale`, `percentile`, `user`), 9 colormaps (`gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis`, `heat`, `cool`, `rainbow`) plus invert; the GPU path samples a 256x1 LUT texture and the worker fallback reproduces the same bytes; stretch, limits and the byte rule live once in `core/imaging/scale.rs`, shared by the desktop commands (`compute_scale_limits_cmd`, `get_colormap_lut_cmd`) and the server
+  - Pixel readout with `BUNIT` (FITS) and ASDF `unit` mapping via `probe_pixel_cmd`, sharing `core/imaging/pixel_probe.rs` with the server `/v2/.../pixel` endpoint (value, unit, box min/max/mean/median, pixel and NaN counts)
+  - Coordinate frames for the cursor readout: ICRS, FK5 (J2000), Galactic and Ecliptic (J2000), in sexagesimal or decimal format, via `core/astrometry/frames.rs` and the `frame` argument of `pixel_to_world_cmd`
+  - CI: `backend-tests-unix` matrix (ubuntu/macos, `cargo test --all-features`) and `frontend-tests` (vitest) jobs; `vitest` added with `pnpm test` / `pnpm test:watch` and smoke tests for `pixelMapping`, `filterWavelengths` and the binary IPC parsers
+- **Phase 2 (planes, DQ)**
+  - Image references: every path-based command accepts `<path>#hdu=<n>` (any FITS HDU) or `<path>#array=<key>` (any ASDF array, dotted keys such as `roman.dq`); the ref is the cache key and output files derive their stem from it (`jw01234_cal.fits#hdu=3` -> `jw01234_cal_hdu3.png`, `r0000.asdf#array=roman.dq` -> `r0000_roman_dq.png`); parsing lives in `types/image_ref.rs`, one loader (`infra/image_source.rs`) serves the desktop commands and the server
+  - Lossless integer planes: BITPIX 8/16/32 HDUs and int8..int32/uint8..uint32/bool8 ASDF arrays decode bit-exactly (`IntPlane`, BZERO 32768/2147483648 handled without float rounding) alongside the float view; cached next to the pixels and counted in the cache budget
+  - DQ flag tables: JWST (32 bits), HST (15 bits), Roman and unknown instruments use the JWST convention; table selected from `TELESCOP`/`INSTRUME` and the ASDF `meta.telescope`/`meta.instrument.name` cards; `get_dq_flag_table_cmd` returns the flags, default overlay mask and exclusion mask
+  - Companion readout: DQ/ERR planes resolved by `EXTNAME`+`EXTVER` (FITS) or sibling array keys (ASDF); `probe_pixel_cmd` and the server `/v2/.../pixel` add `dq` (`bits`, `value`, `names`, `table`, `text` such as `3: DO_NOT_USE | SATURATED`) and `err` (`value`, `unit`)
+  - DQ overlay: `get_dq_mask_preview` returns a binary OR-reduced mask grid (16-byte LE header: width, height, mask, table id) on the same grid as `get_raw_pixels_preview`; raw previews and mask previews share `preview_dims`/`cell_range`
+  - DQ-masked statistics: `compute_histogram(excludeDq)` and `measure_photometry_cmd(excludeDq)` treat `DO_NOT_USE` (JWST convention) or the documented HST bad-pixel bits as NaN and report `masked` / `dq_excluded`
+  - Server: `open` and `hdu` accept `array` (exactly one of `hdu`/`array`); image metadata and responses gain `array`, `plane_ref` and `is_dq`
 - **Search Everywhere** command palette (`Ctrl+K` / double `Shift`, IntelliJ-style): fuzzy search over processed files, tool panels (Headers/Analysis/Processing/Stacking/Synth/Export/Settings), and actions (open files/folder, toggle panels, ZIP export, new batch); full keyboard navigation, status-bar entry point
 - Right tool panel is now resizable (280–640px); all splitter positions (sidebar, right panel, compose panel height) persist across sessions via `localStorage` (`src/utils/layout.ts`)
 - IntelliJ-style splitters: zero-width in layout with a 7px grab area, accent highlight on hover (delayed) and while dragging, double-click resets to the default size
@@ -44,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apply_tone_composite_cmd` reads from `COMPOSITE_KEY` and renders preview only (no cache write), preserving linear calibrated data
 
 ### Changed
+- `process_fits` / `process_fits_full` responses gain `image_ref` (canonical ref) and `plane` (`kind`, `index`, `key`, `extname`, `extver`, `is_dq`, `is_err`, `dq_ref`, `err_ref`, `source_path`, `dq_table`)
+- `get_fits_extensions` rows gain `extver`, `ref`, `kind` (`hdu`/`array`), `is_dq`, `is_err` and also list ASDF arrays; `get_header_by_hdu` rejects ASDF files ("ASDF arrays have no HDU index")
+- `compute_scale_limits_cmd` rejects percentile `low >= high`, percentiles outside `0..=100`, non-finite values and user `vmin >= vmax` instead of silently producing an empty range
+- Server `render` accepts the `user` scale algorithm (`manual` kept as an alias, echoed back as `user`) and the new colormaps (`inferno`, `magma`, `plasma`, `cividis`, `heat`, `cool`, `rainbow`); stretch and colormap math now imported from `core/` instead of a server-local copy
+- Server `pixel` response gains a top-level `unit` (from `BUNIT`) and `neighborhood.median`
+- Server `pix2sky` accepts an optional `frame` (`icrs`, `fk5`, `galactic`, `ecliptic`) and echoes it in the response
 - **IntelliJ-style neutral chrome**: structural borders, separators, panel headers, scrollbars and progress tracks moved from teal-tinted literals to neutral semantic tokens (`--ab-border`, `--ab-bg-hover`, `--ab-bg-active`, `--ab-text-1..4`); the teal accent is now reserved for interactive states (active tool, selection, focus, actions)
 - Flat headers: preview/app header gradients replaced with flat panel surfaces; strip buttons use a neutral active background with accent-colored icon/label
 - ExportStep detects STF identity (`Math.abs(midtone - 0.5) > 1e-4`) before composite PNG export; sends `applyStfStretch: false` when identity, activating backend auto-stretch

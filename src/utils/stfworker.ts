@@ -1,3 +1,7 @@
+import type { DisplayTransfer } from "./displayTransfer";
+
+export type { DisplayTransfer } from "./displayTransfer";
+
 interface RenderResult {
   bitmap: ImageBitmap;
   width: number;
@@ -8,11 +12,8 @@ interface RenderParams {
   pixels?: Float32Array;
   width?: number;
   height?: number;
-  dataMin: number;
-  dataMax: number;
-  shadow: number;
-  midtone: number;
-  highlight: number;
+  transfer: DisplayTransfer;
+  lut: Uint8Array;
 }
 
 type Callback = (result: RenderResult | null) => void;
@@ -84,10 +85,7 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
       else reject(new Error("STF render returned no result"));
     });
 
-    const {
-      pixels, width, height,
-      dataMin, dataMax, shadow, midtone, highlight,
-    } = params;
+    const { pixels, width, height, transfer, lut } = params;
 
     const useRetained = _hasPixels && !pixels;
 
@@ -96,11 +94,8 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
       id,
       width,
       height,
-      dataMin,
-      dataMax,
-      shadow,
-      midtone,
-      highlight,
+      transfer,
+      lut,
     };
     if (!useRetained && pixels) {
       msg.pixels = pixels;

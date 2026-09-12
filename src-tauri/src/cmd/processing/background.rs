@@ -3,13 +3,13 @@ use std::sync::Arc;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, save_preview_png, auto_stretch_preview};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, output_stem, resolve_output_dir, save_preview_png, auto_stretch_preview};
 use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, deband_axis_name, detect_band_axis, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
-    MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS, DEFAULT_STEM,
+    MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS,
     MIN_GRID_SIZE, MAX_GRID_SIZE, MIN_POLY_DEGREE, MAX_POLY_DEGREE, MIN_ITERATIONS, MAX_ITERATIONS,
     RES_CORRECTED_PNG, RES_MODEL_PNG, RES_CORRECTED_FITS, RES_SAMPLE_COUNT,
     RES_RMS_RESIDUAL, RES_ELAPSED_MS, RES_DIMENSIONS, RES_CACHE_KEY,
@@ -54,10 +54,7 @@ pub async fn extract_background_cmd(
         let rendered = auto_stretch_preview(&bg_result.corrected);
         let model_rendered = auto_stretch_preview(&bg_result.model);
 
-        let stem = std::path::Path::new(&path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(DEFAULT_STEM);
+        let stem = output_stem(&path);
 
         let corrected_png = format!("{}/{}_bg_corrected.png", output_dir, stem);
         let model_png = format!("{}/{}_bg_model.png", output_dir, stem);

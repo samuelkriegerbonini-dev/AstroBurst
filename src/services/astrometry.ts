@@ -1,7 +1,19 @@
 import { typedInvoke } from "../infrastructure/tauri";
-import type { WcsInfo, PlateSolveOptions, PixelToWorldResult, PointingOverlapResult } from "../shared/types/astrometry";
+import type {
+  WcsInfo,
+  PlateSolveOptions,
+  PixelToWorldResult,
+  PointingOverlapResult,
+  SkyFrame,
+} from "../shared/types/astrometry";
 
-export type { WcsInfo, PlateSolveOptions, PixelToWorldResult, PointingOverlapResult } from "../shared/types/astrometry";
+export type {
+  WcsInfo,
+  PlateSolveOptions,
+  PixelToWorldResult,
+  PointingOverlapResult,
+  SkyFrame,
+} from "../shared/types/astrometry";
 
 export interface PlateSolveResult {
   success: boolean;
@@ -38,6 +50,10 @@ export function checkPointingOverlap(paths: string[], threshold?: number): Promi
   });
 }
 
-export function pixelToWorld(path: string, points: [number, number][]): Promise<PixelToWorldResult> {
-  return typedInvoke<PixelToWorldResult>("pixel_to_world_cmd", { path, points });
+export function pixelToWorld(
+  path: string,
+  points: [number, number][],
+  frame: SkyFrame = "icrs",
+): Promise<PixelToWorldResult> {
+  return typedInvoke<PixelToWorldResult>("pixel_to_world_cmd", { path, points, frame });
 }

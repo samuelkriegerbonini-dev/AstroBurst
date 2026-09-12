@@ -5,13 +5,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 use ndarray::Array2;
 
+use crate::infra::image_source::{Companions, PlaneInfo};
 use crate::types::ImageStats;
 use crate::types::header::HduHeader;
+use crate::types::image::IntPlane;
+
+pub struct PlaneLoad {
+    pub arr: Array2<f32>,
+    pub stats: ImageStats,
+    pub header: HduHeader,
+    pub int_plane: Option<IntPlane>,
+    pub info: Option<PlaneInfo>,
+    pub companions: Option<Companions>,
+}
+
+impl PlaneLoad {
+    pub fn synthetic(arr: Array2<f32>, stats: ImageStats, header: HduHeader) -> Self {
+        Self { arr, stats, header, int_plane: None, info: None, companions: None }
+    }
+}
 
 struct CachedImage {
     arr: Arc<Array2<f32>>,
     stats: ImageStats,
     header: Option<HduHeader>,
+    int_plane: Option<Arc<IntPlane>>,
+    info: Option<PlaneInfo>,
+    companions: Option<Companions>,
 }
 
 pub struct ImageEntry {
@@ -33,6 +53,18 @@ impl ImageEntry {
 
     pub fn header(&self) -> Option<&HduHeader> {
         self.inner.header.as_ref()
+    }
+
+    pub fn int_plane(&self) -> Option<&IntPlane> {
+        self.inner.int_plane.as_deref()
+    }
+
+    pub fn plane_info(&self) -> Option<&PlaneInfo> {
+        self.inner.info.as_ref()
+    }
+
+    pub fn companions(&self) -> Option<&Companions> {
+        self.inner.companions.as_ref()
     }
 }
 
@@ -71,7 +103,9 @@ impl LruInner {
 
     fn entry_bytes(entry: &Arc<CachedImage>) -> usize {
         let (rows, cols) = entry.arr.dim();
-        rows.saturating_mul(cols).saturating_mul(std::mem::size_of::<f32>())
+        let pixels = rows.saturating_mul(cols).saturating_mul(std::mem::size_of::<f32>());
+        let ints = entry.int_plane.as_ref().map(|p| p.byte_size()).unwrap_or(0);
+        pixels.saturating_add(ints)
     }
 
     fn next_gen(&self) -> u64 {
@@ -216,6 +250,9 @@ impl ImageCache {
             arr: Arc::new(arr),
             stats,
             header: None,
+            int_plane: None,
+            info: None,
+            companions: None,
         });
 
         {
@@ -247,6 +284,9 @@ impl ImageCache {
             arr: Arc::new(arr),
             stats,
             header: Some(header),
+            int_plane: None,
+            info: None,
+            companions: None,
         });
 
         {
@@ -257,6 +297,42 @@ impl ImageCache {
                 }
             }
             cache.put(path.to_string(), Arc::clone(&entry));
+        }
+
+        Ok(ImageEntry { inner: entry })
+    }
+
+    pub fn get_or_load_plane<F>(&self, key: &str, loader: F) -> Result<ImageEntry>
+    where
+        F: FnOnce() -> Result<PlaneLoad>,
+    {
+        {
+            let cache = self.inner.read().unwrap();
+            if let Some(entry) = cache.get_readonly(key) {
+                if entry.header.is_some() {
+                    return Ok(ImageEntry { inner: entry });
+                }
+            }
+        }
+
+        let load = loader()?;
+        let entry = Arc::new(CachedImage {
+            arr: Arc::new(load.arr),
+            stats: load.stats,
+            header: Some(load.header),
+            int_plane: load.int_plane.map(Arc::new),
+            info: load.info,
+            companions: load.companions,
+        });
+
+        {
+            let mut cache = self.inner.write().unwrap();
+            if let Some(existing) = cache.get_readonly(key) {
+                if existing.header.is_some() {
+                    return Ok(ImageEntry { inner: existing });
+                }
+            }
+            cache.put(key.to_string(), Arc::clone(&entry));
         }
 
         Ok(ImageEntry { inner: entry })
@@ -279,6 +355,9 @@ impl ImageCache {
                     arr: Arc::clone(&entry.arr),
                     stats: entry.stats.clone(),
                     header: Some(header),
+                    int_plane: entry.int_plane.clone(),
+                    info: entry.info.clone(),
+                    companions: entry.companions.clone(),
                 });
                 let mut w = self.inner.write().unwrap();
                 w.put(path.to_string(), Arc::clone(&upgraded));
@@ -293,6 +372,9 @@ impl ImageCache {
             arr,
             stats,
             header: None,
+            int_plane: None,
+            info: None,
+            companions: None,
         });
         let mut cache = self.inner.write().unwrap();
         cache.put(key.to_string(), entry);
@@ -337,6 +419,7 @@ pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::image_ref::ImageRef;
     use crate::types::ImageStats;
 
     fn make_test_entry(rows: usize, cols: usize) -> (Array2<f32>, ImageStats) {
@@ -544,6 +627,115 @@ mod tests {
         assert!(cache.get("__wizard_ch_ha_cropped").is_none());
         assert!(cache.get("__composite_r").is_some());
         assert!(cache.get("a.fits").is_some());
+    }
+
+    fn int_plane(rows: usize, cols: usize) -> IntPlane {
+        IntPlane { bits: Array2::from_elem((rows, cols), 3u32), signed: false }
+    }
+
+    fn companions() -> Companions {
+        Companions {
+            dq: Some(ImageRef::hdu("a.fits", 3)),
+            err: Some(ImageRef::hdu("a.fits", 2)),
+        }
+    }
+
+    fn plane(rows: usize, cols: usize, ints: bool) -> PlaneLoad {
+        let (arr, stats) = make_test_entry(rows, cols);
+        PlaneLoad {
+            arr,
+            stats,
+            header: HduHeader::empty(),
+            int_plane: ints.then(|| int_plane(rows, cols)),
+            info: None,
+            companions: Some(companions()),
+        }
+    }
+
+    #[test]
+    fn get_or_load_plane_stores_int_plane_and_counts_its_bytes() {
+        let cache = ImageCache::new(4, usize::MAX);
+        let entry = cache
+            .get_or_load_plane("a.fits#hdu=3", || Ok(plane(10, 10, true)))
+            .unwrap();
+        assert!(entry.header().is_some());
+        assert_eq!(entry.int_plane().unwrap().bits[[0, 0]], 3);
+        assert_eq!(cache.memory_estimate_bytes(), 10 * 10 * 4 + 10 * 10 * 4);
+
+        let again = cache
+            .get_or_load_plane("a.fits#hdu=3", || panic!("must not reload"))
+            .unwrap();
+        assert!(again.int_plane().is_some());
+
+        let none = cache
+            .get_or_load_plane("b.fits", || Ok(plane(4, 4, false)))
+            .unwrap();
+        assert!(none.int_plane().is_none());
+        assert_eq!(cache.memory_estimate_bytes(), 800 + 64);
+    }
+
+    #[test]
+    fn get_or_load_plane_keeps_companions_and_synthetic_has_none() {
+        let cache = ImageCache::new(4, usize::MAX);
+        let entry = cache
+            .get_or_load_plane("a.fits#hdu=1", || Ok(plane(2, 2, false)))
+            .unwrap();
+        assert_eq!(entry.companions(), Some(&companions()));
+        assert!(entry.plane_info().is_none());
+
+        let (arr, stats) = make_test_entry(2, 2);
+        let synthetic = cache
+            .get_or_load_plane("cut", || Ok(PlaneLoad::synthetic(arr, stats, HduHeader::empty())))
+            .unwrap();
+        assert!(synthetic.companions().is_none());
+        assert!(synthetic.int_plane().is_none());
+        let (arr, stats) = make_test_entry(2, 2);
+        cache.insert_synthetic("__composite_r", Arc::new(arr), stats);
+        assert!(cache.get("__composite_r").unwrap().companions().is_none());
+    }
+
+    #[test]
+    fn get_or_load_plane_replaces_headerless_entry() {
+        let cache = ImageCache::new(4, usize::MAX);
+        cache.get_or_load("k", || Ok(make_test_entry(5, 5))).unwrap();
+        let entry = cache
+            .get_or_load_plane("k", || Ok(plane(6, 6, true)))
+            .unwrap();
+        assert_eq!(entry.arr().dim(), (6, 6));
+        assert!(entry.int_plane().is_some());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn upgrade_header_keeps_int_plane_and_companions() {
+        let cache = ImageCache::new(4, usize::MAX);
+        let (arr, stats) = make_test_entry(3, 3);
+        let inner = Arc::new(CachedImage {
+            arr: Arc::new(arr),
+            stats,
+            header: None,
+            int_plane: Some(Arc::new(int_plane(3, 3))),
+            info: None,
+            companions: Some(companions()),
+        });
+        cache.inner.write().unwrap().put("p".into(), inner);
+        let upgraded = cache.upgrade_header("p", || Ok(HduHeader::empty())).unwrap();
+        assert!(upgraded.header().is_some());
+        assert!(upgraded.int_plane().is_some());
+        assert_eq!(upgraded.companions(), Some(&companions()));
+        assert_eq!(cache.memory_estimate_bytes(), 9 * 4 * 2);
+    }
+
+    #[test]
+    fn plane_refs_are_not_pinned_and_evict_normally() {
+        let cache = ImageCache::new(2, usize::MAX);
+        cache
+            .get_or_load_plane("a.fits#hdu=2", || Ok(plane(2, 2, false)))
+            .unwrap();
+        cache.get_or_load("b.fits", || Ok(make_test_entry(2, 2))).unwrap();
+        cache.get_or_load("c.fits", || Ok(make_test_entry(2, 2))).unwrap();
+        assert!(cache.get("a.fits#hdu=2").is_none());
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, output_stem, resolve_output_dir};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::write_fits_mono;
@@ -168,10 +168,7 @@ pub async fn crop_channels_cmd(
                 cache_keys.push(k.clone());
 
                 if write_disk {
-                    let stem = std::path::Path::new(&paths[i])
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("ch");
+                    let stem = output_stem(&paths[i]);
                     let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
                     write_fits_mono(&out_path, &cropped, None)?;
                     out_paths.push(out_path);
@@ -179,10 +176,7 @@ pub async fn crop_channels_cmd(
                     out_paths.push(k);
                 }
             } else {
-                let stem = std::path::Path::new(&paths[i])
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("ch");
+                let stem = output_stem(&paths[i]);
                 let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
                 resolve_output_dir(&output_dir)?;
                 write_fits_mono(&out_path, &cropped, None)?;

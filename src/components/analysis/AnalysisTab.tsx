@@ -4,7 +4,7 @@ import RgbStfPanel from "./RgbStfPanel";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
-import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
 import { useCompositePreview } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
@@ -54,6 +54,7 @@ function AnalysisTabInner({
   const { setRenderedPreviewUrl, activeImagePath } = useRenderContext();
   const { isShowingComposite } = useCompositePreview();
   const { rawPixels, rgbRawPixels } = useRawPixelsContext();
+  const { display } = useDisplayContext();
 
   const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
   const [starLoading, setStarLoading] = useState(false);
@@ -198,6 +199,7 @@ function AnalysisTabInner({
             onAutoStf={handleAutoStf}
             onReset={handleResetStf}
             stats={histStats}
+            disabled={display.stretch !== "mtf"}
           />
         )}
 

@@ -1,20 +1,13 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
-use std::fs::File;
-
 use axum::{extract::State, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
-use astroburst_lib::core::imaging::stats::compute_image_stats;
-use astroburst_lib::infra::asdf::converter::is_asdf_file;
-use astroburst_lib::infra::asdf_bridge::extract_image_from_asdf;
-use astroburst_lib::infra::cache::{ImageCache, ImageEntry};
-use astroburst_lib::infra::fits::dispatcher::resolve_single_image;
-use astroburst_lib::infra::fits::reader::{extract_image_mmap, extract_image_mmap_by_index};
-use astroburst_lib::types::header::HduHeader;
+use astroburst_lib::infra::cache::{ImageCache, ImageEntry, PlaneLoad};
+use astroburst_lib::infra::image_source::{load_plane, LoadedPlane, PlaneInfo};
+use astroburst_lib::types::image_ref::{ImageRef, PlaneSelector};
 use astroburst_lib::types::ImageStats;
-use ndarray::Array2;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -25,39 +18,19 @@ use crate::state::AppState;
 pub struct OpenParams {
     pub path: String,
     pub hdu: Option<usize>,
+    pub array: Option<String>,
     pub name: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct HduParams {
-    pub hdu: usize,
+    pub hdu: Option<usize>,
+    pub array: Option<String>,
     pub name: Option<String>,
 }
 
-fn load_auto(path: &str) -> anyhow::Result<(Array2<f32>, ImageStats, HduHeader)> {
-    let p = std::path::Path::new(path);
-    if is_asdf_file(p) {
-        let r = extract_image_from_asdf(p)?;
-        let stats = compute_image_stats(&r.image);
-        return Ok((r.image, stats, r.header));
-    }
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)?;
-    let r = extract_image_mmap(&file)?;
-    let stats = compute_image_stats(&r.image);
-    Ok((r.image, stats, r.header))
-}
-
-fn load_by_index(path: &str, hdu: usize) -> anyhow::Result<(Array2<f32>, ImageStats, HduHeader)> {
-    let p = std::path::Path::new(path);
-    if is_asdf_file(p) {
-        anyhow::bail!("ASDF files have no addressable HDU index; open without `hdu`");
-    }
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)?;
-    let r = extract_image_mmap_by_index(&file, hdu)?;
-    let stats = compute_image_stats(&r.image);
-    Ok((r.image, stats, r.header))
+pub(crate) fn load_ref(r: &ImageRef) -> anyhow::Result<PlaneLoad> {
+    load_plane(r).map(LoadedPlane::into_plane_load)
 }
 
 pub(crate) fn load_replacing<F>(
@@ -66,11 +39,11 @@ pub(crate) fn load_replacing<F>(
     loader: F,
 ) -> anyhow::Result<ImageEntry>
 where
-    F: FnOnce() -> anyhow::Result<(Array2<f32>, ImageStats, HduHeader)>,
+    F: FnOnce() -> anyhow::Result<PlaneLoad>,
 {
     let loaded = loader()?;
     cache.invalidate(image_ref);
-    cache.get_or_load_full(image_ref, || Ok(loaded))
+    cache.get_or_load_plane(image_ref, || Ok(loaded))
 }
 
 fn stats_json(s: &ImageStats) -> Value {
@@ -81,11 +54,48 @@ fn stats_json(s: &ImageStats) -> Value {
     })
 }
 
+fn selector_parts(kind: &PlaneSelector) -> (Option<usize>, Option<String>) {
+    match kind {
+        PlaneSelector::Hdu(n) => (Some(*n), None),
+        PlaneSelector::Array(k) => (None, Some(k.clone())),
+        PlaneSelector::Auto => (None, None),
+    }
+}
+
+pub(crate) fn plane_selection(hdu: Option<usize>, array: Option<String>) -> Result<Option<PlaneSelector>> {
+    match (hdu, array) {
+        (Some(_), Some(_)) => Err(AppError::BadRequest("provide exactly one of hdu or array".into())),
+        (Some(n), None) => Ok(Some(PlaneSelector::Hdu(n))),
+        (None, Some(k)) => Ok(Some(PlaneSelector::Array(k))),
+        (None, None) => Ok(None),
+    }
+}
+
+pub(crate) fn plane_load_error(e: anyhow::Error) -> AppError {
+    let text = format!("{:#}", e);
+    if text.contains("no ASDF arrays") || text.contains("no HDU index") {
+        AppError::BadRequest(text)
+    } else {
+        AppError::Internal(e)
+    }
+}
+
 pub(crate) fn register_and_respond(
     session: &Session,
     image_ref: String,
     source: Option<String>,
     hdu: Option<usize>,
+    entry: &ImageEntry,
+) -> Value {
+    register_plane_and_respond(session, image_ref, source, hdu, None, entry)
+}
+
+pub(crate) fn register_plane_and_respond(
+    session: &Session,
+    image_ref: String,
+    source: Option<String>,
+    hdu: Option<usize>,
+    plane: Option<(&ImageRef, &PlaneInfo)>,
     entry: &ImageEntry,
 ) -> Value {
     let (rows, cols) = entry.arr().dim();
@@ -100,10 +110,26 @@ pub(crate) fn register_and_respond(
         .map(|h| serde_json::to_value(&h.index).unwrap_or(json!(null)))
         .unwrap_or(json!(null));
 
+    let (hdu, array, plane_ref, is_dq) = match plane {
+        Some((r, info)) => {
+            let (h, a) = selector_parts(&info.kind);
+            let resolved = match &info.kind {
+                PlaneSelector::Hdu(n) => ImageRef::hdu(&r.path, *n),
+                PlaneSelector::Array(k) => ImageRef::array(&r.path, k),
+                PlaneSelector::Auto => r.clone(),
+            };
+            (h, a, resolved.cache_key(), info.is_dq)
+        }
+        None => (hdu, None, image_ref.clone(), false),
+    };
+
     let meta = ImageMeta {
         image_ref: image_ref.clone(),
         source,
         hdu,
+        array: array.clone(),
+        plane_ref: plane_ref.clone(),
+        is_dq,
         width: cols,
         height: rows,
         wcs_present,
@@ -117,11 +143,34 @@ pub(crate) fn register_and_respond(
         "active_ref": image_ref,
         "dims": [cols, rows],
         "hdu": hdu,
+        "array": array,
+        "plane_ref": plane_ref,
+        "is_dq": is_dq,
         "extname": extname,
         "wcs_present": wcs_present,
         "stats": stats_json(stats),
         "header": header_map,
     })
+}
+
+async fn open_ref(session: &Session, image_ref: String, source: String, r: ImageRef) -> Result<Json<Value>> {
+    let sess = session.cache.clone();
+    let ref_for_load = image_ref.clone();
+    let r_for_load = r.clone();
+    let entry = tokio::task::spawn_blocking(move || {
+        load_replacing(&sess, &ref_for_load, || load_ref(&r_for_load))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
+    .map_err(plane_load_error)?;
+
+    let info = entry
+        .plane_info()
+        .cloned()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("plane info missing after load")))?;
+    let body = register_plane_and_respond(session, image_ref.clone(), Some(source), None, Some((&r, &info)), &entry);
+    *session.v2.active_ref.write().await = Some(image_ref);
+    Ok(Json(body))
 }
 
 pub async fn open(
@@ -133,24 +182,9 @@ pub async fn open(
         .name
         .clone()
         .unwrap_or_else(|| session.v2.next_ref("img"));
-    let path = params.path.clone();
-    let hdu = params.hdu;
-
-    let sess = session.clone();
-    let ref_for_load = image_ref.clone();
-    let entry = tokio::task::spawn_blocking(move || {
-        load_replacing(&sess.cache, &ref_for_load, || match hdu {
-            Some(i) => load_by_index(&path, i),
-            None => load_auto(&path),
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
-    .map_err(AppError::Internal)?;
-
-    let body = register_and_respond(&session, image_ref.clone(), Some(params.path), hdu, &entry);
-    *session.v2.active_ref.write().await = Some(image_ref);
-    Ok(Json(body))
+    let plane = plane_selection(params.hdu, params.array)?.unwrap_or(PlaneSelector::Auto);
+    let r = ImageRef { path: params.path.clone(), plane };
+    open_ref(&session, image_ref, params.path, r).await
 }
 
 pub async fn switch_hdu(
@@ -158,6 +192,8 @@ pub async fn switch_hdu(
     State(_state): State<AppState>,
     Json(params): Json<HduParams>,
 ) -> Result<Json<Value>> {
+    let plane = plane_selection(params.hdu, params.array)?
+        .ok_or_else(|| AppError::BadRequest("provide exactly one of hdu or array".into()))?;
     let active = session.v2.active_ref.read().await.clone();
     let active = active.ok_or_else(|| {
         AppError::BadRequest("no active image in this session; open a file first".into())
@@ -175,21 +211,8 @@ pub async fn switch_hdu(
         .name
         .clone()
         .unwrap_or_else(|| session.v2.next_ref("img"));
-    let hdu = params.hdu;
-    let path = source.clone();
-
-    let sess = session.clone();
-    let ref_for_load = image_ref.clone();
-    let entry = tokio::task::spawn_blocking(move || {
-        load_replacing(&sess.cache, &ref_for_load, || load_by_index(&path, hdu))
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
-    .map_err(AppError::Internal)?;
-
-    let body = register_and_respond(&session, image_ref.clone(), Some(source), Some(hdu), &entry);
-    *session.v2.active_ref.write().await = Some(image_ref);
-    Ok(Json(body))
+    let r = ImageRef { path: source.clone(), plane };
+    open_ref(&session, image_ref, source, r).await
 }
 
 pub async fn list_images(
@@ -214,11 +237,14 @@ pub async fn list_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use astroburst_lib::core::imaging::stats::compute_image_stats;
+    use astroburst_lib::types::header::HduHeader;
+    use ndarray::Array2;
 
-    fn image(rows: usize, cols: usize, fill: f32) -> (Array2<f32>, ImageStats, HduHeader) {
+    fn image(rows: usize, cols: usize, fill: f32) -> PlaneLoad {
         let arr = Array2::from_elem((rows, cols), fill);
         let stats = compute_image_stats(&arr);
-        (arr, stats, HduHeader::empty())
+        PlaneLoad::synthetic(arr, stats, HduHeader::empty())
     }
 
     #[test]
@@ -228,7 +254,7 @@ mod tests {
         let first = load_replacing(&cache, "x", || Ok(image(8, 8, 1.0))).unwrap();
         assert_eq!(first.arr().dim(), (8, 8));
 
-        let stale = cache.get_or_load_full("x", || Ok(image(6, 6, 2.0))).unwrap();
+        let stale = cache.get_or_load_plane("x", || Ok(image(6, 6, 2.0))).unwrap();
         assert_eq!(stale.arr().dim(), (8, 8));
 
         let second = load_replacing(&cache, "x", || Ok(image(6, 6, 2.0))).unwrap();
@@ -243,7 +269,7 @@ mod tests {
         let cache = ImageCache::new(4, usize::MAX);
         load_replacing(&cache, "x", || Ok(image(8, 8, 1.0))).unwrap();
 
-        let err = load_replacing(&cache, "x", || anyhow::bail!("no such file"))
+        let err = load_replacing(&cache, "x", || -> anyhow::Result<PlaneLoad> { anyhow::bail!("no such file") })
             .err()
             .expect("failed load must surface the loader error");
         assert!(err.to_string().contains("no such file"));

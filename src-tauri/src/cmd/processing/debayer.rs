@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached_full, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_cached_full, output_stem, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
 use crate::core::imaging::debayer::{debayer_bilinear, debayer_superpixel, BayerPattern};
 use crate::core::imaging::stats::compute_image_stats;
@@ -37,11 +37,8 @@ fn output_header(source: Option<&HduHeader>, superpixel: bool) -> Option<HduHead
     Some(h)
 }
 
-fn file_stem(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("frame")
+fn file_stem(path: &str) -> String {
+    output_stem(path)
 }
 
 fn resolve_pattern(

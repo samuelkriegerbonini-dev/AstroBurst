@@ -171,6 +171,8 @@ class FileStore {
         id: generateId(),
         name: f.name,
         path: f.path,
+        sourcePath: f.path,
+        imageRef: null,
         size: f.size,
         status: FILE_STATUS.QUEUED,
         result: null,
@@ -278,6 +280,23 @@ class FileStore {
     this.state.statsVersion++;
     this.bumpVersion();
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
+  }
+
+  switchImageRef(id: string, ref: string, result: ProcessResult) {
+    const existing = this.state.fileMap.get(id);
+    if (!existing) return;
+
+    const updated: ProcessedFile = {
+      ...existing,
+      path: ref,
+      imageRef: ref === existing.sourcePath ? null : ref,
+      result,
+    };
+    this.state.fileMap.set(id, updated);
+    this.state.statsVersion++;
+    this.state.selectedVersion++;
+    this.bumpVersion();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List, id);
   }
 
   selectFile(id: string) {

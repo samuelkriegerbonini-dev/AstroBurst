@@ -6,8 +6,9 @@ use memmap2::{Mmap, MmapOptions};
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 
-use crate::types::HduHeader;
 use crate::types::constants::BLOCK_SIZE;
+use crate::types::image::IntPlane;
+use crate::types::{HduHeader, ImageRef, PlaneSelector};
 
 use super::compress;
 use super::file_bytes::read_file_bytes;
@@ -136,6 +137,143 @@ pub fn decode_pixels_blank(
         }
         _ => Vec::new(),
     }
+}
+
+pub enum IntPixels {
+    U32(Vec<u32>),
+    I32(Vec<i32>),
+}
+
+pub fn decode_pixels_int(data: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> Result<IntPixels> {
+    if bscale != 1.0 || !bzero.is_finite() || bzero.fract() != 0.0 {
+        bail!("scaled integer data (BSCALE={}, BZERO={})", bscale, bzero);
+    }
+    match bitpix {
+        8 => {
+            if bzero < 0.0 || bzero > u32::MAX as f64 {
+                bail!("BZERO {} out of range for BITPIX 8", bzero);
+            }
+            let off = bzero as u32;
+            let out: Result<Vec<u32>> = data
+                .par_iter()
+                .map(|&b| (b as u32).checked_add(off).context("BITPIX 8 value overflow"))
+                .collect();
+            Ok(IntPixels::U32(out?))
+        }
+        16 => {
+            if bzero == 32768.0 {
+                Ok(IntPixels::U32(
+                    data.par_chunks_exact(2)
+                        .map(|c| (i16::from_be_bytes([c[0], c[1]]) as i64 + 32768) as u32)
+                        .collect(),
+                ))
+            } else {
+                if bzero < i32::MIN as f64 || bzero > i32::MAX as f64 {
+                    bail!("BZERO {} out of range for BITPIX 16", bzero);
+                }
+                let off = bzero as i32;
+                let out: Result<Vec<i32>> = data
+                    .par_chunks_exact(2)
+                    .map(|c| {
+                        (i16::from_be_bytes([c[0], c[1]]) as i32)
+                            .checked_add(off)
+                            .context("BITPIX 16 value overflow")
+                    })
+                    .collect();
+                Ok(IntPixels::I32(out?))
+            }
+        }
+        32 => {
+            if bzero == 2147483648.0 {
+                Ok(IntPixels::U32(
+                    data.par_chunks_exact(4)
+                        .map(|c| (i32::from_be_bytes([c[0], c[1], c[2], c[3]]) as i64 + 2147483648) as u32)
+                        .collect(),
+                ))
+            } else {
+                if bzero < i32::MIN as f64 || bzero > i32::MAX as f64 {
+                    bail!("BZERO {} out of range for BITPIX 32", bzero);
+                }
+                let off = bzero as i32;
+                let out: Result<Vec<i32>> = data
+                    .par_chunks_exact(4)
+                    .map(|c| {
+                        i32::from_be_bytes([c[0], c[1], c[2], c[3]])
+                            .checked_add(off)
+                            .context("BITPIX 32 value overflow")
+                    })
+                    .collect();
+                Ok(IntPixels::I32(out?))
+            }
+        }
+        other => bail!("not an integer plane (BITPIX={})", other),
+    }
+}
+
+pub fn int_pixels_to_plane(px: IntPixels, rows: usize, cols: usize) -> Result<IntPlane> {
+    let (bits, signed) = match px {
+        IntPixels::U32(v) => (v, false),
+        IntPixels::I32(v) => (v.into_iter().map(|x| x as u32).collect(), true),
+    };
+    let bits = Array2::from_shape_vec((rows, cols), bits)
+        .context("Failed to reshape integer plane")?;
+    Ok(IntPlane { bits, signed })
+}
+
+pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPlane> {
+    let mmap = read_file_bytes(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+    if hdu_index >= hdus.len() {
+        bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
+    }
+    let hdu = &hdus[hdu_index];
+    if hdu.is_compressed {
+        bail!("HDU {} is a compressed image; lossless integer read is not supported", hdu_index);
+    }
+    let h = &hdu.header;
+    let naxis = h.get_i64("NAXIS").unwrap_or(0);
+    let naxis1_i = h.get_i64("NAXIS1").unwrap_or(0);
+    let naxis2_i = h.get_i64("NAXIS2").unwrap_or(0);
+    if naxis < 2 || naxis1_i <= 0 || naxis2_i <= 0 {
+        bail!("HDU {} is not a 2D image (NAXIS={})", hdu_index, naxis);
+    }
+    let bitpix = h.get_i64("BITPIX").context("Missing BITPIX")?;
+    if !matches!(bitpix, 8 | 16 | 32) {
+        bail!("not an integer plane (BITPIX={})", bitpix);
+    }
+    let (naxis1, naxis2) = (naxis1_i as usize, naxis2_i as usize);
+    let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
+    let slice_bytes = naxis1
+        .checked_mul(naxis2)
+        .and_then(|v| v.checked_mul(bytes_per_pixel))
+        .context("Image size overflow")?;
+    let data_end = hdu
+        .info
+        .data_start
+        .checked_add(slice_bytes)
+        .context("Image data end overflow")?;
+    if data_end > mmap.len() {
+        bail!("Image data exceeds file size");
+    }
+    let (bzero, bscale) = scaling(h);
+    let px = decode_pixels_int(&mmap[hdu.info.data_start..data_end], bitpix, bscale, bzero)?;
+    int_pixels_to_plane(px, naxis2, naxis1)
+}
+
+pub fn auto_hdu_index(file: &File) -> Result<usize> {
+    let hdus = scan_hdu_headers(file)?;
+    if hdus.is_empty() {
+        bail!("No HDUs found in FITS file");
+    }
+    select_best_image_hdu(&hdus).context("No 2D image block found in any HDU")
+}
+
+pub fn extract_header_by_index_merged(file: &File, hdu_index: usize) -> Result<HduHeader> {
+    let hdus = scan_hdu_headers(file)?;
+    if hdu_index >= hdus.len() {
+        bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
+    }
+    Ok(build_merged_header(&hdus, hdu_index))
 }
 
 pub fn decode_single_pixel(raw: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> f32 {
@@ -762,10 +900,15 @@ pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
 }
 
 pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open {}", path))?;
-    let result = extract_image_mmap(&file)
-        .with_context(|| format!("Failed to load {}", path))?;
+    let r = ImageRef::parse(path);
+    let file = File::open(&r.path)
+        .with_context(|| format!("Failed to open {}", r.path))?;
+    let result = match &r.plane {
+        PlaneSelector::Auto => extract_image_mmap(&file),
+        PlaneSelector::Hdu(n) => extract_image_mmap_by_index(&file, *n),
+        PlaneSelector::Array(_) => bail!("FITS files have no ASDF arrays; use #hdu=<n>: {}", path),
+    }
+    .with_context(|| format!("Failed to load {}", path))?;
     Ok(result.image)
 }
 
@@ -776,8 +919,274 @@ pub fn read_primary_header(path: &str) -> Result<HduHeader> {
 }
 
 #[cfg(test)]
+pub mod test_fixtures {
+    use std::io::Write;
+
+    use crate::types::constants::BLOCK_SIZE;
+
+    pub enum HduData {
+        F32(Vec<f32>),
+        I32(Vec<i32>),
+        I16(Vec<i16>),
+    }
+
+    pub struct TestHdu {
+        pub extname: Option<&'static str>,
+        pub extver: Option<i64>,
+        pub cols: usize,
+        pub rows: usize,
+        pub data: HduData,
+        pub extra_cards: Vec<(&'static str, String)>,
+    }
+
+    fn card(key: &str, value: &str) -> Vec<u8> {
+        let mut bytes = format!("{key:<8}= {value}").into_bytes();
+        bytes.resize(80, b' ');
+        bytes
+    }
+
+    fn header_block(cards: &[(&str, String)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (k, v) in cards {
+            out.extend_from_slice(&card(k, v));
+        }
+        let mut end = b"END".to_vec();
+        end.resize(80, b' ');
+        out.extend_from_slice(&end);
+        while out.len() % BLOCK_SIZE != 0 {
+            out.push(b' ');
+        }
+        out
+    }
+
+    fn pad(mut out: Vec<u8>) -> Vec<u8> {
+        while out.len() % BLOCK_SIZE != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    pub fn write_test_mef(path: &std::path::Path, primary_cards: &[(&str, String)], hdus: &[TestHdu]) {
+        let mut buf = Vec::new();
+        let mut primary: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "0".into()),
+            ("EXTEND", "T".into()),
+        ];
+        primary.extend(primary_cards.iter().cloned());
+        buf.extend_from_slice(&header_block(&primary));
+        for hdu in hdus {
+            let (bitpix, data) = match &hdu.data {
+                HduData::F32(v) => ("-32", v.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<u8>>()),
+                HduData::I32(v) => ("32", v.iter().flat_map(|x| x.to_be_bytes()).collect()),
+                HduData::I16(v) => ("16", v.iter().flat_map(|x| x.to_be_bytes()).collect()),
+            };
+            let mut cards: Vec<(&str, String)> = vec![
+                ("XTENSION", "'IMAGE   '".into()),
+                ("BITPIX", bitpix.into()),
+                ("NAXIS", "2".into()),
+                ("NAXIS1", hdu.cols.to_string()),
+                ("NAXIS2", hdu.rows.to_string()),
+                ("PCOUNT", "0".into()),
+                ("GCOUNT", "1".into()),
+            ];
+            if let Some(n) = hdu.extname {
+                cards.push(("EXTNAME", format!("'{n:<8}'")));
+            }
+            if let Some(v) = hdu.extver {
+                cards.push(("EXTVER", v.to_string()));
+            }
+            cards.extend(hdu.extra_cards.iter().cloned());
+            buf.extend_from_slice(&header_block(&cards));
+            buf.extend_from_slice(&pad(data));
+        }
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
+    pub fn ramp_f32(cols: usize, rows: usize) -> Vec<f32> {
+        (0..cols * rows).map(|i| i as f32).collect()
+    }
+
+    pub fn sci_err_dq_mef(path: &std::path::Path, cols: usize, rows: usize, dq_bits: Vec<i32>) {
+        sci_err_dq_mef_with_dq_cards(path, cols, rows, dq_bits, vec![]);
+    }
+
+    pub fn sci_err_dq_mef_with_dq_cards(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        dq_bits: Vec<i32>,
+        dq_cards: Vec<(&'static str, String)>,
+    ) {
+        let mut dq_extra: Vec<(&'static str, String)> = vec![("BZERO", "2147483648".into()), ("BSCALE", "1".into())];
+        dq_extra.extend(dq_cards);
+        write_test_mef(
+            path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(ramp_f32(cols, rows)), extra_cards: vec![("BUNIT", "'MJy/sr'".into())] },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols, rows, data: HduData::F32(ramp_f32(cols, rows).iter().map(|v| v * 0.5).collect()), extra_cards: vec![("BUNIT", "'MJy/sr'".into())] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols, rows, data: HduData::I32(dq_bits), extra_cards: dq_extra },
+                TestHdu { extname: Some("SCI"), extver: Some(2), cols, rows, data: HduData::F32(ramp_f32(cols, rows)), extra_cards: vec![] },
+            ],
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_fixtures::*;
+
+    #[test]
+    fn decode_int_bitpix8_with_bzero() {
+        let px = decode_pixels_int(&[0, 255, 7], 8, 1.0, 0.0).unwrap();
+        assert!(matches!(px, IntPixels::U32(ref v) if v == &[0, 255, 7]));
+        let px = decode_pixels_int(&[0, 255], 8, 1.0, 10.0).unwrap();
+        assert!(matches!(px, IntPixels::U32(ref v) if v == &[10, 265]));
+        assert!(decode_pixels_int(&[1], 8, 1.0, -1.0).is_err());
+    }
+
+    #[test]
+    fn decode_int_bitpix16_unsigned_via_bzero_32768() {
+        let data: Vec<u8> = [i16::MAX, i16::MIN, -1i16, 0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let px = decode_pixels_int(&data, 16, 1.0, 32768.0).unwrap();
+        match px {
+            IntPixels::U32(v) => assert_eq!(v, vec![65535, 0, 32767, 32768]),
+            _ => panic!("expected U32"),
+        }
+    }
+
+    #[test]
+    fn decode_int_bitpix16_signed_negative() {
+        let data: Vec<u8> = [-5i16, 300].iter().flat_map(|v| v.to_be_bytes()).collect();
+        match decode_pixels_int(&data, 16, 1.0, 0.0).unwrap() {
+            IntPixels::I32(v) => assert_eq!(v, vec![-5, 300]),
+            _ => panic!("expected I32"),
+        }
+        match decode_pixels_int(&data, 16, 1.0, -10.0).unwrap() {
+            IntPixels::I32(v) => assert_eq!(v, vec![-15, 290]),
+            _ => panic!("expected I32"),
+        }
+    }
+
+    #[test]
+    fn decode_int_bitpix32_unsigned_via_bzero_keeps_bit31() {
+        let data: Vec<u8> = [-1i32, i32::MIN, 1].iter().flat_map(|v| v.to_be_bytes()).collect();
+        match decode_pixels_int(&data, 32, 1.0, 2147483648.0).unwrap() {
+            IntPixels::U32(v) => {
+                assert_eq!(v, vec![0x7FFF_FFFF, 0, 0x8000_0001]);
+                assert_ne!(v[2] & (1 << 31), 0);
+            }
+            _ => panic!("expected U32"),
+        }
+    }
+
+    #[test]
+    fn decode_int_bitpix32_signed_and_overflow() {
+        let data: Vec<u8> = [-7i32, i32::MAX].iter().flat_map(|v| v.to_be_bytes()).collect();
+        match decode_pixels_int(&data, 32, 1.0, 0.0).unwrap() {
+            IntPixels::I32(v) => assert_eq!(v, vec![-7, i32::MAX]),
+            _ => panic!("expected I32"),
+        }
+        assert!(decode_pixels_int(&data, 32, 1.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn decode_int_rejects_scaled_and_float() {
+        assert!(decode_pixels_int(&[1, 2], 16, 2.0, 0.0).is_err());
+        assert!(decode_pixels_int(&[1, 2], 16, 1.0, 0.5).is_err());
+        assert!(decode_pixels_int(&[0; 4], -32, 1.0, 0.0).is_err());
+        assert!(decode_pixels_int(&[0; 8], 64, 1.0, 0.0).is_err());
+        assert!(decode_pixels_int(&[0; 8], -64, 1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn int_pixels_to_plane_marks_signedness() {
+        let p = int_pixels_to_plane(IntPixels::I32(vec![-1, 2]), 1, 2).unwrap();
+        assert!(p.signed);
+        assert_eq!(p.bits[[0, 0]], u32::MAX);
+        assert_eq!(p.value_at(0, 0), -1);
+        let p = int_pixels_to_plane(IntPixels::U32(vec![u32::MAX]), 1, 1).unwrap();
+        assert!(!p.signed);
+        assert_eq!(p.value_at(0, 0), 4294967295);
+        assert!(int_pixels_to_plane(IntPixels::U32(vec![1, 2, 3]), 2, 2).is_err());
+    }
+
+    #[test]
+    fn extract_int_plane_by_index_preserves_high_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq.fits");
+        let mut dq = vec![0i32; 16];
+        dq[5] = 1;
+        dq[9] = ((2147483648u32 | 1) as i64 - 2147483648) as i32;
+        sci_err_dq_mef(&path, 4, 4, dq);
+        let file = File::open(&path).unwrap();
+        let plane = extract_int_plane_by_index(&file, 3).unwrap();
+        assert!(!plane.signed);
+        assert_eq!(plane.bits.dim(), (4, 4));
+        assert_eq!(plane.bits[[1, 1]], 2147483649);
+        assert_eq!(plane.bits[[2, 1]], 2147483649);
+        assert_eq!(plane.bits[[1, 1]] & (1 << 31), 1 << 31);
+        assert_eq!(plane.value_at(2, 1), 2147483649);
+        assert!(extract_int_plane_by_index(&file, 1).is_err());
+        assert!(extract_int_plane_by_index(&file, 0).is_err());
+        assert!(extract_int_plane_by_index(&file, 9).is_err());
+    }
+
+    #[test]
+    fn extract_int_plane_by_index_rejects_compressed() {
+        let dir = match compressed_fixtures_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        let path = dir.join("rice_i16_default_tile.fits");
+        if !path.exists() {
+            return;
+        }
+        let file = File::open(&path).unwrap();
+        let err = extract_int_plane_by_index(&file, 1).unwrap_err();
+        assert!(err.to_string().contains("compressed"), "{err}");
+    }
+
+    #[test]
+    fn auto_hdu_index_prefers_sci() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mef.fits");
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("WEIGHT"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("SCI"), extver: None, cols: 6, rows: 3, data: HduData::F32(ramp_f32(6, 3)), extra_cards: vec![] },
+            ],
+        );
+        let file = File::open(&path).unwrap();
+        assert_eq!(auto_hdu_index(&file).unwrap(), 2);
+        let merged = extract_header_by_index_merged(&file, 2).unwrap();
+        assert_eq!(merged.get("EXTNAME"), Some("SCI"));
+        assert_eq!(merged.get("EXTEND"), Some("T"));
+        assert!(extract_header_by_index_merged(&file, 5).is_err());
+    }
+
+    #[test]
+    fn load_fits_image_honours_hdu_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.fits");
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("A"), extver: None, cols: 5, rows: 2, data: HduData::F32(ramp_f32(5, 2)), extra_cards: vec![] },
+                TestHdu { extname: Some("SCI"), extver: None, cols: 3, rows: 7, data: HduData::F32(ramp_f32(3, 7)), extra_cards: vec![] },
+            ],
+        );
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+        assert_eq!(load_fits_image(&key).unwrap().dim(), (2, 5));
+        assert_eq!(load_fits_image(path.to_str().unwrap()).unwrap().dim(), (7, 3));
+        assert!(load_fits_image(&format!("{}#array=dq", path.to_str().unwrap())).is_err());
+    }
 
     #[test]
     fn test_decode_pixels_i16() {

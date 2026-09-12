@@ -92,6 +92,23 @@ pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -
     bilinear_finite(slice, rows, cols, iy, ix, fx, fy)
 }
 
+pub fn preview_dims(rows: usize, cols: usize, max_dim: usize) -> (usize, usize) {
+    if rows <= max_dim && cols <= max_dim {
+        return (rows, cols);
+    }
+    let scale = max_dim as f64 / (rows.max(cols) as f64);
+    let dst_rows = ((rows as f64) * scale).round().max(1.0) as usize;
+    let dst_cols = ((cols as f64) * scale).round().max(1.0) as usize;
+    (dst_rows, dst_cols)
+}
+
+#[inline]
+pub fn cell_range(d: usize, src: usize, dst: usize) -> (usize, usize) {
+    let start = d * src / dst;
+    let end = (((d + 1) * src) / dst).max(start + 1).min(src);
+    (start, end)
+}
+
 #[inline]
 fn bilinear_finite(
     slice: &[f32],
@@ -222,5 +239,49 @@ mod tests {
         let data: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let v = bicubic_sample(&data, 10, 10, 3.0, 4.0);
         assert!((v - 34.0).abs() < 1e-3);
+    }
+
+    fn legacy_dims(rows: usize, cols: usize, max_dim: usize) -> (usize, usize) {
+        if rows <= max_dim && cols <= max_dim {
+            return (rows, cols);
+        }
+        let scale = max_dim as f64 / (rows.max(cols) as f64);
+        (
+            ((rows as f64) * scale).round().max(1.0) as usize,
+            ((cols as f64) * scale).round().max(1.0) as usize,
+        )
+    }
+
+    #[test]
+    fn preview_dims_matches_legacy_formula() {
+        assert_eq!(preview_dims(100, 200, 2048), (100, 200));
+        assert_eq!(preview_dims(4096, 4096, 2048), (2048, 2048));
+        assert_eq!(preview_dims(3000, 1000, 2048), (2048, 683));
+        assert_eq!(preview_dims(1000, 3000, 2048), (683, 2048));
+        assert_eq!(preview_dims(1, 100000, 16), (1, 16));
+        for (r, c, m) in [(4096, 4096, 1024), (12345, 6789, 2048), (7, 9000, 512), (2049, 2048, 2048), (2048, 2048, 2048)] {
+            assert_eq!(preview_dims(r, c, m), legacy_dims(r, c, m), "{r}x{c}@{m}");
+        }
+    }
+
+    #[test]
+    fn cell_range_is_monotone_and_covers_each_source_index_once() {
+        for (src, dst) in [(4, 2), (10, 3), (4096, 2048), (7, 7), (2048, 683), (5, 2)] {
+            let mut covered = vec![0u32; src];
+            let mut prev_end = 0;
+            for d in 0..dst {
+                let (s, e) = cell_range(d, src, dst);
+                assert!(s < e, "{src}/{dst} cell {d}");
+                assert_eq!(s, prev_end, "{src}/{dst} cell {d} must start where the previous ended");
+                for i in s..e {
+                    covered[i] += 1;
+                }
+                prev_end = e;
+            }
+            assert_eq!(prev_end, src, "{src}/{dst}");
+            assert!(covered.iter().all(|&c| c == 1), "{src}/{dst}: {covered:?}");
+        }
+        assert_eq!(cell_range(0, 4, 2), (0, 2));
+        assert_eq!(cell_range(1, 4, 2), (2, 4));
     }
 }

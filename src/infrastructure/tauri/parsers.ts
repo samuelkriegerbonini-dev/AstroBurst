@@ -74,6 +74,34 @@ export function toUint8Array(raw: unknown): Uint8Array {
   throw new Error(`Unexpected IPC response type: ${typeof raw} / ${ctorName}`);
 }
 
+const DQ_MASK_HEADER_SIZE = 16;
+
+export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView) {
+  const bytes = toUint8Array(raw);
+  if (bytes.length < DQ_MASK_HEADER_SIZE) {
+    throw new Error(`DQ mask: response too small (${bytes.length} bytes)`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(0, true);
+  const height = view.getUint32(4, true);
+  const mask = view.getUint32(8, true);
+  const tableId = view.getUint32(12, true);
+
+  const ncells = width * height;
+  const expected = DQ_MASK_HEADER_SIZE + ncells;
+  if (bytes.length < expected) {
+    throw new Error(`DQ mask: expected ${expected} bytes, got ${bytes.length}`);
+  }
+
+  return {
+    width,
+    height,
+    mask,
+    tableId,
+    cells: new Uint8Array(bytes.buffer, bytes.byteOffset + DQ_MASK_HEADER_SIZE, ncells),
+  };
+}
+
 const FFT_HEADER_SIZE = 32;
 
 export function parseFftBuffer(bytes: Uint8Array) {

@@ -4,8 +4,8 @@ import type { HistogramData, FftData } from "../shared/types/analysis";
 import type { StarDetectionResult } from "../shared/types/processing";
 import type { ProcessResult } from "../shared/types/fits.types";
 
-export function computeHistogram(path: string): Promise<HistogramData> {
-  return typedInvoke<HistogramData>("compute_histogram", { path });
+export function computeHistogram(path: string, excludeDq = false): Promise<HistogramData> {
+  return typedInvoke<HistogramData>("compute_histogram", { path, excludeDq });
 }
 
 export async function computeFftSpectrum(path: string): Promise<FftData> {
@@ -107,7 +107,7 @@ export function measurePhotometry(
   path: string,
   x: number,
   y: number,
-  options: { apertureRadius?: number; gaiaMatch?: boolean } = {},
+  options: { apertureRadius?: number; gaiaMatch?: boolean; excludeDq?: boolean } = {},
 ): Promise<PhotometryMeasurement> {
   return typedInvoke<PhotometryMeasurement>("measure_photometry_cmd", {
     path,
@@ -115,5 +115,6 @@ export function measurePhotometry(
     y,
     apertureRadius: options.apertureRadius ?? null,
     gaiaMatch: options.gaiaMatch ?? true,
+    excludeDq: options.excludeDq ?? false,
   });
 }

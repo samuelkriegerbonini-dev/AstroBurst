@@ -1,4 +1,5 @@
 import type { StfParams } from "./fits.types";
+import type { DqProbe, ErrProbe } from "./dq";
 
 export interface HistogramData {
   bins: number[];
@@ -12,6 +13,8 @@ export interface HistogramData {
   total_pixels: number;
   auto_stf: StfParams;
   elapsed_ms?: number;
+  masked?: boolean;
+  dq_excluded?: number | null;
 }
 
 export interface RawPixelData {
@@ -44,4 +47,24 @@ export interface FftData {
   dc_magnitude: number;
   max_magnitude: number;
   elapsed_ms: number;
+}
+
+export interface PixelNeighborhood {
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+  median: number | null;
+  n_pixels: number;
+  n_nan: number;
+}
+
+export interface PixelProbeResult {
+  x: number;
+  y: number;
+  value: number | null;
+  unit: string | null;
+  box: number;
+  neighborhood: PixelNeighborhood;
+  dq: DqProbe | null;
+  err: ErrProbe | null;
 }

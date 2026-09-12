@@ -1,33 +1,28 @@
-use std::fs::File;
-
 use serde_json::json;
 
-use crate::cmd::common::blocking_cmd;
+use crate::cmd::common::{blocking_cmd, image_ref, source_path};
+use crate::core::astrometry::frames::{convert_from_icrs, SkyFrame};
 use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::{extract_header_mmap, extract_image_mmap};
+use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, DEFAULT_ASTROMETRY_API_URL, HEADER_NAXIS1,
     HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_FOV_ARCMIN,
-    RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_NAXIS1, RES_NAXIS2,
-    RES_PIXEL_SCALE_ARCSEC,
+    RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
+    RES_PIXEL_SCALE_ARCSEC, RES_POINTS,
 };
 
 const MAX_UPLOAD_DIM: usize = 2048;
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)?;
-    let header = extract_header_mmap(&file)?;
+    let header = load_plane_header(&image_ref(path))?;
     let wcs = WcsTransform::from_header(&header)?;
     Ok((header, wcs))
 }
 
 fn load_wcs_only(path: &str) -> anyhow::Result<WcsTransform> {
-    let (fits_path, _tmp) = resolve_single_image(path)?;
-    let file = File::open(&fits_path)?;
-    let header = extract_header_mmap(&file)?;
+    let header = load_plane_header(&image_ref(path))?;
     WcsTransform::from_header(&header)
 }
 
@@ -38,7 +33,7 @@ static WCS_CACHE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn load_wcs_cached(path: &str) -> anyhow::Result<std::sync::Arc<WcsTransform>> {
-    let stamp: Option<WcsStamp> = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+    let stamp: Option<WcsStamp> = std::fs::metadata(source_path(path)).ok().map(|m| (m.len(), m.modified().ok()));
 
     if let Some(st) = &stamp {
         let cache = WCS_CACHE.lock().unwrap();
@@ -87,15 +82,16 @@ pub async fn plate_solve_cmd(
         move || -> anyhow::Result<_> {
             let resolved_key = resolve_api_key(api_key);
 
-            let (resolved_path, tmp) = resolve_single_image(&path)?;
-            let file = File::open(&resolved_path)?;
-            let result = extract_image_mmap(&file)?;
+            let r = image_ref(&path);
+            let (resolved_path, tmp) = resolve_single_image(&r.path)?;
+            let loaded = load_plane(&r)?;
+            let (image, header) = (loaded.arr, loaded.header);
 
-            let naxis1 = result.header.get_i64(HEADER_NAXIS1).unwrap_or(0) as usize;
-            let naxis2 = result.header.get_i64(HEADER_NAXIS2).unwrap_or(0) as usize;
+            let naxis1 = header.get_i64(HEADER_NAXIS1).unwrap_or(0) as usize;
+            let naxis2 = header.get_i64(HEADER_NAXIS2).unwrap_or(0) as usize;
 
             let detection = crate::core::analysis::star_detection::detect_stars(
-                &result.image,
+                &image,
                 5.0,
             );
 
@@ -120,7 +116,7 @@ pub async fn plate_solve_cmd(
                 );
 
                 let downsampled = crate::core::alignment::downsample::area_downsample(
-                    &result.image, ds_rows, ds_cols,
+                    &image, ds_rows, ds_cols,
                 );
 
                 let tmp_file = tempfile::Builder::new()
@@ -131,14 +127,21 @@ pub async fn plate_solve_cmd(
                 crate::infra::fits::writer::write_fits_mono(
                     &tmp_path,
                     &downsampled,
-                    Some(&result.header),
+                    Some(&header),
                 )?;
 
                 let fx = naxis1 as f64 / ds_cols as f64;
                 let fy = naxis2 as f64 / ds_rows as f64;
                 (tmp_path, Some(tmp_file), Some((fx, fy)))
-            } else {
+            } else if r.is_auto() {
                 (resolved_path.to_string_lossy().to_string(), None, None)
+            } else {
+                let tmp_file = tempfile::Builder::new()
+                    .suffix(".fits")
+                    .tempfile()?;
+                let tmp_path = tmp_file.path().to_string_lossy().to_string();
+                crate::infra::fits::writer::write_fits_mono(&tmp_path, &image, Some(&header))?;
+                (tmp_path, Some(tmp_file), None)
             };
 
             let is_pixel_scale = scale_units.as_deref().map_or(true, |u| u.contains("pix"));
@@ -279,31 +282,29 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
     })
 }
 
-/// Batched pixel->sky conversion for the frontend cursor RA/Dec readout, backing
-/// the full projection coverage wcs-rs gives us (the old readout did its own
-/// client-side math in `src/utils/wcstransform.ts`, limited to TAN/SIN/ARC/CAR).
-/// `points` are 0-based image-array pixel coordinates. Each result entry is
-/// `[ra, dec]` in degrees, or `null` if that point has no valid sky position
-/// (e.g. a singular CD matrix) -- NaN cannot round-trip through JSON.
 #[tauri::command]
 pub async fn pixel_to_world_cmd(
     path: String,
     points: Vec<(f64, f64)>,
+    frame: Option<String>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let frame = SkyFrame::from_name(frame.as_deref().unwrap_or("icrs"))
+            .map_err(|e| anyhow::anyhow!(e))?;
         let wcs = load_wcs_cached(&path)?;
         let coords = wcs.pixel_to_world_batch(&points);
         let out: Vec<serde_json::Value> = coords
             .into_iter()
             .map(|c| {
-                if c.ra.is_finite() && c.dec.is_finite() {
-                    json!([c.ra, c.dec])
+                let (lon, lat) = convert_from_icrs(frame, c.ra, c.dec);
+                if lon.is_finite() && lat.is_finite() {
+                    json!([lon, lat])
                 } else {
                     serde_json::Value::Null
                 }
             })
             .collect();
-        Ok(json!({ "points": out }))
+        Ok(json!({ RES_POINTS: out, RES_FRAME: frame.name() }))
     })
 }
 

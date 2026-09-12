@@ -1,17 +1,26 @@
 const RENDER_STF_SHADER = `
 struct Uniforms {
-    data_min: f32,
-    data_max: f32,
+    vmin: f32,
+    vmax: f32,
     shadow: f32,
     midtone: f32,
     highlight: f32,
+    asinh_a: f32,
+    power: f32,
     tex_w: f32,
     tex_h: f32,
-    _pad: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    stretch_kind: u32,
+    invert: u32,
+    _pad3: u32,
+    _pad4: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Uniforms;
 @group(0) @binding(1) var raw_tex: texture_2d<f32>;
+@group(0) @binding(2) var lut_tex: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -45,9 +54,33 @@ fn mtf(m: f32, x: f32) -> f32 {
     return a / b;
 }
 
-fn is_nan_bits(v: f32) -> bool {
+fn is_non_finite_bits(v: f32) -> bool {
     let bits = bitcast<u32>(v);
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+    return (bits & 0x7F800000u) == 0x7F800000u;
+}
+
+fn stretch(n: f32) -> f32 {
+    let kind = params.stretch_kind;
+    if (kind == 0u) {
+        let range = params.highlight - params.shadow;
+        let x = clamp((n - params.shadow) / max(range, 1e-8), 0.0, 1.0);
+        return mtf(params.midtone, x);
+    }
+    if (kind == 2u) {
+        return clamp(log(1000.0 * n + 1.0) / log(1001.0), 0.0, 1.0);
+    }
+    if (kind == 3u) {
+        return clamp(sqrt(n), 0.0, 1.0);
+    }
+    if (kind == 4u) {
+        let a = select(0.1, params.asinh_a, params.asinh_a > 0.0);
+        return clamp(asinh(n / a) / asinh(1.0 / a), 0.0, 1.0);
+    }
+    if (kind == 5u) {
+        let p = select(2.0, params.power, params.power > 0.0);
+        return clamp(pow(n, p), 0.0, 1.0);
+    }
+    return clamp(n, 0.0, 1.0);
 }
 
 @fragment
@@ -57,19 +90,20 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         u32(clamp(uv.y * params.tex_h, 0.0, params.tex_h - 1.0)),
     );
     let val = textureLoad(raw_tex, px, 0).r;
-    if (is_nan_bits(val)) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (is_non_finite_bits(val)) {
+        return vec4<f32>(textureLoad(lut_tex, vec2<u32>(0u, 0u), 0).rgb, 1.0);
     }
 
-    let norm = (val - params.data_min) / max(params.data_max - params.data_min, 1e-8);
+    let range = params.vmax - params.vmin;
+    let n = select(0.0, clamp((val - params.vmin) / range, 0.0, 1.0), range > 0.0);
+    let y = stretch(n);
 
-    let range = params.highlight - params.shadow;
-    var x = (norm - params.shadow) / max(range, 1e-8);
-    x = clamp(x, 0.0, 1.0);
+    var idx = u32(floor(y * 255.0 + 0.5));
+    if (params.invert == 1u) {
+        idx = 255u - idx;
+    }
 
-    let pixel_val = mtf(params.midtone, x);
-
-    return vec4<f32>(pixel_val, pixel_val, pixel_val, 1.0);
+    return vec4<f32>(textureLoad(lut_tex, vec2<u32>(idx, 0u), 0).rgb, 1.0);
 }
 `;
 

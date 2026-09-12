@@ -1,5 +1,6 @@
 import { typedInvoke } from "../infrastructure/tauri";
 import type { HeaderData } from "../shared/types/header";
+import type { PlaneKind } from "../shared/types/fits.types";
 
 export function getHeader(path: string): Promise<Record<string, string>> {
   return typedInvoke<Record<string, string>>("get_header", { path });
@@ -18,6 +19,11 @@ export interface FitsExtension {
   naxis3: number;
   bitpix: number;
   has_data: boolean;
+  extver: number | null;
+  ref: string;
+  kind: PlaneKind;
+  is_dq: boolean;
+  is_err: boolean;
 }
 
 export function getFitsExtensions(path: string): Promise<{ extensions: FitsExtension[] }> {

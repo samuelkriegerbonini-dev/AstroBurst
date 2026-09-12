@@ -4,6 +4,7 @@ import { useFileContext, useHistContext, useStarOverlayContext } from "../../con
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
 import WcsReadout from "../header/WcsReadout";
+import PixelReadout from "../header/PixelReadout";
 
 const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
@@ -32,6 +33,13 @@ export const InfoPanel = memo(function InfoPanel() {
           mouseY={mousePixel?.y ?? null}
         />
       )}
+      {file.path && (
+        <PixelReadout
+          filePath={file.path}
+          mouseX={mousePixel?.x ?? null}
+          mouseY={mousePixel?.y ?? null}
+        />
+      )}
       {file.result?.dimensions && (
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
@@ -45,6 +53,11 @@ export const InfoPanel = memo(function InfoPanel() {
             <span>mean={histData.mean?.toFixed(2)}</span>
             <span>median={histData.median?.toFixed(2)}</span>
             <span>&sigma;={histData.sigma?.toFixed(2)}</span>
+            {histData.masked && (
+              <span className="text-zinc-600" title="Pixels flagged by the DQ exclusion mask were ignored">
+                (DQ-masked, {histData.dq_excluded ?? 0} excluded)
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3 flex-wrap">
             <span style={{ color: "rgba(239,68,68,0.6)" }}>S={stfParams.shadow.toFixed(4)}</span>

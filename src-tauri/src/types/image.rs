@@ -94,3 +94,47 @@ impl Default for ScnrConfig {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct IntPlane {
+    pub bits: ndarray::Array2<u32>,
+    pub signed: bool,
+}
+
+impl IntPlane {
+    pub fn value_at(&self, y: usize, x: usize) -> i64 {
+        let raw = self.bits[[y, x]];
+        if self.signed {
+            raw as i32 as i64
+        } else {
+            raw as i64
+        }
+    }
+
+    pub fn byte_size(&self) -> usize {
+        let (rows, cols) = self.bits.dim();
+        rows.saturating_mul(cols).saturating_mul(std::mem::size_of::<u32>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn int_plane_value_at_respects_signedness() {
+        let bits = ndarray::Array2::from_shape_vec((1, 2), vec![0xFFFF_FFFFu32, 0x8000_0001]).unwrap();
+        let unsigned = IntPlane { bits: bits.clone(), signed: false };
+        assert_eq!(unsigned.value_at(0, 0), 4294967295);
+        assert_eq!(unsigned.value_at(0, 1), 2147483649);
+        let signed = IntPlane { bits, signed: true };
+        assert_eq!(signed.value_at(0, 0), -1);
+        assert_eq!(signed.value_at(0, 1), -2147483647);
+    }
+
+    #[test]
+    fn int_plane_byte_size_is_four_per_pixel() {
+        let p = IntPlane { bits: ndarray::Array2::zeros((3, 5)), signed: false };
+        assert_eq!(p.byte_size(), 60);
+    }
+}

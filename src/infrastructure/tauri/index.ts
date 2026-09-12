@@ -3,7 +3,7 @@ import { getOutputDir } from "./output";
 
 export { typedInvoke, isTauri, getPreviewUrl } from "./client";
 export { getOutputDir, getOutputDirTiles, getExportDir } from "./output";
-export { parseRawPixelBuffer, toUint8Array, parseFftBuffer } from "./parsers";
+export { parseRawPixelBuffer, toUint8Array, parseFftBuffer, parseDqMaskBuffer } from "./parsers";
 
 async function resolveDir(explicit?: string): Promise<string> {
   if (explicit && explicit !== "./output") return explicit;

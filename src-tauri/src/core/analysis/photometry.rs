@@ -1,6 +1,7 @@
 use ndarray::Array2;
 use serde::Serialize;
 
+use crate::core::imaging::dq_flags::apply_exclusion;
 use crate::types::constants::MAD_TO_SIGMA;
 
 fn sorted_median(vals: &[f64]) -> f64 {
@@ -278,6 +279,22 @@ pub fn measure_star(
     })
 }
 
+pub fn measure_star_masked(
+    image: &Array2<f32>,
+    click_x: f64,
+    click_y: f64,
+    config: &PhotometryConfig,
+    excluded: Option<&Array2<u8>>,
+) -> Result<StarPhotometry, String> {
+    match excluded {
+        Some(mask) if mask.dim() == image.dim() => {
+            let masked = apply_exclusion(image, mask).map_err(|e| e.to_string())?;
+            measure_star(&masked, click_x, click_y, config)
+        }
+        _ => measure_star(image, click_x, click_y, config),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +385,30 @@ mod tests {
         let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
         assert!((result.aperture_radius - 10.0).abs() < 1e-9);
         assert!(result.aperture_pixels > 300);
+    }
+
+    #[test]
+    fn test_masked_peak_moves_measurement_to_next_pixel() {
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let plain = measure_star(&img, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert_eq!(plain.peak, img[[32, 32]] as f64);
+
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        mask[[32, 32]] = 1;
+        let masked = measure_star_masked(&img, 32.0, 32.0, &PhotometryConfig::default(), Some(&mask)).unwrap();
+        assert!(masked.peak < plain.peak, "peak {} should drop below {}", masked.peak, plain.peak);
+        assert!((masked.peak - img[[32, 33]] as f64).abs() < 1e-6 || (masked.peak - img[[33, 32]] as f64).abs() < 1e-6);
+
+        let none = measure_star_masked(&img, 32.0, 32.0, &PhotometryConfig::default(), None).unwrap();
+        assert_eq!(none.peak, plain.peak);
+        assert_eq!(none.net_flux, plain.net_flux);
+
+        let all = Array2::<u8>::ones((64, 64));
+        assert!(measure_star_masked(&img, 32.0, 32.0, &PhotometryConfig::default(), Some(&all)).is_err());
+
+        let wrong = Array2::<u8>::ones((8, 8));
+        let ignored = measure_star_masked(&img, 32.0, 32.0, &PhotometryConfig::default(), Some(&wrong)).unwrap();
+        assert_eq!(ignored.peak, plain.peak);
     }
 
     #[test]

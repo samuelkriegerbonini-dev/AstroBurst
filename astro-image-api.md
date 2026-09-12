@@ -56,7 +56,8 @@ Open a FITS file and create an analysis session.
 ```json
 {
   "source": "file:///data/obs/coadd_r_2026-03-14.fits",   // or s3://, https://
-  "hdu": null,              // null = auto-select first image HDU
+  "hdu": null,              // null = auto-select first image HDU; FITS only
+  "array": null,            // ASDF only: dotted array key such as "dq", "err", "roman.data"; at most one of hdu/array
   "readonly": true,
   "label": "NGC 4151 r-band coadd"
 }
@@ -68,6 +69,9 @@ Open a FITS file and create an analysis session.
   "session_id": "sx_9f3a12",
   "file": "coadd_r_2026-03-14.fits",
   "hdu_index": 1,
+  "array": null,                    // the ASDF array key when one was selected
+  "plane_ref": "/data/obs/coadd_r_2026-03-14.fits#hdu=1",   // canonical plane reference (`<path>#hdu=<n>` or `<path>#array=<key>`)
+  "is_dq": false,                   // true when the selected plane is a data-quality (DQ/MASK) plane
   "shape": [21600, 21600],          // [ny, nx]
   "dtype": "float32",
   "bunit": "electron/s",
@@ -82,7 +86,7 @@ Open a FITS file and create an analysis session.
 ```
 
 ### `GET /sessions/{id}` — session status, memory footprint, open HDU.
-### `POST /sessions/{id}/hdu` — switch active HDU: `{"hdu": 2}` (e.g., move from SCI to WEIGHT or MASK extension).
+### `POST /sessions/{id}/hdu` — switch active plane: `{"hdu": 2}` for a FITS extension (e.g., move from SCI to WEIGHT or MASK) or `{"array": "dq"}` for an ASDF array. Exactly one of `hdu`/`array` is required; both or neither is a `400` ("provide exactly one of hdu or array"). The response carries the same `hdu`, `array`, `plane_ref` and `is_dq` fields as the open response.
 ### `DELETE /sessions/{id}` — close and free resources.
 ### `POST /sessions/{id}/keepalive` — extend TTL (default TTL 60 min idle).
 
@@ -120,16 +124,16 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
     // sky alternative: {"type":"sky","ra":182.6357,"dec":39.4058,"size_arcmin":3.0}
   },
   "scale": {
-    "algorithm": "zscale",            // zscale | minmax | percentile | manual
-    "stretch": "linear",              // linear | log | sqrt | asinh | power | histeq
-    "vmin": null, "vmax": null,       // used when algorithm = manual
+    "algorithm": "zscale",            // zscale | minmax | percentile | user ("manual" accepted as an alias of user)
+    "stretch": "linear",              // linear | log | sqrt | asinh | power (histeq is rejected: it is a global transform, not a pointwise curve)
+    "vmin": null, "vmax": null,       // used when algorithm = user; a missing bound is filled from the finite data min/max
     "percentile": [1.0, 99.5],        // used when algorithm = percentile
     "asinh_a": 0.1,                   // softening for asinh
     "power": 2.0,                     // exponent for power stretch
     "zscale_contrast": 0.25
   },
-  "colormap": "heat",                 // gray | heat | viridis | inferno | plasma | cool | rainbow | bone
-  "invert_cmap": false,
+  "colormap": "heat",                 // gray (alias grey) | viridis | inferno | magma | plasma | cividis | heat | cool | rainbow
+  "invert_cmap": false,               // flips the LUT index (255 - idx); NaN pixels always take LUT[0]
   "output": {
     "max_px": 1024,                   // long side of the PNG; server bins/interp as needed
     "return_base64": false,
@@ -166,10 +170,12 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
 ```
 
 **Notes for agents**
-- `resolved.vmin/vmax` is the key feedback signal. If a zscale render looks washed out or too hard, take these numbers, consult `/histogram`, and re-render with `algorithm: "manual"` and adjusted `vmin`/`vmax`. This is *the* canonical loop (see §19, Workflow A).
+- `resolved.vmin/vmax` is the key feedback signal. If a zscale render looks washed out or too hard, take these numbers, consult `/histogram`, and re-render with `algorithm: "user"` and adjusted `vmin`/`vmax`. This is *the* canonical loop (see §19, Workflow A).
+- `resolved.scale_algorithm` echoes the canonical name: a request sent with `"manual"` is reported back as `"user"`.
 - `clipped_fraction` tells you how much of the pixel distribution is saturated to pure black/white in the PNG — a large `above_vmax` with a faint-target science case means you are probably fine; a large `below_vmin` means faint structure may be hidden.
-- Use `stretch: "asinh"` with small `asinh_a` (0.01–0.1) to show faint outskirts and bright cores simultaneously; `log` for nebulosity; `histeq` as a quick "show me everything" diagnostic (never for judging relative brightness).
-- To compare two renders fairly, hold `vmin/vmax/stretch` fixed (manual) and vary only the region or image.
+- Use `stretch: "asinh"` with small `asinh_a` (0.01–0.1) to show faint outskirts and bright cores simultaneously; `log` for nebulosity.
+- Colormaps: `gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis` (matplotlib 256-entry tables, perceptually uniform, non-decreasing luminance) and the DS9 segment maps `heat`, `cool`, `rainbow`. Names are case-insensitive; `grey` is accepted for `gray`. The same LUTs and the same byte rule (`idx = round(y * 255)`, `invert` → `255 - idx`) drive the desktop viewer, so a server PNG and the desktop display agree pixel for pixel.
+- To compare two renders fairly, hold `vmin/vmax/stretch` fixed (`user`) and vary only the region or image.
 
 ### `POST /sessions/{id}/render/rgb`
 Compose a 3-color PNG from three aligned images (session HDUs or `image_ref`s):
@@ -224,7 +230,31 @@ Inputs must share a pixel grid; if not, call `/align` first (§14). Response for
 **Response:** bin edges, counts, mode estimate, plus `image_url` of the plot when requested. Typical agent use: find where the sky mode sits and where the source tail begins, then set `vmin` just below the mode and `vmax` at the knee of the bright tail.
 
 ### `POST /sessions/{id}/pixel`
-Point query: `{"x": 8123, "y": 11302, "box": 5}` → value at pixel, plus min/max/mean of the surrounding box and the sky coordinate. Cheap sanity check ("is that white speck real or a hot pixel?" — a single hot pixel has no elevated neighbors).
+Point query: `{"x": 8123, "y": 11302, "box": 5}` → value at pixel, plus min/max/mean/median of the surrounding box and the sky coordinate. Cheap sanity check ("is that white speck real or a hot pixel?" — a single hot pixel has no elevated neighbors).
+
+```json
+{
+  "ref": "img_0",
+  "x": 8123, "y": 11302,              // floor of the requested coordinates (0-based array indices)
+  "value": 0.0312,                    // null when the pixel is NaN/Inf
+  "unit": "MJy/sr",                   // header BUNIT (quotes/whitespace stripped); null when absent. ASDF files map quantity units and meta.bunit_data / meta.bunit / roman.meta.bunit to BUNIT
+  "box": 5,                           // must be odd; even values are rejected with 400 bad_request
+  "neighborhood": {
+    "min": 0.0101, "max": 0.0412, "mean": 0.0287, "median": 0.0290,   // finite pixels of the (edge-clipped) box; null when none
+    "n_pixels": 25, "n_nan": 0
+  },
+  "sky": {"ra": 182.6357, "dec": 39.4058},  // null when the image has no usable WCS
+  "dq": {                             // null when the plane has no DQ companion (FITS EXTNAME=DQ with the same EXTVER, ASDF sibling `dq` key) or the companion is not a lossless integer plane
+    "bits": 3,                        // raw unsigned flag word, bit 31 preserved
+    "value": 3,                       // the same word as stored (signed when the plane is signed)
+    "names": ["DO_NOT_USE", "SATURATED"],
+    "table": "jwst",                  // "jwst" | "roman" | "hst" | "unknown" — chosen from the DQ plane header (TELESCOP/INSTRUME and ASDF meta keys)
+    "text": "3: DO_NOT_USE | SATURATED"
+  },
+  "err": {"value": 0.0123, "unit": "MJy/sr"}   // null when the plane has no ERR companion; value null when the ERR pixel is NaN/Inf
+}
+```
+Out-of-range coordinates return `400` with `code: "pixel_out_of_bounds"`. The same probe (`core/imaging/pixel_probe.rs`) backs the desktop pixel readout, so both report identical numbers. Companion planes are resolved once when the plane is opened and cached in the session, so repeated probes do not touch the file; derived refs (`/bin`, `/cutout`) have no companions and always report `dq: null, err: null`.
 
 ---
 
@@ -254,10 +284,10 @@ Block-average or block-sum rebinning: `{"factor": 4, "method": "mean"}` → deri
 ### `POST /sessions/{id}/wcs/pix2sky` and `/wcs/sky2pix`
 Batch-capable:
 ```json
-{"coords": [[8123, 11302], [10000, 10000]]}          // pix2sky
-{"coords": [{"ra": 182.6357, "dec": 39.4058}]}       // sky2pix
+{"points": [[8123, 11302], [10000, 10000]], "frame": "galactic"}   // pix2sky; frame optional
+{"points": [[182.6357, 39.4058]]}                                     // sky2pix (ICRS degrees)
 ```
-Response includes `on_image: true/false` per point. `sky2pix` also accepts sexagesimal strings (`"12:10:32.6 +39:24:21"`) and resolvable object names (`{"name": "NGC 4151"}`, resolved via Sesame/SIMBAD; response echoes the resolved ICRS position).
+Response includes `on_image: true/false` per point and, for `pix2sky`, the resolved `frame`. `frame` selects the output frame of `pix2sky`: `icrs` (default), `fk5` (J2000), `galactic`, `ecliptic` (J2000, IAU 2006 mean obliquity); the conversion is applied to the WCS ICRS result with the astropy rotation matrices (`core/astrometry/frames.rs`). The per-point keys stay `ra`/`dec` for every frame and carry the frame's longitude/latitude in degrees (galactic `l`/`b`, ecliptic `λ`/`β`); longitude is wrapped into `[0, 360)`. An unknown frame is a `400 bad_request` listing the four names. `sky2pix` always takes ICRS degrees. Planned: sexagesimal strings (`"12:10:32.6 +39:24:21"`) and resolvable object names (`{"name": "NGC 4151"}`, resolved via Sesame/SIMBAD; response echoes the resolved ICRS position).
 
 ### `POST /sessions/{id}/wcs/separation`
 Angular separation and position angle between two sky points or two pixels.

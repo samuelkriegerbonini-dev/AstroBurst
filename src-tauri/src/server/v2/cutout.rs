@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
+use astroburst_lib::infra::cache::PlaneLoad;
 use astroburst_lib::types::header::HduHeader;
 use ndarray::Array2;
 
@@ -168,7 +169,7 @@ pub async fn cutout(
                 }
             }
             let stats = compute_image_stats(&out);
-            Ok((out, stats, header))
+            Ok(PlaneLoad::synthetic(out, stats, header))
         })
     })
     .await

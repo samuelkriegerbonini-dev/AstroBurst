@@ -4,7 +4,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use rayon::prelude::*;
 
-use crate::cmd::common::{blocking_cmd, load_cached};
+use crate::cmd::common::{blocking_cmd, dq_exclusion, load_cached};
 use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
@@ -12,26 +12,57 @@ use crate::types::constants::{
     RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
     RES_PHOTOMETRY, RES_SKY, RES_GAIA,
     RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
+    RES_MASKED, RES_DQ_EXCLUDED,
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
-use crate::core::analysis::photometry::{measure_star, PhotometryConfig};
+use crate::core::analysis::photometry::{measure_star_masked, PhotometryConfig};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
 use crate::core::astrometry::spcc::query_gaia_vizier;
 use crate::core::astrometry::wcs::WcsTransform;
-use crate::core::imaging::stats::{compute_histogram_with_stats, downsample_histogram};
+use crate::core::imaging::dq_flags::apply_exclusion;
+use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::auto_stf;
 
 const PAR_THRESHOLD: usize = 1_000_000;
 
+pub(crate) struct DqMask {
+    pub map: ndarray::Array2<u8>,
+    pub excluded: u64,
+}
+
+pub(crate) fn resolve_dq_mask(path: &str, exclude_dq: bool, dims: (usize, usize)) -> Option<DqMask> {
+    if !exclude_dq {
+        return None;
+    }
+    let map = match dq_exclusion(path) {
+        Ok(Some(m)) if m.dim() == dims => m,
+        Ok(_) => return None,
+        Err(e) => {
+            log::warn!("DQ exclusion unavailable for {}: {:#}", path, e);
+            return None;
+        }
+    };
+    let excluded = map.iter().filter(|&&v| v != 0).count() as u64;
+    Some(DqMask { map, excluded })
+}
+
 #[tauri::command]
-pub async fn compute_histogram(path: String) -> Result<serde_json::Value, String> {
+pub async fn compute_histogram(path: String, exclude_dq: Option<bool>) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         let cached = load_cached(&path)?;
-        let stats = cached.stats();
+        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), cached.arr().dim());
 
-        let hist = compute_histogram_with_stats(cached.arr(), stats);
+        let masked_arr = match &mask {
+            Some(m) => Some(apply_exclusion(cached.arr(), &m.map)?),
+            None => None,
+        };
+        let masked_stats = masked_arr.as_ref().map(compute_image_stats);
+        let arr = masked_arr.as_ref().unwrap_or(cached.arr());
+        let stats = masked_stats.as_ref().unwrap_or(cached.stats());
+
+        let hist = compute_histogram_with_stats(arr, stats);
         let display_bins = downsample_histogram(&hist, HISTOGRAM_BINS_DISPLAY);
         let stf_params = auto_stf(stats, &AutoStfConfig::default());
 
@@ -53,6 +84,8 @@ pub async fn compute_histogram(path: String) -> Result<serde_json::Value, String
                 RES_HIGHLIGHT: stf_params.highlight,
             },
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            RES_MASKED: mask.is_some(),
+            RES_DQ_EXCLUDED: mask.as_ref().map(|m| m.excluded),
         }))
     })
 }
@@ -201,11 +234,13 @@ pub async fn measure_photometry_cmd(
     y: f64,
     aperture_radius: Option<f64>,
     gaia_match: Option<bool>,
+    exclude_dq: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         let entry = crate::cmd::common::load_cached_full(&path)
             .or_else(|_| load_cached(&path))?;
+        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
 
         let config = PhotometryConfig {
             aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
@@ -213,7 +248,7 @@ pub async fn measure_photometry_cmd(
             ..PhotometryConfig::default()
         };
 
-        let phot = measure_star(entry.arr(), x, y, &config)
+        let phot = measure_star_masked(entry.arr(), x, y, &config, mask.as_ref().map(|m| &m.map))
             .map_err(|e| anyhow::anyhow!(e))?;
 
         let mut sky = serde_json::Value::Null;
@@ -257,6 +292,7 @@ pub async fn measure_photometry_cmd(
             RES_SKY: sky,
             RES_GAIA: gaia,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            RES_MASKED: mask.is_some(),
         }))
     })
 }
@@ -310,4 +346,33 @@ pub async fn analyze_subframes_cmd(
             RES_ELAPSED_MS: elapsed,
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+
+    #[test]
+    fn resolve_dq_mask_counts_excluded_pixels_on_mef() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hist.fits");
+        let mut dq = vec![-2147483648i32; 16];
+        dq[1] = -2147483647;
+        dq[6] = -2147483645;
+        dq[9] = -2147483646;
+        sci_err_dq_mef(&path, 4, 4, dq);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+        let entry = load_cached(&key).unwrap();
+        let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
+        assert_eq!(mask.excluded, 2);
+        assert_eq!(mask.map[[0, 1]], 1);
+        assert_eq!(mask.map[[1, 2]], 1);
+        assert_eq!(mask.map[[2, 1]], 0);
+        let masked = apply_exclusion(entry.arr(), &mask.map).unwrap();
+        assert_eq!(compute_image_stats(&masked).valid_count, entry.stats().valid_count - 2);
+        assert!(resolve_dq_mask(&key, false, entry.arr().dim()).is_none());
+        assert!(resolve_dq_mask(&key, true, (1, 1)).is_none());
+        assert!(resolve_dq_mask(&format!("{}#hdu=4", path.to_str().unwrap()), true, (4, 4)).is_none());
+    }
 }

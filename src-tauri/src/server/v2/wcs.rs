@@ -3,6 +3,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use astroburst_lib::core::astrometry::frames::{convert_from_icrs, SkyFrame};
 use astroburst_lib::core::astrometry::wcs::{angular_separation, WcsTransform};
 
 use crate::error::{AppError, Result};
@@ -14,6 +15,19 @@ pub struct Pix2SkyParams {
     pub points: Vec<[f64; 2]>,
     #[serde(default, alias = "ref")]
     pub image_ref: Option<String>,
+    #[serde(default)]
+    pub frame: Option<String>,
+}
+
+fn parse_frame(name: Option<&str>) -> Result<SkyFrame> {
+    SkyFrame::from_name(name.unwrap_or("icrs")).map_err(|message| AppError::BadRequestWithHint {
+        code: "bad_request",
+        message,
+        hint: Some(format!(
+            "supported frames: {}",
+            SkyFrame::ALL.iter().map(|f| f.name()).collect::<Vec<_>>().join(", ")
+        )),
+    })
 }
 
 #[derive(Deserialize)]
@@ -85,6 +99,7 @@ pub async fn pix2sky(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<Pix2SkyParams>,
 ) -> Result<Json<Value>> {
+    let frame = parse_frame(params.frame.as_deref())?;
     let target = target_ref(&session, params.image_ref).await?;
     let (wcs, w, h) = load_wcs(&session, &target)?;
 
@@ -95,11 +110,12 @@ pub async fn pix2sky(
         .iter()
         .zip(sky.iter())
         .map(|(&(x, y), c)| {
+            let (lon, lat) = convert_from_icrs(frame, c.ra, c.dec);
             json!({
                 "x": x,
                 "y": y,
-                "ra": c.ra,
-                "dec": c.dec,
+                "ra": lon,
+                "dec": lat,
                 "on_image": on_image(x, y, w, h),
             })
         })
@@ -107,6 +123,7 @@ pub async fn pix2sky(
 
     Ok(Json(json!({
         "ref": target,
+        "frame": frame.name(),
         "count": results.len(),
         "results": results,
     })))
@@ -171,6 +188,34 @@ pub async fn separation(
             body["a_sky"] = json!([ca.ra, ca.dec]);
             body["b_sky"] = json!([cb.ra, cb.dec]);
             Ok(Json(body))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_frame_defaults_to_icrs_and_accepts_the_four_names() {
+        assert_eq!(parse_frame(None).unwrap(), SkyFrame::Icrs);
+        assert_eq!(parse_frame(Some(" Galactic ")).unwrap(), SkyFrame::Galactic);
+        assert_eq!(parse_frame(Some("fk5")).unwrap(), SkyFrame::Fk5J2000);
+        assert_eq!(parse_frame(Some("ecliptic")).unwrap(), SkyFrame::EclipticJ2000);
+    }
+
+    #[test]
+    fn parse_frame_rejects_unknown_with_bad_request_and_hint() {
+        match parse_frame(Some("supergalactic")).unwrap_err() {
+            AppError::BadRequestWithHint { code, message, hint } => {
+                assert_eq!(code, "bad_request");
+                assert!(message.contains("supergalactic"), "{message}");
+                let hint = hint.unwrap();
+                for f in SkyFrame::ALL {
+                    assert!(hint.contains(f.name()), "{hint} lacks {}", f.name());
+                }
+            }
+            other => panic!("expected BadRequestWithHint, got {other:?}"),
         }
     }
 }

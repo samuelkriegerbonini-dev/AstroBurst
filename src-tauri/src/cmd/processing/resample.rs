@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, render_asinh_and_save, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, extract_image_resolved, output_stem, render_asinh_and_save, resolve_output_dir};
 use crate::core::imaging::resample::{resample_with_wcs, strip_sip_cards};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::types::constants::{
@@ -32,11 +32,7 @@ pub async fn resample_fits_cmd(
         strip_sip_cards(&mut out_header);
         out_header.remove("NAXIS3");
 
-        let name = format!("{}_resampled",
-            std::path::Path::new(&path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("resampled"));
+        let name = format!("{}_resampled", output_stem(&path));
         let (png_path, _) = render_asinh_and_save(&result.image, &output_dir, &name, false)?;
         let fits_path = format!("{}/{}.fits", output_dir, name);
         crate::infra::fits::writer::write_fits_mono(&fits_path, &result.image, Some(&out_header))?;

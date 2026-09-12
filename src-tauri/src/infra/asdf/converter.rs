@@ -7,10 +7,69 @@ use serde_yaml::Value;
 
 use super::parser::{AsdfError, AsdfFile};
 use super::tree::{untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
+use crate::types::image::IntPlane;
 
 enum PixelLayout {
     Planar,
     Interleaved,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsdfArrayInfo {
+    pub key: String,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+    pub bitpix: i64,
+}
+
+pub fn bitpix_for_dtype(d: &DType) -> i64 {
+    match d {
+        DType::Int8 | DType::UInt8 | DType::Bool8 => 8,
+        DType::Int16 | DType::UInt16 => 16,
+        DType::Int32 | DType::UInt32 => 32,
+        DType::Int64 | DType::UInt64 => 64,
+        DType::Float32 => -32,
+        DType::Float64 => -64,
+        DType::Complex64 | DType::Complex128 => 0,
+    }
+}
+
+fn array_info_at(node: &Value, key: String) -> Option<AsdfArrayInfo> {
+    let meta = AsdfImage::try_meta_or_wrapped(node).ok().flatten()?;
+    if meta.shape.len() < 2 {
+        return None;
+    }
+    let bitpix = bitpix_for_dtype(&meta.dtype);
+    Some(AsdfArrayInfo { key, shape: meta.shape, dtype: meta.dtype, bitpix })
+}
+
+pub fn auto_data_key(asdf: &AsdfFile) -> Option<String> {
+    AsdfImage::find_data_array(&asdf.tree)
+        .ok()
+        .flatten()
+        .map(|(key, _)| key)
+}
+
+pub fn list_arrays(asdf: &AsdfFile) -> Vec<AsdfArrayInfo> {
+    let mut out = Vec::new();
+    let Some(mapping) = untag(&asdf.tree).as_mapping() else {
+        return out;
+    };
+    for (k, v) in mapping.iter() {
+        let Some(key) = k.as_str() else { continue };
+        if let Some(info) = array_info_at(v, key.to_string()) {
+            out.push(info);
+        }
+    }
+    if let Some(roman) = asdf.tree.get("roman").and_then(|r| untag(r).as_mapping()) {
+        for (k, v) in roman.iter() {
+            let Some(key) = k.as_str() else { continue };
+            if let Some(info) = array_info_at(v, format!("roman.{}", key)) {
+                out.push(info);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -21,6 +80,7 @@ pub struct AsdfImage {
     pub data: Vec<f32>,
     pub wcs: Option<WcsInfo>,
     pub metadata: HashMap<String, String>,
+    pub unit: Option<String>,
 }
 
 impl AsdfImage {
@@ -50,7 +110,29 @@ impl AsdfImage {
             data: Vec::new(),
             wcs,
             metadata,
+            unit: None,
         }
+    }
+
+    fn node_at<'a>(tree: &'a Value, key: &str) -> Option<&'a Value> {
+        let mut node = tree;
+        for part in key.split('.') {
+            node = untag(node).as_mapping()?.get(Value::String(part.to_string()))?;
+        }
+        Some(node)
+    }
+
+    fn extract_unit(tree: &Value, key: &str) -> Option<String> {
+        let node = Self::node_at(tree, key)?;
+        let unit = untag(node)
+            .as_mapping()?
+            .get(Value::String("unit".to_string()))?;
+        let text = match untag(unit) {
+            Value::String(s) => s.trim().to_string(),
+            Value::Number(n) => n.to_string(),
+            _ => return None,
+        };
+        (!text.is_empty()).then_some(text)
     }
 
     fn from_array(
@@ -97,7 +179,94 @@ impl AsdfImage {
             data,
             wcs,
             metadata: Self::extract_metadata(&asdf.tree, key),
+            unit: Self::extract_unit(&asdf.tree, key),
         })
+    }
+
+    pub fn load_array(asdf: &AsdfFile, key: &str) -> Result<Self, AsdfError> {
+        let node = Self::node_at(&asdf.tree, key)
+            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
+        let meta = Self::try_meta_or_wrapped(node)?
+            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
+        let wcs = Self::resolve_wcs(&asdf.tree);
+        Self::from_array(asdf, key, meta, wcs)
+    }
+
+    pub fn load_array_int(asdf: &AsdfFile, key: &str) -> Result<Option<IntPlane>, AsdfError> {
+        let node = Self::node_at(&asdf.tree, key)
+            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
+        let mut meta = Self::try_meta_or_wrapped(node)?
+            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
+        let signed = match meta.dtype {
+            DType::Int8 | DType::Int16 | DType::Int32 => true,
+            DType::UInt8 | DType::UInt16 | DType::UInt32 | DType::Bool8 => false,
+            _ => return Ok(None),
+        };
+        let bits: Vec<u32> = match &meta.source {
+            ArraySource::Inline(values) => values
+                .iter()
+                .map(|&v| if signed { v as i32 as u32 } else { v as u32 })
+                .collect(),
+            ArraySource::Block(index) => {
+                let block = asdf.block_data(*index)?;
+                meta.resolve_streamed_shape(block.len());
+                let raw = Self::gather_array_bytes(&block, &meta);
+                match Self::to_int_pixels(&raw, &meta) {
+                    Some((bits, _)) => bits,
+                    None => return Ok(None),
+                }
+            }
+        };
+        let (height, width) = match meta.shape.len() {
+            2 => (meta.shape[0], meta.shape[1]),
+            3 if meta.shape[0] <= 4 || meta.shape[2] > 4 => (meta.shape[1], meta.shape[2]),
+            _ => return Ok(None),
+        };
+        let expected = width * height;
+        if bits.len() < expected {
+            return Err(AsdfError::ShapeMismatch { got: bits.len(), expected });
+        }
+        let mut plane = bits;
+        plane.truncate(expected);
+        let arr = ndarray::Array2::from_shape_vec((height, width), plane)
+            .map_err(|_| AsdfError::ShapeMismatch { got: expected, expected })?;
+        Ok(Some(IntPlane { bits: arr, signed }))
+    }
+
+    pub fn array_exists(tree: &Value, key: &str) -> bool {
+        Self::node_at(tree, key)
+            .and_then(|n| Self::try_meta_or_wrapped(n).ok().flatten())
+            .is_some()
+    }
+
+    fn to_int_pixels(raw: &[u8], meta: &NdArrayMeta) -> Option<(Vec<u32>, bool)> {
+        let order = meta.byteorder;
+        macro_rules! decode_int {
+            ($n:literal, $ty:ty, $signed:expr) => {{
+                let v: Vec<u32> = raw
+                    .chunks_exact($n)
+                    .map(|c| {
+                        let b: [u8; $n] = c.try_into().unwrap_or([0u8; $n]);
+                        let x = match order {
+                            ByteOrder::Big => <$ty>::from_be_bytes(b),
+                            ByteOrder::Little => <$ty>::from_le_bytes(b),
+                        };
+                        x as i64 as u32
+                    })
+                    .collect();
+                Some((v, $signed))
+            }};
+        }
+        match &meta.dtype {
+            DType::Int8 => Some((raw.iter().map(|&c| c as i8 as i32 as u32).collect(), true)),
+            DType::UInt8 => Some((raw.iter().map(|&c| c as u32).collect(), false)),
+            DType::Bool8 => Some((raw.iter().map(|&c| (c != 0) as u32).collect(), false)),
+            DType::Int16 => decode_int!(2, i16, true),
+            DType::UInt16 => decode_int!(2, u16, false),
+            DType::Int32 => decode_int!(4, i32, true),
+            DType::UInt32 => decode_int!(4, u32, false),
+            _ => None,
+        }
     }
 
     pub fn has_image(&self) -> bool {
@@ -134,13 +303,8 @@ impl AsdfImage {
         if let Some(mapping) = tree.as_mapping() {
             for key in &candidates {
                 if let Some(node) = mapping.get(Value::String(key.to_string())) {
-                    if let Some(meta) = Self::try_meta(node, true)? {
+                    if let Some(meta) = Self::try_meta_or_wrapped(node)? {
                         return Ok(Some((key.to_string(), meta)));
-                    }
-                    if let Some(data_node) = node.get("data") {
-                        if let Some(meta) = Self::try_meta(data_node, true)? {
-                            return Ok(Some((key.to_string(), meta)));
-                        }
                     }
                 }
             }
@@ -150,7 +314,7 @@ impl AsdfImage {
             let roman_paths = ["data", "science", "sci"];
             for rp in &roman_paths {
                 if let Some(node) = roman.get(*rp) {
-                    if let Some(meta) = Self::try_meta(node, true)? {
+                    if let Some(meta) = Self::try_meta_or_wrapped(node)? {
                         return Ok(Some((format!("roman.{}", rp), meta)));
                     }
                 }
@@ -166,6 +330,20 @@ impl AsdfImage {
             }
         }
 
+        Ok(None)
+    }
+
+    fn try_meta_or_wrapped(node: &Value) -> Result<Option<NdArrayMeta>, AsdfError> {
+        if let Some(meta) = Self::try_meta(node, true)? {
+            return Ok(Some(meta));
+        }
+        for wrapper in ["data", "value"] {
+            if let Some(inner) = node.get(wrapper) {
+                if let Some(meta) = Self::try_meta(inner, true)? {
+                    return Ok(Some(meta));
+                }
+            }
+        }
         Ok(None)
     }
 
@@ -590,6 +768,54 @@ mod tests {
     }
 
     #[test]
+    fn plain_ndarray_node_has_no_unit() {
+        let img = load_bytes(asdf_bytes(TREE_2X3, &[raw_block(&f32_le(&[1.; 6]))])).unwrap();
+        assert_eq!(img.unit, None);
+    }
+
+    #[test]
+    fn quantity_tagged_data_node_yields_unit() {
+        let tree = "data: !unit/quantity-1.1.0\n  value: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  unit: !unit/unit-1.0.0 DN / s\n";
+        let img = load_bytes(asdf_bytes(tree, &[])).unwrap();
+        assert_eq!((img.height, img.width), (2, 2));
+        assert_eq!(img.data, vec![1., 2., 3., 4.]);
+        assert_eq!(img.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("data"));
+        assert_eq!(img.unit.as_deref(), Some("DN / s"));
+    }
+
+    #[test]
+    fn try_meta_or_wrapped_unwraps_data_and_value_containers() {
+        let inline: Value = serde_yaml::from_str("data: [[1, 2], [3, 4]]\ndatatype: float32\n").unwrap();
+        assert_eq!(AsdfImage::try_meta_or_wrapped(&inline).unwrap().unwrap().shape, vec![2, 2]);
+
+        let wrapped_data: Value =
+            serde_yaml::from_str("data:\n  data: [[1, 2, 3]]\n  datatype: float32\n").unwrap();
+        assert_eq!(AsdfImage::try_meta_or_wrapped(&wrapped_data).unwrap().unwrap().shape, vec![1, 3]);
+
+        let wrapped_value: Value =
+            serde_yaml::from_str("value:\n  data: [[1], [2], [3]]\n  datatype: float32\nunit: electron\n").unwrap();
+        assert_eq!(AsdfImage::try_meta_or_wrapped(&wrapped_value).unwrap().unwrap().shape, vec![3, 1]);
+
+        let scalar: Value = serde_yaml::from_str("value: 7\nunit: electron\n").unwrap();
+        assert!(AsdfImage::try_meta_or_wrapped(&scalar).unwrap().is_none());
+    }
+
+    #[test]
+    fn roman_quantity_node_yields_unit_through_dotted_key() {
+        let tree = "roman:\n  meta:\n    instrument: {name: WFI}\n  data: !unit/quantity-1.1.0\n    value: !core/ndarray-1.0.0\n      data: [[5, 6], [7, 8]]\n      datatype: float32\n    unit: electron\n";
+        let img = load_bytes(asdf_bytes(tree, &[])).unwrap();
+        assert_eq!(img.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("roman.data"));
+        assert_eq!(img.unit.as_deref(), Some("electron"));
+    }
+
+    #[test]
+    fn empty_unit_is_treated_as_absent() {
+        let tree = "data: !unit/quantity-1.1.0\n  value: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  unit: '  '\n";
+        let img = load_bytes(asdf_bytes(tree, &[])).unwrap();
+        assert_eq!(img.unit, None);
+    }
+
+    #[test]
     fn zlib_block_decompressed() {
         use std::io::Write;
         let payload = f32_le(&[7., 7., 7., 7., 7., 7.]);
@@ -792,6 +1018,110 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "ASDF view failures: {:?}", failures);
+    }
+
+    const MULTI_TREE: &str = "meta:\n  telescope: JWST\ndata: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2, 3]\ndq: !core/ndarray-1.0.0\n  source: 1\n  datatype: uint32\n  byteorder: big\n  shape: [2, 3]\nerr: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2, 3]\nwave: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [6]\nroman:\n  meta:\n    instrument: {name: WFI}\n  dq: !core/ndarray-1.0.0\n    source: 2\n    datatype: int16\n    byteorder: little\n    shape: [2, 3]\n";
+
+    fn multi_file() -> AsdfFile {
+        let dq: Vec<u8> = [0u32, 0x8000_0001, 3, 0, 0, 0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let rdq: Vec<u8> = [-5i16, 7, 0, 0, 0, 0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let blocks = vec![raw_block(&f32_le(&[1., 2., 3., 4., 5., 6.])), raw_block(&dq), raw_block(&rdq)];
+        AsdfFile::from_bytes(asdf_bytes(MULTI_TREE, &blocks)).unwrap()
+    }
+
+    #[test]
+    fn list_arrays_reports_rank2_arrays_in_tree_order() {
+        let file = multi_file();
+        let arrays = list_arrays(&file);
+        let keys: Vec<&str> = arrays.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, vec!["data", "dq", "err", "roman.dq"]);
+        assert_eq!(arrays[1].bitpix, 32);
+        assert_eq!(arrays[1].dtype, DType::UInt32);
+        assert_eq!(arrays[1].shape, vec![2, 3]);
+        assert_eq!(arrays[3].bitpix, 16);
+        assert_eq!(arrays[0].bitpix, -32);
+    }
+
+    #[test]
+    fn load_array_by_dotted_key() {
+        let file = multi_file();
+        let dq = AsdfImage::load_array(&file, "dq").unwrap();
+        assert_eq!((dq.height, dq.width), (2, 3));
+        assert_eq!(dq.data[1], 0x8000_0001u32 as f32);
+        assert_eq!(dq.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("dq"));
+        let rdq = AsdfImage::load_array(&file, "roman.dq").unwrap();
+        assert_eq!(rdq.data, vec![-5., 7., 0., 0., 0., 0.]);
+        assert_eq!(rdq.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("roman.dq"));
+        assert!(matches!(AsdfImage::load_array(&file, "nope"), Err(AsdfError::MissingField(k)) if k == "nope"));
+        assert!(matches!(AsdfImage::load_array(&file, "meta"), Err(AsdfError::MissingField(_))));
+    }
+
+    #[test]
+    fn load_array_int_decodes_integer_dtypes_losslessly() {
+        let file = multi_file();
+        let dq = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert!(!dq.signed);
+        assert_eq!(dq.bits.dim(), (2, 3));
+        assert_eq!(dq.bits[[0, 1]], 0x8000_0001);
+        assert_eq!(dq.value_at(0, 1), 2147483649);
+        assert_eq!(dq.bits[[0, 2]], 3);
+
+        let rdq = AsdfImage::load_array_int(&file, "roman.dq").unwrap().unwrap();
+        assert!(rdq.signed);
+        assert_eq!(rdq.value_at(0, 0), -5);
+        assert_eq!(rdq.value_at(0, 1), 7);
+
+        assert!(AsdfImage::load_array_int(&file, "data").unwrap().is_none());
+        assert!(matches!(AsdfImage::load_array_int(&file, "missing"), Err(AsdfError::MissingField(_))));
+    }
+
+    #[test]
+    fn load_array_int_little_endian_uint32_and_bool8() {
+        let tree = "dq: !core/ndarray-1.0.0\n  source: 0\n  datatype: uint32\n  byteorder: little\n  shape: [1, 2]\nmask: !core/ndarray-1.0.0\n  source: 1\n  datatype: bool8\n  shape: [1, 3]\n";
+        let dq: Vec<u8> = [0x8000_0001u32, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[raw_block(&dq), raw_block(&[0, 1, 5])])).unwrap();
+        let p = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert_eq!(p.bits[[0, 0]], 0x8000_0001);
+        assert_eq!(p.bits[[0, 1]], 2);
+        let m = AsdfImage::load_array_int(&file, "mask").unwrap().unwrap();
+        assert!(!m.signed);
+        assert_eq!(m.bits.as_slice().unwrap(), &[0, 1, 1]);
+    }
+
+    #[test]
+    fn load_array_int_inline_source_casts_values() {
+        let tree = "dq: !core/ndarray-1.0.0\n  data: [[0, 3], [1, 0]]\n  datatype: uint32\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[])).unwrap();
+        let p = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert_eq!(p.bits.as_slice().unwrap(), &[0, 3, 1, 0]);
+    }
+
+    #[test]
+    fn bitpix_for_dtype_table() {
+        assert_eq!(bitpix_for_dtype(&DType::Int8), 8);
+        assert_eq!(bitpix_for_dtype(&DType::UInt8), 8);
+        assert_eq!(bitpix_for_dtype(&DType::Bool8), 8);
+        assert_eq!(bitpix_for_dtype(&DType::Int16), 16);
+        assert_eq!(bitpix_for_dtype(&DType::UInt16), 16);
+        assert_eq!(bitpix_for_dtype(&DType::Int32), 32);
+        assert_eq!(bitpix_for_dtype(&DType::UInt32), 32);
+        assert_eq!(bitpix_for_dtype(&DType::Int64), 64);
+        assert_eq!(bitpix_for_dtype(&DType::UInt64), 64);
+        assert_eq!(bitpix_for_dtype(&DType::Float32), -32);
+        assert_eq!(bitpix_for_dtype(&DType::Float64), -64);
+        assert_eq!(bitpix_for_dtype(&DType::Complex64), 0);
+        assert_eq!(bitpix_for_dtype(&DType::Complex128), 0);
+    }
+
+    #[test]
+    fn array_exists_checks_dotted_keys() {
+        let file = multi_file();
+        assert!(AsdfImage::array_exists(&file.tree, "dq"));
+        assert!(AsdfImage::array_exists(&file.tree, "roman.dq"));
+        assert!(AsdfImage::array_exists(&file.tree, "wave"));
+        assert!(!AsdfImage::array_exists(&file.tree, "roman.err"));
+        assert!(!AsdfImage::array_exists(&file.tree, "meta"));
+        assert!(!AsdfImage::array_exists(&file.tree, "nothing"));
     }
 
     #[test]

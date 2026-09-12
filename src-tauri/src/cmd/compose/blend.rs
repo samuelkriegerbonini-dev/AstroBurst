@@ -3,7 +3,7 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, output_stem, resolve_output_dir, extract_image_resolved, MAX_PREVIEW_DIM};
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::cmd::helpers;
 use crate::core::alignment::pair::align_pair_with_label;
@@ -278,10 +278,7 @@ pub async fn align_channels_cmd(
         };
 
         if write_disk {
-            let stem0 = std::path::Path::new(&paths[0])
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("ch0");
+            let stem0 = output_stem(&paths[0]);
             let out0 = format!("{}/{}_aligned.fits", output_dir, stem0);
             crate::infra::fits::writer::write_fits_mono(&out0, ref_arr, None)?;
             channel_results.push(json!({
@@ -306,10 +303,7 @@ pub async fn align_channels_cmd(
                 target.to_owned()
             };
 
-            let label = std::path::Path::new(&paths[i])
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("ch");
+            let label = output_stem(&paths[i]);
 
             let result = align_pair_with_label(
                 ref_arr,
@@ -317,7 +311,7 @@ pub async fn align_channels_cmd(
                 method,
                 rows,
                 cols,
-                label,
+                &label,
             )?;
 
             let cache_key = if use_bin_ids {

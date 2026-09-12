@@ -25,7 +25,10 @@ interface HistogramPanelProps {
   onAutoStf?: () => void;
   onReset?: () => void;
   stats?: HistogramStats | null;
+  disabled?: boolean;
 }
+
+const DISABLED_HINT = "STF applies only to the mtf stretch";
 
 function HistogramPanel({
                           bins = [],
@@ -38,6 +41,7 @@ function HistogramPanel({
                           onAutoStf,
                           onReset,
                           stats,
+                          disabled = false,
                         }: HistogramPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -202,6 +206,7 @@ function HistogramPanel({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (disabled) return;
       const norm = getMouseNorm(e.nativeEvent);
       const { shadow: s, midtone: m, highlight: hi } = stateRef.current;
       const midX = s + m * (hi - s);
@@ -243,8 +248,12 @@ function HistogramPanel({
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [getMouseNorm, onChange],
+    [getMouseNorm, onChange, disabled],
   );
+
+  useEffect(() => {
+    if (disabled) setManualMode(false);
+  }, [disabled]);
 
   const shadowVal = useMemo(
     () => (dataMin + shadow * (dataMax - dataMin)).toFixed(1),
@@ -264,20 +273,20 @@ function HistogramPanel({
           Histogram / STF
         </span>
         <div className="flex items-center gap-0.5">
-          <ToolbarBtn onClick={onAutoStf} title="Auto Stretch (STF)" active={false} color="var(--ab-blue)">
+          <ToolbarBtn onClick={onAutoStf} title={disabled ? DISABLED_HINT : "Auto Stretch (STF)"} active={false} color="var(--ab-blue)" disabled={disabled}>
             <Wand2 size={11} />
             <span>Auto</span>
           </ToolbarBtn>
-          <ToolbarBtn onClick={openManual} title="Manual input" active={manualMode} color="var(--ab-teal)">
+          <ToolbarBtn onClick={openManual} title={disabled ? DISABLED_HINT : "Manual input"} active={manualMode} color="var(--ab-teal)" disabled={disabled}>
             <SlidersHorizontal size={11} />
           </ToolbarBtn>
-          <ToolbarBtn onClick={onReset} title="Reset to linear" active={false} color="#71717a">
+          <ToolbarBtn onClick={onReset} title={disabled ? DISABLED_HINT : "Reset to linear"} active={false} color="#71717a" disabled={disabled}>
             <RotateCcw size={11} />
           </ToolbarBtn>
         </div>
       </div>
 
-      <div ref={containerRef} className="relative" style={{ height: CANVAS_H, margin: "6px 6px 0" }}>
+      <div ref={containerRef} className="relative" style={{ height: CANVAS_H, margin: "6px 6px 0", opacity: disabled ? 0.55 : 1 }}>
         <canvas
           ref={canvasRef}
           height={CANVAS_H}
@@ -287,11 +296,18 @@ function HistogramPanel({
         <canvas
           ref={overlayRef}
           height={CANVAS_H}
-          className="w-full rounded-md absolute inset-0 cursor-crosshair"
+          className={`w-full rounded-md absolute inset-0 ${disabled ? "cursor-not-allowed" : "cursor-crosshair"}`}
           style={{ height: CANVAS_H }}
           onMouseDown={handleMouseDown}
+          title={disabled ? DISABLED_HINT : undefined}
         />
       </div>
+
+      {disabled && (
+        <div className="px-3 py-1 text-[9px] text-zinc-500" style={{ borderTop: "1px solid rgba(63,63,70,0.12)" }}>
+          {DISABLED_HINT}
+        </div>
+      )}
 
       {manualMode ? (
         <div
@@ -350,19 +366,22 @@ function ToolbarBtn({
                       title,
                       active,
                       color,
+                      disabled = false,
                       children,
                     }: {
   onClick?: () => void;
   title: string;
   active: boolean;
   color: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md transition-colors"
+      disabled={disabled}
+      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       style={{
         color: active ? color : "#71717a",
         background: active ? "rgba(20,184,166,0.08)" : undefined,

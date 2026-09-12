@@ -1,25 +1,49 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { Database, ChevronRight, FileText, Search, X, Copy, Check } from "lucide-react";
+import { Database, ChevronRight, FileText, Search, X, Copy, Check, Eye, Loader2 } from "lucide-react";
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
 import type { FitsExtension } from "../../services/header";
+import type { PlaneInfo } from "../../shared/types/fits.types";
 
 interface HduSelectorPanelProps {
   filePath: string;
+  activePath: string;
+  activePlane?: PlaneInfo | null;
   onSelectHdu?: (hduIndex: number, header: Record<string, string>) => void;
+  onActivate?: (ref: string) => void;
+  activating?: boolean;
+  activateError?: string | null;
 }
 
 type HduInfo = FitsExtension;
 
 const TYPE_STYLES: Record<string, { bg: string; border: string; text: string }> = {
   IMAGE: { bg: "rgba(59,130,246,0.1)", border: "rgba(59,130,246,0.25)", text: "#93c5fd" },
+  ARRAY: { bg: "rgba(59,130,246,0.1)", border: "rgba(59,130,246,0.25)", text: "#93c5fd" },
   TABLE: { bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.25)", text: "#fcd34d" },
   BINTABLE: { bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.25)", text: "#fcd34d" },
   PRIMARY: { bg: "rgba(139,92,246,0.1)", border: "rgba(139,92,246,0.25)", text: "#c4b5fd" },
 };
 
 const DEFAULT_TYPE_STYLE = { bg: "rgba(113,113,122,0.1)", border: "rgba(113,113,122,0.2)", text: "#a1a1aa" };
+const DQ_TAG_STYLE = { bg: "rgba(248,113,113,0.12)", border: "rgba(248,113,113,0.3)", text: "#f87171" };
+const ERR_TAG_STYLE = { bg: "rgba(251,191,36,0.12)", border: "rgba(251,191,36,0.3)", text: "#fbbf24" };
 
-export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorPanelProps) {
+function isShownPlane(ext: HduInfo, activePath: string, activePlane: PlaneInfo | null | undefined): boolean {
+  if (activePath === ext.ref) return true;
+  if (!activePlane) return false;
+  if (ext.kind === "hdu") return activePlane.kind === "hdu" && activePlane.index === ext.index;
+  return activePlane.kind === "array" && activePlane.key === ext.extname;
+}
+
+export default function HduSelectorPanel({
+  filePath,
+  activePath,
+  activePlane,
+  onSelectHdu,
+  onActivate,
+  activating = false,
+  activateError = null,
+}: HduSelectorPanelProps) {
   const [extensions, setExtensions] = useState<HduInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -89,6 +113,10 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
     );
   }, [hduHeader, hduSearch]);
 
+  const isAsdf = extensions.length > 0 && extensions[0].kind === "array";
+  const panelTitle = isAsdf ? "ASDF Arrays" : "FITS Extensions";
+  const countLabel = isAsdf ? `${extensions.length} arrays` : `${extensions.length} HDUs`;
+
   if (loading) {
     return (
       <div className="ab-panel flex items-center justify-center py-5">
@@ -135,67 +163,118 @@ export default function HduSelectorPanel({ filePath, onSelectHdu }: HduSelectorP
         <div className="flex items-center gap-2">
           <Database size={12} style={{ color: "var(--ab-rose)" }} />
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
-            FITS Extensions
+            {panelTitle}
           </span>
         </div>
         <span className="text-[10px] font-mono text-zinc-500">
-          {extensions.length} HDUs
+          {countLabel}
         </span>
       </div>
 
-      <div className="max-h-[200px] overflow-y-auto">
+      <div className="max-h-[240px] overflow-y-auto">
         {extensions.map((ext, i) => {
           const idx = ext.index ?? i;
-          const isSelected = selectedIdx === idx;
+          const isHdu = ext.kind === "hdu";
+          const isSelected = isHdu && selectedIdx === idx;
+          const isShown = isShownPlane(ext, activePath, activePlane);
           const dimParts = [ext.naxis1, ext.naxis2, ext.naxis3]
             .slice(0, Math.max(0, ext.naxis))
             .filter((d) => d > 0);
           const dims = dimParts.length > 0 ? dimParts.join(" × ") : "";
-          const typeLabel = idx === 0 ? "PRIMARY" : ext.has_data ? "IMAGE" : "EXT";
+          const typeLabel = !isHdu ? "ARRAY" : idx === 0 ? "PRIMARY" : ext.has_data ? "IMAGE" : "EXT";
           const ts = TYPE_STYLES[typeLabel] || DEFAULT_TYPE_STYLE;
+          const tag = ext.is_dq ? { label: "DQ", style: DQ_TAG_STYLE } : ext.is_err ? { label: "ERR", style: ERR_TAG_STYLE } : null;
+          const nameLabel = ext.extname
+            ? ext.extver !== null && ext.extver !== undefined && isHdu
+              ? `${ext.extname},${ext.extver}`
+              : ext.extname
+            : "(unnamed)";
 
           return (
-            <button
-              key={i}
-              onClick={() => handleSelectHdu(idx)}
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-all"
+            <div
+              key={ext.ref || i}
+              className="flex items-center gap-2 px-3 py-1.5 transition-all"
               style={{
-                background: isSelected ? "rgba(244,63,94,0.06)" : "transparent",
+                background: isSelected ? "rgba(244,63,94,0.06)" : isShown ? "rgba(20,184,166,0.05)" : "transparent",
                 borderBottom: "1px solid rgba(63,63,70,0.12)",
               }}
-              onMouseOver={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(63,63,70,0.15)"; }}
-              onMouseOut={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
             >
-              <span
-                className="transition-transform shrink-0"
-                style={{ transform: isSelected ? "rotate(90deg)" : "rotate(0deg)" }}
+              <button
+                onClick={() => { if (isHdu) handleSelectHdu(idx); }}
+                disabled={!isHdu}
+                className="flex items-center gap-2.5 flex-1 min-w-0 text-left disabled:cursor-default"
+                title={isHdu ? "Show this HDU's header" : ext.extname ?? undefined}
               >
-                <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "#52525b" }} />
-              </span>
-              <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "#52525b" }}>
-                #{idx}
-              </span>
-              <span
-                className="text-[9px] font-bold px-2 py-0.5 rounded shrink-0"
-                style={{ background: ts.bg, border: `1px solid ${ts.border}`, color: ts.text }}
-              >
-                {typeLabel}
-              </span>
-              <span
-                className="text-[11px] truncate flex-1"
-                style={{ color: isSelected ? "#e4e4e7" : "#71717a" }}
-              >
-                {ext.extname || "(unnamed)"}
-              </span>
-              {dims && (
-                <span className="text-[10px] font-mono shrink-0" style={{ color: "#52525b" }}>
-                  {dims}
+                <span
+                  className="transition-transform shrink-0"
+                  style={{ transform: isSelected ? "rotate(90deg)" : "rotate(0deg)", visibility: isHdu ? "visible" : "hidden" }}
+                >
+                  <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "#52525b" }} />
                 </span>
+                <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "#52525b" }}>
+                  #{idx}
+                </span>
+                <span
+                  className="text-[9px] font-bold px-2 py-0.5 rounded shrink-0"
+                  style={{ background: ts.bg, border: `1px solid ${ts.border}`, color: ts.text }}
+                >
+                  {typeLabel}
+                </span>
+                <span
+                  className="text-[11px] truncate flex-1"
+                  style={{ color: isSelected || isShown ? "#e4e4e7" : "#71717a" }}
+                  title={ext.extname ?? undefined}
+                >
+                  {nameLabel}
+                </span>
+                {tag && (
+                  <span
+                    className="text-[9px] font-bold px-1.5 py-px rounded shrink-0"
+                    style={{ background: tag.style.bg, border: `1px solid ${tag.style.border}`, color: tag.style.text }}
+                  >
+                    {tag.label}
+                  </span>
+                )}
+                {dims && (
+                  <span className="text-[10px] font-mono shrink-0" style={{ color: "#52525b" }}>
+                    {dims}
+                  </span>
+                )}
+              </button>
+              {ext.has_data && (
+                isShown ? (
+                  <span
+                    className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 flex items-center gap-1"
+                    style={{ background: "rgba(20,184,166,0.12)", border: "1px solid rgba(20,184,166,0.3)", color: "var(--ab-teal)" }}
+                    title="Currently displayed plane"
+                  >
+                    <Eye size={9} />
+                    shown
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => onActivate?.(ext.ref)}
+                    disabled={activating || !onActivate}
+                    className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-700/40"
+                    style={{ color: "#a1a1aa", border: "1px solid rgba(113,113,122,0.3)" }}
+                    title={`Display ${ext.ref}`}
+                  >
+                    {activating ? <Loader2 size={9} className="animate-spin" /> : "Display"}
+                  </button>
+                )
               )}
-            </button>
+            </div>
           );
         })}
       </div>
+
+      {activateError && (
+        <div className="flex items-center gap-2 px-3 py-2" style={{ borderTop: "1px solid var(--ab-border)" }}>
+          <p className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={activateError}>
+            Failed to display plane: {activateError}
+          </p>
+        </div>
+      )}
 
       {headerLoading && (
         <div className="flex items-center justify-center py-4" style={{ borderTop: "1px solid var(--ab-border)" }}>

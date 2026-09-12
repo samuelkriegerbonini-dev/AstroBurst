@@ -2,49 +2,71 @@ use std::fs::File;
 
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached_full};
+use crate::cmd::common::{blocking_cmd, image_ref, source_path};
 use crate::core::metadata::header_discovery::{detect_filter, suggest_palette, suggest_palette_with_type, PaletteType};
+use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::{extract_header_mmap, list_extensions};
+use crate::infra::image_source::{is_dq_name, is_err_name, list_planes, load_plane_header, plane_ref};
 use crate::types::constants::{
     RES_BITPIX, RES_CARDS, RES_CATEGORIES, RES_CONFIDENCE, RES_EXTENSIONS,
-    RES_EXTNAME, RES_FILE_NAME, RES_FILE_PATH, RES_FILENAME_HINT, RES_FILTER,
+    RES_EXTNAME, RES_EXTVER, RES_FILE_NAME, RES_FILE_PATH, RES_FILENAME_HINT, RES_FILTER,
     RES_FILTER_DETECTION, RES_FILTER_ID, RES_FILTERS, RES_HAS_DATA,
-    RES_HUBBLE_CHANNEL, RES_INDEX, RES_KEY, RES_MATCHED_KEYWORD, RES_MATCHED_VALUE,
-    RES_NAXIS, RES_NAXIS1, RES_NAXIS2, RES_NAXIS3, RES_PALETTE, RES_PATH,
+    RES_HUBBLE_CHANNEL, RES_INDEX, RES_IS_DQ, RES_IS_ERR, RES_KEY, RES_KIND,
+    RES_MATCHED_KEYWORD, RES_MATCHED_VALUE,
+    RES_NAXIS, RES_NAXIS1, RES_NAXIS2, RES_NAXIS3, RES_PALETTE, RES_PATH, RES_REF,
     RES_TOTAL_CARDS, RES_VALUE,
     CATEGORY_OBSERVATION, CATEGORY_INSTRUMENT, CATEGORY_IMAGE,
     CATEGORY_WCS, CATEGORY_PROCESSING, CATEGORY_OTHER,
+    PLANE_KIND_ARRAY, PLANE_KIND_HDU,
 };
+use crate::types::header::HduHeader;
+
+fn header_for(path: &str) -> anyhow::Result<HduHeader> {
+    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
+        if let Some(header) = entry.header() {
+            return Ok(header.clone());
+        }
+    }
+    if let Ok(entry) = GLOBAL_IMAGE_CACHE.upgrade_header(path, || load_plane_header(&image_ref(path))) {
+        if let Some(header) = entry.header() {
+            return Ok(header.clone());
+        }
+    }
+    load_plane_header(&image_ref(path))
+}
+
+pub(crate) fn extensions_json(path: &str) -> anyhow::Result<serde_json::Value> {
+    let source = source_path(path);
+    let (extensions, is_asdf) = list_planes(&source)?;
+    let ext_json: Vec<serde_json::Value> = extensions
+        .iter()
+        .map(|ext| {
+            let name = ext.extname.as_deref().unwrap_or("");
+            json!({
+                RES_INDEX: ext.index,
+                RES_EXTNAME: ext.extname,
+                RES_EXTVER: ext.extver,
+                RES_NAXIS: ext.naxis,
+                RES_NAXIS1: ext.naxis1,
+                RES_NAXIS2: ext.naxis2,
+                RES_NAXIS3: ext.naxis3,
+                RES_BITPIX: ext.bitpix,
+                RES_HAS_DATA: ext.has_data,
+                RES_REF: plane_ref(&source, ext, is_asdf).cache_key(),
+                RES_KIND: if is_asdf { PLANE_KIND_ARRAY } else { PLANE_KIND_HDU },
+                RES_IS_DQ: is_dq_name(name),
+                RES_IS_ERR: is_err_name(name),
+            })
+        })
+        .collect();
+    Ok(json!({ RES_EXTENSIONS: ext_json }))
+}
 
 #[tauri::command]
 pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        if let Some(entry) = GLOBAL_IMAGE_CACHE.get(&path) {
-            if let Some(header) = entry.header() {
-                return Ok(serde_json::to_value(&header.index)?);
-            }
-        }
-
-        if let Ok(entry) = GLOBAL_IMAGE_CACHE.upgrade_header(&path, || {
-            let (fits_path, _tmp) = resolve_single_image(&path)?;
-            let file = File::open(&fits_path)?;
-            Ok(extract_header_mmap(&file)?)
-        }) {
-            if let Some(header) = entry.header() {
-                return Ok(serde_json::to_value(&header.index)?);
-            }
-        }
-
-        let cached = load_cached_full(&path)?;
-        if let Some(header) = cached.header() {
-            return Ok(serde_json::to_value(&header.index)?);
-        }
-
-        let (fits_path, _tmp) = resolve_single_image(&path)?;
-        let file = File::open(&fits_path)?;
-        let header = extract_header_mmap(&file)?;
+        let header = header_for(&path)?;
         Ok(serde_json::to_value(&header.index)?)
     })
 }
@@ -52,33 +74,9 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let header = if let Some(entry) = GLOBAL_IMAGE_CACHE.get(&path) {
-            if let Some(h) = entry.header() {
-                h.clone()
-            } else {
-                let cached = load_cached_full(&path)?;
-                match cached.header() {
-                    Some(h) => h.clone(),
-                    None => {
-                        let (fits_path, _tmp) = resolve_single_image(&path)?;
-                        let file = File::open(&fits_path)?;
-                        extract_header_mmap(&file)?
-                    }
-                }
-            }
-        } else {
-            let cached = load_cached_full(&path)?;
-            match cached.header() {
-                Some(h) => h.clone(),
-                None => {
-                    let (fits_path, _tmp) = resolve_single_image(&path)?;
-                    let file = File::open(&fits_path)?;
-                    extract_header_mmap(&file)?
-                }
-            }
-        };
+        let header = header_for(&path)?;
 
-        let file_name = std::path::Path::new(&path)
+        let file_name = std::path::Path::new(&source_path(&path))
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
@@ -159,33 +157,16 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
 
 #[tauri::command]
 pub async fn get_fits_extensions(path: String) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let (fits_path, _tmp) = resolve_single_image(&path)?;
-        let file = File::open(&fits_path)?;
-        let extensions = list_extensions(&file)?;
-        let ext_json: Vec<serde_json::Value> = extensions
-            .iter()
-            .map(|ext| {
-                json!({
-                    RES_INDEX: ext.index,
-                    RES_EXTNAME: ext.extname,
-                    RES_NAXIS: ext.naxis,
-                    RES_NAXIS1: ext.naxis1,
-                    RES_NAXIS2: ext.naxis2,
-                    RES_NAXIS3: ext.naxis3,
-                    RES_BITPIX: ext.bitpix,
-                    RES_HAS_DATA: ext.has_data,
-                })
-            })
-            .collect();
-        Ok(json!({ RES_EXTENSIONS: ext_json }))
-    })
+    blocking_cmd!(extensions_json(&path))
 }
 
 #[tauri::command]
 pub async fn get_header_by_hdu(path: String, hdu_index: usize) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let (fits_path, _tmp) = resolve_single_image(&path)?;
+        let (fits_path, _tmp) = resolve_single_image(&source_path(&path))?;
+        if is_asdf_file(&fits_path) {
+            anyhow::bail!("ASDF arrays have no HDU index");
+        }
         let file = File::open(&fits_path)?;
         let header = crate::infra::fits::reader::extract_header_by_index(&file, hdu_index)?;
         Ok(serde_json::to_value(&header)?)
@@ -203,9 +184,7 @@ pub async fn detect_narrowband_filters(paths: Vec<String>, palette: Option<Strin
         let mut file_headers: Vec<(String, crate::types::header::HduHeader)> = Vec::new();
 
         for p in &paths {
-            let (fits_path, _tmp) = resolve_single_image(p)?;
-            let file = File::open(&fits_path)?;
-            let header = extract_header_mmap(&file)?;
+            let header = load_plane_header(&image_ref(p))?;
             file_headers.push((p.clone(), header));
         }
 

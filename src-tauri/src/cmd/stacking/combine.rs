@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, render_asinh_and_save, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, output_stem, render_asinh_and_save, resolve_output_dir};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::cmd::helpers;
 use crate::core::stacking::calibration::calibrate_from_paths;
@@ -41,10 +41,7 @@ pub async fn calibrate(
 
         progress_clone.tick_with_stage(STAGE_RENDER);
 
-        let stem = std::path::Path::new(&science_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("calibrated");
+        let stem = output_stem(&science_path);
 
         let (png_path, fits_path) = render_asinh_and_save(
             &calibrated,

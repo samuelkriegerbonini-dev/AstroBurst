@@ -9,8 +9,11 @@ export interface WcsInfo {
   naxis2: number;
 }
 
+export type SkyFrame = "icrs" | "fk5" | "galactic" | "ecliptic";
+
 export interface PixelToWorldResult {
   points: ([number, number] | null)[];
+  frame: SkyFrame;
 }
 
 export interface PointingOverlapFile {

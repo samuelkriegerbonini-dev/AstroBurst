@@ -38,6 +38,7 @@ interface AdvancedImageViewerProps {
   onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   className?: string;
 }
 
@@ -49,6 +50,7 @@ function AdvancedImageViewer({
   onPixelClick,
   onMouseLeave,
   overlayCanvasRef,
+  dqCanvasRef,
   className = "",
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -286,6 +288,10 @@ function AdvancedImageViewer({
                 <canvas ref={overlayCanvasRef}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
               )}
+              {dqCanvasRef && (
+                <canvas ref={dqCanvasRef}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
+              )}
             </div>
             <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
@@ -309,6 +315,10 @@ function AdvancedImageViewer({
               onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />
             {overlayCanvasRef && (
               <canvas ref={overlayCanvasRef}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
+            )}
+            {dqCanvasRef && (
+              <canvas ref={dqCanvasRef}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
             )}
           </div>

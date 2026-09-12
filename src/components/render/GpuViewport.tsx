@@ -14,6 +14,7 @@ interface GpuViewportProps {
   onMouseLeave?: () => void;
   onCanvasClick?: (e: React.MouseEvent<HTMLElement>) => void;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   children: React.ReactNode;
 }
 
@@ -28,6 +29,7 @@ function GpuViewport({
   onMouseLeave,
   onCanvasClick,
   overlayCanvasRef,
+  dqCanvasRef,
   children,
 }: GpuViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -175,6 +177,12 @@ function GpuViewport({
           {overlayCanvasRef && (
             <canvas
               ref={overlayCanvasRef}
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
+            />
+          )}
+          {dqCanvasRef && (
+            <canvas
+              ref={dqCanvasRef}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
             />
           )}

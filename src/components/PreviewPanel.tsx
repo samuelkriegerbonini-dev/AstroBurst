@@ -14,8 +14,12 @@ import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { useProgress } from "../hooks/useProgress";
 import { loadLayout, saveLayout } from "../utils/layout";
+import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
+import { parseImageRef, planeLabel } from "../utils/imageRef";
 import { useRightTool, rightToolStore } from "../hooks/useRightTool";
 import type { ToolId, RightToolId } from "../hooks/useRightTool";
+import DqControls from "./preview/DqControls";
+import DqOverlayCanvas from "./preview/DqOverlayCanvas";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
 const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
@@ -124,7 +128,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { starOverlayRef } = useStarOverlayContext();
   const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
 
-  const [useGpu, setUseGpu] = useState(false);
+  const [gpuPref] = useState(() => loadGpuPreference());
+  const [useGpu, setUseGpu] = useState(gpuPref ?? false);
   const [gpuAvailable, setGpuAvailable] = useState<boolean | null>(null);
   const [gpuProbing, setGpuProbing] = useState(true);
   const [gpuReason, setGpuReason] = useState<string | null>(null);
@@ -155,6 +160,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const prevFileIdRef = useRef<string | null>(null);
   const prevCompositeUrlRef = useRef<string | null>(null);
   const rgbLoadKeyRef = useRef<string | null>(null);
+  const gpuLoadKeyRef = useRef<string | null>(null);
+  const dqCanvasRef = useRef<HTMLCanvasElement>(null);
   const specAbortRef = useRef(0);
   const fileDimsRef = useRef<[number, number] | undefined>(undefined);
   fileDimsRef.current = file?.result?.dimensions;
@@ -177,7 +184,15 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const rStartX = useRef(0);
   const rStartW = useRef(0);
 
-  useEffect(() => { probeGpu().then(() => { setGpuAvailable(isGpuAvailable() === true); setGpuReason(getGpuReason()); setGpuProbing(false); }); }, []);
+  useEffect(() => {
+    probeGpu().then(() => {
+      const ok = isGpuAvailable() === true;
+      setGpuAvailable(ok);
+      setGpuReason(getGpuReason());
+      setGpuProbing(false);
+      if (ok && gpuPref === null) setUseGpu(true);
+    });
+  }, [gpuPref]);
 
   useEffect(() => {
     const unsub = onGpuLost(() => {
@@ -195,27 +210,42 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       if (prevFileIdRef.current !== null) {
         prevFileIdRef.current = null;
         rgbLoadKeyRef.current = null;
+        gpuLoadKeyRef.current = null;
         clearRawPixels();
         clearRgbRawPixels();
       }
       return;
     }
-    if (file.id === prevFileIdRef.current) return;
-    prevFileIdRef.current = file.id;
+    const key = `${file.id}|${file.path}`;
+    const wantGpu = !!gpuAvailable && useGpu;
+    const isRgb = !!file.result?.is_rgb;
+    const path = file.path;
+    if (key === prevFileIdRef.current) {
+      if (wantGpu && gpuLoadKeyRef.current !== key) {
+        gpuLoadKeyRef.current = key;
+        if (isRgb) {
+          rgbLoadKeyRef.current = key;
+          loadRgbRawPixels(path);
+        } else {
+          loadRawPixels();
+        }
+      }
+      return;
+    }
+    prevFileIdRef.current = key;
     specAbortRef.current++;
     resetSpectrum();
     resetMouse();
     clearRawPixels();
     clearRgbRawPixels();
     rgbLoadKeyRef.current = null;
-    if (gpuAvailable && useGpu) {
-      const fid = file.id;
-      const path = file.path;
-      const isRgb = !!file.result?.is_rgb;
+    gpuLoadKeyRef.current = null;
+    if (wantGpu) {
+      gpuLoadKeyRef.current = key;
       queueMicrotask(() => {
-        if (prevFileIdRef.current !== fid) return;
+        if (prevFileIdRef.current !== key) return;
         if (isRgb) {
-          rgbLoadKeyRef.current = `${fid}|${path}`;
+          rgbLoadKeyRef.current = key;
           loadRgbRawPixels(path, true);
         } else {
           loadRawPixels(true);
@@ -244,6 +274,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);
+    gpuLoadKeyRef.current = file ? `${file.id}|${file.path}` : null;
     if (compositePreviewUrl) {
       const source = isFileRgbView ? (file?.path ?? null) : null;
       rgbLoadKeyRef.current = `${file?.id}|${source ?? compositePreviewUrl}`;
@@ -262,11 +293,14 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const handleToggleGpu = useCallback(() => {
     if (useGpu) {
       setUseGpu(false);
+      saveGpuPreference(false);
       rgbLoadKeyRef.current = null;
+      gpuLoadKeyRef.current = null;
       clearRawPixels();
       clearRgbRawPixels();
       return;
     }
+    saveGpuPreference(true);
     if (gpuAvailable === false) {
       setGpuProbing(true);
       probeGpu().then(() => {
@@ -424,6 +458,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
 
   const useAdvancedViewer = !compositePreviewUrl && !useGpu;
 
+  const planeBadge = file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
+
   return (
     <div className="flex h-full overflow-hidden">
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
@@ -435,6 +471,15 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
           </div>
           <div className="flex items-center gap-2 justify-center flex-1 min-w-0">
             {file && <span className="text-[10px] font-mono text-zinc-400 truncate max-w-[200px]" title={file.name}>{file.name}</span>}
+            {planeBadge && (
+              <span
+                className="text-[9px] font-mono px-1.5 py-px rounded shrink-0"
+                style={{ background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", border: "1px solid rgba(20,184,166,0.3)" }}
+                title={file?.path}
+              >
+                {planeBadge}
+              </span>
+            )}
             {file?.result?.dimensions && (
               <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 shrink-0">
                 <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
@@ -444,6 +489,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {file && <DqControls />}
+            {file && <DqOverlayCanvas canvasRef={dqCanvasRef} />}
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu && !gpuSupported)}
                       title={gpuAvailable === false && gpuSupported ? `${gpuReason ?? "GPU unavailable"} — click to retry` : gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
@@ -469,11 +516,12 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
               onPixelClick={emitPixelClick}
               onMouseLeave={handleLeave}
               overlayCanvasRef={starOverlayRef}
+              dqCanvasRef={dqCanvasRef}
             />
           ) : (
             <div className="h-full" onMouseMove={handlePreviewMouseMove} onMouseLeave={handleLeave}>
               <Suspense fallback={<TabSpinner />}>
-                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} rgbRawPixels={rgbRawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} />
+                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} rgbRawPixels={rgbRawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} dqCanvasRef={dqCanvasRef} />
               </Suspense>
             </div>
           )}

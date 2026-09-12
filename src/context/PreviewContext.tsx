@@ -16,8 +16,28 @@ import type { NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
 import { useCompositeActions } from "./CompositeContext";
 import { clearCompositeCache } from "../services/compose";
-import type { ProcessedFile, StfParams, HistogramData, RawPixelData, RawRgbPixelData } from "../shared/types";
+import type {
+  ProcessedFile,
+  StfParams,
+  HistogramData,
+  RawPixelData,
+  RawRgbPixelData,
+  PlaneInfo,
+  DqFlagTable,
+  DqMaskData,
+  DqOverlaySettings,
+} from "../shared/types";
 import type { CubeDims } from "../shared/types/cube";
+import {
+  COLORMAP_NAMES,
+  DEFAULT_DISPLAY_SETTINGS,
+  LIMIT_MODES,
+  STRETCH_MODES,
+  type DisplaySettings,
+  type ScaleLimits,
+} from "../shared/types/display";
+import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
+import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
 
 export interface ChannelSuggestion {
   file_path: string;
@@ -102,7 +122,80 @@ interface NarrowbandContextValue {
   setSelectedPalette: (p: string) => void;
 }
 
+interface DisplayContextValue {
+  display: DisplaySettings;
+  setDisplay: (patch: Partial<DisplaySettings>) => void;
+  limits: ScaleLimits | null;
+  lut: Uint8Array | null;
+  limitsLoading: boolean;
+  limitsError: string | null;
+}
+
+interface DqContextValue {
+  plane: PlaneInfo | null;
+  flagTable: DqFlagTable | null;
+  overlay: DqOverlaySettings;
+  setOverlay: (patch: Partial<DqOverlaySettings>) => void;
+  excludeDq: boolean;
+  setExcludeDq: (v: boolean) => void;
+  dqMask: DqMaskData | null;
+  dqMaskLoading: boolean;
+}
+
+const DEFAULT_DQ_OVERLAY: DqOverlaySettings = { enabled: false, mask: 0 };
+
+const DISPLAY_STORAGE_KEY = "astroburst.display.v1";
+const LIMITS_DEBOUNCE_MS = 150;
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
+  const d = DEFAULT_DISPLAY_SETTINGS;
+  if (!raw || typeof raw !== "object") return d;
+  const r = raw as Record<string, unknown>;
+  const stretch = STRETCH_MODES.find((s) => s === r.stretch) ?? d.stretch;
+  const limits = LIMIT_MODES.find((l) => l === r.limits) ?? d.limits;
+  const colormap = COLORMAP_NAMES.find((c) => c === r.colormap) ?? d.colormap;
+  return {
+    stretch,
+    limits,
+    percentileLow: finiteOr(r.percentileLow, d.percentileLow),
+    percentileHigh: finiteOr(r.percentileHigh, d.percentileHigh),
+    userLo: finiteOrNull(r.userLo),
+    userHi: finiteOrNull(r.userHi),
+    zscaleContrast: finiteOr(r.zscaleContrast, d.zscaleContrast),
+    asinhA: finiteOr(r.asinhA, d.asinhA),
+    power: finiteOr(r.power, d.power),
+    colormap,
+    invert: r.invert === true,
+  };
+}
+
+function loadDisplaySettings(): DisplaySettings {
+  try {
+    const text = window.localStorage.getItem(DISPLAY_STORAGE_KEY);
+    if (!text) return DEFAULT_DISPLAY_SETTINGS;
+    return sanitizeDisplaySettings(JSON.parse(text));
+  } catch {
+    return DEFAULT_DISPLAY_SETTINGS;
+  }
+}
+
+function saveDisplaySettings(settings: DisplaySettings): void {
+  try {
+    window.localStorage.setItem(DISPLAY_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+  }
+}
+
 const FileCtx = createContext<FileContextValue | null>(null);
+const DisplayCtx = createContext<DisplayContextValue | null>(null);
 const DoneFilesCtx = createContext<DoneFilesContextValue | null>(null);
 const HistCtx = createContext<HistContextValue | null>(null);
 const CubeCtx = createContext<CubeContextValue | null>(null);
@@ -112,6 +205,7 @@ const RenderActionsCtx = createContext<RenderActionsContextValue | null>(null);
 const StarOverlayCtx = createContext<StarOverlayContextValue | null>(null);
 const RawPixelsCtx = createContext<RawPixelsContextValue | null>(null);
 const NarrowbandCtx = createContext<NarrowbandContextValue | null>(null);
+const DqCtx = createContext<DqContextValue | null>(null);
 
 function useCtx<T>(ctx: React.Context<T | null>, name: string): T {
   const val = useContext(ctx);
@@ -129,6 +223,8 @@ export const useRenderActions = () => useCtx(RenderActionsCtx, "useRenderActions
 export const useStarOverlayContext = () => useCtx(StarOverlayCtx, "useStarOverlayContext");
 export const useRawPixelsContext = () => useCtx(RawPixelsCtx, "useRawPixelsContext");
 export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandContext");
+export const useDisplayContext = () => useCtx(DisplayCtx, "useDisplayContext");
+export const useDqContext = () => useCtx(DqCtx, "useDqContext");
 
 interface Props {
   file: ProcessedFile | null;
@@ -156,6 +252,10 @@ function computePreviewMaxDim(): number {
   return Math.min(Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr), PREVIEW_MAX_DIM_CAP);
 }
 
+function fileKeyOf(file: ProcessedFile | null): string | null {
+  return file ? `${file.id}|${file.path}` : null;
+}
+
 export function PreviewProvider({ file, doneFiles, children }: Props) {
   const composite = useCompositeActions();
 
@@ -176,8 +276,27 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
+  const [display, setDisplayRaw] = useState<DisplaySettings>(loadDisplaySettings);
+  const [limits, setLimits] = useState<ScaleLimits | null>(null);
+  const [limitsLoading, setLimitsLoading] = useState(false);
+  const [limitsError, setLimitsError] = useState<string | null>(null);
+  const [lut, setLut] = useState<Uint8Array | null>(GRAY_LUT_RGBA);
+  const [flagTable, setFlagTable] = useState<DqFlagTable | null>(null);
+  const [overlay, setOverlayRaw] = useState<DqOverlaySettings>(DEFAULT_DQ_OVERLAY);
+  const [excludeDq, setExcludeDq] = useState(false);
+  const [dqMask, setDqMask] = useState<DqMaskData | null>(null);
+  const [dqMaskLoading, setDqMaskLoading] = useState(false);
+  const [dqMaskRefetch, setDqMaskRefetch] = useState(0);
 
   const prevFileIdRef = useRef<string | null>(null);
+  const histSeqRef = useRef(0);
+  const maskedHistKeyRef = useRef<string | null>(null);
+  const flagTableSeqRef = useRef(0);
+  const dqMaskSeqRef = useRef(0);
+  const dqMaskKeyRef = useRef("");
+  const excludeDqRef = useRef(excludeDq);
+  excludeDqRef.current = excludeDq;
+  const limitsSeqRef = useRef(0);
   const seqRef = useRef(0);
   const rawPixelsAbortRef = useRef(0);
   const rgbRawPixelsAbortRef = useRef(0);
@@ -198,15 +317,20 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const filePathRef = useRef(file?.path);
   filePathRef.current = file?.path;
 
+  const fileKey = fileKeyOf(file);
+
   const setRenderedPreviewUrl = useCallback(
     (url: string | null) => {
-      const creatingId = file?.id ?? null;
-      if (prevFileIdRef.current !== creatingId) return;
+      if (prevFileIdRef.current !== fileKey) return;
       setRenderedPreviewUrlRaw(url);
-      if (url && creatingId && !url.includes("cube_frame_")) setPreviewCache(creatingId, url);
+      if (url && fileKey && !url.includes("cube_frame_")) setPreviewCache(fileKey, url);
     },
-    [file?.id],
+    [fileKey],
   );
+
+  const setOverlay = useCallback((patch: Partial<DqOverlaySettings>) => {
+    setOverlayRaw((prev) => ({ ...prev, ...patch }));
+  }, []);
 
   const setActiveImagePath = useCallback((path: string | null) => {
     setActiveImagePathRaw(path);
@@ -216,6 +340,81 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setSelectedPaletteRaw(p);
     narrowbandKeyRef.current = "";
   }, []);
+
+  const setDisplay = useCallback((patch: Partial<DisplaySettings>) => {
+    setDisplayRaw((prev) => {
+      const next = { ...prev, ...patch };
+      saveDisplaySettings(next);
+      return next;
+    });
+  }, []);
+
+  const filePath = file?.path ?? null;
+  const {
+    stretch: displayStretch,
+    limits: displayLimits,
+    percentileLow,
+    percentileHigh,
+    zscaleContrast,
+    userLo,
+    userHi,
+    colormap: displayColormap,
+  } = display;
+
+  useEffect(() => {
+    const seq = ++limitsSeqRef.current;
+    if (!filePath || displayStretch === "mtf") {
+      setLimitsLoading(false);
+      setLimitsError(null);
+      return;
+    }
+    setLimitsLoading(true);
+    const timer = window.setTimeout(() => {
+      computeScaleLimits(filePath, {
+        ...DEFAULT_DISPLAY_SETTINGS,
+        limits: displayLimits,
+        percentileLow,
+        percentileHigh,
+        zscaleContrast,
+        userLo,
+        userHi,
+      })
+        .then((res) => {
+          if (limitsSeqRef.current !== seq) return;
+          setLimits(res);
+          setLimitsError(null);
+        })
+        .catch((err) => {
+          if (limitsSeqRef.current !== seq) return;
+          console.error("[AstroBurst] Scale limits failed:", err);
+          setLimitsError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (limitsSeqRef.current !== seq) return;
+          setLimitsLoading(false);
+        });
+    }, LIMITS_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [filePath, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getColormapLut(displayColormap)
+      .then((rgba) => {
+        if (cancelled) return;
+        setLut(rgba);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[AstroBurst] Colormap LUT fetch failed, using gray:", err);
+        setLut(GRAY_LUT_RGBA);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [displayColormap]);
 
   useEffect(() => {
     if (doneFiles.length < 2) return;
@@ -314,7 +513,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (prev === 0 || prev >= PREVIEW_MAX_DIM_CAP) return;
         const next = computePreviewMaxDim();
         if (next <= prev * 1.25) return;
-        if (rawPixelsRef.current) loadRawPixels(true);
+        if (rawPixelsRef.current) {
+          loadRawPixels(true);
+          setDqMaskRefetch((c) => c + 1);
+        }
         if (rgbRawPixelsRef.current) loadRgbRawPixels(rgbSourceRef.current, true);
       }, 300);
     };
@@ -326,10 +528,19 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [loadRawPixels, loadRgbRawPixels]);
 
   useEffect(() => {
-    if (!file?.path || file.id === prevFileIdRef.current) return;
-    prevFileIdRef.current = file.id;
+    if (!file?.path || fileKey === prevFileIdRef.current) return;
+    prevFileIdRef.current = fileKey;
 
     setHistData(null);
+    setFlagTable(null);
+    setOverlayRaw(DEFAULT_DQ_OVERLAY);
+    setDqMask(null);
+    setDqMaskLoading(false);
+    dqMaskKeyRef.current = "";
+    dqMaskSeqRef.current++;
+    flagTableSeqRef.current++;
+    histSeqRef.current++;
+    if (!excludeDqRef.current) maskedHistKeyRef.current = null;
     setStfParams(DEFAULT_STF);
     setIsCube(false);
     setIsSpectralCube(false);
@@ -343,6 +554,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRgbRawPixelsLoading(false);
     setNarrowbandPalette(null);
     setActiveImagePathRaw(null);
+    setLimits(null);
     rawPixelsAbortRef.current++;
     rgbRawPixelsAbortRef.current++;
 
@@ -352,9 +564,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       clearCompositeCache().catch(() => {});
     }
 
-    setRenderedPreviewUrlRaw(previewUrlCache.get(file.id) ?? null);
+    setRenderedPreviewUrlRaw(fileKey ? previewUrlCache.get(fileKey) ?? null : null);
 
     const seq = ++seqRef.current;
+    const hseq = histSeqRef.current;
     const stale = () => seqRef.current !== seq;
 
     const isRgbFits = file.result?.is_rgb === true;
@@ -374,13 +587,15 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     }
 
     const precomputedHist = file.result?.histogram;
-    if (precomputedHist?.bins) {
+    if (excludeDqRef.current) {
+      if (precomputedHist?.auto_stf) setStfParams(precomputedHist.auto_stf);
+    } else if (precomputedHist?.bins) {
       setHistData(precomputedHist);
       if (precomputedHist.auto_stf) setStfParams(precomputedHist.auto_stf);
     } else {
       computeHistogram(file.path)
         .then((data) => {
-          if (stale()) return;
+          if (stale() || histSeqRef.current !== hseq) return;
           setHistData(data);
           if (data.auto_stf) setStfParams(data.auto_stf);
         })
@@ -405,7 +620,68 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file?.id]);
+  }, [fileKey]);
+
+  const plane = file?.result?.plane ?? null;
+  const dqRef = plane?.dq_ref ?? null;
+
+  useEffect(() => {
+    if (!filePath || !dqRef) return;
+    const seq = ++flagTableSeqRef.current;
+    getDqFlagTable(filePath)
+      .then((table) => {
+        if (flagTableSeqRef.current !== seq) return;
+        setFlagTable(table);
+        setOverlayRaw({ enabled: false, mask: table.default_mask });
+      })
+      .catch((err) => {
+        if (flagTableSeqRef.current !== seq) return;
+        console.error("[AstroBurst] DQ flag table fetch failed:", err);
+      });
+  }, [fileKey, filePath, dqRef]);
+
+  const overlayEnabled = overlay.enabled;
+  const overlayMask = overlay.mask;
+
+  useEffect(() => {
+    if (!filePath || !dqRef || !overlayEnabled) return;
+    const maxDim = computePreviewMaxDim();
+    const key = `${fileKey}|${overlayMask}|${maxDim}`;
+    if (dqMaskKeyRef.current === key) return;
+    dqMaskKeyRef.current = key;
+    const seq = ++dqMaskSeqRef.current;
+    setDqMaskLoading(true);
+    getDqMaskPreview(filePath, overlayMask, maxDim)
+      .then((mask) => {
+        if (dqMaskSeqRef.current !== seq) return;
+        setDqMask(mask);
+      })
+      .catch((err) => {
+        if (dqMaskSeqRef.current !== seq) return;
+        dqMaskKeyRef.current = "";
+        console.error("[AstroBurst] DQ mask fetch failed:", err);
+      })
+      .finally(() => {
+        if (dqMaskSeqRef.current !== seq) return;
+        setDqMaskLoading(false);
+      });
+  }, [fileKey, filePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
+
+  useEffect(() => {
+    if (!filePath) return;
+    if (!excludeDq && maskedHistKeyRef.current !== fileKey) return;
+    maskedHistKeyRef.current = excludeDq ? fileKey : null;
+    const seq = ++histSeqRef.current;
+    computeHistogram(filePath, excludeDq)
+      .then((data) => {
+        if (histSeqRef.current !== seq) return;
+        setHistData(data);
+      })
+      .catch((err) => {
+        if (histSeqRef.current !== seq) return;
+        console.error("[AstroBurst] Masked histogram failed:", err);
+      });
+  }, [fileKey, filePath, excludeDq]);
 
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),
@@ -466,6 +742,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [],
   );
 
+  const displayValue = useMemo<DisplayContextValue>(
+    () => ({ display, setDisplay, limits, lut, limitsLoading, limitsError }),
+    [display, setDisplay, limits, lut, limitsLoading, limitsError],
+  );
+
+  const dqValue = useMemo<DqContextValue>(
+    () => ({ plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask, dqMaskLoading }),
+    [plane, flagTable, overlay, setOverlay, excludeDq, dqMask, dqMaskLoading],
+  );
+
   return (
     <FileCtx.Provider value={fileValue}>
       <DoneFilesCtx.Provider value={doneFilesValue}>
@@ -477,7 +763,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
                 <RawPixelsCtx.Provider value={rawPixelsValue}>
                   <NarrowbandCtx.Provider value={narrowbandValue}>
                     <StarOverlayCtx.Provider value={starOverlayValue}>
-                      {children}
+                      <DisplayCtx.Provider value={displayValue}>
+                        <DqCtx.Provider value={dqValue}>
+                          {children}
+                        </DqCtx.Provider>
+                      </DisplayCtx.Provider>
                     </StarOverlayCtx.Provider>
                   </NarrowbandCtx.Provider>
                 </RawPixelsCtx.Provider>

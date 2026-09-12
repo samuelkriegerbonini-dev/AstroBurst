@@ -1,10 +1,12 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { renderStfInWorker, cancelPendingRenders, setWorkerPixels, clearWorkerPixels } from "../../utils/stfworker";
 import { getGpuSingleton, getGpuState, onGpuLost, type GpuResources as GpuSingleton } from "../../infrastructure/gpu/GpuSingleton";
+import { LUT_BYTES, type DisplayTransfer } from "../../utils/displayTransfer";
 
 interface GpuResources {
   uniformBuffer: GPUBuffer;
   texture: GPUTexture;
+  lutTexture: GPUTexture;
   bindGroup: GPUBindGroup;
 }
 
@@ -12,23 +14,51 @@ interface GpuRendererProps {
   rawData: Float32Array | null;
   width: number;
   height: number;
-  dataMin: number;
-  dataMax: number;
-  shadow?: number;
-  midtone?: number;
-  highlight?: number;
+  transfer: DisplayTransfer;
+  lut: Uint8Array;
   className?: string;
+}
+
+const UNIFORM_BYTES = 64;
+const UNIFORM_WORDS = 16;
+
+interface UniformScratch {
+  buffer: ArrayBuffer;
+  f32: Float32Array;
+  u32: Uint32Array;
+}
+
+function makeScratch(): UniformScratch {
+  const buffer = new ArrayBuffer(UNIFORM_BYTES);
+  return { buffer, f32: new Float32Array(buffer), u32: new Uint32Array(buffer) };
+}
+
+function fillUniforms(s: UniformScratch, t: DisplayTransfer, w: number, h: number): void {
+  const { f32, u32 } = s;
+  f32[0] = t.vmin;
+  f32[1] = t.vmax;
+  f32[2] = t.shadow;
+  f32[3] = t.midtone;
+  f32[4] = t.highlight;
+  f32[5] = t.asinhA;
+  f32[6] = t.power;
+  f32[7] = w;
+  f32[8] = h;
+  f32[9] = 0;
+  f32[10] = 0;
+  f32[11] = 0;
+  u32[12] = t.stretchKind;
+  u32[13] = t.invert ? 1 : 0;
+  u32[14] = 0;
+  u32[15] = 0;
 }
 
 export default function GpuRenderer({
   rawData,
   width,
   height,
-  dataMin,
-  dataMax,
-  shadow = 0,
-  midtone = 0.5,
-  highlight = 1,
+  transfer,
+  lut,
   className = "",
 }: GpuRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -36,13 +66,14 @@ export default function GpuRenderer({
   const resourcesRef = useRef<GpuResources | null>(null);
   const prevDimsRef = useRef({ w: 0, h: 0 });
   const uploadedDataRef = useRef<Float32Array | null>(null);
+  const uploadedLutRef = useRef<Uint8Array | null>(null);
   const [gpuReady, setGpuReady] = useState(false);
   const [gpuGen, setGpuGen] = useState(0);
   const renderSeqRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const contextConfiguredRef = useRef(false);
-  const uniformScratchRef = useRef<Float32Array | null>(null);
-  const lastUniformWriteRef = useRef<Float32Array | null>(null);
+  const uniformScratchRef = useRef<UniformScratch | null>(null);
+  const lastUniformWriteRef = useRef<Uint32Array | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,8 +90,10 @@ export default function GpuRenderer({
     if (!res) return;
     if (res.uniformBuffer) res.uniformBuffer.destroy();
     if (res.texture) res.texture.destroy();
+    if (res.lutTexture) res.lutTexture.destroy();
     resourcesRef.current = null;
     uploadedDataRef.current = null;
+    uploadedLutRef.current = null;
     contextConfiguredRef.current = false;
     lastUniformWriteRef.current = null;
   }, []);
@@ -128,7 +161,7 @@ export default function GpuRenderer({
       destroyGPUResources();
 
       const uniformBuffer = device.createBuffer({
-        size: 32,
+        size: UNIFORM_BYTES,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
 
@@ -138,15 +171,22 @@ export default function GpuRenderer({
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
 
+      const lutTexture = device.createTexture({
+        size: [256, 1, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+
       const bindGroup = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: uniformBuffer } },
           { binding: 1, resource: texture.createView() },
+          { binding: 2, resource: lutTexture.createView() },
         ],
       });
 
-      resourcesRef.current = { uniformBuffer, texture, bindGroup };
+      resourcesRef.current = { uniformBuffer, texture, lutTexture, bindGroup };
       prevDimsRef.current = { w, h };
       lastUniformWriteRef.current = null;
     }
@@ -163,25 +203,34 @@ export default function GpuRenderer({
       uploadedDataRef.current = rawData;
     }
 
-    let uniforms = uniformScratchRef.current;
-    if (!uniforms) {
-      uniforms = new Float32Array(8);
-      uniformScratchRef.current = uniforms;
+    if (uploadedLutRef.current !== lut && lut.length >= LUT_BYTES) {
+      device.queue.writeTexture(
+        { texture: res.lutTexture },
+        lut as Uint8Array<ArrayBuffer>,
+        { bytesPerRow: LUT_BYTES, rowsPerImage: 1 },
+        [256, 1, 1]
+      );
+      uploadedLutRef.current = lut;
     }
-    uniforms[0] = dataMin; uniforms[1] = dataMax; uniforms[2] = shadow; uniforms[3] = midtone;
-    uniforms[4] = highlight; uniforms[5] = w; uniforms[6] = h; uniforms[7] = 0;
+
+    let scratch = uniformScratchRef.current;
+    if (!scratch) {
+      scratch = makeScratch();
+      uniformScratchRef.current = scratch;
+    }
+    fillUniforms(scratch, transfer, w, h);
 
     const last = lastUniformWriteRef.current;
     let unchanged = last !== null;
     if (last) {
-      for (let i = 0; i < 8; i++) {
-        if (last[i] !== uniforms[i]) { unchanged = false; break; }
+      for (let i = 0; i < UNIFORM_WORDS; i++) {
+        if (last[i] !== scratch.u32[i]) { unchanged = false; break; }
       }
     }
     if (!unchanged) {
-      device.queue.writeBuffer(res.uniformBuffer, 0, uniforms as Float32Array<ArrayBuffer>);
-      if (!lastUniformWriteRef.current) lastUniformWriteRef.current = new Float32Array(8);
-      lastUniformWriteRef.current.set(uniforms);
+      device.queue.writeBuffer(res.uniformBuffer, 0, scratch.buffer);
+      if (!lastUniformWriteRef.current) lastUniformWriteRef.current = new Uint32Array(UNIFORM_WORDS);
+      lastUniformWriteRef.current.set(scratch.u32);
     }
 
     const commandEncoder = device.createCommandEncoder();
@@ -201,7 +250,7 @@ export default function GpuRenderer({
     passEncoder.end();
 
     device.queue.submit([commandEncoder.finish()]);
-  }, [rawData, width, height, dataMin, dataMax, shadow, midtone, highlight, destroyGPUResources]);
+  }, [rawData, width, height, transfer, lut, destroyGPUResources]);
 
   const cpuBusyRef = useRef(false);
   const cpuPendingRef = useRef(false);
@@ -222,11 +271,8 @@ export default function GpuRenderer({
         pixels: sendPixels ? rawData : undefined,
         width: sendPixels ? width : undefined,
         height: sendPixels ? height : undefined,
-        dataMin,
-        dataMax,
-        shadow,
-        midtone,
-        highlight,
+        transfer,
+        lut,
       });
 
       if (renderSeqRef.current !== seq) return;
@@ -256,7 +302,7 @@ export default function GpuRenderer({
         renderCPUWorkerRef.current();
       }
     }
-  }, [rawData, width, height, dataMin, dataMax, shadow, midtone, highlight]);
+  }, [rawData, width, height, transfer, lut]);
   renderCPUWorkerRef.current = renderCPUWorker;
 
   useEffect(() => {

@@ -1,9 +1,26 @@
-export type { AstroFile, ProcessedFile, ProcessResult, StfParams, ResampleResult } from "./fits.types";
-export type { HistogramData, FftData, RawPixelData, RawRgbChannel, RawRgbPixelData } from "./analysis";
+export type { AstroFile, ProcessedFile, ProcessResult, StfParams, ResampleResult, PlaneKind, PlaneInfo } from "./fits.types";
+export type {
+  DqTableName,
+  DqFlag,
+  DqFlagTable,
+  DqProbe,
+  ErrProbe,
+  DqMaskData,
+  DqOverlaySettings,
+} from "./dq";
+export type {
+  HistogramData,
+  FftData,
+  RawPixelData,
+  RawRgbChannel,
+  RawRgbPixelData,
+  PixelNeighborhood,
+  PixelProbeResult,
+} from "./analysis";
 export type { HeaderData } from "./header";
 export type { QueueStats, FileStatus } from "./queue";
 export type { TauriCommandError } from "./errors";
-export type { WcsInfo, PlateSolveOptions } from "./astrometry";
+export type { WcsInfo, PlateSolveOptions, SkyFrame, PixelToWorldResult } from "./astrometry";
 export type { AppConfig, ApiKeyResult } from "./config";
 export type { CubeDims, CubeProcessResult, CubeSpectrum } from "./cube";
 export type {
@@ -36,3 +53,12 @@ export type {
   StackOptions,
 } from "./stacking";
 export type { TileResult } from "./tiles";
+export type {
+  StretchMode,
+  LimitMode,
+  ColormapName,
+  DisplaySettings,
+  ScaleLimits,
+  ColormapLutResult,
+} from "./display";
+export { COLORMAP_NAMES, STRETCH_MODES, LIMIT_MODES, DEFAULT_DISPLAY_SETTINGS } from "./display";
