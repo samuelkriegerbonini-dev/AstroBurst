@@ -4,13 +4,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::region::RegionShape;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::infra::cache::PlaneLoad;
 use astroburst_lib::types::header::HduHeader;
 use ndarray::Array2;
 
 use super::images::{load_replacing, register_and_respond};
-use super::region::RegionSpec;
+use super::region::{pixel_shape, RegionSpec};
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
@@ -24,6 +25,8 @@ pub struct CutoutParams {
     pub name: Option<String>,
     #[serde(default = "default_true")]
     pub preserve_wcs: bool,
+    #[serde(default)]
+    pub mask_outside: bool,
 }
 
 fn default_true() -> bool {
@@ -38,6 +41,18 @@ struct CutoutRect {
     height: usize,
 }
 
+fn resolve_cutout_shape(
+    region: &RegionSpec,
+    img_w: usize,
+    img_h: usize,
+    wcs: Option<&WcsTransform>,
+) -> Result<Option<RegionShape>> {
+    match region {
+        RegionSpec::Shape(spec) => Ok(Some(pixel_shape(spec, img_w, img_h, wcs)?)),
+        _ => Ok(None),
+    }
+}
+
 fn resolve_cutout_rect(
     region: &RegionSpec,
     img_w: usize,
@@ -47,6 +62,10 @@ fn resolve_cutout_rect(
 ) -> Result<CutoutRect> {
     let (x0, y0, width, height) = match region {
         RegionSpec::Pixel { x, y, width, height, .. } => (*x, *y, *width, *height),
+        RegionSpec::Shape(spec) => {
+            let b = pixel_shape(spec, img_w, img_h, wcs)?.bounds();
+            (b.x0, b.y0, (b.x1 - b.x0 + 1).max(1) as usize, (b.y1 - b.y0 + 1).max(1) as usize)
+        }
         RegionSpec::Sky { ra, dec, size_arcmin, .. } => {
             let wcs = wcs.ok_or_else(|| AppError::BadRequestWithHint {
                 code: "wcs_required",
@@ -136,6 +155,8 @@ pub async fn cutout(
         state.config.cache_max_bytes,
     )?;
     let fraction = fraction_on_image(&rect, img_w, img_h);
+    let shape = resolve_cutout_shape(&params.region, img_w, img_h, wcs.as_ref())?;
+    let mask_shape = if params.mask_outside { shape.clone() } else { None };
 
     let header = if params.preserve_wcs {
         shifted_header(entry.header(), &rect)
@@ -165,6 +186,9 @@ pub async fn cutout(
                     if sx < 0 || sx >= img_w as i64 {
                         continue;
                     }
+                    if mask_shape.as_ref().is_some_and(|s| !s.contains(sx as f64, sy as f64)) {
+                        continue;
+                    }
                     out[[oy, ox]] = data[[sy as usize, sx as usize]];
                 }
             }
@@ -181,6 +205,9 @@ pub async fn cutout(
     body["region"] = json!({
         "x": x0, "y": y0, "width": width, "height": height,
     });
+    if let Some(s) = &shape {
+        body["region"]["shape"] = json!(s);
+    }
     *session.v2.active_ref.write().await = Some(image_ref);
     Ok(Json(body))
 }
@@ -259,6 +286,24 @@ mod tests {
 
         let r = resolve_cutout_rect(&pixel(-2, -2, 4, 4), 8, 8, None, 64).unwrap();
         assert!((fraction_on_image(&r, 8, 8) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn shape_cutout_rect_comes_from_bounds() {
+        let spec: RegionSpec =
+            serde_json::from_str(r#"{"type":"shape","shape":"circle","x":4.5,"y":4.5,"r":2}"#).unwrap();
+        let r = resolve_cutout_rect(&spec, 10, 10, None, BUDGET).unwrap();
+        assert_eq!((r.x0, r.y0, r.width, r.height), (2, 2, 6, 6));
+        let shape = resolve_cutout_shape(&spec, 10, 10, None).unwrap().expect("shape");
+        assert_eq!(shape.kind(), "circle");
+        assert!(resolve_cutout_shape(&pixel(0, 0, 2, 2), 10, 10, None).unwrap().is_none());
+
+        let sky: RegionSpec = serde_json::from_str(
+            r#"{"type":"shape","shape":"circle","x":150.0,"y":2.0,"r":3,"system":"fk5"}"#,
+        )
+        .unwrap();
+        let err = resolve_cutout_rect(&sky, 10, 10, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("wcs_required"));
     }
 
     #[test]

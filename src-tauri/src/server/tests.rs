@@ -2069,3 +2069,151 @@ async fn v2_render_invert_cmap_flips_gray_endpoints() {
     assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0]);
     assert_eq!(img.get_pixel(1, 0).0, [170, 170, 170]);
 }
+
+fn stats_fixture_array() -> ndarray::Array2<f32> {
+    let (w, h) = (10usize, 10usize);
+    let mut pixels = vec![1.0f32; w * h];
+    let region_vals: [f32; 16] = [
+        100.0, 101.0, 102.0, 103.0,
+        104.0, 105.0, 106.0, 107.0,
+        108.0, 109.0, 110.0, 111.0,
+        112.0, 8000.0, 9000.0, f32::NAN,
+    ];
+    for y in 2..6 {
+        for x in 2..6 {
+            pixels[y * w + x] = region_vals[(y - 2) * 4 + (x - 2)];
+        }
+    }
+    ndarray::Array2::from_shape_vec((h, w), pixels).unwrap()
+}
+
+#[tokio::test]
+async fn v2_stats_shape_region_matches_core_masked_values() {
+    let (state, _dir) = seed_stats_session("s-stats-shape").await;
+    let shape = astroburst_lib::core::imaging::region::RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 };
+    let expected = shape.masked_values(&stats_fixture_array(), None);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-stats-shape/stats",
+        r#"{"region":{"type":"shape","shape":"circle","x":4.5,"y":4.5,"r":2}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["valid_count"], expected.values.len() as u64);
+    assert_eq!(json["n_nan"], expected.n_nan);
+    assert_eq!(json["region"]["shape"], "circle");
+    assert_eq!(json["region"]["bounds"]["x0"], 2);
+    assert_eq!(json["region"]["bounds"]["x1"], 7);
+    assert_eq!(json["region"]["clipped"], false);
+    let sum: f64 = expected.values.iter().map(|&v| v as f64).sum();
+    assert!((json["sum"].as_f64().unwrap() - sum).abs() < 1e-6);
+    assert!((json["area"].as_f64().unwrap() - std::f64::consts::PI * 4.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn v2_histogram_shape_region_bins_sum_to_valid_count() {
+    let (state, _dir) = seed_stats_session("s-hist-shape").await;
+    let shape = astroburst_lib::core::imaging::region::RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 };
+    let expected = shape.masked_values(&stats_fixture_array(), None);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-hist-shape/histogram",
+        r#"{"region":{"type":"shape","shape":"circle","x":4.5,"y":4.5,"r":2},"bins":8}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let total: u64 = json["bins"].as_array().unwrap().iter().map(|b| b.as_u64().unwrap()).sum();
+    assert_eq!(total, expected.values.len() as u64);
+    assert_eq!(json["region"]["shape"], "circle");
+    assert!(json["region"]["bounds"].is_object());
+}
+
+#[tokio::test]
+async fn v2_stats_sky_shape_without_wcs_errors_wcs_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("nowcs-shape.fits");
+    v2_fixtures::write_no_wcs_fits(&fits, 8, 8);
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-stats-nowcs");
+    post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-stats-nowcs/open",
+        &format!(r#"{{"path":{}}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap()),
+    )
+    .await;
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-stats-nowcs/stats",
+        r#"{"region":{"type":"shape","shape":"circle","x":150.0,"y":2.0,"r":3,"system":"fk5"}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "wcs_required");
+}
+
+#[tokio::test]
+async fn v2_stats_shape_out_of_bounds_then_clips() {
+    let (state, _dir) = seed_stats_session("s-stats-shape-oob").await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-stats-shape-oob/stats",
+        r#"{"region":{"type":"shape","shape":"circle","x":8,"y":4,"r":3}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "region_out_of_bounds");
+    assert!(json["error"]["hint"].as_str().unwrap().contains("clip=true"));
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-stats-shape-oob/stats",
+        r#"{"region":{"type":"shape","shape":"circle","x":8,"y":4,"r":3,"clip":true}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["region"]["clipped"], true);
+    let expected = astroburst_lib::core::imaging::region::RegionShape::Circle { x: 8.0, y: 4.0, r: 3.0 }
+        .masked_values(&stats_fixture_array(), None);
+    assert_eq!(json["valid_count"], expected.values.len() as u64);
+}
+
+#[tokio::test]
+async fn v2_cutout_shape_with_mask_outside_nan_fills_outside_the_shape() {
+    let (state, _dir) = seed_wcs_session("s-cut-shape").await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-cut-shape/cutout",
+        r#"{"region":{"type":"shape","shape":"circle","x":4,"y":4,"r":2},"mask_outside":true}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["dims"], serde_json::json!([5, 5]));
+    assert_eq!(json["stats"]["valid_count"], 13);
+    assert_eq!(json["region"]["width"], 5);
+    assert_eq!(json["region"]["height"], 5);
+    assert_eq!(json["region"]["x"], 2);
+    assert_eq!(json["region"]["shape"]["shape"], "circle");
+    assert_eq!(json["region"]["shape"]["r"], 2.0);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-cut-shape/cutout",
+        r#"{"region":{"type":"shape","shape":"circle","x":4,"y":4,"r":2},"ref":"img_0"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["stats"]["valid_count"], 25);
+}

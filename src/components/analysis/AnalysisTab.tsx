@@ -6,6 +6,7 @@ import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
 import { useCompositePreview } from "../../context/CompositeContext";
+import { useRegionKey } from "../../hooks/useRegionKey";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
 import type { StarDetectionResult } from "../../shared/types";
@@ -15,6 +16,8 @@ const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PlateSolvePanel = lazy(() => import("./PlateSolvePanel"));
 const PhotometryPanel = lazy(() => import("./PhotometryPanel"));
 const TileViewerPanel = lazy(() => import("./TileViewerPanel"));
+const RegionsPanel = lazy(() => import("../regions/RegionsPanel"));
+const RegionProfilesPanel = lazy(() => import("../regions/RegionProfilesPanel"));
 
 const EMPTY_STARS: Star[] = [];
 
@@ -51,7 +54,7 @@ function AnalysisTabInner({
   const { file } = useFileContext();
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
-  const { setRenderedPreviewUrl, activeImagePath } = useRenderContext();
+  const { setRenderedPreviewUrl } = useRenderContext();
   const { isShowingComposite } = useCompositePreview();
   const { rawPixels, rgbRawPixels } = useRawPixelsContext();
   const { display } = useDisplayContext();
@@ -60,7 +63,7 @@ function AnalysisTabInner({
   const [starLoading, setStarLoading] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
 
-  const effectivePath = (isShowingComposite && activeImagePath) ? activeImagePath : file?.path;
+  const effectivePath = useRegionKey();
 
   const rafIdRef = useRef<number | null>(null);
   const pendingStfRef = useRef<StfParams | null>(null);
@@ -221,6 +224,10 @@ function AnalysisTabInner({
 
         <PhotometryPanel filePath={effectivePath ?? null} />
 
+        <RegionsPanel filePath={effectivePath ?? null} />
+
+        <RegionProfilesPanel filePath={effectivePath ?? null} />
+
         {effectivePath && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
           <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />
         )}
@@ -234,7 +241,7 @@ function AnalysisTabInner({
             cubeDims={cubeDims}
             elapsed={specElapsed}
             error={specError}
-            filePath={effectivePath}
+            filePath={effectivePath ?? undefined}
             onCollapsePreview={handleCollapsePreview}
             onFramePreview={handleFramePreview}
           />

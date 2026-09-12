@@ -104,6 +104,15 @@ declare module "lucide-react" {
   export const ZoomIn: Icon;
   export const ZoomOut: Icon;
   export const Scissors: Icon;
+  export const Circle: Icon;
+  export const CircleDot: Icon;
+  export const Pentagon: Icon;
+  export const Minus: Icon;
+  export const Dot: Icon;
+  export const MousePointer2: Icon;
+  export const FileUp: Icon;
+  export const Egg: Icon;
+  export const Shapes: Icon;
 }
 
 declare module "@tauri-apps/plugin-dialog" {

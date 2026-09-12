@@ -1,9 +1,24 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
+use ndarray::{s, Array2};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::region::{
+    shape_to_pixel, PixelBounds, RegionError, RegionShape, RegionSystem,
+};
 
 use crate::error::AppError;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShapeSpec {
+    #[serde(flatten)]
+    pub shape: RegionShape,
+    #[serde(default)]
+    pub system: RegionSystem,
+    #[serde(default)]
+    pub clip: Option<bool>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -37,6 +52,131 @@ pub enum RegionSpec {
         size_arcmin: SkySize,
         clip: Option<bool>,
     },
+    Shape(ShapeSpec),
+}
+
+fn extent_hint(img_w: usize, img_h: usize) -> String {
+    format!("image extent is 0..{img_w} x 0..{img_h} px")
+}
+
+fn wcs_required() -> AppError {
+    AppError::BadRequestWithHint {
+        code: "wcs_required",
+        message: "sky region requires a WCS on the image, but none is present".into(),
+        hint: Some("open an image whose header carries WCS keywords, or use a pixel region".into()),
+    }
+}
+
+fn region_error(e: RegionError, img_w: usize, img_h: usize) -> AppError {
+    match e {
+        RegionError::WcsRequired => wcs_required(),
+        RegionError::OffImage => AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: e.to_string(),
+            hint: Some(extent_hint(img_w, img_h)),
+        },
+        other => AppError::BadRequest(other.to_string()),
+    }
+}
+
+pub(crate) fn pixel_shape(
+    spec: &ShapeSpec,
+    img_w: usize,
+    img_h: usize,
+    wcs: Option<&WcsTransform>,
+) -> Result<RegionShape, AppError> {
+    spec.shape
+        .validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let shape = shape_to_pixel(&spec.shape, spec.system, wcs).map_err(|e| region_error(e, img_w, img_h))?;
+    if spec.system.is_sky() {
+        shape.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
+    }
+    Ok(shape)
+}
+
+fn bounds_rect(b: PixelBounds) -> (i64, i64, usize, usize) {
+    (b.x0, b.y0, (b.x1 - b.x0 + 1).max(1) as usize, (b.y1 - b.y0 + 1).max(1) as usize)
+}
+
+pub fn resolve_shape(
+    spec: &ShapeSpec,
+    img_w: usize,
+    img_h: usize,
+    wcs: Option<&WcsTransform>,
+) -> Result<(RegionShape, PixelBounds, bool), AppError> {
+    let shape = pixel_shape(spec, img_w, img_h, wcs)?;
+    let b = shape.bounds();
+    let overlaps = b.x1 >= 0 && b.y1 >= 0 && b.x0 < img_w as i64 && b.y0 < img_h as i64;
+    if !overlaps {
+        return Err(AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: "region does not overlap the image at all".into(),
+            hint: Some(extent_hint(img_w, img_h)),
+        });
+    }
+    let clipped = b.x0 < 0 || b.y0 < 0 || b.x1 >= img_w as i64 || b.y1 >= img_h as i64;
+    if clipped && spec.clip != Some(true) {
+        return Err(AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: format!(
+                "{} region bounds [x={}..{}, y={}..{}] do not fit the image",
+                shape.kind(),
+                b.x0,
+                b.x1,
+                b.y0,
+                b.y1
+            ),
+            hint: Some(format!("{}; pass clip=true to clamp", extent_hint(img_w, img_h))),
+        });
+    }
+    Ok((shape, b, clipped))
+}
+
+pub struct RegionValues {
+    pub finite: Vec<f32>,
+    pub n_nan: u64,
+    pub region: serde_json::Value,
+    pub shape: Option<RegionShape>,
+}
+
+pub fn region_values(
+    arr: &Array2<f32>,
+    spec: Option<&RegionSpec>,
+    wcs: Option<&WcsTransform>,
+) -> Result<RegionValues, AppError> {
+    let (rows, cols) = arr.dim();
+    if let Some(RegionSpec::Shape(shape_spec)) = spec {
+        let (shape, bounds, clipped) = resolve_shape(shape_spec, cols, rows, wcs)?;
+        let mv = shape.masked_values(arr, None);
+        let mut region = serde_json::to_value(&shape)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("serialising region shape: {e}")))?;
+        if let Some(obj) = region.as_object_mut() {
+            obj.insert("bounds".into(), json!(bounds));
+            obj.insert("clipped".into(), json!(clipped));
+        }
+        return Ok(RegionValues { finite: mv.values, n_nan: mv.n_nan, region, shape: Some(shape) });
+    }
+
+    let (region_arr, resolved): (Array2<f32>, ResolvedRegion) = match spec {
+        Some(spec) => {
+            let r = resolve_region(spec, cols, rows, wcs)?;
+            let sub = arr
+                .slice(s![r.y..r.y + r.height, r.x..r.x + r.width])
+                .to_owned();
+            (sub, r)
+        }
+        None => (
+            arr.to_owned(),
+            ResolvedRegion { x: 0, y: 0, width: cols, height: rows, clipped: false },
+        ),
+    };
+    let slice = region_arr
+        .as_slice()
+        .expect("region_arr is standard-layout after to_owned()");
+    let n_nan = slice.iter().filter(|v| v.is_nan()).count() as u64;
+    let finite: Vec<f32> = slice.iter().copied().filter(|v| v.is_finite()).collect();
+    Ok(RegionValues { finite, n_nan, region: json!(resolved), shape: None })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,12 +196,9 @@ pub(crate) fn spec_to_rect(
 ) -> Result<(i64, i64, usize, usize), AppError> {
     let (x0, y0, w, h) = match spec {
         RegionSpec::Pixel { x, y, width, height, .. } => (*x, *y, *width, *height),
+        RegionSpec::Shape(shape_spec) => bounds_rect(pixel_shape(shape_spec, img_w, img_h, wcs)?.bounds()),
         RegionSpec::Sky { ra, dec, size_arcmin, .. } => {
-            let wcs = wcs.ok_or_else(|| AppError::BadRequestWithHint {
-                code: "wcs_required",
-                message: "sky region requires a WCS on the image, but none is present".into(),
-                hint: Some("open an image whose header carries WCS keywords, or use a pixel region".into()),
-            })?;
+            let wcs = wcs.ok_or_else(wcs_required)?;
             let (cx, cy) = wcs.world_to_pixel(*ra, *dec);
             if !cx.is_finite() || !cy.is_finite() {
                 return Err(AppError::BadRequestWithHint {
@@ -116,6 +253,7 @@ pub fn resolve_region(
 ) -> Result<ResolvedRegion, AppError> {
     let clip = match spec {
         RegionSpec::Pixel { clip, .. } | RegionSpec::Sky { clip, .. } => clip.unwrap_or(false),
+        RegionSpec::Shape(shape_spec) => shape_spec.clip.unwrap_or(false),
     };
     let (x0, y0, w, h) = spec_to_rect(spec, img_w, img_h, wcs)?;
 
@@ -331,5 +469,102 @@ mod tests {
         let spec = RegionSpec::Pixel { x: 100, y: 100, width: 10, height: 10, clip: None };
         let r = resolve_region_clamped(&spec, 8, 8, None).unwrap();
         assert_eq!(r, ResolvedRegion { x: 7, y: 7, width: 1, height: 1, clipped: true });
+    }
+
+    #[test]
+    fn shape_spec_deserialises_and_unknown_shapes_are_rejected() {
+        let spec: RegionSpec =
+            serde_json::from_str(r#"{"type":"shape","shape":"circle","x":4.5,"y":4.5,"r":2.0,"system":"image"}"#).unwrap();
+        match spec {
+            RegionSpec::Shape(s) => {
+                assert_eq!(s.shape, RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 });
+                assert_eq!(s.system, RegionSystem::Image);
+                assert_eq!(s.clip, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        let spec: RegionSpec = serde_json::from_str(
+            r#"{"type":"shape","shape":"box","x":150.1,"y":2.2,"width":30,"height":15,"angle":0,"system":"fk5","clip":true}"#,
+        )
+        .unwrap();
+        match spec {
+            RegionSpec::Shape(s) => {
+                assert_eq!(s.system, RegionSystem::Fk5);
+                assert_eq!(s.clip, Some(true));
+                assert_eq!(s.shape.kind(), "box");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(serde_json::from_str::<RegionSpec>(r#"{"type":"shape","shape":"hexagon"}"#).is_err());
+        let spec: RegionSpec =
+            serde_json::from_str(r#"{"type":"pixel","x":1,"y":2,"width":3,"height":4}"#).unwrap();
+        assert!(matches!(spec, RegionSpec::Pixel { x: 1, y: 2, width: 3, height: 4, clip: None }));
+    }
+
+    fn shape_spec(shape: RegionShape, clip: Option<bool>) -> ShapeSpec {
+        ShapeSpec { shape, system: RegionSystem::Image, clip }
+    }
+
+    #[test]
+    fn resolve_shape_bounds_clip_and_errors() {
+        let inside = shape_spec(RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 }, None);
+        let (shape, b, clipped) = resolve_shape(&inside, 10, 10, None).unwrap();
+        assert_eq!(shape.kind(), "circle");
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (2, 2, 7, 7));
+        assert!(!clipped);
+
+        let edge = shape_spec(RegionShape::Circle { x: 8.0, y: 4.0, r: 3.0 }, None);
+        let err = resolve_shape(&edge, 10, 10, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+        assert!(hint_of(&err).unwrap().contains("clip=true"));
+        let edge = shape_spec(RegionShape::Circle { x: 8.0, y: 4.0, r: 3.0 }, Some(true));
+        let (_, _, clipped) = resolve_shape(&edge, 10, 10, None).unwrap();
+        assert!(clipped);
+
+        let far = shape_spec(RegionShape::Circle { x: 80.0, y: 80.0, r: 3.0 }, Some(true));
+        let err = resolve_shape(&far, 10, 10, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+
+        let bad = shape_spec(RegionShape::Circle { x: 4.0, y: 4.0, r: 0.0 }, None);
+        assert!(matches!(resolve_shape(&bad, 10, 10, None).unwrap_err(), AppError::BadRequest(_)));
+
+        let sky = ShapeSpec {
+            shape: RegionShape::Circle { x: 150.0, y: 2.0, r: 3.0 },
+            system: RegionSystem::Fk5,
+            clip: None,
+        };
+        let err = resolve_shape(&sky, 10, 10, None).unwrap_err();
+        assert_eq!(code_of(&err), Some("wcs_required"));
+
+        let rect = resolve_region(&RegionSpec::Shape(inside), 10, 10, None).unwrap();
+        assert_eq!(rect, ResolvedRegion { x: 2, y: 2, width: 6, height: 6, clipped: false });
+    }
+
+    #[test]
+    fn region_values_shape_and_rect_paths() {
+        let mut arr = Array2::from_elem((10, 10), 1.0f32);
+        arr[[4, 4]] = f32::NAN;
+        arr[[0, 0]] = f32::INFINITY;
+        let spec = RegionSpec::Shape(shape_spec(RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 }, None));
+        let rv = region_values(&arr, Some(&spec), None).unwrap();
+        let expected = RegionShape::Circle { x: 4.5, y: 4.5, r: 2.0 }.masked_values(&arr, None);
+        assert_eq!(rv.finite.len(), expected.values.len());
+        assert_eq!(rv.n_nan, 1);
+        assert_eq!(rv.region["shape"], "circle");
+        assert_eq!(rv.region["bounds"]["x0"], 2);
+        assert_eq!(rv.region["clipped"], false);
+        assert!(rv.shape.is_some());
+
+        let rv = region_values(&arr, None, None).unwrap();
+        assert_eq!(rv.finite.len(), 98);
+        assert_eq!(rv.n_nan, 1);
+        assert_eq!(rv.region["width"], 10);
+        assert!(rv.shape.is_none());
+
+        let px = RegionSpec::Pixel { x: 0, y: 0, width: 2, height: 2, clip: None };
+        let rv = region_values(&arr, Some(&px), None).unwrap();
+        assert_eq!(rv.finite.len(), 3);
+        assert_eq!(rv.n_nan, 0);
+        assert_eq!(rv.region["clipped"], false);
     }
 }

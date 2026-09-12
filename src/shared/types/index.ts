@@ -62,3 +62,23 @@ export type {
   ColormapLutResult,
 } from "./display";
 export { COLORMAP_NAMES, STRETCH_MODES, LIMIT_MODES, DEFAULT_DISPLAY_SETTINGS } from "./display";
+export type {
+  RegionSystem,
+  RegionShape,
+  RegionShapeKind,
+  RegionTool,
+  RegionProperties,
+  Region,
+  RegionWire,
+  PixelBounds,
+  BackgroundEstimate,
+  RegionStats,
+  RegionStatsEntry,
+  RegionStatsResult,
+  RadialBin,
+  RadialProfile,
+  LineCut,
+  RegionImportResult,
+  RegionExportResult,
+} from "./regions";
+export { REGION_SHAPE_KINDS } from "./regions";

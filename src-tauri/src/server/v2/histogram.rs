@@ -1,6 +1,5 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
 use axum::Json;
-use ndarray::{s, Array2};
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,7 +13,7 @@ use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
-use super::region::{resolve_region, RegionSpec, ResolvedRegion};
+use super::region::{region_values, RegionSpec};
 
 const AUTO_LO_PCT: f64 = 0.001;
 const AUTO_HI_PCT: f64 = 0.999;
@@ -131,26 +130,9 @@ pub async fn histogram(
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
     let arr = entry.arr();
-    let (rows, cols) = arr.dim();
-
-    let (region_arr, resolved): (Array2<f32>, ResolvedRegion) = match &params.region {
-        Some(spec) => {
-            let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
-            let r = resolve_region(spec, cols, rows, wcs.as_ref())?;
-            let sub = arr
-                .slice(s![r.y..r.y + r.height, r.x..r.x + r.width])
-                .to_owned();
-            (sub, r)
-        }
-        None => (
-            arr.to_owned(),
-            ResolvedRegion { x: 0, y: 0, width: cols, height: rows, clipped: false },
-        ),
-    };
-
-    let slice = region_arr
-        .as_slice()
-        .expect("region_arr is standard-layout after to_owned()");
+    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
+    let slice: &[f32] = &values.finite;
 
     let (dmin, dmax, range_source) = match params.range {
         Some([lo, hi]) => (lo, hi, "explicit"),
@@ -188,7 +170,7 @@ pub async fn histogram(
 
     Ok(Json(json!({
         "ref": target,
-        "region": resolved,
+        "region": values.region,
         "bins": counts,
         "bin_edges": hist.bin_edges,
         "min": hist.min,

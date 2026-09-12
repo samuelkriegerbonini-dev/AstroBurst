@@ -441,3 +441,10 @@ pub const EXTNAME_DQ: &str = "DQ";
 pub const EXTNAME_ERR: &str = "ERR";
 pub const DQ_MASK_HEADER_BYTES: usize = 16;
 pub const DEFAULT_MASK_PREVIEW_DIM: u32 = 2048;
+
+pub const RES_REGIONS: &str = "regions";
+pub const RES_REG_TEXT: &str = "reg_text";
+pub const RES_WARNINGS: &str = "warnings";
+pub const RES_HAS_WCS: &str = "has_wcs";
+pub const RES_ID: &str = "id";
+pub const RES_SYSTEM: &str = "system";

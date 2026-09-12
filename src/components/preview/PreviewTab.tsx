@@ -8,6 +8,7 @@ import { GRAY_LUT_RGBA, toDisplayTransfer } from "../../utils/displayTransfer";
 import ZoomPanView from "../ui/ZoomPanView";
 import GpuViewport from "../render/GpuViewport";
 import DisplayControls from "./DisplayControls";
+import { useRegionKey } from "../../hooks/useRegionKey";
 
 const GpuRenderer = lazy(() => import("../render/GpuRenderer"));
 const GpuRgbRenderer = lazy(() => import("../render/GpuRgbRenderer"));
@@ -70,6 +71,11 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   } = useCompositeStf();
   const [stfOpen, setStfOpen] = useState(false);
   const { display, limits, lut } = useDisplayContext();
+  const regionKey = useRegionKey();
+
+  const fitsW = file?.result?.dimensions?.[0];
+  const fitsH = file?.result?.dimensions?.[1];
+  const regionsOnCurrentFile = !!fitsW && !!fitsH && regionKey !== null && regionKey === (file?.path ?? null);
 
   const transfer = useMemo(() => {
     const dataLimits = { vmin: rawPixels?.min ?? 0, vmax: rawPixels?.max ?? 1 };
@@ -229,7 +235,13 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
         {useGpu && rgbRawPixels ? (
           <div className="relative flex-1 min-h-0">
             <Suspense fallback={<Loader2 size={20} className="animate-spin text-zinc-600" />}>
-              <GpuViewport renderW={rgbRawPixels.width} renderH={rgbRawPixels.height}>
+              <GpuViewport
+                renderW={rgbRawPixels.width}
+                renderH={rgbRawPixels.height}
+                fitsW={regionsOnCurrentFile ? fitsW : undefined}
+                fitsH={regionsOnCurrentFile ? fitsH : undefined}
+                regionsEnabled={regionsOnCurrentFile}
+              >
                 <GpuRgbRenderer
                   rgb={rgbRawPixels}
                   stfR={displayReferred ? IDENTITY_STF : compositeStfR}
@@ -261,11 +273,12 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
             <GpuViewport
               renderW={rawPixels.width}
               renderH={rawPixels.height}
-              fitsW={file?.result?.dimensions?.[0]}
-              fitsH={file?.result?.dimensions?.[1]}
+              fitsW={fitsW}
+              fitsH={fitsH}
               overlayCanvasRef={starOverlayRef}
               dqCanvasRef={dqCanvasRef}
               onCanvasClick={isCube ? onImageClick : undefined}
+              regionsEnabled={regionsOnCurrentFile}
             >
               <GpuRenderer
                 rawData={rawPixels.data}

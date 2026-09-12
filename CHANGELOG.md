@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - DQ overlay: `get_dq_mask_preview` returns a binary OR-reduced mask grid (16-byte LE header: width, height, mask, table id) on the same grid as `get_raw_pixels_preview`; raw previews and mask previews share `preview_dims`/`cell_range`
   - DQ-masked statistics: `compute_histogram(excludeDq)` and `measure_photometry_cmd(excludeDq)` treat `DO_NOT_USE` (JWST convention) or the documented HST bad-pixel bits as NaN and report `masked` / `dq_excluded`
   - Server: `open` and `hdu` accept `array` (exactly one of `hdu`/`array`); image metadata and responses gain `array`, `plane_ref` and `is_dq`
+- **Phase 3 (regions)**
+  - Interactive regions in the viewer: circle, ellipse, box, annulus, polygon, line and point, drawn on a dedicated overlay layer with selection, move and resize handles, rotation for box and ellipse, `Delete` to remove and `Escape` to cancel; the tool returns to select after a shape is committed
+  - DS9 region files: `regions_import_cmd` / `regions_export_cmd` read and write `.reg` in the `image`, `icrs` and `fk5` systems (degrees or sexagesimal, radii in image pixels or arcsec/arcmin/degree, `global`/local properties, comments); sky regions convert through the WCS
+  - Per-region statistics (`region_stats_cmd`): count, sum, mean, median, MAD, sigma, min, max, sigma-clipped mean and median, plus background annulus subtraction with net sum and SNR; DQ-excluded pixels are reported separately
+  - `radial_profile_cmd` (mean, median, standard deviation and cumulative sum per integer radius, optional background annulus) and `line_cut_cmd` (bilinear samples along a line) with canvas plots in the Analysis tab
+  - Region geometry lives once in `core/imaging/region.rs` (DS9 convention: a pixel belongs to a region when its centre is inside; a circle of radius 5 at an integer centre covers 81 pixels); the server `v2` region, stats and cutout endpoints use the same shapes
+  - Regions persist per file in the browser store and are listed, edited and exported from the Analysis tab
 - **Search Everywhere** command palette (`Ctrl+K` / double `Shift`, IntelliJ-style): fuzzy search over processed files, tool panels (Headers/Analysis/Processing/Stacking/Synth/Export/Settings), and actions (open files/folder, toggle panels, ZIP export, new batch); full keyboard navigation, status-bar entry point
 - Right tool panel is now resizable (280–640px); all splitter positions (sidebar, right panel, compose panel height) persist across sessions via `localStorage` (`src/utils/layout.ts`)
 - IntelliJ-style splitters: zero-width in layout with a 7px grab area, accent highlight on hover (delayed) and while dragging, double-click resets to the default size
@@ -31,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `pixel_to_world_cmd` Tauri command backing the cursor RA/Dec readout, replacing a duplicated client-side pixel<->sky implementation (`src/utils/wcstransform.ts`, now removed) with the same wcs-rs-backed engine used everywhere else
 
 ### Fixed
+- Regions were invisible in the GPU viewer: the overlay measured its host container in a layout effect that runs before React attaches the parent ref, so the canvas backing store stayed 1x1 while still consuming pointer events (toolbar live, nothing drawn, nothing selectable). The host is now resolved from the canvas itself, so the layer is sized and observed on the first commit
+- Regions were misplaced in the tile viewer: the rendered preview size was never reset when the displayed image changed, so a region could be mapped with the previous file's raster width against the new file's FITS dimensions, and the in-progress draft was global instead of per file, painting one image's shape over another
+- Drawing a region left the drawing tool active, so clicking the new selection handles started another shape instead of selecting; left-drag panning is no longer swallowed when the gesture does not hit a region
 - WCS headers using the `PC` matrix convention (no `CD` keywords, e.g. ASDF/Roman-derived FITS) were silently mis-transformed: the old hand-rolled WCS math only ever read `CD1_1..CD2_2` or fell back to `CDELT`+`CROTA2`, ignoring `PC` entirely
 - Cross-checked against `mapproj` 0.4.0's own SIP polynomial evaluator, which has a confirmed bug (advances polynomial powers by repeated squaring instead of by degree) that silently produces wildly wrong sky coordinates for any SIP-distorted header; AstroBurst's WCS wrapper strips the `-SIP` CTYPE suffix before constructing the wcs-rs engine so its broken SIP path never runs, and applies/inverts SIP with its own (previously existing, still correct) math instead
 

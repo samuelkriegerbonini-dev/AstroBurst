@@ -62,6 +62,40 @@ pub fn combine_channel_stats(a: &ImageStats, b: &ImageStats, c: &ImageStats) -> 
     }
 }
 
+pub fn finite_slice_stats(finite: &mut [f32]) -> ImageStats {
+    if finite.is_empty() {
+        return ImageStats::default();
+    }
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    let mut sum = 0.0f64;
+    for &v in finite.iter() {
+        let vf = v as f64;
+        if vf < min {
+            min = vf;
+        }
+        if vf > max {
+            max = vf;
+        }
+        sum += vf;
+    }
+    let n = finite.len() as u64;
+    let mean = sum / n as f64;
+    let median = exact_median_mut(finite);
+    let mut deviations = finite.to_vec();
+    let mad = exact_mad_mut(&mut deviations, median as f32) as f64;
+    let sigma = (mad * MAD_TO_SIGMA).max(1e-30);
+    ImageStats {
+        min,
+        max,
+        median,
+        mad,
+        sigma,
+        mean,
+        valid_count: n,
+    }
+}
+
 fn compute_image_stats_exact(slice: &[f32]) -> ImageStats {
     let (global_min, global_max, global_sum, total_valid) = scan_stats(slice);
 
@@ -485,5 +519,50 @@ mod tests {
     fn percentile_empty_is_nan() {
         let mut v: Vec<f32> = vec![];
         assert!(percentile(&mut v, 0.5).is_nan());
+    }
+
+    #[test]
+    fn finite_slice_stats_keeps_zero_and_negative_pixels() {
+        let region = Array2::from_shape_vec((2, 3), vec![-5.0f32, -1.0, 0.0, 2.0, 6.0, f32::NAN]).unwrap();
+        let mut finite: Vec<f32> = region.iter().copied().filter(|v| v.is_finite()).collect();
+        let s = finite_slice_stats(&mut finite);
+
+        assert_eq!(s.valid_count, 5);
+        assert_eq!(s.min, -5.0);
+        assert_eq!(s.max, 6.0);
+        assert!((s.mean - 0.4).abs() < 1e-12);
+        assert_eq!(s.median, 0.0);
+        assert_eq!(s.mad, 2.0);
+        assert!((s.sigma - 2.0 * MAD_TO_SIGMA).abs() < 1e-12);
+
+        let legacy = compute_image_stats(&region);
+        assert_eq!(legacy.valid_count, 2);
+        assert_eq!(legacy.min, 2.0);
+    }
+
+    #[test]
+    fn finite_slice_stats_matches_core_for_positive_data_and_handles_empty() {
+        let region = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                100.0f32, 101.0, 102.0, 103.0,
+                104.0, 105.0, 106.0, 107.0,
+                108.0, 109.0, 110.0, 111.0,
+                112.0, 8000.0, 9000.0, f32::NAN,
+            ],
+        )
+        .unwrap();
+        let mut finite: Vec<f32> = region.iter().copied().filter(|v| v.is_finite()).collect();
+        let ours = finite_slice_stats(&mut finite);
+        let core = compute_image_stats(&region);
+        assert_eq!(ours.valid_count, core.valid_count);
+        assert_eq!(ours.min, core.min);
+        assert_eq!(ours.max, core.max);
+        assert_eq!(ours.median, core.median);
+        assert_eq!(ours.mad, core.mad);
+        assert!((ours.mean - core.mean).abs() < 1e-9);
+
+        let empty = finite_slice_stats(&mut []);
+        assert_eq!(empty.valid_count, 0);
     }
 }

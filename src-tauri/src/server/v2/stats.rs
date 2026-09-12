@@ -1,54 +1,17 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
 use axum::Json;
-use ndarray::{s, Array2};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
-use astroburst_lib::core::imaging::stats::percentile;
-use astroburst_lib::math::{exact_mad_mut, exact_median_mut, sigma_clipped_stats};
-use astroburst_lib::types::constants::MAD_TO_SIGMA;
-use astroburst_lib::types::ImageStats;
+use astroburst_lib::core::imaging::stats::{finite_slice_stats, percentile};
+use astroburst_lib::math::sigma_clipped_stats;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
-use super::region::{resolve_region, RegionSpec, ResolvedRegion};
-
-fn finite_stats(finite: &mut [f32]) -> ImageStats {
-    if finite.is_empty() {
-        return ImageStats::default();
-    }
-    let mut min = f64::MAX;
-    let mut max = f64::MIN;
-    let mut sum = 0.0f64;
-    for &v in finite.iter() {
-        let vf = v as f64;
-        if vf < min {
-            min = vf;
-        }
-        if vf > max {
-            max = vf;
-        }
-        sum += vf;
-    }
-    let n = finite.len() as u64;
-    let mean = sum / n as f64;
-    let median = exact_median_mut(finite);
-    let mut deviations = finite.to_vec();
-    let mad = exact_mad_mut(&mut deviations, median as f32) as f64;
-    let sigma = (mad * MAD_TO_SIGMA).max(1e-30);
-    ImageStats {
-        min,
-        max,
-        median,
-        mad,
-        sigma,
-        mean,
-        valid_count: n,
-    }
-}
+use super::region::{region_values, RegionSpec};
 
 #[derive(Deserialize)]
 pub struct StatsParams {
@@ -102,34 +65,15 @@ pub async fn stats(
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
     let arr = entry.arr();
-    let (rows, cols) = arr.dim();
-
-    let (region_arr, resolved): (Array2<f32>, ResolvedRegion) = match &params.region {
-        Some(spec) => {
-            let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
-            let r = resolve_region(spec, cols, rows, wcs.as_ref())?;
-            let sub = arr
-                .slice(s![r.y..r.y + r.height, r.x..r.x + r.width])
-                .to_owned();
-            (sub, r)
-        }
-        None => (
-            arr.to_owned(),
-            ResolvedRegion { x: 0, y: 0, width: cols, height: rows, clipped: false },
-        ),
-    };
-
-    let slice = region_arr
-        .as_slice()
-        .expect("region_arr is standard-layout after to_owned()");
-    let n_nan = slice.iter().filter(|v| v.is_nan()).count() as u64;
-
-    let mut finite: Vec<f32> = slice.iter().copied().filter(|v| v.is_finite()).collect();
-    let base = finite_stats(&mut finite);
+    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
+    let mut finite = values.finite;
+    let n_nan = values.n_nan;
+    let base = finite_slice_stats(&mut finite);
 
     let mut body = json!({
         "ref": target,
-        "region": resolved,
+        "region": values.region,
         "min": base.min,
         "max": base.max,
         "median": base.median,
@@ -139,6 +83,11 @@ pub async fn stats(
         "valid_count": base.valid_count,
         "n_nan": n_nan,
     });
+
+    if let Some(shape) = &values.shape {
+        body["sum"] = json!(finite.iter().map(|&v| v as f64).sum::<f64>());
+        body["area"] = json!(shape.area());
+    }
 
     if let Some(sc) = &params.sigma_clip {
         let mut vals = finite.clone();
@@ -176,14 +125,17 @@ pub async fn stats(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use astroburst_lib::core::imaging::stats::compute_image_stats;
+    use astroburst_lib::types::constants::MAD_TO_SIGMA;
+    use ndarray::Array2;
+
+    use super::*;
 
     #[test]
     fn finite_stats_keeps_zero_and_negative_pixels() {
         let region = Array2::from_shape_vec((2, 3), vec![-5.0f32, -1.0, 0.0, 2.0, 6.0, f32::NAN]).unwrap();
         let mut finite: Vec<f32> = region.iter().copied().filter(|v| v.is_finite()).collect();
-        let s = finite_stats(&mut finite);
+        let s = finite_slice_stats(&mut finite);
 
         assert_eq!(s.valid_count, 5);
         assert_eq!(s.min, -5.0);
@@ -211,7 +163,7 @@ mod tests {
         )
         .unwrap();
         let mut finite: Vec<f32> = region.iter().copied().filter(|v| v.is_finite()).collect();
-        let ours = finite_stats(&mut finite);
+        let ours = finite_slice_stats(&mut finite);
         let core = compute_image_stats(&region);
         assert_eq!(ours.valid_count, core.valid_count);
         assert_eq!(ours.min, core.min);
@@ -220,7 +172,7 @@ mod tests {
         assert_eq!(ours.mad, core.mad);
         assert!((ours.mean - core.mean).abs() < 1e-9);
 
-        let empty = finite_stats(&mut []);
+        let empty = finite_slice_stats(&mut []);
         assert_eq!(empty.valid_count, 0);
     }
 }

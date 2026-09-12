@@ -11,6 +11,7 @@ pub mod metadata;
 pub mod output;
 pub mod processing;
 pub mod psf;
+pub mod regions;
 pub mod spcc;
 pub mod stacking;
 pub mod synth;

@@ -9,6 +9,8 @@ pub mod masked_stretch;
 pub mod normalize;
 pub mod pixel_probe;
 pub mod psf_estimation;
+pub mod region;
+pub mod region_file;
 pub mod resample;
 pub mod sampling;
 pub mod scale;

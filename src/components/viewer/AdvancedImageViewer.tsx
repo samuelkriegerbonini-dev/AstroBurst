@@ -22,6 +22,9 @@ import {
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
+import RegionToolbar from "../regions/RegionToolbar";
+import RegionsLayer from "../regions/RegionsLayer";
+import { useRegionKey } from "../../hooks/useRegionKey";
 
 interface ViewerImage {
   url: string;
@@ -54,7 +57,8 @@ function AdvancedImageViewer({
   className = "",
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
+  const regionKey = useRegionKey();
+  const [imgNatural, setImgNatural] = useState<{ w: number; h: number; url: string } | null>(null);
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -66,9 +70,11 @@ function AdvancedImageViewer({
   const clickStart = useRef<{ x: number; y: number } | null>(null);
 
   const activeImage = processed ?? original;
+  const activeUrl = activeImage?.url ?? null;
   const hasComparison = !!original && !!processed;
-  const renderW = imgNatural?.w ?? 0;
-  const renderH = imgNatural?.h ?? 0;
+  const naturalSize = imgNatural && imgNatural.url === activeUrl ? imgNatural : null;
+  const renderW = naturalSize?.w ?? 0;
+  const renderH = naturalSize?.h ?? 0;
 
   const {
     transform, transformRef, setTransform,
@@ -86,7 +92,7 @@ function AdvancedImageViewer({
       const rect = containerRef.current?.getBoundingClientRect();
       if (compareMode && rect && Math.abs((e.clientX - rect.left) - rect.width * comparePos / 100) < 12) {
         compareDragging.current = true;
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.setPointerCapture(e.pointerId);
         return;
       }
       if (e.button === 1 || (e.button === 0 && cursorMode === "pan")) {
@@ -94,7 +100,7 @@ function AdvancedImageViewer({
         isPanningRef.current = true;
         const t = transformRef.current;
         panStart.current = { x: e.clientX, y: e.clientY, tx: t.x, ty: t.y };
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.setPointerCapture(e.pointerId);
       }
     },
     [compareMode, comparePos, cursorMode, transformRef],
@@ -156,8 +162,8 @@ function AdvancedImageViewer({
     const img = e.currentTarget;
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    if (nw > 0 && nh > 0) setImgNatural({ w: nw, h: nh });
-  }, []);
+    if (nw > 0 && nh > 0 && activeUrl) setImgNatural({ w: nw, h: nh, url: activeUrl });
+  }, [activeUrl]);
 
   const { onLoad: mainRetryOnLoad } = mainRetry;
   const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -165,6 +171,8 @@ function AdvancedImageViewer({
     mainRetryOnLoad();
   }, [handleNaturalSize, mainRetryOnLoad]);
 
+  const regionsEnabled =
+    !!activeImage?.width && !!activeImage?.height && renderW > 0 && renderH > 0 && regionKey !== null;
   const compareActive = compareMode && hasComparison;
   const viewerError = compareActive ? (procRetry.error || origRetry.error) : mainRetry.error;
   const viewerLoading = compareActive ? (procRetry.loading || origRetry.loading) : mainRetry.loading;
@@ -240,6 +248,8 @@ function AdvancedImageViewer({
           </button>
         </div>
 
+        {regionsEnabled && <RegionToolbar />}
+
         <div className="ab-viewer-toolbar-group ml-auto">
           {ZOOM_PRESETS.map((z) => (
             <button
@@ -283,7 +293,7 @@ function AdvancedImageViewer({
           <>
             <div style={{ ...imgStyle, zIndex: 1 }}>
               <img src={procRetry.src ?? ""} alt={processed.label} draggable={false}
-                onLoad={(e) => { handleNaturalSize(e); procRetry.onLoad(); }} onError={procRetry.onError} style={{ display: "block" }} />
+                onLoad={(e) => { handleNaturalSize(e); procRetry.onLoad(); }} onError={procRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
               {overlayCanvasRef && (
                 <canvas ref={overlayCanvasRef}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
@@ -296,7 +306,7 @@ function AdvancedImageViewer({
             <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
                 <img src={origRetry.src ?? ""} alt={original.label} draggable={false}
-                  onLoad={origRetry.onLoad} onError={origRetry.onError} style={{ display: "block" }} />
+                  onLoad={origRetry.onLoad} onError={origRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
               </div>
             </div>
             <div className="ab-viewer-compare-line" style={{ left: `${comparePos}%`, zIndex: 3 }}>
@@ -312,7 +322,7 @@ function AdvancedImageViewer({
         ) : !viewerError ? (
           <div style={imgStyle}>
             <img src={mainRetry.src ?? ""} alt={activeImage.label} draggable={false}
-              onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block" }} />
+              onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
             {overlayCanvasRef && (
               <canvas ref={overlayCanvasRef}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
@@ -323,6 +333,15 @@ function AdvancedImageViewer({
             )}
           </div>
         ) : null}
+        <RegionsLayer
+          containerRef={containerRef}
+          transform={transform}
+          renderW={renderW}
+          renderH={renderH}
+          fitsW={activeImage.width ?? renderW}
+          fitsH={activeImage.height ?? renderH}
+          enabled={regionsEnabled}
+        />
       </div>
 
       {showOverlay && (

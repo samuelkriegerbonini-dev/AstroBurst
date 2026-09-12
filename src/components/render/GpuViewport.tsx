@@ -2,6 +2,8 @@ import { useCallback, useRef, useState, memo } from "react";
 import { ZoomIn, ZoomOut, Maximize, Square, RotateCcw, Move, Crosshair } from "lucide-react";
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { screenToImagePixel } from "../../utils/pixelMapping";
+import RegionToolbar from "../regions/RegionToolbar";
+import RegionsLayer from "../regions/RegionsLayer";
 
 interface GpuViewportProps {
   renderW: number;
@@ -9,6 +11,7 @@ interface GpuViewportProps {
   fitsW?: number;
   fitsH?: number;
   crosshairEnabled?: boolean;
+  regionsEnabled?: boolean;
   onMousePixel?: (x: number, y: number) => void;
   onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
@@ -24,6 +27,7 @@ function GpuViewport({
   fitsW,
   fitsH,
   crosshairEnabled = false,
+  regionsEnabled = false,
   onMousePixel,
   onPixelClick,
   onMouseLeave,
@@ -47,6 +51,7 @@ function GpuViewport({
 
   const effFitsW = fitsW ?? renderW;
   const effFitsH = fitsH ?? renderH;
+  const regionsActive = regionsEnabled && renderW > 0 && renderH > 0 && effFitsW > 0 && effFitsH > 0;
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -56,7 +61,7 @@ function GpuViewport({
         isPanningRef.current = true;
         const t = transformRef.current;
         panStart.current = { x: e.clientX, y: e.clientY, tx: t.x, ty: t.y };
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.setPointerCapture(e.pointerId);
       }
     },
     [cursorMode, transformRef],
@@ -148,6 +153,8 @@ function GpuViewport({
           </>
         )}
 
+        {regionsActive && <RegionToolbar />}
+
         <div className="ab-viewer-toolbar-group ml-auto">
           {ZOOM_PRESETS.map((z) => (
             <button
@@ -187,6 +194,15 @@ function GpuViewport({
             />
           )}
         </div>
+        <RegionsLayer
+          containerRef={containerRef}
+          transform={transform}
+          renderW={renderW}
+          renderH={renderH}
+          fitsW={effFitsW}
+          fitsH={effFitsH}
+          enabled={regionsActive}
+        />
       </div>
     </div>
   );

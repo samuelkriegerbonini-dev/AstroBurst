@@ -141,6 +141,10 @@ pub fn icrs_to_fk5_j2000(ra: f64, dec: f64) -> (f64, f64) {
     transform(&ICRS_TO_FK5_J2000, ra, dec)
 }
 
+pub fn fk5_j2000_to_icrs(ra: f64, dec: f64) -> (f64, f64) {
+    transform(&mat_transpose(&ICRS_TO_FK5_J2000), ra, dec)
+}
+
 pub fn icrs_to_galactic(ra: f64, dec: f64) -> (f64, f64) {
     transform(&ICRS_TO_GALACTIC, ra, dec)
 }
@@ -295,6 +299,19 @@ mod tests {
         let back = mat_transpose(&ICRS_TO_ECLIPTIC_J2000);
         let (r2, d2) = cartesian_to_spherical(mat_apply(&back, spherical_to_cartesian(l, b)));
         assert!(lon_diff(r2, 300.0) < 1e-9 && (d2 - 40.0).abs() < 1e-9, "({r2},{d2})");
+    }
+
+    #[test]
+    fn fk5_to_icrs_inverts_icrs_to_fk5_at_several_positions() {
+        for (ra, dec) in [(0.0, 0.0), (10.0, 20.0), (150.0, 2.0), (274.7, -13.8), (359.9, 89.5)] {
+            let (fra, fdec) = icrs_to_fk5_j2000(ra, dec);
+            let (r2, d2) = fk5_j2000_to_icrs(fra, fdec);
+            assert!(lon_diff(r2, ra) < 1e-9 && (d2 - dec).abs() < 1e-9, "({ra},{dec}) -> ({r2},{d2})");
+            let (r3, d3) = icrs_to_fk5_j2000(r2, d2);
+            assert!(lon_diff(r3, fra) < 1e-9 && (d3 - fdec).abs() < 1e-9);
+        }
+        let sep = crate::core::astrometry::wcs::angular_separation(10.0, 20.0, fk5_j2000_to_icrs(10.0, 20.0).0, fk5_j2000_to_icrs(10.0, 20.0).1) * 3600.0;
+        assert!(sep > 0.005 && sep < 0.03, "FK5->ICRS separation {sep} arcsec");
     }
 
     #[test]
