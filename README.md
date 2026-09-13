@@ -228,14 +228,17 @@ Setup, code style, tests, the architecture overview and the current priority are
 
 The headless server, the v2 API, the Python client, the WCS engine migration, FITS tile compression, zscale and the colormaps were contributed by [Jae-Joon Lee](https://github.com/leejjoon).
 
-AstroBurst is free and GPLv3. If it helps your work, you can [support development on Ko-fi](https://ko-fi.com/astroburst).
+AstroBurst is free and AGPLv3. If it helps your work, you can [support development on Ko-fi](https://ko-fi.com/astroburst).
 
 <!-- SUPPORTERS:START -->
 <!-- SUPPORTERS:END -->
 
 ## License
 
-GPLv3. See [LICENSE](LICENSE).
+AGPLv3. See [LICENSE](LICENSE).
+
+The network clause (section 13) covers the optional headless REST API: if you run a
+modified AstroBurst as a network service, you must offer the modified source to its users.
 
 ---
 

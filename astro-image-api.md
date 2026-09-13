@@ -803,7 +803,7 @@ Roughly **15 weeks to a scientifically complete Rust service** — about 50% mor
 
 ### 22.1 What AstroBurst is
 
-An open-source Rust/Tauri/WebGPU desktop application for processing JWST/HST/Roman imagery (FITS + ASDF), ~31k LOC of backend Rust, GPL-3.0-or-later, active development (last push the day before this assessment), CI, and a large backend test suite.
+An open-source Rust/Tauri/WebGPU desktop application for processing JWST/HST/Roman imagery (FITS + ASDF), ~31k LOC of backend Rust, AGPL-3.0-or-later, active development (last push the day before this assessment), CI, and a large backend test suite.
 
 **Verified in this assessment:**
 - **Test suite: 401/402 pass** on a fresh clone (Rust 1.89, `--features server`). The single failure is the ASDF compression reference suite, which requires the optional `asdf-full` (bzip2/lz4) feature that was deliberately excluded from the build — a feature-gating artifact, not a code-health problem.
@@ -843,7 +843,7 @@ Three things make AstroBurst far more than a random Rust astro codebase for our 
 
 ### 22.4 License and governance
 
-- **GPL-3.0-or-later** (not AGPL). Consequences: a fork stays GPL; if we distribute binaries, source must be offered; **running it as an internal or hosted service triggers no copyleft obligation** (no network clause). Acceptable for an open research tool; a blocker only if a proprietary distributable were the goal.
+- **AGPL-3.0-or-later**. Consequences: a fork stays AGPL; if we distribute binaries, source must be offered; **running a modified build as a hosted service also triggers the copyleft obligation** (network clause, section 13). Acceptable for an open research tool; a blocker if a proprietary distributable or a closed hosted service were the goal.
 - CONTRIBUTING + **CLA** exist, CI runs typecheck + the backend tests. Risk: effectively a single primary author (bus factor) — mitigated by the fact that the headless-server contribution path is demonstrably open, and by keeping our fork mergeable.
 
 ### 22.5 Recommendation: yes — fork, upstream-first
@@ -871,7 +871,7 @@ Base the tool on AstroBurst rather than starting fresh. The overlap is not incid
 
 ### 23.1 What the stack is
 
-Three crates from CDS Strasbourg, designed to work together (fitsrs re-exports wcs-rs; `HDU::wcs()` builds a WCS directly from a parsed header; wcs-rs delegates projection math to mapproj). They power **Aladin Lite v3**, i.e. they parse real survey data in production daily. All three are **MIT/Apache-2.0 dual-licensed** — permissive, and compatible with embedding in the GPL AstroBurst fork.
+Three crates from CDS Strasbourg, designed to work together (fitsrs re-exports wcs-rs; `HDU::wcs()` builds a WCS directly from a parsed header; wcs-rs delegates projection math to mapproj). They power **Aladin Lite v3**, i.e. they parse real survey data in production daily. All three are **MIT/Apache-2.0 dual-licensed** — permissive, and compatible with embedding in the AGPL AstroBurst fork.
 
 | Crate | Role | Notable scope |
 |---|---|---|

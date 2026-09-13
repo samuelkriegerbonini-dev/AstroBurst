@@ -165,4 +165,4 @@ All contributions require signing our [Contributor License Agreement (CLA)](CLA.
 
 ## License
 
-AstroBurst is licensed under the [GNU General Public License v3.0](LICENSE). By contributing, you agree to the terms outlined in the CLA.
+AstroBurst is licensed under the [GNU Affero General Public License v3.0](LICENSE). By contributing, you agree to the terms outlined in the CLA.
