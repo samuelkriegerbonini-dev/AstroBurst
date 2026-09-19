@@ -2,8 +2,43 @@ use anyhow::{bail, Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::math::median::f32_cmp;
+use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::math::median::{f32_cmp, median_f32_mut};
+use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 pub(crate) use crate::infra::fits::reader::load_fits_image;
+
+const FLAT_MEDIAN_MAX_SAMPLES: usize = 131_072;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MasterConfig {
+    pub rejection: RejectionMethod,
+    pub combine: CombineMethod,
+    pub sigma_low: f32,
+    pub sigma_high: f32,
+}
+
+impl Default for MasterConfig {
+    fn default() -> Self {
+        Self {
+            rejection: RejectionMethod::WinsorizedSigmaClip,
+            combine: CombineMethod::Mean,
+            sigma_low: 4.0,
+            sigma_high: 3.0,
+        }
+    }
+}
+
+impl MasterConfig {
+    pub fn rejection_params(&self) -> RejectionParams {
+        RejectionParams {
+            rejection: self.rejection,
+            combine: self.combine,
+            sigma_low: self.sigma_low,
+            sigma_high: self.sigma_high,
+            ..RejectionParams::default()
+        }
+    }
+}
 
 pub struct CalibrationConfig {
     pub master_bias: Option<Array2<f32>>,
@@ -103,13 +138,23 @@ pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Result<
     Ok(Array2::from_shape_vec((rows, cols), result).unwrap())
 }
 
-fn median_combine_row_major(
-    frames: Vec<Array2<f32>>,
-    rows: usize,
-    cols: usize,
-) -> Vec<f32> {
+pub fn combine_master_frames(frames: &[Array2<f32>], config: &MasterConfig) -> Result<Array2<f32>> {
+    let Some(first) = frames.first() else {
+        bail!("No frames to combine");
+    };
+    let (rows, cols) = first.dim();
+    for (i, frame) in frames.iter().enumerate().skip(1) {
+        if frame.dim() != (rows, cols) {
+            bail!(
+                "Dimension mismatch: frame {} is {:?}, expected ({}, {})",
+                i, frame.dim(), rows, cols
+            );
+        }
+    }
+
     let n = frames.len();
     let npix = rows * cols;
+    let params = config.rejection_params();
 
     let slices: Vec<&[f32]> = frames
         .iter()
@@ -122,42 +167,64 @@ fn median_combine_row_major(
         .par_chunks_mut(cols)
         .enumerate()
         .for_each(|(y, row_buf)| {
-            let mut vals = Vec::with_capacity(n);
+            let mut samples: Vec<Sample> = Vec::with_capacity(n);
+            let mut scratch = KernelScratch::default();
             let base = y * cols;
             for x in 0..cols {
-                vals.clear();
+                samples.clear();
                 let idx = base + x;
-                for s in &slices {
+                for (i, s) in slices.iter().enumerate() {
                     let v = s[idx];
                     if v.is_finite() {
-                        vals.push(v);
+                        samples.push(Sample::plain(v, i as u16));
                     }
                 }
-                if vals.is_empty() {
-                    row_buf[x] = 0.0;
-                } else {
-                    let mid = vals.len() / 2;
-                    vals.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
-                    row_buf[x] = vals[mid];
-                }
+                let out = reject_and_combine_with(&mut samples, None, &params, &mut scratch);
+                row_buf[x] = if out.kept == 0 { 0.0 } else { out.value };
             }
         });
 
-    result
+    Array2::from_shape_vec((rows, cols), result).context("Failed to reshape combined master")
 }
 
-pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
-    if bias_paths.is_empty() {
-        bail!("No bias frames provided");
+fn sampled_positive_median(frame: &Array2<f32>) -> Option<f32> {
+    let stride = (frame.len() / FLAT_MEDIAN_MAX_SAMPLES).max(1);
+    let mut samples: Vec<f32> = frame
+        .iter()
+        .step_by(stride)
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .collect();
+    if samples.is_empty() {
+        return None;
     }
+    Some(median_f32_mut(&mut samples))
+}
 
-    let first = load_fits_image(&bias_paths[0])?;
+pub fn scale_flats_to_first_median(frames: &mut [Array2<f32>]) {
+    let Some(reference) = frames.first().and_then(sampled_positive_median) else {
+        return;
+    };
+    frames.par_iter_mut().skip(1).for_each(|frame| {
+        if let Some(median) = sampled_positive_median(frame) {
+            if median > 0.0 {
+                let gain = reference / median;
+                if gain.is_finite() && gain != 1.0 {
+                    frame.mapv_inplace(|v| v * gain);
+                }
+            }
+        }
+    });
+}
+
+fn load_matching_frames(paths: &[String]) -> Result<Vec<Array2<f32>>> {
+    let first = load_fits_image(&paths[0])?;
     let (rows, cols) = first.dim();
 
-    let mut frames = Vec::with_capacity(bias_paths.len());
+    let mut frames = Vec::with_capacity(paths.len());
     frames.push(first);
 
-    for path in &bias_paths[1..] {
+    for path in &paths[1..] {
         let frame = load_fits_image(path)?;
         if frame.dim() != (rows, cols) {
             bail!(
@@ -167,50 +234,44 @@ pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
         }
         frames.push(frame);
     }
+    Ok(frames)
+}
 
-    let result = median_combine_row_major(frames, rows, cols);
+pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
+    create_master_bias_with(bias_paths, &MasterConfig::default())
+}
 
-    Ok(Array2::from_shape_vec((rows, cols), result)
-        .context("Failed to reshape master bias")?)
+pub fn create_master_bias_with(bias_paths: &[String], config: &MasterConfig) -> Result<Array2<f32>> {
+    if bias_paths.is_empty() {
+        bail!("No bias frames provided");
+    }
+    let frames = load_matching_frames(bias_paths)?;
+    combine_master_frames(&frames, config).context("Failed to combine master bias")
 }
 
 pub fn create_master_dark(
     dark_paths: &[String],
     master_bias: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>> {
+    create_master_dark_with(dark_paths, master_bias, &MasterConfig::default())
+}
+
+pub fn create_master_dark_with(
+    dark_paths: &[String],
+    master_bias: Option<&Array2<f32>>,
+    config: &MasterConfig,
+) -> Result<Array2<f32>> {
     if dark_paths.is_empty() {
         bail!("No dark frames provided");
     }
 
-    let first = load_fits_image(&dark_paths[0])?;
-    let (rows, cols) = first.dim();
-
-    let first = match master_bias {
-        Some(bias) => subtract_bias(&first, bias),
-        None => first,
-    };
-
-    let mut frames = Vec::with_capacity(dark_paths.len());
-    frames.push(first);
-
-    for path in &dark_paths[1..] {
-        let mut frame = load_fits_image(path)?;
-        if frame.dim() != (rows, cols) {
-            bail!(
-                "Dimension mismatch: expected ({}, {}), got {:?}",
-                rows, cols, frame.dim()
-            );
+    let mut frames = load_matching_frames(dark_paths)?;
+    if let Some(bias) = master_bias {
+        for frame in frames.iter_mut() {
+            *frame = subtract_bias(frame, bias);
         }
-        if let Some(bias) = master_bias {
-            frame = subtract_bias(&frame, bias);
-        }
-        frames.push(frame);
     }
-
-    let result = median_combine_row_major(frames, rows, cols);
-
-    Ok(Array2::from_shape_vec((rows, cols), result)
-        .context("Failed to reshape master dark")?)
+    combine_master_frames(&frames, config).context("Failed to combine master dark")
 }
 
 fn median_exposure_seconds(paths: &[String]) -> Option<f64> {
@@ -246,6 +307,16 @@ pub fn create_master_flat(
     master_dark: Option<&Array2<f32>>,
     dark_exposure_seconds: Option<f64>,
 ) -> Result<Array2<f32>> {
+    create_master_flat_with(flat_paths, master_bias, master_dark, dark_exposure_seconds, &MasterConfig::default())
+}
+
+pub fn create_master_flat_with(
+    flat_paths: &[String],
+    master_bias: Option<&Array2<f32>>,
+    master_dark: Option<&Array2<f32>>,
+    dark_exposure_seconds: Option<f64>,
+    config: &MasterConfig,
+) -> Result<Array2<f32>> {
     if flat_paths.is_empty() {
         bail!("No flat frames provided");
     }
@@ -256,34 +327,19 @@ pub fn create_master_flat(
         1.0
     };
 
-    let first = load_fits_image(&flat_paths[0])?;
-    let (rows, cols) = first.dim();
-
-    let preprocess = |mut frame: Array2<f32>| -> Array2<f32> {
+    let mut frames = load_matching_frames(flat_paths)?;
+    for frame in frames.iter_mut() {
         if let Some(bias) = master_bias {
-            frame = subtract_bias(&frame, bias);
+            *frame = subtract_bias(frame, bias);
         }
         if let Some(dark) = master_dark {
-            frame = subtract_dark(&frame, dark, dark_scale);
+            *frame = subtract_dark(frame, dark, dark_scale);
         }
-        frame
-    };
-
-    let mut frames = Vec::with_capacity(flat_paths.len());
-    frames.push(preprocess(first));
-
-    for path in &flat_paths[1..] {
-        let frame = load_fits_image(path)?;
-        if frame.dim() != (rows, cols) {
-            bail!(
-                "Dimension mismatch: expected ({}, {}), got {:?}",
-                rows, cols, frame.dim()
-            );
-        }
-        frames.push(preprocess(frame));
     }
 
-    let mut result = median_combine_row_major(frames, rows, cols);
+    scale_flats_to_first_median(&mut frames);
+
+    let mut result = combine_master_frames(&frames, config).context("Failed to combine master flat")?;
 
     let mut positives: Vec<f32> = result
         .iter()
@@ -297,17 +353,16 @@ pub fn create_master_flat(
         let median = positives[mid] as f64;
         let inv_median = if median.abs() > 1e-10 { 1.0 / median as f32 } else { 1.0 };
 
-        result.par_iter_mut().for_each(|v| {
-            if v.is_finite() && *v > 0.0 {
-                *v *= inv_median;
+        result.par_mapv_inplace(|v| {
+            if v.is_finite() && v > 0.0 {
+                v * inv_median
             } else {
-                *v = 1.0;
+                1.0
             }
         });
     }
 
-    Ok(Array2::from_shape_vec((rows, cols), result)
-        .context("Failed to reshape normalized master flat")?)
+    Ok(result)
 }
 
 pub fn calibrate_from_paths(
@@ -499,5 +554,108 @@ mod tests {
             dark_exposure_ratio: 1.0,
         };
         assert!(calibrate_image(&raw, &config).is_err());
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn unit(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+
+        fn gaussian(&mut self) -> f64 {
+            let u1 = self.unit().max(1e-12);
+            let u2 = self.unit();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    fn gaussian_frames(n: usize, rows: usize, cols: usize, mean: f32, sigma: f32, seed: u64) -> Vec<Array2<f32>> {
+        let mut rng = Lcg(seed);
+        (0..n)
+            .map(|_| Array2::from_shape_fn((rows, cols), |_| mean + sigma * rng.gaussian() as f32))
+            .collect()
+    }
+
+    fn sample_sigma(arr: &Array2<f32>) -> f64 {
+        let n = arr.len() as f64;
+        let mean = arr.iter().map(|&v| v as f64).sum::<f64>() / n;
+        (arr.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    }
+
+    #[test]
+    fn master_config_default_is_winsorized_mean_with_pixinsight_sigmas() {
+        let c = MasterConfig::default();
+        assert_eq!(c.rejection, RejectionMethod::WinsorizedSigmaClip);
+        assert_eq!(c.combine, CombineMethod::Mean);
+        assert_eq!((c.sigma_low, c.sigma_high), (4.0, 3.0));
+    }
+
+    #[test]
+    fn master_combine_removes_cosmic_ray_and_keeps_level() {
+        let mut frames: Vec<Array2<f32>> = (0..7).map(|_| Array2::from_elem((4, 4), 100.0)).collect();
+        frames[3][[1, 2]] = 60000.0;
+        let master = combine_master_frames(&frames, &MasterConfig::default()).unwrap();
+        assert_eq!(master.dim(), (4, 4));
+        assert!((master[[1, 2]] - 100.0).abs() < 1e-3, "cosmic ray leaked: {}", master[[1, 2]]);
+        assert!((master[[0, 0]] - 100.0).abs() < 1e-3);
+
+        let plain_mean = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Mean, ..MasterConfig::default() };
+        let leaked = combine_master_frames(&frames, &plain_mean).unwrap();
+        assert!(leaked[[1, 2]] > 8000.0);
+    }
+
+    #[test]
+    fn master_combine_reduces_noise_like_a_mean_not_a_median() {
+        let frames = gaussian_frames(7, 64, 64, 1000.0, 1.0, 20260919);
+        let mean_master = combine_master_frames(&frames, &MasterConfig::default()).unwrap();
+        let median_only = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Median, ..MasterConfig::default() };
+        let median_master = combine_master_frames(&frames, &median_only).unwrap();
+        let expected = 1.0 / 7f64.sqrt();
+        let s_mean = sample_sigma(&mean_master);
+        let s_median = sample_sigma(&median_master);
+        assert!((s_mean - expected).abs() < 0.15 * expected, "mean master sigma {s_mean} vs expected {expected}");
+        assert!(s_median > s_mean * 1.1, "median master {s_median} should be noisier than mean master {s_mean}");
+    }
+
+    #[test]
+    fn master_combine_rejects_shape_mismatch_and_empty_input() {
+        let frames = vec![Array2::from_elem((2, 2), 1.0f32), Array2::from_elem((2, 3), 1.0f32)];
+        assert!(combine_master_frames(&frames, &MasterConfig::default()).is_err());
+        assert!(combine_master_frames(&[], &MasterConfig::default()).is_err());
+    }
+
+    #[test]
+    fn flat_frames_are_scaled_to_first_median_before_combining() {
+        let a = Array2::from_shape_vec((1, 4), vec![10.0, 20.0, 30.0, 40.0]).unwrap();
+        let mut frames = vec![a.clone(), a.mapv(|v| v * 2.0), a.mapv(|v| v * 0.25)];
+        scale_flats_to_first_median(&mut frames);
+        assert_eq!(frames[0], a);
+        for frame in &frames[1..] {
+            for (x, y) in frame.iter().zip(a.iter()) {
+                assert!((x - y).abs() < 1e-4, "{x} vs {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn master_bias_from_paths_uses_rejection_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..7 {
+            let mut frame = Array2::from_elem((4, 4), 100.0f32);
+            if i == 4 {
+                frame[[2, 1]] = 60000.0;
+            }
+            let path = dir.path().join(format!("bias{i}.fits"));
+            crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &frame, None).unwrap();
+            paths.push(path.to_str().unwrap().to_string());
+        }
+        let master = create_master_bias(&paths).unwrap();
+        assert!((master[[2, 1]] - 100.0).abs() < 1e-3);
+        let plain_mean = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Mean, ..MasterConfig::default() };
+        let leaked = create_master_bias_with(&paths, &plain_mean).unwrap();
+        assert!(leaked[[2, 1]] > 8000.0);
     }
 }

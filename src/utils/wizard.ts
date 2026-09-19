@@ -24,6 +24,8 @@ export interface SubframeMetrics {
   background_median: number;
   background_sigma: number;
   noise_ratio: number;
+  noise_sigma: number;
+  noise_fraction: number;
   weight: number;
   accepted: boolean;
 }

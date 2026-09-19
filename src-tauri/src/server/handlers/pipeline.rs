@@ -8,15 +8,17 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use astroburst_lib::core::imaging::calibration_pipeline::{
-    BatchPipelineConfig, BatchStackConfig, CalibrationMasters, ChannelInput,
-    run_batch_pipeline,
+    lights_with_dq_planes, run_batch_pipeline, validate_cosmetic_config, BatchPipelineConfig,
+    BatchStackConfig, CalibrationMasters, ChannelInput, DQ_COSMETIC_WARNING,
 };
+use astroburst_lib::core::imaging::cosmetic::CosmeticConfig;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat,
 };
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::{load_fits_image, read_primary_header};
+use astroburst_lib::types::stacking::{CombineMethod, RejectionMethod};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -70,6 +72,18 @@ pub struct PipelineParams {
     pub normalize: Option<bool>,
     pub align: Option<bool>,
     pub result_prefix: Option<String>,
+    pub rejection: Option<String>,
+    pub combine: Option<String>,
+    #[serde(default)]
+    pub cosmetic: Option<CosmeticConfig>,
+}
+
+fn cosmetic_warnings(light_paths: Vec<String>) -> Vec<String> {
+    if lights_with_dq_planes(light_paths.iter()).is_empty() {
+        Vec::new()
+    } else {
+        vec![DQ_COSMETIC_WARNING.to_string()]
+    }
 }
 
 fn read_exposure_s(path: &str) -> Option<f64> {
@@ -128,14 +142,39 @@ pub async fn run(
     let flat_paths = params.flat_paths.unwrap_or_default();
     let prefix = params.result_prefix.unwrap_or_default();
 
+    let rejection = match params.rejection.as_deref() {
+        Some(name) => RejectionMethod::from_name(name).map_err(AppError::BadRequest)?,
+        None => RejectionMethod::default(),
+    };
+    let combine = match params.combine.as_deref() {
+        Some(name) => CombineMethod::from_name(name).map_err(AppError::BadRequest)?,
+        None => CombineMethod::default(),
+    };
+
+    if let Some(cosmetic) = &params.cosmetic {
+        validate_cosmetic_config(cosmetic).map_err(AppError::BadRequest)?;
+    }
+
     let config = BatchPipelineConfig {
         stack: BatchStackConfig {
             sigma_low: params.sigma_low.unwrap_or(2.5),
             sigma_high: params.sigma_high.unwrap_or(3.0),
             max_iterations: 5,
             normalize_before_stack: params.normalize.unwrap_or(true),
+            rejection,
+            combine,
         },
         align: params.align.unwrap_or(true),
+        cosmetic: params.cosmetic,
+    };
+
+    let warnings = if config.cosmetic.is_some() {
+        let light_paths: Vec<String> = params.channels.iter().flat_map(|ch| ch.paths.iter().cloned()).collect();
+        tokio::task::spawn_blocking(move || cosmetic_warnings(light_paths))
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("dq inspection panicked: {e}")))?
+    } else {
+        Vec::new()
     };
 
     let slot_names: Vec<String> = params
@@ -244,6 +283,7 @@ pub async fn run(
             "job_id": job_id,
             "status": "running",
             "slots": slot_names_resp,
+            "warnings": warnings,
         })),
     ))
 }

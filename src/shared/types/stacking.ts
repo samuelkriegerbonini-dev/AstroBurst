@@ -1,3 +1,24 @@
+import type { CosmeticConfig } from "./cosmetic";
+
+export type RejectionMethod =
+  | "none"
+  | "sigma_clip"
+  | "winsorized_sigma_clip"
+  | "linear_fit_clip"
+  | "percentile_clip"
+  | "min_max";
+
+export type CombineMethod = "mean" | "median" | "min" | "max";
+
+export type NormalizationMethod =
+  | "none"
+  | "additive"
+  | "multiplicative"
+  | "additive_scaling"
+  | "multiplicative_scaling";
+
+export type RejectionNormalization = "none" | "scale_offset";
+
 export interface CalibrateResult {
   png_path: string;
   fits_path?: string;
@@ -10,6 +31,11 @@ export interface CalibrateResult {
   elapsed_ms: number;
 }
 
+export interface StackNormalizationApplied {
+  offset: number;
+  scale: number;
+}
+
 export interface StackResult {
   png_path: string;
   fits_path?: string;
@@ -19,6 +45,13 @@ export interface StackResult {
   offsets?: [number, number][];
   dimensions: [number, number];
   elapsed_ms: number;
+  rejection?: RejectionMethod;
+  combine?: CombineMethod;
+  normalization?: NormalizationMethod;
+  rejection_normalization?: RejectionNormalization;
+  normalization_applied?: StackNormalizationApplied[];
+  rejection_low_fits?: string | null;
+  rejection_high_fits?: string | null;
 }
 
 export interface PipelineChannel {
@@ -35,6 +68,9 @@ export interface PipelineRequest {
   sigma_high?: number;
   normalize?: boolean;
   align?: boolean;
+  rejection?: RejectionMethod;
+  combine?: CombineMethod;
+  cosmetic?: CosmeticConfig | null;
 }
 
 export interface PipelineChannelStats {
@@ -43,6 +79,7 @@ export interface PipelineChannelStats {
   lights_after_rejection?: number[];
   mean: number;
   stddev: number;
+  cosmetic_replaced?: number | null;
 }
 
 export interface PipelineStats {
@@ -64,6 +101,7 @@ export interface PipelineResult {
   channel_previews: PipelineChannelPreview[];
   rgb_preview?: string;
   elapsed_ms?: number;
+  warnings?: string[];
 }
 
 export interface CalibrateOptions {
@@ -81,6 +119,16 @@ export interface StackOptions {
   align?: boolean;
   alignMethod?: string;
   weights?: number[];
+  rejection?: RejectionMethod;
+  combine?: CombineMethod;
+  normalization?: NormalizationMethod;
+  rejectionNormalization?: RejectionNormalization;
+  winsorCutoff?: number;
+  percentileLow?: number;
+  percentileHigh?: number;
+  minmaxLow?: number;
+  minmaxHigh?: number;
+  rejectionMaps?: boolean;
 }
 
 export interface DrizzleRgbOptions {

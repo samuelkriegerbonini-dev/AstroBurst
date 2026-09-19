@@ -4,6 +4,10 @@ import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorA
 import type { ProcessedFile } from "../../shared/types";
 
 const DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
+const DEFAULT_BIAS = 0;
+const BIAS_MIN = -1;
+const BIAS_MAX = 3;
+const BIAS_STEP = 0.05;
 const SCALE_LABELS = ["Fine detail", "Small structures", "Medium structures", "Large structures", "Very large"];
 
 interface WaveletResult {
@@ -29,9 +33,27 @@ const ICON = (
   </svg>
 );
 
+function fitToScales(prev: number[], numScales: number, defaults: readonly number[], fallback: number): number[] {
+  if (prev.length === numScales) return prev;
+  const next: number[] = [];
+  for (let i = 0; i < numScales; i++) {
+    next.push(prev[i] ?? defaults[i] ?? fallback);
+  }
+  return next;
+}
+
+function scaleLabel(idx: number): string {
+  return SCALE_LABELS[idx] || `Scale ${idx + 1}`;
+}
+
+function formatBias(v: number): string {
+  return `${v > 0 ? "+" : ""}${v.toFixed(2)}`;
+}
+
 export default function WaveletPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: WaveletPanelProps) {
   const [numScales, setNumScales] = useState(5);
   const [thresholds, setThresholds] = useState<number[]>([...DEFAULT_THRESHOLDS]);
+  const [layerBias, setLayerBias] = useState<number[]>(() => Array(5).fill(DEFAULT_BIAS));
   const [linear, setLinear] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<WaveletResult | null>(null);
@@ -45,16 +67,24 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
     });
   }, []);
 
-  useEffect(() => {
-    setThresholds((prev) => {
-      if (prev.length === numScales) return prev;
-      const next: number[] = [];
-      for (let i = 0; i < numScales; i++) {
-        next.push(prev[i] ?? DEFAULT_THRESHOLDS[i] ?? 1.0);
-      }
+  const updateBias = useCallback((idx: number, value: number) => {
+    setLayerBias((prev) => {
+      const next = [...prev];
+      next[idx] = value;
       return next;
     });
+  }, []);
+
+  const resetBias = useCallback(() => {
+    setLayerBias(Array(numScales).fill(DEFAULT_BIAS));
   }, [numScales]);
+
+  useEffect(() => {
+    setThresholds((prev) => fitToScales(prev, numScales, DEFAULT_THRESHOLDS, 1.0));
+    setLayerBias((prev) => fitToScales(prev, numScales, [], DEFAULT_BIAS));
+  }, [numScales]);
+
+  const hasBias = layerBias.slice(0, numScales).some((b) => b !== DEFAULT_BIAS);
 
   const handleRun = useCallback(async () => {
     if (!selectedFile?.path) return;
@@ -66,6 +96,7 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
         numScales,
         thresholds: thresholds.slice(0, numScales),
         linear,
+        layerBias: layerBias.slice(0, numScales),
       });
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
@@ -75,7 +106,7 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
     } finally {
       setIsRunning(false);
     }
-  }, [selectedFile, outputDir, numScales, thresholds, linear, onPreviewUpdate, onProcessingDone]);
+  }, [selectedFile, outputDir, numScales, thresholds, linear, layerBias, onPreviewUpdate, onProcessingDone]);
 
   const originalUrl = selectedFile?.result?.previewUrl;
   const resultUrl = result?.previewUrl;
@@ -97,7 +128,7 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
           {thresholds.slice(0, numScales).map((val, idx) => (
             <div key={idx} className="flex items-center gap-2">
               <span className="text-[10px] text-zinc-500 w-24 truncate">
-                {SCALE_LABELS[idx] || `Scale ${idx + 1}`}
+                {scaleLabel(idx)}
               </span>
               <div className="flex-1">
                 <Slider
@@ -115,6 +146,44 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
               <span className="text-[10px] font-mono text-zinc-300 w-6 text-right">{val.toFixed(1)}</span>
             </div>
           ))}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-zinc-400">Detail bias per scale</label>
+            {hasBias && (
+              <button
+                type="button"
+                className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                disabled={isRunning}
+                onClick={resetBias}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {layerBias.slice(0, numScales).map((val, idx) => (
+            <div key={idx} className="flex items-center gap-2">
+              <span className="text-[10px] text-zinc-500 w-24 truncate">
+                {scaleLabel(idx)}
+              </span>
+              <div className="flex-1">
+                <Slider
+                  label=""
+                  value={val}
+                  min={BIAS_MIN}
+                  max={BIAS_MAX}
+                  step={BIAS_STEP}
+                  disabled={isRunning}
+                  accent="sky"
+                  format={formatBias}
+                  onChange={(v) => updateBias(idx, v)}
+                />
+              </div>
+              <span className="text-[10px] font-mono text-zinc-300 w-10 text-right">{formatBias(val)}</span>
+            </div>
+          ))}
+          <span className="text-[10px] text-zinc-600">0 keeps the layer, positive sharpens, negative softens (-1 removes it).</span>
         </div>
 
         <Toggle label="Soft threshold (linear)" checked={linear} disabled={isRunning} accent="sky" onChange={setLinear} />

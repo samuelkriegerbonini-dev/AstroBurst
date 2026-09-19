@@ -611,7 +611,7 @@ fn evaluate_polynomial_surface(
     Array2::from_shape_vec((rows, cols), result).unwrap()
 }
 
-fn apply_correction(
+pub(crate) fn apply_correction(
     image: &Array2<f32>,
     model: &Array2<f32>,
     mode: &BackgroundMode,
@@ -685,7 +685,7 @@ fn compute_rms_residual(
     (sum_sq / samples.len() as f64).sqrt()
 }
 
-fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Result<()> {
+pub(crate) fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Result<()> {
     for col in 0..n {
         let mut max_row = col;
         let mut max_val = a[col * n + col].abs();

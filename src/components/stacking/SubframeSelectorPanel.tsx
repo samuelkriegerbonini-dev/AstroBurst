@@ -2,13 +2,23 @@ import { useState, useCallback, useMemo } from "react";
 import { BarChart3, Check, X } from "lucide-react";
 import { Slider, RunButton, SectionHeader } from "../ui";
 import { analyzeSubframes, type SubframeMetrics, type SubframeAnalysisResult } from "../../services/analysis";
+import type { SubframeNoiseMetrics } from "../../shared/types/statistics";
 
 interface SubframeSelectorPanelProps {
   files: string[];
-  onSelectionChange?: (accepted: string[], rejected: string[]) => void;
+  onSelectionChange?: (accepted: string[], rejected: string[], weightsByPath?: Record<string, number>) => void;
 }
 
+type SubframeRow = SubframeMetrics & Partial<SubframeNoiseMetrics>;
+type SubframeColumn = keyof SubframeRow;
+
 const ICON = <BarChart3 size={14} className="text-teal-400" />;
+
+function formatNoise(sigma: number | undefined): string {
+  if (sigma == null || !Number.isFinite(sigma)) return "--";
+  if (sigma === 0) return "0";
+  return Math.abs(sigma) < 1e-3 || Math.abs(sigma) >= 1e6 ? sigma.toExponential(2) : sigma.toPrecision(4);
+}
 
 export default function SubframeSelectorPanel({ files, onSelectionChange }: SubframeSelectorPanelProps) {
   const [loading, setLoading] = useState(false);
@@ -26,7 +36,7 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
   const [snrWeight, setSnrWeight] = useState(1.0);
   const [noiseWeight, setNoiseWeight] = useState(0.3);
 
-  const [sortBy, setSortBy] = useState<keyof SubframeMetrics>("weight");
+  const [sortBy, setSortBy] = useState<SubframeColumn>("weight");
   const [sortAsc, setSortAsc] = useState(false);
 
   const handleAnalyze = useCallback(async () => {
@@ -68,7 +78,7 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
     });
   }, [result]);
 
-  const effectiveSubframes = useMemo(() => {
+  const effectiveSubframes = useMemo<SubframeRow[]>(() => {
     if (!result) return [];
     return result.subframes.map((s) => ({
       ...s,
@@ -79,12 +89,18 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
   const sorted = useMemo(() => {
     const arr = [...effectiveSubframes];
     arr.sort((a, b) => {
-      const va = a[sortBy] as number;
-      const vb = b[sortBy] as number;
+      const va = a[sortBy];
+      const vb = b[sortBy];
       if (typeof va === "boolean" || typeof vb === "boolean") {
         return sortAsc ? Number(va) - Number(vb) : Number(vb) - Number(va);
       }
-      return sortAsc ? va - vb : vb - va;
+      if (typeof va === "string" || typeof vb === "string") {
+        const cmp = String(va).localeCompare(String(vb));
+        return sortAsc ? cmp : -cmp;
+      }
+      const na = va ?? Number.NEGATIVE_INFINITY;
+      const nb = vb ?? Number.NEGATIVE_INFINITY;
+      return sortAsc ? na - nb : nb - na;
     });
     return arr;
   }, [effectiveSubframes, sortBy, sortAsc]);
@@ -96,10 +112,14 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
     if (!onSelectionChange) return;
     const accepted = effectiveSubframes.filter((s) => s.accepted).map((s) => s.file_path);
     const rejected = effectiveSubframes.filter((s) => !s.accepted).map((s) => s.file_path);
-    onSelectionChange(accepted, rejected);
+    onSelectionChange(
+      accepted,
+      rejected,
+      Object.fromEntries(effectiveSubframes.filter((s) => s.accepted).map((s) => [s.file_path, s.weight])),
+    );
   }, [effectiveSubframes, onSelectionChange]);
 
-  const handleSort = useCallback((col: keyof SubframeMetrics) => {
+  const handleSort = useCallback((col: SubframeColumn) => {
     if (sortBy === col) {
       setSortAsc((prev) => !prev);
     } else {
@@ -183,6 +203,7 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
                 <ThSort label="FWHM" col="median_fwhm" current={sortBy} asc={sortAsc} onClick={handleSort} />
                 <ThSort label="Ecc" col="median_eccentricity" current={sortBy} asc={sortAsc} onClick={handleSort} />
                 <ThSort label="SNR" col="median_snr" current={sortBy} asc={sortAsc} onClick={handleSort} />
+                <ThSort label="Noise" col="noise_sigma" current={sortBy} asc={sortAsc} onClick={handleSort} />
                 <ThSort label="Weight" col="weight" current={sortBy} asc={sortAsc} onClick={handleSort} />
               </tr>
               </thead>
@@ -216,6 +237,12 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
                     <td className={`px-2 py-1 text-right font-mono ${sub.median_snr < minSnr ? "text-red-400" : "text-zinc-300"}`}>
                       {sub.median_snr.toFixed(1)}
                     </td>
+                    <td
+                      className="px-2 py-1 text-right font-mono text-zinc-300"
+                      title={sub.noise_fraction != null ? `k-sigma MRS noise, ${(sub.noise_fraction * 100).toFixed(0)}% of pixels used` : "k-sigma MRS noise"}
+                    >
+                      {formatNoise(sub.noise_sigma)}
+                    </td>
                     <td className="px-2 py-1 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <div className="w-12 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -247,10 +274,10 @@ function ThSort({
                   onClick,
                 }: {
   label: string;
-  col: keyof SubframeMetrics;
-  current: keyof SubframeMetrics;
+  col: SubframeColumn;
+  current: SubframeColumn;
   asc: boolean;
-  onClick: (col: keyof SubframeMetrics) => void;
+  onClick: (col: SubframeColumn) => void;
 }) {
   const active = current === col;
   return (

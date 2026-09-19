@@ -106,6 +106,7 @@ export function waveletDenoise(
     numScales?: number;
     thresholds?: number[];
     linear?: boolean;
+    layerBias?: number[];
   } = {},
 ): Promise<WaveletResult> {
   return withPreview<WaveletResult>("wavelet_denoise_cmd", outputDir, {
@@ -113,6 +114,7 @@ export function waveletDenoise(
     numScales: options.numScales ?? 5,
     thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
     linear: options.linear ?? true,
+    layerBias: options.layerBias ?? null,
   });
 }
 

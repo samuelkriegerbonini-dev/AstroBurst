@@ -2,6 +2,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use super::star_detection::{detect_stars, DetectedStar};
+use crate::core::imaging::statistics::evaluate_noise;
 
 const DETECTION_SIGMA: f64 = 4.0;
 const MIN_STARS_FOR_METRICS: usize = 5;
@@ -17,6 +18,8 @@ pub struct SubframeMetrics {
     pub background_median: f64,
     pub background_sigma: f64,
     pub noise_ratio: f64,
+    pub noise_sigma: f64,
+    pub noise_fraction: f64,
     pub weight: f64,
     pub accepted: bool,
 }
@@ -61,6 +64,7 @@ pub fn analyze_subframe(
 
     let result = detect_stars(image, DETECTION_SIGMA);
     let stars = &result.stars;
+    let noise = evaluate_noise(image);
 
     if stars.len() < MIN_STARS_FOR_METRICS.min(config.min_stars) {
         return SubframeMetrics {
@@ -73,6 +77,8 @@ pub fn analyze_subframe(
             background_median: result.background_median,
             background_sigma: result.background_sigma,
             noise_ratio: 0.0,
+            noise_sigma: noise.sigma,
+            noise_fraction: noise.fraction,
             weight: 0.0,
             accepted: false,
         };
@@ -105,6 +111,8 @@ pub fn analyze_subframe(
         background_median: result.background_median,
         background_sigma: result.background_sigma,
         noise_ratio,
+        noise_sigma: noise.sigma,
+        noise_fraction: noise.fraction,
         weight,
         accepted,
     }
@@ -196,17 +204,45 @@ mod tests {
                 file_path: "a".into(), file_name: "a".into(),
                 star_count: 10, median_fwhm: 2.0, median_eccentricity: 0.2,
                 median_snr: 20.0, background_median: 0.1, background_sigma: 0.01,
-                noise_ratio: 0.1, weight: 0.5, accepted: true,
+                noise_ratio: 0.1, noise_sigma: 0.01, noise_fraction: 0.95, weight: 0.5, accepted: true,
             },
             SubframeMetrics {
                 file_path: "b".into(), file_name: "b".into(),
                 star_count: 10, median_fwhm: 3.0, median_eccentricity: 0.4,
                 median_snr: 15.0, background_median: 0.1, background_sigma: 0.02,
-                noise_ratio: 0.2, weight: 1.0, accepted: true,
+                noise_ratio: 0.2, noise_sigma: 0.02, noise_fraction: 0.95, weight: 1.0, accepted: true,
             },
         ];
         normalize_weights(&mut metrics);
         assert!((metrics[1].weight - 1.0).abs() < 1e-10);
         assert!((metrics[0].weight - 0.5).abs() < 1e-10);
+    }
+
+    fn gaussian_noise_image(rows: usize, cols: usize, sigma: f64, seed: u64) -> Array2<f32> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((rows, cols), |_| {
+            let u1: f64 = rng.gen::<f64>().max(1e-30);
+            let u2: f64 = rng.gen::<f64>();
+            (100.0 + sigma * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
+        })
+    }
+
+    #[test]
+    fn test_analyze_subframe_reports_k_sigma_noise_even_without_stars() {
+        let image = gaussian_noise_image(128, 128, 2.5, 9);
+        let metrics = analyze_subframe(&image, "C:/frames/noise_only.fits", &SubframeWeightConfig::default());
+        assert_eq!(metrics.file_name, "noise_only.fits");
+        assert!((metrics.noise_sigma - 2.5).abs() / 2.5 < 0.05, "noise sigma {}", metrics.noise_sigma);
+        assert!(metrics.noise_fraction > 0.9, "fraction {}", metrics.noise_fraction);
+    }
+
+    #[test]
+    fn test_analyze_subframe_noise_orders_frames_by_noise_level() {
+        let cfg = SubframeWeightConfig::default();
+        let quiet = analyze_subframe(&gaussian_noise_image(96, 96, 1.0, 1), "quiet.fits", &cfg);
+        let loud = analyze_subframe(&gaussian_noise_image(96, 96, 4.0, 2), "loud.fits", &cfg);
+        assert!(loud.noise_sigma > 3.0 * quiet.noise_sigma, "quiet {} loud {}", quiet.noise_sigma, loud.noise_sigma);
     }
 }

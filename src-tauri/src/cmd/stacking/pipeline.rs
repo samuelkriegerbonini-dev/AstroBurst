@@ -2,16 +2,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::imaging::calibration_pipeline::{
-    run_batch_pipeline, BatchPipelineConfig, BatchPipelineResult, BatchPipelineStats,
-    BatchStackConfig, CalibrationMasters, ChannelInput,
+    lights_with_dq_planes, run_batch_pipeline, BatchPipelineConfig, BatchPipelineResult,
+    BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput, DQ_COSMETIC_WARNING,
 };
+use crate::core::imaging::cosmetic::CosmeticConfig;
 use crate::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat, load_fits_image,
 };
 use crate::infra::fits::reader::read_primary_header;
 use crate::types::constants::{
     RES_LABEL, RES_PIXELS_B64, RES_WIDTH, RES_HEIGHT,
-    RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW,
+    RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW, RES_WARNINGS,
 };
 
 const PIPELINE_PREVIEW_DIM: usize = 2048;
@@ -32,10 +33,26 @@ pub struct PipelineRequest {
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
     pub align: Option<bool>,
+    pub rejection: Option<String>,
+    pub combine: Option<String>,
+    #[serde(default)]
+    pub cosmetic: Option<CosmeticConfig>,
 }
 
 fn load_batch(paths: &[String]) -> Result<Vec<ndarray::Array2<f32>>, anyhow::Error> {
     paths.iter().map(|p| load_fits_image(p)).collect()
+}
+
+fn pipeline_warnings(channels: &[ChannelFilesInput], cosmetic_enabled: bool) -> Vec<String> {
+    if !cosmetic_enabled {
+        return Vec::new();
+    }
+    let flagged = lights_with_dq_planes(channels.iter().flat_map(|ch| ch.paths.iter()));
+    if flagged.is_empty() {
+        Vec::new()
+    } else {
+        vec![DQ_COSMETIC_WARNING.to_string()]
+    }
 }
 
 fn read_exposure_seconds(path: &str) -> Option<f64> {
@@ -147,6 +164,7 @@ fn compose_rgb_from_stacked_masters(
             ..BatchStackConfig::default()
         },
         align: false,
+        cosmetic: None,
     };
     run_batch_pipeline(channels, &no_masters, &passthrough)
 }
@@ -193,6 +211,11 @@ pub async fn run_pipeline_cmd(
     request: PipelineRequest,
 ) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
+            .map_err(|e| format!("{:#}", e))?;
+        let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
+            .map_err(|e| format!("{:#}", e))?;
+
         let master_bias = if request.bias_paths.is_empty() {
             None
         } else {
@@ -261,10 +284,14 @@ pub async fn run_pipeline_cmd(
                 sigma_high: request.sigma_high.unwrap_or(3.0),
                 max_iterations: 5,
                 normalize_before_stack: request.normalize.unwrap_or(true),
+                rejection,
+                combine,
             },
             align: request.align.unwrap_or(true),
+            cosmetic: request.cosmetic.clone(),
         };
 
+        let warnings = pipeline_warnings(&request.channels, config.cosmetic.is_some());
         let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, &config)?;
 
         let channel_previews: Vec<serde_json::Value> = result
@@ -287,6 +314,7 @@ pub async fn run_pipeline_cmd(
             RES_STATS: result.stats,
             RES_CHANNEL_PREVIEWS: channel_previews,
             RES_RGB_PREVIEW: rgb_preview,
+            RES_WARNINGS: warnings,
         }))
     })
         .await
@@ -335,7 +363,44 @@ mod tests {
         BatchPipelineConfig {
             stack: BatchStackConfig::default(),
             align: false,
+            cosmetic: None,
         }
+    }
+
+    #[test]
+    fn pipeline_request_accepts_a_partial_cosmetic_object_and_defaults_to_off() {
+        let with: PipelineRequest = serde_json::from_str(
+            r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[],"cosmetic":{"use_master_dark":true,"dark_hot_sigma":5}}"#,
+        )
+        .unwrap();
+        let cosmetic = with.cosmetic.expect("cosmetic parsed");
+        assert!(cosmetic.use_master_dark);
+        assert_eq!(cosmetic.dark_hot_sigma, Some(5.0));
+        assert!(cosmetic.defects.is_empty());
+
+        let without: PipelineRequest =
+            serde_json::from_str(r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[]}"#).unwrap();
+        assert!(without.cosmetic.is_none());
+    }
+
+    #[test]
+    fn pipeline_warnings_flag_dq_planes_only_when_cosmetic_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mef = dir.path().join("light_dq.fits");
+        crate::infra::fits::reader::test_fixtures::sci_err_dq_mef(&mef, 4, 4, vec![0i32; 16]);
+        let plain = dir.path().join("light_plain.fits");
+        crate::infra::fits::writer::write_fits_mono(plain.to_str().unwrap(), &Array2::from_elem((4, 4), 1.0f32), None)
+            .unwrap();
+
+        let dq_channel = vec![ChannelFilesInput {
+            label: "L".into(),
+            paths: vec![plain.to_str().unwrap().to_string(), mef.to_str().unwrap().to_string()],
+        }];
+        assert_eq!(pipeline_warnings(&dq_channel, true), vec![DQ_COSMETIC_WARNING.to_string()]);
+        assert!(pipeline_warnings(&dq_channel, false).is_empty());
+
+        let plain_channel = vec![ChannelFilesInput { label: "L".into(), paths: vec![plain.to_str().unwrap().to_string()] }];
+        assert!(pipeline_warnings(&plain_channel, true).is_empty());
     }
 
     fn test_masters() -> CalibrationMasters {

@@ -4,8 +4,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::region::RegionShape;
+use astroburst_lib::core::imaging::statistics::{
+    evaluate_noise, evaluate_noise_in_region, statistics_from_finite, NoiseEvaluation,
+};
 use astroburst_lib::core::imaging::stats::{finite_slice_stats, percentile};
 use astroburst_lib::math::sigma_clipped_stats;
+use ndarray::{s, Array2};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -23,6 +28,8 @@ pub struct StatsParams {
     pub sigma_clip: Option<SigmaClipParams>,
     #[serde(default)]
     pub percentiles: Vec<f64>,
+    #[serde(default)]
+    pub noise: bool,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +45,33 @@ fn default_sigma() -> f32 {
 }
 fn default_maxiters() -> usize {
     5
+}
+
+fn pixel_window(arr: &Array2<f32>, region: &Value) -> Option<Array2<f32>> {
+    let x = region.get("x")?.as_u64()? as usize;
+    let y = region.get("y")?.as_u64()? as usize;
+    let width = region.get("width")?.as_u64()? as usize;
+    let height = region.get("height")?.as_u64()? as usize;
+    let (rows, cols) = arr.dim();
+    if width == 0 || height == 0 || x + width > cols || y + height > rows {
+        return None;
+    }
+    Some(arr.slice(s![y..y + height, x..x + width]).to_owned())
+}
+
+fn noise_for_request(
+    arr: &Array2<f32>,
+    shape: Option<&RegionShape>,
+    region: &Value,
+) -> Result<NoiseEvaluation> {
+    if let Some(shape) = shape {
+        return evaluate_noise_in_region(arr, shape, None)
+            .map_err(|e| AppError::BadRequest(format!("noise evaluation: {e:#}")));
+    }
+    Ok(match pixel_window(arr, region) {
+        Some(window) => evaluate_noise(&window),
+        None => evaluate_noise(arr),
+    })
 }
 
 async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
@@ -69,6 +103,7 @@ pub async fn stats(
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
     let mut finite = values.finite;
     let n_nan = values.n_nan;
+    let exact = statistics_from_finite(finite.clone(), finite.len() as u64 + n_nan, n_nan, 0);
     let base = finite_slice_stats(&mut finite);
 
     let mut body = json!({
@@ -82,7 +117,18 @@ pub async fn stats(
         "mean": base.mean,
         "valid_count": base.valid_count,
         "n_nan": n_nan,
+        "avg_dev": exact.avg_dev,
+        "bwmv_sqrt": exact.bwmv_sqrt,
+        "std_dev": exact.std_dev,
+        "count_fraction": exact.fraction,
+        "nan_count": exact.nan_count,
     });
+
+    if params.noise {
+        let noise = noise_for_request(arr, values.shape.as_ref(), &body["region"])?;
+        body["noise"] = serde_json::to_value(&noise)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("serialising noise evaluation: {e}")))?;
+    }
 
     if let Some(shape) = &values.shape {
         body["sum"] = json!(finite.iter().map(|&v| v as f64).sum::<f64>());

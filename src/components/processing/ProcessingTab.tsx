@@ -13,8 +13,21 @@ const PsfPanel = lazy(() => import("./PsfPanel"));
 const ArcsinhStretchPanel = lazy(() => import("./ArcsinhStretchPanel"));
 const MaskedStretchPanel = lazy(() => import("./MaskedStretchPanel"));
 const DebayerPanel = lazy(() => import("./DebayerPanel"));
+const PixelMathPanel = lazy(() => import("./PixelMathPanel"));
+const LocalContrastPanel = lazy(() => import("./LocalContrastPanel"));
+const HdrPanel = lazy(() => import("./HdrPanel"));
 
-type ProcessingSection = "debayer" | "background" | "denoise" | "psf" | "deconvolution" | "stretch" | "masked_stretch";
+type ProcessingSection =
+  | "debayer"
+  | "background"
+  | "denoise"
+  | "psf"
+  | "deconvolution"
+  | "stretch"
+  | "masked_stretch"
+  | "local_contrast"
+  | "hdr"
+  | "pixelmath";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "debayer", label: "Debayer", color: "orange" },
@@ -24,6 +37,9 @@ const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "deconvolution", label: "Deconv", color: "indigo" },
   { id: "stretch", label: "Stretch", color: "amber" },
   { id: "masked_stretch", label: "Masked", color: "rose" },
+  { id: "local_contrast", label: "LHE", color: "teal" },
+  { id: "hdr", label: "HDRMT", color: "violet" },
+  { id: "pixelmath", label: "PixelMath", color: "violet" },
 ];
 
 export interface ProcessingChain {
@@ -74,6 +90,7 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
   indigo: { active: "bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30", dot: "bg-indigo-400" },
   amber: { active: "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30", dot: "bg-amber-400" },
   rose: { active: "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30", dot: "bg-rose-400" },
+  teal: { active: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
 
 function ProcessingTabInner() {
@@ -272,6 +289,14 @@ function ProcessingTabInner() {
     return { ...file, path };
   }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
 
+  const nonLinearInput = useMemo(() => {
+    if (!file) return null;
+    const path = chain.maskedStretchFits || chain.stretchFits || file.path;
+    return { ...file, path };
+  }, [file, chain.maskedStretchFits, chain.stretchFits]);
+
+  const nonLinearChainedFrom = chain.maskedStretchFits ? "masked_stretch" : chain.stretchFits ? "stretch" : undefined;
+
   const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits || chain.maskedStretchFits;
 
   return (
@@ -405,6 +430,31 @@ function ProcessingTabInner() {
               chainedFrom={
                 chain.deconvFits ? "deconv" : chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
               }
+            />
+          </div>
+          <div style={{ display: active === "local_contrast" ? "block" : "none" }}>
+            <LocalContrastPanel
+              selectedFile={nonLinearInput}
+              outputDir={resolvedDir}
+              onPreviewUpdate={handlePreviewUpdate}
+              onProcessingDone={handleStretchDone}
+              chainedFrom={nonLinearChainedFrom}
+            />
+          </div>
+          <div style={{ display: active === "hdr" ? "block" : "none" }}>
+            <HdrPanel
+              selectedFile={nonLinearInput}
+              outputDir={resolvedDir}
+              onPreviewUpdate={handlePreviewUpdate}
+              onProcessingDone={handleStretchDone}
+              chainedFrom={nonLinearChainedFrom}
+            />
+          </div>
+          <div style={{ display: active === "pixelmath" ? "block" : "none" }}>
+            <PixelMathPanel
+              selectedFile={file}
+              outputDir={resolvedDir}
+              onPreviewUpdate={handlePreviewUpdate}
             />
           </div>
         </div>

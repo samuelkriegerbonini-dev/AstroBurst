@@ -17,6 +17,7 @@ pub async fn wavelet_denoise_cmd(
     num_scales: usize,
     thresholds: Vec<f64>,
     linear: bool,
+    layer_bias: Option<Vec<f32>>,
 ) -> Result<serde_json::Value, String> {
     let n_scales = num_scales.clamp(1, 8);
     let progress = ProgressHandle::new(&app, EVENT_WAVELET_PROGRESS, (n_scales * 2 + 1) as u64);
@@ -25,12 +26,19 @@ pub async fn wavelet_denoise_cmd(
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
 
+        if let Some(bias) = &layer_bias {
+            if bias.iter().any(|b| !b.is_finite()) {
+                anyhow::bail!("layer_bias must contain only finite values");
+            }
+        }
+
         let entry = load_from_cache_or_disk(&path)?;
 
         let config = WaveletConfig {
             num_scales: n_scales,
             thresholds: thresholds.iter().map(|&t| t as f32).collect(),
             linear_denoise: linear,
+            layer_bias,
         };
 
         let wav_result = wavelet_denoise(entry.arr(), &config, Some(&progress_clone))?;

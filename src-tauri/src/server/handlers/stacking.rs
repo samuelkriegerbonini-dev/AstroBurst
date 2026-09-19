@@ -11,7 +11,10 @@ use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::calibration::{drizzle_from_paths, stack_from_paths};
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::types::compose::AlignMethod;
-use astroburst_lib::types::stacking::{DrizzleConfig, DrizzleKernel, StackConfig};
+use astroburst_lib::types::stacking::{
+    CombineMethod, DrizzleConfig, DrizzleKernel, NormalizationMethod, RejectionMethod,
+    RejectionNormalization, StackConfig,
+};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -64,6 +67,23 @@ pub struct StackParams {
     pub align: Option<bool>,
     pub align_method: Option<String>,
     pub weights: Option<Vec<f64>>,
+    pub rejection: Option<String>,
+    pub combine: Option<String>,
+    pub normalization: Option<String>,
+    pub rejection_normalization: Option<String>,
+    pub winsor_cutoff: Option<f32>,
+    pub percentile_low: Option<f32>,
+    pub percentile_high: Option<f32>,
+    pub minmax_low: Option<usize>,
+    pub minmax_high: Option<usize>,
+    pub rejection_maps: Option<bool>,
+}
+
+fn parse_named<T>(name: Option<&str>, parse: fn(&str) -> std::result::Result<T, String>, default: T) -> Result<T> {
+    match name {
+        Some(n) => parse(n).map_err(AppError::BadRequest),
+        None => Ok(default),
+    }
 }
 
 #[derive(Deserialize)]
@@ -93,16 +113,35 @@ pub async fn stack(
         .try_acquire_owned()
         .map_err(|_| AppError::TooManyRequests)?;
 
+    let defaults = StackConfig::default();
     let config = StackConfig {
-        sigma_low: params.sigma_low.unwrap_or(3.0),
-        sigma_high: params.sigma_high.unwrap_or(3.0),
-        max_iterations: params.max_iterations.unwrap_or(5),
+        sigma_low: params.sigma_low.unwrap_or(defaults.sigma_low),
+        sigma_high: params.sigma_high.unwrap_or(defaults.sigma_high),
+        max_iterations: params.max_iterations.unwrap_or(defaults.max_iterations),
         align: params.align.unwrap_or(true),
         align_method: match params.align_method.as_deref() {
             Some("affine") => AlignMethod::Affine,
             _ => AlignMethod::PhaseCorrelation,
         },
         weights: params.weights,
+        rejection: parse_named(params.rejection.as_deref(), RejectionMethod::from_name, defaults.rejection)?,
+        combine: parse_named(params.combine.as_deref(), CombineMethod::from_name, defaults.combine)?,
+        normalization: parse_named(
+            params.normalization.as_deref(),
+            NormalizationMethod::from_name,
+            defaults.normalization,
+        )?,
+        rejection_normalization: parse_named(
+            params.rejection_normalization.as_deref(),
+            RejectionNormalization::from_name,
+            defaults.rejection_normalization,
+        )?,
+        winsor_cutoff: params.winsor_cutoff.unwrap_or(defaults.winsor_cutoff),
+        percentile_low: params.percentile_low.unwrap_or(defaults.percentile_low),
+        percentile_high: params.percentile_high.unwrap_or(defaults.percentile_high),
+        minmax_low: params.minmax_low.unwrap_or(defaults.minmax_low),
+        minmax_high: params.minmax_high.unwrap_or(defaults.minmax_high),
+        rejection_maps: params.rejection_maps.unwrap_or(false),
     };
 
     let result_slot = params.result_slot.unwrap_or_else(|| "stacked".into());

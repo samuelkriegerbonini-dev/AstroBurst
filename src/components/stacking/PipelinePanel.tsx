@@ -1,7 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { AlertTriangle } from "lucide-react";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
 import { runCalibrationPipeline } from "../../services/stacking";
+import type { CombineMethod, PipelineResult, RejectionMethod } from "../../shared/types/stacking";
+import type { CosmeticConfig } from "../../shared/types/cosmetic";
+import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
+import { parseDefectList, formatDefectError } from "../../utils/defectList";
 
 interface FileGroup {
   label: string;
@@ -13,26 +18,10 @@ interface ChannelFilesInput {
   paths: string[];
 }
 
-interface ChannelPreview {
-  label: string;
-  pixels_b64: string;
-  width: number;
-  height: number;
-}
-
-interface PipelineResponse {
-  stats: {
-    darks_combined: number;
-    flats_combined: number;
-    bias_combined: number;
-    channels: { label: string; lights_input: number; mean: number; stddev: number }[];
-  };
-  channel_previews: ChannelPreview[];
-  rgb_preview: string | null;
-}
-
 const CHANNEL_LABELS = ["R", "G", "B"];
 const CHANNEL_COLORS: Record<string, string> = { R: "#ef4444", G: "#22c55e", B: "#3b82f6" };
+const MAX_DEFECT_ERRORS = 3;
+const DEFECT_PLACEHOLDER = "Point x y\nCol x [y0 y1]\nRow y [x0 x1]\n# 0-based, one entry per line";
 
 const ICON = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-400">
@@ -49,7 +38,7 @@ interface PipelinePanelProps {
 }
 
 export default function PipelinePanel(_props: PipelinePanelProps) {
-  const [result, setResult] = useState<PipelineResponse | null>(null);
+  const [result, setResult] = useState<PipelineResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState("");
@@ -62,12 +51,41 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   const [bias, setBias] = useState<string[]>([]);
   const [sigmaLow, setSigmaLow] = useState(2.5);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
+  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
+  const [combine, setCombine] = useState<CombineMethod>("mean");
   const [normalize, setNormalize] = useState(true);
   const [align, setAlign] = useState(true);
   const [activePreview, setActivePreview] = useState<string | null>(null);
 
+  const [cosmeticEnabled, setCosmeticEnabled] = useState(false);
+  const [cosmeticUseDark, setCosmeticUseDark] = useState(true);
+  const [cosmeticHotSigma, setCosmeticHotSigma] = useState(3.0);
+  const [cosmeticColdEnabled, setCosmeticColdEnabled] = useState(false);
+  const [cosmeticColdSigma, setCosmeticColdSigma] = useState(3.0);
+  const [cosmeticAutoEnabled, setCosmeticAutoEnabled] = useState(false);
+  const [cosmeticAutoSigma, setCosmeticAutoSigma] = useState(3.0);
+  const [defectText, setDefectText] = useState("");
+
+  const parsedDefects = useMemo(() => parseDefectList(defectText), [defectText]);
+  const defectErrors = cosmeticEnabled ? parsedDefects.errors : [];
+
   const rgbCanvasRef = useRef<HTMLCanvasElement>(null);
   const chCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  const buildCosmetic = useCallback((): CosmeticConfig | null => {
+    if (!cosmeticEnabled) return null;
+    return {
+      use_master_dark: cosmeticUseDark,
+      dark_hot_sigma: cosmeticUseDark ? cosmeticHotSigma : null,
+      dark_cold_sigma: cosmeticUseDark && cosmeticColdEnabled ? cosmeticColdSigma : null,
+      auto_hot_sigma: cosmeticAutoEnabled ? cosmeticAutoSigma : null,
+      auto_cold_sigma: null,
+      defects: parsedDefects.defects,
+      cfa: false,
+      amount: 1,
+      replacement: "median",
+    };
+  }, [cosmeticEnabled, cosmeticUseDark, cosmeticHotSigma, cosmeticColdEnabled, cosmeticColdSigma, cosmeticAutoEnabled, cosmeticAutoSigma, parsedDefects]);
 
   const pickFiles = useCallback(async (title: string): Promise<string[]> => {
     const selected = await open({
@@ -111,7 +129,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       .filter((c) => c.paths.length > 0)
       .map((c) => ({ label: c.label, paths: c.paths }));
 
-    if (channelInputs.length === 0) return;
+    if (channelInputs.length === 0 || defectErrors.length > 0) return;
 
     setLoading(true);
     setError(null);
@@ -126,7 +144,10 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         sigma_high: sigmaHigh,
         normalize,
         align,
-      }) as PipelineResponse;
+        rejection,
+        combine,
+        cosmetic: buildCosmetic(),
+      });
       setResult(res);
       setActivePreview(res.rgb_preview ? "RGB" : res.channel_previews[0]?.label ?? null);
       setProgress("");
@@ -187,6 +208,10 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   }, [result, activePreview]);
 
   const totalLights = channels.reduce((s, c) => s + c.paths.length, 0);
+  const smallestChannel = channels
+    .filter((c) => c.paths.length > 0)
+    .reduce((min, c) => Math.min(min, c.paths.length), Number.POSITIVE_INFINITY);
+  const hint = rejectionFrameHint(rejection, Number.isFinite(smallestChannel) ? smallestChannel : 0);
 
   const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: number; onAdd: () => void; onClear: () => void }) => (
     <div className="flex items-center justify-between">
@@ -230,10 +255,71 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} onClear={() => setBias([])} />
       </div>
 
+      <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+        <span className="text-xs text-zinc-500 uppercase tracking-wider">Cosmetic correction</span>
+        <Toggle label="Repair hot / cold pixels after dark subtraction" checked={cosmeticEnabled} accent="sky" onChange={setCosmeticEnabled} />
+        {cosmeticEnabled && (
+          <div className="flex flex-col gap-2 pl-2 border-l border-zinc-800">
+            <Toggle label="Use master dark" checked={cosmeticUseDark} accent="sky" onChange={setCosmeticUseDark} />
+            {cosmeticUseDark && (
+              <>
+                <Slider label="Hot sigma" value={cosmeticHotSigma} min={0.5} max={20} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setCosmeticHotSigma} />
+                <Toggle label="Cold pixels" checked={cosmeticColdEnabled} accent="sky" onChange={setCosmeticColdEnabled} />
+                {cosmeticColdEnabled && (
+                  <Slider label="Cold sigma" value={cosmeticColdSigma} min={0.5} max={20} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setCosmeticColdSigma} />
+                )}
+                {darks.length === 0 && (
+                  <p className="text-[10px] text-amber-400/80 leading-snug">Add dark frames above: without a master dark this method does nothing.</p>
+                )}
+              </>
+            )}
+            <Toggle label="Auto detect hot pixels per light" checked={cosmeticAutoEnabled} accent="sky" onChange={setCosmeticAutoEnabled} />
+            {cosmeticAutoEnabled && (
+              <Slider label="Auto sigma" value={cosmeticAutoSigma} min={0.5} max={20} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setCosmeticAutoSigma} />
+            )}
+            <label className="text-xs text-zinc-400">Defect list</label>
+            <textarea
+              value={defectText}
+              onChange={(e) => setDefectText(e.target.value)}
+              placeholder={DEFECT_PLACEHOLDER}
+              spellCheck={false}
+              disabled={loading}
+              className="w-full h-20 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-sky-400"
+            />
+            <div className="text-[10px] text-zinc-500">
+              {parsedDefects.defects.length} entr{parsedDefects.defects.length === 1 ? "y" : "ies"}
+              {defectErrors.length > 0 && <span className="text-amber-400"> - {defectErrors.length} invalid line{defectErrors.length === 1 ? "" : "s"}</span>}
+            </div>
+            {defectErrors.slice(0, MAX_DEFECT_ERRORS).map((err) => (
+              <div key={err.line} className="text-[10px] text-amber-400/90 font-mono">{formatDefectError(err)}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Stacking</span>
-        <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
-        <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Rejection</label>
+          <select value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select">
+            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        {totalLights > 0 && (
+          <p className={`text-[10px] leading-snug ${hint.severity === "warn" ? "text-amber-400/80" : "text-zinc-500"}`}>{hint.text}</p>
+        )}
+        {rejectionUsesSigma(rejection) && (
+          <>
+            <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
+            <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
+          </>
+        )}
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Combine</label>
+          <select value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select">
+            {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
         <Toggle label="Normalize before stack" checked={normalize} accent="sky" onChange={setNormalize} />
         <Toggle label="Align frames before stack" checked={align} accent="sky" onChange={setAlign} />
       </div>
@@ -242,7 +328,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         label={`Run Pipeline (${totalLights} lights)`}
         runningLabel={progress || "Processing..."}
         running={loading}
-        disabled={totalLights === 0}
+        disabled={totalLights === 0 || defectErrors.length > 0}
         accent="sky"
         onClick={handleRun}
       />
@@ -251,6 +337,12 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in border-t border-zinc-800/50 pt-3">
           <span className="text-xs font-semibold text-zinc-400">Results</span>
+          {result.warnings?.map((warning) => (
+            <div key={warning} className="flex items-start gap-2 text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+              <span>{warning}</span>
+            </div>
+          ))}
 
           <div className="flex gap-1">
             {result.channel_previews.map((ch) => (
@@ -285,6 +377,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
             {result.stats.channels.map((ch) => (
               <div key={ch.label}>
                 {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
+                {ch.cosmetic_replaced != null && `, ${ch.cosmetic_replaced.toLocaleString()} px repaired`}
               </div>
             ))}
             {result.stats.darks_combined > 0 && <div>Master dark: {result.stats.darks_combined} frames</div>}

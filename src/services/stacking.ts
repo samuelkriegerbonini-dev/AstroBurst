@@ -1,5 +1,13 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions, DrizzleRgbOptions, DrizzleRgbResult } from "../shared/types/stacking";
+import { evaluateNoiseBatch } from "./statistics";
+import { noiseWeightsFromSigmas, type NoiseWeightSummary } from "../utils/noiseWeights";
+
+export async function noiseWeightsFor(paths: string[]): Promise<NoiseWeightSummary> {
+  const batch = await evaluateNoiseBatch(paths);
+  const sigmaByPath = new Map(batch.results.map((entry) => [entry.path, entry.sigma]));
+  return noiseWeightsFromSigmas(paths.map((path) => sigmaByPath.get(path) ?? null));
+}
 
 export function calibrate(
   sciencePath: string,

@@ -23,8 +23,11 @@ export interface BackgroundResult {
 
 export interface WaveletResult {
   png_path: string;
+  fits_path?: string;
   previewUrl?: string;
   dimensions: [number, number];
+  scales_processed?: number;
+  noise_estimate?: number;
   elapsed_ms: number;
 }
 

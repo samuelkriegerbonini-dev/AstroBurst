@@ -7,6 +7,8 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider, Toggle } from "../../ui";
 import type { WizardAction } from "../../../context/ComposeWizardContext";
 import { resolveEffectivePath } from "../../../hooks/useFileStore";
+import type { CombineMethod, RejectionMethod } from "../../../shared/types/stacking";
+import { COMBINE_OPTIONS, REJECTION_OPTIONS } from "../../../utils/stackingRejection";
 
 interface StackStepProps {
   state: WizardState;
@@ -35,6 +37,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   const [minStars, _setMinStars] = useState(5);
   const [useDrizzle, setUseDrizzle] = useState(false);
   const [drizzleScale, setDrizzleScale] = useState(2.0);
+  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
+  const [combine, setCombine] = useState<CombineMethod>("mean");
 
   const stackableBins = useMemo(
     () => state.bins.filter((b) => b.files.length > 1),
@@ -122,6 +126,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
             align: true,
             name: `stacked_${binId}`,
             weights,
+            rejection,
+            combine,
           });
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {
@@ -134,7 +140,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     } finally {
       setLoading((prev) => ({ ...prev, [binId]: false }));
     }
-  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale]);
+  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
@@ -184,9 +190,27 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         )}
       </div>
 
+      {!useDrizzle && (
+        <div className="flex items-center gap-2">
+          <label className="text-[10px] text-zinc-400 shrink-0">Rejection</label>
+          <select value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select flex-1">
+            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <label className="text-[10px] text-zinc-400 shrink-0">Combine</label>
+          <select value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select flex-1">
+            {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      )}
+
       {useDrizzle && Object.keys(state.subframeResults).length > 0 && (
         <p className="text-[9px] text-amber-400/70">
           Drizzle ignores subframe quality weights — they apply only to sigma-clip stacking.
+        </p>
+      )}
+      {!useDrizzle && combine === "median" && Object.keys(state.subframeResults).length > 0 && (
+        <p className="text-[9px] text-amber-400/70">
+          Median combination ignores subframe quality weights.
         </p>
       )}
 

@@ -1,12 +1,22 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
-import { stackFrames } from "../../services/stacking";
-import type { StackResult } from "../../shared/types/stacking";
+import { noiseWeightsFor, stackFrames } from "../../services/stacking";
+import type { CombineMethod, NormalizationMethod, RejectionMethod, StackResult } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { StackConfig } from "./StackingTab";
 import { resolveEffectivePath } from "../../hooks/useFileStore";
+import { combineFrameWeights, formatWeightRange } from "../../utils/noiseWeights";
+import {
+  COMBINE_OPTIONS,
+  DEFAULT_STACK_SETTINGS,
+  NORMALIZATION_OPTIONS,
+  REJECTION_OPTIONS,
+  rejectionFrameHint,
+  rejectionUsesSigma,
+  subframeWeightsFor,
+} from "../../utils/stackingRejection";
 
 interface StackingPanelProps {
   files: ProcessedFile[];
@@ -15,9 +25,14 @@ interface StackingPanelProps {
   stackConfig?: StackConfig;
   onStackConfigChange?: (config: Partial<StackConfig>) => void;
   rejectedPaths?: string[];
+  subframeWeights?: Record<string, number>;
 }
 
 const ICON = <Layers size={14} className="text-amber-400" />;
+
+function fileName(path: string): string {
+  return path.split(/[/\\]/).pop() || path;
+}
 
 export default function StackingPanel({
   files = [],
@@ -26,18 +41,33 @@ export default function StackingPanel({
   stackConfig,
   onStackConfigChange,
   rejectedPaths = [],
+  subframeWeights,
 }: StackingPanelProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isStacking, setIsStacking] = useState(false);
   const [result, setResult] = useState<StackResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [noiseWeighting, setNoiseWeighting] = useState(false);
+  const [noiseWeightRange, setNoiseWeightRange] = useState<string | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
 
-  const sigmaLow = stackConfig?.sigmaLow ?? 3.0;
-  const sigmaHigh = stackConfig?.sigmaHigh ?? 3.0;
-  const maxIterations = stackConfig?.maxIterations ?? 5;
-  const align = stackConfig?.align ?? true;
-  const alignMethod = stackConfig?.alignMethod ?? "phase_correlation";
+  const config: StackConfig = { ...DEFAULT_STACK_SETTINGS, ...stackConfig };
+  const {
+    sigmaLow,
+    sigmaHigh,
+    maxIterations,
+    align,
+    rejection,
+    combine,
+    normalization,
+    winsorCutoff,
+    percentileLow,
+    percentileHigh,
+    minmaxLow,
+    minmaxHigh,
+    rejectionMaps,
+  } = config;
+  const alignMethod = config.alignMethod ?? "phase_correlation";
 
   useEffect(() => {
     if (injectedPaths.length === 0) return;
@@ -78,18 +108,46 @@ export default function StackingPanel({
 
   const selectNone = useCallback(() => setSelectedPaths([]), []);
 
+  const weights = useMemo(() => subframeWeightsFor(selectedPaths, subframeWeights), [selectedPaths, subframeWeights]);
+  const weightedCount = weights ? weights.filter((w) => w !== 1.0).length : 0;
+  const hint = rejectionFrameHint(rejection, selectedPaths.length, minmaxLow, minmaxHigh);
+
   const handleStack = useCallback(async () => {
     if (selectedPaths.length < 2) return;
     setIsStacking(true);
     setError(null);
     setResult(null);
     try {
-      const res = await stackFrames(selectedPaths.map(resolveEffectivePath), await getOutputDir(), {
+      const paths = selectedPaths.map(resolveEffectivePath);
+      let frameWeights = weights;
+      if (noiseWeighting) {
+        const noise = await noiseWeightsFor(paths);
+        frameWeights = combineFrameWeights(weights, noise.weights);
+        setNoiseWeightRange(formatWeightRange({
+          weights: frameWeights,
+          min: Math.min(...frameWeights),
+          max: Math.max(...frameWeights),
+          missing: noise.missing,
+        }));
+      } else {
+        setNoiseWeightRange(null);
+      }
+      const res = await stackFrames(paths, await getOutputDir(), {
         sigmaLow,
         sigmaHigh,
         maxIterations,
         align,
         alignMethod,
+        weights: frameWeights,
+        rejection,
+        combine,
+        normalization,
+        winsorCutoff,
+        percentileLow,
+        percentileHigh,
+        minmaxLow,
+        minmaxHigh,
+        rejectionMaps,
       });
       setResult(res);
       onResult?.(res);
@@ -98,7 +156,26 @@ export default function StackingPanel({
     } finally {
       setIsStacking(false);
     }
-  }, [selectedPaths, sigmaLow, sigmaHigh, maxIterations, align, alignMethod, onResult]);
+  }, [
+    selectedPaths,
+    sigmaLow,
+    sigmaHigh,
+    maxIterations,
+    align,
+    alignMethod,
+    weights,
+    noiseWeighting,
+    rejection,
+    combine,
+    normalization,
+    winsorCutoff,
+    percentileLow,
+    percentileHigh,
+    minmaxLow,
+    minmaxHigh,
+    rejectionMaps,
+    onResult,
+  ]);
 
   const injectedOnly = injectedPaths.filter((p) => !files.some((f) => f.path === p));
 
@@ -121,14 +198,13 @@ export default function StackingPanel({
             </div>
             {injectedOnly.map((path) => {
               const isSelected = selectedPaths.includes(path);
-              const name = path.split(/[/\\]/).pop() || path;
               return (
                 <button key={path} onClick={() => toggleFile(path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-emerald-500/10 text-zinc-200 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}>
                   <GripVertical size={10} className="text-zinc-700 shrink-0" />
                   <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${isSelected ? "bg-emerald-500/20 border-emerald-500" : "border-zinc-600"}`}>
                     {isSelected && <CheckCircle2 size={10} className="text-emerald-400" />}
                   </span>
-                  <span className="truncate">{name}</span>
+                  <span className="truncate">{fileName(path)}</span>
                   <span className="ml-auto text-[9px] text-emerald-500/60 shrink-0">calibrated</span>
                 </button>
               );
@@ -139,6 +215,7 @@ export default function StackingPanel({
         {files.map((f) => {
           const isSelected = selectedPaths.includes(f.path);
           const isRejected = rejectedPaths.includes(f.path);
+          const weight = subframeWeights?.[f.path];
           return (
             <button key={f.id} onClick={() => toggleFile(f.path)} className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"} ${isRejected && !isSelected ? "opacity-50" : ""}`}>
               <GripVertical size={10} className="text-zinc-700 shrink-0" />
@@ -146,19 +223,79 @@ export default function StackingPanel({
                 {isSelected && <CheckCircle2 size={10} className="text-amber-400" />}
               </span>
               <span className="truncate">{f.name}</span>
-              {isRejected && (
+              {isRejected ? (
                 <span className="ml-auto text-[9px] text-red-400/70 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
-              )}
+              ) : weight !== undefined ? (
+                <span className="ml-auto text-[9px] text-teal-400/70 shrink-0 font-mono" title="Subframe quality weight">{(weight * 100).toFixed(0)}%</span>
+              ) : null}
             </button>
           );
         })}
       </div>
 
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
-        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sigma Clipping</span>
-        <Slider label="Sigma Low" value={sigmaLow} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaLow: v })} />
-        <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaHigh: v })} />
-        <Slider label="Max Iterations" value={maxIterations} min={1} max={20} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ maxIterations: v })} />
+        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Pixel Rejection</span>
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Rejection</label>
+          <select value={rejection} onChange={(e) => onStackConfigChange?.({ rejection: e.target.value as RejectionMethod })} className="ab-select">
+            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <p className={`text-[10px] leading-snug ${hint.severity === "warn" ? "text-amber-400/80" : "text-zinc-500"}`}>{hint.text}</p>
+
+        {rejectionUsesSigma(rejection) && (
+          <>
+            <Slider label="Sigma Low" value={sigmaLow} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaLow: v })} />
+            <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaHigh: v })} />
+            <Slider label="Max Iterations" value={maxIterations} min={1} max={20} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ maxIterations: v })} />
+          </>
+        )}
+        {rejection === "winsorized_sigma_clip" && (
+          <Slider label="Winsorization Cutoff" value={winsorCutoff} min={1.0} max={10.0} step={0.1} accent="amber" format={(v) => `${v.toFixed(1)}σ`} onChange={(v) => onStackConfigChange?.({ winsorCutoff: v })} />
+        )}
+        {rejection === "percentile_clip" && (
+          <>
+            <Slider label="Percentile Low" value={percentileLow} min={0.0} max={1.0} step={0.01} accent="amber" format={(v) => v.toFixed(2)} onChange={(v) => onStackConfigChange?.({ percentileLow: v })} />
+            <Slider label="Percentile High" value={percentileHigh} min={0.0} max={1.0} step={0.01} accent="amber" format={(v) => v.toFixed(2)} onChange={(v) => onStackConfigChange?.({ percentileHigh: v })} />
+          </>
+        )}
+        {rejection === "min_max" && (
+          <>
+            <Slider label="Reject Low" value={minmaxLow} min={0} max={10} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ minmaxLow: v })} />
+            <Slider label="Reject High" value={minmaxHigh} min={0} max={10} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ minmaxHigh: v })} />
+          </>
+        )}
+
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Combine</label>
+          <select value={combine} onChange={(e) => onStackConfigChange?.({ combine: e.target.value as CombineMethod })} className="ab-select">
+            {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        {combine === "median" && (weightedCount > 0 || noiseWeighting) && (
+          <p className="text-[10px] text-amber-400/80 leading-snug">Median combination ignores frame weights.</p>
+        )}
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Normalization</label>
+          <select value={normalization} onChange={(e) => onStackConfigChange?.({ normalization: e.target.value as NormalizationMethod })} className="ab-select">
+            {NORMALIZATION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <Toggle label="Save rejection maps" checked={rejectionMaps} accent="amber" onChange={(v) => onStackConfigChange?.({ rejectionMaps: v })} />
+        {weightedCount > 0 && (
+          <p className="text-[10px] text-teal-400/80 leading-snug">Subframe quality weights apply to {weightedCount} selected frame(s).</p>
+        )}
+        <Toggle label="Weight frames by noise (1/sigma^2)" checked={noiseWeighting} accent="amber" onChange={setNoiseWeighting} />
+        {noiseWeighting && (
+          <p className="text-[10px] text-zinc-500 leading-snug">
+            {noiseWeightRange
+              ? `Frame weights ${noiseWeightRange}, normalised to mean 1${weightedCount > 0 ? " and multiplied by the subframe weights" : ""}.`
+              : "Noise is estimated per frame (k-sigma MRS) when you stack; quieter frames get more weight."}
+          </p>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <Toggle label="Auto-align before stacking" checked={align} accent="amber" onChange={(v) => onStackConfigChange?.({ align: v })} />
         {align && (
           <div className="flex items-center justify-between">
@@ -184,7 +321,16 @@ export default function StackingPanel({
             { label: "Dimensions", value: result.dimensions ? `${result.dimensions[0]}×${result.dimensions[1]}` : "--" },
             { label: "Frames", value: result.frame_count },
             { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
+            { label: "Rejection", value: result.rejection ?? rejection },
+            { label: "Combine", value: result.combine ?? combine },
+            { label: "Normalization", value: result.normalization ?? normalization },
           ]} />
+          {(result.rejection_low_fits || result.rejection_high_fits) && (
+            <div className="flex flex-col gap-0.5 text-[10px] text-zinc-500 font-mono">
+              {result.rejection_low_fits && <span title={result.rejection_low_fits}>low map: {fileName(result.rejection_low_fits)}</span>}
+              {result.rejection_high_fits && <span title={result.rejection_high_fits}>high map: {fileName(result.rejection_high_fits)}</span>}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -2217,3 +2217,282 @@ async fn v2_cutout_shape_with_mask_outside_nan_fills_outside_the_shape() {
     let json = body_json(resp).await;
     assert_eq!(json["stats"]["valid_count"], 25);
 }
+
+#[tokio::test]
+async fn stack_accepts_named_rejection_and_combine_and_rejects_unknown_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for i in 0..5 {
+        let p = dir.path().join(format!("frame{i}.fits"));
+        let pixels: Vec<f32> = (0..64)
+            .map(|k| if i == 2 && k == 10 { 60000.0 } else { 100.0 + (k % 4) as f32 })
+            .collect();
+        v2_fixtures::write_pixels_fits(&p, 8, 8, &pixels);
+        paths.push(p.to_str().unwrap().to_string());
+    }
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-stack-rej");
+
+    let body = serde_json::json!({
+        "paths": paths,
+        "align": false,
+        "rejection": "winsorized_sigma_clip",
+        "combine": "median",
+        "normalization": "none",
+        "result_slot": "rej"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-stack-rej/stacking/stack", &body).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = body_json(resp).await;
+    let jid = json["job_id"].as_str().unwrap().to_string();
+
+    let mut status = String::new();
+    for _ in 0..400 {
+        let resp = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/s-stack-rej/jobs/{jid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        status = body_json(resp).await["status"].as_str().unwrap().to_string();
+        if status != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(status, "done");
+
+    let session = state.sessions.get("s-stack-rej").unwrap();
+    let entry = session.cache.get("rej").expect("stacked slot");
+    assert!((entry.arr()[[1, 2]] - 102.0).abs() < 1e-3, "cosmic ray leaked: {}", entry.arr()[[1, 2]]);
+    assert!(entry.arr().iter().all(|v| *v < 200.0));
+    drop(session);
+
+    for bad in [
+        serde_json::json!({ "paths": paths, "rejection": "bogus" }),
+        serde_json::json!({ "paths": paths, "combine": "mode" }),
+        serde_json::json!({ "paths": paths, "normalization": "robust" }),
+        serde_json::json!({ "paths": paths, "rejection_normalization": "scale" }),
+    ] {
+        let resp = post_json(build_router(state.clone()), "/sessions/s-stack-rej/stacking/stack", &bad.to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let bad_pipeline = serde_json::json!({
+        "channels": [{ "label": "R", "paths": paths }],
+        "rejection": "bogus"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-stack-rej/pipeline/run", &bad_pipeline).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bad_pipeline = serde_json::json!({
+        "channels": [{ "label": "R", "paths": paths }],
+        "combine": "mode"
+    })
+    .to_string();
+    let resp = post_json(build_router(state), "/sessions/s-stack-rej/pipeline/run", &bad_pipeline).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+fn gaussian_noise_array(rows: usize, cols: usize, sigma: f64, seed: u64) -> ndarray::Array2<f32> {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(seed);
+    ndarray::Array2::from_shape_fn((rows, cols), |_| {
+        let u1: f64 = rng.gen::<f64>().max(1e-30);
+        let u2: f64 = rng.gen::<f64>();
+        (sigma * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
+    })
+}
+
+#[tokio::test]
+async fn v2_stats_background_subtracted_frame_keeps_negative_pixels_and_adds_exact_keys() {
+    let arr = ndarray::Array2::from_shape_vec(
+        (2, 4),
+        vec![-3.0f32, -2.0, -1.0, 0.0, 1.0, 2.0, 30.0, f32::NAN],
+    )
+    .unwrap();
+    let legacy = astroburst_lib::core::imaging::stats::compute_image_stats(&arr);
+    assert_eq!(legacy.valid_count, 3);
+    assert_eq!(legacy.median, 2.0);
+
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-stats-neg", "img_0", arr);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-stats-neg/stats", r#"{}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["valid_count"], 7);
+    assert_eq!(json["median"], 0.0);
+    assert_eq!(json["min"], -3.0);
+    assert_eq!(json["nan_count"], 1);
+    assert!((json["count_fraction"].as_f64().unwrap() - 7.0 / 8.0).abs() < 1e-12);
+    let avg_dev = (3.0 + 2.0 + 1.0 + 0.0 + 1.0 + 2.0 + 30.0) / 7.0;
+    assert!((json["avg_dev"].as_f64().unwrap() - avg_dev).abs() < 1e-9);
+    assert_eq!(json["mad"], 2.0);
+    let bwmv = json["bwmv_sqrt"].as_f64().unwrap();
+    assert!(bwmv > 0.0 && bwmv < json["std_dev"].as_f64().unwrap(), "bwmv {bwmv}");
+    assert!(json.get("noise").is_none() || json["noise"].is_null());
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-stats-neg/stats", r#"{"noise": true}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["median"], 0.0);
+    assert_eq!(json["noise"]["method"], "k-sigma-mrs");
+    assert!(json["noise"]["sigma"].is_number());
+    assert!(json["noise"]["fraction"].is_number());
+}
+
+#[tokio::test]
+async fn v2_stats_noise_evaluation_follows_the_requested_region() {
+    let mut arr = gaussian_noise_array(128, 128, 2.0, 77);
+    let quiet = gaussian_noise_array(128, 128, 0.5, 78);
+    for y in 0..64 {
+        for x in 0..128 {
+            arr[[y, x]] = quiet[[y, x]];
+        }
+    }
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-stats-noise", "img_0", arr);
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-stats-noise/stats",
+        r#"{"noise": true, "region": {"type":"pixel","x":8,"y":72,"width":100,"height":48}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let loud = json["noise"]["sigma"].as_f64().unwrap();
+    assert!((loud - 2.0).abs() / 2.0 < 0.1, "pixel region sigma {loud}");
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-stats-noise/stats",
+        r#"{"noise": true, "region": {"type":"shape","shape":"box","x":64,"y":30,"width":100,"height":40}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let quiet_sigma = json["noise"]["sigma"].as_f64().unwrap();
+    assert!((quiet_sigma - 0.5).abs() / 0.5 < 0.1, "shape region sigma {quiet_sigma}");
+    assert_eq!(json["region"]["shape"], "box");
+}
+
+async fn wait_for_job(state: &AppState, sid: &str, jid: &str) -> String {
+    let mut status = String::new();
+    for _ in 0..400 {
+        let resp = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{sid}/jobs/{jid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        status = body_json(resp).await["status"].as_str().unwrap().to_string();
+        if status != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    status
+}
+
+#[tokio::test]
+async fn pipeline_run_with_cosmetic_repairs_master_dark_hot_pixels_and_reports_dq_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let hot = 3usize * 8 + 2;
+    let mut dark_paths = Vec::new();
+    for i in 0..3 {
+        let p = dir.path().join(format!("dark{i}.fits"));
+        let pixels: Vec<f32> = (0..64)
+            .map(|k| if k == hot { 5000.0 } else { 10.0 + ((k * 7 + i) % 5) as f32 })
+            .collect();
+        v2_fixtures::write_pixels_fits(&p, 8, 8, &pixels);
+        dark_paths.push(p.to_str().unwrap().to_string());
+    }
+    let mut light_paths = Vec::new();
+    for i in 0..4 {
+        let p = dir.path().join(format!("light{i}.fits"));
+        let pixels: Vec<f32> = (0..64)
+            .map(|k| if k == hot { 9000.0 } else { 110.0 + ((k * 7 + i) % 5) as f32 })
+            .collect();
+        v2_fixtures::write_pixels_fits(&p, 8, 8, &pixels);
+        light_paths.push(p.to_str().unwrap().to_string());
+    }
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-pipe-cos");
+
+    let body = serde_json::json!({
+        "channels": [{ "label": "R", "paths": light_paths }],
+        "dark_paths": dark_paths,
+        "align": false,
+        "normalize": false,
+        "rejection": "none",
+        "result_prefix": "cos_",
+        "cosmetic": { "use_master_dark": true, "dark_hot_sigma": 5 }
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-cos/pipeline/run", &body).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = body_json(resp).await;
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    let jid = json["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-pipe-cos", &jid).await, "done");
+
+    let session = state.sessions.get("s-pipe-cos").unwrap();
+    let entry = session.cache.get("cos_R").expect("stacked slot");
+    let repaired = entry.arr()[[3, 2]];
+    assert!(repaired < 110.0, "hot pixel survived cosmetic correction: {repaired}");
+    assert!(repaired > 90.0, "hot pixel over-corrected: {repaired}");
+    assert!((entry.arr()[[0, 0]] - 100.0).abs() < 5.0, "background off: {}", entry.arr()[[0, 0]]);
+    drop(session);
+
+    let bad = serde_json::json!({
+        "channels": [{ "label": "R", "paths": light_paths }],
+        "cosmetic": { "dark_hot_sigma": -1 }
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-cos/pipeline/run", &bad).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let mef = dir.path().join("light_dq.fits");
+    v2_fixtures::write_mef_with_dq(&mef, 8, 8);
+    let with_dq = serde_json::json!({
+        "channels": [{ "label": "L", "paths": [mef.to_str().unwrap()] }],
+        "align": false,
+        "normalize": false,
+        "result_prefix": "dq_",
+        "cosmetic": { "use_master_dark": true, "dark_hot_sigma": 5 }
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-cos/pipeline/run", &with_dq).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = body_json(resp).await;
+    let warnings = json["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("DQ"), "{warnings:?}");
+    let jid = json["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-pipe-cos", &jid).await, "done");
+
+    let without_cosmetic = serde_json::json!({
+        "channels": [{ "label": "L", "paths": [mef.to_str().unwrap()] }],
+        "align": false,
+        "result_prefix": "plain_"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-cos/pipeline/run", &without_cosmetic).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = body_json(resp).await;
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    let jid = json["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-pipe-cos", &jid).await, "done");
+}

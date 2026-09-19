@@ -445,3 +445,39 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (8, 8));
     }
 }
+
+pub(crate) fn parse_rejection_method(
+    name: Option<&str>,
+) -> anyhow::Result<crate::types::stacking::RejectionMethod> {
+    match name {
+        Some(n) => crate::types::stacking::RejectionMethod::from_name(n).map_err(anyhow::Error::msg),
+        None => Ok(crate::types::stacking::RejectionMethod::default()),
+    }
+}
+
+pub(crate) fn parse_combine_method(
+    name: Option<&str>,
+) -> anyhow::Result<crate::types::stacking::CombineMethod> {
+    match name {
+        Some(n) => crate::types::stacking::CombineMethod::from_name(n).map_err(anyhow::Error::msg),
+        None => Ok(crate::types::stacking::CombineMethod::default()),
+    }
+}
+
+pub(crate) fn parse_normalization_method(
+    name: Option<&str>,
+) -> anyhow::Result<crate::types::stacking::NormalizationMethod> {
+    match name {
+        Some(n) => crate::types::stacking::NormalizationMethod::from_name(n).map_err(anyhow::Error::msg),
+        None => Ok(crate::types::stacking::NormalizationMethod::default()),
+    }
+}
+
+pub(crate) fn parse_rejection_normalization(
+    name: Option<&str>,
+) -> anyhow::Result<crate::types::stacking::RejectionNormalization> {
+    match name {
+        Some(n) => crate::types::stacking::RejectionNormalization::from_name(n).map_err(anyhow::Error::msg),
+        None => Ok(crate::types::stacking::RejectionNormalization::default()),
+    }
+}

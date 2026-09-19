@@ -1,30 +1,29 @@
-import { lazy, Suspense, memo, useState, useCallback } from "react";
+import { lazy, Suspense, memo, useState, useCallback, useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { useDoneFilesContext, useRenderActions } from "../../context/PreviewContext";
+import { useSelectedFile } from "../../hooks/useFileStore";
+import { getOutputDir } from "../../infrastructure/tauri";
+import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
 
 const CalibrationPanel = lazy(() => import("./CalibrationPanel"));
+const CosmeticPanel = lazy(() => import("./CosmeticPanel"));
 const StackingPanel = lazy(() => import("./StackingPanel"));
 const PipelinePanel = lazy(() => import("./PipelinePanel"));
 const SubframeSelectorPanel = lazy(() => import("./SubframeSelectorPanel"));
 const DrizzleRgbPanel = lazy(() => import("./DrizzleRgbPanel"));
 
-type StackSection = "calibrate" | "subframe" | "stack" | "pipeline" | "drizzle_rgb";
+type StackSection = "calibrate" | "cosmetic" | "subframe" | "stack" | "pipeline" | "drizzle_rgb";
 
 const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "calibrate", label: "Calibrate", color: "violet" },
+  { id: "cosmetic", label: "Cosmetic", color: "fuchsia" },
   { id: "subframe", label: "Subframes", color: "teal" },
   { id: "stack", label: "Stack", color: "amber" },
   { id: "pipeline", label: "Pipeline", color: "cyan" },
   { id: "drizzle_rgb", label: "Drizzle RGB", color: "rose" },
 ];
 
-export interface StackConfig {
-  sigmaLow: number;
-  sigmaHigh: number;
-  maxIterations: number;
-  align: boolean;
-  alignMethod?: string;
-}
+export type StackConfig = StackSettings;
 
 export interface CalibrationState {
   calibratedPath: string | null;
@@ -34,18 +33,13 @@ export interface CalibrationState {
   hasFlat: boolean;
 }
 
-const DEFAULT_STACK_CONFIG: StackConfig = {
-  sigmaLow: 3.0,
-  sigmaHigh: 3.0,
-  maxIterations: 5,
-  align: true,
-  alignMethod: "phase_correlation",
-};
-
 function StackingTabInner() {
   const { doneFiles } = useDoneFilesContext();
   const { setRenderedPreviewUrl } = useRenderActions();
+  const selectedFile = useSelectedFile();
   const [active, setActive] = useState<StackSection>("calibrate");
+  const [resolvedDir, setResolvedDir] = useState("./output");
+  useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
   const [calibration, setCalibration] = useState<CalibrationState>({
     calibratedPath: null,
@@ -55,14 +49,19 @@ function StackingTabInner() {
     hasFlat: false,
   });
 
-  const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_CONFIG);
+  const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_SETTINGS);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
   const [rejectedPaths, setRejectedPaths] = useState<string[]>([]);
+  const [subframeWeights, setSubframeWeights] = useState<Record<string, number> | undefined>(undefined);
 
-  const handleSubframeSelection = useCallback((_accepted: string[], rejected: string[]) => {
-    setRejectedPaths(rejected);
-    setActive("stack");
-  }, []);
+  const handleSubframeSelection = useCallback(
+    (_accepted: string[], rejected: string[], weights?: Record<string, number>) => {
+      setRejectedPaths(rejected);
+      setSubframeWeights(weights);
+      setActive("stack");
+    },
+    [],
+  );
 
   const handlePreviewUpdate = useCallback(
     (url: string | null | undefined) => {
@@ -131,7 +130,9 @@ function StackingTabInner() {
                         ? "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30"
                         : s.color === "rose"
                           ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30"
-                          : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
+                          : s.color === "fuchsia"
+                            ? "bg-fuchsia-600/20 text-fuchsia-400 ring-1 ring-fuchsia-500/30"
+                            : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
                   : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
               }`}
             >
@@ -159,6 +160,9 @@ function StackingTabInner() {
               onCalibrationDone={handleCalibrationDone}
             />
           </div>
+          <div style={{ display: active === "cosmetic" ? "block" : "none" }}>
+            <CosmeticPanel selectedFile={selectedFile} outputDir={resolvedDir} onPreviewUpdate={handlePreviewUpdate} />
+          </div>
           <div style={{ display: active === "subframe" ? "block" : "none" }}>
             <SubframeSelectorPanel files={doneFiles.map(f => f.path)} onSelectionChange={handleSubframeSelection} />
           </div>
@@ -170,6 +174,7 @@ function StackingTabInner() {
               stackConfig={stackConfig}
               onStackConfigChange={handleStackConfigChange}
               rejectedPaths={rejectedPaths}
+              subframeWeights={subframeWeights}
             />
           </div>
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>

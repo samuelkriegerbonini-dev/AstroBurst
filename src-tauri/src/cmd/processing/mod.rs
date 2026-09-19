@@ -1,7 +1,10 @@
 mod background;
 mod curves;
+mod dbe;
 mod debayer;
 mod deconvolution;
+mod hdr;
+mod local_contrast;
 mod resample;
 mod star_removal;
 mod stretch;
@@ -9,8 +12,11 @@ mod wavelet;
 
 pub use background::*;
 pub use curves::*;
+pub use dbe::*;
 pub use debayer::*;
 pub use deconvolution::*;
+pub use hdr::*;
+pub use local_contrast::*;
 pub use resample::*;
 pub use star_removal::*;
 pub use stretch::*;

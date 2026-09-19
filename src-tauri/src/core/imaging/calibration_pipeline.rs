@@ -1,14 +1,18 @@
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::math::median::f32_cmp;
+use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
 use crate::math::sigma_clip::sigma_clipped_stats;
-use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
+use crate::core::imaging::cosmetic::{
+    apply_cosmetic, defect_map_auto, defect_map_from_dark, defect_map_from_list, merge_maps, CosmeticConfig,
+};
 use crate::core::imaging::stats::percentile;
 use crate::core::imaging::stretch::{arcsinh_stretch_rgb_with_stats, arcsinh_stretch_with_stats};
+use crate::infra::image_source::{is_dq_name, list_planes};
 
-const MEANAD_TO_SIGMA: f64 = 1.2533;
 const PREVIEW_STRETCH_FACTOR: f32 = 20.0;
+pub const DQ_COSMETIC_WARNING: &str = "cosmetic correction applied to data with DQ planes";
 
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
@@ -30,6 +34,8 @@ pub struct BatchStackConfig {
     pub sigma_high: f32,
     pub max_iterations: usize,
     pub normalize_before_stack: bool,
+    pub rejection: RejectionMethod,
+    pub combine: CombineMethod,
 }
 
 impl Default for BatchStackConfig {
@@ -39,6 +45,21 @@ impl Default for BatchStackConfig {
             sigma_high: 3.0,
             max_iterations: 5,
             normalize_before_stack: true,
+            rejection: RejectionMethod::SigmaClip,
+            combine: CombineMethod::Mean,
+        }
+    }
+}
+
+impl BatchStackConfig {
+    pub fn rejection_params(&self) -> RejectionParams {
+        RejectionParams {
+            rejection: self.rejection,
+            combine: self.combine,
+            sigma_low: self.sigma_low,
+            sigma_high: self.sigma_high,
+            max_iterations: self.max_iterations,
+            ..RejectionParams::default()
         }
     }
 }
@@ -47,6 +68,7 @@ impl Default for BatchStackConfig {
 pub struct BatchPipelineConfig {
     pub stack: BatchStackConfig,
     pub align: bool,
+    pub cosmetic: Option<CosmeticConfig>,
 }
 
 impl Default for BatchPipelineConfig {
@@ -54,6 +76,7 @@ impl Default for BatchPipelineConfig {
         Self {
             stack: BatchStackConfig::default(),
             align: true,
+            cosmetic: None,
         }
     }
 }
@@ -80,45 +103,40 @@ pub struct BatchChannelStats {
     pub lights_after_rejection: Vec<usize>,
     pub mean: f64,
     pub stddev: f64,
+    #[serde(default)]
+    pub cosmetic_replaced: Option<u64>,
 }
 
-pub fn calibrate_light(
+fn master_slice(master: Option<&Array2<f32>>, npix: usize) -> Option<&[f32]> {
+    master
+        .map(|m| m.as_slice().expect("contiguous"))
+        .filter(|s| s.len() == npix)
+}
+
+fn apply_masters(
     light: &Array2<f32>,
-    masters: &CalibrationMasters,
+    bias: Option<&[f32]>,
+    dark: Option<&[f32]>,
+    flat: Option<&[f32]>,
     dark_scale: f32,
 ) -> Array2<f32> {
     let (rows, cols) = light.dim();
-    let npix = rows * cols;
     let src = light.as_slice().expect("contiguous");
 
-    let bias_slice = masters.bias.as_ref().map(|b| b.as_slice().expect("contiguous"));
-    let dark_slice = masters.dark.as_ref().map(|d| d.as_slice().expect("contiguous"));
-    let flat_slice = masters.flat.as_ref().map(|f| f.as_slice().expect("contiguous"));
-
-    let bias_ok = bias_slice.map_or(true, |s| s.len() == npix);
-    let dark_ok = dark_slice.map_or(true, |s| s.len() == npix);
-    let flat_ok = flat_slice.map_or(true, |s| s.len() == npix);
-
-    let result: Vec<f32> = (0..npix)
+    let result: Vec<f32> = (0..rows * cols)
         .into_par_iter()
         .map(|i| {
             let mut v = src[i];
-            if bias_ok {
-                if let Some(b) = bias_slice {
-                    v -= b[i];
-                }
+            if let Some(b) = bias {
+                v -= b[i];
             }
-            if dark_ok {
-                if let Some(d) = dark_slice {
-                    v -= d[i] * dark_scale;
-                }
+            if let Some(d) = dark {
+                v -= d[i] * dark_scale;
             }
-            if flat_ok {
-                if let Some(f) = flat_slice {
-                    let fv = f[i];
-                    if fv.is_finite() && fv.abs() > 1e-4 {
-                        v /= fv;
-                    }
+            if let Some(f) = flat {
+                let fv = f[i];
+                if fv.is_finite() && fv.abs() > 1e-4 {
+                    v /= fv;
                 }
             }
             v
@@ -126,6 +144,127 @@ pub fn calibrate_light(
         .collect();
 
     Array2::from_shape_vec((rows, cols), result).unwrap()
+}
+
+pub fn calibrate_light(
+    light: &Array2<f32>,
+    masters: &CalibrationMasters,
+    dark_scale: f32,
+) -> Array2<f32> {
+    let npix = light.len();
+    apply_masters(
+        light,
+        master_slice(masters.bias.as_ref(), npix),
+        master_slice(masters.dark.as_ref(), npix),
+        master_slice(masters.flat.as_ref(), npix),
+        dark_scale,
+    )
+}
+
+pub fn calibrate_light_with_cosmetic(
+    light: &Array2<f32>,
+    masters: &CalibrationMasters,
+    dark_scale: f32,
+    cosmetic: Option<&ChannelCosmetic>,
+) -> (Array2<f32>, usize) {
+    let Some(cosmetic) = cosmetic else {
+        return (calibrate_light(light, masters, dark_scale), 0);
+    };
+    let npix = light.len();
+    let bias = master_slice(masters.bias.as_ref(), npix);
+    let dark = master_slice(masters.dark.as_ref(), npix);
+    let flat = master_slice(masters.flat.as_ref(), npix);
+
+    let dark_subtracted = apply_masters(light, bias, dark, None, dark_scale);
+    let (corrected, replaced) = cosmetic.correct(&dark_subtracted);
+    let calibrated = match flat {
+        Some(_) => apply_masters(&corrected, None, None, flat, dark_scale),
+        None => corrected,
+    };
+    (calibrated, replaced)
+}
+
+pub fn validate_cosmetic_config(config: &CosmeticConfig) -> Result<(), String> {
+    config.validate().map_err(|e| format!("Cosmetic correction: {:#}", e))
+}
+
+#[derive(Debug, Clone)]
+pub struct CosmeticPlan {
+    config: CosmeticConfig,
+    dark_map: Option<Array2<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelCosmetic {
+    config: CosmeticConfig,
+    base_map: Option<Array2<u8>>,
+}
+
+impl CosmeticPlan {
+    pub fn build(config: &CosmeticConfig, master_dark: Option<&Array2<f32>>) -> Result<Self, String> {
+        validate_cosmetic_config(config)?;
+        let dark_map = match master_dark {
+            Some(dark) if config.use_master_dark => {
+                Some(defect_map_from_dark(dark, config.dark_hot_sigma, config.dark_cold_sigma))
+            }
+            _ => None,
+        };
+        Ok(Self { config: config.clone(), dark_map })
+    }
+
+    pub fn for_dims(&self, dims: (usize, usize)) -> Result<ChannelCosmetic, String> {
+        let mut maps: Vec<Array2<u8>> = Vec::new();
+        if let Some(dark_map) = self.dark_map.as_ref().filter(|m| m.dim() == dims) {
+            maps.push(dark_map.clone());
+        }
+        if !self.config.defects.is_empty() {
+            let list_map = defect_map_from_list(&self.config.defects, dims.0, dims.1)
+                .map_err(|e| format!("Cosmetic defect list: {:#}", e))?;
+            maps.push(list_map);
+        }
+        let base_map = match maps.len() {
+            0 => None,
+            1 => maps.pop(),
+            _ => Some(merge_maps(&maps.iter().collect::<Vec<_>>())),
+        };
+        Ok(ChannelCosmetic { config: self.config.clone(), base_map })
+    }
+}
+
+impl ChannelCosmetic {
+    fn auto_enabled(&self) -> bool {
+        self.config.auto_hot_sigma.is_some() || self.config.auto_cold_sigma.is_some()
+    }
+
+    pub fn correct(&self, image: &Array2<f32>) -> (Array2<f32>, usize) {
+        let auto_map = self.auto_enabled().then(|| {
+            defect_map_auto(image, self.config.auto_hot_sigma, self.config.auto_cold_sigma, self.config.cfa)
+        });
+        let merged;
+        let map: &Array2<u8> = match (self.base_map.as_ref(), auto_map.as_ref()) {
+            (Some(base), Some(auto)) => {
+                merged = merge_maps(&[base, auto]);
+                &merged
+            }
+            (Some(base), None) => base,
+            (None, Some(auto)) => auto,
+            (None, None) => return (image.clone(), 0),
+        };
+        apply_cosmetic(image, map, self.config.replacement, self.config.amount, self.config.cfa)
+    }
+}
+
+pub fn carries_dq_plane(path: &str) -> bool {
+    match list_planes(path) {
+        Ok((planes, _)) => planes
+            .iter()
+            .any(|plane| plane.extname.as_deref().is_some_and(is_dq_name)),
+        Err(_) => false,
+    }
+}
+
+pub fn lights_with_dq_planes<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    paths.into_iter().filter(|p| carries_dq_plane(p)).cloned().collect()
 }
 
 pub fn run_batch_pipeline(
@@ -176,16 +315,28 @@ pub fn run_batch_pipeline(
 
     let mut master_channels: Vec<(String, Array2<f32>)> = Vec::new();
 
+    let cosmetic_plan = match &config.cosmetic {
+        Some(cfg) => Some(CosmeticPlan::build(cfg, masters.dark.as_ref())?),
+        None => None,
+    };
+
     for channel in &channels {
-        let calibrated: Vec<Array2<f32>> = channel
+        let channel_cosmetic = match &cosmetic_plan {
+            Some(plan) => Some(plan.for_dims(channel.lights[0].dim())?),
+            None => None,
+        };
+        let (calibrated, replaced_counts): (Vec<Array2<f32>>, Vec<usize>) = channel
             .lights
             .par_iter()
             .enumerate()
             .map(|(i, l)| {
                 let scale = channel.dark_scales.get(i).copied().unwrap_or(1.0);
-                calibrate_light(l, masters, scale)
+                calibrate_light_with_cosmetic(l, masters, scale, channel_cosmetic.as_ref())
             })
-            .collect();
+            .unzip();
+        let cosmetic_replaced = channel_cosmetic
+            .as_ref()
+            .map(|_| replaced_counts.iter().map(|&n| n as u64).sum());
 
         let registered = if config.align && calibrated.len() > 1 {
             let (rows, cols) = calibrated[0].dim();
@@ -238,7 +389,7 @@ pub fn run_batch_pipeline(
         };
 
         let (mut stacked, rejection_counts) =
-            sigma_clipped_mean_stack(&normalized, &config.stack);
+            reject_and_combine_stack(&normalized, &config.stack);
         stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
@@ -254,6 +405,7 @@ pub fn run_batch_pipeline(
             lights_after_rejection: rejection_counts,
             mean: mean_val,
             stddev: var.sqrt(),
+            cosmetic_replaced,
         });
 
         master_channels.push((channel.label.clone(), stacked));
@@ -434,11 +586,12 @@ fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     }).collect()
 }
 
-fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -> (Array2<f32>, Vec<usize>) {
+fn reject_and_combine_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -> (Array2<f32>, Vec<usize>) {
     let (h, w) = frames[0].dim();
     let n = frames.len();
     let mut result = Array2::<f32>::zeros((h, w));
     let mut rejection_counts = vec![0usize; n];
+    let params = config.rejection_params();
 
     let frame_slices: Vec<&[f32]> = frames.iter()
         .map(|f| f.as_slice().expect("contiguous"))
@@ -448,55 +601,26 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
     let row_data: Vec<(Vec<f32>, Vec<usize>)> = rows.par_iter().map(|&y| {
         let mut row = vec![0.0f32; w];
         let mut local_rejected = vec![0usize; n];
-        let mut vals: Vec<(f32, usize)> = Vec::with_capacity(n);
-        let mut scratch: Vec<f32> = Vec::with_capacity(n);
+        let mut samples: Vec<Sample> = Vec::with_capacity(n);
+        let mut scratch = KernelScratch::default();
 
         let base = y * w;
 
         for x in 0..w {
-            vals.clear();
+            samples.clear();
             let idx = base + x;
             for (i, slice) in frame_slices.iter().enumerate() {
                 let v = slice[idx];
                 if v.is_finite() {
-                    vals.push((v, i));
+                    samples.push(Sample::plain(v, i as u16));
                 }
             }
 
-            for _ in 0..config.max_iterations {
-                if vals.len() < 3 { break; }
-
-                scratch.clear();
-                scratch.extend(vals.iter().map(|(v, _)| *v));
-                let mid = scratch.len() / 2;
-                scratch.select_nth_unstable_by(mid, |a, b| f32_cmp(a, b));
-                let median = scratch[mid];
-
-                scratch.iter_mut().for_each(|v| *v = (*v - median).abs());
-                let mad_mid = scratch.len() / 2;
-                scratch.select_nth_unstable_by(mad_mid, |a, b| f32_cmp(a, b));
-                let mad_sigma = scratch[mad_mid] as f64 * MAD_TO_SIGMA;
-                let sigma = if mad_sigma > 1e-10 {
-                    mad_sigma as f32
-                } else {
-                    let mean_abs = vals.iter()
-                        .map(|(v, _)| (*v as f64 - median as f64).abs())
-                        .sum::<f64>() / vals.len() as f64;
-                    (mean_abs * MEANAD_TO_SIGMA) as f32
-                };
-
-                if sigma < 1e-10 { break; }
-                let before = vals.len();
-                vals.retain(|(v, frame_idx)| {
-                    let z = (v - median) / sigma;
-                    let keep = z > -config.sigma_low && z < config.sigma_high;
-                    if !keep { local_rejected[*frame_idx] += 1; }
-                    keep
-                });
-                if vals.len() == before { break; }
+            let out = reject_and_combine_with(&mut samples, None, &params, &mut scratch);
+            for rejected in &samples[out.kept..] {
+                local_rejected[rejected.frame as usize] += 1;
             }
-
-            row[x] = if vals.is_empty() { 0.0 } else { vals.iter().map(|(v, _)| v).sum::<f32>() / vals.len() as f32 };
+            row[x] = out.value;
         }
         (row, local_rejected)
     }).collect();
@@ -511,6 +635,9 @@ fn sigma_clipped_mean_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::imaging::cosmetic::Defect;
+    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use crate::infra::fits::writer::write_fits_mono;
 
     fn frame_with_stars(sky: f32, n_bright: usize) -> Array2<f32> {
         let mut a = Array2::from_elem((40, 40), sky);
@@ -572,7 +699,7 @@ mod tests {
     fn sigma_clip_rejects_lone_outlier_over_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 1000.0, 60000.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = sigma_clipped_mean_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
         assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
     }
@@ -581,8 +708,194 @@ mod tests {
     fn sigma_clip_keeps_quantized_noise_around_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 999.0, 1001.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = sigma_clipped_mean_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3);
         assert_eq!(rejections, vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn batch_stack_config_defaults_to_sigma_clip_mean() {
+        let c = BatchStackConfig::default();
+        assert_eq!(c.rejection, RejectionMethod::SigmaClip);
+        assert_eq!(c.combine, CombineMethod::Mean);
+        assert_eq!((c.sigma_low, c.sigma_high), (2.5, 3.0));
+    }
+
+    #[test]
+    fn reject_and_combine_stack_honours_rejection_and_combine_choice() {
+        let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 1000.0, 60000.0]);
+        let config = BatchStackConfig {
+            normalize_before_stack: false,
+            rejection: RejectionMethod::WinsorizedSigmaClip,
+            combine: CombineMethod::Median,
+            ..Default::default()
+        };
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
+        assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
+
+        let frames = frames_1x1(&[1.0, 2.0, 3.0, 4.0, 100.0]);
+        let config = BatchStackConfig {
+            normalize_before_stack: false,
+            rejection: RejectionMethod::None,
+            combine: CombineMethod::Median,
+            ..Default::default()
+        };
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        assert_eq!(stacked[[0, 0]], 3.0);
+        assert_eq!(rejections, vec![0; 5]);
+    }
+
+    fn pseudo_noise(y: usize, x: usize) -> f32 {
+        let h = (y as u32).wrapping_mul(2654435761) ^ (x as u32).wrapping_mul(40503);
+        (h % 11) as f32 * 0.3
+    }
+
+    fn dark_with_hot_pixel() -> Array2<f32> {
+        let mut dark = Array2::from_shape_fn((16, 16), |(y, x)| 10.0 + pseudo_noise(y, x));
+        dark[[5, 5]] = 1000.0;
+        dark
+    }
+
+    fn light_with_hot_pixel() -> Array2<f32> {
+        let mut light = Array2::from_shape_fn((16, 16), |(y, x)| 110.0 + pseudo_noise(y, x));
+        light[[5, 5]] = 5000.0;
+        light
+    }
+
+    fn dark_hot_config() -> CosmeticConfig {
+        CosmeticConfig { use_master_dark: true, dark_hot_sigma: Some(5.0), ..Default::default() }
+    }
+
+    fn dark_only_masters() -> CalibrationMasters {
+        CalibrationMasters { dark: Some(dark_with_hot_pixel()), flat: None, bias: None }
+    }
+
+    #[test]
+    fn cosmetic_step_repairs_hot_pixel_flagged_by_the_master_dark() {
+        let masters = dark_only_masters();
+        let light = light_with_hot_pixel();
+        let plan = CosmeticPlan::build(&dark_hot_config(), masters.dark.as_ref()).unwrap();
+        let channel = plan.for_dims(light.dim()).unwrap();
+
+        let untouched = calibrate_light(&light, &masters, 1.0);
+        assert!((untouched[[5, 5]] - 4000.0).abs() < 1e-3);
+
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        assert_eq!(replaced, 1);
+        assert!((corrected[[5, 5]] - 100.0).abs() < 1.0, "hot pixel survived: {}", corrected[[5, 5]]);
+        for (pos, &v) in untouched.indexed_iter() {
+            if pos != (5, 5) {
+                assert_eq!(corrected[pos], v);
+            }
+        }
+
+        let (plain, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None);
+        assert_eq!(replaced, 0);
+        assert_eq!(plain, untouched);
+    }
+
+    #[test]
+    fn cosmetic_step_runs_after_dark_subtraction_and_before_flat_division() {
+        let mut flat = Array2::from_elem((16, 16), 2.0f32);
+        flat[[5, 5]] = 4.0;
+        let masters = CalibrationMasters { flat: Some(flat), ..dark_only_masters() };
+        let light = light_with_hot_pixel();
+        let plan = CosmeticPlan::build(&dark_hot_config(), masters.dark.as_ref()).unwrap();
+        let channel = plan.for_dims(light.dim()).unwrap();
+
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        assert_eq!(replaced, 1);
+        assert!((corrected[[5, 5]] - 25.0).abs() < 0.5, "expected neighbour median / flat: {}", corrected[[5, 5]]);
+        assert!((corrected[[0, 0]] - 50.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn run_batch_pipeline_counts_cosmetic_replacements_and_is_off_by_default() {
+        let masters = dark_only_masters();
+        let channel = ChannelInput {
+            lights: (0..3).map(|_| light_with_hot_pixel()).collect(),
+            label: "L".into(),
+            dark_scales: vec![1.0; 3],
+        };
+        let stack = BatchStackConfig {
+            normalize_before_stack: false,
+            rejection: RejectionMethod::None,
+            ..Default::default()
+        };
+
+        let with_cosmetic = BatchPipelineConfig { stack: stack.clone(), align: false, cosmetic: Some(dark_hot_config()) };
+        let res = run_batch_pipeline(vec![channel.clone()], &masters, &with_cosmetic).unwrap();
+        assert_eq!(res.stats.channels[0].cosmetic_replaced, Some(3));
+        assert!((res.master_channels[0].1[[5, 5]] - 100.0).abs() < 1.0);
+
+        let default_config = BatchPipelineConfig { stack, align: false, ..Default::default() };
+        assert!(default_config.cosmetic.is_none());
+        let res = run_batch_pipeline(vec![channel], &masters, &default_config).unwrap();
+        assert_eq!(res.stats.channels[0].cosmetic_replaced, None);
+        assert!((res.master_channels[0].1[[5, 5]] - 4000.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn cosmetic_plan_merges_defect_list_and_auto_map_and_skips_a_missing_dark() {
+        let cfg = CosmeticConfig {
+            use_master_dark: true,
+            auto_hot_sigma: Some(5.0),
+            defects: vec![Defect::Point { x: 2, y: 3 }],
+            ..Default::default()
+        };
+        let plan = CosmeticPlan::build(&cfg, None).unwrap();
+        let mut light = Array2::from_shape_fn((16, 16), |(y, x)| 100.0 + pseudo_noise(y, x));
+        light[[9, 9]] = 5000.0;
+        let channel = plan.for_dims(light.dim()).unwrap();
+        let masters = CalibrationMasters { dark: None, flat: None, bias: None };
+
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        assert_eq!(replaced, 2);
+        assert!(corrected[[9, 9]] < 104.0, "auto hot pixel survived: {}", corrected[[9, 9]]);
+        assert!((corrected[[3, 2]] - light[[3, 2]]).abs() < 4.0);
+        assert_ne!(corrected[[3, 2]], light[[3, 2]]);
+
+        let outside = CosmeticConfig {
+            use_master_dark: false,
+            defects: vec![Defect::Point { x: 40, y: 0 }],
+            ..Default::default()
+        };
+        let plan = CosmeticPlan::build(&outside, None).unwrap();
+        assert!(plan.for_dims((16, 16)).is_err());
+
+        let nothing = CosmeticConfig { use_master_dark: false, ..Default::default() };
+        let plan = CosmeticPlan::build(&nothing, None).unwrap();
+        let channel = plan.for_dims(light.dim()).unwrap();
+        let (same, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        assert_eq!(replaced, 0);
+        assert_eq!(same, light);
+    }
+
+    #[test]
+    fn cosmetic_plan_rejects_invalid_sigma_and_amount() {
+        let zero_sigma = CosmeticConfig { dark_hot_sigma: Some(0.0), ..Default::default() };
+        assert!(CosmeticPlan::build(&zero_sigma, None).is_err());
+        let nan_sigma = CosmeticConfig { auto_cold_sigma: Some(f32::NAN), ..Default::default() };
+        assert!(validate_cosmetic_config(&nan_sigma).is_err());
+        let bad_amount = CosmeticConfig { amount: 1.5, ..Default::default() };
+        assert!(validate_cosmetic_config(&bad_amount).is_err());
+        assert!(validate_cosmetic_config(&CosmeticConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn carries_dq_plane_detects_dq_extensions_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mef = dir.path().join("mef.fits");
+        sci_err_dq_mef(&mef, 4, 4, vec![0i32; 16]);
+        let mef_path = mef.to_str().unwrap().to_string();
+        let plain = dir.path().join("plain.fits");
+        let plain_path = plain.to_str().unwrap().to_string();
+        write_fits_mono(&plain_path, &Array2::from_elem((4, 4), 1.0f32), None).unwrap();
+
+        assert!(carries_dq_plane(&mef_path));
+        assert!(carries_dq_plane(&format!("{}#hdu=1", mef_path)));
+        assert!(!carries_dq_plane(&plain_path));
+        assert!(!carries_dq_plane("C:/definitely/missing/light.fits"));
     }
 }
