@@ -31,8 +31,9 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="AstroBurst processing the Pillars of Creation: file panel, live preview, histogram and analysis tools" width="100%">
+  <img src="docs/screenshots/hero.png" alt="AstroBurst composing the Pillars of Creation from three HST narrowband frames, with the colour calibration step, the live GPU preview and the analysis panel" width="100%">
 </p>
+<p align="center"><em>The Pillars of Creation composed from the three HST/WFPC2 narrowband frames that ship with the app, at the colour step: spectrophotometric calibration against Gaia DR3 on the left, the live GPU composite in the middle, per-channel STF and the analysis panel on the right.</em></p>
 
 **Latest:** 0.6.0-preview. Since 0.5.8: DS9-class display controls shared with the headless server, any-HDU / any-array image references, DQ decoding and overlays, interactive regions with DS9 `.reg` exchange, a PixInsight-class processing round (rejection families, frame normalization, cosmetic correction, DBE spline background, PixelMath, LHE, HDRMT, exact statistics) and a science round (header photometric calibration, spectral axes and velocities, cube moment maps, SCI+ERR+DQ cutouts, WCS grid, Gaia DR3 catalog). Full history in [CHANGELOG.md](CHANGELOG.md).
 
@@ -53,7 +54,7 @@ Image processing runs locally. Two optional features reach the network: plate so
 ### Viewer, regions and pixel readout
 
 <p align="center">
-  <img src="docs/screenshots/27-regions-and-pixel-readout.png" alt="A box region on a JWST NIRCam mosaic with the display controls bar and the pixel readout panel" width="100%">
+  <img src="docs/screenshots/01-viewer-regions-and-readout.png" alt="A box region on a JWST NIRCam mosaic with the display controls bar and the pixel readout panel" width="100%">
 </p>
 <p align="center"><em>A box region selected over a JWST NIRCam F187N mosaic. Top: the display-controls bar, here on MTF stretch, min/max limits, gray colormap inverted. Right: the readout reporting the pixel as 45.4738 &plusmn; 0.7261 MJy/sr with its ICRS sexagesimal position.</em></p>
 
@@ -72,7 +73,7 @@ Region statistics, cutouts, histograms and rendering are available on the headle
 ### Data quality and units
 
 <p align="center">
-  <img src="docs/screenshots/29-hdu-planes-and-header-explorer.png" alt="The FITS extensions list of a JWST NIRCam i2d product with SCI, ERR, CON, WHT and variance planes, and the header explorer" width="100%">
+  <img src="docs/screenshots/02-planes-and-header-explorer.png" alt="The FITS extensions list of a JWST NIRCam i2d product with SCI, ERR, CON, WHT and variance planes, and the header explorer" width="100%">
 </p>
 <p align="center"><em>A JWST NIRCam i2d product on the GPU viewer: the extension list exposes SCI, ERR, CON, WHT and the variance planes for display, and the header explorer groups the 277 keywords.</em></p>
 
@@ -85,7 +86,7 @@ The DQ overlay and DQ exclusion are desktop-only. The server pixel endpoint retu
 ### Colour calibration
 
 <p align="center">
-  <img src="docs/screenshots/28-spcc-gpu-composite.png" alt="Spectrophotometric colour calibration panel over an RGB composite" width="100%">
+  <img src="docs/screenshots/03-colour-calibration-spcc.png" alt="Spectrophotometric colour calibration panel over an RGB composite" width="100%">
 </p>
 <p align="center"><em>Spectrophotometric colour calibration against Gaia DR3 with a selectable white reference and SCNR, on an RGB composite rendering through the GPU display path.</em></p>
 
@@ -94,26 +95,28 @@ Spectrophotometric colour calibration solves channel gains against a real Gaia D
 ### Compose wizard
 
 <p align="center">
-  <img src="docs/screenshots/10-export-final.png" alt="The finished SHO composite of the Pillars of Creation on the export step" width="100%">
-</p>
-<p align="center"><em>The export step with a finished SHO narrowband composite. White balance and SCNR are baked in from the calibrated linear composite and the stretch is applied at write time.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/33-channel-auto-map.png" alt="The channel step of the compose wizard with three narrowband frames mapped to Ha, OIII and SII from their FITS headers" width="100%">
+  <img src="docs/screenshots/04-compose-channel-auto-map.png" alt="The channel step of the compose wizard with three narrowband frames mapped to Ha, OIII and SII from their FITS headers" width="100%">
 </p>
 <p align="center"><em>The channel step: three HST WFPC2 narrowband frames assigned to H-alpha, [O III] and [S II] by reading the filter from each header and matching it to the bin wavelength, with no manual mapping.</em></p>
 
 Ten steps: channels, stack, align, crop, background, blend, colour, stretch, adjust, export. Filters are detected from headers and mapped to channel bins by wavelength. Stacking uses the same rejection family as the Stack tab (sigma, Winsorized sigma, linear fit, percentile, min/max) with a subframe selector and optional drizzle. Alignment is sub-pixel phase correlation by default or star-based affine (triangle asterism with RANSAC, 2000 iterations) for rotation, with an automatic fallback chain of affine, rigid, phase correlation, identity. Background correction has four families: per-channel polynomial surface, linked shared gradient, neutralize (sky pedestal only) and de-band for 1/f striping (rows, columns, both or an auto-detected axis), offered as seven options in the selector. Blend presets (SHO, HOO, Dynamic HOO, Foraxx, Hubble Legacy, RGB, plus wavelength-spreading Auto and Balanced) resolve by spectral wavelength rather than bin order. Stretch offers star removal (starless image plus a separate stars layer), masked stretch with star protection, GHS, arcsinh and linked or per-channel STF.
 
 <p align="center">
-  <img src="docs/screenshots/34-masked-stretch-modes.png" alt="The stretch step with the mode list open on masked stretch, star protection controls and the header explorer" width="100%">
+  <img src="docs/screenshots/05-compose-masked-stretch.png" alt="The stretch step with the mode list open on masked stretch, star protection controls and the header explorer" width="100%">
 </p>
-<p align="center"><em>The stretch step on the blended composite, with the four stretch modes and the star-protection controls of the masked stretch: detection sigma, maximum eccentricity, mask growth and a shared star mask across channels. The header explorer on the right shows the filter that assigned this frame to its channel.</em></p> Adjust applies monotone Fritsch-Carlson spline tone curves. The composite is non-destructive: white balance and SCNR always reconstruct from an immutable original cache.
+<p align="center"><em>The stretch step on the blended composite, with the four stretch modes and the star-protection controls of the masked stretch: detection sigma, maximum eccentricity, mask growth and a shared star mask across channels. The header explorer on the right shows the filter that assigned this frame to its channel.</em></p>
+
+Adjust applies monotone Fritsch-Carlson spline tone curves. The composite is non-destructive: white balance and SCNR always reconstruct from an immutable original cache.
+
+<p align="center">
+  <img src="docs/screenshots/06-compose-curves-and-result.png" alt="The adjust step with a tone curve applied to the finished composite" width="100%">
+</p>
+<p align="center"><em>The last step before export: a monotone spline tone curve applied to the calibrated composite, with the result rendering live through the GPU path. The magenta corner is the gap between the WFPC2 chips, not an artefact of the processing.</em></p>
 
 ### Processing
 
 <p align="center">
-  <img src="docs/screenshots/31-pixelmath.png" alt="The PixelMath panel with a validated NaN-fill expression, result statistics and a target/result comparison" width="100%">
+  <img src="docs/screenshots/07-pixelmath.png" alt="The PixelMath panel with a validated NaN-fill expression, result statistics and a target/result comparison" width="100%">
 </p>
 <p align="center"><em>PixelMath on a NIRCam mosaic: the expression is validated as you type, the result is written as a new FITS with provenance cards, and the panel compares target and result.</em></p>
 
@@ -128,21 +131,16 @@ Ten steps: channels, stack, align, crop, background, blend, colour, stretch, adj
 ### Science analysis
 
 <p align="center">
-  <img src="docs/screenshots/30-gaia-catalog-and-statistics.png" alt="The Analysis tab with the Gaia DR3 catalog panel, the exact statistics table and the coordinate frame selector" width="100%">
+  <img src="docs/screenshots/08-analysis-tab.png" alt="The Analysis tab with the Gaia DR3 catalog panel, the exact statistics table and the coordinate frame selector" width="100%">
 </p>
 <p align="center"><em>The Analysis tab on a NIRCam F335M mosaic: Gaia DR3 cone search and cross-match, the exact statistics table in MJy/sr with a noise evaluation toggle, regions, FFT and deep zoom, with the readout frame switched between ICRS, FK5, galactic and ecliptic.</em></p>
-
-<p align="center">
-  <img src="docs/screenshots/09-ghs-stretch-analysis.png" alt="The analysis strip beside a GHS stretch: plate solution, star detection and photometry" width="100%">
-</p>
-<p align="center"><em>The analysis strip beside a GHS stretch in progress: a plate-solved field with labelled annotations, star detection with FWHM and SNR overlays, interactive photometry, an FFT power spectrum and the histogram readout.</em></p>
 
 **Photometry.** Aperture photometry with fractional edge-pixel weights, a local background annulus, ERR-plane error propagation (or sky noise plus an optional Poisson term), the SATURATED DQ bit or a header saturation level, masked-pixel counts and a curve-of-growth aperture correction. The zero point is read from the header, JWST `MJy/sr` with `PIXAR_SR` or `DN/s` with `PHOTMJSR`, HST `PHOTFLAM`/`PHOTPLAM`/`PHOTZPT`, Roman `conversion_megajanskys`, or generic `MAGZERO`-style keywords, so the panel reports AB magnitude with error, flux in Jy and surface brightness, and warns when the image carries an `ABPROC` provenance card left by a processing step.
 
 **Catalogs.** Gaia DR3 cone search through VizieR with proper motions propagated from J2016.0 to the observation date, an overlay layer with labels, full-field cross-match of detected stars with astrometric residuals (median dRA/dDec, rms) and a photometric zero point in G, BP or RP with an optional colour term, RFC-4180 CSV export of rows, sources and matches, and a one-click copy of rows into Point regions for `.reg` export.
 
 <p align="center">
-  <img src="docs/screenshots/32-gaia-crossmatch-and-statistics.png" alt="Gaia DR3 cross-match results with astrometric residuals and a photometric zero point, above the exact statistics table" width="100%">
+  <img src="docs/screenshots/09-gaia-crossmatch-and-statistics.png" alt="Gaia DR3 cross-match results with astrometric residuals and a photometric zero point, above the exact statistics table" width="100%">
 </p>
 <p align="center"><em>A Gaia DR3 cross-match on an HST WFPC2 frame of the Eagle Nebula: 68 matched stars with a median offset of 0.330 and -0.009 arcsec and 0.458 arcsec rms, a zero point of 26.229 ± 0.036 from 58 stars with the colour term fitted, and the statistics table below. The panel says plainly that the frame already carries an HST flux calibration, so the Gaia zero point is informational, and that the header has no observation date, so catalogue positions stay at J2016.0.</em></p>
 
@@ -152,7 +150,7 @@ Ten steps: channels, stack, align, crop, background, blend, colour, stretch, adj
 
 Star detection with flux, FWHM and SNR, a 64K-bin histogram with auto-STF and an FFT power spectrum complete the tab. Plate solving goes through astrometry.net and needs a free nova.astrometry.net API key entered in Settings; large images are auto-downsampled and the result is rescaled to full resolution. WCS is handled by the [wcs](https://github.com/cds-astro/wcs-rs) crate (about twenty FITS projections, CD/PC/CDELT conventions) with SIP distortion applied in the wrapper; see [ADR 0001](docs/adr/0001-wcs-rs-for-wcs-engine.md). A synthetic data generator produces star fields with configurable distributions, PSF models, a CCD noise model and a ground-truth catalogue CSV for validating photometry and alignment.
 
-More screens are in [`docs/screenshots/`](docs/screenshots).
+Every screenshot above is in [`docs/screenshots/`](docs/screenshots), taken on the current build.
 
 ## Install and build
 
