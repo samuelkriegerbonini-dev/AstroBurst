@@ -162,6 +162,23 @@ pub fn convert_from_icrs(frame: SkyFrame, ra: f64, dec: f64) -> (f64, f64) {
     }
 }
 
+pub fn galactic_to_icrs(lon: f64, lat: f64) -> (f64, f64) {
+    transform(&mat_transpose(&ICRS_TO_GALACTIC), lon, lat)
+}
+
+pub fn ecliptic_j2000_to_icrs(lon: f64, lat: f64) -> (f64, f64) {
+    transform(&mat_transpose(&ICRS_TO_ECLIPTIC_J2000), lon, lat)
+}
+
+pub fn convert_to_icrs(frame: SkyFrame, lon: f64, lat: f64) -> (f64, f64) {
+    match frame {
+        SkyFrame::Icrs => (lon.rem_euclid(360.0), lat),
+        SkyFrame::Fk5J2000 => fk5_j2000_to_icrs(lon, lat),
+        SkyFrame::Galactic => galactic_to_icrs(lon, lat),
+        SkyFrame::EclipticJ2000 => ecliptic_j2000_to_icrs(lon, lat),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +354,45 @@ mod tests {
         }
         let (l, b) = convert_from_icrs(SkyFrame::Galactic, f64::NAN, 1.0);
         assert!(l.is_nan() && b.is_nan());
+    }
+
+    #[test]
+    fn convert_to_icrs_inverts_convert_from_icrs_for_every_frame() {
+        let positions = [
+            (0.0, 0.0),
+            (10.0, 20.0),
+            (83.5, -5.25),
+            (192.85948, 27.12825),
+            (266.40498, -28.93617),
+            (359.99, 89.5),
+            (300.0, -89.9),
+        ];
+        for frame in SkyFrame::ALL {
+            for &(ra, dec) in &positions {
+                let (lon, lat) = convert_from_icrs(frame, ra, dec);
+                let (ra2, dec2) = convert_to_icrs(frame, lon, lat);
+                assert!(
+                    lon_diff(ra2, ra) < 1e-9 && (dec2 - dec).abs() < 1e-9,
+                    "{frame:?}: ({ra},{dec}) -> ({lon},{lat}) -> ({ra2},{dec2})"
+                );
+                let (lon2, lat2) = convert_from_icrs(frame, ra2, dec2);
+                let sep = crate::core::astrometry::wcs::angular_separation(lon, lat, lon2, lat2);
+                assert!(sep < 1e-9, "{frame:?}: ({lon},{lat}) vs ({lon2},{lat2}) separated by {sep} deg");
+            }
+        }
+        let (ra, dec) = convert_to_icrs(SkyFrame::Icrs, -30.0, 5.0);
+        assert!((ra - 330.0).abs() < 1e-12 && dec == 5.0);
+        let (ra, dec) = convert_to_icrs(SkyFrame::Galactic, 0.0, 0.0);
+        assert!(lon_diff(ra, 266.40498).abs() < 1e-4 && (dec + 28.93617).abs() < 1e-4, "({ra},{dec})");
+        let (ra, dec) = convert_to_icrs(SkyFrame::EclipticJ2000, 90.0, 0.0);
+        assert!(lon_diff(ra, 90.0) < 1e-5 && (dec - 23.4392794).abs() < 1e-5, "({ra},{dec})");
+        for frame in SkyFrame::ALL {
+            let (ra, _) = convert_to_icrs(frame, f64::NAN, 1.0);
+            assert!(ra.is_nan(), "{frame:?} NaN lon -> ra {ra}");
+            let (_, dec) = convert_to_icrs(frame, 1.0, f64::NAN);
+            assert!(dec.is_nan(), "{frame:?} NaN lat -> dec {dec}");
+        }
+        let (ra, dec) = convert_to_icrs(SkyFrame::Galactic, f64::NAN, 1.0);
+        assert!(ra.is_nan() && dec.is_nan());
     }
 }

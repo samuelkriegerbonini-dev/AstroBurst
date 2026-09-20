@@ -78,6 +78,8 @@ export interface RegionStats {
   background: BackgroundEstimate | null;
   net_sum: number | null;
   net_snr: number | null;
+  sum_err?: number | null;
+  weighted_mean?: number | null;
 }
 
 export interface RegionStatsEntry {

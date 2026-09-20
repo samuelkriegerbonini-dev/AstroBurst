@@ -82,6 +82,7 @@ pub enum RegionError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskedValues {
     pub values: Vec<f32>,
+    pub errors: Vec<f32>,
     pub n_inside: u64,
     pub n_nan: u64,
     pub n_excluded: u64,
@@ -159,6 +160,7 @@ fn nearest_pixel(x: f64, y: f64) -> (i64, i64) {
 
 struct RowScan {
     values: Vec<f32>,
+    errors: Vec<f32>,
     n_inside: u64,
     n_nan: u64,
     n_excluded: u64,
@@ -166,10 +168,10 @@ struct RowScan {
 
 impl RowScan {
     fn empty() -> Self {
-        Self { values: Vec::new(), n_inside: 0, n_nan: 0, n_excluded: 0 }
+        Self { values: Vec::new(), errors: Vec::new(), n_inside: 0, n_nan: 0, n_excluded: 0 }
     }
 
-    fn take(&mut self, v: f32, excluded: bool) {
+    fn take(&mut self, v: f32, err: Option<f32>, excluded: bool) {
         self.n_inside += 1;
         if excluded {
             self.n_excluded += 1;
@@ -177,11 +179,15 @@ impl RowScan {
             self.n_nan += 1;
         } else {
             self.values.push(v);
+            if let Some(e) = err {
+                self.errors.push(e);
+            }
         }
     }
 
     fn merge(mut self, other: RowScan) -> Self {
         self.values.extend(other.values);
+        self.errors.extend(other.errors);
         self.n_inside += other.n_inside;
         self.n_nan += other.n_nan;
         self.n_excluded += other.n_excluded;
@@ -191,6 +197,7 @@ impl RowScan {
 
 fn sample_pixels(
     arr: &Array2<f32>,
+    err: Option<&Array2<f32>>,
     excluded: Option<&Array2<u8>>,
     pixels: impl Iterator<Item = (i64, i64)>,
 ) -> RowScan {
@@ -202,7 +209,7 @@ fn sample_pixels(
         }
         let (ux, uy) = (px as usize, py as usize);
         let ex = excluded.is_some_and(|m| m[[uy, ux]] != 0);
-        scan.take(arr[[uy, ux]], ex);
+        scan.take(arr[[uy, ux]], err.map(|e| e[[uy, ux]]), ex);
     }
     scan
 }
@@ -431,7 +438,17 @@ impl RegionShape {
     }
 
     pub fn masked_values(&self, arr: &Array2<f32>, excluded: Option<&Array2<u8>>) -> MaskedValues {
+        self.masked_values_with_err(arr, None, excluded)
+    }
+
+    pub fn masked_values_with_err(
+        &self,
+        arr: &Array2<f32>,
+        err: Option<&Array2<f32>>,
+        excluded: Option<&Array2<u8>>,
+    ) -> MaskedValues {
         let (rows, cols) = arr.dim();
+        let err = err.filter(|e| e.dim() == arr.dim());
         let clipped = self.bounds_exceed(rows, cols);
         let scan = match self {
             RegionShape::Line { x1, y1, x2, y2 } => {
@@ -447,15 +464,16 @@ impl RegionShape {
                         last = Some(p);
                     }
                 }
-                sample_pixels(arr, excluded, pixels.into_iter())
+                sample_pixels(arr, err, excluded, pixels.into_iter())
             }
             RegionShape::Point { x, y } => {
-                sample_pixels(arr, excluded, std::iter::once(nearest_pixel(*x, *y)))
+                sample_pixels(arr, err, excluded, std::iter::once(nearest_pixel(*x, *y)))
             }
-            _ => self.scan_lattice(arr, excluded),
+            _ => self.scan_lattice(arr, err, excluded),
         };
         MaskedValues {
             values: scan.values,
+            errors: scan.errors,
             n_inside: scan.n_inside,
             n_nan: scan.n_nan,
             n_excluded: scan.n_excluded,
@@ -463,7 +481,12 @@ impl RegionShape {
         }
     }
 
-    fn scan_lattice(&self, arr: &Array2<f32>, excluded: Option<&Array2<u8>>) -> RowScan {
+    fn scan_lattice(
+        &self,
+        arr: &Array2<f32>,
+        err: Option<&Array2<f32>>,
+        excluded: Option<&Array2<u8>>,
+    ) -> RowScan {
         let (rows, cols) = arr.dim();
         let b = self.bounds();
         let x0 = b.x0.max(0);
@@ -483,7 +506,7 @@ impl RegionShape {
                 }
                 let ux = px as usize;
                 let ex = excluded.is_some_and(|m| m[[uy, ux]] != 0);
-                scan.take(arr[[uy, ux]], ex);
+                scan.take(arr[[uy, ux]], err.map(|e| e[[uy, ux]]), ex);
             }
             scan
         };
@@ -541,6 +564,8 @@ pub struct RegionStats {
     pub background: Option<BackgroundEstimate>,
     pub net_sum: Option<f64>,
     pub net_snr: Option<f64>,
+    pub sum_err: Option<f64>,
+    pub weighted_mean: Option<f64>,
 }
 
 fn background_estimate(mut values: Vec<f32>) -> Option<BackgroundEstimate> {
@@ -572,13 +597,14 @@ pub fn region_stats(
     shape: &RegionShape,
     background: Option<&RegionShape>,
     excluded: Option<&Array2<u8>>,
+    err: Option<&Array2<f32>>,
     clip: SigmaClip,
 ) -> Result<RegionStats, RegionError> {
     shape.validate()?;
     if let Some(bg) = background {
         bg.validate()?;
     }
-    let mv = shape.masked_values(arr, excluded);
+    let mv = shape.masked_values_with_err(arr, err, excluded);
     if mv.values.is_empty() {
         return Err(RegionError::Empty { shape: shape.kind() });
     }
@@ -613,6 +639,7 @@ pub fn region_stats(
         (Some(b), Some(ns)) if b.sigma > 0.0 => Some(ns / (b.sigma * (count as f64).sqrt())),
         _ => None,
     };
+    let (sum_err, weighted_mean) = error_summary(&mv.values, &mv.errors);
 
     Ok(RegionStats {
         count,
@@ -636,7 +663,37 @@ pub fn region_stats(
         background: bg,
         net_sum,
         net_snr,
+        sum_err,
+        weighted_mean,
     })
+}
+
+fn error_summary(values: &[f32], errors: &[f32]) -> (Option<f64>, Option<f64>) {
+    if errors.len() != values.len() || errors.is_empty() {
+        return (None, None);
+    }
+    let mut sum_sq = 0.0f64;
+    let mut n_err = 0u64;
+    let mut weighted_sum = 0.0f64;
+    let mut weight_total = 0.0f64;
+    for (&v, &e) in values.iter().zip(errors) {
+        if !e.is_finite() || e < 0.0 {
+            continue;
+        }
+        let e = e as f64;
+        sum_sq += e * e;
+        n_err += 1;
+        if e > 0.0 {
+            let w = 1.0 / (e * e);
+            weighted_sum += w * v as f64;
+            weight_total += w;
+        }
+    }
+    if n_err == 0 {
+        return (None, None);
+    }
+    let weighted_mean = (weight_total > 0.0).then(|| weighted_sum / weight_total);
+    (Some(sum_sq.sqrt()), weighted_mean)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1261,7 +1318,7 @@ mod tests {
     #[test]
     fn region_stats_known_values() {
         let arr = known_4x4();
-        let s = region_stats(&arr, &whole(), None, None, SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &whole(), None, None, None, SigmaClip::default()).unwrap();
         assert_eq!(s.count, 16);
         assert_eq!(s.n_nan, 0);
         assert_eq!(s.sum, 136.0);
@@ -1282,18 +1339,71 @@ mod tests {
     fn region_stats_counts_nan_and_excluded_separately() {
         let mut arr = known_4x4();
         arr[[1, 1]] = f32::NAN;
-        let s = region_stats(&arr, &whole(), None, None, SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &whole(), None, None, None, SigmaClip::default()).unwrap();
         assert_eq!(s.count, 15);
         assert_eq!(s.n_nan, 1);
         assert_eq!(s.sum, 135.0);
         let mut ex = Array2::<u8>::zeros((6, 6));
         ex[[4, 4]] = 1;
         ex[[3, 3]] = 7;
-        let s = region_stats(&arr, &whole(), None, Some(&ex), SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &whole(), None, Some(&ex), None, SigmaClip::default()).unwrap();
         assert_eq!(s.count, 13);
         assert_eq!(s.n_excluded, 2);
         assert_eq!(s.max, 15.0);
         assert_eq!(s.sum, 135.0 - 16.0 - 11.0);
+    }
+
+    #[test]
+    fn region_stats_with_err_plane_reports_sum_err_and_weighted_mean() {
+        let arr = known_4x4();
+        let err = Array2::from_elem((6, 6), 0.5f32);
+        let s = region_stats(&arr, &whole(), None, None, Some(&err), SigmaClip::default()).unwrap();
+        assert!((s.sum_err.unwrap() - 0.5 * 4.0).abs() < 1e-9, "sum_err={:?}", s.sum_err);
+        assert!((s.weighted_mean.unwrap() - s.mean).abs() < 1e-9, "weighted_mean={:?}", s.weighted_mean);
+        assert_eq!(s.count, 16);
+        assert_eq!(s.sum, 136.0);
+
+        let mut varied = err.clone();
+        varied[[1, 1]] = 2.0;
+        let s = region_stats(&arr, &whole(), None, None, Some(&varied), SigmaClip::default()).unwrap();
+        assert!((s.sum_err.unwrap() - (15.0f64 * 0.25 + 4.0).sqrt()).abs() < 1e-9);
+        let expected_weighted = (4.0 * 135.0 + 0.25) / (15.0 * 4.0 + 0.25);
+        assert!((s.weighted_mean.unwrap() - expected_weighted).abs() < 1e-9, "{:?}", s.weighted_mean);
+
+        let mut nan_err = err.clone();
+        nan_err[[2, 2]] = f32::NAN;
+        let s = region_stats(&arr, &whole(), None, None, Some(&nan_err), SigmaClip::default()).unwrap();
+        assert!((s.sum_err.unwrap() - 0.5 * 15f64.sqrt()).abs() < 1e-9);
+        assert!((s.weighted_mean.unwrap() - (136.0 - 6.0) / 15.0).abs() < 1e-9);
+        assert_eq!(s.count, 16);
+
+        let mut zero_err = err.clone();
+        zero_err[[1, 1]] = 0.0;
+        let s = region_stats(&arr, &whole(), None, None, Some(&zero_err), SigmaClip::default()).unwrap();
+        assert!((s.sum_err.unwrap() - 0.5 * 15f64.sqrt()).abs() < 1e-9);
+        assert!((s.weighted_mean.unwrap() - 135.0 / 15.0).abs() < 1e-9);
+
+        let mut nan_arr = known_4x4();
+        nan_arr[[1, 1]] = f32::NAN;
+        let mut ex = Array2::<u8>::zeros((6, 6));
+        ex[[4, 4]] = 1;
+        let s = region_stats(&nan_arr, &whole(), None, Some(&ex), Some(&err), SigmaClip::default()).unwrap();
+        assert_eq!(s.count, 14);
+        assert!((s.sum_err.unwrap() - 0.5 * 14f64.sqrt()).abs() < 1e-9);
+        assert!((s.weighted_mean.unwrap() - s.mean).abs() < 1e-9);
+
+        let wrong = Array2::from_elem((3, 3), 0.5f32);
+        let s = region_stats(&arr, &whole(), None, None, Some(&wrong), SigmaClip::default()).unwrap();
+        assert!(s.sum_err.is_none() && s.weighted_mean.is_none());
+
+        let all_nan_err = Array2::from_elem((6, 6), f32::NAN);
+        let s = region_stats(&arr, &whole(), None, None, Some(&all_nan_err), SigmaClip::default()).unwrap();
+        assert!(s.sum_err.is_none() && s.weighted_mean.is_none());
+
+        let point = RegionShape::Point { x: 2.0, y: 2.0 };
+        let s = region_stats(&arr, &point, None, None, Some(&err), SigmaClip::default()).unwrap();
+        assert_eq!(s.sum_err, Some(0.5));
+        assert_eq!(s.weighted_mean, Some(s.mean));
     }
 
     #[test]
@@ -1308,7 +1418,7 @@ mod tests {
         let clean_mean = clean_sum / 63.0;
         arr[[4, 4]] = 1000.0;
         let region = RegionShape::Box { x: 3.5, y: 3.5, width: 8.0, height: 8.0, angle: 0.0 };
-        let s = region_stats(&arr, &region, None, None, SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &region, None, None, None, SigmaClip::default()).unwrap();
         assert_eq!(s.n_rejected, 1);
         assert!((s.clipped_mean - clean_mean).abs() < 1e-6, "{} vs {clean_mean}", s.clipped_mean);
         assert!(s.clipped_sigma < 1.0);
@@ -1324,7 +1434,7 @@ mod tests {
         }
         let src = circle(16.0, 16.0, 3.0);
         let bg = RegionShape::Annulus { x: 16.0, y: 16.0, r_inner: 6.0, r_outer: 10.0 };
-        let s = region_stats(&arr, &src, Some(&bg), None, SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &src, Some(&bg), None, None, SigmaClip::default()).unwrap();
         let b = s.background.clone().expect("background");
         let bg_mv = bg.masked_values(&arr, None);
         assert_eq!(b.count, bg_mv.values.len() as u64);
@@ -1340,20 +1450,20 @@ mod tests {
         let arr = known_4x4();
         let off = circle(100.0, 100.0, 2.0);
         assert_eq!(
-            region_stats(&arr, &off, None, None, SigmaClip::default()),
+            region_stats(&arr, &off, None, None, None, SigmaClip::default()),
             Err(RegionError::Empty { shape: "circle" })
         );
         let nan = Array2::from_elem((6, 6), f32::NAN);
         assert!(matches!(
-            region_stats(&nan, &whole(), None, None, SigmaClip::default()),
+            region_stats(&nan, &whole(), None, None, None, SigmaClip::default()),
             Err(RegionError::Empty { shape: "box" })
         ));
         let bg = RegionShape::Annulus { x: 100.0, y: 100.0, r_inner: 1.0, r_outer: 2.0 };
         assert_eq!(
-            region_stats(&arr, &whole(), Some(&bg), None, SigmaClip::default()),
+            region_stats(&arr, &whole(), Some(&bg), None, None, SigmaClip::default()),
             Err(RegionError::Invalid("background region is empty".into()))
         );
-        let s = region_stats(&arr, &RegionShape::Point { x: 1.0, y: 1.0 }, None, None, SigmaClip::default()).unwrap();
+        let s = region_stats(&arr, &RegionShape::Point { x: 1.0, y: 1.0 }, None, None, None, SigmaClip::default()).unwrap();
         assert_eq!(s.count, 1);
         assert_eq!(s.std, 0.0);
     }

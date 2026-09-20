@@ -31,6 +31,7 @@ import type { CubeDims } from "../shared/types/cube";
 import {
   COLORMAP_NAMES,
   DEFAULT_DISPLAY_SETTINGS,
+  GRID_FRAMES,
   LIMIT_MODES,
   STRETCH_MODES,
   type DisplaySettings,
@@ -38,6 +39,7 @@ import {
 } from "../shared/types/display";
 import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
 import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
+import { clampGridDensity } from "../utils/gridSteps";
 
 export interface ChannelSuggestion {
   file_path: string;
@@ -162,6 +164,7 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
   const stretch = STRETCH_MODES.find((s) => s === r.stretch) ?? d.stretch;
   const limits = LIMIT_MODES.find((l) => l === r.limits) ?? d.limits;
   const colormap = COLORMAP_NAMES.find((c) => c === r.colormap) ?? d.colormap;
+  const gridFrame = GRID_FRAMES.find((f) => f === r.gridFrame) ?? d.gridFrame;
   return {
     stretch,
     limits,
@@ -174,6 +177,9 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
     power: finiteOr(r.power, d.power),
     colormap,
     invert: r.invert === true,
+    grid: r.grid === true,
+    gridFrame,
+    gridDensity: clampGridDensity(finiteOr(r.gridDensity, d.gridDensity)),
   };
 }
 

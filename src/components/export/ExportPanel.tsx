@@ -1,8 +1,19 @@
 import { useState, useCallback, useEffect } from "react";
-import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon } from "lucide-react";
+import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon, Scissors } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
 import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export";
+import { getWcsInfo } from "../../services/astrometry";
+import {
+  cutoutDefaultFileName,
+  describeCutout,
+  exportCutout,
+  manualCutoutBox,
+  selectedBoxRegion,
+} from "../../services/cutout";
+import { useRegionKey } from "../../hooks/useRegionKey";
+import { useRegionDoc } from "../../hooks/useRegionStore";
+import type { CutoutExportResult, CutoutSizeUnit } from "../../shared/types/cutout";
 import type { StfParams } from "../../shared/types";
 
 interface AlignedExportState {
@@ -115,10 +126,46 @@ export default function ExportPanel({
   const [pngExporting, setPngExporting] = useState(false);
   const [pngExported, setPngExported] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cutoutIncludeErr, setCutoutIncludeErr] = useState(true);
+  const [cutoutIncludeDq, setCutoutIncludeDq] = useState(true);
+  const [cutoutUnit, setCutoutUnit] = useState<CutoutSizeUnit>("px");
+  const [cutoutCentreX, setCutoutCentreX] = useState("");
+  const [cutoutCentreY, setCutoutCentreY] = useState("");
+  const [cutoutWidth, setCutoutWidth] = useState("");
+  const [cutoutHeight, setCutoutHeight] = useState("");
+  const [cutoutPixelScale, setCutoutPixelScale] = useState<number | null>(null);
+  const [cutoutExporting, setCutoutExporting] = useState(false);
+  const [cutoutResult, setCutoutResult] = useState<CutoutExportResult | null>(null);
+
+  const regionKey = useRegionKey();
+  const regionDoc = useRegionDoc(regionKey);
+  const selectedBox = selectedBoxRegion(regionDoc.regions, regionDoc.selectedId);
 
   useEffect(() => {
     if (alignMethod) setAlignedMethod(alignMethod);
   }, [alignMethod]);
+
+  useEffect(() => {
+    setCutoutResult(null);
+    setCutoutPixelScale(null);
+    if (!filePath) return;
+    let cancelled = false;
+    getWcsInfo(filePath)
+      .then((info) => {
+        if (cancelled) return;
+        const scale = info.pixel_scale_arcsec > 0 ? info.pixel_scale_arcsec : null;
+        setCutoutPixelScale(scale);
+        if (scale == null) setCutoutUnit("px");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCutoutPixelScale(null);
+        setCutoutUnit("px");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath]);
 
   const handleExport = useCallback(async () => {
     if (!filePath || !onExport) return;
@@ -285,9 +332,66 @@ export default function ExportPanel({
     }
   }, [rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
 
+  const handleExportCutout = useCallback(async () => {
+    if (!filePath) return;
+    const region = selectedBox ?? manualCutoutBox({
+      centreX: parseFloat(cutoutCentreX),
+      centreY: parseFloat(cutoutCentreY),
+      width: parseFloat(cutoutWidth),
+      height: parseFloat(cutoutHeight),
+      unit: cutoutUnit,
+      pixelScaleArcsec: cutoutPixelScale,
+    });
+    if (!region) {
+      setError(
+        cutoutUnit === "arcsec" && cutoutPixelScale == null
+          ? "Arcsecond sizes need a WCS pixel scale; switch the unit to px or select a box region."
+          : "Select a box region or enter a centre and a positive size for the cutout.",
+      );
+      return;
+    }
+    setError(null);
+    setCutoutExporting(true);
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        defaultPath: cutoutDefaultFileName(filePath),
+        filters: [{ name: "FITS", extensions: ["fits", "fit"] }],
+        title: "Export cutout",
+      });
+      if (!target) return;
+      const result = await exportCutout(filePath, region, {
+        outputPath: target,
+        includeErr: cutoutIncludeErr,
+        includeDq: cutoutIncludeDq,
+      });
+      setCutoutResult(result);
+      setSavedPath(result.output_path);
+      setTimeout(() => setSavedPath(null), 8000);
+    } catch (e) {
+      console.error("Cutout export failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCutoutExporting(false);
+    }
+  }, [
+    filePath,
+    selectedBox,
+    cutoutCentreX,
+    cutoutCentreY,
+    cutoutWidth,
+    cutoutHeight,
+    cutoutUnit,
+    cutoutPixelScale,
+    cutoutIncludeErr,
+    cutoutIncludeDq,
+  ]);
+
   const hasRgb = (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) || !!compositeStf;
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
+  const cutoutInputClass =
+    "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-violet-500/50 w-full";
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
@@ -362,6 +466,73 @@ export default function ExportPanel({
               </p>
             )}
           </>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+        <SectionHeader
+          icon={<Scissors size={14} className="text-violet-400" />}
+          title="Cutout"
+          subtitle={selectedBox ? "selected box region" : "manual box"}
+        />
+        {selectedBox ? (
+          <p className="text-[10px] text-zinc-500 px-1 font-mono">
+            {selectedBox.width.toFixed(1)} x {selectedBox.height.toFixed(1)} px at ({selectedBox.x.toFixed(1)}, {selectedBox.y.toFixed(1)})
+            {selectedBox.angle !== 0 && ", rotated: bounds are used"}
+          </p>
+        ) : (
+          <>
+            <div className="flex gap-2">
+              <div className="flex-1 flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">Centre X (px)</label>
+                <input type="number" step={0.5} value={cutoutCentreX} onChange={(e) => setCutoutCentreX(e.target.value)} className={cutoutInputClass} />
+              </div>
+              <div className="flex-1 flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">Centre Y (px)</label>
+                <input type="number" step={0.5} value={cutoutCentreY} onChange={(e) => setCutoutCentreY(e.target.value)} className={cutoutInputClass} />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1 flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">Width ({cutoutUnit})</label>
+                <input type="number" min={0} step={1} value={cutoutWidth} onChange={(e) => setCutoutWidth(e.target.value)} className={cutoutInputClass} />
+              </div>
+              <div className="flex-1 flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">Height ({cutoutUnit})</label>
+                <input type="number" min={0} step={1} value={cutoutHeight} onChange={(e) => setCutoutHeight(e.target.value)} className={cutoutInputClass} />
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <label className="text-[9px] text-zinc-500 uppercase">Unit</label>
+                <select value={cutoutUnit} onChange={(e) => setCutoutUnit(e.target.value as CutoutSizeUnit)} className="ab-select">
+                  <option value="px">px</option>
+                  <option value="arcsec" disabled={cutoutPixelScale == null}>arcsec</option>
+                </select>
+              </div>
+            </div>
+            {cutoutPixelScale != null && (
+              <p className="text-[10px] text-zinc-600 px-1">{cutoutPixelScale.toFixed(4)} arcsec/px from the image WCS</p>
+            )}
+          </>
+        )}
+        <Toggle label="Include ERR extension" checked={cutoutIncludeErr} accent="violet" onChange={setCutoutIncludeErr} />
+        <Toggle label="Include DQ extension" checked={cutoutIncludeDq} accent="violet" onChange={setCutoutIncludeDq} />
+        <RunButton
+          label="Export cutout (SCI/ERR/DQ)"
+          runningLabel="Exporting..."
+          running={cutoutExporting}
+          disabled={!filePath}
+          accent="violet"
+          icon={<Scissors size={12} />}
+          onClick={handleExportCutout}
+        />
+        {cutoutResult && (
+          <div className="flex flex-col gap-0.5 px-1">
+            <p className="text-[10px] text-violet-300 font-mono">{describeCutout(cutoutResult)}</p>
+            <p className="text-[10px] text-zinc-600 font-mono">LTV1 {cutoutResult.ltv1}, LTV2 {cutoutResult.ltv2}, {cutoutResult.elapsed_ms} ms</p>
+            {cutoutResult.warnings.map((w) => (
+              <p key={w} className="text-[10px] text-amber-300/80">{w}</p>
+            ))}
+          </div>
         )}
       </div>
 

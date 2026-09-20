@@ -2,6 +2,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
+use crate::core::astrometry::catalog::parse_gaia_tsv;
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::math::sigma_clip::sigma_clipped_stats;
@@ -351,70 +352,18 @@ pub(crate) fn query_gaia_vizier(
 
 #[cfg_attr(not(feature = "vizier"), allow(dead_code))]
 fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
-    let mut col_ra: Option<usize> = None;
-    let mut col_dec: Option<usize> = None;
-    let mut col_color: Option<usize> = None;
-    let mut col_gmag: Option<usize> = None;
-    let mut in_data = false;
-    let mut out = Vec::new();
-
-    for line in body.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let fields: Vec<&str> = trimmed.split('\t').map(|f| f.trim()).collect();
-
-        if !in_data {
-            let is_dashes = fields
-                .iter()
-                .all(|f| !f.is_empty() && f.chars().all(|c| c == '-'));
-            if is_dashes {
-                if col_ra.is_none() || col_dec.is_none() || col_color.is_none() {
-                    return out;
-                }
-                in_data = true;
-            } else if col_ra.is_none() {
-                col_ra = fields.iter().position(|f| *f == "RA_ICRS");
-                col_dec = fields.iter().position(|f| *f == "DE_ICRS");
-                col_color = fields.iter().position(|f| *f == "BP-RP");
-                col_gmag = fields.iter().position(|f| *f == "Gmag");
-            }
-            continue;
-        }
-
-        let (Some(ir), Some(id), Some(ic)) = (col_ra, col_dec, col_color) else {
-            break;
-        };
-        if fields.len() <= ir.max(id).max(ic) {
-            continue;
-        }
-
-        let (Ok(ra), Ok(dec), Ok(bp_rp)) = (
-            fields[ir].parse::<f64>(),
-            fields[id].parse::<f64>(),
-            fields[ic].parse::<f64>(),
-        ) else {
-            continue;
-        };
-
-        if !(ra.is_finite() && dec.is_finite() && bp_rp.is_finite()) {
-            continue;
-        }
-        if !(0.0..360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
-            continue;
-        }
-
-        let gmag = col_gmag
-            .and_then(|ig| fields.get(ig))
-            .and_then(|f| f.parse::<f64>().ok())
-            .filter(|v| v.is_finite());
-
-        out.push(CatalogStar { ra, dec, bp_rp, gmag });
-    }
-
-    out
+    parse_gaia_tsv(body)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            row.bp_rp.map(|bp_rp| CatalogStar {
+                ra: row.ra,
+                dec: row.dec,
+                bp_rp,
+                gmag: row.g,
+            })
+        })
+        .collect()
 }
 
 fn cross_match_stars(

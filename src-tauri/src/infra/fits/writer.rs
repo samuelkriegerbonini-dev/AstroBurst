@@ -94,7 +94,11 @@ fn write_header_end(writer: &mut BufWriter<File>, bytes_written: usize) -> Resul
 
 const I16_BLANK: i16 = i16::MIN;
 
-fn write_f32_slice_as_be(writer: &mut BufWriter<File>, slice: &[f32]) -> Result<()> {
+fn write_be_slice<T: Copy>(
+    writer: &mut BufWriter<File>,
+    slice: &[T],
+    encode: impl Fn(T) -> [u8; 4],
+) -> Result<()> {
     const CHUNK: usize = 16384;
     let mut be_buf = vec![0u8; CHUNK * 4];
 
@@ -103,13 +107,15 @@ fn write_f32_slice_as_be(writer: &mut BufWriter<File>, slice: &[f32]) -> Result<
         chunk
             .iter()
             .zip(buf.chunks_exact_mut(4))
-            .for_each(|(&val, out)| {
-                out.copy_from_slice(&val.to_be_bytes());
-            });
+            .for_each(|(&val, out)| out.copy_from_slice(&encode(val)));
         writer.write_all(buf)?;
     }
 
     Ok(())
+}
+
+fn write_f32_slice_as_be(writer: &mut BufWriter<File>, slice: &[f32]) -> Result<()> {
+    write_be_slice(writer, slice, f32::to_be_bytes)
 }
 
 fn write_i16_slice_as_be(writer: &mut BufWriter<File>, data: &[f32], bzero: f64, bscale: f64) -> Result<()> {
@@ -938,6 +944,122 @@ pub(crate) fn write_planes_gzip2_lossless(
     )
 }
 
+pub enum HduData<'a> {
+    F32(&'a Array2<f32>),
+    I32(&'a Array2<i32>),
+    U32(&'a Array2<u32>),
+}
+
+pub struct ImageHdu<'a> {
+    pub data: HduData<'a>,
+    pub header: Option<&'a HduHeader>,
+    pub extname: &'a str,
+    pub extver: u32,
+}
+
+const U32_BZERO: i64 = 2147483648;
+
+fn is_mef_structural_key(key: &str) -> bool {
+    matches!(
+        key,
+        "SIMPLE" | "XTENSION" | "BITPIX" | "NAXIS" | "EXTEND" | "PCOUNT" | "GCOUNT" | "EXTNAME" | "EXTVER"
+            | "BZERO" | "BSCALE" | "BLANK" | "CHECKSUM" | "DATASUM" | "ZBITPIX" | "ZIMAGE" | "ZCMPTYPE"
+            | "END"
+    ) || key.starts_with("NAXIS")
+        || key.starts_with("ZNAXIS")
+}
+
+fn without_structural_cards(header: &HduHeader) -> HduHeader {
+    let mut out = HduHeader::empty();
+    for (key, value) in &header.cards {
+        let key = key.trim();
+        if !is_mef_structural_key(key) {
+            out.cards.push((key.to_string(), value.clone()));
+            out.index.insert(key.to_string(), value.clone());
+        }
+    }
+    out
+}
+
+fn u32_to_bzero_shifted_be(val: u32) -> [u8; 4] {
+    ((val as i64 - U32_BZERO) as i32).to_be_bytes()
+}
+
+fn write_image_extension(writer: &mut BufWriter<File>, hdu: &ImageHdu) -> Result<()> {
+    let (rows, cols, bitpix) = match hdu.data {
+        HduData::F32(a) => (a.dim().0, a.dim().1, "-32"),
+        HduData::I32(a) => (a.dim().0, a.dim().1, "32"),
+        HduData::U32(a) => (a.dim().0, a.dim().1, "32"),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    push_header_card(&mut buf, "XTENSION", "IMAGE");
+    push_header_card(&mut buf, "BITPIX", bitpix);
+    push_header_card(&mut buf, "NAXIS", "2");
+    push_header_card(&mut buf, "NAXIS1", &cols.to_string());
+    push_header_card(&mut buf, "NAXIS2", &rows.to_string());
+    push_header_card(&mut buf, "PCOUNT", "0");
+    push_header_card(&mut buf, "GCOUNT", "1");
+    push_header_card(&mut buf, "EXTNAME", hdu.extname);
+    push_header_card(&mut buf, "EXTVER", &hdu.extver.to_string());
+    if matches!(hdu.data, HduData::U32(_)) {
+        push_header_card(&mut buf, "BZERO", &U32_BZERO.to_string());
+        push_header_card(&mut buf, "BSCALE", "1");
+    }
+    if let Some(hdr) = hdu.header {
+        for card in &hdr.cards {
+            let key = card.0.trim();
+            if !is_mef_structural_key(key) {
+                push_header_card(&mut buf, key, &card.1);
+            }
+        }
+    }
+    writer.write_all(&buf)?;
+    write_header_end(writer, buf.len())?;
+
+    let data_bytes = match hdu.data {
+        HduData::F32(a) => {
+            let owned = a.as_standard_layout();
+            let slice = owned.as_slice().context("F32 plane not contiguous")?;
+            write_f32_slice_as_be(writer, slice)?;
+            slice.len() * 4
+        }
+        HduData::I32(a) => {
+            let owned = a.as_standard_layout();
+            let slice = owned.as_slice().context("I32 plane not contiguous")?;
+            write_be_slice(writer, slice, i32::to_be_bytes)?;
+            slice.len() * 4
+        }
+        HduData::U32(a) => {
+            let owned = a.as_standard_layout();
+            let slice = owned.as_slice().context("U32 plane not contiguous")?;
+            write_be_slice(writer, slice, u32_to_bzero_shifted_be)?;
+            slice.len() * 4
+        }
+    };
+    pad_to_block(writer, data_bytes, 0u8)
+}
+
+pub fn write_mef_images(
+    path: &str,
+    primary_header: Option<&HduHeader>,
+    hdus: &[ImageHdu],
+) -> Result<()> {
+    if hdus.is_empty() {
+        bail!("a multi-extension FITS file needs at least one image HDU");
+    }
+    let file = File::create(path).context("Failed to create FITS file")?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let primary = primary_header
+        .and_then(|h| filter_header(h, false, true))
+        .map(|h| without_structural_cards(&h));
+    write_primary_hdu_stub(&mut writer, primary.as_ref())?;
+    for hdu in hdus {
+        write_image_extension(&mut writer, hdu)?;
+    }
+    writer.flush().context("Failed to flush FITS file")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,5 +1310,135 @@ mod tests {
         let path = std::env::temp_dir().join("ab_rice_bad_bitpix.fits");
         let p = path.to_str().unwrap();
         assert!(write_fits_mono_rice(p, &data, None, -64, 16.0).is_err());
+    }
+
+    use crate::infra::fits::reader::{
+        extract_header_by_index, extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions,
+    };
+
+    #[test]
+    fn mef_images_round_trip_f32_u32_and_i32_planes_bit_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mef_images.fits");
+        let p = path.to_str().unwrap();
+
+        let mut sci = smooth_test_image(5, 7);
+        sci[[1, 2]] = f32::NAN;
+        sci[[4, 6]] = -1.5e-3;
+        let dq = Array2::from_shape_fn((5, 7), |(y, x)| (y * 7 + x) as u32 * 3);
+        let mut dq = dq;
+        dq[[0, 0]] = (1u32 << 31) + 5;
+        dq[[4, 6]] = u32::MAX;
+        let signed = Array2::from_shape_fn((5, 7), |(y, x)| (y * 7 + x) as i32 - 20);
+        let mut signed = signed;
+        signed[[2, 3]] = i32::MIN;
+        signed[[2, 4]] = i32::MAX;
+
+        let sci_header = mk_header(&[
+            ("CRPIX1", "3.5"),
+            ("BUNIT", "MJy/sr"),
+            ("LTV1", "-10"),
+            ("NAXIS1", "999"),
+            ("BITPIX", "16"),
+            ("EXTNAME", "WRONG"),
+        ]);
+        let primary = mk_header(&[
+            ("TELESCOP", "JWST"),
+            ("CRVAL1", "150.0"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "77"),
+            ("CHECKSUM", "abc"),
+            ("DATASUM", "123"),
+            ("XTENSION", "IMAGE"),
+            ("ZNAXIS1", "5"),
+            ("ZBITPIX", "-32"),
+            ("PROGRAM", "01234"),
+        ]);
+
+        write_mef_images(
+            p,
+            Some(&primary),
+            &[
+                ImageHdu { data: HduData::F32(&sci), header: Some(&sci_header), extname: "SCI", extver: 1 },
+                ImageHdu { data: HduData::U32(&dq), header: None, extname: "DQ", extver: 1 },
+                ImageHdu { data: HduData::I32(&signed), header: None, extname: "MASK", extver: 2 },
+            ],
+        )
+        .unwrap();
+
+        let file = std::fs::File::open(p).unwrap();
+        let exts = list_extensions(&file).unwrap();
+        assert_eq!(exts.len(), 4);
+        assert_eq!(exts[0].naxis, 0);
+        assert!(!exts[0].has_data);
+        assert_eq!(exts[1].extname.as_deref(), Some("SCI"));
+        assert_eq!(exts[1].extver, Some(1));
+        assert_eq!(exts[1].bitpix, -32);
+        assert_eq!((exts[1].naxis1, exts[1].naxis2), (7, 5));
+        assert_eq!(exts[2].extname.as_deref(), Some("DQ"));
+        assert_eq!(exts[2].bitpix, 32);
+        assert_eq!(exts[3].extname.as_deref(), Some("MASK"));
+        assert_eq!(exts[3].extver, Some(2));
+
+        let primary_back = extract_header_by_index(&file, 0).unwrap();
+        assert_eq!(primary_back.get("SIMPLE"), Some("T"));
+        assert_eq!(primary_back.get_i64("NAXIS"), Some(0));
+        assert_eq!(primary_back.get("EXTEND"), Some("T"));
+        assert_eq!(primary_back.get("TELESCOP"), Some("JWST"));
+        assert_eq!(primary_back.get("PROGRAM"), Some("01234"));
+        assert!(primary_back.get("CRVAL1").is_none());
+        assert!(primary_back.get("NAXIS1").is_none());
+        assert!(primary_back.get("CHECKSUM").is_none());
+        assert!(primary_back.get("DATASUM").is_none());
+        assert!(primary_back.get("XTENSION").is_none());
+        assert!(primary_back.get("ZNAXIS1").is_none());
+        assert!(primary_back.get("ZBITPIX").is_none());
+
+        let sci_back = extract_image_mmap_by_index(&file, 1).unwrap();
+        assert_eq!(sci_back.image.dim(), (5, 7));
+        for (a, b) in sci.iter().zip(sci_back.image.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        let sci_hdr = extract_header_by_index(&file, 1).unwrap();
+        assert_eq!(sci_hdr.get("XTENSION"), Some("IMAGE"));
+        assert_eq!(sci_hdr.get_i64("BITPIX"), Some(-32));
+        assert_eq!(sci_hdr.get_i64("NAXIS1"), Some(7));
+        assert_eq!(sci_hdr.get_i64("NAXIS2"), Some(5));
+        assert_eq!(sci_hdr.get_i64("PCOUNT"), Some(0));
+        assert_eq!(sci_hdr.get_i64("GCOUNT"), Some(1));
+        assert_eq!(sci_hdr.get("EXTNAME"), Some("SCI"));
+        assert_eq!(sci_hdr.get_i64("EXTVER"), Some(1));
+        assert_eq!(sci_hdr.get_f64("CRPIX1"), Some(3.5));
+        assert_eq!(sci_hdr.get_f64("LTV1"), Some(-10.0));
+        assert_eq!(sci_hdr.get("BUNIT"), Some("MJy/sr"));
+
+        let dq_back = extract_int_plane_by_index(&file, 2).unwrap();
+        assert!(!dq_back.signed);
+        assert_eq!(dq_back.bits, dq);
+        assert_eq!(dq_back.bits[[0, 0]], (1u32 << 31) + 5);
+        assert_eq!(dq_back.bits[[4, 6]], u32::MAX);
+        let dq_hdr = extract_header_by_index(&file, 2).unwrap();
+        assert_eq!(dq_hdr.get_f64("BZERO"), Some(2147483648.0));
+        assert_eq!(dq_hdr.get_f64("BSCALE"), Some(1.0));
+
+        let signed_back = extract_int_plane_by_index(&file, 3).unwrap();
+        assert!(signed_back.signed);
+        for (a, b) in signed.iter().zip(signed_back.bits.iter()) {
+            assert_eq!(*a, *b as i32);
+        }
+        assert_eq!(signed_back.value_at(2, 3), i32::MIN as i64);
+        assert_eq!(signed_back.value_at(2, 4), i32::MAX as i64);
+        let mask_hdr = extract_header_by_index(&file, 3).unwrap();
+        assert!(mask_hdr.get("BZERO").is_none());
+
+        assert_eq!(std::fs::metadata(p).unwrap().len() % FITS_BLOCK_SIZE as u64, 0);
+    }
+
+    #[test]
+    fn mef_images_rejects_an_empty_hdu_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.fits");
+        assert!(write_mef_images(path.to_str().unwrap(), None, &[]).is_err());
+        assert!(!path.exists());
     }
 }

@@ -90,8 +90,9 @@ function RegionRow({
           <StatCell label="n" value={`${s.count}${s.n_excluded > 0 ? ` (−${s.n_excluded} dq)` : ""}`} />
           <StatCell label="mean" value={fmt(s.mean)} />
           <StatCell label="med" value={fmt(s.median)} />
-          <StatCell label="sum" value={fmt(s.sum)} />
+          <StatCell label="sum" value={s.sum_err != null ? `${fmt(s.sum)} ± ${fmt(s.sum_err)}` : fmt(s.sum)} />
           <StatCell label="σ" value={fmt(s.sigma)} />
+          {s.weighted_mean != null && <StatCell label="wmean" value={fmt(s.weighted_mean)} />}
           {s.net_sum !== null && <StatCell label="net" value={fmt(s.net_sum)} />}
           {s.net_snr !== null && <StatCell label="snr" value={fmt(s.net_snr, 1)} />}
           {s.clipped && <span className="text-amber-400/80">clipped</span>}

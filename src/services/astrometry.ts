@@ -5,6 +5,8 @@ import type {
   PixelToWorldResult,
   PointingOverlapResult,
   SkyFrame,
+  WcsGridError,
+  WcsGridResult,
 } from "../shared/types/astrometry";
 
 export type {
@@ -13,7 +15,24 @@ export type {
   PixelToWorldResult,
   PointingOverlapResult,
   SkyFrame,
+  WcsGrid,
+  WcsGridError,
+  WcsGridResult,
 } from "../shared/types/astrometry";
+
+export const DEFAULT_GRID_DENSITY = 3;
+
+export function isWcsGridError(result: WcsGridResult): result is WcsGridError {
+  return typeof (result as WcsGridError).error === "string";
+}
+
+export function gridLines(
+  path: string,
+  frame: SkyFrame = "icrs",
+  density: number = DEFAULT_GRID_DENSITY,
+): Promise<WcsGridResult> {
+  return typedInvoke<WcsGridResult>("grid_lines_cmd", { path, frame, density });
+}
 
 export interface PlateSolveResult {
   success: boolean;

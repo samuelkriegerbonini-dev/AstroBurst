@@ -1175,6 +1175,8 @@ async fn v2_cutout_partial_overlap_nan_fills_and_reports_fraction() {
     assert!(frac < 1.0);
     assert!((frac - 0.25).abs() < 1e-12);
     assert_eq!(json["stats"]["valid_count"], 4);
+    assert_eq!(json["ltv1"], serde_json::json!(-6.0));
+    assert_eq!(json["ltv2"], serde_json::json!(-6.0));
 }
 
 #[tokio::test]
@@ -2495,4 +2497,72 @@ async fn pipeline_run_with_cosmetic_repairs_master_dark_hot_pixels_and_reports_d
     assert_eq!(json["warnings"], serde_json::json!([]));
     let jid = json["job_id"].as_str().unwrap().to_string();
     assert_eq!(wait_for_job(&state, "s-pipe-cos", &jid).await, "done");
+}
+
+#[tokio::test]
+async fn v2_wcs_grid_handler_returns_lines_labels_and_steps() {
+    use crate::error::AppError;
+    use crate::extractors::SessionExtractor;
+    use crate::v2::wcs::{grid, GridParams};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("grid.fits");
+    v2_fixtures::write_wcs_fits(&fits, 64, 64);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-grid");
+    let body = format!(r#"{{"path":{}}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap());
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-grid/open", &body).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let session = state.sessions.get("s-grid").map(|e| Arc::clone(e.value())).unwrap();
+    let call = |params: GridParams| grid(SessionExtractor(Arc::clone(&session)), axum::Json(params));
+
+    let json = call(GridParams { image: None, frame: None, density: None }).await.unwrap().0;
+    assert_eq!(json["ref"], "img_0");
+    assert_eq!(json["frame"], "icrs");
+    assert!((json["lat_step_deg"].as_f64().unwrap() * 3600.0 - 5.0).abs() < 1e-9, "{}", json["lat_step_deg"]);
+    assert!((json["lon_step_deg"].as_f64().unwrap() * 240.0 - 1.0).abs() < 1e-9, "{}", json["lon_step_deg"]);
+    assert_eq!(json["notes"], serde_json::json!([]));
+    let lines = json["lines"].as_array().unwrap();
+    let lat_lines = lines.iter().filter(|l| l["kind"] == "lat").count();
+    let lon_lines = lines.iter().filter(|l| l["kind"] == "lon").count();
+    assert!(lat_lines >= 3, "{lat_lines} latitude lines");
+    assert!(lon_lines >= 1, "{lon_lines} longitude lines");
+    for line in lines {
+        assert!(line["label"].is_string());
+        let points = line["points"].as_array().unwrap();
+        assert!(points.len() >= 2);
+        for p in points {
+            let x = p[0].as_f64().unwrap();
+            let y = p[1].as_f64().unwrap();
+            assert!((-1.5..=64.5).contains(&x) && (-1.5..=64.5).contains(&y), "point ({x},{y}) outside the image");
+        }
+    }
+    let labels = json["labels"].as_array().unwrap();
+    assert!(labels.iter().any(|l| l["edge"] == "left" && l["kind"] == "lat"), "{labels:?}");
+    assert!(labels.iter().any(|l| l["edge"] == "bottom" && l["kind"] == "lon"), "{labels:?}");
+    assert!(labels.iter().all(|l| l["text"].is_string() && l["x"].is_number() && l["y"].is_number()));
+
+    let galactic = call(GridParams { image: Some("img_0".into()), frame: Some("galactic".into()), density: Some(5) })
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(galactic["frame"], "galactic");
+    assert!(galactic["lines"].as_array().unwrap().len() > lines.len());
+    let lon_labels: Vec<&str> = galactic["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["kind"] == "lon")
+        .map(|l| l["text"].as_str().unwrap())
+        .collect();
+    assert!(!lon_labels.is_empty());
+    assert!(lon_labels.iter().all(|t| t.ends_with('°') && !t.contains('h')), "{lon_labels:?}");
+
+    let err = call(GridParams { image: None, frame: Some("supergalactic".into()), density: None }).await.err().unwrap();
+    assert!(matches!(err, AppError::BadRequestWithHint { code: "bad_request", .. }), "{err:?}");
+    let err = call(GridParams { image: None, frame: None, density: Some(9) }).await.err().unwrap();
+    assert!(matches!(err, AppError::BadRequestWithHint { code: "bad_request", .. }), "{err:?}");
+    let err = call(GridParams { image: Some("missing".into()), frame: None, density: None }).await.err().unwrap();
+    assert!(matches!(err, AppError::NotFound(_)), "{err:?}");
 }

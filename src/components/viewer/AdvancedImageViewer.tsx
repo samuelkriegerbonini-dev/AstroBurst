@@ -24,6 +24,7 @@ import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
+import OverlayLayer from "./OverlayLayer";
 import { useRegionKey } from "../../hooks/useRegionKey";
 
 interface ViewerImage {
@@ -333,6 +334,15 @@ function AdvancedImageViewer({
             )}
           </div>
         ) : null}
+        <OverlayLayer
+          containerRef={containerRef}
+          transform={transform}
+          renderW={renderW}
+          renderH={renderH}
+          fitsW={activeImage.width ?? renderW}
+          fitsH={activeImage.height ?? renderH}
+          enabled={regionsEnabled}
+        />
         <RegionsLayer
           containerRef={containerRef}
           transform={transform}

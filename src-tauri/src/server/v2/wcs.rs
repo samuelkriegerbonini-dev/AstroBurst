@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::frames::{convert_from_icrs, SkyFrame};
+use astroburst_lib::core::astrometry::grid::{wcs_grid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use astroburst_lib::core::astrometry::wcs::{angular_separation, WcsTransform};
 
 use crate::error::{AppError, Result};
@@ -35,6 +36,16 @@ pub struct Sky2PixParams {
     pub points: Vec<[f64; 2]>,
     #[serde(default, alias = "ref")]
     pub image_ref: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GridParams {
+    #[serde(default, alias = "ref", alias = "image_ref")]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub frame: Option<String>,
+    #[serde(default)]
+    pub density: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +169,27 @@ pub async fn sky2pix(
         "count": results.len(),
         "results": results,
     })))
+}
+
+pub async fn grid(
+    SessionExtractor(session): SessionExtractor,
+    Json(params): Json<GridParams>,
+) -> Result<Json<Value>> {
+    let frame = parse_frame(params.frame.as_deref())?;
+    let density = params.density.unwrap_or(DEFAULT_DENSITY);
+    if !(MIN_DENSITY..=MAX_DENSITY).contains(&density) {
+        return Err(AppError::BadRequestWithHint {
+            code: "bad_request",
+            message: format!("grid density {density} is out of range"),
+            hint: Some(format!("density must be between {MIN_DENSITY} and {MAX_DENSITY}")),
+        });
+    }
+    let target = target_ref(&session, params.image).await?;
+    let (wcs, w, h) = load_wcs(&session, &target)?;
+    let grid = wcs_grid(&wcs, w, h, frame, density).map_err(AppError::BadRequest)?;
+    let mut body = serde_json::to_value(&grid).map_err(|e| AppError::Internal(e.into()))?;
+    body["ref"] = json!(target);
+    Ok(Json(body))
 }
 
 pub async fn separation(

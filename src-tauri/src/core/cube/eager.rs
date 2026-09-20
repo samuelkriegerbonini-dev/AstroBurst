@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 
+use crate::core::astrometry::spectral::spectral_axis;
 use crate::math::simd::collapse_mean_simd;
 use crate::math::median::f32_cmp;
 use crate::types::constants::MAD_TO_SIGMA;
@@ -65,10 +66,29 @@ pub struct SpectralClassification {
     pub reason: String,
     pub axis_type: Option<String>,
     pub axis_unit: Option<String>,
+    pub axis_unit_assumed: bool,
     pub channel_count: usize,
 }
 
+fn assumed_axis_unit(header: &HduHeader, naxis3: usize) -> Option<String> {
+    spectral_axis(header, naxis3)
+        .ok()
+        .filter(|axis| axis.kind.is_spectral() && !axis.header_unit.is_empty())
+        .map(|axis| axis.header_unit.to_uppercase())
+}
+
 pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClassification {
+    let mut classification = classify_spectral_cube_from_cards(header, naxis3);
+    if classification.is_spectral && classification.axis_unit.is_none() {
+        if let Some(unit) = assumed_axis_unit(header, naxis3) {
+            classification.axis_unit = Some(unit);
+            classification.axis_unit_assumed = true;
+        }
+    }
+    classification
+}
+
+fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> SpectralClassification {
     let ctype3 = header.get("CTYPE3").map(|s| s.trim().trim_matches('\'').trim().to_uppercase());
     let cunit3 = header.get("CUNIT3").map(|s| s.trim().trim_matches('\'').trim().to_uppercase());
     let has_cdelt3 = header.get_f64("CDELT3").is_some();
@@ -91,6 +111,7 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
             reason: format!("CTYPE3 indicates spectral axis: {}", ctype3.as_deref().unwrap_or("")),
             axis_type: ctype3,
             axis_unit: cunit3,
+            axis_unit_assumed: false,
             channel_count: naxis3,
         };
     }
@@ -101,6 +122,7 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
             reason: format!("CUNIT3 indicates spectral data: {}", cunit3.as_deref().unwrap_or("")),
             axis_type: ctype3,
             axis_unit: cunit3,
+            axis_unit_assumed: false,
             channel_count: naxis3,
         };
     }
@@ -111,6 +133,7 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
             reason: format!("NAXIS3={} with no spectral keywords: likely RGB/RGBA composition", naxis3),
             axis_type: ctype3,
             axis_unit: cunit3,
+            axis_unit_assumed: false,
             channel_count: naxis3,
         };
     }
@@ -121,6 +144,7 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
             reason: format!("NAXIS3={} with CRVAL3/CDELT3 present: likely spectral cube", naxis3),
             axis_type: ctype3,
             axis_unit: cunit3,
+            axis_unit_assumed: false,
             channel_count: naxis3,
         };
     }
@@ -131,6 +155,7 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
             reason: format!("NAXIS3={}: high channel count suggests spectral data", naxis3),
             axis_type: ctype3,
             axis_unit: cunit3,
+            axis_unit_assumed: false,
             channel_count: naxis3,
         };
     }
@@ -140,21 +165,14 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
         reason: format!("NAXIS3={} with no spectral metadata: ambiguous, treating as non-spectral", naxis3),
         axis_type: ctype3,
         axis_unit: cunit3,
+        axis_unit_assumed: false,
         channel_count: naxis3,
     }
 }
 
 pub fn build_wavelength_axis(header: &HduHeader) -> Option<Vec<f64>> {
-    let crval3 = header.get_f64("CRVAL3")?;
-    let cdelt3 = header.get_f64("CDELT3")?;
-    let crpix3 = header.get_f64("CRPIX3").unwrap_or(1.0);
-    let naxis3 = header.get_i64("NAXIS3")? as usize;
-
-    let axis: Vec<f64> = (0..naxis3)
-        .map(|i| crval3 + (i as f64 - crpix3 + 1.0) * cdelt3)
-        .collect();
-
-    Some(axis)
+    let naxis3 = header.get_i64("NAXIS3").filter(|n| *n > 0)? as usize;
+    spectral_axis(header, naxis3).ok().map(|axis| axis.header_values())
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +340,7 @@ pub fn process_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::imaging::region::test_support::make_header;
     use crate::types::constants::PADDING_THRESHOLD;
 
     #[test]
@@ -354,5 +373,59 @@ mod tests {
         for &v in out.iter() {
             assert!(v.is_finite() && v > PADDING_THRESHOLD && v <= 1.0, "{}", v);
         }
+    }
+
+    #[test]
+    fn wavelength_axis_reads_cd3_3_and_pc3_3_and_keeps_header_units() {
+        let muse = make_header(&[
+            ("NAXIS3", "3"),
+            ("CTYPE3", "AWAV"),
+            ("CUNIT3", "Angstrom"),
+            ("CRVAL3", "4750.0"),
+            ("CD3_3", "1.25"),
+            ("CRPIX3", "1.0"),
+        ]);
+        assert_eq!(build_wavelength_axis(&muse).unwrap(), vec![4750.0, 4751.25, 4752.5]);
+        let pc = make_header(&[
+            ("NAXIS3", "2"),
+            ("CTYPE3", "FREQ"),
+            ("CUNIT3", "Hz"),
+            ("CRVAL3", "2.3e11"),
+            ("CDELT3", "1.0e6"),
+            ("PC3_3", "2.0"),
+            ("CRPIX3", "1.0"),
+        ]);
+        let axis = build_wavelength_axis(&pc).unwrap();
+        assert!((axis[1] - 2.30002e11).abs() < 1.0, "{:?}", axis);
+    }
+
+    #[test]
+    fn wavelength_axis_keeps_the_legacy_contract_and_drops_non_linear_axes() {
+        let legacy = make_header(&[("NAXIS3", "4"), ("CRVAL3", "10.0"), ("CDELT3", "2.0"), ("CRPIX3", "2.0")]);
+        assert_eq!(build_wavelength_axis(&legacy).unwrap(), vec![8.0, 10.0, 12.0, 14.0]);
+        let log = make_header(&[("NAXIS3", "4"), ("CTYPE3", "WAVE-LOG"), ("CRVAL3", "1.0"), ("CDELT3", "0.1")]);
+        assert!(build_wavelength_axis(&log).is_none());
+        let no_depth = make_header(&[("CRVAL3", "1.0"), ("CDELT3", "0.1")]);
+        assert!(build_wavelength_axis(&no_depth).is_none());
+        let no_step = make_header(&[("NAXIS3", "4"), ("CRVAL3", "1.0")]);
+        assert!(build_wavelength_axis(&no_step).is_none());
+    }
+
+    #[test]
+    fn classification_assumes_the_fits_default_unit_when_cunit3_is_missing() {
+        let bare = make_header(&[("CTYPE3", "WAVE"), ("CRVAL3", "4.7e-7"), ("CDELT3", "1.25e-10")]);
+        let c = classify_spectral_cube(&bare, 3000);
+        assert!(c.is_spectral);
+        assert_eq!(c.axis_unit.as_deref(), Some("M"));
+        assert!(c.axis_unit_assumed);
+        let explicit = make_header(&[("CTYPE3", "WAVE"), ("CUNIT3", "um"), ("CRVAL3", "1.0"), ("CDELT3", "0.01")]);
+        let c = classify_spectral_cube(&explicit, 3000);
+        assert_eq!(c.axis_unit.as_deref(), Some("UM"));
+        assert!(!c.axis_unit_assumed);
+        let no_axis = make_header(&[("CTYPE3", "WAVE")]);
+        let c = classify_spectral_cube(&no_axis, 3000);
+        assert!(c.is_spectral);
+        assert!(c.axis_unit.is_none());
+        assert!(!c.axis_unit_assumed);
     }
 }

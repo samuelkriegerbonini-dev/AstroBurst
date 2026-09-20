@@ -5,9 +5,12 @@ import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLi
 import {
   COLORMAP_NAMES,
   DEFAULT_DISPLAY_SETTINGS,
+  GRID_DENSITIES,
+  GRID_FRAMES,
   LIMIT_MODES,
   STRETCH_MODES,
   type ColormapName,
+  type GridFrame,
   type LimitMode,
   type StretchMode,
 } from "../../shared/types/display";
@@ -237,6 +240,45 @@ function DisplayControlsInner({ vmin, vmax }: DisplayControlsProps) {
         />
         <span className={LABEL_CLASS}>invert</span>
       </label>
+
+      <label className="flex items-center gap-1 cursor-pointer" title="WCS coordinate grid overlay (needs a plate-solved image)">
+        <input
+          type="checkbox"
+          className="accent-zinc-400"
+          checked={display.grid}
+          onChange={(e) => setDisplay({ grid: e.target.checked })}
+        />
+        <span className={LABEL_CLASS}>grid</span>
+      </label>
+
+      {display.grid && (
+        <>
+          <label className="flex items-center gap-1" title="sky frame of the coordinate grid">
+            <span className={LABEL_CLASS}>frame</span>
+            <select
+              className={SELECT_CLASS}
+              value={display.gridFrame}
+              onChange={(e) => setDisplay({ gridFrame: e.target.value as GridFrame })}
+            >
+              {GRID_FRAMES.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-1" title="grid density (1 = sparse, 5 = dense)">
+            <span className={LABEL_CLASS}>density</span>
+            <select
+              className={SELECT_CLASS}
+              value={display.gridDensity}
+              onChange={(e) => setDisplay({ gridDensity: Number(e.target.value) })}
+            >
+              {GRID_DENSITIES.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
 
       <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
         {limitsLoading ? "…" : `${formatLimit(vmin)} … ${formatLimit(vmax)}`}

@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, image_ref, source_path};
 use crate::core::astrometry::frames::{convert_from_icrs, SkyFrame};
+use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
@@ -21,40 +22,95 @@ fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduH
     Ok((header, wcs))
 }
 
-fn load_wcs_only(path: &str) -> anyhow::Result<WcsTransform> {
-    let header = load_plane_header(&image_ref(path))?;
-    WcsTransform::from_header(&header)
-}
-
 type WcsStamp = (u64, Option<std::time::SystemTime>);
 
+#[derive(Clone)]
+struct CachedWcs {
+    wcs: std::sync::Arc<WcsTransform>,
+    naxis1: usize,
+    naxis2: usize,
+}
+
 static WCS_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (WcsStamp, std::sync::Arc<WcsTransform>)>>,
+    std::sync::Mutex<std::collections::HashMap<String, (WcsStamp, CachedWcs)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-fn load_wcs_cached(path: &str) -> anyhow::Result<std::sync::Arc<WcsTransform>> {
-    let stamp: Option<WcsStamp> = std::fs::metadata(source_path(path)).ok().map(|m| (m.len(), m.modified().ok()));
+const WCS_CACHE_CAPACITY: usize = 64;
+
+type GridCacheKey = (String, &'static str, u8);
+
+static GRID_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<GridCacheKey, (WcsStamp, std::sync::Arc<WcsGrid>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const GRID_CACHE_CAPACITY: usize = 32;
+
+fn file_stamp(path: &str) -> Option<WcsStamp> {
+    std::fs::metadata(source_path(path)).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+fn load_wcs_with_dims_cached(path: &str) -> anyhow::Result<CachedWcs> {
+    let stamp = file_stamp(path);
 
     if let Some(st) = &stamp {
         let cache = WCS_CACHE.lock().unwrap();
-        if let Some((cached_stamp, wcs)) = cache.get(path) {
+        if let Some((cached_stamp, cached)) = cache.get(path) {
             if cached_stamp == st {
-                return Ok(std::sync::Arc::clone(wcs));
+                return Ok(cached.clone());
             }
         }
     }
 
-    let wcs = std::sync::Arc::new(load_wcs_only(path)?);
+    let header = load_plane_header(&image_ref(path))?;
+    let cached = CachedWcs {
+        wcs: std::sync::Arc::new(WcsTransform::from_header(&header)?),
+        naxis1: header.get_i64(HEADER_NAXIS1).unwrap_or(0).max(0) as usize,
+        naxis2: header.get_i64(HEADER_NAXIS2).unwrap_or(0).max(0) as usize,
+    };
 
     if let Some(st) = stamp {
         let mut cache = WCS_CACHE.lock().unwrap();
-        if cache.len() >= 64 {
+        if cache.len() >= WCS_CACHE_CAPACITY {
             cache.clear();
         }
-        cache.insert(path.to_string(), (st, std::sync::Arc::clone(&wcs)));
+        cache.insert(path.to_string(), (st, cached.clone()));
     }
 
-    Ok(wcs)
+    Ok(cached)
+}
+
+fn load_wcs_cached(path: &str) -> anyhow::Result<std::sync::Arc<WcsTransform>> {
+    load_wcs_with_dims_cached(path).map(|c| c.wcs)
+}
+
+fn load_grid_cached(path: &str, frame: SkyFrame, density: u8) -> anyhow::Result<std::sync::Arc<WcsGrid>> {
+    let stamp = file_stamp(path);
+    let key: GridCacheKey = (path.to_string(), frame.name(), density);
+
+    if let Some(st) = &stamp {
+        let cache = GRID_CACHE.lock().unwrap();
+        if let Some((cached_stamp, grid)) = cache.get(&key) {
+            if cached_stamp == st {
+                return Ok(std::sync::Arc::clone(grid));
+            }
+        }
+    }
+
+    let cached = load_wcs_with_dims_cached(path)?;
+    let grid = std::sync::Arc::new(
+        wcs_grid(&cached.wcs, cached.naxis1, cached.naxis2, frame, density)
+            .map_err(|e| anyhow::anyhow!(e))?,
+    );
+
+    if let Some(st) = stamp {
+        let mut cache = GRID_CACHE.lock().unwrap();
+        if cache.len() >= GRID_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, (st, std::sync::Arc::clone(&grid)));
+    }
+
+    Ok(grid)
 }
 
 fn resolve_api_key(provided: Option<String>) -> Option<String> {
@@ -308,6 +364,23 @@ pub async fn pixel_to_world_cmd(
     })
 }
 
+#[tauri::command]
+pub async fn grid_lines_cmd(
+    path: String,
+    frame: Option<String>,
+    density: Option<u8>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let frame = SkyFrame::from_name(frame.as_deref().unwrap_or("icrs"))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let density = density.unwrap_or(DEFAULT_DENSITY).clamp(MIN_DENSITY, MAX_DENSITY);
+        match load_grid_cached(&path, frame, density) {
+            Ok(grid) => Ok(serde_json::to_value(&*grid)?),
+            Err(e) => Ok(json!({ "error": format!("{:#}", e) })),
+        }
+    })
+}
+
 struct SkyFootprint {
     center_ra: f64,
     center_dec: f64,
@@ -465,7 +538,49 @@ pub async fn check_pointing_overlap_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::{footprint_overlap_fraction, wrap180, SkyFootprint};
+    use super::{footprint_overlap_fraction, load_grid_cached, wrap180, SkyFootprint};
+    use crate::core::astrometry::frames::SkyFrame;
+    use crate::core::astrometry::grid::{DEFAULT_DENSITY, MAX_DENSITY};
+    use crate::core::imaging::region::test_support::{make_header, north_up_cd, wcs_cards};
+
+    fn write_north_up_fits(path: &str, size: usize) {
+        let cards = wcs_cards(north_up_cd());
+        let pairs: Vec<(&str, &str)> = cards.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let header = make_header(&pairs);
+        let arr = ndarray::Array2::<f32>::zeros((size, size));
+        crate::infra::fits::writer::write_fits_mono(path, &arr, Some(&header)).unwrap();
+    }
+
+    #[test]
+    fn grid_cache_is_keyed_by_path_frame_density_and_file_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grid.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+
+        let first = load_grid_cached(&path, SkyFrame::Icrs, DEFAULT_DENSITY).unwrap();
+        assert_eq!(first.frame, "icrs");
+        assert!(!first.lines.is_empty() && !first.labels.is_empty());
+        assert!((first.lat_step_deg * 3600.0 - 15.0).abs() < 1e-9, "lat step {}", first.lat_step_deg);
+
+        let again = load_grid_cached(&path, SkyFrame::Icrs, DEFAULT_DENSITY).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again), "same key must hit the cache");
+
+        let galactic = load_grid_cached(&path, SkyFrame::Galactic, DEFAULT_DENSITY).unwrap();
+        assert_eq!(galactic.frame, "galactic");
+        assert!(!std::sync::Arc::ptr_eq(&first, &galactic));
+
+        let denser = load_grid_cached(&path, SkyFrame::Icrs, MAX_DENSITY).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &denser));
+        assert!(denser.lines.len() > first.lines.len(), "{} vs {}", denser.lines.len(), first.lines.len());
+
+        write_north_up_fits(&path, 200);
+        let refreshed = load_grid_cached(&path, SkyFrame::Icrs, DEFAULT_DENSITY).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &refreshed), "a changed file must invalidate the cache");
+        assert!(refreshed.lat_step_deg > first.lat_step_deg, "{} vs {}", refreshed.lat_step_deg, first.lat_step_deg);
+
+        let missing = dir.path().join("missing.fits").to_string_lossy().to_string();
+        assert!(load_grid_cached(&missing, SkyFrame::Icrs, DEFAULT_DENSITY).is_err());
+    }
 
     fn footprint(ra: f64, dec: f64, size_deg: f64) -> SkyFootprint {
         let half = size_deg / 2.0;

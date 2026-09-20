@@ -4,11 +4,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::cutout::{
+    cut_plane_within, fraction_on_image, reported_ltv, shift_header, CutoutError, CutoutRect, CutoutRequest,
+};
 use astroburst_lib::core::imaging::region::RegionShape;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::infra::cache::PlaneLoad;
 use astroburst_lib::types::header::HduHeader;
-use ndarray::Array2;
 
 use super::images::{load_replacing, register_and_respond};
 use super::region::{pixel_shape, RegionSpec};
@@ -33,14 +35,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug)]
-struct CutoutRect {
-    x0: i64,
-    y0: i64,
-    width: usize,
-    height: usize,
-}
-
 fn resolve_cutout_shape(
     region: &RegionSpec,
     img_w: usize,
@@ -53,6 +47,65 @@ fn resolve_cutout_shape(
     }
 }
 
+fn extent_hint(img_w: usize, img_h: usize) -> Option<String> {
+    Some(format!("image extent is 0..{img_w} x 0..{img_h} px"))
+}
+
+fn cutout_request(
+    region: &RegionSpec,
+    img_w: usize,
+    img_h: usize,
+    wcs: Option<&WcsTransform>,
+) -> Result<CutoutRequest> {
+    Ok(match region {
+        RegionSpec::Pixel { x, y, width, height, .. } => {
+            CutoutRequest::Pixel { x0: *x, y0: *y, width: *width, height: *height }
+        }
+        RegionSpec::Shape(spec) => {
+            let b = pixel_shape(spec, img_w, img_h, wcs)?.bounds();
+            CutoutRequest::Pixel {
+                x0: b.x0,
+                y0: b.y0,
+                width: (b.x1 - b.x0 + 1).max(1) as usize,
+                height: (b.y1 - b.y0 + 1).max(1) as usize,
+            }
+        }
+        RegionSpec::Sky { ra, dec, size_arcmin, .. } => {
+            let (width_arcmin, height_arcmin) = size_arcmin.wh();
+            CutoutRequest::Sky { ra: *ra, dec: *dec, width_arcmin, height_arcmin }
+        }
+    })
+}
+
+fn cutout_error(err: CutoutError, img_w: usize, img_h: usize) -> AppError {
+    match err {
+        CutoutError::WcsRequired => AppError::BadRequestWithHint {
+            code: "wcs_required",
+            message: err.to_string(),
+            hint: Some("open an image whose header carries WCS keywords, or use a pixel region".into()),
+        },
+        CutoutError::DegenerateScale => AppError::BadRequestWithHint {
+            code: "wcs_required",
+            message: err.to_string(),
+            hint: None,
+        },
+        CutoutError::OffImage { .. } | CutoutError::OutsideImage { .. } | CutoutError::EmptyRect => {
+            AppError::BadRequestWithHint {
+                code: "region_out_of_bounds",
+                message: err.to_string(),
+                hint: extent_hint(img_w, img_h),
+            }
+        }
+        CutoutError::TooLarge { x0, y0, width, height, max_bytes } => AppError::BadRequestWithHint {
+            code: "region_out_of_bounds",
+            message: format!(
+                "cutout {width}x{height} px at ({x0}, {y0}) exceeds the session memory budget of {max_bytes} bytes"
+            ),
+            hint: extent_hint(img_w, img_h),
+        },
+    }
+}
+
 fn resolve_cutout_rect(
     region: &RegionSpec,
     img_w: usize,
@@ -60,75 +113,27 @@ fn resolve_cutout_rect(
     wcs: Option<&WcsTransform>,
     max_bytes: usize,
 ) -> Result<CutoutRect> {
-    let (x0, y0, width, height) = match region {
-        RegionSpec::Pixel { x, y, width, height, .. } => (*x, *y, *width, *height),
-        RegionSpec::Shape(spec) => {
-            let b = pixel_shape(spec, img_w, img_h, wcs)?.bounds();
-            (b.x0, b.y0, (b.x1 - b.x0 + 1).max(1) as usize, (b.y1 - b.y0 + 1).max(1) as usize)
-        }
-        RegionSpec::Sky { ra, dec, size_arcmin, .. } => {
-            let wcs = wcs.ok_or_else(|| AppError::BadRequestWithHint {
-                code: "wcs_required",
-                message: "sky region requires a WCS on the image, but none is present".into(),
-                hint: Some("open an image whose header carries WCS keywords, or use a pixel region".into()),
-            })?;
-            let (cx, cy) = wcs.world_to_pixel(*ra, *dec);
-            if !cx.is_finite() || !cy.is_finite() {
-                return Err(AppError::BadRequestWithHint {
-                    code: "region_out_of_bounds",
-                    message: format!("sky position ({ra}, {dec}) does not project onto the image plane"),
-                    hint: Some(format!("image extent is 0..{img_w} x 0..{img_h} px")),
-                });
-            }
-            let scale = wcs.pixel_scale_arcsec();
-            if !(scale.is_finite() && scale > 0.0) {
-                return Err(AppError::BadRequestWithHint {
-                    code: "wcs_required",
-                    message: "image WCS has a degenerate pixel scale".into(),
-                    hint: None,
-                });
-            }
-            let (wa, ha) = size_arcmin.wh();
-            let wpx = (wa * 60.0 / scale).round().max(1.0) as usize;
-            let hpx = (ha * 60.0 / scale).round().max(1.0) as usize;
-            let x0 = (cx - wpx as f64 / 2.0).round() as i64;
-            let y0 = (cy - hpx as f64 / 2.0).round() as i64;
-            (x0, y0, wpx, hpx)
-        }
-    };
-
-    if width == 0 || height == 0 {
-        return Err(AppError::BadRequestWithHint {
-            code: "region_out_of_bounds",
-            message: "cutout width and height must both be > 0".into(),
-            hint: Some(format!("image extent is 0..{img_w} x 0..{img_h} px")),
-        });
-    }
-
-    let bytes = width
-        .checked_mul(height)
-        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()));
-    let representable = i64::try_from(width).ok().and_then(|w| x0.checked_add(w)).is_some()
-        && i64::try_from(height).ok().and_then(|h| y0.checked_add(h)).is_some();
-    if !matches!(bytes, Some(b) if b <= max_bytes) || !representable {
-        return Err(AppError::BadRequestWithHint {
-            code: "region_out_of_bounds",
-            message: format!(
-                "cutout {width}x{height} px at ({x0}, {y0}) exceeds the session memory budget of {max_bytes} bytes"
-            ),
-            hint: Some(format!("image extent is 0..{img_w} x 0..{img_h} px")),
-        });
-    }
-
-    Ok(CutoutRect { x0, y0, width, height })
+    let request = cutout_request(region, img_w, img_h, wcs)?;
+    astroburst_lib::core::imaging::cutout::resolve_cutout_rect(&request, img_w, img_h, wcs, max_bytes)
+        .map_err(|e| cutout_error(e, img_w, img_h))
 }
 
-fn fraction_on_image(rect: &CutoutRect, img_w: usize, img_h: usize) -> f64 {
-    let x1 = rect.x0 as f64 + rect.width as f64;
-    let y1 = rect.y0 as f64 + rect.height as f64;
-    let on_w = (x1.min(img_w as f64) - (rect.x0.max(0) as f64)).max(0.0);
-    let on_h = (y1.min(img_h as f64) - (rect.y0.max(0) as f64)).max(0.0);
-    (on_w * on_h) / (rect.width as f64 * rect.height as f64)
+fn attach_cutout_fields(
+    body: &mut Value,
+    rect: &CutoutRect,
+    fraction: f64,
+    shape: Option<&RegionShape>,
+    ltv: (f64, f64),
+) {
+    body["fraction_on_image"] = json!(fraction);
+    body["region"] = json!({
+        "x": rect.x0, "y": rect.y0, "width": rect.width, "height": rect.height,
+    });
+    if let Some(s) = shape {
+        body["region"]["shape"] = json!(s);
+    }
+    body["ltv1"] = json!(ltv.0);
+    body["ltv2"] = json!(ltv.1);
 }
 
 pub async fn cutout(
@@ -159,10 +164,14 @@ pub async fn cutout(
     let mask_shape = if params.mask_outside { shape.clone() } else { None };
 
     let header = if params.preserve_wcs {
-        shifted_header(entry.header(), &rect)
+        entry
+            .header()
+            .map(|h| shift_header(h, &rect))
+            .unwrap_or_else(HduHeader::empty)
     } else {
         HduHeader::empty()
     };
+    let ltv = reported_ltv(Some(&header), &rect);
 
     let image_ref = params
         .name
@@ -170,28 +179,11 @@ pub async fn cutout(
         .unwrap_or_else(|| session.v2.next_ref("cutout"));
 
     let data = entry.data_arc();
-    let CutoutRect { x0, y0, width, height } = rect;
     let sess = session.clone();
     let ref_for_load = image_ref.clone();
     let cutout_entry = tokio::task::spawn_blocking(move || {
         load_replacing(&sess.cache, &ref_for_load, || {
-            let mut out = Array2::<f32>::from_elem((height, width), f32::NAN);
-            for oy in 0..height {
-                let sy = y0 + oy as i64;
-                if sy < 0 || sy >= img_h as i64 {
-                    continue;
-                }
-                for ox in 0..width {
-                    let sx = x0 + ox as i64;
-                    if sx < 0 || sx >= img_w as i64 {
-                        continue;
-                    }
-                    if mask_shape.as_ref().is_some_and(|s| !s.contains(sx as f64, sy as f64)) {
-                        continue;
-                    }
-                    out[[oy, ox]] = data[[sy as usize, sx as usize]];
-                }
-            }
+            let out = cut_plane_within(&data, &rect, mask_shape.as_ref());
             let stats = compute_image_stats(&out);
             Ok(PlaneLoad::synthetic(out, stats, header))
         })
@@ -201,13 +193,7 @@ pub async fn cutout(
     .map_err(AppError::Internal)?;
 
     let mut body = register_and_respond(&session, image_ref.clone(), None, None, &cutout_entry);
-    body["fraction_on_image"] = json!(fraction);
-    body["region"] = json!({
-        "x": x0, "y": y0, "width": width, "height": height,
-    });
-    if let Some(s) = &shape {
-        body["region"]["shape"] = json!(s);
-    }
+    attach_cutout_fields(&mut body, &rect, fraction, shape.as_ref(), ltv);
     *session.v2.active_ref.write().await = Some(image_ref);
     Ok(Json(body))
 }
@@ -225,22 +211,6 @@ async fn target_ref(session: &Session, explicit: Option<String>) -> Result<Strin
                 AppError::BadRequest("no active image in this session; open a file first".into())
             }),
     }
-}
-
-fn shifted_header(parent: Option<&HduHeader>, rect: &CutoutRect) -> HduHeader {
-    let mut hdr = match parent {
-        Some(h) => h.clone(),
-        None => return HduHeader::empty(),
-    };
-    if let Some(cr1) = hdr.get_f64("CRPIX1") {
-        hdr.set_f64("CRPIX1", cr1 - rect.x0 as f64);
-    }
-    if let Some(cr2) = hdr.get_f64("CRPIX2") {
-        hdr.set_f64("CRPIX2", cr2 - rect.y0 as f64);
-    }
-    hdr.set("NAXIS1", rect.width.to_string());
-    hdr.set("NAXIS2", rect.height.to_string());
-    hdr
 }
 
 #[cfg(test)]
@@ -307,10 +277,88 @@ mod tests {
     }
 
     #[test]
+    fn box_shape_cutout_rect_keeps_the_bounds_contract() {
+        let half_integer: RegionSpec = serde_json::from_str(
+            r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6}"#,
+        )
+        .unwrap();
+        let r = resolve_cutout_rect(&half_integer, 40, 40, None, BUDGET).unwrap();
+        assert_eq!((r.x0, r.y0, r.width, r.height), (10, 7, 12, 8));
+
+        let integer_centre: RegionSpec =
+            serde_json::from_str(r#"{"type":"shape","shape":"box","x":15,"y":10,"width":10,"height":6}"#).unwrap();
+        let r = resolve_cutout_rect(&integer_centre, 40, 40, None, BUDGET).unwrap();
+        assert_eq!((r.x0, r.y0, r.width, r.height), (10, 7, 11, 7));
+
+        let rotated: RegionSpec = serde_json::from_str(
+            r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6,"angle":30}"#,
+        )
+        .unwrap();
+        let r = resolve_cutout_rect(&rotated, 40, 40, None, BUDGET).unwrap();
+        let b = RegionShape::Box { x: 15.5, y: 10.5, width: 10.0, height: 6.0, angle: 30.0 }.bounds();
+        assert_eq!((r.x0, r.y0, r.width as i64, r.height as i64), (b.x0, b.y0, b.x1 - b.x0 + 1, b.y1 - b.y0 + 1));
+    }
+
+    #[test]
+    fn sky_request_entirely_outside_the_image_maps_to_region_out_of_bounds() {
+        let err = cutout_error(CutoutError::OutsideImage { x0: 3, y0: 1850, width: 6, height: 6 }, 100, 100);
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+        match err {
+            AppError::BadRequestWithHint { message, hint, .. } => {
+                assert!(message.contains("6x6 px at (3, 1850)"), "{message}");
+                assert_eq!(hint.as_deref(), Some("image extent is 0..100 x 0..100 px"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn fraction_on_image_does_not_overflow_for_huge_rects() {
         let rect = CutoutRect { x0: 0, y0: 0, width: 1 << 40, height: 1 << 40 };
         let f = fraction_on_image(&rect, 8, 8);
         assert!(f.is_finite());
         assert!(f > 0.0 && f < 1e-20);
+    }
+
+    #[test]
+    fn empty_and_sky_requests_map_to_the_same_error_codes_as_before() {
+        let err = resolve_cutout_rect(&pixel(0, 0, 0, 4), 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("region_out_of_bounds"));
+        let sky: RegionSpec =
+            serde_json::from_str(r#"{"type":"sky","ra":150.0,"dec":2.0,"size_arcmin":1.0}"#).unwrap();
+        let err = resolve_cutout_rect(&sky, 8, 8, None, BUDGET).unwrap_err();
+        assert_eq!(code_of(&err), Some("wcs_required"));
+        match err {
+            AppError::BadRequestWithHint { hint, .. } => assert!(hint.is_some()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_body_reports_the_registered_header_ltv_or_the_rect_origin() {
+        let rect = CutoutRect { x0: 6, y0: -3, width: 4, height: 4 };
+        let mut body = json!({ "ref": "cutout_0" });
+        let plain = reported_ltv(Some(&HduHeader::empty()), &rect);
+        attach_cutout_fields(&mut body, &rect, 0.25, None, plain);
+        assert_eq!(body["ltv1"], json!(-6.0));
+        assert_eq!(body["ltv2"], json!(3.0));
+        assert_eq!(body["region"]["x"], 6);
+        assert_eq!(body["region"]["height"], 4);
+        assert_eq!(body["fraction_on_image"], json!(0.25));
+        assert!(body["region"].get("shape").is_none());
+
+        let circle = RegionShape::Circle { x: 4.0, y: 4.0, r: 2.0 };
+        attach_cutout_fields(&mut body, &rect, 1.0, Some(&circle), plain);
+        assert_eq!(body["region"]["shape"]["shape"], "circle");
+
+        let mut subarray = HduHeader::empty();
+        subarray.set_f64("LTV1", -512.0);
+        subarray.set_f64("LTV2", 0.0);
+        let registered = shift_header(&subarray, &CutoutRect { x0: 10, y0: 4, width: 4, height: 4 });
+        let composed = reported_ltv(Some(&registered), &rect);
+        attach_cutout_fields(&mut body, &rect, 1.0, None, composed);
+        assert_eq!(body["ltv1"], json!(-522.0));
+        assert_eq!(body["ltv2"], json!(-4.0));
+        assert_eq!(body["ltv1"], json!(registered.get_f64("LTV1").unwrap()));
     }
 }

@@ -1,3 +1,4 @@
+pub mod aperture;
 pub mod confidence;
 pub mod deconvolution;
 pub mod fft;

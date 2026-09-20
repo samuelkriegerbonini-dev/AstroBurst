@@ -88,28 +88,75 @@ export interface StarPhotometry {
   y: number;
   peak: number;
   net_flux: number;
+  flux_err: number;
   mag_inst: number;
   snr: number;
   fwhm: number;
   aperture_radius: number;
   aperture_pixels: number;
+  aperture_area: number;
   bg_mean: number;
   bg_sigma: number;
+  bg_pixels: number;
   saturated: boolean;
+  n_masked: number;
+  n_saturated: number;
+  err_used: boolean;
+  aperture_correction: number | null;
+  flux_total: number | null;
+  plateau_radius: number | null;
+  flux_jy: number | null;
+  flux_err_jy: number | null;
+  mag_ab: number | null;
+  mag_ab_err: number | null;
+  mag_ab_total: number | null;
+  st_mag: number | null;
+}
+
+export type FluxConvention =
+  | { kind: "jwst_mjy_sr"; pixar_sr: number; pixar_a2: number | null; derived_pixar: boolean }
+  | { kind: "jwst_dn_per_sec"; photmjsr: number; pixar_sr: number }
+  | {
+      kind: "hst_counts";
+      photflam: number;
+      photplam: number;
+      photzpt: number;
+      per_second: boolean;
+      exptime: number | null;
+    }
+  | { kind: "roman_dn_per_sec"; mjy_per_dn_s: number; pixar_sr: number }
+  | { kind: "generic_zero_point"; zp: number; keyword: string; per_second: boolean; exptime: number | null };
+
+export interface PhotCal {
+  convention: FluxConvention;
+  bunit: string | null;
+  notes: string[];
+  warnings: string[];
+  label: string;
 }
 
 export interface PhotometryMeasurement {
   photometry: StarPhotometry;
   sky?: { ra: number; dec: number } | null;
   gaia?: { gmag?: number | null; bp_rp: number; separation_arcsec: number } | null;
+  photcal: PhotCal | null;
+  warnings: string[];
+  masked: boolean;
   elapsed_ms: number;
+}
+
+export interface PhotometryOptions {
+  apertureRadius?: number;
+  gaiaMatch?: boolean;
+  excludeDq?: boolean;
+  gain?: number;
 }
 
 export function measurePhotometry(
   path: string,
   x: number,
   y: number,
-  options: { apertureRadius?: number; gaiaMatch?: boolean; excludeDq?: boolean } = {},
+  options: PhotometryOptions = {},
 ): Promise<PhotometryMeasurement> {
   return typedInvoke<PhotometryMeasurement>("measure_photometry_cmd", {
     path,
@@ -118,5 +165,6 @@ export function measurePhotometry(
     apertureRadius: options.apertureRadius ?? null,
     gaiaMatch: options.gaiaMatch ?? true,
     excludeDq: options.excludeDq ?? false,
+    gain: options.gain ?? null,
   });
 }

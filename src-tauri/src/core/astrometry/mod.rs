@@ -1,4 +1,8 @@
 pub mod frames;
+pub mod grid;
 pub mod plate_solve;
 pub mod spcc;
+pub mod spectral;
+pub mod time;
 pub mod wcs;
+pub mod catalog;

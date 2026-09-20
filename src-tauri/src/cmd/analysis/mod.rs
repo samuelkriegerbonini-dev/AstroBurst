@@ -4,7 +4,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use rayon::prelude::*;
 
-use crate::cmd::common::{blocking_cmd, dq_exclusion, load_cached};
+use crate::cmd::common::{blocking_cmd, dq_exclusion, load_cached, load_cached_full, load_companions};
 use crate::types::constants::{
     HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
@@ -12,17 +12,19 @@ use crate::types::constants::{
     RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
     RES_PHOTOMETRY, RES_SKY, RES_GAIA,
     RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
-    RES_MASKED, RES_DQ_EXCLUDED,
+    RES_MASKED, RES_DQ_EXCLUDED, RES_LABEL, RES_WARNINGS,
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
-use crate::core::analysis::photometry::{measure_star_masked, PhotometryConfig};
+use crate::core::analysis::photometry::{measure_star_full, PhotometryConfig, StarPhotometry};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
 use crate::core::astrometry::spcc::query_gaia_vizier;
 use crate::core::astrometry::wcs::WcsTransform;
-use crate::core::imaging::dq_flags::apply_exclusion;
+use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
 use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
 use crate::core::imaging::stf::auto_stf;
+use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
+use crate::infra::cache::ImageEntry;
 
 const PAR_THRESHOLD: usize = 1_000_000;
 
@@ -227,6 +229,165 @@ pub async fn detect_stars_composite(
     })
 }
 
+pub const PHOTOMETRY_SATURATED_FLAG: &str = "SATURATED";
+pub const HEADER_PROCESSING_PROVENANCE: &str = "ABPROC";
+pub const RES_PHOTCAL: &str = "photcal";
+
+pub(crate) struct PhotometryPlanes {
+    pub err: Option<ImageEntry>,
+    pub saturated: Option<ndarray::Array2<u8>>,
+}
+
+pub(crate) fn photometry_planes(path: &str, dims: (usize, usize), warnings: &mut Vec<String>) -> PhotometryPlanes {
+    let comps = match load_companions(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("companion planes unavailable for {}: {:#}", path, e);
+            return PhotometryPlanes { err: None, saturated: None };
+        }
+    };
+    let err = comps.err.and_then(|entry| {
+        let err_dims = entry.arr().dim();
+        if err_dims == dims {
+            Some(entry)
+        } else {
+            warnings.push(format!(
+                "ERR plane {}x{} does not match the image {}x{}; ignored",
+                err_dims.1, err_dims.0, dims.1, dims.0
+            ));
+            None
+        }
+    });
+    let saturated = comps.dq.and_then(|(entry, table)| {
+        let bits = table.mask_from_names(&[PHOTOMETRY_SATURATED_FLAG]).ok()?;
+        let plane = entry.int_plane()?;
+        (plane.bits.dim() == dims).then(|| exclusion_map(&plane.bits, bits))
+    });
+    PhotometryPlanes { err, saturated }
+}
+
+fn apply_calibration(phot: &mut StarPhotometry, cal: &PhotCal) {
+    if let Some(c) = cal.calibrate(phot.net_flux, Some(phot.flux_err)) {
+        phot.flux_jy = Some(c.flux_jy);
+        phot.flux_err_jy = c.flux_err_jy;
+        phot.mag_ab = c.mag_ab;
+        phot.mag_ab_err = c.mag_ab_err;
+        phot.st_mag = c.st_mag;
+    }
+    phot.mag_ab_total = phot
+        .flux_total
+        .and_then(|total| cal.calibrate(total, None))
+        .and_then(|c| c.mag_ab);
+}
+
+fn photcal_json(cal: &PhotCal) -> anyhow::Result<serde_json::Value> {
+    let mut val = serde_json::to_value(cal)?;
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert(RES_LABEL.to_string(), json!(cal.label()));
+    }
+    Ok(val)
+}
+
+fn gaia_match_json(coord_ra: f64, coord_dec: f64) -> serde_json::Value {
+    let Ok(stars) = query_gaia_vizier(coord_ra, coord_dec, 0.01, 1) else {
+        return serde_json::Value::Null;
+    };
+    let cos_dec = coord_dec.to_radians().cos();
+    let mut best: Option<(f64, usize)> = None;
+    for (i, s) in stars.iter().enumerate() {
+        let mut dra = (coord_ra - s.ra).abs();
+        if dra > 180.0 {
+            dra = 360.0 - dra;
+        }
+        let sep = ((dra * cos_dec).powi(2) + (coord_dec - s.dec).powi(2)).sqrt() * 3600.0;
+        if sep < 5.0 && best.map_or(true, |(bd, _)| sep < bd) {
+            best = Some((sep, i));
+        }
+    }
+    match best {
+        Some((sep, i)) => json!({
+            RES_GMAG: stars[i].gmag,
+            RES_BP_RP: stars[i].bp_rp,
+            RES_SEPARATION_ARCSEC: sep,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+pub(crate) fn photometry_for_path(
+    path: &str,
+    x: f64,
+    y: f64,
+    aperture_radius: Option<f64>,
+    gaia_match: bool,
+    exclude_dq: bool,
+    gain: Option<f64>,
+) -> anyhow::Result<serde_json::Value> {
+    let t0 = Instant::now();
+    let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
+    let dims = entry.arr().dim();
+    let mask = resolve_dq_mask(path, exclude_dq, dims);
+    let mut warnings: Vec<String> = Vec::new();
+    let planes = photometry_planes(path, dims, &mut warnings);
+    let header = entry.header();
+    let wcs = header.and_then(|h| WcsTransform::from_header(h).ok());
+    let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+
+    let config = PhotometryConfig {
+        aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
+        image_max: Some(entry.stats().max),
+        gain: gain.filter(|g| g.is_finite() && *g > 0.0),
+        ..PhotometryConfig::default()
+    };
+
+    let mut phot = measure_star_full(
+        entry.arr(),
+        planes.err.as_ref().map(|e| e.arr()),
+        mask.as_ref().map(|m| &m.map),
+        planes.saturated.as_ref(),
+        x,
+        y,
+        &config,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    match &photcal {
+        Some(cal) => {
+            apply_calibration(&mut phot, cal);
+            warnings.extend(cal.warnings.iter().cloned());
+        }
+        None => warnings.push(missing_calibration_reason(header)),
+    }
+    if let Some(provenance) = header.and_then(|h| h.get(HEADER_PROCESSING_PROVENANCE)) {
+        warnings.push(format!("photometry on processed data ({})", provenance.trim().trim_matches('\'').trim()));
+    }
+
+    let mut sky = serde_json::Value::Null;
+    let mut gaia = serde_json::Value::Null;
+    if let Some(wcs) = &wcs {
+        let coord = wcs.pixel_to_world(phot.x, phot.y);
+        sky = json!({ RES_RA: coord.ra, RES_DEC: coord.dec });
+        if gaia_match {
+            gaia = gaia_match_json(coord.ra, coord.dec);
+        }
+    }
+
+    let photcal_value = match &photcal {
+        Some(cal) => photcal_json(cal)?,
+        None => serde_json::Value::Null,
+    };
+
+    Ok(json!({
+        RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+        RES_SKY: sky,
+        RES_GAIA: gaia,
+        RES_PHOTCAL: photcal_value,
+        RES_WARNINGS: warnings,
+        RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        RES_MASKED: mask.is_some(),
+    }))
+}
+
 #[tauri::command]
 pub async fn measure_photometry_cmd(
     path: String,
@@ -235,65 +396,18 @@ pub async fn measure_photometry_cmd(
     aperture_radius: Option<f64>,
     gaia_match: Option<bool>,
     exclude_dq: Option<bool>,
+    gain: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let t0 = Instant::now();
-        let entry = crate::cmd::common::load_cached_full(&path)
-            .or_else(|_| load_cached(&path))?;
-        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
-
-        let config = PhotometryConfig {
-            aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
-            image_max: Some(entry.stats().max),
-            ..PhotometryConfig::default()
-        };
-
-        let phot = measure_star_masked(entry.arr(), x, y, &config, mask.as_ref().map(|m| &m.map))
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        let mut sky = serde_json::Value::Null;
-        let mut gaia = serde_json::Value::Null;
-
-        if let Some(header) = entry.header() {
-            if let Ok(wcs) = WcsTransform::from_header(header) {
-                let coord = wcs.pixel_to_world(phot.x, phot.y);
-                sky = json!({ RES_RA: coord.ra, RES_DEC: coord.dec });
-
-                if gaia_match.unwrap_or(true) {
-                    if let Ok(stars) = query_gaia_vizier(coord.ra, coord.dec, 0.01, 1) {
-                        let cos_dec = coord.dec.to_radians().cos();
-                        let mut best: Option<(f64, usize)> = None;
-                        for (i, s) in stars.iter().enumerate() {
-                            let mut dra = (coord.ra - s.ra).abs();
-                            if dra > 180.0 {
-                                dra = 360.0 - dra;
-                            }
-                            let sep = ((dra * cos_dec).powi(2) + (coord.dec - s.dec).powi(2))
-                                .sqrt()
-                                * 3600.0;
-                            if sep < 5.0 && best.map_or(true, |(bd, _)| sep < bd) {
-                                best = Some((sep, i));
-                            }
-                        }
-                        if let Some((sep, i)) = best {
-                            gaia = json!({
-                                RES_GMAG: stars[i].gmag,
-                                RES_BP_RP: stars[i].bp_rp,
-                                RES_SEPARATION_ARCSEC: sep,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(json!({
-            RES_PHOTOMETRY: serde_json::to_value(&phot)?,
-            RES_SKY: sky,
-            RES_GAIA: gaia,
-            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            RES_MASKED: mask.is_some(),
-        }))
+        photometry_for_path(
+            &path,
+            x,
+            y,
+            aperture_radius,
+            gaia_match.unwrap_or(true),
+            exclude_dq.unwrap_or(false),
+            gain,
+        )
     })
 }
 
@@ -351,7 +465,134 @@ pub async fn analyze_subframes_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use crate::infra::fits::reader::test_fixtures::{sci_err_dq_mef, write_test_mef, HduData, TestHdu};
+
+    fn gaussian_pixels(size: usize, amp: f32, sigma: f32, bg: f32) -> Vec<f32> {
+        let c = (size / 2) as f32;
+        (0..size * size)
+            .map(|i| {
+                let x = (i % size) as f32 - c;
+                let y = (i / size) as f32 - c;
+                bg + amp * (-(x * x + y * y) / (2.0 * sigma * sigma)).exp()
+            })
+            .collect()
+    }
+
+    fn jwst_star_mef(path: &std::path::Path, sci_cards: Vec<(&'static str, String)>) -> String {
+        let size = 64;
+        let mut dq = vec![0i32 - 2147483647 - 1; size * size];
+        dq[32 * size + 33] = 2 - 2147483647 - 1;
+        dq[30 * size + 30] = 1 - 2147483647 - 1;
+        let mut cards = vec![
+            ("BUNIT", "'MJy/sr'".to_string()),
+            ("PIXAR_SR", "2.1E-13".to_string()),
+            ("PHOTMJSR", "0.5".to_string()),
+            ("TELESCOP", "'JWST'".to_string()),
+        ];
+        cards.extend(sci_cards);
+        write_test_mef(
+            path,
+            &[],
+            &[
+                TestHdu {
+                    extname: Some("SCI"),
+                    extver: Some(1),
+                    cols: size,
+                    rows: size,
+                    data: HduData::F32(gaussian_pixels(size, 1000.0, 2.0, 100.0)),
+                    extra_cards: cards,
+                },
+                TestHdu {
+                    extname: Some("ERR"),
+                    extver: Some(1),
+                    cols: size,
+                    rows: size,
+                    data: HduData::F32(vec![0.5; size * size]),
+                    extra_cards: vec![("BUNIT", "'MJy/sr'".into())],
+                },
+                TestHdu {
+                    extname: Some("DQ"),
+                    extver: Some(1),
+                    cols: size,
+                    rows: size,
+                    data: HduData::I32(dq),
+                    extra_cards: vec![("BZERO", "2147483648".into()), ("BSCALE", "1".into())],
+                },
+            ],
+        );
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    #[test]
+    fn photometry_for_path_calibrates_with_err_and_dq_companions() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = jwst_star_mef(&dir.path().join("jwst_star.fits"), vec![]);
+        let out = photometry_for_path(&key, 32.0, 32.0, None, false, true, None).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        assert_eq!(out[RES_MASKED], true);
+        assert_eq!(phot["err_used"], true);
+        assert_eq!(phot["n_saturated"], 1);
+        assert_eq!(phot["saturated"], true);
+        assert_eq!(phot["n_masked"], 1);
+        let net = phot["net_flux"].as_f64().unwrap();
+        let flux_jy = phot["flux_jy"].as_f64().unwrap();
+        assert!((flux_jy - net * 2.1e-13 * 1e6).abs() < 1e-15, "flux_jy={flux_jy} net={net}");
+        let mag_ab = phot["mag_ab"].as_f64().unwrap();
+        assert!((mag_ab - (-2.5 * flux_jy.log10() + 8.90)).abs() < 1e-9);
+        let flux_err = phot["flux_err"].as_f64().unwrap();
+        assert!((phot["flux_err_jy"].as_f64().unwrap() - flux_err * 2.1e-7).abs() < 1e-15);
+        assert!(phot["mag_ab_err"].as_f64().unwrap() > 0.0);
+        assert!(phot["st_mag"].is_null());
+        assert_eq!(out[RES_PHOTCAL]["convention"]["kind"], "jwst_mjy_sr");
+        assert_eq!(out[RES_PHOTCAL]["bunit"], "MJy/sr");
+        assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"));
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(out[RES_SKY].is_null() && out[RES_GAIA].is_null());
+
+        let unmasked = photometry_for_path(&key, 32.0, 32.0, None, false, false, None).unwrap();
+        assert_eq!(unmasked[RES_MASKED], false);
+        assert_eq!(unmasked[RES_PHOTOMETRY]["n_masked"], 0);
+        assert_eq!(unmasked[RES_PHOTOMETRY]["n_saturated"], 1);
+    }
+
+    #[test]
+    fn photometry_for_path_warns_on_processed_data_and_missing_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = jwst_star_mef(
+            &dir.path().join("processed.fits"),
+            vec![("ABPROC", "'ghs_stretch'".to_string())],
+        );
+        let out = photometry_for_path(&key, 32.0, 32.0, Some(5.0), false, false, None).unwrap();
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap() == "photometry on processed data (ghs_stretch)"),
+            "{warnings:?}"
+        );
+        assert!((out[RES_PHOTOMETRY]["aperture_radius"].as_f64().unwrap() - 5.0).abs() < 1e-9);
+
+        let plain = dir.path().join("plain.fits");
+        let size = 64;
+        let mut arr = ndarray::Array2::<f32>::zeros((size, size));
+        for (i, v) in gaussian_pixels(size, 1000.0, 2.0, 100.0).into_iter().enumerate() {
+            arr[[i / size, i % size]] = v;
+        }
+        crate::infra::fits::writer::write_fits_mono(plain.to_str().unwrap(), &arr, None).unwrap();
+        let out = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, false, false, Some(2.0)).unwrap();
+        assert!(out[RES_PHOTCAL].is_null());
+        let phot = &out[RES_PHOTOMETRY];
+        assert!(phot["flux_jy"].is_null() && phot["mag_ab"].is_null());
+        assert_eq!(phot["err_used"], false);
+        assert_eq!(phot["n_saturated"], 0);
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap().contains("no photometric calibration")),
+            "{warnings:?}"
+        );
+        let with_gain = phot["flux_err"].as_f64().unwrap();
+        let without = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, false, false, None).unwrap();
+        assert!(with_gain > without[RES_PHOTOMETRY]["flux_err"].as_f64().unwrap());
+    }
 
     #[test]
     fn resolve_dq_mask_counts_excluded_pixels_on_mef() {

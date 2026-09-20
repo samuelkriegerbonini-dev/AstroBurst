@@ -19,6 +19,7 @@ const TileViewerPanel = lazy(() => import("./TileViewerPanel"));
 const RegionsPanel = lazy(() => import("../regions/RegionsPanel"));
 const RegionProfilesPanel = lazy(() => import("../regions/RegionProfilesPanel"));
 const StatisticsPanel = lazy(() => import("./StatisticsPanel"));
+const CatalogPanel = lazy(() => import("./CatalogPanel"));
 
 const EMPTY_STARS: Star[] = [];
 
@@ -224,6 +225,8 @@ function AnalysisTabInner({
         />
 
         <PhotometryPanel filePath={effectivePath ?? null} />
+
+        <CatalogPanel filePath={effectivePath ?? null} />
 
         <StatisticsPanel filePath={effectivePath ?? null} />
 

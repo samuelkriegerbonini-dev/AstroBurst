@@ -4,8 +4,10 @@ use anyhow::{anyhow, bail};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use ndarray::Array2;
+
 use crate::cmd::analysis::{resolve_dq_mask, DqMask};
-use crate::cmd::common::{blocking_cmd, load_cached_full};
+use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::region::{
     line_cut, radial_profile, region_stats, RegionShape, RegionSystem, SigmaClip,
@@ -32,6 +34,16 @@ fn entry_wcs(entry: &ImageEntry) -> Option<WcsTransform> {
     entry.header().and_then(|h| WcsTransform::from_header(h).ok())
 }
 
+pub(crate) fn companion_err(path: &str, dims: (usize, usize)) -> Option<ImageEntry> {
+    match load_companions(path) {
+        Ok(comps) => comps.err.filter(|e| e.arr().dim() == dims),
+        Err(e) => {
+            log::warn!("ERR companion unavailable for {}: {:#}", path, e);
+            None
+        }
+    }
+}
+
 fn with_timing(mut body: Value, masked: bool, t0: Instant) -> Value {
     if let Some(obj) = body.as_object_mut() {
         obj.insert(RES_MASKED.to_string(), json!(masked));
@@ -44,13 +56,14 @@ pub(crate) fn stats_for_entry(
     entry: &ImageEntry,
     regions: &[RegionStatsRequest],
     mask: Option<&DqMask>,
+    err: Option<&Array2<f32>>,
     clip: SigmaClip,
 ) -> Vec<Value> {
     let excluded = mask.map(|m| &m.map);
     regions
         .iter()
         .map(|req| {
-            match region_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, clip) {
+            match region_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, err, clip) {
                 Ok(stats) => json!({ RES_ID: req.id, RES_STATS: stats, RES_ERROR: Value::Null }),
                 Err(e) => json!({ RES_ID: req.id, RES_STATS: Value::Null, RES_ERROR: e.to_string() }),
             }
@@ -98,7 +111,8 @@ pub async fn region_stats_cmd(
             sigma: sigma.unwrap_or(defaults.sigma),
             maxiters: maxiters.unwrap_or(defaults.maxiters),
         };
-        let entries = stats_for_entry(&entry, &regions, mask.as_ref(), clip);
+        let err_entry = companion_err(&path, entry.arr().dim());
+        let entries = stats_for_entry(&entry, &regions, mask.as_ref(), err_entry.as_ref().map(|e| e.arr()), clip);
         Ok(json!({
             RES_REGIONS: entries,
             RES_MASKED: mask.is_some(),
@@ -209,7 +223,7 @@ mod tests {
             req("all", whole.clone()),
             req("empty", RegionShape::Circle { x: 100.0, y: 100.0, r: 2.0 }),
         ];
-        let out = stats_for_entry(&entry, &regions, Some(&mask), SigmaClip::default());
+        let out = stats_for_entry(&entry, &regions, Some(&mask), None, SigmaClip::default());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0][RES_ID], "all");
         assert!(out[0][RES_ERROR].is_null());
@@ -219,7 +233,7 @@ mod tests {
         assert!(out[1][RES_STATS].is_null());
         assert!(out[1][RES_ERROR].as_str().unwrap().contains("no finite pixels"));
 
-        let unmasked = stats_for_entry(&entry, &regions[..1], None, SigmaClip::default());
+        let unmasked = stats_for_entry(&entry, &regions[..1], None, None, SigmaClip::default());
         assert_eq!(unmasked[0][RES_STATS]["n_excluded"], 0);
         assert_eq!(unmasked[0][RES_STATS]["count"], 16);
         assert_eq!(unmasked[0][RES_STATS]["sum"], 120.0);
@@ -228,9 +242,49 @@ mod tests {
             &entry,
             &[req("bad", RegionShape::Circle { x: 1.0, y: 1.0, r: -1.0 })],
             None,
+            None,
             SigmaClip::default(),
         );
         assert!(invalid[0][RES_ERROR].as_str().unwrap().contains("invalid region"));
+    }
+
+    #[test]
+    fn stats_for_entry_propagates_the_err_companion_of_a_mef() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("err_regions.fits");
+        let mut dq = vec![-2147483648i32; 16];
+        dq[1] = -2147483647;
+        dq[6] = -2147483645;
+        sci_err_dq_mef(&path, 4, 4, dq);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+        let entry = load_cached_full(&key).unwrap();
+        let err = companion_err(&key, entry.arr().dim()).expect("ERR companion");
+        assert_eq!(err.arr()[[0, 2]], 1.0);
+
+        let whole = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
+        let regions = vec![req("all", whole)];
+        let out = stats_for_entry(&entry, &regions, None, Some(err.arr()), SigmaClip::default());
+        let sum_err = out[0][RES_STATS]["sum_err"].as_f64().unwrap();
+        let expected: f64 = (0..16).map(|i| (0.5 * i as f64).powi(2)).sum::<f64>().sqrt();
+        assert!((sum_err - expected).abs() < 1e-6, "sum_err={sum_err} expected={expected}");
+        assert!(out[0][RES_STATS]["weighted_mean"].as_f64().unwrap().is_finite());
+
+        let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
+        let masked = stats_for_entry(&entry, &regions, Some(&mask), Some(err.arr()), SigmaClip::default());
+        let expected_masked: f64 = (0..16)
+            .filter(|i| *i != 1 && *i != 6)
+            .map(|i| (0.5 * i as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let masked_err = masked[0][RES_STATS]["sum_err"].as_f64().unwrap();
+        assert!((masked_err - expected_masked).abs() < 1e-6, "sum_err={masked_err} expected={expected_masked}");
+
+        let without = stats_for_entry(&entry, &regions, None, None, SigmaClip::default());
+        assert!(without[0][RES_STATS]["sum_err"].is_null());
+        assert!(without[0][RES_STATS]["weighted_mean"].is_null());
+
+        assert!(companion_err(&key, (8, 8)).is_none());
+        assert!(companion_err(&format!("{}#hdu=4", path.to_str().unwrap()), (4, 4)).is_none());
     }
 
     #[test]

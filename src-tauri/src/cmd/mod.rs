@@ -19,3 +19,6 @@ pub mod synth;
 pub mod visualization;
 pub mod pixelmath;
 pub mod statistics;
+pub mod cutout;
+pub mod spectral;
+pub mod catalog;

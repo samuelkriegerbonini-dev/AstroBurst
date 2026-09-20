@@ -1,10 +1,28 @@
-import { typedInvoke, withPreview, getOutputDir } from "../infrastructure/tauri";
-import type { CubeDims, CubeProcessResult, CubeSpectrum } from "../shared/types/cube";
+import { typedInvoke, withPreview, getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
+import type {
+  CollapseRangeMode,
+  CollapseRangeResult,
+  CubeDims,
+  CubeProcessResult,
+  CubeSpectrum,
+  MomentConfig,
+  MomentMapsResult,
+  RegionSpectrum,
+} from "../shared/types/cube";
+import type { RegionShape } from "../shared/types/regions";
 
 const CUBE_PREVIEWS: [string, string][] = [
   ["collapsed_path", "collapsedPreviewUrl"],
   ["collapsed_median_path", "collapsedMedianPreviewUrl"],
 ];
+
+interface RawCubeSpectrum {
+  spectrum?: number[];
+  values?: number[];
+  wavelengths?: number[] | null;
+  is_spectral?: boolean;
+  unit?: string;
+}
 
 export function processCube(path: string, outputDir?: string, frameStep = 5): Promise<CubeProcessResult> {
   return withPreview<CubeProcessResult>("process_cube_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS);
@@ -34,6 +52,56 @@ export async function getCubeFrame(
   });
 }
 
-export function getCubeSpectrum(path: string, x: number, y: number): Promise<CubeSpectrum> {
-  return typedInvoke<CubeSpectrum>("get_cube_spectrum", { path, x, y });
+export function toCubeSpectrum(raw: RawCubeSpectrum, x: number, y: number): CubeSpectrum {
+  return {
+    values: raw.values ?? raw.spectrum ?? [],
+    wavelengths: raw.wavelengths ?? [],
+    x,
+    y,
+    unit: raw.unit,
+    is_spectral: raw.is_spectral,
+  };
+}
+
+export async function getCubeSpectrum(path: string, x: number, y: number): Promise<CubeSpectrum> {
+  const raw = await typedInvoke<RawCubeSpectrum>("get_cube_spectrum", { path, x, y });
+  return toCubeSpectrum(raw, x, y);
+}
+
+export function getCubeSpectrumRegion(
+  path: string,
+  shape: RegionShape,
+  background: RegionShape | null,
+): Promise<RegionSpectrum> {
+  return typedInvoke<RegionSpectrum>("get_cube_spectrum_region_cmd", { path, shape, background });
+}
+
+export function collapseCubeRange(
+  path: string,
+  outputDir: string | undefined,
+  z0: number,
+  z1: number,
+  mode: CollapseRangeMode,
+): Promise<CollapseRangeResult> {
+  return withPreview<CollapseRangeResult>("collapse_cube_range_cmd", outputDir, { path, z0, z1, mode });
+}
+
+export async function computeMomentMaps(
+  path: string,
+  outputDir: string | undefined,
+  config: MomentConfig,
+): Promise<MomentMapsResult> {
+  const dir = outputDir && outputDir !== "./output" ? outputDir : await getOutputDir();
+  const result = await typedInvoke<MomentMapsResult>("moment_maps_cmd", { path, outputDir: dir, config });
+  const [m0, m1, m2] = await Promise.all([
+    getPreviewUrl(result.m0.png_path),
+    getPreviewUrl(result.m1.png_path),
+    getPreviewUrl(result.m2.png_path),
+  ]);
+  return {
+    ...result,
+    m0: { ...result.m0, previewUrl: m0 },
+    m1: { ...result.m1, previewUrl: m1 },
+    m2: { ...result.m2, previewUrl: m2 },
+  };
 }

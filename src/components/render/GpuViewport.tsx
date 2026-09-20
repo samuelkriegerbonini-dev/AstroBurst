@@ -4,6 +4,7 @@ import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform
 import { screenToImagePixel } from "../../utils/pixelMapping";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
+import OverlayLayer from "../viewer/OverlayLayer";
 
 interface GpuViewportProps {
   renderW: number;
@@ -194,6 +195,15 @@ function GpuViewport({
             />
           )}
         </div>
+        <OverlayLayer
+          containerRef={containerRef}
+          transform={transform}
+          renderW={renderW}
+          renderH={renderH}
+          fitsW={effFitsW}
+          fitsH={effFitsH}
+          enabled={regionsActive}
+        />
         <RegionsLayer
           containerRef={containerRef}
           transform={transform}

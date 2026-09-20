@@ -16,6 +16,39 @@ export interface PixelToWorldResult {
   frame: SkyFrame;
 }
 
+export type GridKind = "lon" | "lat";
+export type GridEdge = "left" | "right" | "top" | "bottom";
+
+export interface GridLine {
+  kind: GridKind;
+  value_deg: number;
+  points: [number, number][];
+  label: string;
+}
+
+export interface GridLabel {
+  x: number;
+  y: number;
+  text: string;
+  edge: GridEdge;
+  kind: GridKind;
+}
+
+export interface WcsGrid {
+  frame: SkyFrame;
+  lines: GridLine[];
+  labels: GridLabel[];
+  lon_step_deg: number;
+  lat_step_deg: number;
+  notes: string[];
+}
+
+export interface WcsGridError {
+  error: string;
+}
+
+export type WcsGridResult = WcsGrid | WcsGridError;
+
 export interface PointingOverlapFile {
   path: string;
   has_wcs: boolean;

@@ -1,4 +1,12 @@
+import type { SkyFrame } from "./astrometry";
+
 export type StretchMode = "mtf" | "linear" | "log" | "sqrt" | "asinh" | "power";
+export type GridFrame = SkyFrame;
+export const GRID_FRAMES: readonly GridFrame[] = ["icrs", "fk5", "galactic", "ecliptic"];
+export const GRID_DENSITY_MIN = 1;
+export const GRID_DENSITY_MAX = 5;
+export const GRID_DENSITY_DEFAULT = 3;
+export const GRID_DENSITIES: readonly number[] = [1, 2, 3, 4, 5];
 export type LimitMode = "minmax" | "zscale" | "percentile" | "user";
 export type ColormapName =
   | "gray"
@@ -37,6 +45,9 @@ export interface DisplaySettings {
   power: number;
   colormap: ColormapName;
   invert: boolean;
+  grid: boolean;
+  gridFrame: GridFrame;
+  gridDensity: number;
 }
 
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
@@ -51,6 +62,9 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   power: 2,
   colormap: "gray",
   invert: false,
+  grid: false,
+  gridFrame: "icrs",
+  gridDensity: GRID_DENSITY_DEFAULT,
 };
 
 export interface ScaleLimits {
