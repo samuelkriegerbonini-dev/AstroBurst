@@ -495,6 +495,36 @@ mod tests {
     }
 
     #[test]
+    fn saturated_blob_larger_than_a_tile_stays_bright() {
+        let rows = 512usize;
+        let cols = 512usize;
+        let mut image = Array2::<f32>::zeros((rows, cols));
+        let mut seed = 12345u32;
+        for y in 0..rows {
+            for x in 0..cols {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = ((seed >> 8) as f32 / 16777216.0 - 0.5) * 0.02;
+                let dy = y as f32 - 256.0;
+                let dx = x as f32 - 256.0;
+                let blob = 3.0 * (-(dy * dy + dx * dx) / (2.0 * 90.0 * 90.0)).exp();
+                image[[y, x]] = (0.08 + noise + blob).min(1.0);
+            }
+        }
+        let out = lhe(&image, &LheConfig::default()).unwrap();
+        let mut core_min = f32::INFINITY;
+        let mut core_max = f32::NEG_INFINITY;
+        for y in 200..312 {
+            for x in 200..312 {
+                let v = out.image[[y, x]];
+                core_min = core_min.min(v);
+                core_max = core_max.max(v);
+            }
+        }
+        println!("PROBE core_min={} core_max={} in_core={}", core_min, core_max, image[[256, 256]]);
+        assert!(core_min > 0.3, "saturated core went dark: min {}", core_min);
+    }
+
+    #[test]
     fn flat_image_is_unchanged() {
         let mut image = Array2::from_elem((64, 64), 0.37f32);
         image[[3, 3]] = f32::NAN;

@@ -122,7 +122,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
-  const { renderedPreviewUrl } = useRenderContext();
+  const { renderedPreviewUrl, processedSourcePath } = useRenderContext();
   const { compositePreviewUrl } = useCompositePreview();
   const { initRgb, setCompositePreviewUrl } = useCompositeActions();
   const { starOverlayRef } = useStarOverlayContext();
@@ -271,6 +271,21 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       loadRawPixels();
     }
   }, [compositePreviewUrl, file, gpuAvailable, useGpu, isFileRgbView, loadRgbRawPixels, clearRgbRawPixels, loadRawPixels]);
+
+  const processedSourceFileKeyRef = useRef<string | null>(null);
+  const prevProcessedSourceRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = file ? `${file.id}|${file.path}` : null;
+    const previous = prevProcessedSourceRef.current;
+    prevProcessedSourceRef.current = processedSourcePath;
+    if (processedSourceFileKeyRef.current !== key) {
+      processedSourceFileKeyRef.current = key;
+      return;
+    }
+    if (previous === processedSourcePath) return;
+    if (!file || !gpuAvailable || !useGpu || compositePreviewUrl || file.result?.is_rgb) return;
+    loadRawPixels(true);
+  }, [processedSourcePath, file, gpuAvailable, useGpu, compositePreviewUrl, loadRawPixels]);
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);

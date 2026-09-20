@@ -95,11 +95,14 @@ interface RenderContextValue {
   setRenderedPreviewUrl: (url: string | null) => void;
   activeImagePath: string | null;
   setActiveImagePath: (path: string | null) => void;
+  processedSourcePath: string | null;
+  setProcessedSource: (path: string | null) => void;
 }
 
 interface RenderActionsContextValue {
   setRenderedPreviewUrl: (url: string | null) => void;
   setActiveImagePath: (path: string | null) => void;
+  setProcessedSource: (path: string | null) => void;
 }
 
 interface StarOverlayContextValue {
@@ -240,13 +243,18 @@ interface Props {
 
 const PREVIEW_CACHE_MAX = 50;
 const previewUrlCache = new Map<string, string>();
+const processedSourceCache = new Map<string, string>();
+
+function setCappedCache(cache: Map<string, string>, key: string, value: string) {
+  if (cache.size >= PREVIEW_CACHE_MAX) {
+    const first = cache.keys().next().value;
+    if (first !== undefined) cache.delete(first);
+  }
+  cache.set(key, value);
+}
 
 function setPreviewCache(key: string, value: string) {
-  if (previewUrlCache.size >= PREVIEW_CACHE_MAX) {
-    const first = previewUrlCache.keys().next().value;
-    if (first !== undefined) previewUrlCache.delete(first);
-  }
-  previewUrlCache.set(key, value);
+  setCappedCache(previewUrlCache, key, value);
 }
 
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
@@ -274,6 +282,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [rgbChannels, setRgbChannels] = useState<RgbChannelMap | null>(null);
   const [lastAlignMethod, setLastAlignMethod] = useState<string | null>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
+  const [processedSourcePath, setProcessedSourcePathRaw] = useState<string | null>(null);
+  const processedSourceRef = useRef<string | null>(null);
+  processedSourceRef.current = processedSourcePath;
   const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
@@ -330,6 +341,18 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       if (prevFileIdRef.current !== fileKey) return;
       setRenderedPreviewUrlRaw(url);
       if (url && fileKey && !url.includes("cube_frame_")) setPreviewCache(fileKey, url);
+    },
+    [fileKey],
+  );
+
+  const setProcessedSource = useCallback(
+    (path: string | null) => {
+      if (prevFileIdRef.current !== fileKey) return;
+      processedSourceRef.current = path;
+      setProcessedSourcePathRaw(path);
+      if (!fileKey) return;
+      if (path) setCappedCache(processedSourceCache, fileKey, path);
+      else processedSourceCache.delete(fileKey);
     },
     [fileKey],
   );
@@ -448,7 +471,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [doneFiles, selectedPalette]);
 
   const loadRawPixels = useCallback((force = false) => {
-    const path = filePathRef.current;
+    const path = processedSourceRef.current ?? filePathRef.current;
     if (!path) return;
     if (!force && (rawPixelsRef.current || rawPixelsLoadingRef.current)) return;
     setRawPixelsLoading(true);
@@ -571,6 +594,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     }
 
     setRenderedPreviewUrlRaw(fileKey ? previewUrlCache.get(fileKey) ?? null : null);
+    const restoredSource = fileKey ? processedSourceCache.get(fileKey) ?? null : null;
+    processedSourceRef.current = restoredSource;
+    setProcessedSourcePathRaw(restoredSource);
 
     const seq = ++seqRef.current;
     const hseq = histSeqRef.current;
@@ -628,6 +654,33 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
 
+  const processedHistRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = processedHistRef.current;
+    processedHistRef.current = processedSourcePath;
+    if (previous === processedSourcePath) return;
+    if (excludeDqRef.current) return;
+    const target = processedSourcePath ?? file?.path;
+    if (!target) return;
+    const precomputed = processedSourcePath ? null : file?.result?.histogram;
+    if (precomputed?.bins) {
+      setHistData(precomputed);
+      if (precomputed.auto_stf) setStfParams(precomputed.auto_stf);
+      return;
+    }
+    const hseq = ++histSeqRef.current;
+    computeHistogram(target, excludeDqRef.current)
+      .then((data) => {
+        if (histSeqRef.current !== hseq) return;
+        setHistData(data);
+        if (data.auto_stf) setStfParams(data.auto_stf);
+      })
+      .catch((err) => {
+        if (histSeqRef.current === hseq) console.error("Histogram fetch failed:", err);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processedSourcePath]);
+
   const plane = file?.result?.plane ?? null;
   const dqRef = plane?.dq_ref ?? null;
 
@@ -678,16 +731,17 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (!excludeDq && maskedHistKeyRef.current !== fileKey) return;
     maskedHistKeyRef.current = excludeDq ? fileKey : null;
     const seq = ++histSeqRef.current;
-    computeHistogram(filePath, excludeDq)
+    computeHistogram(processedSourcePath ?? filePath, excludeDq)
       .then((data) => {
         if (histSeqRef.current !== seq) return;
         setHistData(data);
+        if (data.auto_stf) setStfParams(data.auto_stf);
       })
       .catch((err) => {
         if (histSeqRef.current !== seq) return;
         console.error("[AstroBurst] Masked histogram failed:", err);
       });
-  }, [fileKey, filePath, excludeDq]);
+  }, [fileKey, filePath, excludeDq, processedSourcePath]);
 
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),
@@ -718,13 +772,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     () => ({
       renderedPreviewUrl, setRenderedPreviewUrl,
       activeImagePath, setActiveImagePath,
+      processedSourcePath, setProcessedSource,
     }),
-    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath],
+    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath, processedSourcePath, setProcessedSource],
   );
 
   const renderActionsValue = useMemo<RenderActionsContextValue>(
-    () => ({ setRenderedPreviewUrl, setActiveImagePath }),
-    [setRenderedPreviewUrl, setActiveImagePath],
+    () => ({ setRenderedPreviewUrl, setActiveImagePath, setProcessedSource }),
+    [setRenderedPreviewUrl, setActiveImagePath, setProcessedSource],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(

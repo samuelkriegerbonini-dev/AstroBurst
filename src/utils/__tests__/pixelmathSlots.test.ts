@@ -115,3 +115,57 @@ describe("EXAMPLE_EXPRESSIONS", () => {
     ]);
   });
 });
+
+import { autoSlotsFromFiles, bindMissingSlots, missingSlots, referencedSymbols } from "../pixelmathSlots";
+
+describe("automatic slot binding", () => {
+  const files = [{ path: "C:/d/target.fits" }, { path: "C:/d/a.fits" }, { path: "C:/d/b.fits" }, { path: "C:/d/c.fits" }];
+
+  it("binds every loaded file except the target to the next free letters", () => {
+    const slots = autoSlotsFromFiles(files, "C:/d/target.fits", []);
+    expect(slots).toEqual([
+      { name: "A", path: "C:/d/a.fits" },
+      { name: "B", path: "C:/d/b.fits" },
+      { name: "C", path: "C:/d/c.fits" },
+    ]);
+  });
+
+  it("skips paths that are already bound and continues the letter sequence", () => {
+    const slots = autoSlotsFromFiles(files, null, [{ name: "A", path: "C:/d/a.fits" }]);
+    expect(slots.map((s) => s.name)).toEqual(["B", "C", "D"]);
+    expect(slots.map((s) => s.path)).toEqual(["C:/d/target.fits", "C:/d/b.fits", "C:/d/c.fits"]);
+  });
+
+  it("caps the total number of slots", () => {
+    const many = Array.from({ length: MAX_SLOTS + 5 }, (_, i) => ({ path: `C:/d/f${i}.fits` }));
+    expect(autoSlotsFromFiles(many, null, []).length).toBe(MAX_SLOTS);
+  });
+
+  it("lists referenced image symbols without functions, the target or reserved names", () => {
+    expect(referencedSymbols("(A + B + C) / 3")).toEqual(["A", "B", "C"]);
+    expect(referencedSymbols("$T * (A / med(A))")).toEqual(["A"]);
+    expect(referencedSymbols("iif($T != $T, 0, $T)")).toEqual([]);
+    expect(referencedSymbols("rescale($T, min($T), max($T), 0, 1)")).toEqual([]);
+    expect(referencedSymbols("dark_frame - flat")).toEqual(["dark_frame", "flat"]);
+    expect(referencedSymbols("$T * 1e-3 + 2E5 - 1.5e2")).toEqual([]);
+    expect(referencedSymbols("A2 + B_1")).toEqual(["A2", "B_1"]);
+  });
+
+  it("reports only the symbols that have no slot", () => {
+    expect(missingSlots("(A + B + C) / 3", ["A"])).toEqual(["B", "C"]);
+    expect(missingSlots("~$T", [])).toEqual([]);
+  });
+
+  it("binds missing symbols to unbound loaded files and falls back to the target", () => {
+    const added = bindMissingSlots("(A + B + C + D) / 4", files, "C:/d/target.fits", [{ name: "A", path: "C:/d/a.fits" }]);
+    expect(added).toEqual([
+      { name: "B", path: "C:/d/b.fits" },
+      { name: "C", path: "C:/d/c.fits" },
+      { name: "D", path: "C:/d/target.fits" },
+    ]);
+  });
+
+  it("never binds a name that is not a valid slot identifier", () => {
+    expect(bindMissingSlots("$T + pi", files, null, [])).toEqual([]);
+  });
+});

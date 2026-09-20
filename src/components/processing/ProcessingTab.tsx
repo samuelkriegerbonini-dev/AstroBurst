@@ -95,7 +95,7 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 
 function ProcessingTabInner() {
   const { file } = useFileContext();
-  const { setRenderedPreviewUrl } = useRenderActions();
+  const { setRenderedPreviewUrl, setProcessedSource } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
   const { setCompositePreviewUrl } = useCompositeActions();
   const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
@@ -174,11 +174,12 @@ function ProcessingTabInner() {
           denoiseFits: null,
           deconvFits: null,
         }));
+        setProcessedSource(fits);
         const ch = findChannel(file?.path);
         if (ch) syncComposite(fits, ch);
       }
     },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
   );
 
   const handleDenoiseDone = useCallback(
@@ -191,11 +192,12 @@ function ProcessingTabInner() {
           denoiseFits: fits,
           deconvFits: null,
         }));
+        setProcessedSource(fits);
         const ch = findChannel(file?.path);
         if (ch) syncComposite(fits, ch);
       }
     },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
   );
 
   const handleDeconvDone = useCallback(
@@ -207,11 +209,12 @@ function ProcessingTabInner() {
           ...prev,
           deconvFits: fits,
         }));
+        setProcessedSource(fits);
         const ch = findChannel(file?.path);
         if (ch) syncComposite(fits, ch);
       }
     },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
   );
 
   const handlePsfReady = useCallback((kernel: number[][]) => {
@@ -227,11 +230,12 @@ function ProcessingTabInner() {
           ...prev,
           stretchFits: fits,
         }));
+        setProcessedSource(fits);
         const ch = findChannel(file?.path);
         if (ch) syncComposite(fits, ch);
       }
     },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
   );
 
   const handleMaskedStretchDone = useCallback(
@@ -243,23 +247,37 @@ function ProcessingTabInner() {
           ...prev,
           maskedStretchFits: fits,
         }));
+        setProcessedSource(fits);
         const ch = findChannel(file?.path);
         if (ch) syncComposite(fits, ch);
       }
     },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite],
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
   );
 
-  const handleResetChain = useCallback(() => {
+  const handlePixelMathDone = useCallback(
+    (result: { fits_path?: string; previewUrl?: string }) => {
+      if (result?.fits_path) setProcessedSource(result.fits_path);
+    },
+    [setProcessedSource],
+  );
+
+  const clearChain = useCallback(() => {
     setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null });
   }, []);
+
+  const handleResetChain = useCallback(() => {
+    clearChain();
+    setProcessedSource(null);
+    setRenderedPreviewUrl(null);
+  }, [clearChain, setProcessedSource, setRenderedPreviewUrl]);
 
   const chainFileIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (chainFileIdRef.current === (file?.id ?? null)) return;
     chainFileIdRef.current = file?.id ?? null;
-    handleResetChain();
-  }, [file?.id, handleResetChain]);
+    clearChain();
+  }, [file?.id, clearChain]);
 
   const backgroundInput = file;
 
@@ -455,6 +473,7 @@ function ProcessingTabInner() {
               selectedFile={file}
               outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
+              onProcessingDone={handlePixelMathDone}
             />
           </div>
         </div>

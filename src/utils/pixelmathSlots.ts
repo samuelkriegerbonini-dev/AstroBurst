@@ -51,6 +51,72 @@ export function nextSlotName(existing: readonly string[]): string {
   return `${OVERFLOW_PREFIX}${n}`;
 }
 
+export interface LoadedImageRef {
+  path: string;
+}
+
+export interface SlotBinding {
+  name: string;
+  path: string;
+}
+
+export function autoSlotsFromFiles(
+  files: readonly LoadedImageRef[],
+  targetPath: string | null,
+  existing: readonly SlotBinding[],
+): SlotBinding[] {
+  const boundPaths = new Set(existing.map((s) => s.path));
+  const names = existing.map((s) => s.name.trim());
+  const added: SlotBinding[] = [];
+  for (const f of files) {
+    if (!f.path || f.path === targetPath || boundPaths.has(f.path)) continue;
+    if (names.length + added.length >= MAX_SLOTS) break;
+    const name = nextSlotName([...names, ...added.map((s) => s.name)]);
+    added.push({ name, path: f.path });
+    boundPaths.add(f.path);
+  }
+  return added;
+}
+
+const SYMBOL_RE = /(?<![A-Za-z0-9_$.])\$?[A-Za-z_][A-Za-z0-9_]*/g;
+
+export function referencedSymbols(expression: string): string[] {
+  const seen: string[] = [];
+  for (const match of expression.matchAll(SYMBOL_RE)) {
+    const symbol = match[0];
+    const after = expression.slice(match.index + symbol.length).trimStart();
+    if (after.startsWith("(")) continue;
+    if (symbol === TARGET_SYMBOL || symbol.startsWith("$")) continue;
+    if (RESERVED_NAMES.includes(symbol)) continue;
+    if (!seen.includes(symbol)) seen.push(symbol);
+  }
+  return seen;
+}
+
+export function missingSlots(expression: string, boundNames: readonly string[]): string[] {
+  return referencedSymbols(expression).filter((s) => !boundNames.includes(s));
+}
+
+export function bindMissingSlots(
+  expression: string,
+  files: readonly LoadedImageRef[],
+  targetPath: string | null,
+  existing: readonly SlotBinding[],
+): SlotBinding[] {
+  const names = existing.map((s) => s.name.trim());
+  const missing = missingSlots(expression, names);
+  const boundPaths = new Set(existing.map((s) => s.path));
+  const candidates = files.map((f) => f.path).filter((p) => p && p !== targetPath && !boundPaths.has(p));
+  const added: SlotBinding[] = [];
+  for (const name of missing) {
+    if (names.length + added.length >= MAX_SLOTS) break;
+    if (validateSlotName(name, [...names, ...added.map((s) => s.name)]) !== null) continue;
+    const path = candidates.shift() ?? targetPath ?? "";
+    added.push({ name, path });
+  }
+  return added;
+}
+
 export function slotErrors(slots: readonly { name: string }[]): (string | null)[] {
   const names = slots.map((s) => s.name.trim());
   return names.map((name, i) => validateSlotName(name, names.filter((_, j) => j !== i)));

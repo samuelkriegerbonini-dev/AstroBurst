@@ -62,6 +62,8 @@ Preview of the 0.6 line: the viewer maturity phases (0 to 3), the processing-par
 - New `pixel_to_world_cmd` Tauri command backing the cursor RA/Dec readout, replacing a duplicated client-side pixel<->sky implementation (`src/utils/wcstransform.ts`, now removed) with the same wcs-rs-backed engine used everywhere else
 
 ### Fixed
+- The GPU viewer now shows the result of every mono processing step (background, denoise, deconvolution, stretch, masked stretch, LHE, HDRMT, PixelMath): the processed FITS becomes the raw-pixel source of the WebGPU renderer and the histogram and auto-STF are recomputed for it, instead of the GPU path keeping the original pixels while only the CPU path switched to the rendered PNG; Reset in the Processing tab returns both paths to the original image and the processed source is remembered per file like the rendered preview
+- PixelMath binds image slots automatically: the loaded files other than the target become `A`, `B`, `C`, ... when the panel opens, choosing an example such as `(A + B + C) / 3` binds the symbols it references, and an "unknown symbol" error offers a one-click "Bind ... to loaded files" action instead of leaving `$T` as the only symbol
 - **Review follow-ups of Phases 4 and 5**
   - Spacecraft `VELOSYS` is applied with the JWST sign convention (positive = observer receding, so the correction is `-VELOSYS`), stated in the correction notes
   - Saturation for photometry and the catalog zero point comes from `SATURATE`/`SATLEVEL`/`SATURATION`/`DATAMAX`/`MAXLIN` when present, else from the image maximum with a flat-top rule (two aperture pixels at the level), so the brightest star of an unsaturated field is no longer excluded; the source is reported

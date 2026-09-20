@@ -10,7 +10,10 @@ import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
   TARGET_SYMBOL,
+  autoSlotsFromFiles,
+  bindMissingSlots,
   caretLines,
+  missingSlots,
   nextSlotName,
   slotErrors,
 } from "../../utils/pixelmathSlots";
@@ -68,9 +71,19 @@ export default function PixelMathPanel({
   const [error, setError] = useState<string | null>(null);
   const validationSeq = useRef(0);
 
+  const slotsTouchedRef = useRef(false);
+  useEffect(() => {
+    if (slotsTouchedRef.current || doneFiles.length === 0) return;
+    setSlots((prev) => (prev.length > 0 ? prev : autoSlotsFromFiles(doneFiles, targetPath, prev)));
+  }, [doneFiles, targetPath]);
+
   const nameErrors = useMemo(() => slotErrors(slots), [slots]);
   const hasSlotErrors = nameErrors.some((e) => e !== null);
   const slotNamesKey = slots.map((s) => s.name.trim()).join(SLOT_NAME_SEPARATOR);
+  const unboundSymbols = useMemo(
+    () => missingSlots(expression, slots.map((s) => s.name.trim())),
+    [expression, slots],
+  );
 
   useEffect(() => {
     if (!expression.trim() || hasSlotErrors) {
@@ -113,6 +126,7 @@ export default function PixelMathPanel({
   }, [doneFiles, targetPath, slots]);
 
   const addSlot = useCallback(() => {
+    slotsTouchedRef.current = true;
     setSlots((prev) => {
       if (prev.length >= MAX_SLOTS) return prev;
       const defaultPath = doneFiles[0]?.path ?? targetPath ?? "";
@@ -121,16 +135,33 @@ export default function PixelMathPanel({
   }, [doneFiles, targetPath]);
 
   const updateSlot = useCallback((index: number, patch: Partial<PixelMathSlot>) => {
+    slotsTouchedRef.current = true;
     setSlots((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   }, []);
 
   const removeSlot = useCallback((index: number) => {
+    slotsTouchedRef.current = true;
     setSlots((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  const insertExample = useCallback((value: string) => {
-    if (value) setExpression(value);
-  }, []);
+  const bindUnbound = useCallback(
+    (expr: string) => {
+      setSlots((prev) => {
+        const added = bindMissingSlots(expr, doneFiles, targetPath, prev);
+        return added.length ? [...prev, ...added] : prev;
+      });
+    },
+    [doneFiles, targetPath],
+  );
+
+  const insertExample = useCallback(
+    (value: string) => {
+      if (!value) return;
+      setExpression(value);
+      bindUnbound(value);
+    },
+    [bindUnbound],
+  );
 
   const handleRun = useCallback(async () => {
     if (!targetPath) return;
@@ -211,6 +242,16 @@ export default function PixelMathPanel({
             {"\n"}
             {validationError?.message}
           </pre>
+        )}
+        {validationError && unboundSymbols.length > 0 && (
+          <button
+            type="button"
+            className="self-start rounded-md border border-violet-500/40 bg-violet-600/15 px-2 py-1 text-[11px] text-violet-300 hover:bg-violet-600/25"
+            disabled={isRunning}
+            onClick={() => bindUnbound(expression)}
+          >
+            Bind {unboundSymbols.join(", ")} to loaded files
+          </button>
         )}
         {validationError && !caret && (
           <div className="text-[11px] text-red-300">{validationError.message}</div>
