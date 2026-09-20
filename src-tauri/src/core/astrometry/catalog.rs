@@ -84,6 +84,7 @@ pub struct ZeroPointFit {
     pub rms: f64,
     pub n_used: usize,
     pub n_rejected: usize,
+    pub n_without_colour: usize,
     pub band: String,
     pub colour_term_used: bool,
 }
@@ -186,10 +187,7 @@ pub fn parse_gaia_tsv(body: &str) -> Result<Vec<CatalogRow>, String> {
             parallax_mas: cell_f64(&fields, map.parallax),
         });
     }
-    match columns {
-        Some(_) => Ok(rows),
-        None => Err("VizieR response has no column header line".to_string()),
-    }
+    Ok(rows)
 }
 
 pub fn propagate_epoch(rows: &mut [CatalogRow], epoch_year: f64) {
@@ -370,6 +368,7 @@ fn fit_with_colour(points: &[(f64, f64)], band: &str) -> Option<ZeroPointFit> {
         rms,
         n_used: kept.len(),
         n_rejected,
+        n_without_colour: 0,
         band: band.to_string(),
         colour_term_used: true,
     })
@@ -406,6 +405,7 @@ fn fit_median(diffs: &[f64], band: &str) -> Option<ZeroPointFit> {
         rms,
         n_used: kept.len(),
         n_rejected,
+        n_without_colour: 0,
         band: band.to_string(),
         colour_term_used: false,
     })
@@ -429,7 +429,8 @@ pub fn fit_zero_point(
     if use_colour_term {
         let with_colour: Vec<(f64, f64)> = samples.iter().filter_map(|(d, c)| c.map(|c| (*d, c))).collect();
         if with_colour.len() >= MIN_FIT_SAMPLES_WITH_COLOUR {
-            if let Some(fit) = fit_with_colour(&with_colour, band) {
+            if let Some(mut fit) = fit_with_colour(&with_colour, band) {
+                fit.n_without_colour = samples.len() - with_colour.len();
                 return Some(fit);
             }
         }
@@ -622,11 +623,24 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
     }
 
     #[test]
-    fn parse_gaia_tsv_requires_position_columns_and_a_header_line() {
-        assert!(parse_gaia_tsv("").is_err());
-        assert!(parse_gaia_tsv("#only comments\n#here\n").is_err());
+    fn parse_gaia_tsv_requires_position_columns_in_the_header_line() {
         let err = parse_gaia_tsv("RA_ICRS\tGmag\n---\t---\n83.6\t8.5\n").unwrap_err();
         assert!(err.contains("DE_ICRS"), "{err}");
+    }
+
+    #[test]
+    fn parse_gaia_tsv_returns_no_rows_for_a_body_without_a_table() {
+        assert_eq!(parse_gaia_tsv("").unwrap(), Vec::<CatalogRow>::new());
+        assert_eq!(parse_gaia_tsv("   \n\r\n\t\n").unwrap(), Vec::<CatalogRow>::new());
+        let comments_only = "#\n#   VizieR Astronomical Server vizier.cds.unistra.fr\n#INFO status=OK\n#INFO -out.max=5000\n\n#END#\n";
+        assert_eq!(parse_gaia_tsv(comments_only).unwrap(), Vec::<CatalogRow>::new());
+    }
+
+    #[test]
+    fn parse_gaia_tsv_rejects_data_rows_without_a_header_line() {
+        let err = parse_gaia_tsv("#INFO status=OK\n83.633083\t22.014472\t8.512\n").unwrap_err();
+        assert!(err.contains("RA_ICRS"), "{err}");
+        assert!(parse_gaia_tsv("83.6\t22.0\n84.0\t21.9\n").is_err());
     }
 
     #[test]
@@ -754,10 +768,41 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert!((coeff - 0.1).abs() < 0.02, "{fit:?}");
         assert_eq!(fit.n_used, 19);
         assert_eq!(fit.n_rejected, 1);
+        assert_eq!(fit.n_without_colour, 0);
         assert!(fit.colour_term_used);
         assert_eq!(fit.band, "G");
         assert!(fit.rms > 0.0 && fit.rms < 0.01, "{fit:?}");
         assert!((fit.zp_err - fit.rms / 19f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fit_zero_point_counts_matches_dropped_for_a_missing_colour() {
+        let (inst, cat, mut colour) = synthetic_photometry(20);
+        for (i, c) in colour.iter_mut().enumerate() {
+            if !(4..16).contains(&i) {
+                *c = None;
+            }
+        }
+        assert_eq!(colour.iter().filter(|c| c.is_none()).count(), 8);
+
+        let fit = fit_zero_point(&inst, &cat, &colour, true, "G").unwrap();
+        assert!(fit.colour_term_used);
+        assert_eq!(fit.n_without_colour, 8);
+        assert_eq!(fit.n_used, 11, "{fit:?}");
+        assert_eq!(fit.n_rejected, 1, "{fit:?}");
+        assert_eq!(fit.n_used + fit.n_rejected + fit.n_without_colour, 20);
+        assert!((fit.zp - 25.0).abs() < 0.02, "{fit:?}");
+        assert!((fit.colour_coeff.unwrap() - 0.1).abs() < 0.02, "{fit:?}");
+
+        let median = fit_zero_point(&inst, &cat, &colour, false, "G").unwrap();
+        assert!(!median.colour_term_used);
+        assert_eq!(median.n_without_colour, 0, "the median fit uses every match");
+        assert_eq!(median.n_used + median.n_rejected, 20);
+
+        let too_few: Vec<Option<f64>> = colour.iter().enumerate().map(|(i, c)| if i < 2 { *c } else { None }).collect();
+        let fallback = fit_zero_point(&inst, &cat, &too_few, true, "G").unwrap();
+        assert!(!fallback.colour_term_used);
+        assert_eq!(fallback.n_without_colour, 0, "the fallback median fit drops nothing");
     }
 
     #[test]

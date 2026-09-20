@@ -220,7 +220,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
             )}
             {phot.saturated && (
               <div className="text-[10px] text-amber-400/90 bg-amber-900/20 border border-amber-800/30 rounded px-2 py-1.5 col-span-2">
-                Star appears saturated — flux and magnitude are unreliable.
+                Star appears saturated (level from {phot.saturation_source}) — flux and magnitude are unreliable.
               </div>
             )}
             {warnings.length > 0 && (

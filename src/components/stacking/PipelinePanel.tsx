@@ -55,6 +55,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   const [combine, setCombine] = useState<CombineMethod>("mean");
   const [normalize, setNormalize] = useState(true);
   const [align, setAlign] = useState(true);
+  const [darkOptimize, setDarkOptimize] = useState(false);
   const [activePreview, setActivePreview] = useState<string | null>(null);
 
   const [cosmeticEnabled, setCosmeticEnabled] = useState(false);
@@ -147,6 +148,7 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         rejection,
         combine,
         cosmetic: buildCosmetic(),
+        dark_optimize: darkOptimize && darks.length > 0,
       });
       setResult(res);
       setActivePreview(res.rgb_preview ? "RGB" : res.channel_previews[0]?.label ?? null);
@@ -253,6 +255,14 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} onClear={() => setDarks([])} />
         <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} onClear={() => setFlats([])} />
         <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} onClear={() => setBias([])} />
+        {darks.length > 0 && (
+          <>
+            <Toggle label="Optimize dark scale per light (minimise noise)" checked={darkOptimize} accent="sky" onChange={setDarkOptimize} />
+            {darkOptimize && (
+              <p className="text-[10px] text-zinc-500 leading-snug">Each light gets the dark scale that minimises its background noise instead of the exposure ratio.</p>
+            )}
+          </>
+        )}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
@@ -378,6 +388,8 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
               <div key={ch.label}>
                 {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
                 {ch.cosmetic_replaced != null && `, ${ch.cosmetic_replaced.toLocaleString()} px repaired`}
+                {ch.dark_scale_mean != null && `, dark scale ${ch.dark_scale_mean.toFixed(3)}`}
+                {ch.dark_scale_min != null && ch.dark_scale_max != null && ch.dark_scale_max - ch.dark_scale_min > 1e-3 && ` (${ch.dark_scale_min.toFixed(3)}..${ch.dark_scale_max.toFixed(3)})`}
               </div>
             ))}
             {result.stats.darks_combined > 0 && <div>Master dark: {result.stats.darks_combined} frames</div>}

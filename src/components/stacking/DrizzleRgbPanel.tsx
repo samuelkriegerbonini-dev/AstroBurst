@@ -4,7 +4,8 @@ import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from
 import { drizzleRgbStack } from "../../services/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
-import type { DrizzleRgbResult } from "../../shared/types/stacking";
+import type { DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
+import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
 
 type Channel = "r" | "g" | "b";
 
@@ -48,6 +49,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
   const [kernel, setKernel] = useState<"square" | "gaussian" | "lanczos3">("square");
   const [align, setAlign] = useState(true);
   const [alignmentMethod, setAlignmentMethod] = useState<"phase_correlation" | "zncc">("phase_correlation");
+  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
+  const [sigmaLow, setSigmaLow] = useState(3.0);
+  const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [wbMode, setWbMode] = useState<"auto" | "manual" | "none">("auto");
   const [wbR, setWbR] = useState(1.0);
   const [wbG, setWbG] = useState(1.0);
@@ -116,6 +120,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           kernel,
           align,
           alignmentMethod: align ? alignmentMethod : undefined,
+          rejection,
+          sigmaLow: rejectionUsesSigma(rejection) ? sigmaLow : undefined,
+          sigmaHigh: rejectionUsesSigma(rejection) ? sigmaHigh : undefined,
           wbMode,
           wbR: wbMode === "manual" ? wbR : undefined,
           wbG: wbMode === "manual" ? wbG : undefined,
@@ -133,7 +140,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
     } finally {
       setIsRunning(false);
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -240,6 +247,25 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           </div>
         )}
         <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-400">Pixel rejection</label>
+          <select
+            value={rejection}
+            onChange={(e) => setRejection(e.target.value as RejectionMethod)}
+            className="ab-select"
+            disabled={isRunning}
+          >
+            {REJECTION_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        {rejectionUsesSigma(rejection) && (
+          <>
+            <Slider label="Sigma Low" value={sigmaLow} min={1.0} max={6.0} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
+            <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
+          </>
+        )}
+        <div className="flex items-center justify-between">
           <label className="text-xs text-zinc-400">White balance</label>
           <select
             value={wbMode}
@@ -319,6 +345,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             { label: "R frames", value: result.frame_count_r },
             { label: "G frames", value: result.frame_count_g },
             { label: "B frames", value: result.frame_count_b },
+            { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
           ]} />
           {result.fits_path && (
             <div className="text-[10px] text-zinc-500 truncate" title={result.fits_path}>

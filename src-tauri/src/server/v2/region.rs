@@ -174,7 +174,7 @@ pub fn region_values(
     let slice = region_arr
         .as_slice()
         .expect("region_arr is standard-layout after to_owned()");
-    let n_nan = slice.iter().filter(|v| v.is_nan()).count() as u64;
+    let n_nan = slice.iter().filter(|v| !v.is_finite()).count() as u64;
     let finite: Vec<f32> = slice.iter().copied().filter(|v| v.is_finite()).collect();
     Ok(RegionValues { finite, n_nan, region: json!(resolved), shape: None })
 }
@@ -557,14 +557,14 @@ mod tests {
 
         let rv = region_values(&arr, None, None).unwrap();
         assert_eq!(rv.finite.len(), 98);
-        assert_eq!(rv.n_nan, 1);
+        assert_eq!(rv.n_nan, 2);
         assert_eq!(rv.region["width"], 10);
         assert!(rv.shape.is_none());
 
         let px = RegionSpec::Pixel { x: 0, y: 0, width: 2, height: 2, clip: None };
         let rv = region_values(&arr, Some(&px), None).unwrap();
         assert_eq!(rv.finite.len(), 3);
-        assert_eq!(rv.n_nan, 0);
+        assert_eq!(rv.n_nan, 1);
         assert_eq!(rv.region["clipped"], false);
     }
 }

@@ -2,8 +2,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::core::imaging::calibration_pipeline::{
-    lights_with_dq_planes, run_batch_pipeline, BatchPipelineConfig, BatchPipelineResult,
-    BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput, DQ_COSMETIC_WARNING,
+    lights_with_dq_planes, run_batch_pipeline, validate_cosmetic_config, BatchPipelineConfig,
+    BatchPipelineResult, BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput,
+    DQ_COSMETIC_WARNING,
 };
 use crate::core::imaging::cosmetic::CosmeticConfig;
 use crate::core::stacking::calibration::{
@@ -37,6 +38,8 @@ pub struct PipelineRequest {
     pub combine: Option<String>,
     #[serde(default)]
     pub cosmetic: Option<CosmeticConfig>,
+    #[serde(default)]
+    pub dark_optimize: bool,
 }
 
 fn load_batch(paths: &[String]) -> Result<Vec<ndarray::Array2<f32>>, anyhow::Error> {
@@ -165,6 +168,7 @@ fn compose_rgb_from_stacked_masters(
         },
         align: false,
         cosmetic: None,
+        dark_optimize: false,
     };
     run_batch_pipeline(channels, &no_masters, &passthrough)
 }
@@ -210,115 +214,121 @@ where
 pub async fn run_pipeline_cmd(
     request: PipelineRequest,
 ) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
-            .map_err(|e| format!("{:#}", e))?;
-        let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
-            .map_err(|e| format!("{:#}", e))?;
-
-        let master_bias = if request.bias_paths.is_empty() {
-            None
-        } else {
-            Some(create_master_bias(&request.bias_paths).map_err(|e| format!("{:#}", e))?)
-        };
-
-        let master_dark = if request.dark_paths.is_empty() {
-            None
-        } else {
-            Some(create_master_dark(&request.dark_paths, master_bias.as_ref()).map_err(|e| format!("{:#}", e))?)
-        };
-
-        let master_flat = if request.flat_paths.is_empty() {
-            None
-        } else {
-            Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
-        };
-
-        let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {
-            None
-        } else {
-            median_exposure(&request.dark_paths)
-        };
-
-        let masters = CalibrationMasters {
-            dark: master_dark,
-            flat: master_flat,
-            bias: master_bias,
-        };
-
-        let load_channel = |ch: &ChannelFilesInput| -> Result<ChannelInput, String> {
-            let lights = load_batch(&ch.paths).map_err(|e| format!("{:#}", e))?;
-
-            if lights.len() > 1 {
-                let ref_dim = lights[0].dim();
-                for (i, l) in lights.iter().enumerate().skip(1) {
-                    if l.dim() != ref_dim {
-                        return Err(format!(
-                            "Channel '{}': frame {} has shape {:?} but frame 0 has {:?}. All frames must match.",
-                            ch.label, i, l.dim(), ref_dim
-                        ));
-                    }
-                }
-            }
-
-            let dark_scales = compute_dark_scales(&ch.paths, dark_exposure);
-            if dark_scales.iter().any(|s| (*s - 1.0).abs() >= 0.01) {
-                let min_s = dark_scales.iter().cloned().fold(f32::INFINITY, f32::min);
-                let max_s = dark_scales.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                log::info!(
-                    "Channel '{}': scaling master dark by exposure ratio (range {:.3}..{:.3}, dark median {:.1}s)",
-                    ch.label, min_s, max_s, dark_exposure.unwrap_or(0.0)
-                );
-            }
-
-            Ok(ChannelInput {
-                lights,
-                label: ch.label.clone(),
-                dark_scales,
-            })
-        };
-
-        let config = BatchPipelineConfig {
-            stack: BatchStackConfig {
-                sigma_low: request.sigma_low.unwrap_or(2.5),
-                sigma_high: request.sigma_high.unwrap_or(3.0),
-                max_iterations: 5,
-                normalize_before_stack: request.normalize.unwrap_or(true),
-                rejection,
-                combine,
-            },
-            align: request.align.unwrap_or(true),
-            cosmetic: request.cosmetic.clone(),
-        };
-
-        let warnings = pipeline_warnings(&request.channels, config.cosmetic.is_some());
-        let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, &config)?;
-
-        let channel_previews: Vec<serde_json::Value> = result
-            .master_channels
-            .iter()
-            .map(|(label, arr)| {
-                let (b64, w, h) = array2_to_b64_u16(arr);
-                json!({
-                    RES_LABEL: label,
-                    RES_PIXELS_B64: b64,
-                    RES_WIDTH: w,
-                    RES_HEIGHT: h,
-                })
-            })
-            .collect();
-
-        let rgb_preview = result.rgb.as_ref().map(|rgb| rgb_to_b64_u8(rgb));
-
-        Ok(json!({
-            RES_STATS: result.stats,
-            RES_CHANNEL_PREVIEWS: channel_previews,
-            RES_RGB_PREVIEW: rgb_preview,
-            RES_WARNINGS: warnings,
-        }))
-    })
+    tokio::task::spawn_blocking(move || run_pipeline_request(request))
         .await
         .map_err(|e| format!("Task panic: {e}"))?
+}
+
+fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, String> {
+    let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
+        .map_err(|e| format!("{:#}", e))?;
+    let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
+        .map_err(|e| format!("{:#}", e))?;
+    if let Some(cosmetic) = &request.cosmetic {
+        validate_cosmetic_config(cosmetic)?;
+    }
+
+    let master_bias = if request.bias_paths.is_empty() {
+        None
+    } else {
+        Some(create_master_bias(&request.bias_paths).map_err(|e| format!("{:#}", e))?)
+    };
+
+    let master_dark = if request.dark_paths.is_empty() {
+        None
+    } else {
+        Some(create_master_dark(&request.dark_paths, master_bias.as_ref()).map_err(|e| format!("{:#}", e))?)
+    };
+
+    let master_flat = if request.flat_paths.is_empty() {
+        None
+    } else {
+        Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
+    };
+
+    let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {
+        None
+    } else {
+        median_exposure(&request.dark_paths)
+    };
+
+    let masters = CalibrationMasters {
+        dark: master_dark,
+        flat: master_flat,
+        bias: master_bias,
+    };
+
+    let load_channel = |ch: &ChannelFilesInput| -> Result<ChannelInput, String> {
+        let lights = load_batch(&ch.paths).map_err(|e| format!("{:#}", e))?;
+
+        if lights.len() > 1 {
+            let ref_dim = lights[0].dim();
+            for (i, l) in lights.iter().enumerate().skip(1) {
+                if l.dim() != ref_dim {
+                    return Err(format!(
+                        "Channel '{}': frame {} has shape {:?} but frame 0 has {:?}. All frames must match.",
+                        ch.label, i, l.dim(), ref_dim
+                    ));
+                }
+            }
+        }
+
+        let dark_scales = compute_dark_scales(&ch.paths, dark_exposure);
+        if dark_scales.iter().any(|s| (*s - 1.0).abs() >= 0.01) {
+            let min_s = dark_scales.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_s = dark_scales.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            log::info!(
+                "Channel '{}': scaling master dark by exposure ratio (range {:.3}..{:.3}, dark median {:.1}s)",
+                ch.label, min_s, max_s, dark_exposure.unwrap_or(0.0)
+            );
+        }
+
+        Ok(ChannelInput {
+            lights,
+            label: ch.label.clone(),
+            dark_scales,
+        })
+    };
+
+    let config = BatchPipelineConfig {
+        stack: BatchStackConfig {
+            sigma_low: request.sigma_low.unwrap_or(2.5),
+            sigma_high: request.sigma_high.unwrap_or(3.0),
+            max_iterations: 5,
+            normalize_before_stack: request.normalize.unwrap_or(true),
+            rejection,
+            combine,
+        },
+        align: request.align.unwrap_or(true),
+        cosmetic: request.cosmetic.clone(),
+        dark_optimize: request.dark_optimize,
+    };
+
+    let warnings = pipeline_warnings(&request.channels, config.cosmetic.is_some());
+    let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, &config)?;
+
+    let channel_previews: Vec<serde_json::Value> = result
+        .master_channels
+        .iter()
+        .map(|(label, arr)| {
+            let (b64, w, h) = array2_to_b64_u16(arr);
+            json!({
+                RES_LABEL: label,
+                RES_PIXELS_B64: b64,
+                RES_WIDTH: w,
+                RES_HEIGHT: h,
+            })
+        })
+        .collect();
+
+    let rgb_preview = result.rgb.as_ref().map(|rgb| rgb_to_b64_u8(rgb));
+
+    Ok(json!({
+        RES_STATS: result.stats,
+        RES_CHANNEL_PREVIEWS: channel_previews,
+        RES_RGB_PREVIEW: rgb_preview,
+        RES_WARNINGS: warnings,
+    }))
 }
 
 #[cfg(test)]
@@ -364,23 +374,52 @@ mod tests {
             stack: BatchStackConfig::default(),
             align: false,
             cosmetic: None,
+            dark_optimize: false,
         }
     }
 
     #[test]
     fn pipeline_request_accepts_a_partial_cosmetic_object_and_defaults_to_off() {
         let with: PipelineRequest = serde_json::from_str(
-            r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[],"cosmetic":{"use_master_dark":true,"dark_hot_sigma":5}}"#,
+            r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[],"cosmetic":{"use_master_dark":true,"dark_hot_sigma":5},"dark_optimize":true}"#,
         )
         .unwrap();
         let cosmetic = with.cosmetic.expect("cosmetic parsed");
         assert!(cosmetic.use_master_dark);
         assert_eq!(cosmetic.dark_hot_sigma, Some(5.0));
         assert!(cosmetic.defects.is_empty());
+        assert!(with.dark_optimize);
 
         let without: PipelineRequest =
             serde_json::from_str(r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[]}"#).unwrap();
         assert!(without.cosmetic.is_none());
+        assert!(!without.dark_optimize);
+    }
+
+    #[test]
+    fn invalid_cosmetic_config_fails_before_any_master_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_bias = dir.path().join("missing_bias.fits");
+        let request = PipelineRequest {
+            channels: vec![spec("R", 2)],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: vec![missing_bias.to_str().unwrap().to_string()],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: None,
+            align: None,
+            rejection: None,
+            combine: None,
+            cosmetic: Some(CosmeticConfig { amount: 1.5, ..Default::default() }),
+            dark_optimize: false,
+        };
+
+        let err = run_pipeline_request(request).unwrap_err();
+        assert!(err.starts_with("Cosmetic correction"), "{err}");
+        assert!(err.contains("Amount"), "{err}");
+        assert!(!err.contains("missing_bias"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

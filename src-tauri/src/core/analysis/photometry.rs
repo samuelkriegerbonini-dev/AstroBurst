@@ -4,13 +4,20 @@ use serde::Serialize;
 use crate::core::analysis::aperture::{annulus, circular_aperture, weighted_sum, AperturePixel};
 use crate::core::imaging::dq_flags::apply_exclusion;
 use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::header::HduHeader;
 
 const ANNULUS_MEMBERSHIP_WEIGHT: f32 = 0.5;
 pub const SKY_ANNULUS_INNER_FACTOR: f64 = 2.0;
 pub const SKY_ANNULUS_OUTER_FACTOR: f64 = 3.0;
 pub const GROWTH_CURVE_REACH_FACTOR: f64 = 4.0;
 pub const GROWTH_PLATEAU_TOLERANCE: f64 = 0.01;
-const IMAGE_MAX_SATURATION_FRACTION: f64 = 0.95;
+pub const SATURATION_KEYWORDS: [&str; 5] = ["SATURATE", "SATLEVEL", "SATURATION", "DATAMAX", "MAXLIN"];
+pub const IMAGE_MAX_SATURATION_SOURCE: &str = "image maximum";
+pub const DQ_SATURATION_SOURCE: &str = "DQ SATURATED";
+pub const NO_SATURATION_SOURCE: &str = "none";
+const HEADER_SATURATION_FRACTION: f64 = 0.95;
+const FLAT_TOP_TOLERANCE: f64 = 1e-3;
+const FLAT_TOP_MIN_PIXELS: usize = 2;
 
 fn sorted_median(vals: &[f64]) -> f64 {
     let n = vals.len();
@@ -28,7 +35,7 @@ fn sorted_median(vals: &[f64]) -> f64 {
 pub struct PhotometryConfig {
     pub search_radius: usize,
     pub aperture_radius: Option<f64>,
-    pub image_max: Option<f64>,
+    pub saturation: Option<(f64, &'static str)>,
     pub subsamples: u8,
     pub gain: Option<f64>,
 }
@@ -38,11 +45,37 @@ impl Default for PhotometryConfig {
         Self {
             search_radius: 8,
             aperture_radius: None,
-            image_max: None,
+            saturation: None,
             subsamples: 5,
             gain: None,
         }
     }
+}
+
+pub fn saturation_level(header: Option<&HduHeader>, image_max: f64) -> (f64, &'static str) {
+    if let Some(header) = header {
+        for keyword in SATURATION_KEYWORDS {
+            if let Some(level) = header.get_f64(keyword).filter(|v| v.is_finite() && *v > 0.0) {
+                return (level, keyword);
+            }
+        }
+    }
+    (image_max, IMAGE_MAX_SATURATION_SOURCE)
+}
+
+fn flat_top_pixel_count(
+    image: &Array2<f32>,
+    pixels: &[AperturePixel],
+    excluded: Option<&Array2<u8>>,
+    level: f64,
+) -> usize {
+    let floor = level * (1.0 - FLAT_TOP_TOLERANCE);
+    pixels
+        .iter()
+        .filter(|p| !excluded.is_some_and(|m| m[[p.y, p.x]] != 0))
+        .map(|p| image[[p.y, p.x]] as f64)
+        .filter(|v| v.is_finite() && *v >= floor)
+        .count()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +95,7 @@ pub struct StarPhotometry {
     pub bg_sigma: f64,
     pub bg_pixels: u32,
     pub saturated: bool,
+    pub saturation_source: String,
     pub n_masked: u32,
     pub n_saturated: u32,
     pub err_used: bool,
@@ -362,11 +396,15 @@ pub fn measure_star_full(
     let n_saturated = saturated.map_or(0, |map| {
         pixels.iter().filter(|p| map[[p.y, p.x]] != 0).count() as u32
     });
-    let saturated_flag = match saturated {
-        Some(_) => n_saturated > 0,
-        None => config
-            .image_max
-            .map_or(false, |mx| mx > 0.0 && best_v as f64 >= IMAGE_MAX_SATURATION_FRACTION * mx),
+    let level = config.saturation.filter(|(level, _)| level.is_finite() && *level > 0.0);
+    let (saturated_flag, saturation_source) = match (saturated, level) {
+        (Some(_), _) => (n_saturated > 0, DQ_SATURATION_SOURCE),
+        (None, Some((level, source))) if source == IMAGE_MAX_SATURATION_SOURCE => (
+            flat_top_pixel_count(image, &pixels, excluded, level) >= FLAT_TOP_MIN_PIXELS,
+            source,
+        ),
+        (None, Some((level, source))) => (best_v as f64 >= HEADER_SATURATION_FRACTION * level, source),
+        (None, None) => (false, NO_SATURATION_SOURCE),
     };
 
     let plateau = growth_curve_plateau(image, excluded, x, y, r_ap, sky.mean, config.subsamples)
@@ -386,12 +424,13 @@ pub fn measure_star_full(
         snr,
         fwhm,
         aperture_radius: r_ap,
-        aperture_pixels: ap.n_finite,
+        aperture_pixels: ap.weight.round() as u32,
         aperture_area: ap.weight,
         bg_mean: sky.mean,
         bg_sigma: sky.sigma,
         bg_pixels: sky.count,
         saturated: saturated_flag,
+        saturation_source: saturation_source.to_string(),
         n_masked: ap.n_masked,
         n_saturated,
         err_used,
@@ -495,6 +534,7 @@ mod tests {
 
         assert!(result.mag_inst.is_finite());
         assert!(!result.saturated);
+        assert_eq!(result.saturation_source, NO_SATURATION_SOURCE);
         assert!(!result.err_used);
         assert_eq!(result.n_masked, 0);
         assert_eq!(result.n_saturated, 0);
@@ -512,21 +552,98 @@ mod tests {
     }
 
     #[test]
-    fn test_saturation_flag() {
+    fn header_saturation_level_flags_a_peak_near_the_level() {
         let img = gaussian_scene(64, 64, 32.0, 32.0, 900.0, 2.0, 100.0);
         let cfg = PhotometryConfig {
-            image_max: Some(1000.0),
+            saturation: Some((1000.0, "SATURATE")),
             ..PhotometryConfig::default()
         };
         let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
         assert!(result.saturated);
+        assert_eq!(result.saturation_source, "SATURATE");
 
         let cfg_high = PhotometryConfig {
-            image_max: Some(100000.0),
+            saturation: Some((100000.0, "SATURATE")),
             ..PhotometryConfig::default()
         };
         let result2 = measure_star(&img, 32.0, 32.0, &cfg_high).unwrap();
         assert!(!result2.saturated);
+        assert_eq!(result2.saturation_source, "SATURATE");
+
+        let cfg_invalid = PhotometryConfig {
+            saturation: Some((f64::NAN, "SATURATE")),
+            ..PhotometryConfig::default()
+        };
+        let result3 = measure_star(&img, 32.0, 32.0, &cfg_invalid).unwrap();
+        assert!(!result3.saturated);
+        assert_eq!(result3.saturation_source, NO_SATURATION_SOURCE);
+    }
+
+    #[test]
+    fn saturation_level_prefers_header_keywords_over_the_image_maximum() {
+        let mut header = HduHeader::empty();
+        assert_eq!(saturation_level(Some(&header), 70000.0), (70000.0, IMAGE_MAX_SATURATION_SOURCE));
+        assert_eq!(saturation_level(None, 70000.0), (70000.0, IMAGE_MAX_SATURATION_SOURCE));
+
+        header.set("SATURATE", "60000".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (60000.0, "SATURATE"));
+
+        header.set("DATAMAX", "65535".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (60000.0, "SATURATE"));
+
+        header.set("SATURATE", "0".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (65535.0, "DATAMAX"));
+
+        header.set("DATAMAX", "'full'".to_string());
+        header.set("MAXLIN", "58000.5".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (58000.5, "MAXLIN"));
+
+        header.set("SATLEVEL", "-1".to_string());
+        header.set("SATURATION", "59000".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (59000.0, "SATURATION"));
+    }
+
+    #[test]
+    fn brightest_star_of_an_unsaturated_field_is_not_flagged_from_the_image_maximum() {
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 900.0, 2.0, 100.0);
+        let image_max = img.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+        assert_eq!(image_max, 1000.0);
+        let cfg = PhotometryConfig {
+            saturation: Some(saturation_level(None, image_max)),
+            ..PhotometryConfig::default()
+        };
+        let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
+        assert_eq!(result.peak, image_max);
+        assert!(!result.saturated, "a single peak pixel at the image maximum is not a flat top");
+        assert_eq!(result.saturation_source, IMAGE_MAX_SATURATION_SOURCE);
+    }
+
+    #[test]
+    fn clipped_flat_top_star_is_flagged_from_the_image_maximum() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 1100.0, 2.0, 100.0);
+        let clip = 1000.0f32;
+        img.mapv_inplace(|v| v.min(clip));
+        let clipped: Vec<(usize, usize)> = img
+            .indexed_iter()
+            .filter(|(_, v)| **v == clip)
+            .map(|(idx, _)| idx)
+            .collect();
+        assert_eq!(clipped.len(), 5, "centre plus its four neighbours sit at the clip level");
+        let cfg = PhotometryConfig {
+            saturation: Some(saturation_level(None, clip as f64)),
+            ..PhotometryConfig::default()
+        };
+        let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
+        assert!(result.saturated);
+        assert_eq!(result.saturation_source, IMAGE_MAX_SATURATION_SOURCE);
+        assert_eq!(result.n_saturated, 0, "n_saturated counts DQ pixels only");
+
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        for (y, x) in clipped {
+            mask[[y, x]] = 1;
+        }
+        let masked = measure_star_masked(&img, 32.0, 32.0, &cfg, Some(&mask)).unwrap();
+        assert!(!masked.saturated, "excluded pixels do not count toward the flat top");
     }
 
     #[test]
@@ -538,8 +655,23 @@ mod tests {
         };
         let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
         assert!((result.aperture_radius - 10.0).abs() < 1e-9);
-        assert!(result.aperture_pixels > 300);
+        assert_eq!(result.aperture_pixels, result.aperture_area.round() as u32);
         assert!((result.aperture_area - std::f64::consts::PI * 100.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn aperture_pixels_is_the_rounded_effective_area_not_the_touched_pixel_count() {
+        let img = gaussian_scene(64, 64, 32.3, 31.6, 1000.0, 2.0, 50.0);
+        let cfg = PhotometryConfig {
+            aperture_radius: Some(3.0),
+            ..PhotometryConfig::default()
+        };
+        let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
+        let touched = circular_aperture(64, 64, result.x, result.y, 3.0, 5).len() as u32;
+        let area = std::f64::consts::PI * 9.0;
+        assert_eq!(result.aperture_pixels, result.aperture_area.round() as u32);
+        assert!((result.aperture_pixels as f64 - area).abs() <= 1.0, "{} px vs {area}", result.aperture_pixels);
+        assert!(touched > result.aperture_pixels, "{touched} touched pixels vs {} effective", result.aperture_pixels);
     }
 
     #[test]
@@ -743,22 +875,25 @@ mod tests {
     #[test]
     fn dq_saturated_bit_inside_the_aperture_flags_the_star() {
         let img = gaussian_scene(64, 64, 32.0, 32.0, 900.0, 2.0, 100.0);
-        let low_max = PhotometryConfig { image_max: Some(1000.0), ..PhotometryConfig::default() };
+        let low_max = PhotometryConfig { saturation: Some((1000.0, "SATURATE")), ..PhotometryConfig::default() };
 
         let mut sat = Array2::<u8>::zeros((64, 64));
         sat[[32, 33]] = 1;
         let res = measure_star_full(&img, None, None, Some(&sat), 32.0, 32.0, &low_max).unwrap();
         assert!(res.saturated);
         assert_eq!(res.n_saturated, 1);
+        assert_eq!(res.saturation_source, DQ_SATURATION_SOURCE);
 
         let clean = Array2::<u8>::zeros((64, 64));
         let res = measure_star_full(&img, None, None, Some(&clean), 32.0, 32.0, &low_max).unwrap();
-        assert!(!res.saturated, "a DQ plane without the bit overrides the image_max rule");
+        assert!(!res.saturated, "a DQ plane without the bit overrides the header level rule");
         assert_eq!(res.n_saturated, 0);
+        assert_eq!(res.saturation_source, DQ_SATURATION_SOURCE);
 
         let fallback = measure_star_full(&img, None, None, None, 32.0, 32.0, &low_max).unwrap();
         assert!(fallback.saturated);
         assert_eq!(fallback.n_saturated, 0);
+        assert_eq!(fallback.saturation_source, "SATURATE");
 
         let mut far = Array2::<u8>::zeros((64, 64));
         far[[5, 5]] = 1;

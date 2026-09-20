@@ -76,6 +76,8 @@ pub struct PipelineParams {
     pub combine: Option<String>,
     #[serde(default)]
     pub cosmetic: Option<CosmeticConfig>,
+    #[serde(default)]
+    pub dark_optimize: bool,
 }
 
 fn cosmetic_warnings(light_paths: Vec<String>) -> Vec<String> {
@@ -166,6 +168,7 @@ pub async fn run(
         },
         align: params.align.unwrap_or(true),
         cosmetic: params.cosmetic,
+        dark_optimize: params.dark_optimize,
     };
 
     let warnings = if config.cosmetic.is_some() {

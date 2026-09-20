@@ -65,14 +65,17 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PanelResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const requestSeqRef = useRef(0);
 
   const run = useCallback(async () => {
     if (!filePath && !isShowingComposite) return;
+    const seq = ++requestSeqRef.current;
     setLoading(true);
     setError(null);
     try {
       if (isShowingComposite) {
         const res = await computeStatisticsComposite(noise);
+        if (requestSeqRef.current !== seq) return;
         setResult({
           channels: [
             { label: "R", body: res.r },
@@ -88,6 +91,7 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
       } else if (filePath) {
         const region = useRegion ? selectedShape : null;
         const res = await computeStatistics(filePath, { excludeDq, region, noise });
+        if (requestSeqRef.current !== seq) return;
         setResult({
           channels: [{ label: "K", body: res }],
           unit: res.unit,
@@ -98,9 +102,9 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
         });
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (requestSeqRef.current === seq) setLoading(false);
     }
   }, [filePath, isShowingComposite, noise, useRegion, selectedShape, excludeDq]);
 
@@ -108,8 +112,10 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
   runRef.current = run;
 
   useEffect(() => {
+    requestSeqRef.current++;
     setResult(null);
     setError(null);
+    setLoading(false);
     if (filePath || isShowingComposite) void runRef.current();
   }, [filePath, isShowingComposite]);
 
@@ -136,6 +142,14 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
           })
         : [],
     [result, unit],
+  );
+
+  const noiseNotes = useMemo<string[]>(
+    () =>
+      result
+        ? result.channels.flatMap((c) => (c.body.noise_note ? [`${c.label}: ${c.body.noise_note}`] : []))
+        : [],
+    [result],
   );
 
   const handleCopy = useCallback(() => {
@@ -276,6 +290,14 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
                 </tbody>
               </table>
             </div>
+
+            {noiseNotes.length > 0 && (
+              <div className="text-[9px] text-amber-300/80 font-mono space-y-0.5">
+                {noiseNotes.map((note) => (
+                  <div key={note}>{note}</div>
+                ))}
+              </div>
+            )}
           </>
         )}
 

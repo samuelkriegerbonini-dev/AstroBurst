@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.5.8"
+version = "0.6.0-preview"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "AGPL-3.0-or-later"

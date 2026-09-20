@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-preview] - 2026-09-20
+
+Preview of the 0.6 line: the viewer maturity phases (0 to 3), the processing-parity round (Phase 4) and the science round (Phase 5) below, plus the fixes to their review findings. The Windows bundle reports 0.6.0 because MSI versions cannot carry a pre-release identifier.
+
 ### Added
 - **Phase 0+1 (viewer maturity)**
   - Display controls: scale modes (`mtf`, `linear`, `log`, `sqrt`, `asinh`, `power`), limit modes (`minmax`, `zscale`, `percentile`, `user`), 9 colormaps (`gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis`, `heat`, `cool`, `rainbow`) plus invert; the GPU path samples a 256x1 LUT texture and the worker fallback reproduces the same bytes; stretch, limits and the byte rule live once in `core/imaging/scale.rs`, shared by the desktop commands (`compute_scale_limits_cmd`, `get_colormap_lut_cmd`) and the server
@@ -58,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `pixel_to_world_cmd` Tauri command backing the cursor RA/Dec readout, replacing a duplicated client-side pixel<->sky implementation (`src/utils/wcstransform.ts`, now removed) with the same wcs-rs-backed engine used everywhere else
 
 ### Fixed
+- **Review follow-ups of Phases 4 and 5**
+  - Spacecraft `VELOSYS` is applied with the JWST sign convention (positive = observer receding, so the correction is `-VELOSYS`), stated in the correction notes
+  - Saturation for photometry and the catalog zero point comes from `SATURATE`/`SATLEVEL`/`SATURATION`/`DATAMAX`/`MAXLIN` when present, else from the image maximum with a flat-top rule (two aperture pixels at the level), so the brightest star of an unsaturated field is no longer excluded; the source is reported
+  - `aperture_pixels` is the effective pixel count (rounded sum of sub-pixel weights, close to pi r^2) instead of every partially covered pixel
+  - The Gaia zero-point fit reports `n_without_colour`; an empty VizieR body is an empty result instead of an error; CSV numbers are written with the same formatting on disk and in the clipboard copy; the catalog panel's numeric inputs can be cleared and retyped
+  - Drizzle (mono, RGB and the server route) applies pixel rejection before scattering (`rejection` with the shared kernel, `sigma_low`/`sigma_high`), instead of accepting and ignoring the sigma parameters
+  - Calibration pipeline: optional dark-frame optimization (`dark_optimize`) finds the dark scale in [0, 3] that minimises the robust background noise (golden-section search on 1.4826 * MAD) and reports `dark_scale_min/max/mean`; an invalid cosmetic configuration fails before any master frame is built; the noise-weight hint in the Stack tab is cleared when the selection changes
+  - Cosmetic auto-detect groups outlier candidates into 8-connected clusters (same-colour lattice for CFA) and flags clusters of up to 3 pixels, so adjacent hot pairs are repaired while star cores are left alone; a master dark or image whose robust scale collapses to zero falls back to the mean absolute deviation instead of flagging every pixel above the median
+  - Noise evaluation on a region with fewer than 64 finite pixels returns `null` with a `noise_note` (panel, command and server) instead of a sigma of 0; the server `stats` rectangle path counts every non-finite pixel like the shape path; the Statistics panel ignores stale responses
 - Regions were invisible in the GPU viewer: the overlay measured its host container in a layout effect that runs before React attaches the parent ref, so the canvas backing store stayed 1x1 while still consuming pointer events (toolbar live, nothing drawn, nothing selectable). The host is now resolved from the canvas itself, so the layer is sized and observed on the first commit
 - Regions were misplaced in the tile viewer: the rendered preview size was never reset when the displayed image changed, so a region could be mapped with the previous file's raster width against the new file's FITS dimensions, and the in-progress draft was global instead of per file, painting one image's shape over another
 - Drawing a region left the drawing tool active, so clicking the new selection handles started another shape instead of selecting; left-drag panning is no longer swallowed when the gesture does not hit a region

@@ -16,7 +16,7 @@ use crate::types::constants::{
 };
 use crate::types::image::AutoStfConfig;
 use crate::core::analysis::fft::compute_power_spectrum;
-use crate::core::analysis::photometry::{measure_star_full, PhotometryConfig, StarPhotometry};
+use crate::core::analysis::photometry::{measure_star_full, saturation_level, PhotometryConfig, StarPhotometry};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
 use crate::core::astrometry::spcc::query_gaia_vizier;
 use crate::core::astrometry::wcs::WcsTransform;
@@ -335,7 +335,7 @@ pub(crate) fn photometry_for_path(
 
     let config = PhotometryConfig {
         aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
-        image_max: Some(entry.stats().max),
+        saturation: Some(saturation_level(header, entry.stats().max)),
         gain: gain.filter(|g| g.is_finite() && *g > 0.0),
         ..PhotometryConfig::default()
     };
@@ -584,6 +584,8 @@ mod tests {
         assert!(phot["flux_jy"].is_null() && phot["mag_ab"].is_null());
         assert_eq!(phot["err_used"], false);
         assert_eq!(phot["n_saturated"], 0);
+        assert_eq!(phot["saturated"], false, "a single peak at the image maximum is not saturated");
+        assert_eq!(phot["saturation_source"], "image maximum");
         let warnings = out[RES_WARNINGS].as_array().unwrap();
         assert!(
             warnings.iter().any(|w| w.as_str().unwrap().contains("no photometric calibration")),
@@ -592,6 +594,31 @@ mod tests {
         let with_gain = phot["flux_err"].as_f64().unwrap();
         let without = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, false, false, None).unwrap();
         assert!(with_gain > without[RES_PHOTOMETRY]["flux_err"].as_f64().unwrap());
+    }
+
+    #[test]
+    fn photometry_for_path_reads_the_saturation_level_from_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = 64;
+        let mut arr = ndarray::Array2::<f32>::zeros((size, size));
+        for (i, v) in gaussian_pixels(size, 1000.0, 2.0, 100.0).into_iter().enumerate() {
+            arr[[i / size, i % size]] = v;
+        }
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("SATURATE", "1000".to_string());
+        let path = dir.path().join("saturate.fits");
+        crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
+        let out = photometry_for_path(path.to_str().unwrap(), 32.0, 32.0, None, false, false, None).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        assert_eq!(phot["peak"], 1100.0);
+        assert_eq!(phot["saturated"], true);
+        assert_eq!(phot["saturation_source"], "SATURATE");
+        assert_eq!(phot["n_saturated"], 0);
+
+        let key = jwst_star_mef(&dir.path().join("dq.fits"), vec![("SATURATE", "1000".to_string())]);
+        let with_dq = photometry_for_path(&key, 32.0, 32.0, None, false, false, None).unwrap();
+        assert_eq!(with_dq[RES_PHOTOMETRY]["saturation_source"], "DQ SATURATED");
+        assert_eq!(with_dq[RES_PHOTOMETRY]["n_saturated"], 1);
     }
 
     #[test]

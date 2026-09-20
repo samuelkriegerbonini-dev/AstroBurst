@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::region::RegionShape;
 use astroburst_lib::core::imaging::statistics::{
-    evaluate_noise, evaluate_noise_in_region, statistics_from_finite, NoiseEvaluation,
+    evaluate_noise, evaluate_noise_in_region, evaluate_noise_window, statistics_from_finite,
+    RegionNoise,
 };
 use astroburst_lib::core::imaging::stats::{finite_slice_stats, percentile};
 use astroburst_lib::math::sigma_clipped_stats;
@@ -63,15 +64,25 @@ fn noise_for_request(
     arr: &Array2<f32>,
     shape: Option<&RegionShape>,
     region: &Value,
-) -> Result<NoiseEvaluation> {
+    explicit_region: bool,
+) -> Result<RegionNoise> {
     if let Some(shape) = shape {
         return evaluate_noise_in_region(arr, shape, None)
             .map_err(|e| AppError::BadRequest(format!("noise evaluation: {e:#}")));
     }
+    if !explicit_region {
+        return Ok(RegionNoise::Evaluated(evaluate_noise(arr)));
+    }
     Ok(match pixel_window(arr, region) {
-        Some(window) => evaluate_noise(&window),
-        None => evaluate_noise(arr),
+        Some(window) => evaluate_noise_window(&window),
+        None => RegionNoise::Evaluated(evaluate_noise(arr)),
     })
+}
+
+fn rect_pixel_count(region: &Value) -> Option<u64> {
+    let width = region.get("width")?.as_u64()?;
+    let height = region.get("height")?.as_u64()?;
+    Some(width * height)
 }
 
 async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
@@ -102,7 +113,12 @@ pub async fn stats(
     let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
     let mut finite = values.finite;
-    let n_nan = values.n_nan;
+    let n_nan = match values.shape {
+        Some(_) => values.n_nan,
+        None => rect_pixel_count(&values.region)
+            .map(|total| total.saturating_sub(finite.len() as u64))
+            .unwrap_or(values.n_nan),
+    };
     let exact = statistics_from_finite(finite.clone(), finite.len() as u64 + n_nan, n_nan, 0);
     let base = finite_slice_stats(&mut finite);
 
@@ -125,9 +141,11 @@ pub async fn stats(
     });
 
     if params.noise {
-        let noise = noise_for_request(arr, values.shape.as_ref(), &body["region"])?;
-        body["noise"] = serde_json::to_value(&noise)
+        let explicit_region = params.region.is_some();
+        let noise = noise_for_request(arr, values.shape.as_ref(), &body["region"], explicit_region)?;
+        body["noise"] = serde_json::to_value(noise.evaluation())
             .map_err(|e| AppError::Internal(anyhow::anyhow!("serialising noise evaluation: {e}")))?;
+        body["noise_note"] = json!(noise.note());
     }
 
     if let Some(shape) = &values.shape {

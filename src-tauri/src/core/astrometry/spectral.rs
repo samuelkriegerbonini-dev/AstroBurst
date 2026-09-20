@@ -883,19 +883,28 @@ pub fn radial_velocity_correction(header: &HduHeader, ra_deg: f64, dec_deg: f64)
     let telescop = card_string_upper(header, "TELESCOP").unwrap_or_default();
     if is_spacecraft(&telescop) {
         return match header.get_f64("VELOSYS").filter(|v| v.is_finite()) {
-            Some(velosys_m_s) => Ok(RadialVelocityCorrection {
-                barycentric_kms: velosys_m_s / 1000.0,
-                heliocentric_kms: velosys_m_s / 1000.0,
-                jd_mid: jd_mid_or_nan,
-                method: "header VELOSYS",
-                accuracy_kms: 0.0,
-                notes: vec![format!(
-                    "TELESCOP {}: VELOSYS {} m/s taken from the header as the correction toward {}; sign convention assumed: positive when the observer approaches the target (verify against the pipeline that wrote VELOSYS before using it quantitatively)",
-                    telescop,
-                    velosys_m_s,
-                    if frame.is_empty() { "the pipeline frame" } else { frame.as_str() }
-                )],
-            }),
+            Some(velosys_m_s) => {
+                let correction_kms = -velosys_m_s / 1000.0;
+                let frame_note = if frame.is_empty() {
+                    format!("TELESCOP {}: no spectral frame keyword in the header", telescop)
+                } else {
+                    format!("TELESCOP {}: spectral axis in {} ({})", telescop, frame, frame_source)
+                };
+                Ok(RadialVelocityCorrection {
+                    barycentric_kms: correction_kms,
+                    heliocentric_kms: correction_kms,
+                    jd_mid: jd_mid_or_nan,
+                    method: "header VELOSYS",
+                    accuracy_kms: 0.0,
+                    notes: vec![
+                        format!(
+                            "VELOSYS {} m/s from the header, JWST convention (positive = observer receding), applied as {} km/s",
+                            velosys_m_s, correction_kms
+                        ),
+                        frame_note,
+                    ],
+                })
+            }
             None => Err(format!(
                 "TELESCOP {} is a spacecraft: the barycentric correction needs the spacecraft ephemeris and the header carries no VELOSYS",
                 telescop
@@ -1423,10 +1432,19 @@ mod tests {
         let h = axis_header(&[("TELESCOP", "JWST"), ("VELOSYS", "-12345.0"), ("SPECSYS", "TOPOCENT"), ("MJD-AVG", "61120.5")]);
         let c = radial_velocity_correction(&h, 180.0, 0.0).unwrap();
         assert_eq!(c.method, "header VELOSYS");
-        assert!((c.barycentric_kms + 12.345).abs() < 1e-12);
+        assert!((c.barycentric_kms - 12.345).abs() < 1e-12, "VELOSYS -12345 m/s (observer approaching) is a +12.345 km/s correction: {}", c.barycentric_kms);
         assert_eq!(c.heliocentric_kms, c.barycentric_kms);
         assert_eq!(c.jd_mid, jd_from_mjd(61120.5));
         assert!(c.notes.iter().any(|n| n.contains("TOPOCENT")));
+        assert_eq!(
+            c.notes[0],
+            "VELOSYS -12345 m/s from the header, JWST convention (positive = observer receding), applied as 12.345 km/s"
+        );
+
+        let receding = axis_header(&[("TELESCOP", "JWST"), ("VELOSYS", "20000"), ("SPECSYS", "TOPOCENT")]);
+        let c = radial_velocity_correction(&receding, 180.0, 0.0).unwrap();
+        assert!((c.barycentric_kms + 20.0).abs() < 1e-12, "{}", c.barycentric_kms);
+        assert!(c.notes[0].ends_with("applied as -20 km/s"), "{}", c.notes[0]);
     }
 
     #[test]

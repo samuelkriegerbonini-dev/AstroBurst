@@ -99,6 +99,7 @@ export interface StarPhotometry {
   bg_sigma: number;
   bg_pixels: number;
   saturated: boolean;
+  saturation_source: string;
   n_masked: number;
   n_saturated: number;
   err_used: boolean;

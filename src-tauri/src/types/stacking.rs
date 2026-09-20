@@ -279,6 +279,7 @@ pub struct DrizzleConfig {
     pub sigma_iterations: usize,
     pub align: bool,
     pub alignment_method: AlignmentMethod,
+    pub rejection: RejectionMethod,
 }
 
 impl Default for DrizzleConfig {
@@ -292,6 +293,20 @@ impl Default for DrizzleConfig {
             sigma_iterations: 5,
             align: true,
             alignment_method: AlignmentMethod::default(),
+            rejection: RejectionMethod::SigmaClip,
+        }
+    }
+}
+
+impl DrizzleConfig {
+    pub fn rejection_params(&self) -> RejectionParams {
+        RejectionParams {
+            rejection: self.rejection,
+            combine: CombineMethod::Mean,
+            sigma_low: self.sigma_low,
+            sigma_high: self.sigma_high,
+            max_iterations: self.sigma_iterations.max(1),
+            ..RejectionParams::default()
         }
     }
 }

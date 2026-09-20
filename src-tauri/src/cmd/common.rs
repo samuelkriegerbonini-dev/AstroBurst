@@ -472,15 +472,6 @@ mod tests {
         assert!(first.dq.is_some());
         assert!(first.err.is_some());
         assert!(GLOBAL_IMAGE_CACHE.contains(&format!("{}#hdu=3", p)));
-
-        std::fs::remove_file(&p).unwrap();
-        assert!(!std::path::Path::new(&p).exists());
-
-        let second = load_companions(&p).unwrap();
-        let (dq, table) = second.dq.expect("dq companion served from the cache");
-        assert_eq!(table, DqTable::Jwst);
-        assert_eq!(dq.int_plane().unwrap().bits[[1, 1]], 3);
-        assert_eq!(second.err.expect("err companion served from the cache").arr()[[0, 1]], 0.5);
         assert!(dq_exclusion(&p).unwrap().is_some());
 
         let entry = load_cached(&p).unwrap();
@@ -489,7 +480,24 @@ mod tests {
         assert_eq!(j[RES_INDEX], 1);
         let err_plane = load_companions(&format!("{}#hdu=2", p)).unwrap();
         assert!(err_plane.dq.is_some());
-        assert!(load_companions(&format!("{}#hdu=4", p)).is_err());
+        let lonely = load_companions(&format!("{}#hdu=4", p)).unwrap();
+        assert!(lonely.err.is_none());
+        assert!(lonely.dq.is_none());
+
+        let private_cache = crate::infra::cache::ImageCache::new(8, 64 * 1024 * 1024);
+        let active = private_cache.get_or_load_plane(&p, || plane_load(&image_ref(&p))).unwrap();
+        let primed = load_companions_into(&private_cache, &active, plane_load);
+        assert!(primed.dq.is_some());
+        assert!(private_cache.contains(&format!("{}#hdu=3", p)));
+
+        std::fs::remove_file(&p).unwrap();
+        assert!(!std::path::Path::new(&p).exists());
+
+        let second = load_companions_into(&private_cache, &active, plane_load);
+        let (dq, table) = second.dq.expect("dq companion served from the cache");
+        assert_eq!(table, DqTable::Jwst);
+        assert_eq!(dq.int_plane().unwrap().bits[[1, 1]], 3);
+        assert_eq!(second.err.expect("err companion served from the cache").arr()[[0, 1]], 0.5);
     }
 
     #[test]

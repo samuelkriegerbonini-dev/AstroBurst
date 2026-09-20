@@ -32,6 +32,7 @@ pub async fn drizzle_rgb_cmd(
     kernel: Option<String>,
     sigma_low: Option<f32>,
     sigma_high: Option<f32>,
+    rejection: Option<String>,
     align: Option<bool>,
     alignment_method: Option<String>,
     wb_mode: Option<String>,
@@ -55,6 +56,7 @@ pub async fn drizzle_rgb_cmd(
         resolve_output_dir(&output_dir)?;
 
         let k = helpers::parse_drizzle_kernel(kernel.as_deref());
+        let rejection_method = helpers::parse_rejection_method(rejection.as_deref())?;
 
         let am = match alignment_method.as_deref() {
             Some("zncc") => AlignmentMethod::Zncc,
@@ -70,6 +72,7 @@ pub async fn drizzle_rgb_cmd(
             sigma_iterations: DEFAULT_DRIZZLE_SIGMA_ITERS,
             align: align.unwrap_or(true),
             alignment_method: am,
+            rejection: rejection_method,
         };
 
         let wb = helpers::parse_wb(wb_mode.as_deref(), wb_r, wb_g, wb_b);

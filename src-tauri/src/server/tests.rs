@@ -2566,3 +2566,180 @@ async fn v2_wcs_grid_handler_returns_lines_labels_and_steps() {
     let err = call(GridParams { image: Some("missing".into()), frame: None, density: None }).await.err().unwrap();
     assert!(matches!(err, AppError::NotFound(_)), "{err:?}");
 }
+
+#[tokio::test]
+async fn drizzle_rejects_a_cosmic_ray_and_validates_the_rejection_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for i in 0..5 {
+        let p = dir.path().join(format!("drz{i}.fits"));
+        let pixels: Vec<f32> = (0..64)
+            .map(|k| if i == 2 && k == 10 { 60000.0 } else { 100.0 + (k % 4) as f32 })
+            .collect();
+        v2_fixtures::write_pixels_fits(&p, 8, 8, &pixels);
+        paths.push(p.to_str().unwrap().to_string());
+    }
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-drz-rej");
+
+    let body = serde_json::json!({
+        "paths": paths,
+        "align": false,
+        "scale": 1.0,
+        "pixfrac": 1.0,
+        "rejection": "sigma_clip",
+        "result_slot": "drz"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-drz-rej/stacking/drizzle", &body).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let json = body_json(resp).await;
+    let jid = json["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-drz-rej", &jid).await, "done");
+
+    let session = state.sessions.get("s-drz-rej").unwrap();
+    let entry = session.cache.get("drz").expect("drizzled slot");
+    assert_eq!(entry.arr().dim(), (8, 8));
+    assert!((entry.arr()[[1, 2]] - 102.0).abs() < 1e-2, "cosmic ray leaked: {}", entry.arr()[[1, 2]]);
+    drop(session);
+
+    let leaking = serde_json::json!({
+        "paths": paths,
+        "align": false,
+        "scale": 1.0,
+        "pixfrac": 1.0,
+        "rejection": "none",
+        "result_slot": "drz_none"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-drz-rej/stacking/drizzle", &leaking).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let jid = body_json(resp).await["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-drz-rej", &jid).await, "done");
+    let session = state.sessions.get("s-drz-rej").unwrap();
+    let entry = session.cache.get("drz_none").expect("drizzled slot without rejection");
+    assert!(entry.arr()[[1, 2]] > 1000.0, "rejection off still clipped: {}", entry.arr()[[1, 2]]);
+    drop(session);
+
+    let bad = serde_json::json!({ "paths": paths, "rejection": "bogus" }).to_string();
+    let resp = post_json(build_router(state), "/sessions/s-drz-rej/stacking/drizzle", &bad).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn pipeline_run_with_dark_optimize_recovers_the_scaled_dark() {
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = |k: usize| ((k * 37) % 101) as f32;
+    let mut bias_paths = Vec::new();
+    let mut dark_paths = Vec::new();
+    let mut light_paths = Vec::new();
+    for i in 0..3 {
+        let b = dir.path().join(format!("bias{i}.fits"));
+        v2_fixtures::write_pixels_fits(&b, 8, 8, &vec![100.0f32; 64]);
+        bias_paths.push(b.to_str().unwrap().to_string());
+
+        let d = dir.path().join(format!("dark{i}.fits"));
+        let dark: Vec<f32> = (0..64).map(|k| 100.0 + pattern(k)).collect();
+        v2_fixtures::write_pixels_fits(&d, 8, 8, &dark);
+        dark_paths.push(d.to_str().unwrap().to_string());
+
+        let l = dir.path().join(format!("light{i}.fits"));
+        let light: Vec<f32> = (0..64).map(|k| 100.0 + 0.7 * pattern(k) + 200.0).collect();
+        v2_fixtures::write_pixels_fits(&l, 8, 8, &light);
+        light_paths.push(l.to_str().unwrap().to_string());
+    }
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-pipe-dopt");
+
+    let run = |prefix: &str, optimize: bool| {
+        serde_json::json!({
+            "channels": [{ "label": "L", "paths": light_paths }],
+            "bias_paths": bias_paths,
+            "dark_paths": dark_paths,
+            "align": false,
+            "normalize": false,
+            "rejection": "none",
+            "result_prefix": prefix,
+            "dark_optimize": optimize
+        })
+        .to_string()
+    };
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-dopt/pipeline/run", &run("opt_", true)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let jid = body_json(resp).await["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-pipe-dopt", &jid).await, "done");
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-pipe-dopt/pipeline/run", &run("unit_", false)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let jid = body_json(resp).await["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-pipe-dopt", &jid).await, "done");
+
+    let session = state.sessions.get("s-pipe-dopt").unwrap();
+    let optimized = session.cache.get("opt_L").expect("optimized slot");
+    for (pos, &v) in optimized.arr().indexed_iter() {
+        assert!((v - 200.0).abs() < 0.5, "pixel {:?} = {} after dark optimization", pos, v);
+    }
+    let unit = session.cache.get("unit_L").expect("unit-scale slot");
+    let k = 1usize;
+    assert!((unit.arr()[[0, k]] - (200.0 - 0.3 * pattern(k))).abs() < 0.5, "unit scale pixel {}", unit.arr()[[0, k]]);
+}
+
+#[tokio::test]
+async fn v2_stats_counts_inf_pixels_as_nan_on_both_region_paths() {
+    let mut arr = ndarray::Array2::from_elem((8, 8), 1.0f32);
+    arr[[2, 2]] = f32::NAN;
+    arr[[5, 5]] = f32::INFINITY;
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-stats-inf", "img_0", arr);
+
+    let requests = [
+        r#"{}"#,
+        r#"{"region":{"type":"pixel","x":0,"y":0,"width":8,"height":8}}"#,
+        r#"{"region":{"type":"shape","shape":"box","x":3.5,"y":3.5,"width":8,"height":8,"angle":0,"clip":true}}"#,
+    ];
+    for body in requests {
+        let resp = post_json(build_router(state.clone()), "/v2/sessions/s-stats-inf/stats", body).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{body}");
+        let json = body_json(resp).await;
+        assert_eq!(json["valid_count"], 62, "{body}");
+        assert_eq!(json["n_nan"], 2, "{body}");
+        assert_eq!(json["nan_count"], 2, "{body}");
+        assert!((json["count_fraction"].as_f64().unwrap() - 62.0 / 64.0).abs() < 1e-12, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn v2_stats_reports_a_note_instead_of_zero_sigma_for_a_tiny_noise_region() {
+    let (state, _dir) = seed_stats_session("s-stats-tiny-noise").await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-stats-tiny-noise/stats",
+        r#"{"noise": true, "region": {"type":"shape","shape":"circle","x":4.5,"y":4.5,"r":2}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["noise"].is_null(), "{}", json["noise"]);
+    assert_eq!(json["noise_note"], "region too small for noise evaluation (11 finite pixels, 64 needed)");
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-stats-tiny-noise/stats",
+        r#"{"noise": true, "region": {"type":"pixel","x":2,"y":2,"width":4,"height":4}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["noise"].is_null(), "{}", json["noise"]);
+    assert_eq!(json["noise_note"], "region too small for noise evaluation (15 finite pixels, 64 needed)");
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-stats-tiny-noise/stats", r#"{"noise": true}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["noise"]["method"], "k-sigma-mrs");
+    assert!(json["noise_note"].is_null());
+}

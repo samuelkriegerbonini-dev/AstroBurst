@@ -71,6 +71,7 @@ export interface PipelineRequest {
   rejection?: RejectionMethod;
   combine?: CombineMethod;
   cosmetic?: CosmeticConfig | null;
+  dark_optimize?: boolean;
 }
 
 export interface PipelineChannelStats {
@@ -80,6 +81,9 @@ export interface PipelineChannelStats {
   mean: number;
   stddev: number;
   cosmetic_replaced?: number | null;
+  dark_scale_min?: number | null;
+  dark_scale_max?: number | null;
+  dark_scale_mean?: number | null;
 }
 
 export interface PipelineStats {
@@ -139,6 +143,7 @@ export interface DrizzleRgbOptions {
   alignmentMethod?: "phase_correlation" | "zncc";
   sigmaLow?: number;
   sigmaHigh?: number;
+  rejection?: RejectionMethod;
   wbMode?: "auto" | "manual" | "none";
   wbR?: number;
   wbG?: number;

@@ -9,6 +9,90 @@ pub use crate::types::stacking::{AlignmentMethod, DrizzleConfig, DrizzleKernel, 
 use crate::core::alignment::affine;
 use crate::core::alignment::phase_correlation;
 use crate::core::imaging::boundary::clamp_index;
+use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::types::stacking::{RejectionMethod, RejectionParams};
+
+struct KeepMask {
+    bits: Vec<u8>,
+    bytes_per_pixel: usize,
+    in_rows: usize,
+    in_cols: usize,
+    shifts: Vec<(i64, i64)>,
+    rejected: u64,
+}
+
+impl KeepMask {
+    fn build(
+        frames: &[Cow<Array2<f32>>],
+        offsets: &[(f64, f64)],
+        in_rows: usize,
+        in_cols: usize,
+        params: &RejectionParams,
+    ) -> Self {
+        let frame_count = frames.len();
+        let bytes_per_pixel = frame_count.div_ceil(8).max(1);
+        let shifts: Vec<(i64, i64)> = offsets
+            .iter()
+            .map(|&(dx, dy)| (dx.round() as i64, dy.round() as i64))
+            .collect();
+        let slices: Vec<&[f32]> = frames
+            .iter()
+            .map(|f| f.as_ref().as_slice().expect("contiguous"))
+            .collect();
+        let mut bits = vec![u8::MAX; in_rows * in_cols * bytes_per_pixel];
+        let row_len = (in_cols * bytes_per_pixel).max(1);
+        let rejected: u64 = bits
+            .par_chunks_mut(row_len)
+            .enumerate()
+            .map(|(ry, row)| {
+                let mut samples: Vec<Sample> = Vec::with_capacity(frame_count);
+                let mut scratch = KernelScratch::default();
+                let mut count = 0u64;
+                for rx in 0..in_cols {
+                    samples.clear();
+                    for (i, slice) in slices.iter().enumerate() {
+                        let (sx, sy) = shifts[i];
+                        let fy = ry as i64 + sy;
+                        let fx = rx as i64 + sx;
+                        if fy < 0 || fx < 0 || fy >= in_rows as i64 || fx >= in_cols as i64 {
+                            continue;
+                        }
+                        let v = slice[fy as usize * in_cols + fx as usize];
+                        if v.is_finite() {
+                            samples.push(Sample::plain(v, i as u16));
+                        }
+                    }
+                    if samples.len() < 2 {
+                        continue;
+                    }
+                    let outcome = reject_and_combine_with(&mut samples, None, params, &mut scratch);
+                    if outcome.kept == 0 {
+                        continue;
+                    }
+                    for sample in &samples[outcome.kept..] {
+                        let frame = sample.frame as usize;
+                        row[rx * bytes_per_pixel + frame / 8] &= !(1u8 << (frame % 8));
+                        count += 1;
+                    }
+                }
+                count
+            })
+            .sum();
+        Self { bits, bytes_per_pixel, in_rows, in_cols, shifts, rejected }
+    }
+
+    #[inline]
+    fn keeps(&self, frame: usize, iy: usize, ix: usize) -> bool {
+        let (sx, sy) = self.shifts[frame];
+        let ry = iy as i64 - sy;
+        let rx = ix as i64 - sx;
+        if ry < 0 || rx < 0 || ry >= self.in_rows as i64 || rx >= self.in_cols as i64 {
+            return true;
+        }
+        let idx = (ry as usize * self.in_cols + rx as usize) * self.bytes_per_pixel + frame / 8;
+        self.bits[idx] & (1u8 << (frame % 8)) != 0
+    }
+}
 
 fn drizzle_support(scale: f64, pixfrac: f64, kernel: DrizzleKernel) -> (f64, f64, f64) {
     let half = pixfrac * scale * 0.5;
@@ -34,6 +118,7 @@ fn scatter_frame(
     out_cols: usize,
     band_start: usize,
     band_end: usize,
+    keep: Option<(&KeepMask, usize)>,
 ) {
     let (in_rows, in_cols) = frame.dim();
     let src = frame.as_slice().expect("contiguous");
@@ -51,6 +136,11 @@ fn scatter_frame(
             let val = src[row_base + ix];
             if !val.is_finite() {
                 continue;
+            }
+            if let Some((mask, frame_index)) = keep {
+                if !mask.keeps(frame_index, iy, ix) {
+                    continue;
+                }
             }
 
             let cx = (ix as f64 + 0.5 + dx) * scale;
@@ -117,6 +207,7 @@ impl DrizzleAccumulator {
         self.wsum[idx] += w;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn drizzle_frame(
         &mut self,
         frame: &Array2<f32>,
@@ -128,11 +219,12 @@ impl DrizzleAccumulator {
         full_out_rows: usize,
         band_start: usize,
         band_end: usize,
+        keep: Option<(&KeepMask, usize)>,
     ) {
         let out_cols = self.out_cols;
         scatter_frame(
             self, frame, dx, dy, scale, pixfrac, kernel, full_out_rows, out_cols,
-            band_start, band_end,
+            band_start, band_end, keep,
         );
     }
 
@@ -278,9 +370,15 @@ pub fn drizzle_stack(
 
     let band_rows = drizzle_band_rows(out_rows, rayon::current_num_threads());
 
+    let keep_mask = if config.rejection == RejectionMethod::None {
+        None
+    } else {
+        Some(KeepMask::build(&frames, &offsets, in_rows, in_cols, &config.rejection_params()))
+    };
+    let rejected_pixels = keep_mask.as_ref().map_or(0, |mask| mask.rejected);
+
     let mut img_data = vec![0.0f32; out_rows * out_cols];
     let mut wgt_data = vec![0.0f32; out_rows * out_cols];
-    let rejected_pixels = 0u64;
 
     let chunk = (band_rows * out_cols).max(1);
     img_data
@@ -296,6 +394,7 @@ pub fn drizzle_stack(
                 accumulator.drizzle_frame(
                     img.as_ref(), -dx, -dy, scale, pixfrac, config.kernel,
                     out_rows, band_start, band_end,
+                    keep_mask.as_ref().map(|mask| (mask, i)),
                 );
             }
             accumulator.finalize_into(img_chunk, wgt_chunk);
@@ -361,22 +460,54 @@ mod tests {
     }
 
     #[test]
-    fn sigma_params_are_inert() {
-        let frames = vec![
-            Array2::from_elem((16, 16), 1.0f32),
-            Array2::from_elem((16, 16), 100.0f32),
+    fn drizzle_rejects_a_cosmic_ray_present_in_one_of_five_frames() {
+        let mut frames: Vec<Array2<f32>> =
+            (0..5).map(|_| Array2::from_elem((16, 16), 1.0f32)).collect();
+        frames[2][[8, 8]] = 10000.0;
+
+        let result = drizzle_stack(&frames, &config(2.0)).unwrap();
+        assert!(result.rejected_pixels >= 1, "rejected {}", result.rejected_pixels);
+        for oy in 16..18 {
+            for ox in 16..18 {
+                let v = result.image[[oy, ox]];
+                assert!((v - 1.0).abs() < 1e-3, "pixel ({}, {}) = {} != 1.0", oy, ox, v);
+            }
+        }
+
+        let mut off = config(2.0);
+        off.rejection = RejectionMethod::None;
+        let leaked = drizzle_stack(&frames, &off).unwrap();
+        assert_eq!(leaked.rejected_pixels, 0);
+        assert!(leaked.image[[17, 17]] > 100.0, "ray missing without rejection: {}", leaked.image[[17, 17]]);
+    }
+
+    #[test]
+    fn keep_mask_compares_frames_at_their_integer_shifted_positions() {
+        let rows = 16;
+        let cols = 16;
+        let reference = Array2::from_shape_fn((rows, cols), |(_, x)| 100.0 * x as f32);
+        let mut shifted = Array2::from_shape_fn((rows, cols), |(_, x)| 100.0 * x.saturating_sub(1) as f32);
+        shifted[[5, 6]] = 50000.0;
+        let frames: Vec<Cow<Array2<f32>>> = vec![
+            Cow::Borrowed(&reference),
+            Cow::Owned(shifted),
+            Cow::Borrowed(&reference),
+            Cow::Borrowed(&reference),
+            Cow::Borrowed(&reference),
         ];
-        let mut a = config(2.0);
-        a.sigma_low = 0.5;
-        a.sigma_high = 0.5;
-        let mut b = config(2.0);
-        b.sigma_low = 10.0;
-        b.sigma_high = 10.0;
-        let ra = drizzle_stack(&frames, &a).unwrap();
-        let rb = drizzle_stack(&frames, &b).unwrap();
-        assert_eq!(ra.image, rb.image);
-        assert_eq!(ra.rejected_pixels, 0);
-        assert_eq!(rb.rejected_pixels, 0);
+        let offsets = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
+        let params = config(1.0).rejection_params();
+
+        let mask = KeepMask::build(&frames, &offsets, rows, cols, &params);
+        assert_eq!(mask.rejected, 1, "shift ignored: {} rejections", mask.rejected);
+        assert!(!mask.keeps(1, 5, 6));
+        assert!(mask.keeps(1, 5, 5));
+        assert!(mask.keeps(0, 5, 5));
+        assert!(mask.keeps(1, 0, 0));
+
+        let unshifted = vec![(0.0, 0.0); 5];
+        let naive = KeepMask::build(&frames, &unshifted, rows, cols, &params);
+        assert!(naive.rejected > 100, "expected the slope to be rejected without the shift: {}", naive.rejected);
     }
 
     #[test]

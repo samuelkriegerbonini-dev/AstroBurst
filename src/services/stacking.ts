@@ -29,7 +29,16 @@ export function stackFrames(
 export function drizzleFrames(
   paths: string[],
   outputDir?: string,
-  options: { scale?: number; pixfrac?: number; kernel?: string; align?: boolean; name?: string } = {},
+  options: {
+    scale?: number;
+    pixfrac?: number;
+    kernel?: string;
+    align?: boolean;
+    name?: string;
+    rejection?: string;
+    sigmaLow?: number;
+    sigmaHigh?: number;
+  } = {},
 ): Promise<StackResult> {
   const { name, ...rest } = options;
   return withPreview<StackResult>("drizzle_stack", outputDir, { paths, name, ...rest });
@@ -61,6 +70,7 @@ export function drizzleRgbStack(
     alignmentMethod: options.alignmentMethod ?? null,
     sigmaLow: options.sigmaLow ?? null,
     sigmaHigh: options.sigmaHigh ?? null,
+    rejection: options.rejection ?? null,
     wbMode: options.wbMode ?? null,
     wbR: options.wbR ?? null,
     wbG: options.wbG ?? null,

@@ -38,6 +38,10 @@ function parseOptionalNumber(text: string): number | null {
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
+function parseNumberOr(text: string, fallback: number): number {
+  return parseOptionalNumber(text) ?? fallback;
+}
+
 function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
   const ga = a.g ?? Number.POSITIVE_INFINITY;
   const gb = b.g ?? Number.POSITIVE_INFINITY;
@@ -46,10 +50,10 @@ function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
 
 function CatalogPanel({ filePath }: CatalogPanelProps) {
   const [radiusText, setRadiusText] = useState("");
-  const [magLimit, setMagLimit] = useState(DEFAULT_MAG_LIMIT);
+  const [magLimitText, setMagLimitText] = useState(String(DEFAULT_MAG_LIMIT));
   const [band, setBand] = useState<GaiaBand>("G");
   const [colourTerm, setColourTerm] = useState(true);
-  const [matchRadius, setMatchRadius] = useState(DEFAULT_MATCH_RADIUS_ARCSEC);
+  const [matchRadiusText, setMatchRadiusText] = useState(String(DEFAULT_MATCH_RADIUS_ARCSEC));
   const [cone, setCone] = useState<ConeSearchResult | null>(null);
   const [cross, setCross] = useState<CrossMatchResult | null>(null);
   const [searching, setSearching] = useState(false);
@@ -102,7 +106,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
     try {
       const result = await catalogConeSearch(filePath, {
         radiusArcmin: parseOptionalNumber(radiusText),
-        magLimit,
+        magLimit: parseNumberOr(magLimitText, DEFAULT_MAG_LIMIT),
         maxRows: DEFAULT_MAX_ROWS,
       });
       setCone(result);
@@ -113,7 +117,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
     } finally {
       setSearching(false);
     }
-  }, [filePath, radiusText, magLimit]);
+  }, [filePath, radiusText, magLimitText]);
 
   const runCrossMatch = useCallback(async () => {
     if (!filePath) return;
@@ -123,7 +127,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
       const result = await catalogCrossMatch(filePath, {
         sigma: DEFAULT_DETECTION_SIGMA,
         maxStars: DEFAULT_MAX_STARS,
-        radiusArcsec: matchRadius,
+        radiusArcsec: parseNumberOr(matchRadiusText, DEFAULT_MATCH_RADIUS_ARCSEC),
         band,
         colourTerm,
       });
@@ -134,7 +138,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
     } finally {
       setMatching(false);
     }
-  }, [filePath, matchRadius, band, colourTerm, cone, runSearch]);
+  }, [filePath, matchRadiusText, band, colourTerm, cone, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -172,7 +176,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
   );
 
   const copyCsv = useCallback(
-    (kind: CatalogCsvKind) => {
+    async (kind: CatalogCsvKind) => {
       const items = exportItems(kind);
       if (!items) return;
       const text =
@@ -181,7 +185,11 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
           : items.kind === "sources"
             ? sourcesCsv(items.rows)
             : matchesCsv(items.matches);
-      navigator.clipboard?.writeText(text);
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e: unknown) {
+        setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     },
     [exportItems],
   );
@@ -236,8 +244,9 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
               min={5}
               max={21}
               step={0.5}
-              value={magLimit}
-              onChange={(e) => setMagLimit(parseFloat(e.target.value) || DEFAULT_MAG_LIMIT)}
+              value={magLimitText}
+              placeholder={String(DEFAULT_MAG_LIMIT)}
+              onChange={(e) => setMagLimitText(e.target.value)}
               className={INPUT_CLASS}
             />
           </div>
@@ -271,8 +280,9 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
               min={0.2}
               max={30}
               step={0.5}
-              value={matchRadius}
-              onChange={(e) => setMatchRadius(parseFloat(e.target.value) || DEFAULT_MATCH_RADIUS_ARCSEC)}
+              value={matchRadiusText}
+              placeholder={String(DEFAULT_MATCH_RADIUS_ARCSEC)}
+              onChange={(e) => setMatchRadiusText(e.target.value)}
               className={INPUT_CLASS}
             />
           </div>
@@ -321,7 +331,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
               </div>
               <div className="text-cyan-300 font-mono">
                 {zp
-                  ? `ZP ${fmt(zp.zp, 3)} ± ${fmt(zp.zp_err, 3)}  n=${zp.n_used}, ${zp.n_rejected} rejected, rms ${fmt(zp.rms, 3)}${
+                  ? `ZP ${fmt(zp.zp, 3)} ± ${fmt(zp.zp_err, 3)}  n=${zp.n_used}, ${zp.n_rejected} rejected, ${zp.n_without_colour} without colour, rms ${fmt(zp.rms, 3)}${
                       zp.colour_coeff !== null ? `, c(BP-RP) = ${fmt(zp.colour_coeff, 4)}` : ", no colour term"
                     }`
                   : "--"}
@@ -407,7 +417,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
               <Download size={10} />
               Matches CSV
             </button>
-            <button type="button" onClick={() => copyCsv(cross ? "matches" : "catalog")} className={SMALL_BUTTON_CLASS} title="Copy the matches (or the catalog when nothing is matched) as CSV">
+            <button type="button" onClick={() => void copyCsv(cross ? "matches" : "catalog")} className={SMALL_BUTTON_CLASS} title="Copy the matches (or the catalog when nothing is matched) as CSV">
               <ClipboardCopy size={10} />
               Copy CSV
             </button>

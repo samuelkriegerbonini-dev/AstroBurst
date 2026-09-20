@@ -12,12 +12,13 @@ use crate::core::imaging::pixel_probe::data_unit;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::statistics::{
     evaluate_noise, evaluate_noise_in_region, evaluate_noise_masked, exact_statistics, finite_range,
-    statistics_for_region, ChannelStatistics, NoiseEvaluation,
+    statistics_for_region, ChannelStatistics, NoiseEvaluation, RegionNoise,
 };
 use crate::types::constants::{RES_DATA_MAX, RES_DATA_MIN, RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_MASKED, RES_PATH};
 
 pub const KEY_STATISTICS: &str = "statistics";
 pub const KEY_NOISE: &str = "noise";
+pub const KEY_NOISE_NOTE: &str = "noise_note";
 pub const KEY_UNIT: &str = "unit";
 pub const KEY_RESULTS: &str = "results";
 pub const KEY_SIGMA: &str = "sigma";
@@ -32,6 +33,7 @@ const MAX_BATCH_PATHS: usize = 4096;
 struct ChannelBody {
     statistics: ChannelStatistics,
     noise: Option<NoiseEvaluation>,
+    noise_note: Option<String>,
     data_min: f64,
     data_max: f64,
 }
@@ -46,16 +48,16 @@ fn channel_body(
         Some(shape) => statistics_for_region(arr, shape, mask)?,
         None => exact_statistics(arr, mask),
     };
-    let noise = if want_noise {
-        Some(match region {
-            Some(shape) => evaluate_noise_in_region(arr, shape, mask)?,
-            None => evaluate_noise_masked(arr, mask),
-        })
-    } else {
-        None
+    let (noise, noise_note) = match (want_noise, region) {
+        (false, _) => (None, None),
+        (true, Some(shape)) => match evaluate_noise_in_region(arr, shape, mask)? {
+            RegionNoise::Evaluated(noise) => (Some(noise), None),
+            too_small => (None, too_small.note()),
+        },
+        (true, None) => (Some(evaluate_noise_masked(arr, mask)), None),
     };
     let (data_min, data_max) = finite_range(arr);
-    Ok(ChannelBody { statistics, noise, data_min, data_max })
+    Ok(ChannelBody { statistics, noise, noise_note, data_min, data_max })
 }
 
 fn nullable_f64(v: f64) -> Value {
@@ -70,6 +72,7 @@ fn channel_json(body: &ChannelBody) -> Result<Value> {
     Ok(json!({
         KEY_STATISTICS: serde_json::to_value(&body.statistics)?,
         KEY_NOISE: body.noise.as_ref().map(serde_json::to_value).transpose()?,
+        KEY_NOISE_NOTE: body.noise_note.as_deref(),
         RES_DATA_MIN: nullable_f64(body.data_min),
         RES_DATA_MAX: nullable_f64(body.data_max),
     }))
@@ -158,9 +161,9 @@ mod tests {
     #[test]
     fn channel_body_reports_exact_statistics_noise_and_full_frame_range_for_a_region() {
         let data = Array2::from_shape_fn((32, 32), |(y, x)| ((y * 32 + x) as f32) - 100.0);
-        let shape = RegionShape::Box { x: 16.0, y: 16.0, width: 5.0, height: 5.0, angle: 0.0 };
+        let shape = RegionShape::Box { x: 16.0, y: 16.0, width: 9.0, height: 9.0, angle: 0.0 };
         let body = channel_body(&data, Some(&shape), None, true).unwrap();
-        assert_eq!(body.statistics.count, 25);
+        assert_eq!(body.statistics.count, 81);
         assert_eq!(body.statistics.median, (16.0 * 32.0 + 16.0) - 100.0);
         assert_eq!(body.data_min, -100.0);
         assert_eq!(body.data_max, 923.0);
@@ -181,6 +184,34 @@ mod tests {
         assert_eq!(j[KEY_STATISTICS]["count"], 0);
         assert_eq!(j[KEY_STATISTICS]["nan_count"], 4);
         assert!(j[KEY_NOISE].is_null());
+        assert!(j[KEY_NOISE_NOTE].is_null());
+    }
+
+    #[test]
+    fn channel_json_reports_a_note_instead_of_zero_sigma_for_a_tiny_region() {
+        let data = Array2::from_shape_fn((32, 32), |(y, x)| ((y * 32 + x) as f32) - 100.0);
+        let point = RegionShape::Point { x: 10.0, y: 10.0 };
+        let body = channel_body(&data, Some(&point), None, true).unwrap();
+        assert_eq!(body.statistics.count, 1);
+        assert!(body.noise.is_none());
+        let j = channel_json(&body).unwrap();
+        assert!(j[KEY_NOISE].is_null());
+        assert_eq!(j[KEY_NOISE_NOTE], "region too small for noise evaluation (0 finite pixels, 64 needed)");
+
+        let circle = RegionShape::Circle { x: 10.0, y: 10.0, r: 2.0 };
+        let j = channel_json(&channel_body(&data, Some(&circle), None, true).unwrap()).unwrap();
+        assert_eq!(j[KEY_STATISTICS]["count"], 13);
+        assert!(j[KEY_NOISE].is_null());
+        assert_eq!(j[KEY_NOISE_NOTE], "region too small for noise evaluation (13 finite pixels, 64 needed)");
+
+        let big = RegionShape::Box { x: 16.0, y: 16.0, width: 9.0, height: 9.0, angle: 0.0 };
+        let j = channel_json(&channel_body(&data, Some(&big), None, true).unwrap()).unwrap();
+        assert!(j[KEY_NOISE].is_object());
+        assert!(j[KEY_NOISE_NOTE].is_null());
+
+        let j = channel_json(&channel_body(&data, Some(&circle), None, false).unwrap()).unwrap();
+        assert!(j[KEY_NOISE].is_null());
+        assert!(j[KEY_NOISE_NOTE].is_null());
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub struct DrizzleParams {
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub align: Option<bool>,
+    pub rejection: Option<String>,
 }
 
 pub async fn stack(
@@ -191,6 +192,11 @@ pub async fn drizzle(
         sigma_low: params.sigma_low.unwrap_or(3.0),
         sigma_high: params.sigma_high.unwrap_or(3.0),
         align: params.align.unwrap_or(true),
+        rejection: parse_named(
+            params.rejection.as_deref(),
+            RejectionMethod::from_name,
+            RejectionMethod::default(),
+        )?,
         ..DrizzleConfig::default()
     };
 

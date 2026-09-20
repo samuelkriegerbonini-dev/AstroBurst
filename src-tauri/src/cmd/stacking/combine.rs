@@ -201,6 +201,9 @@ pub async fn drizzle_stack(
     kernel: Option<String>,
     align: Option<bool>,
     name: Option<String>,
+    rejection: Option<String>,
+    sigma_low: Option<f32>,
+    sigma_high: Option<f32>,
 ) -> Result<serde_json::Value, String> {
     let frame_count = paths.len() as u64;
     let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
@@ -209,12 +212,16 @@ pub async fn drizzle_stack(
     blocking_cmd!({
         resolve_output_dir(&output_dir)?;
 
+        let defaults = DrizzleConfig::default();
         let config = DrizzleConfig {
             scale: scale.unwrap_or(2.0),
             pixfrac: pixfrac.unwrap_or(0.7),
             kernel: helpers::parse_drizzle_kernel(kernel.as_deref()),
             align: align.unwrap_or(true),
-            ..DrizzleConfig::default()
+            rejection: helpers::parse_rejection_method(rejection.as_deref())?,
+            sigma_low: sigma_low.unwrap_or(defaults.sigma_low),
+            sigma_high: sigma_high.unwrap_or(defaults.sigma_high),
+            ..defaults
         };
 
         let result = drizzle_from_paths(&paths, &config, None)?;

@@ -26,6 +26,7 @@ export interface NoiseEvaluation {
 export interface ChannelStatisticsBody {
   statistics: ChannelStatistics;
   noise: NoiseEvaluation | null;
+  noise_note: string | null;
   data_min: number | null;
   data_max: number | null;
 }

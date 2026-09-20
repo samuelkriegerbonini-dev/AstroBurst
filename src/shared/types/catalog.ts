@@ -88,6 +88,7 @@ export interface ZeroPointFit {
   rms: number;
   n_used: number;
   n_rejected: number;
+  n_without_colour: number;
   band: GaiaBand;
   colour_term_used: boolean;
 }

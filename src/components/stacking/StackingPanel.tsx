@@ -51,6 +51,11 @@ export default function StackingPanel({
   const [noiseWeightRange, setNoiseWeightRange] = useState<string | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
 
+  const replaceSelection = useCallback((update: (prev: string[]) => string[]) => {
+    setNoiseWeightRange(null);
+    setSelectedPaths(update);
+  }, []);
+
   const config: StackConfig = { ...DEFAULT_STACK_SETTINGS, ...stackConfig };
   const {
     sigmaLow,
@@ -74,14 +79,14 @@ export default function StackingPanel({
     const newPaths = injectedPaths.filter((p) => !prevInjectedRef.current.includes(p));
     if (newPaths.length === 0) return;
     prevInjectedRef.current = injectedPaths;
-    setSelectedPaths((prev) => {
+    replaceSelection((prev) => {
       const merged = [...prev];
       for (const p of newPaths) {
         if (!merged.includes(p)) merged.push(p);
       }
       return merged;
     });
-  }, [injectedPaths]);
+  }, [injectedPaths, replaceSelection]);
 
   const prevRejectedRef = useRef<string>("");
   useEffect(() => {
@@ -89,24 +94,24 @@ export default function StackingPanel({
     if (key === prevRejectedRef.current) return;
     prevRejectedRef.current = key;
     if (rejectedPaths.length === 0) return;
-    setSelectedPaths((prev) => prev.filter((p) => !rejectedPaths.includes(p)));
-  }, [rejectedPaths]);
+    replaceSelection((prev) => prev.filter((p) => !rejectedPaths.includes(p)));
+  }, [rejectedPaths, replaceSelection]);
 
   const toggleFile = useCallback((path: string) => {
-    setSelectedPaths((prev) =>
+    replaceSelection((prev) =>
       prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path],
     );
-  }, []);
+  }, [replaceSelection]);
 
   const selectAll = useCallback(() => {
     const allPaths = [
       ...files.map((f) => f.path),
       ...injectedPaths.filter((p) => !files.some((f) => f.path === p)),
     ];
-    setSelectedPaths(allPaths);
-  }, [files, injectedPaths]);
+    replaceSelection(() => allPaths);
+  }, [files, injectedPaths, replaceSelection]);
 
-  const selectNone = useCallback(() => setSelectedPaths([]), []);
+  const selectNone = useCallback(() => replaceSelection(() => []), [replaceSelection]);
 
   const weights = useMemo(() => subframeWeightsFor(selectedPaths, subframeWeights), [selectedPaths, subframeWeights]);
   const weightedCount = weights ? weights.filter((w) => w !== 1.0).length : 0;

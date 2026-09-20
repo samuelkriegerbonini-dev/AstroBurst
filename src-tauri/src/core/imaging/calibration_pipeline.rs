@@ -10,9 +10,17 @@ use crate::core::imaging::cosmetic::{
 use crate::core::imaging::stats::percentile;
 use crate::core::imaging::stretch::{arcsinh_stretch_rgb_with_stats, arcsinh_stretch_with_stats};
 use crate::infra::image_source::{is_dq_name, list_planes};
+use crate::math::median::{exact_mad_mut, median_f32_mut};
+use crate::types::constants::MAD_TO_SIGMA;
 
 const PREVIEW_STRETCH_FACTOR: f32 = 20.0;
 pub const DQ_COSMETIC_WARNING: &str = "cosmetic correction applied to data with DQ planes";
+const DARK_OPTIMIZE_MAX_SAMPLES: usize = 262_144;
+const DARK_OPTIMIZE_SCALE_MAX: f64 = 3.0;
+const DARK_OPTIMIZE_TOLERANCE: f64 = 1e-3;
+const DARK_OPTIMIZE_MAX_EVALUATIONS: usize = 40;
+const DARK_OPTIMIZE_STAR_SIGMA: f32 = 5.0;
+const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_895;
 
 #[derive(Debug, Clone)]
 pub struct CalibrationMasters {
@@ -69,6 +77,7 @@ pub struct BatchPipelineConfig {
     pub stack: BatchStackConfig,
     pub align: bool,
     pub cosmetic: Option<CosmeticConfig>,
+    pub dark_optimize: bool,
 }
 
 impl Default for BatchPipelineConfig {
@@ -77,6 +86,7 @@ impl Default for BatchPipelineConfig {
             stack: BatchStackConfig::default(),
             align: true,
             cosmetic: None,
+            dark_optimize: false,
         }
     }
 }
@@ -105,6 +115,12 @@ pub struct BatchChannelStats {
     pub stddev: f64,
     #[serde(default)]
     pub cosmetic_replaced: Option<u64>,
+    #[serde(default)]
+    pub dark_scale_min: Option<f32>,
+    #[serde(default)]
+    pub dark_scale_max: Option<f32>,
+    #[serde(default)]
+    pub dark_scale_mean: Option<f32>,
 }
 
 fn master_slice(master: Option<&Array2<f32>>, npix: usize) -> Option<&[f32]> {
@@ -186,6 +202,131 @@ pub fn calibrate_light_with_cosmetic(
 
 pub fn validate_cosmetic_config(config: &CosmeticConfig) -> Result<(), String> {
     config.validate().map_err(|e| format!("Cosmetic correction: {:#}", e))
+}
+
+struct DarkOptimizeSample {
+    light_minus_bias: Vec<f32>,
+    dark: Vec<f32>,
+}
+
+fn dark_optimize_sample(light: &[f32], bias: Option<&[f32]>, dark: &[f32]) -> DarkOptimizeSample {
+    let npix = light.len();
+    let stride = npix.div_ceil(DARK_OPTIMIZE_MAX_SAMPLES).max(1);
+    let capacity = npix / stride + 1;
+    let mut light_values = Vec::with_capacity(capacity);
+    let mut light_minus_bias = Vec::with_capacity(capacity);
+    let mut dark_values = Vec::with_capacity(capacity);
+    for i in (0..npix).step_by(stride) {
+        let l = light[i];
+        let d = dark[i];
+        let b = bias.map_or(0.0, |b| b[i]);
+        if !(l.is_finite() && d.is_finite() && b.is_finite()) {
+            continue;
+        }
+        light_values.push(l);
+        light_minus_bias.push(l - b);
+        dark_values.push(d);
+    }
+    if light_values.is_empty() {
+        return DarkOptimizeSample { light_minus_bias, dark: dark_values };
+    }
+    let mut work = light_values.clone();
+    let median = median_f32_mut(&mut work);
+    let sigma = exact_mad_mut(&mut work, median) * MAD_TO_SIGMA as f32;
+    let ceiling = if sigma > 0.0 { median + DARK_OPTIMIZE_STAR_SIGMA * sigma } else { f32::INFINITY };
+    let mut background = DarkOptimizeSample {
+        light_minus_bias: Vec::with_capacity(light_values.len()),
+        dark: Vec::with_capacity(light_values.len()),
+    };
+    for ((&l, &lb), &d) in light_values.iter().zip(&light_minus_bias).zip(&dark_values) {
+        if l <= ceiling {
+            background.light_minus_bias.push(lb);
+            background.dark.push(d);
+        }
+    }
+    background
+}
+
+fn residual_robust_sigma(light_minus_bias: &[f32], dark: &[f32], scale: f32, work: &mut Vec<f32>) -> f64 {
+    work.clear();
+    work.extend(light_minus_bias.iter().zip(dark).map(|(&l, &d)| l - scale * d));
+    let median = median_f32_mut(work);
+    exact_mad_mut(work, median) as f64 * MAD_TO_SIGMA
+}
+
+fn golden_section_minimum(
+    mut lo: f64,
+    mut hi: f64,
+    tolerance: f64,
+    max_evaluations: usize,
+    mut objective: impl FnMut(f64) -> f64,
+) -> f64 {
+    let mut c = hi - GOLDEN_RATIO_INVERSE * (hi - lo);
+    let mut d = lo + GOLDEN_RATIO_INVERSE * (hi - lo);
+    let mut fc = objective(c);
+    let mut fd = objective(d);
+    let mut evaluations = 2;
+    while hi - lo > tolerance && evaluations < max_evaluations {
+        if fc <= fd {
+            hi = d;
+            d = c;
+            fd = fc;
+            c = hi - GOLDEN_RATIO_INVERSE * (hi - lo);
+            fc = objective(c);
+        } else {
+            lo = c;
+            c = d;
+            fc = fd;
+            d = lo + GOLDEN_RATIO_INVERSE * (hi - lo);
+            fd = objective(d);
+        }
+        evaluations += 1;
+    }
+    0.5 * (lo + hi)
+}
+
+pub fn optimize_dark_scale(light: &Array2<f32>, bias: Option<&Array2<f32>>, dark: &Array2<f32>) -> f32 {
+    let npix = light.len();
+    let Some(dark_slice) = master_slice(Some(dark), npix) else {
+        return 1.0;
+    };
+    let light_slice = light.as_slice().expect("contiguous");
+    let sample = dark_optimize_sample(light_slice, master_slice(bias, npix), dark_slice);
+    if sample.dark.len() < 2 {
+        return 1.0;
+    }
+    let mut work = Vec::with_capacity(sample.dark.len());
+    let scale = golden_section_minimum(
+        0.0,
+        DARK_OPTIMIZE_SCALE_MAX,
+        DARK_OPTIMIZE_TOLERANCE,
+        DARK_OPTIMIZE_MAX_EVALUATIONS,
+        |k| residual_robust_sigma(&sample.light_minus_bias, &sample.dark, k as f32, &mut work),
+    );
+    scale as f32
+}
+
+fn channel_dark_scales(channel: &ChannelInput, masters: &CalibrationMasters, optimize: bool) -> Vec<f32> {
+    match masters.dark.as_ref() {
+        Some(dark) if optimize => channel
+            .lights
+            .par_iter()
+            .map(|light| optimize_dark_scale(light, masters.bias.as_ref(), dark))
+            .collect(),
+        _ => (0..channel.lights.len())
+            .map(|i| channel.dark_scales.get(i).copied().unwrap_or(1.0))
+            .collect(),
+    }
+}
+
+fn dark_scale_summary(scales: &[f32], has_dark: bool) -> (Option<f32>, Option<f32>, Option<f32>) {
+    if !has_dark || scales.is_empty() {
+        return (None, None, None);
+    }
+    let min = scales.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = scales.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mean = scales.iter().map(|&s| s as f64).sum::<f64>() / scales.len() as f64;
+    (Some(min), Some(max), Some(mean as f32))
 }
 
 #[derive(Debug, Clone)]
@@ -325,13 +466,15 @@ pub fn run_batch_pipeline(
             Some(plan) => Some(plan.for_dims(channel.lights[0].dim())?),
             None => None,
         };
+        let dark_scales = channel_dark_scales(channel, masters, config.dark_optimize);
+        let (dark_scale_min, dark_scale_max, dark_scale_mean) =
+            dark_scale_summary(&dark_scales, masters.dark.is_some());
         let (calibrated, replaced_counts): (Vec<Array2<f32>>, Vec<usize>) = channel
             .lights
             .par_iter()
             .enumerate()
             .map(|(i, l)| {
-                let scale = channel.dark_scales.get(i).copied().unwrap_or(1.0);
-                calibrate_light_with_cosmetic(l, masters, scale, channel_cosmetic.as_ref())
+                calibrate_light_with_cosmetic(l, masters, dark_scales[i], channel_cosmetic.as_ref())
             })
             .unzip();
         let cosmetic_replaced = channel_cosmetic
@@ -406,6 +549,9 @@ pub fn run_batch_pipeline(
             mean: mean_val,
             stddev: var.sqrt(),
             cosmetic_replaced,
+            dark_scale_min,
+            dark_scale_max,
+            dark_scale_mean,
         });
 
         master_channels.push((channel.label.clone(), stacked));
@@ -824,7 +970,12 @@ mod tests {
             ..Default::default()
         };
 
-        let with_cosmetic = BatchPipelineConfig { stack: stack.clone(), align: false, cosmetic: Some(dark_hot_config()) };
+        let with_cosmetic = BatchPipelineConfig {
+            stack: stack.clone(),
+            align: false,
+            cosmetic: Some(dark_hot_config()),
+            dark_optimize: false,
+        };
         let res = run_batch_pipeline(vec![channel.clone()], &masters, &with_cosmetic).unwrap();
         assert_eq!(res.stats.channels[0].cosmetic_replaced, Some(3));
         assert!((res.master_channels[0].1[[5, 5]] - 100.0).abs() < 1.0);
@@ -897,5 +1048,112 @@ mod tests {
         assert!(carries_dq_plane(&format!("{}#hdu=1", mef_path)));
         assert!(!carries_dq_plane(&plain_path));
         assert!(!carries_dq_plane("C:/definitely/missing/light.fits"));
+    }
+
+    fn seeded_uniform(rows: usize, cols: usize, amplitude: f32, seed: u32) -> Array2<f32> {
+        let mut state = seed;
+        Array2::from_shape_fn((rows, cols), |_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 * amplitude
+        })
+    }
+
+    fn seeded_gaussian(rows: usize, cols: usize, sigma: f32, seed: u64) -> Array2<f32> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((rows, cols), |_| {
+            let u1: f64 = rng.gen::<f64>().max(1e-30);
+            let u2: f64 = rng.gen::<f64>();
+            ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32 * sigma
+        })
+    }
+
+    fn robust_sigma(frame: &Array2<f32>) -> f32 {
+        let mut values: Vec<f32> = frame.iter().copied().filter(|v| v.is_finite()).collect();
+        let median = median_f32_mut(&mut values);
+        exact_mad_mut(&mut values, median) * MAD_TO_SIGMA as f32
+    }
+
+    fn scaled_dark_scene(noise_seed: u64) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+        let bias = Array2::from_shape_fn((128, 128), |(y, x)| 300.0 + ((x + y) % 3) as f32);
+        let dark_pattern = seeded_uniform(128, 128, 300.0, 99);
+        let noise = seeded_gaussian(128, 128, 5.0, noise_seed);
+        let mut light = &bias + &dark_pattern.mapv(|d| 0.7 * d) + 500.0 + &noise;
+        light[[10, 10]] = 60000.0;
+        light[[50, 60]] = 40000.0;
+        light[[51, 60]] = 45000.0;
+        (light, bias, dark_pattern)
+    }
+
+    #[test]
+    fn dark_optimization_recovers_the_scale_and_lowers_the_calibrated_noise() {
+        let (light, bias, dark) = scaled_dark_scene(7);
+
+        let k = optimize_dark_scale(&light, Some(&bias), &dark);
+        assert!((k - 0.7).abs() <= 0.05, "recovered dark scale {k}");
+
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
+        let optimized = robust_sigma(&calibrate_light(&light, &masters, k));
+        let unit = robust_sigma(&calibrate_light(&light, &masters, 1.0));
+        assert!(optimized < unit, "optimized sigma {optimized} not below unit-scale sigma {unit}");
+        assert!(optimized < 7.0, "optimized sigma {optimized} far from the injected 5.0");
+    }
+
+    #[test]
+    fn golden_section_finds_a_quadratic_minimum_within_tolerance_and_budget() {
+        let mut evaluations = 0usize;
+        let k = golden_section_minimum(0.0, 3.0, 1e-3, 40, |x| {
+            evaluations += 1;
+            (x - 1.234).powi(2)
+        });
+        assert!((k - 1.234).abs() < 1e-3, "minimum {k}");
+        assert!(evaluations <= 40, "{evaluations} evaluations");
+    }
+
+    #[test]
+    fn dark_optimization_sample_drops_stars_and_falls_back_without_a_dark() {
+        let light: Vec<f32> = (0..1000).map(|i| if i == 500 { 1e6 } else { 100.0 + (i % 7) as f32 }).collect();
+        let dark: Vec<f32> = (0..1000).map(|i| (i % 5) as f32).collect();
+        let sample = dark_optimize_sample(&light, None, &dark);
+        assert_eq!(sample.dark.len(), 999);
+        assert!(sample.light_minus_bias.iter().all(|&v| v < 1e5));
+
+        let mismatched = Array2::from_elem((4, 4), 1.0f32);
+        assert_eq!(optimize_dark_scale(&Array2::from_elem((8, 8), 5.0f32), None, &mismatched), 1.0);
+    }
+
+    #[test]
+    fn run_batch_pipeline_reports_dark_scale_stats_and_only_optimizes_when_asked() {
+        let (light_a, bias, dark) = scaled_dark_scene(11);
+        let (light_b, _, _) = scaled_dark_scene(12);
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
+        let channel = ChannelInput {
+            lights: vec![light_a, light_b],
+            label: "L".into(),
+            dark_scales: vec![1.0; 2],
+        };
+        let stack = BatchStackConfig { normalize_before_stack: false, rejection: RejectionMethod::None, ..Default::default() };
+
+        let plain = BatchPipelineConfig { stack: stack.clone(), align: false, ..Default::default() };
+        assert!(!plain.dark_optimize);
+        let res = run_batch_pipeline(vec![channel.clone()], &masters, &plain).unwrap();
+        let stats = &res.stats.channels[0];
+        assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (Some(1.0), Some(1.0), Some(1.0)));
+        let unit_sigma = robust_sigma(&res.master_channels[0].1);
+
+        let optimized = BatchPipelineConfig { stack: stack.clone(), align: false, dark_optimize: true, ..Default::default() };
+        let res = run_batch_pipeline(vec![channel.clone()], &masters, &optimized).unwrap();
+        let stats = &res.stats.channels[0];
+        let mean = stats.dark_scale_mean.expect("dark scale reported");
+        assert!((mean - 0.7).abs() <= 0.05, "mean dark scale {mean}");
+        assert!(stats.dark_scale_min.unwrap() <= mean && mean <= stats.dark_scale_max.unwrap());
+        let optimized_sigma = robust_sigma(&res.master_channels[0].1);
+        assert!(optimized_sigma < unit_sigma, "{optimized_sigma} vs {unit_sigma}");
+
+        let no_dark = CalibrationMasters { dark: None, flat: None, bias: masters.bias.clone() };
+        let res = run_batch_pipeline(vec![channel], &no_dark, &optimized).unwrap();
+        let stats = &res.stats.channels[0];
+        assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (None, None, None));
     }
 }

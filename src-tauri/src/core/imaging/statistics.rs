@@ -8,6 +8,7 @@ use crate::core::imaging::wavelet::k_sigma_noise;
 use crate::math::median::exact_median_mut;
 
 pub const NOISE_METHOD_K_SIGMA_MRS: &str = "k-sigma-mrs";
+pub const MIN_NOISE_REGION_PIXELS: usize = 64;
 
 const BIWEIGHT_TUNING_CONSTANT: f64 = 9.0;
 const NOISE_CLIP_K: f64 = 3.0;
@@ -40,6 +41,31 @@ pub struct NoiseEvaluation {
     pub fraction: f64,
     pub iterations: usize,
     pub method: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegionNoise {
+    Evaluated(NoiseEvaluation),
+    TooSmall { finite_pixels: usize },
+}
+
+impl RegionNoise {
+    pub fn evaluation(&self) -> Option<&NoiseEvaluation> {
+        match self {
+            RegionNoise::Evaluated(noise) => Some(noise),
+            RegionNoise::TooSmall { .. } => None,
+        }
+    }
+
+    pub fn note(&self) -> Option<String> {
+        match self {
+            RegionNoise::Evaluated(_) => None,
+            RegionNoise::TooSmall { finite_pixels } => Some(format!(
+                "region too small for noise evaluation ({} finite pixels, {} needed)",
+                finite_pixels, MIN_NOISE_REGION_PIXELS
+            )),
+        }
+    }
 }
 
 impl ChannelStatistics {
@@ -244,14 +270,24 @@ pub fn evaluate_noise(data: &Array2<f32>) -> NoiseEvaluation {
     }
 }
 
+fn masked_copy(data: &Array2<f32>, excluded: Option<&Array2<u8>>) -> Option<Array2<f32>> {
+    let mask = excluded.filter(|m| m.dim() == data.dim())?;
+    Some(Array2::from_shape_fn(data.dim(), |idx| if mask[idx] != 0 { f32::NAN } else { data[idx] }))
+}
+
 pub fn evaluate_noise_masked(data: &Array2<f32>, excluded: Option<&Array2<u8>>) -> NoiseEvaluation {
-    match excluded {
-        Some(mask) if mask.dim() == data.dim() => {
-            let masked = Array2::from_shape_fn(data.dim(), |idx| if mask[idx] != 0 { f32::NAN } else { data[idx] });
-            evaluate_noise(&masked)
-        }
-        _ => evaluate_noise(data),
+    match masked_copy(data, excluded) {
+        Some(masked) => evaluate_noise(&masked),
+        None => evaluate_noise(data),
     }
+}
+
+pub fn evaluate_noise_window(window: &Array2<f32>) -> RegionNoise {
+    let finite_pixels = window.iter().filter(|v| v.is_finite()).count();
+    if finite_pixels < MIN_NOISE_REGION_PIXELS {
+        return RegionNoise::TooSmall { finite_pixels };
+    }
+    RegionNoise::Evaluated(evaluate_noise(window))
 }
 
 fn clipped_bounds(data_dim: (usize, usize), shape: &RegionShape) -> Option<(i64, i64, i64, i64)> {
@@ -293,7 +329,7 @@ pub fn evaluate_noise_in_region(
     data: &Array2<f32>,
     shape: &RegionShape,
     excluded: Option<&Array2<u8>>,
-) -> Result<NoiseEvaluation> {
+) -> Result<RegionNoise> {
     shape.validate()?;
     let window = match region_window(data, shape) {
         Some(w) => w,
@@ -302,7 +338,10 @@ pub fn evaluate_noise_in_region(
     let mask_window = excluded
         .filter(|m| m.dim() == data.dim())
         .and_then(|m| region_window_mask(m, shape));
-    Ok(evaluate_noise_masked(&window, mask_window.as_ref()))
+    Ok(match masked_copy(&window, mask_window.as_ref()) {
+        Some(masked) => evaluate_noise_window(&masked),
+        None => evaluate_noise_window(&window),
+    })
 }
 
 #[cfg(test)]
@@ -559,7 +598,43 @@ mod tests {
         let bottom = RegionShape::Box { x: 80.0, y: 120.0, width: 120.0, height: 40.0, angle: 0.0 };
         let n_top = evaluate_noise_in_region(&image, &top, None).unwrap();
         let n_bottom = evaluate_noise_in_region(&image, &bottom, None).unwrap();
+        let n_top = n_top.evaluation().expect("top region is large enough");
+        let n_bottom = n_bottom.evaluation().expect("bottom region is large enough");
         assert!((n_top.sigma - 0.2).abs() / 0.2 < 0.1, "top sigma {}", n_top.sigma);
         assert!((n_bottom.sigma - 1.0).abs() < 0.1, "bottom sigma {}", n_bottom.sigma);
+    }
+
+    #[test]
+    fn evaluate_noise_in_region_declines_windows_with_fewer_than_sixty_four_finite_pixels() {
+        let image = gaussian_noise_image(64, 64, 1.0, 9);
+        let circle = RegionShape::Circle { x: 20.0, y: 20.0, r: 2.0 };
+        assert_eq!(
+            evaluate_noise_in_region(&image, &circle, None).unwrap(),
+            RegionNoise::TooSmall { finite_pixels: 13 }
+        );
+        let line = RegionShape::Line { x1: 2.0, y1: 2.0, x2: 40.0, y2: 30.0 };
+        assert_eq!(
+            evaluate_noise_in_region(&image, &line, None).unwrap(),
+            RegionNoise::TooSmall { finite_pixels: 0 }
+        );
+        let point = RegionShape::Point { x: 5.0, y: 5.0 };
+        let too_small = evaluate_noise_in_region(&image, &point, None).unwrap();
+        assert!(too_small.evaluation().is_none());
+        assert_eq!(
+            too_small.note().as_deref(),
+            Some("region too small for noise evaluation (0 finite pixels, 64 needed)")
+        );
+
+        let square = RegionShape::Box { x: 20.5, y: 20.5, width: 8.0, height: 8.0, angle: 0.0 };
+        let evaluated = evaluate_noise_in_region(&image, &square, None).unwrap();
+        assert!(evaluated.note().is_none());
+        assert_eq!(evaluated.evaluation().unwrap().method, "k-sigma-mrs");
+
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        mask[[20, 20]] = 1;
+        assert_eq!(
+            evaluate_noise_in_region(&image, &square, Some(&mask)).unwrap(),
+            RegionNoise::TooSmall { finite_pixels: 63 }
+        );
     }
 }

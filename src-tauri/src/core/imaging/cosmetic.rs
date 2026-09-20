@@ -24,6 +24,8 @@ const MIN_NEIGHBOURS_FOR_MEDIAN: usize = 3;
 const INNER_RING_STEPS: isize = 1;
 const OUTER_RING_STEPS: isize = 2;
 const OUTER_RING_CAPACITY: usize = 24;
+const MAX_DEFECT_CLUSTER_PIXELS: usize = 3;
+const MEAN_ABS_DEV_TO_SIGMA: f64 = 1.2533;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -145,13 +147,18 @@ pub fn parse_defect_list(text: &str) -> Result<Vec<Defect>, String> {
     Ok(defects)
 }
 
-fn robust_center_and_scale(values: &mut Vec<f32>) -> Option<(f32, f32)> {
+fn robust_center_and_scale(values: &mut [f32]) -> Option<(f32, f32)> {
     if values.is_empty() {
         return None;
     }
     let median = exact_median_mut(values) as f32;
     let mad = exact_mad_mut(values, median);
-    Some((median, (mad as f64 * MAD_TO_SIGMA) as f32))
+    if mad > 0.0 {
+        return Some((median, (mad as f64 * MAD_TO_SIGMA) as f32));
+    }
+    let mean_abs_dev = values.iter().map(|&d| d as f64).sum::<f64>() / values.len() as f64;
+    let sigma = (mean_abs_dev * MEAN_ABS_DEV_TO_SIGMA) as f32;
+    (sigma > 0.0).then_some((median, sigma))
 }
 
 fn standard_slice(image: &Array2<f32>) -> Vec<f32> {
@@ -249,19 +256,78 @@ fn local_median_residuals(src: &[f32], rows: usize, cols: usize, stride: usize) 
     residual
 }
 
-fn has_same_sign_neighbour(
-    candidates: &[i8],
+fn auto_candidates(
+    image: &Array2<f32>,
+    hot_sigma: Option<f32>,
+    cold_sigma: Option<f32>,
+    stride: usize,
+) -> Option<Vec<i8>> {
+    let (rows, cols) = image.dim();
+    let src = standard_slice(image);
+    let residual = local_median_residuals(&src, rows, cols, stride);
+    let mut finite: Vec<f32> = residual.iter().copied().filter(|v| v.is_finite()).collect();
+    let (center, scale) = robust_center_and_scale(&mut finite)?;
+    let hot_limit = hot_sigma.map(|k| center + k * scale);
+    let cold_limit = cold_sigma.map(|k| center - k * scale);
+    Some(
+        residual
+            .par_iter()
+            .map(|&r| {
+                if !r.is_finite() {
+                    0
+                } else if hot_limit.is_some_and(|limit| r > limit) {
+                    1
+                } else if cold_limit.is_some_and(|limit| r < limit) {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect(),
+    )
+}
+
+fn flag_small_clusters(
+    mut candidates: Vec<i8>,
     rows: usize,
     cols: usize,
-    y: usize,
-    x: usize,
     stride: usize,
-    sign: i8,
-) -> bool {
-    NEIGHBOUR_OFFSETS.iter().any(|&(dy, dx)| {
-        offset_index(rows, cols, y, x, dy * stride as isize, dx * stride as isize)
-            .is_some_and(|idx| candidates[idx] == sign)
-    })
+) -> Vec<u8> {
+    let mut flags = vec![0u8; candidates.len()];
+    let mut component: Vec<usize> = Vec::new();
+    let mut frontier: Vec<usize> = Vec::new();
+    for start in 0..candidates.len() {
+        let sign = candidates[start];
+        if sign == 0 {
+            continue;
+        }
+        candidates[start] = 0;
+        component.clear();
+        frontier.push(start);
+        while let Some(idx) = frontier.pop() {
+            component.push(idx);
+            let (y, x) = (idx / cols, idx % cols);
+            for &(dy, dx) in &NEIGHBOUR_OFFSETS {
+                let step = (dy * stride as isize, dx * stride as isize);
+                let Some(next) = offset_index(rows, cols, y, x, step.0, step.1) else {
+                    continue;
+                };
+                if candidates[next] != sign {
+                    continue;
+                }
+                candidates[next] = 0;
+                frontier.push(next);
+            }
+        }
+        if component.len() > MAX_DEFECT_CLUSTER_PIXELS {
+            continue;
+        }
+        let flag = if sign > 0 { FLAG_HOT } else { FLAG_COLD };
+        for &idx in &component {
+            flags[idx] = flag;
+        }
+    }
+    flags
 }
 
 pub fn defect_map_auto(
@@ -276,38 +342,10 @@ pub fn defect_map_auto(
         return map;
     }
     let stride = if cfa { 2 } else { 1 };
-    let src = standard_slice(image);
-    let residual = local_median_residuals(&src, rows, cols, stride);
-    let mut finite: Vec<f32> = residual.iter().copied().filter(|v| v.is_finite()).collect();
-    let Some((center, scale)) = robust_center_and_scale(&mut finite) else {
+    let Some(candidates) = auto_candidates(image, hot_sigma, cold_sigma, stride) else {
         return map;
     };
-    let hot_limit = hot_sigma.map(|k| center + k * scale);
-    let cold_limit = cold_sigma.map(|k| center - k * scale);
-    let candidates: Vec<i8> = residual
-        .par_iter()
-        .map(|&r| {
-            if !r.is_finite() {
-                0
-            } else if hot_limit.is_some_and(|limit| r > limit) {
-                1
-            } else if cold_limit.is_some_and(|limit| r < limit) {
-                -1
-            } else {
-                0
-            }
-        })
-        .collect();
-    let mut flags = vec![0u8; rows * cols];
-    flags.par_chunks_mut(cols).enumerate().for_each(|(y, row)| {
-        for (x, out) in row.iter_mut().enumerate() {
-            let sign = candidates[y * cols + x];
-            if sign == 0 || has_same_sign_neighbour(&candidates, rows, cols, y, x, stride, sign) {
-                continue;
-            }
-            *out = if sign > 0 { FLAG_HOT } else { FLAG_COLD };
-        }
-    });
+    let flags = flag_small_clusters(candidates, rows, cols, stride);
     Array2::from_shape_vec((rows, cols), flags).expect("flag buffer matches image shape")
 }
 
@@ -538,6 +576,38 @@ mod tests {
         map.indexed_iter().filter(|(_, &v)| v != 0).map(|(p, _)| p).collect()
     }
 
+    fn star_pixels(cy: usize, cx: usize, step: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::with_capacity(25);
+        for dy in -2i64..=2 {
+            for dx in -2i64..=2 {
+                let y = (cy as i64 + dy * step as i64) as usize;
+                let x = (cx as i64 + dx * step as i64) as usize;
+                out.push((y, x));
+            }
+        }
+        out
+    }
+
+    fn add_gaussian_star(img: &mut Array2<f32>, cy: usize, cx: usize, amplitude: f32, step: usize) {
+        for dy in -2i64..=2 {
+            for dx in -2i64..=2 {
+                let r2 = (dy * dy + dx * dx) as f32;
+                let y = (cy as i64 + dy * step as i64) as usize;
+                let x = (cx as i64 + dx * step as i64) as usize;
+                img[[y, x]] += amplitude * (-0.5 * r2).exp();
+            }
+        }
+    }
+
+    fn candidate_positions(candidates: &[i8], cols: usize, sign: i8) -> Vec<(usize, usize)> {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c == sign)
+            .map(|(idx, _)| (idx / cols, idx % cols))
+            .collect()
+    }
+
     #[test]
     fn parse_defect_list_accepts_all_three_forms() {
         let text = "# hot pixels\nPoint 10 20\ncol 5\nCOL 7 2 9\nRow 3\n\nrow 4 1 6 // trailing note\n// end\n";
@@ -662,8 +732,100 @@ mod tests {
         assert_eq!(flagged_positions(&cfa), vec![(8, 9)]);
         assert_eq!(cfa[[8, 9]], FLAG_HOT);
 
-        let mono = defect_map_auto(&img, Some(3.0), None, false);
+        let mono = defect_map_auto(&img, Some(2.0), None, false);
         assert!(flagged_positions(&mono).len() > 1);
+    }
+
+    #[test]
+    fn auto_flags_an_adjacent_hot_pair_and_a_lone_hot_pixel_but_not_a_four_pixel_block() {
+        let mut img = noisy_flat(64, 64, 100.0);
+        img[[10, 10]] = 1100.0;
+        img[[10, 11]] = 1100.0;
+        img[[30, 40]] = 1100.0;
+        for y in 50..52 {
+            for x in 50..52 {
+                img[[y, x]] = 1100.0;
+            }
+        }
+        let candidates = auto_candidates(&img, Some(3.0), None, 1).unwrap();
+        let mut expected_candidates = vec![(10, 10), (10, 11), (30, 40), (50, 50), (50, 51), (51, 50), (51, 51)];
+        expected_candidates.sort();
+        assert_eq!(candidate_positions(&candidates, 64, 1), expected_candidates);
+
+        let map = defect_map_auto(&img, Some(3.0), None, false);
+        assert_eq!(flagged_positions(&map), vec![(10, 10), (10, 11), (30, 40)]);
+        assert_eq!(map[[10, 10]], FLAG_HOT);
+        assert_eq!(map[[10, 11]], FLAG_HOT);
+    }
+
+    #[test]
+    fn auto_drops_a_five_by_five_star_whose_pixels_all_exceed_the_threshold() {
+        let mut img = noisy_flat(64, 64, 100.0);
+        add_gaussian_star(&mut img, 40, 40, 1000.0, 1);
+        img[[10, 10]] = 1100.0;
+
+        let candidates = auto_candidates(&img, Some(3.0), Some(3.0), 1).unwrap();
+        let mut expected_candidates = star_pixels(40, 40, 1);
+        expected_candidates.push((10, 10));
+        expected_candidates.sort();
+        assert_eq!(candidate_positions(&candidates, 64, 1), expected_candidates);
+        assert!(candidate_positions(&candidates, 64, -1).is_empty());
+
+        let map = defect_map_auto(&img, Some(3.0), Some(3.0), false);
+        assert_eq!(flagged_positions(&map), vec![(10, 10)]);
+    }
+
+    #[test]
+    fn auto_cfa_clusters_candidates_on_the_stride_two_lattice() {
+        let mut img = Array2::from_shape_fn((64, 64), |(y, x)| if y % 2 == 0 && x % 2 == 0 { 200.0 } else { 10.0 });
+        img[[8, 9]] = 1000.0;
+        img[[8, 11]] = 1000.0;
+        img[[8, 10]] = 1000.0;
+        add_gaussian_star(&mut img, 20, 17, 1000.0, 2);
+
+        let candidates = auto_candidates(&img, Some(3.0), None, 2).unwrap();
+        let mut expected_candidates = star_pixels(20, 17, 2);
+        expected_candidates.extend([(8, 9), (8, 10), (8, 11)]);
+        expected_candidates.sort();
+        assert_eq!(candidate_positions(&candidates, 64, 1), expected_candidates);
+
+        let cfa = defect_map_auto(&img, Some(3.0), None, true);
+        assert_eq!(flagged_positions(&cfa), vec![(8, 9), (8, 10), (8, 11)]);
+    }
+
+    #[test]
+    fn from_dark_falls_back_to_the_mean_absolute_deviation_when_the_mad_is_zero() {
+        let mut dark = Array2::from_shape_fn((64, 64), |(y, x)| if (y * 7 + x) % 3 == 0 { 101.0 } else { 100.0 });
+        let hot = [(3, 7), (40, 41), (63, 0)];
+        for &(y, x) in &hot {
+            dark[[y, x]] = 5000.0;
+        }
+        let map = defect_map_from_dark(&dark, Some(3.0), Some(3.0));
+        let mut expected = hot.to_vec();
+        expected.sort();
+        assert_eq!(flagged_positions(&map), expected);
+
+        let mut constant = Array2::from_elem((64, 64), 100.0f32);
+        for &(y, x) in &hot {
+            constant[[y, x]] = 5000.0;
+        }
+        assert_eq!(flagged_positions(&defect_map_from_dark(&constant, Some(3.0), Some(3.0))), expected);
+    }
+
+    #[test]
+    fn from_dark_flags_nothing_on_a_perfectly_constant_dark() {
+        let dark = Array2::from_elem((32, 32), 100.0f32);
+        assert!(flagged_positions(&defect_map_from_dark(&dark, Some(3.0), Some(3.0))).is_empty());
+        assert!(flagged_positions(&defect_map_auto(&dark, Some(3.0), Some(3.0), false)).is_empty());
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_mean_absolute_deviation_when_the_mad_is_zero() {
+        let mut img = Array2::from_shape_fn((32, 32), |(y, x)| if y % 3 == 0 && x % 3 == 0 { 101.0 } else { 100.0 });
+        img[[16, 16]] = 5000.0;
+        let map = defect_map_auto(&img, Some(3.0), Some(3.0), false);
+        assert_eq!(flagged_positions(&map), vec![(16, 16)]);
+        assert_eq!(map[[16, 16]], FLAG_HOT);
     }
 
     #[test]
@@ -776,7 +938,7 @@ mod tests {
         img[[5, 5]] = 5000.0;
         let mut dark = Array2::from_elem((8, 8), 10.0f32);
         dark[[1, 1]] = 1000.0;
-        dark[[6, 2]] = -50.0;
+        dark[[6, 2]] = -100.0;
         let cfg = CosmeticConfig {
             use_master_dark: true,
             dark_hot_sigma: Some(3.0),

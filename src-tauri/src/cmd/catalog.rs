@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::cmd::analysis::photometry_planes;
 use crate::cmd::common::{blocking_cmd, load_cached_full};
-use crate::core::analysis::photometry::{measure_star_full, PhotometryConfig};
+use crate::core::analysis::photometry::{measure_star_full, saturation_level, PhotometryConfig, DQ_SATURATION_SOURCE};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
     cross_match, fit_zero_point, observation_epoch_year, propagate_epoch, query_gaia_cached, CatalogRow,
@@ -368,9 +368,11 @@ pub(crate) fn crossmatch_for_path(
     let n_detected = stars.len();
     stars.truncate(max_stars.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_STARS));
 
+    let (level, level_source) = saturation_level(Some(header), entry.stats().max);
+    let saturation_source = if planes.saturated.is_some() { DQ_SATURATION_SOURCE } else { level_source };
     let config = PhotometryConfig {
         aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
-        image_max: Some(entry.stats().max),
+        saturation: Some((level, level_source)),
         ..PhotometryConfig::default()
     };
     let sources = measure_sources(
@@ -411,8 +413,9 @@ pub(crate) fn crossmatch_for_path(
     let zero_point = fit_zero_point(&mag_inst, &cat_mag, &colour, colour_term.unwrap_or(true), &band);
     if pairs.len() > usable.len() {
         warnings.push(format!(
-            "{} saturated star(s) excluded from the zero point",
-            pairs.len() - usable.len()
+            "{} saturated star(s) excluded from the zero point (saturation from {})",
+            pairs.len() - usable.len(),
+            saturation_source
         ));
     }
     if let Some(cal) = &photcal {
@@ -486,6 +489,7 @@ fn csv_cell(value: Option<&Value>) -> String {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => csv_escape(s),
         Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Number(n)) if n.is_f64() => n.as_f64().map_or_else(String::new, |f| f.to_string()),
         Some(Value::Number(n)) => n.to_string(),
         Some(other) => csv_escape(&other.to_string()),
     }
@@ -655,8 +659,8 @@ mod tests {
         let csv = build_csv(CSV_KIND_SOURCES, &items).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
         assert_eq!(lines[0], "x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated");
-        assert_eq!(lines[1], "1.5,2.0,150.0,2.0,1234.5,-7.73,17.27,4.7,120.0,false");
-        assert_eq!(lines[2], "3.0,4.0,150.1,2.1,10.0,-2.5,,4.1,5.0,true");
+        assert_eq!(lines[1], "1.5,2,150,2,1234.5,-7.73,17.27,4.7,120,false");
+        assert_eq!(lines[2], "3,4,150.1,2.1,10,-2.5,,4.1,5,true");
         assert_eq!(lines[3], "");
         assert_eq!(lines.len(), 4, "file ends with a single line terminator");
 
@@ -672,8 +676,8 @@ mod tests {
         let csv = build_csv(CSV_KIND_CATALOG, &tricky).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
         assert_eq!(lines[0], "id,ra,dec,ra_epoch,dec_epoch,pm_ra_masyr,pm_dec_masyr,parallax_mas,g,bp,rp,bp_rp,x,y,on_image");
-        assert_eq!(lines[1], "\"say \"\"hi\"\", friend\",1.0,2.0,1.0,2.0,,,,9.5,,,,10.0,20.0,true");
-        assert_eq!(lines[2], "\"multi\nline\",3.0,4.0,3.0,4.0,,,,,,,,,,false");
+        assert_eq!(lines[1], "\"say \"\"hi\"\", friend\",1,2,1,2,,,,9.5,,,,10,20,true");
+        assert_eq!(lines[2], "\"multi\nline\",3,4,3,4,,,,,,,,,,false");
 
         let matched = vec![json!({
             "star": {"x": 30.0, "y": 30.0, "ra": 150.0, "dec": 2.0, "flux": 100.0, "mag_inst": -5.0, "mag_ab": null, "fwhm": 4.0, "snr": 50.0},
@@ -683,7 +687,7 @@ mod tests {
         let csv = build_csv(CSV_KIND_MATCHES, &matched).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
         assert_eq!(lines[0], "id,x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,cat_ra,cat_dec,g,bp,rp,bp_rp,sep_arcsec,d_ra_arcsec,d_dec_arcsec");
-        assert_eq!(lines[1], "gaia1,30.0,30.0,150.0,2.0,100.0,-5.0,,4.0,50.0,150.0001,2.0001,20.0,,,0.8,0.3,0.2,-0.1");
+        assert_eq!(lines[1], "gaia1,30,30,150,2,100,-5,,4,50,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1");
 
         let err = build_csv("bogus", &[]).unwrap_err().to_string();
         assert!(err.contains("bogus"), "{err}");
@@ -694,6 +698,20 @@ mod tests {
         assert_eq!(n, 2);
         let written = std::fs::read_to_string(&out).unwrap();
         assert_eq!(written, build_csv(CSV_KIND_SOURCES, &items).unwrap());
+    }
+
+    #[test]
+    fn csv_numbers_use_the_shortest_round_trip_form_like_the_frontend_copy() {
+        let items = vec![json!({
+            "x": 2.0, "y": 30, "ra": 0.1, "dec": 0.000123, "flux": 1234.5, "mag_inst": -7.0,
+            "mag_ab": 0.30000000000000004, "fwhm": 4.0, "snr": 120.0, "saturated": false
+        })];
+        let csv = build_csv(CSV_KIND_SOURCES, &items).unwrap();
+        let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
+        assert_eq!(lines[1], "2,30,0.1,0.000123,1234.5,-7,0.30000000000000004,4,120,false");
+        assert_eq!(csv_cell(Some(&json!(2.0))), "2");
+        assert_eq!(csv_cell(Some(&json!(2))), "2");
+        assert_eq!(csv_cell(Some(&json!(-0.5))), "-0.5");
     }
 
     #[test]
@@ -794,15 +812,18 @@ mod tests {
             .iter()
             .max_by(|a, b| a["flux"].as_f64().unwrap().total_cmp(&b["flux"].as_f64().unwrap()))
             .unwrap();
-        assert_eq!(brightest["saturated"], true, "the star at the image maximum is flagged saturated: {brightest:?}");
+        assert_eq!(brightest["saturated"], false, "a single peak at the image maximum is not a flat top: {brightest:?}");
+        assert!(sources.iter().all(|s| s["saturated"] == false), "{sources:?}");
         let zp = &out["zero_point"];
         assert_eq!(zp["band"], "G");
         assert_eq!(zp["colour_term_used"], false);
-        assert_eq!(zp["n_used"], 4, "the saturated star stays matched but leaves the zero-point fit");
+        assert_eq!(zp["n_used"], 5, "every matched star of an unsaturated field enters the zero-point fit");
+        assert_eq!(zp["n_rejected"], 0);
+        assert_eq!(zp["n_without_colour"], 0);
         let value = zp["zp"].as_f64().unwrap();
         assert!((value - TEST_ZERO_POINT).abs() < 0.1, "zp={value}");
         let warnings = out[RES_WARNINGS].as_array().unwrap();
-        assert!(warnings.iter().any(|w| w.as_str().unwrap() == "1 saturated star(s) excluded from the zero point"), "{warnings:?}");
+        assert!(!warnings.iter().any(|w| w.as_str().unwrap().contains("saturated")), "{warnings:?}");
         assert!(!warnings.iter().any(|w| w.as_str().unwrap().contains("flux-calibrated")), "{warnings:?}");
 
         let with_colour = crossmatch_for_path(&path, None, None, None, Some("G".into()), Some(true), None).unwrap();
@@ -817,6 +838,36 @@ mod tests {
         assert_eq!(rp_band["band"], "RP");
         assert!(rp_band["zero_point"].is_null(), "no RP magnitudes in the catalog rows");
         assert_eq!(rp_band["matches"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn crossmatch_excludes_stars_above_the_header_saturation_level_from_the_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_star_field(&dir, "saturate.fits", &[("DATE-OBS", "2016-01-01T00:00:00"), ("SATURATE", "4000")]);
+        let header = wcs_header(&[]);
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), catalog_rows_for_field(&wcs));
+
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        let sources = out["sources"].as_array().unwrap();
+        let brightest = sources
+            .iter()
+            .max_by(|a, b| a["flux"].as_f64().unwrap().total_cmp(&b["flux"].as_f64().unwrap()))
+            .unwrap();
+        assert_eq!(brightest["saturated"], true, "peak 4100 sits above 95% of SATURATE 4000: {brightest:?}");
+        assert_eq!(sources.iter().filter(|s| s["saturated"] == true).count(), 1, "{sources:?}");
+        assert_eq!(out["matches"].as_array().unwrap().len(), 5);
+        let zp = &out["zero_point"];
+        assert_eq!(zp["n_used"], 4, "the saturated star stays matched but leaves the zero-point fit");
+        assert!((zp["zp"].as_f64().unwrap() - TEST_ZERO_POINT).abs() < 0.1, "{zp:?}");
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap() == "1 saturated star(s) excluded from the zero point (saturation from SATURATE)"),
+            "{warnings:?}"
+        );
     }
 
     #[test]
