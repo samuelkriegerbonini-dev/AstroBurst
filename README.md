@@ -31,9 +31,9 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="AstroBurst composing the Pillars of Creation from three HST narrowband frames, with the colour calibration step, the live GPU preview and the analysis panel" width="100%">
+  <img src="docs/screenshots/hero.png" alt="AstroBurst showing a finished composite of the Pillars of Creation, the blend presets of the compose wizard, the live per-channel STF on the GPU and the analysis panel with the plate solution and the Gaia catalog" width="100%">
 </p>
-<p align="center"><em>The Pillars of Creation composed from the three HST/WFPC2 narrowband frames that ship with the app, at the colour step: spectrophotometric calibration against Gaia DR3 on the left, the live GPU composite in the middle, per-channel STF and the analysis panel on the right.</em></p>
+<p align="center"><em>The Pillars of Creation composed from the three HST/WFPC2 narrowband frames that ship with the app. Bottom: the ten wizard steps with the blend presets, resolved by spectral wavelength rather than bin order. Right: per-channel STF running live on the GPU, the plate solution read from the header, and the Gaia DR3 panel.</em></p>
 
 **Latest:** 0.6.0-preview. Since 0.5.8: DS9-class display controls shared with the headless server, any-HDU / any-array image references, DQ decoding and overlays, interactive regions with DS9 `.reg` exchange, a PixInsight-class processing round (rejection families, frame normalization, cosmetic correction, DBE spline background, PixelMath, LHE, HDRMT, exact statistics) and a science round (header photometric calibration, spectral axes and velocities, cube moment maps, SCI+ERR+DQ cutouts, WCS grid, Gaia DR3 catalog). Full history in [CHANGELOG.md](CHANGELOG.md).
 
