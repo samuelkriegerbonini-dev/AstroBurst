@@ -1,7 +1,13 @@
 import { useCallback, useRef, useState } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { processFitsFull, processFits, resampleFits } from "../services/fits";
-import { getHeader } from "../services/header";
+import { getHeader, getFitsExtensions } from "../services/header";
+import {
+  shouldRetryWithoutFullAnalysis,
+  combineAttemptErrors,
+  selectCubePlaneHdu,
+  isCubePlaneResult,
+} from "../utils/fitsErrors";
 import {
   fileStore,
   useFileStats,
@@ -34,6 +40,7 @@ function detectResolutionGroups(files: ProcessedFile[]): ResolutionGroup[] {
   const groups: ResolutionGroup[] = [];
   for (const file of files) {
     if (file.status !== FILE_STATUS.DONE || !file.result?.dimensions) continue;
+    if (isCubePlaneResult(file.result.header, file.result.is_rgb)) continue;
     const [w, h] = file.result.dimensions;
     const existing = groups.find(
       (g) => Math.abs(g.width - w) < 10 && Math.abs(g.height - h) < 10,
@@ -55,6 +62,28 @@ function shouldResample(groups: ResolutionGroup[]) {
   const ratio = (largest.width * largest.height) / (smallest.width * smallest.height);
   if (ratio < RESAMPLE_RATIO_THRESHOLD) return { needed: false, targetGroup: null, resampleGroups: [] as ResolutionGroup[] };
   return { needed: true, targetGroup: smallest, resampleGroups: sorted.slice(1) };
+}
+
+async function loadFirstCubePlane(file: ProcessedFile, rejection: string): Promise<boolean> {
+  let cubeRef: string | null = null;
+  try {
+    const { extensions } = await getFitsExtensions(file.path);
+    cubeRef = selectCubePlaneHdu(extensions);
+  } catch (e) {
+    console.warn(`[AstroBurst] Extension scan failed for ${file.path} after ${rejection}:`, e);
+    return false;
+  }
+  if (cubeRef === null) return false;
+
+  try {
+    const result = await processFitsFull(cubeRef);
+    fileStore.switchImageRef(file.id, cubeRef, result);
+    fileStore.fileDone(file.id, result);
+    return true;
+  } catch (e) {
+    console.warn(`[AstroBurst] Cube plane load failed for ${cubeRef}:`, e);
+    return false;
+  }
 }
 
 export function useFileQueue() {
@@ -82,21 +111,21 @@ export function useFileQueue() {
         fileStore.fileDone(file.id, result);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        const isRetriable = !msg.includes("Calibration reference file")
-          && !msg.includes("No such file")
-          && !msg.includes("not found")
-          && !msg.includes("Permission denied");
-
-        if (isRetriable) {
-          try {
-            const result = await processFits(file.path);
-            let header = null;
-            try { header = await getHeader(file.path); } catch (e) { console.warn(`[AstroBurst] Header fetch failed for ${file.path}:`, e); }
-            fileStore.fileDone(file.id, { ...result, header });
-            return;
-          } catch {}
+        if (!shouldRetryWithoutFullAnalysis(msg)) {
+          const loadedAsCube = await loadFirstCubePlane(file, msg);
+          if (!loadedAsCube) fileStore.fileError(file.id, msg);
+          return;
         }
-        fileStore.fileError(file.id, msg);
+        try {
+          const result = await processFits(file.path);
+          let header = null;
+          try { header = await getHeader(file.path); } catch (e) { console.warn(`[AstroBurst] Header fetch failed for ${file.path}:`, e); }
+          fileStore.fileDone(file.id, { ...result, header });
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          console.warn(`[AstroBurst] Retry without full analysis failed for ${file.path}:`, retryErr);
+          fileStore.fileError(file.id, combineAttemptErrors(msg, retryMsg));
+        }
       }
     },
     [],

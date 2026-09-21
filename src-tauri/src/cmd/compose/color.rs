@@ -5,6 +5,7 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
+use crate::core::compose::white_balance::{analyze_wb_reference, validate_wb_factor, WbChannel};
 use crate::core::imaging::stats::{compute_image_stats, compute_image_stats_with_known_range};
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
@@ -14,6 +15,38 @@ use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_
 use super::rgb::composite_png_path;
 
 const PAR_THRESHOLD: usize = 4_000_000;
+
+pub const RES_EMPTY_CHANNELS: &str = "empty_channels";
+
+fn validated_wb_factors(r_factor: f64, g_factor: f64, b_factor: f64) -> anyhow::Result<(f32, f32, f32)> {
+    Ok((
+        validate_wb_factor(WbChannel::R, r_factor)? as f32,
+        validate_wb_factor(WbChannel::G, g_factor)? as f32,
+        validate_wb_factor(WbChannel::B, b_factor)? as f32,
+    ))
+}
+
+fn auto_wb_payload(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> anyhow::Result<serde_json::Value> {
+    let analysis = analyze_wb_reference(sr, sg, sb);
+
+    let reference = analysis.reference.ok_or_else(|| {
+        anyhow::anyhow!("Auto white balance found no usable signal: R, G and B are all empty. Check the blend inputs.")
+    })?;
+
+    let (wb_r, wb_g, wb_b) = analysis.factors;
+    let empty: Vec<&str> = analysis.empty_channels.iter().map(|c| c.as_str()).collect();
+
+    Ok(json!({
+        RES_R_FACTOR: wb_r,
+        RES_G_FACTOR: wb_g,
+        RES_B_FACTOR: wb_b,
+        RES_STAB_R: analysis.stability.0,
+        RES_STAB_G: analysis.stability.1,
+        RES_STAB_B: analysis.stability.2,
+        RES_REF_CHANNEL: reference.as_str(),
+        RES_EMPTY_CHANNELS: empty,
+    }))
+}
 
 fn calibrate_channel(
     orig: &Array2<f32>,
@@ -111,9 +144,7 @@ pub async fn calibrate_and_scnr_cmd(
         let (orig_r, orig_g, orig_b) = helpers::load_composite_orig_rgb()
             .map_err(|_| anyhow::anyhow!("No original composite. Run Blend first."))?;
 
-        let rf = (r_factor as f32).max(1e-6);
-        let gf = (g_factor as f32).max(1e-6);
-        let bf = (b_factor as f32).max(1e-6);
+        let (rf, gf, bf) = validated_wb_factors(r_factor, g_factor, b_factor)?;
 
         let sr = orig_r.stats();
         let sg = orig_g.stats();
@@ -189,36 +220,84 @@ pub async fn compute_auto_wb_cmd() -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let (entry_r, entry_g, entry_b) = helpers::load_orig_or_composite()?;
 
-        let sr = entry_r.stats();
-        let sg = entry_g.stats();
-        let sb = entry_b.stats();
-
-        let stability = |med: f64, mad: f64| -> f64 {
-            if med > 1e-10 { mad / med } else { f64::MAX }
-        };
-        let stab_r = stability(sr.median, sr.mad);
-        let stab_g = stability(sg.median, sg.mad);
-        let stab_b = stability(sb.median, sb.mad);
-
-        let (wb_r, wb_g, wb_b) = if stab_r <= stab_g && stab_r <= stab_b {
-            let m = sr.median.max(1e-10);
-            (1.0, m / sg.median.max(1e-10), m / sb.median.max(1e-10))
-        } else if stab_b <= stab_g {
-            let m = sb.median.max(1e-10);
-            (m / sr.median.max(1e-10), m / sg.median.max(1e-10), 1.0)
-        } else {
-            let m = sg.median.max(1e-10);
-            (m / sr.median.max(1e-10), 1.0, m / sb.median.max(1e-10))
-        };
-
-        Ok(json!({
-            RES_R_FACTOR: wb_r,
-            RES_G_FACTOR: wb_g,
-            RES_B_FACTOR: wb_b,
-            RES_STAB_R: stab_r,
-            RES_STAB_G: stab_g,
-            RES_STAB_B: stab_b,
-            RES_REF_CHANNEL: if stab_r <= stab_g && stab_r <= stab_b { "R" } else if stab_b <= stab_g { "B" } else { "G" },
-        }))
+        auto_wb_payload(entry_r.stats(), entry_g.stats(), entry_b.stats())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_stats(median: f64, mad: f64) -> ImageStats {
+        ImageStats {
+            min: 0.0,
+            max: 1.0,
+            median,
+            mad,
+            sigma: mad * 1.4826,
+            mean: median,
+            valid_count: 1000,
+        }
+    }
+
+    #[test]
+    fn auto_wb_payload_reports_empty_channels_as_neutral() {
+        let payload = auto_wb_payload(
+            &ImageStats::default(),
+            &make_stats(0.5, 0.01),
+            &ImageStats::default(),
+        )
+        .unwrap();
+
+        assert_eq!(payload[RES_R_FACTOR], 1.0);
+        assert_eq!(payload[RES_G_FACTOR], 1.0);
+        assert_eq!(payload[RES_B_FACTOR], 1.0);
+        assert_eq!(payload[RES_REF_CHANNEL], "G");
+        assert_eq!(payload[RES_EMPTY_CHANNELS], json!(["R", "B"]));
+        assert!(payload[RES_STAB_R].is_null());
+    }
+
+    #[test]
+    fn auto_wb_payload_fails_when_every_channel_is_empty() {
+        let err = auto_wb_payload(
+            &ImageStats::default(),
+            &ImageStats::default(),
+            &ImageStats::default(),
+        )
+        .expect_err("an entirely empty composite must not report success");
+
+        assert!(
+            err.to_string().contains("no usable signal"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn auto_wb_payload_keeps_usable_channels_unchanged() {
+        let sr = make_stats(0.5, 0.001);
+        let sg = make_stats(0.25, 0.02);
+        let sb = make_stats(0.125, 0.03);
+        let payload = auto_wb_payload(&sr, &sg, &sb).unwrap();
+
+        assert_eq!(payload[RES_REF_CHANNEL], "R");
+        assert_eq!(payload[RES_R_FACTOR], 1.0);
+        assert_eq!(payload[RES_G_FACTOR], 2.0);
+        assert_eq!(payload[RES_B_FACTOR], 4.0);
+        assert_eq!(payload[RES_EMPTY_CHANNELS], json!([]));
+    }
+
+    #[test]
+    fn applied_factors_reject_out_of_range_gain() {
+        let err = validated_wb_factors(63_671_007_156.372_07, 1.0, 63_671_007_156.372_07)
+            .expect_err("a 6.4e10 gain must not be applied");
+        assert!(err.to_string().contains("channel R"), "unexpected error: {}", err);
+
+        let err = validated_wb_factors(1.0, 1.0, 0.0)
+            .expect_err("a zero gain must not be applied");
+        assert!(err.to_string().contains("channel B"), "unexpected error: {}", err);
+
+        let (r, g, b) = validated_wb_factors(1.3, 1.0, 2.5).unwrap();
+        assert_eq!((r, g, b), (1.3f32, 1.0f32, 2.5f32));
+    }
 }

@@ -4,92 +4,16 @@ import { AlertTriangle } from "lucide-react";
 import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
-import {BLEND_PRESETS, BlendWeight, FrequencyBin, WizardState, resolveChannelPath} from "../../../utils/wizard";
+import {BLEND_PRESETS, BlendWeight, WizardState, resolveChannelPath} from "../../../utils/wizard";
+import {
+  blendMatrixError,
+  blendWeightsCoverAllColumns,
+  resolvePresetWeights,
+  wavelengthAutoWeights,
+  wavelengthAutoWeightsBalanced,
+  weightsForFilledBins,
+} from "../../../utils/blendWeights";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
-
-const CANONICAL_WAVELENGTH: Record<string, number> = {
-  sii: 673, ha: 656, nii: 658, oiii: 501,
-  r: 620, g: 530, b: 470, l: 550,
-};
-
-function binWavelength(bin: FrequencyBin): number {
-  if (bin.wavelength) return bin.wavelength;
-  return CANONICAL_WAVELENGTH[bin.id] ?? 550;
-}
-
-const round2 = (x: number) => Math.round(x * 100) / 100;
-
-function wavelengthAutoWeights(filledBins: FrequencyBin[]): BlendWeight[] {
-  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
-  const n = sorted.length;
-  return sorted.map((bin, i) => {
-    const p = n > 1 ? i / (n - 1) : 0.5;
-    return {
-      channelId: bin.id,
-      r: round2(Math.max(0, 2 * p - 1)),
-      g: round2(1 - Math.abs(2 * p - 1)),
-      b: round2(Math.max(0, 1 - 2 * p)),
-    };
-  });
-}
-
-function wavelengthAutoWeightsBalanced(filledBins: FrequencyBin[]): BlendWeight[] {
-  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
-  const n = sorted.length;
-  const raw = sorted.map((bin, i) => {
-    const p = n > 1 ? i / (n - 1) : 0.5;
-    return {
-      channelId: bin.id,
-      r: Math.max(0, 2 * p - 1),
-      g: 1 - Math.abs(2 * p - 1),
-      b: Math.max(0, 1 - 2 * p),
-    };
-  });
-
-  const colSum = (k: "r" | "g" | "b") => raw.reduce((acc, w) => acc + w[k], 0);
-  const norm = (total: number) => (total > 1e-6 ? 1 / total : 1);
-  const fr = norm(colSum("r"));
-  const fg = norm(colSum("g"));
-  const fb = norm(colSum("b"));
-
-  return raw.map((w) => ({
-    channelId: w.channelId,
-    r: round2(w.r * fr),
-    g: round2(w.g * fg),
-    b: round2(w.b * fb),
-  }));
-}
-
-function resolvePresetWeights(
-  preset: { weights: BlendWeight[] },
-  filledBins: FrequencyBin[],
-): BlendWeight[] | null {
-  const exact = preset.weights.filter((w) =>
-    filledBins.some((b) => b.id === w.channelId)
-  );
-  if (exact.length > 0) return exact;
-
-  if (filledBins.length < 2) return null;
-
-  const presetWithWl = preset.weights.map((w) => ({
-    ...w,
-    wl: CANONICAL_WAVELENGTH[w.channelId] ?? 550,
-  }));
-  const sortedPreset = [...presetWithWl].sort((a, b) => b.wl - a.wl);
-
-  const sortedBins = [...filledBins].sort((a, b) => binWavelength(b) - binWavelength(a));
-
-  const resolved: BlendWeight[] = sortedPreset
-    .slice(0, sortedBins.length)
-    .map((pw, i) => ({
-      channelId: sortedBins[i].id,
-      r: pw.r,
-      g: pw.g,
-      b: pw.b,
-    }));
-
-  return resolved.length >= 2 ? resolved : null;
-}
 
 interface BlendStepProps {
   state: WizardState;
@@ -112,6 +36,7 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   const [lrgbLoading, setLrgbLoading] = useState(false);
   const [lrgbApplied, setLrgbApplied] = useState(false);
   const [lrgbError, setLrgbError] = useState("");
+  const [presetError, setPresetError] = useState("");
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
 
@@ -119,14 +44,23 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     const preset = BLEND_PRESETS[presetId];
     if (!preset) return;
     const resolved = resolvePresetWeights(preset, filledBins);
-    if (resolved) onWeightsChange(resolved, presetId);
+    if (!resolved) {
+      setPresetError(
+        `${preset.label} cannot fill R, G and B from the channels you loaded — it would leave an output channel black. Use Auto (λ) or set the weights by hand.`,
+      );
+      return;
+    }
+    setPresetError("");
+    onWeightsChange(resolved, presetId);
   }, [filledBins, onWeightsChange]);
 
   const handleAutoWavelength = useCallback(() => {
+    setPresetError("");
     onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
   }, [filledBins, onWeightsChange]);
 
   const handleAutoWavelengthBalanced = useCallback(() => {
+    setPresetError("");
     onWeightsChange(wavelengthAutoWeightsBalanced(filledBins), "auto_wavelength_balanced");
   }, [filledBins, onWeightsChange]);
 
@@ -136,10 +70,9 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
     const sig = filledBins.map((b) => b.id).sort().join("|");
     if (autoAppliedRef.current === sig) return;
     autoAppliedRef.current = sig;
-    const hasAssigned = state.blendWeights.some(
-      (w) => (w.r > 0 || w.g > 0 || w.b > 0) && filledBins.some((b) => b.id === w.channelId),
-    );
-    if (!hasAssigned) {
+    setPresetError("");
+    const applicable = weightsForFilledBins(state.blendWeights, filledBins);
+    if (!blendWeightsCoverAllColumns(applicable)) {
       onWeightsChange(wavelengthAutoWeights(filledBins), "auto_wavelength");
     }
   }, [filledBins, state.blendWeights, onWeightsChange]);
@@ -160,15 +93,23 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
   }, [state.blendWeights, onWeightsChange]);
 
   const activeWeights = useMemo(() => {
-    const existing = new Set(state.blendWeights.map((w) => w.channelId));
-    const base = [...state.blendWeights];
-    for (const bin of filledBins) {
-      if (!existing.has(bin.id)) {
-        base.push({ channelId: bin.id, r: 0, g: 0, b: 0 });
-      }
-    }
-    return base.filter((w) => filledBins.some((b) => b.id === w.channelId));
+    const assigned = weightsForFilledBins(state.blendWeights, filledBins);
+    const covered = new Set(assigned.map((w) => w.channelId));
+    const unassigned: BlendWeight[] = filledBins
+      .filter((b) => !covered.has(b.id))
+      .map((b) => ({ channelId: b.id, r: 0, g: 0, b: 0 }));
+    return [...assigned, ...unassigned];
   }, [state.blendWeights, filledBins]);
+
+  const channelLabels = useMemo(
+    () => activeWeights.map((w) => state.bins.find((b) => b.id === w.channelId)?.shortLabel ?? w.channelId),
+    [activeWeights, state.bins],
+  );
+
+  const matrixError = useMemo(
+    () => blendMatrixError(activeWeights, channelLabels),
+    [activeWeights, channelLabels],
+  );
 
   const channelStages = useMemo(() => {
     const stages: Record<string, "background" | "cropped" | "aligned" | "stacked" | "raw"> = {};
@@ -223,8 +164,12 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         })
         .filter(Boolean) as { channelIdx: number; r: number; g: number; b: number }[];
 
-      if (backendWeights.length === 0) {
-        throw new Error("No weights assigned. Adjust the weight matrix.");
+      const sentLabels = channelOrder.map(
+        (id) => state.bins.find((b) => b.id === id)?.shortLabel ?? id,
+      );
+      const matrixProblem = blendMatrixError(backendWeights, sentLabels);
+      if (matrixProblem) {
+        throw new Error(matrixProblem);
       }
 
       const dir = await getOutputDir();
@@ -313,6 +258,13 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         })}
       </div>
 
+      {presetError && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>{presetError}</span>
+        </div>
+      )}
+
       <div className="flex flex-col gap-0.5">
         <div className="grid grid-cols-[1fr_60px_60px_60px] gap-1 px-1 text-[9px] text-zinc-600 uppercase tracking-wider">
           <span>Channel</span>
@@ -391,6 +343,13 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
             {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
             — the blend will have no common signal. Check the channel assignment in step 1.
           </span>
+        </div>
+      )}
+
+      {matrixError && (
+        <div className="flex items-start gap-1.5 text-[10px] text-red-300/90 bg-red-900/15 border border-red-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>{matrixError}</span>
         </div>
       )}
 

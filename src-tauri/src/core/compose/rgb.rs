@@ -243,8 +243,12 @@ pub fn process_rgb(
     let stats_b = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full),
-        WhiteBalance::Manual(r, g, b) => (*r, *g, *b),
+        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full)?,
+        WhiteBalance::Manual(r, g, b) => (
+            white_balance::validate_wb_factor(white_balance::WbChannel::R, *r)?,
+            white_balance::validate_wb_factor(white_balance::WbChannel::G, *g)?,
+            white_balance::validate_wb_factor(white_balance::WbChannel::B, *b)?,
+        ),
         WhiteBalance::None => (1.0, 1.0, 1.0),
     };
 

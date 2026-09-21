@@ -1,4 +1,4 @@
-use ndarray::{Array2, s};
+use ndarray::{Array2, Zip, s};
 
 use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::white_balance;
@@ -39,18 +39,42 @@ pub struct ProcessedDrizzleRgb {
     pub scnr_applied: bool,
 }
 
+const CHANNEL_LABELS: [&str; 3] = ["R", "G", "B"];
+
+fn mean_of(a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
+    let mut out = Array2::<f32>::zeros(a.raw_dim());
+    Zip::from(&mut out)
+        .and(a)
+        .and(b)
+        .par_for_each(|o, &av, &bv| *o = (av + bv) * 0.5);
+    out
+}
+
 pub fn process_drizzle_rgb(
     channels: &DrizzleRgbChannels,
     config: &DrizzleRgbConfig,
-) -> ProcessedDrizzleRgb {
+) -> Result<ProcessedDrizzleRgb> {
     let dims: Vec<(usize, usize)> = [&channels.r, &channels.g, &channels.b]
         .iter()
         .filter_map(|r| r.as_ref().map(|img| img.dim()))
         .collect();
-    let min_rows = dims.iter().map(|d| d.0).min().unwrap_or(0);
-    let min_cols = dims.iter().map(|d| d.1).min().unwrap_or(0);
-    let out_rows = min_rows;
-    let out_cols = min_cols;
+
+    if dims.len() < 2 {
+        bail!(
+            "RGB drizzle needs at least 2 stacked channels, got {} (R: {} frame(s), G: {} frame(s), B: {} frame(s)); a channel with fewer than 2 frames is dropped before this point",
+            dims.len(),
+            channels.frame_count_r,
+            channels.frame_count_g,
+            channels.frame_count_b
+        );
+    }
+
+    let out_rows = dims.iter().map(|d| d.0).min().unwrap_or(0);
+    let out_cols = dims.iter().map(|d| d.1).min().unwrap_or(0);
+
+    if out_rows == 0 || out_cols == 0 {
+        bail!("RGB drizzle received an empty channel image ({}x{})", out_rows, out_cols);
+    }
 
     let crop = |img: &Array2<f32>| -> Array2<f32> {
         let (r, c) = img.dim();
@@ -61,37 +85,47 @@ pub fn process_drizzle_rgb(
         }
     };
 
-    let zeros = Array2::<f32>::zeros((out_rows, out_cols));
-    let mut r_img = channels.r.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
-    let mut g_img = channels.g.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
-    let mut b_img = channels.b.as_ref().map(|r| crop(r)).unwrap_or_else(|| zeros.clone());
+    let mut planes: [Option<Array2<f32>>; 3] = [
+        channels.r.as_ref().map(|img| crop(img)),
+        channels.g.as_ref().map(|img| crop(img)),
+        channels.b.as_ref().map(|img| crop(img)),
+    ];
 
-    let present: Vec<usize> = [channels.r.is_some(), channels.g.is_some(), channels.b.is_some()]
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &p)| if p { Some(i) } else { None })
-        .collect();
-
-    if config.align && present.len() >= 2 && out_rows > 0 && out_cols > 0 {
-        let reference = match present[0] {
-            0 => r_img.clone(),
-            1 => g_img.clone(),
-            _ => b_img.clone(),
-        };
-        let align_to_ref = |img: &mut Array2<f32>, label: &str| {
-            match align_pair_with_label(&reference, img, config.align_method, out_rows, out_cols, label) {
-                Ok(res) => *img = res.aligned,
-                Err(e) => log::warn!("Drizzle RGB: channel '{}' registration failed: {}", label, e),
-            }
-        };
-        for &idx in &present[1..] {
-            match idx {
-                0 => align_to_ref(&mut r_img, "R"),
-                1 => align_to_ref(&mut g_img, "G"),
-                _ => align_to_ref(&mut b_img, "B"),
+    if config.align {
+        let reference_idx = planes.iter().position(|p| p.is_some()).unwrap_or(0);
+        let reference = planes[reference_idx].clone();
+        if let Some(reference) = reference {
+            for idx in (reference_idx + 1)..planes.len() {
+                if let Some(img) = planes[idx].as_mut() {
+                    let label = CHANNEL_LABELS[idx];
+                    match align_pair_with_label(&reference, img, config.align_method, out_rows, out_cols, label) {
+                        Ok(res) => *img = res.aligned,
+                        Err(e) => log::warn!("Drizzle RGB: channel '{}' registration failed: {}", label, e),
+                    }
+                }
             }
         }
     }
+
+    let [r_plane, g_plane, b_plane] = planes;
+    let (r_img, g_img, b_img) = match (r_plane, g_plane, b_plane) {
+        (Some(r), Some(g), Some(b)) => (r, g, b),
+        (None, Some(g), Some(b)) => {
+            log::warn!("Drizzle RGB: no R channel, synthesising it as the mean of G and B");
+            (mean_of(&g, &b), g, b)
+        }
+        (Some(r), None, Some(b)) => {
+            log::warn!("Drizzle RGB: no G channel, synthesising it as the mean of R and B");
+            let g = mean_of(&r, &b);
+            (r, g, b)
+        }
+        (Some(r), Some(g), None) => {
+            log::warn!("Drizzle RGB: no B channel, synthesising it as the mean of R and G");
+            let b = mean_of(&r, &g);
+            (r, g, b)
+        }
+        _ => bail!("RGB drizzle needs at least 2 stacked channels"),
+    };
 
     let sr_full = stats::compute_image_stats(&r_img);
     let sg_full = stats::compute_image_stats(&g_img);
@@ -102,8 +136,12 @@ pub fn process_drizzle_rgb(
     let stats_b_raw = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full),
-        WhiteBalance::Manual(r, g, b) => (*r, *g, *b),
+        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full)?,
+        WhiteBalance::Manual(r, g, b) => (
+            white_balance::validate_wb_factor(white_balance::WbChannel::R, *r)?,
+            white_balance::validate_wb_factor(white_balance::WbChannel::G, *g)?,
+            white_balance::validate_wb_factor(white_balance::WbChannel::B, *b)?,
+        ),
         WhiteBalance::None => (1.0, 1.0, 1.0),
     };
 
@@ -153,7 +191,7 @@ pub fn process_drizzle_rgb(
         false
     };
 
-    ProcessedDrizzleRgb {
+    Ok(ProcessedDrizzleRgb {
         r_stretched,
         g_stretched,
         b_stretched,
@@ -168,7 +206,7 @@ pub fn process_drizzle_rgb(
         stats_g: stats_g_raw,
         stats_b: stats_b_raw,
         scnr_applied,
-    }
+    })
 }
 
 use anyhow::{bail, Result};
@@ -265,7 +303,7 @@ pub fn drizzle_rgb(
         scale,
     };
 
-    let processed = process_drizzle_rgb(&channels, config);
+    let processed = process_drizzle_rgb(&channels, config)?;
     let (out_rows, out_cols) = processed.output_dims;
 
     let mut pixels = vec![0u8; out_rows * out_cols * 3];
@@ -322,4 +360,102 @@ pub fn drizzle_rgb(
         stats_b: processed.stats_b,
         scnr_applied: processed.scnr_applied,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::compose::AlignMethod;
+    use ndarray::arr2;
+
+    fn config_without_stretch() -> DrizzleRgbConfig {
+        DrizzleRgbConfig {
+            white_balance: WhiteBalance::None,
+            auto_stretch: false,
+            align: false,
+            align_method: AlignMethod::PhaseCorrelation,
+            scnr: None,
+            ..DrizzleRgbConfig::default()
+        }
+    }
+
+    fn channels(
+        r: Option<Array2<f32>>,
+        g: Option<Array2<f32>>,
+        b: Option<Array2<f32>>,
+    ) -> DrizzleRgbChannels {
+        let frames = |c: &Option<Array2<f32>>| if c.is_some() { 2 } else { 0 };
+        let (frame_count_r, frame_count_g, frame_count_b) = (frames(&r), frames(&g), frames(&b));
+        DrizzleRgbChannels {
+            r,
+            g,
+            b,
+            frame_count_r,
+            frame_count_g,
+            frame_count_b,
+            rejected_pixels: 0,
+            input_dims: (2, 2),
+            scale: 2.0,
+        }
+    }
+
+    #[test]
+    fn missing_channel_is_synthesised_instead_of_zero_filled() {
+        let g = arr2(&[[2.0f32, 2.0], [2.0, 2.0]]);
+        let b = arr2(&[[4.0f32, 4.0], [4.0, 4.0]]);
+
+        let processed =
+            process_drizzle_rgb(&channels(None, Some(g), Some(b)), &config_without_stretch()).unwrap();
+
+        assert_eq!(processed.r_wb, arr2(&[[3.0f32, 3.0], [3.0, 3.0]]));
+        assert!(
+            processed.r_wb.iter().all(|v| *v > 0.0),
+            "the absent R channel must not come back as a black plane"
+        );
+    }
+
+    #[test]
+    fn a_manual_white_balance_factor_is_bounded_like_the_automatic_one() {
+        let plane = arr2(&[[2.0f32, 2.0], [2.0, 2.0]]);
+        let with_wb = |wb: WhiteBalance| DrizzleRgbConfig {
+            white_balance: wb,
+            ..config_without_stretch()
+        };
+
+        let err = match process_drizzle_rgb(
+            &channels(Some(plane.clone()), Some(plane.clone()), Some(plane.clone())),
+            &with_wb(WhiteBalance::Manual(1e10, 1.0, 1.0)),
+        ) {
+            Ok(_) => panic!("a manual gain of 1e10 must not reach the pixels"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("channel R"), "{}", err);
+        assert!(err.contains("outside the usable range"), "{}", err);
+
+        assert!(process_drizzle_rgb(
+            &channels(Some(plane.clone()), Some(plane.clone()), Some(plane.clone())),
+            &with_wb(WhiteBalance::Manual(1.0, f64::NAN, 1.0)),
+        )
+        .is_err());
+
+        let ok = process_drizzle_rgb(
+            &channels(Some(plane.clone()), Some(plane.clone()), Some(plane)),
+            &with_wb(WhiteBalance::Manual(2.0, 1.0, 1.0)),
+        )
+        .unwrap();
+        assert_eq!(ok.r_wb, arr2(&[[4.0f32, 4.0], [4.0, 4.0]]));
+    }
+
+    #[test]
+    fn a_single_channel_is_rejected_instead_of_yielding_two_black_planes() {
+        let g = arr2(&[[2.0f32, 2.0], [2.0, 2.0]]);
+
+        let err = match process_drizzle_rgb(&channels(None, Some(g), None), &config_without_stretch()) {
+            Ok(_) => panic!("a lone channel must be rejected, not padded with black planes"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(err.contains("at least 2 stacked channels"), "{}", err);
+        assert!(err.contains("frame(s)"), "{}", err);
+    }
 }

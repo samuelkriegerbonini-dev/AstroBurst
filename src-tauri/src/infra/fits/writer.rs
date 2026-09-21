@@ -84,6 +84,13 @@ fn write_header_card(writer: &mut BufWriter<File>, key: &str, value: &str, comme
     Ok(80)
 }
 
+fn write_string_header_card(writer: &mut BufWriter<File>, key: &str, value: &str) -> Result<usize> {
+    let mut buf = Vec::new();
+    push_header_card(&mut buf, key, value);
+    writer.write_all(&buf)?;
+    Ok(buf.len())
+}
+
 fn write_header_end(writer: &mut BufWriter<File>, bytes_written: usize) -> Result<usize> {
     let end_card = format!("{:<80}", "END");
     writer.write_all(end_card.as_bytes())?;
@@ -93,6 +100,8 @@ fn write_header_end(writer: &mut BufWriter<File>, bytes_written: usize) -> Resul
 }
 
 const I16_BLANK: i16 = i16::MIN;
+
+const RGB_AXIS_TYPE: &str = "RGB";
 
 fn write_be_slice<T: Copy>(
     writer: &mut BufWriter<File>,
@@ -362,7 +371,8 @@ pub fn write_fits_mono_bitpix(
 
     if let Some(hdr) = header {
         static SKIP_MONO: &[&str] = &[
-            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "BZERO", "BSCALE", "BLANK", "END",
+            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4",
+            "BZERO", "BSCALE", "BLANK", "END",
         ];
         bytes += write_extra_header_cards(&mut writer, hdr, SKIP_MONO)?;
     }
@@ -429,6 +439,7 @@ pub fn write_fits_rgb_bitpix(
     bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
     bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
     bytes += write_header_card(&mut writer, "NAXIS3", "3", "RGB channels")?;
+    bytes += write_string_header_card(&mut writer, "CTYPE3", RGB_AXIS_TYPE)?;
     bytes += write_header_card(&mut writer, "BZERO", &format!("{:.10E}", bzero), "")?;
     bytes += write_header_card(&mut writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
     if bitpix == 16 {
@@ -437,7 +448,7 @@ pub fn write_fits_rgb_bitpix(
 
     if let Some(hdr) = header {
         static SKIP_RGB: &[&str] = &[
-            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3",
+            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4", "CTYPE3",
             "BZERO", "BSCALE", "BLANK", "END",
         ];
         bytes += write_extra_header_cards(&mut writer, hdr, SKIP_RGB)?;
@@ -551,7 +562,8 @@ fn encode_quantized_row(row: &[f32], quantize_level: f64, tile_index: usize) -> 
 fn is_reserved_bintable_key(key: &str) -> bool {
     if matches!(
         key,
-        "XTENSION" | "BITPIX" | "NAXIS" | "NAXIS1" | "NAXIS2" | "PCOUNT" | "GCOUNT"
+        "XTENSION" | "BITPIX" | "NAXIS" | "NAXIS1" | "NAXIS2" | "NAXIS3" | "NAXIS4"
+            | "PCOUNT" | "GCOUNT"
             | "TFIELDS" | "BZERO" | "BSCALE" | "BLANK" | "THEAP" | "END"
     ) || key.starts_with("TTYPE")
         || key.starts_with("TFORM")
@@ -582,6 +594,7 @@ fn write_compressed_bintable(
     ncols: usize,
     nrows_per_plane: usize,
     nplanes: usize,
+    colour_axis: bool,
     zbitpix: i32,
     quantized: bool,
     has_null: bool,
@@ -629,6 +642,9 @@ fn write_compressed_bintable(
     if nplanes > 1 {
         push_header_card(&mut buf, "ZNAXIS3", &nplanes.to_string());
     }
+    if colour_axis {
+        push_header_card(&mut buf, "CTYPE3", RGB_AXIS_TYPE);
+    }
     push_header_card(&mut buf, "ZTILE1", &ncols.to_string());
     push_header_card(&mut buf, "ZTILE2", "1");
     if nplanes > 1 {
@@ -657,9 +673,10 @@ fn write_compressed_bintable(
     if let Some(hdr) = header {
         for card in &hdr.cards {
             let key = card.0.trim();
-            if !is_reserved_bintable_key(key) {
-                push_header_card(&mut buf, key, &card.1);
+            if is_reserved_bintable_key(key) || (colour_axis && key == "CTYPE3") {
+                continue;
             }
+            push_header_card(&mut buf, key, &card.1);
         }
     }
 
@@ -745,7 +762,7 @@ pub fn write_fits_mono_rice(
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     write_primary_hdu_stub(&mut writer, None)?;
     write_compressed_bintable(
-        &mut writer, ncols, nrows, 1, bitpix, quantized, has_null, Some(I16_BLANK as i64),
+        &mut writer, ncols, nrows, 1, false, bitpix, quantized, has_null, Some(I16_BLANK as i64),
         bzero, bscale, header, "RICE_1", &encoded_rows,
     )?;
     writer.flush()?;
@@ -808,7 +825,7 @@ pub fn write_fits_rgb_rice(
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     write_primary_hdu_stub(&mut writer, None)?;
     write_compressed_bintable(
-        &mut writer, ncols, nrows, 3, bitpix, quantized, has_null, Some(I16_BLANK as i64),
+        &mut writer, ncols, nrows, 3, true, bitpix, quantized, has_null, Some(I16_BLANK as i64),
         bzero, bscale, header, "RICE_1", &encoded_rows,
     )?;
     writer.flush()?;
@@ -846,7 +863,7 @@ pub(crate) fn write_planes_quantized(
     let encoded_rows: Vec<EncodedRow> = encoded.into_iter().map(|(enc, _)| enc).collect();
 
     write_compressed_bintable(
-        writer, ncols, nrows, planes.len(), -32, true, has_null, None, 0.0, 1.0, header,
+        writer, ncols, nrows, planes.len(), false, -32, true, has_null, None, 0.0, 1.0, header,
         "RICE_1", &encoded_rows,
     )
 }
@@ -890,7 +907,7 @@ pub(crate) fn write_planes_lossless_int(
         .collect();
 
     write_compressed_bintable(
-        writer, ncols, nrows, raw_planes.len(), zbitpix, false, false, blank, bzero, bscale,
+        writer, ncols, nrows, raw_planes.len(), false, zbitpix, false, false, blank, bzero, bscale,
         header, "RICE_1", &encoded_rows,
     )
 }
@@ -939,8 +956,8 @@ pub(crate) fn write_planes_gzip2_lossless(
         .collect();
 
     write_compressed_bintable(
-        writer, ncols, nrows, raw_plane_bytes.len(), zbitpix, false, false, None, bzero, bscale,
-        header, "GZIP_2", &encoded_rows,
+        writer, ncols, nrows, raw_plane_bytes.len(), false, zbitpix, false, false, None, bzero,
+        bscale, header, "GZIP_2", &encoded_rows,
     )
 }
 
@@ -1301,6 +1318,208 @@ mod tests {
                 assert!((o - d).abs() < 2.0, "orig={o} dec={d}");
             }
         }
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn rice_rgb_cube_reloads_through_the_colour_gate() {
+        use crate::infra::fits::reader::try_extract_rgb_mmap;
+
+        let path = std::env::temp_dir().join("ab_rice_rgb_colour_gate.fits");
+        let p = path.to_str().unwrap();
+        let r = smooth_test_image(9, 21);
+        let g = r.mapv(|v| v * 0.5);
+        let b = r.mapv(|v| v + 5.0);
+        let spectral = mk_header(&[("CTYPE3", "WAVE"), ("CUNIT3", "um"), ("OBJECT", "M16")]);
+
+        write_fits_rgb_rice(p, &r, &g, &b, Some(&spectral), -32, 16.0).unwrap();
+
+        let bytes = std::fs::read(p).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let parsed = parse_header_at(&bytes, primary.next_hdu_offset).unwrap();
+        assert_eq!(parsed.header.get("CTYPE3"), Some("RGB"));
+        assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
+
+        let file = File::open(p).unwrap();
+        let rgb = try_extract_rgb_mmap(&file)
+            .unwrap()
+            .expect("a compressed RGB cube must come back as a colour image");
+        assert_eq!(rgb.r.dim(), r.dim());
+        for (orig, decoded) in [(&r, &rgb.r), (&g, &rgb.g), (&b, &rgb.b)] {
+            for (o, d) in orig.iter().zip(decoded.iter()) {
+                assert!((o - d).abs() < 2.0, "orig={o} dec={d}");
+            }
+        }
+        drop(file);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn uncompressed_rgb_cube_marks_its_colour_axis_and_reloads() {
+        use crate::infra::fits::reader::try_extract_rgb_mmap;
+
+        let path = std::env::temp_dir().join("ab_rgb_colour_axis.fits");
+        let p = path.to_str().unwrap();
+        let r = smooth_test_image(6, 8);
+        let g = r.mapv(|v| v * 2.0);
+        let b = r.mapv(|v| v - 1.0);
+        let spectral = mk_header(&[("CTYPE3", "WAVE"), ("CUNIT3", "um")]);
+
+        write_fits_rgb(p, &r, &g, &b, Some(&spectral)).unwrap();
+
+        let bytes = std::fs::read(p).unwrap();
+        let parsed = parse_header_at(&bytes, 0).unwrap();
+        assert_eq!(parsed.header.get("CTYPE3"), Some("RGB"));
+
+        let file = File::open(p).unwrap();
+        let rgb = try_extract_rgb_mmap(&file)
+            .unwrap()
+            .expect("an exported RGB cube must reload as a colour image");
+        assert_eq!(rgb.g, g);
+        drop(file);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn mono_output_never_declares_an_axis_beyond_its_own_naxis() {
+        let path = std::env::temp_dir().join("ab_mono_axis_cards.fits");
+        let p = path.to_str().unwrap();
+        let data = Array2::<f32>::zeros((4, 5));
+        let cube_header = mk_header(&[
+            ("NAXIS3", "7"),
+            ("NAXIS4", "2"),
+            ("OBJECT", "M16"),
+        ]);
+
+        write_fits_mono(p, &data, Some(&cube_header)).unwrap();
+
+        let bytes = std::fs::read(p).unwrap();
+        let parsed = parse_header_at(&bytes, 0).unwrap();
+        assert_eq!(parsed.header.get_i64("NAXIS"), Some(2));
+        assert_eq!(parsed.header.get("NAXIS3"), None);
+        assert_eq!(parsed.header.get("NAXIS4"), None);
+        assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    fn find_card(bytes: &[u8], key: &str) -> String {
+        let mut offset = 0usize;
+        while offset + 80 <= bytes.len() {
+            let card = &bytes[offset..offset + 80];
+            if String::from_utf8_lossy(&card[0..8]).trim() == "END" {
+                break;
+            }
+            if String::from_utf8_lossy(&card[0..8]).trim() == key {
+                return String::from_utf8_lossy(card).to_string();
+            }
+            offset += 80;
+        }
+        panic!("card {key} not found");
+    }
+
+    #[test]
+    fn the_colour_marker_is_written_as_a_quoted_fits_string() {
+        let path = std::env::temp_dir().join("ab_rgb_ctype3_encoding.fits");
+        let p = path.to_str().unwrap();
+        let r = smooth_test_image(4, 6);
+
+        write_fits_rgb(p, &r, &r, &r, None).unwrap();
+        let uncompressed = std::fs::read(p).unwrap();
+        let card = find_card(&uncompressed, "CTYPE3");
+        assert_eq!(&card[8..10], "= ");
+        assert_eq!(
+            card.as_bytes()[10],
+            b'\'',
+            "a FITS character value opens with a quote at column 11: {card:?}"
+        );
+        assert_eq!(card.trim_end(), "CTYPE3  = 'RGB     '");
+        let _ = std::fs::remove_file(p);
+
+        let rice_path = std::env::temp_dir().join("ab_rgb_ctype3_encoding_rice.fits");
+        let rp = rice_path.to_str().unwrap();
+        write_fits_rgb_rice(rp, &r, &r, &r, None, -32, 16.0).unwrap();
+        let compressed = std::fs::read(rp).unwrap();
+        let primary = parse_header_at(&compressed, 0).unwrap();
+        let rice_card = find_card(&compressed[primary.next_hdu_offset..], "CTYPE3");
+        assert_eq!(
+            rice_card.trim_end(),
+            card.trim_end(),
+            "both writers must encode the colour marker identically"
+        );
+        let _ = std::fs::remove_file(rp);
+    }
+
+    #[test]
+    fn rgb_output_never_declares_a_fourth_axis() {
+        let path = std::env::temp_dir().join("ab_rgb_axis_cards.fits");
+        let p = path.to_str().unwrap();
+        let r = smooth_test_image(4, 5);
+        let ramp_header = mk_header(&[("NAXIS3", "5"), ("NAXIS4", "2"), ("OBJECT", "M16")]);
+
+        write_fits_rgb(p, &r, &r, &r, Some(&ramp_header)).unwrap();
+
+        let bytes = std::fs::read(p).unwrap();
+        let parsed = parse_header_at(&bytes, 0).unwrap();
+        assert_eq!(parsed.header.get_i64("NAXIS"), Some(3));
+        assert_eq!(parsed.header.get_i64("NAXIS3"), Some(3));
+        assert_eq!(parsed.header.get("NAXIS4"), None);
+        assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn compressed_mono_output_never_declares_an_axis_beyond_its_own_naxis() {
+        let path = std::env::temp_dir().join("ab_rice_mono_axis_cards.fits");
+        let p = path.to_str().unwrap();
+        let data = smooth_test_image(6, 10);
+        let ramp_header = mk_header(&[("NAXIS3", "5"), ("NAXIS4", "2"), ("OBJECT", "M16")]);
+
+        write_fits_mono_rice(p, &data, Some(&ramp_header), -32, 16.0).unwrap();
+
+        let (header, _) = read_back_mono(p);
+        assert_eq!(header.get("NAXIS3"), None);
+        assert_eq!(header.get("NAXIS4"), None);
+        assert_eq!(header.get("OBJECT"), Some("M16"));
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn a_non_colour_plane_stack_keeps_its_own_third_axis_type() {
+        let path = std::env::temp_dir().join("ab_planes_spectral_axis.fits");
+        let p = path.to_str().unwrap();
+        let planes = vec![
+            smooth_test_image(5, 9),
+            smooth_test_image(5, 9).mapv(|v| v * 2.0),
+            smooth_test_image(5, 9).mapv(|v| v + 3.0),
+        ];
+        let spectral = mk_header(&[("CTYPE3", "WAVE"), ("CUNIT3", "um"), ("EXTNAME", "CUBE")]);
+
+        {
+            let file = File::create(p).unwrap();
+            let mut writer = BufWriter::new(file);
+            write_primary_hdu_stub(&mut writer, None).unwrap();
+            write_planes_quantized(&mut writer, &planes, Some(&spectral), 16.0).unwrap();
+            writer.flush().unwrap();
+        }
+
+        let bytes = std::fs::read(p).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let parsed = parse_header_at(&bytes, primary.next_hdu_offset).unwrap();
+        assert_eq!(parsed.header.get_i64("ZNAXIS3"), Some(3));
+        assert_eq!(
+            parsed.header.get("CTYPE3"),
+            Some("WAVE"),
+            "a generic plane stack must not be relabelled as a colour cube"
+        );
+
+        let file = File::open(p).unwrap();
+        assert!(
+            crate::infra::fits::reader::try_extract_rgb_mmap(&file)
+                .unwrap()
+                .is_none(),
+            "a spectral cube must not reload as an RGB composite"
+        );
+        drop(file);
         let _ = std::fs::remove_file(p);
     }
 

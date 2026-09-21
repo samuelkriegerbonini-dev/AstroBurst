@@ -132,10 +132,17 @@ fn companion_fits_path(source: &Path) -> Option<std::path::PathBuf> {
     fits.exists().then_some(fits)
 }
 
+fn holds_single_plane(info: &HduInfo) -> bool {
+    info.has_data && (info.naxis == 2 || (info.naxis == 3 && info.naxis3 == 1))
+}
+
 fn pick_companion(exts: &[HduInfo], active: &HduInfo, name: &str) -> Option<usize> {
     let candidates: Vec<&HduInfo> = exts
         .iter()
-        .filter(|e| e.has_data && e.extname.as_deref().is_some_and(|n| n.trim().eq_ignore_ascii_case(name)))
+        .filter(|e| {
+            holds_single_plane(e)
+                && e.extname.as_deref().is_some_and(|n| n.trim().eq_ignore_ascii_case(name))
+        })
         .collect();
     match active.extver {
         Some(v) => candidates.iter().find(|e| e.extver == Some(v)).map(|e| e.index),
@@ -373,7 +380,8 @@ pub fn plane_ref(path: &str, info: &HduInfo, is_asdf: bool) -> ImageRef {
 mod tests {
     use super::*;
     use crate::infra::fits::reader::test_fixtures::{
-        ramp_f32, sci_err_dq_mef, write_test_mef, HduData, TestHdu,
+        cube_hdu, empty_primary_cards, ramp_f32, sci_err_dq_mef, write_raw_hdus, write_test_mef,
+        HduData, TestHdu,
     };
 
     fn mef_path(dir: &tempfile::TempDir) -> String {
@@ -423,6 +431,60 @@ mod tests {
 
         let c = companions_of(&ImageRef::auto(&p));
         assert_eq!(c.dq, Some(ImageRef::hdu(&p, 3)));
+    }
+
+    fn sci_2d_hdu(cols: usize, rows: usize) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", cols.to_string()),
+            ("NAXIS2", rows.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", "'SCI     '".into()),
+        ];
+        let data: Vec<u8> = (0..cols * rows).flat_map(|i| (i as f32).to_be_bytes()).collect();
+        (cards, data)
+    }
+
+    #[test]
+    fn a_cube_companion_is_skipped_instead_of_being_read_as_its_first_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube_companions.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                sci_2d_hdu(4, 3),
+                cube_hdu("ERR", 4, 3, 5, &[]),
+                cube_hdu("DQ", 4, 3, 5, &[]),
+            ],
+        );
+        let p = path.to_str().unwrap().to_string();
+
+        let c = companions_of(&ImageRef::hdu(&p, 1));
+        assert_eq!(
+            c,
+            Companions::default(),
+            "a 3D ERR or DQ extension holds one plane per group read, none of which is the companion of plane 1"
+        );
+
+        let single_plane = dir.path().join("single_plane_companions.fits");
+        write_raw_hdus(
+            &single_plane,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                sci_2d_hdu(4, 3),
+                cube_hdu("ERR", 4, 3, 1, &[]),
+            ],
+        );
+        let sp = single_plane.to_str().unwrap().to_string();
+        assert_eq!(
+            companions_of(&ImageRef::hdu(&sp, 1)).err,
+            Some(ImageRef::hdu(&sp, 2)),
+            "a rank-3 extension of a single plane is still a usable companion"
+        );
     }
 
     #[test]
@@ -633,6 +695,48 @@ mod tests {
         assert!(load_plane_header(&ImageRef::auto(&p)).is_err());
         assert!(is_calib_ref_asdf(Path::new("jwst_miri_photom_0042.asdf")));
         assert!(!is_calib_ref_asdf(Path::new("jw01234_cal.asdf")));
+    }
+
+    const RAMP_TREE: &str = "roman:\n  data: !core/ndarray-1.0.0\n    data: [[[1, 2], [3, 4]], [[5, 6], [7, 8]], [[9, 10], [11, 12]]]\n    datatype: float32\n";
+
+    #[test]
+    fn a_multi_plane_asdf_refusal_is_never_read_as_missing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_asdf(&dir, "jw_cal.asdf", RAMP_TREE);
+        mef_path(&dir);
+
+        let refusal = extract_plane_from_asdf(Path::new(&p), None)
+            .err()
+            .expect("a ramp must not load as a 2D image");
+        assert!(
+            !missing_asdf_data(&refusal),
+            "the multi-plane refusal must stay clear of the missing-data phrase that triggers the companion fallback: {refusal:#}"
+        );
+
+        let err = load_plane(&ImageRef::auto(&p))
+            .err()
+            .expect("the refusal must surface instead of opening the companion .fits");
+        assert!(format!("{err:#}").contains("not a single 2D image"), "{err:#}");
+        let header_err = load_plane_header(&ImageRef::auto(&p))
+            .err()
+            .expect("the header path must refuse the ramp too");
+        assert!(format!("{header_err:#}").contains("not a single 2D image"), "{header_err:#}");
+    }
+
+    #[test]
+    fn an_explicit_array_ref_recovers_the_first_plane_of_a_multi_plane_ramp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_asdf(&dir, "jw_ramp.asdf", RAMP_TREE);
+
+        let loaded = load_plane(&ImageRef::array(&p, "roman.data"))
+            .expect("an explicit array ref is the recovery the queue retries with");
+        assert_eq!(loaded.arr.dim(), (2, 2));
+        assert_eq!(loaded.arr[[0, 0]], 1.0);
+        assert_eq!(loaded.arr[[1, 1]], 4.0);
+        assert_eq!(loaded.info.kind, PlaneSelector::Array("roman.data".into()));
+
+        load_plane_header(&ImageRef::array(&p, "roman.data"))
+            .expect("the header path must accept the same explicit ref");
     }
 
     #[test]

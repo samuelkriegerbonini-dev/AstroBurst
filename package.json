@@ -1,7 +1,7 @@
 {
   "name": "astroburst",
   "private": true,
-  "version": "0.6.0-preview",
+  "version": "0.6.0-previewV2",
   "type": "module",
   "scripts": {
     "dev": "vite",

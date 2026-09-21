@@ -190,7 +190,7 @@ pub async fn blend_channels_cmd(
             );
         }
 
-        let (r, g, b) = blend_channels(&refs, &blend_weights, max_rows, max_cols);
+        let (r, g, b) = blend_channels(&refs, &blend_weights, max_rows, max_cols)?;
 
         let (stats_r, (stats_g, stats_b)) = rayon::join(
             || compute_image_stats(&r),

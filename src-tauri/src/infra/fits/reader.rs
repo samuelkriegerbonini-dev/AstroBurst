@@ -237,6 +237,13 @@ pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPl
     if naxis < 2 || naxis1_i <= 0 || naxis2_i <= 0 {
         bail!("HDU {} is not a 2D image (NAXIS={})", hdu_index, naxis);
     }
+    let planes = declared_plane_count(h, naxis);
+    if planes != 1 {
+        bail!(
+            "HDU {} is a {}D cube of {} planes, not a 2D integer plane",
+            hdu_index, naxis, planes
+        );
+    }
     let bitpix = h.get_i64("BITPIX").context("Missing BITPIX")?;
     if !matches!(bitpix, 8 | 16 | 32) {
         bail!("not an integer plane (BITPIX={})", bitpix);
@@ -265,7 +272,7 @@ pub fn auto_hdu_index(file: &File) -> Result<usize> {
     if hdus.is_empty() {
         bail!("No HDUs found in FITS file");
     }
-    select_best_image_hdu(&hdus).context("No 2D image block found in any HDU")
+    select_best_image_hdu(&hdus).with_context(|| no_image_hdu_error(&hdus))
 }
 
 pub fn extract_header_by_index_merged(file: &File, hdu_index: usize) -> Result<HduHeader> {
@@ -410,6 +417,21 @@ struct ScannedHdu {
     info: HduInfo,
     header: HduHeader,
     is_compressed: bool,
+    is_image_hdu: bool,
+    plane_count: i64,
+    is_single_plane_image: bool,
+}
+
+const MAX_FITS_AXES: i64 = 999;
+
+fn declared_plane_count_with_prefix(header: &HduHeader, naxis: i64, prefix: &str) -> i64 {
+    (3..=naxis.clamp(0, MAX_FITS_AXES))
+        .map(|axis| header.get_i64(&format!("{prefix}NAXIS{axis}")).unwrap_or(1))
+        .fold(1i64, |acc, len| acc.saturating_mul(len))
+}
+
+fn declared_plane_count(header: &HduHeader, naxis: i64) -> i64 {
+    declared_plane_count_with_prefix(header, naxis, "")
 }
 
 fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
@@ -422,29 +444,24 @@ fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
         .is_none_or(|x| x.trim().eq_ignore_ascii_case("IMAGE"));
     let is_compressed = compress::is_compressed_image_hdu(h);
 
-    // For a compressed-image BINTABLE, the Z-prefixed keywords (ZNAXIS,
-    // ZNAXISn, ZBITPIX) describe the *decompressed* image shape; NAXIS/
-    // NAXISn/BITPIX describe the BINTABLE storage itself (row bytes, row
-    // count, BITPIX=8) and are irrelevant to callers picking an image HDU.
-    // v1 scope: only 2D (ZNAXIS=2) compressed images are selectable --
-    // 3D compressed cubes fall through as has_data=false rather than
-    // being mis-selected into the plain-image/cube/RGB byte-slicing paths.
-    let (naxis, naxis1, naxis2, naxis3, bitpix, has_data) = if is_compressed {
+    // A compressed-image BINTABLE describes its decompressed image in ZNAXIS/ZNAXISn/ZBITPIX; NAXIS/NAXISn/BITPIX describe the table storage.
+    let (naxis, naxis1, naxis2, naxis3, bitpix, plane_count) = if is_compressed {
         let shape = compress::read_compressed_shape(h);
-        let has_data = (shape.znaxis == 2 || (shape.znaxis == 3 && shape.znaxis3 >= 1))
-            && shape.znaxis1 > 1
-            && shape.znaxis2 > 1;
+        let planes = declared_plane_count_with_prefix(h, shape.znaxis, "Z");
         let naxis3 = if shape.znaxis == 3 { shape.znaxis3 } else { 0 };
-        (shape.znaxis, shape.znaxis1, shape.znaxis2, naxis3, shape.zbitpix, has_data)
+        (shape.znaxis, shape.znaxis1, shape.znaxis2, naxis3, shape.zbitpix, planes)
     } else {
         let naxis = h.get_i64("NAXIS").unwrap_or(0);
         let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
         let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
         let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
         let bitpix = h.get_i64("BITPIX").unwrap_or(0);
-        let has_data = is_image_hdu && naxis >= 2 && naxis1 > 1 && naxis2 > 1;
-        (naxis, naxis1, naxis2, naxis3, bitpix, has_data)
+        (naxis, naxis1, naxis2, naxis3, bitpix, declared_plane_count(h, naxis))
     };
+
+    let decodable = if is_compressed { naxis <= 3 } else { is_image_hdu };
+    let has_data = decodable && naxis >= 2 && naxis1 > 1 && naxis2 > 1 && plane_count >= 1;
+    let is_single_plane_image = has_data && plane_count == 1;
 
     ScannedHdu {
         info: HduInfo {
@@ -462,6 +479,9 @@ fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
         },
         header: parsed.header,
         is_compressed,
+        is_image_hdu,
+        plane_count,
+        is_single_plane_image,
     }
 }
 
@@ -555,13 +575,13 @@ fn scan_hdu_headers(file: &File) -> Result<Vec<ScannedHdu>> {
 }
 
 fn select_best_image_hdu(hdus: &[ScannedHdu]) -> Option<usize> {
-    if hdus.len() == 1 && hdus[0].info.has_data {
+    if hdus.len() == 1 && hdus[0].is_single_plane_image {
         return Some(0);
     }
 
     for (i, hdu) in hdus.iter().enumerate() {
         if let Some(ref name) = hdu.info.extname {
-            if name.eq_ignore_ascii_case("SCI") && hdu.info.has_data {
+            if name.eq_ignore_ascii_case("SCI") && hdu.is_single_plane_image {
                 return Some(i);
             }
         }
@@ -571,16 +591,189 @@ fn select_best_image_hdu(hdus: &[ScannedHdu]) -> Option<usize> {
         if i == 0 {
             continue;
         }
-        if hdu.info.has_data {
+        if hdu.is_single_plane_image {
             return Some(i);
         }
     }
 
-    if hdus.first().map(|h| h.info.has_data).unwrap_or(false) {
+    if hdus.first().map(|h| h.is_single_plane_image).unwrap_or(false) {
         return Some(0);
     }
 
     None
+}
+
+fn xtension_label(header: &HduHeader) -> &str {
+    header
+        .get("XTENSION")
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .unwrap_or("PRIMARY")
+}
+
+fn shape_label(hdu: &ScannedHdu) -> String {
+    let prefix = if hdu.is_compressed { "Z" } else { "" };
+    let naxis = hdu.info.naxis;
+    if naxis <= 0 {
+        return format!("{prefix}NAXIS=0");
+    }
+    let dims: Vec<String> = (1..=naxis.clamp(1, MAX_FITS_AXES))
+        .map(|axis| {
+            hdu.header
+                .get_i64(&format!("{prefix}NAXIS{axis}"))
+                .unwrap_or(0)
+                .to_string()
+        })
+        .collect();
+    format!("{prefix}NAXIS={naxis} [{}]", dims.join("x"))
+}
+
+fn hdu_usability_reason(hdu: &ScannedHdu) -> String {
+    if hdu.is_single_plane_image {
+        return "loadable 2D image".to_string();
+    }
+    if !hdu.is_image_hdu && !hdu.is_compressed {
+        return format!("{} extension, holds no image pixels", xtension_label(&hdu.header));
+    }
+    if hdu.info.naxis <= 0 {
+        return "header only, no pixel data".to_string();
+    }
+    if hdu.info.naxis == 1 {
+        return "1D array, not an image".to_string();
+    }
+    if hdu.plane_count > 1 {
+        return format!(
+            "{}D cube of {} planes, not a single 2D image",
+            hdu.info.naxis, hdu.plane_count
+        );
+    }
+    if hdu.plane_count <= 0 {
+        return "declared axis of length zero, no pixel data".to_string();
+    }
+    if hdu.is_compressed && hdu.info.naxis > 3 {
+        return format!(
+            "compressed {}D block, only 2D and 3D compressed images are supported",
+            hdu.info.naxis
+        );
+    }
+    format!(
+        "degenerate image dimensions {}x{}",
+        hdu.info.naxis1, hdu.info.naxis2
+    )
+}
+
+fn hdu_label(hdu: &ScannedHdu) -> String {
+    let name = hdu
+        .info
+        .extname
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| xtension_label(&hdu.header).to_string());
+    format!("HDU {} ({})", hdu.info.index, name)
+}
+
+fn most_image_like_hdu(hdus: &[ScannedHdu]) -> Option<&ScannedHdu> {
+    let rank = |hdu: &ScannedHdu| {
+        (
+            u8::from((hdu.is_image_hdu || hdu.is_compressed) && hdu.info.naxis >= 2),
+            u8::from(
+                hdu.info
+                    .extname
+                    .as_deref()
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case("SCI")),
+            ),
+            hdu.info.naxis1.saturating_mul(hdu.info.naxis2),
+        )
+    };
+    hdus.iter()
+        .filter(|hdu| hdu.info.naxis > 0)
+        .fold(None, |best: Option<&ScannedHdu>, hdu| match best {
+            Some(current) if rank(current) >= rank(hdu) => Some(current),
+            _ => Some(hdu),
+        })
+        .or_else(|| hdus.first())
+}
+
+const MAX_INVENTORY_ENTRIES: usize = 12;
+
+fn no_image_hdu_error(hdus: &[ScannedHdu]) -> String {
+    let mut entries: Vec<String> = hdus
+        .iter()
+        .take(MAX_INVENTORY_ENTRIES)
+        .map(|hdu| {
+            format!(
+                "[{}] EXTNAME={} XTENSION={} {} -- {}",
+                hdu.info.index,
+                hdu.info
+                    .extname
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("(none)"),
+                xtension_label(&hdu.header),
+                shape_label(hdu),
+                hdu_usability_reason(hdu),
+            )
+        })
+        .collect();
+    if hdus.len() > MAX_INVENTORY_ENTRIES {
+        entries.push(format!("... {} more HDUs", hdus.len() - MAX_INVENTORY_ENTRIES));
+    }
+    let verdict = match most_image_like_hdu(hdus) {
+        Some(hdu) => format!("{}: {}; ", hdu_label(hdu), hdu_usability_reason(hdu)),
+        None => String::new(),
+    };
+    format!(
+        "{verdict}no HDU in this file holds a 2D image. HDUs: {}",
+        entries.join("; ")
+    )
+}
+
+const COLOUR_AXIS_NAMES: [&str; 3] = ["RGB", "COLOR", "COLOUR"];
+
+const NON_COLOUR_AXIS_TYPES: [&str; 12] = [
+    "WAVE", "AWAV", "FREQ", "VELO", "VRAD", "VOPT", "ENER", "WAVN", "ZOPT", "BETA", "STOKES",
+    "TIME",
+];
+
+fn normalised_card(value: &str) -> String {
+    value.trim().trim_matches('\'').trim().to_ascii_uppercase()
+}
+
+fn is_colour_marker(value: &str) -> bool {
+    let normalised = normalised_card(value);
+    COLOUR_AXIS_NAMES.contains(&normalised.as_str())
+}
+
+fn is_non_colour_axis_type(value: &str) -> bool {
+    let normalised = normalised_card(value);
+    let head = normalised.split('-').next().unwrap_or("");
+    NON_COLOUR_AXIS_TYPES.contains(&head)
+}
+
+fn has_rgb_marker(hdu: &ScannedHdu) -> bool {
+    hdu.header.get("CTYPE3").is_some_and(is_colour_marker)
+        || hdu.info.extname.as_deref().is_some_and(is_colour_marker)
+}
+
+fn third_axis_is_not_colour(hdu: &ScannedHdu) -> bool {
+    let h = &hdu.header;
+    h.get("CTYPE3").is_some_and(is_non_colour_axis_type)
+        || h.get("CUNIT3").is_some_and(|u| !normalised_card(u).is_empty())
+        || (h.get_f64("CRVAL3").is_some() && h.get_f64("CDELT3").is_some())
+}
+
+fn select_rgb_cube_hdu(hdus: &[ScannedHdu]) -> Option<usize> {
+    hdus.iter().position(|hdu| {
+        (hdu.is_image_hdu || hdu.is_compressed)
+            && hdu.info.naxis == 3
+            && (3..=4).contains(&hdu.info.naxis3)
+            && hdu.info.naxis1 > 1
+            && hdu.info.naxis2 > 1
+            && (has_rgb_marker(hdu) || !third_axis_is_not_colour(hdu))
+    })
 }
 
 fn build_merged_header(hdus: &[ScannedHdu], selected_idx: usize) -> HduHeader {
@@ -597,12 +790,32 @@ fn extract_image_from_hdu(
     mmap: &[u8],
     hdu: &ScannedHdu,
 ) -> Result<Array2<f32>> {
+    if !hdu.is_single_plane_image {
+        bail!(
+            "HDU {} cannot be loaded as a 2D image: {}",
+            hdu.info.index,
+            hdu_usability_reason(hdu)
+        );
+    }
+    decode_hdu_plane(mmap, hdu, 0)
+}
+
+fn decode_hdu_plane(
+    mmap: &[u8],
+    hdu: &ScannedHdu,
+    plane_index: usize,
+) -> Result<Array2<f32>> {
     if hdu.is_compressed {
         let mut planes = compress::decode_compressed_planes(mmap, &hdu.header, hdu.info.data_start)?;
-        if planes.is_empty() {
-            bail!("Compressed image HDU decoded to zero planes");
+        if plane_index >= planes.len() {
+            bail!(
+                "Compressed image HDU {} decoded to {} planes, plane {} was requested",
+                hdu.info.index,
+                planes.len(),
+                plane_index
+            );
         }
-        return Ok(planes.swap_remove(0));
+        return Ok(planes.swap_remove(plane_index));
     }
 
     let h = &hdu.header;
@@ -623,16 +836,22 @@ fn extract_image_from_hdu(
         .and_then(|v| v.checked_mul(bytes_per_pixel))
         .context("Image size overflow")?;
 
-    let data_end = hdu
+    let plane_offset = slice_bytes
+        .checked_mul(plane_index)
+        .context("Plane offset overflow")?;
+    let data_begin = hdu
         .info
         .data_start
+        .checked_add(plane_offset)
+        .context("Plane start overflow")?;
+    let data_end = data_begin
         .checked_add(slice_bytes)
         .context("Image data end overflow")?;
     if data_end > mmap.len() {
         bail!("Image data exceeds file size");
     }
 
-    let raw = &mmap[hdu.info.data_start..data_end];
+    let raw = &mmap[data_begin..data_end];
     let (bzero, bscale) = scaling(h);
     let pixels = decode_pixels_blank(raw, bitpix, bscale, bzero, blank_value(h));
     let image = Array2::from_shape_vec((naxis2, naxis1), pixels)
@@ -677,7 +896,7 @@ pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
     let is_mef = hdus.len() > 1;
 
     let selected_idx = select_best_image_hdu(&hdus)
-        .context("No 2D image block found in any HDU")?;
+        .with_context(|| no_image_hdu_error(&hdus))?;
 
     let image = extract_image_from_hdu(&mmap, &hdus[selected_idx])?;
     let header = build_merged_header(&hdus, selected_idx);
@@ -714,7 +933,7 @@ pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
     }
 
     let selected_idx = select_best_image_hdu(&hdus)
-        .context("No 2D image block found in any HDU")?;
+        .with_context(|| no_image_hdu_error(&hdus))?;
 
     Ok(build_merged_header(&hdus, selected_idx))
 }
@@ -727,16 +946,26 @@ pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<Mmap
         bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
     }
 
-    if !hdus[hdu_index].info.has_data {
-        bail!("HDU {} has no image data", hdu_index);
+    let hdu = &hdus[hdu_index];
+    if !hdu.info.has_data {
+        bail!(
+            "HDU {} cannot be loaded as a 2D image: {}",
+            hdu_index,
+            hdu_usability_reason(hdu)
+        );
     }
 
-    let image = extract_image_from_hdu(&mmap, &hdus[hdu_index])?;
+    let image = decode_hdu_plane(&mmap, hdu, 0)?;
     let header = build_merged_header(&hdus, hdu_index);
 
-    let selected_extension = if hdu_index > 0 {
-        hdus[hdu_index].info.extname.clone()
-            .or_else(|| Some(format!("HDU {}", hdu_index)))
+    let base_extension = hdus[hdu_index].info.extname.clone()
+        .or_else(|| Some(format!("HDU {}", hdu_index)));
+    let selected_extension = if hdus[hdu_index].plane_count > 1 {
+        base_extension.map(|name| {
+            format!("{} (plane 1 of {})", name.trim(), hdus[hdu_index].plane_count)
+        })
+    } else if hdu_index > 0 {
+        base_extension
     } else {
         None
     };
@@ -763,19 +992,14 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
         bail!("No HDUs found in FITS file");
     }
 
-    let selected_idx = match select_best_image_hdu(&hdus) {
+    let selected_idx = match select_rgb_cube_hdu(&hdus) {
         Some(i) => i,
         None => return Ok(None),
     };
 
     let hdu = &hdus[selected_idx];
     let h = &hdu.header;
-    let naxis = hdu.info.naxis;
     let naxis3 = hdu.info.naxis3;
-
-    if naxis != 3 || naxis3 < 3 || naxis3 > 4 {
-        return Ok(None);
-    }
 
     let (r, g, b) = if hdu.is_compressed {
         let mut planes = compress::decode_compressed_planes(&mmap, h, hdu.info.data_start)?;
@@ -966,6 +1190,49 @@ pub mod test_fixtures {
         out
     }
 
+    pub fn write_raw_hdus(path: &std::path::Path, hdus: &[(Vec<(&'static str, String)>, Vec<u8>)]) {
+        let mut buf = Vec::new();
+        for (cards, data) in hdus {
+            buf.extend_from_slice(&header_block(cards));
+            buf.extend_from_slice(&pad(data.clone()));
+        }
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
+    pub fn empty_primary_cards() -> Vec<(&'static str, String)> {
+        vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "0".into()),
+            ("EXTEND", "T".into()),
+        ]
+    }
+
+    pub fn cube_hdu(
+        extname: &'static str,
+        cols: usize,
+        rows: usize,
+        planes: usize,
+        extra: &[(&'static str, String)],
+    ) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let mut cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "3".into()),
+            ("NAXIS1", cols.to_string()),
+            ("NAXIS2", rows.to_string()),
+            ("NAXIS3", planes.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", format!("'{extname:<8}'")),
+        ];
+        cards.extend(extra.iter().cloned());
+        let data: Vec<u8> = (0..cols * rows * planes)
+            .flat_map(|i| (i as f32).to_be_bytes())
+            .collect();
+        (cards, data)
+    }
+
     pub fn write_test_mef(path: &std::path::Path, primary_cards: &[(&str, String)], hdus: &[TestHdu]) {
         let mut buf = Vec::new();
         let mut primary: Vec<(&str, String)> = vec![
@@ -1136,6 +1403,31 @@ mod tests {
     }
 
     #[test]
+    fn extract_int_plane_by_index_rejects_a_cube() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq_cube.fits");
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "32".into()),
+            ("NAXIS", "3".into()),
+            ("NAXIS1", "4".into()),
+            ("NAXIS2", "3".into()),
+            ("NAXIS3", "5".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", "'DQ      '".into()),
+        ];
+        let data: Vec<u8> = (0..4 * 3 * 5).flat_map(|i| (i as i32).to_be_bytes()).collect();
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (cards, data)]);
+        let file = File::open(&path).unwrap();
+        let err = extract_int_plane_by_index(&file, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("3D cube of 5 planes"),
+            "a DQ cube must not be silently truncated to plane 0: {err}"
+        );
+    }
+
+    #[test]
     fn extract_int_plane_by_index_rejects_compressed() {
         let dir = match compressed_fixtures_dir() {
             Some(d) => d,
@@ -1168,6 +1460,359 @@ mod tests {
         assert_eq!(merged.get("EXTNAME"), Some("SCI"));
         assert_eq!(merged.get("EXTEND"), Some("T"));
         assert!(extract_header_by_index_merged(&file, 5).is_err());
+    }
+
+    fn bintable_hdu(
+        extname: &'static str,
+        row_bytes: usize,
+        rows: usize,
+    ) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'BINTABLE'".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", row_bytes.to_string()),
+            ("NAXIS2", rows.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("TFIELDS", "2".into()),
+            ("TTYPE1", "'WAVELENGTH'".into()),
+            ("TFORM1", "'1D      '".into()),
+            ("TTYPE2", "'FLUX    '".into()),
+            ("TFORM2", "'1D      '".into()),
+            ("EXTNAME", format!("'{extname:<8}'")),
+        ];
+        (cards, vec![0u8; row_bytes * rows])
+    }
+
+    #[test]
+    fn spectral_cube_is_rejected_instead_of_collapsing_to_plane_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s3d.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 5, &[("CTYPE3", "'WAVE    '".into())]),
+            ],
+        );
+        let file = File::open(&path).unwrap();
+
+        let err = auto_hdu_index(&file).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.starts_with("HDU 1 (SCI): 3D cube of 5 planes"), "{msg}");
+        assert!(msg.contains("NAXIS=3 [4x3x5]"), "{msg}");
+
+        assert!(extract_image_mmap(&file).is_err());
+        assert!(extract_header_mmap(&file).is_err());
+        assert!(load_fits_image(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn spectral_cube_stays_openable_through_an_explicit_hdu_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s3d_explicit.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 5, &[("CTYPE3", "'WAVE    '".into())]),
+            ],
+        );
+        let file = File::open(&path).unwrap();
+
+        let exts = list_extensions(&file).unwrap();
+        assert!(exts[1].has_data, "the cube HDU still holds pixel data");
+        assert_eq!(exts[1].naxis3, 5);
+
+        let result = extract_image_mmap_by_index(&file, 1).expect("explicit #hdu= must open a cube");
+        assert_eq!(result.image.dim(), (3, 4));
+        assert_eq!(result.image[[0, 0]], 0.0);
+        assert_eq!(result.image[[2, 3]], 11.0);
+        assert_eq!(result.selected_extension.as_deref(), Some("SCI (plane 1 of 5)"));
+        assert_eq!(result.header.get("NAXIS3"), Some("5"));
+
+        let by_ref = format!("{}#hdu=1", path.to_str().unwrap());
+        assert_eq!(load_fits_image(&by_ref).unwrap().dim(), (3, 4));
+    }
+
+    #[test]
+    fn degenerate_third_and_fourth_axes_still_load_as_2d() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("degenerate.fits");
+        let mut four_d = cube_hdu("SCI", 5, 2, 1, &[]);
+        four_d.0.retain(|(k, _)| *k != "NAXIS");
+        four_d.0.push(("NAXIS", "4".into()));
+        four_d.0.push(("NAXIS4", "1".into()));
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 6, 4, 1, &[]),
+            ],
+        );
+        let file = File::open(&path).unwrap();
+        assert_eq!(auto_hdu_index(&file).unwrap(), 1);
+        assert_eq!(extract_image_mmap(&file).unwrap().image.dim(), (4, 6));
+
+        let path4 = dir.path().join("degenerate4.fits");
+        write_raw_hdus(&path4, &[(empty_primary_cards(), Vec::new()), four_d]);
+        let file4 = File::open(&path4).unwrap();
+        assert_eq!(auto_hdu_index(&file4).unwrap(), 1);
+        assert_eq!(extract_image_mmap(&file4).unwrap().image.dim(), (2, 5));
+    }
+
+    #[test]
+    fn rejection_message_lists_the_hdu_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x1d.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                bintable_hdu("EXTRACT1D", 16, 4),
+            ],
+        );
+        let file = File::open(&path).unwrap();
+        let msg = format!("{:#}", auto_hdu_index(&file).unwrap_err());
+
+        assert!(msg.contains("EXTRACT1D"), "{msg}");
+        assert!(msg.contains("BINTABLE"), "{msg}");
+        assert!(msg.contains("holds no image pixels"), "{msg}");
+        assert!(msg.contains("[0] EXTNAME=(none) XTENSION=PRIMARY"), "{msg}");
+        assert!(!msg.contains("not found"), "{msg}");
+        assert!(!msg.contains("No such file"), "{msg}");
+        assert!(!msg.contains("Permission denied"), "{msg}");
+        assert!(!msg.contains("Calibration reference file"), "{msg}");
+    }
+
+    #[test]
+    fn rejection_message_front_loads_the_verdict_for_the_most_image_like_hdu() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let x1d = dir.path().join("verdict_x1d.fits");
+        write_raw_hdus(
+            &x1d,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                bintable_hdu("EXTRACT1D", 16, 4),
+            ],
+        );
+        let msg = format!("{:#}", auto_hdu_index(&File::open(&x1d).unwrap()).unwrap_err());
+        assert!(
+            msg.starts_with("HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels;"),
+            "{msg}"
+        );
+
+        let s3d = dir.path().join("verdict_s3d.fits");
+        write_raw_hdus(
+            &s3d,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 6, 4, 1400, &[("CTYPE3", "'WAVE    '".into())]),
+                cube_hdu("ERR", 6, 4, 1400, &[]),
+                bintable_hdu("HDRTAB", 8, 2),
+            ],
+        );
+        let msg = format!("{:#}", auto_hdu_index(&File::open(&s3d).unwrap()).unwrap_err());
+        assert!(
+            msg.starts_with("HDU 1 (SCI): 3D cube of 1400 planes, not a single 2D image;"),
+            "{msg}"
+        );
+        assert!(msg[..50].contains("cube"), "the first 50 rendered characters must carry the verdict: {msg}");
+    }
+
+    #[test]
+    fn rgb_cube_is_rejected_only_when_the_third_axis_is_not_a_colour_axis() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let unmarked = dir.path().join("three_plane.fits");
+        write_raw_hdus(
+            &unmarked,
+            &[(empty_primary_cards(), Vec::new()), cube_hdu("SCI", 4, 3, 3, &[])],
+        );
+        let stack = try_extract_rgb_mmap(&File::open(&unmarked).unwrap())
+            .unwrap()
+            .expect("an unmarked 3-plane stack is still a colour composite");
+        assert_eq!(stack.r.dim(), (3, 4));
+        assert_eq!(stack.b[[0, 0]], 24.0);
+
+        let spectral = dir.path().join("three_plane_wave.fits");
+        write_raw_hdus(
+            &spectral,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'WAVE    '".into())]),
+            ],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&spectral).unwrap()).unwrap().is_none());
+
+        let velocity = dir.path().join("three_plane_velo.fits");
+        write_raw_hdus(
+            &velocity,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'VELO-LSR'".into())]),
+            ],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&velocity).unwrap()).unwrap().is_none());
+
+        let calibrated_axis = dir.path().join("three_plane_cunit.fits");
+        write_raw_hdus(
+            &calibrated_axis,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CUNIT3", "'um      '".into())]),
+            ],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&calibrated_axis).unwrap()).unwrap().is_none());
+
+        let sampled_axis = dir.path().join("three_plane_crval.fits");
+        write_raw_hdus(
+            &sampled_axis,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CRVAL3", "4.9".into()), ("CDELT3", "0.008".into())]),
+            ],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&sampled_axis).unwrap()).unwrap().is_none());
+
+        let colour_named_table = dir.path().join("colortab.fits");
+        write_raw_hdus(
+            &colour_named_table,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("COLORTAB", 4, 3, 3, &[("CTYPE3", "'WAVE    '".into())]),
+            ],
+        );
+        assert!(
+            try_extract_rgb_mmap(&File::open(&colour_named_table).unwrap()).unwrap().is_none(),
+            "EXTNAME must match a colour name exactly, not merely contain one"
+        );
+
+        let ctype = dir.path().join("rgb_ctype.fits");
+        write_raw_hdus(
+            &ctype,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'RGB     '".into())]),
+            ],
+        );
+        let rgb = try_extract_rgb_mmap(&File::open(&ctype).unwrap()).unwrap().unwrap();
+        assert_eq!(rgb.r.dim(), (3, 4));
+        assert_eq!(rgb.r[[0, 0]], 0.0);
+        assert_eq!(rgb.g[[0, 0]], 12.0);
+        assert_eq!(rgb.b[[0, 0]], 24.0);
+
+        let named = dir.path().join("rgb_extname.fits");
+        write_raw_hdus(
+            &named,
+            &[(empty_primary_cards(), Vec::new()), cube_hdu("RGB", 4, 3, 3, &[])],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&named).unwrap()).unwrap().is_some());
+
+        let marked_with_axis_cards = dir.path().join("rgb_with_axis_cards.fits");
+        write_raw_hdus(
+            &marked_with_axis_cards,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu(
+                    "SCI",
+                    4,
+                    3,
+                    3,
+                    &[("CTYPE3", "'RGB     '".into()), ("CUNIT3", "'        '".into())],
+                ),
+            ],
+        );
+        assert!(
+            try_extract_rgb_mmap(&File::open(&marked_with_axis_cards).unwrap()).unwrap().is_some(),
+            "an explicit colour CTYPE3 outranks the non-colour axis heuristics"
+        );
+    }
+
+    #[test]
+    fn compressed_3d_cube_is_not_selectable_as_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zcube.fits");
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'BINTABLE'".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", "8".into()),
+            ("NAXIS2", "3".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("TFIELDS", "1".into()),
+            ("TTYPE1", "'COMPRESSED_DATA'".into()),
+            ("TFORM1", "'1PB     '".into()),
+            ("ZIMAGE", "T".into()),
+            ("ZCMPTYPE", "'RICE_1  '".into()),
+            ("ZBITPIX", "-32".into()),
+            ("ZNAXIS", "3".into()),
+            ("ZNAXIS1", "4".into()),
+            ("ZNAXIS2", "3".into()),
+            ("ZNAXIS3", "5".into()),
+            ("EXTNAME", "'SCI     '".into()),
+        ];
+        write_raw_hdus(
+            &path,
+            &[(empty_primary_cards(), Vec::new()), (cards, vec![0u8; 24])],
+        );
+        let file = File::open(&path).unwrap();
+        let msg = format!("{:#}", auto_hdu_index(&file).unwrap_err());
+        assert!(msg.starts_with("HDU 1 (SCI): 3D cube of 5 planes"), "{msg}");
+        assert!(msg.contains("ZNAXIS=3 [4x3x5]"), "{msg}");
+    }
+
+    #[test]
+    fn compressed_four_dimensional_block_reports_its_real_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("z4d.fits");
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'BINTABLE'".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", "8".into()),
+            ("NAXIS2", "3".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("TFIELDS", "1".into()),
+            ("TTYPE1", "'COMPRESSED_DATA'".into()),
+            ("TFORM1", "'1PB     '".into()),
+            ("ZIMAGE", "T".into()),
+            ("ZCMPTYPE", "'RICE_1  '".into()),
+            ("ZBITPIX", "-32".into()),
+            ("ZNAXIS", "4".into()),
+            ("ZNAXIS1", "100".into()),
+            ("ZNAXIS2", "100".into()),
+            ("ZNAXIS3", "1".into()),
+            ("ZNAXIS4", "7".into()),
+            ("EXTNAME", "'SCI     '".into()),
+        ];
+        write_raw_hdus(
+            &path,
+            &[(empty_primary_cards(), Vec::new()), (cards, vec![0u8; 24])],
+        );
+        let file = File::open(&path).unwrap();
+        let msg = format!("{:#}", auto_hdu_index(&file).unwrap_err());
+        assert!(msg.contains("4D cube of 7 planes"), "{msg}");
+        assert!(!msg.contains("degenerate image dimensions"), "{msg}");
+    }
+
+    #[test]
+    fn declared_plane_count_saturates_instead_of_overflowing() {
+        let header = HduHeader {
+            cards: vec![],
+            index: HashMap::from([
+                ("NAXIS".to_string(), "6".to_string()),
+                ("NAXIS3".to_string(), "3037000500".to_string()),
+                ("NAXIS4".to_string(), "3037000500".to_string()),
+                ("NAXIS5".to_string(), "3037000500".to_string()),
+                ("NAXIS6".to_string(), "3037000500".to_string()),
+            ]),
+        };
+        assert_eq!(declared_plane_count(&header, 6), i64::MAX);
     }
 
     #[test]

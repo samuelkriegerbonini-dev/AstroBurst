@@ -17,7 +17,13 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { RunButton, SectionHeader } from "../ui";
-import { filterToWavelengthNm } from "../../utils/filterWavelengths";
+import { filterCodeAndWavelengthNm } from "../../utils/filterWavelengths";
+import {
+  filenameChannelSlot,
+  groupByWavelength,
+  resolveFilterFromName,
+  splitSpectralThirds,
+} from "../../utils/channelMapping";
 
 export interface ChannelFile {
   id: string;
@@ -92,51 +98,32 @@ const PALETTE_PRESETS = [
   { id: "Custom", label: "Custom", desc: "Manual assignment", icon: "\ud83c\udfa8" },
 ] as const;
 
+function fileFilterInfo(file: ChannelFile): { code: string; nm: number } | null {
+  return filterCodeAndWavelengthNm(file.filter) ?? resolveFilterFromName(file.name || file.path || "");
+}
+
 function autoMapByMetadata(files: ChannelFile[]): Partial<ChannelAssignment> {
-  const withWavelength = files
-    .map((f) => ({ file: f, wl: filterToWavelengthNm(f.filter) }))
-    .filter((x): x is { file: ChannelFile; wl: number } => x.wl !== null)
-    .sort((a, b) => a.wl - b.wl);
+  const entries = files
+    .map((file) => ({ item: file, info: fileFilterInfo(file) }))
+    .filter((x): x is { item: ChannelFile; info: { code: string; nm: number } } => x.info !== null)
+    .map((x) => ({ item: x.item, code: x.info.code, nm: x.info.nm }));
 
-  if (withWavelength.length === 0) return {};
+  if (entries.length === 0) return {};
 
-  if (withWavelength.length >= 3) {
-    const sorted = [...withWavelength].sort((a, b) => b.wl - a.wl);
-    return {
-      R: sorted[0].file,
-      G: sorted[Math.floor(sorted.length / 2)].file,
-      B: sorted[sorted.length - 1].file,
-    };
-  }
-
-  if (withWavelength.length === 2) {
-    return {
-      R: withWavelength[1].file,
-      B: withWavelength[0].file,
-    };
-  }
-
-  return {};
+  const spectral = splitSpectralThirds(groupByWavelength(entries));
+  const result: Partial<ChannelAssignment> = {};
+  if (spectral.r.length > 0) result.R = spectral.r[0];
+  if (spectral.g.length > 0) result.G = spectral.g[0];
+  if (spectral.b.length > 0) result.B = spectral.b[0];
+  return result;
 }
 
 function autoMapByFilename(files: ChannelFile[]): Partial<ChannelAssignment> {
   const result: Partial<ChannelAssignment> = {};
-  const patterns: Record<ChannelSlot, RegExp[]> = {
-    L: [/[_-]l[._-]/i, /luminance|lum|clear/i],
-    R: [/[_-]r[._-]/i, /ha|h.?alpha|red/i, /f444w|f410m|f356w/i],
-    G: [/[_-]g[._-]/i, /oiii|o3|green/i, /f200w|f277w/i],
-    B: [/[_-]b[._-]/i, /sii|s2|blue/i, /f115w|f090w|f150w/i],
-  };
-
-  for (const slot of (["L", "R", "G", "B"] as ChannelSlot[])) {
-    for (const f of files) {
-      if (Object.values(result).some((v) => v?.id === f.id)) continue;
-      const name = f.name || f.path || "";
-      if (patterns[slot].some((p) => p.test(name))) {
-        result[slot] = f;
-        break;
-      }
-    }
+  for (const f of files) {
+    if (Object.values(result).some((v) => v?.id === f.id)) continue;
+    const slot = filenameChannelSlot(f.name || f.path || "");
+    if (slot && !result[slot]) result[slot] = f;
   }
   return result;
 }

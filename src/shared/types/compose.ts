@@ -50,6 +50,7 @@ export interface AutoWbResult {
   g_factor: number;
   b_factor: number;
   ref_channel: string;
+  empty_channels?: string[];
 }
 
 export interface CalibrateCompositeResult {

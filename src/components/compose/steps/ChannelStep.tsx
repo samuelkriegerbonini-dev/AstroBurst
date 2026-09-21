@@ -3,7 +3,15 @@ import { Wand2, FolderOpen, ChevronDown, X, Sparkles, AlertTriangle } from "luci
 import type { ProcessedFile } from "../../../shared/types";
 import { ingestFiles } from "../../../hooks/useFileIngest";
 import {DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
-import { filterCodeAndWavelengthNm } from "../../../utils/filterWavelengths";
+import {
+  UnmappedFile,
+  assignedPaths,
+  detectChannel,
+  displayFilterValue,
+  exclusivelyAssignedPaths,
+  runAutoMap,
+  shortName,
+} from "../../../utils/channelMapping";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 
 interface NarrowbandPalette {
@@ -32,75 +40,8 @@ interface ChannelStepProps {
   filterDetections?: FilterDetection[];
 }
 
-const FILTER_TO_BIN: Record<string, string> = {
-  "Halpha": "ha", "Ha": "ha", "H_alpha": "ha", "H-alpha": "ha",
-  "OIII": "oiii", "O3": "oiii", "[OIII]": "oiii",
-  "SII": "sii", "S2": "sii", "[SII]": "sii",
-  "NII": "nii",
-  "Red": "r", "R": "r",
-  "Green": "g", "G": "g", "V": "g",
-  "Blue": "b", "B": "b",
-  "Luminance": "l", "Lum": "l", "Clear": "l", "CLR": "l", "L": "l",
-};
-
-const FILTER_PATTERNS: [string, RegExp][] = [
-  ["ha", /(?:H[-_]?(?:alpha|a)|\b656\s*(?:nm)?|H_?α|F656N)/i],
-  ["oiii", /(?:O\s*III|\[?OIII\]?|50[012](?:\.\d+)?\s*nm|\b50[12]\b|\b5007\b|O3\b|F50[123]N)/i],
-  ["sii", /(?:S\s*II|\[?SII\]?|\b673\s*(?:nm)?|S2\b|F673N)/i],
-  ["r", /\b(?:Red|R['_-]?band|Sloan[_-]?r)\b/i],
-  ["g", /\b(?:Green|G['_-]?band|Sloan[_-]?g|V[_-]?band)\b/i],
-  ["b", /\b(?:Blue|B['_-]?band|Sloan[_-]?b)\b/i],
-  ["l", /\b(?:Lum(?:inance)?|L['_-]?band|Clear|CLR)\b/i],
-];
-
-const FILENAME_PATTERNS: [string, RegExp][] = [
-  ["ha", /(?:[_-]HA[_\-.\s]|[_-]HALPHA|[_-]H_?ALPHA|656)/i],
-  ["oiii", /(?:[_-]OIII[_\-.\s]|[_-]O3[_\-.\s]|502)/i],
-  ["sii", /(?:[_-]SII[_\-.\s]|[_-]S2[_\-.\s]|673)/i],
-  ["r", /(?:[_-]RED[_\-.\s]|[_-]R\.)/i],
-  ["g", /(?:[_-]GREEN[_\-.\s]|[_-]G\.)/i],
-  ["b", /(?:[_-]BLUE[_\-.\s]|[_-]B\.)/i],
-  ["l", /(?:[_-]LUM[_\-.\s]|[_-]L\.|[_-]CLEAR)/i],
-];
-
-function detectChannelByHeader(file: ProcessedFile): string | null {
-  const header = file.result?.header;
-  if (!header) return null;
-
-  const filterVal = (header.FILTER ?? header.FILTER1 ?? header.FILTER2 ?? "").toString().trim();
-  if (!filterVal) return null;
-
-  const directMatch = FILTER_TO_BIN[filterVal];
-  if (directMatch) return directMatch;
-
-  for (const [binId, pattern] of FILTER_PATTERNS) {
-    if (pattern.test(filterVal)) return binId;
-  }
-
-  return null;
-}
-
-function detectChannelByFilename(file: ProcessedFile): string | null {
-  const fname = file.name || file.path || "";
-  for (const [binId, pattern] of FILENAME_PATTERNS) {
-    if (pattern.test(fname)) return binId;
-  }
-  return null;
-}
-
-function detectChannel(file: ProcessedFile): string | null {
-  return detectChannelByHeader(file) ?? detectChannelByFilename(file);
-}
-
-function shortName(path: string): string {
-  return path.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") ?? path;
-}
-
 function getFilterInfo(file: ProcessedFile): string | null {
-  const header = file.result?.header;
-  if (!header) return null;
-  const f = header.FILTER ?? header.FILTER1 ?? header.FILTER2;
-  return f ? String(f).trim() : null;
+  return displayFilterValue(file);
 }
 
 interface BinDropdownProps {
@@ -192,21 +133,11 @@ export default function ChannelStep({
   const [customLabel, setCustomLabel] = useState("");
   const [customWl, setCustomWl] = useState("");
   const [autoMapSource, setAutoMapSource] = useState<string | null>(null);
+  const [unmappedFiles, setUnmappedFiles] = useState<UnmappedFile[]>([]);
 
-  const assignedSet = useMemo(() => {
-    const s = new Set<string>();
-    for (const bin of state.bins) for (const f of bin.files) s.add(f);
-    return s;
-  }, [state.bins]);
+  const assignedSet = useMemo(() => assignedPaths(state.bins), [state.bins]);
 
-  const colorAssignedSet = useMemo(() => {
-    const s = new Set<string>();
-    for (const bin of state.bins) {
-      if (bin.id === "l") continue;
-      for (const f of bin.files) s.add(f);
-    }
-    return s;
-  }, [state.bins]);
+  const colorAssignedSet = useMemo(() => exclusivelyAssignedPaths(state.bins), [state.bins]);
 
   const unassigned = useMemo(
     () => doneFiles.filter((f) => !assignedSet.has(f.path)),
@@ -221,136 +152,20 @@ export default function ChannelStep({
   const { disjointPairs } = usePointingOverlap(overlapPaths);
 
   const handleAutoMap = useCallback(() => {
-    const next = state.bins.map((b) => ({ ...b, files: [...b.files] }));
-
-    if (narrowbandPalette?.is_complete) {
-      const paletteMap: Record<string, string | undefined> = {};
-      if (narrowbandPalette.r_file?.file_path) paletteMap[narrowbandPalette.r_file.file_path] = "r";
-      if (narrowbandPalette.g_file?.file_path) paletteMap[narrowbandPalette.g_file.file_path] = "g";
-      if (narrowbandPalette.b_file?.file_path) paletteMap[narrowbandPalette.b_file.file_path] = "b";
-
-      let mapped = 0;
-      for (const file of doneFiles) {
-        if (assignedSet.has(file.path)) continue;
-        const target = paletteMap[file.path];
-        if (target) {
-          const bin = next.find((b) => b.id === target);
-          if (bin && !bin.files.includes(file.path)) {
-            bin.files.push(file.path);
-            mapped++;
-          }
-        }
-      }
-      if (mapped > 0) {
-        onBinsChange(next);
-        setAutoMapSource(narrowbandPalette.palette_name ?? "Palette");
-        return;
-      }
-    }
-
-    if (filterDetections && filterDetections.length > 0) {
-      let mapped = 0;
-      for (const det of filterDetections) {
-        if (assignedSet.has(det.path)) continue;
-        if (!det.filter) continue;
-
-        let targetBin: string | null = null;
-        const filterStr = String(det.filter);
-
-        const direct = FILTER_TO_BIN[filterStr];
-        if (direct) {
-          targetBin = direct;
-        } else {
-          for (const [binId, pattern] of FILTER_PATTERNS) {
-            if (pattern.test(filterStr)) { targetBin = binId; break; }
-          }
-        }
-
-        if (det.hubble_channel) {
-          const hc = String(det.hubble_channel).toLowerCase();
-          if (hc === "r" || hc === "red") targetBin = targetBin ?? "r";
-          else if (hc === "g" || hc === "green") targetBin = targetBin ?? "g";
-          else if (hc === "b" || hc === "blue") targetBin = targetBin ?? "b";
-        }
-
-        if (targetBin) {
-          const bin = next.find((b) => b.id === targetBin);
-          if (bin && !bin.files.includes(det.path)) {
-            bin.files.push(det.path);
-            mapped++;
-          }
-        }
-      }
-      if (mapped > 0) {
-        onBinsChange(next);
-        setAutoMapSource("FITS Headers (Rust)");
-        return;
-      }
-    }
-
-    let headerMapped = 0;
-    const dynamicBins: FrequencyBin[] = [];
-    for (const file of doneFiles) {
-      if (assignedSet.has(file.path)) continue;
-
-      const ch = detectChannelByHeader(file);
-      if (ch) {
-        const bin = next.find((b) => b.id === ch);
-        if (bin && !bin.files.includes(file.path)) {
-          bin.files.push(file.path);
-          headerMapped++;
-        }
-        continue;
-      }
-
-      const fv = getFilterInfo(file);
-      const info = fv ? filterCodeAndWavelengthNm(fv) : null;
-      if (!info) continue;
-
-      const binId = `wl${info.nm}`;
-      let bin = next.find((b) => b.id === binId) ?? dynamicBins.find((b) => b.id === binId);
-      if (!bin) {
-        const hue = Math.round((info.nm * 0.18) % 360);
-        bin = {
-          id: binId,
-          label: `${info.code} (${info.nm}nm)`,
-          shortLabel: info.code.slice(0, 5),
-          wavelength: info.nm,
-          color: `hsl(${hue}, 70%, 55%)`,
-          files: [],
-        };
-        dynamicBins.push(bin);
-      }
-      if (!bin.files.includes(file.path)) {
-        bin.files.push(file.path);
-        headerMapped++;
-      }
-    }
-    if (headerMapped > 0) {
-      onBinsChange(dynamicBins.length > 0 ? [...next, ...dynamicBins] : next);
-      setAutoMapSource(dynamicBins.length > 0 ? "FITS Headers + Wavelength" : "FITS Headers");
+    const result = runAutoMap({
+      bins: state.bins,
+      files: doneFiles,
+      assigned: assignedSet,
+      palette: narrowbandPalette,
+      detections: filterDetections,
+    });
+    setUnmappedFiles(result.unmapped);
+    if (result.mappedCount === 0) {
+      setAutoMapSource(null);
       return;
     }
-
-    let fnameMapped = 0;
-    for (const file of doneFiles) {
-      if (assignedSet.has(file.path)) continue;
-      const ch = detectChannelByFilename(file);
-      if (ch) {
-        const bin = next.find((b) => b.id === ch);
-        if (bin && !bin.files.includes(file.path)) {
-          bin.files.push(file.path);
-          fnameMapped++;
-        }
-      }
-    }
-    if (fnameMapped > 0) {
-      onBinsChange(next);
-      setAutoMapSource("Filename");
-      return;
-    }
-
-    setAutoMapSource(null);
+    onBinsChange(result.bins);
+    setAutoMapSource(result.sources.join(" + "));
   }, [state.bins, doneFiles, assignedSet, onBinsChange, narrowbandPalette, filterDetections]);
 
   const handleDrop = useCallback((binId: string, filePath: string) => {
@@ -388,6 +203,7 @@ export default function ChannelStep({
   const handleClearAll = useCallback(() => {
     onBinsChange(state.bins.map((b) => ({ ...b, files: [] })));
     setAutoMapSource(null);
+    setUnmappedFiles([]);
   }, [state.bins, onBinsChange]);
 
   const handleOpenFolder = useCallback(async () => {
@@ -546,6 +362,18 @@ export default function ChannelStep({
             {" "}point at different sky regions
             {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
             {" "}— their WCS footprints do not overlap, so blending them produces a patchwork with no common signal. Check the channel assignment.
+          </span>
+        </div>
+      )}
+
+      {unmappedFiles.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>
+            Auto Map could not resolve {unmappedFiles.length} file(s):{" "}
+            {unmappedFiles.slice(0, 4).map((u) => `${u.name}${u.filter ? ` [${u.filter}]` : " [no FILTER keyword]"}`).join(", ")}
+            {unmappedFiles.length > 4 ? ` and ${unmappedFiles.length - 4} more` : ""}
+            {" "}— their filter is not in the wavelength table, so they stay unassigned. Drop them into a channel manually.
           </span>
         </div>
       )}

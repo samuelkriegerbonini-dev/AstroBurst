@@ -161,7 +161,8 @@ pub fn spcc_calibrate_rgb(
 
     let (wr_r, wr_g, wr_b) = white_reference_rgb(&config.white_reference);
 
-    let (r_factor, g_factor, b_factor, avg_ci) = compute_correction_factors(&matched, wr_r, wr_g, wr_b);
+    let (r_factor, g_factor, b_factor, avg_ci) =
+        compute_correction_factors(&matched, wr_r, wr_g, wr_b)?;
 
     let white_ref_name = match &config.white_reference {
         WhiteReference::AverageSpiral => "Average Spiral Galaxy".into(),
@@ -459,12 +460,28 @@ fn aperture_flux_f32(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> f64 {
     flux.max(0.0)
 }
 
+const MIN_WHITE_REFERENCE_WEIGHT: f64 = 1e-3;
+
+fn validate_white_reference(wr_r: f64, wr_g: f64, wr_b: f64) -> Result<(), String> {
+    for (name, weight) in [("R", wr_r), ("G", wr_g), ("B", wr_b)] {
+        if !weight.is_finite() || weight <= MIN_WHITE_REFERENCE_WEIGHT {
+            return Err(format!(
+                "White reference {} weight is {}, which carries no usable signal (must be > {}). Pick a different white reference.",
+                name, weight, MIN_WHITE_REFERENCE_WEIGHT
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn compute_correction_factors(
     matched: &[MatchedStar],
     wr_r: f64,
     wr_g: f64,
     wr_b: f64,
-) -> (f64, f64, f64, f64) {
+) -> Result<(f64, f64, f64, f64), String> {
+    validate_white_reference(wr_r, wr_g, wr_b)?;
+
     let mut sum_ratio_r = 0.0f64;
     let mut sum_ratio_g = 0.0f64;
     let mut sum_ratio_b = 0.0f64;
@@ -510,28 +527,48 @@ fn compute_correction_factors(
         ci_count += 1;
     }
 
-    if sum_weight_r < 1e-10 || sum_weight_g < 1e-10 || sum_weight_b < 1e-10 {
-        return (1.0, 1.0, 1.0, 0.0);
+    let unmeasured: Vec<&str> = [
+        ("R", sum_weight_r),
+        ("G", sum_weight_g),
+        ("B", sum_weight_b),
+    ]
+    .into_iter()
+    .filter(|(_, weight)| !weight.is_finite() || *weight <= 0.0)
+    .map(|(name, _)| name)
+    .collect();
+
+    if !unmeasured.is_empty() {
+        return Err(format!(
+            "No matched star carries measurable flux in {}. A channel without signal cannot be spectrophotometrically calibrated; neutral factors would report success on an empty channel.",
+            unmeasured.join(", ")
+        ));
     }
 
-    let mut r_factor = sum_ratio_r / sum_weight_r;
-    let mut g_factor = sum_ratio_g / sum_weight_g;
-    let mut b_factor = sum_ratio_b / sum_weight_b;
+    let mut r_factor = sum_ratio_r / sum_weight_r / wr_r;
+    let mut g_factor = sum_ratio_g / sum_weight_g / wr_g;
+    let mut b_factor = sum_ratio_b / sum_weight_b / wr_b;
 
-    r_factor /= wr_r.max(1e-10);
-    g_factor /= wr_g.max(1e-10);
-    b_factor /= wr_b.max(1e-10);
+    if !g_factor.is_finite() || g_factor <= 0.0 {
+        return Err(format!(
+            "Green correction factor is {}, so the other channels cannot be normalized against it.",
+            g_factor
+        ));
+    }
 
-    let norm = g_factor;
-    if norm > 1e-10 {
-        r_factor /= norm;
-        g_factor = 1.0;
-        b_factor /= norm;
+    r_factor /= g_factor;
+    b_factor /= g_factor;
+    g_factor = 1.0;
+
+    if !r_factor.is_finite() || !b_factor.is_finite() {
+        return Err(format!(
+            "Correction factors are not finite after green normalization (R {}, B {}).",
+            r_factor, b_factor
+        ));
     }
 
     let avg_ci = if ci_count > 0 { sum_ci / ci_count as f64 } else { 0.0 };
 
-    (r_factor, g_factor, b_factor, avg_ci)
+    Ok((r_factor, g_factor, b_factor, avg_ci))
 }
 
 #[cfg(test)]
@@ -600,6 +637,57 @@ mod tests {
             flux_contaminated
         );
         assert!(flux_clean > 9000.0, "expected ~10000 net star flux, got {}", flux_clean);
+    }
+
+    fn matched_sample() -> Vec<MatchedStar> {
+        vec![
+            MatchedStar { bp_rp: 0.8, measured_r: 1.0, measured_g: 1.2, measured_b: 0.9 },
+            MatchedStar { bp_rp: 1.4, measured_r: 2.0, measured_g: 1.8, measured_b: 1.1 },
+            MatchedStar { bp_rp: 0.4, measured_r: 0.7, measured_g: 1.0, measured_b: 1.3 },
+        ]
+    }
+
+    #[test]
+    fn compute_correction_factors_rejects_zero_white_reference() {
+        let err = compute_correction_factors(&matched_sample(), 1.0, 1.0, 0.0)
+            .expect_err("a zero white reference weight must not become a x1e10 gain");
+        assert!(err.contains("White reference B"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn compute_correction_factors_rejects_negligible_white_reference() {
+        let err = compute_correction_factors(&matched_sample(), 1e-12, 1.0, 1.0)
+            .expect_err("a negligible white reference weight must not become a huge gain");
+        assert!(err.contains("White reference R"), "unexpected error: {}", err);
+
+        let err = compute_correction_factors(&matched_sample(), 1.0, f64::NAN, 1.0)
+            .expect_err("a non-finite white reference weight must be rejected");
+        assert!(err.contains("White reference G"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn compute_correction_factors_stay_bounded_for_usable_white_reference() {
+        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral);
+        let (r_factor, g_factor, b_factor, _) =
+            compute_correction_factors(&matched_sample(), wr_r, wr_g, wr_b).unwrap();
+
+        assert_eq!(g_factor, 1.0);
+        assert!(r_factor.is_finite() && r_factor > 1e-3 && r_factor < 1e3, "r_factor {}", r_factor);
+        assert!(b_factor.is_finite() && b_factor > 1e-3 && b_factor < 1e3, "b_factor {}", b_factor);
+    }
+
+    #[test]
+    fn compute_correction_factors_reject_a_channel_without_measured_flux() {
+        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral);
+        let matched: Vec<MatchedStar> = matched_sample()
+            .into_iter()
+            .map(|s| MatchedStar { measured_b: 0.0, ..s })
+            .collect();
+
+        let err = compute_correction_factors(&matched, wr_r, wr_g, wr_b)
+            .expect_err("an empty B channel must not be reported as a successful calibration");
+
+        assert!(err.contains("measurable flux in B"), "unexpected error: {}", err);
     }
 
     #[test]

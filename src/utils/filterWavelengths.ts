@@ -16,6 +16,9 @@ const FILTER_WAVELENGTHS_NM = new Map<string, number>([
   ["F360M", 3600], ["F405N", 4050], ["F410M", 4100], ["F430M", 4300],
   ["F444W", 4440], ["F460M", 4600], ["F466N", 4660], ["F470N", 4700],
   ["F480M", 4800],
+  ["F560W", 5600], ["F770W", 7700], ["F1000W", 10000], ["F1130W", 11300],
+  ["F1280W", 12800], ["F1500W", 15000], ["F1800W", 18000], ["F2100W", 21000],
+  ["F2550W", 25500],
 ]);
 
 export function filterToWavelengthNm(filter?: string | null): number | null {

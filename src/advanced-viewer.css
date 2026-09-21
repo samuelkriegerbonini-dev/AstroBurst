@@ -833,10 +833,12 @@
 
 .ab-mfl-error-text {
   font-size: 10px;
+  line-height: 1.25;
   color: rgba(239, 68, 68, 0.85);
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
   user-select: text;
 }
 

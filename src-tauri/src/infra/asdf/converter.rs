@@ -22,6 +22,30 @@ pub struct AsdfArrayInfo {
     pub bitpix: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaneGeometry {
+    pub height: usize,
+    pub width: usize,
+    pub plane_count: usize,
+}
+
+pub fn plane_geometry(shape: &[usize]) -> PlaneGeometry {
+    let (height, width, plane_count, _) = AsdfImage::interpret_shape(shape);
+    PlaneGeometry { height, width, plane_count }
+}
+
+pub fn is_interleaved_layout(shape: &[usize]) -> bool {
+    matches!(AsdfImage::interpret_shape(shape).3, PixelLayout::Interleaved)
+}
+
+pub fn shape_label(shape: &[usize]) -> String {
+    shape
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<String>>()
+        .join("x")
+}
+
 pub fn bitpix_for_dtype(d: &DType) -> i64 {
     match d {
         DType::Int8 | DType::UInt8 | DType::Bool8 => 8,
@@ -77,6 +101,7 @@ pub struct AsdfImage {
     pub width: usize,
     pub height: usize,
     pub channels: usize,
+    pub shape: Vec<usize>,
     pub data: Vec<f32>,
     pub wcs: Option<WcsInfo>,
     pub metadata: HashMap<String, String>,
@@ -107,6 +132,7 @@ impl AsdfImage {
             width: 0,
             height: 0,
             channels: 0,
+            shape: Vec::new(),
             data: Vec::new(),
             wcs,
             metadata,
@@ -151,10 +177,7 @@ impl AsdfImage {
             }
         };
 
-        let (height, width, channels, layout) = match Self::interpret_shape(&meta.shape) {
-            Ok(dims) => dims,
-            Err(_) => return Ok(Self::empty(wcs, Self::extract_metadata(&asdf.tree, key))),
-        };
+        let (height, width, channels, layout) = Self::interpret_shape(&meta.shape);
 
         let expected: usize = meta.shape.iter().product();
         if pixels.len() < expected {
@@ -176,6 +199,7 @@ impl AsdfImage {
             width,
             height,
             channels,
+            shape: meta.shape,
             data,
             wcs,
             metadata: Self::extract_metadata(&asdf.tree, key),
@@ -217,11 +241,14 @@ impl AsdfImage {
                 }
             }
         };
-        let (height, width) = match meta.shape.len() {
-            2 => (meta.shape[0], meta.shape[1]),
-            3 if meta.shape[0] <= 4 || meta.shape[2] > 4 => (meta.shape[1], meta.shape[2]),
-            _ => return Ok(None),
-        };
+        if meta.shape.len() < 2 {
+            return Ok(None);
+        }
+        let geometry = plane_geometry(&meta.shape);
+        if geometry.plane_count > 1 && is_interleaved_layout(&meta.shape) {
+            return Ok(None);
+        }
+        let (height, width) = (geometry.height, geometry.width);
         let expected = width * height;
         if bits.len() < expected {
             return Err(AsdfError::ShapeMismatch { got: bits.len(), expected });
@@ -273,28 +300,30 @@ impl AsdfImage {
         self.width > 0 && self.height > 0
     }
 
-    pub fn to_array2(&self) -> ndarray::Array2<f32> {
-        if !self.has_image() {
-            return ndarray::Array2::zeros((0, 0));
-        }
-        let plane = if self.channels <= 1 {
-            self.data.clone()
-        } else {
-            self.data[..self.width * self.height].to_vec()
-        };
-        ndarray::Array2::from_shape_vec((self.height, self.width), plane)
-            .unwrap_or_else(|_| ndarray::Array2::zeros((self.height, self.width)))
+    pub fn plane_count(&self) -> usize {
+        self.channels
     }
 
-    pub fn into_array2(self) -> ndarray::Array2<f32> {
-        if !self.has_image() {
-            return ndarray::Array2::zeros((0, 0));
+    fn plane_bounds(&self, index: usize) -> Option<(usize, usize)> {
+        if !self.has_image() || index >= self.channels.max(1) {
+            return None;
         }
-        let (height, width) = (self.height, self.width);
-        let mut plane = self.data;
-        plane.truncate(width * height);
-        ndarray::Array2::from_shape_vec((height, width), plane)
-            .unwrap_or_else(|_| ndarray::Array2::zeros((height, width)))
+        let size = self.width.checked_mul(self.height)?;
+        let start = index.checked_mul(size)?;
+        let end = start.checked_add(size)?;
+        (end <= self.data.len()).then_some((start, end))
+    }
+
+    pub fn plane(&self, index: usize) -> Option<ndarray::Array2<f32>> {
+        let (start, end) = self.plane_bounds(index)?;
+        ndarray::Array2::from_shape_vec((self.height, self.width), self.data[start..end].to_vec()).ok()
+    }
+
+    pub fn into_plane(mut self, index: usize) -> Option<ndarray::Array2<f32>> {
+        let (start, end) = self.plane_bounds(index)?;
+        self.data.truncate(end);
+        self.data.drain(..start);
+        ndarray::Array2::from_shape_vec((self.height, self.width), self.data).ok()
     }
 
     fn find_data_array(tree: &Value) -> Result<Option<(String, NdArrayMeta)>, AsdfError> {
@@ -513,15 +542,20 @@ impl AsdfImage {
         out
     }
 
-    fn interpret_shape(shape: &[usize]) -> Result<(usize, usize, usize, PixelLayout), AsdfError> {
+    fn interpret_shape(shape: &[usize]) -> (usize, usize, usize, PixelLayout) {
         match shape.len() {
-            0 => Ok((1, 1, 1, PixelLayout::Planar)),
-            1 => Ok((1, shape[0], 1, PixelLayout::Planar)),
-            2 => Ok((shape[0], shape[1], 1, PixelLayout::Planar)),
-            3 if shape[0] <= 4 => Ok((shape[1], shape[2], shape[0], PixelLayout::Planar)),
-            3 if shape[2] <= 4 => Ok((shape[0], shape[1], shape[2], PixelLayout::Interleaved)),
-            3 => Ok((shape[1], shape[2], shape[0], PixelLayout::Planar)),
-            n => Err(AsdfError::UnsupportedRank(n)),
+            0 => (1, 1, 1, PixelLayout::Planar),
+            1 => (1, shape[0], 1, PixelLayout::Planar),
+            2 => (shape[0], shape[1], 1, PixelLayout::Planar),
+            3 if shape[0] <= 4 => (shape[1], shape[2], shape[0], PixelLayout::Planar),
+            3 if shape[2] <= 4 => (shape[0], shape[1], shape[2], PixelLayout::Interleaved),
+            3 => (shape[1], shape[2], shape[0], PixelLayout::Planar),
+            n => (
+                shape[n - 2],
+                shape[n - 1],
+                shape[..n - 2].iter().product(),
+                PixelLayout::Planar,
+            ),
         }
     }
 
@@ -847,14 +881,67 @@ mod tests {
     }
 
     #[test]
-    fn cube_selects_first_plane_and_reports_channels() {
+    fn cube_keeps_every_plane_and_reports_the_plane_count() {
         let tree = "data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [5, 2, 6]\n";
         let values: Vec<f32> = (0..60).map(|i| i as f32).collect();
         let img = load_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&values))])).unwrap();
-        assert_eq!((img.height, img.width, img.channels), (2, 6, 5));
-        let arr = img.into_array2();
-        assert_eq!(arr.dim(), (2, 6));
-        assert_eq!(arr.as_slice().unwrap(), &values[..12]);
+        assert_eq!((img.height, img.width), (2, 6));
+        assert_eq!(img.plane_count(), 5);
+        assert_eq!(img.shape, vec![5, 2, 6]);
+        assert_eq!(img.data, values, "every plane must survive the load");
+
+        let first = img.plane(0).expect("plane 1 of 5");
+        assert_eq!(first.dim(), (2, 6));
+        assert_eq!(first.as_slice().unwrap(), &values[..12]);
+        let last = img.plane(4).expect("plane 5 of 5");
+        assert_eq!(last.as_slice().unwrap(), &values[48..]);
+        assert!(img.plane(5).is_none(), "there is no sixth plane");
+
+        let owned = img.into_plane(3).expect("plane 4 of 5");
+        assert_eq!(owned.as_slice().unwrap(), &values[36..48]);
+    }
+
+    #[test]
+    fn into_plane_declines_an_image_without_pixels() {
+        let tree = "meta:\n  instrument: {name: WFI}\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[])).unwrap();
+        let empty = AsdfImage::from_file(&file).unwrap();
+        assert!(!empty.has_image());
+        assert!(empty.plane(0).is_none());
+        assert!(empty.into_plane(0).is_none());
+    }
+
+    #[test]
+    fn plane_geometry_counts_planes_for_every_layout() {
+        let single = |height, width| PlaneGeometry { height, width, plane_count: 1 };
+        assert_eq!(plane_geometry(&[2, 6]), single(2, 6));
+        assert_eq!(plane_geometry(&[1, 2, 6]), single(2, 6));
+        assert_eq!(plane_geometry(&[8, 6, 1]), single(8, 6));
+        assert_eq!(plane_geometry(&[1, 1, 2, 6]), single(2, 6));
+        assert_eq!(plane_geometry(&[5, 2, 6]), PlaneGeometry { height: 2, width: 6, plane_count: 5 });
+        assert_eq!(plane_geometry(&[3, 2, 6]), PlaneGeometry { height: 2, width: 6, plane_count: 3 });
+        assert_eq!(plane_geometry(&[8, 6, 3]), PlaneGeometry { height: 8, width: 6, plane_count: 3 });
+        assert_eq!(plane_geometry(&[7, 2, 2, 6]), PlaneGeometry { height: 2, width: 6, plane_count: 14 });
+        assert_eq!(shape_label(&[6, 4096, 4096]), "6x4096x4096");
+    }
+
+    #[test]
+    fn load_array_int_takes_the_first_plane_of_a_planar_cube_and_declines_interleaved() {
+        let tree = "dq: !core/ndarray-1.0.0\n  source: 0\n  datatype: uint32\n  byteorder: little\n  shape: [5, 2, 6]\nflat: !core/ndarray-1.0.0\n  source: 0\n  datatype: uint32\n  byteorder: little\n  shape: [2, 3]\nwoven: !core/ndarray-1.0.0\n  source: 0\n  datatype: uint32\n  byteorder: little\n  shape: [5, 4, 3]\n";
+        let bits: Vec<u8> = (0..60u32).flat_map(|v| v.to_le_bytes()).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[raw_block(&bits)])).unwrap();
+
+        let dq = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert_eq!(dq.bits.dim(), (2, 6));
+        assert_eq!(dq.bits.as_slice().unwrap(), &(0..12u32).collect::<Vec<u32>>()[..]);
+
+        let flat = AsdfImage::load_array_int(&file, "flat").unwrap().unwrap();
+        assert_eq!(flat.bits.dim(), (2, 3));
+
+        assert!(
+            AsdfImage::load_array_int(&file, "woven").unwrap().is_none(),
+            "an interleaved multi-channel mask cannot be sliced without de-interleaving"
+        );
     }
 
     #[test]

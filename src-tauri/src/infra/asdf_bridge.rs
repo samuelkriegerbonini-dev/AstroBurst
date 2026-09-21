@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use ndarray::Array2;
 
-use crate::infra::asdf::converter::{is_asdf_file, list_arrays, AsdfArrayInfo, AsdfImage};
+use crate::infra::asdf::converter::{
+    auto_data_key, is_asdf_file, is_interleaved_layout, list_arrays, plane_geometry, shape_label,
+    AsdfArrayInfo, AsdfImage,
+};
 use crate::infra::asdf::AsdfFile;
 use crate::infra::fits::reader::{HduInfo, MmapImageResult};
 use crate::types::constants::HEADER_BUNIT;
@@ -11,6 +15,9 @@ use crate::types::image::IntPlane;
 use crate::types::HduHeader;
 
 const BUNIT_METADATA_KEYS: [&str; 4] = ["meta.bunit_data", "meta.bunit", "roman.meta.bunit", "header.BUNIT"];
+
+pub const ASDF_SELECTED_PLANE: &str = "ASDFPLAN";
+pub const ASDF_PLANE_COUNT: &str = "ASDFNPLN";
 
 fn resolve_bunit(asdf_img: &AsdfImage) -> Option<String> {
     asdf_img
@@ -33,19 +40,30 @@ pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
 
 fn array_info_to_hdu(i: usize, a: &AsdfArrayInfo) -> HduInfo {
     let rank = a.shape.len();
+    let geometry = plane_geometry(&a.shape);
     HduInfo {
         index: i,
         extname: Some(a.key.clone()),
         naxis: rank as i64,
-        naxis1: a.shape.get(rank.wrapping_sub(1)).copied().unwrap_or(0) as i64,
-        naxis2: a.shape.get(rank.wrapping_sub(2)).copied().unwrap_or(0) as i64,
-        naxis3: if rank == 3 { a.shape[0] as i64 } else { 0 },
+        naxis1: geometry.width as i64,
+        naxis2: geometry.height as i64,
+        naxis3: if rank >= 3 { geometry.plane_count as i64 } else { 0 },
         bitpix: a.bitpix,
         has_data: rank >= 2,
         extver: None,
         header_start: 0,
         data_start: 0,
     }
+}
+
+fn multi_plane_refusal(key: &str, shape: &[usize], planes: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "ASDF array '{}' cannot be loaded as a 2D image: {}D array [{}] of {} planes, not a single 2D image",
+        key,
+        shape.len(),
+        shape_label(shape),
+        planes
+    )
 }
 
 pub fn list_asdf_arrays(path: &Path) -> Result<Vec<HduInfo>> {
@@ -75,14 +93,27 @@ pub fn extract_plane_from_asdf(path: &Path, key: Option<&str>) -> Result<MmapIma
 }
 
 pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Result<MmapImageResult> {
+    let arrays = list_arrays(asdf);
+    let explicit = key.is_some();
+    if !explicit {
+        if let Some(info) = auto_data_key(asdf)
+            .as_deref()
+            .and_then(|k| arrays.iter().find(|a| a.key == k))
+        {
+            let planes = plane_geometry(&info.shape).plane_count;
+            if planes > 1 {
+                return Err(multi_plane_refusal(&info.key, &info.shape, planes));
+            }
+        }
+    }
+
     let asdf_img = match key {
         Some(k) => AsdfImage::load_array(asdf, k),
         None => AsdfImage::from_file(asdf),
     }
     .map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
 
-    let has_image = asdf_img.has_image();
-    if !has_image {
+    if !asdf_img.has_image() {
         anyhow::bail!("ASDF load failed: Missing field: data array");
     }
     let data_key = asdf_img
@@ -90,18 +121,99 @@ pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Resul
         .get("ASDF_DATA_KEY")
         .cloned()
         .unwrap_or_default();
+    let plane_count = asdf_img.plane_count();
+    if !explicit && plane_count != 1 {
+        return Err(multi_plane_refusal(&data_key, &asdf_img.shape, plane_count));
+    }
+
+    let header = synthesise_header(&asdf_img, &data_key, plane_count);
+    let image = asdf_img
+        .into_plane(0)
+        .with_context(|| format!("ASDF array '{data_key}' has no readable first plane"))?;
+
+    let extensions: Vec<HduInfo> = arrays
+        .iter()
+        .enumerate()
+        .map(|(i, a)| array_info_to_hdu(i, a))
+        .collect();
+    let extension_count = extensions.len();
+
+    Ok(MmapImageResult {
+        header,
+        image,
+        is_mef: false,
+        selected_extension: Some(data_key),
+        extension_count,
+        extensions,
+    })
+}
+
+pub struct AsdfRgbResult {
+    pub r: Array2<f32>,
+    pub g: Array2<f32>,
+    pub b: Array2<f32>,
+    pub header: HduHeader,
+}
+
+fn is_interleaved_colour(shape: &[usize]) -> bool {
+    let geometry = plane_geometry(shape);
+    is_interleaved_layout(shape)
+        && (3..=4).contains(&geometry.plane_count)
+        && geometry.width > 1
+        && geometry.height > 1
+}
+
+pub fn try_extract_rgb_from_asdf(path: &Path) -> Result<Option<AsdfRgbResult>> {
+    let asdf = AsdfFile::open(path).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
+    let Some(key) = auto_data_key(&asdf) else {
+        return Ok(None);
+    };
+    let arrays = list_arrays(&asdf);
+    let Some(info) = arrays.iter().find(|a| a.key == key) else {
+        return Ok(None);
+    };
+    if !is_interleaved_colour(&info.shape) {
+        return Ok(None);
+    }
+
+    let asdf_img = AsdfImage::load_array(&asdf, &key)
+        .map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
+    let plane_count = asdf_img.plane_count();
+    let header = synthesise_header(&asdf_img, &key, plane_count);
+    let channel = |i: usize| {
+        asdf_img
+            .plane(i)
+            .with_context(|| format!("ASDF array '{key}' is missing colour plane {}", i + 1))
+    };
+    Ok(Some(AsdfRgbResult {
+        r: channel(0)?,
+        g: channel(1)?,
+        b: channel(2)?,
+        header,
+    }))
+}
+
+fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize) -> HduHeader {
     let (width, height) = (asdf_img.width, asdf_img.height);
-    let naxis_str = "2";
+    let rank = asdf_img.shape.len();
 
     let mut cards = Vec::new();
     let mut index = HashMap::new();
 
-    push_card(&mut cards, &mut index, "NAXIS", naxis_str.into());
+    push_card(&mut cards, &mut index, "NAXIS", rank.max(2).to_string());
     push_card(&mut cards, &mut index, "NAXIS1", width.to_string());
     push_card(&mut cards, &mut index, "NAXIS2", height.to_string());
+    for axis in 3..=rank {
+        let length = if axis == 3 { plane_count.max(1) } else { 1 };
+        push_card(&mut cards, &mut index, &format!("NAXIS{axis}"), length.to_string());
+    }
     push_card(&mut cards, &mut index, "BITPIX", "-32".into());
-    push_card(&mut cards, &mut index, "EXTNAME", data_key.clone());
-    push_card(&mut cards, &mut index, "ASDF_DATA_KEY", data_key.clone());
+    push_card(&mut cards, &mut index, "EXTNAME", data_key.to_string());
+    push_card(&mut cards, &mut index, "ASDF_DATA_KEY", data_key.to_string());
+    if plane_count > 1 {
+        push_card(&mut cards, &mut index, ASDF_SELECTED_PLANE, "1".into());
+        push_card(&mut cards, &mut index, ASDF_PLANE_COUNT, plane_count.to_string());
+    }
 
     if let Some(ref wcs) = asdf_img.wcs {
         let wcs_entries = [
@@ -140,30 +252,14 @@ pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Resul
     }
 
     if !index.contains_key(HEADER_BUNIT) {
-        if let Some(unit) = resolve_bunit(&asdf_img) {
+        if let Some(unit) = resolve_bunit(asdf_img) {
             push_card(&mut cards, &mut index, HEADER_BUNIT, unit);
         }
     }
 
     push_card(&mut cards, &mut index, "ASDF_SRC", "true".into());
 
-    let header = HduHeader { cards, index };
-
-    let extensions: Vec<HduInfo> = list_arrays(asdf)
-        .iter()
-        .enumerate()
-        .map(|(i, a)| array_info_to_hdu(i, a))
-        .collect();
-    let extension_count = extensions.len();
-
-    Ok(MmapImageResult {
-        header,
-        image: asdf_img.into_array2(),
-        is_mef: false,
-        selected_extension: Some(data_key),
-        extension_count,
-        extensions,
-    })
+    HduHeader { cards, index }
 }
 
 fn push_card(
@@ -275,6 +371,156 @@ mod tests {
         assert_eq!(companion_key("data", "err"), "err");
         assert_eq!(companion_key("sci", "dq"), "dq");
         assert_eq!(companion_key("a.b.c", "err"), "a.b.err");
+    }
+
+    const CUBE_TREE: &str = "meta:\n  telescope: ROMAN\nroman:\n  data: !core/ndarray-1.0.0\n    data: [[[1, 2], [3, 4]], [[5, 6], [7, 8]], [[9, 10], [11, 12]]]\n    datatype: float32\n  dq: !core/ndarray-1.0.0\n    data: [[[0, 1], [0, 0]], [[1, 1], [0, 0]], [[0, 0], [0, 1]]]\n    datatype: uint32\n";
+
+    #[test]
+    fn auto_refuses_a_cube_but_an_explicit_reference_opens_its_first_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, CUBE_TREE);
+
+        let auto = extract_plane_from_asdf(&path, None).err().expect("a ramp must not load as an image");
+        let msg = format!("{auto:#}");
+        assert!(msg.contains("'roman.data'"), "{msg}");
+        assert!(msg.contains("3D array [3x2x2] of 3 planes"), "{msg}");
+        assert!(msg.contains("not a single 2D image"), "{msg}");
+
+        let explicit = extract_plane_from_asdf(&path, Some("roman.data"))
+            .expect("an explicit #array= reference must open plane 1, as #hdu= does for a FITS cube");
+        assert_eq!(explicit.image.dim(), (2, 2));
+        assert_eq!(explicit.image.as_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(explicit.header.get(ASDF_SELECTED_PLANE), Some("1"));
+        assert_eq!(explicit.header.get(ASDF_PLANE_COUNT), Some("3"));
+        assert_eq!(explicit.header.get("NAXIS"), Some("3"));
+        assert_eq!(explicit.header.get("NAXIS3"), Some("3"));
+        assert_eq!(
+            explicit.selected_extension.as_deref(),
+            Some("roman.data"),
+            "the bare key is the ASDF data key that companion resolution consumes"
+        );
+
+        let dq = extract_int_plane_from_asdf(&path, "roman.dq").unwrap().unwrap();
+        assert_eq!(dq.bits.dim(), (2, 2));
+        assert_eq!(
+            dq.bits.as_slice().unwrap(),
+            &[0, 1, 0, 0],
+            "the mask plane must line up with the image plane it accompanies"
+        );
+    }
+
+    #[test]
+    fn a_deep_nested_cube_is_refused_after_loading_when_the_array_list_misses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let values: Vec<String> = (0..60).map(|v| v.to_string()).collect();
+        let tree = format!(
+            "products:\n  sci:\n    data: !core/ndarray-1.0.0\n      data: [{}]\n      shape: [6, 2, 5]\n      datatype: float32\n",
+            values.join(", ")
+        );
+        let path = write_asdf(&dir, &tree);
+
+        assert!(
+            list_asdf_arrays(&path).unwrap().is_empty(),
+            "the pre-load guard cannot see an array nested below a top-level key"
+        );
+
+        let refused = extract_plane_from_asdf(&path, None)
+            .err()
+            .expect("a nested ramp must not load as an image either");
+        let msg = format!("{refused:#}");
+        assert!(msg.contains("'products'"), "{msg}");
+        assert!(msg.contains("3D array [6x2x5] of 6 planes"), "{msg}");
+        assert!(msg.contains("not a single 2D image"), "{msg}");
+    }
+
+    fn interleaved_tree() -> String {
+        let values: Vec<String> = (0..30).map(|v| v.to_string()).collect();
+        format!(
+            "rgb: !core/ndarray-1.0.0\n  data: [{}]\n  shape: [5, 2, 3]\n  datatype: float32\n",
+            values.join(", ")
+        )
+    }
+
+    #[test]
+    fn multi_plane_arrays_stay_listed_with_their_real_plane_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let arrays = list_asdf_arrays(&write_asdf(&dir, CUBE_TREE)).unwrap();
+        let cube = arrays
+            .iter()
+            .find(|e| e.extname.as_deref() == Some("roman.data"))
+            .expect("the ramp is still listed");
+        assert!(cube.has_data, "a cube still holds pixel data");
+        assert_eq!(cube.naxis, 3);
+        assert_eq!(cube.naxis1, 2);
+        assert_eq!(cube.naxis2, 2);
+        assert_eq!(cube.naxis3, 3);
+
+        let path = write_asdf(&dir, &interleaved_tree());
+        let listed = list_asdf_arrays(&path).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].naxis, 3);
+        assert_eq!(listed[0].naxis1, 2);
+        assert_eq!(listed[0].naxis2, 5);
+        assert_eq!(listed[0].naxis3, 3);
+
+        let refused = extract_plane_from_asdf(&path, None)
+            .err()
+            .expect("an interleaved 3-channel array is not a single 2D image");
+        assert!(format!("{refused:#}").contains("3D array [5x2x3] of 3 planes"), "{refused:#}");
+    }
+
+    #[test]
+    fn an_interleaved_colour_array_is_recovered_as_an_rgb_composite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, &interleaved_tree());
+
+        let rgb = try_extract_rgb_from_asdf(&path)
+            .unwrap()
+            .expect("a [height, width, 3] array is a colour image, not a ramp");
+        assert_eq!(rgb.r.dim(), (5, 2));
+        assert_eq!(rgb.r.as_slice().unwrap(), &[0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0]);
+        assert_eq!(rgb.g.as_slice().unwrap(), &[1.0, 4.0, 7.0, 10.0, 13.0, 16.0, 19.0, 22.0, 25.0, 28.0]);
+        assert_eq!(rgb.b.as_slice().unwrap(), &[2.0, 5.0, 8.0, 11.0, 14.0, 17.0, 20.0, 23.0, 26.0, 29.0]);
+        assert_eq!(rgb.header.get(ASDF_PLANE_COUNT), Some("3"));
+
+        let explicit = extract_plane_from_asdf(&path, Some("rgb")).expect("explicit reference opens the red plane");
+        assert_eq!(explicit.image, rgb.r);
+    }
+
+    #[test]
+    fn a_planar_ramp_is_never_mistaken_for_a_colour_image() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            try_extract_rgb_from_asdf(&write_asdf(&dir, CUBE_TREE)).unwrap().is_none(),
+            "a [3, height, width] Roman ramp is three resultant reads, not three colour channels"
+        );
+        assert!(
+            try_extract_rgb_from_asdf(&write_asdf(&dir, INLINE_DATA)).unwrap().is_none(),
+            "a plain 2D array has no colour planes"
+        );
+    }
+
+    #[test]
+    fn degenerate_leading_axis_loads_and_keeps_its_rank_in_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = "data: !core/ndarray-1.0.0\n  data: [[[1, 2, 3], [4, 5, 6]]]\n  datatype: float32\n";
+        let result = extract_plane_from_asdf(&write_asdf(&dir, tree), None).unwrap();
+        assert_eq!(result.image.dim(), (2, 3));
+        assert_eq!(result.image[[1, 2]], 6.0);
+        assert_eq!(result.header.get("NAXIS"), Some("3"));
+        assert_eq!(result.header.get("NAXIS1"), Some("3"));
+        assert_eq!(result.header.get("NAXIS2"), Some("2"));
+        assert_eq!(result.header.get("NAXIS3"), Some("1"));
+        assert_eq!(result.selected_extension.as_deref(), Some("data"));
+    }
+
+    #[test]
+    fn plain_2d_array_still_reports_naxis_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = extract_image_from_asdf(&write_asdf(&dir, INLINE_DATA)).unwrap();
+        assert_eq!(result.header.get("NAXIS"), Some("2"));
+        assert_eq!(result.header.get("NAXIS3"), None);
+        assert_eq!(result.image.dim(), (2, 2));
     }
 
     #[test]

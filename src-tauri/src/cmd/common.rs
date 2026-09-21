@@ -349,7 +349,18 @@ pub(crate) fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbI
     }
     let p = std::path::Path::new(&r.path);
     if crate::infra::asdf::converter::is_asdf_file(p) {
-        return Ok(None);
+        let (asdf_path, tmp) = resolve_single_image(&r.path)?;
+        return Ok(
+            crate::infra::asdf_bridge::try_extract_rgb_from_asdf(&asdf_path)?.map(|rgb| {
+                ResolvedRgbImage {
+                    r: rgb.r,
+                    g: rgb.g,
+                    b: rgb.b,
+                    header: rgb.header,
+                    _tmp: tmp,
+                }
+            }),
+        );
     }
 
     let (fits_path, tmp) = resolve_single_image(&r.path)?;
@@ -405,6 +416,57 @@ mod tests {
         writer.finish().unwrap();
         std::fs::remove_file(&inner).unwrap();
         zip_path.to_str().unwrap().to_string()
+    }
+
+    fn asdf(dir: &tempfile::TempDir, name: &str, tree_yaml: &str) -> String {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        bytes.extend_from_slice(tree_yaml.as_bytes());
+        bytes.extend_from_slice(b"...\n");
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn an_asdf_colour_array_is_recovered_as_rgb_while_a_ramp_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let values: Vec<String> = (0..30).map(|v| v.to_string()).collect();
+        let colour = asdf(
+            &dir,
+            "colour.asdf",
+            &format!(
+                "rgb: !core/ndarray-1.0.0\n  data: [{}]\n  shape: [5, 2, 3]\n  datatype: float32\n",
+                values.join(", ")
+            ),
+        );
+
+        let rgb = try_extract_rgb_resolved(&colour)
+            .unwrap()
+            .expect("an interleaved colour array must reach the RGB path");
+        assert_eq!(rgb.r.dim(), (5, 2));
+        assert_eq!(rgb.r[[0, 0]], 0.0);
+        assert_eq!(rgb.g[[0, 0]], 1.0);
+        assert_eq!(rgb.b[[0, 0]], 2.0);
+        assert_eq!(rgb.header.get("EXTNAME"), Some("rgb"));
+
+        assert!(
+            try_extract_rgb_resolved(&format!("{}#array=rgb", colour)).unwrap().is_none(),
+            "an explicit plane reference asks for one plane, not a composite"
+        );
+
+        let ramp = asdf(
+            &dir,
+            "ramp.asdf",
+            "roman:\n  data: !core/ndarray-1.0.0\n    data: [[[1, 2], [3, 4]], [[5, 6], [7, 8]], [[9, 10], [11, 12]]]\n    datatype: float32\n",
+        );
+        assert!(
+            try_extract_rgb_resolved(&ramp).unwrap().is_none(),
+            "a planar ramp must fall through to the normal loader"
+        );
+
+        let plain = asdf(&dir, "plain.asdf", "data: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\n");
+        assert!(try_extract_rgb_resolved(&plain).unwrap().is_none());
     }
 
     #[test]

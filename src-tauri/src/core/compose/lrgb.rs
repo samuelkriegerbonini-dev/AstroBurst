@@ -66,14 +66,22 @@ fn finite_min_max(arrays: &[&Array2<f32>]) -> Option<(f32, f32)> {
     }
 }
 
-fn normalize_min_max(arr: &Array2<f32>, mn: f32, mx: f32) -> Array2<f32> {
-    let inv = 1.0 / (mx - mn);
-    arr.mapv(|v| if v.is_finite() { ((v - mn) * inv).clamp(0.0, 1.0) } else { v })
+fn finite_reciprocal(span: f32) -> Option<f32> {
+    let inv = 1.0 / span;
+    (span.is_finite() && span > 0.0 && inv.is_finite()).then_some(inv)
 }
 
-fn scale_by_max(arr: &Array2<f32>, max: f32) -> Array2<f32> {
-    let inv = 1.0 / max;
-    arr.mapv(|v| if v.is_finite() { (v * inv).clamp(0.0, 1.0) } else { v })
+fn normalize_min_max(arr: &Array2<f32>, mn: f32, mx: f32) -> Result<Array2<f32>> {
+    let inv = finite_reciprocal(mx - mn).ok_or_else(|| {
+        anyhow::anyhow!("Luminance range [{}, {}] is too narrow to normalize", mn, mx)
+    })?;
+    Ok(arr.mapv(|v| if v.is_finite() { ((v - mn) * inv).clamp(0.0, 1.0) } else { v }))
+}
+
+fn scale_by_max(arr: &Array2<f32>, max: f32) -> Result<Array2<f32>> {
+    let inv = finite_reciprocal(max)
+        .ok_or_else(|| anyhow::anyhow!("RGB peak {} is too small to scale by", max))?;
+    Ok(arr.mapv(|v| if v.is_finite() { (v * inv).clamp(0.0, 1.0) } else { v }))
 }
 
 pub fn lrgb_combine_normalized(
@@ -98,10 +106,10 @@ pub fn lrgb_combine_normalized(
         bail!("RGB composite has no positive signal");
     }
 
-    let l_norm = normalize_min_max(l, l_min, l_max);
-    let mut rn = scale_by_max(r, rgb_max);
-    let mut gn = scale_by_max(g, rgb_max);
-    let mut bn = scale_by_max(b, rgb_max);
+    let l_norm = normalize_min_max(l, l_min, l_max)?;
+    let mut rn = scale_by_max(r, rgb_max)?;
+    let mut gn = scale_by_max(g, rgb_max)?;
+    let mut bn = scale_by_max(b, rgb_max)?;
 
     apply_lrgb(&l_norm, &mut rn, &mut gn, &mut bn, lightness_weight, chrominance_weight)?;
 
@@ -213,6 +221,45 @@ mod tests {
             rn[[15, 8]],
             rn[[0, 8]]
         );
+    }
+
+    #[test]
+    fn normalize_min_max_rejects_unrepresentable_span() {
+        let smallest_subnormal = f32::from_bits(1);
+        let arr = Array2::from_elem((4, 4), 0.0f32);
+
+        let err = normalize_min_max(&arr, 0.0, smallest_subnormal)
+            .expect_err("a span with an infinite reciprocal must be rejected");
+        assert!(err.to_string().contains("too narrow"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn normalize_min_max_still_maps_a_real_range() {
+        let arr = Array2::from_shape_fn((2, 2), |(y, x)| (y * 2 + x) as f32);
+        let out = normalize_min_max(&arr, 0.0, 3.0).unwrap();
+        assert!((out[[0, 0]] - 0.0).abs() < 1e-6);
+        assert!((out[[1, 1]] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scale_by_max_rejects_unrepresentable_peak() {
+        let arr = Array2::from_elem((4, 4), 0.0f32);
+        let err = scale_by_max(&arr, f32::from_bits(1))
+            .expect_err("a peak with an infinite reciprocal must be rejected");
+        assert!(err.to_string().contains("too small"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn lrgb_combine_normalized_rejects_degenerate_luminance_span() {
+        let mut l = Array2::from_elem((8, 8), 0.0f32);
+        l[[3, 3]] = f32::from_bits(1);
+        let r = Array2::from_elem((8, 8), 0.4f32);
+        let g = Array2::from_elem((8, 8), 0.2f32);
+        let b = Array2::from_elem((8, 8), 0.1f32);
+
+        let err = lrgb_combine_normalized(&l, &r, &g, &b, 1.0, 1.0)
+            .expect_err("a luminance plane with no representable span must not produce NaN pixels");
+        assert!(err.to_string().contains("too narrow"), "unexpected error: {}", err);
     }
 
     #[test]

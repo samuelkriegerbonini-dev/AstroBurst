@@ -6,6 +6,7 @@ import { Slider, RunButton, Toggle } from "../../ui";
 import { calibrateAndScnr, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { getOutputDir } from "../../../infrastructure/tauri";
+import { wbSliderBounds, wbFactorsOutOfRange, WB_APPLY_MIN, WB_APPLY_MAX } from "../../../utils/whiteBalanceRange";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -26,6 +27,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
   const [loading, setLoading] = useState(false);
   const [autoLoading, setAutoLoading] = useState(false);
   const [refChannel, setRefChannel] = useState<string | null>(null);
+  const [emptyChannels, setEmptyChannels] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number | null>(null);
 
@@ -64,26 +66,31 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         setLocalG(g);
         setLocalB(b);
         setRefChannel(res.ref_channel ?? null);
+        setEmptyChannels(res.empty_channels ?? []);
         onWbChangeRef.current("auto", r, g, b);
       })
       .catch((e) => {
         if (cancelled) return;
+        setEmptyChannels([]);
+        setRefChannel(null);
         setError(`Auto WB failed: ${e instanceof Error ? e.message : String(e)}`);
       })
       .finally(() => { if (!cancelled) setAutoLoading(false); });
     return () => { cancelled = true; };
   }, [state.wbMode, state.compositeReady]);
 
-  const sliderMax = useMemo(
-    () => Math.max(3.0, Math.ceil(Math.max(localR, localG, localB) * 1.5 * 10) / 10),
+  const { min: sliderMin, max: sliderMax } = useMemo(
+    () => wbSliderBounds(localR, localG, localB),
     [localR, localG, localB],
   );
-  const sliderMin = useMemo(
-    () => Math.min(0.1, Math.floor(Math.min(localR, localG, localB) * 0.5 * 10) / 10),
+  const outOfRange = useMemo(
+    () => wbFactorsOutOfRange(localR, localG, localB),
     [localR, localG, localB],
   );
 
   const handleModeChange = useCallback((mode: WizardState["wbMode"]) => {
+    setEmptyChannels([]);
+    setRefChannel(null);
     onWbChange(mode, localR, localG, localB);
   }, [onWbChange, localR, localG, localB]);
 
@@ -94,6 +101,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     if (axis === "r") setLocalR(val);
     if (axis === "g") setLocalG(val);
     if (axis === "b") setLocalB(val);
+    setEmptyChannels([]);
     onWbChange("manual", nr, ng, nb);
   }, [localR, localG, localB, onWbChange]);
 
@@ -153,6 +161,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       setLocalR(1.0);
       setLocalG(1.0);
       setLocalB(1.0);
+      setEmptyChannels([]);
       onWbChange("manual", 1.0, 1.0, 1.0);
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
@@ -212,6 +221,24 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
           {state.wbMode === "auto" && !autoLoading && refChannel && (
             <div className="text-[9px] text-zinc-500">
               Reference channel: {refChannel} (lowest MAD/median)
+            </div>
+          )}
+          {emptyChannels.length > 0 && (
+            <div className="flex items-start gap-2 text-[10px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md px-2 py-1.5">
+              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+              <span>
+                No usable signal in {emptyChannels.join(", ")}. Those factors stay at 1.00:
+                an empty channel cannot be recovered by scaling. Check the blend inputs.
+              </span>
+            </div>
+          )}
+          {outOfRange.length > 0 && (
+            <div className="flex items-start gap-2 text-[10px] text-red-400/90 bg-red-500/10 border border-red-500/20 rounded-md px-2 py-1.5">
+              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+              <span>
+                Factor for {outOfRange.join(", ")} is outside the applicable range
+                [{WB_APPLY_MIN}, {WB_APPLY_MAX}] and will be rejected on apply.
+              </span>
             </div>
           )}
           <Slider label="R" value={localR} min={sliderMin} max={sliderMax} step={0.01} accent="red"

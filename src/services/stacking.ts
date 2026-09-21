@@ -48,11 +48,13 @@ export function runCalibrationPipeline(request: PipelineRequest): Promise<Pipeli
   return typedInvoke<PipelineResult>("run_pipeline_cmd", { request });
 }
 
-function channelOrNull(paths: string[]): string[] | null {
-  return paths.length >= 2 ? paths : null;
+export const MIN_DRIZZLE_FRAMES_PER_CHANNEL = 2;
+
+export function channelOrNull(paths: string[]): string[] | null {
+  return paths.length >= MIN_DRIZZLE_FRAMES_PER_CHANNEL ? paths : null;
 }
 
-export function drizzleRgbStack(
+export async function drizzleRgbStack(
   rPaths: string[],
   gPaths: string[],
   bPaths: string[],
