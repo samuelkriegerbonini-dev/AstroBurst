@@ -382,7 +382,16 @@ mod tests {
         assert!(header.get("BUNIT").is_none(), "BUNIT no longer describes the pixels");
         assert!(header.get("EXTNAME").is_none());
         assert!(header.get("XTENSION").is_none());
-        assert!(header.get(HEADER_PMSOURCE).unwrap().ends_with("pm_src.fits"));
+        let mut full_source = header.get(HEADER_PMSOURCE).unwrap().to_string();
+        for (k, v) in &header.cards {
+            if k == "HISTORY" && v.starts_with("PMSOURCE+ ") {
+                full_source.push_str(&v["PMSOURCE+ ".len()..]);
+            }
+        }
+        assert!(
+            full_source.ends_with("pm_src.fits"),
+            "Caminho remontado não termina com pm_src.fits: {}", full_source
+        );
     }
 
     #[tokio::test]
