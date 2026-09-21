@@ -27,10 +27,10 @@ pub const TARGET_SYMBOL: &str = "$T";
 
 const HEADER_ABPROC: &str = "ABPROC";
 const HEADER_PMEXPR: &str = "PMEXPR";
-const HEADER_PMSOURCE: &str = "PMSOURCE";
+const HEADER_PMSOURCE: &str = "PMSRC";
 const MAX_HEADER_VALUE_BYTES: usize = 67;
-const HISTORY_CONT_PREFIX: &str = "PMEXPR+ ";
-const MAX_HISTORY_CHUNK_BYTES: usize = 62;
+const MAX_CONTINUATION_CARDS: usize = 9;
+const TRUNCATION_MARKER: &str = "...";
 const PREVIEW_FLOOR: f32 = 2.0 * PADDING_THRESHOLD;
 const STRUCTURAL_CARDS: &[&str] = &[
     "XTENSION", "EXTNAME", "EXTVER", "PCOUNT", "GCOUNT", "EXTEND", "NAXIS3", "CHECKSUM", "DATASUM",
@@ -81,25 +81,51 @@ fn header_safe(value: &str) -> String {
     cleaned
 }
 
-fn split_header_value(value: &str, first: usize, rest: usize) -> (String, Vec<String>) {
+fn chunk_header_value(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
     let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut limit = first;
-    for c in value.chars() {
-        if current.len() + c.len_utf8() > limit {
-            chunks.push(std::mem::take(&mut current));
-            limit = rest;
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut end = (start + MAX_HEADER_VALUE_BYTES).min(bytes.len());
+        while end > start + 1 && end < bytes.len() && bytes[end - 1] == b' ' {
+            end -= 1;
         }
-        current.push(c);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
+        chunks.push(value[start..end].to_string());
+        start = end;
     }
     if chunks.is_empty() {
-        return (String::new(), Vec::new());
+        chunks.push(String::new());
     }
-    let head = chunks.remove(0);
-    (head, chunks)
+    if chunks.len() > MAX_CONTINUATION_CARDS + 1 {
+        chunks.truncate(MAX_CONTINUATION_CARDS + 1);
+        if let Some(last) = chunks.last_mut() {
+            while last.len() + TRUNCATION_MARKER.len() > MAX_HEADER_VALUE_BYTES {
+                last.pop();
+            }
+            last.push_str(TRUNCATION_MARKER);
+        }
+    }
+    chunks
+}
+
+fn set_long_value(header: &mut HduHeader, base: &str, value: &str) {
+    for (i, chunk) in chunk_header_value(value).into_iter().enumerate() {
+        let key = if i == 0 { base.to_string() } else { format!("{}{}", base, i) };
+        header.set(&key, chunk);
+    }
+}
+
+#[cfg(test)]
+fn read_long_value(header: &HduHeader, base: &str) -> Option<String> {
+    let head = header.get(base)?.to_string();
+    let mut full = head;
+    for i in 1..=MAX_CONTINUATION_CARDS {
+        match header.get(&format!("{}{}", base, i)) {
+            Some(chunk) => full.push_str(chunk),
+            None => break,
+        }
+    }
+    Some(full)
 }
 
 pub(crate) fn output_suffix(name: Option<&str>) -> String {
@@ -128,29 +154,8 @@ pub(crate) fn output_header(source: Option<&HduHeader>, expression: &str, target
     }
     header.set(HEADER_ABPROC, DEFAULT_PIXELMATH_SUFFIX.to_string());
 
-    let (head, rest) = split_header_value(
-        &header_safe(expression),
-        MAX_HEADER_VALUE_BYTES,
-        MAX_HISTORY_CHUNK_BYTES,
-    );
-    header.set(HEADER_PMEXPR, head);
-    for chunk in rest {
-        header
-            .cards
-            .push(("HISTORY".to_string(), format!("{}{}", HISTORY_CONT_PREFIX, chunk)));
-    }
-
-    let (source_head, source_rest) = split_header_value(
-        &header_safe(target),
-        MAX_HEADER_VALUE_BYTES,
-        MAX_HISTORY_CHUNK_BYTES,
-    );
-    header.set(HEADER_PMSOURCE, source_head);
-    for chunk in source_rest {
-        header
-            .cards
-            .push(("HISTORY".to_string(), format!("PMSOURCE+ {}", chunk)));
-    }
+    set_long_value(&mut header, HEADER_PMEXPR, &header_safe(expression));
+    set_long_value(&mut header, HEADER_PMSOURCE, &header_safe(target));
     header
 }
 
@@ -382,16 +387,12 @@ mod tests {
         assert!(header.get("BUNIT").is_none(), "BUNIT no longer describes the pixels");
         assert!(header.get("EXTNAME").is_none());
         assert!(header.get("XTENSION").is_none());
-        let mut full_source = header.get(HEADER_PMSOURCE).unwrap().to_string();
-        for (k, v) in &header.cards {
-            if k == "HISTORY" && v.starts_with("PMSOURCE+ ") {
-                full_source.push_str(&v["PMSOURCE+ ".len()..]);
-            }
-        }
+        let full_source = read_long_value(header, HEADER_PMSOURCE).expect("source recorded");
         assert!(
             full_source.ends_with("pm_src.fits"),
-            "Caminho remontado não termina com pm_src.fits: {}", full_source
+            "reassembled source path does not end with pm_src.fits: {full_source}"
         );
+        assert_eq!(full_source, source_path(&f.target));
     }
 
     #[tokio::test]
@@ -545,22 +546,48 @@ mod tests {
     }
 
     #[test]
-    fn pmexpr_is_header_safe_and_spills_into_history() {
+    fn pmexpr_is_header_safe_and_spills_into_numbered_cards() {
         let header = output_header(None, "$T - med($T)\n + A * 0.5", "x.fits");
         assert_eq!(header.get(HEADER_PMEXPR), Some("$T - med($T) + A * 0.5"));
         assert!(!header.get(HEADER_PMEXPR).unwrap().contains('\n'));
 
         let long = format!("$T * ({})", vec!["1"; 120].join(" + "));
         let header = output_header(None, &long, "x.fits");
-        let head = header.get(HEADER_PMEXPR).unwrap();
-        assert!(head.len() <= MAX_HEADER_VALUE_BYTES, "{}", head.len());
-        let continued: String = header
-            .cards
-            .iter()
-            .filter(|(k, v)| k == "HISTORY" && v.starts_with(HISTORY_CONT_PREFIX))
-            .map(|(_, v)| v[HISTORY_CONT_PREFIX.len()..].to_string())
-            .collect();
-        assert_eq!(format!("{}{}", head, continued), long);
+        assert!(header.get(HEADER_PMEXPR).unwrap().len() <= MAX_HEADER_VALUE_BYTES);
+        assert_eq!(read_long_value(&header, HEADER_PMEXPR).as_deref(), Some(long.as_str()));
+    }
+
+    #[test]
+    fn long_provenance_survives_a_real_write_and_read() {
+        let long_expr = format!("$T * ({})", vec!["1"; 120].join(" + "));
+        let long_source = format!("/{}/deep/pm_src.fits", vec!["some_long_directory"; 4].join("/"));
+        assert!(long_expr.len() > MAX_HEADER_VALUE_BYTES && long_source.len() > MAX_HEADER_VALUE_BYTES);
+
+        let header = output_header(None, &long_expr, &long_source);
+        assert!(header.get("PMEXPR1").is_some(), "no numbered continuation emitted");
+        assert!(
+            !header.cards.iter().any(|(k, _)| k == "HISTORY" || k == "COMMENT"),
+            "provenance must not depend on HISTORY: reader.rs:372 skips cards without '= '"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prov.fits").to_str().unwrap().to_string();
+        write_fits_mono(&path, &Array2::<f32>::zeros((2, 2)), Some(&header)).unwrap();
+
+        let reread = load_cached_full(&path).unwrap();
+        let reread = reread.header().expect("header survived the round trip");
+        assert_eq!(read_long_value(reread, HEADER_PMEXPR).as_deref(), Some(long_expr.as_str()));
+        assert_eq!(read_long_value(reread, HEADER_PMSOURCE).as_deref(), Some(long_source.as_str()));
+    }
+
+    #[test]
+    fn an_expression_longer_than_every_card_is_marked_truncated_not_silently_cut() {
+        let huge: String = std::iter::repeat("$T + 1 ").take(400).collect();
+        let header = output_header(None, &huge, "x.fits");
+        let recorded = read_long_value(&header, HEADER_PMEXPR).unwrap();
+        assert!(recorded.ends_with(TRUNCATION_MARKER), "{recorded}");
+        assert!(header.get(&format!("PMEXPR{}", MAX_CONTINUATION_CARDS)).is_some());
+        assert!(header.get(&format!("PMEXPR{}", MAX_CONTINUATION_CARDS + 1)).is_none());
     }
 
     #[test]
