@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, memo } from "react";
+import { useEffect, useId, useMemo, useRef, useState, memo } from "react";
 import { Globe, Loader2 } from "lucide-react";
 import { getRadialVelocityCorrection, isCorrectionError } from "../../services/spectral";
 import type {
@@ -34,9 +34,9 @@ export interface SpectralAxisControlsProps {
 }
 
 const SELECT_CLASS =
-  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-violet-500/50 w-full disabled:opacity-40";
+  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 w-full disabled:opacity-40";
 const INPUT_CLASS =
-  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs font-mono text-zinc-200 outline-none focus:border-violet-500/50 w-full disabled:opacity-40";
+  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:border-violet-500/50 w-full disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 
 function frameLabel(frame: CorrectionFrame): string {
@@ -61,20 +61,23 @@ function SpectralAxisControls({
   onCorrectionChange,
   onCorrectionLoaded,
 }: SpectralAxisControlsProps) {
+  const axisId = useId();
+  const restId = useId();
+  const conventionId = useId();
+  const correctionId = useId();
   const modes = useMemo(() => availableModes(axis), [axis]);
   const [restText, setRestText] = useState(() => (restValue === null ? "" : String(restValue)));
   const [response, setResponse] = useState<RadialVelocityCorrectionResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const prefilledAxis = useRef<SpectralAxisInfo | null>(null);
+  const prefilledAxis = useRef<SpectralAxisInfo | null>(restValue === null ? null : axis);
   const loadedRef = useRef(onCorrectionLoaded);
   loadedRef.current = onCorrectionLoaded;
 
   useEffect(() => {
     if (axis === prefilledAxis.current) return;
     prefilledAxis.current = axis;
-    const rest = defaultRestUm(axis);
-    if (rest !== null && restValue === null) onRestChange(rest);
-  }, [axis, restValue, onRestChange]);
+    onRestChange(defaultRestUm(axis));
+  }, [axis, onRestChange]);
 
   useEffect(() => {
     setRestText((current) =>
@@ -123,8 +126,11 @@ function SpectralAxisControls({
     <div className="flex flex-col gap-2 px-3 pb-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
       <div className="flex gap-2">
         <div className="flex-1 flex flex-col gap-0.5">
-          <label className={LABEL_CLASS}>Axis</label>
+          <label htmlFor={axisId} className={LABEL_CLASS}>
+            Axis
+          </label>
           <select
+            id={axisId}
             value={mode}
             disabled={modes.length === 0}
             onChange={(e) => onModeChange(e.target.value as SpectralAxisMode)}
@@ -139,8 +145,11 @@ function SpectralAxisControls({
           </select>
         </div>
         <div className="flex-1 flex flex-col gap-0.5">
-          <label className={LABEL_CLASS}>{"Rest wavelength, vacuum (μm)"}</label>
+          <label htmlFor={restId} className={LABEL_CLASS}>
+            {"Rest wavelength, vacuum (μm)"}
+          </label>
           <input
+            id={restId}
             type="number"
             min={0}
             step={0.0001}
@@ -160,8 +169,11 @@ function SpectralAxisControls({
       {mode === "velocity" && (
         <div className="flex gap-2">
           <div className="flex-1 flex flex-col gap-0.5">
-            <label className={LABEL_CLASS}>Convention</label>
+            <label htmlFor={conventionId} className={LABEL_CLASS}>
+              Convention
+            </label>
             <select
+              id={conventionId}
               value={convention}
               onChange={(e) => onConventionChange(e.target.value as VelocityConvention)}
               className={SELECT_CLASS}
@@ -174,8 +186,11 @@ function SpectralAxisControls({
             </select>
           </div>
           <div className="flex-1 flex flex-col gap-0.5">
-            <label className={LABEL_CLASS}>Apply correction</label>
+            <label htmlFor={correctionId} className={LABEL_CLASS}>
+              Apply correction
+            </label>
             <select
+              id={correctionId}
               value={correction}
               disabled={result === null}
               onChange={(e) => onCorrectionChange(e.target.value as CorrectionFrame)}

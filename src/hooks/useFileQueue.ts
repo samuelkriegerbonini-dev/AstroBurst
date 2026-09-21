@@ -41,7 +41,7 @@ function detectResolutionGroups(files: ProcessedFile[]): ResolutionGroup[] {
   for (const file of files) {
     if (file.status !== FILE_STATUS.DONE || !file.result?.dimensions) continue;
     if (isCubePlaneResult(file.result.header, file.result.is_rgb)) continue;
-    const [w, h] = file.result.dimensions;
+    const [w, h] = file.result.resampled?.dimensions ?? file.result.dimensions;
     const existing = groups.find(
       (g) => Math.abs(g.width - w) < 10 && Math.abs(g.height - h) < 10,
     );

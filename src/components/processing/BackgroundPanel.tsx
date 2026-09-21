@@ -1,6 +1,10 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
+import { X } from "lucide-react";
 import { extractBackground } from "../../services/processing";
 import { extractBackgroundDbe } from "../../services/dbe";
+import { cancelProgress } from "../../services/progress";
+import { useProgress } from "../../hooks/useProgress";
+import { BACKGROUND_PROGRESS_EVENT } from "../../shared/types/processing";
 import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -55,6 +59,8 @@ function sampleStroke(sample: DbeSample): string {
 }
 
 export default function BackgroundPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: BackgroundPanelProps) {
+  const progress = useProgress(BACKGROUND_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
   const [model, setModel] = useState<BackgroundModel>("polynomial");
   const [params, setParams] = useState<BackgroundParams>({
     gridSize: 8,
@@ -70,6 +76,9 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   const [error, setError] = useState<string | null>(null);
   const [showModel, setShowModel] = useState(false);
   const [showSamples, setShowSamples] = useState(true);
+
+  const modelId = useId();
+  const modeId = useId();
 
   const regionKey = useRegionKey();
   const regionDoc = useRegionDoc(regionKey);
@@ -112,17 +121,20 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
     setIsRunning(true);
     setError(null);
     setResult(null);
+    resetProgress();
     try {
       const res = model === "spline" ? await runSpline(selectedFile.path) : await runPolynomial(selectedFile.path);
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
       onProcessingDone?.(res);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) setError(msg);
     } finally {
       setIsRunning(false);
+      resetProgress();
     }
-  }, [selectedFile, model, runSpline, runPolynomial, onPreviewUpdate, onProcessingDone]);
+  }, [selectedFile, model, runSpline, runPolynomial, resetProgress, onPreviewUpdate, onProcessingDone]);
 
   const isSpline = model === "spline";
   const splineSamples = result?.samples;
@@ -146,8 +158,8 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
 
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Model</label>
-          <select value={model} onChange={(e) => setModel(e.target.value as BackgroundModel)} disabled={isRunning} className="ab-select">
+          <label htmlFor={modelId} className="text-xs text-zinc-400">Model</label>
+          <select id={modelId} value={model} onChange={(e) => setModel(e.target.value as BackgroundModel)} disabled={isRunning} className="ab-select">
             <option value="polynomial">Polynomial</option>
             <option value="spline">Spline (DBE)</option>
           </select>
@@ -192,8 +204,8 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
         )}
 
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Mode</label>
-          <select value={isSpline ? dbe.mode : params.mode} onChange={(e) => setMode(e.target.value as DbeMode)} disabled={isRunning} className="ab-select">
+          <label htmlFor={modeId} className="text-xs text-zinc-400">Mode</label>
+          <select id={modeId} value={isSpline ? dbe.mode : params.mode} onChange={(e) => setMode(e.target.value as DbeMode)} disabled={isRunning} className="ab-select">
             <option value="subtract">Subtract</option>
             <option value="divide">Divide</option>
           </select>
@@ -201,6 +213,29 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
       </div>
 
       <RunButton label={isSpline ? "Extract Background (Spline)" : "Extract Background"} runningLabel="Extracting..." running={isRunning} disabled={!selectedFile} accent="emerald" onClick={handleRun} />
+
+      {isRunning && progress.active && (
+        <div className="flex flex-col gap-1.5 animate-fade-in">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-emerald), #6ee7b7)" }} />
+          </div>
+          <div className="flex justify-between items-center text-[10px] text-zinc-500">
+            <span>{progress.stage}</span>
+            <span className="flex items-center gap-2">
+              {progress.percent}%
+              <button
+                onClick={() => { cancelProgress(BACKGROUND_PROGRESS_EVENT).catch(() => {}); }}
+                title="Cancel background extraction"
+                aria-label="Cancel background extraction"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
+
       <ErrorAlert message={error} />
 
       {result && (

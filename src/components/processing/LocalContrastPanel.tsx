@@ -62,9 +62,11 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
         onProcessingDone?.(res);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) setError(msg);
     } finally {
       setIsRunning(false);
+      resetProgress();
     }
   }, [canRun, isShowingComposite, selectedFile?.path, outputDir, config, resetProgress, setCompositePreviewUrl, onPreviewUpdate, onProcessingDone]);
 

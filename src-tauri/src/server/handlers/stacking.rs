@@ -160,7 +160,7 @@ pub async fn stack(
 
         tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
 
-        let outcome = stack_from_paths(&paths, &config, None).map(|r| r.image);
+        let outcome = stack_from_paths(&paths, &config, None, None).map(|r| r.image);
         publish_result(&job, &tx, &cache, &slot, outcome);
     });
 
@@ -215,7 +215,7 @@ pub async fn drizzle(
 
         tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
 
-        let outcome = drizzle_from_paths(&paths, &config, None).map(|r| r.image);
+        let outcome = drizzle_from_paths(&paths, &config, None, None).map(|r| r.image);
         publish_result(&job, &tx, &cache, &slot, outcome);
     });
 

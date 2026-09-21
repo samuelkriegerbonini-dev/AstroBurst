@@ -306,6 +306,7 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
                       type="range"
                       min={0} max={1} step={0.05}
                       value={val}
+                      aria-label={`${bin.shortLabel} weight into ${axis.toUpperCase()} (0-1)`}
                       onChange={(e) => handleWeightChange(w.channelId, axis, parseFloat(e.target.value))}
                       className="w-full h-1 rounded-full appearance-none cursor-pointer"
                       style={{

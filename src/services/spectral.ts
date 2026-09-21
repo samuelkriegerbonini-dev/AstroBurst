@@ -3,20 +3,10 @@ import type {
   RadialVelocityCorrectionError,
   RadialVelocityCorrectionResponse,
   SpectralAxisInfo,
-  VelocityAxisResult,
-  VelocityConvention,
 } from "../shared/types/spectral";
 
 export function getSpectralAxis(path: string): Promise<SpectralAxisInfo> {
   return typedInvoke<SpectralAxisInfo>("spectral_axis_cmd", { path });
-}
-
-export function getVelocityAxis(
-  path: string,
-  restUm: number,
-  convention: VelocityConvention,
-): Promise<VelocityAxisResult> {
-  return typedInvoke<VelocityAxisResult>("velocity_axis_cmd", { path, restUm, convention });
 }
 
 export function getRadialVelocityCorrection(

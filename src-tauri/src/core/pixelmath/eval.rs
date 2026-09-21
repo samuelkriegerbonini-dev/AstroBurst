@@ -125,6 +125,21 @@ impl Program {
     pub fn stack_depth(&self) -> usize {
         self.stack_depth
     }
+
+    pub fn referenced_slots(&self) -> Vec<bool> {
+        let mut used = vec![false; self.slot_names.len()];
+        for op in &self.ops {
+            match *op {
+                Op::Load(slot) | Op::Reduce(_, slot) => {
+                    if let Some(flag) = used.get_mut(slot) {
+                        *flag = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        used
+    }
 }
 
 fn is_slot_identifier(name: &str) -> bool {
@@ -228,7 +243,16 @@ fn function_op(func: Function, arg_count: usize) -> Op {
 
 fn emit(expr: &Expr, slot_names: &[String], ops: &mut Vec<Op>) -> Result<(), PixelMathError> {
     match expr {
-        Expr::Number(value) => ops.push(Op::Const(*value as f32)),
+        Expr::Number(value) => {
+            let narrowed = *value as f32;
+            if !narrowed.is_finite() {
+                return Err(PixelMathError::new(format!(
+                    "number {} is outside the range this engine can represent (max 3.4e38)",
+                    value
+                )));
+            }
+            ops.push(Op::Const(narrowed));
+        }
         Expr::Symbol { name, span } => ops.push(Op::Load(resolve_symbol(name, *span, slot_names)?)),
         Expr::Unary { op, operand } => {
             emit(operand, slot_names, ops)?;
@@ -288,18 +312,75 @@ fn collect_finite(values: &[f32]) -> Vec<f32> {
     values.par_iter().copied().filter(|v| v.is_finite()).collect()
 }
 
-fn mean_f64(values: &[f32]) -> f64 {
-    values.par_iter().map(|&v| v as f64).sum::<f64>() / values.len() as f64
+fn needs_finite_buffer(reducer: Reducer) -> bool {
+    matches!(reducer, Reducer::Med | Reducer::Mdev | Reducer::Adev)
 }
 
-fn reduce(reducer: Reducer, finite: &[f32]) -> f32 {
+fn finite_count_and_sum(values: &[f32]) -> (usize, f64) {
+    values
+        .par_iter()
+        .fold(
+            || (0usize, 0.0f64),
+            |(n, s), &v| if v.is_finite() { (n + 1, s + v as f64) } else { (n, s) },
+        )
+        .reduce(|| (0usize, 0.0f64), |a, b| (a.0 + b.0, a.1 + b.1))
+}
+
+fn reduce_streaming(reducer: Reducer, values: &[f32]) -> f32 {
+    match reducer {
+        Reducer::Min => {
+            let m = values.par_iter().copied().filter(|v| v.is_finite()).reduce(|| f32::INFINITY, f32::min);
+            if m.is_finite() {
+                m
+            } else {
+                f32::NAN
+            }
+        }
+        Reducer::Max => {
+            let m = values
+                .par_iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .reduce(|| f32::NEG_INFINITY, f32::max);
+            if m.is_finite() {
+                m
+            } else {
+                f32::NAN
+            }
+        }
+        Reducer::Mean => {
+            let (n, sum) = finite_count_and_sum(values);
+            if n == 0 {
+                f32::NAN
+            } else {
+                (sum / n as f64) as f32
+            }
+        }
+        Reducer::Sdev => {
+            let (n, sum) = finite_count_and_sum(values);
+            if n == 0 {
+                return f32::NAN;
+            }
+            if n < 2 {
+                return 0.0;
+            }
+            let mean = sum / n as f64;
+            let sum_sq = values
+                .par_iter()
+                .filter(|v| v.is_finite())
+                .map(|&v| (v as f64 - mean).powi(2))
+                .sum::<f64>();
+            (sum_sq / (n as f64 - 1.0)).sqrt() as f32
+        }
+        _ => unreachable!("buffered reducers are handled by reduce_buffered"),
+    }
+}
+
+fn reduce_buffered(reducer: Reducer, finite: &[f32]) -> f32 {
     if finite.is_empty() {
         return f32::NAN;
     }
     match reducer {
-        Reducer::Mean => mean_f64(finite) as f32,
-        Reducer::Min => finite.par_iter().copied().reduce(|| f32::INFINITY, f32::min),
-        Reducer::Max => finite.par_iter().copied().reduce(|| f32::NEG_INFINITY, f32::max),
         Reducer::Med => {
             let mut buf = finite.to_vec();
             exact_median_mut(&mut buf) as f32
@@ -309,20 +390,21 @@ fn reduce(reducer: Reducer, finite: &[f32]) -> f32 {
             let median = exact_median_mut(&mut buf) as f32;
             exact_mad_mut(&mut buf, median)
         }
-        Reducer::Sdev => {
-            let n = finite.len();
-            if n < 2 {
-                return 0.0;
-            }
-            let mean = mean_f64(finite);
-            let sum_sq = finite.par_iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>();
-            (sum_sq / (n as f64 - 1.0)).sqrt() as f32
-        }
         Reducer::Adev => {
             let mut buf = finite.to_vec();
             let median = exact_median_mut(&mut buf);
             (finite.par_iter().map(|&v| (v as f64 - median).abs()).sum::<f64>() / finite.len() as f64) as f32
         }
+        _ => unreachable!("streaming reducers are handled by reduce_streaming"),
+    }
+}
+
+#[cfg(test)]
+fn reduce(reducer: Reducer, values: &[f32]) -> f32 {
+    if needs_finite_buffer(reducer) {
+        reduce_buffered(reducer, values)
+    } else {
+        reduce_streaming(reducer, values)
     }
 }
 
@@ -333,8 +415,12 @@ fn resolve_reducers(ops: &[Op], inputs: &[&[f32]]) -> Vec<Op> {
         .map(|op| match *op {
             Op::Reduce(reducer, slot) => {
                 let value = *values.entry((reducer, slot)).or_insert_with(|| {
-                    let finite = finite_cache.entry(slot).or_insert_with(|| collect_finite(inputs[slot]));
-                    reduce(reducer, finite)
+                    if needs_finite_buffer(reducer) {
+                        let finite = finite_cache.entry(slot).or_insert_with(|| collect_finite(inputs[slot]));
+                        reduce_buffered(reducer, finite)
+                    } else {
+                        reduce_streaming(reducer, inputs[slot])
+                    }
                 });
                 Op::Const(value)
             }
@@ -540,7 +626,7 @@ fn finish_output(out: &mut [f32], opts: &OutputOptions) {
     let rescale = if opts.rescale {
         let (lo, hi) = finite_range(out);
         if lo.is_finite() {
-            Some((lo, hi - lo))
+            Some((lo as f64, hi as f64 - lo as f64))
         } else {
             None
         }
@@ -549,12 +635,23 @@ fn finish_output(out: &mut [f32], opts: &OutputOptions) {
     };
     let truncate = opts.truncate;
     out.par_iter_mut().for_each(|v| {
-        if !v.is_finite() {
-            *v = f32::NAN;
+        if v.is_nan() {
+            return;
+        }
+        if v.is_infinite() {
+            *v = if truncate {
+                if *v > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                f32::NAN
+            };
             return;
         }
         if let Some((lo, range)) = rescale {
-            *v = if range > 0.0 { (*v - lo) / range } else { 0.0 };
+            *v = if range > 0.0 { ((*v as f64 - lo) / range) as f32 } else { 0.0 };
         }
         if truncate {
             *v = v.clamp(0.0, 1.0);
@@ -583,7 +680,11 @@ pub fn evaluate(
         return Err(PixelMathError::new("at least one image slot is required"));
     };
     let dims = first.dim();
+    let referenced = program.referenced_slots();
     for (i, slot) in slots.iter().enumerate().skip(1) {
+        if !referenced[i] {
+            continue;
+        }
         if slot.dim() != dims {
             return Err(PixelMathError::new(format!(
                 "dimension mismatch: {} is {} but {} is {} (width x height)",
@@ -596,9 +697,15 @@ pub fn evaluate(
     }
     let flats: Vec<Cow<[f32]>> = slots
         .iter()
-        .map(|a| match a.as_slice() {
-            Some(s) => Cow::Borrowed(s),
-            None => Cow::Owned(a.iter().copied().collect()),
+        .enumerate()
+        .map(|(i, a)| {
+            if !referenced[i] {
+                return Cow::Borrowed(&[][..]);
+            }
+            match a.as_slice() {
+                Some(s) => Cow::Borrowed(s),
+                None => Cow::Owned(a.iter().copied().collect()),
+            }
         })
         .collect();
     let inputs: Vec<&[f32]> = flats.iter().map(|c| c.as_ref()).collect();

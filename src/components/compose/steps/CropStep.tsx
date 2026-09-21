@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import { Scissors } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { cropChannels, type CropResult } from "../../../services/compose";
@@ -11,6 +11,7 @@ interface CropStepProps {
 }
 
 export default function CropStep({ state, onCropped }: CropStepProps) {
+  const marginId = useId();
   const [mode, setMode] = useState<"auto" | "manual">("auto");
   const [top, setTop] = useState(0);
   const [bottom, setBottom] = useState(0);
@@ -93,7 +94,12 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
           <Scissors size={12} className="text-cyan-400" />
           <span className="text-xs text-zinc-300">Crop aligned channels</span>
         </div>
-        <select value={mode} onChange={(e) => setMode(e.target.value as "auto" | "manual")} className="ab-select">
+        <select
+          value={mode}
+          aria-label="Crop mode"
+          onChange={(e) => setMode(e.target.value as "auto" | "manual")}
+          className="ab-select"
+        >
           <option value="auto">Auto-detect borders</option>
           <option value="manual">Manual margins</option>
         </select>
@@ -111,9 +117,13 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
           {([["Top", top, setTop], ["Bottom", bottom, setBottom], ["Left", left, setLeft], ["Right", right, setRight]] as const).map(
             ([label, val, setter]) => (
               <div key={label} className="flex items-center justify-between gap-2">
-                <label className="text-[10px] text-zinc-400 w-12">{label}</label>
+                <label htmlFor={`${marginId}-${label}`} className="text-[10px] text-zinc-400 w-12">
+                  {label}
+                </label>
                 <input
+                  id={`${marginId}-${label}`}
                   type="number"
+                  aria-label={`${label} margin (px)`}
                   min={0}
                   value={val}
                   onChange={(e) => setter(Math.max(0, parseInt(e.target.value) || 0))}

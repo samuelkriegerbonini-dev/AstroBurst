@@ -31,11 +31,11 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="AstroBurst showing a finished composite of the Pillars of Creation, the blend presets of the compose wizard, the live per-channel STF on the GPU and the analysis panel with the plate solution and the Gaia catalog" width="100%">
+  <img src="docs/screenshots/hero.png" alt="A finished Pillars of Creation composite with a spline tone curve applied, the pixel readout panel, and the header explorer proposing a channel assignment from the FITS filter keyword" width="100%">
 </p>
-<p align="center"><em>The Pillars of Creation composed from the three HST/WFPC2 narrowband frames that ship with the app. Bottom: the ten wizard steps with the blend presets, resolved by spectral wavelength rather than bin order. Right: per-channel STF running live on the GPU, the plate solution read from the header, and the Gaia DR3 panel.</em></p>
+<p align="center"><em>The Pillars of Creation composed from the three HST/WFPC2 narrowband frames that ship with the app, nine of the ten wizard steps done and the composite ready. Bottom: a monotone spline tone curve, applied in 39&nbsp;ms. Left: the readout for pixel (800, 799) &mdash; 134.35 with its 5&times;5 neighbourhood, the ICRS position at 0.10&Prime;/px, and the WFPC2 exposure it came from. Right: the header explorer reading <code>FILTNAM1: F656N</code> and offering to assign that frame to the green channel, which is how the wizard maps filters to channels without a manual step. The magenta corner is the gap between the WFPC2 chips, not a processing artefact.</em></p>
 
-**Latest:** 0.6.0-preview. Since 0.5.8: DS9-class display controls shared with the headless server, any-HDU / any-array image references, DQ decoding and overlays, interactive regions with DS9 `.reg` exchange, a PixInsight-class processing round (rejection families, frame normalization, cosmetic correction, DBE spline background, PixelMath, LHE, HDRMT, exact statistics) and a science round (header photometric calibration, spectral axes and velocities, cube moment maps, SCI+ERR+DQ cutouts, WCS grid, Gaia DR3 catalog). Full history in [CHANGELOG.md](CHANGELOG.md).
+**Latest:** 0.6.0. Since 0.5.8: DS9-class display controls shared with the headless server, any-HDU / any-array image references, DQ decoding and overlays, interactive regions with DS9 `.reg` exchange, a PixInsight-class processing round (rejection families, frame normalization, cosmetic correction, DBE spline background, PixelMath, LHE, HDRMT, exact statistics) and a science round (header photometric calibration, spectral axes and velocities, cube moment maps, SCI+ERR+DQ cutouts, WCS grid, Gaia DR3 catalog). Full history in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 
@@ -54,9 +54,9 @@ Image processing runs locally. Two optional features reach the network: plate so
 ### Viewer, regions and pixel readout
 
 <p align="center">
-  <img src="docs/screenshots/01-viewer-regions-and-readout.png" alt="A box region on a JWST NIRCam mosaic with the display controls bar and the pixel readout panel" width="100%">
+  <img src="docs/screenshots/05-wcs-grid-and-hdrmt.png" alt="A WCS coordinate grid with sexagesimal edge labels over a JWST NIRCam mosaic, beside the HDR multiscale transform panel and its before/after comparison" width="100%">
 </p>
-<p align="center"><em>A box region selected over a JWST NIRCam F187N mosaic. Top: the display-controls bar, here on MTF stretch, min/max limits, gray colormap inverted. Right: the readout reporting the pixel as 45.4738 &plusmn; 0.7261 MJy/sr with its ICRS sexagesimal position.</em></p>
+<p align="center"><em>The WCS grid on a NIRCam F200W mosaic of the Eagle Nebula, in ICRS at density 3. The lines are traced in world coordinates through the WCS rather than drawn on the pixel axes, so they follow the sky at any zoom and the edge labels land on sexagesimal-friendly steps &mdash; right ascension in hours down the left, declination in arcminutes along the bottom. Right: the HDR multiscale transform over six layers, with the wipe comparing the original against the result.</em></p>
 
 **Display controls.** Six stretch curves: MTF, linear, log, sqrt, asinh with an adjustable softening parameter, and power with an adjustable exponent. Four limit algorithms: min/max, zscale (IRAF-style, adjustable contrast), percentile (1 to 99.5 by default) and explicit user vmin/vmax. Nine colormaps (gray, viridis, inferno, magma, plasma, cividis, heat, cool, rainbow) with an invert toggle. The desktop app applies them through a LUT texture in a WebGPU shader and falls back to a CPU worker when WebGPU is unavailable or the device is lost; the headless server computes the same stretch and limits on the CPU and returns a PNG.
 
@@ -70,12 +70,17 @@ Region statistics, cutouts, histograms and rendering are available on the headle
 
 **Statistics.** An exact PixInsight-style table per image or per selected region: count, mean, median, avgDev, MAD, sqrt(BWMV), stdDev, variance, min, max, sum, NaN and DQ-excluded counts, in raw, normalised or 16-bit units, per channel for composites, with k-sigma multiresolution noise evaluation and copy-as-CSV. Zeros and negatives are included and nothing is approximated by a histogram.
 
+<p align="center">
+  <img src="docs/screenshots/03-statistics-and-noise.png" alt="The exact statistics table with k-sigma noise evaluation over a JWST NIRCam mosaic, beside the regions panel and the FFT power spectrum" width="100%">
+</p>
+<p align="center"><em>A 14344&times;8589 NIRCam F200W mosaic of the Eagle Nebula, measured over the full frame in 3.5&nbsp;s: 118,643,186 finite pixels (96.30%), median 5.18733 MJy/sr, MAD 0.664225, sqrt(BWMV) 1.10867, and 4,557,430 NaN pixels counted rather than dropped. The last two rows are the k-sigma multiresolution noise evaluation &mdash; &sigma;&nbsp;=&nbsp;0.0818 from the 83.54% of pixels it classes as noise, which is the number that matters when weighting frames by 1/&sigma;&sup2;. Below: the regions panel and the FFT power spectrum.</em></p>
+
 ### Data quality and units
 
 <p align="center">
-  <img src="docs/screenshots/02-planes-and-header-explorer.png" alt="The FITS extensions list of a JWST NIRCam i2d product with SCI, ERR, CON, WHT and variance planes, and the header explorer" width="100%">
+  <img src="docs/screenshots/01-extensions-and-header-explorer.png" alt="The ten HDUs of a JWST NIRCam i2d product listed with SCI, ERR, CON, WHT and the three variance planes, beside the grouped header explorer" width="100%">
 </p>
-<p align="center"><em>A JWST NIRCam i2d product on the GPU viewer: the extension list exposes SCI, ERR, CON, WHT and the variance planes for display, and the header explorer groups the 277 keywords.</em></p>
+<p align="center"><em>A JWST NIRCam i2d product on the GPU viewer. Left of the header: all ten HDUs, each with a Display button &mdash; SCI, ERR, CON, WHT, VAR_POISSON, VAR_RNOISE and VAR_FLAT are images you can show and measure, not just metadata. Right: the header explorer over all 281 keywords, grouped into IMAGE, OBSERVATION, PROCESSING, WCS / ASTROMETRY and the remaining 260. Bottom: the channel bins waiting for an assignment. Top: the batch of 96 files as it finished.</em></p>
 
 **Any HDU, any array.** An image reference of the form `path#hdu=3` or `path#array=roman.dq` makes any FITS extension or any ASDF array the displayed image, not only the auto-detected SCI plane. Every path-based command accepts the reference, so DQ and ERR planes can be displayed and measured like any other image. Pick one from the HDU panel in the desktop app, or over HTTP on the server.
 
@@ -85,40 +90,25 @@ The DQ overlay and DQ exclusion are desktop-only. The server pixel endpoint retu
 
 ### Colour calibration
 
-<p align="center">
-  <img src="docs/screenshots/03-colour-calibration-spcc.png" alt="Spectrophotometric colour calibration panel over an RGB composite" width="100%">
-</p>
-<p align="center"><em>Spectrophotometric colour calibration against Gaia DR3 with a selectable white reference and SCNR, on an RGB composite rendering through the GPU display path.</em></p>
-
 Spectrophotometric colour calibration solves channel gains against a real Gaia DR3 cone search through VizieR (the `vizier` feature, on by default), falling back to a synthetic catalogue when the feature is off. Auto white balance picks the channel with the lowest noise (MAD over median) as the reference rather than always green. SCNR removes green excess and redistributes the lost luminance to red and blue with BT.709 weights.
 
 ### Compose wizard
 
-<p align="center">
-  <img src="docs/screenshots/04-compose-channel-auto-map.png" alt="The channel step of the compose wizard with three narrowband frames mapped to Ha, OIII and SII from their FITS headers" width="100%">
-</p>
-<p align="center"><em>The channel step: three HST WFPC2 narrowband frames assigned to H-alpha, [O III] and [S II] by reading the filter from each header and matching it to the bin wavelength, with no manual mapping.</em></p>
-
 Ten steps: channels, stack, align, crop, background, blend, colour, stretch, adjust, export. Filters are detected from headers and mapped to channel bins by wavelength. Stacking uses the same rejection family as the Stack tab (sigma, Winsorized sigma, linear fit, percentile, min/max) with a subframe selector and optional drizzle. Alignment is sub-pixel phase correlation by default or star-based affine (triangle asterism with RANSAC, 2000 iterations) for rotation, with an automatic fallback chain of affine, rigid, phase correlation, identity. Background correction has four families: per-channel polynomial surface, linked shared gradient, neutralize (sky pedestal only) and de-band for 1/f striping (rows, columns, both or an auto-detected axis), offered as seven options in the selector. Blend presets (SHO, HOO, Dynamic HOO, Foraxx, Hubble Legacy, RGB, plus wavelength-spreading Auto and Balanced) resolve by spectral wavelength rather than bin order. Stretch offers star removal (starless image plus a separate stars layer), masked stretch with star protection, GHS, arcsinh and linked or per-channel STF.
-
-<p align="center">
-  <img src="docs/screenshots/05-compose-masked-stretch.png" alt="The stretch step with the mode list open on masked stretch, star protection controls and the header explorer" width="100%">
-</p>
-<p align="center"><em>The stretch step on the blended composite, with the four stretch modes and the star-protection controls of the masked stretch: detection sigma, maximum eccentricity, mask growth and a shared star mask across channels. The header explorer on the right shows the filter that assigned this frame to its channel.</em></p>
 
 Adjust applies monotone Fritsch-Carlson spline tone curves. The composite is non-destructive: white balance and SCNR always reconstruct from an immutable original cache.
 
 <p align="center">
-  <img src="docs/screenshots/06-compose-curves-and-result.png" alt="The adjust step with a tone curve applied to the finished composite" width="100%">
+  <img src="docs/screenshots/07-drizzle-rgb.png" alt="The drizzle RGB panel assigning NIRCam frames to red, green and blue channels, with the drizzle, alignment and rejection parameters" width="100%">
 </p>
-<p align="center"><em>The last step before export: a monotone spline tone curve applied to the calibrated composite, with the result rendering live through the GPU path. The magenta corner is the gap between the WFPC2 chips, not an artefact of the processing.</em></p>
+<p align="center"><em>Drizzle straight to RGB: each loaded frame is assigned to one or more channels, then scattered at 2&times; with a 0.70 pixfrac and a square kernel. The same rejection family the Stack tab uses is applied <em>before</em> the scatter &mdash; sigma clipping at 3.0/3.0 here &mdash; rather than after, so rejected pixels never reach the output grid. Alignment across frames and across channels runs in the same pass.</em></p>
 
 ### Processing
 
 <p align="center">
-  <img src="docs/screenshots/07-pixelmath.png" alt="The PixelMath panel with a validated NaN-fill expression, result statistics and a target/result comparison" width="100%">
+  <img src="docs/screenshots/04-local-contrast-and-compare.png" alt="Local histogram equalization with its kernel and contrast-limit controls, an original/equalized wipe, a circle region on the image and the coordinate frame selector open" width="100%">
 </p>
-<p align="center"><em>PixelMath on a NIRCam mosaic: the expression is validated as you type, the result is written as a new FITS with provenance cards, and the panel compares target and result.</em></p>
+<p align="center"><em>Local histogram equalization on the same NIRCam mosaic: CLAHE on lightness, 64&nbsp;px circular kernel, contrast limit 2.0, 8-bit histogram, 0.47&nbsp;s over 14344&times;8589. The banner reads <em>Using output from LHE / HDRMT</em> &mdash; each processing step feeds the next, and the breadcrumb above names the chain. Below the controls, a draggable wipe compares original against equalized. On the image: a circle region, and the readout panel with the coordinate frame open on its four choices (ICRS, FK5, galactic, ecliptic).</em></p>
 
 **Calibration and integration.** Bias, dark and flat masters integrated with Winsorized sigma clipping instead of a plain median; EXPTIME-ratio dark scaling or dark-frame optimization by robust-noise minimisation; cosmetic correction from a master dark, from automatic cluster-aware detection or from a PixInsight-style defect list, CFA-aware, standalone or inside the pipeline. Integration offers the rejection family (sigma, Winsorized sigma, linear fit, percentile, min/max, none), mean/median/min/max combination, additive or multiplicative frame normalization with optional scaling, scale+offset rejection normalization, low/high rejection maps, subframe quality weights and 1/sigma² noise weights. Drizzle at 1 to 4x with square, Gaussian or Lanczos3 kernels applies the same pixel rejection before scattering. Everything is exposed on the desktop and on the headless server with the same parameter names.
 
@@ -126,23 +116,23 @@ Adjust applies monotone Fritsch-Carlson spline tone curves. The composite is non
 
 **PixelMath.** A per-pixel expression language over the target image (`$T`) and named image slots bound to loaded files (`A`, `B`, ...): arithmetic, comparison and logical operators, `iif`, `~` inversion, per-pixel functions (abs, sqrt, exp, ln, log, log2, pow, min, max, floor, ceil, round, trunc, sign, clip, rescale) and image statistics (mean, med, mdev, sdev, adev, min, max) over finite pixels. NaN propagates, output goes to a new file with `ABPROC` and `PMEXPR` provenance cards, and slots for the symbols you type are bound to the loaded files automatically.
 
+<p align="center">
+  <img src="docs/screenshots/06-pixelmath.png" alt="The PixelMath panel with a background-subtraction expression and image slots bound to the loaded NIRCam files" width="100%">
+</p>
+<p align="center"><em>PixelMath subtracting the frame median from the target: <code>$T - med($T)</code>. The slots down the right are bound to the loaded files automatically from the symbols in the expression, so an eighteen-frame set is addressable as <code>A</code> through <code>R</code> without wiring each one by hand.</em></p>
+
 **Multiscale and local contrast.** A-trous wavelet denoise with per-scale thresholds and a PixInsight MLT-style per-scale detail bias; Local Histogram Equalization (CLAHE on lightness with kernel radius, contrast limit, 8/10/12-bit histograms and blend amount) and HDR Multiscale Transform (2 to 8 layers, overdrive, inverted mode, star-core deringing) for stretched images and the RGB composite. Richardson-Lucy deconvolution (FFT-based, Tikhonov regularization, deringing) with a synthetic or empirical PSF, and empirical PSF estimation with moment-based FWHM. OSC debayer (RGGB, BGGR, GRBG, GBRG, honouring XBAYROFF and YBAYROFF). Every processing step feeds the next one in the chain and the result is shown on the GPU viewer as well as on the CPU path.
 
 ### Science analysis
 
 <p align="center">
-  <img src="docs/screenshots/08-analysis-tab.png" alt="The Analysis tab with the Gaia DR3 catalog panel, the exact statistics table and the coordinate frame selector" width="100%">
+  <img src="docs/screenshots/02-plate-solve-photometry-gaia.png" alt="The solved plate solution, the photometry panel and the Gaia DR3 cross-match controls over a NIRCam F335M mosaic" width="100%">
 </p>
-<p align="center"><em>The Analysis tab on a NIRCam F335M mosaic: Gaia DR3 cone search and cross-match, the exact statistics table in MJy/sr with a noise evaluation toggle, regions, FFT and deep zoom, with the readout frame switched between ICRS, FK5, galactic and ecliptic.</em></p>
+<p align="center"><em>The astrometry and photometry column on a NIRCam F335M mosaic. The plate solution resolves to 12h&nbsp;40m&nbsp;6.98s, &minus;11&deg;&nbsp;37&prime;&nbsp;59.4&Prime; at 0.063&Prime;/px over a 5.9&prime;&nbsp;&times;&nbsp;2.4&prime; field. Photometry propagates error from the ERR plane and reads the zero point out of the header, so it reports AB magnitudes and fluxes in Jy rather than instrument counts. Below, the Gaia DR3 cone search with a G limit and a match radius, and the cross-match that produces astrometric residuals and a photometric zero point.</em></p>
 
 **Photometry.** Aperture photometry with fractional edge-pixel weights, a local background annulus, ERR-plane error propagation (or sky noise plus an optional Poisson term), the SATURATED DQ bit or a header saturation level, masked-pixel counts and a curve-of-growth aperture correction. The zero point is read from the header, JWST `MJy/sr` with `PIXAR_SR` or `DN/s` with `PHOTMJSR`, HST `PHOTFLAM`/`PHOTPLAM`/`PHOTZPT`, Roman `conversion_megajanskys`, or generic `MAGZERO`-style keywords, so the panel reports AB magnitude with error, flux in Jy and surface brightness, and warns when the image carries an `ABPROC` provenance card left by a processing step.
 
 **Catalogs.** Gaia DR3 cone search through VizieR with proper motions propagated from J2016.0 to the observation date, an overlay layer with labels, full-field cross-match of detected stars with astrometric residuals (median dRA/dDec, rms) and a photometric zero point in G, BP or RP with an optional colour term, RFC-4180 CSV export of rows, sources and matches, and a one-click copy of rows into Point regions for `.reg` export.
-
-<p align="center">
-  <img src="docs/screenshots/09-gaia-crossmatch-and-statistics.png" alt="Gaia DR3 cross-match results with astrometric residuals and a photometric zero point, above the exact statistics table" width="100%">
-</p>
-<p align="center"><em>A Gaia DR3 cross-match on an HST WFPC2 frame of the Eagle Nebula: 68 matched stars with a median offset of 0.330 and -0.009 arcsec and 0.458 arcsec rms, a zero point of 26.229 ± 0.036 from 58 stars with the colour term fitted, and the statistics table below. The panel says plainly that the frame already carries an HST flux calibration, so the Gaia zero point is informational, and that the header has no observation date, so catalogue positions stay at J2016.0.</em></p>
 
 **Spectra and cubes.** A full FITS spectral axis (WAVE, AWAV, FREQ and velocity kinds; `CDELT3`, `CD3_3` or `PC3_3`; lenient `CUNIT3`; `RESTWAV`/`RESTFRQ`; `SPECSYS`/`VELOSYS`) with air/vacuum conversion (Greisen et al. 2006) and optical, radio or relativistic velocity axes, plus a barycentric or heliocentric correction for ground-based headers from a low-precision analytic ephemeris (about 0.02 km/s), with spectra already in a rest frame recognised and spacecraft headers using `VELOSYS`. For IFU cubes: region (aperture) spectra with annulus sky subtraction in native units and Jy, channel-range collapse from a brush on the spectrum plot, and M0/M1/M2 moment maps with a per-pixel continuum fit and SNR masking, written as 2D FITS with the celestial WCS kept. Cubes open through a memory-mapped lazy reader.
 
@@ -150,7 +140,7 @@ Adjust applies monotone Fritsch-Carlson spline tone curves. The composite is non
 
 Star detection with flux, FWHM and SNR, a 64K-bin histogram with auto-STF and an FFT power spectrum complete the tab. Plate solving goes through astrometry.net and needs a free nova.astrometry.net API key entered in Settings; large images are auto-downsampled and the result is rescaled to full resolution. WCS is handled by the [wcs](https://github.com/cds-astro/wcs-rs) crate (about twenty FITS projections, CD/PC/CDELT conventions) with SIP distortion applied in the wrapper; see [ADR 0001](docs/adr/0001-wcs-rs-for-wcs-engine.md). A synthetic data generator produces star fields with configurable distributions, PSF models, a CCD noise model and a ground-truth catalogue CSV for validating photometry and alignment.
 
-Every screenshot above is in [`docs/screenshots/`](docs/screenshots), taken on the current build.
+Every screenshot above is in [`docs/screenshots/`](docs/screenshots), all taken on the 0.6.0 build. The colour frames are the HST/WFPC2 narrowband set that ships with the app; the mono ones are JWST NIRCam mosaics of the same field, which is why the same object recurs at very different pixel scales.
 
 ## Install and build
 

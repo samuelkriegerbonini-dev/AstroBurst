@@ -58,7 +58,6 @@ export function extractBackground(
     iterations: options.iterations ?? 3,
     mode: options.mode ?? "subtract",
     binId: options.binId ?? null,
-    persistToDisk: false,
   }, [
     ["corrected_png", "previewUrl"],
     ["model_png", "modelUrl"],

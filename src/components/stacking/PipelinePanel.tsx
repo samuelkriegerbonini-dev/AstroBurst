@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useId, useRef, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle } from "lucide-react";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
@@ -7,6 +7,9 @@ import type { CombineMethod, PipelineResult, RejectionMethod } from "../../share
 import type { CosmeticConfig } from "../../shared/types/cosmetic";
 import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
+import { detectChannel } from "../../utils/channelMapping";
+import type { ProcessedFile } from "../../shared/types";
+import type { CalibrationState, StackConfig } from "./StackingTab";
 
 interface FileGroup {
   label: string;
@@ -30,29 +33,77 @@ const ICON = (
   </svg>
 );
 
-interface PipelinePanelProps {
-  files?: unknown[];
-  onPreviewUpdate?: (url: string | null | undefined) => void;
-  calibration?: unknown;
-  stackConfig?: unknown;
+const CHANNEL_SLOT_FOR_BIN: Record<string, string> = {
+  r: "R",
+  g: "G",
+  b: "B",
+  ha: "R",
+  oiii: "G",
+  sii: "B",
+};
+
+function channelsFromFiles(files: ProcessedFile[]): FileGroup[] {
+  const groups: FileGroup[] = CHANNEL_LABELS.map((l) => ({ label: l, paths: [] }));
+  for (const file of files) {
+    if (!file.path) continue;
+    const bin = detectChannel(file);
+    const slot = bin ? CHANNEL_SLOT_FOR_BIN[bin] : undefined;
+    if (!slot) continue;
+    const group = groups.find((g) => g.label === slot);
+    if (group) group.paths.push(file.path);
+  }
+  return groups;
 }
 
-export default function PipelinePanel(_props: PipelinePanelProps) {
+function withMissingPaths(current: string[], incoming: string[]): string[] {
+  const present = new Set(current);
+  const missing = incoming.filter((p) => !present.has(p));
+  return missing.length === 0 ? current : [...current, ...missing];
+}
+
+function mergeChannelSeed(current: FileGroup[], seed: FileGroup[]): FileGroup[] {
+  let changed = false;
+  const merged = current.map((group) => {
+    const incoming = seed.find((s) => s.label === group.label);
+    if (!incoming) return group;
+    const paths = withMissingPaths(group.paths, incoming.paths);
+    if (paths === group.paths) return group;
+    changed = true;
+    return { ...group, paths };
+  });
+  return changed ? merged : current;
+}
+
+const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: number; onAdd: () => void; onClear: () => void }) => (
+  <div className="flex items-center justify-between">
+    <span className="text-xs text-zinc-400">{label}: {count}</span>
+    <div className="flex gap-1">
+      <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
+      {count > 0 && <button onClick={onClear} className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded">Clear</button>}
+    </div>
+  </div>
+);
+
+interface PipelinePanelProps {
+  files?: ProcessedFile[];
+  calibration?: CalibrationState;
+  stackConfig?: StackConfig;
+}
+
+export default function PipelinePanel({ files = [], calibration, stackConfig }: PipelinePanelProps) {
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState("");
 
-  const [channels, setChannels] = useState<FileGroup[]>(
-    CHANNEL_LABELS.map((l) => ({ label: l, paths: [] }))
-  );
-  const [darks, setDarks] = useState<string[]>([]);
-  const [flats, setFlats] = useState<string[]>([]);
-  const [bias, setBias] = useState<string[]>([]);
-  const [sigmaLow, setSigmaLow] = useState(2.5);
-  const [sigmaHigh, setSigmaHigh] = useState(3.0);
-  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
-  const [combine, setCombine] = useState<CombineMethod>("mean");
+  const [channels, setChannels] = useState<FileGroup[]>(() => channelsFromFiles(files));
+  const [darks, setDarks] = useState<string[]>(() => calibration?.darkPaths ?? []);
+  const [flats, setFlats] = useState<string[]>(() => calibration?.flatPaths ?? []);
+  const [bias, setBias] = useState<string[]>(() => calibration?.biasPaths ?? []);
+  const [sigmaLow, setSigmaLow] = useState(() => stackConfig?.sigmaLow ?? 2.5);
+  const [sigmaHigh, setSigmaHigh] = useState(() => stackConfig?.sigmaHigh ?? 3.0);
+  const [rejection, setRejection] = useState<RejectionMethod>(() => stackConfig?.rejection ?? "sigma_clip");
+  const [combine, setCombine] = useState<CombineMethod>(() => stackConfig?.combine ?? "mean");
   const [normalize, setNormalize] = useState(true);
   const [align, setAlign] = useState(true);
   const [darkOptimize, setDarkOptimize] = useState(false);
@@ -67,11 +118,45 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   const [cosmeticAutoSigma, setCosmeticAutoSigma] = useState(3.0);
   const [defectText, setDefectText] = useState("");
 
+  const defectListId = useId();
+  const rejectionId = useId();
+  const combineId = useId();
+
   const parsedDefects = useMemo(() => parseDefectList(defectText), [defectText]);
   const defectErrors = cosmeticEnabled ? parsedDefects.errors : [];
 
   const rgbCanvasRef = useRef<HTMLCanvasElement>(null);
   const chCanvasRef = useRef<HTMLCanvasElement>(null);
+  const decodedPreviewsRef = useRef(new Map<string, ImageData>());
+
+  const seededFilesRef = useRef(files);
+  useEffect(() => {
+    if (seededFilesRef.current === files) return;
+    seededFilesRef.current = files;
+    setChannels((prev) => mergeChannelSeed(prev, channelsFromFiles(files)));
+  }, [files]);
+
+  const seededCalibrationRef = useRef(calibration);
+  useEffect(() => {
+    if (seededCalibrationRef.current === calibration) return;
+    seededCalibrationRef.current = calibration;
+    if (!calibration) return;
+    setDarks((prev) => withMissingPaths(prev, calibration.darkPaths));
+    setFlats((prev) => withMissingPaths(prev, calibration.flatPaths));
+    setBias((prev) => withMissingPaths(prev, calibration.biasPaths));
+  }, [calibration]);
+
+  const seededConfigRef = useRef(stackConfig);
+  const configTouchedRef = useRef(false);
+  useEffect(() => {
+    if (seededConfigRef.current === stackConfig) return;
+    seededConfigRef.current = stackConfig;
+    if (!stackConfig || configTouchedRef.current) return;
+    setSigmaLow(stackConfig.sigmaLow);
+    setSigmaHigh(stackConfig.sigmaHigh);
+    setRejection(stackConfig.rejection);
+    setCombine(stackConfig.combine);
+  }, [stackConfig]);
 
   const buildCosmetic = useCallback((): CosmeticConfig | null => {
     if (!cosmeticEnabled) return null;
@@ -163,6 +248,10 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
   };
 
   useEffect(() => {
+    decodedPreviewsRef.current.clear();
+  }, [result]);
+
+  useEffect(() => {
     if (activePreview !== "RGB") return;
     if (!result?.rgb_preview || !rgbCanvasRef.current) return;
     const firstCh = result.channel_previews[0];
@@ -175,14 +264,15 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const raw = atob(result.rgb_preview);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-
-    const imgData = ctx.createImageData(w, h);
-    const px = new Uint32Array(imgData.data.buffer);
-    for (let i = 0, j = 0; i < w * h; i++, j += 3) {
-      px[i] = (255 << 24) | (bytes[j + 2] << 16) | (bytes[j + 1] << 8) | bytes[j];
+    let imgData = decodedPreviewsRef.current.get("RGB");
+    if (!imgData) {
+      const raw = atob(result.rgb_preview);
+      imgData = ctx.createImageData(w, h);
+      const px = new Uint32Array(imgData.data.buffer);
+      for (let i = 0, j = 0; i < w * h; i++, j += 3) {
+        px[i] = (255 << 24) | (raw.charCodeAt(j + 2) << 16) | (raw.charCodeAt(j + 1) << 8) | raw.charCodeAt(j);
+      }
+      decodedPreviewsRef.current.set("RGB", imgData);
     }
     ctx.putImageData(imgData, 0, 0);
   }, [result, activePreview]);
@@ -199,12 +289,16 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const raw = atob(ch.pixels_b64);
-    const imgData = ctx.createImageData(w, h);
-    const px = new Uint32Array(imgData.data.buffer);
-    for (let i = 0, j = 0; i < w * h; i++, j += 2) {
-      const v = (raw.charCodeAt(j) | (raw.charCodeAt(j + 1) << 8)) >> 8;
-      px[i] = (255 << 24) | (v << 16) | (v << 8) | v;
+    let imgData = decodedPreviewsRef.current.get(ch.label);
+    if (!imgData) {
+      const raw = atob(ch.pixels_b64);
+      imgData = ctx.createImageData(w, h);
+      const px = new Uint32Array(imgData.data.buffer);
+      for (let i = 0, j = 0; i < w * h; i++, j += 2) {
+        const v = (raw.charCodeAt(j) | (raw.charCodeAt(j + 1) << 8)) >> 8;
+        px[i] = (255 << 24) | (v << 16) | (v << 8) | v;
+      }
+      decodedPreviewsRef.current.set(ch.label, imgData);
     }
     ctx.putImageData(imgData, 0, 0);
   }, [result, activePreview]);
@@ -214,16 +308,6 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
     .filter((c) => c.paths.length > 0)
     .reduce((min, c) => Math.min(min, c.paths.length), Number.POSITIVE_INFINITY);
   const hint = rejectionFrameHint(rejection, Number.isFinite(smallestChannel) ? smallestChannel : 0);
-
-  const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: number; onAdd: () => void; onClear: () => void }) => (
-    <div className="flex items-center justify-between">
-      <span className="text-xs text-zinc-400">{label}: {count}</span>
-      <div className="flex gap-1">
-        <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
-        {count > 0 && <button onClick={onClear} className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded">Clear</button>}
-      </div>
-    </div>
-  );
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -287,14 +371,15 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
             {cosmeticAutoEnabled && (
               <Slider label="Auto sigma" value={cosmeticAutoSigma} min={0.5} max={20} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setCosmeticAutoSigma} />
             )}
-            <label className="text-xs text-zinc-400">Defect list</label>
+            <label htmlFor={defectListId} className="text-xs text-zinc-400">Defect list</label>
             <textarea
+              id={defectListId}
               value={defectText}
               onChange={(e) => setDefectText(e.target.value)}
               placeholder={DEFECT_PLACEHOLDER}
               spellCheck={false}
               disabled={loading}
-              className="w-full h-20 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-sky-400"
+              className="w-full h-20 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 focus:border-sky-400"
             />
             <div className="text-[10px] text-zinc-500">
               {parsedDefects.defects.length} entr{parsedDefects.defects.length === 1 ? "y" : "ies"}
@@ -310,8 +395,8 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Stacking</span>
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Rejection</label>
-          <select value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select">
+          <label htmlFor={rejectionId} className="text-xs text-zinc-400">Rejection</label>
+          <select id={rejectionId} value={rejection} onChange={(e) => { configTouchedRef.current = true; setRejection(e.target.value as RejectionMethod); }} className="ab-select">
             {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
@@ -320,13 +405,13 @@ export default function PipelinePanel(_props: PipelinePanelProps) {
         )}
         {rejectionUsesSigma(rejection) && (
           <>
-            <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
-            <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
+            <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={(v) => { configTouchedRef.current = true; setSigmaLow(v); }} />
+            <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={(v) => { configTouchedRef.current = true; setSigmaHigh(v); }} />
           </>
         )}
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Combine</label>
-          <select value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select">
+          <label htmlFor={combineId} className="text-xs text-zinc-400">Combine</label>
+          <select id={combineId} value={combine} onChange={(e) => { configTouchedRef.current = true; setCombine(e.target.value as CombineMethod); }} className="ab-select">
             {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>

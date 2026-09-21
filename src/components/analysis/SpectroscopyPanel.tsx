@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo } from "react";
+import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "react";
 import { Activity, BarChart3, CircleDot, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import SpectralAxisControls from "./SpectralAxisControls";
@@ -9,6 +9,7 @@ import {
   processCube,
   processCubeLazy,
 } from "../../services/cube";
+import { getSpectralAxis } from "../../services/spectral";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -31,10 +32,12 @@ import type { Region, RegionShape } from "../../shared/types/regions";
 import type {
   CorrectionFrame,
   RadialVelocityCorrectionResult,
+  SpectralAxisInfo,
   SpectralAxisMode,
   VelocityConvention,
 } from "../../shared/types/spectral";
 import { applyCorrectionKms, formatAxis, formatAxisValue } from "../../utils/spectralAxis";
+import { formatAxisTick } from "../../utils/plotScale";
 import {
   axisValueToPixel,
   channelRangeFromDrag,
@@ -124,9 +127,9 @@ const BRUSH_COLORS: Record<BrushTarget, string> = {
   right: "rgba(245,158,11,0.18)",
 };
 const INPUT_CLASS =
-  "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 outline-none focus:border-violet-500/50 w-14 disabled:opacity-40";
+  "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 focus:border-violet-500/50 w-14 disabled:opacity-40";
 const SELECT_CLASS =
-  "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 outline-none focus:border-violet-500/50 disabled:opacity-40";
+  "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 
 function SpectroscopyPanel({
@@ -147,7 +150,13 @@ function SpectroscopyPanel({
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
   const [collapseResult, setCollapseResult] = useState<{ elapsed_ms?: number; elapsed?: number } | null>(null);
+  const [collapseError, setCollapseError] = useState<string | null>(null);
   const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
+  const regionSeqRef = useRef(0);
+  const collapseSeqRef = useRef(0);
+  const rangeSeqRef = useRef(0);
+  const momentSeqRef = useRef(0);
+  const previousFileRef = useRef<string | undefined>(filePath);
 
   const { region, regionLoading, regionError } = useSpectrum();
   const regionKey = useRegionKey();
@@ -155,13 +164,18 @@ function SpectroscopyPanel({
   const picked = useMemo(() => pickRegion(regionDoc.regions, regionDoc.selectedId), [regionDoc]);
   const [regionView, setRegionView] = useState<RegionView>("sum");
 
-  const axis = cubeDims?.spectral_axis ?? null;
+  const headerAxis = cubeDims?.spectral_axis ?? null;
+  const [headerFallbackAxis, setHeaderFallbackAxis] = useState<SpectralAxisInfo | null>(null);
+  const [axisError, setAxisError] = useState<string | null>(null);
+  const axis = headerAxis ?? headerFallbackAxis;
   const [mode, setMode] = useState<SpectralAxisMode>("wavelength_vac");
   const [restUm, setRestUm] = useState<number | null>(null);
   const [convention, setConvention] = useState<VelocityConvention>("optical");
   const [correction, setCorrection] = useState<CorrectionFrame>("none");
   const [correctionResult, setCorrectionResult] = useState<RadialVelocityCorrectionResult | null>(null);
 
+  const brushTargetId = useId();
+  const snrId = useId();
   const [brushTarget, setBrushTarget] = useState<BrushTarget>("range");
   const [range, setRange] = useState<ChannelRange | null>(null);
   const [windows, setWindows] = useState<ContinuumWindows | null>(null);
@@ -177,12 +191,43 @@ function SpectroscopyPanel({
   const [momentKind, setMomentKind] = useState<MomentKind>("m0");
 
   useEffect(() => {
+    regionSeqRef.current++;
+    collapseSeqRef.current++;
+    rangeSeqRef.current++;
+    momentSeqRef.current++;
     setRange(null);
     setWindows(null);
     setMomentResult(null);
     setRangeError(null);
     setMomentError(null);
+    setCollapseResult(null);
+    setCollapseError(null);
+    setCollapseLoading(false);
+    setRangeLoading(false);
+    setMomentLoading(false);
+    if (previousFileRef.current !== filePath) {
+      previousFileRef.current = filePath;
+      setRegionView("sum");
+      clearRegionSpectrum();
+    }
   }, [filePath]);
+
+  useEffect(() => {
+    setHeaderFallbackAxis(null);
+    setAxisError(null);
+    if (!filePath || headerAxis) return;
+    let cancelled = false;
+    getSpectralAxis(filePath)
+      .then((info) => {
+        if (!cancelled) setHeaderFallbackAxis(info);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setAxisError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, headerAxis]);
 
   const series = useMemo<number[]>(() => {
     if (region) {
@@ -216,7 +261,8 @@ function SpectroscopyPanel({
     if (n === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const [xMin, xMax] = axisX.values ? arrayMinMax(axisX.values) : [0, n - 1];
     const [rawYMin, rawYMax] = arrayMinMax(series);
-    const yPad = (rawYMax - rawYMin) * 0.05;
+    const span = rawYMax - rawYMin;
+    const yPad = span > 0 ? span * 0.05 : Math.max(Math.abs(rawYMax), 1) * 0.05;
     return { xMin, xMax, yMin: rawYMin - yPad, yMax: rawYMax + yPad };
   }, [series, axisX, n]);
 
@@ -292,7 +338,7 @@ function SpectroscopyPanel({
     for (let i = 0; i <= N_GRID_Y; i++) {
       const val = yMax - (i / N_GRID_Y) * yRange;
       const y = PAD.top + (i / N_GRID_Y) * plotH;
-      ctx.fillText(val.toFixed(1), PAD.left - 4, y + 3);
+      ctx.fillText(formatAxisTick(val, yRange), PAD.left - 4, y + 3);
     }
 
     ctx.textAlign = "center";
@@ -458,17 +504,23 @@ function SpectroscopyPanel({
   const handleCollapse = useCallback(
     async (mode: "sum" | "median") => {
       if (!filePath) return;
+      const seq = ++collapseSeqRef.current;
       setCollapseLoading(true);
       setCollapseMode(mode);
       setCollapseResult(null);
+      setCollapseError(null);
       try {
         const dir = await getOutputDir();
         const result = mode === "sum" ? await processCube(filePath, dir, 1) : await processCubeLazy(filePath, dir, 1);
+        if (collapseSeqRef.current !== seq) return;
         setCollapseResult(result);
-        const url = result.collapsedPreviewUrl || result.collapsedMedianPreviewUrl;
+        const url =
+          mode === "median"
+            ? (result.collapsedMedianPreviewUrl ?? result.collapsedPreviewUrl)
+            : result.collapsedPreviewUrl;
         if (url && onCollapsePreview) onCollapsePreview(url);
       } catch (e) {
-        console.error("Cube collapse failed:", e);
+        if (collapseSeqRef.current === seq) setCollapseError(e instanceof Error ? e.message : String(e));
       } finally {
         setCollapseLoading(false);
       }
@@ -478,26 +530,30 @@ function SpectroscopyPanel({
 
   const handleRegionSpectrum = useCallback(async () => {
     if (!filePath || !picked.target) return;
+    const seq = ++regionSeqRef.current;
     beginRegionSpectrum();
     try {
       const result = await getCubeSpectrumRegion(filePath, picked.target.shape, picked.background?.shape ?? null);
+      if (regionSeqRef.current !== seq) return;
       commitRegionSpectrum(result);
       setRegionView((view) => (view === "jy" && !result.flux_jy ? "sum" : view));
     } catch (e) {
-      failRegionSpectrum(e instanceof Error ? e.message : String(e));
+      if (regionSeqRef.current === seq) failRegionSpectrum(e instanceof Error ? e.message : String(e));
     }
   }, [filePath, picked]);
 
   const handleCollapseRange = useCallback(async () => {
     if (!filePath || !range) return;
+    const seq = ++rangeSeqRef.current;
     setRangeLoading(true);
     setRangeError(null);
     try {
       const dir = await getOutputDir();
       const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode);
+      if (rangeSeqRef.current !== seq) return;
       if (result.previewUrl && onCollapsePreview) onCollapsePreview(result.previewUrl);
     } catch (e) {
-      setRangeError(e instanceof Error ? e.message : String(e));
+      if (rangeSeqRef.current === seq) setRangeError(e instanceof Error ? e.message : String(e));
     } finally {
       setRangeLoading(false);
     }
@@ -523,6 +579,7 @@ function SpectroscopyPanel({
       setMomentError(`continuum windows must be channel ranges inside 0–${Math.max(channelCount - 1, 0)}`);
       return;
     }
+    const seq = ++momentSeqRef.current;
     setMomentLoading(true);
     setMomentError(null);
     try {
@@ -536,12 +593,13 @@ function SpectroscopyPanel({
         snr_threshold: snr,
         mask_below_threshold: maskBelow,
       });
+      if (momentSeqRef.current !== seq) return;
       setMomentResult(result);
       showMoment(result, "m0");
     } catch (e) {
-      setMomentError(e instanceof Error ? e.message : String(e));
+      if (momentSeqRef.current === seq) setMomentError(e instanceof Error ? e.message : String(e));
     } finally {
-      setMomentLoading(false);
+      if (momentSeqRef.current === seq) setMomentLoading(false);
     }
   }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, showMoment]);
 
@@ -563,17 +621,19 @@ function SpectroscopyPanel({
       const value = parseChannelInput(text, channelCount);
       if (value === null) return;
       setWindows((current) => {
-        const base: ContinuumWindows = current ?? [
-          [0, 0],
-          [0, 0],
+        const seeded = current ?? (range ? defaultContinuumWindows(range, channelCount) : null);
+        const base: ContinuumWindows = seeded ?? [
+          [value, value],
+          [value, value],
         ];
         const next: ContinuumWindows = [[...base[0]], [...base[1]]] as ContinuumWindows;
         next[side][edge] = value;
-        if (next[side][0] > next[side][1]) next[side] = [next[side][1], next[side][0]];
+        if (edge === 0 && next[side][1] < value) next[side][1] = value;
+        if (edge === 1 && next[side][0] > value) next[side][0] = value;
         return next;
       });
     },
-    [channelCount],
+    [channelCount, range],
   );
 
   const labelMapping = useMemo(() => mappingFor(LABEL_MAPPING_WIDTH), [mappingFor]);
@@ -673,6 +733,12 @@ function SpectroscopyPanel({
         onCorrectionLoaded={setCorrectionResult}
       />
 
+      {!axis && axisError && (
+        <p className="mx-3 mb-2 text-[10px] text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20">
+          No spectral axis for this file: {axisError}
+        </p>
+      )}
+
       <div ref={containerRef} className="p-2">
         {isLoading ? (
           <div
@@ -767,14 +833,21 @@ function SpectroscopyPanel({
               {collapseResult.elapsed_ms ?? collapseResult.elapsed}ms
             </span>
           )}
+          {collapseError && (
+            <p className="w-full text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
+              Cube collapse failed: {collapseError}
+            </p>
+          )}
         </div>
       )}
 
       {filePath && cubeDims && totalFrames > 1 && (
         <div className="px-3 pb-2 flex flex-col gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
           <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-            <span className={LABEL_CLASS}>Brush</span>
-            <select value={brushTarget} onChange={(e) => setBrushTarget(e.target.value as BrushTarget)} className={SELECT_CLASS}>
+            <label htmlFor={brushTargetId} className={LABEL_CLASS}>
+              Brush
+            </label>
+            <select id={brushTargetId} value={brushTarget} onChange={(e) => setBrushTarget(e.target.value as BrushTarget)} className={SELECT_CLASS}>
               <option value="range">line range</option>
               <option value="left">continuum A</option>
               <option value="right">continuum B</option>
@@ -789,6 +862,7 @@ function SpectroscopyPanel({
               min={0}
               max={Math.max(channelCount - 1, 0)}
               value={range ? range.z0 : ""}
+              aria-label="Range first channel z0"
               placeholder="z0"
               onChange={(e) => updateRangeEdge("z0", e.target.value)}
               className={INPUT_CLASS}
@@ -798,11 +872,17 @@ function SpectroscopyPanel({
               min={0}
               max={Math.max(channelCount - 1, 0)}
               value={range ? range.z1 : ""}
+              aria-label="Range last channel z1"
               placeholder="z1"
               onChange={(e) => updateRangeEdge("z1", e.target.value)}
               className={INPUT_CLASS}
             />
-            <select value={rangeMode} onChange={(e) => setRangeMode(e.target.value as CollapseRangeMode)} className={SELECT_CLASS}>
+            <select
+              value={rangeMode}
+              aria-label="Range collapse mode"
+              onChange={(e) => setRangeMode(e.target.value as CollapseRangeMode)}
+              className={SELECT_CLASS}
+            >
               {COLLAPSE_RANGE_MODES.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -836,6 +916,7 @@ function SpectroscopyPanel({
                   min={0}
                   max={Math.max(channelCount - 1, 0)}
                   value={windows ? windows[side][0] : ""}
+                  aria-label={`Continuum ${side === 0 ? "A" : "B"} first channel`}
                   placeholder="from"
                   onChange={(e) => updateWindowEdge(side, 0, e.target.value)}
                   className={INPUT_CLASS}
@@ -845,6 +926,7 @@ function SpectroscopyPanel({
                   min={0}
                   max={Math.max(channelCount - 1, 0)}
                   value={windows ? windows[side][1] : ""}
+                  aria-label={`Continuum ${side === 0 ? "A" : "B"} last channel`}
                   placeholder="to"
                   onChange={(e) => updateWindowEdge(side, 1, e.target.value)}
                   className={INPUT_CLASS}
@@ -866,8 +948,11 @@ function SpectroscopyPanel({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-            <span className={LABEL_CLASS}>SNR</span>
+            <label htmlFor={snrId} className={LABEL_CLASS}>
+              SNR
+            </label>
             <input
+              id={snrId}
               type="number"
               min={0}
               step={0.5}

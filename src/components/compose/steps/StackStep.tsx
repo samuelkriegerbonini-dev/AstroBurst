@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { stackFrames, drizzleFrames } from "../../../services/stacking";
@@ -31,12 +31,14 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
   const [analyzeErrors, setAnalyzeErrors] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, Record<string, boolean>>>({});
-  const [maxFwhm, _setMaxFwhm] = useState(8.0);
-  const [maxEcc, _setMaxEcc] = useState(0.7);
-  const [minSnr, _setMinSnr] = useState(5.0);
-  const [minStars, _setMinStars] = useState(5);
+  const [maxFwhm, setMaxFwhm] = useState(8.0);
+  const [maxEcc, setMaxEcc] = useState(0.7);
+  const [minSnr, setMinSnr] = useState(5.0);
+  const [minStars, setMinStars] = useState(5);
   const [useDrizzle, setUseDrizzle] = useState(false);
   const [drizzleScale, setDrizzleScale] = useState(2.0);
+  const rejectionId = useId();
+  const combineId = useId();
   const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
   const [combine, setCombine] = useState<CombineMethod>("mean");
 
@@ -111,7 +113,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       const subResult = state.subframeResults[binId];
       let weights: number[] | undefined;
       if (subResult) {
-        const byPath = new Map(subResult.subframes.map((s) => [s.file_path, s.weight]));
+        const byPath = new Map(subResult.subframes.map((s) => [resolveEffectivePath(s.file_path), s.weight]));
         weights = files.map((f) => byPath.get(f) ?? 1.0);
       }
       const result = useDrizzle
@@ -192,16 +194,35 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
       {!useDrizzle && (
         <div className="flex items-center gap-2">
-          <label className="text-[10px] text-zinc-400 shrink-0">Rejection</label>
-          <select value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select flex-1">
+          <label htmlFor={rejectionId} className="text-[10px] text-zinc-400 shrink-0">Rejection</label>
+          <select id={rejectionId} value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select flex-1">
             {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <label className="text-[10px] text-zinc-400 shrink-0">Combine</label>
-          <select value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select flex-1">
+          <label htmlFor={combineId} className="text-[10px] text-zinc-400 shrink-0">Combine</label>
+          <select id={combineId} value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select flex-1">
             {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
       )}
+
+      <div className="flex flex-col gap-1.5 p-2 rounded-lg border border-zinc-800/40 bg-zinc-900/30">
+        <span className="text-[9px] text-zinc-500 uppercase tracking-wider">
+          Analyze thresholds (frames outside these are rejected)
+        </span>
+        <Slider label="Max FWHM" value={maxFwhm} min={1} max={20} step={0.1} accent="teal"
+                format={(v) => `${v.toFixed(1)} px`} onChange={setMaxFwhm}
+                hint="raise it for poor seeing" />
+        <Slider label="Max Eccentricity" value={maxEcc} min={0} max={1} step={0.01} accent="teal"
+                format={(v) => v.toFixed(2)} onChange={setMaxEcc}
+                hint="1.00 accepts any star elongation" />
+        <Slider label="Min SNR" value={minSnr} min={0} max={50} step={0.5} accent="teal"
+                format={(v) => v.toFixed(1)} onChange={setMinSnr} />
+        <Slider label="Min Stars" value={minStars} min={0} max={100} step={1} accent="teal"
+                format={(v) => `${v}`} onChange={setMinStars} />
+        <span className="text-[8px] text-zinc-600">
+          Re-run Analyze after changing a threshold.
+        </span>
+      </div>
 
       {useDrizzle && Object.keys(state.subframeResults).length > 0 && (
         <p className="text-[9px] text-amber-400/70">

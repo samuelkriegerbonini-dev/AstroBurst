@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { Download, Loader2, Check, FolderOpen, Archive } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveRgbPaths } from "../../../utils/wizard";
@@ -44,6 +44,9 @@ function buildHistory(state: WizardState): string[] {
 export default function ExportStep({ state }: ExportStepProps) {
   const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
 
+  const formatId = useId();
+  const bitDepthId = useId();
+  const bitpixId = useId();
   const [format, setFormat] = useState<"png" | "fits">("png");
   const [bitDepth, setBitDepth] = useState(16);
   const [bitpix, setBitpix] = useState(-32);
@@ -246,8 +249,9 @@ export default function ExportStep({ state }: ExportStepProps) {
       )}
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Format</label>
+        <label htmlFor={formatId} className="text-xs text-zinc-400">Format</label>
         <select
+          id={formatId}
           value={format}
           onChange={(e) => setFormat(e.target.value as "png" | "fits")}
           className="ab-select"
@@ -259,8 +263,9 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       {format === "png" && (
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Bit Depth</label>
+          <label htmlFor={bitDepthId} className="text-xs text-zinc-400">Bit Depth</label>
           <select
+            id={bitDepthId}
             value={bitDepth}
             onChange={(e) => setBitDepth(Number(e.target.value))}
             className="ab-select"
@@ -273,8 +278,9 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       {format === "fits" && (
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">BITPIX</label>
+          <label htmlFor={bitpixId} className="text-xs text-zinc-400">BITPIX</label>
           <select
+            id={bitpixId}
             value={bitpix}
             onChange={(e) => setBitpix(Number(e.target.value))}
             className="ab-select"

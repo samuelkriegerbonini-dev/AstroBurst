@@ -2,6 +2,7 @@ use super::lexer::{tokenize, Token, TokenKind};
 use super::{PixelMathError, Span};
 
 const MAX_NESTING: usize = 256;
+const MAX_NODES: usize = 4096;
 const PREFIX_BINDING_POWER: u8 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +178,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    nodes: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -208,6 +210,17 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn node(&mut self, span: Span) -> Result<(), PixelMathError> {
+        self.nodes += 1;
+        if self.nodes > MAX_NODES {
+            return Err(PixelMathError::at(
+                format!("expression too large: more than {} terms", MAX_NODES),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     fn leave(&mut self) {
         self.depth -= 1;
     }
@@ -223,6 +236,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.advance();
+            self.node(tok.span)?;
             self.enter(tok.span)?;
             let rhs = self.parse_expr(right_bp)?;
             self.leave();
@@ -233,6 +247,7 @@ impl<'a> Parser<'a> {
 
     fn parse_prefix(&mut self) -> Result<Expr, PixelMathError> {
         let tok = self.advance();
+        self.node(tok.span)?;
         match tok.kind {
             TokenKind::Number(value) => Ok(Expr::Number(value)),
             TokenKind::Ident => {
@@ -343,7 +358,7 @@ pub fn parse(src: &str) -> Result<Expr, PixelMathError> {
     if tokens.len() == 1 {
         return Err(PixelMathError::at("empty expression", Span::new(0, 0)));
     }
-    let mut parser = Parser { src, tokens, pos: 0, depth: 0 };
+    let mut parser = Parser { src, tokens, pos: 0, depth: 0, nodes: 0 };
     let expr = parser.parse_expr(0)?;
     let trailing = parser.peek();
     if trailing.kind != TokenKind::Eof {
@@ -440,5 +455,21 @@ mod tests {
         assert!(err.message.contains("nesting"), "{}", err.message);
         let ok = format!("{}1{}", "(".repeat(200), ")".repeat(200));
         assert!(parse(&ok).is_ok());
+    }
+
+    #[test]
+    fn flat_operator_chain_is_rejected_before_it_can_overflow_emit() {
+        let chain = format!("$T{}", "+1".repeat(20000));
+        let err = parse(&chain).unwrap_err();
+        assert!(err.message.contains("too large"), "{}", err.message);
+        let unary = format!("{}1", "-".repeat(20000));
+        let err = parse(&unary).unwrap_err();
+        assert!(
+            err.message.contains("too large") || err.message.contains("nesting"),
+            "{}",
+            err.message
+        );
+        let within_cap = format!("$T{}", "+1".repeat(2000));
+        assert!(parse(&within_cap).is_ok());
     }
 }

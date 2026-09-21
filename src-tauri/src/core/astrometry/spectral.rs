@@ -532,10 +532,6 @@ pub fn velocity_axis(axis: &SpectralAxis, rest_um: f64, convention: VelocityConv
     Ok(VelocityAxis { values_kms, convention, rest_um, notes })
 }
 
-pub fn velocity_axis_kms(axis: &SpectralAxis, rest_um: f64, convention: VelocityConvention) -> Result<Vec<f64>, String> {
-    velocity_axis(axis, rest_um, convention).map(|v| v.values_kms)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SiteLocation {
     pub lon_deg: f64,
@@ -1244,7 +1240,6 @@ mod tests {
         assert!(v.values_kms[2] > v.values_kms[1]);
         assert!(v.notes.is_empty());
         assert!(velocity_axis(&axis, 0.0, VelocityConvention::Radio).is_err());
-        assert_eq!(velocity_axis_kms(&axis, rest_um, VelocityConvention::Radio).unwrap().len(), 3);
     }
 
     #[test]

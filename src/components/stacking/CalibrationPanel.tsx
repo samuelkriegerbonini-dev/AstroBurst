@@ -1,17 +1,25 @@
 import { useState, useCallback, useMemo } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { Slider, ErrorAlert } from "../ui";
+import { useProgress } from "../../hooks/useProgress";
 import { calibrate } from "../../services/stacking";
-import type { CalibrateResult } from "../../shared/types/stacking";
+import type { CalibrateResult } from "../../shared/types";
+import { CALIBRATE_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
 import type { ProcessedFile } from "../../shared/types";
 
+export interface CalibrationMasters {
+  darkPaths: string[];
+  flatPaths: string[];
+  biasPaths: string[];
+}
+
 interface CalibrationPanelProps {
   files: ProcessedFile[];
   onPreviewUpdate?: (url: string | null | undefined) => void;
-  onCalibrationDone?: (result: CalibrateResult) => void;
+  onCalibrationDone?: (result: CalibrateResult, masters: CalibrationMasters) => void;
 }
 
 function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
@@ -32,6 +40,8 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
   const [result, setResult] = useState<CalibrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastAssignment, setLastAssignment] = useState<CalibAssignment | null>(null);
+  const progress = useProgress(CALIBRATE_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
 
   const channelFiles = useMemo(() => toChannelFiles(files), [files]);
 
@@ -41,22 +51,29 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
     setIsCalibrating(true);
     setError(null);
     setResult(null);
+    resetProgress();
+    const masters: CalibrationMasters = {
+      darkPaths: assignments.dark.map((f) => f.path),
+      flatPaths: assignments.flat.map((f) => f.path),
+      biasPaths: assignments.bias.map((f) => f.path),
+    };
     try {
       const res = await calibrate(assignments.science.path, await getOutputDir(), {
-        biasPaths: assignments.bias.length > 0 ? assignments.bias.map((f) => f.path) : undefined,
-        darkPaths: assignments.dark.length > 0 ? assignments.dark.map((f) => f.path) : undefined,
-        flatPaths: assignments.flat.length > 0 ? assignments.flat.map((f) => f.path) : undefined,
+        biasPaths: masters.biasPaths.length > 0 ? masters.biasPaths : undefined,
+        darkPaths: masters.darkPaths.length > 0 ? masters.darkPaths : undefined,
+        flatPaths: masters.flatPaths.length > 0 ? masters.flatPaths : undefined,
         darkExposureRatio,
       });
       setResult(res);
       onPreviewUpdate?.(res?.previewUrl);
-      onCalibrationDone?.(res);
+      onCalibrationDone?.(res, masters);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsCalibrating(false);
+      resetProgress();
     }
-  }, [darkExposureRatio, onPreviewUpdate, onCalibrationDone]);
+  }, [darkExposureRatio, resetProgress, onPreviewUpdate, onCalibrationDone]);
 
   const hasDarks = lastAssignment ? lastAssignment.dark.length > 0 : false;
 
@@ -81,6 +98,18 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
             format={(v) => `${v.toFixed(1)}x`}
             onChange={setDarkExposureRatio}
           />
+        </div>
+      )}
+
+      {isCalibrating && progress.active && (
+        <div className="px-4 flex flex-col gap-1.5 animate-fade-in">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-sky), #7dd3fc)" }} />
+          </div>
+          <div className="flex justify-between items-center text-[10px] text-zinc-500">
+            <span>{progress.stage}</span>
+            <span>{progress.percent}%</span>
+          </div>
         </div>
       )}
 

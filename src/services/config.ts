@@ -22,6 +22,7 @@ export function getApiKey(service = "astrometry"): Promise<ApiKeyResult> {
 export interface OutputDirInfo {
   output_dir: string;
   total_size: number;
+  max_size?: number;
   file_count: number;
 }
 

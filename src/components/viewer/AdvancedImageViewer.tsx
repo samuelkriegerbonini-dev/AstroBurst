@@ -78,6 +78,7 @@ function AdvancedImageViewer({
   const renderH = naturalSize?.h ?? 0;
 
   const {
+    attachContainer,
     transform, transformRef, setTransform,
     fitToWindow, zoomTo, zoomIn, zoomOut, setOneToOne,
     hasRenderDims, zoomPct,
@@ -265,7 +266,7 @@ function AdvancedImageViewer({
       </div>
 
       <div
-        ref={containerRef}
+        ref={attachContainer}
         className="ab-viewer-canvas"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -295,14 +296,6 @@ function AdvancedImageViewer({
             <div style={{ ...imgStyle, zIndex: 1 }}>
               <img src={procRetry.src ?? ""} alt={processed.label} draggable={false}
                 onLoad={(e) => { handleNaturalSize(e); procRetry.onLoad(); }} onError={procRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
-              {overlayCanvasRef && (
-                <canvas ref={overlayCanvasRef}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
-              )}
-              {dqCanvasRef && (
-                <canvas ref={dqCanvasRef}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
-              )}
             </div>
             <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
@@ -324,6 +317,10 @@ function AdvancedImageViewer({
           <div style={imgStyle}>
             <img src={mainRetry.src ?? ""} alt={activeImage.label} draggable={false}
               onLoad={handleImageLoad} onError={mainRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
+          </div>
+        ) : null}
+        {!viewerError && (overlayCanvasRef || dqCanvasRef) && (
+          <div style={{ ...imgStyle, width: renderW, height: renderH, pointerEvents: "none", zIndex: 2 }}>
             {overlayCanvasRef && (
               <canvas ref={overlayCanvasRef}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
@@ -333,7 +330,7 @@ function AdvancedImageViewer({
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }} />
             )}
           </div>
-        ) : null}
+        )}
         <OverlayLayer
           containerRef={containerRef}
           transform={transform}

@@ -8,7 +8,7 @@ use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::types::constants::{
-    DEFAULT_API_KEY_SERVICE, DEFAULT_ASTROMETRY_API_URL, HEADER_NAXIS1,
+    DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1,
     HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_FOV_ARCMIN,
     RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
     RES_PIXEL_SCALE_ARCSEC, RES_POINTS,
@@ -208,9 +208,7 @@ pub async fn plate_solve_cmd(
             };
 
             let cfg = crate::infra::astrometry::plate_solve::SolveConfig {
-                api_url: config::load_config()
-                    .map(|c| c.astrometry_api_url)
-                    .unwrap_or_else(|_| DEFAULT_ASTROMETRY_API_URL.into()),
+                api_url: config::astrometry_api_url()?,
                 api_key: resolved_key.unwrap_or_default(),
                 ra_hint: center_ra,
                 dec_hint: center_dec,

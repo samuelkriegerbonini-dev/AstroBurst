@@ -5,6 +5,7 @@ import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
+import { DECONV_PROGRESS_EVENT } from "../../shared/types/processing";
 
 function enforceOdd(value: number): number {
   const v = Math.round(value);
@@ -46,7 +47,7 @@ const ICON = (
 );
 
 export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom, psfKernel }: DeconvolutionPanelProps) {
-  const progress = useProgress("deconv-progress");
+  const progress = useProgress(DECONV_PROGRESS_EVENT);
   const [params, setParams] = useState<DeconvParams>({
     iterations: 20,
     psfSigma: 2.0,
@@ -144,7 +145,7 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
             <span className="flex items-center gap-2">
               {progress.percent}%
               <button
-                onClick={() => { cancelProgress("deconv-progress").catch(() => {}); }}
+                onClick={() => { cancelProgress(DECONV_PROGRESS_EVENT).catch(() => {}); }}
                 title="Cancel deconvolution"
                 aria-label="Cancel deconvolution"
                 className="text-zinc-500 hover:text-red-400 transition-colors"

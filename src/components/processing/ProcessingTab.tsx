@@ -3,7 +3,7 @@ import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
 import { useFileContext, useRenderActions, useRgbContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeScnr, useCompositeActions } from "../../context/CompositeContext";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
-import { getPreviewUrl } from "../../infrastructure/tauri/client";
+import { getPreviewUrl } from "../../infrastructure/tauri";
 import { getOutputDir } from "../../infrastructure/tauri";
 
 const DeconvolutionPanel = lazy(() => import("./DeconvolutionPanel"));
@@ -49,12 +49,28 @@ export interface ProcessingChain {
   psfKernel: number[][] | null;
   stretchFits: string | null;
   maskedStretchFits: string | null;
+  localContrastFits: string | null;
+  pixelMathFits: string | null;
 }
 
 interface StepDoneResult {
   previewUrl?: string;
   corrected_fits?: string;
   fits_path?: string;
+}
+
+const CHAIN_FITS_KEYS = [
+  "backgroundFits",
+  "denoiseFits",
+  "deconvFits",
+  "stretchFits",
+  "maskedStretchFits",
+  "localContrastFits",
+  "pixelMathFits",
+] as const;
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
 }
 
 function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
@@ -65,6 +81,8 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
   if (chain.deconvFits) steps.push("Deconv");
   if (chain.stretchFits) steps.push("Stretch");
   if (chain.maskedStretchFits) steps.push("Masked");
+  if (chain.localContrastFits) steps.push("LHE/HDRMT");
+  if (chain.pixelMathFits) steps.push("PixelMath");
 
   if (steps.length <= 1) return null;
 
@@ -110,6 +128,8 @@ function ProcessingTabInner() {
     psfKernel: null,
     stretchFits: null,
     maskedStretchFits: null,
+    localContrastFits: null,
+    pixelMathFits: null,
   });
 
   const [compositeSyncError, setCompositeSyncError] = useState<string | null>(null);
@@ -229,6 +249,7 @@ function ProcessingTabInner() {
         setChain((prev) => ({
           ...prev,
           stretchFits: fits,
+          localContrastFits: null,
         }));
         setProcessedSource(fits);
         const ch = findChannel(file?.path);
@@ -246,6 +267,24 @@ function ProcessingTabInner() {
         setChain((prev) => ({
           ...prev,
           maskedStretchFits: fits,
+          localContrastFits: null,
+        }));
+        setProcessedSource(fits);
+        const ch = findChannel(file?.path);
+        if (ch) syncComposite(fits, ch);
+      }
+    },
+    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
+  );
+
+  const handleLocalContrastDone = useCallback(
+    (result: StepDoneResult) => {
+      handlePreviewUpdate(result?.previewUrl);
+      if (result?.fits_path) {
+        const fits = result.fits_path;
+        setChain((prev) => ({
+          ...prev,
+          localContrastFits: fits,
         }));
         setProcessedSource(fits);
         const ch = findChannel(file?.path);
@@ -256,14 +295,25 @@ function ProcessingTabInner() {
   );
 
   const handlePixelMathDone = useCallback(
-    (result: { fits_path?: string; previewUrl?: string }) => {
-      if (result?.fits_path) setProcessedSource(result.fits_path);
+    (result: { fits_path?: string; previewUrl?: string; cleaned_paths?: string[] }) => {
+      if (!result?.fits_path) return;
+      setProcessedSource(result.fits_path);
+      const deleted = new Set((result.cleaned_paths ?? []).map(normalizePath));
+      setChain((prev) => {
+        const next: ProcessingChain = { ...prev, pixelMathFits: result.fits_path ?? null };
+        if (deleted.size === 0) return next;
+        for (const key of CHAIN_FITS_KEYS) {
+          const value = next[key];
+          if (value && deleted.has(normalizePath(value))) next[key] = null;
+        }
+        return next;
+      });
     },
     [setProcessedSource],
   );
 
   const clearChain = useCallback(() => {
-    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null });
+    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null, localContrastFits: null, pixelMathFits: null });
   }, []);
 
   const handleResetChain = useCallback(() => {
@@ -309,13 +359,33 @@ function ProcessingTabInner() {
 
   const nonLinearInput = useMemo(() => {
     if (!file) return null;
-    const path = chain.maskedStretchFits || chain.stretchFits || file.path;
+    const path = chain.localContrastFits || chain.maskedStretchFits || chain.stretchFits || file.path;
     return { ...file, path };
-  }, [file, chain.maskedStretchFits, chain.stretchFits]);
+  }, [file, chain.localContrastFits, chain.maskedStretchFits, chain.stretchFits]);
 
-  const nonLinearChainedFrom = chain.maskedStretchFits ? "masked_stretch" : chain.stretchFits ? "stretch" : undefined;
+  const nonLinearChainedFrom = chain.localContrastFits
+    ? "LHE / HDRMT"
+    : chain.maskedStretchFits
+      ? "masked_stretch"
+      : chain.stretchFits
+        ? "stretch"
+        : undefined;
 
-  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits || chain.maskedStretchFits;
+  const pixelMathChainNotice = chain.localContrastFits
+    ? "LHE / HDRMT"
+    : chain.maskedStretchFits
+      ? "masked stretch"
+      : chain.stretchFits
+        ? "stretch"
+        : chain.deconvFits
+          ? "deconvolution"
+          : chain.denoiseFits
+            ? "denoise"
+            : chain.backgroundFits
+              ? "background extraction"
+              : undefined;
+
+  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits || chain.maskedStretchFits || chain.localContrastFits || chain.pixelMathFits;
 
   return (
     <div className="flex flex-col h-full">
@@ -329,7 +399,9 @@ function ProcessingTabInner() {
               (s.id === "psf" && chain.psfKernel) ||
               (s.id === "deconvolution" && chain.deconvFits) ||
               (s.id === "stretch" && chain.stretchFits) ||
-              (s.id === "masked_stretch" && chain.maskedStretchFits);
+              (s.id === "masked_stretch" && chain.maskedStretchFits) ||
+              ((s.id === "local_contrast" || s.id === "hdr") && chain.localContrastFits) ||
+              (s.id === "pixelmath" && chain.pixelMathFits);
             const colors = COLOR_MAP[s.color];
             return (
               <button
@@ -455,7 +527,7 @@ function ProcessingTabInner() {
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
-              onProcessingDone={handleStretchDone}
+              onProcessingDone={handleLocalContrastDone}
               chainedFrom={nonLinearChainedFrom}
             />
           </div>
@@ -464,7 +536,7 @@ function ProcessingTabInner() {
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
               onPreviewUpdate={handlePreviewUpdate}
-              onProcessingDone={handleStretchDone}
+              onProcessingDone={handleLocalContrastDone}
               chainedFrom={nonLinearChainedFrom}
             />
           </div>
@@ -472,6 +544,7 @@ function ProcessingTabInner() {
             <PixelMathPanel
               selectedFile={file}
               outputDir={resolvedDir}
+              chainedFrom={pixelMathChainNotice}
               onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handlePixelMathDone}
             />

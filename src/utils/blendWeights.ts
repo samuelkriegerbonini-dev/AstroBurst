@@ -1,4 +1,5 @@
 import type { BlendWeight, FrequencyBin } from "./wizard";
+import { REUSABLE_BIN_IDS } from "./channelMapping";
 
 export const CANONICAL_WAVELENGTH: Record<string, number> = {
   sii: 673, ha: 656, nii: 658, oiii: 501,
@@ -72,8 +73,12 @@ function spectralAxes(index: number, count: number): ColorAxes {
   return triangleAxes(index / (count - 1));
 }
 
+export function spectralBins(filledBins: FrequencyBin[]): FrequencyBin[] {
+  return filledBins.filter((b) => !REUSABLE_BIN_IDS.has(b.id));
+}
+
 function spectralRows(filledBins: FrequencyBin[]): (ColorAxes & { channelId: string })[] {
-  const sorted = [...filledBins].sort((a, b) => binWavelength(a) - binWavelength(b));
+  const sorted = spectralBins(filledBins).sort((a, b) => binWavelength(a) - binWavelength(b));
   return sorted.map((bin, i) => ({ channelId: bin.id, ...spectralAxes(i, sorted.length) }));
 }
 
@@ -118,9 +123,10 @@ export function resolvePresetWeights(
   const exact = weightsForFilledBins(preset.weights, filledBins);
   if (blendWeightsCoverAllColumns(exact)) return exact;
 
-  if (filledBins.length < 2) return null;
+  const spectral = spectralBins(filledBins);
+  if (spectral.length < 2) return null;
 
-  const remapped = remapPresetByWavelength(preset.weights, filledBins);
+  const remapped = remapPresetByWavelength(preset.weights, spectral);
   if (remapped.length < 2 || !blendWeightsCoverAllColumns(remapped)) return null;
   return remapped;
 }

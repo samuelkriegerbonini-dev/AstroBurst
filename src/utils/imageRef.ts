@@ -58,6 +58,18 @@ export function arrayRef(path: string, key: string): string {
   return formatImageRef({ path, plane: { kind: "array", key } });
 }
 
+const SOURCE_EXTENSION = /\.(fits?|fts)(\.(fz|gz))?$|\.(asdf|zip|gz)$/i;
+
+export function exportStem(pathOrRef: string, fallback = "output"): string {
+  const stem = parseImageRef(pathOrRef)
+    .path
+    .split("#")[0]
+    .split(/[/\\]/)
+    .pop()
+    ?.replace(SOURCE_EXTENSION, "");
+  return stem && stem.length > 0 ? stem : fallback;
+}
+
 export function planeLabel(ref: ImageRef, extname?: string | null): string | null {
   switch (ref.plane.kind) {
     case "auto":

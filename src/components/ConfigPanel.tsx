@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useId } from "react";
 import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw, HardDrive, Trash2 } from "lucide-react";
 import { getConfig, updateConfig, saveApiKey, getApiKey, getOutputDirInfo, cleanupOutput } from "../services/config";
 import type { AppConfig, OutputDirInfo } from "../services/config";
@@ -10,7 +10,14 @@ function formatMb(bytes: number): string {
 
 export default function ConfigPanel() {
 
+  const apiUrlId = useId();
+  const timeoutId = useId();
+  const maxStarsId = useId();
+  const targetBgId = useId();
+  const shadowKId = useId();
+
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [apiUrlDraft, setApiUrlDraft] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiKeyMasked, setApiKeyMasked] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -24,6 +31,7 @@ export default function ConfigPanel() {
     try {
       const [cfg, keyResult] = await Promise.all([getConfig(), getApiKey()]);
       setConfig(cfg);
+      setApiUrlDraft(cfg.astrometry_api_url ?? "");
       if (keyResult?.key) {
         setApiKeyMasked(keyResult.key.slice(0, 4) + "..." + keyResult.key.slice(-4));
         setApiKey("");
@@ -93,7 +101,12 @@ export default function ConfigPanel() {
     try {
       const dir = await getOutputDir();
       const res = await cleanupOutput(dir);
-      setStorageInfo({ output_dir: res.output_dir, total_size: res.total_size, file_count: res.file_count });
+      setStorageInfo((prev) => ({
+        output_dir: res.output_dir,
+        total_size: res.total_size,
+        max_size: prev?.max_size,
+        file_count: res.file_count,
+      }));
       setCleanResult(
         res.cleaned_files > 0
           ? `${res.cleaned_files} files removed (${formatMb(res.cleaned_bytes)})`
@@ -109,6 +122,17 @@ export default function ConfigPanel() {
   const pendingSavesRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const reqSeqRef = useRef(0);
 
+  const persistField = useCallback(async (field: string, value: unknown) => {
+    const timers = pendingSavesRef.current;
+    const seq = ++reqSeqRef.current;
+    try {
+      const updated = await updateConfig(field, value);
+      if (seq === reqSeqRef.current && timers.size === 0) setConfig(updated);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   const handleUpdateField = useCallback(
     (field: string, value: unknown) => {
       setError(null);
@@ -116,19 +140,33 @@ export default function ConfigPanel() {
       const timers = pendingSavesRef.current;
       const existing = timers.get(field);
       if (existing) clearTimeout(existing);
-      timers.set(field, setTimeout(async () => {
+      timers.set(field, setTimeout(() => {
         timers.delete(field);
-        const seq = ++reqSeqRef.current;
-        try {
-          const updated = await updateConfig(field, value);
-          if (seq === reqSeqRef.current && timers.size === 0) setConfig(updated);
-        } catch (e: unknown) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
+        void persistField(field, value);
       }, 300));
     },
-    [],
+    [persistField],
   );
+
+  const commitField = useCallback(
+    (field: string, value: unknown) => {
+      setError(null);
+      const timers = pendingSavesRef.current;
+      const existing = timers.get(field);
+      if (existing) {
+        clearTimeout(existing);
+        timers.delete(field);
+      }
+      void persistField(field, value);
+    },
+    [persistField],
+  );
+
+  const commitApiUrl = useCallback(() => {
+    const next = apiUrlDraft.trim();
+    if (!config || next === config.astrometry_api_url) return;
+    commitField("astrometry_api_url", next);
+  }, [apiUrlDraft, config, commitField]);
 
   if (loading) {
     return (
@@ -157,7 +195,8 @@ export default function ConfigPanel() {
             onChange={(e) => setApiKey(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") handleSaveApiKey(); }}
             placeholder={apiKeyMasked ? "Enter new key to replace..." : "Paste your API key..."}
-            className="flex-1 bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 outline-none focus:border-teal-500/50 placeholder:text-zinc-600"
+            aria-label="Astrometry.net API key"
+            className="flex-1 bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 focus:border-teal-500/50 placeholder:text-zinc-600"
           />
           <button
             onClick={handleSaveApiKey}
@@ -187,23 +226,31 @@ export default function ConfigPanel() {
             </h4>
 
             <div>
-              <label className="text-[10px] text-zinc-400 block mb-1">API URL</label>
+              <label htmlFor={apiUrlId} className="text-[10px] text-zinc-400 block mb-1">API URL</label>
               <input
+                id={apiUrlId}
                 type="text"
-                value={config.astrometry_api_url || ""}
-                onChange={(e) => handleUpdateField("astrometry_api_url", e.target.value)}
-                className="w-full bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-1.5 text-[11px] font-mono text-zinc-300 outline-none focus:border-teal-500/50"
+                value={apiUrlDraft}
+                onChange={(e) => setApiUrlDraft(e.target.value)}
+                onBlur={commitApiUrl}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                placeholder="https://nova.astrometry.net"
+                className="w-full bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-1.5 text-[11px] font-mono text-zinc-300 focus:border-teal-500/50"
               />
+              <p className="text-[10px] text-zinc-600 mt-1">
+                Must be an https:// URL — the API key is sent to this host.
+              </p>
             </div>
 
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-zinc-400">Timeout (seconds)</label>
+                <label htmlFor={timeoutId} className="text-[10px] text-zinc-400">Timeout (seconds)</label>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {config.plate_solve_timeout_secs}s
                 </span>
               </div>
               <input
+                id={timeoutId}
                 type="range"
                 min={30}
                 max={600}
@@ -216,12 +263,13 @@ export default function ConfigPanel() {
 
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-zinc-400">Max Stars</label>
+                <label htmlFor={maxStarsId} className="text-[10px] text-zinc-400">Max Stars</label>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {config.plate_solve_max_stars}
                 </span>
               </div>
               <input
+                id={maxStarsId}
                 type="range"
                 min={20}
                 max={500}
@@ -240,12 +288,13 @@ export default function ConfigPanel() {
 
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-zinc-400">Target Background</label>
+                <label htmlFor={targetBgId} className="text-[10px] text-zinc-400">Target Background</label>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {config.auto_stretch_target_bg?.toFixed(2)}
                 </span>
               </div>
               <input
+                id={targetBgId}
                 type="range"
                 min={0.1}
                 max={0.5}
@@ -258,12 +307,13 @@ export default function ConfigPanel() {
 
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-zinc-400">Shadow Clipping (K)</label>
+                <label htmlFor={shadowKId} className="text-[10px] text-zinc-400">Shadow Clipping (K)</label>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {config.auto_stretch_shadow_k?.toFixed(1)}
                 </span>
               </div>
               <input
+                id={shadowKId}
                 type="range"
                 min={-5.0}
                 max={-0.5}
@@ -296,8 +346,16 @@ export default function ConfigPanel() {
         <div className="flex items-center justify-between gap-3">
           <div className="flex flex-col gap-0.5 min-w-0">
             <span className="text-xs text-zinc-300 font-mono">
-              {storageInfo ? `${formatMb(storageInfo.total_size)} · ${storageInfo.file_count} files` : "--"}
+              {storageInfo
+                ? `${formatMb(storageInfo.total_size)}${storageInfo.max_size ? ` of ${formatMb(storageInfo.max_size)}` : ""} · ${storageInfo.file_count} files`
+                : "--"}
             </span>
+            {storageInfo?.max_size != null && storageInfo.total_size > storageInfo.max_size && (
+              <span className="text-[10px] text-amber-400">
+                Over the size limit. Nothing is deleted automatically — use Clean up when you no longer need
+                the oldest results.
+              </span>
+            )}
             {storageInfo && (
               <span className="text-[10px] text-zinc-600 font-mono truncate" title={storageInfo.output_dir}>
                 {storageInfo.output_dir}

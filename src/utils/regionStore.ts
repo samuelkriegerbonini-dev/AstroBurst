@@ -19,6 +19,7 @@ export class RegionStoreCore {
   private tool: RegionTool = "none";
   private draft: { fileKey: string; shape: RegionShape } | null = null;
   private pending = new Set<string>();
+  private deferred = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly storage: RegionStorage | null;
   private readonly now: () => number;
@@ -95,11 +96,18 @@ export class RegionStoreCore {
     }, SAVE_DEBOUNCE_MS);
   }
 
+  persistNow(fileKey: string): void {
+    this.pending.add(fileKey);
+    this.flush();
+  }
+
   flush(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    for (const key of this.deferred) this.pending.add(key);
+    this.deferred.clear();
     if (this.pending.size === 0) return;
     for (const key of this.pending) {
       const doc = this.docs.get(key);
@@ -115,13 +123,14 @@ export class RegionStoreCore {
     this.commit(fileKey, { regions: [...doc.regions, region], selectedId: doc.selectedId }, true);
   }
 
-  update(fileKey: string, id: string, patch: Partial<Region>): void {
+  update(fileKey: string, id: string, patch: Partial<Region>, persist = true): void {
     const doc = this.getDoc(fileKey);
     const idx = doc.regions.findIndex((r) => r.id === id);
     if (idx < 0) return;
     const regions = doc.regions.slice();
     regions[idx] = { ...regions[idx], ...patch, id };
-    this.commit(fileKey, { regions, selectedId: doc.selectedId }, true);
+    this.commit(fileKey, { regions, selectedId: doc.selectedId }, persist);
+    if (!persist) this.deferred.add(fileKey);
   }
 
   remove(fileKey: string, id: string): void {
@@ -172,3 +181,12 @@ function browserStorage(): RegionStorage | null {
 }
 
 export const regionStore = new RegionStoreCore(browserStorage());
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => regionStore.flush());
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") regionStore.flush();
+    });
+  }
+}

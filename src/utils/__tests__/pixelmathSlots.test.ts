@@ -165,6 +165,10 @@ describe("automatic slot binding", () => {
     ]);
   });
 
+  it("binds nothing when there is neither a free file nor a target", () => {
+    expect(bindMissingSlots("(A + B) / 2", [], null, [])).toEqual([]);
+  });
+
   it("never binds a name that is not a valid slot identifier", () => {
     expect(bindMissingSlots("$T + pi", files, null, [])).toEqual([]);
   });

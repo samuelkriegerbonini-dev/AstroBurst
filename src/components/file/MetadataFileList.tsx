@@ -61,6 +61,7 @@ interface MetadataFileListProps {
   isExporting?: boolean;
   zipProgress?: number;
   downloaded?: boolean;
+  exportError?: string | null;
   groupByInstrument?: boolean;
   productTypes?: string[];
   customChips?: string[];
@@ -105,6 +106,9 @@ function shortName(fullName: string): string {
   if (filterPart) return `...${filterPart}_${last}`;
   return parts.slice(-3).join("_");
 }
+
+const ITEM_HEIGHT = 72;
+const OVERSCAN = 4;
 
 interface MetadataFileItemProps {
   file: MetadataFile;
@@ -156,6 +160,7 @@ function MetadataFileItem({ file, isSelected, onSelect }: MetadataFileItemProps)
       role="option"
       aria-selected={isSelected}
       className={`ab-mfl-item ${isSelected ? "ab-mfl-item-selected" : ""} ${isClickable ? "ab-mfl-item-clickable" : ""}`}
+      style={{ height: ITEM_HEIGHT, overflow: "hidden" }}
       onClick={handleClick}
       draggable={status === "done"}
       onDragStart={handleDragStart}
@@ -259,9 +264,6 @@ const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   && prev.file.previewUrl === next.file.previewUrl,
 );
 
-const ITEM_HEIGHT = 58;
-const OVERSCAN = 4;
-
 function MetadataFileList({
                             files,
                             totalFiles,
@@ -273,6 +275,7 @@ function MetadataFileList({
                             isExporting = false,
                             zipProgress = 0,
                             downloaded = false,
+                            exportError = null,
                             productTypes = [],
                             customChips = [],
                             activeFilters = [],
@@ -350,7 +353,9 @@ function MetadataFileList({
     }
   }, [filteredFiles, selectedId, onSelect]);
 
+  const searchTerm = searchQuery.trim();
   const isFiltered = activeFilters.length > 0;
+  const isNarrowed = isFiltered || searchTerm.length > 0;
   const total = totalFiles ?? files.length;
 
   const handlePinSearch = useCallback(() => {
@@ -401,7 +406,7 @@ function MetadataFileList({
             className="text-[10px] font-mono px-1.5 py-0.5 rounded"
             style={{ color: "var(--ab-teal)", background: "rgba(20,184,166,0.08)" }}
           >
-            {isFiltered ? `${files.length}/${total}` : files.length}
+            {isNarrowed ? `${filteredFiles.length}/${total}` : files.length}
           </span>
         </div>
         <button
@@ -481,6 +486,7 @@ function MetadataFileList({
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleSearchKeyDown}
             placeholder="Search files, filters, instruments..."
+            aria-label="Search files, filters, instruments"
             className="ab-mfl-search-input"
           />
           {searchQuery.trim() && (
@@ -514,18 +520,39 @@ function MetadataFileList({
         aria-activedescendant={selectedId ? `mfl-opt-${selectedId}` : undefined}
         onKeyDown={handleListKeyDown}
       >
-        <div style={{ height: filteredFiles.length * ITEM_HEIGHT, position: "relative" }}>
-          <div style={{ position: "absolute", top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>
-            {visibleFiles.map((file) => (
-              <MemoFileItem
-                key={file.id}
-                file={file}
-                isSelected={file.id === selectedId}
-                onSelect={onSelect}
-              />
-            ))}
+        {filteredFiles.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-10 px-4 text-center">
+            {total === 0 ? (
+              <span className="text-[11px] text-zinc-600">No files loaded</span>
+            ) : searchTerm ? (
+              <>
+                <span className="text-[11px] text-zinc-600">No files match &ldquo;{searchTerm}&rdquo;</span>
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="text-[10px] px-2 py-1 rounded text-zinc-400 hover:text-zinc-200"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)" }}
+                >
+                  Clear search
+                </button>
+              </>
+            ) : (
+              <span className="text-[11px] text-zinc-600">No files match the active filters</span>
+            )}
           </div>
-        </div>
+        ) : (
+          <div style={{ height: filteredFiles.length * ITEM_HEIGHT, position: "relative" }}>
+            <div style={{ position: "absolute", top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>
+              {visibleFiles.map((file) => (
+                <MemoFileItem
+                  key={file.id}
+                  file={file}
+                  isSelected={file.id === selectedId}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {doneCount > 0 && (
@@ -544,6 +571,9 @@ function MetadataFileList({
               <><Download size={12} /> Download ZIP ({doneCount})</>
             )}
           </button>
+          {exportError && (
+            <p className="mt-1 text-[10px] text-red-400 leading-snug" role="alert">{exportError}</p>
+          )}
         </div>
       )}
     </div>

@@ -72,16 +72,20 @@ export default function HeaderExplorerPanel({
   const prevPathRef = useRef<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    if (!file?.path || file.path === prevPathRef.current) return;
-    prevPathRef.current = file.path;
+  const runLoad = useCallback((path: string) => {
     setLoadError(false);
-    setSearch("");
-    const result = onLoadHeaderRef.current?.(file.path);
+    const result = onLoadHeaderRef.current?.(path);
     if (result && typeof (result as Promise<void>).catch === "function") {
       (result as Promise<void>).catch(() => setLoadError(true));
     }
-  }, [file?.path]);
+  }, []);
+
+  useEffect(() => {
+    if (!file?.path || file.path === prevPathRef.current) return;
+    prevPathRef.current = file.path;
+    setSearch("");
+    runLoad(file.path);
+  }, [file?.path, runLoad]);
 
   const toggleCategory = useCallback((cat: string) => {
     setExpanded((prev) => ({ ...prev, [cat]: !prev[cat] }));
@@ -205,7 +209,7 @@ export default function HeaderExplorerPanel({
           </div>
           <p className="text-[11px] text-zinc-400">Failed to read header</p>
           <button
-            onClick={() => { setLoadError(false); onLoadHeader?.(file.path); }}
+            onClick={() => runLoad(file.path)}
             className="text-[10px] font-medium px-4 py-1.5 rounded-md transition-all"
             style={{ background: "rgba(20,184,166,0.1)", border: "1px solid rgba(20,184,166,0.2)", color: "var(--ab-teal)" }}
           >
@@ -256,7 +260,8 @@ export default function HeaderExplorerPanel({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search keywords or values..."
-                className="w-full pl-8 pr-8 py-1.5 text-[11px] text-zinc-300 rounded-md outline-none placeholder:text-zinc-600 transition-colors"
+                aria-label="Search keywords or values"
+                className="w-full pl-8 pr-8 py-1.5 text-[11px] text-zinc-300 rounded-md placeholder:text-zinc-600 transition-colors"
                 style={{
                   background: "rgba(24,24,32,0.8)",
                   border: search ? "1px solid rgba(20,184,166,0.25)" : "1px solid rgba(63,63,70,0.4)",

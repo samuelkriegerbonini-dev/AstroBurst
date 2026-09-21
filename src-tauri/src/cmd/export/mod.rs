@@ -13,7 +13,8 @@ use crate::infra::fits::writer::{
 };
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_OUTPUT_PATH, RES_QUANTIZE_LEVEL};
+use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES};
 
 const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
 
@@ -328,6 +329,43 @@ pub async fn export_png(
     })
 }
 
+#[tauri::command]
+pub async fn compress_mef_cmd(
+    source_path: String,
+    output_path: String,
+    lossless: bool,
+    quantize_level: Option<f64>,
+    drop_extnames: Vec<String>,
+    raw_extnames: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+
+        let mode = if lossless {
+            CompressMode::Lossless
+        } else {
+            CompressMode::Lossy { quantize_level: quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL) }
+        };
+
+        let opts = CompressOptions { mode, drop_extnames, raw_extnames };
+
+        crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
+        let report = write_compressed_mef(&source_path, &output_path, &opts)?;
+
+        let source_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
+        let output_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+
+        Ok(json!({
+            RES_OUTPUT_PATH: output_path,
+            RES_DROPPED: report.dropped,
+            RES_KEPT_RAW: report.kept_raw,
+            RES_SOURCE_SIZE_BYTES: source_size,
+            RES_OUTPUT_SIZE_BYTES: output_size,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
+    })
+}
+
 fn explicit_stf_requested(do_stf: bool, mr: Option<f64>, mg: Option<f64>, mb: Option<f64>) -> bool {
     do_stf
         && [mr, mg, mb]
@@ -544,7 +582,58 @@ pub async fn export_rgb_png(
 
 #[cfg(test)]
 mod tests {
-    use super::{explicit_stf_requested, fits_rgb_uses_composite, png_rgb_uses_composite};
+    use super::{compress_mef_cmd, explicit_stf_requested, fits_rgb_uses_composite, png_rgb_uses_composite};
+    use crate::infra::fits::reader::parse_header_at;
+    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use crate::types::constants::{
+        BLOCK_SIZE, RES_DROPPED, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES,
+        RES_SOURCE_SIZE_BYTES,
+    };
+
+    #[tokio::test]
+    async fn compress_mef_cmd_compresses_sci_drops_dq_and_keeps_err_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mef_source.fits");
+        sci_err_dq_mef(&source, 8, 8, vec![0i32; 64]);
+        let output = dir.path().join("mef_output.fits");
+
+        let value = compress_mef_cmd(
+            source.to_str().unwrap().to_string(),
+            output.to_str().unwrap().to_string(),
+            false,
+            Some(16.0),
+            vec!["DQ".to_string()],
+            vec!["ERR".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value[RES_OUTPUT_PATH], output.to_str().unwrap());
+        assert_eq!(value[RES_DROPPED], serde_json::json!(["DQ"]));
+        assert_eq!(value[RES_KEPT_RAW], serde_json::json!(["ERR"]));
+        assert!(value[RES_SOURCE_SIZE_BYTES].as_u64().unwrap() > 0);
+        assert!(value[RES_OUTPUT_SIZE_BYTES].as_u64().unwrap() > 0);
+
+        let bytes = std::fs::read(&output).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let mut offset = primary.next_hdu_offset;
+        let mut extnames = Vec::new();
+        let mut compressed = Vec::new();
+        while offset + BLOCK_SIZE <= bytes.len() {
+            let hdu = parse_header_at(&bytes, offset).unwrap();
+            if let Some(name) = hdu.header.get("EXTNAME") {
+                extnames.push(name.trim().trim_matches('\'').trim().to_string());
+                compressed.push(hdu.header.get("ZCMPTYPE").is_some());
+            }
+            offset = hdu.next_hdu_offset;
+        }
+
+        assert!(!extnames.iter().any(|n| n == "DQ"), "{extnames:?}");
+        let sci = extnames.iter().position(|n| n == "SCI").unwrap();
+        assert!(compressed[sci], "SCI must be compressed");
+        let err = extnames.iter().position(|n| n == "ERR").unwrap();
+        assert!(!compressed[err], "ERR must be copied verbatim");
+    }
 
     #[test]
     fn fits_rgb_composite_only_when_at_most_one_real_path() {

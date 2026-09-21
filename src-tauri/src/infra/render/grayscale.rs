@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use crate::math::simd::find_minmax_simd;
 
-fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usize, usize)> {
+pub(crate) fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usize, usize)> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
     let (min, max) = find_minmax_simd(slice);

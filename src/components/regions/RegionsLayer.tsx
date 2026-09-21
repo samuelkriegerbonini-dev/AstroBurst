@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Region, RegionShape, RegionTool } from "../../shared/types";
-import type { ViewerTransform } from "../../utils/pixelMapping";
+import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMapping";
 import {
   isRegionMappingUsable,
   regionPointToScreen,
@@ -71,6 +71,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const hoverRef = useRef<Pt | null>(null);
+  const hoverRafRef = useRef<number | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoverTick, setHoverTick] = useState(0);
   const [hostEl, setHostEl] = useState<HTMLElement | null>(null);
@@ -127,6 +128,8 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
     ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textBaseline = "bottom";
 
+    const screenScale = screenPxPerImagePx(transform, renderW, fitsW);
+
     const strokePolylines = (lines: Pt[][]) => {
       for (const line of lines) {
         if (line.length === 0) continue;
@@ -147,7 +150,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       ctx.strokeStyle = color;
       ctx.lineWidth = r.props.width ?? DEFAULT_WIDTH;
       ctx.setLineDash(dashed ? DASH : []);
-      strokePolylines(shapeOutline(r.shape));
+      strokePolylines(shapeOutline(r.shape, screenScale));
       ctx.setLineDash([]);
       if (r.props.text) {
         const b = shapeBounds(r.shape);
@@ -159,7 +162,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         ctx.strokeStyle = SELECT_COLOR;
         ctx.lineWidth = 1;
         ctx.setLineDash([2, 2]);
-        strokePolylines(shapeOutline(r.shape));
+        strokePolylines(shapeOutline(r.shape, screenScale));
         ctx.setLineDash([]);
         for (const hnd of shapeHandles(r.shape)) {
           const p = toScreen(hnd);
@@ -193,7 +196,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
           ctx.fillRect(s.x - 2, s.y - 2, 4, 4);
         }
       } else {
-        strokePolylines(shapeOutline(draft));
+        strokePolylines(shapeOutline(draft, screenScale));
       }
       ctx.setLineDash([]);
     }
@@ -201,8 +204,20 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
 
   useEffect(() => {
     if (!fileKey) return;
-    return () => regionStore.clearDraft(fileKey);
+    return () => {
+      regionStore.clearDraft(fileKey);
+      regionStore.flush();
+    };
   }, [fileKey]);
+
+  useEffect(() => {
+    return () => {
+      if (hoverRafRef.current !== null) {
+        cancelAnimationFrame(hoverRafRef.current);
+        hoverRafRef.current = null;
+      }
+    };
+  }, []);
 
   const commitDraft = useCallback(
     (shape: RegionShape) => {
@@ -294,7 +309,12 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       if (!drag) {
         if (tool === "polygon" && regionStore.getDraftFor(fileKey)) {
           hoverRef.current = pt;
-          setHoverTick((t) => t + 1);
+          if (hoverRafRef.current === null) {
+            hoverRafRef.current = requestAnimationFrame(() => {
+              hoverRafRef.current = null;
+              setHoverTick((t) => t + 1);
+            });
+          }
         }
         if (tool === "select" && pt) {
           const d = regionStore.getDoc(fileKey);
@@ -315,9 +335,9 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         }
         regionStore.setDraft(fileKey, createShape(drag.tool, drag.start, pt));
       } else if (drag.kind === "move") {
-        regionStore.update(fileKey, drag.id, { shape: translateShape(drag.shapeStart, pt.x - drag.start.x, pt.y - drag.start.y) });
+        regionStore.update(fileKey, drag.id, { shape: translateShape(drag.shapeStart, pt.x - drag.start.x, pt.y - drag.start.y) }, false);
       } else {
-        regionStore.update(fileKey, drag.id, { shape: moveHandle(drag.shapeStart, drag.handleId, pt) });
+        regionStore.update(fileKey, drag.id, { shape: moveHandle(drag.shapeStart, drag.handleId, pt) }, false);
       }
     },
     [fileKey, tool, toImage, tolerance],
@@ -331,7 +351,10 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       if (!drag || !fileKey) return;
       e.stopPropagation();
       if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-      if (drag.kind !== "draw") return;
+      if (drag.kind !== "draw") {
+        regionStore.persistNow(fileKey);
+        return;
+      }
       const d = regionStore.getDraftFor(fileKey);
       if (d && (drag.moved || drag.tool === "point")) commitDraft(d);
       else regionStore.clearDraft(fileKey);
@@ -384,7 +407,12 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   }, [active, fileKey, closePolygon]);
 
   useEffect(() => {
-    if (tool !== "polygon") hoverRef.current = null;
+    if (tool === "polygon") return;
+    hoverRef.current = null;
+    if (hoverRafRef.current !== null) {
+      cancelAnimationFrame(hoverRafRef.current);
+      hoverRafRef.current = null;
+    }
   }, [tool]);
 
   if (!active) return null;

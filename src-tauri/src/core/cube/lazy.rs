@@ -120,6 +120,7 @@ pub struct LazyCubeResult {
     pub total_frames: usize,
     pub center_spectrum: Vec<f32>,
     pub wavelengths: Option<Vec<f64>>,
+    pub elapsed_ms: u64,
 }
 
 const DEFAULT_CACHE_BYTES: usize = 256 << 20;
@@ -764,6 +765,7 @@ pub fn process_cube_lazy(
 ) -> Result<LazyCubeResult> {
     use std::fs;
 
+    let t0 = std::time::Instant::now();
     let lazy = LazyCube::open(fits_path)?;
     let g = &lazy.geometry;
     let (depth, rows, cols) = (g.naxis3, g.naxis2, g.naxis1);
@@ -815,6 +817,7 @@ pub fn process_cube_lazy(
         total_frames: depth,
         center_spectrum: spectrum,
         wavelengths,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
 #[cfg(test)]

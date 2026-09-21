@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Database, ChevronRight, FileText, Search, X, Copy, Check, Eye, Loader2 } from "lucide-react";
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
 import type { FitsExtension } from "../../services/header";
@@ -55,8 +55,11 @@ export default function HduSelectorPanel({
   const [headerError, setHeaderError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
 
+  const headerRequestRef = useRef(0);
+
   useEffect(() => {
     if (!filePath) return;
+    let cancelled = false;
     setLoading(true);
     setExtensions([]);
     setSelectedIdx(null);
@@ -64,20 +67,30 @@ export default function HduSelectorPanel({
     setHduSearch("");
     setExtensionsError(null);
     setHeaderError(null);
+    setHeaderLoading(false);
+    headerRequestRef.current++;
 
     getFitsExtensions(filePath)
       .then((result) => {
+        if (cancelled) return;
         setExtensions(result?.extensions ?? []);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Failed to load FITS extensions:", err);
         setExtensionsError(err instanceof Error ? err.message : String(err));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+
+    return () => { cancelled = true; };
   }, [filePath, loadAttempt]);
 
   const handleSelectHdu = useCallback(
     async (idx: number) => {
+      const req = ++headerRequestRef.current;
       setSelectedIdx(idx);
       setHeaderLoading(true);
       setHduHeader(null);
@@ -85,13 +98,15 @@ export default function HduSelectorPanel({
       setHeaderError(null);
       try {
         const header = await getHeaderByHdu(filePath, idx);
+        if (headerRequestRef.current !== req) return;
         setHduHeader(header.index);
         onSelectHdu?.(idx, header.index);
       } catch (err) {
+        if (headerRequestRef.current !== req) return;
         console.error("Failed to load HDU header:", err);
         setHeaderError(err instanceof Error ? err.message : String(err));
       } finally {
-        setHeaderLoading(false);
+        if (headerRequestRef.current === req) setHeaderLoading(false);
       }
     },
     [filePath, onSelectHdu],
@@ -321,7 +336,8 @@ export default function HduSelectorPanel({
                   value={hduSearch}
                   onChange={(e) => setHduSearch(e.target.value)}
                   placeholder="Filter HDU keys..."
-                  className="w-full pl-6 pr-6 py-1 text-[10px] text-zinc-300 rounded outline-none placeholder:text-zinc-600 transition-colors"
+                  aria-label="Filter HDU keys"
+                  className="w-full pl-6 pr-6 py-1 text-[10px] text-zinc-300 rounded placeholder:text-zinc-600 transition-colors"
                   style={{
                     background: "rgba(24,24,32,0.6)",
                     border: hduSearch ? "1px solid rgba(244,63,94,0.2)" : "1px solid rgba(63,63,70,0.3)",

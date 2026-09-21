@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import { alignChannels } from "../../../services/compose";
@@ -16,6 +16,7 @@ function resolveChannelPath(state: WizardState, binId: string): string | null {
 }
 
 export default function AlignStep({ state, onAligned }: AlignStepProps) {
+  const methodId = useId();
   const [method, setMethod] = useState("phase_correlation");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AlignResult | null>(null);
@@ -73,8 +74,8 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Method</label>
-        <select value={method} onChange={(e) => setMethod(e.target.value)} className="ab-select">
+        <label htmlFor={methodId} className="text-xs text-zinc-400">Method</label>
+        <select id={methodId} value={method} onChange={(e) => setMethod(e.target.value)} className="ab-select">
           <option value="phase_correlation">Phase Correlation (sub-pixel)</option>
           <option value="affine">Star-based Affine (rotation)</option>
         </select>

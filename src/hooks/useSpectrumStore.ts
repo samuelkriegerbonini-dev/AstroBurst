@@ -85,8 +85,8 @@ class SpectrumStore {
   }
 
   clearRegion() {
-    if (!this.value.region && !this.value.regionError) return;
-    this.emit({ ...this.value, region: null, regionError: null });
+    if (!this.value.region && !this.value.regionError && !this.value.regionLoading) return;
+    this.emit({ ...this.value, region: null, regionError: null, regionLoading: false });
   }
 
   reset() {

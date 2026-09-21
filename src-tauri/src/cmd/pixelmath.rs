@@ -1,20 +1,23 @@
 use std::time::Instant;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use ndarray::Array2;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cmd::common::{
-    blocking_cmd, load_cached, load_cached_full, output_stem, render_and_save, resolve_output_dir,
+    auto_stretch_preview, blocking_cmd, cleanup_output_dir_keeping, load_validated_full, output_stem,
+    resolve_output_dir, save_preview_png, source_path,
 };
 use crate::core::imaging::stats::finite_slice_stats;
 use crate::core::pixelmath::{compile, evaluate, validate, OutputOptions, PixelMathError};
-use crate::infra::cache::ImageEntry;
+use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::infra::fits::writer::{filter_header, write_fits_mono};
 use crate::types::constants::{
-    RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH, RES_STATS,
+    RES_CLEANED_BYTES, RES_CLEANED_FILES, RES_CLEANED_PATHS, RES_DIMENSIONS, RES_ELAPSED_MS,
+    RES_FITS_PATH, RES_PNG_PATH, RES_STATS, RES_WARNINGS,
 };
+use crate::types::constants::PADDING_THRESHOLD;
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
 
@@ -24,8 +27,21 @@ pub const TARGET_SYMBOL: &str = "$T";
 
 const HEADER_ABPROC: &str = "ABPROC";
 const HEADER_PMEXPR: &str = "PMEXPR";
+const HEADER_PMSOURCE: &str = "PMSOURCE";
+const MAX_HEADER_VALUE_BYTES: usize = 67;
+const HISTORY_CONT_PREFIX: &str = "PMEXPR+ ";
+const MAX_HISTORY_CHUNK_BYTES: usize = 62;
+const PREVIEW_FLOOR: f32 = 2.0 * PADDING_THRESHOLD;
 const STRUCTURAL_CARDS: &[&str] = &[
     "XTENSION", "EXTNAME", "EXTVER", "PCOUNT", "GCOUNT", "EXTEND", "NAXIS3", "CHECKSUM", "DATASUM",
+];
+const CUBE_AXIS_CARDS: &[&str] = &[
+    "CTYPE3", "CRVAL3", "CRPIX3", "CDELT3", "CUNIT3", "CROTA3", "CD3_3", "CD1_3", "CD2_3", "CD3_1",
+    "CD3_2", "PC3_3", "PC1_3", "PC2_3", "PC3_1", "PC3_2", "PS3_0", "PS3_1", "PV3_0", "PV3_1",
+];
+const RESCALED_VALUE_CARDS: &[&str] = &[
+    "BUNIT", "DATAMIN", "DATAMAX", "SATURATE", "SATLEVEL", "SATURATION", "MAXLIN", "MAGZPT",
+    "PHOTFLAM", "PHOTPLAM", "PHOTZPT", "PHOTMJSR", "PIXAR_SR", "PIXAR_A2", "ZP", "ZPTMAG",
 ];
 
 const KEY_OK: &str = "ok";
@@ -40,7 +56,50 @@ pub struct PixelMathSlot {
 }
 
 fn pixelmath_error(err: PixelMathError) -> anyhow::Error {
-    anyhow!("pixelmath: {}", err)
+    match err.position {
+        Some(position) => anyhow!("pixelmath: {} (position {})", err.message, position),
+        None => anyhow!("pixelmath: {}", err.message),
+    }
+}
+
+fn header_safe(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for c in value.chars() {
+        let printable = if c.is_ascii_graphic() { Some(c) } else { None };
+        match printable {
+            Some(c) if c != '\'' => {
+                if pending_space && !cleaned.is_empty() {
+                    cleaned.push(' ');
+                }
+                pending_space = false;
+                cleaned.push(c);
+            }
+            _ => pending_space = true,
+        }
+    }
+    cleaned
+}
+
+fn split_header_value(value: &str, first: usize, rest: usize) -> (String, Vec<String>) {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut limit = first;
+    for c in value.chars() {
+        if current.len() + c.len_utf8() > limit {
+            chunks.push(std::mem::take(&mut current));
+            limit = rest;
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let head = chunks.remove(0);
+    (head, chunks)
 }
 
 pub(crate) fn output_suffix(name: Option<&str>) -> String {
@@ -57,22 +116,71 @@ pub(crate) fn output_suffix(name: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn output_header(source: Option<&HduHeader>, expression: &str) -> HduHeader {
+pub(crate) fn output_header(source: Option<&HduHeader>, expression: &str, target: &str) -> HduHeader {
     let mut header = source
         .and_then(|h| filter_header(h, true, true))
         .unwrap_or_else(HduHeader::empty);
-    for key in STRUCTURAL_CARDS {
+    for key in STRUCTURAL_CARDS.iter().chain(CUBE_AXIS_CARDS).chain(RESCALED_VALUE_CARDS) {
         header.remove(key);
     }
+    if header.get("WCSAXES").is_some() {
+        header.set("WCSAXES", "2".to_string());
+    }
     header.set(HEADER_ABPROC, DEFAULT_PIXELMATH_SUFFIX.to_string());
-    header.set(HEADER_PMEXPR, expression.to_string());
+
+    let (head, rest) = split_header_value(
+        &header_safe(expression),
+        MAX_HEADER_VALUE_BYTES,
+        MAX_HISTORY_CHUNK_BYTES,
+    );
+    header.set(HEADER_PMEXPR, head);
+    for chunk in rest {
+        header
+            .cards
+            .push(("HISTORY".to_string(), format!("{}{}", HISTORY_CONT_PREFIX, chunk)));
+    }
+
+    let (source_head, source_rest) = split_header_value(
+        &header_safe(target),
+        MAX_HEADER_VALUE_BYTES,
+        MAX_HISTORY_CHUNK_BYTES,
+    );
+    header.set(HEADER_PMSOURCE, source_head);
+    for chunk in source_rest {
+        header
+            .cards
+            .push(("HISTORY".to_string(), format!("PMSOURCE+ {}", chunk)));
+    }
     header
 }
 
-pub(crate) fn finite_output_stats(arr: &Array2<f32>) -> (ImageStats, usize) {
+pub(crate) fn finite_output_stats(arr: &Array2<f32>) -> (Option<ImageStats>, usize) {
     let mut finite: Vec<f32> = arr.iter().copied().filter(|v| v.is_finite()).collect();
     let non_finite = arr.len() - finite.len();
-    (finite_slice_stats(&mut finite), non_finite)
+    if finite.is_empty() {
+        return (None, non_finite);
+    }
+    (Some(finite_slice_stats(&mut finite)), non_finite)
+}
+
+fn preview_pixels(result: &Array2<f32>) -> Vec<u8> {
+    let lo = result
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f32::INFINITY, f32::min);
+    if !lo.is_finite() || lo > PADDING_THRESHOLD {
+        return auto_stretch_preview(result);
+    }
+    let shifted = result.mapv(|v| if v.is_finite() { v - lo + PREVIEW_FLOOR } else { v });
+    auto_stretch_preview(&shifted)
+}
+
+fn plane_count(entry: &ImageEntry) -> Option<i64> {
+    entry
+        .header()
+        .and_then(|h| h.get_i64("NAXIS3"))
+        .filter(|&n| n > 1)
 }
 
 pub(crate) fn slot_names_with_target(names: &[String]) -> Vec<String> {
@@ -91,32 +199,78 @@ pub(crate) fn run_pixelmath(
 ) -> anyhow::Result<Value> {
     let t0 = Instant::now();
     let output_dir = resolve_output_dir(output_dir)?;
-    let target = load_cached_full(path)?;
-    let mut entries: Vec<ImageEntry> = Vec::with_capacity(slots.len() + 1);
-    entries.push(target.clone());
-    for slot in slots {
-        entries.push(load_cached(&slot.path)?);
-    }
+
     let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
     let slot_names = slot_names_with_target(&user_names);
     let program = compile(expression, &slot_names).map_err(pixelmath_error)?;
-    let arrays: Vec<&Array2<f32>> = entries.iter().map(|e| e.arr()).collect();
+    let referenced = program.referenced_slots();
+
+    let target = load_validated_full(path)
+        .with_context(|| format!("{} = {}", TARGET_SYMBOL, path))?;
+    let mut entries: Vec<Option<ImageEntry>> = Vec::with_capacity(slots.len() + 1);
+    entries.push(Some(target.clone()));
+    for (i, slot) in slots.iter().enumerate() {
+        if !referenced[i + 1] {
+            entries.push(None);
+            continue;
+        }
+        let entry = load_validated_full(&slot.path)
+            .with_context(|| format!("slot {} = {}", slot.name, slot.path))?;
+        entries.push(Some(entry));
+    }
+
+    let mut warnings: Vec<String> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let Some(entry) = entry else { continue };
+        if let Some(planes) = plane_count(entry) {
+            warnings.push(format!(
+                "{} is plane 1 of {}; the other planes were not read",
+                slot_names[i], planes
+            ));
+        }
+        if entry.plane_info().is_some_and(|info| info.is_dq) {
+            warnings.push(format!(
+                "{} is a data-quality plane read as 32-bit float; flag values above 16777216 lose their low bits, so only zero/non-zero tests are exact",
+                slot_names[i]
+            ));
+        }
+    }
+
+    let target_arr = target.arr();
+    let arrays: Vec<&Array2<f32>> = entries
+        .iter()
+        .map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(target_arr))
+        .collect();
     let result = evaluate(&program, &arrays, &opts).map_err(pixelmath_error)?;
 
     let suffix = output_suffix(name);
-    let rendered = render_and_save(&result, path, &output_dir, &suffix, false)?;
-    let fits_path = format!("{}/{}_{}.fits", output_dir, output_stem(path), suffix);
-    let header = output_header(target.header(), expression);
+    let stem = output_stem(path);
+    let fits_path = format!("{}/{}_{}.fits", output_dir, stem, suffix);
+    let png_path = format!("{}/{}_{}.png", output_dir, stem, suffix);
+    let header = output_header(target.header(), expression, &source_path(path));
+
     write_fits_mono(&fits_path, &result, Some(&header))?;
+    GLOBAL_IMAGE_CACHE.invalidate(&fits_path);
+
+    let (rows, cols) = result.dim();
+    save_preview_png(preview_pixels(&result), cols, rows, &png_path)?;
+
+    let mut keep_owned: Vec<String> = vec![source_path(path), fits_path.clone(), png_path.clone()];
+    keep_owned.extend(slots.iter().map(|s| source_path(&s.path)));
+    let keep: Vec<&str> = keep_owned.iter().map(String::as_str).collect();
+    let (cleaned_files, cleaned_bytes, cleaned_paths) = cleanup_output_dir_keeping(&output_dir, &keep);
 
     let (stats, non_finite) = finite_output_stats(&result);
-    let (rows, cols) = rendered.dims;
     Ok(json!({
-        RES_PNG_PATH: rendered.png_path,
+        RES_PNG_PATH: png_path,
         RES_FITS_PATH: fits_path,
         RES_DIMENSIONS: [cols, rows],
         RES_STATS: stats,
         RES_NON_FINITE_COUNT: non_finite,
+        RES_WARNINGS: warnings,
+        RES_CLEANED_FILES: cleaned_files,
+        RES_CLEANED_BYTES: cleaned_bytes,
+        RES_CLEANED_PATHS: cleaned_paths,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
     }))
 }
@@ -168,6 +322,7 @@ pub async fn pixelmath_validate_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::common::load_cached_full;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
     use crate::types::constants::{RES_MAX, RES_MIN};
 
@@ -224,9 +379,10 @@ mod tests {
         let header = written.header().expect("header");
         assert_eq!(header.get(HEADER_ABPROC), Some("pixelmath"));
         assert_eq!(header.get(HEADER_PMEXPR), Some("$T * 2 + A"));
-        assert_eq!(header.get("BUNIT"), Some("MJy/sr"));
+        assert!(header.get("BUNIT").is_none(), "BUNIT no longer describes the pixels");
         assert!(header.get("EXTNAME").is_none());
         assert!(header.get("XTENSION").is_none());
+        assert!(header.get(HEADER_PMSOURCE).unwrap().ends_with("pm_src.fits"));
     }
 
     #[tokio::test]
@@ -270,7 +426,7 @@ mod tests {
         let err = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T + * 2".into(), vec![], None, None, None)
             .await
             .unwrap_err();
-        assert_eq!(err, "pixelmath: unexpected token '*' at 5");
+        assert_eq!(err, "pixelmath: unexpected token '*' (position 5)");
 
         let err = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T + B".into(), vec![], None, None, None)
             .await
@@ -293,6 +449,31 @@ mod tests {
         assert!(err.contains("$T is 4x4"), "{err}");
         assert!(err.contains("big is 5x5"), "{err}");
         assert!(!std::path::Path::new(&f.out_dir).join("pm_err_hdu1_pixelmath.fits").exists());
+    }
+
+    #[tokio::test]
+    async fn slots_the_expression_never_references_do_not_constrain_the_run() {
+        let f = fixture("pm_unused.fits", 4);
+        let other = fixture("pm_unused_other.fits", 5);
+        let res = pixelmath_cmd(
+            f.target.clone(),
+            f.out_dir.clone(),
+            "$T * 2".into(),
+            vec![slot("A", &other.target), slot("B", "C:/does/not/exist.fits")],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res[RES_DIMENSIONS], json!([4, 4]));
+        assert_eq!(
+            pixelmath_validate_cmd("$T * 2".into(), vec!["A".into(), "B".into()])
+                .await
+                .unwrap()[KEY_OK],
+            true,
+            "validation and the run must agree"
+        );
     }
 
     #[tokio::test]
@@ -322,15 +503,55 @@ mod tests {
 
     #[test]
     fn output_header_without_source_still_carries_provenance() {
-        let header = output_header(None, "~$T");
+        let header = output_header(None, "~$T", "C:/data/m42.fits");
         assert_eq!(header.get(HEADER_ABPROC), Some("pixelmath"));
         assert_eq!(header.get(HEADER_PMEXPR), Some("~$T"));
+        assert_eq!(header.get(HEADER_PMSOURCE), Some("C:/data/m42.fits"));
         let mut source = HduHeader::empty();
         source.set("EXTNAME", "DQ".into());
         source.set("CRVAL1", "10.5".into());
-        let copied = output_header(Some(&source), "$T");
+        let copied = output_header(Some(&source), "$T", "x.fits");
         assert!(copied.get("EXTNAME").is_none());
         assert_eq!(copied.get("CRVAL1"), Some("10.5"));
+    }
+
+    #[test]
+    fn output_header_drops_cards_that_no_longer_describe_the_pixels() {
+        let mut source = HduHeader::empty();
+        source.set("BUNIT", "MJy/sr".into());
+        source.set("PIXAR_SR", "2.1E-13".into());
+        source.set("SATURATE", "60000".into());
+        source.set("WCSAXES", "3".into());
+        source.set("CTYPE3", "WAVE".into());
+        source.set("CRVAL3", "1.5".into());
+        source.set("CRVAL1", "83.8".into());
+        source.set("EXPTIME", "300".into());
+        let out = output_header(Some(&source), "$T * 2", "cube.fits");
+        for dropped in ["BUNIT", "PIXAR_SR", "SATURATE", "CTYPE3", "CRVAL3"] {
+            assert!(out.get(dropped).is_none(), "{dropped} survived");
+        }
+        assert_eq!(out.get("WCSAXES"), Some("2"));
+        assert_eq!(out.get("CRVAL1"), Some("83.8"));
+        assert_eq!(out.get("EXPTIME"), Some("300"));
+    }
+
+    #[test]
+    fn pmexpr_is_header_safe_and_spills_into_history() {
+        let header = output_header(None, "$T - med($T)\n + A * 0.5", "x.fits");
+        assert_eq!(header.get(HEADER_PMEXPR), Some("$T - med($T) + A * 0.5"));
+        assert!(!header.get(HEADER_PMEXPR).unwrap().contains('\n'));
+
+        let long = format!("$T * ({})", vec!["1"; 120].join(" + "));
+        let header = output_header(None, &long, "x.fits");
+        let head = header.get(HEADER_PMEXPR).unwrap();
+        assert!(head.len() <= MAX_HEADER_VALUE_BYTES, "{}", head.len());
+        let continued: String = header
+            .cards
+            .iter()
+            .filter(|(k, v)| k == "HISTORY" && v.starts_with(HISTORY_CONT_PREFIX))
+            .map(|(_, v)| v[HISTORY_CONT_PREFIX.len()..].to_string())
+            .collect();
+        assert_eq!(format!("{}{}", head, continued), long);
     }
 
     #[test]
@@ -338,8 +559,54 @@ mod tests {
         let arr = Array2::from_shape_vec((2, 2), vec![f32::NAN, 1e-9, f32::INFINITY, 2.0]).unwrap();
         let (stats, non_finite) = finite_output_stats(&arr);
         assert_eq!(non_finite, 2);
+        let stats = stats.expect("some finite pixels");
         assert_eq!(stats.valid_count, 2);
         assert_eq!(stats.min, 1e-9f32 as f64);
         assert_eq!(stats.max, 2.0);
+    }
+
+    fn synthetic_sky(rows: usize, cols: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(r, c)| {
+            let base = 3.5 + ((r * 7 + c * 13) % 11) as f32 * 0.4;
+            if r == rows / 2 && c == cols / 2 {
+                3356.0
+            } else {
+                base
+            }
+        })
+    }
+
+    #[test]
+    fn preview_of_a_signed_result_is_not_a_black_frame() {
+        let sky = synthetic_sky(64, 64);
+        let median = 3.5 + 5.0 * 0.4;
+        let signed = sky.mapv(|v| v - median);
+        assert!(signed.iter().any(|&v| v < 0.0), "fixture must be signed");
+
+        let pixels = preview_pixels(&signed);
+        let zeros = pixels.iter().filter(|&&p| p == 0).count();
+        let distinct = pixels.iter().copied().collect::<std::collections::HashSet<u8>>().len();
+
+        assert!(
+            zeros * 2 < pixels.len(),
+            "more than half the preview is black: {zeros}/{}",
+            pixels.len()
+        );
+        assert!(distinct > 8, "preview collapsed to {distinct} levels");
+    }
+
+    #[test]
+    fn preview_of_an_all_nan_result_is_black_without_panicking() {
+        let pixels = preview_pixels(&Array2::from_elem((8, 8), f32::NAN));
+        assert!(pixels.iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn finite_output_stats_report_nothing_when_every_pixel_is_non_finite() {
+        let arr = Array2::from_elem((2, 2), f32::NAN);
+        let (stats, non_finite) = finite_output_stats(&arr);
+        assert_eq!(non_finite, 4);
+        assert!(stats.is_none(), "all-NaN result must not report zeros as measurements");
+        assert!(json!({ RES_STATS: stats })[RES_STATS].is_null());
     }
 }

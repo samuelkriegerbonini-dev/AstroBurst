@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ndarray::Array2;
 use serde_json::json;
 
@@ -11,7 +13,7 @@ use crate::infra::fits::writer::write_fits_mono;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, STAGE_RENDER, STAGE_SAVE,
-    RES_DIMENSIONS, RES_DX, RES_DY, RES_FITS_PATH, RES_FRAME_COUNT,
+    RES_DIMENSIONS, RES_DX, RES_DY, RES_ELAPSED_MS, RES_FITS_PATH, RES_FRAME_COUNT,
     RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_MAX, RES_MEAN, RES_MIN,
     RES_OFFSETS, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STATS,
 };
@@ -39,6 +41,7 @@ pub async fn calibrate(
     let progress_clone = progress.clone();
 
     blocking_cmd!({
+        let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
         let calibrated = calibrate_from_paths(
@@ -72,6 +75,7 @@ pub async fn calibrate(
             RES_HAS_BIAS: bias_paths.is_some(),
             RES_HAS_DARK: dark_paths.is_some(),
             RES_HAS_FLAT: flat_paths.is_some(),
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
             RES_STATS: {
                 RES_MIN: stats.min,
                 RES_MAX: stats.max,
@@ -117,6 +121,7 @@ pub async fn stack(
     let progress_clone = progress.clone();
 
     blocking_cmd!({
+        let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
         let defaults = StackConfig::default();
@@ -139,7 +144,7 @@ pub async fn stack(
             rejection_maps: rejection_maps.unwrap_or(false),
         };
 
-        let result = stack_from_paths(&paths, &config, None)?;
+        let result = stack_from_paths(&paths, &config, None, Some(&progress_clone))?;
 
         progress_clone.tick_with_stage(STAGE_RENDER);
 
@@ -181,6 +186,7 @@ pub async fn stack(
             RES_NORMALIZATION_APPLIED: result.normalization_applied.iter().map(|(offset, scale)| json!({"offset": offset, "scale": scale})).collect::<Vec<_>>(),
             RES_REJECTION_LOW_FITS: rejection_low_fits,
             RES_REJECTION_HIGH_FITS: rejection_high_fits,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
             RES_STATS: {
                 RES_MIN: stats.min,
                 RES_MAX: stats.max,
@@ -210,6 +216,7 @@ pub async fn drizzle_stack(
     let progress_clone = progress.clone();
 
     blocking_cmd!({
+        let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
         let defaults = DrizzleConfig::default();
@@ -224,7 +231,7 @@ pub async fn drizzle_stack(
             ..defaults
         };
 
-        let result = drizzle_from_paths(&paths, &config, None)?;
+        let result = drizzle_from_paths(&paths, &config, None, Some(&progress_clone))?;
 
         progress_clone.tick_with_stage(STAGE_RENDER);
 
@@ -250,6 +257,7 @@ pub async fn drizzle_stack(
             RES_FRAME_COUNT: result.frame_count,
             RES_REJECTED_PIXELS: result.rejected_pixels,
             RES_SCALE: result.output_scale,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
             RES_STATS: {
                 RES_MIN: stats.min,
                 RES_MAX: stats.max,

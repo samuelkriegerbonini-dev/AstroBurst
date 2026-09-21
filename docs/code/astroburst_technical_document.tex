@@ -105,7 +105,7 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.4.6}}
+\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.6.0}}
 \fancyhead[R]{\small\textcolor{gray}{\thepage}}
 \fancyfoot[C]{\small\textcolor{gray}{AGPL-3.0 License \textbullet\ \the\year}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -113,6 +113,9 @@
 
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt}
+
+\SetKwInput{Input}{Input}
+\SetKwInput{Output}{Output}
 
 \newcommand{\code}[1]{\texttt{\small #1}}
 \newcommand{\crate}[1]{\texttt{#1}}
@@ -123,10 +126,10 @@
     \vspace{-1cm}
     {\Huge\bfseries\textcolor{astropurple}{AstroBurst}}\\[0.3cm]
     {\Large High-Performance Astronomical Image Processor}\\[0.2cm]
-    {\large Technical Document --- Release v0.4.6}
+    {\large Technical Document --- Release v0.6.0}
 }
 \author{Samuel Krieger Bonini}
-\date{April 2026}
+\date{September 2026}
 
 \begin{document}
 
@@ -140,9 +143,9 @@
             \toprule
             \textbf{Field} & \textbf{Value} \\
             \midrule
-            Document Version & 0.4.6 \\
-            Release & v0.4.6 \\
-            Date & April 2026 \\
+            Document Version & 0.6.0 \\
+            Release & v0.6.0 \\
+            Date & September 2026 \\
             Author & Samuel Krieger Bonini \\
             Stack & Rust 1.75+ $\cdot$ Tauri v2.10 $\cdot$ React 19 $\cdot$ TypeScript 5.7 \\
             Platforms & Windows $\cdot$ macOS $\cdot$ Linux \\
@@ -168,7 +171,106 @@
     \item Advanced astrophotographers processing deep-sky narrowband and broadband imaging data
     \end{itemize}
 
-    Version 0.4.6 delivers a complete processing pipeline from raw FITS/ASDF ingestion through calibration, stacking, alignment, color composition, and export, with \textbf{47 backend commands} exposed through a typed TypeScript API layer and an 11-step ComposeWizard pipeline.
+    Version 0.6.0 delivers a complete processing pipeline from raw FITS/ASDF ingestion through calibration, stacking, alignment, color composition, and export, with \textbf{107 backend commands} exposed through a typed TypeScript API layer and a 10-step ComposeWizard pipeline. Beyond the desktop application, the same processing core is exposed over HTTP by an optional headless server (Section~\ref{sec:server}), so region statistics, rendering, histograms and cutouts are reachable from a script without a display.
+
+    The releases between 0.4.6 and 0.6.0 moved the project from a composition tool towards an instrument-aware one: any FITS HDU or ASDF array can be displayed and measured, data-quality flags are decoded against per-telescope bit tables, photometry is calibrated from header zero points into AB magnitudes and janskys, and spectral cubes carry a real FITS spectral axis with velocity conventions and barycentric correction.
+
+    \subsection{What's New in v0.6.0}
+
+    Version 0.6.0 is published as a preview of the 0.6 line: the viewer maturity phases (0 to 3), a processing-parity round (Phase 4) and a science-analysis round (Phase 5), together with the fixes raised by their reviews. The Windows MSI bundle reports \code{0.6.0} rather than \code{0.6.0-preview}, because MSI version numbers cannot carry a pre-release identifier.
+
+    \begin{itemize}[nosep]
+    \item \textbf{Phase 0+1 (viewer maturity)}
+        \begin{itemize}[nosep]
+        \item \textbf{Display controls} --- Scale modes (\code{mtf}, \code{linear}, \code{log}, \code{sqrt}, \code{asinh}, \code{power}), limit modes (\code{minmax}, \code{zscale}, \code{percentile}, \code{user}) and 9 colormaps plus invert; the GPU path samples a $256 \times 1$ LUT texture and the worker fallback reproduces the same bytes, with stretch, limits and the byte rule defined once in \code{core/imaging/scale.rs} and shared by \code{compute\_scale\_limits\_cmd}, \code{get\_colormap\_lut\_cmd} and the server
+        \item \textbf{Pixel readout} --- \code{probe\_pixel\_cmd} reports value, unit (FITS \code{BUNIT} or ASDF \code{unit}), box min/max/mean/median and pixel/NaN counts from \code{core/imaging/pixel\_probe.rs}, shared with the server \code{/v2/.../pixel} endpoint
+        \item \textbf{Coordinate frames} --- ICRS, FK5 (J2000), galactic and ecliptic (J2000) cursor readout in sexagesimal or decimal form, via \code{core/astrometry/frames.rs} and the \code{frame} argument of \code{pixel\_to\_world\_cmd}
+        \item \textbf{Test CI} --- \code{backend-tests-unix} matrix (Ubuntu/macOS, \cmd{cargo test --all-features}) and a \code{frontend-tests} job; \crate{vitest} added with \cmd{pnpm test}, covering \code{pixelMapping}, \code{filterWavelengths} and the binary IPC parsers
+        \end{itemize}
+    \item \textbf{Phase 2 (planes, DQ)}
+        \begin{itemize}[nosep]
+        \item \textbf{Image references} --- Every path-based command accepts \code{<path>\#hdu=<n>} (any FITS HDU) or \code{<path>\#array=<key>} (any ASDF array, dotted keys such as \code{roman.dq}); the reference is the cache key and output stems derive from it. Parsing lives in \code{types/image\_ref.rs} and a single loader (\code{infra/image\_source.rs}) serves both the desktop commands and the server
+        \item \textbf{Lossless integer planes} --- BITPIX 8/16/32 HDUs and int8--int32, uint8--uint32 and bool8 ASDF arrays decode bit-exactly (\code{IntPlane}, with BZERO 32768/2147483648 handled without float rounding) alongside the float view, cached next to the pixels and counted in the cache budget
+        \item \textbf{DQ flag tables} --- JWST (32 bits), HST (15 bits) and Roman conventions selected from \code{TELESCOP}/\code{INSTRUME} or the ASDF \code{meta.telescope}/\code{meta.instrument.name} cards; \code{get\_dq\_flag\_table\_cmd} returns the flags, the default overlay mask and the exclusion mask
+        \item \textbf{Companion readout} --- DQ and ERR planes resolved by \code{EXTNAME}+\code{EXTVER} (FITS) or sibling array keys (ASDF); the pixel probe and the server endpoint add a \code{dq} block (bits, value, names, table, decoded text) and an \code{err} block (value, unit)
+        \item \textbf{DQ overlay} --- \code{get\_dq\_mask\_preview} returns a binary OR-reduced mask grid with a 16-byte little-endian header (width, height, mask, table id) on the same grid as \code{get\_raw\_pixels\_preview}, both sharing \code{preview\_dims}/\code{cell\_range}
+        \item \textbf{DQ-masked statistics} --- \code{compute\_histogram(excludeDq)} and \code{measure\_photometry\_cmd(excludeDq)} treat \code{DO\_NOT\_USE} (JWST convention) or the documented HST bad-pixel bits as NaN and report \code{masked}/\code{dq\_excluded} counts
+        \end{itemize}
+    \item \textbf{Phase 3 (regions)}
+        \begin{itemize}[nosep]
+        \item \textbf{Interactive regions} --- Circle, ellipse, box, annulus, polygon, line and point drawn on a dedicated overlay layer, with selection, move and resize handles, rotation for box and ellipse, \code{Delete} to remove and \code{Escape} to cancel; the tool returns to select once a shape is committed
+        \item \textbf{DS9 region files} --- \code{regions\_import\_cmd}/\code{regions\_export\_cmd} read and write \code{.reg} in the \code{image}, \code{icrs} and \code{fk5} systems (degrees or sexagesimal, radii in pixels or arcsec/arcmin/degree, \code{global} and local properties); sky regions convert through the WCS
+        \item \textbf{Per-region statistics} --- \code{region\_stats\_cmd} returns count, sum, mean, median, MAD, sigma, min, max and sigma-clipped mean/median, with background annulus subtraction yielding net sum and SNR; DQ-excluded pixels are reported separately
+        \item \textbf{Profiles and cuts} --- \code{radial\_profile\_cmd} (mean, median, standard deviation and cumulative sum per integer radius, optional background annulus) and \code{line\_cut\_cmd} (bilinear samples along a line), plotted on canvas in the Analysis tab
+        \item \textbf{Shared geometry} --- Region geometry lives once in \code{core/imaging/region.rs} under the DS9 convention (a pixel belongs to a region when its centre is inside, so a radius-5 circle on an integer centre covers 81 pixels); the server \code{v2} region, stats and cutout endpoints use the same shapes
+        \end{itemize}
+    \item \textbf{Phase 4 (processing parity)}
+        \begin{itemize}[nosep]
+        \item \textbf{Pixel rejection} --- Sigma clipping, Winsorized sigma clipping, linear fit clipping, percentile clipping, min/max or none, combined by mean, median, min or max; selectable in the Stack tab, the compose wizard, the calibration pipeline and the headless server, with unknown names rejected as 400
+        \item \textbf{Frame normalization} --- None, additive, multiplicative and either with scaling, computed on the pixels finite in every frame, plus scale+offset rejection normalization and optional \code{\_rejection\_low}/\code{\_rejection\_high} maps; the rejection kernel lives once in \code{core/stacking/combine.rs} and the batch pipeline uses it
+        \item \textbf{Master frames} --- Bias, dark and flat masters are integrated with that same kernel (\code{MasterConfig}, Winsorized sigma clipping 4/3 and averaging by default, flats scaled to the first frame's median) instead of a plain per-pixel median
+        \item \textbf{Cosmetic correction} --- Hot/cold pixels from a master dark with separate sigma thresholds, auto-detection against the local median with star-core protection, PixInsight-style defect lists (\code{Point}, \code{Col}, \code{Row}, 0-based) validated line by line, CFA-aware replacement by the median or mean of unflagged neighbours blended by an amount, and batch mode over loaded lights; in the pipeline the step runs after dark subtraction and before flat division
+        \item \textbf{Spline (DBE) background} --- A regularised thin-plate spline through box samples with automatic grid placement, Point regions as manual samples, star and outlier rejection, adjustable smoothing, subtract/divide modes and median-preserving normalization; writes \code{\_dbe\_corrected.fits} and \code{\_dbe\_model.fits} with the source WCS and an \code{ABPROC} provenance card
+        \item \textbf{PixelMath} --- A per-pixel expression language over the target image (\code{\$T}) and named image slots, with arithmetic, comparison and logical operators, \code{iif}, inversion, per-pixel functions and image statistics over finite pixels; NaN-preserving, with optional truncate or rescale to $[0, 1]$, output to \code{\_pixelmath.fits} carrying \code{ABPROC} and \code{PMEXPR} cards, and live validation with a caret on the failing token
+        \item \textbf{Local Histogram Equalization} --- CLAHE with circular or square kernel, contrast limit, 8/10/12-bit histograms and blend amount, applied on luminance so hue is preserved
+        \item \textbf{HDR Multiscale Transform} --- 2--8 wavelet layers with iterations, overdrive, inverted mode, lightness or per-channel operation and star-core deringing; refuses linear input and states that a stretch must come first
+        \item \textbf{Multiscale API} --- Wavelet noise reduction gains an MLT-style per-scale detail bias ($-1$ to $+3$); the \`a-trous decomposition (\code{atrous\_decompose}, \code{atrous\_reconstruct}, \code{atrous\_reconstruct\_with\_bias}) and the noise estimators (\code{noise\_sigma\_mad}, iterative \code{k\_sigma\_noise}) are public for other multiscale tools
+        \item \textbf{Statistics and noise} --- An exact statistics table (count, count \%, mean, median, avgDev, MAD, $\sqrt{\mathrm{BWMV}}$, stdDev, variance, min, max, sum, NaN, excluded) in raw, $[0, 1]$ or 16-bit units with no histogram approximation, per channel for composites and with region/DQ options; k-sigma multiresolution noise is exposed in the panel, on \code{POST /v2/sessions/:sid/stats}, in \code{evaluate\_noise\_batch\_cmd}, as a Subframe Selector column and as a $1/\sigma^2$ frame-weighting toggle in the Stack tab
+        \end{itemize}
+    \item \textbf{Phase 5 (science analysis)}
+        \begin{itemize}[nosep]
+        \item \textbf{Photometric calibration} --- \code{core/metadata/photcal.rs} reads JWST \code{MJy/sr} (via \code{PIXAR\_SR} or a WCS-derived pixel area, flagged as derived) and \code{DN/s} via \code{PHOTMJSR}, HST \code{PHOTFLAM}/\code{PHOTPLAM}/\code{PHOTZPT} (STmag and ABmag), Roman \code{conversion\_megajanskys}/\code{pixelarea\_steradians} and generic zero-point cards; the Photometry panel reports AB magnitude with error, flux in Jy, surface brightness and the convention used
+        \item \textbf{Aperture photometry} --- Fractional edge-pixel weights in the shared \code{core/analysis/aperture.rs} ($5 \times 5$ sub-pixels by default), ERR-plane error propagation or sky noise with an optional Poisson term, the SATURATED DQ bit, masked-pixel counts and a curve-of-growth aperture correction with the total magnitude; region statistics on images with an ERR plane report the summed error and the inverse-variance weighted mean
+        \item \textbf{FITS spectral axis} --- \code{core/astrometry/spectral.rs} handles WAVE/AWAV/FREQ/VRAD/VOPT/VELO/ZOPT axes with \code{CDELT3}, \code{CD3\_3} or \code{PC3\_3} steps, lenient \code{CUNIT3} spellings with FITS default units, \code{RESTWAV}/\code{RESTFRQ}, \code{SPECSYS}/\code{VELOSYS} and explicit errors for \code{-LOG} and \code{-TAB} axes, so MUSE \code{CD3\_3} and ALMA FREQ cubes get a correct axis
+        \item \textbf{Velocity and barycentric correction} --- Air/vacuum conversion (Greisen et al.\ 2006, FITS Paper III eq.\ 65), optical, radio and relativistic velocity axes from a rest wavelength, and a barycentric/heliocentric radial-velocity correction for ground-based headers (site and mid-exposure recovered from the usual cards, Meeus low-precision ephemeris, about 0.02\,km/s), with FITS date, JD/MJD and GMST helpers in \code{core/astrometry/time.rs} and panel controls backed by \code{spectral\_axis\_cmd}, \code{velocity\_axis\_cmd} and \code{radial\_velocity\_correction\_cmd}
+        \item \textbf{Spectral-cube science} --- Region spectra over circle, box, ellipse or polygon with optional annulus sky subtraction, in native units and in Jy for \code{MJy/sr} cubes (\code{get\_cube\_spectrum\_region\_cmd}); channel-range collapse by sum, mean or median saved as 2D FITS with the spectral axis removed (\code{collapse\_cube\_range\_cmd}); and M0, M1, M2 moment maps with a per-pixel continuum fit from two side windows, SNR masking and a velocity axis (\code{moment\_maps\_cmd})
+        \item \textbf{Science cutout export} --- A multi-extension FITS (SCI, ERR, DQ) from a box region or a manual centre and size in pixels or arcseconds, with \code{CRPIX} shifted, \code{LTV1}/\code{LTV2}/\code{LTM1\_1}/\code{LTM2\_2} recorded, NaN padding outside the parent and padded DQ pixels flagged; \code{core/imaging/cutout.rs} is shared with the server endpoint, and the FITS writer gains \code{write\_mef\_images} for plain multi-HDU IMAGE files
+        \item \textbf{WCS coordinate grid} --- ICRS, FK5, galactic or ecliptic iso-lines traced in world coordinates with sexagesimal-friendly steps, RA 0h wrap and polar fields handled and non-overlapping edge labels; \code{grid\_lines\_cmd} and \code{POST /v2/sessions/:sid/wcs/grid} return the polylines, labels and steps, drawn through a non-persisted overlay store (\code{src/utils/overlayStore.ts}) shared by the CPU and GPU viewers
+        \item \textbf{Gaia DR3 catalog panel} --- VizieR cone search around the image centre with proper motions propagated from J2016.0 to the observation date, rows placed on the image with labels, full-field cross-match of detected stars with astrometric residuals (median dRA/dDec, rms), a 3-sigma-clipped photometric zero point in G, BP or RP with an optional colour term, RFC-4180 CSV export and one-click conversion of rows into Point regions
+        \end{itemize}
+    \item \textbf{Search Everywhere} --- IntelliJ-style command palette (\code{Ctrl+K} or double \code{Shift}) with fuzzy search over processed files, tool panels and actions, full keyboard navigation and a status-bar entry point
+    \item \textbf{Workspace layout} --- Resizable right tool panel (280--640\,px), zero-width splitters with a 7\,px grab area and double-click reset, animated tool windows (200\,ms slide, hidden panels \code{inert} and unmounted), \code{prefers-reduced-motion} support, and splitter positions persisted through \code{src/utils/layout.ts}
+    \item \textbf{WCS engine} --- Replaced with the \crate{wcs} crate (wcs-rs + mapproj), taking projection support from TAN/SIN/ARC/CAR to roughly 20 FITS projections and adding proper CD/PC/CDELT matrix handling; \code{WcsTransform}'s public API is unchanged, and \code{pixel\_to\_world\_cmd} replaces the duplicated client-side implementation that was removed
+    \item \textbf{SIP is evaluated by AstroBurst} --- \crate{mapproj} 0.4.0's SIP evaluator advances polynomial powers by repeated squaring instead of by degree, silently producing wrong sky coordinates for any SIP header; the wrapper strips the \code{-SIP} CTYPE suffix before constructing the wcs-rs engine so that path never runs, and applies and inverts SIP with AstroBurst's own math
+    \item \textbf{GPU viewer parity with processing} --- The processed FITS now becomes the raw-pixel source of the WebGPU renderer for every mono step, with histogram and auto-STF recomputed for it, instead of the GPU path keeping the original pixels while only the CPU path switched to the rendered PNG; Reset returns both paths to the original image
+    \end{itemize}
+
+    \subsection{What's New in v0.5.8}
+
+    Version 0.5.8 is an audit release: the math, GPU flow, image-processing and performance paths were reviewed across 21 module groups with every finding reproduced by hand before being fixed, and the ASDF reader was validated against the ASDF Standard 1.5/1.6.
+
+    \begin{itemize}[nosep]
+    \item \textbf{Drizzle kernel} --- The Lanczos3 kernel was evaluated in output-pixel units, so at scale 3 (and any integer scale with zero offsets) 8/9 of the output pixels received zero weight and rendered as holes; the kernel argument and support now scale with the output grid
+    \item \textbf{Sigma-clip floor} --- Sigma-clip combine and the batch pipeline used a 1e-10 sigma floor when the MAD is 0 (more than half the samples tied), rejecting every value that differed from the median; they now fall back to the mean absolute deviation and skip rejection when the scale is truly zero
+    \item \textbf{Star removal} --- The soft star mask was applied twice, since push-pull fill already blends by the mask, leaving $m - m^2$ of the star flux at every mask edge
+    \item \textbf{GHS stretch} --- $D = 0$ returned the raw, un-normalized data instead of the normalized identity, producing a white preview and export once the composite was cached
+    \item \textbf{Wavelet reconstruction} --- Negative pixels were clamped to 0 and NaN was rewritten as 0
+    \item \textbf{Phase correlation} --- A confident coarse shift was discarded whenever the fixed centre crop was featureless, falling back to identity or noise; the coarse estimate is now kept when the refine pass has no signal
+    \item \textbf{Star detection} --- Saturated flat-top stars were deblended into several detections; equal-valued adjacent maxima now collapse to a single seed
+    \item \textbf{GPU/CPU preview parity} --- IPC preview extrema were computed over all finite pixels while auto-STF came from padding-aware statistics, so the GPU render and the canonical PNG disagreed; NaN pixels were rewritten to 0.0 before upload and rendered gray; and linked STF on the GPU normalized each channel by its own range while the Rust path uses the combined range
+    \item \textbf{WebGPU recovery} --- A failed initialisation (no adapter, device creation error) was cached for the whole session; the retry path re-probes
+    \item \textbf{Compressed FITS tiles} --- Quantized GZIP\_1/GZIP\_2 tiles were decoded as raw f32 bit patterns (the integer width is now inferred from the tile byte count), ZBITPIX $\pm 64$ was rejected for every codec including AstroBurst's own GZIP\_2 files, the Rice decoder indexed the stream unchecked and panicked on short or corrupt tiles, and constant tiles quantized with scale 1 under SUBTRACTIVE\_DITHER\_1 gained $\pm 0.5$ noise on decode
+    \item \textbf{ASDF block handling} --- Blocks are memory-mapped and decompressed lazily, so only the block behind the selected array is decoded (Roman L2 files carry six or more full-frame arrays), and uncompressed contiguous arrays are borrowed instead of copied three times
+    \item \textbf{ASDF conformance} --- \code{\#ASDF BLOCK INDEX} trailers, CRLF line endings, tree padding, STREAMED blocks and \code{shape: ['*', ...]} are handled per spec; negative strides were silently read as contiguous; external block references now fail explicitly; gWCS chains under \code{roman.meta.wcs} are resolved with the \code{Shift} offset converted from 0-based gwcs pixels to 1-based \code{CRPIX}; YAML-tagged \code{meta} subtrees are flattened into the header instead of dropped; and allocation sizes from untrusted block headers are bounded
+    \item \textbf{Headless server correctness} --- Region, histogram, cutout and pixel endpoints validated inputs only after arithmetic that could wrap or allocate unbounded memory; statistics and histograms silently discarded every pixel $\le$ 1e-7, giving wrong results for bias-subtracted or difference images; binning by a non-divisible factor averaged overlapping windows; viewport auto-STF from crop statistics was applied with global normalization; and re-opening an image under an existing name returned the stale cached array
+    \item \textbf{Job state} --- Cancellation is observed by workers before results are published and terminal transitions are atomic, so a late worker can no longer overwrite \code{cancelled}
+    \item \textbf{Memory and throughput} --- The batch stacking pipeline loads and stacks one channel at a time and returns 2048\,px previews instead of full-resolution base64 masters; drizzle scatters contributions directly into per-band accumulators in parallel instead of materialising every contribution as a tuple; and cube global statistics sample at most 32 frames with a pixel stride bounded to roughly 8M samples
+    \end{itemize}
+
+    \subsection{What's New in v0.5.5}
+    \begin{itemize}[nosep]
+    \item \textbf{WebGPU RGB preview} --- GPU-only \code{GpuRgbRenderer} renders full RGB composites from three \code{r32float} textures with per-channel STF in the WGSL shader (MTF identical to the mono shader, the CPU worker and the Rust backend); falls back to the PNG composite when WebGPU is unavailable, no adapter is found or the device is lost
+    \item \textbf{Live per-channel RGB STF} --- \code{RgbStfPanel} in the Analysis tab restretches the GPU composite live with no backend round-trip; the mono STF slider skips its backend render while a GPU preview is active
+    \item \textbf{Linear RGB preview command} --- \code{get\_raw\_rgb\_pixels\_preview(path?, max\_dim)} returns a linear 3-channel float preview with per-channel min/max from a native RGB FITS or the composite cache (planar R$|$G$|$B behind a 32-byte header), with \code{encode\_channel\_preview} factored out of the mono encoder byte-identically
+    \item \textbf{Canonical filter table} --- \code{FILTER\_WAVELENGTHS\_NM} and \code{filter\_to\_wavelength\_nm} in \code{types/constants.rs}, mirrored by \code{utils/filterWavelengths.ts}, normalize CLEAR, separators and dual filters, replacing two duplicated JWST tables
+    \item \textbf{Dynamic channel Auto-Map} --- Each non-narrowband, non-RGB filter gets its own wavelength-labelled channel grouped by nm, so NIRCam F090W--F444W yields five distinct channels
+    \item \textbf{Auto ($\lambda$) blend} --- Spreads any number of channels across R/G/B by wavelength, applied once for untouched broadband stacks and never overriding a palette or manual weights
+    \item \textbf{Preview downsampling} --- Nearest-neighbour replaced by a contrast-weighted hybrid (mean to max) area kernel that preserves faint point sources while anti-aliasing the background
+    \item \textbf{STF GPU/CPU parity} --- The CPU fallback worker no longer hard-zeros raw $\le$ 1e-7, which blacked out background-subtracted pixels that the GPU shader maps to gray; epsilons are aligned at 1e-8
+    \item \textbf{Preview normalization} --- \code{data\_min}/\code{data\_max} describe the full image through a shared \code{scan\_extrema} instead of the decimated subset, so the live preview matches the canonical PNG
+    \item \textbf{GPU failure handling} --- \code{GpuSingleton} exposes \code{onGpuLost} and an uncaptured-error handler so a dead device's resources are dropped and the CPU worker takes over, an oversized image degrades to the worker instead of a blank canvas, and switching files no longer leaves stale pixels blocking the fetch
+    \item \textbf{Dead code removed} --- The orphaned ZNCC WebGPU shader (\code{zncc\_align.wgsl}), the unreachable client-side downsample worker and unused imports
+    \end{itemize}
 
     \subsection{What's New in v0.4.6}
     \begin{itemize}[nosep]
@@ -303,12 +405,12 @@
 
     \subsection{Frontend (React + TypeScript)}
 
-    The frontend is organized around the ComposeWizard (11-step pipeline) and split preview contexts:
+    The frontend is organized around the ComposeWizard (10-step pipeline) and split preview contexts:
 
     \begin{description}[style=nextline, leftmargin=2cm]
-    \item[\texttt{services/}] 12 domain-specific service modules wrapping Tauri IPC: compose, fits, analysis, header, cube, stacking, processing, config, astrometry, export, synth, tiles.
-    \item[\texttt{ComposeWizard}] 11-step pipeline: Channels $\to$ Stack $\to$ Align $\to$ Crop $\to$ BG $\to$ Blend $\to$ Color $\to$ Mask $\to$ Stretch $\to$ Adjust $\to$ Export. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic.
-    \item[Preview Contexts] 8 split React contexts (FileCtx, DoneFilesCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RawPixelsCtx, NarrowbandCtx) for granular re-render control.
+    \item[\texttt{services/}] 24 domain-specific service modules wrapping Tauri IPC: analysis, astrometry, catalog, compose, config, cosmetic, cube, cutout, dbe, display, export, fits, header, localContrast, pixelmath, processing, progress, regions, spectral, stacking, statistics, synth, tiles, tone. Command name strings live only in these modules; components never call \code{typedInvoke} directly.
+    \item[\texttt{ComposeWizard}] 10-step pipeline: Channels $\to$ Stack $\to$ Align $\to$ Crop $\to$ Background $\to$ Blend $\to$ Colour $\to$ Stretch $\to$ Adjust $\to$ Export. The separate Mask step of v0.4.2 was folded into Stretch, where star protection is now a mode of the masked stretch rather than a stage of its own. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic; each step declares an \code{enabled} predicate over the wizard data, so availability is derived from state rather than from a completion flag.
+    \item[Preview Contexts] 12 split React contexts (FileCtx, DisplayCtx, DoneFilesCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RenderActionsCtx, StarOverlayCtx, RawPixelsCtx, NarrowbandCtx, DqCtx) for granular re-render control. Splitting them this finely is what keeps a cursor move over the image from re-rendering the file list or the wizard.
     \item[GPU Rendering] WebGPU singleton with WGSL fragment shader for real-time STF. CPU worker fallback with identical MTF implementation. Both use symmetric denominator protection and padding threshold matching the Rust backend.
     \end{description}
 
@@ -544,41 +646,501 @@
 
 
 %% ============================================================================
+    \subsection{Pixel Rejection Families (v0.6.0)}
+    \label{sec:rejection_families}
+
+    The stacking kernel (\code{core/stacking/combine.rs}) separates \textbf{rejection} from \textbf{combination}. For one output pixel let $\{(v_k, c_k)\}_{k=1}^{N}$ be the samples contributed by the $N$ frames, where $v_k$ is the stored value and $c_k$ the comparison value used for the statistics (Section~\ref{sec:frame_normalization}); without rejection normalization $c_k = v_k$. Non-finite samples are discarded before any test. Rejection selects a surviving subset; the combination step then acts on the $v_k$ of the survivors only, never on the $c_k$.
+
+    All scale estimates share one fallback: the robust scale is $1.4826 \cdot \operatorname{MAD}$, and when the MAD is zero it degrades to $1.2533141$ times the mean absolute deviation about the same centre.
+
+    \textbf{Sigma clipping.} Iterative, with the keep test
+
+    \begin{equation}
+        \boxed{
+            \text{keep } k \iff -\sigma_{\text{low}} \, s \;\le\; c_k - \mu \;\le\; \sigma_{\text{high}} \, s
+        }
+        \label{eq:sigma_keep}
+    \end{equation}
+
+    On the first iteration $\mu = \operatorname{median}(c)$ and $s = 1.4826 \cdot \operatorname{MAD}(c)$; on every later iteration $\mu$ is the mean and $s$ the sample standard deviation (divisor $N-1$). The loop stops at \code{max\_iterations} (default 5), when an iteration removes nothing, when $s \leq 0$, or when fewer than two samples remain. Defaults are $\sigma_{\text{low}} = 4.0$ and $\sigma_{\text{high}} = 3.0$.
+
+    \textbf{Winsorized sigma clipping.} The centre stays the median at every iteration; only the scale changes. With $s_0 = 1.4826 \cdot \operatorname{MAD}(c)$ and cutoff $\kappa$ (default 5.0), the samples are first Winsorized,
+
+    \begin{equation}
+        \tilde{c}_k = \operatorname{clamp}\!\left(c_k,\; \mu - \kappa s_0,\; \mu + \kappa s_0\right),
+    \end{equation}
+
+    and a fixed-point iteration then re-estimates the scale with the tails held at $\pm 1.5$ current sigmas:
+
+    \begin{align}
+        u_k^{(j)} &= \operatorname{clamp}\!\left(\tilde{c}_k,\; \mu - 1.5\,s^{(j)},\; \mu + 1.5\,s^{(j)}\right) \\[4pt]
+        s^{(j+1)} &= 1.134 \cdot \operatorname{stdev}\!\left(u^{(j)}\right)
+    \end{align}
+
+    \begin{notebox}[Tails are replaced, not discarded]
+        Every sample outside the window is \emph{set to the window edge} and stays in the sum; the divisor remains $N$ (variance uses $N-1$). The estimator therefore keeps the full sample count while the outliers lose their leverage, which is what distinguishes it from trimming. The factor $1.134$ restores consistency with the Gaussian standard deviation after that replacement. At most 10 steps, stopping when the relative change falls below $10^{-4}$.
+    \end{notebox}
+
+    The keep test is then Equation~\ref{eq:sigma_keep} with $\mu$ the median and $s$ the Winsorized sigma. Needs at least three samples.
+
+    \textbf{Linear fit clipping.} The samples are sorted by $c$ and a straight line in \emph{rank} is fitted by least squares over the inner half of the ranks, that is $i \in [\lfloor n/4 \rfloor,\; n - \lfloor n/4 \rfloor)$:
+
+    \begin{equation}
+        c_{(i)} \approx a + b\,i, \qquad
+        r_i = c_{(i)} - (a + b\,i), \qquad
+        d = 1.4826 \cdot \operatorname{median}_i \left| r_i \right|
+    \end{equation}
+
+    Residuals are evaluated at \emph{all} ranks, not only the fitted ones, and the keep test is $-\sigma_{\text{low}} d \le r_i \le \sigma_{\text{high}} d$. The method needs at least 5 samples; below that the kernel falls back to plain sigma clipping.
+
+    \textbf{Percentile clipping.} A single non-iterative pass about the median $m = \operatorname{median}(c)$, with bounds expressed as fractions of the median magnitude:
+
+    \begin{equation}
+        \text{keep } k \iff -p_{\text{low}} \left| m \right| \;\le\; c_k - m \;\le\; p_{\text{high}} \left| m \right|
+    \end{equation}
+
+    Defaults $p_{\text{low}} = 0.2$ and $p_{\text{high}} = 0.1$. Needs at least 3 samples and a finite, non-zero $\left| m \right|$; otherwise the set passes untouched.
+
+    \textbf{Min/max clipping.} No statistics at all: sort by $c$, drop the $n_{\text{low}}$ smallest and the $n_{\text{high}}$ largest (both default 1). Skipped entirely when $N \le n_{\text{low}} + n_{\text{high}}$.
+
+    \begin{table}[H]
+        \centering
+        \begin{tabularx}{\textwidth}{lXcc}
+            \toprule
+            \textbf{Method} & \textbf{Criterion} & \textbf{Iterative} & \textbf{Min. $N$} \\
+            \midrule
+            Sigma clip & deviation from median/mean in units of $s$ & yes & 2 \\
+            Winsorized sigma clip & same, $s$ from tail replacement & yes & 3 \\
+            Linear fit clip & residual from a line fitted in rank & yes & 5 \\
+            Percentile clip & deviation as a fraction of $\left| m \right|$ & no & 3 \\
+            Min/max & fixed count from each end & no & $n_{\text{low}}{+}n_{\text{high}}{+}1$ \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Rejection families and their guards (\code{RejectionParams}).}
+    \end{table}
+
+    \textbf{The combination step.} Applied to the surviving $v_k$:
+
+    \begin{equation}
+        S = \begin{cases}
+            \dfrac{1}{K}\displaystyle\sum_{k} v_k & \text{mean, unweighted} \\[12pt]
+            \dfrac{\sum_{k} w_{f(k)} \, v_k}{\sum_{k} w_{f(k)}} & \text{mean, per-frame weights } w \\[12pt]
+            \operatorname{median}_k v_k, \quad \min_k v_k, \quad \max_k v_k & \text{median, min, max}
+        \end{cases}
+    \end{equation}
+
+    where $f(k)$ is the frame index of sample $k$. Weights act on the mean only; the weighted form reverts to the plain mean when $\sum w \le 10^{-12}$. If every sample is rejected the pixel takes the last centre used by the rejection loop, or $0$ when no finite centre was computed. With \code{rejection\_maps} enabled the kernel also returns two \code{u16} maps holding the low and high rejection counts per pixel.
+
+    \subsection{Frame Normalization (v0.6.0)}
+    \label{sec:frame_normalization}
+
+    Normalization brings frames onto a common photometric footing before rejection. The per-frame statistics are computed on the \textbf{mutual overlap}: a linear pixel index contributes only when the value is finite in \emph{every} frame, so all frames are described over exactly the same set of pixels. The index is strided so that at most $131\,072$ positions are sampled. For each frame the location is the median and the scale is $1.4826 \cdot \operatorname{MAD}$ over that set; frame 0 is the reference $(m_0, s_0)$.
+
+    Each frame $f$ receives an affine map $v \mapsto k_f v + z_f$ with
+
+    \begin{equation}
+        (z_f, k_f) = \begin{cases}
+            (0,\; 1) & \text{none} \\[4pt]
+            (m_0 - m_f,\; 1) & \text{additive} \\[4pt]
+            \left(0,\; m_0 / m_f\right) & \text{multiplicative} \\[4pt]
+            \left(m_0 - \dfrac{s_0}{s_f} m_f,\; \dfrac{s_0}{s_f}\right) & \text{additive with scaling (default)} \\[10pt]
+            \left(0,\; s_0 / s_f\right) & \text{multiplicative with scaling}
+        \end{cases}
+    \end{equation}
+
+    The plain forms equalise the sky level only; the scaling variants also equalise the dispersion, so that frames taken under different transparency or sky brightness contribute noise of comparable amplitude. Both ratios are guarded: $s_0/s_f$ becomes 1 when either scale is non-positive or non-finite, and $m_0/m_f$ becomes 1 when $\left| m_f \right| \le 10^{-12}$.
+
+    \textbf{Scale + offset rejection normalization} is a separate, non-destructive stage. After the maps above have been applied, the post-normalization statistics are $m'_f = k_f m_f + z_f$ and $s'_f = k_f s_f$, and each frame gets a relative scale $\rho_f = s'_f / s'_0$. The rejection kernel then sees a comparison value
+
+    \begin{equation}
+        \boxed{
+            c_k = \frac{v_k - m'_f}{\rho_f} + m'_0
+        }
+    \end{equation}
+
+    while the value entering the combination remains $v_k$. Rejection decisions are therefore taken in the reference frame's units, but the stacked result is still built from the frames' own pixels. A frame with $m'_f = m'_0$ and $\rho_f = 1$ is left alone. Statistics are computed whenever either normalization or scale + offset rejection normalization is requested.
+
+    \subsection{Thin-Plate Spline Background Extraction --- DBE (v0.6.0)}
+    \label{sec:dbe}
+
+    The Spline background model (\code{core/imaging/dbe.rs}) fits a \textbf{regularised thin-plate spline} through box samples, in place of the global polynomial surface of the Background Extraction subsection. Coordinates are divided by $S = \max(\text{rows}, \text{cols})$ before the fit, so the node spacing is $O(1)$.
+
+    The radial basis function is the two-dimensional thin-plate kernel
+
+    \begin{equation}
+        \boxed{
+            \varphi(r) = r^2 \ln r \quad (r > 0), \qquad \varphi(0) = 0
+        }
+    \end{equation}
+
+    and the model is that kernel plus an affine term,
+
+    \begin{equation}
+        B(x, y) = a_0 + a_1 x + a_2 y + \sum_{j=1}^{n} \lambda_j \, \varphi\!\left(\left\| \mathbf{p} - \mathbf{p}_j \right\|\right)
+    \end{equation}
+
+    The coefficients come from one $(n+3) \times (n+3)$ system solved by Gaussian elimination with partial pivoting:
+
+    \begin{equation}
+        \begin{pmatrix}
+            \mat{K} + \mu \mat{W}^{-1} & \mat{P} \\
+            \mat{P}^{\!\top} & \mat{0}
+        \end{pmatrix}
+        \begin{pmatrix} \boldsymbol{\lambda} \\ \mathbf{a} \end{pmatrix}
+        =
+        \begin{pmatrix} \mathbf{z} \\ \mathbf{0} \end{pmatrix},
+        \qquad
+        K_{ij} = \varphi\!\left(\left\| \mathbf{p}_i - \mathbf{p}_j \right\|\right),
+        \quad
+        \mat{P} = \begin{pmatrix} 1 & x_1 & y_1 \\ \vdots & \vdots & \vdots \\ 1 & x_n & y_n \end{pmatrix}
+    \end{equation}
+
+    The three zero rows are the usual side conditions $\sum_j \lambda_j = \sum_j \lambda_j x_j = \sum_j \lambda_j y_j = 0$, which make the affine part unique. Regularisation is the diagonal term
+
+    \begin{equation}
+        \left(\mu \mat{W}^{-1}\right)_{ii} = \frac{\mu}{\max(w_i,\, 10^{-6})},
+        \qquad
+        \mu = \text{smoothing} \cdot \begin{cases}
+            \bar{d}^{\,2} \left| \ln \bar{d} \right| & 0 < \bar{d} < 1 \\
+            1 & \text{otherwise}
+        \end{cases}
+    \end{equation}
+
+    where $\bar{d}$ is the mean nearest-neighbour distance between scaled nodes, so the penalty is scaled by the kernel's own magnitude at the typical node spacing. Smoothing defaults to $0.25$. Because $\mu$ is divided by the sample weight $w_i$, a poorly filled sample box is smoothed harder than a fully covered one; at $\mu = 0$ the spline interpolates the samples exactly.
+
+    \textbf{Sample placement.} Manual samples (Point regions) are taken first. The automatic grid divides the image into $g \times g$ cells ($g$ default 10, at least 2, each cell at least 4\,px per axis), trims a margin of a quarter cell on each side and places the sample at the centre of the remaining inner box. Automatic positions within $1$\,px of a manual one are dropped, and the automatic set is thinned uniformly so that the total does not exceed \code{max\_samples} (default 400).
+
+    Each sample is a box of half-width \code{sample\_radius} (default 5, so $11 \times 11$\,px) reduced by sigma-clipped statistics ($\kappa = 2.5$, 3 iterations) to a median, a sigma and a maximum; the sample value is the median and its weight is the finite fraction of the nominal box area, capped at 1.
+
+    \textbf{Sample rejection} has four recorded reasons:
+
+    \begin{itemize}[nosep]
+    \item \code{bounds} --- the rounded centre falls outside the image
+    \item \code{finite} --- fewer than $25\%$ of the nominal box pixels are finite
+    \item \code{star} --- the box maximum exceeds $\text{median} + 5 \max(\sigma_{\text{sky}}, \sigma_{\text{box}})$, where $\sigma_{\text{sky}}$ is the median of the usable per-box sigmas
+    \item \code{deviation} --- after a first fit, the residual exceeds $\max\!\left(\text{tolerance} \cdot \sigma_{\text{sky}},\; 3 \sigma_{\text{res}}\right)$, with $\sigma_{\text{res}}$ the MAD-based sigma of the residuals and tolerance default $1.0$
+    \end{itemize}
+
+    Deviation rejection runs once and the spline is refitted on the survivors; it is skipped when it would leave fewer than 4 accepted samples, which is also the minimum for any fit. The final model is evaluated on a coarse lattice of step $\max\!\left(8,\; \min(\text{rows},\text{cols})/256\right)$ and bilinearly interpolated to full resolution, then applied by subtraction or by division (guarded at $B > 10^{-10}$). The reported RMS residual is taken over the accepted samples only.
+
+    \subsection{Aperture Photometry with Fractional Pixel Weights (v0.6.0)}
+    \label{sec:aperture_photometry}
+
+    \code{core/analysis/aperture.rs} replaces the centre-in-circle rule with a sub-pixel coverage weight. For a pixel whose centre is at distance $d$ from the aperture centre, with $\delta = 1/\sqrt{2}$ the half-diagonal of a pixel:
+
+    \begin{equation}
+        w = \begin{cases}
+            1 & d + \delta \le r \\[4pt]
+            0 & d - \delta > r \\[4pt]
+            \dfrac{1}{n^2} \displaystyle\sum_{i=0}^{n-1} \sum_{j=0}^{n-1} \mathbf{1}\!\left[\left\| \mathbf{s}_{ij} - \mathbf{c} \right\|^2 \le r^2\right] & \text{otherwise}
+        \end{cases}
+    \end{equation}
+
+    where the sampling points are $\mathbf{s}_{ij} = \mathbf{p} + \left(\tfrac{i + 0.5}{n} - \tfrac{1}{2},\; \tfrac{j + 0.5}{n} - \tfrac{1}{2}\right)$, an $n \times n$ grid over the pixel with $n = $ \code{subsamples}, default 5. Only the boundary band is sampled; interior and exterior pixels take the closed forms. An annulus weight is the difference of the two circle fractions, $w_{\text{out}} - w_{\text{in}}$, evaluated on the same grid.
+
+    The aperture integral and its effective area are
+
+    \begin{equation}
+        F = \sum_{p} w_p \, I_p, \qquad A = \sum_{p} w_p
+    \end{equation}
+
+    over pixels that are finite and not set in the exclusion mask; masked and non-finite pixels are counted separately and reported. $A$ is what \code{aperture\_pixels} rounds, so it tracks $\pi r^2$ rather than the count of partially covered pixels.
+
+    \textbf{Local background.} The sky annulus has radii $2 r_{\text{ap}}$ and $3 r_{\text{ap}}$ about the refined centroid. Only annulus pixels with $w \ge 0.5$ are taken as members. From the finite values in that set, $\bar{b}$ is the mean of the interquartile range (ranks $\lfloor n/4 \rfloor$ to $\lfloor 3n/4 \rfloor$) and $\sigma_{\text{sky}} = 1.4826 \cdot \operatorname{median}_i \left| b_i - \operatorname{median}(b) \right|$ over the whole set. The net flux is $F_{\text{net}} = F - \bar{b} A$ and the instrumental magnitude $m = -2.5 \log_{10} F_{\text{net}}$.
+
+    The aperture radius defaults to $1.5 \times \text{FWHM}$ clamped to $[2, 60]$\,px, with the FWHM taken from second moments truncated at half maximum and corrected by the factor $1 - \ln 2$ for that truncation.
+
+    \textbf{Error propagation} always carries the uncertainty of the sky level itself,
+
+    \begin{equation}
+        \sigma^2_{\bar{b}} = \frac{A^2 \sigma^2_{\text{sky}}}{n_{\text{bg}}},
+    \end{equation}
+
+    and then takes one of two forms depending on whether an ERR plane accompanies the data:
+
+    \begin{align}
+        \sigma^2_F &= \sum_{p} \left(w_p \, e_p\right)^2 \;+\; \sigma^2_{\bar{b}}
+            && \text{ERR plane present} \label{eq:phot_err_plane} \\[4pt]
+        \sigma^2_F &= \frac{\max(F_{\text{net}}, 0)}{g} \;+\; A\,\sigma^2_{\text{sky}} \;+\; \sigma^2_{\bar{b}}
+            && \text{no ERR plane} \label{eq:phot_err_poisson}
+    \end{align}
+
+    In Equation~\ref{eq:phot_err_plane} each pixel's quoted error is scaled by the same fractional weight used for the flux. In Equation~\ref{eq:phot_err_poisson} the Poisson term is present only when a gain $g$ in electrons per ADU is supplied, and is zero otherwise; the second term is the shot noise of the sky within the aperture. The result reports which of the two was used, and $\text{SNR} = F_{\text{net}} / \sigma_F$.
+
+    \textbf{Curve-of-growth aperture correction.} The cumulative net flux is measured at integer radii out to $4 r_{\text{ap}}$,
+
+    \begin{equation}
+        C(r) = \sum_{p \in \mathcal{A}(r)} w_p I_p \;-\; \bar{b} \sum_{p \in \mathcal{A}(r)} w_p
+    \end{equation}
+
+    and the plateau is the first radius $r \ge \max\!\left(\lfloor r_{\text{ap}} \rfloor + 1,\, 3\right)$ satisfying
+
+    \begin{equation}
+        C(r) > 0 \quad\text{and}\quad \left| C(r) - C(r-2) \right| < 0.01 \, C(r)
+    \end{equation}
+
+    that is, the growth curve has flattened to better than $1\%$ over two radial steps. If that radius reaches the inner edge of the sky annulus, $2 r_{\text{ap}}$, no correction is reported, because the curve would then be contaminated by the region used to define the background. Otherwise the correction factor is $F_{\text{net}} / C(r_{\text{plateau}})$ and $C(r_{\text{plateau}})$ is reported as the total flux.
+
+    \subsection{Barycentric and Heliocentric Radial Velocity (v0.6.0)}
+    \label{sec:radial_velocity}
+
+    \code{core/astrometry/spectral.rs} computes the correction from the header alone, using the \textbf{Meeus low-precision ephemeris} (\emph{Astronomical Algorithms}, ch.~25 for the Sun and a truncated ch.~47 for the Moon). Times come from \code{core/astrometry/time.rs}: Julian dates through the Meeus calendar algorithm, $T$ in Julian centuries from J2000.0, and GMST from
+
+    \begin{equation}
+        \theta_{\text{GMST}} = 280.46061837 + 360.98564736629\,d + 0.000387933\,T^2 - \frac{T^3}{38\,710\,000}
+    \end{equation}
+
+    with $d = \text{JD} - 2451545.0$. UTC is treated as UT1 and $\text{TT} = \text{UTC} + 69.2$\,s.
+
+    \textbf{Solar coordinates.}
+
+    \begin{align}
+        L_0 &= 280.46646 + 36000.76983\,T + 0.0003032\,T^2 \\
+        M &= 357.52911 + 35999.05029\,T - 0.0001537\,T^2 \\
+        e &= 0.016708634 - 0.000042037\,T - 0.0000001267\,T^2 \\
+        C &= (1.914602 - 0.004817\,T - 0.000014\,T^2)\sin M + (0.019993 - 0.000101\,T)\sin 2M + 0.000289 \sin 3M \\
+        \odot &= L_0 + C, \qquad R = \frac{1.000001018\,(1 - e^2)}{1 + e \cos(M + C)}
+    \end{align}
+
+    The Earth--Moon barycentre sits at heliocentric ecliptic longitude $\odot + 180^{\circ}$ and radius $R$; the Earth itself is offset from it by the geocentric lunar vector divided by $1 + 81.30056$. The heliocentric velocity is a central difference of that position with $\Delta t = 1/48$\,day, converted with $1\,\text{AU} = 149\,597\,870.7$\,km, then rotated from the ecliptic of date to equatorial J2000 by $R_z\!\left(-(1.3969713\,T + 0.0003086\,T^2)\right)$ followed by $R_x(23.4392911^{\circ})$.
+
+    \textbf{Diurnal term.} On the WGS84 ellipsoid ($a = 6\,378\,137$\,m, $f = 1/298.257223563$, $e^2 = 2f - f^2$), with $N = a / \sqrt{1 - e^2 \sin^2\phi}$ the prime vertical radius, the site's distance from the rotation axis and its velocity are
+
+    \begin{equation}
+        \rho = (N + h)\cos\phi, \qquad
+        \mathbf{v}_{\text{rot}} = \omega \rho \left(-\sin\theta_{\text{LST}},\; \cos\theta_{\text{LST}},\; 0\right),
+        \qquad \omega = 7.292115 \times 10^{-5}\,\text{rad\,s}^{-1}
+    \end{equation}
+
+    with $\theta_{\text{LST}} = \theta_{\text{GMST}} + \lambda$ and longitude read east-positive.
+
+    \textbf{Projection.} With the target unit vector $\hat{\mathbf{u}} = (\cos\delta\cos\alpha,\; \cos\delta\sin\alpha,\; \sin\delta)$,
+
+    \begin{align}
+        v_{\text{helio}} &= \mathbf{v}_{\oplus} \cdot \hat{\mathbf{u}} \;+\; \mathbf{v}_{\text{rot}} \cdot \hat{\mathbf{u}} \\[4pt]
+        v_{\text{bary}} &= v_{\text{helio}} \;+\; \mathbf{v}_{\odot} \cdot \hat{\mathbf{u}}
+    \end{align}
+
+    where $\mathbf{v}_{\odot} = -\sum_p \mathbf{v}_p \, m_p / M_{\odot}$ is the Sun's reflex motion about the solar-system barycentre, modelled as circular orbits for Jupiter, Saturn, Uranus and Neptune. The sign convention is that the correction is \emph{added} to a topocentric velocity, positive when the observer moves toward the target.
+
+    \begin{notebox}[Quoted accuracy]
+        The correction is reported with \code{accuracy\_kms} $= 0.02$\,km\,s$^{-1}$ and the method string \emph{Meeus low-precision ephemeris}. A \code{SPECSYS} of \code{GEOCENTR} skips the diurnal term; frames already barycentric or beyond report a zero shift with the frame named; spacecraft headers (\code{TELESCOP} containing JWST, HST or ROMAN) take the correction as $-\text{VELOSYS}/1000$ in km\,s$^{-1}$ from the header, or are refused with the reason, since the spacecraft ephemeris is not reconstructible from the header.
+    \end{notebox}
+
+    \textbf{Air and vacuum wavelengths.} Following Greisen et al. (2006), FITS Paper~III eq.~65, with $\lambda$ in micrometres,
+
+    \begin{equation}
+        \boxed{
+            n(\lambda) = 1 + 10^{-6}\left(287.6155 + \frac{1.62887}{\lambda^2} + \frac{0.01360}{\lambda^4}\right)
+        }
+    \end{equation}
+
+    The forward direction is direct, $\lambda_{\text{air}} = \lambda_{\text{vac}} / n(\lambda_{\text{vac}})$. The inverse has no closed form and is solved by fixed-point iteration $\lambda^{(k+1)} = \lambda_{\text{air}} \, n(\lambda^{(k)})$ started at $\lambda_{\text{air}} \, n(\lambda_{\text{air}})$, converging at $10^{-10}\,\mu$m within at most 50 steps. Below $0.2\,\mu$m the formula is outside its stated range and the wavelength is passed through unchanged, with a note.
+
+    \textbf{Velocity conventions.} With $c = 299\,792.458$\,km\,s$^{-1}$, observed $\lambda$ and rest $\lambda_0$:
+
+    \begin{align}
+        v_{\text{opt}} &= c \, \frac{\lambda - \lambda_0}{\lambda_0}
+            && \lambda = \lambda_0 (1 + \beta) \\[4pt]
+        v_{\text{rad}} &= c \, \frac{\lambda - \lambda_0}{\lambda}
+            && \lambda = \frac{\lambda_0}{1 - \beta} \\[4pt]
+        v_{\text{rel}} &= c \, \frac{\lambda^2 - \lambda_0^2}{\lambda^2 + \lambda_0^2}
+            && \lambda = \lambda_0 \sqrt{\frac{1 + \beta}{1 - \beta}}
+    \end{align}
+
+    with $\beta = v/c$; the right-hand column is the inversion used to place a velocity back on the wavelength axis. The three agree to first order in $\beta$ and diverge beyond it.
+
+    \subsection{Moment Maps (v0.6.0)}
+    \label{sec:moment_maps}
+
+    \code{core/cube/moments.rs} collapses a spectral cube over a channel range $[z_0, z_1]$ into three maps. The spectral axis is first converted to velocity by the convention of Section~\ref{sec:radial_velocity}; an axis already stored in velocity units is used as-is. Channel widths come from a centred difference,
+
+    \begin{equation}
+        \Delta v_z = \begin{cases}
+            \left| v_1 - v_0 \right| & z = 0 \\[4pt]
+            \left| v_{n-1} - v_{n-2} \right| & z = n-1 \\[4pt]
+            \tfrac{1}{2}\left| v_{z+1} - v_{z-1} \right| & \text{otherwise}
+        \end{cases}
+    \end{equation}
+
+    \textbf{Per-pixel continuum.} Two side windows $[z_a, z_b]$ and $[z_c, z_d]$ are merged, sorted and deduplicated. When the two windows differ and at least three channels remain, a first-order baseline is fitted per pixel by ordinary least squares in the channel index; otherwise the fit collapses to a constant, and it also collapses when fewer than three channels are finite or the normal equations are degenerate:
+
+    \begin{equation}
+        b_i(z) = \alpha_i + \beta_i z, \qquad
+        \beta_i = \frac{n \sum z y - \sum z \sum y}{n \sum z^2 - \left(\sum z\right)^2}, \qquad
+        \alpha_i = \frac{\sum y - \beta_i \sum z}{n}
+    \end{equation}
+
+    The per-pixel noise $\sigma_i$ is the MAD-based robust sigma of that fit's residuals, $1.4826 \cdot \operatorname{MAD}$. With no windows the raw channel values are used and a single global sigma is taken from a line-free channel, $z_0 - 1$ if it exists, otherwise $z_1 + 1$.
+
+    \textbf{The moments.} With the continuum-subtracted sample $s_{i,z} = I_{i,z} - b_i(z)$:
+
+    \begin{equation}
+        \boxed{
+            M_0 = \sum_{z=z_0}^{z_1} s_{i,z} \, \Delta v_z
+        }
+    \end{equation}
+
+    \begin{align}
+        M_1 &= \frac{\sum_{z \,:\, s > 0} s_{i,z} \, v_z}{\sum_{z \,:\, s > 0} s_{i,z}} \\[8pt]
+        M_2 &= \sqrt{ \max\!\left( \frac{\sum_{z \,:\, s > 0} s_{i,z} \, v_z^2}{\sum_{z \,:\, s > 0} s_{i,z}} - M_1^2 ,\; 0 \right) }
+    \end{align}
+
+    $M_0$ is the integrated intensity and takes every finite channel, positive or negative, weighted by its own channel width. $M_1$ and $M_2$ are the intensity-weighted mean velocity and its dispersion, and both restrict the sum to \emph{positive} samples so that negative noise excursions cannot drive the weights or push the variance negative; the variance is clamped at zero before the root regardless.
+
+    \textbf{SNR masking.} The noise used for a pixel is the larger of its own residual sigma and a global floor, the map median of the per-pixel sigmas. A pixel passes when
+
+    \begin{equation}
+        \boxed{
+            \frac{M_0}{\sigma_i \, \sqrt{N_{\text{ch}}} \; \overline{\Delta v}} \;\ge\; t
+        }
+    \end{equation}
+
+    with $N_{\text{ch}} = z_1 - z_0 + 1$, $\overline{\Delta v}$ the mean channel width over the range and $t$ the threshold, default $3.0$. The $\sqrt{N_{\text{ch}}} \, \overline{\Delta v}$ factor is the propagated noise of the $M_0$ sum itself. $M_1$ and $M_2$ are written only where the test passes; $M_0$ is kept for failing pixels when \code{mask\_below\_threshold} is disabled, and stays NaN otherwise. When no noise estimate is available the pixel is passed and counted as unmaskable.
+
+    \subsection{Wavelet Per-Scale Detail Bias (v0.6.0)}
+    \label{sec:wavelet_bias}
+
+    \code{core/imaging/wavelet.rs} implements the \`a trous (``with holes'') transform with the $B_3$ spline kernel
+
+    \begin{equation}
+        h = \tfrac{1}{16}\left[1,\; 4,\; 6,\; 4,\; 1\right]
+    \end{equation}
+
+    applied separably, with a hole spacing of $2^k$ taps at scale $k$, edge clamping, and renormalisation over the finite taps only so that NaN pixels do not spread. Starting from $c_0 = I$:
+
+    \begin{equation}
+        c_{k+1} = h_k * c_k, \qquad w_{k+1} = c_k - c_{k+1}, \qquad
+        I = \sum_{k=1}^{N} w_k + c_N
+    \end{equation}
+
+    Up to 8 scales, default 5. The decomposition is exact: the layers and the residual sum back to the input.
+
+    \textbf{Per-scale threshold.} The noise is estimated once from the finest layer, $\sigma_{w_1} = 1.4826 \cdot \operatorname{median}\left| w_1 \right|$, and referred back to the image by the $B_3$ scaling table
+
+    \begin{equation}
+        \sigma = \frac{\sigma_{w_1}}{\kappa_0}, \qquad
+        \kappa = \left(0.8908,\, 0.2007,\, 0.0856,\, 0.0413,\, 0.0205,\, 0.0103,\, 0.0051\right),
+        \qquad \kappa_k = \frac{\kappa_6}{2^{\,k-6}} \;\; (k > 6)
+    \end{equation}
+
+    so that scale $k$ is thresholded at its own expected noise amplitude:
+
+    \begin{equation}
+        \boxed{
+            T_k = t_k \, \sigma \, \kappa_k
+        }
+    \end{equation}
+
+    with per-scale multipliers $t$ defaulting to $(3,\, 2.5,\, 2,\, 1.5,\, 1)$; scales beyond the supplied list reuse the last entry. Thresholding is soft by default, $w' = \operatorname{sgn}(w)\max(\left| w \right| - T_k,\, 0)$, or hard, $w' = w \cdot \mathbf{1}\!\left[\left| w \right| > T_k\right]$.
+
+    \textbf{Detail bias.} Reconstruction applies a per-layer gain rather than summing the layers back at unit weight:
+
+    \begin{equation}
+        \boxed{
+            I' = c_N + \sum_{k=1}^{N} \left(1 + \beta_k\right) w'_k
+        }
+    \end{equation}
+
+    The bias $\beta_k$ is exposed on $[-1, +3]$ in steps of $0.05$, default $0$, and layers with no entry take $\beta_k = 0$. At $\beta_k = 0$ the layer is restored as it stands, so a run with all biases zero and all thresholds zero is the identity. At $\beta_k = -1$ the gain vanishes and the scale is removed from the image entirely; positive values amplify structure at that scale, up to four times its measured amplitude at $\beta_k = 3$. Because each $\beta_k$ multiplies one layer of an exact decomposition, the operation is a linear per-scale filter and does not move energy between scales.
+
+    \subsection{Local Histogram Equalization and HDR Multiscale Transform (v0.6.0)}
+    \label{sec:lhe_hdrmt}
+
+    \textbf{LHE} (\code{core/imaging/local\_contrast.rs}) is contrast-limited adaptive histogram equalization. The image is covered by a grid of tiles of side $R = $ \code{kernel\_radius}, clamped to $[16, 512]$ with default 64, and a lookup table is built at each tile centre from the pixels within $R$ of it --- a disc when \code{circular} is set, the bounding square otherwise. Values are mapped onto $B = 2^b$ bins, $b \in \{8, 10, 12\}$ with default 8, by
+
+    \begin{equation}
+        p(v) = \operatorname{clamp}\!\left(\frac{v - v_{\min}}{v_{\max} - v_{\min}},\, 0,\, 1\right) (B - 1),
+        \qquad j = \left\lfloor p(v) + \tfrac{1}{2} \right\rfloor
+    \end{equation}
+
+    over the finite range of the whole image.
+
+    \textbf{Clip limit and redistribution.} With $n$ pixels in the window and contrast limit $\gamma$ clamped to $[1, 64]$ (default 2.0),
+
+    \begin{equation}
+        \boxed{
+            c = \max\!\left(\frac{\gamma \, n}{B},\; 1\right),
+            \qquad
+            E = \sum_{j=0}^{B-1} \max\!\left(h_j - c,\; 0\right),
+            \qquad
+            p_j = \min(h_j,\, c) + \frac{E}{B}
+        }
+    \end{equation}
+
+    The clip limit is therefore a multiple of the \emph{mean} bin population: $\gamma = 1$ flattens the histogram to uniform and gives no local contrast gain, while larger values allow progressively steeper transfer curves. The clipped mass $E$ is not discarded but spread uniformly over all $B$ bins, so $\sum_j p_j = n$ exactly and the transfer function remains a valid CDF. The lookup table is the mid-point corrected cumulative sum
+
+    \begin{equation}
+        L_j = \operatorname{clamp}\!\left(\frac{1}{n}\left(\sum_{i \le j} p_i - \tfrac{1}{2} p_j\right),\; 0,\; 1\right)
+    \end{equation}
+
+    Each output pixel is interpolated linearly between the two adjacent bins of a table and bilinearly between the four surrounding tile tables, then blended with the input by the amount $a \in [0,1]$ and clamped back into the input range:
+
+    \begin{equation}
+        v' = \operatorname{clamp}\!\left((1 - a)\, v + a\, \hat{v},\; v_{\min},\; v_{\max}\right)
+    \end{equation}
+
+    Non-finite pixels are passed through, and an image whose finite range is below $10^{-12}$ is returned unchanged.
+
+    \textbf{HDRMT} (\code{core/imaging/hdr.rs}) compresses large-scale dynamic range through the same \`a trous decomposition. Each of \code{iterations} passes (1--4, default 1) does:
+
+    \begin{enumerate}[nosep]
+    \item decompose the working image into $N$ detail layers (2--8, default 6) plus the residual $c_N$;
+    \item clamp the residual from above at its own median, $c_N \leftarrow \min\!\left(c_N,\; \operatorname{median}(c_N)\right)$;
+    \item reconstruct with the per-layer bias of Section~\ref{sec:wavelet_bias}, $\beta_k = -\text{overdrive}$ for the two coarsest detail layers ($k + 2 \ge N$) and $\beta_k = 0$ elsewhere, with overdrive clamped to $[0,1]$;
+    \item rescale the result to $[0, 1]$.
+    \end{enumerate}
+
+    Step 2 is the transform itself: every pixel whose large-scale background sits above the median is pulled down to it, so a bright core and a faint outskirt end up on the same footing, while the detail layers that carry the structure are reinjected untouched. Optional inversion runs the whole pass on $1 - v$ to compress dark rather than bright structure; optional deringing blends the original normalised image back under a star mask with weight $m \cdot a$. The image is finally mapped back to its original range. On RGB the transform runs on the BT.709 luminance ($0.2126\,R + 0.7152\,G + 0.0722\,B$) and the ratio is applied to the three channels, so hue is preserved.
+
+    \begin{notebox}[Why linear input is refused]
+        HDRMT rejects any image whose finite median is below $1\%$ of its finite maximum, with the message \emph{``HDRMT expects a non-linear (stretched) image; median is below 1\% of the maximum''}. On linear astronomical data almost every pixel sits just above the sky floor while the stars span several decades, so the residual median of step 2 would lie at that floor and the clamp would flatten essentially the whole frame. The transform assumes a stretch has already redistributed the histogram, which is why it is placed after the STF in the pipeline rather than before it.
+    \end{notebox}
+
+
     \section{Command Module Reference}
     \label{sec:commands}
 %% ============================================================================
 
-    The backend exposes \textbf{47 Tauri commands} across 12 modules.
+    The backend registers \textbf{107 Tauri commands}, all of them listed in the \code{tauri::generate\_handler!} macro in \code{src-tauri/src/lib.rs}; the table below groups them by their \code{cmd::} module path.
 
-    \subsection{Compose Module (\texttt{cmd/compose.rs})}
+    The command name strings appear nowhere in the React components. They live only in the service layer, \code{src/services/*.ts}, where each exported function passes the literal name to \code{typedInvoke} (\code{src/infrastructure/tauri/client.ts}). Arguments cross the boundary in camelCase and arrive in Rust as snake\_case --- \code{computeStatistics} sends \code{excludeDq} and \code{compute\_statistics\_cmd} receives \code{exclude\_dq} --- so a rename on either side is a runtime failure, not a compile error.
 
     \begin{table}[H]
         \centering
         \small
-        \begin{tabularx}{\textwidth}{lXX}
+        \begin{tabularx}{\textwidth}{lrX}
     \toprule
-    \textbf{Command} & \textbf{Parameters} & \textbf{Returns} \\
+    \textbf{Module} & \textbf{Commands} & \textbf{Area} \\
     \midrule
-    \cmd{compose\_rgb\_cmd} & r/g/b\_path, stretch/wb/scnr, align\_method & png, STF, offsets \\
-    \cmd{blend\_channels\_cmd} & channel\_paths[], weights[], preset & png, STF, lum FITS \\
-    \cmd{align\_channels\_cmd} & paths[], align\_method & per-channel aligned FITS \\
-    \cmd{restretch\_composite\_cmd} & per-channel STF, SCNR opts & png \\
-    \cmd{calibrate\_composite\_cmd} & r/g/b\_factor & png (ORIG $\times$ WB) \\
-    \cmd{apply\_scnr\_cmd} & method, amount, r/g/b\_factor & png (ORIG $\times$ WB $\times$ SCNR) \\
-    \cmd{compute\_auto\_wb\_cmd} & --- & r/g/b factors, ref channel \\
-    \cmd{reset\_wb\_cmd} & output\_dir & png (ORIG $\to$ KEY) \\
-    \cmd{clear\_composite\_cache\_cmd} & --- & --- \\
-    \cmd{update\_composite\_channel\_cmd} & channel, path & updated flag \\
-    \cmd{export\_aligned\_channels\_cmd} & r/g/b\_path, align, WCS opts & per-channel FITS \\
+    \code{cmd::io} & 4 & FITS/ASDF ingestion, linear mono and RGB preview buffers \\
+    \code{cmd::export} & 5 & FITS and PNG export, mono and RGB, RICE-compressed MEF \\
+    \code{cmd::metadata} & 5 & Headers, HDU and ASDF array listings, narrowband filter detection \\
+    \code{cmd::analysis} & 6 & Histograms, FFT power spectrum, star detection, photometry, subframe metrics \\
+    \code{cmd::regions} & 5 & Region statistics, radial profiles, line cuts, DS9 \code{.reg} import and export \\
+    \code{cmd::visualization} & 8 & STF render, scale limits, colormap LUT, pixel probe, DQ flag table and mask preview, tile pyramids \\
+    \code{cmd::stacking} & 5 & Calibration, integration, drizzle (mono and RGB), batch pipeline \\
+    \code{cmd::compose} & 11 & Channel blend, alignment, crop, LRGB, white balance, SCNR, restretch, composite cache \\
+    \code{cmd::processing} & 21 & Resample, debayer, deconvolution, background and DBE, wavelets, arcsinh/GHS/masked stretch, star removal, tone, LHE, HDRMT, mono and composite variants \\
+    \code{cmd::pixelmath} & 2 & Expression evaluation and expression validation \\
+    \code{cmd::cosmetic} & 2 & Cosmetic correction, single frame and batch \\
+    \code{cmd::statistics} & 3 & Exact statistics (mono and composite) and batch noise evaluation \\
+    \code{cmd::cube} & 8 & Cube processing, frames, spectra, region spectra, range collapse, moment maps \\
+    \code{cmd::spectral} & 2 & Spectral axis construction and radial-velocity correction \\
+    \code{cmd::cutout} & 1 & Science cutout export (SCI, ERR, DQ) \\
+    \code{cmd::catalog} & 3 & Gaia DR3 cone search, cross-match, CSV export \\
+    \code{cmd::astrometry} & 5 & Plate solving, WCS info, pixel-to-world, pointing overlap, grid lines \\
+    \code{cmd::psf} & 1 & PSF estimation \\
+    \code{cmd::spcc} & 1 & Spectrophotometric colour calibration \\
+    \code{cmd::config} & 4 & Configuration read and write, API key storage \\
+    \code{cmd::synth} & 2 & Synthetic frame and synthetic stack generation \\
+    \code{cmd::output} & 3 & Output directory info, cleanup, progress cancellation \\
+    \midrule
+    \textbf{Total} & \textbf{107} & \\
     \bottomrule
         \end{tabularx}
-        \caption{Compose module (11 commands). All WB/SCNR commands read from ORIG cache.}
+        \caption{The 107 commands registered in \code{generate\_handler!}, grouped by \code{cmd::} module. Counts read off the macro block in \code{src-tauri/src/lib.rs}.}
     \end{table}
-
-    \subsection{Image, Analysis, Processing, Stacking, Cube, Astrometry, Config}
-
-    Remaining 36 commands cover: \cmd{process\_fits}, \cmd{process\_fits\_full}, \cmd{get\_raw\_pixels\_preview}, \cmd{export\_fits}, \cmd{export\_fits\_rgb}, \cmd{export\_png}, \cmd{export\_rgb\_png}, \cmd{resample\_fits\_cmd}, \cmd{compute\_histogram}, \cmd{compute\_fft\_spectrum}, \cmd{detect\_stars}, \cmd{apply\_stf\_render}, \cmd{generate\_tiles}, \cmd{deconvolve\_rl\_cmd}, \cmd{extract\_background\_cmd}, \cmd{wavelet\_denoise\_cmd}, \cmd{masked\_stretch\_cmd}, \cmd{apply\_arcsinh\_stretch\_cmd}, \cmd{estimate\_psf\_cmd}, \cmd{spcc\_calibrate\_cmd}, \cmd{calibrate}, \cmd{stack}, \cmd{drizzle\_stack\_cmd}, \cmd{drizzle\_rgb\_cmd}, \cmd{run\_pipeline\_cmd}, \cmd{process\_cube\_cmd}, \cmd{process\_cube\_lazy\_cmd}, \cmd{get\_cube\_info}, \cmd{get\_cube\_frame}, \cmd{get\_cube\_spectrum}, \cmd{plate\_solve\_cmd}, \cmd{get\_wcs\_info}, \cmd{detect\_narrowband\_filters}, \cmd{get\_config}, \cmd{update\_config}, \cmd{save\_api\_key}, \cmd{get\_api\_key}, \cmd{generate\_synth\_cmd}, \cmd{generate\_synth\_stack\_cmd}.
-
 
 %% ============================================================================
     \section{FITS and ASDF I/O}
@@ -586,7 +1148,19 @@
 
     FITS via \crate{memmap2} with BSCALE/BZERO: $v_{\text{phys}} = \text{BSCALE} \times v_{\text{stored}} + \text{BZERO}$. Multi-BITPIX export: 16 (auto BZERO/BSCALE), $-32$ (float32), $-64$ (float64).
 
-    ASDF: first Rust implementation. YAML tree $\to$ NdArrayMeta $\to$ binary block (zlib/bzip2/lz4) $\to$ Array2. Roman data model traversal. Auto-dispatch by extension.
+    ASDF: first Rust implementation. YAML tree $\to$ NdArrayMeta $\to$ binary block (zlib/bzip2/lz4) $\to$ Array2. Roman data model traversal. Auto-dispatch by extension. The reader was rewritten in 0.5.8 around \crate{memmap2} with lazily decoded blocks and validated against the ASDF Standard.
+
+    \subsection{Image References (v0.6.0)}
+
+    Every path-based command accepts a reference rather than a bare path: \code{<path>\#hdu=<n>} selects any FITS HDU and \code{<path>\#array=<key>} any ASDF array, including dotted keys such as \code{roman.dq}. Parsing lives in \code{types/image\_ref.rs}; a single loader in \code{infra/image\_source.rs} resolves references for both the desktop commands and the headless server. The reference, not the path, is the cache key, and output filenames derive their stem from it, so \code{jw01234\_cal.fits\#hdu=3} writes \code{jw01234\_cal\_hdu3.png}. This is what makes ERR, DQ and variance planes first-class images that can be displayed and measured like any other.
+
+    \subsection{Lossless Integer Planes (v0.6.0)}
+
+    A DQ plane is a bit field, so rounding it through \code{f32} destroys individual flags. BITPIX 8/16/32 HDUs and int8--int32, uint8--uint32 and bool8 ASDF arrays are therefore decoded a second time into an \code{IntPlane} that sits beside the float view in the cache and counts against the same budget. The BZERO offsets 32768 and 2147483648 that FITS uses to store unsigned data in signed types are applied in integer arithmetic, never through a float intermediate. Display and processing stay in \code{f32}/\code{f64}; only flag decoding reads the integer plane.
+
+    \subsection{Multi-Extension Output (v0.6.0)}
+
+    \code{write\_mef\_images} writes plain multi-HDU IMAGE files from \code{f32}, \code{i32} and \code{u32} arrays. The science cutout path uses it to emit SCI, ERR and DQ in one file with \code{CRPIX} shifted and \code{LTV1}/\code{LTV2}/\code{LTM1\_1}/\code{LTM2\_2} recorded, so the cutout remains registerable against its parent. \code{export\_fits} can additionally write RICE\_1-compressed tiles with a quantization level, for BITPIX 16 or $-32$ only.
 
 
 %% ============================================================================
@@ -595,8 +1169,189 @@
 
     WGSL fragment shader implementing MTF with symmetric denominator guard. \code{r32float} texture, 6-vertex fullscreen quad. Uniform buffer: $[\text{dataMin}, \text{dataMax}, \text{shadow}, \text{midtone}, \text{highlight}, W, H, \text{pad}]$ (32 bytes). CPU worker fallback with identical \code{stfTransfer} function.
 
+    \subsection{Display Path Unification (v0.6.0)}
+
+    The shader is no longer MTF-only. It evaluates the six scale modes (\code{mtf}, \code{linear}, \code{log}, \code{sqrt}, \code{asinh}, \code{power}) and samples a $256 \times 1$ LUT texture for the colormap, so a colormap change uploads 1\,KiB rather than re-rendering on the CPU. Limits come from the four limit modes (\code{minmax}, \code{zscale}, \code{percentile}, \code{user}) computed in Rust by \code{compute\_scale\_limits\_cmd}; the LUT itself comes from \code{get\_colormap\_lut\_cmd}.
+
+    The point of the exercise is that the stretch, the limit algorithms and the float-to-byte rule are written once, in \code{core/imaging/scale.rs}, and three consumers agree on them: the WGSL shader, the TypeScript worker fallback, and the headless server which returns a PNG. The parity is asserted rather than assumed --- a vitest case sweeps every scale kind and checks the WGSL port against the canonical transfer within \code{f32} rounding.
+
+    Device loss is recoverable. A failed initialisation used to be cached for the session, so one transient adapter error left the app on the CPU path until restart; the retry path now re-probes.
+
+    \begin{notebox}[GPU scope]
+        The GPU is used for display only. Stacking, alignment, drizzle, deconvolution, background extraction, PixelMath, wavelets and the compose pipeline all run on the CPU in Rust, parallelised with \crate{rayon}. No processing result depends on a GPU being present.
+    \end{notebox}
+
 
 %% ============================================================================
+%% ============================================================================
+    \section{Headless HTTP Server}
+    \label{sec:server}
+%% ============================================================================
+
+    AstroBurst ships a second binary that exposes the same imaging core over HTTP, with no window, no WebView and no Tauri runtime. It is an \crate{axum} 0.7 service on \crate{tokio}, built around short-lived sessions that hold a per-session image cache, so a script or notebook can open a FITS or ASDF file once and then issue many inspection calls against the decoded array instead of re-reading the file each time. The headless server was contributed by Jae-Joon Lee (\url{https://github.com/leejjoon}); the Cargo manifest records this on the server dependency block and on the \code{[[bin]]} entry, and every source file under \code{src-tauri/src/server/} carries the same note.
+
+    The server is gated behind the \code{server} Cargo feature, which is \emph{not} in \code{default}. The feature pulls in \crate{axum}, \crate{tower}, \crate{tower-http}, \crate{dashmap}, \crate{uuid}, \crate{tokio-stream}, \crate{tokio-util} and \crate{env\_logger}, all declared optional. The binary is \code{astroburst-server} (\code{src/server/main.rs}) and declares \code{required-features = ["server"]}, so it is only built when that feature is on. Because the desktop feature \code{tauri} is a default, the server build turns the defaults off and re-enables the non-UI ones explicitly:
+
+    \begin{infobox}[Build]
+        \cmd{cargo build --no-default-features --features server,astrometry-net,asdf-full,vizier}
+    \end{infobox}
+
+    On start the process reads its configuration from the environment, initialises \crate{env\_logger}, spawns the TTL cleaner and serves on the configured address. Every response carries an \code{x-request-id} header, echoed from the request when present and otherwise a fresh UUIDv4, applied as a \crate{tower} middleware layer over the whole router.
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{lXl}
+            \toprule
+            \textbf{Variable} & \textbf{Meaning} & \textbf{Default} \\
+            \midrule
+            \code{ASTROBURST\_BIND} & Listen address & \code{127.0.0.1:8080} \\
+            \code{ASTROBURST\_SESSION\_TTL} & Idle seconds before a session is evicted & \code{900} \\
+            \code{ASTROBURST\_SESSION\_MAX} & Concurrent sessions & \code{8} \\
+            \code{ASTROBURST\_JOBS\_MAX} & Concurrent long-running jobs & \code{4} \\
+            \code{ASTROBURST\_CACHE\_MAX\_ENTRIES} & Per-session cache entries & \code{32} \\
+            \code{ASTROBURST\_CACHE\_MAX\_BYTES} & Per-session cache bytes & \code{2\,GiB} \\
+            \code{ASTROBURST\_CLEANUP\_INTERVAL} & Seconds between TTL sweeps & \code{60} \\
+            \code{ASTROBURST\_LOG\_LEVEL} & Default \code{RUST\_LOG} value & \code{info} \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Server configuration (\code{server/config.rs}). An unparseable value is reported on stderr and replaced by the default rather than aborting startup.}
+    \end{table}
+
+    \subsection{Session Model}
+
+    A session is created by \code{POST /v2/sessions} (or the identical \code{POST /sessions}), which answers \code{201} with a UUIDv4 \code{session\_id}. Sessions live in a \crate{dashmap} keyed by that id; there is no authentication and no per-session credential.
+
+    Each session owns four things (\code{server/session.rs}):
+
+    \begin{itemize}[nosep]
+        \item an \code{ImageCache} --- the same LRU cache the desktop app uses --- bounded by both \code{cache\_max\_entries} and \code{cache\_max\_bytes};
+        \item a map of jobs, keyed by job id;
+        \item the v2 state: a monotonic counter, an \code{active\_ref} under an \code{RwLock}, and a map of \code{ImageMeta} records;
+        \item a \code{last\_accessed} timestamp.
+    \end{itemize}
+
+    Images are referenced by name inside the session rather than by path. The v2 routes mint a ref on each producing call --- \code{img\_0}, \code{img\_1}, \code{cutout\_0}, \code{bin\_0} and so on, from a per-session counter --- unless the caller supplies \code{name}. Each ref carries an \code{ImageMeta} record holding \code{image\_ref}, \code{source}, \code{hdu}, \code{array}, \code{plane\_ref}, \code{is\_dq}, \code{width}, \code{height}, \code{wcs\_present} and \code{extname}. The most recently opened, cut or switched image becomes the session's \code{active\_ref}, and every consuming endpoint treats a missing \code{ref} field as ``use the active ref'', failing with \code{400} if there is none. The older slot-based routes instead take a caller-chosen \code{slot} string, defaulting to the file path.
+
+    Lifetime is bounded on three axes. Session creation fails with \code{503} once \code{session\_max} sessions exist. Any request that resolves a session touches its timestamp through the \code{SessionExtractor}, and \code{POST /v2/sessions/:sid/keepalive} exists to do only that. A background task ticks every \code{cleanup\_interval}, skips any session with a running job, and removes sessions idle longer than \code{session\_ttl}, logging the eviction. \code{DELETE /v2/sessions/:sid} removes one immediately.
+
+    Eviction inside a session is independent of session lifetime: the image cache drops least-recently-used entries when either bound is exceeded, which can silently invalidate a ref the client still holds. The server reconciles rather than pretending otherwise --- \code{prune\_evicted\_meta} drops metadata whose cache entry is gone, and \code{reconcile\_active\_ref} additionally clears \code{active\_ref} when it points at an evicted image. \code{GET /v2/sessions/:sid} and \code{GET /v2/sessions/:sid/images} run that reconciliation before reporting, so a listing never advertises an image the cache no longer holds.
+
+    \subsection{The v2 API Surface}
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{llX}
+            \toprule
+            \textbf{Method} & \textbf{Path} & \textbf{Purpose} \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Liveness}} \\
+            GET & \code{/health} & Status, version, active and cumulative session counts \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Session lifecycle}} \\
+            POST & \code{/v2/sessions} & Create a session, return its id \\
+            GET & \code{/v2/sessions/:sid} & Active ref, image count, cache bytes \\
+            DELETE & \code{/v2/sessions/:sid} & Drop the session and its cache \\
+            POST & \code{/v2/sessions/:sid/keepalive} & Refresh the idle timer \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Images and structure}} \\
+            POST & \code{/v2/sessions/:sid/open} & Open a FITS or ASDF plane, become the active ref \\
+            POST & \code{/v2/sessions/:sid/hdu} & Re-open the active image at another HDU or array \\
+            GET & \code{/v2/sessions/:sid/images} & List refs with their metadata \\
+            GET & \code{/v2/sessions/:sid/structure} & HDU listing of the source file (FITS only) \\
+            GET & \code{/v2/sessions/:sid/header} & Header cards, optionally glob-filtered by \code{keys} \\
+            GET & \code{/v2/sessions/:sid/wcs} & WCS summary: projection, CRPIX/CRVAL, CD, scale, rotation, parity, SIP \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Astrometry}} \\
+            POST & \code{/v2/sessions/:sid/wcs/pix2sky} & Batch pixel $\to$ sky, in a named frame \\
+            POST & \code{/v2/sessions/:sid/wcs/sky2pix} & Batch sky $\to$ pixel \\
+            POST & \code{/v2/sessions/:sid/wcs/separation} & Angular separation between two sky or two pixel points \\
+            POST & \code{/v2/sessions/:sid/wcs/grid} & Coordinate grid lines and labels at a given density \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Measurement}} \\
+            POST & \code{/v2/sessions/:sid/pixel} & Probe a pixel with an odd $n\times n$ box, plus DQ and ERR companions \\
+            POST & \code{/v2/sessions/:sid/stats} & Region statistics: exact moments, sigma clipping, percentiles, noise \\
+            POST & \code{/v2/sessions/:sid/histogram} & Binned histogram over a region, auto or explicit range \\
+            \midrule
+            \multicolumn{3}{l}{\textit{Derived images and display}} \\
+            POST & \code{/v2/sessions/:sid/cutout} & Cut a region into a new ref, optionally shifting the WCS \\
+            POST & \code{/v2/sessions/:sid/bin} & Block-mean downsample into a new ref \\
+            POST & \code{/v2/sessions/:sid/render} & Render a region to PNG with limits, stretch, colormap, overlays \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Every route registered in \code{server/router.rs} under \code{/v2}, plus \code{/health}. Paths are literal; \code{:sid} is the session id.}
+    \end{table}
+
+    The v2 endpoints share one region grammar (\code{server/v2/region.rs}): a request may pass a pixel rectangle, a sky rectangle in arcminutes around an RA/Dec, or a full shape --- the core \code{RegionShape} set --- in pixel or sky coordinates. A region that leaves the frame is rejected with \code{region\_out\_of\_bounds} unless the caller passes \code{clip: true}, and a sky region on an image without WCS is rejected with \code{wcs\_required}.
+
+    \code{POST /v2/sessions/:sid/render} is the only route that does not answer JSON: it returns \code{image/png} and puts the resolved parameters --- the region actually used, \code{vmin}/\code{vmax}, the limit algorithm, stretch, colormap, the binning factor applied to honour \code{max\_dim}, the PNG's arcsec-per-pixel scale and the fraction of pixels clipped at each end --- into an \code{x-render-resolved} JSON header. Crosshair and scalebar overlays are drawn into the buffer before encoding.
+
+    Alongside these, the router keeps an earlier slot-based surface: \code{POST /sessions} and, under \code{/sessions/:sid}, \code{fits/open} and \code{fits/header} for I/O; \code{image/render}, \code{image/stf} and \code{image/viewport} for STF-based PNG output; \code{stacking/stack}, \code{stacking/drizzle} and \code{pipeline/run} for batch work; and the three job routes below. These address images by \code{slot} and do not participate in the v2 ref or active-ref model.
+
+    \subsection{Job Model}
+
+    Only three routes start work that can outlive a request: \code{stacking/stack}, \code{stacking/drizzle} and \code{pipeline/run}. All three follow the same contract (\code{server/job.rs}, \code{server/handlers/}):
+
+    \begin{itemize}[nosep]
+        \item \textbf{Admission.} The handler validates its parameters, then takes a permit from a \code{Semaphore} sized at \code{jobs\_max} with \code{try\_acquire\_owned}. No permit means an immediate \code{429}; the queue never builds up.
+        \item \textbf{Submission.} A \code{Job} is created with a bounded 256-slot event channel, registered in \code{session.jobs}, and the work is moved onto \code{spawn\_blocking} holding the permit. The handler answers \code{202 Accepted} with \code{job\_id}, \code{status: "running"} and the cache slot(s) the result will be stored under. The pipeline route additionally returns any DQ cosmetic warnings raised while inspecting the input frames.
+        \item \textbf{Polling.} \code{GET /sessions/:sid/jobs/:jid} returns \code{id}, \code{action}, \code{status} (\code{running}, \code{done}, \code{error}, \code{cancelled}), \code{pct}, and \code{started\_at}/\code{completed\_at} as milliseconds since the epoch.
+        \item \textbf{Streaming.} \code{GET /sessions/:sid/jobs/:jid/stream} is a Server-Sent Events stream of \code{progress}, \code{complete} and \code{error} events, with a 30-second keep-alive. The receiver is taken out of the job on first subscribe, so a second subscriber gets \code{409}.
+        \item \textbf{Cancellation.} \code{DELETE /sessions/:sid/jobs/:jid} cancels a running job's \code{CancellationToken}, marks it cancelled and returns the job record. Transitions out of \code{running} go through a compare-and-exchange, and \code{set\_cancelled} is a plain store, so a worker that finishes after the cancel cannot overwrite the cancelled state with \code{done} or \code{error}.
+    \end{itemize}
+
+    Results are written into the session's image cache under the requested slot names; there is no separate result store and no download route for them. Sessions with a running job are skipped by the TTL cleaner, so a long stack cannot have its own session evicted underneath it.
+
+    \subsection{What Is Shared, and What Is Not}
+
+    The server is a second front end over the library crate, not a reimplementation. It links \code{astroburst\_lib} and calls the same core modules the Tauri commands call:
+
+    \begin{itemize}[nosep]
+        \item \code{core/imaging/scale.rs} --- \code{LimitMode}, \code{StretchKind}, \code{resolve\_limits}, \code{normalize\_and\_stretch}: used by \code{server/v2/render/handler.rs} and by \code{cmd/visualization/mod.rs}, so limits and stretches resolve identically on both;
+        \item \code{core/imaging/region.rs} --- the shape set, \code{shape\_to\_pixel}, masked values: used by \code{server/v2/region.rs} and by \code{cmd/regions.rs}, \code{cmd/statistics.rs}, \code{cmd/cutout.rs};
+        \item \code{core/imaging/cutout.rs} --- \code{resolve\_cutout\_rect}, \code{cut\_plane\_within}, \code{shift\_header}, \code{reported\_ltv}: used by \code{server/v2/cutout.rs} and \code{cmd/cutout.rs};
+        \item \code{core/imaging/pixel\_probe.rs} --- \code{probe\_pixel}, \code{probe\_companions}, \code{data\_unit}: used by \code{server/v2/pixel.rs} and by \code{cmd/statistics.rs} and \code{cmd/visualization/mod.rs}.
+    \end{itemize}
+
+    The same holds for \code{core/imaging/colormap.rs}, \code{core/imaging/statistics.rs}, \code{core/astrometry/} (\code{wcs.rs}, \code{grid.rs}, \code{frames.rs}) and the infrastructure layer --- \code{infra/cache.rs} and \code{infra/image\_source.rs} --- all of which both binaries import.
+
+    The split is in the command layer, not the core. Radial profiles, line cuts and DS9 \code{.reg} import/export exist as core functions (\code{radial\_profile} and \code{line\_cut} in \code{core/imaging/region.rs}, and \code{core/imaging/region\_file.rs}) but are reachable only through \code{cmd/regions.rs}; no route in \code{server/router.rs} exposes them. Likewise, the \code{exclude\_dq} flag that drives \code{resolve\_dq\_mask} appears only under \code{cmd/} --- in \code{cmd/analysis/mod.rs}, \code{cmd/regions.rs} and \code{cmd/statistics.rs} --- and is absent from the server's \code{StatsParams} and \code{HistogramParams}. Both README claims therefore hold as written.
+
+    \begin{notebox}[DQ on the server]
+        The asymmetry is narrower than ``no DQ''. \code{POST /v2/sessions/:sid/pixel} does load the DQ and ERR companions of the probed plane and returns decoded DQ flags for the sampled pixel. What the server lacks is DQ-\emph{masked} aggregation: its stats and histogram endpoints have no exclusion flag, so they measure every finite pixel in the region regardless of its DQ state.
+    \end{notebox}
+
+    Further desktop-only surface: the compose wizard has no server routes at all, and \code{histogram} rejects \code{render\_png: true} with a \code{not\_implemented} code rather than plotting server-side.
+
+    \subsection{Error Model}
+
+    All failures go through one enum in \code{server/error.rs} and serialise to a single envelope, \code{\{"success": false, "error": \{"code", "message", "hint"?\}\}}, where \code{hint} is present only on the variant that carries one.
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{llX}
+            \toprule
+            \textbf{Status} & \textbf{Code} & \textbf{Raised for} \\
+            \midrule
+            400 & \code{bad\_request} & Malformed path or body, unknown colormap, stretch, algorithm or frame, both \code{hdu} and \code{array} given, zero or oversized bin factor, no active image in the session \\
+            400 & \code{pixel\_out\_of\_bounds} & Pixel probe outside the array; hint gives the valid extent \\
+            400 & \code{region\_out\_of\_bounds} & Region off-image, non-overlapping, clipped without \code{clip: true}, or a cutout exceeding the session memory budget \\
+            400 & \code{wcs\_required} & Sky coordinates requested on an image with no header, no usable WCS, or a degenerate pixel scale \\
+            400 & \code{not\_implemented} & \code{render\_png} on the histogram endpoint \\
+            404 & \code{not\_found} & Unknown session, image ref, slot or job id \\
+            409 & \code{conflict} & Second SSE subscriber on one job \\
+            429 & \code{too\_many\_requests} & No job permit available \\
+            503 & \code{service\_unavailable} & Session cap reached \\
+            500 & \code{internal\_error} & Any \crate{anyhow} error reaching the boundary, including a panicking blocking task \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Status codes produced by \code{AppError}. The four typed 400 codes let a client distinguish a bad request from an out-of-frame one without parsing prose.}
+    \end{table}
+
+    Two details are worth noting for clients. The \code{429} message is the fixed string \code{"job queue full (max 4 concurrent)"}, which states the default rather than the configured \code{jobs\_max}; the status code, not the text, is the contract. And errors that originate in the core --- \code{RegionError}, \code{CutoutError}, \code{ProbeError} --- are mapped explicitly to \code{400} with a hint, so a caller mistake is never reported as \code{500}. The exception is plane loading, where only the two recognised messages (no ASDF arrays, no HDU index) become \code{400} and everything else is surfaced as \code{internal\_error}.
+
     \section{Performance Benchmarks}
 %% ============================================================================
 
@@ -619,13 +1374,16 @@
             WB (non-destructive) & 4096$\times$4096 $\times$ 3 & 45\,ms & ORIG read + factor \\
             \bottomrule
         \end{tabular}
-        \caption{Benchmarks (AMD Ryzen 9 7950X, 64\,GB DDR5, NVMe). Binary: $\sim$15\,MB.}
+        \caption{Benchmarks (AMD Ryzen 9 7950X, 64\,GB DDR5, NVMe). Binary: $\sim$15\,MB. Measured on the v0.4.6 build and \emph{not} re-measured for 0.6.0: the kernels behind these rows are unchanged, but the figures should be treated as the order of magnitude rather than as current numbers. The operations added since --- pixel rejection, DBE, PixelMath, LHE, HDRMT, moment maps --- are not represented here at all.}
     \end{table}
 
 
 %% ============================================================================
     \section{Dependencies}
 %% ============================================================================
+
+
+    The default feature set is \code{tauri}, \code{astrometry-net}, \code{asdf-full} and \code{vizier}; the headless server is built instead with \code{--no-default-features --features server,astrometry-net,asdf-full,vizier}.
 
     \begin{table}[H]
         \centering
@@ -634,35 +1392,75 @@
     \toprule
     \textbf{Crate} & \textbf{Version} & \textbf{Purpose} \\
     \midrule
-    \crate{tauri} & 2.10 & Application framework, IPC, asset protocol \\
-    \crate{ndarray} & 0.16 & N-dimensional arrays, Rayon parallel iterators \\
+    \crate{tokio} & 1 & Async runtime; every command is moved off the UI thread with \code{spawn\_blocking} \\
+    \crate{serde} & 1 & Derived serialization for the IPC and server payloads \\
+    \crate{serde\_json} & 1 & JSON command responses \\
+    \crate{serde\_yaml} & 0.9 & ASDF YAML tree parsing (\code{infra/asdf/parser.rs}, \code{tree.rs}) \\
+    \crate{anyhow} & 1.0 & Error propagation inside commands \\
+    \crate{thiserror} & 2.0 & Typed errors for the region, cutout and pixel-probe cores \\
+    \crate{ndarray} & 0.16 & N-dimensional arrays, with the \code{rayon} and \code{serde} features \\
     \crate{rayon} & 1.10 & Data-parallel batch processing \\
-    \crate{memmap2} & 0.9 & Memory-mapped FITS I/O \\
-    \crate{rustfft} & 6.4 & FFT for deconvolution, phase correlation, power spectrum \\
-    \crate{image} & 0.25 & PNG encoding (8/16-bit) \\
-    \crate{serde\_yaml} & 0.9 & ASDF YAML tree parsing \\
-    \crate{flate2} & 1.0 & zlib decompression (ASDF blocks) \\
-    \crate{bzip2} & 0.5 & bzip2 decompression (ASDF, default feature) \\
-    \crate{lz4\_flex} & 0.11 & lz4 decompression (ASDF, default feature) \\
-    \crate{reqwest} & 0.12 & Astrometry.net API, Vizier TAP (optional) \\
+    \crate{rand} & 0.8 & Seeded RNG for the synthetic data generator (\code{core/synth}) and tests \\
+    \crate{image} & 0.25 & PNG encoding, 8 and 16 bit (\code{cmd/helpers.rs}) \\
+    \crate{rustfft} & 6.2 & FFT for deconvolution, phase correlation and the power spectrum \\
+    \crate{num-complex} & 0.4 & Complex arithmetic alongside \crate{rustfft} \\
+    \crate{memmap2} & 0.9 & Memory-mapped FITS and ASDF reads, lazy cube frames \\
+    \crate{flate2} & 1.0 & zlib for ASDF blocks and GZIP\_1/GZIP\_2 FITS tiles \\
+    \crate{wcs} & 0.4 & wcs-rs projection engine ($\sim$20 FITS projections); SIP is applied by AstroBurst's own math \\
+    \crate{zip} & 2 & Transparent \code{.zip} FITS containers (\code{infra/fits/dispatcher.rs}) \\
+    \crate{tempfile} & 3.8 & Scratch files for the plate-solve upload and for tests \\
+    \crate{dirs} & 5.0 & Platform data and config directories \\
+    \crate{regex} & 1.10 & Header keyword discovery (\code{core/metadata/header\_discovery.rs}) \\
+    \crate{base64} & 0.22.1 & Base64 previews in the batch pipeline response \\
+    \crate{log} & 0.4.29 & Logging facade used by the commands and the server \\
+    \crate{libc} & 0.2 & Linux target only: \code{fstatfs} identifies a network filesystem before a file is memory-mapped \\
+    \crate{tauri-build} & 2.5 & Build dependency: Tauri context and asset generation \\
     \bottomrule
         \end{tabularx}
+        \caption{Unconditional dependencies, from \code{src-tauri/Cargo.toml} at v0.6.0.}
     \end{table}
 
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{llX}
+    \toprule
+    \textbf{Crate} & \textbf{Version} & \textbf{Purpose (gating feature)} \\
+    \midrule
+    \crate{tauri} & 2.10 & Application framework, IPC, asset protocol --- \code{tauri} \\
+    \crate{tauri-plugin-dialog} & 2.6.0 & Native file dialogs --- \code{tauri} \\
+    \crate{tauri-plugin-fs} & 2.2.0 & Filesystem access from the webview --- \code{tauri} \\
+    \crate{tauri-plugin-shell} & 2.3 & External process and shell access --- \code{tauri} \\
+    \crate{tauri-plugin-opener} & 2.3 & Open files and URLs in the system handler --- \code{tauri} \\
+    \crate{axum} & 0.7 & HTTP router of the headless server --- \code{server} \\
+    \crate{tower} & 0.4 & Service utilities (\code{ServiceExt} in the server test harness) --- \code{server} \\
+    \crate{tower-http} & 0.5 & Declared with the \code{request-id}, \code{trace} and \code{util} features --- \code{server} \\
+    \crate{dashmap} & 6 & Concurrent session and image maps --- \code{server} \\
+    \crate{uuid} & 1 & v4 session and job identifiers --- \code{server} \\
+    \crate{tokio-stream} & 0.1 & SSE job-event stream --- \code{server} \\
+    \crate{tokio-util} & 0.7 & Cancellation tokens for jobs --- \code{server} \\
+    \crate{env\_logger} & 0.11 & Logger initialisation for the server binary --- \code{server} \\
+    \crate{reqwest} & 0.12 & Astrometry.net upload and VizieR TAP --- \code{astrometry-net}; \code{vizier} adds \code{reqwest/blocking} \\
+    \crate{bzip2} & 0.5 & bzip2 ASDF blocks --- \code{asdf-full} \\
+    \crate{lz4\_flex} & 0.11 & lz4 ASDF blocks --- \code{asdf-full} \\
+    \bottomrule
+        \end{tabularx}
+        \caption{Optional dependencies and the Cargo feature that gates each.}
+    \end{table}
 
 %% ============================================================================
     \section{Known Limitations}
 %% ============================================================================
 
     \begin{enumerate}[nosep]
-    \item No non-linear distortion correction (barrel/pincushion)
-    \item Online plate solving only (local index planned)
-    \item WebGPU Chromium 113+ required; Canvas 2D fallback available
-    \item No session persistence
-    \item ASDF read-only (writer not implemented)
-    \item No MAST API integration (manual download required)
-    \item Cube ``Collapse Sum'' relabeled to ``Collapse Mean'' in v0.4.5
-    \item Flatpak/Flathub distribution pending reviewer approval
+    \item \textbf{Plate solving is online only.} Solving uploads the frame to nova.astrometry.net and needs a free API key; there is no local index. This is the largest functional gap against comparable tools.
+    \item \textbf{No optical distortion correction of the image.} WCS SIP distortion \emph{is} applied, by the wrapper in \code{core/astrometry/wcs.rs} rather than by the \crate{wcs} crate, so coordinates are correct on SIP headers; what is absent is resampling the pixels to remove barrel or pincushion distortion.
+    \item \textbf{ASDF is read-only.} The reader is complete (memory-mapped, lazy blocks, validated against the ASDF Standard); no writer is implemented, so Roman products are exported as FITS.
+    \item \textbf{No MAST API integration.} Observatory data must be downloaded manually before it is opened.
+    \item \textbf{No session persistence.} Panel sizes and per-file regions survive a restart through \code{localStorage}; the loaded set of files, the processing chain and the composite state do not. There is no project file.
+    \item \textbf{WebGPU is preferred, not required.} The display path needs Chromium 113+; when WebGPU is unavailable or the device is lost the app falls back to a CPU worker that reproduces the same bytes.
+    \item \textbf{Server parity is partial.} Rendering, region statistics, histograms and cutouts are available over HTTP. Radial profiles, line cuts and DS9 \code{.reg} import/export are desktop-only, and the server statistics and histogram endpoints do not yet accept the DQ exclusion flag that the desktop commands take.
+    \item \textbf{Flatpak/Flathub distribution} is pending reviewer approval.
     \end{enumerate}
 
 
@@ -670,40 +1468,65 @@
     \section{Roadmap}
 %% ============================================================================
 
+
     \begin{table}[H]
         \centering
-        \begin{tabular}{lll}
+        \small
+        \begin{tabularx}{\textwidth}{Xll}
             \toprule
             \textbf{Feature} & \textbf{Priority} & \textbf{Status} \\
             \midrule
+            Batch calibration and stacking pipeline & Medium & \textcolor{ForestGreen}{Done (v0.3.0)} \\
             Star-based affine alignment & High & \textcolor{ForestGreen}{Done (v0.4.0)} \\
-            Non-destructive WB/SCNR & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
             ComposeWizard pipeline & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
             Masked stretch & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
             SPCC calibration & High & \textcolor{ForestGreen}{Done (v0.4.2)} \\
+            Non-destructive WB/SCNR & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
             STF GPU/CPU consistency & High & \textcolor{ForestGreen}{Done (v0.4.5)} \\
             Tone curves (AdjustStep) & High & \textcolor{ForestGreen}{Done (v0.4.6)} \\
             Cache-only processing & High & \textcolor{ForestGreen}{Done (v0.4.6)} \\
             Auto-STF preview & Medium & \textcolor{ForestGreen}{Done (v0.4.6)} \\
+            Headless HTTP server and Python client & Medium & \textcolor{ForestGreen}{Done (v0.5.5.2)} \\
+            Star removal (starless plus stars layer) & Medium & \textcolor{ForestGreen}{Done (v0.5.6.1)} \\
+            Display controls: scale modes, limit modes, colormaps & High & \textcolor{ForestGreen}{Done (v0.5.8.1)} \\
+            Multi-extension FITS: any HDU, any ASDF array, ERR/DQ & High & \textcolor{ForestGreen}{Done (v0.5.8.1)} \\
+            DQ flag decoding, tables and overlays & High & \textcolor{ForestGreen}{Done (v0.5.8.1)} \\
+            Interactive regions with DS9 \code{.reg} exchange & High & \textcolor{ForestGreen}{Done (v0.5.8.2)} \\
+            Pixel rejection family and frame normalization & High & \textcolor{ForestGreen}{Done (v0.5.8.3)} \\
+            DBE spline background & High & \textcolor{ForestGreen}{Done (v0.5.8.3)} \\
+            PixelMath & High & \textcolor{ForestGreen}{Done (v0.5.8.3)} \\
+            LHE and HDR multiscale transform & Medium & \textcolor{ForestGreen}{Done (v0.5.8.3)} \\
+            Exact statistics with k-sigma noise evaluation & High & \textcolor{ForestGreen}{Done (v0.5.8.3)} \\
+            Photometric calibration and Gaia DR3 catalog panel & Medium & \textcolor{ForestGreen}{Done (v0.5.8.4)} \\
+            Spectral axes and velocity conventions & Medium & \textcolor{ForestGreen}{Done (v0.5.8.4)} \\
+            Cube moment maps and range collapse & Medium & \textcolor{ForestGreen}{Done (v0.5.8.4)} \\
+            Science cutout export (SCI/ERR/DQ) & Medium & \textcolor{ForestGreen}{Done (v0.5.8.4)} \\
+            WCS coordinate grid overlay & Medium & \textcolor{ForestGreen}{Done (v0.5.8.4)} \\
+            GPU viewer follows the processed result & High & \textcolor{ForestGreen}{Done (v0.6.0)} \\
+            \midrule
             Flatpak/Flathub & Medium & \textcolor{YellowOrange}{Pending} \\
             \midrule
-            Multi-extension FITS (ERR/DQ/VAR) & High & Planned (v0.5) \\
-            MAST API integration & High & Planned (v0.5) \\
-            WCS overlay on preview & Medium & Planned (v0.5) \\
-            Batch pipeline & Medium & Planned (v0.5) \\
-            Star removal & Medium & Planned (v0.6) \\
-            Photometric calibration (Gaia DR3) & Medium & Planned (v0.6) \\
-            Full GPU pipeline (WebGPU compute) & Medium & Planned (v1.0) \\
+            Local plate-solving index (offline solver) & High & Planned \\
+            Masks as a first-class object & High & Planned \\
+            Process history, undo and presets & High & Planned \\
+            Local normalization & High & Planned \\
+            Mosaic assembly with overlap normalization & Medium & Planned \\
+            Comet and asteroid alignment & Medium & Planned \\
+            RAW reader (LibRaw or \crate{rawloader}) & Medium & Planned \\
+            XISF reader & Medium & Planned \\
+            TIFF read and write (Astro-TIFF) & Medium & Planned \\
+            MAST query and download & Medium & Planned \\
+            Full GPU compute pipeline & Low & Planned (v1.0) \\
             \bottomrule
-        \end{tabular}
+        \end{tabularx}
+        \caption{Done rows are dated from the release tag that first contains the implementing commit; the four-component tags (v0.5.8.1 to v0.5.8.4 and the v0.5.5.x/v0.5.6.x line) are point releases that \code{CHANGELOG.md} groups under its published [0.5.5], [0.5.8] and [0.6.0-preview] entries, so look there rather than for a tag-numbered entry. Planned rows follow the repository roadmap; each was confirmed absent from \code{src-tauri/src} and \code{src} before being listed --- there is no offline solve path (\code{solve\_offline\_placeholder} always fails), no command exposes \code{generate\_star\_mask}, no undo or action log exists beside the fixed \code{ProcessingChain}, and local normalization, mosaic assembly, comet alignment and the RAW/XISF/TIFF readers have no implementation at all. MAST likewise has no implementation: the matches for ``mast'' in the tree are \code{CalibrationMasters} and master bias/dark/flat identifiers, plus \code{C:/MAST/...} fixture paths in a frontend test.}
     \end{table}
-
 
 %% ============================================================================
     \appendix
     \section{Sample Test Data}
 %% ============================================================================
 
-    HST/WFPC2 narrowband FITS in \code{tests/sample-data/}: 502nmos.fits ([OIII] 502\,nm, Blue), 656nmos.fits (H$\alpha$ 656\,nm, Green), 673nmos.fits ([SII] 673\,nm, Red). 1600$\times$1600 float32, WCS TAN. Public domain (NASA/ESA).
+    HST/WFPC2 narrowband FITS in \code{exampleFits/sample-data/}: 502nmos.fits ([OIII] 502\,nm, Blue), 656nmos.fits (H$\alpha$ 656\,nm, Green), 673nmos.fits ([SII] 673\,nm, Red). 1600$\times$1600 float32, WCS TAN. Public domain (NASA/ESA). The same directory carries \code{synthetic\_catalog.csv}, the ground-truth source list emitted by the synthetic data generator, which is what photometry and alignment are validated against.
 
 \end{document}

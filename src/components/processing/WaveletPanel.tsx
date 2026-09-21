@@ -1,7 +1,11 @@
 import { useState, useCallback, useEffect } from "react";
+import { X } from "lucide-react";
 import { waveletDenoise } from "../../services/processing";
+import { cancelProgress } from "../../services/progress";
+import { useProgress } from "../../hooks/useProgress";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
+import { WAVELET_PROGRESS_EVENT } from "../../shared/types/processing";
 
 const DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
 const DEFAULT_BIAS = 0;
@@ -51,6 +55,8 @@ function formatBias(v: number): string {
 }
 
 export default function WaveletPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: WaveletPanelProps) {
+  const progress = useProgress(WAVELET_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
   const [numScales, setNumScales] = useState(5);
   const [thresholds, setThresholds] = useState<number[]>([...DEFAULT_THRESHOLDS]);
   const [layerBias, setLayerBias] = useState<number[]>(() => Array(5).fill(DEFAULT_BIAS));
@@ -91,6 +97,7 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
     setIsRunning(true);
     setError(null);
     setResult(null);
+    resetProgress();
     try {
       const res = await waveletDenoise(selectedFile.path, outputDir, {
         numScales,
@@ -102,11 +109,13 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
       onPreviewUpdate?.(res?.previewUrl);
       onProcessingDone?.(res);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) setError(msg);
     } finally {
       setIsRunning(false);
+      resetProgress();
     }
-  }, [selectedFile, outputDir, numScales, thresholds, linear, layerBias, onPreviewUpdate, onProcessingDone]);
+  }, [selectedFile, outputDir, numScales, thresholds, linear, layerBias, resetProgress, onPreviewUpdate, onProcessingDone]);
 
   const originalUrl = selectedFile?.result?.previewUrl;
   const resultUrl = result?.previewUrl;
@@ -190,6 +199,29 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
       </div>
 
       <RunButton label="Run Noise Reduction" runningLabel="Denoising..." running={isRunning} disabled={!selectedFile} accent="sky" onClick={handleRun} />
+
+      {isRunning && progress.active && (
+        <div className="flex flex-col gap-1.5 animate-fade-in">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-sky), #7dd3fc)" }} />
+          </div>
+          <div className="flex justify-between items-center text-[10px] text-zinc-500">
+            <span>{progress.stage}</span>
+            <span className="flex items-center gap-2">
+              {progress.percent}%
+              <button
+                onClick={() => { cancelProgress(WAVELET_PROGRESS_EVENT).catch(() => {}); }}
+                title="Cancel noise reduction"
+                aria-label="Cancel noise reduction"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
+
       <ErrorAlert message={error} />
 
       {result && (

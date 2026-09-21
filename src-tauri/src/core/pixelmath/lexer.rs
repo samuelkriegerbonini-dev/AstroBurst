@@ -76,6 +76,14 @@ fn two_char(bytes: &[u8], i: usize, second: u8) -> bool {
     i + 1 < bytes.len() && bytes[i + 1] == second
 }
 
+fn describe_char(c: char) -> String {
+    if c.is_ascii_graphic() {
+        format!("'{}'", c)
+    } else {
+        format!("U+{:04X}", c as u32)
+    }
+}
+
 pub fn tokenize(src: &str) -> Result<Vec<Token>, PixelMathError> {
     let bytes = src.as_bytes();
     let mut tokens = Vec::new();
@@ -133,8 +141,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, PixelMathError> {
                 _ => {
                     let ch = src[start..].chars().next().unwrap_or('?');
                     return Err(PixelMathError::at(
-                        format!("unexpected character '{}'", ch),
-                        Span::new(start, ch.len_utf8()),
+                        format!("unexpected character {}", describe_char(ch)),
+                        Span::new(start, 1),
                     ));
                 }
             }
@@ -226,6 +234,17 @@ mod tests {
         assert_eq!(err.position, Some(0));
         let err = tokenize("1 é 2").unwrap_err();
         assert_eq!(err.position, Some(2));
-        assert_eq!(err.length, Some(2));
+        assert_eq!(err.length, Some(1));
+        assert!(err.message.contains("U+00E9"), "{}", err.message);
+    }
+
+    #[test]
+    fn invisible_characters_are_named_by_code_point() {
+        let err = tokenize("$T\u{00A0}+ 1").unwrap_err();
+        assert_eq!(err.position, Some(2));
+        assert_eq!(err.length, Some(1));
+        assert!(err.message.contains("U+00A0"), "{}", err.message);
+        let err = tokenize("$T\u{200B}+ 1").unwrap_err();
+        assert!(err.message.contains("U+200B"), "{}", err.message);
     }
 }

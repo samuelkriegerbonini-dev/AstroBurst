@@ -1,10 +1,12 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import { Grid3X3, CheckCircle2, Wand2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
+import { useProgress } from "../../hooks/useProgress";
 import { drizzleRgbStack } from "../../services/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
+import { DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
 
 type Channel = "r" | "g" | "b";
@@ -63,6 +65,14 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<DrizzleRgbResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const progress = useProgress(DRIZZLE_RGB_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
+  const kernelId = useId();
+  const alignmentId = useId();
+  const rejectionId = useId();
+  const whiteBalanceId = useId();
+  const gainId = useId();
+  const scnrMethodId = useId();
 
   const channelPaths = useMemo(() => {
     const out: Record<Channel, string[]> = { r: [], g: [], b: [] };
@@ -108,6 +118,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
     setIsRunning(true);
     setError(null);
     setResult(null);
+    resetProgress();
     try {
       const res = await drizzleRgbStack(
         channelPaths.r,
@@ -139,8 +150,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
+      resetProgress();
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -219,8 +231,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
         <Slider label="Scale" value={scale} min={1.0} max={3.0} step={0.5} accent="rose" format={(v) => `${v.toFixed(1)}x`} onChange={setScale} />
         <Slider label="Pixfrac" value={pixfrac} min={0.1} max={1.0} step={0.05} accent="rose" format={(v) => v.toFixed(2)} onChange={setPixfrac} />
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Kernel</label>
+          <label htmlFor={kernelId} className="text-xs text-zinc-400">Kernel</label>
           <select
+            id={kernelId}
             value={kernel}
             onChange={(e) => setKernel(e.target.value as typeof kernel)}
             className="ab-select"
@@ -234,8 +247,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
         <Toggle label="Align frames and channels" checked={align} accent="rose" onChange={setAlign} />
         {align && (
           <div className="flex items-center justify-between">
-            <label className="text-xs text-zinc-400">Alignment</label>
+            <label htmlFor={alignmentId} className="text-xs text-zinc-400">Alignment</label>
             <select
+              id={alignmentId}
               value={alignmentMethod}
               onChange={(e) => setAlignmentMethod(e.target.value as typeof alignmentMethod)}
               className="ab-select"
@@ -247,8 +261,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           </div>
         )}
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Pixel rejection</label>
+          <label htmlFor={rejectionId} className="text-xs text-zinc-400">Pixel rejection</label>
           <select
+            id={rejectionId}
             value={rejection}
             onChange={(e) => setRejection(e.target.value as RejectionMethod)}
             className="ab-select"
@@ -266,8 +281,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
           </>
         )}
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">White balance</label>
+          <label htmlFor={whiteBalanceId} className="text-xs text-zinc-400">White balance</label>
           <select
+            id={whiteBalanceId}
             value={wbMode}
             onChange={(e) => setWbMode(e.target.value as typeof wbMode)}
             className="ab-select"
@@ -286,15 +302,16 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
               { label: "B", val: wbB, set: setWbB },
             ].map(({ label, val, set }) => (
               <div key={label} className="flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
+                <label htmlFor={`${gainId}-${label}`} className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
                 <input
+                  id={`${gainId}-${label}`}
                   type="number"
                   min={0}
                   step={0.05}
                   value={val}
                   onChange={(e) => set(parseFloat(e.target.value) || 0)}
                   disabled={isRunning}
-                  className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-rose-500/50 w-full"
+                  className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-rose-500/50 w-full"
                 />
               </div>
             ))}
@@ -306,8 +323,9 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             <Slider label="SCNR amount" value={scnrAmount} min={0} max={1} step={0.05} accent="rose"
                     format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setScnrAmount} />
             <div className="flex items-center justify-between">
-              <label className="text-xs text-zinc-400">SCNR method</label>
+              <label htmlFor={scnrMethodId} className="text-xs text-zinc-400">SCNR method</label>
               <select
+                id={scnrMethodId}
                 value={scnrMethod}
                 onChange={(e) => setScnrMethod(e.target.value as "average" | "maximum")}
                 className="ab-select"
@@ -330,6 +348,19 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
         accent="rose"
         onClick={handleRun}
       />
+
+      {isRunning && (
+        <div className="flex flex-col gap-1.5 animate-fade-in">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-rose), #fda4af)" }} />
+          </div>
+          <div className="flex justify-between items-center text-[10px] text-zinc-500">
+            <span>{progress.stage}</span>
+            <span>{progress.percent}%</span>
+          </div>
+        </div>
+      )}
+
       <ErrorAlert message={error} />
 
       {result && (

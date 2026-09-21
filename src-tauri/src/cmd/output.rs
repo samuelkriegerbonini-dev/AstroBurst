@@ -10,10 +10,11 @@ use crate::cmd::common::blocking_cmd;
 use crate::infra::config::load_config;
 use crate::types::constants::{
     DEFAULT_OUTPUT_MAX_BYTES, RES_CLEANED_BYTES, RES_CLEANED_FILES,
-    RES_ELAPSED_MS, RES_FILE_COUNT, RES_OUTPUT_DIR, RES_TOTAL_SIZE,
+    RES_ELAPSED_MS, RES_FILE_COUNT, RES_MAX_SIZE, RES_OUTPUT_DIR, RES_TOTAL_SIZE,
 };
 
 static OUTPUT_MAX_BYTES: OnceLock<u64> = OnceLock::new();
+static SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn get_max_bytes() -> u64 {
     *OUTPUT_MAX_BYTES.get_or_init(|| {
@@ -54,19 +55,54 @@ fn walk_dir_entries(dir: &Path) -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
+fn normalized_key(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase()
+}
+
 pub(crate) fn enforce_output_lru(dir: &Path, max_bytes: u64) -> Result<(usize, u64)> {
+    let (count, bytes, _) = enforce_output_lru_keeping(dir, max_bytes, &[])?;
+    Ok((count, bytes))
+}
+
+pub(crate) fn enforce_output_lru_keeping(
+    dir: &Path,
+    max_bytes: u64,
+    keep: &[&str],
+) -> Result<(usize, u64, Vec<String>)> {
+    let _guard = SWEEP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let protected: std::collections::HashSet<String> = keep
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| normalized_key(Path::new(p)))
+        .collect();
     let mut entries = walk_dir_entries(dir)?;
     let total: u64 = entries.iter().map(|e| e.size).sum();
 
     if total <= max_bytes {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
+    entries.retain(|e| !protected.contains(&normalized_key(&e.path)));
     entries.sort_by(|a, b| a.mtime.cmp(&b.mtime));
+
+    let removable: u64 = entries.iter().map(|e| e.size).sum();
+    let floor = total - removable;
+    if floor >= max_bytes {
+        log::warn!(
+            "LRU cleanup: {} bytes are in use by the running command, above the {} byte cap; nothing removed",
+            floor,
+            max_bytes
+        );
+        return Ok((0, 0, Vec::new()));
+    }
 
     let mut current = total;
     let mut removed_count = 0usize;
     let mut removed_bytes = 0u64;
+    let mut removed_paths: Vec<String> = Vec::new();
 
     for entry in &entries {
         if current <= max_bytes {
@@ -77,11 +113,15 @@ pub(crate) fn enforce_output_lru(dir: &Path, max_bytes: u64) -> Result<(usize, u
                 current = current.saturating_sub(entry.size);
                 removed_count += 1;
                 removed_bytes += entry.size;
+                removed_paths.push(entry.path.to_string_lossy().to_string());
                 log::info!(
                     "LRU cleanup: removed {} ({} bytes)",
                     entry.path.display(),
                     entry.size
                 );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                current = current.saturating_sub(entry.size);
             }
             Err(e) => {
                 log::warn!("LRU cleanup: failed to remove {}: {}", entry.path.display(), e);
@@ -96,7 +136,7 @@ pub(crate) fn enforce_output_lru(dir: &Path, max_bytes: u64) -> Result<(usize, u
         current
     );
 
-    Ok((removed_count, removed_bytes))
+    Ok((removed_count, removed_bytes, removed_paths))
 }
 
 fn dir_info(dir: &Path) -> Result<(u64, usize)> {
@@ -113,6 +153,7 @@ pub async fn get_output_dir_info(output_dir: String) -> Result<serde_json::Value
         Ok(json!({
             RES_OUTPUT_DIR: output_dir,
             RES_TOTAL_SIZE: total_size,
+            RES_MAX_SIZE: get_max_bytes(),
             RES_FILE_COUNT: file_count,
         }))
     })
@@ -147,4 +188,66 @@ pub async fn cleanup_output_cmd(
 #[tauri::command]
 pub async fn cancel_progress_cmd(event: String) -> Result<bool, String> {
     Ok(crate::infra::progress::cancel_event(&event))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_file(dir: &Path, name: &str, bytes: usize) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(&vec![b'x'; bytes]).unwrap();
+        f.flush().unwrap();
+        path
+    }
+
+    #[test]
+    fn lru_never_removes_a_protected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let oldest = write_file(dir.path(), "slot_input.fits", 4096);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let middle = write_file(dir.path(), "stale_result.fits", 4096);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newest = write_file(dir.path(), "fresh_result.fits", 4096);
+
+        let keep = [oldest.to_str().unwrap()];
+        let (removed, _, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("stale_result.fits"), "{paths:?}");
+
+        assert_eq!(removed, 1);
+        assert!(oldest.exists(), "protected input was deleted");
+        assert!(!middle.exists(), "oldest unprotected file should go first");
+        assert!(newest.exists());
+    }
+
+    #[test]
+    fn lru_removes_nothing_when_the_protected_files_alone_exceed_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_a = write_file(dir.path(), "master_a.fits", 6000);
+        let master_b = write_file(dir.path(), "master_b.fits", 6000);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let old_result = write_file(dir.path(), "old_result.fits", 1000);
+
+        let keep = [master_a.to_str().unwrap(), master_b.to_str().unwrap()];
+        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep).unwrap();
+
+        assert_eq!((removed, bytes, paths.len()), (0, 0, 0));
+        assert!(
+            old_result.exists(),
+            "scorched an unprotected file for a target the keep-set makes unreachable"
+        );
+        assert!(master_a.exists() && master_b.exists());
+    }
+
+    #[test]
+    fn lru_is_a_no_op_below_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let only = write_file(dir.path(), "result.fits", 100);
+        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &[]).unwrap();
+        assert_eq!((removed, bytes, paths.len()), (0, 0, 0));
+        assert!(only.exists());
+    }
 }

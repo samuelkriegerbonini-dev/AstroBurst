@@ -45,6 +45,7 @@ function GpuViewport({
   const clickStart = useRef<{ x: number; y: number } | null>(null);
 
   const {
+    attachContainer,
     transform, transformRef, setTransform,
     fitToWindow, zoomTo, zoomIn, zoomOut, setOneToOne,
     hasRenderDims, zoomPct,
@@ -171,7 +172,7 @@ function GpuViewport({
       </div>
 
       <div
-        ref={containerRef}
+        ref={attachContainer}
         className="ab-viewer-canvas"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

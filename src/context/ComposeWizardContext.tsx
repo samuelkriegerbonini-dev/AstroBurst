@@ -56,7 +56,10 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         if (b.files.length > 0 && !action.bins.some((n) => n.id === b.id)) changedIds.add(b.id);
       }
       if (changedIds.size === 0) {
-        return { ...state, bins: action.bins, completedSteps: completed };
+        const unchangedCompleted = hasFiles
+          ? { ...state.completedSteps, channels: true }
+          : state.completedSteps;
+        return { ...state, bins: action.bins, completedSteps: unchangedCompleted };
       }
       const stackedPaths = { ...state.stackedPaths };
       for (const id of changedIds) delete stackedPaths[id];

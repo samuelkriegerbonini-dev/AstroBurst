@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense, memo } from "react";
 import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
@@ -66,6 +66,14 @@ function AnalysisTabInner({
   const [detectError, setDetectError] = useState<string | null>(null);
 
   const effectivePath = useRegionKey();
+  const detectSeqRef = useRef(0);
+
+  useEffect(() => {
+    detectSeqRef.current++;
+    setStarResult(null);
+    setDetectError(null);
+    setStarLoading(false);
+  }, [effectivePath, isShowingComposite]);
 
   const rafIdRef = useRef<number | null>(null);
   const pendingStfRef = useRef<StfParams | null>(null);
@@ -132,6 +140,7 @@ function AnalysisTabInner({
 
   const handleDetectStars = useCallback(
     async (sigma: number) => {
+      const seq = ++detectSeqRef.current;
       setStarLoading(true);
       setDetectError(null);
       try {
@@ -140,12 +149,13 @@ function AnalysisTabInner({
           : effectivePath
             ? await detectStars(effectivePath, sigma, 200)
             : null;
+        if (detectSeqRef.current !== seq) return;
         setStarResult(result);
       } catch (e) {
         console.error("Star detection failed:", e);
-        setDetectError(e instanceof Error ? e.message : String(e));
+        if (detectSeqRef.current === seq) setDetectError(e instanceof Error ? e.message : String(e));
       } finally {
-        setStarLoading(false);
+        if (detectSeqRef.current === seq) setStarLoading(false);
       }
     },
     [effectivePath, isShowingComposite],

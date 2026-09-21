@@ -57,7 +57,7 @@
   border-radius: var(--ab-radius-sm);
   border: none;
   background: transparent;
-  color: #71717a;
+  color: var(--ab-text-3);
   cursor: pointer;
   transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
 }
@@ -80,8 +80,8 @@
 .ab-viewer-zoom-preset {
   padding: 2px 6px;
   font-size: 9px;
-  font-family: "JetBrains Mono", monospace;
-  color: #52525b;
+  font-family: var(--ab-font-mono);
+  color: var(--ab-text-4);
   background: transparent;
   border: none;
   border-radius: 3px;
@@ -167,13 +167,13 @@
 
 .ab-viewer-status-item {
   font-size: 10px;
-  font-family: "JetBrains Mono", monospace;
-  color: #71717a;
+  font-family: var(--ab-font-mono);
+  color: var(--ab-text-3);
 }
 
 .ab-viewer-status-label {
   margin-left: auto;
-  color: #52525b;
+  color: var(--ab-text-4);
 }
 
 /* ─── SmartChannelMapper ─── */
@@ -201,7 +201,7 @@
   border-radius: 4px;
   font-size: 10px;
   font-weight: 500;
-  color: #f59e0b;
+  color: var(--ab-amber);
   background: rgba(245, 158, 11, 0.1);
   border: 1px solid rgba(245, 158, 11, 0.2);
 }
@@ -236,7 +236,7 @@
   align-items: center;
   gap: 6px;
   font-size: 10px;
-  color: #52525b;
+  color: var(--ab-text-4);
   padding: 6px 8px;
   border-radius: var(--ab-radius-sm);
   background: rgba(24, 24, 32, 0.4);
@@ -298,7 +298,7 @@
   border-radius: 3px;
   border: none;
   background: rgba(63, 63, 70, 0.3);
-  color: #52525b;
+  color: var(--ab-text-4);
   cursor: pointer;
   transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
   position: relative;
@@ -365,7 +365,7 @@
 
 .ab-channel-name {
   font-size: 8px;
-  color: #52525b;
+  color: var(--ab-text-4);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -413,8 +413,8 @@
 
 .ab-channel-exptime {
   font-size: 9px;
-  font-family: "JetBrains Mono", monospace;
-  color: #71717a;
+  font-family: var(--ab-font-mono);
+  color: var(--ab-text-3);
 }
 
 .ab-channel-clear {
@@ -426,7 +426,7 @@
   border-radius: 4px;
   border: none;
   background: rgba(63, 63, 70, 0.3);
-  color: #71717a;
+  color: var(--ab-text-3);
   cursor: pointer;
   flex-shrink: 0;
   transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
@@ -444,7 +444,7 @@
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 10px;
-  color: #71717a;
+  color: var(--ab-text-3);
   background: rgba(63, 63, 70, 0.2);
   border: 1px dashed rgba(63, 63, 70, 0.4);
   cursor: pointer;
@@ -478,7 +478,7 @@
   padding: 12px;
   text-align: center;
   font-size: 11px;
-  color: #52525b;
+  color: var(--ab-text-4);
 }
 
 .ab-channel-dropdown-item {
@@ -509,7 +509,7 @@
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 9px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--ab-font-mono);
   font-weight: 600;
   border: 1px solid;
   white-space: nowrap;
@@ -546,11 +546,12 @@
 }
 
 .ab-mfl-search:focus-within {
-  border-color: rgba(20, 184, 166, 0.3);
+  border-color: var(--ab-accent);
+  box-shadow: 0 0 0 1px var(--ab-accent);
 }
 
 .ab-mfl-search-icon {
-  color: #52525b;
+  color: var(--ab-text-4);
   flex-shrink: 0;
 }
 
@@ -564,7 +565,7 @@
 }
 
 .ab-mfl-search-input::placeholder {
-  color: #71717a;
+  color: var(--ab-text-3);
 }
 
 .ab-mfl-search-row {
@@ -582,7 +583,7 @@
   height: 16px;
   border-radius: var(--ab-radius-sm);
   background: transparent;
-  color: #52525b;
+  color: var(--ab-text-4);
   border: none;
   cursor: pointer;
   flex-shrink: 0;
@@ -771,7 +772,7 @@
 }
 
 .ab-mfl-status-dot[data-status="queued"] {
-  background: #52525b;
+  background: var(--ab-text-4);
 }
 
 .ab-mfl-status-dot[data-status="processing"] {
@@ -802,20 +803,20 @@
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 9px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--ab-font-mono);
   font-weight: 500;
   border: 1px solid;
   white-space: nowrap;
 }
 
 .ab-mfl-chip-neutral {
-  color: #71717a;
+  color: var(--ab-text-3);
   background: rgba(63, 63, 70, 0.2);
   border-color: rgba(63, 63, 70, 0.3);
 }
 
 .ab-mfl-chip-dim {
-  color: #52525b;
+  color: var(--ab-text-4);
   background: transparent;
   border-color: transparent;
   font-size: 9px;
@@ -823,18 +824,18 @@
 
 .ab-mfl-processing-text {
   font-size: 10px;
-  color: rgba(20, 184, 166, 0.6);
+  color: var(--ab-teal);
 }
 
 .ab-mfl-queued-text {
   font-size: 10px;
-  color: #52525b;
+  color: var(--ab-text-4);
 }
 
 .ab-mfl-error-text {
   font-size: 10px;
   line-height: 1.25;
-  color: rgba(239, 68, 68, 0.85);
+  color: #fca5a5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -866,13 +867,13 @@
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
-  font-family: var(--ab-font-mono, monospace);
+  font-family: var(--ab-font-mono);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
   transition: background-color var(--ab-transition), border-color var(--ab-transition), color var(--ab-transition), box-shadow var(--ab-transition), opacity var(--ab-transition), transform var(--ab-transition), filter var(--ab-transition);
   background: rgba(255, 255, 255, 0.03);
-  color: #71717a;
+  color: var(--ab-text-3);
   border: 1px solid rgba(63, 63, 70, 0.3);
 }
 
@@ -930,9 +931,9 @@
   padding: 1px 6px;
   font-size: 9px;
   font-weight: 700;
-  font-family: var(--ab-font-mono, monospace);
+  font-family: var(--ab-font-mono);
   letter-spacing: 0.05em;
-  color: #71717a;
+  color: var(--ab-text-3);
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease, filter 0.15s ease;
   line-height: 1;
 }
@@ -1038,7 +1039,7 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #52525b;
+  color: var(--ab-text-4);
   flex-shrink: 0;
   padding-right: 4px;
 }

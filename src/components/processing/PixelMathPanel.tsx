@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
 import { useDoneFilesContext } from "../../context/PreviewContext";
@@ -15,18 +15,48 @@ import {
   caretLines,
   missingSlots,
   nextSlotName,
+  referencedSymbols,
   slotErrors,
 } from "../../utils/pixelmathSlots";
 
 interface PixelMathPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
+  chainedFrom?: string;
   onPreviewUpdate?: (url: string | null | undefined) => void;
   onProcessingDone?: (result: PixelMathResult) => void;
 }
 
 const VALIDATION_DEBOUNCE_MS = 300;
 const ACCENT = "violet";
+const MAX_RETAINED_PANELS = 32;
+
+interface RetainedPanelState {
+  expression: string;
+  slots: PixelMathSlot[];
+  truncate: boolean;
+  rescale: boolean;
+  outputName: string;
+  slotsTouched: boolean;
+  result: PixelMathResult | null;
+}
+
+const retained = new Map<string, RetainedPanelState>();
+
+function retainedFor(key: string | null): RetainedPanelState | undefined {
+  return key ? retained.get(key) : undefined;
+}
+
+function retain(key: string | null, state: RetainedPanelState): void {
+  if (!key) return;
+  retained.delete(key);
+  retained.set(key, state);
+  while (retained.size > MAX_RETAINED_PANELS) {
+    const oldest = retained.keys().next().value;
+    if (oldest === undefined) break;
+    retained.delete(oldest);
+  }
+}
 const SLOT_NAME_SEPARATOR = "\u0000";
 const ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-400">
@@ -35,9 +65,9 @@ const ICON = (
 );
 
 const TEXTAREA_CLASS =
-  "w-full min-h-[72px] resize-y rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 font-mono text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500/40";
+  "w-full min-h-[72px] resize-y rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 font-mono text-xs text-zinc-200 focus:ring-1 focus:ring-violet-500/40";
 const INPUT_CLASS =
-  "rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 font-mono text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500/40";
+  "rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 font-mono text-xs text-zinc-200 focus:ring-1 focus:ring-violet-500/40";
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -53,6 +83,7 @@ function formatValue(v: number | undefined): string {
 export default function PixelMathPanel({
   selectedFile,
   outputDir = "./output",
+  chainedFrom,
   onPreviewUpdate,
   onProcessingDone,
 }: PixelMathPanelProps) {
@@ -60,21 +91,59 @@ export default function PixelMathPanel({
   const regionKey = useRegionKey();
   const targetPath = regionKey ?? selectedFile?.path ?? null;
 
-  const [expression, setExpression] = useState("");
-  const [slots, setSlots] = useState<PixelMathSlot[]>([]);
-  const [truncate, setTruncate] = useState(false);
-  const [rescale, setRescale] = useState(false);
-  const [outputName, setOutputName] = useState("");
+  const initial = retainedFor(targetPath);
+  const [expression, setExpression] = useState(initial?.expression ?? "");
+  const [slots, setSlots] = useState<PixelMathSlot[]>(initial?.slots ?? []);
+  const [truncate, setTruncate] = useState(initial?.truncate ?? false);
+  const [rescale, setRescale] = useState(initial?.rescale ?? false);
+  const [outputName, setOutputName] = useState(initial?.outputName ?? "");
   const [validation, setValidation] = useState<PixelMathValidation | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<PixelMathResult | null>(null);
+  const [result, setResult] = useState<PixelMathResult | null>(initial?.result ?? null);
   const [error, setError] = useState<string | null>(null);
   const validationSeq = useRef(0);
+  const expressionId = useId();
+  const outputNameId = useId();
 
-  const slotsTouchedRef = useRef(false);
+  const slotsTouchedRef = useRef(initial?.slotsTouched ?? false);
+  const restoredForRef = useRef(targetPath);
+  const targetPathRef = useRef(targetPath);
+  targetPathRef.current = targetPath;
+
+  useEffect(() => {
+    if (restoredForRef.current === targetPath) return;
+    restoredForRef.current = targetPath;
+    const saved = retainedFor(targetPath);
+    slotsTouchedRef.current = saved?.slotsTouched ?? false;
+    setExpression(saved?.expression ?? "");
+    setSlots(saved?.slots ?? []);
+    setTruncate(saved?.truncate ?? false);
+    setRescale(saved?.rescale ?? false);
+    setOutputName(saved?.outputName ?? "");
+    setResult(saved?.result ?? null);
+    setValidation(null);
+    setError(null);
+  }, [targetPath]);
+
+  useEffect(() => {
+    retain(targetPath, {
+      expression,
+      slots,
+      truncate,
+      rescale,
+      outputName,
+      slotsTouched: slotsTouchedRef.current,
+      result,
+    });
+  }, [targetPath, expression, slots, truncate, rescale, outputName, result]);
+
   useEffect(() => {
     if (slotsTouchedRef.current || doneFiles.length === 0) return;
-    setSlots((prev) => (prev.length > 0 ? prev : autoSlotsFromFiles(doneFiles, targetPath, prev)));
+    setSlots((prev) => {
+      const kept = prev.filter((s) => s.path !== targetPath);
+      if (kept.length > 0) return kept.length === prev.length ? prev : kept;
+      return autoSlotsFromFiles(doneFiles, targetPath, kept);
+    });
   }, [doneFiles, targetPath]);
 
   const nameErrors = useMemo(() => slotErrors(slots), [slots]);
@@ -86,11 +155,11 @@ export default function PixelMathPanel({
   );
 
   useEffect(() => {
+    const seq = ++validationSeq.current;
+    setValidation(null);
     if (!expression.trim() || hasSlotErrors) {
-      setValidation(null);
       return;
     }
-    const seq = ++validationSeq.current;
     const names = slotNamesKey ? slotNamesKey.split(SLOT_NAME_SEPARATOR) : [];
     const handle = setTimeout(() => {
       validatePixelMath(expression, names)
@@ -165,20 +234,26 @@ export default function PixelMathPanel({
 
   const handleRun = useCallback(async () => {
     if (!targetPath) return;
+    const ranOn = targetPath;
+    const referenced = referencedSymbols(expression);
     setIsRunning(true);
     setError(null);
     setResult(null);
     try {
-      const res = await runPixelMath(targetPath, outputDir, expression, {
-        slots: slots.map((s) => ({ name: s.name.trim(), path: s.path })),
+      const res = await runPixelMath(ranOn, outputDir, expression, {
+        slots: slots
+          .map((s) => ({ name: s.name.trim(), path: s.path }))
+          .filter((s) => referenced.includes(s.name)),
         truncate,
         rescale,
         name: outputName,
       });
+      if (ranOn !== targetPathRef.current) return;
       setResult(res);
       onPreviewUpdate?.(res.previewUrl);
       onProcessingDone?.(res);
     } catch (err: unknown) {
+      if (ranOn !== targetPathRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRunning(false);
@@ -192,8 +267,13 @@ export default function PixelMathPanel({
       : null;
   const canRun = !!targetPath && expression.trim().length > 0 && !hasSlotErrors && !validationError;
 
-  const originalUrl = selectedFile?.result?.previewUrl;
+  const originalUrl =
+    selectedFile?.path === targetPath
+      ? selectedFile?.result?.previewUrl
+      : doneFiles.find((f) => f.path === targetPath)?.result?.previewUrl;
   const resultUrl = result?.previewUrl;
+  const [targetPreviewBroken, setTargetPreviewBroken] = useState(false);
+  useEffect(() => setTargetPreviewBroken(false), [originalUrl]);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
@@ -207,10 +287,17 @@ export default function PixelMathPanel({
           {TARGET_SYMBOL} = <span className="text-zinc-300">{baseName(targetPath)}</span>
         </div>
       )}
+      {targetPath && chainedFrom && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          {TARGET_SYMBOL} is the file as loaded. PixelMath does not consume the processing chain, so the
+          <span className="font-medium"> {chainedFrom} </span>
+          result is not part of this expression — bind it to a slot if you want it.
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Expression</label>
+          <label htmlFor={expressionId} className="text-xs text-zinc-400">Expression</label>
           <select
             className="ab-select"
             value=""
@@ -227,6 +314,7 @@ export default function PixelMathPanel({
           </select>
         </div>
         <textarea
+          id={expressionId}
           className={TEXTAREA_CLASS}
           value={expression}
           spellCheck={false}
@@ -310,6 +398,11 @@ export default function PixelMathPanel({
               </button>
             </div>
             {nameErrors[i] && <div className="text-[10px] text-red-300">{nameErrors[i]}</div>}
+            {!nameErrors[i] && s.path === targetPath && (
+              <div className="text-[10px] text-amber-300">
+                {s.name.trim() || `Slot ${i + 1}`} is the same image as {TARGET_SYMBOL}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -318,8 +411,9 @@ export default function PixelMathPanel({
         <Toggle label="Truncate result to [0, 1]" checked={truncate} disabled={isRunning} accent={ACCENT} onChange={setTruncate} />
         <Toggle label="Rescale result to [0, 1]" checked={rescale} disabled={isRunning} accent={ACCENT} onChange={setRescale} />
         <div className="flex items-center justify-between gap-2">
-          <label className="text-xs text-zinc-400">Output name</label>
+          <label htmlFor={outputNameId} className="text-xs text-zinc-400">Output name</label>
           <input
+            id={outputNameId}
             className={`${INPUT_CLASS} w-40`}
             value={outputName}
             disabled={isRunning}
@@ -347,8 +441,29 @@ export default function PixelMathPanel({
               { label: "Output", value: baseName(result.fits_path) },
             ]}
           />
-          {originalUrl && resultUrl && (
-            <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Target" resultLabel="PixelMath" accent={ACCENT} />
+          {result.warnings?.map((w) => (
+            <div key={w} className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+              {w}
+            </div>
+          ))}
+          {!!result.cleaned_files && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+              Output cleanup removed {result.cleaned_files} older file(s) (
+              {((result.cleaned_bytes ?? 0) / 1048576).toFixed(0)} MB) to stay under the size cap. Inputs of this run
+              were kept.
+            </div>
+          )}
+          {originalUrl && resultUrl && !targetPreviewBroken && (
+            <>
+              <img src={originalUrl} alt="" className="hidden" onError={() => setTargetPreviewBroken(true)} />
+              <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Target" resultLabel="PixelMath" accent={ACCENT} />
+            </>
+          )}
+          {originalUrl && resultUrl && targetPreviewBroken && (
+            <div className="text-[11px] text-zinc-500">
+              The target preview is no longer on disk, so only the PixelMath result is shown. Reload the file to
+              restore the comparison.
+            </div>
           )}
         </div>
       )}

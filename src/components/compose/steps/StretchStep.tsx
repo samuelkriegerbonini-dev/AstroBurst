@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useRef } from "react";
 import type { WizardState } from "../wizard";
 import { resolveAnyChannelPath } from "../wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
@@ -48,6 +48,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [error, setError] = useState("");
   const [linked, setLinked] = useState(state.linkedStf);
   const [sharedMask, setSharedMask] = useState(true);
+  const stretchModeId = useId();
   const [detectionSigma, setDetectionSigma] = useState(8.0);
   const [maxEccentricity, setMaxEccentricity] = useState(0.85);
   const [srOpen, setSrOpen] = useState(false);
@@ -303,8 +304,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Stretch Mode</label>
-        <select value={state.stretchMode} onChange={(e) => handleModeChange(e.target.value as WizardState["stretchMode"])} className="ab-select">
+        <label htmlFor={stretchModeId} className="text-xs text-zinc-400">Stretch Mode</label>
+        <select id={stretchModeId} value={state.stretchMode} onChange={(e) => handleModeChange(e.target.value as WizardState["stretchMode"])} className="ab-select">
           <option value="masked">Masked Stretch (star-protected)</option>
           <option value="arcsinh">Arcsinh Stretch</option>
           <option value="ghs">GHS (Generalized Hyperbolic)</option>

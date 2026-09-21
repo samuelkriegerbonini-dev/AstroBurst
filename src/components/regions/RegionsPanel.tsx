@@ -60,8 +60,17 @@ function RegionRow({
   const canBackground = region.shape.shape !== "line" && region.shape.shape !== "point";
   return (
     <div
+      role="option"
+      tabIndex={0}
+      aria-selected={selected}
       onClick={() => onSelect(region.id)}
-      className={`rounded px-2 py-1.5 cursor-pointer border ${
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        onSelect(region.id);
+      }}
+      className={`rounded px-2 py-1.5 cursor-pointer border focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
         selected ? "border-sky-500/50 bg-sky-900/15" : "border-transparent bg-zinc-900/70 hover:bg-zinc-800/60"
       }`}
     >
@@ -103,6 +112,7 @@ function RegionRow({
           <span className="text-zinc-600">bg</span>
           <select
             value={region.backgroundId ?? ""}
+            aria-label={`bg annulus for ${shapeSummary(region.shape)}`}
             onChange={(e) => onBackground(region.id, e.target.value || null)}
             className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono max-w-[180px]"
           >
@@ -169,7 +179,11 @@ function RegionsPanel({ filePath }: RegionsPanelProps) {
       }
       const notes = res.warnings.slice();
       if (!res.has_wcs && res.regions.length === 0) notes.push("image has no WCS: sky-system regions cannot be imported");
-      if (added === 0 && res.regions.length === 0) notes.push("no supported regions found in the file");
+      if (res.regions.length === 0) notes.push("no supported regions found in the file");
+      else if (added < res.regions.length) {
+        const skipped = res.regions.length - added;
+        notes.push(`${skipped} region${skipped === 1 ? "" : "s"} skipped as invalid`);
+      }
       setWarnings(notes);
     } catch (e) {
       setIoError(e instanceof Error ? e.message : String(e));
@@ -216,6 +230,7 @@ function RegionsPanel({ filePath }: RegionsPanelProps) {
             value={system}
             onChange={(e) => setSystem(e.target.value as RegionSystem)}
             className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono"
+            aria-label="Coordinate system for export"
             title="Coordinate system for export"
           >
             {SYSTEMS.map((s) => (
@@ -261,18 +276,22 @@ function RegionsPanel({ filePath }: RegionsPanelProps) {
             ))}
           </div>
         )}
-        {doc.regions.map((r) => (
-          <RegionRow
-            key={r.id}
-            region={r}
-            selected={r.id === doc.selectedId}
-            entry={stats.get(r.id)}
-            annuli={annuli.filter((a) => a.id !== r.id)}
-            onSelect={handleSelect}
-            onBackground={handleBackground}
-            onDelete={handleDelete}
-          />
-        ))}
+        {doc.regions.length > 0 && (
+          <div role="listbox" aria-label="Regions" className="space-y-1.5">
+            {doc.regions.map((r) => (
+              <RegionRow
+                key={r.id}
+                region={r}
+                selected={r.id === doc.selectedId}
+                entry={stats.get(r.id)}
+                annuli={annuli.filter((a) => a.id !== r.id)}
+                onSelect={handleSelect}
+                onBackground={handleBackground}
+                onDelete={handleDelete}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

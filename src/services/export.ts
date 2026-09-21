@@ -1,5 +1,15 @@
 import { typedInvoke } from "../infrastructure/tauri";
 
+export const DEFAULT_QUANTIZE_LEVEL = 16;
+
+export type FitsCompression = "rice" | "none";
+
+export const RICE_SUPPORTED_BITPIX: readonly number[] = [16, -32];
+
+export function riceSupportsBitpix(bitpix: number): boolean {
+  return RICE_SUPPORTED_BITPIX.includes(bitpix);
+}
+
 export interface ExportFitsOptions {
   applyStfStretch?: boolean;
   shadow?: number;
@@ -8,6 +18,8 @@ export interface ExportFitsOptions {
   copyWcs?: boolean;
   copyMetadata?: boolean;
   bitpix?: number;
+  compress?: FitsCompression;
+  quantizeLevel?: number;
 }
 
 export interface ExportFitsRgbOptions {
@@ -15,6 +27,8 @@ export interface ExportFitsRgbOptions {
   copyMetadata?: boolean;
   bitpix?: number;
   history?: string[];
+  compress?: FitsCompression;
+  quantizeLevel?: number;
 }
 
 export interface ExportAlignedOptions {
@@ -50,7 +64,48 @@ export interface ExportResult {
   elapsed_ms: number;
   file_size_bytes?: number;
   bitpix?: number;
+  compress?: string;
+  quantize_level?: number;
   channels?: Array<{ path: string; channel: string }>;
+}
+
+export interface CompressMefOptions {
+  lossless?: boolean;
+  quantizeLevel?: number | null;
+  dropExtnames?: string[];
+  rawExtnames?: string[];
+}
+
+export interface CompressMefResult {
+  output_path: string;
+  dropped: string[];
+  kept_raw: string[];
+  source_size_bytes: number;
+  output_size_bytes: number;
+  elapsed_ms: number;
+}
+
+export function parseExtnameList(text: string): string[] {
+  return text
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+export function compressMef(
+  sourcePath: string,
+  outputPath: string,
+  options: CompressMefOptions = {},
+): Promise<CompressMefResult> {
+  const lossless = options.lossless ?? true;
+  return typedInvoke<CompressMefResult>("compress_mef_cmd", {
+    sourcePath,
+    outputPath,
+    lossless,
+    quantizeLevel: lossless ? null : options.quantizeLevel ?? DEFAULT_QUANTIZE_LEVEL,
+    dropExtnames: options.dropExtnames ?? [],
+    rawExtnames: options.rawExtnames ?? [],
+  });
 }
 
 export function exportPng(
@@ -128,6 +183,8 @@ export function exportFits(
     copyWcs: options.copyWcs ?? true,
     copyMetadata: options.copyMetadata ?? true,
     bitpix: options.bitpix,
+    compress: options.compress ?? "none",
+    quantizeLevel: options.quantizeLevel ?? DEFAULT_QUANTIZE_LEVEL,
   });
 }
 
@@ -147,5 +204,7 @@ export function exportFitsRgb(
     copyMetadata: options.copyMetadata ?? true,
     bitpix: options.bitpix ?? -32,
     history: options.history,
+    compress: options.compress ?? "none",
+    quantizeLevel: options.quantizeLevel ?? DEFAULT_QUANTIZE_LEVEL,
   });
 }

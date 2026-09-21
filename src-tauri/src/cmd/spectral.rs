@@ -4,7 +4,7 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, load_cached_full};
 use crate::core::astrometry::spectral::{
     header_target_coordinates, is_non_linear_spectral_ctype, radial_velocity_correction, spectral_axis_on,
-    velocity_axis, RadialVelocityCorrection, SpectralAxis, VelocityConvention,
+    RadialVelocityCorrection, SpectralAxis,
 };
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::types::header::HduHeader;
@@ -91,18 +91,6 @@ pub fn correction_json(header: &HduHeader, ra: Option<f64>, dec: Option<f64>) ->
 pub async fn spectral_axis_cmd(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let axis = with_spectral_header(&path, |h| header_spectral_axis(h).map_err(anyhow::Error::msg))?;
-        Ok(serde_json::to_value(&axis)?)
-    })
-}
-
-#[tauri::command]
-pub async fn velocity_axis_cmd(path: String, rest_um: f64, convention: String) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let convention = VelocityConvention::parse(&convention).map_err(anyhow::Error::msg)?;
-        let axis = with_spectral_header(&path, |h| {
-            let axis = header_spectral_axis(h).map_err(anyhow::Error::msg)?;
-            velocity_axis(&axis, rest_um, convention).map_err(anyhow::Error::msg)
-        })?;
         Ok(serde_json::to_value(&axis)?)
     })
 }

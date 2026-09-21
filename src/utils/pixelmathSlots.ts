@@ -111,7 +111,8 @@ export function bindMissingSlots(
   for (const name of missing) {
     if (names.length + added.length >= MAX_SLOTS) break;
     if (validateSlotName(name, [...names, ...added.map((s) => s.name)]) !== null) continue;
-    const path = candidates.shift() ?? targetPath ?? "";
+    const path = candidates.shift() ?? targetPath;
+    if (!path) break;
     added.push({ name, path });
   }
   return added;

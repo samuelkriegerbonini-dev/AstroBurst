@@ -96,6 +96,7 @@ interface RenderContextValue {
   activeImagePath: string | null;
   setActiveImagePath: (path: string | null) => void;
   processedSourcePath: string | null;
+  processedSourceVersion: number;
   setProcessedSource: (path: string | null) => void;
 }
 
@@ -145,6 +146,7 @@ interface DqContextValue {
   setExcludeDq: (v: boolean) => void;
   dqMask: DqMaskData | null;
   dqMaskLoading: boolean;
+  dqMaskError: string | null;
 }
 
 const DEFAULT_DQ_OVERLAY: DqOverlaySettings = { enabled: false, mask: 0 };
@@ -283,6 +285,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [lastAlignMethod, setLastAlignMethod] = useState<string | null>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
   const [processedSourcePath, setProcessedSourcePathRaw] = useState<string | null>(null);
+  const [processedSourceVersion, setProcessedSourceVersion] = useState(0);
   const processedSourceRef = useRef<string | null>(null);
   processedSourceRef.current = processedSourcePath;
   const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
@@ -303,6 +306,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [excludeDq, setExcludeDq] = useState(false);
   const [dqMask, setDqMask] = useState<DqMaskData | null>(null);
   const [dqMaskLoading, setDqMaskLoading] = useState(false);
+  const [dqMaskError, setDqMaskError] = useState<string | null>(null);
   const [dqMaskRefetch, setDqMaskRefetch] = useState(0);
 
   const prevFileIdRef = useRef<string | null>(null);
@@ -340,7 +344,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     (url: string | null) => {
       if (prevFileIdRef.current !== fileKey) return;
       setRenderedPreviewUrlRaw(url);
-      if (url && fileKey && !url.includes("cube_frame_")) setPreviewCache(fileKey, url);
+      if (!fileKey) return;
+      if (url === null) previewUrlCache.delete(fileKey);
+      else if (!url.includes("cube_frame_")) setPreviewCache(fileKey, url);
     },
     [fileKey],
   );
@@ -350,6 +356,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       if (prevFileIdRef.current !== fileKey) return;
       processedSourceRef.current = path;
       setProcessedSourcePathRaw(path);
+      setProcessedSourceVersion((v) => v + 1);
       if (!fileKey) return;
       if (path) setCappedCache(processedSourceCache, fileKey, path);
       else processedSourceCache.delete(fileKey);
@@ -399,7 +406,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     }
     setLimitsLoading(true);
     const timer = window.setTimeout(() => {
-      computeScaleLimits(filePath, {
+      computeScaleLimits(processedSourcePath ?? filePath, {
         ...DEFAULT_DISPLAY_SETTINGS,
         limits: displayLimits,
         percentileLow,
@@ -426,7 +433,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [filePath, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
+  }, [filePath, processedSourcePath, processedSourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
 
   useEffect(() => {
     let cancelled = false;
@@ -565,6 +572,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setOverlayRaw(DEFAULT_DQ_OVERLAY);
     setDqMask(null);
     setDqMaskLoading(false);
+    setDqMaskError(null);
     dqMaskKeyRef.current = "";
     dqMaskSeqRef.current++;
     flagTableSeqRef.current++;
@@ -656,9 +664,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const processedHistRef = useRef<string | null>(null);
   useEffect(() => {
+    const token = processedSourceVersion + "|" + (processedSourcePath ?? "");
     const previous = processedHistRef.current;
-    processedHistRef.current = processedSourcePath;
-    if (previous === processedSourcePath) return;
+    processedHistRef.current = token;
+    if (previous === token) return;
     if (excludeDqRef.current) return;
     const target = processedSourcePath ?? file?.path;
     if (!target) return;
@@ -679,7 +688,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (histSeqRef.current === hseq) console.error("Histogram fetch failed:", err);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processedSourcePath]);
+  }, [processedSourcePath, processedSourceVersion]);
 
   const plane = file?.result?.plane ?? null;
   const dqRef = plane?.dq_ref ?? null;
@@ -710,14 +719,17 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     dqMaskKeyRef.current = key;
     const seq = ++dqMaskSeqRef.current;
     setDqMaskLoading(true);
+    setDqMask(null);
     getDqMaskPreview(filePath, overlayMask, maxDim)
       .then((mask) => {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMask(mask);
+        setDqMaskError(null);
       })
       .catch((err) => {
         if (dqMaskSeqRef.current !== seq) return;
         dqMaskKeyRef.current = "";
+        setDqMaskError(err instanceof Error ? err.message : String(err));
         console.error("[AstroBurst] DQ mask fetch failed:", err);
       })
       .finally(() => {
@@ -772,9 +784,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     () => ({
       renderedPreviewUrl, setRenderedPreviewUrl,
       activeImagePath, setActiveImagePath,
-      processedSourcePath, setProcessedSource,
+      processedSourcePath, processedSourceVersion, setProcessedSource,
     }),
-    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath, processedSourcePath, setProcessedSource],
+    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath, processedSourcePath, processedSourceVersion, setProcessedSource],
   );
 
   const renderActionsValue = useMemo<RenderActionsContextValue>(
@@ -809,8 +821,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const dqValue = useMemo<DqContextValue>(
-    () => ({ plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask, dqMaskLoading }),
-    [plane, flagTable, overlay, setOverlay, excludeDq, dqMask, dqMaskLoading],
+    () => ({ plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask, dqMaskLoading, dqMaskError }),
+    [plane, flagTable, overlay, setOverlay, excludeDq, dqMask, dqMaskLoading, dqMaskError],
   );
 
   return (

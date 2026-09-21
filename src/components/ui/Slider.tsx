@@ -1,4 +1,5 @@
-import { memo, useCallback, useState, useRef, useEffect } from "react";
+import { memo, useCallback, useState, useRef, useEffect, useId } from "react";
+import { resolveTypedValue } from "./sliderValue";
 
 interface SliderProps {
   label: string;
@@ -31,6 +32,7 @@ function Slider({
   onCommit,
   hint,
 }: SliderProps) {
+  const rangeId = useId();
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const editStartText = useRef("");
@@ -92,10 +94,9 @@ function Slider({
     if (editText === editStartText.current) return;
     const parsed = parseFloat(editText);
     if (!isNaN(parsed)) {
-      const clamped = Math.max(min, Math.min(max, parsed));
-      (onCommit ?? onChange)?.(clamped);
+      (onCommit ?? onChange)?.(resolveTypedValue(parsed, min, max, step, isLog));
     }
-  }, [editText, min, max, onChange, onCommit]);
+  }, [editText, min, max, step, isLog, onChange, onCommit]);
 
   const handleEditKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
@@ -111,7 +112,7 @@ function Slider({
   return (
     <div className="ab-slider-group">
       <div className="flex justify-between items-center mb-1">
-        <label className="ab-slider-label">
+        <label className="ab-slider-label" htmlFor={rangeId}>
           {label}
           {hint && <span className="ab-slider-hint">{hint}</span>}
         </label>
@@ -119,6 +120,7 @@ function Slider({
           <input
             ref={inputRef}
             type="text"
+            aria-label={`${label} value`}
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onBlur={commitEdit}
@@ -126,22 +128,27 @@ function Slider({
             className="ab-slider-value-edit"
           />
         ) : (
-          <span
+          <button
+            type="button"
             className="ab-slider-value"
             onClick={handleValueClick}
+            disabled={disabled}
+            aria-label={`Edit ${label} value`}
             title="Click to edit value"
           >
             {display}
-          </span>
+          </button>
         )}
       </div>
       <input
         ref={rangeRef}
+        id={rangeId}
         type="range"
         min={isLog ? 0 : min}
         max={isLog ? 1 : max}
         step={isLog ? 1 / LOG_STEPS : step}
         value={isLog ? toPos(effective) : effective}
+        aria-valuetext={display}
         onChange={handleChange}
         disabled={disabled}
         className="ab-slider"

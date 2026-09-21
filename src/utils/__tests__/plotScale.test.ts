@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { niceTicks, linearScale, finiteExtent } from "../plotScale";
+import { niceTicks, linearScale, finiteExtent, formatAxisTick } from "../plotScale";
 
 describe("niceTicks", () => {
   it("chooses round steps covering the domain", () => {
@@ -28,6 +28,30 @@ describe("linearScale", () => {
 
   it("returns the range midpoint for a degenerate domain", () => {
     expect(linearScale([3, 3], [0, 10])(3)).toBe(5);
+  });
+});
+
+describe("formatAxisTick", () => {
+  it("keeps Jy/beam scale spectra readable instead of collapsing to 0.0", () => {
+    const yMin = -1.5e-4;
+    const yMax = 3.2e-3;
+    const range = yMax - yMin;
+    const ticks = [0, 1, 2, 3, 4].map((i) => formatAxisTick(yMax - (i / 4) * range, range));
+    expect(ticks).toEqual(["3.20e-3", "2.36e-3", "1.53e-3", "6.88e-4", "-1.50e-4"]);
+    expect(new Set(ticks).size).toBe(ticks.length);
+  });
+
+  it("uses fixed notation with a precision derived from the range", () => {
+    expect(formatAxisTick(1234, 2000)).toBe("1234");
+    expect(formatAxisTick(0.25, 1)).toBe("0.25");
+    expect(formatAxisTick(1.5, 0.04)).toBe("1.5000");
+  });
+
+  it("handles zero, huge values and non-finite input", () => {
+    expect(formatAxisTick(0, 3e-3)).toBe("0");
+    expect(formatAxisTick(4.2e6, 1e6)).toBe("4.20e+6");
+    expect(formatAxisTick(NaN, 1)).toBe("");
+    expect(formatAxisTick(2, 0)).toBe("2.00");
   });
 });
 

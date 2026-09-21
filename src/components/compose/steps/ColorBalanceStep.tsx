@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useId, useMemo, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath, isNarrowbandWorkflow, type FilterDetectionRef } from "../../../utils/wizard";
@@ -25,6 +25,8 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
   const [localG, setLocalG] = useState(state.wbG);
   const [localB, setLocalB] = useState(state.wbB);
   const [loading, setLoading] = useState(false);
+  const wbModeId = useId();
+  const scnrMethodId = useId();
   const [autoLoading, setAutoLoading] = useState(false);
   const [refChannel, setRefChannel] = useState<string | null>(null);
   const [emptyChannels, setEmptyChannels] = useState<string[]>([]);
@@ -131,6 +133,11 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     onScnrChange(state.scnrEnabled, state.scnrAmount, scnrMethod, val);
   }, [state.scnrEnabled, state.scnrAmount, scnrMethod, onScnrChange]);
 
+  const wbDisabled = state.wbMode === "none";
+  const appliedR = wbDisabled ? 1.0 : localR;
+  const appliedG = wbDisabled ? 1.0 : localG;
+  const appliedB = wbDisabled ? 1.0 : localB;
+
   const handleApply = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -140,7 +147,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       const scnr = state.scnrEnabled
         ? { enabled: true, method: scnrMethod, amount: state.scnrAmount, preserveLuminance: preserveLum }
         : undefined;
-      const res = await calibrateAndScnr(dir, localR, localG, localB, scnr);
+      const res = await calibrateAndScnr(dir, appliedR, appliedG, appliedB, scnr);
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
         onResult(url, res.auto_stf ?? undefined);
@@ -151,7 +158,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     } finally {
       setLoading(false);
     }
-  }, [localR, localG, localB, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, onResult]);
+  }, [appliedR, appliedG, appliedB, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, onResult]);
 
   const handleReset = useCallback(async () => {
     setLoading(true);
@@ -174,7 +181,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     }
   }, [onResult, onWbChange]);
 
-  const isFactorsNeutral = localR === 1.0 && localG === 1.0 && localB === 1.0;
+  const isFactorsNeutral = appliedR === 1.0 && appliedG === 1.0 && appliedB === 1.0;
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -201,8 +208,8 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       )}
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">White Balance</label>
-        <select value={state.wbMode} onChange={(e) => handleModeChange(e.target.value as WizardState["wbMode"])} className="ab-select">
+        <label htmlFor={wbModeId} className="text-xs text-zinc-400">White Balance</label>
+        <select id={wbModeId} value={state.wbMode} onChange={(e) => handleModeChange(e.target.value as WizardState["wbMode"])} className="ab-select">
           <option value="auto">Auto (Stability)</option>
           <option value="spcc">SPCC (Spectrophotometric)</option>
           <option value="manual">Manual</option>
@@ -296,8 +303,8 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       {state.scnrEnabled && (
         <div className="flex flex-col gap-2 pl-2">
           <div className="flex items-center justify-between">
-            <label className="text-xs text-zinc-400">Method</label>
-            <select value={scnrMethod} onChange={(e) => handleMethodChange(e.target.value)} className="ab-select">
+            <label htmlFor={scnrMethodId} className="text-xs text-zinc-400">Method</label>
+            <select id={scnrMethodId} value={scnrMethod} onChange={(e) => handleMethodChange(e.target.value)} className="ab-select">
               <option value="average">Average Neutral</option>
               <option value="maximum">Maximum Neutral</option>
             </select>
@@ -330,14 +337,16 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         </div>
       )}
 
-      {state.compositeReady && state.wbMode !== "none" && (
+      {state.compositeReady && (state.wbMode !== "none" || state.scnrEnabled) && (
         <div className="flex items-center gap-2">
           <div className="flex-1">
             <RunButton
               label={
-                isFactorsNeutral && !state.scnrEnabled
-                  ? "Apply Color Balance (neutral)"
-                  : `Apply Color Balance (R=${localR.toFixed(2)} G=${localG.toFixed(2)} B=${localB.toFixed(2)}${state.scnrEnabled ? " + SCNR" : ""})`
+                wbDisabled && state.scnrEnabled
+                  ? "Apply SCNR (white balance off)"
+                  : isFactorsNeutral && !state.scnrEnabled
+                    ? "Apply Color Balance (neutral)"
+                    : `Apply Color Balance (R=${appliedR.toFixed(2)} G=${appliedG.toFixed(2)} B=${appliedB.toFixed(2)}${state.scnrEnabled ? " + SCNR" : ""})`
               }
               runningLabel="Applying..."
               running={loading}

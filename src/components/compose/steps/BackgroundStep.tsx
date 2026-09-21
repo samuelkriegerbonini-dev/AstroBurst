@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
@@ -26,6 +26,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
   const [gridSize, setGridSize] = useState(8);
   const [polyDegree, setPolyDegree] = useState(3);
   const [sigmaClip, setSigmaClip] = useState(2.5);
+  const modeId = useId();
   const [mode, setMode] = useState<"independent" | "linked" | "neutralize" | "deband_auto" | "deband_rows" | "deband_cols" | "deband_both">("independent");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, BgExtractResult>>({});
@@ -153,8 +154,8 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Mode</label>
-        <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} className="ab-select">
+        <label htmlFor={modeId} className="text-xs text-zinc-400">Mode</label>
+        <select id={modeId} value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} className="ab-select">
           <option value="independent">Per-channel (independent)</option>
           <option value="linked">Linked (shared gradient)</option>
           <option value="neutralize">Neutralize (remove pedestal)</option>

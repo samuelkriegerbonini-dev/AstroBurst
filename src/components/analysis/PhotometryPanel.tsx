@@ -57,22 +57,37 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const { excludeDq } = useDqContext();
   const lastSeqRef = useRef(0);
   const busyRef = useRef(false);
+  const requestSeqRef = useRef(0);
+  const clickRef = useRef(click);
+  clickRef.current = click;
+
+  useEffect(() => {
+    requestSeqRef.current++;
+    lastSeqRef.current = clickRef.current?.seq ?? lastSeqRef.current;
+    setResult(null);
+    setHistory([]);
+    setError(null);
+    setIsMeasuring(false);
+    busyRef.current = false;
+  }, [filePath]);
 
   const measure = useCallback(
     async (x: number, y: number) => {
       if (!filePath || busyRef.current) return;
+      const seq = ++requestSeqRef.current;
       busyRef.current = true;
       setIsMeasuring(true);
       setError(null);
       try {
         const res = await measurePhotometry(filePath, x, y, { gaiaMatch, excludeDq });
+        if (requestSeqRef.current !== seq) return;
         setResult(res);
         setHistory((prev) => [res, ...prev].slice(0, 4));
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : String(e));
+        if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
       } finally {
         busyRef.current = false;
-        setIsMeasuring(false);
+        if (requestSeqRef.current === seq) setIsMeasuring(false);
       }
     },
     [filePath, gaiaMatch, excludeDq],

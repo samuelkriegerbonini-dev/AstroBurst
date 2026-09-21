@@ -29,6 +29,7 @@ import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
 import { loadLayout, saveLayout } from "./utils/layout";
+import { terminateStfWorker } from "./utils/stfworker";
 import CommandPalette, { type PaletteAction, type PaletteFile } from "./components/CommandPalette";
 import { useRightTool, rightToolStore, RIGHT_TOOLS, type RightToolId } from "./hooks/useRightTool";
 import nebulaImg from "./assets/nebulosa.jpg";
@@ -123,7 +124,7 @@ export default function App() {
   const selectedFile = useSelectedFile();
   const allDoneFiles = useDoneFiles();
 
-  const { exportZip, progress: zipProgress, isExporting, downloaded } = useZipExport();
+  const { exportZip, progress: zipProgress, isExporting, downloaded, error: zipError } = useZipExport();
 
   const activeFilters = useActiveFilters();
   const filterMode = useFilterMode();
@@ -158,11 +159,22 @@ export default function App() {
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
       setView("complete");
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 3000);
+      if (stats.done > 0 && stats.failed === 0) {
+        setShowConfetti(true);
+        setTimeout(() => setShowConfetti(false), 3000);
+      }
     }
     prevCompleteRef.current = isComplete;
-  }, [isComplete]);
+  }, [isComplete, stats.done, stats.failed]);
+
+  useEffect(() => {
+    const teardownRenderWorker = () => terminateStfWorker();
+    window.addEventListener("beforeunload", teardownRenderWorker);
+    return () => {
+      window.removeEventListener("beforeunload", teardownRenderWorker);
+      teardownRenderWorker();
+    };
+  }, []);
 
   const handleBrowseFiles = useCallback(async () => {
     if (isTauri()) {
@@ -284,8 +296,13 @@ export default function App() {
   }, []);
 
   const handleExportZip = useCallback(() => {
-    exportZip(fileStore.getFiles());
-  }, [exportZip]);
+    const all = fileStore.getFiles();
+    exportZip(
+      activeFilters.length === 0
+        ? all
+        : all.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode)),
+    );
+  }, [exportZip, activeFilters, filterMode]);
 
   const storeVersion = useSyncExternalStore(fileStore.subscribe, fileStore.getVersion);
   const metaCacheRef = useRef<WeakMap<ProcessedFile, MetadataFile>>(new WeakMap());
@@ -319,6 +336,12 @@ export default function App() {
       fileStore.selectFile(filteredSelectedId);
     }
   }, [filteredSelectedId, selectedId]);
+
+  const visibleSelectedFile = useMemo(() => {
+    if (!selectedFile) return null;
+    if (activeFilters.length === 0) return selectedFile;
+    return filteredMetadataFiles.some((f) => f.id === selectedFile.id) ? selectedFile : null;
+  }, [selectedFile, activeFilters, filteredMetadataFiles]);
 
   const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
     if (!sidebarOpen) return;
@@ -478,7 +501,7 @@ export default function App() {
               ) : (
                 <CompositeProvider>
                   <ComposeWizardProvider>
-                    <PreviewProvider file={selectedFile} doneFiles={filteredDoneFiles}>
+                    <PreviewProvider file={visibleSelectedFile} doneFiles={filteredDoneFiles}>
                       <div className="flex flex-col h-full">
                         <div
                           className="px-4 py-2 shrink-0 space-y-1.5"
@@ -559,6 +582,7 @@ export default function App() {
                                 isExporting={isExporting}
                                 zipProgress={zipProgress}
                                 downloaded={downloaded}
+                                exportError={zipError}
                                 productTypes={productTypes}
                                 customChips={filterState.customChips}
                                 activeFilters={activeFilters}

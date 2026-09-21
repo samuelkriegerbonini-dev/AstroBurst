@@ -3,7 +3,10 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::infra::progress::ProgressHandle;
 use crate::math::median::{f32_cmp, median_f32_mut};
+use crate::types::constants::STAGE_LOAD_FRAME;
+use crate::types::error::AppError;
 use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 pub(crate) use crate::infra::fits::reader::load_fits_image;
 
@@ -409,25 +412,47 @@ pub fn calibrate_from_paths(
     calibrate_image(&science, &config)
 }
 
+fn load_frames_with_progress(
+    paths: &[String],
+    calibration: Option<&CalibrationConfig>,
+    progress: Option<&ProgressHandle>,
+) -> Result<Vec<Array2<f32>>> {
+    let mut images: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
+    for path in paths {
+        if let Some(p) = progress {
+            if p.is_cancelled() {
+                return Err(AppError::Cancelled.into());
+            }
+        }
+        let mut img = load_fits_image(path)?;
+        if let Some(cal) = calibration {
+            img = calibrate_image(&img, cal)?;
+        }
+        images.push(img);
+        if let Some(p) = progress {
+            p.tick_with_stage(STAGE_LOAD_FRAME);
+        }
+    }
+    Ok(images)
+}
+
 pub fn stack_from_paths(
     paths: &[String],
     config: &crate::types::stacking::StackConfig,
     calibration: Option<&CalibrationConfig>,
+    progress: Option<&ProgressHandle>,
 ) -> Result<crate::types::stacking::StackResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
 
-    let images: Vec<Array2<f32>> = paths
-        .iter()
-        .map(|path| {
-            let img = load_fits_image(path)?;
-            match calibration {
-                Some(cal) => calibrate_image(&img, cal),
-                None => Ok(img),
-            }
-        })
-        .collect::<Result<_>>()?;
+    let images = load_frames_with_progress(paths, calibration, progress)?;
+
+    if let Some(p) = progress {
+        if p.is_cancelled() {
+            return Err(AppError::Cancelled.into());
+        }
+    }
 
     let result = crate::core::stacking::combine::stack_images(&images, config)?;
     Ok(result)
@@ -437,18 +462,18 @@ pub fn drizzle_from_paths(
     paths: &[String],
     config: &crate::types::stacking::DrizzleConfig,
     calibration: Option<&CalibrationConfig>,
+    progress: Option<&ProgressHandle>,
 ) -> Result<crate::types::stacking::DrizzleResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
 
-    let mut images: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
-    for path in paths {
-        let mut img = load_fits_image(path)?;
-        if let Some(cal) = calibration {
-            img = calibrate_image(&img, cal)?;
+    let images = load_frames_with_progress(paths, calibration, progress)?;
+
+    if let Some(p) = progress {
+        if p.is_cancelled() {
+            return Err(AppError::Cancelled.into());
         }
-        images.push(img);
     }
 
     let result = crate::core::stacking::drizzle::drizzle_stack(&images, config)?;

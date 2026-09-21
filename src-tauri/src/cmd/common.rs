@@ -156,7 +156,7 @@ pub(crate) fn record_preview_stamp(path: &str) {
     }
 }
 
-pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
+fn revalidate_stamp(path: &str) {
     if let Ok(m) = std::fs::metadata(source_path(path)) {
         let stamp: FileStamp = (m.len(), m.modified().ok());
         let mut stamps = PREVIEW_STAMPS.lock().unwrap();
@@ -171,7 +171,16 @@ pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
             }
         }
     }
+}
+
+pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
+    revalidate_stamp(path);
     load_from_cache_or_disk(path)
+}
+
+pub(crate) fn load_validated_full(path: &str) -> Result<ImageEntry> {
+    revalidate_stamp(path);
+    load_cached_full(path)
 }
 
 fn downsample_nn<const BPP: usize>(
@@ -295,14 +304,15 @@ fn platform_fallback_dir() -> std::path::PathBuf {
 pub(crate) fn resolve_output_dir(output_dir: &str) -> Result<String> {
     let path = std::path::Path::new(output_dir);
     if path.exists() {
-        maybe_enforce_lru(output_dir);
         return Ok(output_dir.to_string());
     }
     match std::fs::create_dir_all(path) {
         Ok(_) => Ok(output_dir.to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
-            || e.raw_os_error() == Some(5)
-            || e.raw_os_error() == Some(30) => {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                || e.raw_os_error() == Some(5)
+                || e.raw_os_error() == Some(30) =>
+        {
             let fallback = platform_fallback_dir();
             std::fs::create_dir_all(&fallback)
                 .context("Failed to create fallback output directory")?;
@@ -311,27 +321,28 @@ pub(crate) fn resolve_output_dir(output_dir: &str) -> Result<String> {
                 output_dir,
                 fallback.display()
             );
-            let resolved = fallback.to_string_lossy().to_string();
-            maybe_enforce_lru(&resolved);
-            Ok(resolved)
+            Ok(fallback.to_string_lossy().to_string())
         }
         Err(e) => Err(e).context(format!("Failed to create output directory: {}", output_dir)),
     }
 }
 
-fn maybe_enforce_lru(dir: &str) {
+pub(crate) fn cleanup_output_dir_keeping(dir: &str, keep: &[&str]) -> (usize, u64, Vec<String>) {
+    crate::cmd::output::enforce_output_lru_keeping(std::path::Path::new(dir), lru_threshold(), keep)
+        .unwrap_or((0, 0, Vec::new()))
+}
+
+fn lru_threshold() -> u64 {
     use crate::types::constants::DEFAULT_OUTPUT_MAX_BYTES;
     static MAX_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
-    let threshold = *MAX_BYTES.get_or_init(|| {
+    *MAX_BYTES.get_or_init(|| {
         crate::infra::config::load_config()
             .ok()
             .and_then(|cfg| cfg.output_max_size_mb)
             .map(|mb| mb * 1_048_576)
             .unwrap_or(DEFAULT_OUTPUT_MAX_BYTES)
-    });
-
-    let _ = crate::cmd::output::enforce_output_lru(std::path::Path::new(dir), threshold);
+    })
 }
 
 pub(crate) struct ResolvedRgbImage {

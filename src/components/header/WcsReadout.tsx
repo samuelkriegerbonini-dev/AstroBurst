@@ -24,7 +24,7 @@ const FORMATS: readonly CoordFormat[] = ["sexagesimal", "decimal"];
 const HOVER_DEBOUNCE_MS = 40;
 
 const SELECT_CLASS =
-  "bg-transparent border border-zinc-800 rounded px-0.5 text-[9px] text-zinc-400 focus:outline-none focus:border-zinc-600";
+  "bg-transparent border border-zinc-800 rounded px-0.5 text-[9px] text-zinc-400 focus:border-zinc-600";
 
 function loadReadoutPreference(): ReadoutPreference {
   try {
@@ -147,6 +147,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           value={pref.frame}
           onChange={(e) => updatePref({ frame: e.target.value as SkyFrame })}
           title="Coordinate frame"
+          aria-label="Coordinate frame"
         >
           {FRAMES.map((f) => (
             <option key={f} value={f}>{f}</option>
@@ -157,6 +158,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           value={pref.format}
           onChange={(e) => updatePref({ format: e.target.value as CoordFormat })}
           title="Coordinate format"
+          aria-label="Coordinate format"
         >
           {FORMATS.map((f) => (
             <option key={f} value={f}>{f}</option>

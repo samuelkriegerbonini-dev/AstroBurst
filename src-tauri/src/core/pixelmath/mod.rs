@@ -271,6 +271,40 @@ mod tests {
     }
 
     #[test]
+    fn unreferenced_slots_do_not_constrain_dimensions() {
+        let target = image4x4();
+        let other = Array2::<f32>::zeros((7, 9));
+        let out = eval_on(
+            "$T - med($T)",
+            &[("$T", &target), ("A", &other)],
+            &OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(out.dim(), (4, 4));
+        assert_close(out[[0, 0]], -7.5, "1 - 8.5");
+        let err = eval_on("$T + A", &[("$T", &target), ("A", &other)], &OutputOptions::default())
+            .unwrap_err();
+        assert!(err.message.contains("dimension mismatch"), "{}", err.message);
+    }
+
+    #[test]
+    fn literals_outside_f32_range_are_rejected() {
+        let err = compile("$T * 1e300", &names(&[])).unwrap_err();
+        assert!(err.message.contains("outside the range"), "{}", err.message);
+        assert!(compile("$T * 3e38", &names(&[])).is_ok());
+    }
+
+    #[test]
+    fn rescale_handles_a_span_wider_than_f32() {
+        let img = Array2::from_shape_vec((1, 3), vec![-3.0e38, 0.0, 3.0e38]).unwrap();
+        let opts = OutputOptions { truncate: false, rescale: true };
+        let out = eval_on("$T", &[("$T", &img)], &opts).unwrap();
+        assert_close(out[[0, 0]], 0.0, "min maps to 0");
+        assert_close(out[[0, 1]], 0.5, "midpoint maps to 0.5");
+        assert_close(out[[0, 2]], 1.0, "max maps to 1");
+    }
+
+    #[test]
     fn unknown_symbol_lists_available_names() {
         let err = compile("$T + Q", &names(&["A", "B"])).unwrap_err();
         assert!(err.message.contains("'Q'"), "{}", err.message);
@@ -351,8 +385,11 @@ mod tests {
         assert_close(out[[1, 3]], 0.5, "8/8 - 0.5");
         assert_eq!(out[[3, 2]], 1.0);
         let inf = eval_on("iif($T == 2, 1/0, $T)", &[("$T", &img)], &opts).unwrap();
-        assert!(inf[[0, 1]].is_nan(), "inf is not clamped, it becomes NaN");
+        assert_eq!(inf[[0, 1]], 1.0, "with truncate on, +inf clamps to 1.0");
         assert_eq!(inf[[0, 2]], 1.0);
+        let neg_inf = eval_on("iif($T == 2, -1/0, $T)", &[("$T", &img)], &opts).unwrap();
+        assert_eq!(neg_inf[[0, 1]], 0.0, "with truncate on, -inf clamps to 0.0");
+        assert!(neg_inf[[0, 0]].is_nan(), "NaN survives truncate");
     }
 
     #[test]

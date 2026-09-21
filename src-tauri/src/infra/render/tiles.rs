@@ -327,16 +327,6 @@ fn save_tile_rgb(buf: &[u8], tile_size: usize, output_path: &str) -> Result<()> 
     Ok(())
 }
 
-pub fn generate_tile_pyramid_rgb(
-    r: &Array2<f32>,
-    g: &Array2<f32>,
-    b: &Array2<f32>,
-    output_dir: &str,
-    params: &TileParams,
-) -> Result<TilePyramid> {
-    generate_tile_pyramid_rgb_inner(r, g, b, output_dir, params, None, None, None)
-}
-
 pub fn generate_tile_pyramid_rgb_stf(
     r: &Array2<f32>,
     g: &Array2<f32>,

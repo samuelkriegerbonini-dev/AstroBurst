@@ -8,7 +8,7 @@ const ON_STYLE: React.CSSProperties = { background: "rgba(248,113,113,0.15)", co
 const OFF_STYLE: React.CSSProperties = { color: "#71717a", border: "1px solid transparent" };
 
 function DqControlsInner() {
-  const { plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading } = useDqContext();
+  const { plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError } = useDqContext();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const hasDq = !!plane?.dq_ref;
@@ -28,9 +28,11 @@ function DqControlsInner() {
 
   const toggleTitle = !hasDq
     ? "No DQ plane in this file"
-    : overlay.enabled
-      ? "DQ overlay shown — click to hide"
-      : "Show flagged DQ pixels over the image";
+    : dqMaskError
+      ? `DQ overlay failed: ${dqMaskError}`
+      : overlay.enabled
+        ? "DQ overlay shown — click to hide"
+        : "Show flagged DQ pixels over the image";
 
   return (
     <div ref={rootRef} className="relative flex items-center gap-0.5">
@@ -62,6 +64,12 @@ function DqControlsInner() {
             <span className="text-[10px] font-semibold text-zinc-300 uppercase tracking-wider">DQ flags</span>
             {flagTable && <span className="text-[9px] font-mono text-zinc-500 truncate max-w-[120px]" title={flagTable.label}>{flagTable.label}</span>}
           </div>
+
+          {dqMaskError && (
+            <div className="px-2.5 py-1.5 text-[9px] text-red-400 break-words" style={{ borderBottom: "1px solid var(--ab-border)" }}>
+              overlay unavailable: {dqMaskError}
+            </div>
+          )}
 
           {!flagTable ? (
             <div className="flex items-center justify-center py-3">

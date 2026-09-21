@@ -50,11 +50,13 @@ export default function CommandPalette({ open, onClose, actions, files, selected
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const lastInputModeRef = useRef<"keyboard" | "mouse">("keyboard");
 
   useEffect(() => {
     if (open) {
       setQuery("");
       setSel(0);
+      lastInputModeRef.current = "keyboard";
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open]);
@@ -93,6 +95,7 @@ export default function CommandPalette({ open, onClose, actions, files, selected
   const clampedSel = Math.min(sel, Math.max(0, entries.length - 1));
 
   useEffect(() => {
+    if (lastInputModeRef.current !== "keyboard") return;
     const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${clampedSel}"]`);
     el?.scrollIntoView({ block: "nearest" });
   }, [clampedSel, entries]);
@@ -105,9 +108,11 @@ export default function CommandPalette({ open, onClose, actions, files, selected
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      lastInputModeRef.current = "keyboard";
       setSel((s) => Math.min(s + 1, entries.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      lastInputModeRef.current = "keyboard";
       setSel((s) => Math.max(s - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
@@ -135,6 +140,7 @@ export default function CommandPalette({ open, onClose, actions, files, selected
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Search files, tools and actions..."
+            aria-label="Search files, tools and actions"
             className="ab-cmdp-input"
             spellCheck={false}
           />
@@ -153,7 +159,7 @@ export default function CommandPalette({ open, onClose, actions, files, selected
                   data-index={i}
                   data-active={i === clampedSel}
                   className="ab-cmdp-item"
-                  onMouseEnter={() => setSel(i)}
+                  onMouseMove={() => { lastInputModeRef.current = "mouse"; setSel(i); }}
                   onClick={() => runEntry(entry)}
                 >
                   {Icon && <Icon size={13} style={{ flexShrink: 0, opacity: 0.7 }} />}

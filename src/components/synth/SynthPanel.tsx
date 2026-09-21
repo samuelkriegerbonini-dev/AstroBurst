@@ -36,6 +36,10 @@ function buildPsfType(choice: PsfChoice, fwhm: number, beta: number, lambdaD: nu
   }
 }
 
+function formatFlux(value: number): string {
+  return `${Math.round(value).toLocaleString()} e⁻`;
+}
+
 export default function SynthPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,8 +48,8 @@ export default function SynthPanel() {
   const [width, setWidth] = useState(2048);
   const [height, setHeight] = useState(2048);
   const [nStars, setNStars] = useState(500);
-  const [fluxMin, _setFluxMin] = useState(100);
-  const [fluxMax, _setFluxMax] = useState(50000);
+  const [fluxMin, setFluxMin] = useState(100);
+  const [fluxMax, setFluxMax] = useState(50000);
   const [seed, setSeed] = useState(42);
 
   const [fieldChoice, setFieldChoice] = useState<FieldChoice>("uniform");
@@ -62,9 +66,9 @@ export default function SynthPanel() {
   const [gain, setGain] = useState(1.5);
   const [readNoise, setReadNoise] = useState(8.0);
   const [skyBg, setSkyBg] = useState(200.0);
-  const [darkCurrent, _setDarkCurrent] = useState(0.05);
+  const [darkCurrent, setDarkCurrent] = useState(0.05);
   const [expTime, setExpTime] = useState(300.0);
-  const [biasLevel, _setBiasLevel] = useState(1000.0);
+  const [biasLevel, setBiasLevel] = useState(1000.0);
 
   const [vignette, setVignette] = useState(false);
   const [vigStrength, setVigStrength] = useState(0.3);
@@ -74,6 +78,18 @@ export default function SynthPanel() {
 
   const [stackMode, setStackMode] = useState(false);
   const [nFrames, setNFrames] = useState(8);
+
+  const handleFluxMin = useCallback((value: number) => {
+    const rounded = Math.round(value);
+    setFluxMin(rounded);
+    setFluxMax((prev) => (prev <= rounded ? rounded + 1 : prev));
+  }, []);
+
+  const handleFluxMax = useCallback((value: number) => {
+    const rounded = Math.round(value);
+    setFluxMax(rounded);
+    setFluxMin((prev) => (prev >= rounded ? Math.max(1, rounded - 1) : prev));
+  }, []);
 
   const buildConfig = useCallback((): SynthConfig => ({
     field: { width, height, n_stars: nStars, flux_min: fluxMin, flux_max: fluxMax, seed },
@@ -137,6 +153,8 @@ export default function SynthPanel() {
         <Slider label="Width" value={width} min={256} max={8192} step={256} disabled={loading} accent="rose" format={(v) => `${v}px`} onChange={setWidth} />
         <Slider label="Height" value={height} min={256} max={8192} step={256} disabled={loading} accent="rose" format={(v) => `${v}px`} onChange={setHeight} />
         <Slider label="Stars" value={nStars} min={10} max={5000} step={10} disabled={loading} accent="rose" onChange={setNStars} />
+        <Slider label="Flux min" value={fluxMin} min={1} max={100000} step={1} scale="log" disabled={loading} accent="rose" format={formatFlux} onChange={handleFluxMin} />
+        <Slider label="Flux max" value={fluxMax} min={1} max={1000000} step={1} scale="log" disabled={loading} accent="rose" format={formatFlux} onChange={handleFluxMax} />
         <Slider label="Seed" value={seed} min={0} max={9999} step={1} disabled={loading} accent="rose" onChange={setSeed} />
       </div>
 
@@ -190,7 +208,9 @@ export default function SynthPanel() {
         <Slider label="Gain" value={gain} min={0.1} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e\u207B/ADU`} onChange={setGain} />
         <Slider label="Read noise" value={readNoise} min={0} max={50} step={0.5} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e\u207B`} onChange={setReadNoise} />
         <Slider label="Sky background" value={skyBg} min={0} max={2000} step={10} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)} ADU`} onChange={setSkyBg} />
+        <Slider label="Dark current" value={darkCurrent} min={0} max={5} step={0.01} disabled={loading} accent="rose" format={(v) => `${v.toFixed(2)} e⁻/s`} onChange={setDarkCurrent} />
         <Slider label="Exposure" value={expTime} min={1} max={3600} step={1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)}s`} onChange={setExpTime} />
+        <Slider label="Bias level" value={biasLevel} min={0} max={5000} step={10} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)} ADU`} onChange={setBiasLevel} />
       </div>
 
       <div className="flex flex-col gap-2">

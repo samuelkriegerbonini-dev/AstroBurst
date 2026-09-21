@@ -1,8 +1,19 @@
-import { useState, useCallback, useEffect } from "react";
-import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon, Scissors } from "lucide-react";
+import { useState, useCallback, useEffect, useMemo, useId } from "react";
+import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon, Scissors, Archive } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
-import { exportAlignedChannels, exportPng, exportRgbPng } from "../../services/export";
+import {
+  compressMef,
+  exportAlignedChannels,
+  exportPng,
+  exportRgbPng,
+  parseExtnameList,
+  riceSupportsBitpix,
+  DEFAULT_QUANTIZE_LEVEL,
+  type CompressMefResult,
+  type FitsCompression,
+} from "../../services/export";
+import { exportStem, parseImageRef } from "../../utils/imageRef";
 import { getWcsInfo } from "../../services/astrometry";
 import {
   cutoutDefaultFileName,
@@ -47,17 +58,24 @@ interface ExportOptions {
   copyWcs: boolean;
   copyMetadata: boolean;
   bitpix: number;
+  compress: FitsCompression;
+  quantizeLevel: number;
 }
 
 interface RgbExportOptions {
   copyWcs: boolean;
   copyMetadata: boolean;
+  bitpix: number;
+  compress: FitsCompression;
+  quantizeLevel: number;
 }
 
 interface ExportResult {
   output_path?: string;
   file_size_bytes?: number;
   elapsed_ms?: number;
+  compress?: string;
+  quantize_level?: number;
 }
 
 interface RgbChannels {
@@ -112,10 +130,19 @@ export default function ExportPanel({
                                       isLoading = false,
                                       lastResult = null,
                                     }: ExportPanelProps) {
+  const fieldId = useId();
   const [applyStf, setApplyStf] = useState(false);
   const [copyWcs, setCopyWcs] = useState(true);
   const [copyMetadata, setCopyMetadata] = useState(true);
   const [bitpix, setBitpix] = useState(-32);
+  const [riceEnabled, setRiceEnabled] = useState(false);
+  const [quantizeLevel, setQuantizeLevel] = useState(String(DEFAULT_QUANTIZE_LEVEL));
+  const [mefLossless, setMefLossless] = useState(true);
+  const [mefQuantizeLevel, setMefQuantizeLevel] = useState(String(DEFAULT_QUANTIZE_LEVEL));
+  const [mefDropExtnames, setMefDropExtnames] = useState("");
+  const [mefRawExtnames, setMefRawExtnames] = useState("");
+  const [mefRunning, setMefRunning] = useState(false);
+  const [mefResult, setMefResult] = useState<CompressMefResult | null>(null);
   const [exportDone, setExportDone] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [alignedExporting, setAlignedExporting] = useState(false);
@@ -167,15 +194,19 @@ export default function ExportPanel({
     };
   }, [filePath]);
 
+  const riceAvailable = riceSupportsBitpix(bitpix);
+  const effectiveCompress: FitsCompression = riceEnabled && riceAvailable ? "rice" : "none";
+  const effectiveQuantizeLevel = useMemo(() => {
+    const parsed = parseFloat(quantizeLevel);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUANTIZE_LEVEL;
+  }, [quantizeLevel]);
+
   const handleExport = useCallback(async () => {
     if (!filePath || !onExport) return;
 
     setError(null);
     const dir = await getExportDir();
-    const stem = filePath
-      .split(/[/\\]/)
-      .pop()
-      ?.replace(/\.(fits?|zip)$/i, "") || "output";
+    const stem = exportStem(filePath);
     const suffix = applyStf ? "_stf" : "_proc";
     const outputPath = `${dir}/${stem}${suffix}.fits`;
 
@@ -188,6 +219,8 @@ export default function ExportPanel({
         copyWcs,
         copyMetadata,
         bitpix,
+        compress: effectiveCompress,
+        quantizeLevel: effectiveQuantizeLevel,
       });
       setExportDone(true);
       setSavedPath(outputPath);
@@ -199,7 +232,7 @@ export default function ExportPanel({
       console.error("Export failed:", e);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [filePath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, onExport]);
+  }, [filePath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport]);
 
   const handleExportRgb = useCallback(async () => {
     if ((!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
@@ -216,6 +249,9 @@ export default function ExportPanel({
         outputPath, {
           copyWcs,
           copyMetadata,
+          bitpix,
+          compress: effectiveCompress,
+          quantizeLevel: effectiveQuantizeLevel,
         });
       setExportDone(true);
       setSavedPath(outputPath);
@@ -227,7 +263,34 @@ export default function ExportPanel({
       console.error("RGB FITS export failed:", e);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [rgbChannels, copyWcs, copyMetadata, onExportRgb, compositeStf]);
+  }, [rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf]);
+
+  const handleCompressMef = useCallback(async () => {
+    if (!filePath) return;
+    const sourcePath = parseImageRef(filePath).path;
+    setError(null);
+    setMefRunning(true);
+    setMefResult(null);
+    try {
+      const dir = await getExportDir();
+      const outputPath = `${dir}/${exportStem(filePath)}_compressed.fits`;
+      const parsedQuantize = parseFloat(mefQuantizeLevel);
+      const result = await compressMef(sourcePath, outputPath, {
+        lossless: mefLossless,
+        quantizeLevel: Number.isFinite(parsedQuantize) && parsedQuantize > 0 ? parsedQuantize : DEFAULT_QUANTIZE_LEVEL,
+        dropExtnames: parseExtnameList(mefDropExtnames),
+        rawExtnames: parseExtnameList(mefRawExtnames),
+      });
+      setMefResult(result);
+      setSavedPath(result.output_path);
+      setTimeout(() => setSavedPath(null), 8000);
+    } catch (e) {
+      console.error("MEF compression failed:", e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMefRunning(false);
+    }
+  }, [filePath, mefLossless, mefQuantizeLevel, mefDropExtnames, mefRawExtnames]);
 
   const handleExportAligned = useCallback(async () => {
     if (!rgbChannels) return;
@@ -260,10 +323,7 @@ export default function ExportPanel({
     setPngExporting(true);
     try {
       const dir = await getExportDir();
-      const stem = filePath
-        .split(/[/\\]/)
-        .pop()
-        ?.replace(/\.(fits?|zip)$/i, "") || "output";
+      const stem = exportStem(filePath);
       const suffix = pngApplyStf ? "_stf" : "";
       const outputPath = `${dir}/${stem}${suffix}.png`;
       await exportPng(filePath, outputPath, {
@@ -391,7 +451,7 @@ export default function ExportPanel({
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
   const cutoutInputClass =
-    "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-violet-500/50 w-full";
+    "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-violet-500/50 w-full";
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
@@ -404,12 +464,46 @@ export default function ExportPanel({
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">BITPIX</label>
-        <select value={bitpix} onChange={(e) => setBitpix(Number(e.target.value))} className="ab-select">
+        <label htmlFor={`${fieldId}-bitpix`} className="text-xs text-zinc-400">BITPIX</label>
+        <select id={`${fieldId}-bitpix`} value={bitpix} onChange={(e) => setBitpix(Number(e.target.value))} className="ab-select">
           {BITPIX_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Toggle
+          label="Rice compression (RICE_1)"
+          checked={riceEnabled && riceAvailable}
+          accent="amber"
+          disabled={!riceAvailable}
+          onChange={setRiceEnabled}
+        />
+        {!riceAvailable && (
+          <p className="text-[10px] text-amber-300/70 px-1">
+            RICE_1 supports BITPIX 16 and -32 only; the file is written uncompressed at BITPIX {bitpix}.
+          </p>
+        )}
+        {riceEnabled && riceAvailable && (
+          <div className="flex items-center justify-between">
+            <label htmlFor={`${fieldId}-quantize`} className="text-xs text-zinc-400">Quantize level</label>
+            <input
+              id={`${fieldId}-quantize`}
+              type="number"
+              min={1}
+              step={1}
+              value={quantizeLevel}
+              onChange={(e) => setQuantizeLevel(e.target.value)}
+              className={`${cutoutInputClass} w-24`}
+            />
+          </div>
+        )}
+        {riceEnabled && riceAvailable && bitpix === 16 && (
+          <p className="text-[10px] text-zinc-600 px-1">
+            At BITPIX 16 the data is scaled losslessly; the quantize level applies to float output.
+          </p>
+        )}
       </div>
 
       <RunButton
@@ -435,8 +529,8 @@ export default function ExportPanel({
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
         <SectionHeader icon={<ImageIcon size={14} className="text-sky-400" />} title="Export PNG" />
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Bit Depth</label>
-          <select value={pngBitDepth} onChange={(e) => setPngBitDepth(Number(e.target.value))} className="ab-select">
+          <label htmlFor={`${fieldId}-png-depth`} className="text-xs text-zinc-400">Bit Depth</label>
+          <select id={`${fieldId}-png-depth`} value={pngBitDepth} onChange={(e) => setPngBitDepth(Number(e.target.value))} className="ab-select">
             <option value={16}>16-bit</option>
             <option value={8}>8-bit</option>
           </select>
@@ -484,26 +578,26 @@ export default function ExportPanel({
           <>
             <div className="flex gap-2">
               <div className="flex-1 flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">Centre X (px)</label>
-                <input type="number" step={0.5} value={cutoutCentreX} onChange={(e) => setCutoutCentreX(e.target.value)} className={cutoutInputClass} />
+                <label htmlFor={`${fieldId}-centre-x`} className="text-[9px] text-zinc-500 uppercase">Centre X (px)</label>
+                <input id={`${fieldId}-centre-x`} type="number" step={0.5} value={cutoutCentreX} onChange={(e) => setCutoutCentreX(e.target.value)} className={cutoutInputClass} />
               </div>
               <div className="flex-1 flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">Centre Y (px)</label>
-                <input type="number" step={0.5} value={cutoutCentreY} onChange={(e) => setCutoutCentreY(e.target.value)} className={cutoutInputClass} />
+                <label htmlFor={`${fieldId}-centre-y`} className="text-[9px] text-zinc-500 uppercase">Centre Y (px)</label>
+                <input id={`${fieldId}-centre-y`} type="number" step={0.5} value={cutoutCentreY} onChange={(e) => setCutoutCentreY(e.target.value)} className={cutoutInputClass} />
               </div>
             </div>
             <div className="flex gap-2">
               <div className="flex-1 flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">Width ({cutoutUnit})</label>
-                <input type="number" min={0} step={1} value={cutoutWidth} onChange={(e) => setCutoutWidth(e.target.value)} className={cutoutInputClass} />
+                <label htmlFor={`${fieldId}-cutout-width`} className="text-[9px] text-zinc-500 uppercase">Width ({cutoutUnit})</label>
+                <input id={`${fieldId}-cutout-width`} type="number" min={0} step={1} value={cutoutWidth} onChange={(e) => setCutoutWidth(e.target.value)} className={cutoutInputClass} />
               </div>
               <div className="flex-1 flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">Height ({cutoutUnit})</label>
-                <input type="number" min={0} step={1} value={cutoutHeight} onChange={(e) => setCutoutHeight(e.target.value)} className={cutoutInputClass} />
+                <label htmlFor={`${fieldId}-cutout-height`} className="text-[9px] text-zinc-500 uppercase">Height ({cutoutUnit})</label>
+                <input id={`${fieldId}-cutout-height`} type="number" min={0} step={1} value={cutoutHeight} onChange={(e) => setCutoutHeight(e.target.value)} className={cutoutInputClass} />
               </div>
               <div className="flex flex-col gap-0.5">
-                <label className="text-[9px] text-zinc-500 uppercase">Unit</label>
-                <select value={cutoutUnit} onChange={(e) => setCutoutUnit(e.target.value as CutoutSizeUnit)} className="ab-select">
+                <label htmlFor={`${fieldId}-cutout-unit`} className="text-[9px] text-zinc-500 uppercase">Unit</label>
+                <select id={`${fieldId}-cutout-unit`} value={cutoutUnit} onChange={(e) => setCutoutUnit(e.target.value as CutoutSizeUnit)} className="ab-select">
                   <option value="px">px</option>
                   <option value="arcsec" disabled={cutoutPixelScale == null}>arcsec</option>
                 </select>
@@ -536,11 +630,96 @@ export default function ExportPanel({
         )}
       </div>
 
+      <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+        <SectionHeader
+          icon={<Archive size={14} className="text-emerald-400" />}
+          title="Compress FITS (multi-extension)"
+          subtitle="keeps SCI + ERR + DQ"
+        />
+        <p className="text-[10px] text-zinc-500 px-1">
+          Compresses every image extension of the selected file in place of collapsing it to a single HDU.
+        </p>
+        <div className="flex items-center justify-between">
+          <label htmlFor={`${fieldId}-mef-mode`} className="text-xs text-zinc-400">Mode</label>
+          <select
+            id={`${fieldId}-mef-mode`}
+            value={mefLossless ? "lossless" : "lossy"}
+            onChange={(e) => setMefLossless(e.target.value === "lossless")}
+            className="ab-select"
+            disabled={mefRunning}
+          >
+            <option value="lossless">Lossless</option>
+            <option value="lossy">Lossy (quantized)</option>
+          </select>
+        </div>
+        {!mefLossless && (
+          <div className="flex items-center justify-between">
+            <label htmlFor={`${fieldId}-mef-quantize`} className="text-xs text-zinc-400">Quantize level</label>
+            <input
+              id={`${fieldId}-mef-quantize`}
+              type="number"
+              min={1}
+              step={1}
+              value={mefQuantizeLevel}
+              onChange={(e) => setMefQuantizeLevel(e.target.value)}
+              className={`${cutoutInputClass} w-24`}
+            />
+          </div>
+        )}
+        <div className="flex flex-col gap-0.5">
+          <label htmlFor={`${fieldId}-mef-drop`} className="text-[9px] text-zinc-500 uppercase">Drop extensions (comma separated)</label>
+          <input
+            id={`${fieldId}-mef-drop`}
+            type="text"
+            value={mefDropExtnames}
+            onChange={(e) => setMefDropExtnames(e.target.value)}
+            placeholder="VAR_POISSON, VAR_RNOISE"
+            className={cutoutInputClass}
+          />
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <label htmlFor={`${fieldId}-mef-raw`} className="text-[9px] text-zinc-500 uppercase">Keep uncompressed (comma separated)</label>
+          <input
+            id={`${fieldId}-mef-raw`}
+            type="text"
+            value={mefRawExtnames}
+            onChange={(e) => setMefRawExtnames(e.target.value)}
+            placeholder="DQ"
+            className={cutoutInputClass}
+          />
+        </div>
+        <RunButton
+          label="Compress FITS"
+          runningLabel="Compressing..."
+          running={mefRunning}
+          disabled={!filePath}
+          accent="emerald"
+          icon={<Archive size={12} />}
+          onClick={handleCompressMef}
+        />
+        {mefResult && (
+          <div className="flex flex-col gap-0.5 px-1">
+            <p className="text-[10px] text-emerald-300 font-mono">
+              {(mefResult.source_size_bytes / 1024).toFixed(0)} KB → {(mefResult.output_size_bytes / 1024).toFixed(0)} KB
+              {mefResult.source_size_bytes > 0 && ` (${Math.round((mefResult.output_size_bytes / mefResult.source_size_bytes) * 100)}%)`}
+              , {mefResult.elapsed_ms} ms
+            </p>
+            <p className="text-[10px] text-zinc-500 font-mono">
+              dropped: {mefResult.dropped.length > 0 ? mefResult.dropped.join(", ") : "none"}
+            </p>
+            <p className="text-[10px] text-zinc-500 font-mono">
+              kept raw: {mefResult.kept_raw.length > 0 ? mefResult.kept_raw.join(", ") : "none"}
+            </p>
+          </div>
+        )}
+      </div>
+
       {hasRgb && rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b) && (
         <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
           <div className="flex items-center justify-between">
-            <label className="text-xs text-zinc-400">Align Method</label>
+            <label htmlFor={`${fieldId}-align-method`} className="text-xs text-zinc-400">Align Method</label>
             <select
+              id={`${fieldId}-align-method`}
               value={alignedMethod}
               onChange={(e) => setAlignedMethod(e.target.value)}
               className="ab-select"
@@ -592,9 +771,15 @@ export default function ExportPanel({
       )}
 
       {lastResult && !savedPath && (
-        <ResultGrid columns={3} items={[
+        <ResultGrid columns={4} items={[
           { label: "Output", value: lastResult.output_path?.split(/[/\\]/).pop() },
           { label: "Size", value: lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--" },
+          {
+            label: lastResult.compress === "rice" ? "Compressed" : "Compression",
+            value: lastResult.compress === "rice"
+              ? `${lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--"} RICE q${lastResult.quantize_level ?? DEFAULT_QUANTIZE_LEVEL}`
+              : "none",
+          },
           { label: "Time", value: lastResult.elapsed_ms != null ? `${lastResult.elapsed_ms} ms` : "--" },
         ]} />
       )}

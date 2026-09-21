@@ -218,7 +218,7 @@ use crate::infra::fits::writer as fits_writer;
 use crate::types::stacking::{DrizzleConfig, DrizzleResult};
 
 fn drizzle_channel(paths: &[String], config: &DrizzleConfig) -> Result<DrizzleResult> {
-    drizzle_from_paths(paths, config, None)
+    drizzle_from_paths(paths, config, None, None)
 }
 
 pub fn drizzle_rgb(

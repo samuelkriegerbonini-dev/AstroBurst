@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { Grid3X3, CheckCircle2, Layers } from "lucide-react";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 import { debayerFits, debayerBatch } from "../../services/processing";
@@ -35,6 +35,8 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
   const [result, setResult] = useState<DebayerResult | null>(null);
   const [batchResult, setBatchResult] = useState<DebayerBatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const patternId = useId();
+  const methodId = useId();
 
   const handleRun = useCallback(async () => {
     if (!selectedFile?.path) return;
@@ -96,8 +98,9 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
       )}
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Bayer Pattern</label>
+        <label htmlFor={patternId} className="text-xs text-zinc-400">Bayer Pattern</label>
         <select
+          id={patternId}
           value={pattern}
           onChange={(e) => setPattern(e.target.value)}
           className="ab-select"
@@ -110,8 +113,9 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Method</label>
+        <label htmlFor={methodId} className="text-xs text-zinc-400">Method</label>
         <select
+          id={methodId}
           value={method}
           onChange={(e) => setMethod(e.target.value as typeof method)}
           className="ab-select"

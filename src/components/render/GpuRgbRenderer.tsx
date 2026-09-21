@@ -15,10 +15,11 @@ interface GpuRgbRendererProps {
   stfR: StfParams;
   stfG: StfParams;
   stfB: StfParams;
+  linked: boolean;
   className?: string;
 }
 
-export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }: GpuRgbRendererProps) {
+export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, linked, className = "" }: GpuRgbRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const resourcesRef = useRef<GpuRgbResources | null>(null);
   const prevDimsRef = useRef({ w: 0, h: 0 });
@@ -151,9 +152,6 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
       u = new Float32Array(20);
       uniformScratchRef.current = u;
     }
-    const linked = stfR.shadow === stfG.shadow && stfG.shadow === stfB.shadow
-      && stfR.midtone === stfG.midtone && stfG.midtone === stfB.midtone
-      && stfR.highlight === stfG.highlight && stfG.highlight === stfB.highlight;
     const linkedMin = Math.min(rgb.r.min, rgb.g.min, rgb.b.min);
     const linkedMax = Math.max(rgb.r.max, rgb.g.max, rgb.b.max);
     u[0] = linked ? linkedMin : rgb.r.min; u[1] = linked ? linkedMax : rgb.r.max; u[2] = stfR.shadow; u[3] = stfR.midtone;
@@ -190,7 +188,7 @@ export default function GpuRgbRenderer({ rgb, stfR, stfG, stfB, className = "" }
     passEncoder.end();
 
     device.queue.submit([commandEncoder.finish()]);
-  }, [rgb, stfR, stfG, stfB, destroyGPUResources]);
+  }, [rgb, stfR, stfG, stfB, linked, destroyGPUResources]);
 
   useEffect(() => {
     if (!gpuReady || !gpuOk) return;

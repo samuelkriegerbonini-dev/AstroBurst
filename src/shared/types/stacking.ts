@@ -168,3 +168,7 @@ export interface DrizzleRgbResult {
   scale: number;
   elapsed_ms: number;
 }
+
+export const STACK_PROGRESS_EVENT = "stack-progress";
+export const CALIBRATE_PROGRESS_EVENT = "calibrate-progress";
+export const DRIZZLE_RGB_PROGRESS_EVENT = "drizzle-rgb-progress";

@@ -18,7 +18,7 @@ export const MIN_SIZE = 1;
 export const MIN_ANNULUS_GAP = 0.5;
 
 const OUTLINE_SEGMENTS = 64;
-const POINT_CROSS_HALF = 3;
+export const POINT_CROSS_HALF_SCREEN_PX = 4;
 const ROT_HANDLE_GAP = 4;
 const SNAP_EPS = 1e-12;
 
@@ -378,7 +378,12 @@ function ring(cx: number, cy: number, rx: number, ry: number, b: Basis): Pt[] {
 
 const IDENTITY_BASIS: Basis = { cos: 1, sin: 0 };
 
-export function shapeOutline(shape: RegionShape): Pt[][] {
+export function pointCrossHalfImagePx(screenPxPerImagePx: number): number {
+  const usable = Number.isFinite(screenPxPerImagePx) && screenPxPerImagePx > 0;
+  return usable ? POINT_CROSS_HALF_SCREEN_PX / screenPxPerImagePx : POINT_CROSS_HALF_SCREEN_PX;
+}
+
+export function shapeOutline(shape: RegionShape, screenPxPerImagePx = 1): Pt[][] {
   switch (shape.shape) {
     case "circle":
       return [ring(shape.x, shape.y, shape.r, shape.r, IDENTITY_BASIS)];
@@ -412,11 +417,13 @@ export function shapeOutline(shape: RegionShape): Pt[][] {
     }
     case "line":
       return [[{ x: shape.x1, y: shape.y1 }, { x: shape.x2, y: shape.y2 }]];
-    case "point":
+    case "point": {
+      const half = pointCrossHalfImagePx(screenPxPerImagePx);
       return [
-        [{ x: shape.x - POINT_CROSS_HALF, y: shape.y }, { x: shape.x + POINT_CROSS_HALF, y: shape.y }],
-        [{ x: shape.x, y: shape.y - POINT_CROSS_HALF }, { x: shape.x, y: shape.y + POINT_CROSS_HALF }],
+        [{ x: shape.x - half, y: shape.y }, { x: shape.x + half, y: shape.y }],
+        [{ x: shape.x, y: shape.y - half }, { x: shape.x, y: shape.y + half }],
       ];
+    }
   }
 }
 

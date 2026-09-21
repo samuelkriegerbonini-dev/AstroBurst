@@ -41,6 +41,24 @@ describe("wavelengthAutoWeights", () => {
     ]);
   });
 
+  it("keeps the luminance bin out of the R and G weights of an LRGB set", () => {
+    const weights = wavelengthAutoWeights([bin("l"), bin("r"), bin("g"), bin("b")]);
+
+    expect(weights.find((w) => w.channelId === "l")).toBeUndefined();
+    expect(weights).toEqual([
+      { channelId: "b", r: 0, g: 0, b: 1 },
+      { channelId: "g", r: 0, g: 1, b: 0 },
+      { channelId: "r", r: 1, g: 0, b: 0 },
+    ]);
+  });
+
+  it("keeps the luminance bin out of the balanced spread as well", () => {
+    const weights = wavelengthAutoWeightsBalanced([bin("l"), bin("ha", 656), bin("oiii", 501)]);
+
+    expect(weights.map((w) => w.channelId)).toEqual(["oiii", "ha"]);
+    expect(emptyBlendColumns(weights)).toEqual([]);
+  });
+
   it("never leaves a column empty for bin counts the auto map produces", () => {
     for (let count = 2; count <= 8; count += 1) {
       const bins = Array.from({ length: count }, (_, i) => bin(`wl${i}`, 400 + i * 100));

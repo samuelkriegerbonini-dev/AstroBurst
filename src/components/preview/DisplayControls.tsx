@@ -18,13 +18,15 @@ import {
 interface DisplayControlsProps {
   vmin: number;
   vmax: number;
+  disabled?: boolean;
 }
 
 const SELECT_CLASS =
-  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] text-zinc-200 focus:outline-none focus:border-zinc-500";
+  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] text-zinc-200 focus:border-zinc-500";
 const INPUT_CLASS =
-  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-200 w-16 focus:outline-none focus:border-zinc-500";
+  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-200 w-16 focus:border-zinc-500";
 const LABEL_CLASS = "text-[9px] uppercase tracking-wide text-zinc-500";
+const GROUP_CLASS = "flex items-center gap-2 shrink-0";
 
 function formatLimit(v: number): string {
   if (!Number.isFinite(v)) return "—";
@@ -39,7 +41,7 @@ function parseNullable(text: string): number | null | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function DisplayControlsInner({ vmin, vmax }: DisplayControlsProps) {
+function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsProps) {
   const { display, setDisplay, limitsLoading, limitsError } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
 
@@ -77,208 +79,219 @@ function DisplayControlsInner({ vmin, vmax }: DisplayControlsProps) {
   };
 
   return (
-    <div
-      className="flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap"
-      style={{ background: "rgba(24,24,27,0.6)" }}
+    <fieldset
+      disabled={disabled}
+      className={`flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap ${disabled ? "opacity-50" : ""}`}
+      style={{ background: "rgba(24,24,27,0.6)", minInlineSize: 0 }}
     >
-      <label className="flex items-center gap-1" title="Stretch curve applied after normalisation">
-        <span className={LABEL_CLASS}>stretch</span>
-        <select
-          className={SELECT_CLASS}
-          value={display.stretch}
-          onChange={(e) => setDisplay({ stretch: e.target.value as StretchMode })}
-        >
-          {STRETCH_MODES.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-      </label>
-
-      {display.stretch === "asinh" && (
-        <label className="flex items-center gap-1" title="asinh softening parameter a">
-          <span className={LABEL_CLASS}>a</span>
-          <input
-            type="number"
-            step={0.01}
-            min={0.0001}
-            className={INPUT_CLASS}
-            value={display.asinhA}
-            onChange={onNumber("asinhA")}
-          />
+      <div className={GROUP_CLASS}>
+        <label className="flex items-center gap-1" title="Stretch curve applied after normalisation">
+          <span className={LABEL_CLASS}>stretch</span>
+          <select
+            className={SELECT_CLASS}
+            value={display.stretch}
+            onChange={(e) => setDisplay({ stretch: e.target.value as StretchMode })}
+          >
+            {STRETCH_MODES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
         </label>
-      )}
 
-      {display.stretch === "power" && (
-        <label className="flex items-center gap-1" title="power-law exponent">
-          <span className={LABEL_CLASS}>p</span>
-          <input
-            type="number"
-            step={0.1}
-            min={0.01}
-            className={INPUT_CLASS}
-            value={display.power}
-            onChange={onNumber("power")}
-          />
-        </label>
-      )}
+        {display.stretch === "asinh" && (
+          <label className="flex items-center gap-1" title="asinh softening parameter a">
+            <span className={LABEL_CLASS}>a</span>
+            <input
+              type="number"
+              step={0.01}
+              min={0.0001}
+              aria-label="Asinh softening parameter a"
+              className={INPUT_CLASS}
+              value={display.asinhA}
+              onChange={onNumber("asinhA")}
+            />
+          </label>
+        )}
 
-      <label
-        className={`flex items-center gap-1 ${isMtf ? "opacity-40" : ""}`}
-        title={isMtf ? "Limits are the data min/max while stretch is mtf" : "How vmin/vmax are chosen"}
-      >
-        <span className={LABEL_CLASS}>limits</span>
-        <select
-          className={SELECT_CLASS}
-          value={display.limits}
-          disabled={isMtf}
-          onChange={(e) => setDisplay({ limits: e.target.value as LimitMode })}
-        >
-          {LIMIT_MODES.map((l) => (
-            <option key={l} value={l}>{l}</option>
-          ))}
-        </select>
-      </label>
-
-      {!isMtf && display.limits === "percentile" && (
-        <>
-          <label className="flex items-center gap-1" title="lower percentile (%)">
-            <span className={LABEL_CLASS}>lo%</span>
+        {display.stretch === "power" && (
+          <label className="flex items-center gap-1" title="power-law exponent">
+            <span className={LABEL_CLASS}>p</span>
             <input
               type="number"
               step={0.1}
-              min={0}
-              max={100}
+              min={0.01}
+              aria-label="Power-law exponent p"
               className={INPUT_CLASS}
-              value={display.percentileLow}
-              onChange={onNumber("percentileLow")}
-              onBlur={commitPercentiles}
-              onKeyDown={onCommitKey(commitPercentiles)}
+              value={display.power}
+              onChange={onNumber("power")}
             />
           </label>
-          <label className="flex items-center gap-1" title="upper percentile (%)">
-            <span className={LABEL_CLASS}>hi%</span>
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={100}
-              className={INPUT_CLASS}
-              value={display.percentileHigh}
-              onChange={onNumber("percentileHigh")}
-              onBlur={commitPercentiles}
-              onKeyDown={onCommitKey(commitPercentiles)}
-            />
-          </label>
-        </>
-      )}
+        )}
+      </div>
 
-      {!isMtf && display.limits === "user" && (
-        <>
-          <label className="flex items-center gap-1" title="vmin (empty = data min)">
-            <span className={LABEL_CLASS}>lo</span>
-            <input
-              type="number"
-              step="any"
-              className={INPUT_CLASS}
-              value={display.userLo ?? ""}
-              placeholder="min"
-              onChange={onNullable("userLo")}
-              onBlur={commitUserLimits}
-              onKeyDown={onCommitKey(commitUserLimits)}
-            />
-          </label>
-          <label className="flex items-center gap-1" title="vmax (empty = data max)">
-            <span className={LABEL_CLASS}>hi</span>
-            <input
-              type="number"
-              step="any"
-              className={INPUT_CLASS}
-              value={display.userHi ?? ""}
-              placeholder="max"
-              onChange={onNullable("userHi")}
-              onBlur={commitUserLimits}
-              onKeyDown={onCommitKey(commitUserLimits)}
-            />
-          </label>
-        </>
-      )}
-
-      {!isMtf && display.limits === "zscale" && (
-        <label className="flex items-center gap-1" title="zscale contrast">
-          <span className={LABEL_CLASS}>contrast</span>
-          <input
-            type="number"
-            step={0.05}
-            min={0.01}
-            max={1}
-            className={INPUT_CLASS}
-            value={display.zscaleContrast}
-            onChange={onNumber("zscaleContrast")}
-          />
-        </label>
-      )}
-
-      <label className="flex items-center gap-1" title="colour lookup table">
-        <span className={LABEL_CLASS}>cmap</span>
-        <select
-          className={SELECT_CLASS}
-          value={display.colormap}
-          onChange={(e) => setDisplay({ colormap: e.target.value as ColormapName })}
+      <div className={GROUP_CLASS}>
+        <label
+          className={`flex items-center gap-1 ${isMtf ? "opacity-40" : ""}`}
+          title={isMtf ? "Limits are the data min/max while stretch is mtf" : "How vmin/vmax are chosen"}
         >
-          {COLORMAP_NAMES.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-      </label>
+          <span className={LABEL_CLASS}>limits</span>
+          <select
+            className={SELECT_CLASS}
+            value={display.limits}
+            disabled={isMtf}
+            onChange={(e) => setDisplay({ limits: e.target.value as LimitMode })}
+          >
+            {LIMIT_MODES.map((l) => (
+              <option key={l} value={l}>{l}</option>
+            ))}
+          </select>
+        </label>
 
-      <label className="flex items-center gap-1 cursor-pointer" title="invert the lookup table">
-        <input
-          type="checkbox"
-          className="accent-zinc-400"
-          checked={display.invert}
-          onChange={(e) => setDisplay({ invert: e.target.checked })}
-        />
-        <span className={LABEL_CLASS}>invert</span>
-      </label>
+        {!isMtf && display.limits === "percentile" && (
+          <>
+            <label className="flex items-center gap-1" title="lower percentile (%)">
+              <span className={LABEL_CLASS}>lo%</span>
+              <input
+                type="number"
+                step={0.1}
+                min={0}
+                max={100}
+                className={INPUT_CLASS}
+                value={display.percentileLow}
+                onChange={onNumber("percentileLow")}
+                onBlur={commitPercentiles}
+                onKeyDown={onCommitKey(commitPercentiles)}
+              />
+            </label>
+            <label className="flex items-center gap-1" title="upper percentile (%)">
+              <span className={LABEL_CLASS}>hi%</span>
+              <input
+                type="number"
+                step={0.1}
+                min={0}
+                max={100}
+                className={INPUT_CLASS}
+                value={display.percentileHigh}
+                onChange={onNumber("percentileHigh")}
+                onBlur={commitPercentiles}
+                onKeyDown={onCommitKey(commitPercentiles)}
+              />
+            </label>
+          </>
+        )}
 
-      <label className="flex items-center gap-1 cursor-pointer" title="WCS coordinate grid overlay (needs a plate-solved image)">
-        <input
-          type="checkbox"
-          className="accent-zinc-400"
-          checked={display.grid}
-          onChange={(e) => setDisplay({ grid: e.target.checked })}
-        />
-        <span className={LABEL_CLASS}>grid</span>
-      </label>
+        {!isMtf && display.limits === "user" && (
+          <>
+            <label className="flex items-center gap-1" title="vmin (empty = data min)">
+              <span className={LABEL_CLASS}>lo</span>
+              <input
+                type="number"
+                step="any"
+                className={INPUT_CLASS}
+                value={display.userLo ?? ""}
+                placeholder="min"
+                onChange={onNullable("userLo")}
+                onBlur={commitUserLimits}
+                onKeyDown={onCommitKey(commitUserLimits)}
+              />
+            </label>
+            <label className="flex items-center gap-1" title="vmax (empty = data max)">
+              <span className={LABEL_CLASS}>hi</span>
+              <input
+                type="number"
+                step="any"
+                className={INPUT_CLASS}
+                value={display.userHi ?? ""}
+                placeholder="max"
+                onChange={onNullable("userHi")}
+                onBlur={commitUserLimits}
+                onKeyDown={onCommitKey(commitUserLimits)}
+              />
+            </label>
+          </>
+        )}
 
-      {display.grid && (
-        <>
-          <label className="flex items-center gap-1" title="sky frame of the coordinate grid">
-            <span className={LABEL_CLASS}>frame</span>
-            <select
-              className={SELECT_CLASS}
-              value={display.gridFrame}
-              onChange={(e) => setDisplay({ gridFrame: e.target.value as GridFrame })}
-            >
-              {GRID_FRAMES.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </select>
+        {!isMtf && display.limits === "zscale" && (
+          <label className="flex items-center gap-1" title="zscale contrast">
+            <span className={LABEL_CLASS}>contrast</span>
+            <input
+              type="number"
+              step={0.05}
+              min={0.01}
+              max={1}
+              className={INPUT_CLASS}
+              value={display.zscaleContrast}
+              onChange={onNumber("zscaleContrast")}
+            />
           </label>
-          <label className="flex items-center gap-1" title="grid density (1 = sparse, 5 = dense)">
-            <span className={LABEL_CLASS}>density</span>
-            <select
-              className={SELECT_CLASS}
-              value={display.gridDensity}
-              onChange={(e) => setDisplay({ gridDensity: Number(e.target.value) })}
-            >
-              {GRID_DENSITIES.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
-          </label>
-        </>
-      )}
+        )}
+      </div>
+
+      <div className={GROUP_CLASS}>
+        <label className="flex items-center gap-1" title="colour lookup table">
+          <span className={LABEL_CLASS}>cmap</span>
+          <select
+            className={SELECT_CLASS}
+            value={display.colormap}
+            onChange={(e) => setDisplay({ colormap: e.target.value as ColormapName })}
+          >
+            {COLORMAP_NAMES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex items-center gap-1 cursor-pointer" title="invert the lookup table">
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            checked={display.invert}
+            onChange={(e) => setDisplay({ invert: e.target.checked })}
+          />
+          <span className={LABEL_CLASS}>invert</span>
+        </label>
+      </div>
+
+      <div className={GROUP_CLASS}>
+        <label className="flex items-center gap-1 cursor-pointer" title="WCS coordinate grid overlay (needs a plate-solved image)">
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            checked={display.grid}
+            onChange={(e) => setDisplay({ grid: e.target.checked })}
+          />
+          <span className={LABEL_CLASS}>grid</span>
+        </label>
+
+        {display.grid && (
+          <>
+            <label className="flex items-center gap-1" title="sky frame of the coordinate grid">
+              <span className={LABEL_CLASS}>frame</span>
+              <select
+                className={SELECT_CLASS}
+                value={display.gridFrame}
+                onChange={(e) => setDisplay({ gridFrame: e.target.value as GridFrame })}
+              >
+                {GRID_FRAMES.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1" title="grid density (1 = sparse, 5 = dense)">
+              <span className={LABEL_CLASS}>density</span>
+              <select
+                className={SELECT_CLASS}
+                value={display.gridDensity}
+                onChange={(e) => setDisplay({ gridDensity: Number(e.target.value) })}
+              >
+                {GRID_DENSITIES.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+      </div>
 
       <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
         {limitsLoading ? "…" : `${formatLimit(vmin)} … ${formatLimit(vmax)}`}
@@ -298,7 +311,7 @@ function DisplayControlsInner({ vmin, vmax }: DisplayControlsProps) {
           {limitsError}
         </span>
       )}
-    </div>
+    </fieldset>
   );
 }
 

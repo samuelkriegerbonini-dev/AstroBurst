@@ -58,6 +58,79 @@ const Overlay = memo(function Overlay({
   );
 });
 
+interface ImageBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+const ImagePreview = memo(function ImagePreview({
+  src,
+  alt,
+  isCube,
+  onClick,
+  onError,
+  starOverlayRef,
+  dqCanvasRef,
+}: {
+  src: string;
+  alt: string | undefined;
+  isCube: boolean;
+  onClick: (e: React.MouseEvent<HTMLElement>) => void;
+  onError: () => void;
+  starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
+  dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+}) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<ImageBox>({ left: 0, top: 0, width: 0, height: 0 });
+
+  const measure = useCallback(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    const next: ImageBox = { left: img.offsetLeft, top: img.offsetTop, width: img.offsetWidth, height: img.offsetHeight };
+    setBox((prev) =>
+      prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height
+        ? prev
+        : next,
+    );
+  }, []);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(img);
+    const frame = frameRef.current;
+    if (frame) ro.observe(frame);
+    return () => ro.disconnect();
+  }, [measure, src]);
+
+  return (
+    <div ref={frameRef} className="relative flex-1 min-h-0 flex items-center justify-center">
+      <img
+        ref={imgRef}
+        src={src}
+        alt={alt}
+        className={`max-w-full max-h-full object-contain ${isCube ? "cursor-crosshair" : ""}`}
+        onClick={onClick}
+        onError={onError}
+        onLoad={measure}
+        loading="eager"
+        decoding="async"
+      />
+      <div
+        className="absolute pointer-events-none"
+        style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+      >
+        <Overlay starOverlayRef={starOverlayRef} dqCanvasRef={dqCanvasRef} isCube={isCube} />
+      </div>
+    </div>
+  );
+});
+
 function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
@@ -165,6 +238,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               step={0.001}
               value={stf[param]}
               onChange={(e) => updateStf(ch, param, parseFloat(e.target.value))}
+              aria-label={`${label} ${param}`}
               className="w-full h-1 accent-violet-400 cursor-pointer"
             />
             <span className="text-[8px] font-mono text-zinc-500 w-9 shrink-0 text-right">{stf[param].toFixed(3)}</span>
@@ -247,6 +321,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
                   stfR={displayReferred ? IDENTITY_STF : compositeStfR}
                   stfG={displayReferred ? IDENTITY_STF : compositeStfG}
                   stfB={displayReferred ? IDENTITY_STF : compositeStfB}
+                  linked={displayReferred ? true : compositeStfLinked}
                 />
               </GpuViewport>
             </Suspense>
@@ -302,18 +377,16 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   if (previewUrl && !previewError) {
     return (
       <div className="flex flex-col h-full">
-        <div className="relative flex-1 min-h-0 flex items-center justify-center">
-          <img
-            src={previewUrl}
-            alt={file?.name}
-            className={`max-w-full max-h-full object-contain ${isCube ? "cursor-crosshair" : ""}`}
-            onClick={onImageClick}
-            onError={handlePreviewError}
-            loading="eager"
-            decoding="async"
-          />
-          <Overlay starOverlayRef={starOverlayRef} dqCanvasRef={dqCanvasRef} isCube={isCube} />
-        </div>
+        <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
+        <ImagePreview
+          src={previewUrl}
+          alt={file?.name}
+          isCube={isCube}
+          onClick={onImageClick}
+          onError={handlePreviewError}
+          starOverlayRef={starOverlayRef}
+          dqCanvasRef={dqCanvasRef}
+        />
       </div>
     );
   }
@@ -321,6 +394,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   if (previewError) {
     return (
       <div className="flex flex-col h-full">
+        <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-zinc-600">
           <Image size={32} strokeWidth={1} />
           <p className="text-xs">Preview unavailable</p>

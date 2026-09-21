@@ -62,6 +62,9 @@ const RIGHT_MIN = 280;
 const RIGHT_MAX = 640;
 const RIGHT_DEFAULT = 380;
 
+const MIN_PREVIEW_W = 320;
+const MIN_PREVIEW_H = 200;
+
 const gpuSupported = typeof navigator !== "undefined" && !!navigator.gpu;
 
 function TabSpinner() {
@@ -122,7 +125,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { isCube } = useCubeContext();
   const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
-  const { renderedPreviewUrl, processedSourcePath } = useRenderContext();
+  const { renderedPreviewUrl, processedSourcePath, processedSourceVersion } = useRenderContext();
   const { compositePreviewUrl } = useCompositePreview();
   const { initRgb, setCompositePreviewUrl } = useCompositeActions();
   const { starOverlayRef } = useStarOverlayContext();
@@ -183,6 +186,79 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const rResizing = useRef(false);
   const rStartX = useRef(0);
   const rStartW = useRef(0);
+
+  const centerColRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const rightToolOpenRef = useRef(false);
+  rightToolOpenRef.current = rightTool !== null;
+  const bottomOpenRef = useRef(false);
+  bottomOpenRef.current = bottomOpen;
+
+  const applyRightWidth = useCallback((width: number) => {
+    const el = rightElRef.current;
+    if (el) el.style.width = `min(${width}px, 60vw)`;
+    const outer = rightOuterRef.current;
+    if (outer) outer.style.width = `min(${width}px, 60vw)`;
+  }, []);
+
+  const applyBottomHeight = useCallback((height: number) => {
+    const el = bottomElRef.current;
+    if (el) el.style.height = `${height}px`;
+    const outer = bottomOuterRef.current;
+    if (outer) outer.style.height = `${height}px`;
+  }, []);
+
+  useEffect(() => {
+    const center = centerColRef.current;
+    if (!center) return;
+    let raf: number | null = null;
+    const clamp = () => {
+      raf = null;
+      if (rResizing.current || !rightToolOpenRef.current) return;
+      const deficit = MIN_PREVIEW_W - center.clientWidth;
+      if (deficit <= 1) return;
+      const next = Math.max(RIGHT_MIN, rightWidthRef.current - deficit);
+      if (next === rightWidthRef.current) return;
+      rightWidthRef.current = next;
+      applyRightWidth(next);
+      saveLayout("rightW", next);
+      forceRender((c) => c + 1);
+    };
+    const ro = new ResizeObserver(() => {
+      if (raf === null) raf = requestAnimationFrame(clamp);
+    });
+    ro.observe(center);
+    return () => {
+      ro.disconnect();
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [applyRightWidth]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    let raf: number | null = null;
+    const clamp = () => {
+      raf = null;
+      if (bResizing.current || !bottomOpenRef.current) return;
+      const deficit = MIN_PREVIEW_H - viewport.clientHeight;
+      if (deficit <= 1) return;
+      const next = Math.max(BOTTOM_MIN, bottomHeightRef.current - deficit);
+      if (next === bottomHeightRef.current) return;
+      bottomHeightRef.current = next;
+      applyBottomHeight(next);
+      saveLayout("bottomH", next);
+      forceRender((c) => c + 1);
+    };
+    const ro = new ResizeObserver(() => {
+      if (raf === null) raf = requestAnimationFrame(clamp);
+    });
+    ro.observe(viewport);
+    return () => {
+      ro.disconnect();
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [applyBottomHeight]);
 
   useEffect(() => {
     probeGpu().then(() => {
@@ -276,16 +352,17 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const prevProcessedSourceRef = useRef<string | null>(null);
   useEffect(() => {
     const key = file ? `${file.id}|${file.path}` : null;
+    const token = processedSourceVersion + "|" + (processedSourcePath ?? "");
     const previous = prevProcessedSourceRef.current;
-    prevProcessedSourceRef.current = processedSourcePath;
+    prevProcessedSourceRef.current = token;
     if (processedSourceFileKeyRef.current !== key) {
       processedSourceFileKeyRef.current = key;
       return;
     }
-    if (previous === processedSourcePath) return;
+    if (previous === token) return;
     if (!file || !gpuAvailable || !useGpu || compositePreviewUrl || file.result?.is_rgb) return;
     loadRawPixels(true);
-  }, [processedSourcePath, file, gpuAvailable, useGpu, compositePreviewUrl, loadRawPixels]);
+  }, [processedSourcePath, processedSourceVersion, file, gpuAvailable, useGpu, compositePreviewUrl, loadRawPixels]);
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);
@@ -383,9 +460,13 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     const el = bottomElRef.current;
     const outer = bottomOuterRef.current;
     if (outer) outer.style.transition = "none";
+    const viewportH = viewportRef.current?.clientHeight;
+    const maxHeight = viewportH === undefined
+      ? BOTTOM_MAX
+      : Math.min(BOTTOM_MAX, Math.max(BOTTOM_MIN, bStartH.current + viewportH - MIN_PREVIEW_H));
     const onMove = (ev: MouseEvent) => {
       if (!bResizing.current) return;
-      const next = Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, bStartH.current - (ev.clientY - bStartY.current)));
+      const next = Math.max(BOTTOM_MIN, Math.min(maxHeight, bStartH.current - (ev.clientY - bStartY.current)));
       bottomHeightRef.current = next;
       if (el) el.style.height = `${next}px`;
       if (outer) outer.style.height = `${next}px`;
@@ -427,9 +508,13 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     const el = rightElRef.current;
     const outer = rightOuterRef.current;
     if (outer) outer.style.transition = "none";
+    const centerW = centerColRef.current?.clientWidth;
+    const maxWidth = centerW === undefined
+      ? RIGHT_MAX
+      : Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, rStartW.current + centerW - MIN_PREVIEW_W));
     const onMove = (ev: MouseEvent) => {
       if (!rResizing.current) return;
-      const next = Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, rStartW.current - (ev.clientX - rStartX.current)));
+      const next = Math.max(RIGHT_MIN, Math.min(maxWidth, rStartW.current - (ev.clientX - rStartX.current)));
       rightWidthRef.current = next;
       if (el) el.style.width = `min(${next}px, 60vw)`;
       if (outer) outer.style.width = `min(${next}px, 60vw)`;
@@ -477,7 +562,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
 
   return (
     <div className="flex h-full overflow-hidden">
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+      <div ref={centerColRef} className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
         <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "rgba(5,5,16,0.6)", borderBottom: "1px solid var(--ab-border)" }}>
           <div className="flex items-center gap-2 shrink-0">
@@ -520,7 +605,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
 
         <ProgressBarInner />
 
-        <div className="flex-1 overflow-hidden min-h-0">
+        <div ref={viewportRef} className="flex-1 overflow-hidden min-h-0">
           {!file ? (
             <AdvancedImageViewer original={null} processed={null} />
           ) : useAdvancedViewer ? (

@@ -189,37 +189,6 @@ impl<T: FftFloat> FftEngine2D<T> {
         });
     }
 
-    pub fn forward_2d_alloc(&self, data: &[Complex<T>]) -> Vec<Complex<T>> {
-        let mut buf = data.to_vec();
-        self.forward_2d(&mut buf);
-        buf
-    }
-
-    pub fn inverse_2d_alloc(&self, data: &[Complex<T>]) -> Vec<Complex<T>> {
-        let mut buf = data.to_vec();
-        self.inverse_2d(&mut buf);
-        buf
-    }
-
-    #[inline]
-    pub fn fwd_row_plan(&self) -> &Arc<dyn Fft<T>> {
-        &self.fwd_row
-    }
-
-    #[inline]
-    pub fn fwd_col_plan(&self) -> &Arc<dyn Fft<T>> {
-        &self.fwd_col
-    }
-
-    #[inline]
-    pub fn inv_row_plan(&self) -> &Arc<dyn Fft<T>> {
-        &self.inv_row
-    }
-
-    #[inline]
-    pub fn inv_col_plan(&self) -> &Arc<dyn Fft<T>> {
-        &self.inv_col
-    }
 }
 
 pub fn prepare_windowed_buffer<T: FftFloat>(
@@ -269,26 +238,6 @@ pub fn prepare_buffer_no_window<T: FftFloat>(
 
 pub fn extract_real<T: FftFloat>(data: &[Complex<T>], rows: usize, cols: usize) -> Vec<T> {
     data.iter().take(rows * cols).map(|c| c.re).collect()
-}
-
-pub fn shifted_log_magnitude<T: FftFloat>(
-    data: &[Complex<T>],
-    rows: usize,
-    cols: usize,
-) -> Vec<T> {
-    let half_r = (rows + 1) / 2;
-    let half_c = (cols + 1) / 2;
-    (0..rows * cols)
-        .into_par_iter()
-        .map(|idx| {
-            let r = idx / cols;
-            let c = idx % cols;
-            let sr = (r + half_r) % rows;
-            let sc = (c + half_c) % cols;
-            let mag = super::complex::norm(data[sr * cols + sc]);
-            T::ln1p_val(mag)
-        })
-        .collect()
 }
 
 pub fn find_peak<T: FftFloat>(surface: &[T], cols: usize) -> (usize, usize, T) {

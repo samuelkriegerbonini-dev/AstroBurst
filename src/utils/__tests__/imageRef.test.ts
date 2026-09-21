@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseImageRef, formatImageRef, hduRef, arrayRef, planeLabel } from "../imageRef";
+import { parseImageRef, formatImageRef, hduRef, arrayRef, planeLabel, exportStem } from "../imageRef";
 
 describe("parseImageRef", () => {
   it("returns auto for a plain path", () => {
@@ -58,6 +58,33 @@ describe("hduRef / arrayRef", () => {
   it("build canonical refs", () => {
     expect(hduRef("a.fits", 3)).toBe("a.fits#hdu=3");
     expect(arrayRef("r.asdf", "roman.dq")).toBe("r.asdf#array=roman.dq");
+  });
+});
+
+describe("exportStem", () => {
+  it("strips directories and the FITS extension", () => {
+    expect(exportStem("C:\\data\\jw01234_i2d.fits")).toBe("jw01234_i2d");
+    expect(exportStem("/home/u/obs/m51.fit")).toBe("m51");
+    expect(exportStem("C:/data/cube.fts")).toBe("cube");
+  });
+
+  it("drops the image-ref fragment before building the stem", () => {
+    expect(exportStem("C:\\data\\jw01234_i2d.fits#hdu=2")).toBe("jw01234_i2d");
+    expect(exportStem("C:/data/r0000.asdf#array=roman.dq")).toBe("r0000");
+    expect(exportStem("C:/data/a.fits#foo=1")).toBe("a");
+  });
+
+  it("covers the other accepted source extensions", () => {
+    expect(exportStem("bundle.zip")).toBe("bundle");
+    expect(exportStem("obs.asdf")).toBe("obs");
+    expect(exportStem("obs.fits.gz")).toBe("obs");
+    expect(exportStem("obs.fits.fz")).toBe("obs");
+  });
+
+  it("falls back when nothing usable remains", () => {
+    expect(exportStem("")).toBe("output");
+    expect(exportStem(".fits")).toBe("output");
+    expect(exportStem("", "image")).toBe("image");
   });
 });
 

@@ -152,6 +152,7 @@ function CubeFrameNavInner({ filePath, totalFrames, onFrameChange }: CubeFrameNa
         max={totalFrames - 1}
         value={currentFrame}
         onChange={handleSlider}
+        aria-label="Cube frame"
         className="w-full accent-purple-500 mb-2"
       />
 

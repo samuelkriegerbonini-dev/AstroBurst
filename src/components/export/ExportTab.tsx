@@ -53,6 +53,10 @@ function ExportTabInner() {
         const result = await exportFitsRgb(rPath, gPath, bPath, outputPath, {
           copyWcs: options?.copyWcs ?? true,
           copyMetadata: options?.copyMetadata ?? true,
+          bitpix: options?.bitpix,
+          history: options?.history,
+          compress: options?.compress,
+          quantizeLevel: options?.quantizeLevel,
         });
         setExportResult(result);
       } catch (e) {

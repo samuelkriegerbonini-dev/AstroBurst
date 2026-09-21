@@ -176,6 +176,7 @@ pub const KERNEL_GAUSSIAN: &str = "gaussian";
 pub const KERNEL_LANCZOS3: &str = "lanczos3";
 pub const KERNEL_LANCZOS: &str = "lanczos";
 
+pub const STAGE_LOAD_FRAME: &str = "load_frame";
 pub const STAGE_RENDER: &str = "render";
 pub const STAGE_SAVE: &str = "save";
 
@@ -210,6 +211,10 @@ pub const ALIGN_METHOD: &str = "align_method";
 pub const COPY_WCS: &str = "copy_wcs";
 
 pub const RES_FILE_SIZE_BYTES: &str = "file_size_bytes";
+pub const RES_SOURCE_SIZE_BYTES: &str = "source_size_bytes";
+pub const RES_OUTPUT_SIZE_BYTES: &str = "output_size_bytes";
+pub const RES_DROPPED: &str = "dropped";
+pub const RES_KEPT_RAW: &str = "kept_raw";
 pub const RES_COMPRESS: &str = "compress";
 pub const RES_QUANTIZE_LEVEL: &str = "quantize_level";
 pub const RES_APPLY_STF: &str = "apply_stf";
@@ -264,9 +269,11 @@ pub const RES_LEVELS_APPLIED: &str = "levels_applied";
 pub const RES_STF_APPLIED: &str = "stf_applied";
 pub const RES_CLEANED_BYTES: &str = "cleaned_bytes";
 pub const RES_CLEANED_FILES: &str = "cleaned_files";
+pub const RES_CLEANED_PATHS: &str = "cleaned_paths";
 pub const RES_FILE_COUNT: &str = "file_count";
 pub const RES_OUTPUT_DIR: &str = "output_dir";
 pub const RES_TOTAL_SIZE: &str = "total_size";
+pub const RES_MAX_SIZE: &str = "max_size";
 
 pub const WIZARD_CACHE_PREFIX: &str = "__wizard_ch_";
 

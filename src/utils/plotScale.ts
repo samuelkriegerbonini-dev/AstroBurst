@@ -40,6 +40,27 @@ export function linearScale(domain: [number, number], range: [number, number]): 
   return (v: number) => r0 + (v - d0) * k;
 }
 
+const TICK_EXPONENTIAL_BELOW = 1e-2;
+const TICK_EXPONENTIAL_ABOVE = 1e5;
+const TICK_EXPONENTIAL_DIGITS = 2;
+const TICK_EXTRA_DECIMALS = 2;
+const TICK_MAX_DECIMALS = 6;
+
+export function formatAxisTick(value: number, range: number): string {
+  if (!Number.isFinite(value)) return "";
+  if (value === 0) return "0";
+  const span = Number.isFinite(range) && range > 0 ? range : Math.abs(value);
+  const magnitude = Math.max(Math.abs(value), span);
+  if (magnitude < TICK_EXPONENTIAL_BELOW || magnitude >= TICK_EXPONENTIAL_ABOVE) {
+    return value.toExponential(TICK_EXPONENTIAL_DIGITS);
+  }
+  const decimals = Math.min(
+    TICK_MAX_DECIMALS,
+    Math.max(0, Math.ceil(-Math.log10(span)) + TICK_EXTRA_DECIMALS),
+  );
+  return value.toFixed(decimals);
+}
+
 export function finiteExtent(values: (number | null)[]): [number, number] | null {
   let lo = Infinity;
   let hi = -Infinity;

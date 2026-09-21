@@ -129,6 +129,53 @@ describe("RegionStoreCore", () => {
     expect(store.getLastSavedAt()).toBe(12345);
   });
 
+  it("skips persistence for a non-persisting update until persistNow", () => {
+    const storage = new MemoryStorage();
+    const store = new RegionStoreCore(storage, () => 999);
+    store.add("f", region("r1"));
+    store.flush();
+    const key = `${STORAGE_PREFIX}f`;
+    const saved = storage.data.get(key) as string;
+
+    for (let i = 0; i < 10; i++) {
+      store.update("f", "r1", { shape: { shape: "circle", x: i, y: i, r: 3 } }, false);
+    }
+    vi.advanceTimersByTime(SAVE_DEBOUNCE_MS * 2);
+    expect(storage.data.get(key)).toBe(saved);
+    expect(store.getDoc("f").regions[0].shape).toEqual({ shape: "circle", x: 9, y: 9, r: 3 });
+
+    store.persistNow("f");
+    expect(JSON.parse(storage.data.get(key) as string)[0].shape).toEqual({ shape: "circle", x: 9, y: 9, r: 3 });
+  });
+
+  it("flush still writes edits that were deferred by an interrupted drag", () => {
+    const storage = new MemoryStorage();
+    const store = new RegionStoreCore(storage);
+    store.add("f", region("r1"));
+    store.flush();
+    store.update("f", "r1", { shape: { shape: "circle", x: 42, y: 7, r: 3 } }, false);
+    store.flush();
+    expect(JSON.parse(storage.data.get(`${STORAGE_PREFIX}f`) as string)[0].shape).toEqual({
+      shape: "circle", x: 42, y: 7, r: 3,
+    });
+  });
+
+  it("does not rewrite storage when only the selection changed", () => {
+    const storage = new MemoryStorage();
+    let writes = 0;
+    const counting = {
+      getItem: (k: string) => storage.getItem(k),
+      setItem: (k: string, v: string) => { writes += 1; storage.setItem(k, v); },
+    };
+    const store = new RegionStoreCore(counting);
+    store.add("f", region("r1"));
+    store.flush();
+    expect(writes).toBe(1);
+    store.select("f", "r1");
+    store.flush();
+    expect(writes).toBe(1);
+  });
+
   it("reloads from storage in a fresh instance", () => {
     const storage = new MemoryStorage();
     const first = new RegionStoreCore(storage);

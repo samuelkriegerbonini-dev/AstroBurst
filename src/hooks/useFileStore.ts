@@ -37,14 +37,12 @@ class FileStore {
   };
 
   private listeners = new Set<Listener>();
-  private fileListeners = new Map<string, Set<Listener>>();
   private statsListeners = new Set<Listener>();
   private selectedListeners = new Set<Listener>();
   private listListeners = new Set<Listener>();
 
   private pendingFlush = false;
   private pendingChannels = 0;
-  private pendingFileIds = new Set<string>();
 
   private _doneFilesCache: ProcessedFile[] = [];
   private _doneFilesCacheVersion = -1;
@@ -54,20 +52,6 @@ class FileStore {
   subscribe = (listener: Listener) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
-  };
-
-  subscribeToFile = (id: string, listener: Listener) => {
-    if (!this.fileListeners.has(id)) {
-      this.fileListeners.set(id, new Set());
-    }
-    this.fileListeners.get(id)!.add(listener);
-    return () => {
-      const set = this.fileListeners.get(id);
-      if (set) {
-        set.delete(listener);
-        if (set.size === 0) this.fileListeners.delete(id);
-      }
-    };
   };
 
   subscribeToStats = (listener: Listener) => {
@@ -131,24 +115,17 @@ class FileStore {
     return s.total > 0 ? Math.round(((s.done + s.failed) / s.total) * 100) : 0;
   };
 
-  private scheduleFlush(channels: number, fileId?: string) {
+  private scheduleFlush(channels: number) {
     this.pendingChannels |= channels;
-    if (fileId) this.pendingFileIds.add(fileId);
 
     if (this.pendingFlush) return;
     this.pendingFlush = true;
 
     queueMicrotask(() => {
       const ch = this.pendingChannels;
-      const fileIds = this.pendingFileIds;
       this.pendingFlush = false;
       this.pendingChannels = 0;
-      this.pendingFileIds = new Set();
 
-      for (const fid of fileIds) {
-        const set = this.fileListeners.get(fid);
-        if (set) set.forEach((l) => l());
-      }
       if (ch & NotifyChannel.Stats) this.statsListeners.forEach((l) => l());
       if (ch & NotifyChannel.Selected) this.selectedListeners.forEach((l) => l());
       if (ch & NotifyChannel.List) this.listListeners.forEach((l) => l());
@@ -214,7 +191,7 @@ class FileStore {
     };
     this.state.fileMap.set(id, updated);
     this.bumpVersion();
-    this.scheduleFlush(NotifyChannel.All, id);
+    this.scheduleFlush(NotifyChannel.All);
   }
 
   fileDone(id: string, result: ProcessResult | null) {
@@ -242,7 +219,7 @@ class FileStore {
 
     let channels = NotifyChannel.All | NotifyChannel.Stats;
     if (selectedChanged) channels |= NotifyChannel.Selected;
-    this.scheduleFlush(channels, id);
+    this.scheduleFlush(channels);
   }
 
   fileError(id: string, error: string) {
@@ -261,7 +238,7 @@ class FileStore {
     this.state.statsVersion++;
     this.bumpVersion();
 
-    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
   }
 
   fileResampled(id: string, resampleResult: ResampleResult) {
@@ -279,7 +256,7 @@ class FileStore {
     this.state.fileMap.set(id, updated);
     this.state.statsVersion++;
     this.bumpVersion();
-    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats, id);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
   }
 
   switchImageRef(id: string, ref: string, result: ProcessResult) {
@@ -296,7 +273,7 @@ class FileStore {
     this.state.statsVersion++;
     this.state.selectedVersion++;
     this.bumpVersion();
-    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List, id);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);
   }
 
   selectFile(id: string) {
@@ -321,7 +298,6 @@ class FileStore {
     this._doneFilesCacheVersion = -1;
     this._allFilesCache = [];
     this._allFilesCacheVersion = -1;
-    this.pendingFileIds.clear();
     this.pendingChannels = 0;
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);
   }
@@ -338,15 +314,6 @@ export function resolveEffectivePath(path: string): string {
 
 export function useFileIds(): string[] {
   return useSyncExternalStore(fileStore.subscribeToList, fileStore.getFileIds);
-}
-
-export function useFileEntry(id: string): ProcessedFile | undefined {
-  const subscribe = useCallback(
-    (listener: Listener) => fileStore.subscribeToFile(id, listener),
-    [id],
-  );
-  const getSnapshot = useCallback(() => fileStore.getFile(id), [id]);
-  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 export function useSelectedFile(): ProcessedFile | null {

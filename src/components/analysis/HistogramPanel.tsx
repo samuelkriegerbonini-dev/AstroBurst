@@ -314,11 +314,11 @@ function HistogramPanel({
           className="flex items-center gap-1.5 px-3 py-2 animate-fade-in"
           style={{ borderTop: "1px solid var(--ab-border)" }}
         >
-          <ManualInput label="S" color="#ef4444" value={draft.shadow} min={0} max={1}
+          <ManualInput label="S" name="S shadow clipping point (0-1)" color="#ef4444" value={draft.shadow} min={0} max={1}
                        onChange={(v) => setDraft((d) => ({ ...d, shadow: v }))} />
-          <ManualInput label="M" color="#eab308" value={draft.midtone} min={0.001} max={0.999}
+          <ManualInput label="M" name="M midtone balance (0-1)" color="#eab308" value={draft.midtone} min={0.001} max={0.999}
                        onChange={(v) => setDraft((d) => ({ ...d, midtone: v }))} />
-          <ManualInput label="H" color="#22c55e" value={draft.highlight} min={0} max={1}
+          <ManualInput label="H" name="H highlight clipping point (0-1)" color="#22c55e" value={draft.highlight} min={0} max={1}
                        onChange={(v) => setDraft((d) => ({ ...d, highlight: v }))} />
           <button
             onClick={applyManual}
@@ -396,6 +396,7 @@ function ToolbarBtn({
 
 function ManualInput({
                        label,
+                       name,
                        color,
                        value,
                        min,
@@ -403,6 +404,7 @@ function ManualInput({
                        onChange,
                      }: {
   label: string;
+  name: string;
   color: string;
   value: string;
   min: number;
@@ -414,12 +416,13 @@ function ManualInput({
       <span className="text-[10px] font-mono w-3 font-semibold" style={{ color }}>{label}</span>
       <input
         type="number"
+        aria-label={name}
         value={value}
         step={0.001}
         min={min}
         max={max}
         onChange={(e) => onChange(e.target.value)}
-        className="w-[72px] text-[10px] font-mono rounded-md px-1.5 py-0.5 text-zinc-200 outline-none transition-colors"
+        className="w-[72px] text-[10px] font-mono rounded-md px-1.5 py-0.5 text-zinc-200 transition-colors"
         style={{
           background: "rgba(24,24,32,0.8)",
           border: `1px solid ${color}33`,

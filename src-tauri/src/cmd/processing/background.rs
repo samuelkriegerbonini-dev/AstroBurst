@@ -26,7 +26,6 @@ pub async fn extract_background_cmd(
     iterations: usize,
     mode: String,
     bin_id: Option<String>,
-    persist_to_disk: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let progress = ProgressHandle::new(&app, PROGRESS_EVENT, PROGRESS_STEPS as u64);
     let progress_clone = progress.clone();
@@ -63,17 +62,16 @@ pub async fn extract_background_cmd(
         save_preview_png(rendered, cols, rows, &corrected_png)?;
         save_preview_png(model_rendered, cols, rows, &model_png)?;
 
+        let corrected_fits = format!("{}/{}_bg_corrected.fits", output_dir, stem);
         let cache_key = match &bin_id {
             Some(bid) => crate::types::constants::wizard_bg_key(bid),
-            None => format!("{}/{}_bg_corrected.fits", output_dir, stem),
+            None => corrected_fits.clone(),
         };
 
         let stats = compute_image_stats(&bg_result.corrected);
 
-        let write_disk = persist_to_disk.unwrap_or(false);
-        if write_disk && bin_id.is_none() {
-            let fits_path = format!("{}/{}_bg_corrected.fits", output_dir, stem);
-            crate::infra::fits::writer::write_fits_mono(&fits_path, &bg_result.corrected, None)?;
+        if bin_id.is_none() {
+            crate::infra::fits::writer::write_fits_mono(&corrected_fits, &bg_result.corrected, None)?;
         }
 
         GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(bg_result.corrected), stats);

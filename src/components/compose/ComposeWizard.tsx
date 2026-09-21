@@ -269,46 +269,48 @@ export default function ComposeWizard() {
     <div className="flex flex-col h-full">
       <MiniInfoBar />
 
-      <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-1 overflow-x-auto scrollbar-hide shrink-0">
-        {STEPS.map((step, idx) => {
-          const isActive = activeStep === step.id;
-          const isEnabled = step.enabled(state);
-          const badge = step.badge?.(state);
-          const isDone = !!state.completedSteps[step.id];
-          const isSuggested = suggestedStep === step.id;
-          const colors = COLOR_MAP[step.color] ?? COLOR_MAP.violet;
-          return (
-            <button
-              key={step.id}
-              onClick={() => isEnabled && handleStepClick(step.id)}
-              disabled={!isEnabled}
-              className={`ab-step-pill ${
-                isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-              } ${isSuggested ? "ab-step-suggested" : ""}`}
-              title={step.label}
-            >
-              <span className="text-[9px] text-zinc-600 font-mono">{idx + 1}</span>
-              {step.shortLabel}
-              {isDone && !badge && (
-                <span className="ab-step-done-badge">
-                  <Check size={8} strokeWidth={3} />
-                </span>
-              )}
-              {badge && (
-                <span className={`w-4 h-4 flex items-center justify-center rounded-full text-[8px] font-bold ${isDone ? "bg-emerald-500 text-white" : colors.dot + " text-zinc-900"}`}>
-                  {isDone && badge === "✓" ? <Check size={8} strokeWidth={3} /> : badge}
-                </span>
-              )}
-              {isSuggested && (
-                <ArrowRight size={10} className="ab-step-arrow" />
-              )}
-            </button>
-          );
-        })}
+      <div className="flex items-start gap-1 px-2 pt-1.5 pb-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-0.5 flex-1 min-w-0">
+          {STEPS.map((step, idx) => {
+            const isActive = activeStep === step.id;
+            const isEnabled = step.enabled(state);
+            const badge = step.badge?.(state);
+            const isDone = !!state.completedSteps[step.id];
+            const isSuggested = suggestedStep === step.id;
+            const colors = COLOR_MAP[step.color] ?? COLOR_MAP.violet;
+            return (
+              <button
+                key={step.id}
+                onClick={() => isEnabled && handleStepClick(step.id)}
+                disabled={!isEnabled}
+                className={`ab-step-pill ${
+                  isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                } ${isSuggested ? "ab-step-suggested" : ""}`}
+                title={step.label}
+              >
+                <span className="text-[9px] text-zinc-600 font-mono">{idx + 1}</span>
+                {step.shortLabel}
+                {isDone && !badge && (
+                  <span className="ab-step-done-badge">
+                    <Check size={8} strokeWidth={3} />
+                  </span>
+                )}
+                {badge && (
+                  <span className={`w-4 h-4 flex items-center justify-center rounded-full text-[8px] font-bold ${isDone ? "bg-emerald-500 text-white" : colors.dot + " text-zinc-900"}`}>
+                    {isDone && badge === "✓" ? <Check size={8} strokeWidth={3} /> : badge}
+                  </span>
+                )}
+                {isSuggested && (
+                  <ArrowRight size={10} className="ab-step-arrow" />
+                )}
+              </button>
+            );
+          })}
+        </div>
 
         <button
           onClick={handleReset}
-          className="ml-auto px-1.5 py-1 rounded text-[9px] text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
+          className="shrink-0 px-1.5 py-1 rounded text-[9px] text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
           title="Reset Wizard"
         >
           <RotateCcw size={10} />

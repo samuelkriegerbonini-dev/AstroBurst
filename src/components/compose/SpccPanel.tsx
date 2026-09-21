@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { spccCalibrate } from "../../services/processing";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 
@@ -42,6 +42,9 @@ const ICON = (
 );
 
 export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady }: SpccPanelProps) {
+  const whiteRefId = useId();
+  const catalogId = useId();
+  const minSnrId = useId();
   const [whiteRef, setWhiteRef] = useState("average_spiral");
   const [catalog, setCatalog] = useState<"gaia" | "builtin">("gaia");
   const [minSnr, setMinSnr] = useState(20);
@@ -85,8 +88,9 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
       )}
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">White Reference</label>
+        <label htmlFor={whiteRefId} className="text-xs text-zinc-400">White Reference</label>
         <select
+          id={whiteRefId}
           value={whiteRef}
           onChange={(e) => setWhiteRef(e.target.value)}
           className="ab-select"
@@ -99,8 +103,9 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Catalog</label>
+        <label htmlFor={catalogId} className="text-xs text-zinc-400">Catalog</label>
         <select
+          id={catalogId}
           value={catalog}
           onChange={(e) => setCatalog(e.target.value as "gaia" | "builtin")}
           className="ab-select"
@@ -113,8 +118,9 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
       </div>
 
       <div className="flex items-center justify-between">
-        <label className="text-xs text-zinc-400">Min SNR</label>
+        <label htmlFor={minSnrId} className="text-xs text-zinc-400">Min SNR</label>
         <input
+          id={minSnrId}
           type="number"
           value={minSnr}
           min={5}

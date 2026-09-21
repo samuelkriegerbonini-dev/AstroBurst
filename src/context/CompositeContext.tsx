@@ -101,8 +101,6 @@ interface CompositeActionsValue {
   resetComposite: () => void;
 }
 
-export type CompositeContextValue = CompositePreviewValue & CompositeStfValue & CompositeScnrValue & CompositeActionsValue;
-
 const CompositePreviewCtx = createContext<CompositePreviewValue | null>(null);
 const CompositeStfCtx = createContext<CompositeStfValue | null>(null);
 const CompositeScnrCtx = createContext<CompositeScnrValue | null>(null);
@@ -118,17 +116,6 @@ export const useCompositePreview = () => useCtx(CompositePreviewCtx, "useComposi
 export const useCompositeStf = () => useCtx(CompositeStfCtx, "useCompositeStf");
 export const useCompositeScnr = () => useCtx(CompositeScnrCtx, "useCompositeScnr");
 export const useCompositeActions = () => useCtx(CompositeActionsCtx, "useCompositeActions");
-
-export function useCompositeContext(): CompositeContextValue {
-  const preview = useCompositePreview();
-  const stf = useCompositeStf();
-  const scnr = useCompositeScnr();
-  const actions = useCompositeActions();
-  return useMemo(
-    () => ({ ...preview, ...stf, ...scnr, ...actions }),
-    [preview, stf, scnr, actions],
-  );
-}
 
 interface Props {
   children: React.ReactNode;

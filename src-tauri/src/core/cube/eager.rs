@@ -20,6 +20,7 @@ pub struct CubeResult {
     pub frame_count: usize,
     pub center_spectrum: Vec<f32>,
     pub wavelengths: Option<Vec<f64>>,
+    pub elapsed_ms: u64,
 }
 
 pub fn collapse_mean(cube: &Array3<f32>) -> Array2<f32> {
@@ -279,6 +280,8 @@ pub fn process_cube(
     use crate::infra::render::render_grayscale;
     use std::fs::File;
 
+    let t0 = std::time::Instant::now();
+
     let (actual_fits_path, _tmp_holder) = if input_path.to_lowercase().ends_with(".zip") {
         let resolved = crate::infra::fits::dispatcher::resolve_input(std::path::Path::new(input_path))
             .with_context(|| format!("Failed to resolve ZIP input {}", input_path))?;
@@ -334,6 +337,7 @@ pub fn process_cube(
         frame_count,
         center_spectrum: spectrum,
         wavelengths,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
 

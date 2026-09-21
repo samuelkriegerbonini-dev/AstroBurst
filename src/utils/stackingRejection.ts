@@ -113,6 +113,47 @@ export function rejectionFrameHint(
   }
 }
 
+const STACK_STAGE_LABELS: Record<string, string> = {
+  load_frame: "Loading frames",
+  render: "Rendering",
+  save: "Saving",
+  complete: "Finishing",
+};
+
+export function stackProgressText(stage: string, current: number, total: number): string {
+  if (!stage) return "Stacking frames...";
+  const label = STACK_STAGE_LABELS[stage] ?? stage;
+  if (total > 0 && current > 0) return `${label} (${current}/${total})`;
+  return label;
+}
+
+export function selectableStackPaths(
+  filePaths: string[],
+  injectedPaths: string[],
+  rejectedPaths: string[],
+): string[] {
+  const rejected = new Set(rejectedPaths);
+  const seen = new Set<string>();
+  const selectable: string[] = [];
+  for (const path of [...filePaths, ...injectedPaths]) {
+    if (rejected.has(path) || seen.has(path)) continue;
+    seen.add(path);
+    selectable.push(path);
+  }
+  return selectable;
+}
+
+export function appendMissingPaths(current: string[], incoming: string[]): string[] {
+  const present = new Set(current);
+  const merged = [...current];
+  for (const path of incoming) {
+    if (present.has(path)) continue;
+    present.add(path);
+    merged.push(path);
+  }
+  return merged;
+}
+
 export function subframeWeightsFor(
   paths: string[],
   weightsByPath: Record<string, number> | undefined,

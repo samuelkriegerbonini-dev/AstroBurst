@@ -23,13 +23,6 @@ export interface SpectralAxisInfo {
   notes: string[];
 }
 
-export interface VelocityAxisResult {
-  values_kms: number[];
-  convention: VelocityConvention;
-  rest_um: number;
-  notes: string[];
-}
-
 export interface RadialVelocityCorrectionResult {
   barycentric_kms: number;
   heliocentric_kms: number;

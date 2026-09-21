@@ -99,3 +99,7 @@ export interface StarDetectionResult {
   count?: number;
   elapsed_ms: number;
 }
+
+export const BACKGROUND_PROGRESS_EVENT = "background-progress";
+export const WAVELET_PROGRESS_EVENT = "wavelet-progress";
+export const DECONV_PROGRESS_EVENT = "deconv-progress";

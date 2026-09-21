@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, Crosshair, Database, Download, Loader2, Shapes } from "lucide-react";
 import { catalogConeSearch, catalogCrossMatch, catalogExportCsv, type CatalogExportItems } from "../../services/catalog";
 import { GAIA_BANDS } from "../../shared/types/catalog";
@@ -24,7 +24,7 @@ const TABLE_ROW_LIMIT = 200;
 const SAVED_NOTICE_MS = 6000;
 
 const INPUT_CLASS =
-  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-cyan-500/50 w-full";
+  "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full";
 const SELECT_CLASS = "bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono";
 const SMALL_BUTTON_CLASS =
   "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
@@ -49,6 +49,10 @@ function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
 }
 
 function CatalogPanel({ filePath }: CatalogPanelProps) {
+  const radiusId = useId();
+  const magLimitId = useId();
+  const bandId = useId();
+  const matchRadiusId = useId();
   const [radiusText, setRadiusText] = useState("");
   const [magLimitText, setMagLimitText] = useState(String(DEFAULT_MAG_LIMIT));
   const [band, setBand] = useState<GaiaBand>("G");
@@ -65,11 +69,16 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
   const [labels, setLabels] = useState(false);
   const [hoverId, setHoverId] = useState<string | null>(null);
 
+  const requestSeqRef = useRef(0);
+
   useEffect(() => {
+    requestSeqRef.current++;
     setCone(null);
     setCross(null);
     setError(null);
     setHoverId(null);
+    setSearching(false);
+    setMatching(false);
   }, [filePath]);
 
   const matchedIds = useMemo(() => new Set((cross?.matches ?? []).map((m) => m.row.id)), [cross]);
@@ -101,6 +110,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
 
   const runSearch = useCallback(async (): Promise<ConeSearchResult | null> => {
     if (!filePath) return null;
+    const seq = ++requestSeqRef.current;
     setSearching(true);
     setError(null);
     try {
@@ -109,20 +119,23 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
         magLimit: parseNumberOr(magLimitText, DEFAULT_MAG_LIMIT),
         maxRows: DEFAULT_MAX_ROWS,
       });
+      if (requestSeqRef.current !== seq) return null;
       setCone(result);
       return result;
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
       return null;
     } finally {
-      setSearching(false);
+      if (requestSeqRef.current === seq) setSearching(false);
     }
   }, [filePath, radiusText, magLimitText]);
 
   const runCrossMatch = useCallback(async () => {
     if (!filePath) return;
+    const seq = ++requestSeqRef.current;
     setMatching(true);
     setError(null);
+    let matched = false;
     try {
       const result = await catalogCrossMatch(filePath, {
         sigma: DEFAULT_DETECTION_SIGMA,
@@ -131,13 +144,15 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
         band,
         colourTerm,
       });
+      if (requestSeqRef.current !== seq) return;
+      matched = true;
       setCross(result);
-      if (!cone) await runSearch();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setMatching(false);
+      if (requestSeqRef.current === seq) setMatching(false);
     }
+    if (matched && !cone) await runSearch();
   }, [filePath, matchRadiusText, band, colourTerm, cone, runSearch]);
 
   const exportItems = useCallback(
@@ -225,8 +240,11 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
       <div className="px-3 py-2 space-y-2">
         <div className="grid grid-cols-2 gap-2">
           <div className="flex flex-col gap-0.5">
-            <label className="text-[9px] text-zinc-500 uppercase">Radius (arcmin)</label>
+            <label htmlFor={radiusId} className="text-[9px] text-zinc-500 uppercase">
+              Radius (arcmin)
+            </label>
             <input
+              id={radiusId}
               type="number"
               min={0.1}
               max={300}
@@ -238,8 +256,11 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
             />
           </div>
           <div className="flex flex-col gap-0.5">
-            <label className="text-[9px] text-zinc-500 uppercase">G limit (mag)</label>
+            <label htmlFor={magLimitId} className="text-[9px] text-zinc-500 uppercase">
+              G limit (mag)
+            </label>
             <input
+              id={magLimitId}
               type="number"
               min={5}
               max={21}
@@ -264,8 +285,10 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
 
         <div className="grid grid-cols-3 gap-2 items-end">
           <div className="flex flex-col gap-0.5">
-            <label className="text-[9px] text-zinc-500 uppercase">Band</label>
-            <select value={band} onChange={(e) => setBand(e.target.value as GaiaBand)} className={SELECT_CLASS}>
+            <label htmlFor={bandId} className="text-[9px] text-zinc-500 uppercase">
+              Band
+            </label>
+            <select id={bandId} value={band} onChange={(e) => setBand(e.target.value as GaiaBand)} className={SELECT_CLASS}>
               {GAIA_BANDS.map((b) => (
                 <option key={b} value={b}>
                   {b}
@@ -274,8 +297,11 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
             </select>
           </div>
           <div className="flex flex-col gap-0.5">
-            <label className="text-[9px] text-zinc-500 uppercase">Match radius (")</label>
+            <label htmlFor={matchRadiusId} className="text-[9px] text-zinc-500 uppercase">
+              Match radius (")
+            </label>
             <input
+              id={matchRadiusId}
               type="number"
               min={0.2}
               max={30}

@@ -134,6 +134,23 @@ export default function ChannelStep({
   const [customWl, setCustomWl] = useState("");
   const [autoMapSource, setAutoMapSource] = useState<string | null>(null);
   const [unmappedFiles, setUnmappedFiles] = useState<UnmappedFile[]>([]);
+  const [armedAction, setArmedAction] = useState<string | null>(null);
+  const armedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (armedTimerRef.current) clearTimeout(armedTimerRef.current);
+  }, []);
+
+  const armAction = useCallback((key: string) => {
+    if (armedTimerRef.current) clearTimeout(armedTimerRef.current);
+    setArmedAction(key);
+    armedTimerRef.current = setTimeout(() => setArmedAction(null), 4000);
+  }, []);
+
+  const disarm = useCallback(() => {
+    if (armedTimerRef.current) clearTimeout(armedTimerRef.current);
+    setArmedAction(null);
+  }, []);
 
   const assignedSet = useMemo(() => assignedPaths(state.bins), [state.bins]);
 
@@ -195,16 +212,27 @@ export default function ChannelStep({
   }, [state.bins, onBinsChange]);
 
   const handleRemoveFile = useCallback((binId: string, filePath: string) => {
+    const key = `file:${binId}:${filePath}`;
+    if (armedAction !== key) {
+      armAction(key);
+      return;
+    }
+    disarm();
     onBinsChange(state.bins.map((b) =>
       b.id === binId ? { ...b, files: b.files.filter((f) => f !== filePath) } : b
     ));
-  }, [state.bins, onBinsChange]);
+  }, [state.bins, onBinsChange, armedAction, armAction, disarm]);
 
   const handleClearAll = useCallback(() => {
+    if (armedAction !== "clear") {
+      armAction("clear");
+      return;
+    }
+    disarm();
     onBinsChange(state.bins.map((b) => ({ ...b, files: [] })));
     setAutoMapSource(null);
     setUnmappedFiles([]);
-  }, [state.bins, onBinsChange]);
+  }, [state.bins, onBinsChange, armedAction, armAction, disarm]);
 
   const handleOpenFolder = useCallback(async () => {
     try {
@@ -243,8 +271,20 @@ export default function ChannelStep({
 
   const handleRemoveBin = useCallback((binId: string) => {
     if (DEFAULT_BINS.some((d) => d.id === binId)) return;
+    const bin = state.bins.find((b) => b.id === binId);
+    const key = `bin:${binId}`;
+    if (bin && bin.files.length > 0 && armedAction !== key) {
+      armAction(key);
+      return;
+    }
+    disarm();
     onBinsChange(state.bins.filter((b) => b.id !== binId));
-  }, [state.bins, onBinsChange]);
+  }, [state.bins, onBinsChange, armedAction, armAction, disarm]);
+
+  const assignedFileCount = useMemo(
+    () => state.bins.reduce((acc, b) => acc + b.files.length, 0),
+    [state.bins],
+  );
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -271,9 +311,16 @@ export default function ChannelStep({
                   className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium bg-violet-600/20 text-violet-400 hover:bg-violet-600/30 transition-all disabled:opacity-30">
             <Wand2 size={10} /> Auto Map
           </button>
-          <button onClick={handleClearAll} disabled={!state.bins.some((b) => b.files.length > 0)}
-                  className="px-2 py-1 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all disabled:opacity-30">
-            Clear
+          <button onClick={handleClearAll} onBlur={() => { if (armedAction === "clear") disarm(); }}
+                  disabled={assignedFileCount === 0}
+                  className={`px-2 py-1 rounded text-[10px] transition-all disabled:opacity-30 ${
+                    armedAction === "clear"
+                      ? "text-amber-300 bg-amber-500/15 ring-1 ring-amber-500/30"
+                      : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                  }`}>
+            {armedAction === "clear"
+              ? `Confirm — clears ${assignedFileCount} assignment${assignedFileCount === 1 ? "" : "s"}?`
+              : "Clear"}
           </button>
         </div>
       </div>
@@ -316,7 +363,19 @@ export default function ChannelStep({
                   />
                   <span className="text-[9px] font-mono text-zinc-600">{bin.files.length}</span>
                   {isCustom && (
-                    <button onClick={() => handleRemoveBin(bin.id)} className="text-zinc-600 hover:text-red-400 p-0.5">
+                    <button onClick={() => handleRemoveBin(bin.id)}
+                            onBlur={() => { if (armedAction === `bin:${bin.id}`) disarm(); }}
+                            aria-label={armedAction === `bin:${bin.id}`
+                              ? `Confirm removing channel ${bin.shortLabel} and its ${bin.files.length} frame(s)`
+                              : `Remove channel ${bin.shortLabel}`}
+                            title={armedAction === `bin:${bin.id}`
+                              ? `Click again to remove ${bin.shortLabel} and unassign ${bin.files.length} frame(s)`
+                              : `Remove channel ${bin.shortLabel}`}
+                            className={`p-0.5 transition-colors ${
+                              armedAction === `bin:${bin.id}`
+                                ? "text-amber-300 bg-amber-500/15 rounded"
+                                : "text-zinc-600 hover:text-red-400"
+                            }`}>
                       <X size={10} />
                     </button>
                   )}
@@ -341,7 +400,18 @@ export default function ChannelStep({
                         </span>
                       )}
                       <button onClick={() => handleRemoveFile(bin.id, fp)}
-                              className="text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                              onBlur={() => { if (armedAction === `file:${bin.id}:${fp}`) disarm(); }}
+                              aria-label={armedAction === `file:${bin.id}:${fp}`
+                                ? `Confirm removing ${shortName(fp)} from ${bin.shortLabel}`
+                                : `Remove ${shortName(fp)} from ${bin.shortLabel}`}
+                              title={armedAction === `file:${bin.id}:${fp}`
+                                ? `Click again to remove ${shortName(fp)}`
+                                : `Remove ${shortName(fp)}`}
+                              className={`transition-opacity shrink-0 ${
+                                armedAction === `file:${bin.id}:${fp}`
+                                  ? "text-amber-300 opacity-100"
+                                  : "text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                              }`}>
                         <X size={9} />
                       </button>
                     </div>
@@ -380,9 +450,11 @@ export default function ChannelStep({
 
       <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-800/30">
         <input value={customLabel} onChange={(e) => setCustomLabel(e.target.value)}
+               aria-label="Custom channel name"
                placeholder="Custom channel..."
                className="flex-1 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-zinc-700" />
         <input value={customWl} onChange={(e) => setCustomWl(e.target.value)}
+               aria-label="Custom channel wavelength (nm)"
                placeholder="nm" type="number"
                className="w-14 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-zinc-700 text-right" />
         <button onClick={handleAddBin} disabled={!customLabel.trim()}

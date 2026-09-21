@@ -14,8 +14,9 @@ import {
   MIN_RADIUS,
   MIN_SIZE,
   MIN_ANNULUS_GAP,
+  POINT_CROSS_HALF_SCREEN_PX,
 } from "../regionGeometry";
-import type { RegionShape } from "../../shared/types/regions";
+import type { RegionShape } from "../../shared/types";
 
 const circle: RegionShape = { shape: "circle", x: 100, y: 200, r: 5 };
 const box: RegionShape = { shape: "box", x: 50, y: 50, width: 20, height: 10, angle: 0 };
@@ -232,6 +233,29 @@ describe("shapeOutline", () => {
     expect(shapeOutline(annulus)).toHaveLength(2);
     expect(shapeOutline(line)[0]).toHaveLength(2);
     expect(shapeOutline({ shape: "point", x: 1, y: 1 })).toHaveLength(2);
+  });
+
+  it("keeps the point cross a constant size on screen at any zoom", () => {
+    const point: RegionShape = { shape: "point", x: 100, y: 100 };
+    const halfOf = (screenPxPerImagePx: number) => {
+      const [horizontal] = shapeOutline(point, screenPxPerImagePx);
+      return (horizontal[1].x - horizontal[0].x) / 2;
+    };
+
+    const zoomedOut = halfOf(0.25);
+    expect(zoomedOut).toBe(POINT_CROSS_HALF_SCREEN_PX / 0.25);
+    expect(zoomedOut * 0.25).toBe(POINT_CROSS_HALF_SCREEN_PX);
+
+    const zoomedIn = halfOf(8);
+    expect(zoomedIn * 8).toBe(POINT_CROSS_HALF_SCREEN_PX);
+
+    const outline = shapeOutline(point, 0.25);
+    expect(outline[0][0]).toEqual({ x: 100 - zoomedOut, y: 100 });
+    expect(outline[1][1]).toEqual({ x: 100, y: 100 + zoomedOut });
+
+    expect(halfOf(1)).toBe(POINT_CROSS_HALF_SCREEN_PX);
+    expect(halfOf(0)).toBe(POINT_CROSS_HALF_SCREEN_PX);
+    expect(halfOf(Number.NaN)).toBe(POINT_CROSS_HALF_SCREEN_PX);
   });
 });
 

@@ -78,14 +78,6 @@ pub(crate) fn prefer_mmap(file: &File, mode: IoMode) -> bool {
     }
 }
 
-pub fn resolved_io_for_file(file: &File) -> &'static str {
-    if prefer_mmap(file, io_mode()) {
-        "mmap"
-    } else {
-        "read"
-    }
-}
-
 pub fn read_file_bytes(file: &File) -> Result<FileBytes> {
     read_file_bytes_with_mode(file, io_mode())
 }

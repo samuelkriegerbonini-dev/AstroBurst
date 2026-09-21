@@ -3,6 +3,9 @@ import {
   rejectionFrameHint,
   rejectionUsesSigma,
   subframeWeightsFor,
+  selectableStackPaths,
+  stackProgressText,
+  appendMissingPaths,
   REJECTION_OPTIONS,
   COMBINE_OPTIONS,
   NORMALIZATION_OPTIONS,
@@ -81,5 +84,43 @@ describe("select options", () => {
       "additive_scaling",
       "multiplicative_scaling",
     ]);
+  });
+});
+
+describe("selectableStackPaths", () => {
+  it("skips frames the subframe selector rejected", () => {
+    expect(selectableStackPaths(["a", "b", "c"], [], ["b"])).toEqual(["a", "c"]);
+  });
+
+  it("keeps calibrated injections that are not already in the file list", () => {
+    expect(selectableStackPaths(["a"], ["a", "cal"], [])).toEqual(["a", "cal"]);
+  });
+
+  it("rejects injected paths too", () => {
+    expect(selectableStackPaths(["a"], ["cal"], ["cal"])).toEqual(["a"]);
+  });
+});
+
+describe("appendMissingPaths", () => {
+  it("appends only the paths that are not selected yet", () => {
+    expect(appendMissingPaths(["a", "b"], ["b", "c"])).toEqual(["a", "b", "c"]);
+  });
+
+  it("keeps the current selection when nothing is new", () => {
+    expect(appendMissingPaths(["a"], ["a"])).toEqual(["a"]);
+  });
+});
+
+describe("stackProgressText", () => {
+  it("falls back to a generic label before the first tick", () => {
+    expect(stackProgressText("", 0, 0)).toBe("Stacking frames...");
+  });
+
+  it("shows the frame counter once the backend ticks per frame", () => {
+    expect(stackProgressText("load_frame", 7, 62)).toBe("Loading frames (7/62)");
+  });
+
+  it("shows the stage alone when the backend only reports stages", () => {
+    expect(stackProgressText("save", 0, 0)).toBe("Saving");
   });
 });

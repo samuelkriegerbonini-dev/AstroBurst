@@ -21,12 +21,21 @@ export interface UseViewerTransformOptions {
 }
 
 export function useViewerTransform({ containerRef, renderW, renderH }: UseViewerTransformOptions) {
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [transform, setTransformState] = useState<Transform>({ scale: 1, x: 0, y: 0 });
   const transformRef = useRef(transform);
   transformRef.current = transform;
   const userInteractedRef = useRef(false);
 
   const hasRenderDims = renderW > 0 && renderH > 0;
+
+  const attachContainer = useCallback(
+    (el: HTMLDivElement | null) => {
+      containerRef.current = el;
+      setContainerEl(el);
+    },
+    [containerRef],
+  );
 
   const setTransform = useCallback((action: React.SetStateAction<Transform>) => {
     userInteractedRef.current = true;
@@ -121,18 +130,17 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   );
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener("wheel", handleWheelNative, { passive: false });
+    if (!containerEl) return;
+    containerEl.addEventListener("wheel", handleWheelNative, { passive: false });
     return () => {
-      el.removeEventListener("wheel", handleWheelNative);
+      containerEl.removeEventListener("wheel", handleWheelNative);
       if (wheelRafRef.current !== null) {
         cancelAnimationFrame(wheelRafRef.current);
         wheelRafRef.current = null;
         pendingWheelRef.current = null;
       }
     };
-  }, [handleWheelNative, containerRef]);
+  }, [handleWheelNative, containerEl]);
 
   useEffect(() => {
     if (hasRenderDims) {
@@ -142,8 +150,7 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   }, [hasRenderDims, renderW, renderH]);
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    if (!containerEl) return;
     let raf: number | null = null;
     const ro = new ResizeObserver(() => {
       if (raf !== null) return;
@@ -152,14 +159,15 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
         if (!userInteractedRef.current) fitToWindowRef.current();
       });
     });
-    ro.observe(el);
+    ro.observe(containerEl);
     return () => {
       ro.disconnect();
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [containerRef]);
+  }, [containerEl]);
 
   return {
+    attachContainer,
     transform,
     transformRef,
     setTransform,

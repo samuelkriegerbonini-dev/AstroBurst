@@ -4,6 +4,7 @@ import { useDoneFilesContext, useRenderActions } from "../../context/PreviewCont
 import { useSelectedFile } from "../../hooks/useFileStore";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
+import type { CalibrationMasters } from "./CalibrationPanel";
 
 const CalibrationPanel = lazy(() => import("./CalibrationPanel"));
 const CosmeticPanel = lazy(() => import("./CosmeticPanel"));
@@ -23,6 +24,15 @@ const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "drizzle_rgb", label: "Drizzle RGB", color: "rose" },
 ];
 
+const SECTION_ACTIVE_CLASS: Record<string, string> = {
+  violet: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30",
+  fuchsia: "bg-fuchsia-600/20 text-fuchsia-400 ring-1 ring-fuchsia-500/30",
+  teal: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30",
+  amber: "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30",
+  cyan: "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30",
+  rose: "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30",
+};
+
 export type StackConfig = StackSettings;
 
 export interface CalibrationState {
@@ -31,6 +41,9 @@ export interface CalibrationState {
   hasBias: boolean;
   hasDark: boolean;
   hasFlat: boolean;
+  darkPaths: string[];
+  flatPaths: string[];
+  biasPaths: string[];
 }
 
 function StackingTabInner() {
@@ -47,15 +60,20 @@ function StackingTabInner() {
     hasBias: false,
     hasDark: false,
     hasFlat: false,
+    darkPaths: [],
+    flatPaths: [],
+    biasPaths: [],
   });
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_SETTINGS);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
   const [rejectedPaths, setRejectedPaths] = useState<string[]>([]);
+  const [acceptedPaths, setAcceptedPaths] = useState<string[] | undefined>(undefined);
   const [subframeWeights, setSubframeWeights] = useState<Record<string, number> | undefined>(undefined);
 
   const handleSubframeSelection = useCallback(
-    (_accepted: string[], rejected: string[], weights?: Record<string, number>) => {
+    (accepted: string[], rejected: string[], weights?: Record<string, number>) => {
+      setAcceptedPaths(accepted);
       setRejectedPaths(rejected);
       setSubframeWeights(weights);
       setActive("stack");
@@ -73,13 +91,16 @@ function StackingTabInner() {
   );
 
   const handleCalibrationDone = useCallback(
-    (result: {
-      previewUrl?: string | null;
-      fits_path?: string;
-      has_bias?: boolean;
-      has_dark?: boolean;
-      has_flat?: boolean;
-    }) => {
+    (
+      result: {
+        previewUrl?: string | null;
+        fits_path?: string;
+        has_bias?: boolean;
+        has_dark?: boolean;
+        has_flat?: boolean;
+      },
+      masters: CalibrationMasters,
+    ) => {
       handlePreviewUpdate(result?.previewUrl);
       if (result?.fits_path) {
         const fitsPath = result.fits_path;
@@ -89,6 +110,9 @@ function StackingTabInner() {
           hasBias: result.has_bias || false,
           hasDark: result.has_dark || false,
           hasFlat: result.has_flat || false,
+          darkPaths: masters.darkPaths,
+          flatPaths: masters.flatPaths,
+          biasPaths: masters.biasPaths,
         });
         setInjectedPaths((prev) => {
           if (prev.includes(fitsPath)) return prev;
@@ -112,7 +136,7 @@ function StackingTabInner() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex gap-1 px-4 pt-3 pb-1">
+      <div className="flex gap-1 flex-wrap px-4 pt-3 pb-1">
         {SECTIONS.map((s) => {
           const isActive = active === s.id;
           const hasCalibrated = s.id === "stack" && calibration.calibratedFitsPath;
@@ -120,25 +144,13 @@ function StackingTabInner() {
             <button
               key={s.id}
               onClick={() => setActive(s.id)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-150 relative ${
-                isActive
-                  ? s.color === "violet"
-                    ? "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30"
-                    : s.color === "amber"
-                      ? "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30"
-                      : s.color === "teal"
-                        ? "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30"
-                        : s.color === "rose"
-                          ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30"
-                          : s.color === "fuchsia"
-                            ? "bg-fuchsia-600/20 text-fuchsia-400 ring-1 ring-fuchsia-500/30"
-                            : "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30"
-                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+              className={`ab-processing-pill whitespace-nowrap shrink-0 ${
+                isActive ? SECTION_ACTIVE_CLASS[s.color] : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
               }`}
             >
               {s.label}
               {hasCalibrated && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-emerald-400" />
+                <span className="ab-processing-pill-dot bg-emerald-400" />
               )}
             </button>
           );
@@ -171,6 +183,7 @@ function StackingTabInner() {
               files={doneFiles}
               onResult={handleStackResult}
               injectedPaths={injectedPaths}
+              acceptedPaths={acceptedPaths}
               stackConfig={stackConfig}
               onStackConfigChange={handleStackConfigChange}
               rejectedPaths={rejectedPaths}
@@ -180,7 +193,6 @@ function StackingTabInner() {
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>
             <PipelinePanel
               files={doneFiles}
-              onPreviewUpdate={handlePreviewUpdate}
               calibration={calibration}
               stackConfig={stackConfig}
             />

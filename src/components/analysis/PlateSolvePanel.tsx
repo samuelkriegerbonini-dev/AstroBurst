@@ -1,8 +1,8 @@
-import { useState, useCallback, useEffect, useMemo, memo } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag } from "lucide-react";
 import { plateSolve, getWcsInfo } from "../../services/astrometry";
 import type { WcsInfo } from "../../services/astrometry";
-import { getApiKey } from "../../services/config";
+import { getApiKey, getConfig } from "../../services/config";
 
 export interface Star {
   x: number;
@@ -50,6 +50,31 @@ interface SolveResult {
 
 const EMPTY_ANNOTATIONS: FieldAnnotation[] = [];
 
+const SOLVE_TICK_MS = 250;
+const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
+
+function parseAngle(text: string, limit: number): number | null {
+  const value = parseFloat(text);
+  return Number.isFinite(value) && Math.abs(value) <= limit ? value : null;
+}
+
+function parseRadius(text: string): number | null {
+  const value = parseFloat(text);
+  return Number.isFinite(value) && value > 0 && value <= 180 ? value : null;
+}
+
+function hintRadiusDeg(info: WcsInfo): number | null {
+  const fov = info.fov_arcmin;
+  if (!fov || !Number.isFinite(fov[0]) || !Number.isFinite(fov[1])) return null;
+  const radius = Math.hypot(fov[0], fov[1]) / 2 / 60;
+  return radius > 0 ? radius : null;
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 interface PlateSolvePanelProps {
   stars?: Star[];
   isLoading?: boolean;
@@ -78,6 +103,14 @@ function PlateSolvePanel({
                                           detectError = null,
                                         }: PlateSolvePanelProps) {
 
+  const sigmaId = useId();
+  const scaleLowId = useId();
+  const scaleHighId = useId();
+  const scaleUnitsId = useId();
+  const downsampleId = useId();
+  const centerRaId = useId();
+  const centerDecId = useId();
+  const searchRadiusId = useId();
   const [sigma, setSigma] = useState(5.0);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showAnnotations, setShowAnnotations] = useState(true);
@@ -92,23 +125,63 @@ function PlateSolvePanel({
   const [scaleUnits, setScaleUnits] = useState<"arcsecperpix" | "arcminwidth" | "degwidth">("arcsecperpix");
   const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
+  const [centerRaText, setCenterRaText] = useState("");
+  const [centerDecText, setCenterDecText] = useState("");
+  const [searchRadiusText, setSearchRadiusText] = useState("");
+  const [solveElapsedMs, setSolveElapsedMs] = useState(0);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_SOLVE_TIMEOUT_SECS);
+  const solveSeqRef = useRef(0);
 
   useEffect(() => {
     getApiKey("astrometry")
       .then((r) => setHasApiKey(!!r?.key))
       .catch(() => setHasApiKey(false));
+    getConfig()
+      .then((cfg) => setTimeoutSecs(cfg.plate_solve_timeout_secs || DEFAULT_SOLVE_TIMEOUT_SECS))
+      .catch(() => setTimeoutSecs(DEFAULT_SOLVE_TIMEOUT_SECS));
+  }, []);
+
+  const applyWcsHints = useCallback((info: WcsInfo) => {
+    if (!Number.isFinite(info.center_ra) || !Number.isFinite(info.center_dec)) return;
+    setCenterRaText(info.center_ra.toFixed(6));
+    setCenterDecText(info.center_dec.toFixed(6));
+    const radius = hintRadiusDeg(info);
+    if (radius !== null) setSearchRadiusText(radius.toFixed(4));
   }, []);
 
   useEffect(() => {
-    if (!filePath) {
-      setWcsInfo(null);
-      setSolveResult(null);
-      return;
-    }
+    solveSeqRef.current++;
+    setWcsInfo(null);
+    setSolveResult(null);
+    setSolveError(null);
+    setSolveLoading(false);
+    setSelectedStar(null);
+    setCenterRaText("");
+    setCenterDecText("");
+    setSearchRadiusText("");
+    if (!filePath) return;
+    let cancelled = false;
     getWcsInfo(filePath)
-      .then((info) => setWcsInfo(info))
-      .catch(() => setWcsInfo(null));
-  }, [filePath]);
+      .then((info) => {
+        if (cancelled) return;
+        setWcsInfo(info);
+        applyWcsHints(info);
+      })
+      .catch(() => {
+        if (!cancelled) setWcsInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, applyWcsHints]);
+
+  useEffect(() => {
+    if (!solveLoading) return;
+    const started = Date.now();
+    setSolveElapsedMs(0);
+    const id = window.setInterval(() => setSolveElapsedMs(Date.now() - started), SOLVE_TICK_MS);
+    return () => window.clearInterval(id);
+  }, [solveLoading]);
 
   const annotations = solveResult?.annotations ?? EMPTY_ANNOTATIONS;
 
@@ -116,11 +189,17 @@ function PlateSolvePanel({
     const canvas = overlayCanvasRef?.current;
     if (!canvas) return;
 
+    const hide = () => {
+      const context = canvas.getContext("2d");
+      context?.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.style.display = "none";
+    };
+
     const drawStars = showOverlay && stars.length > 0;
     const drawAnnotations = showAnnotations && annotations.length > 0;
 
     if (!drawStars && !drawAnnotations) {
-      canvas.style.display = "none";
+      hide();
       return;
     }
 
@@ -222,7 +301,9 @@ function PlateSolvePanel({
         }
       }
     }
-  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvasRef]);
+
+    return hide;
+  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvasRef, filePath]);
 
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
@@ -230,6 +311,11 @@ function PlateSolvePanel({
 
   const handleSolve = useCallback(async () => {
     if (!filePath) return;
+    const seq = ++solveSeqRef.current;
+    const centerRa = parseAngle(centerRaText, 360);
+    const centerDec = parseAngle(centerDecText, 90);
+    const radius = parseRadius(searchRadiusText);
+    const positionHint = centerRa !== null && centerDec !== null;
     setSolveLoading(true);
     setSolveError(null);
     setSolveResult(null);
@@ -239,17 +325,23 @@ function PlateSolvePanel({
         scaleUpper: scaleHigh,
         scaleUnits,
         downsampleFactor: downsample > 1 ? downsample : undefined,
+        centerRa: positionHint ? centerRa : undefined,
+        centerDec: positionHint ? centerDec : undefined,
+        radius: positionHint && radius !== null ? radius : undefined,
       }) as SolveResult;
+      if (solveSeqRef.current !== seq) return;
       setSolveResult(result);
       getWcsInfo(filePath)
-        .then((info) => setWcsInfo(info))
+        .then((info) => {
+          if (solveSeqRef.current === seq) setWcsInfo(info);
+        })
         .catch(() => {});
     } catch (e: unknown) {
-      setSolveError(e instanceof Error ? e.message : String(e));
+      if (solveSeqRef.current === seq) setSolveError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSolveLoading(false);
+      if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [filePath, scaleLow, scaleHigh, scaleUnits, downsample]);
+  }, [filePath, scaleLow, scaleHigh, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -259,6 +351,7 @@ function PlateSolvePanel({
   }, [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
+  const solveHintReady = parseAngle(centerRaText, 360) !== null && parseAngle(centerDecText, 90) !== null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -285,8 +378,11 @@ function PlateSolvePanel({
 
         <div className="px-3 py-2 space-y-2">
           <div className="flex items-center gap-2">
-            <label className="text-[10px] text-zinc-500 w-12">σ thresh</label>
+            <label htmlFor={sigmaId} className="text-[10px] text-zinc-500 w-12">
+              σ thresh
+            </label>
             <input
+              id={sigmaId}
               type="range"
               min="2"
               max="15"
@@ -413,38 +509,47 @@ function PlateSolvePanel({
 
           <div className="flex gap-2">
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale low</label>
+              <label htmlFor={scaleLowId} className="text-[9px] text-zinc-500 uppercase">
+                Scale low
+              </label>
               <input
+                id={scaleLowId}
                 type="number"
                 min={0.01}
                 max={100}
                 step={0.1}
                 value={scaleLow}
                 onChange={(e) => setScaleLow(parseFloat(e.target.value) || 0.1)}
-                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-emerald-500/50 w-full"
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale high</label>
+              <label htmlFor={scaleHighId} className="text-[9px] text-zinc-500 uppercase">
+                Scale high
+              </label>
               <input
+                id={scaleHighId}
                 type="number"
                 min={0.01}
                 max={100}
                 step={0.1}
                 value={scaleHigh}
                 onChange={(e) => setScaleHigh(parseFloat(e.target.value) || 10.0)}
-                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono outline-none focus:border-emerald-500/50 w-full"
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
           </div>
 
           <div className="flex gap-2">
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Scale units</label>
+              <label htmlFor={scaleUnitsId} className="text-[9px] text-zinc-500 uppercase">
+                Scale units
+              </label>
               <select
+                id={scaleUnitsId}
                 value={scaleUnits}
                 onChange={(e) => setScaleUnits(e.target.value as typeof scaleUnits)}
-                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500/50 w-full"
               >
                 <option value="arcsecperpix">arcsec/px</option>
                 <option value="arcminwidth">arcmin width</option>
@@ -452,11 +557,14 @@ function PlateSolvePanel({
               </select>
             </div>
             <div className="flex-1 flex flex-col gap-0.5">
-              <label className="text-[9px] text-zinc-500 uppercase">Downsample</label>
+              <label htmlFor={downsampleId} className="text-[9px] text-zinc-500 uppercase">
+                Downsample
+              </label>
               <select
+                id={downsampleId}
                 value={downsample}
                 onChange={(e) => setDownsample(parseInt(e.target.value, 10))}
-                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-full"
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500/50 w-full"
               >
                 <option value={0}>Auto</option>
                 <option value={2}>2x</option>
@@ -465,17 +573,96 @@ function PlateSolvePanel({
             </div>
           </div>
 
+          <div className="flex gap-2">
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label htmlFor={centerRaId} className="text-[9px] text-zinc-500 uppercase">
+                Centre RA (deg)
+              </label>
+              <input
+                id={centerRaId}
+                type="number"
+                min={0}
+                max={360}
+                step={0.0001}
+                value={centerRaText}
+                placeholder="blind"
+                title="Right ascension of the field centre in degrees; speeds the solve up enormously"
+                onChange={(e) => setCenterRaText(e.target.value)}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
+              />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label htmlFor={centerDecId} className="text-[9px] text-zinc-500 uppercase">
+                Centre Dec (deg)
+              </label>
+              <input
+                id={centerDecId}
+                type="number"
+                min={-90}
+                max={90}
+                step={0.0001}
+                value={centerDecText}
+                placeholder="blind"
+                title="Declination of the field centre in degrees; both centre fields are needed for a hinted solve"
+                onChange={(e) => setCenterDecText(e.target.value)}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
+              />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label htmlFor={searchRadiusId} className="text-[9px] text-zinc-500 uppercase">
+                Radius (deg)
+              </label>
+              <input
+                id={searchRadiusId}
+                type="number"
+                min={0.01}
+                max={180}
+                step={0.1}
+                value={searchRadiusText}
+                placeholder="10"
+                title="Search radius around the centre in degrees (default 10 when left empty)"
+                onChange={(e) => setSearchRadiusText(e.target.value)}
+                className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-[9px] text-zinc-500">
+            <span>
+              {solveHintReady ? "Hinted solve around the field centre" : "Blind solve: fill both centre fields to hint it"}
+            </span>
+            {wcsInfo && (
+              <button
+                type="button"
+                onClick={() => applyWcsHints(wcsInfo)}
+                className="px-1.5 py-0.5 rounded border border-zinc-700/60 text-zinc-400 hover:text-zinc-200"
+                title="Refill the hints from the WCS in the header"
+              >
+                From header
+              </button>
+            )}
+          </div>
+
           <button
             onClick={handleSolve}
             disabled={solveLoading || !filePath}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
           >
             {solveLoading ? (
-              <><Loader2 size={12} className="animate-spin" /> Solving...</>
+              <>
+                <Loader2 size={12} className="animate-spin" /> Solving... {formatDuration(solveElapsedMs)} /{" "}
+                {formatDuration(timeoutSecs * 1000)}
+              </>
             ) : (
               <><Compass size={12} /> Plate Solve</>
             )}
           </button>
+
+          {solveLoading && (
+            <div className="text-[9px] text-zinc-500">
+              Queued on astrometry.net; the request gives up after {formatDuration(timeoutSecs * 1000)}.
+            </div>
+          )}
 
           {!hasApiKey && (
             <div className="text-[10px] text-amber-400/70 bg-amber-900/20 border border-amber-800/20 rounded px-2.5 py-1.5">

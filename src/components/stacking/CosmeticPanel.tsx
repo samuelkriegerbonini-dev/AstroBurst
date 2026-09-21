@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useId, useMemo } from "react";
 import { Wand2, Layers, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
 import { cosmeticCorrect, cosmeticCorrectBatch } from "../../services/cosmetic";
@@ -59,6 +59,9 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
   const [result, setResult] = useState<CosmeticResult | null>(null);
   const [batchResult, setBatchResult] = useState<CosmeticBatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const masterDarkId = useId();
+  const replacementId = useId();
 
   const parsedList = useMemo(() => parseDefectList(defectText), [defectText]);
   const listErrors = listEnabled ? parsedList.errors : [];
@@ -150,8 +153,9 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
         {useMasterDark && (
           <div className="flex flex-col gap-2 pl-2 border-l border-zinc-800">
             <div className="flex items-center justify-between gap-2">
-              <label className="text-xs text-zinc-400 shrink-0">Master dark</label>
+              <label htmlFor={masterDarkId} className="text-xs text-zinc-400 shrink-0">Master dark</label>
               <select
+                id={masterDarkId}
                 value={masterDarkPath}
                 onChange={(e) => setMasterDarkPath(e.target.value)}
                 className="ab-select max-w-[60%] truncate"
@@ -197,7 +201,8 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
               placeholder={DEFECT_PLACEHOLDER}
               spellCheck={false}
               disabled={busy}
-              className="w-full h-24 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-violet-400"
+              aria-label="Defect list (one entry per line, 0-based pixel coordinates)"
+              className="w-full h-24 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 focus:border-violet-400"
             />
             <div className="text-[10px] text-zinc-500">
               {parsedList.defects.length} entr{parsedList.defects.length === 1 ? "y" : "ies"}
@@ -212,8 +217,9 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
         <Toggle label="CFA (Bayer) data" checked={cfa} disabled={busy} accent={ACCENT} onChange={setCfa} />
 
         <div className="flex items-center justify-between">
-          <label className="text-xs text-zinc-400">Replacement</label>
+          <label htmlFor={replacementId} className="text-xs text-zinc-400">Replacement</label>
           <select
+            id={replacementId}
             value={replacement}
             onChange={(e) => setReplacement(e.target.value as CosmeticReplacement)}
             className="ab-select"

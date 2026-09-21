@@ -3,8 +3,18 @@ import type { Region, RegionStatsEntry } from "../shared/types/regions";
 import { regionStats, type RegionStatsRequest } from "../services/regions";
 
 export const STATS_DEBOUNCE_MS = 250;
+export const MAX_REGIONS_PER_STATS_CALL = 512;
 
 const EMPTY_STATS: Map<string, RegionStatsEntry> = new Map();
+
+export function chunkStatsRequests(requests: RegionStatsRequest[]): RegionStatsRequest[][] {
+  if (requests.length <= MAX_REGIONS_PER_STATS_CALL) return requests.length === 0 ? [] : [requests];
+  const chunks: RegionStatsRequest[][] = [];
+  for (let start = 0; start < requests.length; start += MAX_REGIONS_PER_STATS_CALL) {
+    chunks.push(requests.slice(start, start + MAX_REGIONS_PER_STATS_CALL));
+  }
+  return chunks;
+}
 
 export interface RegionStatsState {
   stats: Map<string, RegionStatsEntry>;
@@ -39,9 +49,13 @@ export function useRegionStats(filePath: string | null, regions: Region[], exclu
     const timer = setTimeout(async () => {
       setLoading(true);
       try {
-        const res = await regionStats(filePath, buildStatsRequests(regions), { excludeDq });
-        if (seqRef.current !== seq) return;
-        setStats(new Map(res.regions.map((e) => [e.id, e])));
+        const merged = new Map<string, RegionStatsEntry>();
+        for (const chunk of chunkStatsRequests(buildStatsRequests(regions))) {
+          const res = await regionStats(filePath, chunk, { excludeDq });
+          if (seqRef.current !== seq) return;
+          for (const entry of res.regions) merged.set(entry.id, entry);
+        }
+        setStats(merged);
         setError(null);
       } catch (e) {
         if (seqRef.current !== seq) return;

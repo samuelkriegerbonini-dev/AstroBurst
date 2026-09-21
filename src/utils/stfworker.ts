@@ -22,7 +22,6 @@ let _worker: Worker | null = null;
 const _pendingCallbacks = new Map<number, Callback>();
 let _nextId = 0;
 let _hasPixels = false;
-let _pixelsGeneration = 0;
 
 function getStfWorker(): Worker {
   if (_worker) return _worker;
@@ -59,7 +58,6 @@ export function setWorkerPixels(
   width: number,
   height: number,
 ): Promise<void> {
-  ++_pixelsGeneration;
   const promise = new Promise<void>((resolve) => {
     const worker = getStfWorker();
     const id = _nextId++;
@@ -110,7 +108,6 @@ export function cancelPendingRenders(): void {
 
 export function clearWorkerPixels(): void {
   _hasPixels = false;
-  _pixelsGeneration++;
   if (_worker) {
     _worker.postMessage({ type: "clearPixels" });
   }
@@ -123,6 +120,5 @@ export function terminateStfWorker(): void {
     _pendingCallbacks.clear();
     _nextId = 0;
     _hasPixels = false;
-    _pixelsGeneration = 0;
   }
 }
