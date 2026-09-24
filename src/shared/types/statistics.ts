@@ -13,6 +13,7 @@ export interface ChannelStatistics {
   variance: number;
   std_dev: number;
   nan_count: number;
+  padding: number;
   excluded: number;
 }
 

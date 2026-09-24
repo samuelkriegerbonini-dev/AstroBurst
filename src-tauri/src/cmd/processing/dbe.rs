@@ -3,14 +3,14 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::cmd::common::{
-    auto_stretch_preview, blocking_cmd, load_cached, load_cached_full, output_stem,
-    resolve_output_dir, save_preview_png,
+    blocking_cmd, load_cached, load_cached_full, output_stem, resolve_output_dir,
+    save_auto_stf_preview_png, write_derived_fits,
 };
 use crate::core::imaging::background::BackgroundMode;
 use crate::core::imaging::dbe::{extract_background_dbe, DbeConfig};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
-use crate::infra::fits::writer::{filter_header, write_fits_mono};
+use crate::infra::fits::writer::filter_header;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     PROGRESS_EVENT, PROGRESS_STEPS, RES_CACHE_KEY, RES_CORRECTED_FITS, RES_CORRECTED_PNG,
@@ -48,6 +48,49 @@ fn source_header(path: &str, entry: &ImageEntry) -> Option<HduHeader> {
     load_cached_full(path).ok().and_then(|e| e.header().cloned())
 }
 
+fn run_dbe(
+    path: &str,
+    output_dir: &str,
+    config: &DbeConfig,
+    progress: Option<&ProgressHandle>,
+) -> anyhow::Result<serde_json::Value> {
+    let entry = load_cached(path)?;
+    let header = source_header(path, &entry);
+
+    let result = extract_background_dbe(entry.arr(), config, progress)?;
+
+    let stem = output_stem(path);
+    let (rows, cols) = result.corrected.dim();
+    let corrected_png = format!("{}/{}_dbe_corrected.png", output_dir, stem);
+    let model_png = format!("{}/{}_dbe_model.png", output_dir, stem);
+    save_auto_stf_preview_png(&result.corrected, &corrected_png)?;
+    save_auto_stf_preview_png(&result.model, &model_png)?;
+
+    let corrected_fits = format!("{}/{}_dbe_corrected.fits", output_dir, stem);
+    let model_fits = format!("{}/{}_dbe_model.fits", output_dir, stem);
+    let corrected_header = output_header(header.as_ref(), abproc_for_mode(&config.mode));
+    let model_header = output_header(header.as_ref(), ABPROC_DBE_MODEL);
+    write_derived_fits(&corrected_fits, &result.corrected, Some(&corrected_header))?;
+    write_derived_fits(&model_fits, &result.model, Some(&model_header))?;
+
+    let stats = compute_image_stats(&result.corrected);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(&corrected_fits, Arc::new(result.corrected), stats);
+
+    Ok(json!({
+        RES_CORRECTED_PNG: corrected_png,
+        RES_MODEL_PNG: model_png,
+        RES_CORRECTED_FITS: corrected_fits,
+        RES_CACHE_KEY: corrected_fits,
+        RES_DBE_MODEL_FITS: model_fits,
+        RES_SAMPLE_COUNT: result.sample_count,
+        RES_DBE_REJECTED_COUNT: result.rejected_count,
+        RES_RMS_RESIDUAL: result.rms_residual,
+        RES_ELAPSED_MS: result.elapsed_ms,
+        RES_DIMENSIONS: [cols, rows],
+        RES_DBE_SAMPLES: serde_json::to_value(&result.samples)?,
+    }))
+}
+
 #[tauri::command]
 pub async fn extract_background_dbe_cmd(
     app: tauri::AppHandle,
@@ -56,51 +99,17 @@ pub async fn extract_background_dbe_cmd(
     config: DbeConfig,
 ) -> Result<serde_json::Value, String> {
     let progress = ProgressHandle::new(&app, PROGRESS_EVENT, PROGRESS_STEPS as u64);
-    let progress_clone = progress.clone();
 
     blocking_cmd!({
         let output_dir = resolve_output_dir(&output_dir)?;
-        let entry = load_cached(&path)?;
-        let header = source_header(&path, &entry);
-
-        let result = extract_background_dbe(entry.arr(), &config, Some(&progress_clone))?;
-
-        let stem = output_stem(&path);
-        let (rows, cols) = result.corrected.dim();
-        let corrected_png = format!("{}/{}_dbe_corrected.png", output_dir, stem);
-        let model_png = format!("{}/{}_dbe_model.png", output_dir, stem);
-        save_preview_png(auto_stretch_preview(&result.corrected), cols, rows, &corrected_png)?;
-        save_preview_png(auto_stretch_preview(&result.model), cols, rows, &model_png)?;
-
-        let corrected_fits = format!("{}/{}_dbe_corrected.fits", output_dir, stem);
-        let model_fits = format!("{}/{}_dbe_model.fits", output_dir, stem);
-        let corrected_header = output_header(header.as_ref(), abproc_for_mode(&config.mode));
-        let model_header = output_header(header.as_ref(), ABPROC_DBE_MODEL);
-        write_fits_mono(&corrected_fits, &result.corrected, Some(&corrected_header))?;
-        write_fits_mono(&model_fits, &result.model, Some(&model_header))?;
-
-        let stats = compute_image_stats(&result.corrected);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(&corrected_fits, Arc::new(result.corrected), stats);
-
-        Ok(json!({
-            RES_CORRECTED_PNG: corrected_png,
-            RES_MODEL_PNG: model_png,
-            RES_CORRECTED_FITS: corrected_fits,
-            RES_CACHE_KEY: corrected_fits,
-            RES_DBE_MODEL_FITS: model_fits,
-            RES_SAMPLE_COUNT: result.sample_count,
-            RES_DBE_REJECTED_COUNT: result.rejected_count,
-            RES_RMS_RESIDUAL: result.rms_residual,
-            RES_ELAPSED_MS: result.elapsed_ms,
-            RES_DIMENSIONS: [cols, rows],
-            RES_DBE_SAMPLES: serde_json::to_value(&result.samples)?,
-        }))
+        run_dbe(&path, &output_dir, &config, Some(&progress))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::fits::writer::write_fits_mono;
     use crate::infra::image_source::load_plane;
     use crate::types::image_ref::ImageRef;
     use ndarray::Array2;
@@ -132,5 +141,24 @@ mod tests {
         let loaded = load_plane(&ImageRef::parse(&path_str)).unwrap();
         assert_eq!(loaded.header.get(ABPROC_KEY), Some("dbe-subtract"));
         assert_eq!(loaded.arr.dim(), (8, 8));
+    }
+
+    #[test]
+    fn dbe_previews_of_a_large_image_match_the_gpu_view_of_the_written_results() {
+        use crate::cmd::io::test_support::{assert_matches_gpu_view, wide_sky};
+        use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide_dbe.fits").to_str().unwrap().to_string();
+        write_fits_mono(&src, &wide_sky(24), None).unwrap();
+
+        let config = DbeConfig { auto_grid: Some(4), ..DbeConfig::default() };
+        let value = run_dbe(&src, dir.path().to_str().unwrap(), &config, None).unwrap();
+        GLOBAL_IMAGE_CACHE.remove(value[RES_CORRECTED_FITS].as_str().unwrap());
+        for (png, fits) in [(RES_CORRECTED_PNG, RES_CORRECTED_FITS), (RES_MODEL_PNG, RES_DBE_MODEL_FITS)] {
+            let written = crate::cmd::common::extract_image_resolved(value[fits].as_str().unwrap()).unwrap().arr;
+            let stats = compute_image_stats(&written);
+            let stf = auto_stf(&stats, &AutoStfConfig::default());
+            assert_matches_gpu_view(value[png].as_str().unwrap(), &written, &stf, &stats);
+        }
     }
 }

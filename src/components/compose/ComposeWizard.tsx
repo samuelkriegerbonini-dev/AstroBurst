@@ -1,11 +1,13 @@
-import { useState, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from "react";
 import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
-import { useDoneFilesContext, useRenderActions, useNarrowbandContext, useFileContext, useHistContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useNarrowbandContext, useFileContext, useHistContext, useRenderActions } from "../../context/PreviewContext";
 import { useCompositeActions } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
   nextEnabledStep,
   STEPS,
+  type ChannelStage,
+  type CompositeOp,
 } from "../../utils/wizard";
 import type { StfParams } from "../../shared/types";
 
@@ -87,13 +89,10 @@ export default function ComposeWizard() {
     setCompositeAutoStf,
     setCompositeStf,
   } = useCompositeActions();
-  const {
-    setActiveImagePath,
-  } = useRenderActions();
-
+  const { forgetOutputs } = useRenderActions();
   const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
 
-  const { state, dispatch, activeStep, setActiveStep } = useComposeWizardContext();
+  const { state, dispatch, activeStep, setActiveStep, setOutputForgetter } = useComposeWizardContext();
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -119,7 +118,7 @@ export default function ComposeWizard() {
     setSuggestedStep(null);
   }, [setActiveStep]);
 
-  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams, lumFitsPath?: string | null) => {
+  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -127,12 +126,9 @@ export default function ComposeWizard() {
       setCompositeAutoStf(stfR, stfG, stfB);
       setCompositeStf(stfR, stfG, stfB);
     }
-    if (lumFitsPath) {
-      setActiveImagePath(lumFitsPath);
-    }
     dispatch({ type: "SET_COMPOSITE_READY", ready: true });
     completeStep("blend");
-  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setActiveImagePath, completeStep, dispatch]);
+  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, completeStep, dispatch]);
 
   const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: StfParams; g: StfParams; b: StfParams }) => {
     if (previewUrl) {
@@ -143,10 +139,22 @@ export default function ComposeWizard() {
     }
   }, [setCompositePreviewUrl, setCompositeStf]);
 
+  useEffect(() => {
+    setOutputForgetter(forgetOutputs);
+  }, [setOutputForgetter, forgetOutputs]);
+
   const handleReset = useCallback(() => {
     dispatch({ type: "RESET" });
     setActiveStep("channels");
   }, [dispatch, setActiveStep]);
+
+  const handleCompositeOp = useCallback((op: CompositeOp) => {
+    dispatch({ type: "RECORD_COMPOSITE_OP", op });
+  }, [dispatch]);
+
+  const handleChannelOutput = useCallback((binId: string, stage: "starless" | "stretched", value: ChannelStage) => {
+    dispatch({ type: "SET_CHANNEL_STAGE", binId, stage, value });
+  }, [dispatch]);
 
   const stepContent = useMemo(() => {
     switch (activeStep) {
@@ -213,6 +221,7 @@ export default function ComposeWizard() {
                 handleCompositePreview(url);
               }
             }}
+            onCompositeOp={handleCompositeOp}
           />
         );
       case "colorbalance":
@@ -233,6 +242,7 @@ export default function ComposeWizard() {
               }
               completeStep("colorbalance");
             }}
+            onCompositeOp={handleCompositeOp}
           />
         );
       case "stretch":
@@ -246,6 +256,11 @@ export default function ComposeWizard() {
               handleRestretchPreview(url, stf);
               completeStep("stretch");
             }}
+            onChannelOutput={(binId, stage, value) => {
+              handleChannelOutput(binId, stage, value);
+              completeStep("stretch");
+            }}
+            onCompositeOp={handleCompositeOp}
           />
         );
       case "adjust":
@@ -263,7 +278,7 @@ export default function ComposeWizard() {
       default:
         return null;
     }
-  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch]);
+  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleCompositeOp, handleChannelOutput, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch]);
 
   return (
     <div className="flex flex-col h-full">

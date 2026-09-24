@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::stats::percentile;
+use astroburst_lib::infra::cache::ImageEntry;
 use astroburst_lib::types::constants::HISTOGRAM_BINS;
 use astroburst_lib::types::image::Histogram;
 
@@ -49,8 +50,9 @@ fn finite_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogr
             || vec![0u32; bins],
             |mut local, chunk| {
                 for &v in chunk {
-                    if v.is_finite() {
-                        let idx = ((v as f64 - dmin) * inv_bin_width) as usize;
+                    let vd = v as f64;
+                    if vd >= dmin && vd <= dmax {
+                        let idx = ((vd - dmin) * inv_bin_width) as usize;
                         local[idx.min(last)] += 1;
                     }
                 }
@@ -111,9 +113,20 @@ async fn target_ref(session: &Session, explicit: Option<String>) -> Result<Strin
     }
 }
 
+fn check_range(range: Option<[f64; 2]>) -> Result<()> {
+    match range {
+        Some([lo, hi]) if !(lo.is_finite() && hi.is_finite() && lo < hi) => Err(AppError::BadRequestWithHint {
+            code: "bad_request",
+            message: format!("range must be two finite numbers with range[0] < range[1], got [{lo}, {hi}]"),
+            hint: Some("omit range to use the 0.1..99.9 percentile range of the data".into()),
+        }),
+        _ => Ok(()),
+    }
+}
+
 pub async fn histogram(
     SessionExtractor(session): SessionExtractor,
-    Json(params): Json<HistogramParams>,
+    Json(mut params): Json<HistogramParams>,
 ) -> Result<Json<Value>> {
     if params.render_png == Some(true) {
         return Err(AppError::BadRequestWithHint {
@@ -123,12 +136,20 @@ pub async fn histogram(
         });
     }
     check_bins(params.bins)?;
+    check_range(params.range)?;
 
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = target_ref(&session, params.image_ref.take()).await?;
     let entry = session
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
+    tokio::task::spawn_blocking(move || histogram_body(&entry, target, &params))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
+        .map(Json)
+}
+
+fn histogram_body(entry: &ImageEntry, target: String, params: &HistogramParams) -> Result<Value> {
     let arr = entry.arr();
     let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
@@ -168,7 +189,7 @@ pub async fn histogram(
         json!(hist.bins)
     };
 
-    Ok(Json(json!({
+    Ok(json!({
         "ref": target,
         "region": values.region,
         "bins": counts,
@@ -178,7 +199,7 @@ pub async fn histogram(
         "log_counts": params.log_counts,
         "range_source": range_source,
         "mode": mode,
-    })))
+    }))
 }
 
 #[cfg(test)]
@@ -212,8 +233,25 @@ mod tests {
         assert_eq!(hist.bins.iter().sum::<u32>(), 5);
         assert_eq!(hist.bin_edges, vec![-10.0, -5.0, 0.0, 5.0, 10.0]);
 
-        let legacy = build_histogram(&data, 4, -10.0, 10.0);
-        assert_eq!(legacy.bins.iter().sum::<u32>(), 2);
+        let core = build_histogram(&data, 4, -10.0, 10.0);
+        assert_eq!(core.bins, vec![0, 2, 1, 1]);
+        assert_eq!(core.bins.iter().sum::<u32>(), 4);
+    }
+
+    #[test]
+    fn finite_histogram_skips_values_outside_the_range_and_keeps_the_upper_edge() {
+        let data = [-1.0f32, 0.0, 1.0, 5.0, 10.0, 10.5, 1e6, f32::NEG_INFINITY];
+        let hist = finite_histogram(&data, 2, 0.0, 10.0);
+        assert_eq!(hist.bins, vec![2, 2]);
+    }
+
+    #[test]
+    fn explicit_range_must_be_finite_and_increasing() {
+        for range in [[10.0, 0.0], [5.0, 5.0], [f64::NAN, 1.0], [0.0, f64::INFINITY]] {
+            assert_eq!(code_of(&check_range(Some(range)).unwrap_err()), Some("bad_request"), "{range:?}");
+        }
+        assert!(check_range(Some([0.0, 1e-3])).is_ok());
+        assert!(check_range(None).is_ok());
     }
 
     #[test]

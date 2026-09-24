@@ -1,14 +1,17 @@
 import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense, memo } from "react";
 import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
+import MeasurementBadge from "./MeasurementBadge";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
-import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
-import { useCompositePreview } from "../../context/CompositeContext";
+import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
+import { cpuStfRenderAllowed, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
+import type { CubeResult } from "./SpectroscopyPanel";
 import type { StarDetectionResult } from "../../shared/types";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
@@ -56,16 +59,24 @@ function AnalysisTabInner({
   const { file } = useFileContext();
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
-  const { setRenderedPreviewUrl } = useRenderContext();
-  const { isShowingComposite } = useCompositePreview();
-  const { rawPixels, rgbRawPixels } = useRawPixelsContext();
+  const { publishProcessed, setStfPreviewUrl } = useRenderActions();
+  const { rawPixels, rawPixelsLoading, rgbRawPixels, rgbRawPixelsLoading } = useRawPixelsContext();
   const { display } = useDisplayContext();
 
   const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
   const [starLoading, setStarLoading] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
 
-  const effectivePath = useRegionKey();
+  const target = useAnalysisTarget();
+  const effectivePath = target.path;
+  const compositeOnScreen = target.composite;
+  const rgbPath = target.rgbPath;
+  const regionKey = useRegionKey();
+  const stfLock = histogramStfLock({
+    stretch: display.stretch,
+    compositeOnScreen,
+    previewOnly: target.displayed.previewOnly,
+  });
   const detectSeqRef = useRef(0);
 
   useEffect(() => {
@@ -73,12 +84,13 @@ function AnalysisTabInner({
     setStarResult(null);
     setDetectError(null);
     setStarLoading(false);
-  }, [effectivePath, isShowingComposite]);
+  }, [effectivePath, compositeOnScreen, rgbPath]);
 
   const rafIdRef = useRef<number | null>(null);
-  const pendingStfRef = useRef<StfParams | null>(null);
+  const pendingStfRef = useRef<{ params: StfParams; path: string } | null>(null);
   const ipcBusyRef = useRef(false);
   const ipcFailCountRef = useRef(0);
+  const flushStfRef = useRef<() => void>(() => {});
 
   const flushStfIpc = useCallback(async () => {
     if (ipcBusyRef.current || !pendingStfRef.current || !effectivePath) return;
@@ -87,8 +99,9 @@ function AnalysisTabInner({
       ipcFailCountRef.current = 0;
       return;
     }
-    const params = pendingStfRef.current;
+    const { params, path } = pendingStfRef.current;
     pendingStfRef.current = null;
+    if (path !== effectivePath) return;
     ipcBusyRef.current = true;
     try {
       const result = await applyStfRender(
@@ -101,29 +114,39 @@ function AnalysisTabInner({
       ipcFailCountRef.current = 0;
       if (result.previewUrl) {
         const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-        setRenderedPreviewUrl(bust);
+        setStfPreviewUrl(bust);
       }
     } catch (e) {
       ipcFailCountRef.current++;
       console.error("STF render failed:", e);
     } finally {
       ipcBusyRef.current = false;
-      if (pendingStfRef.current) queueMicrotask(() => flushStfIpc());
+      if (pendingStfRef.current) queueMicrotask(() => flushStfRef.current());
     }
-  }, [effectivePath, setRenderedPreviewUrl]);
+  }, [effectivePath, setStfPreviewUrl]);
+
+  useEffect(() => {
+    flushStfRef.current = flushStfIpc;
+  }, [flushStfIpc]);
+
+  const cpuRender = cpuStfRenderAllowed({
+    hasRawPixels: rawPixels !== null || rgbRawPixels !== null,
+    rawPixelsLoading: rawPixelsLoading || rgbRawPixelsLoading,
+    locked: stfLock !== null,
+  });
 
   const handleStfChange = useCallback(
     (params: StfParams) => {
       setStfParams(params);
-      if (rawPixels || rgbRawPixels) return;
-      pendingStfRef.current = params;
+      if (!cpuRender || !effectivePath) return;
+      pendingStfRef.current = { params, path: effectivePath };
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = requestAnimationFrame(() => {
         rafIdRef.current = null;
-        flushStfIpc();
+        flushStfRef.current();
       });
     },
-    [setStfParams, flushStfIpc, rawPixels, rgbRawPixels],
+    [setStfParams, cpuRender, effectivePath],
   );
 
   const handleAutoStf = useCallback(() => {
@@ -144,8 +167,8 @@ function AnalysisTabInner({
       setStarLoading(true);
       setDetectError(null);
       try {
-        const result = isShowingComposite
-          ? await detectStarsComposite(sigma, 200)
+        const result = compositeOnScreen
+          ? await detectStarsComposite(sigma, 200, rgbPath)
           : effectivePath
             ? await detectStars(effectivePath, sigma, 200)
             : null;
@@ -158,30 +181,39 @@ function AnalysisTabInner({
         if (detectSeqRef.current === seq) setStarLoading(false);
       }
     },
-    [effectivePath, isShowingComposite],
+    [effectivePath, compositeOnScreen, rgbPath],
   );
 
-  const handleCollapsePreview = useCallback(
-    (previewUrl: string) => {
-      const bust = `${previewUrl}${previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-      setRenderedPreviewUrl(bust);
+  const filePath = file?.path;
+  const fileKey = fileKeyOf(file);
+  const publishCube = useCallback(
+    (result: CubeResult) => {
+      if (!fileKey || !filePath) return;
+      publishProcessed(fileKey, {
+        previewUrl: result.previewUrl,
+        fitsPath: result.fitsPath,
+        dimensions: result.dimensions,
+        label: result.label,
+        kind: "cube",
+        inputPath: filePath,
+      });
     },
-    [setRenderedPreviewUrl],
+    [publishProcessed, fileKey, filePath],
   );
 
   const frameSeqRef = useRef(0);
   const handleFramePreview = useCallback(
-    async (outputPath: string) => {
+    async (outputPath: string, frameIndex: number) => {
       const seq = ++frameSeqRef.current;
       try {
         const url = await getPreviewUrl(outputPath);
         if (frameSeqRef.current !== seq) return;
-        setRenderedPreviewUrl(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`);
+        publishCube({ label: `Cube frame ${frameIndex + 1}`, previewUrl: url, fitsPath: null, dimensions: null });
       } catch (e) {
         console.error("Frame preview failed:", e);
       }
     },
-    [setRenderedPreviewUrl],
+    [publishCube],
   );
 
   const hasHist = histData !== null;
@@ -197,6 +229,15 @@ function AnalysisTabInner({
   );
 
   const stars = starResult?.stars || EMPTY_STARS;
+  const rgbStfMode = rgbStfPanelMode({
+    compositeOnScreen,
+    hasRgbRawPixels: rgbRawPixels !== null,
+    displayReferred: rgbRawPixels?.displayReferred === true,
+  });
+  const targetWidth = target.dimensions?.[0];
+  const targetHeight = target.dimensions?.[1];
+  const measurementBadge = useMemo(() => <MeasurementBadge />, []);
+  const compositeMeasurementBadge = useMemo(() => <MeasurementBadge measuresComposite />, []);
 
   return (
     <Suspense fallback={<TabSpinner />}>
@@ -214,11 +255,19 @@ function AnalysisTabInner({
             onAutoStf={handleAutoStf}
             onReset={handleResetStf}
             stats={histStats}
-            disabled={display.stretch !== "mtf"}
+            disabled={stfLock !== null}
+            disabledHint={stfLock ?? undefined}
+            badge={measurementBadge}
           />
         )}
 
-        {isShowingComposite && rgbRawPixels && <RgbStfPanel />}
+        {rgbStfMode === "live" && <RgbStfPanel showSlotHistogram={!target.fileRgbView} />}
+        {rgbStfMode === "baked" && (
+          <div className="px-3 py-2 rounded-lg border border-violet-600/20 bg-violet-900/10 text-[10px] text-violet-300/80">
+            RGB Channel STF is baked in: the composite on screen is display-referred (stretch or curves applied), so
+            channel sliders would not change it.
+          </div>
+        )}
 
         <PlateSolvePanel
           stars={stars}
@@ -227,24 +276,25 @@ function AnalysisTabInner({
           detectError={detectError}
           backgroundMedian={starResult?.background_median}
           backgroundSigma={starResult?.background_sigma}
-          imageWidth={starResult?.image_width || file?.result?.dimensions?.[0]}
-          imageHeight={starResult?.image_height || file?.result?.dimensions?.[1]}
+          imageWidth={starResult?.image_width || targetWidth}
+          imageHeight={starResult?.image_height || targetHeight}
           elapsed={starResult?.elapsed_ms || 0}
           overlayCanvasRef={starOverlayRef}
-          filePath={effectivePath ?? null}
+          filePath={regionKey}
+          sourceBadge={compositeMeasurementBadge}
         />
 
-        <PhotometryPanel filePath={effectivePath ?? null} />
+        <PhotometryPanel filePath={effectivePath} />
 
-        <CatalogPanel filePath={effectivePath ?? null} />
+        <CatalogPanel filePath={regionKey} />
 
-        <StatisticsPanel filePath={effectivePath ?? null} />
+        <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={target.rgbPath} />
 
-        <RegionsPanel filePath={effectivePath ?? null} />
+        <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
 
-        <RegionProfilesPanel filePath={effectivePath ?? null} />
+        <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
 
-        {effectivePath && !isCube && (file?.result?.dimensions?.[0] ?? 0) >= 64 && (
+        {effectivePath && !isCube && (targetWidth ?? 0) >= 64 && (
           <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />
         )}
 
@@ -257,16 +307,18 @@ function AnalysisTabInner({
             cubeDims={cubeDims}
             elapsed={specElapsed}
             error={specError}
-            filePath={effectivePath ?? undefined}
-            onCollapsePreview={handleCollapsePreview}
+            filePath={filePath}
+            onCubeResult={publishCube}
             onFramePreview={handleFramePreview}
           />
         )}
 
         <TileViewerPanel
-          filePath={effectivePath || null}
-          imageWidth={file?.result?.dimensions?.[0]}
-          imageHeight={file?.result?.dimensions?.[1]}
+          filePath={effectivePath}
+          composite={compositeOnScreen}
+          rgbPath={rgbPath}
+          imageWidth={targetWidth}
+          imageHeight={targetHeight}
         />
       </div>
     </Suspense>

@@ -3,7 +3,6 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::types::constants::FILTER_WAVELENGTHS_NM;
 use crate::types::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14,8 +13,6 @@ pub enum NarrowbandFilter {
     Oiii,
     #[serde(rename = "[SII] (673nm)")]
     Sii,
-    #[serde(rename = "Unknown")]
-    Unknown,
 }
 
 impl std::fmt::Display for NarrowbandFilter {
@@ -24,7 +21,6 @@ impl std::fmt::Display for NarrowbandFilter {
             Self::Ha => write!(f, "Hα (656nm)"),
             Self::Oiii => write!(f, "[OIII] (501nm)"),
             Self::Sii => write!(f, "[SII] (673nm)"),
-            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -52,7 +48,6 @@ impl std::fmt::Display for HubbleChannel {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterDetection {
     pub filter: NarrowbandFilter,
-    pub hubble_channel: HubbleChannel,
     pub confidence: Confidence,
     pub matched_keyword: String,
     pub matched_value: String,
@@ -117,6 +112,9 @@ const FILTER_MATCHERS: [(NarrowbandFilter, fn(&str) -> bool); 3] = [
     (NarrowbandFilter::Sii, |v| re_sii().is_match(v)),
 ];
 
+const WAVELENGTH_AXIS_CODES: [&str; 2] = ["WAVE", "AWAV"];
+const ANGSTROM_HEURISTIC_LIMIT: f64 = 1000.0;
+
 const DISCOVERY_KEYWORDS: &[&str] = &[
     "FILTER", "FILTER1", "FILTER2", "FILTER3",
     "INSTRUME", "IMAGETYP",
@@ -172,31 +170,23 @@ fn palette_channels(palette: &PaletteType, filter: NarrowbandFilter) -> Vec<Hubb
             NarrowbandFilter::Sii => vec![HubbleChannel::Red],
             NarrowbandFilter::Ha => vec![HubbleChannel::Green],
             NarrowbandFilter::Oiii => vec![HubbleChannel::Blue],
-            NarrowbandFilter::Unknown => vec![],
         },
         PaletteType::Hoo | PaletteType::NaturalColor => match filter {
             NarrowbandFilter::Ha => vec![HubbleChannel::Red],
             NarrowbandFilter::Oiii => vec![HubbleChannel::Green, HubbleChannel::Blue],
             NarrowbandFilter::Sii => vec![],
-            NarrowbandFilter::Unknown => vec![],
         },
         PaletteType::Hos => match filter {
             NarrowbandFilter::Ha => vec![HubbleChannel::Red],
             NarrowbandFilter::Oiii => vec![HubbleChannel::Green],
             NarrowbandFilter::Sii => vec![HubbleChannel::Blue],
-            NarrowbandFilter::Unknown => vec![],
         },
         PaletteType::Custom => vec![],
     }
 }
 
-fn filter_to_hubble_channel(filter: NarrowbandFilter) -> HubbleChannel {
-    match filter {
-        NarrowbandFilter::Sii => HubbleChannel::Red,
-        NarrowbandFilter::Ha => HubbleChannel::Green,
-        NarrowbandFilter::Oiii => HubbleChannel::Blue,
-        NarrowbandFilter::Unknown => HubbleChannel::Green,
-    }
+pub fn palette_channel(palette: &PaletteType, filter: NarrowbandFilter) -> Option<HubbleChannel> {
+    palette_channels(palette, filter).first().copied()
 }
 
 fn keyword_confidence(keyword: &str) -> Confidence {
@@ -211,7 +201,6 @@ fn keyword_confidence(keyword: &str) -> Confidence {
 fn make_detection(filter: NarrowbandFilter, confidence: Confidence, keyword: &str, value: &str) -> FilterDetection {
     FilterDetection {
         filter,
-        hubble_channel: filter_to_hubble_channel(filter),
         confidence,
         matched_keyword: keyword.to_string(),
         matched_value: value.to_string(),
@@ -303,17 +292,76 @@ pub fn detect_filter(header: &HduHeader) -> Option<FilterDetection> {
         }
     }
 
-    let wavelength = header.get_f64("WAVELEN")
-        .or_else(|| header.get_f64("CRVAL3"))
-        .or_else(|| header.get_f64("WAVELENG"))?;
-
-    let filter = classify_wavelength_nm(wavelength)?;
-    Some(make_detection(filter, Confidence::Medium, "WAVELEN", &format!("{:.1}nm", wavelength)))
+    detect_from_wavelength_card(header)
 }
 
-fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
-    let nm = if nm > 1000.0 { nm / 10.0 } else { nm };
+struct WavelengthCard {
+    keyword: &'static str,
+    value: f64,
+    unit: Option<String>,
+}
 
+fn clean_card(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|s| s.trim().trim_matches('\'').trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn bare_wavelength_card(header: &HduHeader, keyword: &'static str) -> Option<WavelengthCard> {
+    header.get_f64(keyword).map(|value| WavelengthCard { keyword, value, unit: None })
+}
+
+fn spectral_axis_wavelength_card(header: &HduHeader) -> Option<WavelengthCard> {
+    let ctype = clean_card(header, "CTYPE3")?.to_uppercase();
+    if !WAVELENGTH_AXIS_CODES.iter().any(|code| ctype.starts_with(code)) {
+        return None;
+    }
+    let value = header.get_f64("CRVAL3")?;
+    let unit = clean_card(header, "CUNIT3").unwrap_or_else(|| "m".to_string());
+    Some(WavelengthCard { keyword: "CRVAL3", value, unit: Some(unit) })
+}
+
+fn nm_per_unit(unit: &str) -> Option<f64> {
+    match unit.trim().to_lowercase().as_str() {
+        "nm" | "nanometer" | "nanometers" | "nanometre" | "nanometres" => Some(1.0),
+        "angstrom" | "angstroms" | "a" | "å" | "ang" => Some(0.1),
+        "um" | "micron" | "microns" | "micrometer" | "micrometers" | "µm" | "μm" => Some(1.0e3),
+        "mm" => Some(1.0e6),
+        "cm" => Some(1.0e7),
+        "m" | "meter" | "meters" | "metre" | "metres" => Some(1.0e9),
+        _ => None,
+    }
+}
+
+fn heuristic_wavelength_unit(value: f64) -> &'static str {
+    if value > ANGSTROM_HEURISTIC_LIMIT { "Angstrom" } else { "nm" }
+}
+
+fn heuristic_wavelength_nm(value: f64) -> f64 {
+    if value > ANGSTROM_HEURISTIC_LIMIT { value / 10.0 } else { value }
+}
+
+fn detect_from_wavelength_card(header: &HduHeader) -> Option<FilterDetection> {
+    let card = bare_wavelength_card(header, "WAVELEN")
+        .or_else(|| spectral_axis_wavelength_card(header))
+        .or_else(|| bare_wavelength_card(header, "WAVELENG"))?;
+    let (nm, label) = match card.unit.as_deref() {
+        Some(unit) => (card.value * nm_per_unit(unit)?, format!("{} {}", card.value, unit)),
+        None => (
+            heuristic_wavelength_nm(card.value),
+            format!("{} {}", card.value, heuristic_wavelength_unit(card.value)),
+        ),
+    };
+    let filter = narrowband_at_nm(nm)?;
+    Some(make_detection(filter, Confidence::Medium, card.keyword, &label))
+}
+
+fn classify_wavelength_nm(value: f64) -> Option<NarrowbandFilter> {
+    narrowband_at_nm(heuristic_wavelength_nm(value))
+}
+
+fn narrowband_at_nm(nm: f64) -> Option<NarrowbandFilter> {
     if (649.0..=663.0).contains(&nm) {
         Some(NarrowbandFilter::Ha)
     } else if (495.0..=510.0).contains(&nm) {
@@ -323,29 +371,6 @@ fn classify_wavelength_nm(nm: f64) -> Option<NarrowbandFilter> {
     } else {
         None
     }
-}
-
-pub fn filter_to_wavelength_nm(filter: &str) -> Option<u32> {
-    let upper = filter.to_uppercase();
-    if let Some(nm) = lookup_filter_nm(upper.trim()) {
-        return Some(nm);
-    }
-    for token in upper.split(|c: char| !c.is_alphanumeric()) {
-        if token.is_empty() || token == "CLEAR" {
-            continue;
-        }
-        if let Some(nm) = lookup_filter_nm(token) {
-            return Some(nm);
-        }
-    }
-    None
-}
-
-fn lookup_filter_nm(key: &str) -> Option<u32> {
-    FILTER_WAVELENGTHS_NM
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, nm)| *nm)
 }
 
 pub fn suggest_palette(files: &[(String, HduHeader)]) -> PaletteSuggestion {
@@ -502,7 +527,7 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let index: HashMap<String, String> = cards.iter().cloned().collect();
-        HduHeader { cards, index }
+        HduHeader { cards, index, string_keys: None }
     }
 
     #[test]
@@ -514,7 +539,7 @@ mod tests {
         ]);
         let det = detect_filter(&h).unwrap();
         assert_eq!(det.filter, NarrowbandFilter::Ha);
-        assert_eq!(det.hubble_channel, HubbleChannel::Green);
+        assert_eq!(palette_channel(&PaletteType::Sho, det.filter), Some(HubbleChannel::Green));
         assert_eq!(det.confidence, Confidence::High);
     }
 
@@ -523,7 +548,7 @@ mod tests {
         let h = header_with(&[("FILTER", "OIII 6nm")]);
         let det = detect_filter(&h).unwrap();
         assert_eq!(det.filter, NarrowbandFilter::Oiii);
-        assert_eq!(det.hubble_channel, HubbleChannel::Blue);
+        assert_eq!(palette_channel(&PaletteType::Sho, det.filter), Some(HubbleChannel::Blue));
     }
 
     #[test]
@@ -531,7 +556,7 @@ mod tests {
         let h = header_with(&[("FILTER", "SII narrowband")]);
         let det = detect_filter(&h).unwrap();
         assert_eq!(det.filter, NarrowbandFilter::Sii);
-        assert_eq!(det.hubble_channel, HubbleChannel::Red);
+        assert_eq!(palette_channel(&PaletteType::Sho, det.filter), Some(HubbleChannel::Red));
     }
 
     #[test]
@@ -786,17 +811,62 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_to_wavelength_miri() {
-        assert_eq!(filter_to_wavelength_nm("F560W"), Some(5600));
-        assert_eq!(filter_to_wavelength_nm("F770W"), Some(7700));
-        assert_eq!(filter_to_wavelength_nm("F1000W"), Some(10000));
-        assert_eq!(filter_to_wavelength_nm("F1130W"), Some(11300));
-        assert_eq!(filter_to_wavelength_nm("F1280W"), Some(12800));
-        assert_eq!(filter_to_wavelength_nm("F1500W"), Some(15000));
-        assert_eq!(filter_to_wavelength_nm("F1800W"), Some(18000));
-        assert_eq!(filter_to_wavelength_nm("F2100W"), Some(21000));
-        assert_eq!(filter_to_wavelength_nm("F2550W"), Some(25500));
-        assert_eq!(filter_to_wavelength_nm("MIRI/F1000W"), Some(10000));
+    fn a_wavelength_fallback_names_the_card_it_read_and_that_card_unit() {
+        let cube = header_with(&[("CTYPE3", "AWAV"), ("CUNIT3", "Angstrom"), ("CRVAL3", "6563.0")]);
+        let det = detect_filter(&cube).expect("an Angstrom H-alpha axis");
+        assert_eq!(det.filter, NarrowbandFilter::Ha);
+        assert_eq!(det.matched_keyword, "CRVAL3");
+        assert_eq!(det.matched_value, "6563 Angstrom");
+
+        let microns = header_with(&[("CTYPE3", "WAVE"), ("CUNIT3", "um"), ("CRVAL3", "0.5007")]);
+        let det = detect_filter(&microns).expect("an [OIII] axis in microns");
+        assert_eq!(det.filter, NarrowbandFilter::Oiii);
+        assert_eq!(det.matched_value, "0.5007 um");
+
+        let leng = header_with(&[("WAVELENG", "6731")]);
+        let det = detect_filter(&leng).expect("WAVELENG in Angstrom");
+        assert_eq!(det.filter, NarrowbandFilter::Sii);
+        assert_eq!(det.matched_keyword, "WAVELENG");
+        assert_eq!(det.matched_value, "6731 Angstrom");
+
+        let wavelen = header_with(&[("WAVELEN", "656.3")]);
+        let det = detect_filter(&wavelen).unwrap();
+        assert_eq!((det.matched_keyword.as_str(), det.matched_value.as_str()), ("WAVELEN", "656.3 nm"));
+    }
+
+    #[test]
+    fn crval3_of_a_non_wavelength_axis_is_not_a_filter() {
+        for ctype in ["TIME", "FREQ", "VRAD", "STOKES"] {
+            let h = header_with(&[("CTYPE3", ctype), ("CRVAL3", "656.0")]);
+            assert!(detect_filter(&h).is_none(), "CTYPE3={} CRVAL3=656 read as {:?}", ctype, detect_filter(&h).map(|d| d.filter));
+        }
+        assert!(detect_filter(&header_with(&[("CRVAL3", "6563.0")])).is_none());
+    }
+
+    #[test]
+    fn a_spectral_axis_with_a_unit_is_not_rescaled_as_angstrom() {
+        for (crval3, cunit3) in [("6.53", "um"), ("5.0", "um"), ("6.7", "um"), ("6.53e-6", "m"), ("6530", "nm")] {
+            let h = header_with(&[("CTYPE3", "WAVE"), ("CUNIT3", cunit3), ("CRVAL3", crval3)]);
+            assert!(detect_filter(&h).is_none(), "CRVAL3={} {} read as {:?}", crval3, cunit3, detect_filter(&h).map(|d| d.filter));
+        }
+        let unknown = header_with(&[("CTYPE3", "WAVE"), ("CUNIT3", "pixel"), ("CRVAL3", "656.3")]);
+        assert!(detect_filter(&unknown).is_none());
+
+        let default_metres = header_with(&[("CTYPE3", "WAVE"), ("CRVAL3", "6.563e-7")]);
+        let det = detect_filter(&default_metres).expect("a WAVE axis without CUNIT3 is in metres");
+        assert_eq!(det.filter, NarrowbandFilter::Ha);
+        assert_eq!(det.matched_value, "0.0000006563 m");
+        assert!(detect_filter(&header_with(&[("CTYPE3", "WAVE"), ("CRVAL3", "6563")])).is_none());
+    }
+
+    #[test]
+    fn the_channel_follows_the_requested_palette() {
+        assert_eq!(palette_channel(&PaletteType::Hoo, NarrowbandFilter::Ha), Some(HubbleChannel::Red));
+        assert_eq!(palette_channel(&PaletteType::Hoo, NarrowbandFilter::Oiii), Some(HubbleChannel::Green));
+        assert_eq!(palette_channel(&PaletteType::Hoo, NarrowbandFilter::Sii), None);
+        assert_eq!(palette_channel(&PaletteType::Hos, NarrowbandFilter::Sii), Some(HubbleChannel::Blue));
+        assert_eq!(palette_channel(&PaletteType::Sho, NarrowbandFilter::Ha), Some(HubbleChannel::Green));
+        assert_eq!(palette_channel(&PaletteType::Custom, NarrowbandFilter::Ha), None);
     }
 
     #[test]
@@ -963,46 +1033,6 @@ mod tests {
         assert!(p.g_file.is_none());
         assert!(p.b_file.is_none());
         assert_eq!(p.unmapped.len(), 2);
-    }
-
-    #[test]
-    fn test_filter_to_wavelength_named() {
-        assert_eq!(filter_to_wavelength_nm("F656N"), Some(656));
-        assert_eq!(filter_to_wavelength_nm("F501N"), Some(501));
-        assert_eq!(filter_to_wavelength_nm("F502N"), Some(501));
-        assert_eq!(filter_to_wavelength_nm("F673N"), Some(673));
-        assert_eq!(filter_to_wavelength_nm("F090W"), Some(900));
-        assert_eq!(filter_to_wavelength_nm("F187N"), Some(1870));
-        assert_eq!(filter_to_wavelength_nm("F200W"), Some(2000));
-        assert_eq!(filter_to_wavelength_nm("F335M"), Some(3350));
-        assert_eq!(filter_to_wavelength_nm("F444W"), Some(4440));
-    }
-
-    #[test]
-    fn test_filter_to_wavelength_normalization() {
-        assert_eq!(filter_to_wavelength_nm("f200w"), Some(2000));
-        assert_eq!(filter_to_wavelength_nm("F200W-CLEAR"), Some(2000));
-        assert_eq!(filter_to_wavelength_nm("CLEAR;F200W"), Some(2000));
-        assert_eq!(filter_to_wavelength_nm("F164N+F150W2"), Some(1640));
-        assert_eq!(filter_to_wavelength_nm("  F090W  "), Some(900));
-    }
-
-    #[test]
-    fn test_filter_to_wavelength_aliases_and_unknown() {
-        assert_eq!(filter_to_wavelength_nm("Ha"), Some(656));
-        assert_eq!(filter_to_wavelength_nm("OIII"), Some(501));
-        assert_eq!(filter_to_wavelength_nm("SII"), Some(673));
-        assert_eq!(filter_to_wavelength_nm("Luminance"), None);
-        assert_eq!(filter_to_wavelength_nm(""), None);
-    }
-
-    #[test]
-    fn test_filter_wavelength_table_no_duplicate_keys() {
-        use std::collections::HashSet;
-        let mut seen = HashSet::new();
-        for (k, _) in FILTER_WAVELENGTHS_NM {
-            assert!(seen.insert(*k), "duplicate filter key in table: {k}");
-        }
     }
 
     #[test]

@@ -1,13 +1,23 @@
 import { useState, useCallback, useEffect, useId, useRef } from "react";
 import type { WizardState } from "../wizard";
-import { resolveAnyChannelPath } from "../wizard";
+import {
+  channelStretchInput,
+  resolveChannelPath,
+  singleChannelBinId,
+  starRemovalNote,
+  stretchRunSummary,
+  type ChannelStage,
+  type CompositeOp,
+  type StretchRunSummaryInput,
+} from "../../../utils/wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
-import { restretchComposite } from "../../../services/compose";
+import { restretchComposite, renderLinearCompositePreview } from "../../../services/compose";
 import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite, removeStars, removeStarsComposite } from "../../../services/processing";
 import type { StarRemovalResult } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { useRenderActions } from "../../../context/PreviewContext";
 import StfHistogram from "../StfHistogram";
 
 const HIST_RGB = [
@@ -22,6 +32,8 @@ interface StretchStepProps {
   onMaskParams: (growth: number, protection: number) => void;
   onMask: (path: string | null) => void;
   onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
+  onChannelOutput: (binId: string, stage: "starless" | "stretched", value: ChannelStage) => void;
+  onCompositeOp: (op: CompositeOp) => void;
 }
 
 interface ChannelStf {
@@ -34,15 +46,25 @@ const DEFAULT_STF: ChannelStf = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 interface StretchRunResult {
   png_path?: string;
+  fits_path?: string;
   previewUrl?: string;
+  dimensions?: [number, number];
   elapsed_ms?: number;
   iterations_run?: number;
   converged?: boolean;
   stretch_factor?: number;
+  channels?: StretchRunSummaryInput["channels"];
 }
 
-export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult }: StretchStepProps) {
-  const { compositeAutoStfR, compositeAutoStfG, compositeAutoStfB } = useCompositeStf();
+export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult, onChannelOutput, onCompositeOp }: StretchStepProps) {
+  const {
+    compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
+    compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
+  } = useCompositeStf();
+  const { currentFileKey, publishProcessed } = useRenderActions();
+  const channelBinId = state.compositeReady ? null : singleChannelBinId(state);
+  const channelLabel = state.bins.find((b) => b.id === channelBinId)?.shortLabel ?? "";
+  const filledBinCount = state.bins.filter((b) => b.files.length > 0).length;
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<StretchRunResult | null | undefined>(null);
   const [error, setError] = useState("");
@@ -113,15 +135,50 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     onStretchChange(state.stretchMode, state.stretchFactor, v);
   }, [state.stretchMode, state.stretchFactor, onStretchChange]);
 
+  const publishChannelOutput = useCallback(async (
+    runKey: string | null,
+    binId: string,
+    stage: "starless" | "stretched",
+    inputPath: string,
+    out: StretchRunResult,
+    note: string,
+    title: string,
+  ) => {
+    if (!out.fits_path) throw new Error("The command returned no FITS output for this channel");
+    const previewUrl = runKey ? out.previewUrl ?? (out.png_path ? await getPreviewUrl(out.png_path) : null) : null;
+    onChannelOutput(binId, stage, { path: out.fits_path, note });
+    if (!runKey) return;
+    const binLabel = state.bins.find((b) => b.id === binId)?.shortLabel ?? binId;
+    publishProcessed(runKey, {
+      fitsPath: out.fits_path,
+      previewUrl,
+      dimensions: out.dimensions ?? null,
+      label: `Wizard ${binLabel} · ${title}`,
+      kind: "wizard",
+      inputPath,
+    });
+  }, [state.bins, onChannelOutput, publishProcessed]);
+
   const handleRun = useCallback(async () => {
     setLoading(true);
     setError("");
+    const runKey = currentFileKey();
     try {
       let res: StretchRunResult | undefined;
       const dir = await getOutputDir();
       const stfBundle = { r: stfR, g: stfG, b: stfB };
+      if (state.stretchMode === "auto_stf" && !state.compositeReady) {
+        throw new Error("Run Blend first — Auto STF re-stretch operates on the blended composite");
+      }
+      const binId = state.compositeReady ? null : singleChannelBinId(state);
+      const input = binId ? channelStretchInput(state, binId) : null;
+      if (!state.compositeReady && !input) throw new Error("No channel path found");
+      let note = "";
+      let title = "";
 
       if (state.stretchMode === "masked") {
+        note = `masked stretch (target bg ${state.targetBackground.toFixed(2)})`;
+        title = "Masked Stretch";
         if (state.compositeReady) {
           res = await maskedStretchComposite(dir, {
             iterations: 10,
@@ -132,10 +189,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             detectionSigma,
             maxEccentricity,
           });
-        } else {
-          const path = resolveAnyChannelPath(state);
-          if (!path) throw new Error("No channel path found");
-          res = await maskedStretch(path, dir, {
+        } else if (input) {
+          res = await maskedStretch(input, dir, {
             iterations: 10,
             targetBackground: state.targetBackground,
             maskGrowth: state.maskGrowth,
@@ -144,25 +199,13 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             maxEccentricity,
           });
         }
-        if (res?.png_path) {
-          const url = await getPreviewUrl(res.png_path);
-          onResult(url, stfBundle);
-        } else if (res?.previewUrl) {
-          onResult(res.previewUrl, stfBundle);
-        }
       } else if (state.stretchMode === "arcsinh") {
+        note = `arcsinh stretch (factor ${state.stretchFactor})`;
+        title = "Arcsinh Stretch";
         if (state.compositeReady) {
           res = await arcsinhStretchComposite(state.stretchFactor, dir);
-        } else {
-          const path = resolveAnyChannelPath(state);
-          if (!path) throw new Error("No channel path found");
-          res = await applyArcsinhStretch(path, dir, state.stretchFactor);
-        }
-        if (res?.png_path) {
-          const url = await getPreviewUrl(res.png_path);
-          onResult(url, stfBundle);
-        } else if (res?.previewUrl) {
-          onResult(res.previewUrl, stfBundle);
+        } else if (input) {
+          res = await applyArcsinhStretch(input, dir, state.stretchFactor);
         }
       } else if (state.stretchMode === "ghs") {
         const ghsOptions = {
@@ -172,28 +215,22 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           shadowProtect: ghsLp,
           highlightProtect: ghsHp,
         };
+        note = `GHS stretch (D=${ghsD.toFixed(2)} b=${ghsB.toFixed(1)} SP=${ghsSp.toFixed(3)} LP=${ghsLp.toFixed(3)} HP=${ghsHp.toFixed(3)})`;
+        title = "GHS Stretch";
         if (state.compositeReady) {
           res = await ghsStretchComposite(dir, ghsOptions);
-        } else {
-          const path = resolveAnyChannelPath(state);
-          if (!path) throw new Error("No channel path found");
-          res = await applyGhsStretch(path, dir, ghsOptions);
-        }
-        if (res?.png_path) {
-          const url = await getPreviewUrl(res.png_path);
-          onResult(url, stfBundle);
-        } else if (res?.previewUrl) {
-          onResult(res.previewUrl, stfBundle);
+        } else if (input) {
+          res = await applyGhsStretch(input, dir, ghsOptions);
         }
       } else {
-        if (!state.compositeReady) {
-          throw new Error("Run Blend first — Auto STF re-stretch operates on the blended composite");
-        }
-        res = await restretchComposite(dir, stfR, stfG, stfB, undefined, true);
-        if (res?.png_path) {
-          const url = await getPreviewUrl(res.png_path);
-          onResult(url, stfBundle);
-        }
+        res = await restretchComposite(dir, stfR, stfG, stfB, undefined, true, linked);
+      }
+
+      if (state.compositeReady) {
+        const url = res?.png_path ? await getPreviewUrl(res.png_path) : res?.previewUrl ?? null;
+        if (url) onResult(url, stfBundle);
+      } else if (binId && input && res) {
+        await publishChannelOutput(runKey, binId, "stretched", input, res, note, title);
       }
 
       setResult(res);
@@ -202,32 +239,39 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     } finally {
       setLoading(false);
     }
-  }, [state, stfR, stfG, stfB, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, detectionSigma, maxEccentricity, onResult]);
+  }, [state, stfR, stfG, stfB, linked, ghsD, ghsB, ghsSp, ghsLp, ghsHp, sharedMask, detectionSigma, maxEccentricity, onResult, currentFileKey, publishChannelOutput]);
 
   const handleRemoveStars = useCallback(async () => {
     setSrLoading(true);
     setSrError("");
+    const runKey = currentFileKey();
     try {
       const dir = await getOutputDir();
       const opts = { detectionSigma: srSigma, growthFactor: srGrowth };
-      let res: StarRemovalResult;
       if (state.compositeReady) {
-        res = await removeStarsComposite(dir, opts);
-      } else {
-        const path = resolveAnyChannelPath(state);
-        if (!path) throw new Error("No channel path found");
-        res = await removeStars(path, dir, opts);
+        const res = await removeStarsComposite(dir, opts);
+        setSrResult(res);
+        onCompositeOp({ kind: "starRemoval", sigma: srSigma, growth: srGrowth });
+        const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
+        const url = await renderLinearCompositePreview(dir, stf, compositeStfLinked).catch((e) => {
+          console.error("[AstroBurst] Starless composite re-stretch failed:", e);
+          return res.previewUrl ?? null;
+        });
+        if (url) onResult(url);
+        return;
       }
+      const binId = singleChannelBinId(state);
+      const input = binId ? resolveChannelPath(state, binId) : null;
+      if (!binId || !input) throw new Error("No channel path found");
+      const res = await removeStars(input, dir, opts);
       setSrResult(res);
-      if (res.previewUrl) {
-        onResult(res.previewUrl, { r: stfR, g: stfG, b: stfB });
-      }
+      await publishChannelOutput(runKey, binId, "starless", input, res, starRemovalNote(srSigma, srGrowth), "Starless");
     } catch (e) {
       setSrError(e instanceof Error ? e.message : String(e));
     } finally {
       setSrLoading(false);
     }
-  }, [state, srSigma, srGrowth, stfR, stfG, stfB, onResult]);
+  }, [state, srSigma, srGrowth, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onResult, onCompositeOp, currentFileKey, publishChannelOutput]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;
@@ -241,13 +285,14 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
   const isSaturated = state.compositeReady && (state.wbR > 1.3 || state.wbG > 1.3 || state.wbB > 1.3);
 
+  const channelSuffix = channelLabel ? ` · ${channelLabel}` : "";
   const runLabel =
     state.stretchMode === "masked"
-      ? "Apply Masked Stretch"
+      ? `Apply Masked Stretch${channelSuffix}`
       : state.stretchMode === "arcsinh"
-        ? "Apply Arcsinh Stretch"
+        ? `Apply Arcsinh Stretch${channelSuffix}`
         : state.stretchMode === "ghs"
-          ? "Apply GHS Stretch"
+          ? `Apply GHS Stretch${channelSuffix}`
           : state.compositeReady
             ? "Re-stretch Composite"
             : "Apply Auto STF";
@@ -257,6 +302,13 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       {state.compositeReady && (
         <div className="text-[10px] text-emerald-400/70 bg-emerald-500/5 border border-emerald-500/10 rounded-md px-2 py-1.5">
           Operating on blended composite (R/G/B cached). {state.stretchMode === "auto_stf" ? "Adjust STF params to re-stretch." : "Stretch applies per-channel."}
+        </div>
+      )}
+
+      {channelLabel && (
+        <div className="text-[10px] text-amber-400/80 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5">
+          No blended composite: Star Removal and Stretch apply to the {channelLabel} channel only, and Export uses the result for that channel.
+          {filledBinCount > 1 ? " Run Blend to process the colour composite." : ""}
         </div>
       )}
 
@@ -283,7 +335,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
                     format={(v) => `${v.toFixed(2)}x FWHM`} onChange={setSrGrowth}
                     hint="covers halos, may eat nebula if too high" />
             <RunButton
-              label={state.compositeReady ? "Remove Stars from Composite" : "Remove Stars"}
+              label={state.compositeReady ? "Remove Stars from Composite" : `Remove Stars${channelSuffix}`}
               runningLabel="Removing stars..."
               running={srLoading}
               accent="violet"
@@ -296,7 +348,10 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
               </div>
             )}
             <div className="text-[9px] text-zinc-600">
-              Classic detection + inpaint on linear data; the composite cache becomes starless, so stretches below apply to it. Re-run Blend to restore stars. Big saturated stars and diffraction spikes may leave residue.
+              {state.compositeReady
+                ? "Classic detection + inpaint on linear data; the composite cache becomes starless, so stretches below apply to it. Re-run Blend to restore stars."
+                : `Classic detection + inpaint on the linear ${channelLabel} channel; stretches below apply to the starless result until an earlier step changes the channel.`}
+              {" "}Big saturated stars and diffraction spikes may leave residue.
             </div>
             {srError && <div className="text-[9px] text-red-400">{srError}</div>}
           </>
@@ -453,10 +508,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
       {result && (
         <div className="text-[9px] text-zinc-500">
-          {result.elapsed_ms}ms
-          {result.iterations_run && `, ${result.iterations_run} iterations`}
-          {result.converged !== undefined && `, ${result.converged ? "converged" : "not converged"}`}
-          {result.stretch_factor && `, factor=${result.stretch_factor}`}
+          {stretchRunSummary(result)}
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

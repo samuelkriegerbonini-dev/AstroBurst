@@ -1,11 +1,15 @@
+use std::sync::Arc;
 use std::time::Instant;
 
+use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, extract_image_resolved, load_cached, load_from_cache_or_disk, try_extract_rgb_resolved};
+use crate::cmd::common::{blocking_cmd, cached_header, extract_image_resolved, image_ref, invalidate_written, try_extract_rgb_resolved};
+use crate::cmd::compose::rescale_header_to_grid;
+use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
-use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::{apply_stf_f32, AutoStfConfig, StfParams};
+use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats};
+use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig, ImageStats, StfParams};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::writer::{
     filter_header, write_fits_mono_bitpix, write_fits_mono_rice, write_fits_rgb_bitpix,
@@ -14,9 +18,171 @@ use crate::infra::fits::writer::{
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
 use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED};
+use crate::types::header::HduHeader;
 
 const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
+
+struct ExportChannel {
+    arr: Arc<Array2<f32>>,
+    header: Option<HduHeader>,
+}
+
+struct RgbExport {
+    r: Arc<Array2<f32>>,
+    g: Arc<Array2<f32>>,
+    b: Arc<Array2<f32>>,
+    header: Option<HduHeader>,
+}
+
+fn load_export_channel(path: &str) -> anyhow::Result<ExportChannel> {
+    if image_ref(path).is_synthetic() {
+        let entry = GLOBAL_IMAGE_CACHE.get(path).ok_or_else(|| {
+            anyhow::anyhow!("'{}' is no longer in memory: re-run the step that produced it", path)
+        })?;
+        return Ok(ExportChannel { arr: entry.data_arc(), header: entry.header().cloned() });
+    }
+    let resolved = extract_image_resolved(path)?;
+    Ok(ExportChannel { arr: Arc::new(resolved.arr), header: Some(resolved.header) })
+}
+
+fn same_file_triplet(paths: [Option<&str>; 3]) -> Option<&str> {
+    match paths {
+        [Some(r), Some(g), Some(b)] if r == g && g == b && !image_ref(r).is_synthetic() => Some(r),
+        _ => None,
+    }
+}
+
+fn rgb_file_export(paths: [Option<&str>; 3]) -> anyhow::Result<Option<RgbExport>> {
+    let Some(path) = same_file_triplet(paths) else {
+        return Ok(None);
+    };
+    Ok(try_extract_rgb_resolved(path)?.map(|rgb| RgbExport {
+        r: Arc::new(rgb.r),
+        g: Arc::new(rgb.g),
+        b: Arc::new(rgb.b),
+        header: Some(rgb.header),
+    }))
+}
+
+fn explicit_header(header_path: Option<&str>) -> anyhow::Result<Option<HduHeader>> {
+    header_path
+        .map(|p| {
+            cached_header(p).map_err(|e| e.context(format!("Failed to read the header source {}", p)))
+        })
+        .transpose()
+}
+
+fn resample_to(arr: Arc<Array2<f32>>, dims: (usize, usize)) -> anyhow::Result<Arc<Array2<f32>>> {
+    if arr.dim() == dims {
+        return Ok(arr);
+    }
+    Ok(Arc::new(crate::core::imaging::resample::resample_image(&arr, dims.0, dims.1)?))
+}
+
+fn channels_export(paths: [Option<&str>; 3]) -> anyhow::Result<RgbExport> {
+    let [r_path, g_path, b_path] = paths;
+    let r = load_export_channel(r_path.ok_or_else(|| anyhow::anyhow!("R channel path required"))?)?;
+    let g = load_export_channel(g_path.ok_or_else(|| anyhow::anyhow!("G channel path required"))?)?;
+    let b = load_export_channel(b_path.ok_or_else(|| anyhow::anyhow!("B channel path required"))?)?;
+    let rows = r.arr.dim().0.max(g.arr.dim().0).max(b.arr.dim().0);
+    let cols = r.arr.dim().1.max(g.arr.dim().1).max(b.arr.dim().1);
+    let header = [&r, &g, &b].into_iter().find_map(|channel| {
+        channel.header.clone().map(|mut header| {
+            rescale_header_to_grid(&mut header, channel.arr.dim(), (rows, cols));
+            header
+        })
+    });
+    Ok(RgbExport {
+        r: resample_to(r.arr, (rows, cols))?,
+        g: resample_to(g.arr, (rows, cols))?,
+        b: resample_to(b.arr, (rows, cols))?,
+        header,
+    })
+}
+
+fn composite_export(r_path: Option<&str>) -> Option<RgbExport> {
+    let (cr, cg, cb) = match (
+        GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R),
+        GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G),
+        GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B),
+    ) {
+        (Some(cr), Some(cg), Some(cb)) => (cr, cg, cb),
+        _ => return None,
+    };
+    let header = r_path
+        .filter(|p| !image_ref(p).is_synthetic())
+        .and_then(|p| cached_header(p).ok())
+        .or_else(|| cr.header().cloned());
+    Some(RgbExport { r: cr.data_arc(), g: cg.data_arc(), b: cb.data_arc(), header })
+}
+
+fn validated_stf_value(name: &str, value: Option<f64>) -> anyhow::Result<Option<f64>> {
+    match value {
+        Some(v) if !(0.0..=1.0).contains(&v) => {
+            anyhow::bail!("{} must be a number between 0 and 1, got {}", name, v)
+        }
+        other => Ok(other),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PngStf {
+    apply: bool,
+    channels: [[Option<f64>; 3]; 3],
+    linked: Option<bool>,
+}
+
+impl PngStf {
+    fn explicit(&self) -> Option<[StfParams; 3]> {
+        if !self.apply || self.channels.iter().flatten().all(Option::is_none) {
+            return None;
+        }
+        Some(self.channels.map(|[shadow, midtone, highlight]| StfParams {
+            shadow: shadow.unwrap_or(0.0),
+            midtone: midtone.unwrap_or(0.5),
+            highlight: highlight.unwrap_or(1.0),
+        }))
+    }
+}
+
+fn identical_stf(p: &[StfParams; 3]) -> bool {
+    p.iter().all(|s| s.shadow == p[0].shadow && s.midtone == p[0].midtone && s.highlight == p[0].highlight)
+}
+
+fn png_rgb_planes(
+    planes: [&Array2<f32>; 3],
+    stats: [&ImageStats; 3],
+    stf: &PngStf,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+    let explicit = stf.explicit();
+    let linked = stf.linked.unwrap_or_else(|| explicit.as_ref().map_or(true, identical_stf));
+    let combined = combine_channel_stats(stats[0], stats[1], stats[2]);
+    let config = AutoStfConfig::default();
+    let params = match explicit {
+        Some(p) => p,
+        None if linked => [auto_stf(&combined, &config); 3],
+        None => stats.map(|s| auto_stf(s, &config)),
+    };
+    let norm = if linked { [&combined; 3] } else { stats };
+    (
+        apply_stf_f32(planes[0], &params[0], norm[0]),
+        apply_stf_f32(planes[1], &params[1], norm[1]),
+        apply_stf_f32(planes[2], &params[2], norm[2]),
+    )
+}
+
+fn render_rgb_png(
+    planes: (&Array2<f32>, &Array2<f32>, &Array2<f32>),
+    depth: u8,
+    output_path: &str,
+) -> anyhow::Result<()> {
+    if depth == 16 {
+        render_rgb_16bit(planes.0, planes.1, planes.2, output_path)
+    } else {
+        render_rgb(planes.0, planes.1, planes.2, output_path)
+    }
+}
 
 fn wants_rice_compression(compress: &Option<String>) -> bool {
     compress.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("rice"))
@@ -60,12 +226,11 @@ pub async fn export_fits(
         let target_bitpix = bitpix.unwrap_or(-32);
         let use_rice = wants_rice_compression(&compress);
         let qlevel = quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL);
+        refuse_source_as_target(&output_path, &path)?;
 
         let resolved = extract_image_resolved(&path)?;
         let filtered = filter_header(&resolved.header, do_wcs, do_meta);
-
-        let cached = load_from_cache_or_disk(&path).ok();
-        let source_ref = cached.as_ref().map(|e| e.arr()).unwrap_or(&resolved.arr);
+        let source_ref = &resolved.arr;
 
         let stretched;
         let write_ref = if do_stf {
@@ -87,6 +252,7 @@ pub async fn export_fits(
         } else {
             write_fits_mono_bitpix(&output_path, write_ref, filtered.as_ref(), target_bitpix)?;
         }
+        invalidate_written(&output_path);
 
         let file_size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -118,6 +284,7 @@ pub async fn export_fits_rgb(
     history: Option<Vec<String>>,
     compress: Option<String>,
     quantize_level: Option<f64>,
+    header_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -126,70 +293,25 @@ pub async fn export_fits_rgb(
         let target_bitpix = bitpix.unwrap_or(-32);
         let use_rice = wants_rice_compression(&compress);
         let qlevel = quantize_level.unwrap_or(DEFAULT_QUANTIZE_LEVEL);
+        let paths = [r_path.as_deref(), g_path.as_deref(), b_path.as_deref()];
+        let sources = paths.into_iter().chain([header_path.as_deref()]).flatten();
+        for source in sources.filter(|p| !image_ref(p).is_synthetic()) {
+            refuse_source_as_target(&output_path, source)?;
+        }
+        let requested_header = explicit_header(header_path.as_deref())?;
 
-        let composite = if fits_rgb_uses_composite([r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]) {
-            match (
-                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R),
-                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G),
-                GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B),
-            ) {
-                (Some(cr), Some(cg), Some(cb)) => Some((cr, cg, cb)),
-                _ => None,
+        let source = match rgb_file_export(paths)? {
+            Some(file) => file,
+            None => {
+                let composite = if fits_rgb_uses_composite(paths) { composite_export(r_path.as_deref()) } else { None };
+                match composite {
+                    Some(composite) => composite,
+                    None => channels_export(paths)?,
+                }
             }
-        } else {
-            None
         };
-
-        let (r_arr, g_arr, b_arr, header_source) = if let Some((cr, cg, cb)) = composite {
-            let r_hdr = r_path.as_deref()
-                .filter(|p| !p.starts_with("__"))
-                .and_then(|p| extract_image_resolved(p).ok())
-                .map(|r| r.header)
-                .or_else(|| cr.header().cloned());
-            (cr.data_arc(), cg.data_arc(), cb.data_arc(), r_hdr)
-        } else {
-            let r_resolved = extract_image_resolved(
-                r_path.as_deref().ok_or_else(|| anyhow::anyhow!("R channel path required"))?
-            )?;
-            let g_resolved = extract_image_resolved(
-                g_path.as_deref().ok_or_else(|| anyhow::anyhow!("G channel path required"))?
-            )?;
-            let b_resolved = extract_image_resolved(
-                b_path.as_deref().ok_or_else(|| anyhow::anyhow!("B channel path required"))?
-            )?;
-            let g_raw = g_resolved.arr;
-            let b_raw = b_resolved.arr;
-
-            let (r_rows, r_cols) = r_resolved.arr.dim();
-            let g_ok = g_raw.dim() == (r_rows, r_cols);
-            let b_ok = b_raw.dim() == (r_rows, r_cols);
-
-            let (g_final, b_final) = if g_ok && b_ok {
-                (g_raw, b_raw)
-            } else {
-                let max_rows = r_rows.max(g_raw.dim().0).max(b_raw.dim().0);
-                let max_cols = r_cols.max(g_raw.dim().1).max(b_raw.dim().1);
-                let resample_if = |arr: ndarray::Array2<f32>| -> anyhow::Result<ndarray::Array2<f32>> {
-                    if arr.dim() == (max_rows, max_cols) { return Ok(arr); }
-                    crate::core::imaging::resample::resample_image(&arr, max_rows, max_cols)
-                };
-                (resample_if(g_raw)?, resample_if(b_raw)?)
-            };
-
-            let r_final = if r_resolved.arr.dim() != g_final.dim() {
-                let (tr, tc) = g_final.dim();
-                crate::core::imaging::resample::resample_image(&r_resolved.arr, tr, tc)?
-            } else {
-                r_resolved.arr
-            };
-
-            (
-                std::sync::Arc::new(r_final),
-                std::sync::Arc::new(g_final),
-                std::sync::Arc::new(b_final),
-                Some(r_resolved.header),
-            )
-        };
+        let (r_arr, g_arr, b_arr) = (source.r, source.g, source.b);
+        let header_source = requested_header.or(source.header);
 
         let mut filtered = header_source
             .as_ref()
@@ -209,6 +331,7 @@ pub async fn export_fits_rgb(
         } else {
             write_fits_rgb_bitpix(&output_path, &r_arr, &g_arr, &b_arr, filtered.as_ref(), target_bitpix)?;
         }
+        invalidate_written(&output_path);
 
         let file_size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -351,6 +474,7 @@ pub async fn compress_mef_cmd(
 
         crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
         let report = write_compressed_mef(&source_path, &output_path, &opts)?;
+        invalidate_written(&output_path);
 
         let source_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
         let output_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
@@ -359,6 +483,7 @@ pub async fn compress_mef_cmd(
             RES_OUTPUT_PATH: output_path,
             RES_DROPPED: report.dropped,
             RES_KEPT_RAW: report.kept_raw,
+            RES_UNCOMPRESSED: report.uncompressed,
             RES_SOURCE_SIZE_BYTES: source_size,
             RES_OUTPUT_SIZE_BYTES: output_size,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
@@ -366,11 +491,22 @@ pub async fn compress_mef_cmd(
     })
 }
 
-fn explicit_stf_requested(do_stf: bool, mr: Option<f64>, mg: Option<f64>, mb: Option<f64>) -> bool {
-    do_stf
-        && [mr, mg, mb]
-            .iter()
-            .any(|m| m.map_or(false, |v| (v - 0.5).abs() > 1e-4))
+fn rgb_png_response(
+    output_path: &str,
+    depth: u8,
+    applied_stf: bool,
+    dims: (usize, usize),
+    t0: Instant,
+) -> serde_json::Value {
+    let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    json!({
+        RES_OUTPUT_PATH: output_path,
+        RES_BIT_DEPTH: depth,
+        RES_APPLY_STF: applied_stf,
+        RES_FILE_SIZE_BYTES: file_size,
+        RES_DIMENSIONS: [dims.1, dims.0],
+        RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+    })
 }
 
 #[tauri::command]
@@ -390,29 +526,47 @@ pub async fn export_rgb_png(
     shadow_b: Option<f64>,
     midtone_b: Option<f64>,
     highlight_b: Option<f64>,
+    linked: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         let depth = bit_depth.unwrap_or(16);
         let do_stf = apply_stf_stretch.unwrap_or(false);
+        let stf = PngStf {
+            apply: do_stf,
+            channels: [
+                [
+                    validated_stf_value("shadow_r", shadow_r)?,
+                    validated_stf_value("midtone_r", midtone_r)?,
+                    validated_stf_value("highlight_r", highlight_r)?,
+                ],
+                [
+                    validated_stf_value("shadow_g", shadow_g)?,
+                    validated_stf_value("midtone_g", midtone_g)?,
+                    validated_stf_value("highlight_g", highlight_g)?,
+                ],
+                [
+                    validated_stf_value("shadow_b", shadow_b)?,
+                    validated_stf_value("midtone_b", midtone_b)?,
+                    validated_stf_value("highlight_b", highlight_b)?,
+                ],
+            ],
+            linked,
+        };
+        let paths = [r_path.as_deref(), g_path.as_deref(), b_path.as_deref()];
 
-        if png_rgb_uses_composite([r_path.as_deref(), g_path.as_deref(), b_path.as_deref()]) {
-                if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
-                if depth == 16 {
-                    render_rgb_16bit(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
-                } else {
-                    render_rgb(tr.arr(), tg.arr(), tb.arr(), &output_path)?;
-                }
-                let (rows, cols) = tr.arr().dim();
-                let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                return Ok(json!({
-                    RES_OUTPUT_PATH: output_path,
-                    RES_BIT_DEPTH: depth,
-                    RES_APPLY_STF: false,
-                    RES_FILE_SIZE_BYTES: file_size,
-                    RES_DIMENSIONS: [cols, rows],
-                    RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-                }));
+        if let Some(file) = rgb_file_export(paths)? {
+            let stats = [compute_image_stats(&file.r), compute_image_stats(&file.g), compute_image_stats(&file.b)];
+            let (r_out, g_out, b_out) =
+                png_rgb_planes([&file.r, &file.g, &file.b], [&stats[0], &stats[1], &stats[2]], &stf);
+            render_rgb_png((&r_out, &g_out, &b_out), depth, &output_path)?;
+            return Ok(rgb_png_response(&output_path, depth, true, file.r.dim(), t0));
+        }
+
+        if png_rgb_uses_composite(paths) {
+            if let Some((tr, tg, tb)) = helpers::load_composite_toned().or_else(helpers::load_composite_stretched) {
+                render_rgb_png((tr.arr(), tg.arr(), tb.arr()), depth, &output_path)?;
+                return Ok(rgb_png_response(&output_path, depth, false, tr.arr().dim(), t0));
             }
 
             let cache_r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R);
@@ -420,169 +574,37 @@ pub async fn export_rgb_png(
             let cache_b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B);
 
             if let (Some(cr), Some(cg), Some(cb)) = (&cache_r, &cache_g, &cache_b) {
-                let has_explicit_stf = explicit_stf_requested(do_stf, midtone_r, midtone_g, midtone_b);
-
-                let (stf_r, stf_g, stf_b) = if has_explicit_stf {
-                    (
-                        StfParams {
-                            shadow: shadow_r.unwrap_or(0.0),
-                            midtone: midtone_r.unwrap_or(0.5),
-                            highlight: highlight_r.unwrap_or(1.0),
-                        },
-                        StfParams {
-                            shadow: shadow_g.unwrap_or(0.0),
-                            midtone: midtone_g.unwrap_or(0.5),
-                            highlight: highlight_g.unwrap_or(1.0),
-                        },
-                        StfParams {
-                            shadow: shadow_b.unwrap_or(0.0),
-                            midtone: midtone_b.unwrap_or(0.5),
-                            highlight: highlight_b.unwrap_or(1.0),
-                        },
-                    )
-                } else {
-                    let stf_config = AutoStfConfig::default();
-                    let (linked, _) = helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &stf_config);
-                    (linked, linked, linked)
-                };
-
-                let identical_params = stf_r.shadow == stf_g.shadow
-                    && stf_g.shadow == stf_b.shadow
-                    && stf_r.midtone == stf_g.midtone
-                    && stf_g.midtone == stf_b.midtone
-                    && stf_r.highlight == stf_g.highlight
-                    && stf_g.highlight == stf_b.highlight;
-
-                let linked_stats = if identical_params {
-                    Some(crate::core::imaging::stats::combine_channel_stats(
-                        cr.stats(),
-                        cg.stats(),
-                        cb.stats(),
-                    ))
-                } else {
-                    None
-                };
-
-                let (r_out, g_out, b_out) = match &linked_stats {
-                    Some(combined) => (
-                        apply_stf_f32(cr.arr(), &stf_r, combined),
-                        apply_stf_f32(cg.arr(), &stf_g, combined),
-                        apply_stf_f32(cb.arr(), &stf_b, combined),
-                    ),
-                    None => (
-                        apply_stf_f32(cr.arr(), &stf_r, cr.stats()),
-                        apply_stf_f32(cg.arr(), &stf_g, cg.stats()),
-                        apply_stf_f32(cb.arr(), &stf_b, cb.stats()),
-                    ),
-                };
-                if depth == 16 {
-                    render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?;
-                } else {
-                    render_rgb(&r_out, &g_out, &b_out, &output_path)?;
-                }
-                let (rows, cols) = cr.arr().dim();
-                let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                return Ok(json!({
-                    RES_OUTPUT_PATH: output_path,
-                    RES_BIT_DEPTH: depth,
-                    RES_APPLY_STF: do_stf,
-                    RES_FILE_SIZE_BYTES: file_size,
-                    RES_DIMENSIONS: [cols, rows],
-                    RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-                }));
+                let (r_out, g_out, b_out) =
+                    png_rgb_planes([cr.arr(), cg.arr(), cb.arr()], [cr.stats(), cg.stats(), cb.stats()], &stf);
+                render_rgb_png((&r_out, &g_out, &b_out), depth, &output_path)?;
+                return Ok(rgb_png_response(&output_path, depth, do_stf, cr.arr().dim(), t0));
             }
         }
 
-        let r_entry = r_path.as_deref().map(load_cached).transpose()?;
-        let g_entry = g_path.as_deref().map(load_cached).transpose()?;
-        let b_entry = b_path.as_deref().map(load_cached).transpose()?;
+        let [r_entry, g_entry, b_entry] = paths.map(|p| p.map(load_export_channel).transpose());
+        let (r_entry, g_entry, b_entry) = (r_entry?, g_entry?, b_entry?);
 
         let any_entry = r_entry.as_ref().or(g_entry.as_ref()).or(b_entry.as_ref())
             .ok_or_else(|| anyhow::anyhow!("At least one channel path required"))?;
-        let zeros = ndarray::Array2::<f32>::zeros(any_entry.arr().dim());
+        let rows = [&r_entry, &g_entry, &b_entry].iter().flat_map(|e| e.as_ref()).map(|e| e.arr.dim().0).max().unwrap_or(0);
+        let cols = [&r_entry, &g_entry, &b_entry].iter().flat_map(|e| e.as_ref()).map(|e| e.arr.dim().1).max().unwrap_or(0);
+        let zeros = Arc::new(Array2::<f32>::zeros(any_entry.arr.dim()));
 
-        let ra = r_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
-        let ga = g_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
-        let ba = b_entry.as_ref().map(|e| e.arr()).unwrap_or(&zeros);
+        let [ra, ga, ba] = [r_entry, g_entry, b_entry]
+            .map(|e| resample_to(e.map_or_else(|| Arc::clone(&zeros), |e| e.arr), (rows, cols)));
+        let (ra, ga, ba) = (ra?, ga?, ba?);
 
-        let has_explicit_stf = shadow_r.is_some() || shadow_g.is_some() || shadow_b.is_some();
-
-        let stretch_and_render = |r: &ndarray::Array2<f32>, g: &ndarray::Array2<f32>, b: &ndarray::Array2<f32>| -> anyhow::Result<serde_json::Value> {
-            let sr = compute_image_stats(r);
-            let sg = compute_image_stats(g);
-            let sb = compute_image_stats(b);
-
-            let (r_out, g_out, b_out) = if do_stf && has_explicit_stf {
-                let stf_r = StfParams { shadow: shadow_r.unwrap_or(0.0), midtone: midtone_r.unwrap_or(0.5), highlight: highlight_r.unwrap_or(1.0) };
-                let stf_g = StfParams { shadow: shadow_g.unwrap_or(0.0), midtone: midtone_g.unwrap_or(0.5), highlight: highlight_g.unwrap_or(1.0) };
-                let stf_b = StfParams { shadow: shadow_b.unwrap_or(0.0), midtone: midtone_b.unwrap_or(0.5), highlight: highlight_b.unwrap_or(1.0) };
-
-                let identical_params = stf_r.shadow == stf_g.shadow
-                    && stf_g.shadow == stf_b.shadow
-                    && stf_r.midtone == stf_g.midtone
-                    && stf_g.midtone == stf_b.midtone
-                    && stf_r.highlight == stf_g.highlight
-                    && stf_g.highlight == stf_b.highlight;
-
-                if identical_params {
-                    let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
-                    (
-                        apply_stf_f32(r, &stf_r, &combined),
-                        apply_stf_f32(g, &stf_g, &combined),
-                        apply_stf_f32(b, &stf_b, &combined),
-                    )
-                } else {
-                    (
-                        apply_stf_f32(r, &stf_r, &sr),
-                        apply_stf_f32(g, &stf_g, &sg),
-                        apply_stf_f32(b, &stf_b, &sb),
-                    )
-                }
-            } else {
-                let stf_config = AutoStfConfig::default();
-                let (linked, combined) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
-                (
-                    apply_stf_f32(r, &linked, &combined),
-                    apply_stf_f32(g, &linked, &combined),
-                    apply_stf_f32(b, &linked, &combined),
-                )
-            };
-
-            if depth == 16 { render_rgb_16bit(&r_out, &g_out, &b_out, &output_path)?; }
-            else { render_rgb(&r_out, &g_out, &b_out, &output_path)?; }
-
-            let (rows, cols) = r.dim();
-            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-            Ok(json!({
-                RES_OUTPUT_PATH: output_path,
-                RES_BIT_DEPTH: depth,
-                RES_APPLY_STF: true,
-                RES_FILE_SIZE_BYTES: file_size,
-                RES_DIMENSIONS: [cols, rows],
-                RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            }))
-        };
-
-        if ra.dim() != ga.dim() || ra.dim() != ba.dim() {
-            let max_rows = ra.dim().0.max(ga.dim().0).max(ba.dim().0);
-            let max_cols = ra.dim().1.max(ga.dim().1).max(ba.dim().1);
-            let resample_if = |arr: &ndarray::Array2<f32>| -> anyhow::Result<ndarray::Array2<f32>> {
-                if arr.dim() == (max_rows, max_cols) { return Ok(arr.to_owned()); }
-                crate::core::imaging::resample::resample_image(arr, max_rows, max_cols)
-            };
-            let ro = resample_if(ra)?;
-            let go = resample_if(ga)?;
-            let bo = resample_if(ba)?;
-            return stretch_and_render(&ro, &go, &bo);
-        }
-
-        stretch_and_render(ra, ga, ba)
+        let stats = [compute_image_stats(&ra), compute_image_stats(&ga), compute_image_stats(&ba)];
+        let (r_out, g_out, b_out) = png_rgb_planes([&ra, &ga, &ba], [&stats[0], &stats[1], &stats[2]], &stf);
+        render_rgb_png((&r_out, &g_out, &b_out), depth, &output_path)?;
+        Ok(rgb_png_response(&output_path, depth, true, (rows, cols), t0))
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compress_mef_cmd, explicit_stf_requested, fits_rgb_uses_composite, png_rgb_uses_composite};
+    use super::*;
+    use crate::cmd::common::load_cached;
     use crate::infra::fits::reader::parse_header_at;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
     use crate::types::constants::{
@@ -635,6 +657,104 @@ mod tests {
         assert!(!compressed[err], "ERR must be copied verbatim");
     }
 
+    #[tokio::test]
+    async fn compress_mef_cmd_reports_the_image_hdus_it_left_uncompressed() {
+        use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, plane_hdu, write_raw_hdus};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("with_spectrum.fits");
+        let spectrum_cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "1".into()),
+            ("NAXIS1", "10".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", "'SPEC    '".into()),
+        ];
+        let spectrum: Vec<u8> = (0..10).flat_map(|i| (i as f32).to_be_bytes()).collect();
+        write_raw_hdus(&source, &[(empty_primary_cards(), Vec::new()), plane_hdu("SCI", 8, 8), (spectrum_cards, spectrum)]);
+        let output = dir.path().join("with_spectrum_compressed.fits");
+
+        let value = compress_mef_cmd(
+            source.to_str().unwrap().to_string(),
+            output.to_str().unwrap().to_string(),
+            true,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value[RES_UNCOMPRESSED], serde_json::json!(["SPEC"]));
+    }
+
+    #[tokio::test]
+    async fn fits_exports_refuse_to_overwrite_a_file_they_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let [r, g, b, header_src] = ["guard_r.fits", "guard_g.fits", "guard_b.fits", "guard_wcs.fits"].map(|n| tmp_path(&dir, n));
+        for (i, path) in [&r, &g, &b, &header_src].into_iter().enumerate() {
+            crate::infra::fits::writer::write_fits_mono(path, &ramp(i as f32 * 10.0), None).unwrap();
+        }
+        let before = std::fs::read(&r).unwrap();
+
+        for target in [r.clone(), r.replace('\\', "/")] {
+            let err = export_fits(r.clone(), target, None, None, None, None, None, None, None, None, None).await.unwrap_err();
+            assert!(err.contains("source"), "{err}");
+        }
+        let same = || [Some(r.clone()), Some(r.clone()), Some(r.clone())];
+        let [sr, sg, sb] = same();
+        let err = export_fits_rgb(sr, sg, sb, r.clone(), None, None, None, None, None, None, None).await.unwrap_err();
+        assert!(err.contains("source"), "{err}");
+        let err = export_fits_rgb(Some(r.clone()), Some(g.clone()), Some(b.clone()), g.clone(), None, None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("source"), "{err}");
+        let err = export_fits_rgb(
+            Some(r.clone()), Some(g.clone()), Some(b.clone()), header_src.clone(),
+            None, None, None, None, None, None, Some(header_src.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("source"), "{err}");
+        assert!(std::fs::read(&r).unwrap() == before, "the source file was modified");
+
+        let fresh = tmp_path(&dir, "guard_out.fits");
+        export_fits_rgb(Some(r), Some(g), Some(b), fresh, None, None, None, None, None, None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_channel_resampled_onto_a_larger_grid_exports_a_header_for_that_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let [r, g, b] = ["grid_r.fits", "grid_g.fits", "grid_b.fits"].map(|n| tmp_path(&dir, n));
+        let native = header_with(&[
+            ("CTYPE1", "'RA---TAN'"),
+            ("CTYPE2", "'DEC--TAN'"),
+            ("CRPIX1", "4.5"),
+            ("CRPIX2", "3.5"),
+            ("CDELT1", "-1.0E-4"),
+            ("CDELT2", "1.0E-4"),
+            ("PIXAR_SR", "4.0E-14"),
+        ]);
+        crate::infra::fits::writer::write_fits_mono(&r, &ramp(1.0), Some(&native)).unwrap();
+        let large = Array2::from_shape_fn((12, 16), |(y, x)| (y * 16 + x) as f32);
+        crate::infra::fits::writer::write_fits_mono(&g, &large, None).unwrap();
+        crate::infra::fits::writer::write_fits_mono(&b, &large, None).unwrap();
+
+        let out = tmp_path(&dir, "grid_rgb.fits");
+        export_fits_rgb(Some(r), Some(g), Some(b), out.clone(), None, None, None, None, None, None, None).await.unwrap();
+        let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!(written.r.dim(), (12, 16));
+        let close = |key: &str, expected: f64| {
+            let actual = written.header.get_f64(key);
+            assert!(actual.is_some_and(|v| (v - expected).abs() <= expected.abs() * 1e-9), "{key}: {actual:?}, expected {expected}");
+        };
+        close("CDELT1", -5.0e-5);
+        close("CDELT2", 5.0e-5);
+        close("CRPIX1", 8.5);
+        close("CRPIX2", 6.5);
+        close("PIXAR_SR", 1.0e-14);
+    }
+
     #[test]
     fn fits_rgb_composite_only_when_at_most_one_real_path() {
         let a = Some("C:/data/r.fits");
@@ -669,13 +789,239 @@ mod tests {
         assert!(!png_rgb_uses_composite([a, b, c]));
     }
 
+    fn tmp_path(dir: &tempfile::TempDir, name: &str) -> String {
+        dir.path().join(name).to_str().unwrap().to_string()
+    }
+
+    fn ramp(base: f32) -> Array2<f32> {
+        Array2::from_shape_fn((6, 8), |(y, x)| base + (y * 8 + x) as f32)
+    }
+
+    fn header_with(cards: &[(&str, &str)]) -> HduHeader {
+        let mut header = HduHeader::empty();
+        for (k, v) in cards {
+            header.set(k, v.to_string());
+        }
+        header
+    }
+
+    fn uniform_stf(shadow: f64, midtone: f64, highlight: f64) -> [[Option<f64>; 3]; 3] {
+        [[Some(shadow), Some(midtone), Some(highlight)]; 3]
+    }
+
+    fn apply_each(
+        planes: [&Array2<f32>; 3],
+        params: [StfParams; 3],
+        stats: [&ImageStats; 3],
+    ) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+        (
+            apply_stf_f32(planes[0], &params[0], stats[0]),
+            apply_stf_f32(planes[1], &params[1], stats[1]),
+            apply_stf_f32(planes[2], &params[2], stats[2]),
+        )
+    }
+
+    struct Channels {
+        planes: [Array2<f32>; 3],
+        stats: [ImageStats; 3],
+        combined: ImageStats,
+    }
+
+    fn unbalanced_channels() -> Channels {
+        let planes = [ramp(10.0), ramp(10.0).mapv(|v| v * 3.0), ramp(10.0).mapv(|v| v * 9.0 + 400.0)];
+        let stats = [
+            compute_image_stats(&planes[0]),
+            compute_image_stats(&planes[1]),
+            compute_image_stats(&planes[2]),
+        ];
+        let combined = combine_channel_stats(&stats[0], &stats[1], &stats[2]);
+        Channels { planes, stats, combined }
+    }
+
+    impl Channels {
+        fn planes(&self) -> [&Array2<f32>; 3] {
+            [&self.planes[0], &self.planes[1], &self.planes[2]]
+        }
+
+        fn stats(&self) -> [&ImageStats; 3] {
+            [&self.stats[0], &self.stats[1], &self.stats[2]]
+        }
+
+        fn linked(&self) -> [&ImageStats; 3] {
+            [&self.combined; 3]
+        }
+    }
+
+    fn stf(shadow: f64, midtone: f64, highlight: f64) -> StfParams {
+        StfParams { shadow, midtone, highlight }
+    }
+
     #[test]
-    fn explicit_stf_honored_when_any_channel_deviates() {
-        assert!(explicit_stf_requested(true, Some(0.5), Some(0.3), Some(0.5)));
-        assert!(explicit_stf_requested(true, Some(0.2), Some(0.5), Some(0.5)));
-        assert!(explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.7)));
-        assert!(!explicit_stf_requested(true, Some(0.5), Some(0.5), Some(0.5)));
-        assert!(!explicit_stf_requested(false, Some(0.2), Some(0.3), Some(0.7)));
-        assert!(!explicit_stf_requested(true, None, None, None));
+    fn an_explicit_shadow_and_highlight_are_honoured_with_a_neutral_midtone() {
+        let ch = unbalanced_channels();
+        let request = PngStf { apply: true, channels: uniform_stf(0.2, 0.5, 0.9), linked: None };
+        let expected = apply_each(ch.planes(), [stf(0.2, 0.5, 0.9); 3], ch.linked());
+        assert_eq!(png_rgb_planes(ch.planes(), ch.stats(), &request), expected, "the user's clip was replaced by auto STF");
+
+        let ignored = PngStf { apply: false, ..request };
+        let auto = auto_stf(&ch.combined, &AutoStfConfig::default());
+        assert_eq!(png_rgb_planes(ch.planes(), ch.stats(), &ignored), apply_each(ch.planes(), [auto; 3], ch.linked()));
+    }
+
+    #[test]
+    fn the_linked_flag_decides_the_normalisation_instead_of_parameter_equality() {
+        let ch = unbalanced_channels();
+        let equal = uniform_stf(0.1, 0.3, 0.95);
+        let unlinked = PngStf { apply: true, channels: equal, linked: Some(false) };
+        assert_eq!(
+            png_rgb_planes(ch.planes(), ch.stats(), &unlinked),
+            apply_each(ch.planes(), [stf(0.1, 0.3, 0.95); 3], ch.stats()),
+            "unlinked STF with equal values was normalised with the combined stats"
+        );
+
+        let mut different = equal;
+        different[2] = [Some(0.0), Some(0.6), Some(1.0)];
+        let linked = PngStf { apply: true, channels: different, linked: Some(true) };
+        let params = [stf(0.1, 0.3, 0.95), stf(0.1, 0.3, 0.95), stf(0.0, 0.6, 1.0)];
+        assert_eq!(png_rgb_planes(ch.planes(), ch.stats(), &linked), apply_each(ch.planes(), params, ch.linked()));
+
+        let inferred = PngStf { linked: None, ..linked };
+        assert_eq!(png_rgb_planes(ch.planes(), ch.stats(), &inferred), apply_each(ch.planes(), params, ch.stats()));
+        let inferred_equal = PngStf { linked: None, ..unlinked };
+        assert_eq!(
+            png_rgb_planes(ch.planes(), ch.stats(), &inferred_equal),
+            apply_each(ch.planes(), [stf(0.1, 0.3, 0.95); 3], ch.linked())
+        );
+
+        let auto_unlinked = PngStf { apply: false, channels: [[None; 3]; 3], linked: Some(false) };
+        let config = AutoStfConfig::default();
+        let per_channel = [auto_stf(&ch.stats[0], &config), auto_stf(&ch.stats[1], &config), auto_stf(&ch.stats[2], &config)];
+        assert_eq!(
+            png_rgb_planes(ch.planes(), ch.stats(), &auto_unlinked),
+            apply_each(ch.planes(), per_channel, ch.stats())
+        );
+    }
+
+    #[tokio::test]
+    async fn export_rgb_png_rejects_stf_values_outside_the_unit_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tmp_path(&dir, "bad_stf.png");
+        for bad in [2.0, -0.1, f64::NAN] {
+            let err = export_rgb_png(
+                None, None, None, out.clone(), Some(8), Some(true),
+                None, Some(bad), None, None, None, None, None, None, None, None,
+            )
+            .await
+            .unwrap_err();
+            assert!(err.contains("midtone_r"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_linear_composite_png_honours_a_neutral_midtone_stf_and_the_linked_flag() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = tmp_path(&dir, "composite_linear.png");
+        let expected_path = tmp_path(&dir, "expected.png");
+        let ch = unbalanced_channels();
+        helpers::clear_composite();
+        helpers::insert_composite_and_orig(
+            ch.planes[0].clone(), ch.planes[1].clone(), ch.planes[2].clone(),
+            ch.stats[0].clone(), ch.stats[1].clone(), ch.stats[2].clone(),
+        );
+
+        let (s, m, h) = (Some(0.1), Some(0.5), Some(0.9));
+        let value = export_rgb_png(None, None, None, out.clone(), Some(8), Some(true), s, m, h, s, m, h, s, m, h, Some(false)).await;
+        helpers::clear_composite();
+        assert_eq!(value.unwrap()[RES_APPLY_STF], json!(true));
+
+        let (er, eg, eb) = apply_each(ch.planes(), [stf(0.1, 0.5, 0.9); 3], ch.stats());
+        render_rgb_png((&er, &eg, &eb), 8, &expected_path).unwrap();
+        assert!(
+            std::fs::read(&out).unwrap() == std::fs::read(&expected_path).unwrap(),
+            "the composite export replaced the explicit STF or ignored linked=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_fits_writes_the_pixels_it_read_from_disk_not_a_stale_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = tmp_path(&dir, "rerun_hdr.fits");
+        let out = tmp_path(&dir, "exported.fits");
+        crate::infra::fits::writer::write_fits_mono(&src, &Array2::from_elem((4, 4), 1.0), None).unwrap();
+        let first_stamp = std::fs::metadata(&src).unwrap().modified().unwrap();
+        assert_eq!(load_cached(&src).unwrap().arr()[[0, 0]], 1.0);
+
+        crate::infra::fits::writer::write_fits_mono(&src, &Array2::from_elem((4, 4), 2.0), None).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&src).unwrap().set_modified(first_stamp).unwrap();
+
+        export_fits(src.clone(), out.clone(), None, None, None, None, None, None, None, None, None).await.unwrap();
+        assert_eq!(extract_image_resolved(&out).unwrap().arr[[0, 0]], 2.0, "the previous run's pixels were exported");
+    }
+
+    #[tokio::test]
+    async fn an_rgb_fits_given_for_all_three_channels_exports_its_own_planes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = tmp_path(&dir, "osc_rgb.fits");
+        let (r, g, b) = (ramp(1.0), ramp(100.0), ramp(1000.0));
+        let header = header_with(&[("OBJECT", "'NGC7000'")]);
+        crate::infra::fits::writer::write_fits_rgb(&src, &r, &g, &b, Some(&header)).unwrap();
+
+        let fits_out = tmp_path(&dir, "osc_cube.fits");
+        export_fits_rgb(
+            Some(src.clone()), Some(src.clone()), Some(src.clone()), fits_out.clone(),
+            None, None, None, None, None, None, None,
+        )
+        .await
+        .unwrap();
+        let written = try_extract_rgb_resolved(&fits_out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!((&written.r, &written.g, &written.b), (&r, &g, &b));
+        assert_eq!(written.header.get("OBJECT").map(|v| v.trim().trim_matches('\'').trim()), Some("NGC7000"));
+
+        let png_out = tmp_path(&dir, "osc_rgb.png");
+        export_rgb_png(
+            Some(src.clone()), Some(src.clone()), Some(src), png_out.clone(), Some(8), None,
+            None, None, None, None, None, None, None, None, None, None,
+        )
+        .await
+        .unwrap();
+        let png = image::open(&png_out).unwrap().to_rgb8();
+        assert_eq!((png.width(), png.height()), (8, 6));
+        assert!(png.pixels().any(|p| p[0] != p[2]), "the RGB file was exported as a grey plane");
+    }
+
+    #[tokio::test]
+    async fn wizard_channels_held_only_in_memory_export_as_fits_with_the_requested_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = ["r", "g", "b"].map(|c| crate::types::constants::wizard_bg_key(&format!("export_test_{c}")));
+        let planes = [ramp(3.0), ramp(30.0), ramp(300.0)];
+        for (key, plane) in keys.iter().zip(&planes) {
+            GLOBAL_IMAGE_CACHE.insert_synthetic(key, Arc::new(plane.clone()), compute_image_stats(plane));
+        }
+        let source = tmp_path(&dir, "bin_first_file.fits");
+        let solved = header_with(&[("CTYPE1", "'RA---TAN'"), ("CRVAL1", "83.8"), ("CRPIX1", "4.0")]);
+        crate::infra::fits::writer::write_fits_mono(&source, &ramp(0.0), Some(&solved)).unwrap();
+
+        let out = tmp_path(&dir, "wizard_rgb.fits");
+        let [kr, kg, kb] = keys.clone().map(Some);
+        let result = export_fits_rgb(kr, kg, kb, out.clone(), None, None, None, None, None, None, Some(source)).await;
+        let bare_out = tmp_path(&dir, "wizard_rgb_bare.fits");
+        let [kr, kg, kb] = keys.clone().map(Some);
+        let bare = export_fits_rgb(kr, kg, kb, bare_out, None, None, None, None, None, None, None).await;
+        for key in &keys {
+            GLOBAL_IMAGE_CACHE.remove(key);
+        }
+        result.unwrap();
+        bare.unwrap();
+
+        let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!([&written.r, &written.g, &written.b], [&planes[0], &planes[1], &planes[2]]);
+        assert_eq!(written.header.get("CRVAL1").map(str::trim), Some("83.8"), "the WCS of the bin's source was dropped");
+
+        let [kr, kg, kb] = keys.map(Some);
+        let gone = export_fits_rgb(kr, kg, kb, tmp_path(&dir, "gone.fits"), None, None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(gone.contains("no longer in memory"), "{gone}");
     }
 }

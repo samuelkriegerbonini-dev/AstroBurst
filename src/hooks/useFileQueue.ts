@@ -1,19 +1,17 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { processFitsFull, processFits, resampleFits } from "../services/fits";
 import { getHeader, getFitsExtensions } from "../services/header";
+import { releaseCubes } from "../services/cube";
 import {
   shouldRetryWithoutFullAnalysis,
   combineAttemptErrors,
   selectCubePlaneHdu,
   isCubePlaneResult,
 } from "../utils/fitsErrors";
-import {
-  fileStore,
-  useFileStats,
-  useSelectedFile,
-  useSelectedId,
-} from "./useFileStore";
+import { fileStore } from "./useFileStore";
+import { refreshOverwrittenFiles } from "./refreshOverwrittenFiles";
+import { onCommandOutputs } from "../infrastructure/tauri/outputEvents";
 import type { ProcessedFile, AstroFile } from "../shared/types";
 
 const RESAMPLE_RATIO_THRESHOLD = 1.5;
@@ -91,16 +89,12 @@ export function useFileQueue() {
   const [isResamplingState, setIsResampling] = useState(false);
   const [resampleProgressState, setResampleProgress] = useState(0);
 
-  const { stats, isProcessing, isComplete, progress } = useFileStats();
-  const selectedFile = useSelectedFile();
-  const selected = useSelectedId();
+  useEffect(() => onCommandOutputs((result) => {
+    void refreshOverwrittenFiles(result);
+  }), []);
 
   const addFiles = useCallback((fileList: AstroFile[]) => {
     fileStore.addFiles(fileList);
-  }, []);
-
-  const selectFile = useCallback((id: string) => {
-    fileStore.selectFile(id);
   }, []);
 
   const processOneFile = useCallback(
@@ -237,6 +231,7 @@ export function useFileQueue() {
   }, [startProcessing]);
 
   const reset = useCallback(() => {
+    void releaseCubes(fileStore.getFiles().map((f) => f.sourcePath || f.path));
     processingRef.current = false;
     pendingKickRef.current = false;
     setIsResampling(false);
@@ -245,15 +240,7 @@ export function useFileQueue() {
   }, []);
 
   return {
-    files: fileStore.getFiles(),
-    selected,
-    selectedFile,
-    isProcessing,
-    stats,
-    progress,
-    isComplete,
     addFiles,
-    selectFile,
     startProcessing,
     scheduleProcessing,
     reset,

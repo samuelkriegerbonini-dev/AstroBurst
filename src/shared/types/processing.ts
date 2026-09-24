@@ -60,11 +60,20 @@ export interface ArcsinhResult {
   elapsed_ms: number;
 }
 
+export interface MaskedStretchChannelStats {
+  iterations_run: number;
+  final_background: number;
+  converged: boolean;
+}
+
 export interface MaskedStretchResult {
   png_path: string;
   previewUrl?: string;
   dimensions: [number, number];
   elapsed_ms: number;
+  iterations_run?: number;
+  converged?: boolean;
+  channels?: { r: MaskedStretchChannelStats; g: MaskedStretchChannelStats; b: MaskedStretchChannelStats };
 }
 
 export interface SpccResult {
@@ -96,7 +105,6 @@ export interface StarDetectionResult {
   threshold_sigma?: number;
   image_width?: number;
   image_height?: number;
-  count?: number;
   elapsed_ms: number;
 }
 

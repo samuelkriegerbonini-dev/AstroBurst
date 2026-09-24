@@ -1,11 +1,8 @@
 export interface AppConfig {
   astrometry_api_key: string | null;
   astrometry_api_url: string;
-  default_output_dir: string | null;
   plate_solve_timeout_secs: number;
-  plate_solve_max_stars: number;
-  auto_stretch_target_bg: number;
-  auto_stretch_shadow_k: number;
+  output_max_size_mb: number | null;
 }
 
 export interface ApiKeyResult {

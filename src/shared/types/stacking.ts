@@ -36,13 +36,28 @@ export interface StackNormalizationApplied {
   scale: number;
 }
 
+export interface StackFrameOffset {
+  dy: number;
+  dx: number;
+}
+
+export interface StackFrameAlignment {
+  path: string;
+  method_used: string;
+  confidence: number | null;
+  included: boolean;
+}
+
 export interface StackResult {
   png_path: string;
   fits_path?: string;
   previewUrl?: string;
   frame_count?: number;
   rejected_pixels?: number;
-  offsets?: [number, number][];
+  offsets?: StackFrameOffset[];
+  scale?: number;
+  alignment?: StackFrameAlignment[];
+  warnings?: string[];
   dimensions: [number, number];
   elapsed_ms: number;
   rejection?: RejectionMethod;
@@ -135,12 +150,19 @@ export interface StackOptions {
   rejectionMaps?: boolean;
 }
 
+export type DrizzleAlignmentMethod = "phase_correlation" | "affine";
+
+export const DRIZZLE_ALIGNMENT_METHODS: readonly { value: DrizzleAlignmentMethod; label: string }[] = [
+  { value: "phase_correlation", label: "Phase Correlation" },
+  { value: "affine", label: "Star-based (affine)" },
+];
+
 export interface DrizzleRgbOptions {
   scale?: number;
   pixfrac?: number;
   kernel?: "square" | "gaussian" | "lanczos3";
   align?: boolean;
-  alignmentMethod?: "phase_correlation" | "zncc";
+  alignmentMethod?: DrizzleAlignmentMethod;
   sigmaLow?: number;
   sigmaHigh?: number;
   rejection?: RejectionMethod;
@@ -166,6 +188,7 @@ export interface DrizzleRgbResult {
   frame_count_b: number;
   rejected_pixels: number;
   scale: number;
+  warnings?: string[];
   elapsed_ms: number;
 }
 

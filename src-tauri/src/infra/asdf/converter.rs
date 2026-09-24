@@ -93,6 +93,11 @@ pub fn list_arrays(asdf: &AsdfFile) -> Vec<AsdfArrayInfo> {
             }
         }
     }
+    if let Some(key) = auto_data_key(asdf).filter(|k| !out.iter().any(|a| &a.key == k)) {
+        if let Some(info) = AsdfImage::node_at(&asdf.tree, &key).and_then(|n| array_info_at(n, key.clone())) {
+            out.push(info);
+        }
+    }
     out
 }
 
@@ -104,30 +109,57 @@ pub struct AsdfImage {
     pub shape: Vec<usize>,
     pub data: Vec<f32>,
     pub wcs: Option<WcsInfo>,
+    pub wcs_note: Option<String>,
     pub metadata: HashMap<String, String>,
     pub unit: Option<String>,
 }
 
 impl AsdfImage {
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, AsdfError> {
-        let asdf = AsdfFile::open(path)?;
-        Self::from_file(&asdf)
-    }
-
     pub fn from_file(asdf: &AsdfFile) -> Result<Self, AsdfError> {
-        let wcs = Self::resolve_wcs(&asdf.tree);
-
         match Self::find_data_array(&asdf.tree)? {
-            Some((key, meta)) => Self::from_array(asdf, &key, meta, wcs),
-            None => Ok(Self::empty(wcs, Self::extract_metadata(&asdf.tree, ""))),
+            Some((key, meta)) => Self::from_array(asdf, &key, meta),
+            None => Ok(Self::empty(
+                Self::resolve_wcs(asdf),
+                Self::extract_metadata(&asdf.tree, ""),
+            )),
         }
     }
 
-    fn resolve_wcs(tree: &Value) -> Option<WcsInfo> {
-        WcsInfo::from_yaml(tree).or_else(|| WcsInfo::from_gwcs(tree))
+    fn resolve_wcs(asdf: &AsdfFile) -> (Option<WcsInfo>, Option<String>) {
+        if let Some(wcs) = WcsInfo::from_yaml(&asdf.tree) {
+            return (Some(wcs), None);
+        }
+        match WcsInfo::from_gwcs(&asdf.tree, &|node| Self::float_values(asdf, node)) {
+            Ok(wcs) => (wcs, None),
+            Err(reason) => (None, Some(reason)),
+        }
     }
 
-    fn empty(wcs: Option<WcsInfo>, metadata: HashMap<String, String>) -> Self {
+    fn float_values(asdf: &AsdfFile, node: &Value) -> Option<Vec<f64>> {
+        let mut meta = NdArrayMeta::from_yaml(node).ok()?;
+        let index = match &meta.source {
+            ArraySource::Inline(values) => return Some(values.clone()),
+            ArraySource::Block(index) => *index,
+        };
+        let block = asdf.block_data(index).ok()?;
+        meta.resolve_streamed_shape(block.len());
+        let raw = Self::gather_array_bytes(&block, &meta);
+        let order = meta.byteorder;
+        match meta.dtype {
+            DType::Float64 => Some(raw.chunks_exact(8).map(|c| Self::read_f64(c, order)).collect()),
+            DType::Float32 => Some(
+                raw.chunks_exact(4)
+                    .map(|c| f64::from(Self::read_f32(c, order)))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn empty(
+        (wcs, wcs_note): (Option<WcsInfo>, Option<String>),
+        metadata: HashMap<String, String>,
+    ) -> Self {
         Self {
             width: 0,
             height: 0,
@@ -135,6 +167,7 @@ impl AsdfImage {
             shape: Vec::new(),
             data: Vec::new(),
             wcs,
+            wcs_note,
             metadata,
             unit: None,
         }
@@ -161,14 +194,9 @@ impl AsdfImage {
         (!text.is_empty()).then_some(text)
     }
 
-    fn from_array(
-        asdf: &AsdfFile,
-        key: &str,
-        mut meta: NdArrayMeta,
-        wcs: Option<WcsInfo>,
-    ) -> Result<Self, AsdfError> {
+    fn from_array(asdf: &AsdfFile, key: &str, mut meta: NdArrayMeta) -> Result<Self, AsdfError> {
         let mut pixels = match &meta.source {
-            ArraySource::Inline(values) => values.clone(),
+            ArraySource::Inline(values) => values.iter().map(|&v| v as f32).collect(),
             ArraySource::Block(index) => {
                 let block = asdf.block_data(*index)?;
                 meta.resolve_streamed_shape(block.len());
@@ -195,6 +223,7 @@ impl AsdfImage {
             _ => pixels,
         };
 
+        let (wcs, wcs_note) = Self::resolve_wcs(asdf);
         Ok(Self {
             width,
             height,
@@ -202,6 +231,7 @@ impl AsdfImage {
             shape: meta.shape,
             data,
             wcs,
+            wcs_note,
             metadata: Self::extract_metadata(&asdf.tree, key),
             unit: Self::extract_unit(&asdf.tree, key),
         })
@@ -212,8 +242,7 @@ impl AsdfImage {
             .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
         let meta = Self::try_meta_or_wrapped(node)?
             .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
-        let wcs = Self::resolve_wcs(&asdf.tree);
-        Self::from_array(asdf, key, meta, wcs)
+        Self::from_array(asdf, key, meta)
     }
 
     pub fn load_array_int(asdf: &AsdfFile, key: &str) -> Result<Option<IntPlane>, AsdfError> {
@@ -229,7 +258,7 @@ impl AsdfImage {
         let bits: Vec<u32> = match &meta.source {
             ArraySource::Inline(values) => values
                 .iter()
-                .map(|&v| if signed { v as i32 as u32 } else { v as u32 })
+                .map(|&v| if signed { v as i64 as u32 } else { v as u32 })
                 .collect(),
             ArraySource::Block(index) => {
                 let block = asdf.block_data(*index)?;
@@ -352,14 +381,20 @@ impl AsdfImage {
 
         if let Some(mapping) = tree.as_mapping() {
             for (k, v) in mapping.iter() {
-                if let Some(meta) = Self::deep_find_ndarray(v, 0)? {
-                    let key_str = k.as_str().unwrap_or("unknown").to_string();
-                    return Ok(Some((key_str, meta)));
+                let Some(key) = k.as_str().filter(|s| Self::addressable(s)) else {
+                    continue;
+                };
+                if let Some(found) = Self::deep_find_ndarray(v, key.to_string(), 0)? {
+                    return Ok(Some(found));
                 }
             }
         }
 
         Ok(None)
+    }
+
+    fn addressable(key: &str) -> bool {
+        !key.is_empty() && !key.contains('.')
     }
 
     fn try_meta_or_wrapped(node: &Value) -> Result<Option<NdArrayMeta>, AsdfError> {
@@ -393,17 +428,29 @@ impl AsdfImage {
         }
     }
 
-    fn deep_find_ndarray(node: &Value, depth: usize) -> Result<Option<NdArrayMeta>, AsdfError> {
+    fn deep_find_ndarray(
+        node: &Value,
+        path: String,
+        depth: usize,
+    ) -> Result<Option<(String, NdArrayMeta)>, AsdfError> {
         if depth > 4 {
             return Ok(None);
         }
         if let Some(meta) = Self::try_meta(node, false)? {
-            return Ok(Some(meta));
+            return Ok(Some((path, meta)));
+        }
+        if node.get("unit").is_some() {
+            if let Some(meta) = node.get("value").map(|v| Self::try_meta(v, false)).transpose()?.flatten() {
+                return Ok(Some((path, meta)));
+            }
         }
         if let Some(mapping) = node.as_mapping() {
-            for (_, v) in mapping.iter() {
-                if let Some(meta) = Self::deep_find_ndarray(v, depth + 1)? {
-                    return Ok(Some(meta));
+            for (k, v) in mapping.iter() {
+                let Some(key) = k.as_str().filter(|s| Self::addressable(s)) else {
+                    continue;
+                };
+                if let Some(found) = Self::deep_find_ndarray(v, format!("{path}.{key}"), depth + 1)? {
+                    return Ok(Some(found));
                 }
             }
         }
@@ -632,16 +679,20 @@ mod tests {
     use super::*;
     use super::super::tree::NdArrayMeta;
 
-    fn fixtures_dir() -> Option<std::path::PathBuf> {
-        if let Ok(d) = std::env::var("ASDF_FIXTURES") {
-            return Some(std::path::PathBuf::from(d));
+    fn fixtures_dir() -> (std::path::PathBuf, bool) {
+        match std::env::var("ASDF_FIXTURES") {
+            Ok(d) => (std::path::PathBuf::from(d), true),
+            Err(_) => (
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("fixtures")
+                    .join("asdf"),
+                false,
+            ),
         }
-        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("asdf");
-        bundled.is_dir().then_some(bundled)
     }
+
+    const EXTERNAL_ONLY_FIXTURES: [&str; 2] = ["10_multi_array_telescope.asdf", "15_large_uncompressed.asdf"];
 
     fn block(flags: u32, compression: &[u8; 4], data: &[u8], data_size: usize, extra_alloc: usize, extra_header: usize) -> Vec<u8> {
         let mut out = Vec::new();
@@ -714,8 +765,6 @@ mod tests {
         out.extend_from_slice(b"...\n");
         out.extend_from_slice(&raw_block(&f32_le(&[2.; 6])));
         let file = AsdfFile::from_bytes(out).unwrap();
-        assert_eq!(file.standard_version, None);
-        assert_eq!(file.version, "1.0.0");
         assert_eq!(AsdfImage::from_file(&file).unwrap().data.len(), 6);
     }
 
@@ -951,8 +1000,42 @@ mod tests {
         assert_eq!(img.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("roman.data"));
         assert_eq!(img.metadata.get("roman.meta.exposure.exposure_time").map(String::as_str), Some("107.0"));
         assert_eq!(img.metadata.get("roman.meta.instrument.name").map(String::as_str), Some("WFI"));
-        let wcs = img.wcs.expect("roman gwcs resolved");
-        assert_eq!(wcs.crpix, [2044.5, 2044.5]);
+        assert!(img.wcs.is_none(), "two shifts carry no sky position");
+        let note = img.wcs_note.expect("the refusal keeps its reason");
+        assert!(note.contains("celestial reference"), "{note}");
+    }
+
+    #[test]
+    fn gwcs_affine_matrix_stored_in_a_block_is_read_from_the_block() {
+        let tree = "data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2, 3]\nwcs:\n  steps:\n    - transform: !transform/compose-1.2.0\n        forward:\n          - !transform/shift-1.2.0 {offset: -9.0}\n          - !transform/shift-1.2.0 {offset: -4.0}\n          - !transform/affine-1.3.0\n              matrix: !core/ndarray-1.0.0 {source: 1, datatype: float64, byteorder: big, shape: [2, 2]}\n          - !transform/scale-1.2.0 {factor: 0.001}\n          - !transform/scale-1.2.0 {factor: 0.001}\n          - !transform/gnomonic-1.2.0 {direction: pix2sky}\n          - !transform/rotate3d-1.3.0 {phi: 150.0, theta: 2.5, psi: 180.0, direction: native2celestial}\n    - frame: world\n      transform: null\n";
+        let matrix: Vec<u8> = [0.6f64, -0.8, 0.8, 0.6].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let img = load_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&[1.; 6])), raw_block(&matrix)])).unwrap();
+        assert_eq!(img.wcs_note, None);
+        let wcs = img.wcs.expect("block-backed matrix resolved");
+        assert_eq!(wcs.pc, [[0.6, -0.8], [0.8, 0.6]]);
+        assert_eq!(wcs.crpix, [10.0, 5.0]);
+        assert_eq!(wcs.crval, [150.0, 2.5]);
+        assert_eq!(wcs.cdelt, [0.001, 0.001]);
+    }
+
+    #[test]
+    fn nested_array_is_keyed_by_its_full_dotted_path() {
+        let tree = "products:\n  sci:\n    data: !core/ndarray-1.0.0\n      data: [[1, 2], [3, 4]]\n      datatype: float32\n    flux: !unit/quantity-1.1.0\n      value: !core/ndarray-1.0.0\n        data: [[5, 6], [7, 8]]\n        datatype: float32\n      unit: MJy/sr\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[])).unwrap();
+        assert_eq!(auto_data_key(&file).as_deref(), Some("products.sci.data"));
+        let auto = AsdfImage::from_file(&file).unwrap();
+        assert_eq!(auto.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("products.sci.data"));
+        let again = AsdfImage::load_array(&file, "products.sci.data").unwrap();
+        assert_eq!(again.data, auto.data);
+        let listed: Vec<String> = list_arrays(&file).into_iter().map(|a| a.key).collect();
+        assert_eq!(listed, vec!["products.sci.data".to_string()]);
+
+        let quantity_tree = "products:\n  sci:\n    flux: !unit/quantity-1.1.0\n      value: !core/ndarray-1.0.0\n        data: [[5, 6], [7, 8]]\n        datatype: float32\n      unit: MJy/sr\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(quantity_tree, &[])).unwrap();
+        assert_eq!(auto_data_key(&file).as_deref(), Some("products.sci.flux"));
+        let img = AsdfImage::from_file(&file).unwrap();
+        assert_eq!(img.unit.as_deref(), Some("MJy/sr"));
+        assert_eq!(AsdfImage::load_array(&file, "products.sci.flux").unwrap().data, vec![5., 6., 7., 8.]);
     }
 
     #[test]
@@ -970,10 +1053,7 @@ mod tests {
 
     #[test]
     fn asdf_reference_suite() {
-        let dir = match fixtures_dir() {
-            Some(d) => d,
-            None => return,
-        };
+        let (dir, external) = fixtures_dir();
 
         let no_image = [
             "01_minimal_no_arrays.asdf",
@@ -1012,12 +1092,16 @@ mod tests {
         let mut failures = Vec::new();
 
         for name in all {
-            let path = dir.join(name);
-            if !path.exists() {
-                eprintln!("SKIP {} (not bundled)", name);
+            if !external && EXTERNAL_ONLY_FIXTURES.contains(&name) {
                 continue;
             }
-            match AsdfImage::load(&path) {
+            let path = dir.join(name);
+            if !path.exists() {
+                eprintln!("FAIL {} (fixture missing from {})", name, dir.display());
+                failures.push(name);
+                continue;
+            }
+            match AsdfFile::open(&path).and_then(|file| AsdfImage::from_file(&file)) {
                 Ok(img) => {
                     if no_image.contains(&name) && img.has_image() {
                         eprintln!(
@@ -1061,15 +1145,8 @@ mod tests {
 
     #[test]
     fn asdf_view_offset_strides() {
-        let dir = match fixtures_dir() {
-            Some(d) => d,
-            None => return,
-        };
-
+        let (dir, _) = fixtures_dir();
         let path = dir.join("12_shared_view.asdf");
-        if !path.exists() {
-            return;
-        }
         let asdf = AsdfFile::open(&path).expect("open 12_shared_view.asdf");
 
         let cases: &[(&str, f64)] = &[
@@ -1090,7 +1167,7 @@ mod tests {
             let raw = AsdfImage::gather_array_bytes(&block, &meta);
             let pixels = AsdfImage::to_f32_pixels(&raw, &meta);
             let sum: f64 = pixels.iter().map(|&v| v as f64).sum();
-            if (sum - expected).abs() > 1e-6 || pixels.len() != meta.element_count() {
+            if (sum - expected).abs() > 1e-6 || pixels.len() != meta.shape.iter().product::<usize>() {
                 eprintln!(
                     "FAIL view {} (len {} sum {} expected {})",
                     key,
@@ -1184,6 +1261,19 @@ mod tests {
     }
 
     #[test]
+    fn load_array_int_inline_keeps_low_bits_above_two_to_the_24() {
+        let tree = "dq: !core/ndarray-1.0.0\n  data: [[2147483649, 16777217], [4294967295, 1]]\n  datatype: uint32\nsdq: !core/ndarray-1.0.0\n  data: [[-2147483647, 16777217]]\n  datatype: int32\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[])).unwrap();
+        let p = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert_eq!(p.bits.as_slice().unwrap(), &[0x8000_0001, 16_777_217, u32::MAX, 1]);
+        assert_eq!(p.value_at(0, 0), 2147483649);
+        let s = AsdfImage::load_array_int(&file, "sdq").unwrap().unwrap();
+        assert!(s.signed);
+        assert_eq!(s.value_at(0, 0), -2147483647);
+        assert_eq!(s.value_at(0, 1), 16_777_217);
+    }
+
+    #[test]
     fn bitpix_for_dtype_table() {
         assert_eq!(bitpix_for_dtype(&DType::Int8), 8);
         assert_eq!(bitpix_for_dtype(&DType::UInt8), 8);
@@ -1235,5 +1325,74 @@ mod tests {
         let sum: f64 = px.iter().map(|&v| v as f64).sum();
         let expected: f64 = (0..n).map(|i| i as f64).sum();
         assert_eq!(sum, expected);
+    }
+
+    fn science_value(i: usize) -> f32 {
+        (i % 1000) as f32 * 0.5 + 0.25
+    }
+
+    fn error_value(i: usize) -> f32 {
+        (i % 17) as f32 * 0.125
+    }
+
+    #[test]
+    fn multi_array_telescope_file_loads_the_science_array_and_its_metadata() {
+        let (h, w) = (256usize, 256usize);
+        let n = h * w;
+        let tree = format!(
+            "meta:\n  telescope: JWST\n  instrument: {{name: NIRCAM, detector: NRCALONG}}\n  exposure: {{exposure_time: 1288.4}}\nerr: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [{h}, {w}]\ndata: !core/ndarray-1.0.0\n  source: 1\n  datatype: float32\n  byteorder: big\n  shape: [{h}, {w}]\ndq: !core/ndarray-1.0.0\n  source: 2\n  datatype: uint32\n  byteorder: little\n  shape: [{h}, {w}]\n"
+        );
+        let err: Vec<u8> = (0..n).flat_map(|i| error_value(i).to_le_bytes()).collect();
+        let sci: Vec<u8> = (0..n).flat_map(|i| science_value(i).to_be_bytes()).collect();
+        let dq: Vec<u8> = (0..n as u32).flat_map(|i| (i % 3).to_le_bytes()).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(&tree, &[raw_block(&err), raw_block(&sci), raw_block(&dq)])).unwrap();
+
+        let keys: Vec<String> = list_arrays(&file).into_iter().map(|a| a.key).collect();
+        assert_eq!(keys, vec!["err", "data", "dq"]);
+
+        let img = AsdfImage::from_file(&file).unwrap();
+        assert_eq!((img.height, img.width, img.channels), (h, w, 1));
+        assert_eq!(img.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("data"));
+        assert_eq!(img.metadata.get("meta.telescope").map(String::as_str), Some("JWST"));
+        assert_eq!(img.metadata.get("meta.instrument.name").map(String::as_str), Some("NIRCAM"));
+        assert_eq!(img.metadata.get("meta.exposure.exposure_time").map(String::as_str), Some("1288.4"));
+        let expected: f64 = (0..n).map(|i| science_value(i) as f64).sum();
+        assert_eq!(img.data.iter().map(|&v| v as f64).sum::<f64>(), expected);
+        for i in [0, 1, w, n / 2 + 7, n - 1] {
+            assert_eq!(img.data[i], science_value(i), "pixel {i}");
+        }
+
+        let e = AsdfImage::load_array(&file, "err").unwrap();
+        let expected_err: f64 = (0..n).map(|i| error_value(i) as f64).sum();
+        assert_eq!(e.data.iter().map(|&v| v as f64).sum::<f64>(), expected_err);
+        let q = AsdfImage::load_array_int(&file, "dq").unwrap().unwrap();
+        assert_eq!(q.bits[[h - 1, w - 1]], ((n - 1) % 3) as u32);
+    }
+
+    #[test]
+    fn large_uncompressed_file_opened_from_disk_decodes_every_pixel_in_place() {
+        let (h, w) = (1536usize, 2048usize);
+        let value = |r: usize, c: usize| ((r * 7 + c * 13) % 4096) as f32 / 4096.0;
+        let mut raw = Vec::with_capacity(h * w * 4);
+        for r in 0..h {
+            for c in 0..w {
+                raw.extend_from_slice(&value(r, c).to_le_bytes());
+            }
+        }
+        let tree = format!("data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [{h}, {w}]\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large_uncompressed.asdf");
+        std::fs::write(&path, asdf_bytes(&tree, &[raw_block(&raw)])).unwrap();
+        drop(raw);
+
+        let file = AsdfFile::open(&path).unwrap();
+        let img = AsdfImage::from_file(&file).unwrap();
+        assert_eq!((img.height, img.width, img.channels), (h, w, 1));
+        assert_eq!(img.data.len(), h * w);
+        let expected: f64 = (0..h).flat_map(|r| (0..w).map(move |c| (r, c))).map(|(r, c)| value(r, c) as f64).sum();
+        assert_eq!(img.data.iter().map(|&v| v as f64).sum::<f64>(), expected);
+        for (r, c) in [(0, 0), (0, w - 1), (h - 1, 0), (h / 2, w / 3), (h - 1, w - 1)] {
+            assert_eq!(img.data[r * w + c], value(r, c), "pixel ({r},{c})");
+        }
     }
 }

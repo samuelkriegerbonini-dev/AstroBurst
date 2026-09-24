@@ -12,15 +12,6 @@ export class TauriCommandError extends Error {
   }
 }
 
-export function isTauriError(err: unknown): err is TauriCommandError {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "command" in err &&
-    "message" in err
-  );
-}
-
 export function normalizeTauriError(command: string, raw: unknown): TauriCommandError {
   if (raw instanceof TauriCommandError) {
     return raw;

@@ -65,14 +65,15 @@ pub fn apply_noise(image: &Array2<f32>, params: &NoiseParams) -> Array2<f32> {
     let (h, w) = image.dim();
     let mut out = Array2::<f32>::zeros((h, w));
 
+    let sky_e = params.sky_background * params.gain;
+    let dark_e = params.dark_current * params.exposure_time;
     for y in 0..h {
         for x in 0..w {
-            let flux = image[[y, x]] as f64;
-            let signal_e = (flux + params.sky_background) * params.exposure_time
-                + params.dark_current * params.exposure_time;
+            let star_e = image[[y, x]] as f64;
+            let signal_e = star_e + sky_e + dark_e;
             let photon_e = poisson_sample(&mut rng, signal_e.max(0.0));
             let read_e = normal.sample(&mut rng);
-            out[[y, x]] = ((photon_e as f64 + read_e + params.bias_level) / params.gain).max(0.0) as f32;
+            out[[y, x]] = ((photon_e as f64 + read_e) / params.gain + params.bias_level).max(0.0) as f32;
         }
     }
     out
@@ -104,5 +105,40 @@ pub fn apply_vignette(image: &mut Array2<f32>, flat: &Array2<f32>) {
         for x in 0..w {
             image[[y, x]] *= flat[[y, x]];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> NoiseParams {
+        NoiseParams {
+            gain: 2.0,
+            readout_noise: 0.0,
+            sky_background: 0.0,
+            dark_current: 0.0,
+            exposure_time: 300.0,
+            bias_level: 100.0,
+            seed: 9,
+        }
+    }
+
+    #[test]
+    fn star_flux_is_total_electrons_and_bias_is_added_in_adu() {
+        let mut image = Array2::<f32>::zeros((16, 16));
+        image[[8, 8]] = 10_000.0;
+        let out = apply_noise(&image, &params());
+        let star_adu = out[[8, 8]] as f64 - 100.0;
+        assert!((star_adu - 5000.0).abs() < 250.0, "a 10000 e- star gave {star_adu} ADU at gain 2");
+        assert!(out.iter().enumerate().filter(|(i, _)| *i != 8 * 16 + 8).all(|(_, v)| *v == 100.0));
+    }
+
+    #[test]
+    fn sky_background_is_a_level_in_adu() {
+        let sky = NoiseParams { sky_background: 200.0, ..params() };
+        let out = apply_noise(&Array2::<f32>::zeros((64, 64)), &sky);
+        let mean = out.iter().map(|v| *v as f64).sum::<f64>() / out.len() as f64;
+        assert!((mean - 300.0).abs() < 1.0, "sky 200 ADU plus bias 100 ADU gave a mean of {mean}");
     }
 }

@@ -19,7 +19,7 @@ import { useFileQueue } from "./hooks/useFileQueue";
 import { registerFileIngest } from "./hooks/useFileIngest";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
-import { isValidFitsFile } from "./utils/validation";
+import { isValidFitsFile, SUPPORTED_EXTENSIONS } from "./utils/validation";
 import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters } from "./hooks/useProductFilter";
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
@@ -180,15 +180,15 @@ export default function App() {
     if (isTauri()) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
-        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "asdf", "zip"] }] });
+        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: [...SUPPORTED_EXTENSIONS] }] });
         if (result) {
-          const paths = Array.isArray(result) ? result : [result];
-          handleFilesAdded(paths.map((p: string) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
+          const paths = (Array.isArray(result) ? result : [result]).filter((p: string) => isValidFitsFile(p));
+          if (paths.length > 0) handleFilesAdded(paths.map((p: string) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
         }
       } catch (err) { console.error("[AstroBurst] File dialog error:", err); }
     } else {
       const input = document.createElement("input");
-      input.type = "file"; input.multiple = true; input.accept = ".fits,.fit,.fts,.asdf,.zip";
+      input.type = "file"; input.multiple = true; input.accept = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
       input.onchange = (e: Event) => {
         const files = (e.target as HTMLInputElement).files;
         if (!files) return;

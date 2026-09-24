@@ -10,9 +10,53 @@ export interface ImageRef {
 
 const FRAGMENT_HDU = "hdu=";
 const FRAGMENT_ARRAY = "array=";
-const MAX_ARRAY_KEY_LEN = 128;
-const ARRAY_KEY_RE = /^[A-Za-z0-9_.-]+$/;
 const HDU_INDEX_RE = /^[0-9]+$/;
+const UPPER_HEX_PAIR_RE = /^[0-9A-F]{2}$/;
+
+function isArrayKeyByte(b: number): boolean {
+  return (
+    (b >= 0x30 && b <= 0x39) ||
+    (b >= 0x41 && b <= 0x5a) ||
+    (b >= 0x61 && b <= 0x7a) ||
+    b === 0x5f ||
+    b === 0x2e ||
+    b === 0x2d
+  );
+}
+
+function encodeArrayKey(key: string): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(key)) {
+    out += isArrayKeyByte(b) ? String.fromCharCode(b) : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+function decodeArrayKey(encoded: string): string | null {
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < encoded.length) {
+    const c = encoded.charCodeAt(i);
+    if (isArrayKeyByte(c)) {
+      bytes.push(c);
+      i += 1;
+      continue;
+    }
+    if (c !== 0x25) return null;
+    const hex = encoded.slice(i + 1, i + 3);
+    if (!UPPER_HEX_PAIR_RE.test(hex)) return null;
+    const value = parseInt(hex, 16);
+    if (isArrayKeyByte(value)) return null;
+    bytes.push(value);
+    i += 3;
+  }
+  try {
+    const key = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes));
+    return key.length > 0 ? key : null;
+  } catch {
+    return null;
+  }
+}
 
 function parseFragment(fragment: string): PlaneSelector | null {
   if (fragment.startsWith(FRAGMENT_HDU)) {
@@ -22,9 +66,8 @@ function parseFragment(fragment: string): PlaneSelector | null {
     return Number.isSafeInteger(index) ? { kind: "hdu", index } : null;
   }
   if (fragment.startsWith(FRAGMENT_ARRAY)) {
-    const key = fragment.slice(FRAGMENT_ARRAY.length);
-    if (key.length === 0 || key.length > MAX_ARRAY_KEY_LEN || !ARRAY_KEY_RE.test(key)) return null;
-    return { kind: "array", key };
+    const key = decodeArrayKey(fragment.slice(FRAGMENT_ARRAY.length));
+    return key === null ? null : { kind: "array", key };
   }
   return null;
 }
@@ -46,7 +89,7 @@ export function formatImageRef(ref: ImageRef): string {
     case "hdu":
       return `${ref.path}#${FRAGMENT_HDU}${ref.plane.index}`;
     case "array":
-      return `${ref.path}#${FRAGMENT_ARRAY}${ref.plane.key}`;
+      return `${ref.path}#${FRAGMENT_ARRAY}${encodeArrayKey(ref.plane.key)}`;
   }
 }
 

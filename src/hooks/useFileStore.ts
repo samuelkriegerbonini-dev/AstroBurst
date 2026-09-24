@@ -259,6 +259,18 @@ class FileStore {
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
   }
 
+  fileReloaded(id: string, result: ProcessResult) {
+    const existing = this.state.fileMap.get(id);
+    if (!existing || existing.status !== FILE_STATUS.DONE) return;
+
+    this.state.fileMap.set(id, { ...existing, result });
+    this.state.statsVersion++;
+    const isSelected = this.state.selected === id;
+    if (isSelected) this.state.selectedVersion++;
+    this.bumpVersion();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | (isSelected ? NotifyChannel.Selected : 0));
+  }
+
   switchImageRef(id: string, ref: string, result: ProcessResult) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
@@ -342,23 +354,6 @@ export function useDoneFiles(): ProcessedFile[] {
     if (currentVersion !== versionRef.current) {
       versionRef.current = currentVersion;
       cachedRef.current = fileStore.getDoneFiles();
-    }
-    return cachedRef.current;
-  }, []);
-
-  return useSyncExternalStore(subscribe, getSnapshot);
-}
-
-export function useAllFiles(): ProcessedFile[] {
-  const versionRef = useRef(0);
-  const cachedRef = useRef<ProcessedFile[]>([]);
-
-  const subscribe = fileStore.subscribe;
-  const getSnapshot = useCallback(() => {
-    const currentVersion = fileStore.getVersion();
-    if (currentVersion !== versionRef.current) {
-      versionRef.current = currentVersion;
-      cachedRef.current = fileStore.getFiles();
     }
     return cachedRef.current;
   }, []);

@@ -26,6 +26,7 @@ export interface ToneResult {
   levels_applied: boolean;
   curves_applied: boolean;
   scnr_applied: boolean;
+  contrast_reapplied?: string[];
   stf: {
     r: StfParams;
     g: StfParams;

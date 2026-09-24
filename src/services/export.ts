@@ -29,7 +29,10 @@ export interface ExportFitsRgbOptions {
   history?: string[];
   compress?: FitsCompression;
   quantizeLevel?: number;
+  headerPath?: string | null;
 }
+
+export const HEADER_SOURCE_ERROR = "Failed to read the header source";
 
 export interface ExportAlignedOptions {
   alignMethod?: string;
@@ -57,6 +60,7 @@ export interface ExportRgbPngOptions {
   shadowB?: number;
   midtoneB?: number;
   highlightB?: number;
+  linked?: boolean;
 }
 
 export interface ExportResult {
@@ -80,6 +84,7 @@ export interface CompressMefResult {
   output_path: string;
   dropped: string[];
   kept_raw: string[];
+  uncompressed: string[];
   source_size_bytes: number;
   output_size_bytes: number;
   elapsed_ms: number;
@@ -147,6 +152,7 @@ export function exportRgbPng(
     shadowB: options.shadowB,
     midtoneB: options.midtoneB,
     highlightB: options.highlightB,
+    linked: options.linked,
   });
 }
 
@@ -206,5 +212,32 @@ export function exportFitsRgb(
     history: options.history,
     compress: options.compress ?? "none",
     quantizeLevel: options.quantizeLevel ?? DEFAULT_QUANTIZE_LEVEL,
+    headerPath: options.headerPath ?? null,
   });
+}
+
+export interface HeaderedRgbExport {
+  result: ExportResult;
+  headerWarning: string | null;
+}
+
+export async function exportFitsRgbWithHeader(
+  rPath: string | null,
+  gPath: string | null,
+  bPath: string | null,
+  outputPath: string,
+  options: ExportFitsRgbOptions,
+): Promise<HeaderedRgbExport> {
+  const headerPath = options.headerPath ?? null;
+  try {
+    return { result: await exportFitsRgb(rPath, gPath, bPath, outputPath, options), headerWarning: null };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (!headerPath || !message.includes(HEADER_SOURCE_ERROR)) throw e;
+    const result = await exportFitsRgb(rPath, gPath, bPath, outputPath, { ...options, headerPath: null });
+    return {
+      result,
+      headerWarning: `The header source ${headerPath} could not be read, so the FITS was written without its WCS and observation cards.`,
+    };
+  }
 }

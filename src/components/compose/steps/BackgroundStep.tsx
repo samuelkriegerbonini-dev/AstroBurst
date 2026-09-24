@@ -2,6 +2,7 @@ import { useState, useCallback, useId, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
+import { backgroundRunSummary, type BackgroundRunSummaryInput } from "../../../utils/wizard";
 import { extractBackground, extractBackgroundBatch } from "../../../services/processing";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
@@ -11,10 +12,7 @@ interface BackgroundStepProps {
   onBackground: (channelId: string, path: string) => void;
 }
 
-interface BgExtractResult {
-  sample_count?: number;
-  rms_residual?: number;
-  elapsed_ms?: number;
+interface BgExtractResult extends BackgroundRunSummaryInput {
   axis?: string | null;
 }
 
@@ -229,7 +227,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
             )}
             {result && (
               <div className="text-[9px] text-zinc-500">
-                {result.sample_count} samples, RMS {result.rms_residual?.toFixed(4)}, {result.elapsed_ms}ms
+                {backgroundRunSummary(result)}
                 {result.axis && <span className="text-emerald-400/70"> · axis: {result.axis}</span>}
               </div>
             )}

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
+use crate::cmd::common::write_derived_fits;
 use crate::core::synth::pipeline::{self, SynthConfig, SynthResult};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,25 +17,28 @@ pub struct GenerateSynthArgs {
 #[command]
 pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, String> {
     let config = args.config;
+    let header = pipeline::frame_header(&config.noise);
+    let noise = config.noise.clone();
 
     let (noisy, ground_truth, stars) =
         tokio::task::spawn_blocking(move || pipeline::generate(&config))
             .await
-            .map_err(|e| format!("Task failed: {}", e))?;
+            .map_err(|e| format!("Task failed: {}", e))?
+            .map_err(|e| format!("{:#}", e))?;
 
-    pipeline::save_fits(&noisy, &args.output_path)
+    write_derived_fits(&args.output_path, &noisy, Some(&header))
         .map_err(|e| format!("Failed to save FITS: {}", e))?;
 
     if args.save_ground_truth {
         if let Some(gt_path) = &args.ground_truth_path {
-            pipeline::save_fits(&ground_truth, gt_path)
+            write_derived_fits(gt_path, &ground_truth, Some(&header))
                 .map_err(|e| format!("Failed to save ground truth: {}", e))?;
         }
     }
 
     if args.save_catalog {
         if let Some(cat_path) = &args.catalog_path {
-            pipeline::save_catalog(&stars, cat_path)
+            pipeline::save_catalog(&stars, &noise, cat_path)
                 .map_err(|e| format!("Failed to save catalog: {}", e))?;
         }
     }
@@ -57,26 +61,99 @@ pub struct GenerateStackArgs {
 #[command]
 pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthResult, String> {
     let config = args.config;
+    let header = pipeline::frame_header(&config.noise);
+    let (width, height) = (config.field.width, config.field.height);
 
     let (frames, _gt, stars) =
         tokio::task::spawn_blocking(move || pipeline::generate_stack(&config))
             .await
-            .map_err(|e| format!("Task failed: {}", e))?;
+            .map_err(|e| format!("Task failed: {}", e))?
+            .map_err(|e| format!("{:#}", e))?;
 
     let dir = std::path::Path::new(&args.output_dir);
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create dir: {}", e))?;
 
     for (i, frame) in frames.iter().enumerate() {
         let path = dir.join(format!("{}_{:04}.fits", args.prefix, i));
-        pipeline::save_fits(frame, path.to_str().unwrap_or("frame.fits"))
+        write_derived_fits(path.to_str().unwrap_or("frame.fits"), frame, Some(&header))
             .map_err(|e| format!("Failed to save frame {}: {}", i, e))?;
     }
 
-    let first = &frames[0];
     Ok(SynthResult {
-        width: first.dim().1 as u32,
-        height: first.dim().0 as u32,
+        width,
+        height,
         star_count: stars.len(),
         output_path: Some(args.output_dir),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::common::load_cached_full;
+    use crate::core::synth::pipeline::FieldType;
+
+    fn small_config() -> SynthConfig {
+        let mut config = SynthConfig::default();
+        config.field.width = 32;
+        config.field.height = 32;
+        config.field.n_stars = 5;
+        config
+    }
+
+    #[tokio::test]
+    async fn a_stack_of_zero_frames_is_an_error_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("stack");
+        let mut config = small_config();
+        config.n_frames = 0;
+        let args = GenerateStackArgs {
+            config,
+            output_dir: out.to_str().unwrap().to_string(),
+            prefix: "synth".to_string(),
+        };
+        let err = generate_synth_stack_cmd(args).await.expect_err("zero frames must be refused");
+        assert!(err.contains("Frame count 0"), "{err}");
+        assert!(!out.exists(), "an empty output directory was left behind");
+    }
+
+    #[tokio::test]
+    async fn a_king_cluster_without_a_tidal_radius_is_an_error_instead_of_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = small_config();
+        config.field_type = FieldType::KingCluster { core_radius: 50.0, tidal_radius: 0.0 };
+        let args = GenerateSynthArgs {
+            config,
+            output_path: dir.path().join("king.fits").to_str().unwrap().to_string(),
+            save_catalog: false,
+            catalog_path: None,
+            save_ground_truth: false,
+            ground_truth_path: None,
+        };
+        let err = generate_synth_cmd(args).await.expect_err("a zero tidal radius must be refused");
+        assert!(err.contains("Tidal radius"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn written_frames_carry_the_exposure_gain_and_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("frame.fits").to_str().unwrap().to_string();
+        let gt = dir.path().join("truth.fits").to_str().unwrap().to_string();
+        let args = GenerateSynthArgs {
+            config: small_config(),
+            output_path: out.clone(),
+            save_catalog: false,
+            catalog_path: None,
+            save_ground_truth: true,
+            ground_truth_path: Some(gt.clone()),
+        };
+        generate_synth_cmd(args).await.unwrap();
+        for path in [&out, &gt] {
+            let entry = load_cached_full(path).unwrap();
+            let header = entry.header().expect("header");
+            assert_eq!(header.get_f64("EXPTIME"), Some(300.0));
+            assert_eq!(header.get_f64("GAIN"), Some(1.5));
+            assert_eq!(header.get("BUNIT").map(|v| v.trim().trim_matches('\'').trim()), Some("ADU"));
+        }
+    }
 }

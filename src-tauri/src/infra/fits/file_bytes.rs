@@ -16,16 +16,6 @@ pub enum IoMode {
     Read,
 }
 
-impl IoMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IoMode::Auto => "auto",
-            IoMode::Mmap => "mmap",
-            IoMode::Read => "read",
-        }
-    }
-}
-
 impl FromStr for IoMode {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -177,7 +167,51 @@ fn is_network_fs(file: &File) -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(any(target_os = "macos", test))]
+const MACOS_NETWORK_FS_TYPES: [&[u8]; 4] = [b"smbfs", b"nfs", b"afpfs", b"webdav"];
+
+#[cfg(any(target_os = "macos", test))]
+const STATFS64_BYTES: usize = 2168;
+#[cfg(any(target_os = "macos", test))]
+const STATFS64_WORDS: usize = STATFS64_BYTES.div_ceil(8);
+#[cfg(any(target_os = "macos", test))]
+const F_FSTYPENAME_OFFSET: usize = 72;
+#[cfg(any(target_os = "macos", test))]
+const F_FSTYPENAME_LEN: usize = 16;
+
+#[cfg(any(target_os = "macos", test))]
+fn is_network_fs_type_name(field: &[u8]) -> bool {
+    let name = field.split(|&b| b == 0).next().unwrap_or(field);
+    MACOS_NETWORK_FS_TYPES.contains(&name)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn statfs64_fstypename(stat: &[u64; STATFS64_WORDS]) -> Vec<u8> {
+    stat.iter()
+        .flat_map(|word| word.to_ne_bytes())
+        .skip(F_FSTYPENAME_OFFSET)
+        .take(F_FSTYPENAME_LEN)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn is_network_fs(file: &File) -> bool {
+    use std::os::raw::c_int;
+    use std::os::unix::io::AsRawFd;
+
+    extern "C" {
+        #[cfg_attr(not(target_arch = "aarch64"), link_name = "fstatfs$INODE64")]
+        fn fstatfs(fd: c_int, buf: *mut u64) -> c_int;
+    }
+
+    let mut stat = [0u64; STATFS64_WORDS];
+    if unsafe { fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    is_network_fs_type_name(&statfs64_fstypename(&stat))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn is_network_fs(_file: &File) -> bool {
     false
 }
@@ -223,5 +257,44 @@ mod tests {
 
         let owned = read_file_bytes_with_mode(&file, IoMode::Read).unwrap();
         assert_eq!(&*owned, b"0123456789");
+    }
+
+    fn fstypename_field(name: &str) -> [u8; 16] {
+        let mut field = [0u8; 16];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        field
+    }
+
+    #[test]
+    fn macos_network_filesystem_type_names_are_recognised() {
+        for name in ["smbfs", "nfs", "afpfs", "webdav"] {
+            assert!(is_network_fs_type_name(&fstypename_field(name)), "{name}");
+        }
+        for name in ["apfs", "hfs", "msdos", "exfat", "devfs", "nfsx", "smb", ""] {
+            assert!(!is_network_fs_type_name(&fstypename_field(name)), "{name:?}");
+        }
+        assert!(is_network_fs_type_name(b"webdav"), "a field without a terminator is read to its end");
+    }
+
+    #[test]
+    fn fstypename_is_read_from_its_statfs64_offset() {
+        let mut bytes = [b'x'; STATFS64_WORDS * 8];
+        bytes[F_FSTYPENAME_OFFSET..F_FSTYPENAME_OFFSET + F_FSTYPENAME_LEN].copy_from_slice(&fstypename_field("smbfs"));
+        let mut stat = [0u64; STATFS64_WORDS];
+        for (word, chunk) in stat.iter_mut().zip(bytes.chunks_exact(8)) {
+            *word = u64::from_ne_bytes(chunk.try_into().unwrap());
+        }
+        assert_eq!(STATFS64_WORDS * 8, STATFS64_BYTES);
+        assert_eq!(statfs64_fstypename(&stat), fstypename_field("smbfs"));
+        assert!(is_network_fs_type_name(&statfs64_fstypename(&stat)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_local_temporary_file_is_mapped_in_auto_mode_on_macos() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = File::open(tmp.path()).unwrap();
+        assert!(!is_network_fs(&file));
+        assert!(prefer_mmap(&file, IoMode::Auto));
     }
 }

@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect, memo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
+import { bustPreviewUrl } from "../../hooks/useProcessingRun";
 
 interface CompareViewProps {
   originalUrl: string;
@@ -20,6 +21,8 @@ function CompareView({
   const [position, setPosition] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
+  const shownResultUrl = useMemo(() => bustPreviewUrl(resultUrl, Date.now()) ?? resultUrl, [resultUrl]);
+  const shownOriginalUrl = useMemo(() => bustPreviewUrl(originalUrl, Date.now()) ?? originalUrl, [originalUrl]);
 
   const handleMouseDown = useCallback(() => {
     dragging.current = true;
@@ -57,13 +60,13 @@ function CompareView({
         onMouseDown={handleMouseDown}
       >
         <img
-          src={resultUrl}
+          src={shownResultUrl}
           alt={resultLabel}
           className="absolute inset-0 w-full h-full object-contain"
           draggable={false}
         />
         <img
-          src={originalUrl}
+          src={shownOriginalUrl}
           alt={originalLabel}
           className="absolute inset-0 w-full h-full object-contain"
           style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}

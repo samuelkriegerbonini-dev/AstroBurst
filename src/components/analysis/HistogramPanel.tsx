@@ -26,6 +26,8 @@ interface HistogramPanelProps {
   onReset?: () => void;
   stats?: HistogramStats | null;
   disabled?: boolean;
+  disabledHint?: string;
+  badge?: React.ReactNode;
 }
 
 const DISABLED_HINT = "STF applies only to the mtf stretch";
@@ -42,6 +44,8 @@ function HistogramPanel({
                           onReset,
                           stats,
                           disabled = false,
+                          disabledHint = DISABLED_HINT,
+                          badge,
                         }: HistogramPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -269,18 +273,21 @@ function HistogramPanel({
   return (
     <div className="ab-panel overflow-hidden">
       <div className="ab-panel-header" style={{ padding: "4px 12px" }}>
-        <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
-          Histogram / STF
-        </span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+            Histogram / STF
+          </span>
+          {badge}
+        </div>
         <div className="flex items-center gap-0.5">
-          <ToolbarBtn onClick={onAutoStf} title={disabled ? DISABLED_HINT : "Auto Stretch (STF)"} active={false} color="var(--ab-blue)" disabled={disabled}>
+          <ToolbarBtn onClick={onAutoStf} title={disabled ? disabledHint : "Auto Stretch (STF)"} active={false} color="var(--ab-blue)" disabled={disabled}>
             <Wand2 size={11} />
             <span>Auto</span>
           </ToolbarBtn>
-          <ToolbarBtn onClick={openManual} title={disabled ? DISABLED_HINT : "Manual input"} active={manualMode} color="var(--ab-teal)" disabled={disabled}>
+          <ToolbarBtn onClick={openManual} title={disabled ? disabledHint : "Manual input"} active={manualMode} color="var(--ab-teal)" disabled={disabled}>
             <SlidersHorizontal size={11} />
           </ToolbarBtn>
-          <ToolbarBtn onClick={onReset} title={disabled ? DISABLED_HINT : "Reset to linear"} active={false} color="#71717a" disabled={disabled}>
+          <ToolbarBtn onClick={onReset} title={disabled ? disabledHint : "Reset to linear"} active={false} color="#71717a" disabled={disabled}>
             <RotateCcw size={11} />
           </ToolbarBtn>
         </div>
@@ -299,13 +306,13 @@ function HistogramPanel({
           className={`w-full rounded-md absolute inset-0 ${disabled ? "cursor-not-allowed" : "cursor-crosshair"}`}
           style={{ height: CANVAS_H }}
           onMouseDown={handleMouseDown}
-          title={disabled ? DISABLED_HINT : undefined}
+          title={disabled ? disabledHint : undefined}
         />
       </div>
 
       {disabled && (
         <div className="px-3 py-1 text-[9px] text-zinc-500" style={{ borderTop: "1px solid rgba(63,63,70,0.12)" }}>
-          {DISABLED_HINT}
+          {disabledHint}
         </div>
       )}
 

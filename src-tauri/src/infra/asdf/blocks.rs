@@ -11,7 +11,6 @@ pub struct BlockHeader {
     pub allocated_size: u64,
     pub used_size: u64,
     pub data_size: u64,
-    pub checksum: [u8; 16],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,19 +24,9 @@ pub enum Compression {
 
 #[derive(Debug)]
 pub struct BlockRef {
-    pub index: usize,
     pub header: BlockHeader,
     pub data_start: usize,
     pub used_size: usize,
-}
-
-impl BlockRef {
-    pub fn original_size(&self) -> usize {
-        match self.header.compression {
-            Compression::None => self.used_size,
-            _ => self.header.data_size as usize,
-        }
-    }
 }
 
 impl BlockHeader {
@@ -66,9 +55,6 @@ impl BlockHeader {
         let used_size = u64::from_be_bytes(h[16..24].try_into().expect("8 bytes"));
         let data_size = u64::from_be_bytes(h[24..32].try_into().expect("8 bytes"));
 
-        let mut checksum = [0u8; 16];
-        checksum.copy_from_slice(&h[32..48]);
-
         Ok((
             Self {
                 header_size,
@@ -77,7 +63,6 @@ impl BlockHeader {
                 allocated_size,
                 used_size,
                 data_size,
-                checksum,
             },
             total_header,
         ))

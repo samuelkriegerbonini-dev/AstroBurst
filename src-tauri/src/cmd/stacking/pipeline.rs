@@ -9,8 +9,8 @@ use crate::core::imaging::calibration_pipeline::{
 use crate::core::imaging::cosmetic::CosmeticConfig;
 use crate::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat, load_fits_image,
+    median_exposure_seconds, read_exposure_seconds,
 };
-use crate::infra::fits::reader::read_primary_header;
 use crate::types::constants::{
     RES_LABEL, RES_PIXELS_B64, RES_WIDTH, RES_HEIGHT,
     RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW, RES_WARNINGS,
@@ -56,23 +56,6 @@ fn pipeline_warnings(channels: &[ChannelFilesInput], cosmetic_enabled: bool) -> 
     } else {
         vec![DQ_COSMETIC_WARNING.to_string()]
     }
-}
-
-fn read_exposure_seconds(path: &str) -> Option<f64> {
-    let header = read_primary_header(path).ok()?;
-    header
-        .get_f64("EXPTIME")
-        .or_else(|| header.get_f64("EXPOSURE"))
-        .filter(|v| v.is_finite() && *v > 0.0)
-}
-
-fn median_exposure(paths: &[String]) -> Option<f64> {
-    let mut vals: Vec<f64> = paths.iter().filter_map(|p| read_exposure_seconds(p)).collect();
-    if vals.is_empty() {
-        return None;
-    }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(vals[vals.len() / 2])
 }
 
 fn compute_dark_scales(light_paths: &[String], dark_exposure: Option<f64>) -> Vec<f32> {
@@ -173,10 +156,28 @@ fn compose_rgb_from_stacked_masters(
     run_batch_pipeline(channels, &no_masters, &passthrough)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct MasterFrameCounts {
+    darks: usize,
+    flats: usize,
+    bias: usize,
+}
+
+impl MasterFrameCounts {
+    fn of(request: &PipelineRequest) -> Self {
+        Self {
+            darks: request.dark_paths.len(),
+            flats: request.flat_paths.len(),
+            bias: request.bias_paths.len(),
+        }
+    }
+}
+
 fn stack_channels_one_at_a_time<F>(
     specs: &[ChannelFilesInput],
     mut load_channel: F,
     masters: &CalibrationMasters,
+    counts: MasterFrameCounts,
     config: &BatchPipelineConfig,
 ) -> Result<BatchPipelineResult, String>
 where
@@ -196,9 +197,9 @@ where
     }
 
     let stats = BatchPipelineStats {
-        darks_combined: if masters.dark.is_some() { 1 } else { 0 },
-        flats_combined: if masters.flat.is_some() { 1 } else { 0 },
-        bias_combined: if masters.bias.is_some() { 1 } else { 0 },
+        darks_combined: counts.darks,
+        flats_combined: counts.flats,
+        bias_combined: counts.bias,
         channels: channel_stats,
     };
 
@@ -243,13 +244,13 @@ fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, S
     let master_flat = if request.flat_paths.is_empty() {
         None
     } else {
-        Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
+        Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure_seconds(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
     };
 
     let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {
         None
     } else {
-        median_exposure(&request.dark_paths)
+        median_exposure_seconds(&request.dark_paths)
     };
 
     let masters = CalibrationMasters {
@@ -305,7 +306,8 @@ fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, S
     };
 
     let warnings = pipeline_warnings(&request.channels, config.cosmetic.is_some());
-    let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, &config)?;
+    let counts = MasterFrameCounts::of(&request);
+    let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, counts, &config)?;
 
     let channel_previews: Vec<serde_json::Value> = result
         .master_channels
@@ -463,7 +465,8 @@ mod tests {
         let masters = test_masters();
         let config = test_config();
 
-        let sequential = stack_channels_one_at_a_time(&specs, |s| Ok(synthetic_channel(s)), &masters, &config)
+        let counts = MasterFrameCounts { darks: 0, flats: 0, bias: 7 };
+        let sequential = stack_channels_one_at_a_time(&specs, |s| Ok(synthetic_channel(s)), &masters, counts, &config)
             .expect("sequential run");
         let batch = run_batch_pipeline(specs.iter().map(synthetic_channel).collect(), &masters, &config)
             .expect("batch run");
@@ -481,9 +484,9 @@ mod tests {
             assert!((a - b).abs() <= 1e-4, "rgb {a} vs {b}");
         }
 
-        assert_eq!(sequential.stats.bias_combined, batch.stats.bias_combined);
-        assert_eq!(sequential.stats.darks_combined, batch.stats.darks_combined);
-        assert_eq!(sequential.stats.flats_combined, batch.stats.flats_combined);
+        assert_eq!(sequential.stats.bias_combined, 7);
+        assert_eq!(sequential.stats.darks_combined, 0);
+        assert_eq!(sequential.stats.flats_combined, 0);
         assert_eq!(sequential.stats.channels.len(), 3);
         for (cs, cb) in sequential.stats.channels.iter().zip(batch.stats.channels.iter()) {
             assert_eq!(cs.label, cb.label);
@@ -509,6 +512,7 @@ mod tests {
                 }
             },
             &test_masters(),
+            MasterFrameCounts::default(),
             &test_config(),
         )
         .unwrap_err();
@@ -518,9 +522,51 @@ mod tests {
 
     #[test]
     fn per_channel_stacking_rejects_empty_request() {
-        let err = stack_channels_one_at_a_time(&[], |s| Ok(synthetic_channel(s)), &test_masters(), &test_config())
-            .unwrap_err();
+        let err = stack_channels_one_at_a_time(
+            &[],
+            |s| Ok(synthetic_channel(s)),
+            &test_masters(),
+            MasterFrameCounts::default(),
+            &test_config(),
+        )
+        .unwrap_err();
         assert_eq!(err, "No channels provided");
+    }
+
+    fn write_frames(dir: &tempfile::TempDir, prefix: &str, count: usize, level: f32) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                let frame = Array2::from_shape_fn((12, 12), |(y, x)| level + ((x * 7 + y * 3 + i) % 5) as f32);
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pipeline_stats_report_how_many_frames_built_each_master() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "L".into(), paths: write_frames(&dir, "light", 2, 500.0) }],
+            dark_paths: write_frames(&dir, "dark", 3, 10.0),
+            flat_paths: write_frames(&dir, "flat", 2, 1000.0),
+            bias_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: None,
+            align: Some(false),
+            rejection: None,
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        };
+
+        let response = run_pipeline_request(request).unwrap();
+        let stats = &response[RES_STATS];
+        assert_eq!(stats["darks_combined"], 3, "{stats}");
+        assert_eq!(stats["flats_combined"], 2, "{stats}");
+        assert_eq!(stats["bias_combined"], 0, "{stats}");
     }
 
     #[test]
@@ -537,6 +583,21 @@ mod tests {
             assert_eq!(le, lc);
             assert_close(me, mc, &format!("master {le}"));
         }
+    }
+
+    #[test]
+    fn dark_scales_read_the_exposure_of_hdu_refs() {
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("light.fits");
+        write_test_mef(
+            &path,
+            &[("EXPTIME", "30.0".to_string())],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: 2, rows: 2, data: HduData::F32(vec![1.0, 2.0, 3.0, 4.0]), extra_cards: vec![] }],
+        );
+        let reference = crate::types::image_ref::ImageRef::hdu(path.to_str().unwrap(), 1).cache_key();
+        let scales = compute_dark_scales(&[reference], Some(300.0));
+        assert!((scales[0] - 0.1).abs() < 1e-6, "{scales:?}");
     }
 
     #[test]

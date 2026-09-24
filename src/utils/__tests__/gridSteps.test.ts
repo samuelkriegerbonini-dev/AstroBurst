@@ -8,92 +8,14 @@ import {
 } from "../../components/viewer/painters/gridPainter";
 import type { WcsGrid } from "../../shared/types/astrometry";
 import type { Pt } from "../regionGeometry";
-import {
-  DECIMAL_STEPS_DEG,
-  chooseStep,
-  clampGridDensity,
-  decimalPlaces,
-  formatLatLabel,
-  formatLonLabel,
-  lonStepTable,
-  stepValuesDeg,
-  targetLines,
-} from "../gridSteps";
+import { clampGridDensity } from "../gridSteps";
 
-const FIELD_200_ARCSEC = 200.12 / 3600;
-const TWO_SECONDS = 2 / 240;
-
-describe("gridSteps step selection", () => {
-  it("picks the largest step that keeps the line count at or below the target", () => {
-    expect(chooseStep("hours", FIELD_200_ARCSEC, 9) * 240).toBeCloseTo(2, 9);
-    expect(chooseStep("sexagesimal", FIELD_200_ARCSEC, 9) * 3600).toBeCloseTo(30, 9);
-    expect(chooseStep("sexagesimal", FIELD_200_ARCSEC, 5) * 3600).toBeCloseTo(60, 9);
-    expect(chooseStep("sexagesimal", FIELD_200_ARCSEC, 13) * 3600).toBeCloseTo(20, 9);
-    expect(chooseStep("decimal", FIELD_200_ARCSEC, 9)).toBeCloseTo(0.01, 12);
-  });
-
-  it("falls back to the coarsest step for whole-sky extents and to the finest for empty ones", () => {
-    expect(chooseStep("hours", 360, 9)).toBeCloseTo(45, 9);
-    expect(chooseStep("sexagesimal", 1000, 9)).toBeCloseTo(45, 9);
-    expect(chooseStep("sexagesimal", 0, 9) * 3600).toBeCloseTo(1, 9);
-    expect(chooseStep("decimal", Number.NaN, 9)).toBeCloseTo(45, 9);
-  });
-
-  it("derives the target line count from the density and clamps it", () => {
-    expect(targetLines(3)).toBe(9);
-    expect(targetLines(0)).toBe(5);
-    expect(targetLines(9)).toBe(13);
+describe("gridSteps density", () => {
+  it("clamps the density to the supported range and falls back to the default", () => {
     expect(clampGridDensity(0)).toBe(1);
     expect(clampGridDensity(9)).toBe(5);
     expect(clampGridDensity(2.6)).toBe(3);
     expect(clampGridDensity(Number.NaN)).toBe(3);
-  });
-
-  it("uses the hours table for equatorial frames and the decimal table otherwise", () => {
-    expect(lonStepTable("icrs")).toBe("hours");
-    expect(lonStepTable("fk5")).toBe("hours");
-    expect(lonStepTable("galactic")).toBe("decimal");
-    expect(lonStepTable("ecliptic")).toBe("decimal");
-    expect(stepValuesDeg("hours")[0]).toBeCloseTo(90, 12);
-    expect(stepValuesDeg("sexagesimal").at(-1)).toBeCloseTo(1 / 3600, 15);
-    expect(stepValuesDeg("decimal")).toEqual([...DECIMAL_STEPS_DEG]);
-  });
-});
-
-describe("gridSteps label formatting", () => {
-  it("formats hour-based longitudes with seconds only when the step needs them", () => {
-    expect(formatLonLabel("icrs", 150, TWO_SECONDS)).toBe("10h00m00s");
-    expect(formatLonLabel("icrs", 150 + 3 * TWO_SECONDS, TWO_SECONDS)).toBe("10h00m06s");
-    expect(formatLonLabel("fk5", -1 / 240, 1 / 240)).toBe("23h59m59s");
-    expect(formatLonLabel("icrs", 150, 15)).toBe("10h00m");
-    expect(formatLonLabel("icrs", 150.5, 0.25)).toBe("10h02m");
-    expect(formatLonLabel("icrs", 360 - 1e-12, 1 / 240)).toBe("00h00m00s");
-  });
-
-  it("formats galactic and ecliptic longitudes in decimal degrees sized by the step", () => {
-    expect(formatLonLabel("galactic", 123.45, 0.01)).toBe("123.45°");
-    expect(formatLonLabel("ecliptic", 0.5, 0.5)).toBe("0.5°");
-    expect(formatLonLabel("galactic", 30, 5)).toBe("30°");
-    expect(formatLonLabel("galactic", -0.002, 0.002)).toBe("359.998°");
-    expect(formatLonLabel("galactic", 359.9999, 0.001)).toBe("0.000°");
-  });
-
-  it("formats latitudes as signed dd°mm' with seconds only for sub-arcminute steps", () => {
-    expect(formatLatLabel(2 + 90 / 3600, 30 / 3600)).toBe("+02°01'30\"");
-    expect(formatLatLabel(-28.5, 1 / 60)).toBe("-28°30'");
-    expect(formatLatLabel(0, 1)).toBe("+00°00'");
-    expect(formatLatLabel(-1e-13, 1)).toBe("+00°00'");
-    expect(formatLatLabel(45, 45)).toBe("+45°00'");
-    expect(formatLatLabel(-0.5 - 1 / 3600, 1 / 3600)).toBe("-00°30'01\"");
-  });
-
-  it("counts the decimal places a step needs", () => {
-    expect(decimalPlaces(0.5)).toBe(1);
-    expect(decimalPlaces(0.02)).toBe(2);
-    expect(decimalPlaces(5)).toBe(0);
-    expect(decimalPlaces(0.0001)).toBe(4);
-    expect(decimalPlaces(0)).toBe(0);
-    expect(decimalPlaces(Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { Activity } from "lucide-react";
 import type { FftData } from "../../shared/types";
+import MeasurementBadge from "./MeasurementBadge";
 
 interface FftDataExtended extends FftData {
   original_size?: number;
@@ -94,6 +95,7 @@ function FFTPanel({ filePath, computeFftSpectrum }: FFTPanelProps) {
           <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
             FFT Power Spectrum
           </span>
+          <MeasurementBadge />
         </div>
         <button
           onClick={handleCompute}

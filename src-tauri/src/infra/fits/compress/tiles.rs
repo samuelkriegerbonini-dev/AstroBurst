@@ -219,6 +219,27 @@ fn read_fixed_f64(row: &[u8], span: &ColumnSpan) -> Result<f64> {
     }
 }
 
+enum QuantSource {
+    None,
+    Columns { zscale: ColumnSpan, zzero: ColumnSpan },
+    Keywords { zscale: f64, zzero: f64 },
+}
+
+fn quantization_source(header: &HduHeader, layout: &BintableLayout, zquantiz: &str, zbitpix: i64) -> QuantSource {
+    if zquantiz == "NONE" {
+        return QuantSource::None;
+    }
+    if let (Some(&zscale), Some(&zzero)) = (layout.columns.get("ZSCALE"), layout.columns.get("ZZERO")) {
+        return QuantSource::Columns { zscale, zzero };
+    }
+    match (header.get_f64("ZSCALE"), header.get_f64("ZZERO")) {
+        (Some(zscale), Some(zzero)) if zbitpix < 0 && zscale.is_finite() && zzero.is_finite() => {
+            QuantSource::Keywords { zscale, zzero }
+        }
+        _ => QuantSource::None,
+    }
+}
+
 fn find_zval(header: &HduHeader, name: &str, default: i64) -> i64 {
     for i in 1..=99 {
         let key = format!("ZNAME{i}");
@@ -450,6 +471,13 @@ fn decode_one_tile(
 
     match ctx.zcmptype {
         "RICE_1" => {
+            if ctx.zbitpix < 0 && ctx.tile_quant.is_none() {
+                bail!(
+                    "RICE_1 compressed floating-point image (ZBITPIX={}) has no ZSCALE/ZZERO \
+                     columns or keywords, so its integer codes cannot be turned back into values",
+                    ctx.zbitpix
+                );
+            }
             let signed = ctx.zbitpix.unsigned_abs() != 8;
             let params = RiceParams {
                 blocksize: ctx.blocksize,
@@ -503,9 +531,7 @@ fn decode_one_tile(
     }
 }
 
-/// Decode a full 2D compressed-image BINTABLE HDU into a plain pixel array.
-/// `data_start` is the HDU's data-unit start offset (same field already
-/// computed by `parse_header_at` for any HDU type).
+#[cfg(test)]
 pub fn decode_compressed_image(
     mmap: &[u8],
     header: &HduHeader,
@@ -535,22 +561,21 @@ pub fn decode_compressed_planes(
         .context("Missing ZCMPTYPE")?
         .trim()
         .to_uppercase();
-    let is_quantized = header.get("ZQUANTIZ").is_some()
-        && layout.columns.contains_key("ZSCALE")
-        && layout.columns.contains_key("ZZERO");
+    let zquantiz = header
+        .get("ZQUANTIZ")
+        .map(|s| s.trim().to_uppercase())
+        .unwrap_or_default();
+    let quant_source = quantization_source(header, &layout, &zquantiz, geom.zbitpix);
+    let is_quantized = !matches!(quant_source, QuantSource::None);
 
     let global_bzero = header.get_f64("BZERO").unwrap_or(0.0);
     let global_bscale = header.get_f64("BSCALE").unwrap_or(1.0);
     let global_blank = header.get_i64("ZBLANK").or_else(|| header.get_i64("BLANK"));
 
     let dither_seed: Option<i32> = if is_quantized {
-        let zq = header
-            .get("ZQUANTIZ")
-            .map(|s| s.trim().to_uppercase())
-            .unwrap_or_default();
-        if zq.contains("SUBTRACTIVE_DITHER_2") {
+        if zquantiz.contains("SUBTRACTIVE_DITHER_2") {
             bail!("ZQUANTIZ SUBTRACTIVE_DITHER_2 is not supported");
-        } else if zq.contains("SUBTRACTIVE_DITHER_1") {
+        } else if zquantiz.contains("SUBTRACTIVE_DITHER_1") {
             Some(
                 header
                     .get_i64("ZDITHER0")
@@ -584,9 +609,6 @@ pub fn decode_compressed_planes(
         );
     }
 
-    let zscale_col = layout.columns.get("ZSCALE").copied();
-    let zzero_col = layout.columns.get("ZZERO").copied();
-
     let tiles: Vec<Result<DecodedTile>> = (0..n_tiles)
         .into_par_iter()
         .map(|row| -> Result<DecodedTile> {
@@ -615,13 +637,12 @@ pub fn decode_compressed_planes(
                 })?;
             let row_bytes = &mmap[row_start..row_end];
 
-            let tile_quant = if is_quantized {
-                Some((
-                    read_fixed_f64(row_bytes, zscale_col.as_ref().unwrap())?,
-                    read_fixed_f64(row_bytes, zzero_col.as_ref().unwrap())?,
-                ))
-            } else {
-                None
+            let tile_quant = match &quant_source {
+                QuantSource::None => None,
+                QuantSource::Columns { zscale, zzero } => {
+                    Some((read_fixed_f64(row_bytes, zscale)?, read_fixed_f64(row_bytes, zzero)?))
+                }
+                QuantSource::Keywords { zscale, zzero } => Some((*zscale, *zzero)),
             };
 
             let ctx = TileCodecCtx {
@@ -682,13 +703,12 @@ mod tests {
     use std::io::Write;
 
     fn make_header(pairs: &[(&str, &str)]) -> HduHeader {
-        let mut index = HashMap::new();
-        let mut cards = Vec::new();
+        let mut header = HduHeader::empty();
         for &(k, v) in pairs {
-            index.insert(k.to_string(), v.to_string());
-            cards.push((k.to_string(), v.to_string()));
+            header.index.insert(k.to_string(), v.to_string());
+            header.cards.push((k.to_string(), v.to_string()));
         }
-        HduHeader { cards, index }
+        header
     }
 
     fn gzip1(raw: &[u8]) -> Vec<u8> {
@@ -753,12 +773,81 @@ mod tests {
                 ("TFORM2", "1D"),
                 ("TTYPE3", "ZZERO"),
                 ("TFORM3", "1D"),
-                ("ZQUANTIZ", zquantiz),
-                ("ZDITHER0", "1"),
                 ("ZBLANK", "-2147483647"),
             ]);
+            if !zquantiz.is_empty() {
+                pairs.extend([("ZQUANTIZ", zquantiz), ("ZDITHER0", "1")]);
+            }
         }
         (mmap, make_header(&pairs))
+    }
+
+    fn rice_i32(values: &[i32]) -> Vec<u8> {
+        let ints: Vec<i64> = values.iter().map(|&v| v as i64).collect();
+        rice_encode(&ints, &RiceParams { blocksize: 32, bytepix: 4, signed: true })
+    }
+
+    #[test]
+    fn quantized_columns_without_zquantiz_decode_as_no_dither() {
+        for (zcmptype, heap) in [
+            ("RICE_1", rice_i32(&QUANT_INTS)),
+            ("GZIP_1", gzip1(&be_i32(&QUANT_INTS))),
+            ("NOCOMPRESS", be_i32(&QUANT_INTS)),
+        ] {
+            let pixels = decode_single_tile(&SingleTile {
+                zcmptype,
+                zbitpix: -32,
+                npix: QUANT_INTS.len(),
+                heap,
+                quant: Some((0.5, 100.0, "")),
+            })
+            .unwrap();
+            assert_quantized_no_dither(&pixels);
+        }
+    }
+
+    #[test]
+    fn zscale_and_zzero_header_keywords_scale_every_tile() {
+        let (mmap, mut header) = single_tile_hdu(&SingleTile {
+            zcmptype: "RICE_1",
+            zbitpix: -32,
+            npix: QUANT_INTS.len(),
+            heap: rice_i32(&QUANT_INTS),
+            quant: None,
+        });
+        header.set("ZSCALE", "0.5".to_string());
+        header.set("ZZERO", "100.0".to_string());
+        header.set("ZBLANK", NULL_VALUE.to_string());
+        let pixels: Vec<f32> = decode_compressed_image(&mmap, &header, 0).unwrap().iter().copied().collect();
+        assert_quantized_no_dither(&pixels);
+    }
+
+    #[test]
+    fn a_rice_float_image_without_any_scale_is_refused_instead_of_returning_codes() {
+        let err = decode_single_tile(&SingleTile {
+            zcmptype: "RICE_1",
+            zbitpix: -32,
+            npix: QUANT_INTS.len(),
+            heap: rice_i32(&QUANT_INTS),
+            quant: None,
+        })
+        .expect_err("integer codes must not be passed off as float pixels");
+        assert!(err.to_string().contains("ZSCALE/ZZERO"), "{err}");
+    }
+
+    #[test]
+    fn zquantiz_none_keeps_a_lossless_float_tile_unscaled() {
+        let values = [1.5f32, -2.25, 1e10, 0.0, 3.0];
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        let pixels = decode_single_tile(&SingleTile {
+            zcmptype: "GZIP_2",
+            zbitpix: -32,
+            npix: values.len(),
+            heap: gzip2_encode(&raw, 4),
+            quant: Some((0.5, 100.0, "NONE")),
+        })
+        .unwrap();
+        assert_eq!(pixels, values.to_vec());
     }
 
     fn decode_single_tile(t: &SingleTile) -> Result<Vec<f32>> {

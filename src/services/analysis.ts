@@ -2,7 +2,6 @@ import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import { toUint8Array, parseFftBuffer } from "../infrastructure/tauri/parsers";
 import type { HistogramData, FftData } from "../shared/types/analysis";
 import type { StarDetectionResult } from "../shared/types/processing";
-import type { ProcessResult } from "../shared/types/fits.types";
 
 export function computeHistogram(path: string, excludeDq = false): Promise<HistogramData> {
   return typedInvoke<HistogramData>("compute_histogram", { path, excludeDq });
@@ -17,8 +16,8 @@ export function detectStars(path: string, sigma = 5.0, maxStars = 200): Promise<
   return typedInvoke<StarDetectionResult>("detect_stars", { path, sigma, maxStars });
 }
 
-export function detectStarsComposite(sigma = 5.0, maxStars = 200): Promise<StarDetectionResult> {
-  return typedInvoke<StarDetectionResult>("detect_stars_composite", { sigma, maxStars });
+export function detectStarsComposite(sigma = 5.0, maxStars = 200, rgbPath: string | null = null): Promise<StarDetectionResult> {
+  return typedInvoke<StarDetectionResult>("detect_stars_composite", { sigma, maxStars, path: rgbPath });
 }
 
 export interface SubframeMetrics {
@@ -73,14 +72,22 @@ export function analyzeSubframes(
   });
 }
 
+export interface StfRenderResult {
+  png_path: string;
+  previewUrl?: string;
+  shadow: number;
+  midtone: number;
+  highlight: number;
+}
+
 export function applyStfRender(
   path: string,
   outputDir: string | undefined,
   shadow: number,
   midtone: number,
   highlight: number,
-): Promise<ProcessResult> {
-  return withPreview<ProcessResult>("apply_stf_render", outputDir, { path, shadow, midtone, highlight });
+): Promise<StfRenderResult> {
+  return withPreview<StfRenderResult>("apply_stf_render", outputDir, { path, shadow, midtone, highlight });
 }
 
 export interface StarPhotometry {
@@ -89,7 +96,7 @@ export interface StarPhotometry {
   peak: number;
   net_flux: number;
   flux_err: number;
-  mag_inst: number;
+  mag_inst: number | null;
   snr: number;
   fwhm: number;
   aperture_radius: number;
@@ -153,13 +160,19 @@ export interface PhotometryOptions {
   gain?: number;
 }
 
-export function measurePhotometry(
+export function finiteSky(sky: { ra: number | null; dec: number | null } | null | undefined): { ra: number; dec: number } | null {
+  if (!sky) return null;
+  const { ra, dec } = sky;
+  return typeof ra === "number" && typeof dec === "number" && Number.isFinite(ra) && Number.isFinite(dec) ? { ra, dec } : null;
+}
+
+export async function measurePhotometry(
   path: string,
   x: number,
   y: number,
   options: PhotometryOptions = {},
 ): Promise<PhotometryMeasurement> {
-  return typedInvoke<PhotometryMeasurement>("measure_photometry_cmd", {
+  const res = await typedInvoke<PhotometryMeasurement>("measure_photometry_cmd", {
     path,
     x,
     y,
@@ -168,4 +181,5 @@ export function measurePhotometry(
     excludeDq: options.excludeDq ?? false,
     gain: options.gain ?? null,
   });
+  return { ...res, sky: finiteSky(res.sky) };
 }

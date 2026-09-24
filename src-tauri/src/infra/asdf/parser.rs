@@ -13,6 +13,7 @@ const STREAMED_FLAG: u32 = 0x1;
 
 enum Backing {
     Mapped(Mmap),
+    #[cfg(test)]
     Owned(Vec<u8>),
 }
 
@@ -20,6 +21,7 @@ impl Backing {
     fn as_slice(&self) -> &[u8] {
         match self {
             Backing::Mapped(m) => &m[..],
+            #[cfg(test)]
             Backing::Owned(v) => v.as_slice(),
         }
     }
@@ -33,8 +35,6 @@ impl std::fmt::Debug for Backing {
 
 #[derive(Debug)]
 pub struct AsdfFile {
-    pub version: String,
-    pub standard_version: Option<String>,
     pub tree: Value,
     pub blocks: Vec<BlockRef>,
     backing: Backing,
@@ -50,6 +50,7 @@ impl AsdfFile {
         Self::parse(Backing::Mapped(mmap))
     }
 
+    #[cfg(test)]
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AsdfError> {
         Self::parse(Backing::Owned(bytes))
     }
@@ -62,11 +63,9 @@ impl AsdfFile {
         let (yaml_end, blocks_start) = find_tree_end(bytes);
         let text = std::str::from_utf8(&bytes[..yaml_end])
             .map_err(|e| AsdfError::YamlParse(e.to_string()))?;
-        let (version, standard_version, tree) = parse_header_and_tree(text)?;
+        let tree = parse_tree(text)?;
         let blocks = read_blocks(bytes, blocks_start)?;
         Ok(Self {
-            version,
-            standard_version,
             tree,
             blocks,
             backing,
@@ -115,24 +114,12 @@ fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     (from..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
-fn parse_header_and_tree(text: &str) -> Result<(String, Option<String>, Value), AsdfError> {
-    let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
-    let first = lines.next().unwrap_or("");
-    let version = first
-        .trim()
-        .strip_prefix("#ASDF ")
-        .unwrap_or("1.0.0")
-        .to_string();
-
-    let mut standard_version = None;
+fn parse_tree(text: &str) -> Result<Value, AsdfError> {
+    let lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
     let mut yaml_content = String::new();
     let mut in_document = false;
 
-    for line in lines {
-        if let Some(v) = line.trim().strip_prefix("#ASDF_STANDARD ") {
-            standard_version = Some(v.to_string());
-            continue;
-        }
+    for line in lines.skip(1) {
         if line.starts_with("---") {
             in_document = true;
             continue;
@@ -153,9 +140,7 @@ fn parse_header_and_tree(text: &str) -> Result<(String, Option<String>, Value), 
         return Err(AsdfError::NoYamlTree);
     }
 
-    let tree: Value =
-        serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))?;
-    Ok((version, standard_version, tree))
+    serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))
 }
 
 fn read_blocks(buf: &[u8], start: usize) -> Result<Vec<BlockRef>, AsdfError> {
@@ -183,7 +168,6 @@ fn read_blocks(buf: &[u8], start: usize) -> Result<Vec<BlockRef>, AsdfError> {
         if header.flags & STREAMED_FLAG != 0 {
             let used = buf.len() - data_start;
             blocks.push(BlockRef {
-                index: blocks.len(),
                 header,
                 data_start,
                 used_size: used,
@@ -199,7 +183,6 @@ fn read_blocks(buf: &[u8], start: usize) -> Result<Vec<BlockRef>, AsdfError> {
         }
         let used_size = header.used_size as usize;
         blocks.push(BlockRef {
-            index: blocks.len(),
             header,
             data_start,
             used_size,
@@ -231,7 +214,6 @@ pub enum AsdfError {
     BlockOutOfRange(usize),
     ExternalBlock(String),
     ShapeMismatch { got: usize, expected: usize },
-    UnsupportedRank(usize),
 }
 
 impl From<std::io::Error> for AsdfError {
@@ -266,7 +248,6 @@ impl std::fmt::Display for AsdfError {
                     got, expected
                 )
             }
-            AsdfError::UnsupportedRank(n) => write!(f, "Unsupported array rank: {}", n),
         }
     }
 }

@@ -7,11 +7,10 @@ use serde_json::json;
 
 use crate::cmd::common::{
     blocking_cmd, load_cached, load_cached_full, load_companions, output_stem, render_and_save,
-    resolve_output_dir,
+    resolve_output_dir, write_derived_fits,
 };
 use crate::core::imaging::cosmetic::{cosmetic_correct, parse_defect_list, CosmeticConfig, CosmeticResult};
 use crate::infra::cache::ImageEntry;
-use crate::infra::fits::writer::write_fits_mono;
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_ERROR, RES_FAILED, RES_FITS_PATH, RES_PATH, RES_PNG_PATH,
     RES_RESULTS, RES_SUCCEEDED,
@@ -85,7 +84,7 @@ fn correct_one(
     let result = cosmetic_correct(entry.arr(), master_dark, cfg)?;
     let ro = render_and_save(&result.corrected, path, out_dir, SUFFIX_COSMETIC, false)?;
     let fits_path = format!("{}/{}_{}.fits", out_dir, output_stem(path), SUFFIX_COSMETIC);
-    write_fits_mono(&fits_path, &result.corrected, output_header(entry.header()).as_ref())?;
+    write_derived_fits(&fits_path, &result.corrected, output_header(entry.header()).as_ref())?;
     let (rows, cols) = ro.dims;
     let dq = dq_present(path);
     Ok(json!({

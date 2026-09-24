@@ -1,8 +1,15 @@
-import type { ContinuumWindows } from "../shared/types/cube";
+import type { CollapseRangeMode, ContinuumWindows } from "../shared/types/cube";
 
 export interface ChannelRange {
   z0: number;
   z1: number;
+}
+
+export type FullCollapseMode = Extract<CollapseRangeMode, "mean" | "median">;
+
+export function fullCubeCollapse(frames: number, mode: FullCollapseMode): (ChannelRange & { mode: FullCollapseMode }) | null {
+  if (!Number.isSafeInteger(frames) || frames < 1) return null;
+  return { z0: 0, z1: frames - 1, mode };
 }
 
 export interface PlotMapping {

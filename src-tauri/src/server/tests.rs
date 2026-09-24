@@ -6,7 +6,7 @@ use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::config::ServerConfig;
-use crate::job::new_job;
+use crate::job::{new_job, spawn_waiting_worker};
 use crate::router::build_router;
 use crate::session::Session;
 use crate::state::AppState;
@@ -99,7 +99,7 @@ async fn fits_header_unknown_slot_returns_404() {
 async fn get_job_returns_running_status() {
     let state = AppState::new(cfg());
     let session = Session::new("sid-g".into(), &ServerConfig::default());
-    let (job, _tx) = new_job("test-action");
+    let job = new_job("test-action");
     let jid = job.id.clone();
     session.jobs.insert(jid.clone(), Arc::clone(&job));
     state.sessions.insert("sid-g".into(), session);
@@ -120,16 +120,28 @@ async fn get_job_returns_running_status() {
     assert_eq!(json["action"], "test-action");
 }
 
+async fn wait_for_free_permit(state: &AppState) {
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(5), state.job_semaphore.acquire())
+        .await
+        .expect("the worker must give its queue slot back when it exits")
+        .expect("semaphore open");
+    drop(permit);
+}
+
 #[tokio::test]
 async fn cancel_job_sets_cancelled() {
-    let state = AppState::new(cfg());
-    let session = Session::new("sid-c".into(), &ServerConfig::default());
-    let (job, _tx) = new_job("to-cancel");
+    let config = ServerConfig { jobs_max: 1, ..ServerConfig::default() };
+    let state = AppState::new(Arc::new(config.clone()));
+    let session = Session::new("sid-c".into(), &config);
+    let job = new_job("to-cancel");
+    let mut events = job.rx.lock().unwrap().take().unwrap();
     let jid = job.id.clone();
     session.jobs.insert(jid.clone(), Arc::clone(&job));
-    state.sessions.insert("sid-c".into(), session);
+    state.sessions.insert("sid-c".into(), Arc::clone(&session));
+    let release = spawn_waiting_worker(&job, Arc::clone(&state.job_semaphore).try_acquire_owned().unwrap()).await;
+    assert_eq!(state.job_semaphore.available_permits(), 0);
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let resp = app
         .oneshot(
             Request::builder()
@@ -143,13 +155,83 @@ async fn cancel_job_sets_cancelled() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["status"], "cancelled");
+    assert!(job.cancel.is_cancelled());
+    assert!(matches!(events.try_recv(), Ok(crate::job::SseEvent::Cancelled)));
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+    ));
+
+    assert_eq!(state.job_semaphore.available_permits(), 0, "the cancelled worker still runs and keeps its queue slot");
+    assert!(session.has_active_jobs(), "the TTL cleaner must not evict a session whose worker still runs");
+    let resp = post_json(
+        build_router(state.clone()),
+        "/sessions/sid-c/stacking/stack",
+        r#"{"paths":["/nonexistent.fits"],"align":false}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "a retry must wait for the cancelled worker");
+
+    drop(release);
+    wait_for_free_permit(&state).await;
+    assert!(!session.has_active_jobs());
+    assert_eq!(job.current_status(), crate::job::JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn deleting_a_v2_session_cancels_its_running_jobs() {
+    let state = AppState::new(cfg());
+    let session = Session::new("sid-del-jobs".into(), &ServerConfig::default());
+    let job = new_job("stack");
+    session.jobs.insert(job.id.clone(), Arc::clone(&job));
+    state.sessions.insert("sid-del-jobs".into(), session);
+
+    let resp = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/v2/sessions/sid-del-jobs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(job.current_status(), crate::job::JobStatus::Cancelled);
+    assert!(job.cancel.is_cancelled());
+}
+
+#[tokio::test]
+async fn sse_stream_ends_with_a_cancelled_event() {
+    let state = AppState::new(cfg());
+    let session = Session::new("sid-sse-c".into(), &ServerConfig::default());
+    let job = new_job("stack");
+    let jid = job.id.clone();
+    session.jobs.insert(jid.clone(), Arc::clone(&job));
+    state.sessions.insert("sid-sse-c".into(), session);
+
+    let resp = build_router(state.clone())
+        .oneshot(Request::builder().uri(format!("/sessions/sid-sse-c/jobs/{jid}/stream")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    job.progress(30, "loading");
+    job.set_cancelled();
+
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), axum::body::to_bytes(resp.into_body(), usize::MAX))
+        .await
+        .expect("the stream must close after the terminal event")
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("event: progress"), "{text}");
+    assert!(text.trim_end().ends_with(r#"data: {"type":"cancelled"}"#), "{text}");
 }
 
 #[tokio::test]
 async fn sse_second_subscriber_returns_409() {
     let state = AppState::new(cfg());
     let session = Session::new("sid-s".into(), &ServerConfig::default());
-    let (job, _tx) = new_job("sse-test");
+    let job = new_job("sse-test");
     let _ = job.rx.lock().unwrap().take();
     let jid = job.id.clone();
     session.jobs.insert(jid.clone(), Arc::clone(&job));
@@ -201,12 +283,46 @@ fn ttl_skips_session_with_running_job() {
     let session = Session::new("sid-ttl".into(), &c);
     assert!(!session.has_active_jobs(), "fresh session: no active jobs");
 
-    let (job, _tx) = new_job("bg-work");
+    let job = new_job("bg-work");
     session.jobs.insert(job.id.clone(), Arc::clone(&job));
     assert!(session.has_active_jobs(), "running job: session is active");
 
+    assert!(job.begin_commit());
+    assert!(session.has_active_jobs(), "job storing its result: session is still active");
+
     job.set_done();
     assert!(!session.has_active_jobs(), "done job: session no longer active");
+}
+
+#[tokio::test]
+async fn ttl_keeps_a_session_while_its_cancelled_worker_still_runs() {
+    let state = AppState::new(Arc::new(ServerConfig { jobs_max: 1, ..ServerConfig::default() }));
+    let session = Session::new("sid-ttl-c".into(), &ServerConfig::default());
+    let job = new_job("stack");
+    session.jobs.insert(job.id.clone(), Arc::clone(&job));
+    let release = spawn_waiting_worker(&job, Arc::clone(&state.job_semaphore).try_acquire_owned().unwrap()).await;
+
+    assert!(job.set_cancelled());
+    assert!(!job.is_running());
+    assert!(session.has_active_jobs(), "cancelled but the worker is still combining frames");
+
+    drop(release);
+    wait_for_free_permit(&state).await;
+    assert!(!session.has_active_jobs(), "the worker has exited");
+}
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn from_env_with(vars: &[(&str, &str)]) -> ServerConfig {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (k, v) in vars {
+        std::env::set_var(k, v);
+    }
+    let parsed = ServerConfig::from_env();
+    for (k, _) in vars {
+        std::env::remove_var(k);
+    }
+    parsed
 }
 
 #[test]
@@ -220,9 +336,29 @@ fn config_env_var_parsed_and_invalid_falls_back() {
     assert_eq!(d.cleanup_interval.as_secs(), 60);
     assert_eq!(d.log_level, "info");
     assert_eq!(d.bind.to_string(), "127.0.0.1:8080");
+
+    let parsed = from_env_with(&[
+        ("ASTROBURST_SESSION_MAX", "3"),
+        ("ASTROBURST_SESSION_TTL", "120"),
+        ("ASTROBURST_JOBS_MAX", "not-a-number"),
+        ("ASTROBURST_BIND", "127.0.0.1:9"),
+    ]);
+    assert_eq!(parsed.session_max, 3);
+    assert_eq!(parsed.session_ttl.as_secs(), 120);
+    assert_eq!(parsed.jobs_max, d.jobs_max);
+    assert_eq!(parsed.bind.to_string(), "127.0.0.1:9");
+    assert_eq!(parsed.cache_max_entries, d.cache_max_entries);
 }
 
-mod v2_fixtures {
+#[test]
+fn config_zero_cleanup_interval_is_clamped_so_the_ttl_cleaner_cannot_panic() {
+    let parsed = from_env_with(&[("ASTROBURST_CLEANUP_INTERVAL", "0")]);
+    assert_eq!(parsed.cleanup_interval.as_secs(), 1);
+    let parsed = from_env_with(&[("ASTROBURST_CLEANUP_INTERVAL", "5")]);
+    assert_eq!(parsed.cleanup_interval.as_secs(), 5);
+}
+
+pub(crate) mod v2_fixtures {
 
     use std::io::Write;
 
@@ -294,6 +430,29 @@ mod v2_fixtures {
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
 
+    pub fn write_rotated_wcs_fits(path: &std::path::Path, w: usize, h: usize) {
+        let cards: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+            ("CTYPE1", "'RA---TAN'".into()),
+            ("CTYPE2", "'DEC--TAN'".into()),
+            ("CRPIX1", "4.0".into()),
+            ("CRPIX2", "4.0".into()),
+            ("CRVAL1", "150.0".into()),
+            ("CRVAL2", "2.0".into()),
+            ("CD1_1", "-1.0E-4".into()),
+            ("CD1_2", "2.0E-5".into()),
+            ("CD2_1", "-3.0E-5".into()),
+            ("CD2_2", "1.0E-4".into()),
+        ];
+        let mut buf = header_block(&cards);
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
     pub fn write_no_wcs_fits(path: &std::path::Path, w: usize, h: usize) {
         let cards: Vec<(&str, String)> = vec![
             ("SIMPLE", "T".into()),
@@ -319,6 +478,20 @@ mod v2_fixtures {
         cards.extend(wcs_cards());
         let mut buf = header_block(&cards);
         buf.extend_from_slice(&data_block(&ramp(w, h)));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
+    pub fn write_exposure_fits(path: &std::path::Path, w: usize, h: usize, exptime: f64) {
+        let cards: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+            ("EXPTIME", format!("{exptime:.1}")),
+        ];
+        let mut buf = header_block(&cards);
+        buf.extend_from_slice(&data_block(&vec![100.0; w * h]));
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
 
@@ -523,8 +696,9 @@ async fn v2_second_open_adds_ref_without_evicting_first() {
     let json = body_json(resp).await;
     assert_eq!(json["ref"], "img_1");
     assert_eq!(json["active_ref"], "img_1");
+    assert_eq!(json["dims"], serde_json::json!([6, 6]));
 
-    let resp = build_router(state)
+    let resp = build_router(state.clone())
         .oneshot(
             Request::builder()
                 .uri("/v2/sessions/s-two/images")
@@ -536,6 +710,12 @@ async fn v2_second_open_adds_ref_without_evicting_first() {
     let json = body_json(resp).await;
     assert_eq!(json["count"], 2);
     assert_eq!(json["active_ref"], "img_1");
+    assert_eq!(json["images"][0]["width"], 8);
+    assert_eq!(json["images"][1]["width"], 6);
+
+    let session = state.sessions.get("s-two").unwrap().clone();
+    assert_eq!(session.cache.get("img_0").unwrap().arr().dim(), (8, 8));
+    assert_eq!(session.cache.get("img_1").unwrap().arr().dim(), (6, 6));
 }
 
 #[tokio::test]
@@ -1335,14 +1515,14 @@ async fn v2_pixel_reports_bunit_and_median() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["unit"], "MJy/sr");
-    assert_eq!(json["x"], 3);
+    assert_eq!(json["x"], 4);
     assert_eq!(json["y"], 3);
-    assert!((json["value"].as_f64().unwrap() - 27.0).abs() < 1e-6);
+    assert!((json["value"].as_f64().unwrap() - 28.0).abs() < 1e-6);
     let nb = &json["neighborhood"];
     assert_eq!(nb["n_pixels"], 9);
-    assert!((nb["median"].as_f64().unwrap() - 27.0).abs() < 1e-6);
-    assert!((nb["min"].as_f64().unwrap() - 18.0).abs() < 1e-6);
-    assert!((nb["max"].as_f64().unwrap() - 36.0).abs() < 1e-6);
+    assert!((nb["median"].as_f64().unwrap() - 28.0).abs() < 1e-6);
+    assert!((nb["min"].as_f64().unwrap() - 19.0).abs() < 1e-6);
+    assert!((nb["max"].as_f64().unwrap() - 37.0).abs() < 1e-6);
     assert!(json["sky"]["ra"].is_number());
 }
 
@@ -1560,7 +1740,7 @@ fn hist_ramp_4x4() -> ndarray::Array2<f32> {
 }
 
 #[tokio::test]
-async fn v2_histogram_default_auto_range_matches_compute_histogram() {
+async fn v2_histogram_default_auto_range_matches_build_histogram() {
     let arr = hist_ramp_4x4();
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-hist", "img_0", arr.clone());
@@ -1574,7 +1754,7 @@ async fn v2_histogram_default_auto_range_matches_compute_histogram() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
 
-    let expected = astroburst_lib::core::imaging::stats::compute_histogram(&arr, 8);
+    let expected = astroburst_lib::core::imaging::stats::build_histogram(arr.as_slice().unwrap(), 8, 1.0, 16.0);
     let got: Vec<u64> = json["bins"]
         .as_array()
         .unwrap()
@@ -1606,12 +1786,11 @@ async fn v2_histogram_auto_range_excludes_outlier() {
     let mut vals: Vec<f32> = (0..1023).map(|i| 100.0 + i as f32 * 0.1).collect();
     vals.push(1.0e6);
     let arr = ndarray::Array2::from_shape_vec((32, 32), vals).unwrap();
-
-    let raw = astroburst_lib::core::imaging::stats::compute_histogram(&arr, 10);
-    assert!((raw.max - 1.0e6).abs() < 1.0);
+    let raw_max = arr.iter().copied().fold(f32::MIN, f32::max);
+    assert_eq!(raw_max, 1.0e6);
 
     let state = AppState::new(cfg());
-    seed_synthetic_image(&state, "s-hist-out", "img_0", arr);
+    seed_synthetic_image(&state, "s-hist-out", "img_0", arr.clone());
 
     let resp = post_json(
         build_router(state),
@@ -1628,6 +1807,11 @@ async fn v2_histogram_auto_range_excludes_outlier() {
     assert!(hi > 200.0, "auto-range max should still cover the band top, got {hi}");
     let lo = json["min"].as_f64().unwrap();
     assert!(lo >= 100.0 && lo < 110.0, "auto-range min ~band bottom, got {lo}");
+
+    let in_range = arr.iter().filter(|&&v| (v as f64) >= lo && (v as f64) <= hi).count() as u64;
+    let counted: u64 = json["bins"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).sum();
+    assert_eq!(counted, in_range, "bins must hold exactly the in-range pixels");
+    assert!(in_range < 1024);
 }
 
 #[tokio::test]
@@ -1763,20 +1947,20 @@ async fn v2_render_default_full_frame_is_valid_png() {
 
 #[tokio::test]
 async fn v2_render_manual_linear_gray_maps_endpoints_exactly() {
-    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![0.0f32, 1.0, 2.0, 3.0]).unwrap();
+    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-rm", "img_0", arr);
 
     let resp = post_json(
         build_router(state),
         "/v2/sessions/s-rm/render",
-        r#"{"scale":{"algorithm":"manual","vmin":0,"vmax":3,"stretch":"linear"},"colormap":"gray"}"#,
+        r#"{"scale":{"algorithm":"manual","vmin":1,"vmax":4,"stretch":"linear"},"colormap":"gray"}"#,
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let hdr = resolved_header(&resp);
-    assert_eq!(hdr["vmin"], 0.0);
-    assert_eq!(hdr["vmax"], 3.0);
+    assert_eq!(hdr["vmin"], 1.0);
+    assert_eq!(hdr["vmax"], 4.0);
     assert!((hdr["clipped_fraction"]["below_vmin"].as_f64().unwrap() - 0.25).abs() < 1e-9);
     assert!((hdr["clipped_fraction"]["above_vmax"].as_f64().unwrap() - 0.25).abs() < 1e-9);
 
@@ -1787,20 +1971,34 @@ async fn v2_render_manual_linear_gray_maps_endpoints_exactly() {
 
 #[tokio::test]
 async fn v2_render_scale_algorithms_and_stretches_differ() {
+    let mut with_outliers = render_ramp_8x8();
+    with_outliers[[0, 0]] = -1000.0;
+    with_outliers[[7, 7]] = 5000.0;
     let state = AppState::new(cfg());
-    seed_synthetic_image(&state, "s-rd", "img_0", render_ramp_8x8());
+    seed_synthetic_image(&state, "s-rd", "img_0", with_outliers);
 
     let mut outputs = Vec::new();
+    let mut limits = std::collections::HashMap::new();
     for alg in ["zscale", "minmax", "percentile", "manual"] {
         let body = format!(
             r#"{{"scale":{{"algorithm":"{alg}","stretch":"linear","vmin":0,"vmax":40,"percentile":[10,90]}}}}"#
         );
         let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rd/render", &body).await;
         assert_eq!(resp.status(), StatusCode::OK, "alg {alg}");
+        let hdr = resolved_header(&resp);
+        limits.insert(alg, (hdr["vmin"].as_f64().unwrap(), hdr["vmax"].as_f64().unwrap()));
         outputs.push(body_bytes(resp).await);
     }
     let distinct: std::collections::HashSet<_> = outputs.iter().collect();
-    assert!(distinct.len() > 1, "scale algorithms should not all be identical");
+    assert_eq!(distinct.len(), 4, "every scale algorithm must produce its own rendering");
+
+    assert_eq!(limits["minmax"], (-1000.0, 5000.0));
+    assert_eq!(limits["manual"], (0.0, 40.0));
+    let (zlo, zhi) = limits["zscale"];
+    assert!(zlo > -1000.0 && zhi < 5000.0, "zscale must clip the outliers, got {zlo}..{zhi}");
+    let (plo, phi) = limits["percentile"];
+    assert!((1.0..=12.0).contains(&plo) && (51.0..=63.0).contains(&phi), "percentile 10..90 gave {plo}..{phi}");
+    assert_ne!(limits["zscale"], limits["percentile"]);
 
     let mut stretched = Vec::new();
     for st in ["linear", "log", "sqrt", "asinh", "power"] {
@@ -2021,21 +2219,21 @@ async fn v2_render_every_colormap_is_accepted_and_inferno_is_colored() {
 
 #[tokio::test]
 async fn v2_render_user_and_manual_both_resolve_and_echo_user() {
-    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![0.0f32, 1.0, 2.0, 3.0]).unwrap();
+    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-ru", "img_0", arr);
 
     let mut outputs = Vec::new();
     for alg in ["user", "manual"] {
         let body = format!(
-            r#"{{"scale":{{"algorithm":"{alg}","vmin":0,"vmax":3,"stretch":"linear"}},"colormap":"gray"}}"#
+            r#"{{"scale":{{"algorithm":"{alg}","vmin":1,"vmax":4,"stretch":"linear"}},"colormap":"gray"}}"#
         );
         let resp = post_json(build_router(state.clone()), "/v2/sessions/s-ru/render", &body).await;
         assert_eq!(resp.status(), StatusCode::OK, "alg {alg}");
         let hdr = resolved_header(&resp);
         assert_eq!(hdr["scale_algorithm"], "user", "alg {alg}");
-        assert_eq!(hdr["vmin"], 0.0);
-        assert_eq!(hdr["vmax"], 3.0);
+        assert_eq!(hdr["vmin"], 1.0);
+        assert_eq!(hdr["vmax"], 4.0);
         outputs.push(body_bytes(resp).await);
     }
     assert_eq!(outputs[0], outputs[1]);
@@ -2049,20 +2247,20 @@ async fn v2_render_user_and_manual_both_resolve_and_echo_user() {
     assert_eq!(resp.status(), StatusCode::OK);
     let hdr = resolved_header(&resp);
     assert_eq!(hdr["scale_algorithm"], "user");
-    assert_eq!(hdr["vmin"], 0.0);
-    assert_eq!(hdr["vmax"], 3.0);
+    assert_eq!(hdr["vmin"], 1.0);
+    assert_eq!(hdr["vmax"], 4.0);
 }
 
 #[tokio::test]
 async fn v2_render_invert_cmap_flips_gray_endpoints() {
-    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![0.0f32, 1.0, 2.0, 3.0]).unwrap();
+    let arr = ndarray::Array2::from_shape_vec((2, 2), vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-ri", "img_0", arr);
 
     let resp = post_json(
         build_router(state),
         "/v2/sessions/s-ri/render",
-        r#"{"scale":{"algorithm":"user","vmin":0,"vmax":3,"stretch":"linear"},"colormap":"gray","invert_cmap":true}"#,
+        r#"{"scale":{"algorithm":"user","vmin":1,"vmax":4,"stretch":"linear"},"colormap":"gray","invert_cmap":true}"#,
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2319,9 +2517,10 @@ async fn v2_stats_background_subtracted_frame_keeps_negative_pixels_and_adds_exa
         vec![-3.0f32, -2.0, -1.0, 0.0, 1.0, 2.0, 30.0, f32::NAN],
     )
     .unwrap();
-    let legacy = astroburst_lib::core::imaging::stats::compute_image_stats(&arr);
-    assert_eq!(legacy.valid_count, 3);
-    assert_eq!(legacy.median, 2.0);
+    let core = astroburst_lib::core::imaging::stats::compute_image_stats(&arr);
+    assert_eq!(core.valid_count, 6);
+    assert_eq!(core.median, 0.0);
+    assert_eq!(core.min, -3.0);
 
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-stats-neg", "img_0", arr);
@@ -2742,4 +2941,394 @@ async fn v2_stats_reports_a_note_instead_of_zero_sigma_for_a_tiny_noise_region()
     let json = body_json(resp).await;
     assert_eq!(json["noise"]["method"], "k-sigma-mrs");
     assert!(json["noise_note"].is_null());
+}
+
+fn path_body(p: &std::path::Path, extra: &str) -> String {
+    format!(r#"{{"path":{}{extra}}}"#, serde_json::to_string(p.to_str().unwrap()).unwrap())
+}
+
+#[tokio::test]
+async fn v1_fits_open_loads_the_given_path_into_a_reused_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.fits");
+    let b = dir.path().join("b.fits");
+    v2_fixtures::write_wcs_fits(&a, 8, 8);
+    v2_fixtures::write_wcs_fits(&b, 6, 6);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-v1-open");
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-v1-open/fits/open", &path_body(&a, r#","slot":"main""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["dims"], serde_json::json!([8, 8]));
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-v1-open/fits/open", &path_body(&b, r#","slot":"main""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["dims"], serde_json::json!([6, 6]));
+    assert_eq!(json["stats"]["max"], 35.0);
+    let session = state.sessions.get("s-v1-open").unwrap().clone();
+    assert_eq!(session.cache.get("main").unwrap().arr().dim(), (6, 6));
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-v1-open/fits/open", &path_body(&a, "")).await;
+    assert_eq!(body_json(resp).await["dims"], serde_json::json!([8, 8]));
+    v2_fixtures::write_wcs_fits(&a, 4, 4);
+    let resp = post_json(build_router(state.clone()), "/sessions/s-v1-open/fits/open", &path_body(&a, "")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["dims"], serde_json::json!([4, 4]));
+}
+
+#[tokio::test]
+async fn load_errors_caused_by_the_request_are_client_errors_not_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("one.fits");
+    v2_fixtures::write_wcs_fits(&fits, 8, 8);
+    let missing = dir.path().join("missing.fits");
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-errs");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-errs/open", &path_body(&missing, "")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(resp).await["error"]["code"], "not_found");
+
+    let literal = dir.path().join("one.fits#hdu=2");
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-errs/open", &path_body(&literal, "")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-errs/open", &path_body(&fits, r#","hdu":5"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["error"]["code"], "bad_request");
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-errs/fits/open", &path_body(&missing, "")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-errs/fits/open", &path_body(&fits, r#","slot":"v""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    for body in [
+        r#"{"slot":"v","x":0,"y":0,"w":0,"h":4}"#,
+        r#"{"slot":"v","x":0,"y":0,"w":4,"h":0}"#,
+        r#"{"slot":"v","x":1,"y":0,"w":18446744073709551615,"h":4}"#,
+        r#"{"slot":"v","x":0,"y":1,"w":4,"h":18446744073709551615}"#,
+    ] {
+        let resp = post_json(build_router(state.clone()), "/sessions/s-errs/image/viewport", body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let resp = post_json(build_router(state), "/sessions/s-errs/image/viewport", r#"{"slot":"v","x":6,"y":6,"w":4,"h":4}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(decode_rgb(&body_bytes(resp).await).dimensions(), (2, 2));
+}
+
+#[tokio::test]
+async fn full_job_queue_reports_the_configured_limit() {
+    let config = ServerConfig { jobs_max: 2, ..ServerConfig::default() };
+    let state = AppState::new(Arc::new(config));
+    seed_session(&state, "s-429");
+    let _p1 = Arc::clone(&state.job_semaphore).try_acquire_owned().unwrap();
+    let _p2 = Arc::clone(&state.job_semaphore).try_acquire_owned().unwrap();
+
+    let resp = post_json(build_router(state), "/sessions/s-429/stacking/stack", r#"{"paths":["/nonexistent.fits"]}"#).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let msg = body_json(resp).await["error"]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("max 2"), "{msg}");
+}
+
+#[tokio::test]
+async fn v2_bin_turns_an_all_nan_block_into_nan_and_stats_report_it() {
+    let arr = ndarray::Array2::from_shape_vec(
+        (4, 4),
+        vec![
+            1.0, 2.0, f32::NAN, f32::NAN,
+            3.0, 4.0, f32::NAN, f32::NAN,
+            100.0, 200.0, f32::NAN, 9.0,
+            300.0, 400.0, 9.0, 9.0,
+        ],
+    )
+    .unwrap();
+    let state = AppState::new(cfg());
+    let session = seed_synthetic_image(&state, "s-bin-nan", "img_0", arr);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-bin-nan/bin", r#"{"factor":2,"ref":"img_0"}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["stats"]["valid_count"], 3);
+
+    let out = session.cache.get("bin_0").unwrap();
+    let a = out.arr();
+    assert!((a[[0, 0]] - 2.5).abs() < 1e-4);
+    assert!(a[[0, 1]].is_nan(), "all-NaN block must stay NaN, got {}", a[[0, 1]]);
+    assert!((a[[1, 1]] - 9.0).abs() < 1e-4);
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-bin-nan/stats", r#"{"ref":"bin_0"}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["valid_count"], 3);
+    assert_eq!(json["n_nan"], 1);
+    assert_eq!(json["min"], 2.5);
+}
+
+#[tokio::test]
+async fn v2_render_max_dim_draws_an_all_nan_block_as_nan_not_as_zero() {
+    let mut arr = ndarray::Array2::from_elem((8, 8), 10.0f32);
+    for y in 0..4 {
+        for x in 0..4 {
+            arr[[y, x]] = f32::NAN;
+        }
+    }
+    arr[[7, 7]] = -10.0;
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-r-nan", "img_0", arr);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-r-nan/render",
+        r#"{"max_dim":2,"scale":{"algorithm":"manual","vmin":-10,"vmax":10},"colormap":"gray"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resolved_header(&resp)["binning_applied"], 4);
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.dimensions(), (2, 2));
+    assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0]);
+    assert_eq!(img.get_pixel(1, 0).0, [255, 255, 255]);
+}
+
+#[tokio::test]
+async fn open_bin_and_cutout_stats_use_the_same_rule_as_v2_stats() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("bgsub.fits");
+    v2_fixtures::write_pixels_fits(&fits, 4, 2, &[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 30.0, f32::NAN]);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-rule");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rule/open", &path_body(&fits, "")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let opened = body_json(resp).await["stats"].clone();
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rule/stats", r#"{"ref":"img_0"}"#).await;
+    let exact = body_json(resp).await;
+    for key in ["min", "max", "median", "mad", "mean", "valid_count"] {
+        assert_eq!(opened[key], exact[key], "open stats {key}");
+    }
+    assert_eq!(opened["valid_count"], 7);
+    assert_eq!(opened["min"], -3.0);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rule/bin", r#"{"factor":1,"ref":"img_0"}"#).await;
+    assert_eq!(body_json(resp).await["stats"]["valid_count"], 7);
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rule/cutout",
+        r#"{"ref":"img_0","region":{"type":"pixel","x":0,"y":0,"width":4,"height":2}}"#,
+    )
+    .await;
+    assert_eq!(body_json(resp).await["stats"]["valid_count"], 7);
+
+    let resp = post_json(build_router(state), "/sessions/s-rule/fits/open", &path_body(&fits, "")).await;
+    let v1 = body_json(resp).await;
+    assert_eq!(v1["stats"]["valid_count"], 7);
+    assert_eq!(v1["stats"]["min"], -3.0);
+}
+
+#[tokio::test]
+async fn v2_histogram_excludes_pixels_outside_the_range_and_rejects_an_inverted_range() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-hist-range", "img_0", hist_ramp_4x4());
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-hist-range/histogram", r#"{"bins":4,"range":[0,8]}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["bins"], serde_json::json!([1, 2, 2, 3]));
+
+    for range in ["[10,0]", "[5,5]"] {
+        let resp = post_json(
+            build_router(state.clone()),
+            "/v2/sessions/s-hist-range/histogram",
+            &format!(r#"{{"bins":4,"range":{range}}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{range}");
+    }
+}
+
+#[tokio::test]
+async fn v2_stats_rejects_unbounded_sigma_clip_and_percentile_requests() {
+    let (state, _dir) = seed_stats_session("s-stats-bounds").await;
+    let many: Vec<f64> = (0..101).map(|i| i as f64 * 0.5).collect();
+    let many = serde_json::json!({ "percentiles": many }).to_string();
+    for body in [
+        r#"{"sigma_clip":{"maxiters":0}}"#,
+        r#"{"sigma_clip":{"maxiters":101}}"#,
+        r#"{"sigma_clip":{"sigma":0}}"#,
+        r#"{"sigma_clip":{"sigma":-3}}"#,
+        r#"{"percentiles":[150]}"#,
+        r#"{"percentiles":[-1]}"#,
+        many.as_str(),
+    ] {
+        let resp = post_json(build_router(state.clone()), "/v2/sessions/s-stats-bounds/stats", body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-stats-bounds/stats",
+        r#"{"sigma_clip":{"sigma":3,"maxiters":100},"percentiles":[0,100]}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn stack_rejects_minmax_counts_that_overflow_or_reject_every_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for i in 0..3 {
+        let p = dir.path().join(format!("mm{i}.fits"));
+        v2_fixtures::write_pixels_fits(&p, 4, 4, &[100.0 + i as f32; 16]);
+        paths.push(p.to_str().unwrap().to_string());
+    }
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-minmax");
+
+    for (low, high) in [(u64::MAX, 1u64), (2, 1), (3, 0)] {
+        let body = serde_json::json!({
+            "paths": paths, "align": false, "rejection": "minmax", "minmax_low": low, "minmax_high": high
+        })
+        .to_string();
+        let resp = post_json(build_router(state.clone()), "/sessions/s-minmax/stacking/stack", &body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "low {low} high {high}");
+    }
+    assert_eq!(state.job_semaphore.available_permits(), 4);
+
+    let body = serde_json::json!({
+        "paths": paths, "align": false, "rejection": "minmax", "minmax_low": 1, "minmax_high": 1, "result_slot": "mm"
+    })
+    .to_string();
+    let resp = post_json(build_router(state.clone()), "/sessions/s-minmax/stacking/stack", &body).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let jid = body_json(resp).await["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(&state, "s-minmax", &jid).await, "done");
+}
+
+#[tokio::test]
+async fn auto_generated_refs_never_replace_a_client_named_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.fits");
+    let b = dir.path().join("b.fits");
+    let c = dir.path().join("c.fits");
+    v2_fixtures::write_wcs_fits(&a, 8, 8);
+    v2_fixtures::write_wcs_fits(&b, 6, 6);
+    v2_fixtures::write_wcs_fits(&c, 4, 4);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-names");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-names/open", &path_body(&a, r#","name":"img_1""#)).await;
+    assert_eq!(body_json(resp).await["ref"], "img_1");
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-names/open", &path_body(&b, "")).await;
+    assert_eq!(body_json(resp).await["ref"], "img_0");
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-names/open", &path_body(&c, "")).await;
+    let third = body_json(resp).await["ref"].as_str().unwrap().to_string();
+    assert_ne!(third, "img_1");
+    assert_ne!(third, "img_0");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-names/bin", r#"{"factor":2,"ref":"img_1","name":"bin_0"}"#).await;
+    assert_eq!(body_json(resp).await["ref"], "bin_0");
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-names/bin", r#"{"factor":2,"ref":"img_0"}"#).await;
+    assert_ne!(body_json(resp).await["ref"], "bin_0");
+
+    let session = state.sessions.get("s-names").unwrap().clone();
+    assert_eq!(session.cache.get("img_1").unwrap().arr().dim(), (8, 8));
+    assert_eq!(session.cache.get("bin_0").unwrap().arr().dim(), (4, 4));
+    let meta = session.v2.meta.get("img_1").unwrap().clone();
+    assert_eq!(meta.source.as_deref(), a.to_str());
+}
+
+#[tokio::test]
+async fn pixel_coordinates_follow_the_integer_pixel_centre_convention() {
+    let (state, _dir) = seed_wcs_session("s-centre").await;
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-centre/wcs/pix2sky",
+        r#"{"points":[[-0.3,3],[7.7,3],[7.3,3],[3,-0.6]]}"#,
+    )
+    .await;
+    let json = body_json(resp).await;
+    let on: Vec<bool> = json["results"].as_array().unwrap().iter().map(|r| r["on_image"].as_bool().unwrap()).collect();
+    assert_eq!(on, vec![true, false, true, false]);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-centre/pixel", r#"{"x":2.7,"y":0.2}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["x"], 3);
+    assert_eq!(json["y"], 0);
+    assert_eq!(json["value"], 3.0);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-centre/pixel", r#"{"x":-0.4,"y":0}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["value"], 0.0);
+
+    let resp = post_json(build_router(state), "/v2/sessions/s-centre/pixel", r#"{"x":7.6,"y":0}"#).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "pixel_out_of_bounds");
+    assert!(json["error"]["message"].as_str().unwrap().contains("7.6"), "{}", json["error"]["message"]);
+}
+
+#[test]
+fn concurrent_session_creates_never_exceed_session_max() {
+    for _ in 0..50 {
+        let config = ServerConfig { session_max: 4, ..ServerConfig::default() };
+        let state = AppState::new(Arc::new(config));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.create_session().is_some()
+                })
+            })
+            .collect();
+        let created = handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+        assert_eq!(state.sessions.len(), 4);
+        assert_eq!(created, 4);
+    }
+}
+
+#[tokio::test]
+async fn v2_sky2pix_inverts_pix2sky_off_the_reference_pixel_for_a_rotated_cd() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("rot.fits");
+    v2_fixtures::write_rotated_wcs_fits(&fits, 16, 16);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-rot");
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rot/open", &path_body(&fits, "")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let points = [[7.0, 0.0], [0.0, 7.0], [12.5, 9.25], [3.0, 3.0]];
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rot/wcs/pix2sky",
+        &serde_json::json!({ "points": points }).to_string(),
+    )
+    .await;
+    let sky = body_json(resp).await;
+    let radec: Vec<[f64; 2]> = sky["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| [r["ra"].as_f64().unwrap(), r["dec"].as_f64().unwrap()])
+        .collect();
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rot/wcs/sky2pix",
+        &serde_json::json!({ "points": radec }).to_string(),
+    )
+    .await;
+    let back = body_json(resp).await;
+    for (i, p) in points.iter().enumerate() {
+        let x = back["results"][i]["x"].as_f64().unwrap();
+        let y = back["results"][i]["y"].as_f64().unwrap();
+        assert!((x - p[0]).abs() < 1e-6 && (y - p[1]).abs() < 1e-6, "point {p:?} came back as ({x}, {y})");
+    }
 }

@@ -35,7 +35,6 @@ export function gridLines(
 }
 
 export interface PlateSolveResult {
-  success: boolean;
   center_ra: number;
   center_dec: number;
   orientation: number;

@@ -10,7 +10,7 @@ pub type Result<T> = std::result::Result<T, AppError>;
 pub enum AppError {
     NotFound(String),
     Conflict(String),
-    TooManyRequests,
+    TooManyRequests(usize),
     BadRequest(String),
     BadRequestWithHint {
         code: &'static str,
@@ -27,10 +27,10 @@ impl IntoResponse for AppError {
         let (status, code, msg) = match self {
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m),
-            AppError::TooManyRequests => (
+            AppError::TooManyRequests(max) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
-                "job queue full (max 4 concurrent)".into(),
+                format!("job queue full (max {max} concurrent)"),
             ),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m),
             AppError::BadRequestWithHint { code, message, hint: h } => {

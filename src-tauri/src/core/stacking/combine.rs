@@ -2,17 +2,18 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
-pub use crate::types::stacking::{
-    CombineMethod, NormalizationMethod, RejectionMethod, RejectionNormalization, RejectionParams,
-    StackConfig, StackResult,
-};
+use crate::core::alignment::pair;
+use crate::core::imaging::stats::is_valid_pixel;
+use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
 use crate::math::median::{exact_mad_mut, f32_cmp, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
-
-use crate::core::stacking::align;
+use crate::types::stacking::{
+    CombineMethod, FrameAlignment, NormalizationMethod, RejectionMethod, RejectionNormalization,
+    RejectionParams, StackConfig, StackResult,
+};
 
 const MEAN_ABS_DEV_TO_SIGMA: f64 = 1.2533141;
 const WINSOR_HALF_WIDTH_SIGMAS: f32 = 1.5;
@@ -22,6 +23,11 @@ const WINSOR_RELATIVE_TOLERANCE: f32 = 1e-4;
 const LINEAR_FIT_MIN_SAMPLES: usize = 5;
 const PERCENTILE_MIN_SAMPLES: usize = 3;
 const FRAME_STATS_MAX_SAMPLES: usize = 131_072;
+const MULTIPLICATIVE_MAX_RATIO: f64 = 10.0;
+const MULTIPLICATIVE_MIN_LEVEL_SIGMAS: f64 = 3.0;
+const PERCENTILE_MIN_WINDOW_SIGMAS: f64 = 0.5;
+const PERCENTILE_LEVEL_QUANTILE: f64 = 0.1;
+const SECOND_DIFFERENCE_VARIANCE: f64 = 6.0;
 
 fn scale_from_deviations(mad: f32, abs_devs: &[f32]) -> f32 {
     let robust = mad as f64 * MAD_TO_SIGMA;
@@ -380,7 +386,7 @@ fn percentile_clip(samples: &mut [Sample], cfg: &RejectionParams) -> Clipped {
 fn min_max_clip(samples: &mut [Sample], cfg: &RejectionParams) -> Clipped {
     let n = samples.len();
     let (low, high) = (cfg.minmax_low, cfg.minmax_high);
-    if n <= low + high {
+    if low.checked_add(high).map_or(true, |dropped| n <= dropped) {
         return Clipped::untouched(n, f32::NAN);
     }
     samples.sort_unstable_by(|a, b| f32_cmp(&a.cmp, &b.cmp));
@@ -428,56 +434,103 @@ fn combine_kept(
     }
 }
 
-fn sigma_clip_params(sigma_low: f32, sigma_high: f32, max_iter: usize) -> RejectionParams {
-    RejectionParams {
-        rejection: RejectionMethod::SigmaClip,
-        combine: CombineMethod::Mean,
-        sigma_low,
-        sigma_high,
-        max_iterations: max_iter,
-        ..RejectionParams::default()
+pub fn validate_frame_weights(weights: Option<&[f64]>, frames: usize) -> Result<()> {
+    let Some(weights) = weights else {
+        return Ok(());
+    };
+    if weights.len() != frames {
+        bail!(
+            "{} frame weights were given for {} frames; pass exactly one weight per frame",
+            weights.len(),
+            frames
+        );
     }
+    if let Some((i, w)) = weights.iter().enumerate().find(|(_, w)| !w.is_finite() || **w < 0.0) {
+        bail!("Weight {} of frame {} is invalid; frame weights must be finite and not negative", w, i + 1);
+    }
+    Ok(())
 }
 
-pub fn sigma_clip_combine(
-    values: &mut Vec<f32>,
-    sigma_low: f32,
-    sigma_high: f32,
-    max_iter: usize,
-) -> (f32, u32) {
-    let mut samples: Vec<Sample> = values
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| Sample::plain(v, i as u16))
-        .collect();
-    let out = reject_and_combine(&mut samples, None, &sigma_clip_params(sigma_low, sigma_high, max_iter));
-    (out.value, out.rejected_low as u32 + out.rejected_high as u32)
-}
-
-pub fn sigma_clip_combine_weighted(
-    vals: &mut Vec<(f32, f32)>,
-    sigma_low: f32,
-    sigma_high: f32,
-    max_iter: usize,
-) -> (f32, u32) {
-    let weights: Vec<f64> = vals.iter().map(|p| p.1 as f64).collect();
-    let mut samples: Vec<Sample> = vals
-        .iter()
-        .enumerate()
-        .map(|(i, p)| Sample::plain(p.0, i as u16))
-        .collect();
-    let out = reject_and_combine(
-        &mut samples,
-        Some(&weights),
-        &sigma_clip_params(sigma_low, sigma_high, max_iter),
-    );
-    (out.value, out.rejected_low as u32 + out.rejected_high as u32)
+pub fn validate_minmax_counts(rejection: RejectionMethod, low: usize, high: usize, frames: usize) -> Result<()> {
+    if rejection != RejectionMethod::MinMax {
+        return Ok(());
+    }
+    let Some(dropped) = low.checked_add(high) else {
+        bail!("Min/max rejection counts are too large (low {}, high {})", low, high);
+    };
+    if dropped >= frames {
+        bail!(
+            "Min/max rejection drops the {} lowest and {} highest values of each pixel, so it needs more than {} frames, but {} were given; lower the counts or add frames",
+            low,
+            high,
+            dropped,
+            frames
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
 struct FrameStats {
     location: f32,
     scale: f32,
+}
+
+fn faint_level_and_pixel_noise(frame: ArrayView2<f32>) -> Option<(f64, f64)> {
+    let (rows, cols) = frame.dim();
+    let row_stride = (rows.saturating_mul(cols) / FRAME_STATS_MAX_SAMPLES).max(1);
+    let mut magnitudes: Vec<f32> = Vec::new();
+    let mut curvature: Vec<f32> = Vec::new();
+    for row in frame.rows().into_iter().step_by(row_stride) {
+        let (mut before, mut last): (Option<f32>, Option<f32>) = (None, None);
+        for &v in row.iter() {
+            if !is_valid_pixel(v) {
+                (before, last) = (None, None);
+                continue;
+            }
+            magnitudes.push(v.abs());
+            if let (Some(a), Some(b)) = (before, last) {
+                curvature.push(a - 2.0 * b + v);
+            }
+            (before, last) = (last, Some(v));
+        }
+    }
+    if curvature.len() < 2 {
+        return None;
+    }
+    let k = ((magnitudes.len() as f64 * PERCENTILE_LEVEL_QUANTILE) as usize).min(magnitudes.len() - 1);
+    magnitudes.select_nth_unstable_by(k, f32_cmp);
+    let level = magnitudes[k] as f64;
+    let center = median_f32_mut(&mut curvature);
+    let mad = exact_mad_mut(&mut curvature, center);
+    let noise = scale_from_deviations(mad, &curvature) as f64 / SECOND_DIFFERENCE_VARIANCE.sqrt();
+    Some((level, noise))
+}
+
+pub(crate) fn check_percentile_window(reference: ArrayView2<f32>, frames: usize, params: &RejectionParams) -> Result<()> {
+    if params.rejection != RejectionMethod::PercentileClip || frames < PERCENTILE_MIN_SAMPLES {
+        return Ok(());
+    }
+    let fraction = [params.percentile_low, params.percentile_high]
+        .into_iter()
+        .filter(|f| *f > 0.0)
+        .fold(f32::INFINITY, f32::min);
+    if !fraction.is_finite() {
+        return Ok(());
+    }
+    let Some((level, noise)) = faint_level_and_pixel_noise(reference) else {
+        return Ok(());
+    };
+    if noise > 0.0 && fraction as f64 * level < PERCENTILE_MIN_WINDOW_SIGMAS * noise {
+        bail!(
+            "Percentile clipping keeps samples within {}% below and {}% above each pixel's median, so every pixel must sit well above zero. A tenth of the reference frame's pixels are within {:.4} of zero while its pixel-to-pixel noise is {:.4}, so ordinary noise at those pixels would be rejected as outliers (typical of sky-subtracted or pedestal-free data). Use sigma clipping or winsorized sigma clipping instead.",
+            params.percentile_low * 100.0,
+            params.percentile_high * 100.0,
+            level,
+            noise
+        );
+    }
+    Ok(())
 }
 
 fn overlap_frame_stats(frames: &[&[f32]], npix: usize) -> Option<Vec<FrameStats>> {
@@ -505,18 +558,45 @@ fn overlap_frame_stats(frames: &[&[f32]], npix: usize) -> Option<Vec<FrameStats>
     )
 }
 
-fn normalization_terms(method: NormalizationMethod, reference: FrameStats, frame: FrameStats) -> (f64, f64) {
+fn clearly_above_noise(stats: FrameStats) -> bool {
+    stats.location as f64 >= MULTIPLICATIVE_MIN_LEVEL_SIGMAS * stats.scale as f64
+}
+
+fn multiplicative_scale(reference: FrameStats, frame: FrameStats) -> Option<f64> {
+    let (m0, mf) = (reference.location as f64, frame.location as f64);
+    if !(m0 > 0.0 && mf > 0.0 && m0.is_finite() && mf.is_finite()) {
+        return None;
+    }
+    let ratio = m0 / mf;
+    let comparable = ratio >= 1.0 / MULTIPLICATIVE_MAX_RATIO && ratio <= MULTIPLICATIVE_MAX_RATIO;
+    (comparable || (clearly_above_noise(reference) && clearly_above_noise(frame))).then_some(ratio)
+}
+
+fn normalization_terms(method: NormalizationMethod, reference: FrameStats, frame: FrameStats) -> Option<(f64, f64)> {
     let (m0, s0) = (reference.location as f64, reference.scale as f64);
     let (mf, sf) = (frame.location as f64, frame.scale as f64);
     let scale_ratio = if s0 > 0.0 && sf > 0.0 && s0.is_finite() && sf.is_finite() { s0 / sf } else { 1.0 };
-    let location_ratio = if mf.abs() > 1e-12 && m0.is_finite() && mf.is_finite() { m0 / mf } else { 1.0 };
     let location_shift = if m0.is_finite() && mf.is_finite() { m0 - mf } else { 0.0 };
     match method {
-        NormalizationMethod::None => (0.0, 1.0),
-        NormalizationMethod::Additive => (location_shift, 1.0),
-        NormalizationMethod::Multiplicative => (0.0, location_ratio),
-        NormalizationMethod::AdditiveScaling => (m0 - scale_ratio * mf, scale_ratio),
-        NormalizationMethod::MultiplicativeScaling => (0.0, scale_ratio),
+        NormalizationMethod::None => Some((0.0, 1.0)),
+        NormalizationMethod::Additive => Some((location_shift, 1.0)),
+        NormalizationMethod::Multiplicative => multiplicative_scale(reference, frame).map(|ratio| (0.0, ratio)),
+        NormalizationMethod::AdditiveScaling => Some((m0 - scale_ratio * mf, scale_ratio)),
+        NormalizationMethod::MultiplicativeScaling => Some((0.0, scale_ratio)),
+    }
+}
+
+fn unmeasurable_cause(frames: &[Cow<Array2<f32>>], members: &[usize], total: usize) -> String {
+    let blank: Vec<String> = frames
+        .iter()
+        .zip(members)
+        .filter(|(frame, _)| !frame.iter().any(|v| v.is_finite()))
+        .map(|(_, &i)| (i + 1).to_string())
+        .collect();
+    if blank.is_empty() {
+        "fewer than 2 pixels are finite in every frame at once, so the frames share no common area to measure".to_string()
+    } else {
+        format!("frame(s) {} of {} contain no finite pixels", blank.join(", "), total)
     }
 }
 
@@ -595,14 +675,24 @@ pub fn stack_images(
     images: &[Array2<f32>],
     config: &StackConfig,
 ) -> Result<StackResult> {
+    stack_images_cancellable(images, config, &never_cancelled)
+}
+
+pub fn stack_images_cancellable(
+    images: &[Array2<f32>],
+    config: &StackConfig,
+    cancelled: CancelCheck,
+) -> Result<StackResult> {
     if images.is_empty() {
         bail!("No images to stack");
     }
 
     let n = images.len();
+    validate_frame_weights(config.weights.as_deref(), n)?;
+    validate_minmax_counts(config.rejection, config.minmax_low, config.minmax_high, n)?;
 
-    let min_rows = images.iter().map(|img| img.dim().0).min().unwrap();
-    let min_cols = images.iter().map(|img| img.dim().1).min().unwrap();
+    let min_rows = images.iter().map(|img| img.dim().0).min().unwrap_or(0);
+    let min_cols = images.iter().map(|img| img.dim().1).min().unwrap_or(0);
 
     fn crop_to(img: &Array2<f32>, rows: usize, cols: usize) -> Cow<'_, Array2<f32>> {
         let (r, c) = img.dim();
@@ -616,36 +706,70 @@ pub fn stack_images(
     let ref_cropped = crop_to(&images[0], min_rows, min_cols);
 
     let mut aligned: Vec<Cow<Array2<f32>>> = Vec::with_capacity(n);
-    let mut offsets: Vec<(i32, i32)> = Vec::with_capacity(n);
+    let mut members: Vec<usize> = Vec::with_capacity(n);
+    let mut offsets: Vec<(i32, i32)> = vec![(0, 0); n];
+    let mut alignment: Vec<FrameAlignment> = Vec::with_capacity(n);
+    let mut warnings: Vec<String> = Vec::new();
 
     aligned.push(Cow::Borrowed(ref_cropped.as_ref()));
-    offsets.push((0, 0));
+    members.push(0);
+    alignment.push(FrameAlignment::reference());
 
-    for i in 1..n {
-        let cropped = crop_to(&images[i], min_rows, min_cols);
+    for (i, image) in images.iter().enumerate().skip(1) {
+        stop_if_cancelled(cancelled)?;
+        let cropped = crop_to(image, min_rows, min_cols);
 
-        if config.align {
-            let result = align::align_pair_with_label(
-                ref_cropped.as_ref(),
-                cropped.as_ref(),
-                config.align_method,
-                min_rows,
-                min_cols,
-                &format!("frame_{}", i),
-            )?;
-            let dy = result.offset.0.round() as i32;
-            let dx = result.offset.1.round() as i32;
-            offsets.push((dy, dx));
-            aligned.push(Cow::Owned(result.aligned));
-        } else {
-            offsets.push((0, 0));
+        if !config.align {
             aligned.push(cropped);
+            members.push(i);
+            alignment.push(FrameAlignment::unaligned());
+            continue;
+        }
+
+        let result = pair::align_pair_with_label(
+            ref_cropped.as_ref(),
+            cropped.as_ref(),
+            config.align_method,
+            min_rows,
+            min_cols,
+            &format!("frame_{}", i),
+        )?;
+        alignment.push(FrameAlignment {
+            method: result.method_used.clone(),
+            confidence: Some(result.confidence),
+            included: result.registered,
+        });
+        if result.registered {
+            offsets[i] = (result.center_offset.0.round() as i32, result.center_offset.1.round() as i32);
+            aligned.push(Cow::Owned(result.aligned));
+            members.push(i);
+        } else {
+            let message = format!(
+                "Frame {} of {} was left out of the stack: it could not be aligned to frame 1 ({}, confidence {:.2})",
+                i + 1,
+                n,
+                result.method_used,
+                result.confidence
+            );
+            log::warn!("{}", message);
+            warnings.push(message);
         }
     }
 
+    if members.len() < 2 && n > 1 {
+        bail!(
+            "No frame could be aligned to the reference frame (frame 1); if the frames are already registered, stack them with alignment off. {}",
+            warnings.join(" ")
+        );
+    }
+
+    let m = members.len();
     let rows = min_rows;
     let cols = min_cols;
     let npix = rows * cols;
+    let params = config.rejection_params();
+
+    check_percentile_window(aligned[0].view(), m, &params)?;
 
     let needs_stats = config.normalization != NormalizationMethod::None
         || config.rejection_normalization == RejectionNormalization::ScaleOffset;
@@ -659,23 +783,59 @@ pub fn stack_images(
         None
     };
 
-    let mut normalization_applied = vec![(0.0f64, 1.0f64); n];
+    if needs_stats && stats.is_none() {
+        let cause = unmeasurable_cause(&aligned, &members, n);
+        if config.normalization != NormalizationMethod::None {
+            bail!(
+                "Cannot apply {} normalization: {}. Remove the frame or set normalization to none.",
+                config.normalization.name(),
+                cause
+            );
+        }
+        let message = format!("Rejection normalization was skipped: {}.", cause);
+        log::warn!("{}", message);
+        warnings.push(message);
+    }
+
+    let mut applied = vec![(0.0f64, 1.0f64); m];
     if let Some(stats) = &stats {
         if config.normalization != NormalizationMethod::None {
-            for f in 1..n {
-                let (offset, scale) = normalization_terms(config.normalization, stats[0], stats[f]);
-                if offset != 0.0 || scale != 1.0 {
-                    let (k, z) = (scale as f32, offset as f32);
-                    aligned[f].to_mut().par_mapv_inplace(|v| v * k + z);
-                    normalization_applied[f] = (offset, scale);
+            for f in 1..m {
+                match normalization_terms(config.normalization, stats[0], stats[f]) {
+                    Some((offset, scale)) => {
+                        if offset != 0.0 || scale != 1.0 {
+                            let (k, z) = (scale as f32, offset as f32);
+                            aligned[f].to_mut().par_mapv_inplace(|v| v * k + z);
+                            applied[f] = (offset, scale);
+                        }
+                    }
+                    None => {
+                        let message = format!(
+                            "Frame {} of {} was not normalized: {} normalization needs positive background levels that are within a factor of {} of each other or at least {} times their noise (reference {:.4}, frame {:.4})",
+                            members[f] + 1,
+                            n,
+                            config.normalization.name(),
+                            MULTIPLICATIVE_MAX_RATIO,
+                            MULTIPLICATIVE_MIN_LEVEL_SIGMAS,
+                            stats[0].location,
+                            stats[f].location
+                        );
+                        log::warn!("{}", message);
+                        warnings.push(message);
+                    }
                 }
             }
         }
     }
 
+    let mut normalization_applied = vec![(0.0f64, 1.0f64); n];
+    for (&input, &terms) in members.iter().zip(&applied) {
+        normalization_applied[input] = terms;
+    }
+
     let rescaling: Option<Vec<Option<(f32, f32)>>> = match (&stats, config.rejection_normalization) {
         (Some(stats), RejectionNormalization::ScaleOffset) => {
-            Some(rejection_rescaling(stats, &normalization_applied))
+            Some(rejection_rescaling(stats, &applied))
         }
         _ => None,
     };
@@ -686,8 +846,10 @@ pub fn stack_images(
         .map(|img| img.as_slice().expect("contiguous"))
         .collect();
 
-    let weights: Option<Vec<f64>> = config.weights.as_ref().filter(|w| w.len() == n).cloned();
-    let params = config.rejection_params();
+    let weights: Option<Vec<f64>> = config
+        .weights
+        .as_ref()
+        .map(|w| members.iter().map(|&i| w[i]).collect());
 
     let combiner = RowCombiner {
         slices: &aligned_slices,
@@ -707,6 +869,7 @@ pub fn stack_images(
         (Vec::new(), Vec::new())
     };
 
+    stop_if_cancelled(cancelled)?;
     if config.rejection_maps {
         result_data
             .par_chunks_mut(cols)
@@ -714,6 +877,9 @@ pub fn stack_images(
             .zip(high_map.par_chunks_mut(cols))
             .enumerate()
             .for_each(|(y, ((row_buf, low), high))| {
+                if cancelled() {
+                    return;
+                }
                 let rejected = combiner.combine_row(y, row_buf, Some(low), Some(high));
                 total_rejected.fetch_add(rejected, Ordering::Relaxed);
             });
@@ -722,10 +888,14 @@ pub fn stack_images(
             .par_chunks_mut(cols)
             .enumerate()
             .for_each(|(y, row_buf)| {
+                if cancelled() {
+                    return;
+                }
                 let rejected = combiner.combine_row(y, row_buf, None, None);
                 total_rejected.fetch_add(rejected, Ordering::Relaxed);
             });
     }
+    stop_if_cancelled(cancelled)?;
 
     let rejected_pixels = total_rejected.load(Ordering::Relaxed);
 
@@ -741,12 +911,14 @@ pub fn stack_images(
     Ok(StackResult {
         image: Array2::from_shape_vec((rows, cols), result_data)
             .context("Failed to reshape stacked image")?,
-        frame_count: n,
+        frame_count: m,
         rejected_pixels,
         offsets,
         rejection_low,
         rejection_high,
         normalization_applied,
+        alignment,
+        warnings,
     })
 }
 
@@ -754,85 +926,98 @@ pub fn stack_images(
 mod tests {
     use super::*;
 
+    fn clip(values: &[f32], sigma_low: f32, sigma_high: f32, weights: Option<&[f64]>) -> (f32, u32) {
+        let mut samples = samples_from(values);
+        let cfg = RejectionParams { sigma_low, sigma_high, max_iterations: 5, ..params(RejectionMethod::SigmaClip, CombineMethod::Mean) };
+        let out = reject_and_combine(&mut samples, weights, &cfg);
+        (out.value, out.rejected_low as u32 + out.rejected_high as u32)
+    }
+
+    fn clip_weighted(pairs: &[(f32, f32)], sigma_low: f32, sigma_high: f32) -> (f32, u32) {
+        let values: Vec<f32> = pairs.iter().map(|p| p.0).collect();
+        let weights: Vec<f64> = pairs.iter().map(|p| p.1 as f64).collect();
+        clip(&values, sigma_low, sigma_high, Some(&weights))
+    }
+
     #[test]
     fn test_sigma_clip_clean_data() {
-        let mut vals = vec![10.0, 10.1, 9.9, 10.0, 10.2];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![10.0, 10.1, 9.9, 10.0, 10.2];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert!((mean - 10.04).abs() < 0.1);
         assert_eq!(rejected, 0);
     }
 
     #[test]
     fn test_sigma_clip_with_outlier() {
-        let mut vals = vec![10.0, 10.1, 9.9, 10.0, 500.0];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![10.0, 10.1, 9.9, 10.0, 500.0];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert!(mean < 15.0);
         assert!(rejected > 0);
     }
 
     #[test]
     fn test_sigma_clip_cosmic_ray() {
-        let mut vals = vec![100.0, 100.2, 99.8, 100.1, 100.0, 5000.0, 99.9];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 2.0, 2.0, 5);
+        let vals = vec![100.0, 100.2, 99.8, 100.1, 100.0, 5000.0, 99.9];
+        let (mean, rejected) = clip(&vals, 2.0, 2.0, None);
         assert!((mean - 100.0).abs() < 1.0);
         assert!(rejected >= 1);
     }
 
     #[test]
     fn test_sigma_clip_zero_mad_keeps_small_deviations() {
-        let mut vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 999.0];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 999.0];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert_eq!(rejected, 0);
         assert!((mean - 1000.0).abs() < 1e-4);
 
-        let mut vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 1002.0];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![1000.0, 1000.0, 1000.0, 1001.0, 1002.0];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert_eq!(rejected, 0);
         assert!((mean - 1000.6).abs() < 1e-3);
     }
 
     #[test]
     fn test_sigma_clip_zero_mad_still_rejects_outlier() {
-        let mut vals = vec![100.0, 100.0, 100.0, 50000.0, 100.0];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![100.0, 100.0, 100.0, 50000.0, 100.0];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert_eq!(rejected, 1);
         assert!((mean - 100.0).abs() < 1e-4);
     }
 
     #[test]
     fn test_sigma_clip_all_equal_rejects_nothing() {
-        let mut vals = vec![7.0; 6];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![7.0; 6];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert_eq!(rejected, 0);
         assert_eq!(mean, 7.0);
     }
 
     #[test]
     fn weighted_combine_zero_mad_keeps_small_deviations() {
-        let mut vals = vec![
+        let vals = vec![
             (1000.0f32, 1.0f32),
             (1000.0f32, 1.0f32),
             (1000.0f32, 1.0f32),
             (1001.0f32, 1.0f32),
             (999.0f32, 1.0f32),
         ];
-        let (mean, rejected) = sigma_clip_combine_weighted(&mut vals, 3.0, 3.0, 5);
+        let (mean, rejected) = clip_weighted(&vals, 3.0, 3.0);
         assert_eq!(rejected, 0);
         assert!((mean - 1000.0).abs() < 1e-4);
     }
 
     #[test]
     fn test_sigma_clip_empty() {
-        let mut vals: Vec<f32> = vec![];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals: Vec<f32> = vec![];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert!(mean.is_nan());
         assert_eq!(rejected, 0);
     }
 
     #[test]
     fn test_sigma_clip_single() {
-        let mut vals = vec![42.0];
-        let (mean, rejected) = sigma_clip_combine(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![42.0];
+        let (mean, rejected) = clip(&vals, 3.0, 3.0, None);
         assert_eq!(mean, 42.0);
         assert_eq!(rejected, 0);
     }
@@ -887,21 +1072,21 @@ mod tests {
 
     #[test]
     fn weighted_combine_favors_high_weight() {
-        let mut vals = vec![(10.0f32, 1.0f32), (20.0f32, 3.0f32)];
-        let (m, _) = sigma_clip_combine_weighted(&mut vals, 3.0, 3.0, 5);
+        let vals = vec![(10.0f32, 1.0f32), (20.0f32, 3.0f32)];
+        let (m, _) = clip_weighted(&vals, 3.0, 3.0);
         assert!((m - 17.5).abs() < 1e-4);
     }
 
     #[test]
     fn weighted_combine_rejects_outlier() {
-        let mut vals = vec![
+        let vals = vec![
             (100.0f32, 1.0f32),
             (100.2f32, 1.0f32),
             (99.8f32, 1.0f32),
             (100.1f32, 1.0f32),
             (5000.0f32, 1.0f32),
         ];
-        let (m, rej) = sigma_clip_combine_weighted(&mut vals, 2.0, 2.0, 5);
+        let (m, rej) = clip_weighted(&vals, 2.0, 2.0);
         assert!((m - 100.0).abs() < 1.0);
         assert!(rej >= 1);
     }
@@ -1134,6 +1319,51 @@ mod tests {
     }
 
     #[test]
+    fn min_max_counts_that_overflow_reject_nothing_instead_of_panicking() {
+        let mut samples = samples_from(&[5.0, 1.0, 9.0]);
+        let cfg = RejectionParams { minmax_low: usize::MAX, minmax_high: 1, ..params(RejectionMethod::MinMax, CombineMethod::Mean) };
+        let out = reject_and_combine(&mut samples, None, &cfg);
+        assert_eq!(out.kept, 3);
+        assert!((out.value - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn min_max_counts_must_leave_a_frame_to_combine() {
+        assert!(validate_minmax_counts(RejectionMethod::MinMax, usize::MAX, 1, 3).is_err());
+        assert!(validate_minmax_counts(RejectionMethod::MinMax, 2, 1, 3).is_err());
+        assert!(validate_minmax_counts(RejectionMethod::MinMax, 1, 1, 3).is_ok());
+        assert!(validate_minmax_counts(RejectionMethod::SigmaClip, 5, 5, 3).is_ok());
+
+        let frame = Array2::from_elem((4, 4), 10.0f32);
+        let config = StackConfig {
+            align: false,
+            rejection: RejectionMethod::MinMax,
+            minmax_low: 1,
+            minmax_high: 1,
+            ..StackConfig::default()
+        };
+        let err = stack_images(&[frame.clone(), frame.clone()], &config).unwrap_err().to_string();
+        assert!(err.contains("needs more than 2 frames"), "{err}");
+        assert!(stack_images(&[frame.clone(), frame.clone(), frame], &config).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_stack_stops_with_a_cancellation_error() {
+        let images: Vec<Array2<f32>> = (0..3).map(|k| textured_frame(100.0 + k as f32)).collect();
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let err = stack_images_cancellable(&images, &config, &|| true).unwrap_err();
+        assert!(crate::core::stacking::is_cancellation(&err), "{err:#}");
+
+        let checks = AtomicU64::new(0);
+        let late = || checks.fetch_add(1, Ordering::Relaxed) >= 3;
+        let err = stack_images_cancellable(&images, &config, &late).unwrap_err();
+        assert!(crate::core::stacking::is_cancellation(&err), "a cancel raised during the combine was ignored");
+
+        let finished = stack_images_cancellable(&images, &config, &never_cancelled).unwrap();
+        assert_eq!(finished.image, stack_images(&images, &config).unwrap().image);
+    }
+
+    #[test]
     fn median_combine_ignores_weights() {
         let values = [1.0, 2.0, 3.0, 4.0, 100.0];
         let weights = [10.0, 1.0, 1.0, 1.0, 1.0];
@@ -1341,5 +1571,257 @@ mod tests {
         assert!((result.normalization_applied[1].0 + 50.0).abs() < 1e-6);
         assert!((result.image[[0, 0]] - base[[0, 0]]).abs() < 1e-3);
         assert!((result.image[[5, 5]] - base[[5, 5]]).abs() < 1e-3);
+    }
+
+    fn plain_stack_config() -> StackConfig {
+        StackConfig {
+            rejection: RejectionMethod::None,
+            normalization: NormalizationMethod::None,
+            rejection_normalization: RejectionNormalization::None,
+            ..StackConfig::default()
+        }
+    }
+
+    fn blob_frame(cy: f32, cx: f32) -> Array2<f32> {
+        Array2::from_shape_fn((300, 300), |(y, x)| {
+            let dy = y as f32 - cy;
+            let dx = x as f32 - cx;
+            100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
+        })
+    }
+
+    #[test]
+    fn frame_that_fails_alignment_is_left_out_and_reported() {
+        let reference = blob_frame(150.0, 50.0);
+        let images = vec![reference.clone(), reference.clone(), blob_frame(150.0, 250.0)];
+        let result = stack_images(&images, &plain_stack_config()).unwrap();
+        assert_eq!(result.frame_count, 2);
+        assert_eq!(result.alignment.len(), 3);
+        assert_eq!(result.alignment[0], FrameAlignment::reference());
+        assert!(result.alignment[1].included, "{:?}", result.alignment[1]);
+        assert!(!result.alignment[2].included);
+        assert_eq!(result.alignment[2].method, "phase_correlation_identity");
+        assert_eq!(result.offsets, vec![(0, 0); 3]);
+        assert_eq!(result.normalization_applied.len(), 3);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("Frame 3 of 3"), "{}", result.warnings[0]);
+        for (a, b) in result.image.iter().zip(reference.iter()) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn stack_fails_when_no_frame_can_be_aligned_to_the_reference() {
+        let images = vec![blob_frame(150.0, 50.0), blob_frame(150.0, 250.0)];
+        let err = stack_images(&images, &plain_stack_config()).unwrap_err().to_string();
+        assert!(err.contains("No frame could be aligned"), "{err}");
+        assert!(err.contains("Frame 2 of 2"), "{err}");
+    }
+
+    #[test]
+    fn weights_follow_input_frames_when_a_frame_is_left_out() {
+        let reference = blob_frame(150.0, 50.0);
+        let images = vec![reference.clone(), blob_frame(150.0, 250.0), reference.mapv(|v| v * 2.0)];
+        let config = StackConfig { weights: Some(vec![1.0, 5.0, 3.0]), ..plain_stack_config() };
+        let result = stack_images(&images, &config).unwrap();
+        assert_eq!(result.frame_count, 2);
+        let background = result.image[[10, 280]];
+        assert!((background - 175.0).abs() < 1e-3, "background {background}");
+    }
+
+    #[test]
+    fn affine_offsets_report_the_centre_displacement() {
+        let images = vec![pair::star_field(400, 0.0, 21), pair::star_field(400, 3.0, 22)];
+        let config = StackConfig {
+            align_method: crate::types::compose::AlignMethod::Affine,
+            ..plain_stack_config()
+        };
+        let result = stack_images(&images, &config).unwrap();
+        assert!(result.alignment[1].included, "{:?}", result.alignment[1]);
+        assert_eq!(result.offsets[1], (0, 0));
+    }
+
+    #[test]
+    fn frame_weights_must_match_the_frames_and_be_usable() {
+        let frame = Array2::from_elem((2, 2), 10.0f32);
+        let images = vec![frame.clone(), frame.clone(), frame.clone()];
+        let base = StackConfig { align: false, ..StackConfig::default() };
+        for weights in [vec![1.0, 2.0], vec![1.0, -0.5, 1.0], vec![1.0, f64::NAN, 1.0]] {
+            let config = StackConfig { weights: Some(weights.clone()), ..base.clone() };
+            assert!(stack_images(&images, &config).is_err(), "{weights:?} accepted");
+        }
+        let ok = StackConfig { weights: Some(vec![1.0, 0.0, 2.0]), ..base };
+        assert!(stack_images(&images, &ok).is_ok());
+    }
+
+    fn level_frame(level: f32) -> Array2<f32> {
+        Array2::from_shape_fn((12, 12), |(y, x)| level + (((y * 7 + x * 13) % 11) as f32 - 5.0) * 0.001)
+    }
+
+    #[test]
+    fn multiplicative_normalization_skips_frames_without_a_positive_comparable_level() {
+        for (reference, frame) in [(0.01f32, -0.005f32), (0.003, 0.0001)] {
+            let images = vec![level_frame(reference), level_frame(frame)];
+            let config = StackConfig {
+                align: false,
+                normalization: NormalizationMethod::Multiplicative,
+                rejection: RejectionMethod::None,
+                rejection_normalization: RejectionNormalization::None,
+                ..StackConfig::default()
+            };
+            let result = stack_images(&images, &config).unwrap();
+            assert_eq!(result.normalization_applied[1], (0.0, 1.0), "levels {reference} / {frame}");
+            assert_eq!(result.warnings.len(), 1);
+            assert!(result.warnings[0].contains("Frame 2 of 2 was not normalized"), "{}", result.warnings[0]);
+        }
+    }
+
+    #[test]
+    fn normalization_that_cannot_be_measured_is_reported() {
+        let base = textured_frame(100.0);
+        let blank = Array2::from_elem((12, 12), f32::NAN);
+        let images = vec![base.clone(), base.clone(), blank];
+        let config = StackConfig {
+            align: false,
+            normalization: NormalizationMethod::Additive,
+            rejection: RejectionMethod::None,
+            ..StackConfig::default()
+        };
+        let err = stack_images(&images, &config).unwrap_err().to_string();
+        assert!(err.contains("frame(s) 3 of 3 contain no finite pixels"), "{err}");
+
+        let rejection_only = StackConfig { normalization: NormalizationMethod::None, ..config };
+        let result = stack_images(&images, &rejection_only).unwrap();
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].starts_with("Rejection normalization was skipped"), "{}", result.warnings[0]);
+    }
+
+    #[test]
+    fn percentile_clip_refuses_a_background_near_zero() {
+        let mut rng = Lcg(7);
+        let images: Vec<Array2<f32>> = (0..5)
+            .map(|_| Array2::from_shape_fn((32, 32), |_| (rng.next_unit() - 0.5) * 2.0))
+            .collect();
+        let config = StackConfig {
+            align: false,
+            rejection: RejectionMethod::PercentileClip,
+            ..StackConfig::default()
+        };
+        let err = stack_images(&images, &config).unwrap_err().to_string();
+        assert!(err.contains("Percentile clipping"), "{err}");
+
+        let pedestal: Vec<Array2<f32>> = images.iter().map(|f| f.mapv(|v| v + 1000.0)).collect();
+        let result = stack_images(&pedestal, &config).unwrap();
+        assert_eq!(result.frame_count, 5);
+    }
+
+    fn noisy_frames(scene: impl Fn(usize, usize) -> f32, count: usize, sigma: f32, seed: u64) -> Vec<Array2<f32>> {
+        let mut rng = Lcg(seed);
+        let spread = sigma * 12f32.sqrt();
+        (0..count)
+            .map(|_| Array2::from_shape_fn((64, 64), |(y, x)| scene(y, x) + (rng.next_unit() - 0.5) * spread))
+            .collect()
+    }
+
+    fn sky_gradient(_y: usize, x: usize) -> f32 {
+        400.0 + 600.0 * x as f32 / 63.0
+    }
+
+    fn field_filling_nebula(y: usize, x: usize) -> f32 {
+        let (dy, dx) = (y as f32 - 32.0, x as f32 - 32.0);
+        300.0 + 2000.0 * (-(dy * dy + dx * dx) / 800.0).exp()
+    }
+
+    #[test]
+    fn percentile_clip_stacks_frames_with_a_sky_gradient_or_a_field_filling_nebula() {
+        let config = StackConfig {
+            align: false,
+            rejection: RejectionMethod::PercentileClip,
+            ..StackConfig::default()
+        };
+        for (name, scene) in [("gradient", sky_gradient as fn(usize, usize) -> f32), ("nebula", field_filling_nebula)] {
+            let images = noisy_frames(scene, 5, 5.0, 11);
+            let result = stack_images(&images, &config).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(result.frame_count, 5);
+            let error = result
+                .image
+                .indexed_iter()
+                .map(|((y, x), v)| (v - scene(y, x)).abs() as f64)
+                .sum::<f64>()
+                / (64.0 * 64.0);
+            assert!(error < 5.0, "{name}: mean error {error}");
+        }
+    }
+
+    #[test]
+    fn percentile_clip_is_not_refused_when_too_few_frames_remain_to_reject() {
+        let images = noisy_frames(|_, _| 0.0, 2, 1.0, 5);
+        let config = StackConfig {
+            align: false,
+            rejection: RejectionMethod::PercentileClip,
+            normalization: NormalizationMethod::None,
+            ..StackConfig::default()
+        };
+        let result = stack_images(&images, &config).unwrap();
+        assert_eq!(result.rejected_pixels, 0);
+        assert!((result.image[[3, 4]] - (images[0][[3, 4]] + images[1][[3, 4]]) / 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn percentile_guard_judges_only_the_sides_that_clip() {
+        let pedestal = noisy_frames(|_, _| 1000.0, 5, 1.0, 9);
+        let one_sided = StackConfig {
+            align: false,
+            rejection: RejectionMethod::PercentileClip,
+            percentile_low: 0.0,
+            ..StackConfig::default()
+        };
+        assert!(stack_images(&pedestal, &one_sided).is_ok());
+
+        let near_zero = noisy_frames(|_, _| 0.0, 5, 1.0, 9);
+        let err = stack_images(&near_zero, &one_sided).unwrap_err().to_string();
+        assert!(err.contains("Percentile clipping"), "{err}");
+    }
+
+    #[test]
+    fn percentile_guard_reads_a_reference_in_any_memory_layout() {
+        let cfg = params(RejectionMethod::PercentileClip, CombineMethod::Mean);
+        let near_zero = noisy_frames(|_, _| 0.0, 1, 1.0, 3).remove(0);
+        assert!(check_percentile_window(near_zero.t(), 5, &cfg).is_err());
+        let pedestal = near_zero.mapv(|v| v + 1000.0);
+        assert!(check_percentile_window(pedestal.t(), 5, &cfg).is_ok());
+    }
+
+    #[test]
+    fn all_zero_frame_weights_stack_as_a_plain_mean() {
+        let images: Vec<Array2<f32>> = [10.0f32, 20.0, 30.0].iter().map(|&v| Array2::from_elem((2, 2), v)).collect();
+        let config = StackConfig {
+            align: false,
+            weights: Some(vec![0.0, 0.0, 0.0]),
+            rejection: RejectionMethod::None,
+            normalization: NormalizationMethod::None,
+            ..StackConfig::default()
+        };
+        let result = stack_images(&images, &config).unwrap();
+        assert!((result.image[[1, 1]] - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn multiplicative_normalization_scales_frames_with_clear_pedestals_beyond_ten_times() {
+        let base = textured_frame(100.0);
+        let short = base.mapv(|v| v / 20.0);
+        let config = StackConfig {
+            align: false,
+            normalization: NormalizationMethod::Multiplicative,
+            rejection: RejectionMethod::None,
+            rejection_normalization: RejectionNormalization::None,
+            ..StackConfig::default()
+        };
+        let result = stack_images(&[base.clone(), short], &config).unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!((result.normalization_applied[1].1 - 20.0).abs() < 1e-3, "{:?}", result.normalization_applied);
+        for (a, b) in result.image.iter().zip(base.iter()) {
+            assert!((a - b).abs() < 1e-2, "{a} vs {b}");
+        }
     }
 }

@@ -3,6 +3,8 @@ import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { FILE_STATUS } from "../utils/constants";
 import { isTauri } from "../infrastructure/tauri";
+import { fileKeyOf, getRenderRecord } from "../context/PreviewContext";
+import { manifestLine, zipCandidates, zipEntryName } from "../utils/exportSources";
 import type { ProcessedFile } from "../shared/types";
 
 export function useZipExport() {
@@ -23,31 +25,40 @@ export function useZipExport() {
 
     try {
       if (!isTauri()) {
-        throw new Error("ZIP export needs the desktop app: the processed PNGs live on disk.");
+        throw new Error("ZIP export needs the desktop app: the preview PNGs live on disk.");
       }
 
+      const { readFile } = await import("@tauri-apps/plugin-fs");
       const zip = new JSZip();
       const batchSize = 5;
       const missing: string[] = [];
+      const manifest: string[] = [manifestLine("entry", "source", "file")];
+      const taken = new Set<string>();
       let added = 0;
 
       for (let i = 0; i < doneFiles.length; i++) {
         const file = doneFiles[i];
-        const pngName = file.name.replace(/\.fits?$/i, ".png");
-        const pngPath = file.result?.png_path;
+        const key = fileKeyOf(file);
+        const processed = key ? getRenderRecord(key)?.processed ?? null : null;
+        const candidates = zipCandidates({ pngPath: file.result?.png_path ?? null, processed });
 
-        if (pngPath) {
+        let stored = false;
+        for (const candidate of candidates) {
           try {
-            const { readFile } = await import("@tauri-apps/plugin-fs");
-            const data = await readFile(pngPath);
-            zip.file(pngName, data);
+            const data = await readFile(candidate.path);
+            const entry = zipEntryName(file.name, taken);
+            zip.file(entry, data);
+            manifest.push(manifestLine(entry, candidate.source, file.path));
             added++;
+            stored = true;
+            break;
           } catch (err) {
-            console.error(`Failed to read ${pngPath}:`, err);
-            missing.push(file.name);
+            console.error(`Failed to read ${candidate.path}:`, err);
           }
-        } else {
+        }
+        if (!stored) {
           missing.push(file.name);
+          manifest.push(manifestLine(null, "skipped: no readable preview PNG", file.path));
         }
 
         setProgress(Math.round(((i + 1) / doneFiles.length) * 90));
@@ -58,8 +69,10 @@ export function useZipExport() {
       }
 
       if (added === 0) {
-        throw new Error(`No processed image could be read for any of the ${doneFiles.length} files; nothing was downloaded.`);
+        throw new Error(`No preview image could be read for any of the ${doneFiles.length} files; nothing was downloaded.`);
       }
+
+      zip.file("manifest.txt", manifest.join("\n") + "\n");
 
       const blob = await zip.generateAsync(
         {

@@ -1,9 +1,9 @@
-import { useState, useCallback, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useEffect, useRef, lazy, Suspense, memo } from "react";
 import { Loader2 } from "lucide-react";
 import { getFullHeader } from "../../services/header";
 import { processFitsFull } from "../../services/fits";
 import { fileStore } from "../../hooks/useFileStore";
-import { useFileContext, useRgbContext } from "../../context/PreviewContext";
+import { useFileContext, useNarrowbandContext, useRgbContext } from "../../context/PreviewContext";
 import type { HeaderData } from "../../shared/types";
 
 const HeaderExplorerPanel = lazy(() => import("./HeaderExplorerPanel"));
@@ -12,28 +12,42 @@ const HduSelectorPanel = lazy(() => import("./HduSelectorPanel"));
 function HeadersTabInner() {
   const { file } = useFileContext();
   const { setRgbChannels } = useRgbContext();
+  const { selectedPalette } = useNarrowbandContext();
 
   const [headerData, setHeaderData] = useState<HeaderData | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
+  const loadSeqRef = useRef(0);
+  const loadedRef = useRef<{ path: string; palette: string } | null>(null);
+  const paletteRef = useRef(selectedPalette);
+  paletteRef.current = selectedPalette;
 
   const handleLoadHeader = useCallback(
     async (path: string) => {
+      const seq = ++loadSeqRef.current;
+      const palette = paletteRef.current;
+      loadedRef.current = { path, palette };
       setHeaderLoading(true);
       setHeaderData(null);
       try {
-        const data = await getFullHeader(path);
-        setHeaderData(data);
+        const data = await getFullHeader(path, palette);
+        if (seq === loadSeqRef.current) setHeaderData(data);
       } catch (e) {
+        if (seq !== loadSeqRef.current) return;
         console.error("Header load failed:", e);
         throw e;
       } finally {
-        setHeaderLoading(false);
+        if (seq === loadSeqRef.current) setHeaderLoading(false);
       }
     },
     [],
   );
+
+  useEffect(() => {
+    const loaded = loadedRef.current;
+    if (loaded && loaded.palette !== selectedPalette) handleLoadHeader(loaded.path).catch(() => {});
+  }, [selectedPalette, handleLoadHeader]);
 
   const handleAssignChannel = useCallback(
     (channel: string, path: string) => {

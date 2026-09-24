@@ -1,19 +1,21 @@
 import { useState, useCallback, useId, useMemo } from "react";
 import { Grid3X3, CheckCircle2, Wand2 } from "lucide-react";
-import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { useProgress } from "../../hooks/useProgress";
 import { drizzleRgbStack } from "../../services/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
-import type { DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
-import { DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
+import type { DrizzleAlignmentMethod, DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
+import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
+import type { RunTarget } from "./StackingTab";
 
 type Channel = "r" | "g" | "b";
 
 interface DrizzleRgbPanelProps {
   files: ProcessedFile[];
-  onResult?: (result: DrizzleRgbResult) => void;
+  runTarget?: RunTarget | null;
+  onResult?: (result: DrizzleRgbResult, inputs: string[], target: RunTarget | null) => void;
 }
 
 const ICON = <Grid3X3 size={14} className="text-rose-400" />;
@@ -44,13 +46,13 @@ const KERNELS = [
   { value: "lanczos3", label: "Lanczos3" },
 ] as const;
 
-export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPanelProps) {
+export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult }: DrizzleRgbPanelProps) {
   const [assignments, setAssignments] = useState<Record<string, Channel>>({});
   const [scale, setScale] = useState(2.0);
   const [pixfrac, setPixfrac] = useState(0.7);
   const [kernel, setKernel] = useState<"square" | "gaussian" | "lanczos3">("square");
   const [align, setAlign] = useState(true);
-  const [alignmentMethod, setAlignmentMethod] = useState<"phase_correlation" | "zncc">("phase_correlation");
+  const [alignmentMethod, setAlignmentMethod] = useState<DrizzleAlignmentMethod>("phase_correlation");
   const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
   const [sigmaLow, setSigmaLow] = useState(3.0);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
@@ -115,6 +117,8 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
 
   const handleRun = useCallback(async () => {
     if (!canRun) return;
+    const target = runTarget;
+    const inputs = [...channelPaths.r, ...channelPaths.g, ...channelPaths.b];
     setIsRunning(true);
     setError(null);
     setResult(null);
@@ -145,14 +149,14 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
         },
       );
       setResult(res);
-      onResult?.(res);
+      onResult?.(res, inputs, target);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
       resetProgress();
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, onResult]);
+  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -251,12 +255,13 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             <select
               id={alignmentId}
               value={alignmentMethod}
-              onChange={(e) => setAlignmentMethod(e.target.value as typeof alignmentMethod)}
+              onChange={(e) => setAlignmentMethod(e.target.value as DrizzleAlignmentMethod)}
               className="ab-select"
               disabled={isRunning}
             >
-              <option value="phase_correlation">Phase Correlation</option>
-              <option value="zncc">Star-based (ZNCC)</option>
+              {DRIZZLE_ALIGNMENT_METHODS.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
             </select>
           </div>
         )}
@@ -370,7 +375,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             Drizzle RGB Complete
           </div>
           <ResultGrid columns={3} items={[
-            { label: "Output", value: result.output_dims ? `${result.output_dims[1]}×${result.output_dims[0]}` : "--" },
+            { label: "Output", value: result.output_dims ? `${result.output_dims[0]}×${result.output_dims[1]}` : "--" },
             { label: "Scale", value: result.scale ? `${result.scale.toFixed(1)}x` : "--" },
             { label: "Kernel", value: kernel },
             { label: "R frames", value: result.frame_count_r },
@@ -378,6 +383,7 @@ export default function DrizzleRgbPanel({ files = [], onResult }: DrizzleRgbPane
             { label: "B frames", value: result.frame_count_b },
             { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
           ]} />
+          <WarningList warnings={result.warnings} />
           {result.fits_path && (
             <div className="text-[10px] text-zinc-500 truncate" title={result.fits_path}>
               FITS: {result.fits_path}

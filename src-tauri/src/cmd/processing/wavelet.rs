@@ -1,6 +1,7 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir};
+use crate::cmd::processing::local_contrast::render_linear_output;
 use crate::core::imaging::wavelet::{wavelet_denoise, WaveletConfig};
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
@@ -24,7 +25,7 @@ pub async fn wavelet_denoise_cmd(
     let progress_clone = progress.clone();
 
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         if let Some(bias) = &layer_bias {
             if bias.iter().any(|b| !b.is_finite()) {
@@ -43,7 +44,7 @@ pub async fn wavelet_denoise_cmd(
 
         let wav_result = wavelet_denoise(entry.arr(), &config, Some(&progress_clone))?;
 
-        let ro = render_and_save(&wav_result.denoised, &path, &output_dir, "denoised", true)?;
+        let ro = render_linear_output(&wav_result.denoised, &path, &entry, &output_dir, "denoised")?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({

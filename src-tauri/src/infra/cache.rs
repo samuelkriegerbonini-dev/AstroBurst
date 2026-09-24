@@ -82,22 +82,26 @@ struct LruEntry {
     byte_size: usize,
 }
 
+const APP_PINNED_PREFIXES: &[&str] = &["__composite", "__wizard_ch_"];
+
 struct LruInner {
     map: HashMap<String, LruEntry>,
     max_entries: usize,
     max_bytes: usize,
     current_bytes: usize,
     generation: AtomicU64,
+    pinned_prefixes: &'static [&'static str],
 }
 
 impl LruInner {
-    fn new(max_entries: usize, max_bytes: usize) -> Self {
+    fn new(max_entries: usize, max_bytes: usize, pinned_prefixes: &'static [&'static str]) -> Self {
         Self {
             map: HashMap::with_capacity(max_entries),
             max_entries,
             max_bytes,
             current_bytes: 0,
             generation: AtomicU64::new(0),
+            pinned_prefixes,
         }
     }
 
@@ -121,8 +125,8 @@ impl LruInner {
         }
     }
 
-    fn is_pinned(key: &str) -> bool {
-        key.starts_with("__composite") || key.starts_with("__wizard_ch_") || key == "__star_mask"
+    fn is_pinned(&self, key: &str) -> bool {
+        self.pinned_prefixes.iter().any(|prefix| key.starts_with(prefix))
     }
 
     fn evict_lru(&mut self) -> bool {
@@ -132,7 +136,7 @@ impl LruInner {
         let victim = self
             .map
             .iter()
-            .filter(|(k, _)| !Self::is_pinned(k))
+            .filter(|(k, _)| !self.is_pinned(k))
             .min_by_key(|(_, e)| e.gen.load(Ordering::Relaxed))
             .map(|(k, _)| k.clone());
         if let Some(key) = victim {
@@ -145,7 +149,7 @@ impl LruInner {
     }
 
     fn unpinned_len(&self) -> usize {
-        self.map.keys().filter(|k| !Self::is_pinned(k)).count()
+        self.map.keys().filter(|k| !self.is_pinned(k)).count()
     }
 
     fn put(&mut self, key: String, value: Arc<CachedImage>) {
@@ -187,22 +191,11 @@ impl LruInner {
         }
     }
 
-    fn remove_prefix(&mut self, prefix: &str) {
-        let keys: Vec<String> = self
-            .map
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
+    fn remove_where(&mut self, pred: impl Fn(&str) -> bool) {
+        let keys: Vec<String> = self.map.keys().filter(|k| pred(k)).cloned().collect();
         for k in keys {
             self.remove(&k);
         }
-    }
-
-    fn clear(&mut self) {
-        self.map.clear();
-        self.current_bytes = 0;
-        self.generation.store(0, Ordering::Relaxed);
     }
 
     fn len(&self) -> usize {
@@ -220,8 +213,12 @@ pub struct ImageCache {
 
 impl ImageCache {
     pub fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self::with_pinned_prefixes(max_entries, max_bytes, &[])
+    }
+
+    pub fn with_pinned_prefixes(max_entries: usize, max_bytes: usize, pinned_prefixes: &'static [&'static str]) -> Self {
         Self {
-            inner: RwLock::new(LruInner::new(max_entries, max_bytes)),
+            inner: RwLock::new(LruInner::new(max_entries, max_bytes, pinned_prefixes)),
         }
     }
 
@@ -391,12 +388,16 @@ impl ImageCache {
 
     pub fn remove_prefix(&self, prefix: &str) {
         let mut cache = self.inner.write().unwrap();
-        cache.remove_prefix(prefix);
+        cache.remove_where(|k| k.starts_with(prefix));
     }
 
-    pub fn clear(&self) {
+    pub fn remove_where(&self, pred: impl Fn(&str) -> bool) {
         let mut cache = self.inner.write().unwrap();
-        cache.clear();
+        cache.remove_where(pred);
+    }
+
+    pub fn any_key(&self, pred: impl Fn(&str) -> bool) -> bool {
+        self.inner.read().unwrap().map.keys().any(|k| pred(k))
     }
 
     pub fn len(&self) -> usize {
@@ -413,8 +414,9 @@ impl ImageCache {
 const DEFAULT_MAX_ENTRIES: usize = 32;
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
-pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> =
-    LazyLock::new(|| ImageCache::new(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_BYTES));
+pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> = LazyLock::new(|| {
+    ImageCache::with_pinned_prefixes(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_BYTES, APP_PINNED_PREFIXES)
+});
 
 #[cfg(test)]
 mod tests {
@@ -562,9 +564,50 @@ mod tests {
         assert!(cache.get("a").is_none());
     }
 
+    fn app_cache(max_entries: usize) -> ImageCache {
+        ImageCache::with_pinned_prefixes(max_entries, usize::MAX, APP_PINNED_PREFIXES)
+    }
+
+    #[test]
+    fn a_cache_without_pinned_prefixes_evicts_client_named_composite_keys() {
+        let cache = ImageCache::new(2, usize::MAX);
+        for i in 0..5 {
+            let (arr, stats) = make_test_entry(4, 4);
+            cache.insert_synthetic(&format!("__composite_{i}"), Arc::new(arr), stats);
+        }
+        assert_eq!(cache.len(), 2, "names chosen by a client must not bypass the entry cap");
+        assert_eq!(cache.memory_estimate_bytes(), 2 * 4 * 4 * 4);
+        assert!(cache.get("__composite_4").is_some());
+        assert!(cache.get("__composite_0").is_none());
+    }
+
+    #[test]
+    fn the_app_cache_does_not_pin_the_unused_star_mask_key() {
+        let cache = app_cache(1);
+        let (arr, stats) = make_test_entry(2, 2);
+        cache.insert_synthetic("__star_mask", Arc::new(arr), stats);
+        cache.get_or_load("a.fits", || Ok(make_test_entry(2, 2))).unwrap();
+        assert!(cache.get("__star_mask").is_none());
+        assert!(cache.get("a.fits").is_some());
+    }
+
+    #[test]
+    fn remove_where_and_any_key_select_by_predicate() {
+        let cache = ImageCache::new(8, usize::MAX);
+        for key in ["a.fits", "a.fits#hdu=3", "ab.fits"] {
+            cache.get_or_load(key, || Ok(make_test_entry(2, 2))).unwrap();
+        }
+        assert!(cache.any_key(|k| ImageRef::parse(k).path == "a.fits"));
+        cache.remove_where(|k| ImageRef::parse(k).path == "a.fits");
+        assert!(!cache.any_key(|k| ImageRef::parse(k).path == "a.fits"));
+        assert!(cache.contains("ab.fits"));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.memory_estimate_bytes(), 2 * 2 * 4);
+    }
+
     #[test]
     fn test_pinned_only_does_not_infinite_loop() {
-        let cache = ImageCache::new(2, usize::MAX);
+        let cache = app_cache(2);
         cache
             .get_or_load("__composite_r", || Ok(make_test_entry(10, 10)))
             .unwrap();
@@ -582,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_pinned_entries_do_not_consume_regular_slots() {
-        let cache = ImageCache::new(2, usize::MAX);
+        let cache = app_cache(2);
         let (arr, stats) = make_test_entry(10, 10);
         cache.insert_synthetic("__wizard_ch_ha_aligned", Arc::new(arr.clone()), stats.clone());
         cache.insert_synthetic("__wizard_ch_oiii_aligned", Arc::new(arr.clone()), stats.clone());
@@ -608,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_remove_prefix_releases_pinned_bytes() {
-        let cache = ImageCache::new(8, usize::MAX);
+        let cache = app_cache(8);
         let (arr, stats) = make_test_entry(10, 10);
         cache.insert_synthetic("__wizard_ch_ha_aligned", Arc::new(arr.clone()), stats.clone());
         cache.insert_synthetic("__wizard_ch_ha_cropped", Arc::new(arr.clone()), stats.clone());
@@ -750,6 +793,7 @@ mod tests {
                         "SIMPLE".to_string(),
                         "T".to_string(),
                     )]),
+                    string_keys: None,
                 };
                 Ok((arr, stats, header))
             })

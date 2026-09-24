@@ -40,11 +40,15 @@ pub fn sigma_clipped_stats(values: &mut Vec<f32>, kappa: f32, iterations: usize)
 
         let lo = (median - kappa as f64 * sig) as f32;
         let hi = (median + kappa as f64 * sig) as f32;
+        let before = values.len();
         values.retain(|&v| v >= lo && v <= hi);
+        if values.len() == before {
+            break;
+        }
     }
 
     if values.is_empty() {
-        return (0.0, 1.0);
+        return (f64::NAN, f64::NAN);
     }
 
     let median = exact_median_mut(values);
@@ -70,11 +74,46 @@ mod tests {
     }
 
     #[test]
-    fn test_empty() {
+    fn test_empty_reports_no_measurement() {
         let mut vals: Vec<f32> = vec![];
         let (med, sig) = sigma_clipped_stats(&mut vals, 3.0, 3);
-        assert_eq!(med, 0.0);
-        assert_eq!(sig, 1.0);
+        assert!(med.is_nan(), "median of nothing must not be a number, got {med}");
+        assert!(sig.is_nan(), "sigma of nothing must not be a number, got {sig}");
+        assert_eq!(serde_json::json!({ "median": med, "std": sig }), serde_json::json!({ "median": null, "std": null }));
+    }
+
+    #[test]
+    fn test_no_survivors_reports_no_measurement() {
+        for kappa in [-3.0f32, f32::NAN] {
+            let mut vals: Vec<f32> = (1..=50).map(|i| i as f32).collect();
+            let (med, sig) = sigma_clipped_stats(&mut vals, kappa, 3);
+            assert!(vals.is_empty(), "kappa {kappa} should reject every value");
+            assert!(med.is_nan() && sig.is_nan(), "kappa {kappa}: got median {med}, sigma {sig}");
+        }
+    }
+
+    fn ramp_with_outlier() -> Vec<f32> {
+        let mut vals: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        vals.push(100_000.0);
+        vals
+    }
+
+    #[test]
+    fn test_stops_once_a_pass_rejects_nothing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut vals = ramp_with_outlier();
+            let result = sigma_clipped_stats(&mut vals, 3.0, usize::MAX);
+            let _ = tx.send((result, vals.len()));
+        });
+        let ((med, sig), survivors) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("clipping kept iterating after a pass rejected nothing");
+        let mut reference = ramp_with_outlier();
+        let expected = sigma_clipped_stats(&mut reference, 3.0, 3);
+        assert_eq!((med, sig), expected);
+        assert_eq!(survivors, reference.len());
+        assert_eq!(survivors, 100);
     }
 
     #[test]

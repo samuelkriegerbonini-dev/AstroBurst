@@ -22,8 +22,6 @@ export interface PixelMathResult {
   stats: PixelMathStats | null;
   non_finite_count: number;
   warnings?: string[];
-  cleaned_files?: number;
-  cleaned_bytes?: number;
 }
 
 export interface PixelMathValidation {

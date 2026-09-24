@@ -1,7 +1,6 @@
 import { useState, useCallback, useId, useRef, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle } from "lucide-react";
-import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { runCalibrationPipeline } from "../../services/stacking";
 import type { CombineMethod, PipelineResult, RejectionMethod } from "../../shared/types/stacking";
 import type { CosmeticConfig } from "../../shared/types/cosmetic";
@@ -432,12 +431,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in border-t border-zinc-800/50 pt-3">
           <span className="text-xs font-semibold text-zinc-400">Results</span>
-          {result.warnings?.map((warning) => (
-            <div key={warning} className="flex items-start gap-2 text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
-              <span>{warning}</span>
-            </div>
-          ))}
+          <WarningList warnings={result.warnings} />
 
           <div className="flex gap-1">
             {result.channel_previews.map((ch) => (

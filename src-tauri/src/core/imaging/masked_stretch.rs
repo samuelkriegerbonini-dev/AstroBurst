@@ -2,7 +2,7 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig, StarMaskResult};
-use crate::core::imaging::stats::is_valid_pixel;
+use crate::core::imaging::stats::{is_padding, is_valid_pixel};
 
 const MINMAX_CHUNK: usize = 1 << 16;
 
@@ -63,29 +63,29 @@ pub fn masked_stretch(
 
     let normalized = normalize_to_01(image);
     let mask_result = generate_star_mask(&normalized, &mask_config)?;
-    masked_stretch_with_mask(&normalized, &mask_result, config)
+    stretch_normalized(normalized, &image.mapv(is_padding), &mask_result, config)
 }
 
-pub fn masked_stretch_with_mask(
-    image: &Array2<f32>,
+fn stretch_normalized(
+    mut working: Array2<f32>,
+    padding: &Array2<bool>,
     mask_result: &StarMaskResult,
     config: &MaskedStretchConfig,
 ) -> Result<MaskedStretchResult, String> {
-    let mut working = normalize_to_01(image);
     let protection = config.protection_amount as f32;
     let mask = &mask_result.mask;
     let target_bg = config.target_background;
 
     let mut bg_buf: Vec<f32> = Vec::new();
     let mut scratch = Array2::zeros(working.dim());
-    let mut prev_bg = compute_masked_median(&working, mask, &mut bg_buf);
+    let mut prev_bg = compute_masked_median(&working, mask, padding, &mut bg_buf);
     let mut iterations_run = 0;
     let mut converged = false;
 
     for iter_idx in 0..config.iterations {
         iterations_run = iter_idx + 1;
 
-        let bg = compute_masked_median(&working, mask, &mut bg_buf);
+        let bg = compute_masked_median(&working, mask, padding, &mut bg_buf);
 
         let at_target = (bg - target_bg).abs() < config.convergence_threshold;
         let stagnated = iter_idx > 0
@@ -106,7 +106,7 @@ pub fn masked_stretch_with_mask(
         prev_bg = bg;
     }
 
-    let final_bg = compute_masked_median(&working, mask, &mut bg_buf);
+    let final_bg = compute_masked_median(&working, mask, padding, &mut bg_buf);
 
     clamp_inplace(&mut working);
 
@@ -202,12 +202,16 @@ pub fn masked_stretch_rgb_shared(
         ),
     };
 
+    let padding = ndarray::Zip::from(r)
+        .and(g)
+        .and(b)
+        .map_collect(|&rv, &gv, &bv| is_padding(rv) || is_padding(gv) || is_padding(bv));
     let mut bg_buf: Vec<f32> = Vec::new();
     let mut lum = Array2::zeros(wr.dim());
     let mut scratch = Array2::zeros(wr.dim());
 
     compute_luminance_into(&mut lum, &wr, &wg, &wb);
-    let mut prev_bg = compute_masked_median(&lum, mask, &mut bg_buf);
+    let mut prev_bg = compute_masked_median(&lum, mask, &padding, &mut bg_buf);
     let mut iterations_run = 0;
     let mut converged = false;
 
@@ -215,7 +219,7 @@ pub fn masked_stretch_rgb_shared(
         iterations_run = iter_idx + 1;
 
         compute_luminance_into(&mut lum, &wr, &wg, &wb);
-        let bg = compute_masked_median(&lum, mask, &mut bg_buf);
+        let bg = compute_masked_median(&lum, mask, &padding, &mut bg_buf);
 
         let at_target = (bg - target_bg).abs() < config.convergence_threshold;
         let stagnated = iter_idx > 0
@@ -238,7 +242,7 @@ pub fn masked_stretch_rgb_shared(
     }
 
     compute_luminance_into(&mut lum, &wr, &wg, &wb);
-    let final_bg = compute_masked_median(&lum, mask, &mut bg_buf);
+    let final_bg = compute_masked_median(&lum, mask, &padding, &mut bg_buf);
 
     clamp_inplace(&mut wr);
     clamp_inplace(&mut wg);
@@ -356,7 +360,7 @@ fn normalize_to_01_with(image: &Array2<f32>, dmin: f32, dmax: f32) -> Array2<f32
     ndarray::Zip::from(&mut out)
         .and(image)
         .par_for_each(|o, &v| {
-            *o = if !v.is_finite() || v <= 0.0 {
+            *o = if is_padding(v) {
                 0.0
             } else {
                 ((v - dmin) * inv).clamp(0.0, 1.0)
@@ -382,17 +386,23 @@ fn stretch_blend_with_scratch(
         });
 }
 
-fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>, bg_vals: &mut Vec<f32>) -> f64 {
+fn compute_masked_median(
+    image: &Array2<f32>,
+    mask: &Array2<f32>,
+    padding: &Array2<bool>,
+    bg_vals: &mut Vec<f32>,
+) -> f64 {
     bg_vals.clear();
-    match (image.as_slice(), mask.as_slice()) {
-        (Some(img), Some(msk)) => {
+    match (image.as_slice(), mask.as_slice(), padding.as_slice()) {
+        (Some(img), Some(msk), Some(pad)) => {
             let chunks: Vec<Vec<f32>> = img
                 .par_chunks(MINMAX_CHUNK)
                 .zip(msk.par_chunks(MINMAX_CHUNK))
-                .map(|(ic, mc)| {
+                .zip(pad.par_chunks(MINMAX_CHUNK))
+                .map(|((ic, mc), pc)| {
                     let mut local = Vec::with_capacity(ic.len());
                     for (i, &v) in ic.iter().enumerate() {
-                        if mc[i] < 0.5 && v.is_finite() && v > 0.0 {
+                        if mc[i] < 0.5 && !pc[i] && v.is_finite() {
                             local.push(v);
                         }
                     }
@@ -406,8 +416,8 @@ fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>, bg_vals: &mut 
             }
         }
         _ => {
-            ndarray::Zip::from(image).and(mask).for_each(|&v, &m| {
-                if m < 0.5 && v.is_finite() && v > 0.0 {
+            ndarray::Zip::from(image).and(mask).and(padding).for_each(|&v, &m, &p| {
+                if m < 0.5 && !p && v.is_finite() {
                     bg_vals.push(v);
                 }
             });
@@ -419,7 +429,7 @@ fn compute_masked_median(image: &Array2<f32>, mask: &Array2<f32>, bg_vals: &mut 
     }
 
     let mid = bg_vals.len() / 2;
-    bg_vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    bg_vals.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
     bg_vals[mid] as f64
 }
 
@@ -502,5 +512,96 @@ mod tests {
         let bv = res.b.image[[1, 1]];
         assert!((rv - gv).abs() < 1e-3, "R/G diverged at neutral bg: {} vs {}", rv, gv);
         assert!((gv - bv).abs() < 1e-3, "G/B diverged at neutral bg: {} vs {}", gv, bv);
+    }
+
+    const PROBES: [(usize, f32); 4] = [(10, -2.0), (20, -0.1), (30, 0.1), (40, 2.0)];
+    const PROBE_ROW: usize = 32;
+
+    fn zero_mean_sky_with_stars(scale: f32) -> Array2<f32> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut uniform = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut img = Array2::from_shape_fn((64, 64), |_| {
+            let s: f32 = (0..4).map(|_| uniform()).sum();
+            (s - 2.0) * 3.0f32.sqrt()
+        });
+        for &(cy, cx) in &[(12.0f32, 12.0f32), (12.0, 52.0), (52.0, 12.0), (52.0, 52.0)] {
+            for ((y, x), v) in img.indexed_iter_mut() {
+                let d2 = (y as f32 - cy).powi(2) + (x as f32 - cx).powi(2);
+                *v += 500.0 * (-d2 / 4.5).exp();
+            }
+        }
+        for &(x, v) in &PROBES {
+            img[[PROBE_ROW, x]] = v;
+        }
+        img[[0, 0]] = 0.0;
+        img[[0, 1]] = f32::NAN;
+        img.mapv_inplace(|v| v * scale);
+        img
+    }
+
+    fn assert_continuous_ramp(out: &Array2<f32>, label: &str) {
+        let p: Vec<f32> = PROBES.iter().map(|&(x, _)| out[[PROBE_ROW, x]]).collect();
+        assert!(
+            p.windows(2).all(|w| w[0] < w[1]),
+            "{}: probes at -2, -0.1, +0.1, +2 sigma not strictly increasing: {:?}",
+            label,
+            p
+        );
+        assert!(
+            p[2] - p[1] < 0.15 * (p[3] - p[0]),
+            "{}: gap across zero {} vs span {}: {:?}",
+            label,
+            p[2] - p[1],
+            p[3] - p[0],
+            p
+        );
+        assert_eq!(out[[0, 0]], 0.0, "{}: zero padding", label);
+        assert_eq!(out[[0, 1]], 0.0, "{}: NaN padding", label);
+    }
+
+    #[test]
+    fn linked_rgb_stretch_is_continuous_across_zero_on_sky_subtracted_data() {
+        let r = zero_mean_sky_with_stars(1.2);
+        let g = zero_mean_sky_with_stars(1.0);
+        let b = zero_mean_sky_with_stars(0.8);
+        let res = masked_stretch_rgb_shared(&r, &g, &b, &MaskedStretchConfig::default()).unwrap();
+        assert_continuous_ramp(&res.r.image, "R");
+        assert_continuous_ramp(&res.g.image, "G");
+        assert_continuous_ramp(&res.b.image, "B");
+    }
+
+    #[test]
+    fn mono_stretch_is_continuous_across_zero_on_sky_subtracted_data() {
+        let img = zero_mean_sky_with_stars(1.0);
+        let res = masked_stretch(&img, &MaskedStretchConfig::default()).unwrap();
+        assert_continuous_ramp(&res.image, "mono");
+    }
+
+    #[test]
+    fn quantized_levels_above_the_floor_are_not_crushed_to_black() {
+        let level = |y: usize, x: usize| 100.0 + ((x + 3 * y) % 4) as f32;
+        let mut img = Array2::from_shape_fn((64, 64), |(y, x)| level(y, x));
+        for ((y, x), v) in img.indexed_iter_mut() {
+            let d2 = (y as i32 - 32).pow(2) + (x as i32 - 32).pow(2);
+            *v += if d2 <= 2 { 400.0 } else if d2 <= 8 { 100.0 } else { 0.0 };
+        }
+        img[[0, 0]] = 0.0;
+        let res = masked_stretch(&img, &MaskedStretchConfig::default()).unwrap();
+        let out_at = |target: f32| {
+            let (y, x) = (2..10)
+                .flat_map(|y| (2..10).map(move |x| (y, x)))
+                .find(|&(y, x)| level(y, x) == target)
+                .unwrap();
+            res.image[[y, x]]
+        };
+        let outs = [out_at(100.0), out_at(101.0), out_at(102.0), out_at(103.0)];
+        assert_eq!(outs[0], 0.0, "floor level {:?}", outs);
+        assert!(outs.windows(2).all(|w| w[0] < w[1]), "levels merged: {:?}", outs);
+        assert_eq!(res.image[[0, 0]], 0.0);
     }
 }

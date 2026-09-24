@@ -1,7 +1,7 @@
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::core::imaging::stats::percentile;
+use crate::core::imaging::stats::{is_padding, is_valid_pixel, percentile};
 use crate::core::imaging::zscale::{zscale_limits, DEFAULT_CONTRAST};
 use crate::types::constants::{
     SCALE_MODE_MANUAL_ALIAS, SCALE_MODE_MINMAX, SCALE_MODE_PERCENTILE, SCALE_MODE_USER,
@@ -59,16 +59,6 @@ impl StretchKind {
             StretchKind::Sqrt => "sqrt",
             StretchKind::Asinh => "asinh",
             StretchKind::Power => "power",
-        }
-    }
-
-    pub fn gpu_code(self) -> u32 {
-        match self {
-            StretchKind::Linear => 1,
-            StretchKind::Log => 2,
-            StretchKind::Sqrt => 3,
-            StretchKind::Asinh => 4,
-            StretchKind::Power => 5,
         }
     }
 }
@@ -155,11 +145,11 @@ impl LimitMode {
     }
 }
 
-pub fn finite_min_max(data: &Array2<f32>) -> (f64, f64) {
+pub fn valid_min_max(data: &Array2<f32>) -> (f64, f64) {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
     for &v in data.iter() {
-        if v.is_finite() {
+        if is_valid_pixel(v) {
             let v = v as f64;
             if v < min {
                 min = v;
@@ -186,13 +176,13 @@ pub fn resolve_limits(data: &Array2<f32>, mode: LimitMode) -> (f64, f64) {
                 (0.0, 1.0)
             }
         }
-        LimitMode::MinMax => finite_min_max(data),
+        LimitMode::MinMax => valid_min_max(data),
         LimitMode::User { vmin, vmax } => {
-            let (dmin, dmax) = finite_min_max(data);
+            let (dmin, dmax) = valid_min_max(data);
             (vmin.unwrap_or(dmin), vmax.unwrap_or(dmax))
         }
         LimitMode::Percentile { low, high } => {
-            let mut valid: Vec<f32> = data.iter().copied().filter(|v| v.is_finite()).collect();
+            let mut valid: Vec<f32> = data.iter().copied().filter(|&v| is_valid_pixel(v)).collect();
             if valid.is_empty() {
                 return (0.0, 1.0);
             }
@@ -215,7 +205,7 @@ pub fn normalize_and_stretch(
     let norm: Vec<f32> = data
         .par_iter()
         .map(|&v| {
-            if !v.is_finite() {
+            if is_padding(v) {
                 return f32::NAN;
             }
             let vd = v as f64;
@@ -232,7 +222,7 @@ pub fn normalize_and_stretch(
         .fold(
             || (0u64, 0u64, 0u64),
             |(va, be, ab), &v| {
-                if !v.is_finite() {
+                if is_padding(v) {
                     return (va, be, ab);
                 }
                 let vd = v as f64;
@@ -241,10 +231,6 @@ pub fn normalize_and_stretch(
         )
         .reduce(|| (0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
     (norm, valid, below, above)
-}
-
-pub fn stretch_to_byte(y: f32) -> u8 {
-    (y.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -275,10 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn all_names_round_trip_and_gpu_codes_are_one_to_five() {
-        for (i, kind) in StretchKind::ALL.iter().enumerate() {
-            assert_eq!(StretchKind::from_name(kind.name()).unwrap(), *kind);
-            assert_eq!(kind.gpu_code(), i as u32 + 1);
+    fn all_names_round_trip() {
+        for kind in StretchKind::ALL {
+            assert_eq!(StretchKind::from_name(kind.name()).unwrap(), kind);
         }
     }
 
@@ -321,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn stretch_to_byte_matches_shared_golden_vectors() {
+    fn stretch_bytes_match_shared_golden_vectors() {
         let xs = [0.0f32, 0.25, 0.5, 0.75, 1.0];
         let golden: [(StretchKind, [u8; 5]); 5] = [
             (StretchKind::Linear, [0, 64, 128, 191, 255]),
@@ -332,12 +317,10 @@ mod tests {
         ];
         for (kind, want) in golden {
             for (i, &x) in xs.iter().enumerate() {
-                let got = stretch_to_byte(apply_stretch(x, kind, 0.1, 2.0));
+                let got = (apply_stretch(x, kind, 0.1, 2.0) * 255.0).round() as u8;
                 assert_eq!(got, want[i], "{kind:?}({x})");
             }
         }
-        assert_eq!(stretch_to_byte(-1.0), 0);
-        assert_eq!(stretch_to_byte(2.0), 255);
     }
 
     #[test]
@@ -469,10 +452,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_limits_minmax_equals_finite_min_max() {
+    fn resolve_limits_minmax_equals_valid_min_max() {
         let arr = fixture();
-        assert_eq!(resolve_limits(&arr, LimitMode::MinMax), finite_min_max(&arr));
-        assert_eq!(finite_min_max(&arr), (-5000.0, 5000.0));
+        assert_eq!(resolve_limits(&arr, LimitMode::MinMax), valid_min_max(&arr));
+        assert_eq!(valid_min_max(&arr), (-5000.0, 5000.0));
     }
 
     #[test]
@@ -488,7 +471,7 @@ mod tests {
     fn resolve_limits_percentile_full_range_equals_min_max() {
         let arr = fixture();
         let got = resolve_limits(&arr, LimitMode::Percentile { low: 0.0, high: 100.0 });
-        assert_eq!(got, finite_min_max(&arr));
+        assert_eq!(got, valid_min_max(&arr));
         let narrow = resolve_limits(&arr, LimitMode::Percentile { low: 1.0, high: 99.0 });
         assert!(narrow.0 > got.0 && narrow.1 < got.1, "{narrow:?} inside {got:?}");
     }
@@ -496,7 +479,7 @@ mod tests {
     #[test]
     fn resolve_limits_user_fills_missing_bounds_from_data() {
         let arr = fixture();
-        let (dmin, dmax) = finite_min_max(&arr);
+        let (dmin, dmax) = valid_min_max(&arr);
         assert_eq!(
             resolve_limits(&arr, LimitMode::User { vmin: None, vmax: None }),
             (dmin, dmax)
@@ -524,6 +507,56 @@ mod tests {
         }
         let empty = Array2::<f32>::zeros((0, 0));
         assert_eq!(resolve_limits(&empty, LimitMode::MinMax), (0.0, 1.0));
+        let padding_only = Array2::<f32>::zeros((4, 4));
+        for mode in [
+            LimitMode::MinMax,
+            LimitMode::ZScale { contrast: 0.25 },
+            LimitMode::Percentile { low: 1.0, high: 99.5 },
+        ] {
+            assert_eq!(resolve_limits(&padding_only, mode), (0.0, 1.0), "{mode:?}");
+        }
+    }
+
+    fn padded_sky() -> (Array2<f32>, Array2<f32>) {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut uniform = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let sky = Array2::from_shape_fn((100, 100), |_| 1000.0 + 30.0 * ((0..12).map(|_| uniform()).sum::<f32>() - 6.0));
+        let pad = |fill: f32| {
+            let mut a = sky.clone();
+            a.slice_mut(ndarray::s![.., 0..20]).fill(fill);
+            a
+        };
+        (pad(0.0), pad(f32::NAN))
+    }
+
+    #[test]
+    fn display_limits_ignore_zero_padding_like_nan() {
+        let (zero_padded, nan_padded) = padded_sky();
+        for mode in [
+            LimitMode::MinMax,
+            LimitMode::ZScale { contrast: 0.25 },
+            LimitMode::Percentile { low: 1.0, high: 99.5 },
+            LimitMode::User { vmin: None, vmax: None },
+        ] {
+            let got = resolve_limits(&zero_padded, mode);
+            assert_eq!(got, resolve_limits(&nan_padded, mode), "{mode:?}");
+            assert!(got.0 > 800.0, "{mode:?} vmin pulled to {}", got.0);
+        }
+    }
+
+    #[test]
+    fn normalize_and_stretch_treats_zero_padding_like_nan() {
+        let data = [0.0f32, -2.0, 2.0, f32::NAN];
+        let (norm, valid, below, above) = normalize_and_stretch(&data, -2.0, 2.0, StretchKind::Linear, 0.1, 2.0);
+        assert!(norm[0].is_nan(), "padding mapped to {}", norm[0]);
+        assert_eq!((norm[1], norm[2]), (0.0, 1.0));
+        assert!(norm[3].is_nan());
+        assert_eq!((valid, below, above), (2, 1, 1));
     }
 
     fn sequential_reference(
@@ -538,7 +571,7 @@ mod tests {
         let mut norm = Vec::with_capacity(data.len());
         let (mut valid, mut below, mut above) = (0u64, 0u64, 0u64);
         for &v in data {
-            if v.is_finite() {
+            if is_valid_pixel(v) {
                 valid += 1;
                 let vd = v as f64;
                 if vd <= vmin {

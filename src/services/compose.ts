@@ -1,4 +1,4 @@
-import { withPreview, typedInvoke, getOutputDir } from "../infrastructure/tauri";
+import { withPreview, typedInvoke, getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
 import type { StfParams } from "../shared/types";
 import type {
   BlendResult,
@@ -28,6 +28,7 @@ export function restretchComposite(
   stfB: StfParams,
   scnr?: ScnrOptions,
   cacheResult?: boolean,
+  linked?: boolean,
 ): Promise<RestretchResult> {
   return typedInvoke<RestretchResult>("restretch_composite_cmd", {
     outputDir,
@@ -44,7 +45,17 @@ export function restretchComposite(
     scnrMethod: scnr?.method,
     scnrAmount: scnr?.amount,
     cacheResult: cacheResult ?? false,
+    linked,
   });
+}
+
+export async function renderLinearCompositePreview(
+  outputDir: string,
+  stf: { r: StfParams; g: StfParams; b: StfParams },
+  linked: boolean,
+): Promise<string> {
+  const res = await restretchComposite(outputDir, stf.r, stf.g, stf.b, undefined, false, linked);
+  return getPreviewUrl(res.png_path);
 }
 
 export interface LrgbResult {

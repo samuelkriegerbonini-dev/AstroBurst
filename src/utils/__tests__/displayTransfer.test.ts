@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   GRAY_LUT_RGBA,
   STRETCH_KIND,
+  isPaddingValue,
   lutIndex,
   normalize,
   renderRgba,
+  resolveTransferLimits,
   stretchValue,
   toDisplayTransfer,
   transferByte,
@@ -69,7 +71,7 @@ function shaderMtf(m: number, x: number): number {
 }
 
 function shaderByte(val: number, t: DisplayTransfer): number {
-  if (!Number.isFinite(val)) return 0;
+  if (!Number.isFinite(val) || val === 0) return t.invert ? 255 : 0;
   const vmin = f(t.vmin);
   const vmax = f(t.vmax);
   const range = f(vmax - vmin);
@@ -137,13 +139,44 @@ describe("golden stretch bytes", () => {
 describe("non-finite pixels", () => {
   const values = [NaN, Infinity, -Infinity];
   for (const kind of [0, 1, 2, 3, 4, 5] as const) {
-    it(`kind ${kind} maps NaN/Inf to 0 with and without invert`, () => {
+    it(`kind ${kind} maps NaN/Inf to LUT index 0 before inversion`, () => {
       for (const v of values) {
         expect(transferByte(v, withKind(kind))).toBe(0);
-        expect(transferByte(v, withKind(kind, true))).toBe(0);
+        expect(transferByte(v, withKind(kind, true))).toBe(255);
       }
     });
   }
+  it("paints padding below vmin and NaN with the same byte, inverted or not", () => {
+    for (const kind of [0, 1, 2, 3, 4, 5] as const) {
+      for (const invert of [false, true]) {
+        const t: DisplayTransfer = { ...BASE, vmin: 0.5, vmax: 900, stretchKind: kind, invert, shadow: 0.01, midtone: 0.2 };
+        expect(transferByte(NaN, t)).toBe(transferByte(0, t));
+        expect(shaderByte(NaN, t)).toBe(shaderByte(0, t));
+      }
+    }
+  });
+  it("treats exact zero as padding when the valid minimum is negative", () => {
+    for (const kind of [0, 1, 2, 3, 4, 5] as const) {
+      for (const invert of [false, true]) {
+        const t: DisplayTransfer = { ...BASE, vmin: -3.5, vmax: 1200.25, stretchKind: kind, invert, shadow: 0, midtone: 0.5 };
+        const noData = invert ? 255 : 0;
+        for (const v of [0, -0]) {
+          expect(transferByte(v, t)).toBe(noData);
+          expect(shaderByte(v, t)).toBe(noData);
+        }
+      }
+    }
+  });
+  it("keeps tiny non-zero and negative values as data", () => {
+    const t: DisplayTransfer = { ...BASE, vmin: -3.5, vmax: 1200.25, stretchKind: 1 };
+    expect(transferByte(1e-30, t)).toBe(1);
+    expect(transferByte(-1e-30, t)).toBe(1);
+    expect(transferByte(-3.5, t)).toBe(0);
+    expect(transferByte(-3.5, { ...t, invert: true })).toBe(255);
+    expect(isPaddingValue(-2)).toBe(false);
+    expect(isPaddingValue(1e-30)).toBe(false);
+    for (const v of [0, -0, NaN, Infinity, -Infinity]) expect(isPaddingValue(v)).toBe(true);
+  });
 });
 
 describe("MTF kind", () => {
@@ -174,9 +207,9 @@ describe("lutIndex", () => {
     expect(lutIndex(1, true)).toBe(0);
     expect(lutIndex(0, true)).toBe(255);
   });
-  it("maps NaN to 0 even when inverted", () => {
+  it("maps NaN to index 0 and then applies the inversion", () => {
     expect(lutIndex(NaN, false)).toBe(0);
-    expect(lutIndex(NaN, true)).toBe(0);
+    expect(lutIndex(NaN, true)).toBe(255);
   });
 });
 
@@ -252,7 +285,36 @@ describe("toDisplayTransfer", () => {
   });
 });
 
+describe("resolveTransferLimits", () => {
+  const raw = { min: 0.02, max: 60000 };
+  const masked = { data_min: 0.02, data_max: 900 };
+  it("normalises mtf against the histogram range of the displayed image, not the unmasked raw extrema", () => {
+    expect(resolveTransferLimits("mtf", null, raw, masked)).toEqual({ vmin: 0.02, vmax: 900 });
+  });
+  it("falls back to the raw extrema when no histogram matches the displayed image", () => {
+    expect(resolveTransferLimits("mtf", null, raw, null)).toEqual({ vmin: 0.02, vmax: 60000 });
+    expect(resolveTransferLimits("mtf", null, null, null)).toEqual({ vmin: 0, vmax: 1 });
+  });
+  it("ignores a degenerate or non-finite histogram range", () => {
+    expect(resolveTransferLimits("mtf", null, raw, { data_min: 5, data_max: 5 })).toEqual({ vmin: 0.02, vmax: 60000 });
+    expect(resolveTransferLimits("mtf", null, raw, { data_min: NaN, data_max: 5 })).toEqual({ vmin: 0.02, vmax: 60000 });
+  });
+  it("uses the scale limits for every other stretch, with the data range as fallback", () => {
+    expect(resolveTransferLimits("linear", { vmin: 1, vmax: 2 }, raw, masked)).toEqual({ vmin: 1, vmax: 2 });
+    expect(resolveTransferLimits("asinh", null, raw, masked)).toEqual({ vmin: 0.02, vmax: 900 });
+  });
+});
+
 describe("WGSL fragment port parity", () => {
+  it("matches transferByte on padding pixels with and without invert", () => {
+    for (const kind of [0, 1, 2, 3, 4, 5] as const) {
+      for (const invert of [false, true]) {
+        for (const v of [NaN, Infinity, -Infinity, 0, -0]) {
+          expect(shaderByte(v, withKind(kind, invert))).toBe(transferByte(v, withKind(kind, invert)));
+        }
+      }
+    }
+  });
   it("matches the CPU chain byte-exactly on the golden vectors", () => {
     for (const name of Object.keys(GOLDEN) as (keyof typeof GOLDEN)[]) {
       const t = withKind(STRETCH_KIND[name]);

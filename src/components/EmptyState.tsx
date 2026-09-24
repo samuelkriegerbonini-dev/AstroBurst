@@ -1,11 +1,12 @@
 import { Telescope, Upload, FolderOpen } from "lucide-react";
+import { SUPPORTED_EXTENSIONS } from "../utils/validation";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
   onSelectFolder: () => void;
 }
 
-const FORMAT_BADGES = [".fits", ".fit", ".fts", ".asdf", ".zip"];
+const FORMAT_BADGES = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`);
 
 export default function EmptyState({ onBrowseFiles, onSelectFolder }: EmptyStateProps) {
   const handleBrowse = (e: React.MouseEvent<HTMLButtonElement>) => {

@@ -10,6 +10,7 @@ use astroburst_lib::core::imaging::statistics::{
     RegionNoise,
 };
 use astroburst_lib::core::imaging::stats::{finite_slice_stats, percentile};
+use astroburst_lib::infra::cache::ImageEntry;
 use astroburst_lib::math::sigma_clipped_stats;
 use ndarray::{s, Array2};
 
@@ -18,6 +19,9 @@ use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
 use super::region::{region_values, RegionSpec};
+
+const MAX_SIGMA_CLIP_ITERS: usize = 100;
+const MAX_PERCENTILES: usize = 100;
 
 #[derive(Deserialize)]
 pub struct StatsParams {
@@ -100,15 +104,54 @@ async fn target_ref(session: &Session, explicit: Option<String>) -> Result<Strin
     }
 }
 
+fn bad_param(message: String, hint: &str) -> AppError {
+    AppError::BadRequestWithHint { code: "bad_request", message, hint: Some(hint.into()) }
+}
+
+fn validate_stats_params(params: &StatsParams) -> Result<()> {
+    if let Some(sc) = &params.sigma_clip {
+        if !(1..=MAX_SIGMA_CLIP_ITERS).contains(&sc.maxiters) {
+            return Err(bad_param(
+                format!("sigma_clip.maxiters must be between 1 and {MAX_SIGMA_CLIP_ITERS}, got {}", sc.maxiters),
+                "5 is the default",
+            ));
+        }
+        if !(sc.sigma.is_finite() && sc.sigma > 0.0) {
+            return Err(bad_param(
+                format!("sigma_clip.sigma must be a finite number greater than 0, got {}", sc.sigma),
+                "3.0 is the default",
+            ));
+        }
+    }
+    if params.percentiles.len() > MAX_PERCENTILES {
+        return Err(bad_param(
+            format!("at most {MAX_PERCENTILES} percentiles per request, got {}", params.percentiles.len()),
+            "split the request",
+        ));
+    }
+    if let Some(p) = params.percentiles.iter().find(|p| !(p.is_finite() && (0.0..=100.0).contains(*p))) {
+        return Err(bad_param(format!("percentile {p} is outside 0..100"), "percentiles are given in percent"));
+    }
+    Ok(())
+}
+
 pub async fn stats(
     SessionExtractor(session): SessionExtractor,
-    Json(params): Json<StatsParams>,
+    Json(mut params): Json<StatsParams>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, params.image_ref).await?;
+    validate_stats_params(&params)?;
+    let target = target_ref(&session, params.image_ref.take()).await?;
     let entry = session
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
+    tokio::task::spawn_blocking(move || stats_body(&entry, target, &params))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
+        .map(Json)
+}
+
+fn stats_body(entry: &ImageEntry, target: String, params: &StatsParams) -> Result<Value> {
     let arr = entry.arr();
     let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
@@ -159,11 +202,7 @@ pub async fn stats(
         let (median, std) = sigma_clipped_stats(&mut vals, sc.sigma, sc.maxiters);
         let n_survivors = vals.len();
         let n_rejected = n_input - n_survivors;
-        let mean = if n_survivors > 0 {
-            vals.iter().map(|&v| v as f64).sum::<f64>() / n_survivors as f64
-        } else {
-            0.0
-        };
+        let mean = (n_survivors > 0).then(|| vals.iter().map(|&v| v as f64).sum::<f64>() / n_survivors as f64);
         body["clipped"] = json!({
             "mean": mean,
             "median": median,
@@ -184,7 +223,7 @@ pub async fn stats(
         body["percentiles"] = json!(results);
     }
 
-    Ok(Json(body))
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -209,9 +248,29 @@ mod tests {
         assert_eq!(s.mad, 2.0);
         assert!((s.sigma - 2.0 * MAD_TO_SIGMA).abs() < 1e-12);
 
-        let legacy = compute_image_stats(&region);
-        assert_eq!(legacy.valid_count, 2);
-        assert_eq!(legacy.min, 2.0);
+        let core = compute_image_stats(&region);
+        assert_eq!(core.valid_count, 4);
+        assert_eq!(core.min, -5.0);
+    }
+
+    #[test]
+    fn sigma_clip_on_an_all_nan_image_reports_no_measurement() {
+        let cache = astroburst_lib::infra::cache::ImageCache::new(4, 1 << 20);
+        let arr = Array2::from_elem((3, 3), f32::NAN);
+        let stats = compute_image_stats(&arr);
+        cache.insert_synthetic("all-nan", std::sync::Arc::new(arr), stats);
+        let entry = cache.get("all-nan").unwrap();
+        let params = StatsParams {
+            image_ref: None,
+            region: None,
+            sigma_clip: Some(SigmaClipParams { sigma: 3.0, maxiters: 5 }),
+            percentiles: Vec::new(),
+            noise: false,
+        };
+
+        let body = stats_body(&entry, "all-nan".into(), &params).unwrap();
+
+        assert_eq!(body["clipped"], json!({ "mean": null, "median": null, "std": null, "n_rejected": 0 }));
     }
 
     #[test]

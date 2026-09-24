@@ -5,14 +5,15 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::cutout::{
-    cut_plane_within, fraction_on_image, reported_ltv, shift_header, CutoutError, CutoutRect, CutoutRequest,
+    box_pixel_rect, cut_plane_within, fraction_on_image, reported_ltv, shift_header, CutoutError, CutoutRect,
+    CutoutRequest,
 };
 use astroburst_lib::core::imaging::region::RegionShape;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::infra::cache::PlaneLoad;
 use astroburst_lib::types::header::HduHeader;
 
-use super::images::{load_replacing, register_and_respond};
+use super::images::{finite_stats_json, load_replacing, register_and_respond};
 use super::region::{pixel_shape, RegionSpec};
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -62,13 +63,20 @@ fn cutout_request(
             CutoutRequest::Pixel { x0: *x, y0: *y, width: *width, height: *height }
         }
         RegionSpec::Shape(spec) => {
-            let b = pixel_shape(spec, img_w, img_h, wcs)?.bounds();
-            CutoutRequest::Pixel {
-                x0: b.x0,
-                y0: b.y0,
-                width: (b.x1 - b.x0 + 1).max(1) as usize,
-                height: (b.y1 - b.y0 + 1).max(1) as usize,
-            }
+            let shape = pixel_shape(spec, img_w, img_h, wcs)?;
+            let rect = match box_pixel_rect(&shape) {
+                Some(region_rect) => region_rect.rect,
+                None => {
+                    let b = shape.bounds();
+                    CutoutRect {
+                        x0: b.x0,
+                        y0: b.y0,
+                        width: (b.x1 - b.x0 + 1).max(1) as usize,
+                        height: (b.y1 - b.y0 + 1).max(1) as usize,
+                    }
+                }
+            };
+            CutoutRequest::Pixel { x0: rect.x0, y0: rect.y0, width: rect.width, height: rect.height }
         }
         RegionSpec::Sky { ra, dec, size_arcmin, .. } => {
             let (width_arcmin, height_arcmin) = size_arcmin.wh();
@@ -176,23 +184,27 @@ pub async fn cutout(
     let image_ref = params
         .name
         .clone()
-        .unwrap_or_else(|| session.v2.next_ref("cutout"));
+        .unwrap_or_else(|| session.next_free_ref("cutout"));
 
     let data = entry.data_arc();
     let sess = session.clone();
     let ref_for_load = image_ref.clone();
-    let cutout_entry = tokio::task::spawn_blocking(move || {
+    let (cutout_entry, response_stats) = tokio::task::spawn_blocking(move || {
         load_replacing(&sess.cache, &ref_for_load, || {
             let out = cut_plane_within(&data, &rect, mask_shape.as_ref());
             let stats = compute_image_stats(&out);
             Ok(PlaneLoad::synthetic(out, stats, header))
+        })
+        .map(|entry| {
+            let stats = finite_stats_json(entry.arr());
+            (entry, stats)
         })
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
     .map_err(AppError::Internal)?;
 
-    let mut body = register_and_respond(&session, image_ref.clone(), None, None, &cutout_entry);
+    let mut body = register_and_respond(&session, image_ref.clone(), None, None, &cutout_entry, response_stats);
     attach_cutout_fields(&mut body, &rect, fraction, shape.as_ref(), ltv);
     *session.v2.active_ref.write().await = Some(image_ref);
     Ok(Json(body))
@@ -277,13 +289,30 @@ mod tests {
     }
 
     #[test]
-    fn box_shape_cutout_rect_keeps_the_bounds_contract() {
+    fn box_shape_cutout_rect_matches_the_desktop_pixel_centre_rule() {
         let half_integer: RegionSpec = serde_json::from_str(
             r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6}"#,
         )
         .unwrap();
         let r = resolve_cutout_rect(&half_integer, 40, 40, None, BUDGET).unwrap();
-        assert_eq!((r.x0, r.y0, r.width, r.height), (10, 7, 12, 8));
+        assert_eq!((r.x0, r.y0, r.width, r.height), (11, 8, 10, 6));
+        let desktop = astroburst_lib::core::imaging::cutout::box_pixel_rect(&RegionShape::Box {
+            x: 15.5,
+            y: 10.5,
+            width: 10.0,
+            height: 6.0,
+            angle: 0.0,
+        })
+        .unwrap()
+        .rect;
+        assert_eq!((r.x0, r.y0, r.width, r.height), (desktop.x0, desktop.y0, desktop.width, desktop.height));
+
+        let quarter: RegionSpec = serde_json::from_str(
+            r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6,"angle":90}"#,
+        )
+        .unwrap();
+        let r = resolve_cutout_rect(&quarter, 40, 40, None, BUDGET).unwrap();
+        assert_eq!((r.width, r.height), (6, 10));
 
         let integer_centre: RegionSpec =
             serde_json::from_str(r#"{"type":"shape","shape":"box","x":15,"y":10,"width":10,"height":6}"#).unwrap();

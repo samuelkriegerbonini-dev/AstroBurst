@@ -3,7 +3,6 @@ pub const BLOCK_SIZE: usize = 2880;
 pub const HEADER_NAXIS1: &str = "NAXIS1";
 pub const HEADER_NAXIS2: &str = "NAXIS2";
 
-pub const PADDING_THRESHOLD: f32 = 1e-7;
 pub const MAD_TO_SIGMA: f64 = 1.4826;
 pub const HISTOGRAM_BINS: usize = 65536;
 pub const HISTOGRAM_BINS_DISPLAY: usize = 512;
@@ -15,7 +14,6 @@ pub const MAX_POLY_DEGREE: usize = 5;
 pub const MIN_ITERATIONS: usize = 1;
 pub const MAX_ITERATIONS: usize = 10;
 pub const MODE_DIVIDE: &str = "divide";
-pub const DEFAULT_STEM: &str = "bg";
 
 pub const PROGRESS_EVENT: &str = "background-progress";
 pub const EVENT_DECONV_PROGRESS: &str = "deconv-progress";
@@ -82,13 +80,6 @@ pub const RES_FOV_W_ARCMIN: &str = "field_of_view_w_arcmin";
 pub const RES_FOV_H_ARCMIN: &str = "field_of_view_h_arcmin";
 pub const RES_FOV_ARCMIN: &str = "fov_arcmin";
 pub const RES_WCS_UPDATES: &str = "wcs_updates";
-pub const RES_WCS_PARAMS: &str = "wcs_params";
-pub const RES_WCS_CRPIX1: &str = "crpix1";
-pub const RES_WCS_CRPIX2: &str = "crpix2";
-pub const RES_WCS_CRVAL1: &str = "crval1";
-pub const RES_WCS_CRVAL2: &str = "crval2";
-pub const RES_WCS_CD: &str = "cd";
-pub const RES_WCS_PROJECTION: &str = "projection";
 
 pub const RES_SAMPLE_COUNT: &str = "sample_count";
 pub const RES_RMS_RESIDUAL: &str = "rms_residual";
@@ -116,9 +107,6 @@ pub const RES_HAS_DARK: &str = "has_dark";
 pub const RES_HAS_FLAT: &str = "has_flat";
 
 pub const RES_SCNR_APPLIED: &str = "scnr_applied";
-pub const RES_OFFSET_G: &str = "offset_g";
-pub const RES_OFFSET_B: &str = "offset_b";
-pub const RES_DIMENSION_INFO: &str = "dimension_info";
 
 pub const RES_FRAMES: &str = "frames";
 pub const RES_BITPIX: &str = "bitpix";
@@ -183,7 +171,6 @@ pub const STAGE_SAVE: &str = "save";
 pub const FILE_DRIZZLE_RGB_PNG: &str = "drizzle_rgb.png";
 pub const FILE_DRIZZLE_RGB_FITS: &str = "drizzle_rgb.fits";
 
-pub const RESAMPLED: &str = "resampled";
 pub const LRGB_APPLIED: &str = "lrgb_applied";
 
 pub const COMPOSITE_KEY_R: &str = "__composite_r";
@@ -215,6 +202,7 @@ pub const RES_SOURCE_SIZE_BYTES: &str = "source_size_bytes";
 pub const RES_OUTPUT_SIZE_BYTES: &str = "output_size_bytes";
 pub const RES_DROPPED: &str = "dropped";
 pub const RES_KEPT_RAW: &str = "kept_raw";
+pub const RES_UNCOMPRESSED: &str = "uncompressed";
 pub const RES_COMPRESS: &str = "compress";
 pub const RES_QUANTIZE_LEVEL: &str = "quantize_level";
 pub const RES_APPLY_STF: &str = "apply_stf";
@@ -293,10 +281,7 @@ pub fn wizard_bg_key(bin_id: &str) -> String {
     wizard_cache_key(bin_id, "_bg")
 }
 
-pub const STAR_MASK_KEY: &str = "__star_mask";
-
 pub const RES_CACHE_KEYS: &str = "cache_keys";
-pub const RES_PERSIST_TO_DISK: &str = "persist_to_disk";
 
 pub const RES_STAB_R: &str = "stab_r";
 pub const RES_STAB_G: &str = "stab_g";
@@ -317,9 +302,6 @@ pub const RES_SUBFRAMES: &str = "subframes";
 pub const RES_TOTAL: &str = "total";
 pub const RES_ACCEPTED: &str = "accepted";
 pub const RES_REJECTED: &str = "rejected";
-
-pub const RES_SIP_A: &str = "sip_a";
-pub const RES_SIP_B: &str = "sip_b";
 
 pub const RES_CACHE_KEY: &str = "cache_key";
 pub const RES_METHOD_USED: &str = "method_used";
@@ -373,34 +355,9 @@ pub const CATEGORY_WCS: &str = "wcs";
 pub const CATEGORY_PROCESSING: &str = "processing";
 pub const CATEGORY_OTHER: &str = "other";
 
-pub const FILTER_WAVELENGTHS_NM: &[(&str, u32)] = &[
-    ("HA", 656), ("HALPHA", 656), ("H_ALPHA", 656),
-    ("OIII", 501), ("O3", 501),
-    ("SII", 673), ("S2", 673),
-    ("NII", 658),
-    ("HB", 486), ("HBETA", 486),
-    ("F656N", 656), ("F657N", 657), ("F658N", 658),
-    ("F673N", 673),
-    ("F501N", 501), ("F502N", 501), ("F503N", 503),
-    ("F487N", 487), ("F469N", 469), ("F631N", 631),
-    ("F070W", 700), ("F090W", 900), ("F115W", 1150), ("F140M", 1400),
-    ("F150W", 1500), ("F150W2", 1500), ("F162M", 1620), ("F164N", 1640),
-    ("F182M", 1820), ("F187N", 1870), ("F200W", 2000), ("F210M", 2100),
-    ("F212N", 2120), ("F250M", 2500), ("F277W", 2770), ("F300M", 3000),
-    ("F322W2", 3220), ("F323N", 3230), ("F335M", 3350), ("F356W", 3560),
-    ("F360M", 3600), ("F405N", 4050), ("F410M", 4100), ("F430M", 4300),
-    ("F444W", 4440), ("F460M", 4600), ("F466N", 4660), ("F470N", 4700),
-    ("F480M", 4800),
-    ("F560W", 5600), ("F770W", 7700), ("F1000W", 10000), ("F1130W", 11300),
-    ("F1280W", 12800), ("F1500W", 15000), ("F1800W", 18000), ("F2100W", 21000),
-    ("F2550W", 25500),
-];
-
 pub const RES_VMIN: &str = "vmin";
 pub const RES_VMAX: &str = "vmax";
 pub const RES_ALGORITHM: &str = "algorithm";
-pub const RES_STRETCH: &str = "stretch";
-pub const RES_COLORMAP: &str = "colormap";
 pub const RES_COLORMAPS: &str = "colormaps";
 pub const RES_RGBA: &str = "rgba";
 pub const RES_NAME: &str = "name";

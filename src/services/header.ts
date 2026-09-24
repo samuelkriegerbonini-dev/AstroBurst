@@ -6,8 +6,8 @@ export function getHeader(path: string): Promise<Record<string, string>> {
   return typedInvoke<Record<string, string>>("get_header", { path });
 }
 
-export function getFullHeader(path: string): Promise<HeaderData> {
-  return typedInvoke<HeaderData>("get_full_header", { path });
+export function getFullHeader(path: string, palette?: string): Promise<HeaderData> {
+  return typedInvoke<HeaderData>("get_full_header", { path, palette: palette ?? null });
 }
 
 export interface FitsExtension {
@@ -39,22 +39,37 @@ export function getHeaderByHdu(path: string, hduIndex: number): Promise<HduRawHe
   return typedInvoke<HduRawHeader>("get_header_by_hdu", { path, hduIndex });
 }
 
+export type DetectionConfidence = "High" | "Medium" | "Low";
+
 export interface NarrowbandFilterDetection {
   path: string;
   filter: string | null;
   hubble_channel?: string | null;
-  confidence?: number;
+  confidence?: DetectionConfidence;
   matched_keyword?: string;
   matched_value?: string;
+}
+
+export interface SuggestedChannelDetection {
+  filter: string;
+  confidence: DetectionConfidence;
+  matched_keyword: string;
+  matched_value: string;
+}
+
+export interface NarrowbandChannelSuggestion {
+  file_path: string;
+  file_name: string;
+  detection: SuggestedChannelDetection | null;
 }
 
 export interface NarrowbandDetection {
   filters: NarrowbandFilterDetection[];
   palette: {
-    r_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;
-    g_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;
-    b_file: { file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null } | null;
-    unmapped: Array<{ file_path: string; file_name: string; detection: { filter_name: string; method: string; confidence: number } | null }>;
+    r_file: NarrowbandChannelSuggestion | null;
+    g_file: NarrowbandChannelSuggestion | null;
+    b_file: NarrowbandChannelSuggestion | null;
+    unmapped: NarrowbandChannelSuggestion[];
     is_complete: boolean;
     palette_name: string;
   };

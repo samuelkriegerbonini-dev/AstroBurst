@@ -1,6 +1,7 @@
 import { memo, useCallback, useState } from "react";
 import { Shapes, FileUp, FileDown, Trash2, Loader2 } from "lucide-react";
 import type { Region, RegionStatsEntry, RegionSystem } from "../../shared/types";
+import { REGION_SYSTEMS } from "../../shared/types/regions";
 import { importRegions, exportRegions, toWire } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionStats } from "../../hooks/useRegionStats";
@@ -9,12 +10,13 @@ import { normalizeProps } from "../../utils/regionPersistence";
 import { shapeSummary, isRegionShape } from "../../utils/regionGeometry";
 import { useDqContext } from "../../context/PreviewContext";
 import { generateId } from "../../utils/format";
+import MeasurementBadge from "../analysis/MeasurementBadge";
 
 interface RegionsPanelProps {
   filePath: string | null;
+  measurePath: string | null;
 }
 
-const SYSTEMS: RegionSystem[] = ["image", "fk5", "icrs"];
 const DEFAULT_SWATCH = "#7dd3fc";
 
 function fileStem(path: string): string {
@@ -129,10 +131,10 @@ function RegionRow({
   );
 }
 
-function RegionsPanel({ filePath }: RegionsPanelProps) {
+function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
-  const { stats, loading, error: statsError } = useRegionStats(filePath, doc.regions, excludeDq);
+  const { stats, loading, error: statsError } = useRegionStats(measurePath, doc.regions, excludeDq);
   const [system, setSystem] = useState<RegionSystem>("image");
   const [busy, setBusy] = useState(false);
   const [ioError, setIoError] = useState<string | null>(null);
@@ -222,6 +224,7 @@ function RegionsPanel({ filePath }: RegionsPanelProps) {
           <Shapes size={12} className="text-sky-400" />
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Regions</span>
           <span className="text-[9px] text-zinc-600 font-mono">{doc.regions.length}</span>
+          {doc.regions.length > 0 && <MeasurementBadge />}
           {excludeDq && <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">DQ masked</span>}
         </div>
         <div className="flex items-center gap-1">
@@ -233,7 +236,7 @@ function RegionsPanel({ filePath }: RegionsPanelProps) {
             aria-label="Coordinate system for export"
             title="Coordinate system for export"
           >
-            {SYSTEMS.map((s) => (
+            {REGION_SYSTEMS.map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>

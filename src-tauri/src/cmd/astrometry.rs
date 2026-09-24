@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, image_ref, source_path};
 use crate::core::astrometry::frames::{convert_from_icrs, SkyFrame};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
-use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
+use crate::core::astrometry::wcs::{angular_separation, pixel_center, pixel_edge_corners, WcsTransform};
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::image_source::{load_plane, load_plane_header};
@@ -13,6 +13,7 @@ use crate::types::constants::{
     RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
     RES_PIXEL_SCALE_ARCSEC, RES_POINTS,
 };
+use crate::types::config::AppConfig;
 
 const MAX_UPLOAD_DIM: usize = 2048;
 
@@ -62,10 +63,11 @@ fn load_wcs_with_dims_cached(path: &str) -> anyhow::Result<CachedWcs> {
     }
 
     let header = load_plane_header(&image_ref(path))?;
+    let (naxis1, naxis2) = image_dims(&header);
     let cached = CachedWcs {
         wcs: std::sync::Arc::new(WcsTransform::from_header(&header)?),
-        naxis1: header.get_i64(HEADER_NAXIS1).unwrap_or(0).max(0) as usize,
-        naxis2: header.get_i64(HEADER_NAXIS2).unwrap_or(0).max(0) as usize,
+        naxis1,
+        naxis2,
     };
 
     if let Some(st) = stamp {
@@ -113,6 +115,20 @@ fn load_grid_cached(path: &str, frame: SkyFrame, density: u8) -> anyhow::Result<
     Ok(grid)
 }
 
+fn plate_solve_timeout(loaded: anyhow::Result<AppConfig>) -> anyhow::Result<u64> {
+    let secs = match loaded {
+        Ok(cfg) => cfg.plate_solve_timeout_secs,
+        Err(e) => {
+            log::warn!("config unavailable ({:#}); using the default plate-solve timeout", e);
+            AppConfig::default().plate_solve_timeout_secs
+        }
+    };
+    if secs == 0 {
+        anyhow::bail!("the plate-solve timeout is 0 seconds; set it to at least 1 second in Settings");
+    }
+    Ok(secs)
+}
+
 fn resolve_api_key(provided: Option<String>) -> Option<String> {
     if let Some(ref k) = provided {
         if !k.is_empty() {
@@ -134,7 +150,7 @@ pub async fn plate_solve_cmd(
     center_dec: Option<f64>,
     radius: Option<f64>,
 ) -> Result<serde_json::Value, String> {
-    let (upload_path, _tmp, _tmp_ds, stars, width, height, ds_factor, cfg) = tokio::task::spawn_blocking(
+    let (upload_path, _tmp, _tmp_ds, upload_dims, original_dims, ds_factor, cfg) = tokio::task::spawn_blocking(
         move || -> anyhow::Result<_> {
             let resolved_key = resolve_api_key(api_key);
 
@@ -143,13 +159,7 @@ pub async fn plate_solve_cmd(
             let loaded = load_plane(&r)?;
             let (image, header) = (loaded.arr, loaded.header);
 
-            let naxis1 = header.get_i64(HEADER_NAXIS1).unwrap_or(0) as usize;
-            let naxis2 = header.get_i64(HEADER_NAXIS2).unwrap_or(0) as usize;
-
-            let detection = crate::core::analysis::star_detection::detect_stars(
-                &image,
-                5.0,
-            );
+            let (naxis2, naxis1) = image.dim();
 
             let target_dims: Option<(usize, usize)> = if let Some(f) = downsample_factor.filter(|&f| f > 1) {
                 let ds_cols = (naxis1 / f as usize).max(1);
@@ -158,14 +168,14 @@ pub async fn plate_solve_cmd(
             } else if naxis1 > MAX_UPLOAD_DIM || naxis2 > MAX_UPLOAD_DIM {
                 let scale = MAX_UPLOAD_DIM as f64 / naxis1.max(naxis2) as f64;
                 Some((
-                    (naxis2 as f64 * scale).round() as usize,
-                    (naxis1 as f64 * scale).round() as usize,
+                    ((naxis2 as f64 * scale).round() as usize).max(1),
+                    ((naxis1 as f64 * scale).round() as usize).max(1),
                 ))
             } else {
                 None
             };
 
-            let (upload_fits, tmp_ds, ds_factor) = if let Some((ds_rows, ds_cols)) = target_dims {
+            let (upload_fits, tmp_ds, ds_factor, upload_dims) = if let Some((ds_rows, ds_cols)) = target_dims {
                 log::info!(
                     "Plate solve: downsampling {}x{} to {}x{} for upload",
                     naxis1, naxis2, ds_cols, ds_rows
@@ -188,16 +198,16 @@ pub async fn plate_solve_cmd(
 
                 let fx = naxis1 as f64 / ds_cols as f64;
                 let fy = naxis2 as f64 / ds_rows as f64;
-                (tmp_path, Some(tmp_file), Some((fx, fy)))
+                (tmp_path, Some(tmp_file), Some((fx, fy)), (ds_cols, ds_rows))
             } else if r.is_auto() {
-                (resolved_path.to_string_lossy().to_string(), None, None)
+                (resolved_path.to_string_lossy().to_string(), None, None, (naxis1, naxis2))
             } else {
                 let tmp_file = tempfile::Builder::new()
                     .suffix(".fits")
                     .tempfile()?;
                 let tmp_path = tmp_file.path().to_string_lossy().to_string();
                 crate::infra::fits::writer::write_fits_mono(&tmp_path, &image, Some(&header))?;
-                (tmp_path, Some(tmp_file), None)
+                (tmp_path, Some(tmp_file), None, (naxis1, naxis2))
             };
 
             let is_pixel_scale = scale_units.as_deref().map_or(true, |u| u.contains("pix"));
@@ -216,12 +226,10 @@ pub async fn plate_solve_cmd(
                 scale_low: scale_lower.map(|v| v * hint_scale),
                 scale_high: scale_upper.map(|v| v * hint_scale),
                 scale_units,
-                max_stars: config::load_config()
-                    .map(|c| Some(c.plate_solve_max_stars))
-                    .unwrap_or(Some(100)),
+                timeout_secs: plate_solve_timeout(config::load_config())?,
             };
 
-            Ok((upload_fits, tmp, tmp_ds, detection.stars, naxis1, naxis2, ds_factor, cfg))
+            Ok((upload_fits, tmp, tmp_ds, upload_dims, (naxis1, naxis2), ds_factor, cfg))
         },
     )
         .await
@@ -231,13 +239,13 @@ pub async fn plate_solve_cmd(
     #[cfg(feature = "astrometry-net")]
     {
         let mut solve_result = crate::infra::astrometry::plate_solve::solve_astrometry_net(
-            &upload_path, &stars, width, height, &cfg,
+            &upload_path, upload_dims.0, upload_dims.1, &cfg,
         )
             .await
             .map_err(|e| e.to_string())?;
 
         if let Some((fx, fy)) = ds_factor {
-            rescale_solve_to_original(&mut solve_result, fx, fy, width, height);
+            rescale_solve_to_original(&mut solve_result, fx, fy, original_dims.0, original_dims.1);
         }
 
         drop((_tmp, _tmp_ds));
@@ -246,7 +254,7 @@ pub async fn plate_solve_cmd(
 
     #[cfg(not(feature = "astrometry-net"))]
     {
-        drop((_tmp, _tmp_ds, upload_path, stars, width, height, ds_factor, cfg));
+        drop((_tmp, _tmp_ds, upload_path, upload_dims, original_dims, ds_factor, cfg));
         let result = crate::infra::astrometry::plate_solve::solve_offline_placeholder()
             .map_err(|e| e.to_string())?;
         serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -266,38 +274,6 @@ fn rescale_solve_to_original(
     result.field_w_arcmin = result.pixel_scale * width as f64 / 60.0;
     result.field_h_arcmin = result.pixel_scale * height as f64 / 60.0;
 
-    result
-        .wcs_headers
-        .retain(|k, _| !["A_", "B_", "AP_", "BP_"].iter().any(|p| k.starts_with(p)));
-
-    let mut updates: Vec<(String, String)> = Vec::new();
-    for (key, value) in &result.wcs_headers {
-        match key.as_str() {
-            "CRPIX1" | "CRPIX2" | "CD1_1" | "CD1_2" | "CD2_1" | "CD2_2" | "CDELT1" | "CDELT2" => {
-                if let Ok(num) = value.trim().parse::<f64>() {
-                    let scaled = match key.as_str() {
-                        "CRPIX1" => fx * (num - 0.5) + 0.5,
-                        "CRPIX2" => fy * (num - 0.5) + 0.5,
-                        "CD1_1" | "CD2_1" | "CDELT1" => num / fx,
-                        _ => num / fy,
-                    };
-                    updates.push((key.clone(), format!("{:.12E}", scaled)));
-                }
-            }
-            "IMAGEW" => updates.push((key.clone(), width.to_string())),
-            "IMAGEH" => updates.push((key.clone(), height.to_string())),
-            "CTYPE1" | "CTYPE2" => {
-                if value.contains("-SIP") {
-                    updates.push((key.clone(), value.replace("-SIP", "")));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (key, value) in updates {
-        result.wcs_headers.insert(key, value);
-    }
-
     for ann in &mut result.annotations {
         ann.pixelx = fx * (ann.pixelx - 0.5) + 0.5;
         ann.pixely = fy * (ann.pixely - 0.5) + 0.5;
@@ -307,22 +283,35 @@ fn rescale_solve_to_original(
     }
 }
 
+fn image_dims(header: &crate::types::header::HduHeader) -> (usize, usize) {
+    let compressed = header
+        .get("ZIMAGE")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("T"));
+    let (key1, key2) = if compressed {
+        ("ZNAXIS1", "ZNAXIS2")
+    } else {
+        (HEADER_NAXIS1, HEADER_NAXIS2)
+    };
+    let dim = |key: &str| {
+        header
+            .get_i64(key)
+            .filter(|n| *n > 0)
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    (dim(key1), dim(key2))
+}
+
 #[tauri::command]
 pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let (header, wcs) = load_header_and_wcs(&path)?;
-        let naxis1 = header.get_i64(HEADER_NAXIS1).unwrap_or(0) as usize;
-        let naxis2 = header.get_i64(HEADER_NAXIS2).unwrap_or(0) as usize;
+        let (naxis1, naxis2) = image_dims(&header);
         let pixel_scale = wcs.pixel_scale_arcsec();
         let (fov_w, fov_h) = wcs.field_of_view(naxis1, naxis2);
-        let center = wcs.pixel_to_world(naxis1 as f64 / 2.0, naxis2 as f64 / 2.0);
+        let (cx, cy) = pixel_center(naxis1, naxis2);
+        let center = wcs.pixel_to_world(cx, cy);
 
-        // Per-pixel wcs_params (crpix/crval/cd/projection/sip) used to be emitted
-        // here so the frontend could do its own pix->sky math client-side
-        // (src/utils/wcstransform.ts). That TS twin is retired in favor of the
-        // `pixel_to_world_cmd` IPC command, which drives the real engine (full
-        // projection coverage, not just TAN/SIN/ARC/CAR) -- so this endpoint now
-        // only reports the static summary fields.
         Ok(json!({
             RES_CENTER_RA: center.ra,
             RES_CENTER_DEC: center.dec,
@@ -389,31 +378,24 @@ struct SkyFootprint {
 
 fn sky_footprint(path: &str) -> anyhow::Result<SkyFootprint> {
     let (header, wcs) = load_header_and_wcs(path)?;
-    let n1 = header.get_i64(HEADER_NAXIS1).unwrap_or(0);
-    let n2 = header.get_i64(HEADER_NAXIS2).unwrap_or(0);
-    if n1 <= 0 || n2 <= 0 {
+    let (n1, n2) = image_dims(&header);
+    if n1 == 0 || n2 == 0 {
         anyhow::bail!("Missing NAXIS1/NAXIS2 in header");
     }
-    let (w, h) = (n1 as f64, n2 as f64);
-    let pts = [
-        (0.0, 0.0),
-        (w - 1.0, 0.0),
-        (w - 1.0, h - 1.0),
-        (0.0, h - 1.0),
-    ];
     let mut corners = [(0.0f64, 0.0f64); 4];
-    for (i, &(x, y)) in pts.iter().enumerate() {
+    for (i, &(x, y)) in pixel_edge_corners(n1, n2).iter().enumerate() {
         let c = wcs.pixel_to_world(x, y);
         if !c.ra.is_finite() || !c.dec.is_finite() {
             anyhow::bail!("Image corner does not project to a valid sky position");
         }
         corners[i] = (c.ra, c.dec);
     }
-    let center = wcs.pixel_to_world(w / 2.0, h / 2.0);
+    let (cx, cy) = pixel_center(n1, n2);
+    let center = wcs.pixel_to_world(cx, cy);
     if !center.ra.is_finite() || !center.dec.is_finite() {
         anyhow::bail!("Image center does not project to a valid sky position");
     }
-    let (fov_w, fov_h) = wcs.field_of_view(n1 as usize, n2 as usize);
+    let (fov_w, fov_h) = wcs.field_of_view(n1, n2);
     Ok(SkyFootprint {
         center_ra: center.ra,
         center_dec: center.dec,
@@ -536,7 +518,11 @@ pub async fn check_pointing_overlap_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::{footprint_overlap_fraction, load_grid_cached, wrap180, SkyFootprint};
+    use super::{
+        footprint_overlap_fraction, image_dims, load_grid_cached, load_wcs_with_dims_cached, plate_solve_timeout,
+        sky_footprint, wrap180, SkyFootprint,
+    };
+    use crate::types::config::AppConfig;
     use crate::core::astrometry::frames::SkyFrame;
     use crate::core::astrometry::grid::{DEFAULT_DENSITY, MAX_DENSITY};
     use crate::core::imaging::region::test_support::{make_header, north_up_cd, wcs_cards};
@@ -547,6 +533,77 @@ mod tests {
         let header = make_header(&pairs);
         let arr = ndarray::Array2::<f32>::zeros((size, size));
         crate::infra::fits::writer::write_fits_mono(path, &arr, Some(&header)).unwrap();
+    }
+
+    fn north_up_wcs_header() -> crate::types::header::HduHeader {
+        let cards = wcs_cards(north_up_cd());
+        let pairs: Vec<(&str, &str)> = cards
+            .iter()
+            .filter(|(k, _)| !k.starts_with("NAXIS"))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        make_header(&pairs)
+    }
+
+    #[test]
+    fn tile_compressed_images_use_their_decompressed_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rice.fits").to_string_lossy().to_string();
+        let arr = ndarray::Array2::<f32>::from_shape_fn((30, 40), |(r, c)| (r * 40 + c) as f32);
+        crate::infra::fits::writer::write_fits_mono_rice(&path, &arr, Some(&north_up_wcs_header()), 16, 0.0).unwrap();
+
+        let cached = load_wcs_with_dims_cached(&path).unwrap();
+        assert_eq!((cached.naxis1, cached.naxis2), (40, 30));
+        let footprint = sky_footprint(&path).unwrap();
+        assert!((footprint.fov_w_arcmin - 40.0 / 60.0).abs() < 1e-9, "fov_w {}", footprint.fov_w_arcmin);
+        assert!((footprint.fov_h_arcmin - 30.0 / 60.0).abs() < 1e-9, "fov_h {}", footprint.fov_h_arcmin);
+
+        let plain = make_header(&[("NAXIS1", "64"), ("NAXIS2", "32")]);
+        assert_eq!(image_dims(&plain), (64, 32));
+        let table = make_header(&[("XTENSION", "BINTABLE"), ("ZIMAGE", "T"), ("NAXIS1", "8"), ("NAXIS2", "23"), ("ZNAXIS1", "37"), ("ZNAXIS2", "23")]);
+        assert_eq!(image_dims(&table), (37, 23));
+        assert_eq!(image_dims(&make_header(&[("NAXIS1", "-4")])), (0, 0));
+    }
+
+    #[test]
+    fn footprint_centre_and_corners_use_pixel_centres_and_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("footprint.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+
+        let fp = sky_footprint(&path).unwrap();
+        assert!((fp.center_ra - 150.0).abs() < 1e-9 && (fp.center_dec - 2.0).abs() < 1e-9, "({}, {})", fp.center_ra, fp.center_dec);
+        let height_arcsec = (fp.corners[2].1 - fp.corners[1].1) * 3600.0;
+        assert!((height_arcsec - 100.0).abs() < 1e-4, "footprint spans {height_arcsec} arcsec");
+    }
+
+    #[cfg(feature = "astrometry-net")]
+    #[test]
+    fn rescale_maps_an_upload_space_solution_to_the_original_frame() {
+        use crate::infra::astrometry::plate_solve::{FieldAnnotation, SolveResult};
+        let mut result = SolveResult {
+            ra_center: 10.0,
+            dec_center: 20.0,
+            orientation: 30.0,
+            pixel_scale: 2.0,
+            field_w_arcmin: 2.0 * 2048.0 / 60.0,
+            field_h_arcmin: 2.0 * 1024.0 / 60.0,
+            annotations: vec![FieldAnnotation {
+                kind: "ngc".into(),
+                names: vec!["NGC 1".into()],
+                pixelx: 1024.5,
+                pixely: 512.5,
+                radius: Some(10.0),
+            }],
+        };
+        super::rescale_solve_to_original(&mut result, 2.0, 2.0, 4096, 2048);
+        assert!((result.pixel_scale - 1.0).abs() < 1e-12);
+        assert!((result.field_w_arcmin - 4096.0 / 60.0).abs() < 1e-9);
+        assert!((result.field_h_arcmin - 2048.0 / 60.0).abs() < 1e-9);
+        let ann = &result.annotations[0];
+        assert!((ann.pixelx - 2048.5).abs() < 1e-12 && (ann.pixely - 1024.5).abs() < 1e-12);
+        assert_eq!(ann.radius, Some(20.0));
+        assert_eq!((result.ra_center, result.dec_center, result.orientation), (10.0, 20.0, 30.0));
     }
 
     #[test]
@@ -596,6 +653,17 @@ mod tests {
             fov_w_arcmin: size_deg * 60.0,
             fov_h_arcmin: size_deg * 60.0,
         }
+    }
+
+    #[test]
+    fn plate_solve_uses_the_configured_timeout_and_refuses_zero() {
+        let configured = AppConfig { plate_solve_timeout_secs: 45, ..AppConfig::default() };
+        assert_eq!(plate_solve_timeout(Ok(configured)).unwrap(), 45);
+        let fallback = plate_solve_timeout(Err(anyhow::anyhow!("unreadable config.json"))).unwrap();
+        assert_eq!(fallback, AppConfig::default().plate_solve_timeout_secs);
+        let zero = AppConfig { plate_solve_timeout_secs: 0, ..AppConfig::default() };
+        let err = plate_solve_timeout(Ok(zero)).unwrap_err().to_string();
+        assert!(err.contains("at least 1 second"), "{err}");
     }
 
     #[test]

@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
 use anyhow::{bail, Context, Result};
 use memmap2::{Mmap, MmapOptions};
-use ndarray::{Array2, Array3};
+use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::types::constants::BLOCK_SIZE;
+use crate::types::header::{is_commentary_key, parse_fits_float, MAX_FITS_AXES};
 use crate::types::image::IntPlane;
 use crate::types::{HduHeader, ImageRef, PlaneSelector};
 
@@ -22,11 +23,16 @@ pub fn create_mmap_random(file: &File) -> Result<Mmap> {
     Ok(mmap)
 }
 
-#[inline]
-fn scaling(header: &HduHeader) -> (f64, f64) {
-    let bzero = header.get_f64("BZERO").unwrap_or(0.0);
-    let bscale = header.get_f64("BSCALE").unwrap_or(1.0);
-    (bzero, bscale)
+fn scale_card(header: &HduHeader, key: &str, default: f64) -> Result<f64> {
+    match header.get(key).map(str::trim).filter(|raw| !raw.is_empty()) {
+        None => Ok(default),
+        Some(raw) => parse_fits_float(raw)
+            .with_context(|| format!("{key} = '{raw}' is not a number; the pixel values cannot be scaled")),
+    }
+}
+
+fn scaling(header: &HduHeader) -> Result<(f64, f64)> {
+    Ok((scale_card(header, "BZERO", 0.0)?, scale_card(header, "BSCALE", 1.0)?))
 }
 
 #[inline]
@@ -149,8 +155,15 @@ pub fn decode_pixels_int(data: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> R
         bail!("scaled integer data (BSCALE={}, BZERO={})", bscale, bzero);
     }
     match bitpix {
+        8 if bzero < 0.0 => {
+            if bzero < i32::MIN as f64 {
+                bail!("BZERO {} out of range for BITPIX 8", bzero);
+            }
+            let off = bzero as i32;
+            Ok(IntPixels::I32(data.par_iter().map(|&b| b as i32 + off).collect()))
+        }
         8 => {
-            if bzero < 0.0 || bzero > u32::MAX as f64 {
+            if bzero > u32::MAX as f64 {
                 bail!("BZERO {} out of range for BITPIX 8", bzero);
             }
             let off = bzero as u32;
@@ -262,7 +275,7 @@ pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPl
     if data_end > mmap.len() {
         bail!("Image data exceeds file size");
     }
-    let (bzero, bscale) = scaling(h);
+    let (bzero, bscale) = scaling(h)?;
     let px = decode_pixels_int(&mmap[hdu.info.data_start..data_end], bitpix, bscale, bzero)?;
     int_pixels_to_plane(px, naxis2, naxis1)
 }
@@ -272,7 +285,7 @@ pub fn auto_hdu_index(file: &File) -> Result<usize> {
     if hdus.is_empty() {
         bail!("No HDUs found in FITS file");
     }
-    select_best_image_hdu(&hdus).with_context(|| no_image_hdu_error(&hdus))
+    select_auto_image_hdu(&hdus)
 }
 
 pub fn extract_header_by_index_merged(file: &File, hdu_index: usize) -> Result<HduHeader> {
@@ -281,37 +294,6 @@ pub fn extract_header_by_index_merged(file: &File, hdu_index: usize) -> Result<H
         bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
     }
     Ok(build_merged_header(&hdus, hdu_index))
-}
-
-pub fn decode_single_pixel(raw: &[u8], bitpix: i64, bscale: f64, bzero: f64) -> f32 {
-    match bitpix {
-        8 => (raw[0] as f64 * bscale + bzero) as f32,
-        16 => {
-            let v = i16::from_be_bytes([raw[0], raw[1]]);
-            (v as f64 * bscale + bzero) as f32
-        }
-        32 => {
-            let v = i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            (v as f64 * bscale + bzero) as f32
-        }
-        64 => {
-            let v = i64::from_be_bytes([
-                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-            ]);
-            (v as f64 * bscale + bzero) as f32
-        }
-        -32 => {
-            let v = f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            (v as f64 * bscale + bzero) as f32
-        }
-        -64 => {
-            let v = f64::from_be_bytes([
-                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-            ]);
-            (v * bscale + bzero) as f32
-        }
-        _ => 0.0,
-    }
 }
 
 fn extract_header_value(raw: &str) -> String {
@@ -346,53 +328,134 @@ pub struct ParsedHdu {
     pub next_hdu_offset: usize,
 }
 
+enum HeaderCard {
+    Value { key: String, value: String, quoted: bool, continues: bool },
+    Continue { value: String, continues: bool },
+    Commentary { key: String, text: String },
+    Ignored,
+}
+
+fn card_value(raw: &str) -> (String, bool, bool) {
+    let quoted = raw.trim_start().starts_with('\'');
+    let value = extract_header_value(raw);
+    let continues = quoted && value.ends_with('&');
+    (value, quoted, continues)
+}
+
+fn parse_card(card: &[u8]) -> HeaderCard {
+    let keyword = String::from_utf8_lossy(&card[..8]).trim().to_string();
+    let body = String::from_utf8_lossy(&card[8..]);
+    if is_commentary_key(&keyword) {
+        return HeaderCard::Commentary { key: keyword, text: body.trim().to_string() };
+    }
+    match keyword.as_str() {
+        "CONTINUE" if body.trim_start().starts_with('\'') => {
+            let (value, _, continues) = card_value(&body);
+            HeaderCard::Continue { value, continues }
+        }
+        "HIERARCH" => match body.split_once('=') {
+            Some((name, raw)) if !name.trim().is_empty() => {
+                let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (value, quoted, continues) = card_value(raw);
+                HeaderCard::Value { key: format!("HIERARCH {name}"), value, quoted, continues }
+            }
+            _ => HeaderCard::Ignored,
+        },
+        _ if body.starts_with("= ") => {
+            let (value, quoted, continues) = card_value(&body[2..]);
+            HeaderCard::Value { key: keyword, value, quoted, continues }
+        }
+        _ => HeaderCard::Ignored,
+    }
+}
+
+const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
+
+fn reject_gzip(head: &[u8]) -> Result<()> {
+    if head.starts_with(&GZIP_MAGIC) {
+        bail!("gzip-compressed FITS is not supported; decompress first");
+    }
+    Ok(())
+}
+
+fn reject_gzip_file(file: &File) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = file;
+    f.seek(SeekFrom::Start(0)).context("seek to the start of the file failed")?;
+    let mut head = Vec::with_capacity(GZIP_MAGIC.len());
+    f.take(GZIP_MAGIC.len() as u64)
+        .read_to_end(&mut head)
+        .context("reading the start of the file failed")?;
+    reject_gzip(&head)
+}
+
 pub fn parse_header_at(mmap: &[u8], offset: usize) -> Result<ParsedHdu> {
-    let mut cards = Vec::new();
+    if offset == 0 {
+        reject_gzip(mmap)?;
+    }
+    parse_header_blocks(mmap, offset)
+}
+
+fn parse_header_blocks(mmap: &[u8], offset: usize) -> Result<ParsedHdu> {
+    let mut cards: Vec<(String, String)> = Vec::new();
     let mut index = HashMap::new();
+    let mut string_keys = HashSet::new();
+    let mut long_string: Option<usize> = None;
     let mut pos = offset;
     let mut end_found = false;
 
     while !end_found {
-        if pos + BLOCK_SIZE > mmap.len() {
-            bail!("Unexpected end of file while reading header at offset {}", offset);
-        }
-
-        let block = &mmap[pos..pos + BLOCK_SIZE];
+        let block = pos
+            .checked_add(BLOCK_SIZE)
+            .and_then(|end| mmap.get(pos..end))
+            .with_context(|| format!("Unexpected end of file while reading header at offset {}", offset))?;
         pos += BLOCK_SIZE;
 
         for card_bytes in block.chunks_exact(80) {
-            let keyword_bytes = &card_bytes[0..8];
-            let keyword = String::from_utf8_lossy(keyword_bytes).trim().to_string();
-
-            if keyword == "END" {
+            if String::from_utf8_lossy(&card_bytes[..8]).trim() == "END" {
                 end_found = true;
                 break;
             }
 
-            if card_bytes.len() < 10 || &card_bytes[8..10] != b"= " {
-                continue;
+            let open = long_string.take();
+            match parse_card(card_bytes) {
+                HeaderCard::Value { key, value, quoted, continues } => {
+                    long_string = continues.then_some(cards.len());
+                    if quoted {
+                        string_keys.insert(key.clone());
+                    } else {
+                        string_keys.remove(&key);
+                    }
+                    index.insert(key.clone(), value.clone());
+                    cards.push((key, value));
+                }
+                HeaderCard::Continue { value, continues } => {
+                    if let Some((key, text)) = open.and_then(|i| cards.get_mut(i)) {
+                        text.pop();
+                        text.push_str(&value);
+                        index.insert(key.clone(), text.clone());
+                        long_string = open.filter(|_| continues);
+                    }
+                }
+                HeaderCard::Commentary { key, text } => cards.push((key, text)),
+                HeaderCard::Ignored => {}
             }
-
-            let value_raw_bytes = &card_bytes[10..];
-            let value_str = String::from_utf8_lossy(value_raw_bytes);
-
-            let value = extract_header_value(&value_str);
-
-            cards.push((keyword.clone(), value.clone()));
-            index.insert(keyword, value);
         }
     }
 
-    let header = HduHeader { cards, index };
+    let header = HduHeader { cards, index, string_keys: Some(string_keys) };
     let data_start = pos;
-    let data_bytes_padded = header.padded_data_bytes();
-    let next_hdu = data_start + data_bytes_padded;
+    let next_hdu_offset = header
+        .checked_padded_data_bytes()
+        .and_then(|padded| data_start.checked_add(padded).context("data unit end overflows"))
+        .with_context(|| format!("Invalid data unit size in the header at offset {}", offset))?;
 
     Ok(ParsedHdu {
         header,
         header_start: offset,
         data_start,
-        next_hdu_offset: next_hdu,
+        next_hdu_offset,
     })
 }
 
@@ -421,8 +484,6 @@ struct ScannedHdu {
     plane_count: i64,
     is_single_plane_image: bool,
 }
-
-const MAX_FITS_AXES: i64 = 999;
 
 fn declared_plane_count_with_prefix(header: &HduHeader, naxis: i64, prefix: &str) -> i64 {
     (3..=naxis.clamp(0, MAX_FITS_AXES))
@@ -489,6 +550,7 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
     if mmap.is_empty() {
         bail!("File is empty (0 bytes) — the download or copy may have failed");
     }
+    reject_gzip(mmap)?;
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
 
@@ -517,6 +579,9 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
 pub(crate) fn read_header_blocks(file: &File, offset: usize) -> Result<ParsedHdu> {
     use std::io::{Read, Seek, SeekFrom};
 
+    if offset == 0 {
+        reject_gzip_file(file)?;
+    }
     let mut f = file;
     f.seek(SeekFrom::Start(offset as u64))
         .with_context(|| format!("seek to header at offset {offset} failed"))?;
@@ -535,12 +600,17 @@ pub(crate) fn read_header_blocks(file: &File, offset: usize) -> Result<ParsedHdu
         }
     }
 
-    let parsed = parse_header_at(&buf, 0)?;
+    let parsed = parse_header_blocks(&buf, 0)?;
+    let shift = |relative: usize| {
+        offset
+            .checked_add(relative)
+            .with_context(|| format!("HDU offsets overflow in the header at offset {offset}"))
+    };
     Ok(ParsedHdu {
+        data_start: shift(parsed.data_start)?,
+        next_hdu_offset: shift(parsed.next_hdu_offset)?,
         header: parsed.header,
         header_start: offset,
-        data_start: offset + parsed.data_start,
-        next_hdu_offset: offset + parsed.next_hdu_offset,
     })
 }
 
@@ -549,6 +619,7 @@ fn scan_hdu_headers(file: &File) -> Result<Vec<ScannedHdu>> {
     if file_len == 0 {
         bail!("File is empty (0 bytes) — the download or copy may have failed");
     }
+    reject_gzip_file(file)?;
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
 
@@ -601,6 +672,19 @@ fn select_best_image_hdu(hdus: &[ScannedHdu]) -> Option<usize> {
     }
 
     None
+}
+
+fn select_auto_image_hdu(hdus: &[ScannedHdu]) -> Result<usize> {
+    let selected = select_best_image_hdu(hdus).with_context(|| no_image_hdu_error(hdus))?;
+    if let Some(rgb) = select_rgb_cube_hdu(hdus).and_then(|i| hdus.get(i)) {
+        bail!(
+            "{} holds an RGB colour cube, so this file opens as a colour composite and has no single mono image; {} is a separate plane, open it explicitly with #hdu={}",
+            hdu_label(rgb),
+            hdu_label(&hdus[selected]),
+            selected
+        );
+    }
+    Ok(selected)
 }
 
 fn xtension_label(header: &HduHeader) -> &str {
@@ -765,25 +849,62 @@ fn third_axis_is_not_colour(hdu: &ScannedHdu) -> bool {
         || (h.get_f64("CRVAL3").is_some() && h.get_f64("CDELT3").is_some())
 }
 
+fn has_rgb_cube_shape(hdu: &ScannedHdu) -> bool {
+    (hdu.is_image_hdu || hdu.is_compressed)
+        && hdu.info.naxis == 3
+        && (3..=4).contains(&hdu.info.naxis3)
+        && hdu.info.naxis1 > 1
+        && hdu.info.naxis2 > 1
+}
+
+fn is_science_extension(hdu: &ScannedHdu) -> bool {
+    hdu.info
+        .extname
+        .as_deref()
+        .is_some_and(|n| n.trim().eq_ignore_ascii_case("SCI"))
+}
+
 fn select_rgb_cube_hdu(hdus: &[ScannedHdu]) -> Option<usize> {
+    if let Some(marked) = hdus.iter().position(|hdu| has_rgb_cube_shape(hdu) && has_rgb_marker(hdu)) {
+        return Some(marked);
+    }
+    let has_2d_science = hdus.iter().any(|hdu| hdu.is_single_plane_image && is_science_extension(hdu));
+    if has_2d_science {
+        return None;
+    }
+    let has_2d_image = hdus.iter().any(|hdu| hdu.is_single_plane_image);
     hdus.iter().position(|hdu| {
-        (hdu.is_image_hdu || hdu.is_compressed)
-            && hdu.info.naxis == 3
-            && (3..=4).contains(&hdu.info.naxis3)
-            && hdu.info.naxis1 > 1
-            && hdu.info.naxis2 > 1
-            && (has_rgb_marker(hdu) || !third_axis_is_not_colour(hdu))
+        has_rgb_cube_shape(hdu)
+            && !third_axis_is_not_colour(hdu)
+            && (!has_2d_image || hdu.info.index == 0)
     })
 }
 
-fn build_merged_header(hdus: &[ScannedHdu], selected_idx: usize) -> HduHeader {
-    if selected_idx == 0 || hdus.len() == 1 {
-        return hdus[selected_idx].header.clone();
+fn image_view_header(hdu: &ScannedHdu) -> HduHeader {
+    let mut header = hdu.header.clone();
+    if !hdu.is_compressed {
+        return header;
     }
+    let storage_axes = hdu.header.get_i64("NAXIS").unwrap_or(0).clamp(0, MAX_FITS_AXES);
+    let image_axes = hdu.info.naxis.clamp(0, MAX_FITS_AXES);
+    header.set("BITPIX", hdu.info.bitpix.to_string());
+    header.set("NAXIS", image_axes.to_string());
+    for axis in 1..=storage_axes.max(image_axes) {
+        let key = format!("NAXIS{axis}");
+        match hdu.header.get(&format!("ZNAXIS{axis}")).filter(|_| axis <= image_axes) {
+            Some(len) => header.set(&key, len.trim().to_string()),
+            None => header.remove(&key),
+        }
+    }
+    header
+}
 
-    let primary = &hdus[0].header;
-    let extension = &hdus[selected_idx].header;
-    primary.merge_with(extension)
+fn build_merged_header(hdus: &[ScannedHdu], selected_idx: usize) -> HduHeader {
+    let selected = image_view_header(&hdus[selected_idx]);
+    if selected_idx == 0 || hdus.len() == 1 {
+        return selected;
+    }
+    hdus[0].header.merge_with(&selected)
 }
 
 fn extract_image_from_hdu(
@@ -852,7 +973,7 @@ fn decode_hdu_plane(
     }
 
     let raw = &mmap[data_begin..data_end];
-    let (bzero, bscale) = scaling(h);
+    let (bzero, bscale) = scaling(h)?;
     let pixels = decode_pixels_blank(raw, bitpix, bscale, bzero, blank_value(h));
     let image = Array2::from_shape_vec((naxis2, naxis1), pixels)
         .context("Failed to reshape image pixels")?;
@@ -863,15 +984,8 @@ fn decode_hdu_plane(
 pub struct MmapImageResult {
     pub header: HduHeader,
     pub image: Array2<f32>,
-    pub is_mef: bool,
     pub selected_extension: Option<String>,
-    pub extension_count: usize,
     pub extensions: Vec<HduInfo>,
-}
-
-pub struct MmapCubeResult {
-    pub header: HduHeader,
-    pub cube: Array3<f32>,
 }
 
 pub struct MmapRgbResult {
@@ -879,10 +993,6 @@ pub struct MmapRgbResult {
     pub r: Array2<f32>,
     pub g: Array2<f32>,
     pub b: Array2<f32>,
-    pub is_mef: bool,
-    pub selected_extension: Option<String>,
-    pub extension_count: usize,
-    pub extensions: Vec<HduInfo>,
 }
 
 pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
@@ -893,10 +1003,7 @@ pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
         bail!("No HDUs found in FITS file");
     }
 
-    let is_mef = hdus.len() > 1;
-
-    let selected_idx = select_best_image_hdu(&hdus)
-        .with_context(|| no_image_hdu_error(&hdus))?;
+    let selected_idx = select_auto_image_hdu(&hdus)?;
 
     let image = extract_image_from_hdu(&mmap, &hdus[selected_idx])?;
     let header = build_merged_header(&hdus, selected_idx);
@@ -909,22 +1016,15 @@ pub fn extract_image_mmap(file: &File) -> Result<MmapImageResult> {
     };
 
     let extensions: Vec<HduInfo> = hdus.iter().map(|h| h.info.clone()).collect();
-    let extension_count = hdus.len();
 
     Ok(MmapImageResult {
         header,
         image,
-        is_mef,
         selected_extension,
-        extension_count,
         extensions,
     })
 }
 
-/// Same HDU selection as `extract_image_mmap`, but skips `extract_image_from_hdu`
-/// (pixel decode/decompress) entirely -- for callers that only need the merged
-/// header (e.g. a WCS lookup driven by mouse movement, where re-decoding the
-/// whole image on every call would be far too slow).
 pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
     let hdus = scan_hdu_headers(file)?;
 
@@ -932,8 +1032,10 @@ pub fn extract_header_mmap(file: &File) -> Result<HduHeader> {
         bail!("No HDUs found in FITS file");
     }
 
-    let selected_idx = select_best_image_hdu(&hdus)
-        .with_context(|| no_image_hdu_error(&hdus))?;
+    let selected_idx = match select_rgb_cube_hdu(&hdus) {
+        Some(rgb) => rgb,
+        None => select_auto_image_hdu(&hdus)?,
+    };
 
     Ok(build_merged_header(&hdus, selected_idx))
 }
@@ -971,15 +1073,11 @@ pub fn extract_image_mmap_by_index(file: &File, hdu_index: usize) -> Result<Mmap
     };
 
     let extensions: Vec<HduInfo> = hdus.iter().map(|h| h.info.clone()).collect();
-    let is_mef = hdus.len() > 1;
-    let extension_count = hdus.len();
 
     Ok(MmapImageResult {
         header,
         image,
-        is_mef,
         selected_extension,
-        extension_count,
         extensions,
     })
 }
@@ -992,17 +1090,12 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
         bail!("No HDUs found in FITS file");
     }
 
-    let selected_idx = match select_rgb_cube_hdu(&hdus) {
-        Some(i) => i,
-        None => return Ok(None),
+    let Some(hdu) = select_rgb_cube_hdu(&hdus).and_then(|i| hdus.get(i)) else {
+        return Ok(None);
     };
 
-    let hdu = &hdus[selected_idx];
-    let h = &hdu.header;
-    let naxis3 = hdu.info.naxis3;
-
     let (r, g, b) = if hdu.is_compressed {
-        let mut planes = compress::decode_compressed_planes(&mmap, h, hdu.info.data_start)?;
+        let mut planes = compress::decode_compressed_planes(&mmap, &hdu.header, hdu.info.data_start)?;
         if planes.len() < 3 {
             bail!("Compressed RGB HDU decoded {} planes, expected at least 3", planes.len());
         }
@@ -1011,56 +1104,18 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
         let r = planes.swap_remove(0);
         (r, g, b)
     } else {
-        let naxis1 = h.get_i64("NAXIS1").unwrap_or(0) as usize;
-        let naxis2 = h.get_i64("NAXIS2").unwrap_or(0) as usize;
-        let bitpix = h.get_i64("BITPIX").context("Missing BITPIX in RGB HDU")?;
-        let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-        let plane_size = naxis1 * naxis2 * bytes_per_pixel;
-        let total_size = plane_size * naxis3 as usize;
-        let (bzero, bscale) = scaling(h);
-
-        let data_end = hdu.info.data_start + total_size;
-        if data_end > mmap.len() {
-            bail!("RGB data exceeds file size");
-        }
-
-        let base = hdu.info.data_start;
-        let blank = blank_value(h);
-        let r_pixels = decode_pixels_blank(&mmap[base..base + plane_size], bitpix, bscale, bzero, blank);
-        let g_pixels = decode_pixels_blank(&mmap[base + plane_size..base + 2 * plane_size], bitpix, bscale, bzero, blank);
-        let b_pixels = decode_pixels_blank(&mmap[base + 2 * plane_size..base + 3 * plane_size], bitpix, bscale, bzero, blank);
-
-        let r = Array2::from_shape_vec((naxis2, naxis1), r_pixels)
-            .context("Failed to reshape R channel")?;
-        let g = Array2::from_shape_vec((naxis2, naxis1), g_pixels)
-            .context("Failed to reshape G channel")?;
-        let b = Array2::from_shape_vec((naxis2, naxis1), b_pixels)
-            .context("Failed to reshape B channel")?;
-        (r, g, b)
+        (
+            decode_hdu_plane(&mmap, hdu, 0).context("Failed to decode the R channel")?,
+            decode_hdu_plane(&mmap, hdu, 1).context("Failed to decode the G channel")?,
+            decode_hdu_plane(&mmap, hdu, 2).context("Failed to decode the B channel")?,
+        )
     };
-
-    let header = build_merged_header(&hdus, selected_idx);
-    let is_mef = hdus.len() > 1;
-
-    let selected_extension = if selected_idx > 0 {
-        hdus[selected_idx].info.extname.clone()
-            .or_else(|| Some(format!("HDU {}", selected_idx)))
-    } else {
-        None
-    };
-
-    let extensions: Vec<HduInfo> = hdus.iter().map(|h| h.info.clone()).collect();
-    let extension_count = hdus.len();
 
     Ok(Some(MmapRgbResult {
-        header,
+        header: build_merged_header(&hdus, hdu.info.index),
         r,
         g,
         b,
-        is_mef,
-        selected_extension,
-        extension_count,
-        extensions,
     }))
 }
 
@@ -1075,52 +1130,6 @@ pub fn extract_header_by_index(file: &File, hdu_index: usize) -> Result<HduHeade
         bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
     }
     Ok(hdus.swap_remove(hdu_index).header)
-}
-
-pub fn extract_cube_mmap(file: &File) -> Result<MmapCubeResult> {
-    let mmap = read_file_bytes(file)?;
-    let mut offset: usize = 0;
-
-    while offset + BLOCK_SIZE <= mmap.len() {
-        let parsed = parse_header_at(&mmap, offset)?;
-        let header = &parsed.header;
-
-        let naxis = header.get_i64("NAXIS").unwrap_or(0);
-        let naxis3 = header.get_i64("NAXIS3").unwrap_or(0);
-
-        if naxis == 3 && naxis3 > 1 {
-            let naxis1 = header.get_i64("NAXIS1").unwrap_or(0) as usize;
-            let naxis2 = header.get_i64("NAXIS2").unwrap_or(0) as usize;
-            let naxis3 = naxis3 as usize;
-
-            let data_offset = parsed.data_start;
-            let bitpix = header
-                .get_i64("BITPIX")
-                .context("Missing BITPIX in cube HDU")?;
-            let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-            let total_bytes = naxis1 * naxis2 * naxis3 * bytes_per_pixel;
-
-            let data_end = data_offset + total_bytes;
-            if data_end > mmap.len() {
-                bail!("Cube data exceeds file size");
-            }
-
-            let raw = &mmap[data_offset..data_end];
-            let (bzero, bscale) = scaling(header);
-            let pixels = decode_pixels_blank(raw, bitpix, bscale, bzero, blank_value(header));
-            let cube = Array3::from_shape_vec((naxis3, naxis2, naxis1), pixels)
-                .context("Failed to reshape cube pixels")?;
-
-            return Ok(MmapCubeResult {
-                header: parsed.header,
-                cube,
-            });
-        }
-
-        offset = parsed.next_hdu_offset;
-    }
-
-    bail!("No 3D data block found")
 }
 
 pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
@@ -1233,6 +1242,25 @@ pub mod test_fixtures {
         (cards, data)
     }
 
+    pub fn plane_hdu(
+        extname: &'static str,
+        cols: usize,
+        rows: usize,
+    ) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", cols.to_string()),
+            ("NAXIS2", rows.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", format!("'{extname:<8}'")),
+        ];
+        let data: Vec<u8> = (0..cols * rows).flat_map(|i| (i as f32).to_be_bytes()).collect();
+        (cards, data)
+    }
+
     pub fn write_test_mef(path: &std::path::Path, primary_cards: &[(&str, String)], hdus: &[TestHdu]) {
         let mut buf = Vec::new();
         let mut primary: Vec<(&str, String)> = vec![
@@ -1312,7 +1340,11 @@ mod tests {
         assert!(matches!(px, IntPixels::U32(ref v) if v == &[0, 255, 7]));
         let px = decode_pixels_int(&[0, 255], 8, 1.0, 10.0).unwrap();
         assert!(matches!(px, IntPixels::U32(ref v) if v == &[10, 265]));
-        assert!(decode_pixels_int(&[1], 8, 1.0, -1.0).is_err());
+        let px = decode_pixels_int(&[0, 127, 128, 255], 8, 1.0, -128.0).unwrap();
+        assert!(matches!(px, IntPixels::I32(ref v) if v == &[-128, -1, 0, 127]));
+        let px = decode_pixels_int(&[1], 8, 1.0, -1.0).unwrap();
+        assert!(matches!(px, IntPixels::I32(ref v) if v == &[0]));
+        assert!(decode_pixels_int(&[1], 8, 1.0, -3.0e9).is_err());
     }
 
     #[test]
@@ -1811,6 +1843,7 @@ mod tests {
                 ("NAXIS5".to_string(), "3037000500".to_string()),
                 ("NAXIS6".to_string(), "3037000500".to_string()),
             ]),
+            string_keys: None,
         };
         assert_eq!(declared_plane_count(&header, 6), i64::MAX);
     }
@@ -1855,20 +1888,6 @@ mod tests {
         let data: &[u8] = &[100];
         let pixels = decode_pixels(data, 8, 2.0, 10.0);
         assert!((pixels[0] - 210.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_decode_single_pixel_f32() {
-        let bytes = 1.0f32.to_be_bytes();
-        let val = decode_single_pixel(&bytes, -32, 1.0, 0.0);
-        assert!((val - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_decode_single_pixel_i16() {
-        let bytes = 256i16.to_be_bytes();
-        let val = decode_single_pixel(&bytes, 16, 1.0, 0.0);
-        assert!((val - 256.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1998,6 +2017,14 @@ mod tests {
         assert_eq!(compressed.naxis1, 37);
         assert_eq!(compressed.naxis2, 23);
         assert_eq!(compressed.bitpix, 16);
+
+        let header = extract_header_mmap(&file).unwrap();
+        assert_eq!(header.get_i64("NAXIS1"), Some(37));
+        assert_eq!(header.get_i64("NAXIS2"), Some(23));
+        assert_eq!(header.get_i64("BITPIX"), Some(16));
+        assert_eq!(extract_header_by_index_merged(&file, 1).unwrap().get_i64("NAXIS1"), Some(37));
+        let loaded = extract_image_mmap(&file).unwrap();
+        assert_eq!(loaded.header.get_i64("NAXIS1"), Some(loaded.image.ncols() as i64));
     }
 
     #[test]
@@ -2035,5 +2062,431 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no fixtures found to check");
+    }
+
+    fn raw_header_block(cards: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for card in cards.iter().chain(std::iter::once(&"END")) {
+            let mut bytes = card.as_bytes().to_vec();
+            assert!(bytes.len() <= 80, "card longer than 80 bytes: {card}");
+            bytes.resize(80, b' ');
+            out.extend_from_slice(&bytes);
+        }
+        while out.len() % BLOCK_SIZE != 0 {
+            out.push(b' ');
+        }
+        out
+    }
+
+    fn primary_image_cards(bitpix: &str, axes: &[&str], extra: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+        const AXIS_KEYS: [&str; 4] = ["NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4"];
+        let mut cards: Vec<(&'static str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", bitpix.into()),
+            ("NAXIS", axes.len().to_string()),
+        ];
+        cards.extend(AXIS_KEYS.iter().zip(axes).map(|(k, v)| (*k, v.to_string())));
+        cards.push(("EXTEND", "T".into()));
+        cards.extend(extra.iter().cloned());
+        cards
+    }
+
+    fn compressed_image_hdu(znaxis: &[usize]) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        const ZAXIS_KEYS: [&str; 3] = ["ZNAXIS1", "ZNAXIS2", "ZNAXIS3"];
+        let mut cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'BINTABLE'".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", "8".into()),
+            ("NAXIS2", "3".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("TFIELDS", "1".into()),
+            ("TTYPE1", "'COMPRESSED_DATA'".into()),
+            ("TFORM1", "'1PB     '".into()),
+            ("ZIMAGE", "T".into()),
+            ("ZCMPTYPE", "'RICE_1  '".into()),
+            ("ZBITPIX", "16".into()),
+            ("ZNAXIS", znaxis.len().to_string()),
+        ];
+        cards.extend(ZAXIS_KEYS.iter().zip(znaxis).map(|(k, v)| (*k, v.to_string())));
+        cards.push(("EXTNAME", "'SCI     '".into()));
+        (cards, vec![0u8; 24])
+    }
+
+    #[test]
+    fn header_keeps_commentary_hierarch_and_continued_strings() {
+        let bytes = raw_header_block(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "FILENAME= 'jw01234_very_long_&'",
+            "CONTINUE  'middle_part_&'",
+            "CONTINUE  'rest.fits'          / tail comment",
+            "HIERARCH ESO DET DIT = 10.0 / integration time",
+            "HIERARCH ESO INS FILT1 NAME = 'Ks' / filter",
+            "HISTORY   calibrated with pipeline 1.2",
+            "COMMENT   first note",
+            "COMMENT   second note",
+            "DANGLING= 'ends with &'",
+            "OBJECT  = 'M31'",
+            "CONTINUE  'orphan'",
+        ]);
+        let parsed = parse_header_at(&bytes, 0).unwrap();
+        let h = &parsed.header;
+
+        assert_eq!(h.get("FILENAME"), Some("jw01234_very_long_middle_part_rest.fits"));
+        assert_eq!(h.get_f64("HIERARCH ESO DET DIT"), Some(10.0));
+        assert_eq!(h.get("HIERARCH ESO INS FILT1 NAME"), Some("Ks"));
+        let commentary = |key: &str| -> Vec<&str> {
+            h.cards.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str()).collect()
+        };
+        assert_eq!(commentary("HISTORY"), vec!["calibrated with pipeline 1.2"]);
+        assert_eq!(commentary("COMMENT"), vec!["first note", "second note"]);
+        assert_eq!(h.get("HISTORY"), None, "commentary cards never shadow a keyword lookup");
+        assert_eq!(h.get("DANGLING"), Some("ends with &"));
+        assert_eq!(h.get("OBJECT"), Some("M31"));
+        assert!(!h.cards.iter().any(|(k, _)| k == "CONTINUE"));
+        assert_eq!(parsed.next_hdu_offset, BLOCK_SIZE);
+    }
+
+    #[test]
+    fn fortran_d_exponents_scale_integer_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fortran_scaled.fits");
+        let data: Vec<u8> = [-32768i16, 0, 1, 32767].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let cards = primary_image_cards(
+            "16",
+            &["2", "2"],
+            &[("BZERO", "3.2768D+04".into()), ("BSCALE", "1.0D+00".into())],
+        );
+        write_raw_hdus(&path, &[(cards, data.clone())]);
+
+        let image = load_fits_image(path.to_str().unwrap()).unwrap();
+        assert_eq!(image.iter().copied().collect::<Vec<f32>>(), vec![0.0, 32768.0, 32769.0, 65535.0]);
+        let plane = extract_int_plane_by_index(&File::open(&path).unwrap(), 0).unwrap();
+        assert!(!plane.signed);
+        assert_eq!(plane.value_at(1, 1), 65535);
+
+        let bad = dir.path().join("bad_scale.fits");
+        let cards = primary_image_cards("16", &["2", "2"], &[("BZERO", "'abc'".into())]);
+        write_raw_hdus(&bad, &[(cards, data)]);
+        let err = format!("{:#}", load_fits_image(bad.to_str().unwrap()).unwrap_err());
+        assert!(err.contains("BZERO = 'abc' is not a number"), "{err}");
+    }
+
+    #[test]
+    fn signed_byte_dq_keeps_its_integer_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("int8_dq.fits");
+        let cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", "2".into()),
+            ("NAXIS2", "2".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("BZERO", "-128".into()),
+            ("BSCALE", "1".into()),
+            ("EXTNAME", "'DQ      '".into()),
+        ];
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (cards, vec![0, 127, 128, 255])]);
+        let plane = extract_int_plane_by_index(&File::open(&path).unwrap(), 1).unwrap();
+        assert!(plane.signed);
+        assert_eq!(plane.value_at(0, 0), -128);
+        assert_eq!(plane.value_at(0, 1), -1);
+        assert_eq!(plane.value_at(1, 0), 0);
+        assert_eq!(plane.value_at(1, 1), 127);
+    }
+
+    #[test]
+    fn a_context_cube_after_a_2d_science_image_is_not_read_as_rgb() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for planes in [3, 4] {
+            let i2d = dir.path().join(format!("i2d_con{planes}.fits"));
+            write_raw_hdus(
+                &i2d,
+                &[
+                    (empty_primary_cards(), Vec::new()),
+                    plane_hdu("SCI", 4, 3),
+                    plane_hdu("ERR", 4, 3),
+                    cube_hdu("CON", 4, 3, planes, &[]),
+                ],
+            );
+            let file = File::open(&i2d).unwrap();
+            assert!(
+                try_extract_rgb_mmap(&file).unwrap().is_none(),
+                "a {planes}-plane context cube must not hide the 2D SCI image"
+            );
+            assert_eq!(auto_hdu_index(&file).unwrap(), 1);
+            assert_eq!(extract_image_mmap(&file).unwrap().image.dim(), (3, 4));
+        }
+
+        let weight_then_cube = dir.path().join("wht_cube.fits");
+        write_raw_hdus(
+            &weight_then_cube,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                plane_hdu("WHT", 4, 3),
+                cube_hdu("STACK", 4, 3, 3, &[]),
+            ],
+        );
+        assert!(try_extract_rgb_mmap(&File::open(&weight_then_cube).unwrap()).unwrap().is_none());
+
+        let marked = dir.path().join("sci_and_marked_rgb.fits");
+        write_raw_hdus(
+            &marked,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                plane_hdu("SCI", 4, 3),
+                cube_hdu("COLOUR", 4, 3, 3, &[("CTYPE3", "'RGB     '".into())]),
+            ],
+        );
+        let rgb = try_extract_rgb_mmap(&File::open(&marked).unwrap()).unwrap().expect("an explicit colour marker wins");
+        assert_eq!(rgb.header.get("EXTNAME"), Some("COLOUR"));
+    }
+
+    #[test]
+    fn auto_selection_refuses_a_mono_plane_beside_an_rgb_cube() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let marked = dir.path().join("rgb_with_mask.fits");
+        write_raw_hdus(
+            &marked,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'RGB     '".into())]),
+                plane_hdu("MASK", 4, 3),
+            ],
+        );
+        let file = File::open(&marked).unwrap();
+        assert!(try_extract_rgb_mmap(&file).unwrap().is_some());
+        let msg = format!("{:#}", auto_hdu_index(&file).unwrap_err());
+        assert!(msg.contains("HDU 1 (SCI) holds an RGB colour cube"), "{msg}");
+        assert!(msg.contains("#hdu=2"), "{msg}");
+        assert!(extract_image_mmap(&file).is_err());
+        assert!(load_fits_image(marked.to_str().unwrap()).is_err());
+        assert_eq!(extract_image_mmap_by_index(&file, 2).unwrap().image.dim(), (3, 4));
+
+        let primary_cube = dir.path().join("primary_rgb_with_weight.fits");
+        let data: Vec<u8> = (0..4 * 3 * 3).flat_map(|i| (i as f32).to_be_bytes()).collect();
+        write_raw_hdus(
+            &primary_cube,
+            &[(primary_image_cards("-32", &["4", "3", "3"], &[]), data), plane_hdu("WHT", 4, 3)],
+        );
+        let file = File::open(&primary_cube).unwrap();
+        let rgb = try_extract_rgb_mmap(&file).unwrap().expect("an unmarked primary cube is the colour image");
+        assert_eq!(rgb.b[[0, 0]], 24.0);
+        assert!(auto_hdu_index(&file).is_err());
+    }
+
+    #[test]
+    fn the_header_of_a_colour_file_is_its_rgb_cube_header() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let beside_mask = dir.path().join("rgb_beside_mask.fits");
+        let mut primary = empty_primary_cards();
+        primary.push(("TELESCOP", "'RC8     '".into()));
+        write_raw_hdus(
+            &beside_mask,
+            &[
+                (primary, Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'RGB     '".into()), ("CRVAL1", "150.0".into())]),
+                plane_hdu("MASK", 4, 3),
+            ],
+        );
+        let header = extract_header_mmap(&File::open(&beside_mask).unwrap()).unwrap();
+        assert_eq!(header.get("EXTNAME"), Some("SCI"), "the mask header must not stand in for the colour image");
+        assert_eq!(header.get_i64("NAXIS3"), Some(3));
+        assert_eq!(header.get_f64("CRVAL1"), Some(150.0));
+        assert_eq!(header.get("TELESCOP"), Some("RC8"));
+
+        let lone_cube = dir.path().join("lone_rgb.fits");
+        let data: Vec<u8> = (0..5 * 3 * 3).flat_map(|i| (i as f32).to_be_bytes()).collect();
+        write_raw_hdus(&lone_cube, &[(primary_image_cards("-32", &["5", "3", "3"], &[]), data)]);
+        let file = File::open(&lone_cube).unwrap();
+        assert!(try_extract_rgb_mmap(&file).unwrap().is_some());
+        let header = extract_header_mmap(&file).unwrap();
+        assert_eq!(header.get_i64("NAXIS1"), Some(5));
+        assert_eq!(header.get_i64("NAXIS3"), Some(3));
+        assert!(auto_hdu_index(&file).is_err(), "a header read never makes a colour file loadable as mono");
+
+        let i2d = dir.path().join("i2d_con.fits");
+        write_raw_hdus(
+            &i2d,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                plane_hdu("SCI", 4, 3),
+                cube_hdu("CON", 4, 3, 3, &[]),
+            ],
+        );
+        assert_eq!(extract_header_mmap(&File::open(&i2d).unwrap()).unwrap().get("EXTNAME"), Some("SCI"));
+    }
+
+    #[test]
+    fn compressed_headers_describe_the_decompressed_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("z2d.fits");
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), compressed_image_hdu(&[37, 23])]);
+        let file = File::open(&path).unwrap();
+
+        for header in [extract_header_mmap(&file).unwrap(), extract_header_by_index_merged(&file, 1).unwrap()] {
+            assert_eq!(header.get_i64("NAXIS"), Some(2));
+            assert_eq!(header.get_i64("NAXIS1"), Some(37));
+            assert_eq!(header.get_i64("NAXIS2"), Some(23));
+            assert_eq!(header.get_i64("BITPIX"), Some(16));
+        }
+        let raw = extract_header_by_index(&file, 1).unwrap();
+        assert_eq!(raw.get_i64("NAXIS1"), Some(8), "the raw card view keeps the table storage shape");
+    }
+
+    #[test]
+    fn corrupt_sizes_are_errors_instead_of_wrapped_offsets() {
+        let negative = raw_header_block(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    2",
+            "NAXIS1  =                   -1",
+            "NAXIS2  =                  100",
+        ]);
+        let err = parse_header_at(&negative, 0).err().expect("a negative axis has no data size");
+        assert!(format!("{err:#}").contains("NAXIS1 = -1 is negative"), "{err:#}");
+
+        let overflowing = raw_header_block(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    1",
+            "NAXIS1  =  9223372036854775807",
+        ]);
+        assert!(parse_header_at(&overflowing, 0).is_err());
+
+        let runaway = raw_header_block(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =         999999999999",
+        ]);
+        assert!(parse_header_at(&runaway, 0).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt_tail.fits");
+        let mut bad_ext = plane_hdu("BAD", 4, 3);
+        bad_ext.0.retain(|(k, _)| *k != "NAXIS1");
+        bad_ext.0.push(("NAXIS1", "-1".into()));
+        write_raw_hdus(
+            &path,
+            &[(empty_primary_cards(), Vec::new()), plane_hdu("SCI", 4, 3), bad_ext],
+        );
+        let file = File::open(&path).unwrap();
+        assert_eq!(list_extensions(&file).unwrap().len(), 2, "the scan stops at the corrupt HDU");
+        assert_eq!(scan_all_hdus(&read_file_bytes(&file).unwrap()).unwrap().len(), 2);
+        assert_eq!(extract_image_mmap(&file).unwrap().image.dim(), (3, 4));
+    }
+
+    #[test]
+    fn a_crafted_three_plane_header_is_an_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crafted_rgb.fits");
+        let cards = primary_image_cards("16", &["1024819115206086201", "3", "3"], &[]);
+        write_raw_hdus(&path, &[(cards, vec![0u8; 16])]);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * BLOCK_SIZE as u64);
+        let file = File::open(&path).unwrap();
+        assert!(try_extract_rgb_mmap(&file).is_err());
+        assert!(extract_image_mmap(&file).is_err());
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn a_gzip_compressed_fits_is_refused_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let large = dir.path().join("large.fits");
+        let mut noisy = plane_hdu("SCI", 64, 64);
+        let mut state: u32 = 12345;
+        noisy.1 = (0..64 * 64)
+            .flat_map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                state.to_be_bytes()
+            })
+            .collect();
+        write_raw_hdus(&large, &[(empty_primary_cards(), Vec::new()), noisy]);
+        let small = dir.path().join("small.fits");
+        write_raw_hdus(&small, &[(empty_primary_cards(), Vec::new())]);
+
+        let large_gz = gzip(&std::fs::read(&large).unwrap());
+        let small_gz = gzip(&std::fs::read(&small).unwrap());
+        assert!(large_gz.len() >= BLOCK_SIZE, "one archive must pass the one-block size check");
+        assert!(small_gz.len() < BLOCK_SIZE, "one archive must be shorter than a FITS block");
+
+        for (name, bytes) in [("large.fits.gz", large_gz), ("small.fits.gz", small_gz)] {
+            let gz = dir.path().join(name);
+            std::fs::write(&gz, &bytes).unwrap();
+            let file = File::open(&gz).unwrap();
+            let errors = [
+                extract_image_mmap(&file).err(),
+                extract_image_mmap_by_index(&file, 1).err(),
+                extract_int_plane_by_index(&file, 1).err(),
+                try_extract_rgb_mmap(&file).err(),
+                extract_header_mmap(&file).err(),
+                extract_header_by_index(&file, 0).err(),
+                list_extensions(&file).err(),
+                auto_hdu_index(&file).err(),
+                read_primary_header(gz.to_str().unwrap()).err(),
+                parse_header_at(&bytes, 0).err(),
+            ];
+            for (i, err) in errors.into_iter().enumerate() {
+                let msg = format!("{:#}", err.unwrap_or_else(|| panic!("{name}: reader {i} accepted gzip bytes")));
+                assert!(msg.contains("gzip-compressed FITS is not supported; decompress first"), "{name}: reader {i}: {msg}");
+            }
+        }
+
+        assert_eq!(extract_image_mmap(&File::open(&large).unwrap()).unwrap().image.dim(), (64, 64));
+    }
+
+    #[test]
+    fn string_keys_record_which_values_were_fits_strings() {
+        let block = raw_header_block(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "PROGRAM = '01234   '           / program id",
+            "VISIT   =                  001",
+            "LINENUM = '01.001  '",
+            "FLAG    = 'T       '",
+            "LOGIC   =                    F",
+            "RATIO   =            1.234D-05",
+            "LONGSTR = 'first part&'",
+            "CONTINUE  'second part'",
+            "HIERARCH ESO DET CHIP = '12' / hierarch string",
+            "HIERARCH ESO DET NX = 2048",
+            "DUP     = '1       '",
+            "DUP     =                    2",
+            "REDO    =                    3",
+            "REDO    = 'three   '",
+            "HISTORY 'not a value card'",
+            "COMMENT = 'still commentary'",
+        ]);
+        let parsed = parse_header_at(&block, 0).unwrap();
+        let string_keys = parsed.header.string_keys.as_ref().expect("a header read from a file knows its value types");
+        let mut quoted: Vec<&str> = string_keys.iter().map(String::as_str).collect();
+        quoted.sort_unstable();
+        assert_eq!(quoted, vec!["FLAG", "HIERARCH ESO DET CHIP", "LINENUM", "LONGSTR", "PROGRAM", "REDO"]);
+        assert_eq!(parsed.header.get("PROGRAM"), Some("01234"));
+        assert_eq!(parsed.header.get("VISIT"), Some("001"));
+        assert_eq!(parsed.header.get("LONGSTR"), Some("first partsecond part"));
+        assert_eq!(parsed.header.get("DUP"), Some("2"));
+        assert_eq!(parsed.header.get("REDO"), Some("three"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quoted.fits");
+        std::fs::write(&path, &block).unwrap();
+        let positioned = read_header_blocks(&File::open(&path).unwrap(), 0).unwrap();
+        assert_eq!(positioned.header.string_keys, parsed.header.string_keys);
     }
 }

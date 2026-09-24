@@ -27,7 +27,7 @@ pub async fn spcc_calibrate_cmd(
 
         let header = header_source
             .header()
-            .ok_or_else(|| anyhow::anyhow!("No FITS header found. Run Plate Solve first to embed WCS."))?
+            .ok_or_else(|| anyhow::anyhow!("No FITS header found; SPCC needs an image whose header already carries a celestial WCS."))?
             .clone();
 
         let wr = match white_reference.as_deref() {

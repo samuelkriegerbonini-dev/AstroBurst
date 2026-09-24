@@ -55,6 +55,7 @@ pub struct ConeQuery {
     pub max_rows: usize,
 }
 
+#[cfg(test)]
 impl ConeQuery {
     pub fn new(ra: f64, dec: f64, radius_deg: f64) -> Self {
         Self {

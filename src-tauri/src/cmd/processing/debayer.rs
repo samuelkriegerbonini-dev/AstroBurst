@@ -2,12 +2,11 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_cached_full, output_stem, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_cached_full, output_stem, resolve_output_dir, write_derived_fits, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
 use crate::core::imaging::debayer::{debayer_bilinear, debayer_superpixel, BayerPattern};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
-use crate::infra::fits::writer::write_fits_mono;
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH,
     RES_PATTERN, RES_METHOD, RES_R_PATH, RES_G_PATH, RES_B_PATH,
@@ -37,8 +36,16 @@ fn output_header(source: Option<&HduHeader>, superpixel: bool) -> Option<HduHead
     Some(h)
 }
 
-fn file_stem(path: &str) -> String {
-    output_stem(path)
+fn method_name(superpixel: bool) -> &'static str {
+    if superpixel { METHOD_SUPERPIXEL } else { METHOD_BILINEAR }
+}
+
+fn debayer_tag(path: &str, superpixel: bool, pattern: BayerPattern) -> String {
+    format!("{}_{}_{}", output_stem(path), method_name(superpixel), pattern.name())
+}
+
+fn channel_paths(output_dir: &str, tag: &str) -> [String; 3] {
+    ["R", "G", "B"].map(|c| format!("{}/{}_{}.fits", output_dir, tag, c))
 }
 
 fn resolve_pattern(
@@ -72,14 +79,11 @@ fn debayer_one(
     };
 
     let hdr = output_header(entry.header(), superpixel);
-    let stem = file_stem(path);
-    let r_path = format!("{}/{}_R.fits", output_dir, stem);
-    let g_path = format!("{}/{}_G.fits", output_dir, stem);
-    let b_path = format!("{}/{}_B.fits", output_dir, stem);
+    let [r_path, g_path, b_path] = channel_paths(output_dir, &debayer_tag(path, superpixel, pattern));
 
-    write_fits_mono(&r_path, &r, hdr.as_ref())?;
-    write_fits_mono(&g_path, &g, hdr.as_ref())?;
-    write_fits_mono(&b_path, &b, hdr.as_ref())?;
+    write_derived_fits(&r_path, &r, hdr.as_ref())?;
+    write_derived_fits(&g_path, &g, hdr.as_ref())?;
+    write_derived_fits(&b_path, &b, hdr.as_ref())?;
 
     Ok((r_path, g_path, b_path, r.dim()))
 }
@@ -107,14 +111,12 @@ pub async fn debayer_fits_cmd(
         let (rows, cols) = r.dim();
 
         let hdr = output_header(entry.header(), superpixel);
-        let stem = file_stem(&path);
-        let r_path = format!("{}/{}_R.fits", out_dir, stem);
-        let g_path = format!("{}/{}_G.fits", out_dir, stem);
-        let b_path = format!("{}/{}_B.fits", out_dir, stem);
+        let tag = debayer_tag(&path, superpixel, pat);
+        let [r_path, g_path, b_path] = channel_paths(&out_dir, &tag);
 
-        write_fits_mono(&r_path, &r, hdr.as_ref())?;
-        write_fits_mono(&g_path, &g, hdr.as_ref())?;
-        write_fits_mono(&b_path, &b, hdr.as_ref())?;
+        write_derived_fits(&r_path, &r, hdr.as_ref())?;
+        write_derived_fits(&g_path, &g, hdr.as_ref())?;
+        write_derived_fits(&b_path, &b, hdr.as_ref())?;
 
         let (stats_r, (stats_g, stats_b)) = rayon::join(
             || compute_image_stats(&r),
@@ -126,13 +128,13 @@ pub async fn debayer_fits_cmd(
         let fn_r = make_stf_u8_fn(&linked, &combined);
         let fn_g = make_stf_u8_fn(&linked, &combined);
         let fn_b = make_stf_u8_fn(&linked, &combined);
-        let png_path = format!("{}/{}_debayer.png", out_dir, stem);
+        let png_path = format!("{}/{}_debayer.png", out_dir, tag);
         helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
         Ok(json!({
             RES_PNG_PATH: png_path,
             RES_PATTERN: pat.name(),
-            RES_METHOD: if superpixel { METHOD_SUPERPIXEL } else { METHOD_BILINEAR },
+            RES_METHOD: method_name(superpixel),
             RES_R_PATH: r_path,
             RES_G_PATH: g_path,
             RES_B_PATH: b_path,
@@ -192,8 +194,44 @@ pub async fn debayer_batch_cmd(
             RES_RESULTS: results,
             RES_SUCCEEDED: ok_count,
             RES_FAILED: paths.len() - ok_count,
-            RES_METHOD: if superpixel { METHOD_SUPERPIXEL } else { METHOD_BILINEAR },
+            RES_METHOD: method_name(superpixel),
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::Array2;
+
+    use super::*;
+    use crate::cmd::common::extract_image_resolved;
+    use crate::infra::fits::writer::write_fits_mono;
+
+    #[tokio::test]
+    async fn runs_with_another_method_or_pattern_write_their_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("M42.fits").to_str().unwrap().to_string();
+        write_fits_mono(&src, &Array2::from_shape_fn((8, 8), |(y, x)| (y * 8 + x) as f32 + 10.0), None).unwrap();
+
+        let bilinear = debayer_fits_cmd(src.clone(), out.clone(), None, Some("RGGB".into())).await.unwrap();
+        let superpixel = debayer_fits_cmd(src.clone(), out.clone(), Some(METHOD_SUPERPIXEL.into()), Some("RGGB".into())).await.unwrap();
+        let other_pattern = debayer_fits_cmd(src.clone(), out.clone(), None, Some("GBRG".into())).await.unwrap();
+
+        for key in [RES_R_PATH, RES_G_PATH, RES_B_PATH, RES_PNG_PATH] {
+            assert_ne!(bilinear[key], superpixel[key], "{key}: the super-pixel run replaced the bilinear files");
+            assert_ne!(bilinear[key], other_pattern[key], "{key}: a new pattern replaced the previous files");
+        }
+        let first = bilinear[RES_R_PATH].as_str().unwrap();
+        assert!(first.ends_with("M42_bilinear_RGGB_R.fits"), "{first}");
+        assert_eq!(extract_image_resolved(first).unwrap().arr.dim(), (8, 8), "the bilinear R plane was overwritten");
+        assert_eq!(extract_image_resolved(superpixel[RES_R_PATH].as_str().unwrap()).unwrap().arr.dim(), (4, 4));
+
+        let batch = debayer_batch_cmd(vec![src], out, Some(METHOD_SUPERPIXEL.into()), Some("RGGB".into())).await.unwrap();
+        let item = &batch[RES_RESULTS][0];
+        for key in [RES_R_PATH, RES_G_PATH, RES_B_PATH] {
+            assert_eq!(item[key], superpixel[key], "{key}: batch and single runs name the same output differently");
+        }
+    }
 }

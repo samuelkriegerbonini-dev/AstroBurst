@@ -6,36 +6,6 @@ pub struct SubpixelShift<T: FftFloat> {
     pub dy: T,
 }
 
-impl<T: FftFloat> SubpixelShift<T> {
-    pub fn zero() -> Self {
-        Self {
-            dx: T::zero(),
-            dy: T::zero(),
-        }
-    }
-}
-
-pub fn quadratic_3pt(prev: f64, center: f64, next: f64) -> f64 {
-    let denom = 2.0 * (2.0 * center - prev - next);
-    if denom.abs() < 1e-15 {
-        return 0.0;
-    }
-    let offset = (next - prev) / denom;
-    offset.clamp(-0.5, 0.5)
-}
-
-pub fn foroosh_3pt(prev: f64, center: f64, next: f64) -> f64 {
-    let toward_next = next >= prev;
-    let side = if toward_next { next } else { prev };
-    let denom = center + side;
-    if denom.abs() < 1e-15 {
-        return 0.0;
-    }
-    let magnitude = side / denom;
-    let signed = if toward_next { magnitude } else { -magnitude };
-    signed.clamp(-0.5, 0.5)
-}
-
 fn axis_neighbors<T: FftFloat>(
     surface: &[T],
     rows: usize,
@@ -63,26 +33,6 @@ fn axis_neighbors<T: FftFloat>(
     }
 }
 
-pub fn quadratic_refine_1d<T: FftFloat>(
-    surface: &[T],
-    rows: usize,
-    cols: usize,
-    peak_y: usize,
-    peak_x: usize,
-    axis_y: bool,
-) -> T {
-    let (center, prev, next) = axis_neighbors(surface, rows, cols, peak_y, peak_x, axis_y);
-
-    let two = T::two();
-    let denom = two * (two * center - prev - next);
-    if denom.abs_val() < T::epsilon_val() {
-        return T::zero();
-    }
-    let half = T::half();
-    let result = (next - prev) / denom;
-    result.max_of(T::zero() - half).min_of(half)
-}
-
 pub fn foroosh_refine_1d<T: FftFloat>(
     surface: &[T],
     rows: usize,
@@ -104,19 +54,6 @@ pub fn foroosh_refine_1d<T: FftFloat>(
     let magnitude = side / denom;
     let signed = if toward_next { magnitude } else { zero - magnitude };
     signed.max_of(zero - half).min_of(half)
-}
-
-pub fn quadratic_refine_2d<T: FftFloat>(
-    surface: &[T],
-    rows: usize,
-    cols: usize,
-    peak_y: usize,
-    peak_x: usize,
-) -> SubpixelShift<T> {
-    SubpixelShift {
-        dy: quadratic_refine_1d(surface, rows, cols, peak_y, peak_x, true),
-        dx: quadratic_refine_1d(surface, rows, cols, peak_y, peak_x, false),
-    }
 }
 
 pub fn foroosh_refine_2d<T: FftFloat>(
@@ -162,50 +99,8 @@ pub fn unwrap_and_refine<T: FftFloat>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_subpixel_shift_zero() {
-        let s = SubpixelShift::<f64>::zero();
-        assert!((s.dx - 0.0).abs() < 1e-15);
-        assert!((s.dy - 0.0).abs() < 1e-15);
-    }
-
-    #[test]
-    fn test_quadratic_refine_centered_peak() {
-        let mut surface = vec![0.0f64; 16];
-        surface[5] = 0.5;
-        surface[6] = 1.0;
-        surface[7] = 0.5;
-        let result = quadratic_refine_1d(&surface, 4, 4, 1, 2, false);
-        assert!(result.abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_quadratic_refine_shifted_peak() {
-        let mut surface = vec![0.0f64; 16];
-        surface[5] = 0.3;
-        surface[6] = 1.0;
-        surface[7] = 0.8;
-        let result = quadratic_refine_1d(&surface, 4, 4, 1, 2, false);
-        assert!(result > 0.0);
-        assert!(result < 0.5);
-    }
-
-    #[test]
-    fn test_quadratic_refine_flat_peak() {
-        let surface = vec![1.0f64; 16];
-        let result = quadratic_refine_1d(&surface, 4, 4, 1, 1, true);
-        assert!(result.abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_quadratic_refine_clamp() {
-        let mut surface = vec![0.0f64; 16];
-        surface[5] = 0.0;
-        surface[6] = 1.0;
-        surface[7] = 0.999;
-        let result = quadratic_refine_1d(&surface, 4, 4, 1, 2, false);
-        assert!(result >= -0.5);
-        assert!(result <= 0.5);
+    fn foroosh(prev: f64, center: f64, next: f64) -> f64 {
+        foroosh_refine_1d(&[prev, center, next], 1, 3, 0, 1, false)
     }
 
     #[test]
@@ -233,124 +128,86 @@ mod tests {
     }
 
     #[test]
-    fn test_quadratic_refine_2d() {
+    fn test_foroosh_refine_2d_keeps_axes_apart() {
         let size = 8;
         let mut surface = vec![0.0f64; size * size];
         surface[3 * size + 3] = 1.0;
         surface[3 * size + 2] = 0.6;
         surface[3 * size + 4] = 0.4;
-        surface[2 * size + 3] = 0.7;
-        surface[4 * size + 3] = 0.3;
-        let result = quadratic_refine_2d(&surface, size, size, 3, 3);
-        assert!(result.dx < 0.0);
-        assert!(result.dy < 0.0);
+        surface[2 * size + 3] = 0.3;
+        surface[4 * size + 3] = 0.7;
+        let result = foroosh_refine_2d(&surface, size, size, 3, 3);
+        assert!((result.dx - (-0.6 / 1.6)).abs() < 1e-12, "dx {}", result.dx);
+        assert!((result.dy - 0.7 / 1.7).abs() < 1e-12, "dy {}", result.dy);
     }
 
     #[test]
     fn test_f32_subpixel() {
         let mut surface = vec![0.0f32; 16];
-        surface[5] = 0.5;
+        surface[5] = 0.0;
         surface[6] = 1.0;
-        surface[7] = 0.5;
-        let result = quadratic_refine_1d(&surface, 4, 4, 1, 2, false);
-        assert!(result.abs() < 1e-5);
+        surface[7] = 1.0 / 3.0;
+        let result = foroosh_refine_1d(&surface, 4, 4, 1, 2, false);
+        assert!((result - 0.25).abs() < 1e-6);
     }
 
     #[test]
     fn test_wrap_around_y() {
         let size = 8;
         let mut surface = vec![0.0f64; size * size];
-        surface[0 * size + 3] = 1.0;
+        surface[3] = 1.0;
         surface[(size - 1) * size + 3] = 0.6;
-        surface[1 * size + 3] = 0.4;
-        let result = quadratic_refine_1d(&surface, size, size, 0, 3, true);
-        assert!(result < 0.0);
+        surface[size + 3] = 0.4;
+        let result = foroosh_refine_1d(&surface, size, size, 0, 3, true);
+        assert!((result - (-0.6 / 1.6)).abs() < 1e-12, "{result}");
     }
 
     #[test]
     fn test_wrap_around_x() {
         let size = 8;
         let mut surface = vec![0.0f64; size * size];
-        surface[3 * size + 0] = 1.0;
+        surface[3 * size] = 1.0;
         surface[3 * size + (size - 1)] = 0.6;
         surface[3 * size + 1] = 0.4;
-        let result = quadratic_refine_1d(&surface, size, size, 3, 0, false);
-        assert!(result < 0.0);
+        let result = foroosh_refine_1d(&surface, size, size, 3, 0, false);
+        assert!((result - (-0.6 / 1.6)).abs() < 1e-12, "{result}");
     }
 
     #[test]
-    fn test_quadratic_3pt_symmetric() {
-        let result = quadratic_3pt(0.5, 1.0, 0.5);
-        assert!((result - 0.0).abs() < 1e-15);
+    fn test_foroosh_integer_peak() {
+        assert!(foroosh(0.0, 1.0, 0.0).abs() < 1e-12);
     }
 
     #[test]
-    fn test_quadratic_3pt_asymmetric() {
-        let result = quadratic_3pt(0.3, 1.0, 0.8);
-        assert!(result > 0.0);
-        assert!(result < 0.5);
-        let expected = (0.8 - 0.3) / (2.0 * (2.0 * 1.0 - 0.3 - 0.8));
-        assert!((result - expected).abs() < 1e-15);
+    fn test_foroosh_half_pixel() {
+        assert!((foroosh(0.0, 1.0, 1.0) - 0.5).abs() < 1e-12);
+        assert!((foroosh(1.0, 1.0, 0.0) - (-0.5)).abs() < 1e-12);
     }
 
     #[test]
-    fn test_quadratic_3pt_flat() {
-        let result = quadratic_3pt(1.0, 1.0, 1.0);
-        assert!((result - 0.0).abs() < 1e-15);
-    }
-
-    #[test]
-    fn test_quadratic_3pt_degenerate_denom() {
-        let result = quadratic_3pt(0.5, 0.5, 0.5);
-        assert!((result - 0.0).abs() < 1e-15);
-    }
-
-    #[test]
-    fn test_quadratic_3pt_clamp() {
-        let result = quadratic_3pt(0.0, 0.001, 1000.0);
-        assert!(result >= -0.5);
-        assert!(result <= 0.5);
-
-        let result2 = quadratic_3pt(1000.0, 0.001, 0.0);
-        assert!(result2 >= -0.5);
-        assert!(result2 <= 0.5);
-    }
-
-    #[test]
-    fn test_foroosh_3pt_integer_peak() {
-        assert!(foroosh_3pt(0.0, 1.0, 0.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_foroosh_3pt_half_pixel() {
-        assert!((foroosh_3pt(0.0, 1.0, 1.0) - 0.5).abs() < 1e-12);
-        assert!((foroosh_3pt(1.0, 1.0, 0.0) - (-0.5)).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_foroosh_3pt_quarter_pixel() {
+    fn test_foroosh_quarter_pixel() {
         let third = 1.0 / 3.0;
-        assert!((foroosh_3pt(0.0, 1.0, third) - 0.25).abs() < 1e-12);
-        assert!((foroosh_3pt(third, 1.0, 0.0) - (-0.25)).abs() < 1e-12);
+        assert!((foroosh(0.0, 1.0, third) - 0.25).abs() < 1e-12);
+        assert!((foroosh(third, 1.0, 0.0) - (-0.25)).abs() < 1e-12);
     }
 
     #[test]
-    fn test_foroosh_3pt_direction_toward_larger_neighbor() {
-        assert!(foroosh_3pt(0.2, 1.0, 0.6) > 0.0);
-        assert!(foroosh_3pt(0.6, 1.0, 0.2) < 0.0);
+    fn test_foroosh_direction_toward_larger_neighbor() {
+        assert!(foroosh(0.2, 1.0, 0.6) > 0.0);
+        assert!(foroosh(0.6, 1.0, 0.2) < 0.0);
     }
 
     #[test]
-    fn test_foroosh_3pt_clamped_and_bounded() {
-        let r = foroosh_3pt(0.0, 1.0, 1000.0);
-        assert!(r >= -0.5 && r <= 0.5);
-        let r2 = foroosh_3pt(1000.0, 1.0, 0.0);
-        assert!(r2 >= -0.5 && r2 <= 0.5);
+    fn test_foroosh_clamped_and_bounded() {
+        let r = foroosh(0.0, 1.0, 1000.0);
+        assert!((-0.5..=0.5).contains(&r));
+        let r2 = foroosh(1000.0, 1.0, 0.0);
+        assert!((-0.5..=0.5).contains(&r2));
     }
 
     #[test]
-    fn test_foroosh_3pt_degenerate_denom() {
-        assert!(foroosh_3pt(0.0, 0.0, 0.0).abs() < 1e-12);
+    fn test_foroosh_degenerate_denom() {
+        assert!(foroosh(0.0, 0.0, 0.0).abs() < 1e-12);
     }
 
     fn dirichlet_pc_surface_1d(n: usize, d: f64) -> Vec<f64> {
@@ -378,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn test_foroosh_beats_parabolic_on_dirichlet_peak() {
+    fn test_foroosh_recovers_dirichlet_peak_shift() {
         let n = 64;
         for &d in &[0.1f64, 0.2, 0.25, 0.3, 0.35, -0.2, -0.35] {
             let surface = dirichlet_pc_surface_1d(n, d);
@@ -391,22 +248,12 @@ mod tests {
             let raw = if peak > n / 2 { peak as f64 - n as f64 } else { peak as f64 };
 
             let foroosh = raw + foroosh_refine_1d(&surface, 1, n, 0, peak, false);
-            let parabolic = raw + quadratic_refine_1d(&surface, 1, n, 0, peak, false);
-
             let foroosh_err = (foroosh - d).abs();
-            let parabolic_err = (parabolic - d).abs();
 
             assert!(
                 foroosh_err < 0.03,
                 "foroosh error {:.4} too large at d={}",
                 foroosh_err,
-                d
-            );
-            assert!(
-                foroosh_err < parabolic_err,
-                "foroosh {:.4} should beat parabolic {:.4} at d={}",
-                foroosh_err,
-                parabolic_err,
                 d
             );
         }

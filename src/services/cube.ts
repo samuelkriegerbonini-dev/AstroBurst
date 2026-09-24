@@ -3,33 +3,27 @@ import type {
   CollapseRangeMode,
   CollapseRangeResult,
   CubeDims,
-  CubeProcessResult,
   CubeSpectrum,
   MomentConfig,
   MomentMapsResult,
   RegionSpectrum,
 } from "../shared/types/cube";
 import type { RegionShape } from "../shared/types/regions";
-
-const CUBE_PREVIEWS: [string, string][] = [
-  ["collapsed_path", "collapsedPreviewUrl"],
-  ["collapsed_median_path", "collapsedMedianPreviewUrl"],
-];
+import { parseImageRef } from "../utils/imageRef";
 
 interface RawCubeSpectrum {
   spectrum?: number[];
   values?: number[];
   wavelengths?: number[] | null;
   is_spectral?: boolean;
-  unit?: string;
 }
 
-export function processCube(path: string, outputDir?: string, frameStep = 5): Promise<CubeProcessResult> {
-  return withPreview<CubeProcessResult>("process_cube_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS);
-}
-
-export function processCubeLazy(path: string, outputDir?: string, frameStep = 5): Promise<CubeProcessResult> {
-  return withPreview<CubeProcessResult>("process_cube_lazy_cmd", outputDir, { path, frameStep }, CUBE_PREVIEWS);
+export async function releaseCubes(paths: readonly string[]): Promise<void> {
+  const sources = [...new Set(paths.map((p) => parseImageRef(p).path))];
+  const settled = await Promise.allSettled(sources.map((path) => typedInvoke<void>("release_cube_cmd", { path })));
+  settled.forEach((s, i) => {
+    if (s.status === "rejected") console.warn(`[AstroBurst] Could not release the cube mapping of ${sources[i]}:`, s.reason);
+  });
 }
 
 export function getCubeInfo(path: string): Promise<CubeDims> {
@@ -58,7 +52,6 @@ export function toCubeSpectrum(raw: RawCubeSpectrum, x: number, y: number): Cube
     wavelengths: raw.wavelengths ?? [],
     x,
     y,
-    unit: raw.unit,
     is_spectral: raw.is_spectral,
   };
 }

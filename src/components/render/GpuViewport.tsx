@@ -77,7 +77,7 @@ function GpuViewport({
         setTransform((prev) => ({ ...prev, x: panStart.current.tx + dx, y: panStart.current.ty + dy }));
         return;
       }
-      if (cursorMode === "crosshair" && onMousePixel && hasRenderDims) {
+      if (onMousePixel && hasRenderDims) {
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
         const coord = screenToImagePixel(
@@ -87,7 +87,7 @@ function GpuViewport({
         if (coord) onMousePixel(coord.x, coord.y);
       }
     },
-    [cursorMode, onMousePixel, hasRenderDims, renderW, renderH, effFitsW, effFitsH, setTransform, transformRef],
+    [onMousePixel, hasRenderDims, renderW, renderH, effFitsW, effFitsH, setTransform, transformRef],
   );
 
   const handlePointerUp = useCallback(() => {

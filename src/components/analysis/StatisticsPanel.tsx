@@ -7,12 +7,12 @@ import type {
   DataRange,
   StatisticsUnit,
 } from "../../shared/types/statistics";
-import type { RegionShape } from "../../shared/types/regions";
+import type { RegionShape } from "../../shared/types";
 import { useDqContext } from "../../context/PreviewContext";
-import { useCompositePreview } from "../../context/CompositeContext";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { Toggle, RunButton, ErrorAlert } from "../ui";
+import MeasurementBadge from "./MeasurementBadge";
 import {
   STATISTIC_ROWS,
   UNIT_LABELS,
@@ -25,6 +25,8 @@ import {
 
 interface StatisticsPanelProps {
   filePath: string | null;
+  composite: boolean;
+  rgbPath: string | null;
 }
 
 interface ChannelResult {
@@ -48,9 +50,8 @@ function channelRange(body: ChannelStatisticsBody): DataRange {
   return { min: body.data_min, max: body.data_max };
 }
 
-function StatisticsPanel({ filePath }: StatisticsPanelProps) {
+function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: StatisticsPanelProps) {
   const { excludeDq } = useDqContext();
-  const { isShowingComposite } = useCompositePreview();
   const regionKey = useRegionKey();
   const doc = useRegionDoc(regionKey);
   const selectedShape = useMemo<RegionShape | null>(
@@ -74,7 +75,7 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
     setError(null);
     try {
       if (isShowingComposite) {
-        const res = await computeStatisticsComposite(noise);
+        const res = await computeStatisticsComposite(noise, rgbPath);
         if (requestSeqRef.current !== seq) return;
         setResult({
           channels: [
@@ -106,7 +107,7 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
     } finally {
       if (requestSeqRef.current === seq) setLoading(false);
     }
-  }, [filePath, isShowingComposite, noise, useRegion, selectedShape, excludeDq]);
+  }, [filePath, isShowingComposite, rgbPath, noise, useRegion, selectedShape, excludeDq]);
 
   const runRef = useRef(run);
   runRef.current = run;
@@ -117,7 +118,7 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
     setError(null);
     setLoading(false);
     if (filePath || isShowingComposite) void runRef.current();
-  }, [filePath, isShowingComposite]);
+  }, [filePath, isShowingComposite, rgbPath]);
 
   const sixteenBitAvailable = useMemo(
     () => result !== null && result.channels.every((c) => fitsSixteenBit(channelRange(c.body))),
@@ -174,6 +175,7 @@ function StatisticsPanel({ filePath }: StatisticsPanelProps) {
         <div className="flex items-center gap-2">
           <Grid3X3 size={12} className="text-sky-400" />
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Statistics</span>
+          <MeasurementBadge measuresComposite />
         </div>
         {loading && <Loader2 size={12} className="animate-spin text-sky-400/70" />}
       </div>

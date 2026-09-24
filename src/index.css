@@ -753,41 +753,6 @@ img,
   border-color: var(--ab-accent);
 }
 
-.ab-compose-progress {
-  height: 20px;
-  background: rgba(5, 5, 16, 0.5);
-  border-bottom: 1px solid var(--ab-border);
-  position: relative;
-  overflow: hidden;
-}
-
-.ab-compose-progress-bar {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 100%;
-  transform-origin: left;
-  background: linear-gradient(90deg, rgba(20, 184, 166, 0.15), rgba(59, 130, 246, 0.15));
-  transition: transform 0.3s ease;
-  will-change: transform;
-}
-
-.ab-compose-progress-label {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  font-size: 9px;
-  font-weight: 500;
-  color: rgba(20, 184, 166, 0.85);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-
 .ab-tool-strip {
   width: 42px;
   flex-shrink: 0;

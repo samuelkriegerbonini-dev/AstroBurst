@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Upload, AlertTriangle, X } from "lucide-react";
-import { isValidFitsFile, isCalibRefAsdf } from "../../utils/validation";
+import { isValidFitsFile, isCalibRefAsdf, SUPPORTED_EXTENSIONS_LABEL } from "../../utils/validation";
 import { isTauri } from "../../infrastructure/tauri";
 import type { AstroFile } from "../../shared/types";
 
@@ -160,7 +160,7 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
               Drop anywhere
             </p>
             <p className="text-zinc-500 text-sm">
-              Release to add .fits / .asdf / .zip files
+              Release to add {SUPPORTED_EXTENSIONS_LABEL} files
             </p>
           </div>
         </div>
@@ -173,7 +173,7 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
           >
             <AlertTriangle size={13} className="shrink-0" />
             <span>
-              {rejected.skipped > 0 && `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: .fits .fit .fts .asdf .zip`}
+              {rejected.skipped > 0 && `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: ${SUPPORTED_EXTENSIONS_LABEL}`}
               {rejected.skipped > 0 && rejected.calib > 0 && " · "}
               {rejected.calib > 0 && `${rejected.calib} JWST calibration reference .asdf skipped (not a loadable image)`}
             </span>

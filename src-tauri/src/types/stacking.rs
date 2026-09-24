@@ -246,6 +246,23 @@ impl StackConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameAlignment {
+    pub method: String,
+    pub confidence: Option<f64>,
+    pub included: bool,
+}
+
+impl FrameAlignment {
+    pub fn reference() -> Self {
+        Self { method: "reference".into(), confidence: None, included: true }
+    }
+
+    pub fn unaligned() -> Self {
+        Self { method: "none".into(), confidence: None, included: true }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StackResult {
     pub image: Array2<f32>,
@@ -255,12 +272,14 @@ pub struct StackResult {
     pub rejection_low: Option<Array2<u16>>,
     pub rejection_high: Option<Array2<u16>>,
     pub normalization_applied: Vec<(f64, f64)>,
+    pub alignment: Vec<FrameAlignment>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AlignmentMethod {
     PhaseCorrelation,
-    Zncc,
+    Affine,
 }
 
 impl Default for AlignmentMethod {
@@ -321,20 +340,19 @@ pub enum DrizzleKernel {
 #[derive(Debug, Clone)]
 pub struct DrizzleResult {
     pub image: Array2<f32>,
-    pub weight_map: Array2<f32>,
     pub frame_count: usize,
     pub output_scale: f64,
     pub input_dims: (usize, usize),
     pub output_dims: (usize, usize),
     pub offsets: Vec<(f64, f64)>,
     pub rejected_pixels: u64,
+    pub alignment: Vec<FrameAlignment>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RLConfig {
     pub iterations: usize,
-    pub psf_sigma: f64,
-    pub psf_size: usize,
     pub regularization: f64,
     pub deringing: bool,
     pub deringing_threshold: f32,
@@ -344,8 +362,6 @@ impl Default for RLConfig {
     fn default() -> Self {
         Self {
             iterations: 20,
-            psf_sigma: 2.0,
-            psf_size: 15,
             regularization: 0.001,
             deringing: true,
             deringing_threshold: 0.1,

@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
+pub const MIN_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
@@ -53,7 +55,8 @@ impl ServerConfig {
             cleanup_interval: Duration::from_secs(env_or::<u64>(
                 "ASTROBURST_CLEANUP_INTERVAL",
                 d.cleanup_interval.as_secs(),
-            )),
+            ))
+            .max(MIN_CLEANUP_INTERVAL),
             log_level: env_or("ASTROBURST_LOG_LEVEL", d.log_level),
         }
     }

@@ -3,19 +3,25 @@ import {
   useContext,
   useReducer,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { Dispatch } from "react";
 import {
+  applyCompositeOp,
   BlendWeight,
+  droppedChannelOutputs,
   FrequencyBin,
   INITIAL_STATE,
   invalidateDownstream,
   STEP_ORDER,
   WizardState,
+  withChannelStage,
 } from "../utils/wizard";
-import type { SubframeAnalysisResult } from "../utils/wizard";
+import type { ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
+import { useCompositeActions } from "./CompositeContext";
 
 export type WizardAction =
   | { type: "SET_BINS"; bins: FrequencyBin[] }
@@ -34,6 +40,8 @@ export type WizardAction =
   | { type: "SET_COMPOSITE_READY"; ready: boolean }
   | { type: "SET_SUBFRAME_RESULT"; binId: string; result: SubframeAnalysisResult }
   | { type: "SET_EXCLUDED_FILES"; binId: string; files: string[] }
+  | { type: "SET_CHANNEL_STAGE"; binId: string; stage: "starless" | "stretched"; value: ChannelStage }
+  | { type: "RECORD_COMPOSITE_OP"; op: CompositeOp }
   | { type: "UPDATE"; partial: Partial<WizardState> }
   | { type: "COMPLETE_STEP"; stepId: string }
   | { type: "INVALIDATE_FROM"; stepId: string }
@@ -110,6 +118,10 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, subframeResults: { ...state.subframeResults, [action.binId]: action.result } };
     case "SET_EXCLUDED_FILES":
       return { ...state, excludedFiles: { ...state.excludedFiles, [action.binId]: action.files } };
+    case "SET_CHANNEL_STAGE":
+      return { ...state, channelResults: withChannelStage(state.channelResults, action.binId, action.stage, action.value) };
+    case "RECORD_COMPOSITE_OP":
+      return { ...state, compositeHistory: applyCompositeOp(state.compositeHistory, action.op) };
     case "COMPLETE_STEP": {
       const completed = { ...state.completedSteps, [action.stepId]: true };
       const idx = STEP_ORDER.indexOf(action.stepId);
@@ -136,6 +148,7 @@ interface ComposeWizardContextValue {
   dispatch: Dispatch<WizardAction>;
   activeStep: string;
   setActiveStep: (step: string) => void;
+  setOutputForgetter: (forget: (paths: string[]) => void) => void;
 }
 
 const ComposeWizardCtx = createContext<ComposeWizardContextValue | null>(null);
@@ -153,6 +166,26 @@ interface Props {
 export function ComposeWizardProvider({ children }: Props) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const [activeStep, setActiveStepRaw] = useState("channels");
+  const { clearComposite } = useCompositeActions();
+  const wasReadyRef = useRef(state.compositeReady);
+
+  useEffect(() => {
+    const wasReady = wasReadyRef.current;
+    wasReadyRef.current = state.compositeReady;
+    if (wasReady && !state.compositeReady) void clearComposite();
+  }, [state.compositeReady, clearComposite]);
+
+  const forgetOutputsRef = useRef<((paths: string[]) => void) | null>(null);
+  const outputsStateRef = useRef(state);
+  useEffect(() => {
+    const dropped = droppedChannelOutputs(outputsStateRef.current, state);
+    outputsStateRef.current = state;
+    if (dropped.length > 0) forgetOutputsRef.current?.(dropped);
+  }, [state]);
+
+  const setOutputForgetter = useCallback((forget: (paths: string[]) => void) => {
+    forgetOutputsRef.current = forget;
+  }, []);
 
   const setActiveStep = useCallback((step: string) => {
     setActiveStepRaw(step);
@@ -163,7 +196,8 @@ export function ComposeWizardProvider({ children }: Props) {
     dispatch,
     activeStep,
     setActiveStep,
-  }), [state, dispatch, activeStep, setActiveStep]);
+    setOutputForgetter,
+  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter]);
 
   return (
     <ComposeWizardCtx.Provider value={value}>

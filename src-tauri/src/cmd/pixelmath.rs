@@ -1,48 +1,36 @@
 use std::time::Instant;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use ndarray::Array2;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cmd::common::{
-    auto_stretch_preview, blocking_cmd, cleanup_output_dir_keeping, load_validated_full, output_stem,
-    resolve_output_dir, save_preview_png, source_path,
+    blocking_cmd, derived_output_header, load_cached_full, output_stem, resolve_output_dir,
+    save_auto_stf_preview_png, source_path, write_derived_fits, OutputValues,
 };
-use crate::core::imaging::stats::finite_slice_stats;
+use crate::core::imaging::stats::{finite_slice_stats, is_padding, is_valid_pixel};
 use crate::core::pixelmath::{compile, evaluate, validate, OutputOptions, PixelMathError};
-use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
-use crate::infra::fits::writer::{filter_header, write_fits_mono};
+use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
-    RES_CLEANED_BYTES, RES_CLEANED_FILES, RES_CLEANED_PATHS, RES_DIMENSIONS, RES_ELAPSED_MS,
-    RES_FITS_PATH, RES_PNG_PATH, RES_STATS, RES_WARNINGS,
+    RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH, RES_STATS, RES_WARNINGS,
 };
-use crate::types::constants::PADDING_THRESHOLD;
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
+use crate::types::image_ref::path_key;
 
 pub const RES_NON_FINITE_COUNT: &str = "non_finite_count";
 pub const DEFAULT_PIXELMATH_SUFFIX: &str = "pixelmath";
 pub const TARGET_SYMBOL: &str = "$T";
 
-const HEADER_ABPROC: &str = "ABPROC";
+const USER_SUFFIX_PREFIX: &str = "pm_";
 const HEADER_PMEXPR: &str = "PMEXPR";
 const HEADER_PMSOURCE: &str = "PMSRC";
+const LEGACY_HEADER_PMSOURCE: &str = "PMSOURCE";
 const MAX_HEADER_VALUE_BYTES: usize = 67;
 const MAX_CONTINUATION_CARDS: usize = 9;
 const TRUNCATION_MARKER: &str = "...";
-const PREVIEW_FLOOR: f32 = 2.0 * PADDING_THRESHOLD;
-const STRUCTURAL_CARDS: &[&str] = &[
-    "XTENSION", "EXTNAME", "EXTVER", "PCOUNT", "GCOUNT", "EXTEND", "NAXIS3", "CHECKSUM", "DATASUM",
-];
-const CUBE_AXIS_CARDS: &[&str] = &[
-    "CTYPE3", "CRVAL3", "CRPIX3", "CDELT3", "CUNIT3", "CROTA3", "CD3_3", "CD1_3", "CD2_3", "CD3_1",
-    "CD3_2", "PC3_3", "PC1_3", "PC2_3", "PC3_1", "PC3_2", "PS3_0", "PS3_1", "PV3_0", "PV3_1",
-];
-const RESCALED_VALUE_CARDS: &[&str] = &[
-    "BUNIT", "DATAMIN", "DATAMAX", "SATURATE", "SATLEVEL", "SATURATION", "MAXLIN", "MAGZPT",
-    "PHOTFLAM", "PHOTPLAM", "PHOTZPT", "PHOTMJSR", "PIXAR_SR", "PIXAR_A2", "ZP", "ZPTMAG",
-];
+const ZERO_FRACTION_WARNING: f64 = 0.05;
 
 const KEY_OK: &str = "ok";
 const KEY_MESSAGE: &str = "message";
@@ -81,6 +69,21 @@ fn header_safe(value: &str) -> String {
     cleaned
 }
 
+fn header_safe_path(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c.is_ascii() && !c.is_ascii_control() && c != '\'' && c != '%' {
+            encoded.push(c);
+            continue;
+        }
+        let mut buf = [0u8; 4];
+        for b in c.encode_utf8(&mut buf).bytes() {
+            encoded.push_str(&format!("%{:02X}", b));
+        }
+    }
+    encoded
+}
+
 fn chunk_header_value(value: &str) -> Vec<String> {
     let bytes = value.as_bytes();
     let mut chunks: Vec<String> = Vec::new();
@@ -106,6 +109,13 @@ fn chunk_header_value(value: &str) -> Vec<String> {
         }
     }
     chunks
+}
+
+fn remove_long_value(header: &mut HduHeader, base: &str) {
+    header.remove(base);
+    for i in 1..=MAX_CONTINUATION_CARDS {
+        header.remove(&format!("{}{}", base, i));
+    }
 }
 
 fn set_long_value(header: &mut HduHeader, base: &str, value: &str) {
@@ -137,48 +147,68 @@ pub(crate) fn output_suffix(name: Option<&str>) -> String {
         .collect();
     if cleaned.is_empty() {
         DEFAULT_PIXELMATH_SUFFIX.to_string()
-    } else {
+    } else if cleaned == DEFAULT_PIXELMATH_SUFFIX || cleaned.starts_with(USER_SUFFIX_PREFIX) {
         cleaned
+    } else {
+        format!("{}{}", USER_SUFFIX_PREFIX, cleaned)
     }
 }
 
 pub(crate) fn output_header(source: Option<&HduHeader>, expression: &str, target: &str) -> HduHeader {
-    let mut header = source
-        .and_then(|h| filter_header(h, true, true))
-        .unwrap_or_else(HduHeader::empty);
-    for key in STRUCTURAL_CARDS.iter().chain(CUBE_AXIS_CARDS).chain(RESCALED_VALUE_CARDS) {
-        header.remove(key);
-    }
-    if header.get("WCSAXES").is_some() {
-        header.set("WCSAXES", "2".to_string());
-    }
-    header.set(HEADER_ABPROC, DEFAULT_PIXELMATH_SUFFIX.to_string());
-
+    let mut header = derived_output_header(source, DEFAULT_PIXELMATH_SUFFIX, OutputValues::Rescaled);
+    remove_long_value(&mut header, HEADER_PMEXPR);
+    remove_long_value(&mut header, HEADER_PMSOURCE);
+    header.remove(LEGACY_HEADER_PMSOURCE);
     set_long_value(&mut header, HEADER_PMEXPR, &header_safe(expression));
-    set_long_value(&mut header, HEADER_PMSOURCE, &header_safe(target));
+    set_long_value(&mut header, HEADER_PMSOURCE, &header_safe_path(target));
     header
 }
 
 pub(crate) fn finite_output_stats(arr: &Array2<f32>) -> (Option<ImageStats>, usize) {
-    let mut finite: Vec<f32> = arr.iter().copied().filter(|v| v.is_finite()).collect();
-    let non_finite = arr.len() - finite.len();
-    if finite.is_empty() {
+    let non_finite = arr.iter().filter(|v| !v.is_finite()).count();
+    let mut valid: Vec<f32> = arr.iter().copied().filter(|v| is_valid_pixel(*v)).collect();
+    if valid.is_empty() {
         return (None, non_finite);
     }
-    (Some(finite_slice_stats(&mut finite)), non_finite)
+    (Some(finite_slice_stats(&mut valid)), non_finite)
 }
 
-fn preview_pixels(result: &Array2<f32>) -> Vec<u8> {
-    let lo = result
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .fold(f32::INFINITY, f32::min);
-    if !lo.is_finite() || lo > PADDING_THRESHOLD {
-        return auto_stretch_preview(result);
+fn preview_display(result: &Array2<f32>, inputs: &[&Array2<f32>]) -> Array2<f32> {
+    let mut no_input_data = vec![!inputs.is_empty(); result.len()];
+    for input in inputs {
+        for (flag, &v) in no_input_data.iter_mut().zip(input.iter()) {
+            *flag &= is_padding(v);
+        }
     }
-    let shifted = result.mapv(|v| if v.is_finite() { v - lo + PREVIEW_FLOOR } else { v });
-    auto_stretch_preview(&shifted)
+    let display: Vec<f32> = result
+        .iter()
+        .zip(&no_input_data)
+        .map(|(&v, &padding)| {
+            if padding || !v.is_finite() {
+                f32::NAN
+            } else if v == 0.0 {
+                f32::MIN_POSITIVE
+            } else {
+                v
+            }
+        })
+        .collect();
+    Array2::from_shape_vec(result.dim(), display).unwrap_or_else(|_| result.clone())
+}
+
+fn exact_zero_fraction(arr: &Array2<f32>) -> f64 {
+    let (finite, zeros) = arr.iter().fold((0usize, 0usize), |(finite, zeros), &v| {
+        if v.is_finite() {
+            (finite + 1, zeros + usize::from(v == 0.0))
+        } else {
+            (finite, zeros)
+        }
+    });
+    if finite == 0 {
+        0.0
+    } else {
+        zeros as f64 / finite as f64
+    }
 }
 
 fn plane_count(entry: &ImageEntry) -> Option<i64> {
@@ -192,6 +222,21 @@ pub(crate) fn slot_names_with_target(names: &[String]) -> Vec<String> {
     std::iter::once(TARGET_SYMBOL.to_string())
         .chain(names.iter().cloned())
         .collect()
+}
+
+fn ensure_outputs_are_not_inputs(outputs: &[&str], inputs: &[(&str, &str)]) -> anyhow::Result<()> {
+    for output in outputs {
+        let output_key = path_key(output);
+        if let Some((name, path)) = inputs.iter().find(|(_, path)| path_key(&source_path(path)) == output_key) {
+            bail!(
+                "pixelmath: the output {} is the file of {} ({}); choose another output name so the input is not overwritten",
+                output,
+                name,
+                path
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn run_pixelmath(
@@ -209,8 +254,18 @@ pub(crate) fn run_pixelmath(
     let slot_names = slot_names_with_target(&user_names);
     let program = compile(expression, &slot_names).map_err(pixelmath_error)?;
     let referenced = program.referenced_slots();
+    let reduced = program.reduced_slots();
 
-    let target = load_validated_full(path)
+    let suffix = output_suffix(name);
+    let stem = output_stem(path);
+    let fits_path = format!("{}/{}_{}.fits", output_dir, stem, suffix);
+    let png_path = format!("{}/{}_{}.png", output_dir, stem, suffix);
+    let inputs: Vec<(&str, &str)> = std::iter::once((TARGET_SYMBOL, path))
+        .chain(slots.iter().map(|s| (s.name.as_str(), s.path.as_str())))
+        .collect();
+    ensure_outputs_are_not_inputs(&[&fits_path, &png_path], &inputs)?;
+
+    let target = load_cached_full(path)
         .with_context(|| format!("{} = {}", TARGET_SYMBOL, path))?;
     let mut entries: Vec<Option<ImageEntry>> = Vec::with_capacity(slots.len() + 1);
     entries.push(Some(target.clone()));
@@ -219,7 +274,7 @@ pub(crate) fn run_pixelmath(
             entries.push(None);
             continue;
         }
-        let entry = load_validated_full(&slot.path)
+        let entry = load_cached_full(&slot.path)
             .with_context(|| format!("slot {} = {}", slot.name, slot.path))?;
         entries.push(Some(entry));
     }
@@ -239,6 +294,17 @@ pub(crate) fn run_pixelmath(
                 slot_names[i]
             ));
         }
+        if reduced.get(i).copied().unwrap_or(false) {
+            let zeros = exact_zero_fraction(entry.arr());
+            if zeros >= ZERO_FRACTION_WARNING {
+                warnings.push(format!(
+                    "{} is {:.0}% exact zeros, the value mosaics use as padding; med, mean, sdev, mdev, adev, min and max of {} include those pixels",
+                    slot_names[i],
+                    zeros * 100.0,
+                    slot_names[i]
+                ));
+            }
+        }
     }
 
     let target_arr = target.arr();
@@ -248,22 +314,17 @@ pub(crate) fn run_pixelmath(
         .collect();
     let result = evaluate(&program, &arrays, &opts).map_err(pixelmath_error)?;
 
-    let suffix = output_suffix(name);
-    let stem = output_stem(path);
-    let fits_path = format!("{}/{}_{}.fits", output_dir, stem, suffix);
-    let png_path = format!("{}/{}_{}.png", output_dir, stem, suffix);
     let header = output_header(target.header(), expression, &source_path(path));
+    write_derived_fits(&fits_path, &result, Some(&header))?;
 
-    write_fits_mono(&fits_path, &result, Some(&header))?;
-    GLOBAL_IMAGE_CACHE.invalidate(&fits_path);
-
+    let referenced_inputs: Vec<&Array2<f32>> = arrays
+        .iter()
+        .zip(&referenced)
+        .filter(|(_, used)| **used)
+        .map(|(arr, _)| *arr)
+        .collect();
     let (rows, cols) = result.dim();
-    save_preview_png(preview_pixels(&result), cols, rows, &png_path)?;
-
-    let mut keep_owned: Vec<String> = vec![source_path(path), fits_path.clone(), png_path.clone()];
-    keep_owned.extend(slots.iter().map(|s| source_path(&s.path)));
-    let keep: Vec<&str> = keep_owned.iter().map(String::as_str).collect();
-    let (cleaned_files, cleaned_bytes, cleaned_paths) = cleanup_output_dir_keeping(&output_dir, &keep);
+    save_auto_stf_preview_png(&preview_display(&result, &referenced_inputs), &png_path)?;
 
     let (stats, non_finite) = finite_output_stats(&result);
     Ok(json!({
@@ -273,9 +334,6 @@ pub(crate) fn run_pixelmath(
         RES_STATS: stats,
         RES_NON_FINITE_COUNT: non_finite,
         RES_WARNINGS: warnings,
-        RES_CLEANED_FILES: cleaned_files,
-        RES_CLEANED_BYTES: cleaned_bytes,
-        RES_CLEANED_PATHS: cleaned_paths,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
     }))
 }
@@ -327,9 +385,12 @@ pub async fn pixelmath_validate_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::common::load_cached_full;
+    use crate::cmd::common::test_support::{assert_png_matches, gpu_view_with_auto_stf, wide_textured_sky};
+    use crate::cmd::common::{auto_stretch_preview, HEADER_ABPROC};
+    use crate::core::imaging::stats::compute_image_stats;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
-    use crate::types::constants::{RES_MAX, RES_MIN};
+    use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::constants::{RES_CLEANED_FILES, RES_CLEANED_PATHS, RES_MAX, RES_MIN};
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -356,6 +417,22 @@ mod tests {
         PixelMathSlot { name: name.into(), path: path.into() }
     }
 
+    fn percent_decode(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                out.push(u8::from_str_radix(&value[i + 1..i + 3], 16).unwrap());
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
     #[tokio::test]
     async fn pixelmath_cmd_writes_fits_with_copied_header_and_finite_stats() {
         let f = fixture("pm_src.fits", 4);
@@ -372,7 +449,7 @@ mod tests {
         .unwrap();
         assert_eq!(res[RES_DIMENSIONS], json!([4, 4]));
         assert_eq!(res[RES_NON_FINITE_COUNT], 0);
-        assert_eq!(res[RES_STATS][RES_MIN], 0.0);
+        assert_eq!(res[RES_STATS][RES_MIN], 2.5);
         assert_eq!(res[RES_STATS][RES_MAX], 37.5);
         assert!(std::path::Path::new(res[RES_PNG_PATH].as_str().unwrap()).exists());
         let fits_path = res[RES_FITS_PATH].as_str().unwrap().to_string();
@@ -392,7 +469,7 @@ mod tests {
             full_source.ends_with("pm_src.fits"),
             "reassembled source path does not end with pm_src.fits: {full_source}"
         );
-        assert_eq!(full_source, source_path(&f.target));
+        assert_eq!(percent_decode(&full_source), source_path(&f.target));
     }
 
     #[tokio::test]
@@ -409,7 +486,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(res[RES_FITS_PATH].as_str().unwrap().ends_with("pm_opts_hdu1_clampedv1.fits"));
+        assert!(res[RES_FITS_PATH].as_str().unwrap().ends_with("pm_opts_hdu1_pm_clampedv1.fits"));
         assert_eq!(res[RES_STATS][RES_MAX], 1.0);
 
         let res = pixelmath_cmd(
@@ -424,10 +501,138 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(res[RES_NON_FINITE_COUNT], 1);
-        assert_eq!(res[RES_STATS][RES_MIN], 0.0);
-        assert_eq!(res[RES_STATS][RES_MAX], 1.0);
         let written = load_cached_full(res[RES_FITS_PATH].as_str().unwrap()).unwrap();
         assert!(written.arr()[[0, 3]].is_nan());
+        assert_eq!(written.arr()[[0, 0]], 0.0);
+        assert_eq!(res[RES_STATS][RES_MIN], compute_image_stats(written.arr()).min);
+        assert_eq!(res[RES_STATS][RES_MAX], 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_named_output_never_takes_the_file_name_of_another_step() {
+        let f = fixture("pm_named.fits", 4);
+        for step_suffix in ["arcsinh", "bg_corrected", "stf", "hdu3", "denoised"] {
+            let res = pixelmath_cmd(
+                f.target.clone(),
+                f.out_dir.clone(),
+                "$T * 2".into(),
+                vec![],
+                None,
+                None,
+                Some(step_suffix.into()),
+            )
+            .await
+            .unwrap();
+            let fits_path = res[RES_FITS_PATH].as_str().unwrap();
+            assert!(
+                fits_path.ends_with(&format!("pm_named_hdu1_pm_{step_suffix}.fits")),
+                "{fits_path} can collide with the {step_suffix} step"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pixelmath_refuses_to_overwrite_one_of_its_inputs() {
+        let f = fixture("pm_mask.fits", 4);
+        let first = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T > 5".into(), vec![], None, None, None)
+            .await
+            .unwrap();
+        let mask = first[RES_FITS_PATH].as_str().unwrap().to_string();
+        let before = std::fs::read(&mask).unwrap();
+
+        let err = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T * M".into(), vec![slot("M", &mask)], None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("the file of M"), "{err}");
+        assert_eq!(std::fs::read(&mask).unwrap(), before, "the mask slot was overwritten");
+
+        let unused = pixelmath_cmd(
+            f.target.clone(),
+            f.out_dir.clone(),
+            "$T * 3".into(),
+            vec![slot("M", &mask.replace('/', "\\"))],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(unused.contains("the file of M"), "a differently spelled slot path slipped through: {unused}");
+
+        let renamed = pixelmath_cmd(
+            f.target.clone(),
+            f.out_dir.clone(),
+            "$T * M".into(),
+            vec![slot("M", &mask)],
+            None,
+            None,
+            Some("masked".into()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(renamed[RES_FITS_PATH].as_str().unwrap(), mask);
+    }
+
+    #[tokio::test]
+    async fn an_output_dir_with_a_trailing_separator_still_protects_the_inputs() {
+        let f = fixture("pm_slash.fits", 4);
+        let first = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T > 5".into(), vec![], None, None, None)
+            .await
+            .unwrap();
+        let mask = first[RES_FITS_PATH].as_str().unwrap().to_string();
+        let before = std::fs::read(&mask).unwrap();
+
+        let err = pixelmath_cmd(
+            f.target.clone(),
+            format!("{}/", f.out_dir),
+            "$T * M".into(),
+            vec![slot("M", &mask)],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("the file of M"), "{err}");
+        assert_eq!(std::fs::read(&mask).unwrap(), before, "the mask slot was overwritten through out_dir/");
+    }
+
+    #[tokio::test]
+    async fn pixelmath_does_not_sweep_the_output_directory() {
+        let f = fixture("pm_sweep.fits", 4);
+        std::fs::create_dir_all(&f.out_dir).unwrap();
+        let older = std::path::Path::new(&f.out_dir).join("other_file_bg_corrected.fits");
+        std::fs::write(&older, vec![0u8; 2880]).unwrap();
+        let res = pixelmath_cmd(f.target.clone(), f.out_dir.clone(), "$T + 1".into(), vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(res.get(RES_CLEANED_FILES).is_none(), "{res}");
+        assert!(res.get(RES_CLEANED_PATHS).is_none(), "{res}");
+        assert!(older.exists());
+    }
+
+    #[tokio::test]
+    async fn reducing_a_slot_that_is_mostly_zero_padding_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero_padded.fits").to_str().unwrap().to_string();
+        let padded = Array2::from_shape_fn((10, 10), |(r, c)| if r < 6 { 0.0 } else { 100.0 + c as f32 });
+        write_fits_mono(&path, &padded, None).unwrap();
+        let out_dir = dir.path().join("out").to_str().unwrap().to_string();
+
+        let res = pixelmath_cmd(path.clone(), out_dir.clone(), "$T - med($T)".into(), vec![], None, None, None)
+            .await
+            .unwrap();
+        let warnings: Vec<String> = serde_json::from_value(res[RES_WARNINGS].clone()).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("$T is 60% exact zeros")),
+            "no padding warning for med on a zero-padded frame: {warnings:?}"
+        );
+
+        let res = pixelmath_cmd(path, out_dir, "$T * 2".into(), vec![], None, None, Some("plain".into()))
+            .await
+            .unwrap();
+        let warnings: Vec<String> = serde_json::from_value(res[RES_WARNINGS].clone()).unwrap();
+        assert!(warnings.is_empty(), "no reducer, no warning: {warnings:?}");
     }
 
     #[tokio::test]
@@ -504,11 +709,14 @@ mod tests {
     }
 
     #[test]
-    fn output_suffix_sanitizes_names() {
+    fn output_suffix_sanitizes_and_namespaces_user_names() {
         assert_eq!(output_suffix(None), "pixelmath");
         assert_eq!(output_suffix(Some("   ")), "pixelmath");
-        assert_eq!(output_suffix(Some("ha/oiii ratio")), "haoiiiratio");
-        assert_eq!(output_suffix(Some("ratio_v2-final")), "ratio_v2-final");
+        assert_eq!(output_suffix(Some("pixelmath")), "pixelmath");
+        assert_eq!(output_suffix(Some("ha/oiii ratio")), "pm_haoiiiratio");
+        assert_eq!(output_suffix(Some("ratio_v2-final")), "pm_ratio_v2-final");
+        assert_eq!(output_suffix(Some("pm_ratio")), "pm_ratio");
+        assert_eq!(output_suffix(Some("arcsinh")), "pm_arcsinh");
     }
 
     #[test]
@@ -543,6 +751,57 @@ mod tests {
         assert_eq!(out.get("WCSAXES"), Some("2"));
         assert_eq!(out.get("CRVAL1"), Some("83.8"));
         assert_eq!(out.get("EXPTIME"), Some("300"));
+    }
+
+    #[test]
+    fn a_rescaled_output_drops_every_zero_point_that_photometry_reads() {
+        let mut source = HduHeader::empty();
+        for key in crate::core::metadata::photcal::GENERIC_ZERO_POINT_KEYS {
+            source.set(key, "30.0".into());
+        }
+        source.set("PHOTFLAM", "1e-19".into());
+        source.set("MAXLIN", "50000".into());
+        source.set("CRVAL1", "83.8".into());
+        let out = output_header(Some(&source), "$T * 10", "des.fits");
+        for key in crate::core::metadata::photcal::GENERIC_ZERO_POINT_KEYS {
+            assert!(out.get(key).is_none(), "{key} still calibrates the rescaled pixels");
+        }
+        assert!(out.get("PHOTFLAM").is_none());
+        assert!(out.get("MAXLIN").is_none());
+        assert_eq!(out.get("CRVAL1"), Some("83.8"));
+    }
+
+    #[test]
+    fn rerunning_on_a_pixelmath_output_leaves_no_stale_continuation_cards() {
+        let long_expr = format!("$T * ({})", vec!["1"; 70].join(" + "));
+        let long_source = format!("/{}/deep/pm_src.fits", vec!["some_long_directory"; 4].join("/"));
+        let mut first = output_header(None, &long_expr, &long_source);
+        first.set(LEGACY_HEADER_PMSOURCE, "old.fits".into());
+        assert!(first.get("PMEXPR2").is_some() && first.get("PMSRC1").is_some());
+
+        let second = output_header(Some(&first), "$T / 2", "short.fits");
+        assert_eq!(read_long_value(&second, HEADER_PMEXPR).as_deref(), Some("$T / 2"));
+        assert_eq!(read_long_value(&second, HEADER_PMSOURCE).as_deref(), Some("short.fits"));
+        for stale in ["PMEXPR1", "PMEXPR2", "PMSRC1", LEGACY_HEADER_PMSOURCE] {
+            assert!(second.get(stale).is_none(), "{stale} from the previous run survived");
+        }
+    }
+
+    #[test]
+    fn source_paths_with_apostrophes_or_accents_are_recorded_losslessly() {
+        let target = "C:/Users/O\u{27}Brien/Ori\u{e3}o/100%/m42.fits";
+        let header = output_header(None, "$T", target);
+        let recorded = read_long_value(&header, HEADER_PMSOURCE).unwrap();
+        assert_eq!(recorded, "C:/Users/O%27Brien/Ori%C3%A3o/100%25/m42.fits");
+        assert!(recorded.is_ascii() && !recorded.contains('\u{27}'));
+        assert_eq!(percent_decode(&recorded), target);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accented.fits").to_str().unwrap().to_string();
+        write_fits_mono(&path, &Array2::<f32>::zeros((2, 2)), Some(&header)).unwrap();
+        let reread = load_cached_full(&path).unwrap();
+        let reread = read_long_value(reread.header().unwrap(), HEADER_PMSOURCE).unwrap();
+        assert_eq!(percent_decode(&reread), target);
     }
 
     #[test]
@@ -612,6 +871,12 @@ mod tests {
         })
     }
 
+    fn median_u8(values: impl Iterator<Item = u8>) -> u8 {
+        let mut v: Vec<u8> = values.collect();
+        v.sort_unstable();
+        v[v.len() / 2]
+    }
+
     #[test]
     fn preview_of_a_signed_result_is_not_a_black_frame() {
         let sky = synthetic_sky(64, 64);
@@ -619,7 +884,7 @@ mod tests {
         let signed = sky.mapv(|v| v - median);
         assert!(signed.iter().any(|&v| v < 0.0), "fixture must be signed");
 
-        let pixels = preview_pixels(&signed);
+        let pixels = auto_stretch_preview(&preview_display(&signed, &[&sky]));
         let zeros = pixels.iter().filter(|&&p| p == 0).count();
         let distinct = pixels.iter().copied().collect::<std::collections::HashSet<u8>>().len();
 
@@ -632,9 +897,71 @@ mod tests {
     }
 
     #[test]
+    fn zero_padding_of_the_input_stays_out_of_the_preview_stretch() {
+        let (rows, cols) = (64usize, 64usize);
+        let target = Array2::from_shape_fn((rows, cols), |(r, c)| {
+            if r < 35 {
+                0.0
+            } else if r == 50 && c == 32 {
+                10000.0
+            } else {
+                100.0 + ((r * 7 + c * 13) % 11) as f32 * 2.0
+            }
+        });
+        let result = target.mapv(|v| v * 2.0);
+        let pixels = auto_stretch_preview(&preview_display(&result, &[&target]));
+        let sky = median_u8(pixels.iter().enumerate().filter(|(i, _)| i / cols >= 35).map(|(_, &p)| p));
+        let padding = median_u8(pixels.iter().enumerate().filter(|(i, _)| i / cols < 35).map(|(_, &p)| p));
+        assert_eq!(padding, 0);
+        assert!(sky > 30, "sky rendered near black because padding joined the statistics: {sky}");
+    }
+
+    #[test]
+    fn a_mask_result_previews_black_and_white() {
+        let target = synthetic_sky(16, 16);
+        let mask = target.mapv(|v| if v > 5.0 { 1.0 } else { 0.0 });
+        assert!(mask.iter().any(|&v| v == 0.0) && mask.iter().any(|&v| v == 1.0));
+        let pixels = auto_stretch_preview(&preview_display(&mask, &[&target]));
+        for (m, p) in mask.iter().zip(&pixels) {
+            assert_eq!(*p, if *m == 1.0 { 255 } else { 0 });
+        }
+    }
+
+    #[test]
     fn preview_of_an_all_nan_result_is_black_without_panicking() {
-        let pixels = preview_pixels(&Array2::from_elem((8, 8), f32::NAN));
+        let pixels = auto_stretch_preview(&preview_display(&Array2::from_elem((8, 8), f32::NAN), &[]));
         assert!(pixels.iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn result_stats_leave_exact_zero_padding_out_like_the_image_statistics() {
+        let arr = Array2::from_shape_vec((2, 4), vec![0.0, -4.0, 2.0, 0.0, 6.0, f32::NAN, -1.0, 3.0]).unwrap();
+        let (stats, non_finite) = finite_output_stats(&arr);
+        assert_eq!(non_finite, 1, "exact zeros are padding, not non-finite values");
+        let stats = stats.expect("valid pixels");
+        let image = compute_image_stats(&arr);
+        assert_eq!(stats.valid_count, 5);
+        assert_eq!(stats.valid_count, image.valid_count);
+        assert_eq!(stats.min, -4.0);
+        assert_eq!(stats.median, image.median);
+        assert_eq!(stats.mean, image.mean);
+
+        let (stats, non_finite) = finite_output_stats(&Array2::zeros((2, 2)));
+        assert_eq!(non_finite, 0);
+        assert!(stats.is_none(), "an all-padding result must not report measurements");
+    }
+
+    #[test]
+    fn a_large_result_previews_like_the_gpu_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide.fits").to_str().unwrap().to_string();
+        let out = dir.path().join("out").to_str().unwrap().to_string();
+        let sky = wide_textured_sky();
+        write_fits_mono(&src, &sky, None).unwrap();
+
+        let res = run_pixelmath(&src, &out, "$T * 2", &[], OutputOptions::default(), None).unwrap();
+        let expected = gpu_view_with_auto_stf(&sky.mapv(|v| v * 2.0));
+        assert_png_matches(res[RES_PNG_PATH].as_str().unwrap(), &expected);
     }
 
     #[test]

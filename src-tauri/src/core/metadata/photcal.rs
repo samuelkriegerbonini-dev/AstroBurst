@@ -20,6 +20,9 @@ pub const ROMAN_PIXEL_AREA_SR_KEYS: [&str; 2] = [
     "ROMAN_META_PHOTOMETRY_PIXELAREA_STERADIANS_VALUE",
 ];
 
+const MJY_PER_SR_UNITS: [&str; 6] = ["MJY/SR", "MJYSR-1", "MJY.SR-1", "MJY.SR**-1", "MJYSR**-1", "MJY/STERADIAN"];
+const PIXEL_AREA_TOLERANCE_RATIO: f64 = 1.10;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FluxConvention {
@@ -86,7 +89,7 @@ fn normalized_unit(bunit: &str) -> String {
 }
 
 fn is_mjy_per_sr(unit: &str) -> bool {
-    unit.contains("MJY/SR")
+    MJY_PER_SR_UNITS.contains(&unit)
 }
 
 fn is_dn_per_second(unit: &str) -> bool {
@@ -97,17 +100,26 @@ fn is_rate_unit(unit: &str) -> bool {
     unit.contains("/S")
 }
 
-fn wcs_pixel_scale_arcsec(wcs: Option<&WcsTransform>) -> Option<f64> {
-    wcs.map(WcsTransform::pixel_scale_arcsec).filter(|s| s.is_finite() && *s > 0.0)
+fn wcs_pixel_area_sr(wcs: Option<&WcsTransform>) -> Option<f64> {
+    let cd = wcs?.raw_params().4;
+    let square_degrees = (cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0]).abs();
+    let steradians = square_degrees * 1f64.to_radians().powi(2);
+    (steradians.is_finite() && steradians > 0.0).then_some(steradians)
 }
 
-fn pixel_area_sr_from_scale(scale_arcsec: f64) -> f64 {
-    (scale_arcsec / ARCSEC_PER_RADIAN).powi(2)
+fn square_arcsec(steradians: f64) -> f64 {
+    steradians * ARCSEC_PER_RADIAN.powi(2)
+}
+
+fn areas_disagree(card: f64, wcs: f64) -> bool {
+    let ratio = card / wcs;
+    ratio > PIXEL_AREA_TOLERANCE_RATIO || ratio < PIXEL_AREA_TOLERANCE_RATIO.recip()
 }
 
 struct PixelArea {
     steradians: f64,
     derived: bool,
+    replaced_card: bool,
 }
 
 fn pixel_area_sr(
@@ -116,15 +128,26 @@ fn pixel_area_sr(
     wcs: Option<&WcsTransform>,
     warnings: &mut Vec<String>,
 ) -> Option<PixelArea> {
-    if let Some((_, sr)) = first_card_f64(header, keys.iter().copied()).filter(|(_, v)| *v > 0.0) {
-        return Some(PixelArea { steradians: sr, derived: false });
+    let from_wcs = wcs_pixel_area_sr(wcs);
+    if let Some((key, card)) = first_card_f64(header, keys.iter().copied()).filter(|(_, v)| *v > 0.0) {
+        return Some(match from_wcs {
+            Some(steradians) if areas_disagree(card, steradians) => {
+                warnings.push(format!(
+                    "{key} = {card:.4e} sr is {:.3}x the WCS pixel area ({steradians:.4e} sr); the image was probably resampled after {key} was written, so the WCS pixel area is used",
+                    card / steradians
+                ));
+                PixelArea { steradians, derived: true, replaced_card: true }
+            }
+            _ => PixelArea { steradians: card, derived: false, replaced_card: false },
+        });
     }
-    let scale = wcs_pixel_scale_arcsec(wcs)?;
+    let steradians = from_wcs?;
     warnings.push(format!(
         "{} missing; pixel area derived from the WCS pixel scale ({:.4} arcsec/px)",
-        keys[0], scale
+        keys[0],
+        square_arcsec(steradians).sqrt()
     ));
-    Some(PixelArea { steradians: pixel_area_sr_from_scale(scale), derived: true })
+    Some(PixelArea { steradians, derived: true, replaced_card: false })
 }
 
 impl PhotCal {
@@ -137,10 +160,14 @@ impl PhotCal {
         let convention = if is_mjy_per_sr(&unit) {
             let area = pixel_area_sr(header, &["PIXAR_SR"], wcs, &mut warnings)?;
             let pixar_a2 = match card_f64(header, "PIXAR_A2").filter(|v| *v > 0.0) {
-                Some(a2) => Some(a2),
-                None => wcs_pixel_scale_arcsec(wcs).map(|s| {
-                    notes.push(format!("PIXAR_A2 missing; pixel area {:.6} arcsec^2 taken from the WCS scale", s * s));
-                    s * s
+                Some(a2) if !area.replaced_card => Some(a2),
+                card => wcs_pixel_area_sr(wcs).map(square_arcsec).map(|a2| {
+                    notes.push(format!(
+                        "PIXAR_A2 {}; pixel area {:.6} arcsec^2 taken from the WCS",
+                        if card.is_some() { "replaced like PIXAR_SR" } else { "missing" },
+                        a2
+                    ));
+                    a2
                 }),
             };
             notes.push("JWST MJy/sr: flux [Jy] = sum(MJy/sr) * PIXAR_SR * 1e6".into());
@@ -246,15 +273,6 @@ impl PhotCal {
         }
     }
 
-    fn mjy_per_sr_per_native_unit(&self) -> Option<f64> {
-        match &self.convention {
-            FluxConvention::JwstMjySr { .. } => Some(1.0),
-            FluxConvention::JwstDnPerSec { photmjsr, .. } => Some(*photmjsr),
-            FluxConvention::RomanDnPerSec { mjy_per_dn_s, .. } => Some(*mjy_per_dn_s),
-            _ => None,
-        }
-    }
-
     pub fn calibrate(&self, net: f64, net_err: Option<f64>) -> Option<CalibratedFlux> {
         if !net.is_finite() {
             return None;
@@ -276,20 +294,6 @@ impl PhotCal {
             _ => None,
         };
         Some(CalibratedFlux { flux_jy, flux_err_jy, mag_ab, mag_ab_err, st_mag })
-    }
-
-    pub fn surface_brightness_ab_per_arcsec2(&self, pixel_value: f64) -> Option<f64> {
-        if !pixel_value.is_finite() || pixel_value <= 0.0 {
-            return None;
-        }
-        let mjy_per_sr = pixel_value * self.mjy_per_sr_per_native_unit()?;
-        let jy_per_arcsec2 = match &self.convention {
-            FluxConvention::JwstMjySr { pixar_sr, pixar_a2: Some(a2), .. } if *a2 > 0.0 => {
-                mjy_per_sr * pixar_sr * JY_PER_MJY / a2
-            }
-            _ => mjy_per_sr * JY_PER_MJY / (ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN),
-        };
-        (jy_per_arcsec2 > 0.0).then(|| -2.5 * jy_per_arcsec2.log10() + AB_MAG_ZERO_POINT)
     }
 }
 
@@ -571,6 +575,102 @@ mod tests {
         assert!(missing_calibration_reason(Some(&make_header(&[("BUNIT", "MJy/sr")]))).contains("PIXAR_SR"));
     }
 
+    fn header_with_wcs(cd: [[f64; 2]; 2], extra: &[(&str, String)]) -> (HduHeader, WcsTransform) {
+        let mut cards = wcs_cards(cd);
+        cards.extend(extra.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        let pairs: Vec<(&str, &str)> = cards.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let header = make_header(&pairs);
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        (header, wcs)
+    }
+
+    fn arcsec_to_sr(square_arcsec: f64) -> f64 {
+        square_arcsec / ARCSEC_PER_RADIAN.powi(2)
+    }
+
+    #[test]
+    fn a_pixar_sr_left_over_from_before_a_resample_gives_way_to_the_wcs_pixel_area() {
+        let (native, resampled) = (0.031, 0.063);
+        let deg = resampled / 3600.0;
+        let stale_sr = arcsec_to_sr(native * native);
+        let wcs_sr = arcsec_to_sr(resampled * resampled);
+        let (header, wcs) = header_with_wcs(
+            [[-deg, 0.0], [0.0, deg]],
+            &[
+                ("BUNIT", "MJy/sr".into()),
+                ("PIXAR_SR", format!("{:.6e}", stale_sr)),
+                ("PIXAR_A2", format!("{:.6e}", native * native)),
+            ],
+        );
+        let cal = PhotCal::from_header(&header, Some(&wcs)).expect("calibration");
+        match &cal.convention {
+            FluxConvention::JwstMjySr { pixar_sr, pixar_a2, derived_pixar } => {
+                assert!((pixar_sr - wcs_sr).abs() / wcs_sr < 1e-6, "pixar_sr={pixar_sr} wcs={wcs_sr}");
+                assert!(*derived_pixar);
+                assert!((pixar_a2.unwrap() - resampled * resampled).abs() < 1e-9, "{pixar_a2:?}");
+            }
+            other => panic!("unexpected convention {other:?}"),
+        }
+        assert!(
+            cal.warnings.iter().any(|w| w.starts_with("PIXAR_SR") && w.contains("WCS pixel area is used")),
+            "{:?}",
+            cal.warnings
+        );
+        assert!(cal.label().contains("derived from the WCS"), "{}", cal.label());
+        let true_flux_jy = 1.0e-4;
+        let flux = cal.calibrate(true_flux_jy / (wcs_sr * JY_PER_MJY), None).unwrap();
+        assert!((flux.flux_jy - true_flux_jy).abs() / true_flux_jy < 1e-6, "flux_jy={}", flux.flux_jy);
+
+        let (dn, dn_wcs) = header_with_wcs(
+            [[-deg, 0.0], [0.0, deg]],
+            &[("BUNIT", "DN/s".into()), ("PHOTMJSR", "0.5".into()), ("PIXAR_SR", format!("{:.6e}", stale_sr))],
+        );
+        match PhotCal::from_header(&dn, Some(&dn_wcs)).unwrap().convention {
+            FluxConvention::JwstDnPerSec { pixar_sr, .. } => assert!((pixar_sr - wcs_sr).abs() / wcs_sr < 1e-6),
+            other => panic!("unexpected convention {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pixar_sr_within_ten_percent_of_the_wcs_area_is_kept() {
+        let deg = 0.063 / 3600.0;
+        let wcs_sr = arcsec_to_sr(0.063 * 0.063);
+        let (header, wcs) = header_with_wcs(
+            [[-deg, 0.0], [0.0, deg]],
+            &[("BUNIT", "MJy/sr".into()), ("PIXAR_SR", format!("{:.6e}", wcs_sr * 1.05))],
+        );
+        let cal = PhotCal::from_header(&header, Some(&wcs)).unwrap();
+        match cal.convention {
+            FluxConvention::JwstMjySr { pixar_sr, derived_pixar, .. } => {
+                assert!((pixar_sr - wcs_sr * 1.05).abs() / wcs_sr < 1e-6);
+                assert!(!derived_pixar);
+            }
+            other => panic!("unexpected convention {other:?}"),
+        }
+        assert!(cal.warnings.is_empty(), "{:?}", cal.warnings);
+    }
+
+    #[test]
+    fn the_wcs_pixel_area_of_rectangular_pixels_is_the_cd_determinant() {
+        let (sx, sy) = (0.1, 0.2);
+        let cd = [[-sx / 3600.0, 0.0], [0.0, sy / 3600.0]];
+        let true_sr = arcsec_to_sr(sx * sy);
+        let (derived, wcs) = header_with_wcs(cd, &[("BUNIT", "MJy/sr".into())]);
+        match PhotCal::from_header(&derived, Some(&wcs)).unwrap().convention {
+            FluxConvention::JwstMjySr { pixar_sr, pixar_a2, derived_pixar } => {
+                assert!((pixar_sr - true_sr).abs() / true_sr < 1e-6, "pixar_sr={pixar_sr} true={true_sr}");
+                assert!((pixar_a2.unwrap() - sx * sy).abs() < 1e-9);
+                assert!(derived_pixar);
+            }
+            other => panic!("unexpected convention {other:?}"),
+        }
+
+        let (with_card, wcs) = header_with_wcs(cd, &[("BUNIT", "MJy/sr".into()), ("PIXAR_SR", format!("{:.6e}", true_sr))]);
+        let cal = PhotCal::from_header(&with_card, Some(&wcs)).unwrap();
+        assert!(matches!(cal.convention, FluxConvention::JwstMjySr { derived_pixar: false, .. }));
+        assert!(cal.warnings.is_empty(), "{:?}", cal.warnings);
+    }
+
     #[test]
     fn magnitude_error_follows_the_relative_flux_error() {
         let cal = PhotCal::from_header(&jwst_mjy_sr_header(), None).unwrap();
@@ -589,22 +689,19 @@ mod tests {
     }
 
     #[test]
-    fn surface_brightness_uses_the_pixel_area_in_arcsec2() {
-        let cal = PhotCal::from_header(&jwst_mjy_sr_header(), None).unwrap();
-        let sb = cal.surface_brightness_ab_per_arcsec2(1000.0).expect("surface brightness");
-        let expected = ab_from_jy(1000.0 * 2.1e-13 * 1e6 / 8.9e-4);
-        assert!((sb - expected).abs() < 1e-9, "sb={sb} expected={expected}");
-
-        let no_a2 = make_header(&[("BUNIT", "MJy/sr"), ("PIXAR_SR", "2.1E-13")]);
-        let cal = PhotCal::from_header(&no_a2, None).unwrap();
-        let sb = cal.surface_brightness_ab_per_arcsec2(1000.0).unwrap();
-        let exact = ab_from_jy(1000.0 * 1e6 / (ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN));
-        assert!((sb - exact).abs() < 1e-9, "sb={sb} exact={exact}");
-        assert!(cal.surface_brightness_ab_per_arcsec2(0.0).is_none());
-        assert!(cal.surface_brightness_ab_per_arcsec2(-1.0).is_none());
-
-        let hst = make_header(&[("BUNIT", "ELECTRONS/S"), ("PHOTFLAM", "1.9E-19"), ("PHOTPLAM", "5300")]);
-        assert!(PhotCal::from_header(&hst, None).unwrap().surface_brightness_ab_per_arcsec2(1.0).is_none());
+    fn only_a_plain_mjy_per_sr_unit_is_calibrated_as_a_flux_density() {
+        for unit in ["MJy/sr", "MJy / sr", "MJy sr-1", "MJy.sr**-1", " mjy/SR "] {
+            let header = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2.1E-13")]);
+            assert!(
+                matches!(PhotCal::from_header(&header, None).map(|c| c.convention), Some(FluxConvention::JwstMjySr { .. })),
+                "BUNIT '{unit}' was not recognised as MJy/sr"
+            );
+        }
+        for unit in ["MJy/sr km/s", "MJy/sr x channels", "MJy/sr.km/s", "10 MJy/sr"] {
+            let header = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2.1E-13")]);
+            assert!(PhotCal::from_header(&header, None).is_none(), "BUNIT '{unit}' was calibrated as MJy/sr");
+            assert!(!missing_calibration_reason(Some(&header)).contains("PIXAR_SR"), "{unit}");
+        }
     }
 
     #[test]

@@ -1,10 +1,11 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 
-import { blendChannels, lrgbCombineComposite } from "../../../services/compose";
+import { blendChannels, lrgbCombineComposite, renderLinearCompositePreview } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
+import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton, Slider } from "../../ui";
-import {BLEND_PRESETS, BlendWeight, WizardState, resolveChannelPath} from "../../../utils/wizard";
+import {BLEND_PRESETS, BlendWeight, WizardState, resolveChannelPath, type CompositeOp} from "../../../utils/wizard";
 import {
   blendMatrixError,
   blendWeightsCoverAllColumns,
@@ -19,6 +20,7 @@ interface BlendStepProps {
   state: WizardState;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
   onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
+  onCompositeOp: (op: CompositeOp) => void;
 }
 
 interface BlendRunResult {
@@ -27,7 +29,8 @@ interface BlendRunResult {
   elapsed_ms?: number;
 }
 
-export default function BlendStep({ state, onWeightsChange, onCompositeReady }: BlendStepProps) {
+export default function BlendStep({ state, onWeightsChange, onCompositeReady, onCompositeOp }: BlendStepProps) {
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BlendRunResult | null>(null);
   const [error, setError] = useState("");
@@ -181,13 +184,14 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       const autoStf = res.auto_stf ?? undefined;
+      onCompositeOp({ kind: "blend", preset: state.blendPreset });
       onCompositeReady(previewUrl, autoStf);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [filledBins, state, activeWeights, onCompositeReady]);
+  }, [filledBins, state, activeWeights, onCompositeReady, onCompositeOp]);
 
   const lPath = useMemo(() => resolveChannelPath(state, "l"), [state]);
 
@@ -202,14 +206,19 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady }: 
         chrominance: lrgbChrominance,
       });
       setLrgbApplied(true);
-      const previewUrl = res.previewUrl ?? res.png_path ?? null;
+      onCompositeOp({ kind: "lrgb", lightness: lrgbLightness, chrominance: lrgbChrominance });
+      const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
+      const previewUrl = await renderLinearCompositePreview(dir, stf, compositeStfLinked).catch((e) => {
+        console.error("[AstroBurst] LRGB preview re-stretch failed:", e);
+        return res.previewUrl ?? res.png_path ?? null;
+      });
       onCompositeReady(previewUrl);
     } catch (e) {
       setLrgbError(e instanceof Error ? e.message : String(e));
     } finally {
       setLrgbLoading(false);
     }
-  }, [lPath, lrgbLightness, lrgbChrominance, onCompositeReady]);
+  }, [lPath, lrgbLightness, lrgbChrominance, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onCompositeReady, onCompositeOp]);
 
   if (filledBins.length < 2) {
     return (

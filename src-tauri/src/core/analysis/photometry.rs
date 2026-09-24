@@ -11,7 +11,12 @@ pub const SKY_ANNULUS_INNER_FACTOR: f64 = 2.0;
 pub const SKY_ANNULUS_OUTER_FACTOR: f64 = 3.0;
 pub const GROWTH_CURVE_REACH_FACTOR: f64 = 4.0;
 pub const GROWTH_PLATEAU_TOLERANCE: f64 = 0.01;
-pub const SATURATION_KEYWORDS: [&str; 5] = ["SATURATE", "SATLEVEL", "SATURATION", "DATAMAX", "MAXLIN"];
+pub const SATURATION_KEYWORDS: [&str; 5] = ["SATURATE", "SATLEVEL", "SATURATION", "MAXLIN", "DATAMAX"];
+const DATAMAX_KEYWORD: &str = "DATAMAX";
+const DATAMAX_IS_IMAGE_MAX_TOLERANCE: f64 = 1e-6;
+const COARSE_SKY_INNER: f64 = 8.0;
+const COARSE_SKY_OUTER: f64 = 14.0;
+const MIN_REFINED_SKY_PIXELS: u32 = 16;
 pub const IMAGE_MAX_SATURATION_SOURCE: &str = "image maximum";
 pub const DQ_SATURATION_SOURCE: &str = "DQ SATURATED";
 pub const NO_SATURATION_SOURCE: &str = "none";
@@ -56,6 +61,11 @@ pub fn saturation_level(header: Option<&HduHeader>, image_max: f64) -> (f64, &'s
     if let Some(header) = header {
         for keyword in SATURATION_KEYWORDS {
             if let Some(level) = header.get_f64(keyword).filter(|v| v.is_finite() && *v > 0.0) {
+                let records_the_data = keyword == DATAMAX_KEYWORD
+                    && (level - image_max).abs() <= DATAMAX_IS_IMAGE_MAX_TOLERANCE * level.abs().max(image_max.abs());
+                if records_the_data {
+                    return (image_max, IMAGE_MAX_SATURATION_SOURCE);
+                }
                 return (level, keyword);
             }
         }
@@ -138,7 +148,7 @@ fn annulus_stats(
         return SkyEstimate { mean: 0.0, sigma: 0.0, count: 0 };
     }
 
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals.sort_by(|a, b| a.total_cmp(b));
     let median = sorted_median(&vals);
 
     let lo = vals.len() / 4;
@@ -151,7 +161,7 @@ fn annulus_stats(
     };
 
     let mut devs: Vec<f64> = vals.iter().map(|v| (v - median).abs()).collect();
-    devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    devs.sort_by(|a, b| a.total_cmp(b));
     let sigma = sorted_median(&devs) * MAD_TO_SIGMA;
 
     SkyEstimate { mean, sigma, count: vals.len() as u32 }
@@ -240,14 +250,20 @@ fn err_weighted_variance(
     err: &Array2<f32>,
     pixels: &[AperturePixel],
     excluded: Option<&Array2<u8>>,
+    model_variance: impl Fn(f64) -> f64,
 ) -> f64 {
     pixels
         .iter()
         .filter(|p| !excluded.is_some_and(|m| m[[p.y, p.x]] != 0))
-        .filter(|p| image[[p.y, p.x]].is_finite())
-        .map(|p| (p.weight as f64, err[[p.y, p.x]] as f64))
-        .filter(|(_, e)| e.is_finite())
-        .map(|(w, e)| (w * e).powi(2))
+        .filter_map(|p| {
+            let v = image[[p.y, p.x]] as f64;
+            if !v.is_finite() {
+                return None;
+            }
+            let e = err[[p.y, p.x]] as f64;
+            let pixel_variance = if e.is_finite() { e * e } else { model_variance(v) };
+            Some((p.weight as f64).powi(2) * pixel_variance)
+        })
         .sum()
 }
 
@@ -338,13 +354,26 @@ pub fn measure_star_full(
         working,
         best_x as f64,
         best_y as f64,
-        8.0,
-        14.0,
+        COARSE_SKY_INNER,
+        COARSE_SKY_OUTER,
         config.subsamples,
     );
     let (x, y) = refine_centroid(working, best_x as f64, best_y as f64, coarse_sky.mean, 5);
 
-    let fwhm = fwhm_truncated_moments(working, x, y, coarse_sky.mean);
+    let mut fwhm = fwhm_truncated_moments(working, x, y, coarse_sky.mean);
+    if SKY_ANNULUS_INNER_FACTOR * fwhm > COARSE_SKY_INNER {
+        let wide_sky = annulus_stats(
+            working,
+            x,
+            y,
+            SKY_ANNULUS_INNER_FACTOR * fwhm,
+            SKY_ANNULUS_OUTER_FACTOR * fwhm,
+            config.subsamples,
+        );
+        if wide_sky.count >= MIN_REFINED_SKY_PIXELS {
+            fwhm = fwhm_truncated_moments(working, x, y, wide_sky.mean);
+        }
+    }
     let fwhm_eff = if fwhm > 0.0 { fwhm } else { 4.0 };
 
     let r_ap = config
@@ -375,13 +404,16 @@ pub fn measure_star_full(
     } else {
         0.0
     };
+    let gain = config.gain.filter(|g| g.is_finite() && *g > 0.0);
     let (variance, err_used) = match err {
-        Some(err_plane) => (err_weighted_variance(image, err_plane, &pixels, excluded) + sky_variance, true),
+        Some(err_plane) => {
+            let model_variance = |v: f64| {
+                sky.sigma * sky.sigma + gain.map_or(0.0, |g| (v - sky.mean).max(0.0) / g)
+            };
+            (err_weighted_variance(image, err_plane, &pixels, excluded, model_variance) + sky_variance, true)
+        }
         None => {
-            let poisson = config
-                .gain
-                .filter(|g| g.is_finite() && *g > 0.0)
-                .map_or(0.0, |g| net_flux.max(0.0) / g);
+            let poisson = gain.map_or(0.0, |g| net_flux.max(0.0) / g);
             (poisson + n_ap * sky.sigma * sky.sigma + sky_variance, false)
         }
     };
@@ -391,7 +423,7 @@ pub fn measure_star_full(
     } else {
         net_flux.max(0.0)
     };
-    let mag_inst = -2.5 * net_flux.max(1e-12).log10();
+    let mag_inst = if net_flux > 0.0 { -2.5 * net_flux.log10() } else { f64::NAN };
 
     let n_saturated = saturated.map_or(0, |map| {
         pixels.iter().filter(|p| map[[p.y, p.x]] != 0).count() as u32
@@ -446,29 +478,29 @@ pub fn measure_star_full(
     })
 }
 
-pub fn measure_star(
-    image: &Array2<f32>,
-    click_x: f64,
-    click_y: f64,
-    config: &PhotometryConfig,
-) -> Result<StarPhotometry, String> {
-    measure_star_full(image, None, None, None, click_x, click_y, config)
-}
-
-pub fn measure_star_masked(
-    image: &Array2<f32>,
-    click_x: f64,
-    click_y: f64,
-    config: &PhotometryConfig,
-    excluded: Option<&Array2<u8>>,
-) -> Result<StarPhotometry, String> {
-    measure_star_full(image, None, excluded, None, click_x, click_y, config)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::analysis::aperture::ApertureSum;
+
+    fn measure_star(
+        image: &Array2<f32>,
+        click_x: f64,
+        click_y: f64,
+        config: &PhotometryConfig,
+    ) -> Result<StarPhotometry, String> {
+        measure_star_full(image, None, None, None, click_x, click_y, config)
+    }
+
+    fn measure_star_masked(
+        image: &Array2<f32>,
+        click_x: f64,
+        click_y: f64,
+        config: &PhotometryConfig,
+        excluded: Option<&Array2<u8>>,
+    ) -> Result<StarPhotometry, String> {
+        measure_star_full(image, None, excluded, None, click_x, click_y, config)
+    }
 
     fn aperture_sum(image: &Array2<f32>, x: f64, y: f64, radius: f64, subsamples: u8) -> ApertureSum {
         let (h, w) = image.dim();
@@ -601,6 +633,56 @@ mod tests {
         header.set("SATLEVEL", "-1".to_string());
         header.set("SATURATION", "59000".to_string());
         assert_eq!(saturation_level(Some(&header), 70000.0), (59000.0, "SATURATION"));
+    }
+
+    #[test]
+    fn datamax_ranks_below_maxlin_and_a_datamax_equal_to_the_data_maximum_is_not_a_saturation_level() {
+        let mut header = HduHeader::empty();
+        header.set("DATAMAX", "65535".to_string());
+        header.set("MAXLIN", "58000".to_string());
+        assert_eq!(saturation_level(Some(&header), 70000.0), (58000.0, "MAXLIN"));
+
+        let mut observed = HduHeader::empty();
+        observed.set("DATAMAX", "1000.0".to_string());
+        assert_eq!(saturation_level(Some(&observed), 1000.0), (1000.0, IMAGE_MAX_SATURATION_SOURCE));
+        assert_eq!(saturation_level(Some(&observed), 1200.0), (1000.0, "DATAMAX"));
+
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 900.0, 2.0, 100.0);
+        let cfg = PhotometryConfig {
+            saturation: Some(saturation_level(Some(&observed), 1000.0)),
+            ..PhotometryConfig::default()
+        };
+        let result = measure_star(&img, 32.0, 32.0, &cfg).unwrap();
+        assert!(!result.saturated, "the brightest star was flagged from a DATAMAX that only records the data maximum");
+        assert_eq!(result.saturation_source, IMAGE_MAX_SATURATION_SOURCE);
+    }
+
+    #[test]
+    fn a_non_positive_net_flux_has_no_instrumental_magnitude() {
+        let mut hollow = Array2::from_elem((64, 64), 10.0f32);
+        hollow.slice_mut(ndarray::s![20..44, 20..44]).fill(9.0);
+        let res = measure_star(&hollow, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert!(res.net_flux <= 0.0, "net_flux={}", res.net_flux);
+        assert!(res.mag_inst.is_nan(), "mag_inst={} reported for a net flux of {}", res.mag_inst, res.net_flux);
+        assert!(serde_json::to_value(&res).unwrap()["mag_inst"].is_null());
+
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let star = measure_star(&img, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert!((star.mag_inst - (-2.5 * star.net_flux.log10())).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_wide_source_is_measured_against_a_sky_outside_its_own_wings() {
+        for sigma in [6.0f64, 8.0] {
+            let img = gaussian_scene(160, 160, 80.0, 80.0, 1000.0, sigma, 100.0);
+            let res = measure_star(&img, 80.0, 80.0, &PhotometryConfig::default()).unwrap();
+            let true_fwhm = 2.3548200450309493 * sigma;
+            assert!(
+                (res.fwhm - true_fwhm).abs() / true_fwhm < 0.05,
+                "sigma {sigma}: FWHM {} against a true {true_fwhm}",
+                res.fwhm
+            );
+        }
     }
 
     #[test]
@@ -842,10 +924,39 @@ mod tests {
 
         let mut holed = err.clone();
         holed[[31, 32]] = f32::NAN;
-        let partial = measure_star_full(&img, Some(&holed), None, None, 32.0, 31.0, &cfg).unwrap();
+        let partial = measure_star_full(&noisy, Some(&holed), None, None, 32.0, 31.0, &cfg).unwrap();
         assert!(partial.err_used);
-        let first = measure_star_full(&img, Some(&err), None, None, 32.0, 31.0, &cfg).unwrap();
-        assert!(partial.flux_err < first.flux_err);
+        assert_eq!(partial.net_flux, res.net_flux, "the SCI pixel under the ERR hole still counts as flux");
+        let pixels = circular_aperture(64, 64, partial.x, partial.y, partial.aperture_radius, 5);
+        let hole_w2: f64 = pixels.iter().filter(|p| (p.y, p.x) == (31, 32)).map(|p| (p.weight as f64).powi(2)).sum();
+        assert!(hole_w2 > 0.0, "the hole must sit inside the aperture");
+        let others_w2: f64 = pixels.iter().filter(|p| (p.y, p.x) != (31, 32)).map(|p| (p.weight as f64).powi(2)).sum();
+        let n_ap = partial.aperture_area;
+        let n_bg = partial.bg_pixels as f64;
+        let sky2 = partial.bg_sigma * partial.bg_sigma;
+        let expected = (0.25 * others_w2 + hole_w2 * sky2 + n_ap * n_ap * sky2 / n_bg).sqrt();
+        assert!(
+            (partial.flux_err - expected).abs() < 1e-6,
+            "flux_err={} expected={expected}: the pixel without ERR lost its variance",
+            partial.flux_err
+        );
+    }
+
+    #[test]
+    fn a_pixel_without_err_gets_the_background_model_variance_plus_poisson_with_gain() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 5000.0, 2.0, 100.0);
+        deterministic_noise(&mut img);
+        let all_nan = Array2::from_elem((64, 64), f32::NAN);
+        let cfg = PhotometryConfig { gain: Some(2.0), ..PhotometryConfig::default() };
+        let with_holes = measure_star_full(&img, Some(&all_nan), None, None, 32.0, 32.0, &cfg).unwrap();
+        let without_err = measure_star_full(&img, None, None, None, 32.0, 32.0, &cfg).unwrap();
+        assert!(with_holes.err_used);
+        assert!(
+            with_holes.flux_err > 0.5 * without_err.flux_err,
+            "an all-NaN ERR plane reported {} against the model's {}",
+            with_holes.flux_err,
+            without_err.flux_err
+        );
     }
 
     #[test]

@@ -167,9 +167,8 @@ mod tests {
         use ndarray::Array2;
 
         let img = Array2::from_shape_fn((4, 8), |(y, x)| (y * 8 + x) as f32 / 31.0);
-        let dir = std::env::temp_dir().join("astroburst_l16_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("grad16.png");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grad16.png");
         let path_str = path.to_str().unwrap();
 
         super::render_stretched_16bit(&img, path_str).unwrap();
@@ -181,31 +180,25 @@ mod tests {
             let got = decoded.get_pixel(x as u32, y as u32).0[0];
             assert_eq!(got, expected, "pixel ({},{})", y, x);
         }
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn test_linear_export_maps_negative_and_zero_continuously() {
         use ndarray::Array2;
 
-        let dir = std::env::temp_dir().join("astroburst_linear_neg_test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
         let img16 = Array2::from_shape_vec((1, 5), vec![-32768.0f32, -16384.0, 0.0, 16383.0, 32767.0]).unwrap();
-        let path16 = dir.join("neg16.png");
+        let path16 = dir.path().join("neg16.png");
         super::render_grayscale_16bit(&img16, path16.to_str().unwrap()).unwrap();
         let decoded16 = image::open(&path16).unwrap().into_luma16();
         assert_eq!(decoded16.as_raw().as_slice(), &[0u16, 16384, 32768, 49151, 65535]);
 
         let img8 = Array2::from_shape_vec((1, 5), vec![-255.0f32, -127.0, 0.0, 128.0, 255.0]).unwrap();
-        let path8 = dir.join("neg8.png");
+        let path8 = dir.path().join("neg8.png");
         super::render_grayscale_hq(&img8, path8.to_str().unwrap()).unwrap();
         let decoded8 = image::open(&path8).unwrap().into_luma8();
         assert_eq!(decoded8.as_raw().as_slice(), &[0u8, 64, 128, 192, 255]);
-
-        let _ = std::fs::remove_file(path16);
-        let _ = std::fs::remove_file(path8);
     }
 
     #[test]
@@ -213,14 +206,11 @@ mod tests {
         use ndarray::Array2;
 
         let img = Array2::from_shape_vec((1, 3), vec![-65535.0f32, -32768.0, 0.0]).unwrap();
-        let dir = std::env::temp_dir().join("astroburst_linear_nonpos_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("nonpos16.png");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonpos16.png");
 
         super::render_grayscale_16bit(&img, path.to_str().unwrap()).unwrap();
         let decoded = image::open(&path).unwrap().into_luma16();
         assert_eq!(decoded.as_raw().as_slice(), &[0u16, 32767, 65535]);
-
-        let _ = std::fs::remove_file(path);
     }
 }

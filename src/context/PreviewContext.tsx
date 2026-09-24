@@ -12,10 +12,9 @@ import { computeHistogram } from "../services/analysis";
 import { getCubeInfo } from "../services/cube";
 import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
-import type { NarrowbandFilterDetection } from "../services/header";
+import type { NarrowbandDetection, NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
 import { useCompositeActions } from "./CompositeContext";
-import { clearCompositeCache } from "../services/compose";
 import type {
   ProcessedFile,
   StfParams,
@@ -27,7 +26,8 @@ import type {
   DqMaskData,
   DqOverlaySettings,
 } from "../shared/types";
-import type { CubeDims } from "../shared/types/cube";
+import type { FileRenderState, ProcessedResult, ProcessingChain } from "../shared/types/preview";
+import type { CubeDims } from "../shared/types";
 import {
   COLORMAP_NAMES,
   DEFAULT_DISPLAY_SETTINGS,
@@ -40,21 +40,9 @@ import {
 import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
 import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
 import { clampGridDensity } from "../utils/gridSteps";
+import { EMPTY_CHAIN, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
 
-export interface ChannelSuggestion {
-  file_path: string;
-  file_name: string;
-  detection: { filter_name: string; method: string; confidence: number } | null;
-}
-
-export interface PaletteSuggestion {
-  r_file: ChannelSuggestion | null;
-  g_file: ChannelSuggestion | null;
-  b_file: ChannelSuggestion | null;
-  unmapped: ChannelSuggestion[];
-  is_complete: boolean;
-  palette_name: string;
-}
+export type PaletteSuggestion = NarrowbandDetection["palette"];
 
 export interface RgbChannelMap {
   r: string | null;
@@ -86,24 +74,31 @@ interface CubeContextValue {
 interface RgbContextValue {
   rgbChannels: RgbChannelMap | null;
   setRgbChannels: React.Dispatch<React.SetStateAction<RgbChannelMap | null>>;
-  lastAlignMethod: string | null;
-  setLastAlignMethod: (method: string | null) => void;
 }
 
 interface RenderContextValue {
-  renderedPreviewUrl: string | null;
-  setRenderedPreviewUrl: (url: string | null) => void;
-  activeImagePath: string | null;
-  setActiveImagePath: (path: string | null) => void;
-  processedSourcePath: string | null;
-  processedSourceVersion: number;
-  setProcessedSource: (path: string | null) => void;
+  processed: ProcessedResult | null;
+  processedVersion: number;
+  chain: ProcessingChain;
+  stfPreviewUrl: string | null;
 }
 
 interface RenderActionsContextValue {
-  setRenderedPreviewUrl: (url: string | null) => void;
-  setActiveImagePath: (path: string | null) => void;
-  setProcessedSource: (path: string | null) => void;
+  currentFileKey: () => string | null;
+  publishProcessed: (fileKey: string, result: ProcessedResult, chainUpdate?: (c: ProcessingChain) => ProcessingChain) => void;
+  setChain: (fileKey: string, update: (c: ProcessingChain) => ProcessingChain) => void;
+  resetProcessed: () => void;
+  forgetOutputs: (paths: string[]) => void;
+  setStfPreviewUrl: (url: string | null) => void;
+}
+
+export interface DisplayedImage {
+  path: string | null;
+  dimensions: [number, number] | null;
+  isProcessed: boolean;
+  label: string | null;
+  previewOnly: boolean;
+  previewUrl: string | null;
 }
 
 interface StarOverlayContextValue {
@@ -113,6 +108,7 @@ interface StarOverlayContextValue {
 interface RawPixelsContextValue {
   rawPixels: RawPixelData | null;
   rawPixelsLoading: boolean;
+  rawPixelsError: string | null;
   loadRawPixels: (force?: boolean) => void;
   clearRawPixels: () => void;
   rgbRawPixels: RawRgbPixelData | null;
@@ -237,27 +233,66 @@ export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandCo
 export const useDisplayContext = () => useCtx(DisplayCtx, "useDisplayContext");
 export const useDqContext = () => useCtx(DqCtx, "useDqContext");
 
+export function useDisplayedImage(): DisplayedImage {
+  const { file } = useCtx(FileCtx, "useDisplayedImage");
+  const { processed } = useCtx(RenderCtx, "useDisplayedImage");
+  const filePath = file?.path ?? null;
+  const fileDims = file?.result?.dimensions ?? null;
+  const filePreviewUrl = file?.result?.previewUrl ?? null;
+  return useMemo<DisplayedImage>(
+    () => ({
+      path: processed?.fitsPath ?? filePath,
+      dimensions: processed?.dimensions ?? fileDims,
+      isProcessed: processed !== null,
+      label: processed?.label ?? null,
+      previewOnly: processed !== null && processed.previewUrl !== null && processed.fitsPath === null,
+      previewUrl: processed?.previewUrl ?? filePreviewUrl,
+    }),
+    [processed, filePath, fileDims, filePreviewUrl],
+  );
+}
+
 interface Props {
   file: ProcessedFile | null;
   doneFiles: ProcessedFile[];
   children: React.ReactNode;
 }
 
-const PREVIEW_CACHE_MAX = 50;
-const previewUrlCache = new Map<string, string>();
-const processedSourceCache = new Map<string, string>();
+const RENDER_CACHE_MAX = 50;
+const renderRecords = new Map<string, FileRenderState>();
+let renderVersionSeq = 0;
 
-function setCappedCache(cache: Map<string, string>, key: string, value: string) {
-  if (cache.size >= PREVIEW_CACHE_MAX) {
-    const first = cache.keys().next().value;
-    if (first !== undefined) cache.delete(first);
-  }
-  cache.set(key, value);
+function nextRenderVersion(): number {
+  renderVersionSeq += 1;
+  return renderVersionSeq;
 }
 
-function setPreviewCache(key: string, value: string) {
-  setCappedCache(previewUrlCache, key, value);
+export function getRenderRecord(fileKey: string): FileRenderState | null {
+  return renderRecords.get(fileKey) ?? null;
 }
+
+export function listRenderRecords(): FileRenderState[] {
+  return [...renderRecords.values()];
+}
+
+interface RenderView extends FileRenderState {
+  key: string | null;
+}
+
+const EMPTY_VIEW: RenderView = { key: null, processed: null, chain: EMPTY_CHAIN, version: 0 };
+
+function viewFor(key: string | null): RenderView {
+  const record = key ? renderRecords.get(key) : undefined;
+  return record ? { key, ...record } : { ...EMPTY_VIEW, key };
+}
+
+interface StfPreviewState {
+  key: string | null;
+  version: number;
+  url: string | null;
+}
+
+const NO_STF_PREVIEW: StfPreviewState = { key: null, version: 0, url: null };
 
 const DEFAULT_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
@@ -268,7 +303,7 @@ function computePreviewMaxDim(): number {
   return Math.min(Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr), PREVIEW_MAX_DIM_CAP);
 }
 
-function fileKeyOf(file: ProcessedFile | null): string | null {
+export function fileKeyOf(file: ProcessedFile | null): string | null {
   return file ? `${file.id}|${file.path}` : null;
 }
 
@@ -282,15 +317,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [spectralReason, setSpectralReason] = useState<string | null>(null);
   const [cubeDims, setCubeDims] = useState<CubeDims | null>(null);
   const [rgbChannels, setRgbChannels] = useState<RgbChannelMap | null>(null);
-  const [lastAlignMethod, setLastAlignMethod] = useState<string | null>(null);
-  const [renderedPreviewUrl, setRenderedPreviewUrlRaw] = useState<string | null>(null);
-  const [processedSourcePath, setProcessedSourcePathRaw] = useState<string | null>(null);
-  const [processedSourceVersion, setProcessedSourceVersion] = useState(0);
-  const processedSourceRef = useRef<string | null>(null);
-  processedSourceRef.current = processedSourcePath;
-  const [activeImagePath, setActiveImagePathRaw] = useState<string | null>(null);
+  const [view, setView] = useState<RenderView>(EMPTY_VIEW);
+  const [stfPreview, setStfPreview] = useState<StfPreviewState>(NO_STF_PREVIEW);
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
+  const [rawPixelsError, setRawPixelsError] = useState<string | null>(null);
   const [rgbRawPixels, setRgbRawPixels] = useState<RawRgbPixelData | null>(null);
   const [rgbRawPixelsLoading, setRgbRawPixelsLoading] = useState(false);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
@@ -309,9 +340,23 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [dqMaskError, setDqMaskError] = useState<string | null>(null);
   const [dqMaskRefetch, setDqMaskRefetch] = useState(0);
 
+  const fileKey = fileKeyOf(file);
+  if (view.key !== fileKey) {
+    setView(fileKey ? viewFor(fileKey) : EMPTY_VIEW);
+    setStfPreview(NO_STF_PREVIEW);
+  }
+  const current = view.key === fileKey ? view : EMPTY_VIEW;
+  const processed = current.processed;
+  const processedVersion = current.version;
+  const chain = current.chain;
+  const processedPath = processed?.fitsPath ?? null;
+  const sourceVersion = processedPath ? processedVersion : 0;
+  const processedPreviewOnly = processed !== null && processed.fitsPath === null && processed.previewUrl !== null;
+  const stfPreviewUrl =
+    !processedPreviewOnly && stfPreview.key === fileKey && stfPreview.version === processedVersion ? stfPreview.url : null;
+
   const prevFileIdRef = useRef<string | null>(null);
   const histSeqRef = useRef(0);
-  const maskedHistKeyRef = useRef<string | null>(null);
   const flagTableSeqRef = useRef(0);
   const dqMaskSeqRef = useRef(0);
   const dqMaskKeyRef = useRef("");
@@ -337,39 +382,94 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   rgbRawPixelsLoadingRef.current = rgbRawPixelsLoading;
   const filePathRef = useRef(file?.path);
   filePathRef.current = file?.path;
+  const fileKeyRef = useRef(fileKey);
+  fileKeyRef.current = fileKey;
+  const viewRef = useRef<RenderView>(current);
+  viewRef.current = current;
+  const processedRef = useRef<ProcessedResult | null>(processed);
+  processedRef.current = processed;
 
-  const fileKey = fileKeyOf(file);
+  const currentFileKey = useCallback(() => fileKeyRef.current, []);
 
-  const setRenderedPreviewUrl = useCallback(
-    (url: string | null) => {
-      if (prevFileIdRef.current !== fileKey) return;
-      setRenderedPreviewUrlRaw(url);
-      if (!fileKey) return;
-      if (url === null) previewUrlCache.delete(fileKey);
-      else if (!url.includes("cube_frame_")) setPreviewCache(fileKey, url);
+  const commitView = useCallback((next: RenderView) => {
+    viewRef.current = next;
+    processedRef.current = next.processed;
+    setView(next);
+  }, []);
+
+  const publishProcessed = useCallback(
+    (key: string, result: ProcessedResult, chainUpdate?: (c: ProcessingChain) => ProcessingChain) => {
+      const isCurrent = key === fileKeyRef.current;
+      const base = renderRecords.get(key) ?? (isCurrent ? viewRef.current : null);
+      const baseChain = base?.chain ?? EMPTY_CHAIN;
+      const version = nextRenderVersion();
+      const record: FileRenderState = {
+        processed: {
+          ...result,
+          previewUrl: result.previewUrl ? withVersionParam(result.previewUrl, version) : null,
+        },
+        chain: chainUpdate ? chainUpdate(baseChain) : baseChain,
+        version,
+      };
+      putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
+      if (isCurrent) commitView({ key, ...record });
     },
-    [fileKey],
+    [commitView],
   );
 
-  const setProcessedSource = useCallback(
-    (path: string | null) => {
-      if (prevFileIdRef.current !== fileKey) return;
-      processedSourceRef.current = path;
-      setProcessedSourcePathRaw(path);
-      setProcessedSourceVersion((v) => v + 1);
-      if (!fileKey) return;
-      if (path) setCappedCache(processedSourceCache, fileKey, path);
-      else processedSourceCache.delete(fileKey);
+  const setChain = useCallback(
+    (key: string, update: (c: ProcessingChain) => ProcessingChain) => {
+      const isCurrent = key === fileKeyRef.current;
+      const base = renderRecords.get(key) ?? (isCurrent ? viewRef.current : null);
+      const record: FileRenderState = {
+        processed: base?.processed ?? null,
+        chain: update(base?.chain ?? EMPTY_CHAIN),
+        version: base?.version ?? 0,
+      };
+      putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
+      if (isCurrent) commitView({ key, ...record });
     },
-    [fileKey],
+    [commitView],
+  );
+
+  const resetProcessed = useCallback(() => {
+    const key = fileKeyRef.current;
+    if (!key) return;
+    renderRecords.delete(key);
+    commitView({ key, processed: null, chain: EMPTY_CHAIN, version: nextRenderVersion() });
+  }, [commitView]);
+
+  const forgetOutputs = useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return;
+      for (const [key, record] of [...renderRecords]) {
+        const pruned = pruneRecord(record, paths);
+        if (pruned === null) renderRecords.delete(key);
+        else if (pruned !== record) renderRecords.set(key, pruned);
+      }
+      const key = fileKeyRef.current;
+      if (!key) return;
+      const live = viewRef.current;
+      const pruned = pruneRecord(live, paths);
+      if (pruned === null) {
+        resetProcessed();
+        return;
+      }
+      if (pruned !== live) commitView({ ...pruned, key });
+    },
+    [commitView, resetProcessed],
+  );
+
+  const setStfPreviewUrl = useCallback(
+    (url: string | null) => {
+      if (fileKeyRef.current !== fileKey || viewRef.current.version !== processedVersion) return;
+      setStfPreview({ key: fileKey, version: processedVersion, url });
+    },
+    [fileKey, processedVersion],
   );
 
   const setOverlay = useCallback((patch: Partial<DqOverlaySettings>) => {
     setOverlayRaw((prev) => ({ ...prev, ...patch }));
-  }, []);
-
-  const setActiveImagePath = useCallback((path: string | null) => {
-    setActiveImagePathRaw(path);
   }, []);
 
   const setSelectedPalette = useCallback((p: string) => {
@@ -406,7 +506,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     }
     setLimitsLoading(true);
     const timer = window.setTimeout(() => {
-      computeScaleLimits(processedSourcePath ?? filePath, {
+      computeScaleLimits(processedPath ?? filePath, {
         ...DEFAULT_DISPLAY_SETTINGS,
         limits: displayLimits,
         percentileLow,
@@ -433,7 +533,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [filePath, processedSourcePath, processedSourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
+  }, [filePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
 
   useEffect(() => {
     let cancelled = false;
@@ -478,10 +578,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [doneFiles, selectedPalette]);
 
   const loadRawPixels = useCallback((force = false) => {
-    const path = processedSourceRef.current ?? filePathRef.current;
+    const path = processedRef.current?.fitsPath ?? filePathRef.current;
     if (!path) return;
     if (!force && (rawPixelsRef.current || rawPixelsLoadingRef.current)) return;
     setRawPixelsLoading(true);
+    setRawPixelsError(null);
     const seq = ++rawPixelsAbortRef.current;
     const maxDim = computePreviewMaxDim();
     lastFetchMaxDimRef.current = maxDim;
@@ -499,6 +600,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       .catch((err) => {
         if (rawPixelsAbortRef.current !== seq) return;
         console.error("[AstroBurst] Raw pixels load failed:", err);
+        setRawPixelsError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
         if (rawPixelsAbortRef.current !== seq) return;
@@ -510,6 +612,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     rawPixelsAbortRef.current++;
     setRawPixels(null);
     setRawPixelsLoading(false);
+    setRawPixelsError(null);
   }, []);
 
   const loadRgbRawPixels = useCallback((source: string | null, force = false) => {
@@ -577,37 +680,24 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     dqMaskSeqRef.current++;
     flagTableSeqRef.current++;
     histSeqRef.current++;
-    if (!excludeDqRef.current) maskedHistKeyRef.current = null;
     setStfParams(DEFAULT_STF);
     setIsCube(false);
     setIsSpectralCube(false);
     setSpectralReason(null);
     setCubeDims(null);
-    setRgbChannels(null);
-    setLastAlignMethod(null);
     setRawPixels(null);
     setRawPixelsLoading(false);
+    setRawPixelsError(null);
     setRgbRawPixels(null);
     setRgbRawPixelsLoading(false);
     setNarrowbandPalette(null);
-    setActiveImagePathRaw(null);
     setLimits(null);
     rawPixelsAbortRef.current++;
     rgbRawPixelsAbortRef.current++;
 
     composite.resetComposite();
 
-    if (!file.result?.is_rgb) {
-      clearCompositeCache().catch(() => {});
-    }
-
-    setRenderedPreviewUrlRaw(fileKey ? previewUrlCache.get(fileKey) ?? null : null);
-    const restoredSource = fileKey ? processedSourceCache.get(fileKey) ?? null : null;
-    processedSourceRef.current = restoredSource;
-    setProcessedSourcePathRaw(restoredSource);
-
     const seq = ++seqRef.current;
-    const hseq = histSeqRef.current;
     const stale = () => seqRef.current !== seq;
 
     const isRgbFits = file.result?.is_rgb === true;
@@ -626,23 +716,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       }
     }
 
-    const precomputedHist = file.result?.histogram;
-    if (excludeDqRef.current) {
-      if (precomputedHist?.auto_stf) setStfParams(precomputedHist.auto_stf);
-    } else if (precomputedHist?.bins) {
-      setHistData(precomputedHist);
-      if (precomputedHist.auto_stf) setStfParams(precomputedHist.auto_stf);
-    } else {
-      computeHistogram(file.path)
-        .then((data) => {
-          if (stale() || histSeqRef.current !== hseq) return;
-          setHistData(data);
-          if (data.auto_stf) setStfParams(data.auto_stf);
-        })
-        .catch((err) => {
-          if (!stale()) console.error("Histogram fetch failed:", err);
-        });
-    }
+    const precomputedAutoStf = file.result?.histogram?.auto_stf;
+    if (excludeDqRef.current && !processedPath && precomputedAutoStf) setStfParams(precomputedAutoStf);
 
     const naxis3 = file.result?.header?.NAXIS3;
     const n3 = naxis3 ? parseInt(naxis3, 10) : 0;
@@ -662,33 +737,27 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
 
-  const processedHistRef = useRef<string | null>(null);
+  const precomputedHist = file?.result?.histogram ?? null;
+
   useEffect(() => {
-    const token = processedSourceVersion + "|" + (processedSourcePath ?? "");
-    const previous = processedHistRef.current;
-    processedHistRef.current = token;
-    if (previous === token) return;
-    if (excludeDqRef.current) return;
-    const target = processedSourcePath ?? file?.path;
-    if (!target) return;
-    const precomputed = processedSourcePath ? null : file?.result?.histogram;
+    if (!fileKey || !filePath) return;
+    const seq = ++histSeqRef.current;
+    const precomputed = processedPath || excludeDq ? null : precomputedHist;
     if (precomputed?.bins) {
       setHistData(precomputed);
       if (precomputed.auto_stf) setStfParams(precomputed.auto_stf);
       return;
     }
-    const hseq = ++histSeqRef.current;
-    computeHistogram(target, excludeDqRef.current)
+    computeHistogram(processedPath ?? filePath, excludeDq)
       .then((data) => {
-        if (histSeqRef.current !== hseq) return;
+        if (histSeqRef.current !== seq) return;
         setHistData(data);
         if (data.auto_stf) setStfParams(data.auto_stf);
       })
       .catch((err) => {
-        if (histSeqRef.current === hseq) console.error("Histogram fetch failed:", err);
+        if (histSeqRef.current === seq) console.error("[AstroBurst] Histogram fetch failed:", err);
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processedSourcePath, processedSourceVersion]);
+  }, [fileKey, filePath, processedPath, sourceVersion, excludeDq, precomputedHist]);
 
   const plane = file?.result?.plane ?? null;
   const dqRef = plane?.dq_ref ?? null;
@@ -738,23 +807,6 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       });
   }, [fileKey, filePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
 
-  useEffect(() => {
-    if (!filePath) return;
-    if (!excludeDq && maskedHistKeyRef.current !== fileKey) return;
-    maskedHistKeyRef.current = excludeDq ? fileKey : null;
-    const seq = ++histSeqRef.current;
-    computeHistogram(processedSourcePath ?? filePath, excludeDq)
-      .then((data) => {
-        if (histSeqRef.current !== seq) return;
-        setHistData(data);
-        if (data.auto_stf) setStfParams(data.auto_stf);
-      })
-      .catch((err) => {
-        if (histSeqRef.current !== seq) return;
-        console.error("[AstroBurst] Masked histogram failed:", err);
-      });
-  }, [fileKey, filePath, excludeDq, processedSourcePath]);
-
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),
     [file],
@@ -776,31 +828,27 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const rgbValue = useMemo<RgbContextValue>(
-    () => ({ rgbChannels, setRgbChannels, lastAlignMethod, setLastAlignMethod }),
-    [rgbChannels, lastAlignMethod],
+    () => ({ rgbChannels, setRgbChannels }),
+    [rgbChannels],
   );
 
   const renderValue = useMemo<RenderContextValue>(
-    () => ({
-      renderedPreviewUrl, setRenderedPreviewUrl,
-      activeImagePath, setActiveImagePath,
-      processedSourcePath, processedSourceVersion, setProcessedSource,
-    }),
-    [renderedPreviewUrl, setRenderedPreviewUrl, activeImagePath, setActiveImagePath, processedSourcePath, processedSourceVersion, setProcessedSource],
+    () => ({ processed, processedVersion, chain, stfPreviewUrl }),
+    [processed, processedVersion, chain, stfPreviewUrl],
   );
 
   const renderActionsValue = useMemo<RenderActionsContextValue>(
-    () => ({ setRenderedPreviewUrl, setActiveImagePath, setProcessedSource }),
-    [setRenderedPreviewUrl, setActiveImagePath, setProcessedSource],
+    () => ({ currentFileKey, publishProcessed, setChain, resetProcessed, forgetOutputs, setStfPreviewUrl }),
+    [currentFileKey, publishProcessed, setChain, resetProcessed, forgetOutputs, setStfPreviewUrl],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
     () => ({
-      rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+      rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
       rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
     }),
     [
-      rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+      rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
       rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
     ],
   );
@@ -853,5 +901,3 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     </FileCtx.Provider>
   );
 }
-
-

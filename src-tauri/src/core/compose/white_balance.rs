@@ -1,9 +1,8 @@
 use anyhow::{bail, Result};
 
-use crate::types::constants::PADDING_THRESHOLD;
 use crate::types::image::ImageStats;
 
-pub const MIN_USABLE_MEDIAN: f64 = PADDING_THRESHOLD as f64;
+pub const MIN_WB_SKY_SIGMAS: f64 = 1.0;
 pub const MIN_WB_FACTOR: f64 = 0.01;
 pub const MAX_WB_FACTOR: f64 = 100.0;
 
@@ -30,20 +29,37 @@ pub struct WbAnalysis {
     pub stability: (Option<f64>, Option<f64>, Option<f64>),
     pub reference: Option<WbChannel>,
     pub empty_channels: Vec<WbChannel>,
+    pub sky_not_positive: Vec<WbChannel>,
 }
 
 impl WbAnalysis {
     pub fn has_usable_signal(&self) -> bool {
         self.reference.is_some()
     }
+
+    pub fn median_ratio_is_valid(&self) -> Result<()> {
+        if self.sky_not_positive.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = self.sky_not_positive.iter().map(|c| c.as_str()).collect();
+        bail!(
+            "Auto white balance needs a sky level clearly above zero, but the median of channel {} is within {} sigma of zero (the sky was probably subtracted). Use SPCC or manual factors.",
+            names.join(", "),
+            MIN_WB_SKY_SIGMAS
+        );
+    }
+}
+
+fn has_data(s: &ImageStats) -> bool {
+    s.valid_count > 0 && s.median.is_finite() && s.mad.is_finite() && s.sigma.is_finite()
+}
+
+fn sky_is_positive(s: &ImageStats) -> bool {
+    s.median > 0.0 && s.median > MIN_WB_SKY_SIGMAS * s.sigma
 }
 
 pub fn channel_stability(s: &ImageStats) -> Option<f64> {
-    if s.valid_count == 0
-        || !s.median.is_finite()
-        || s.median <= MIN_USABLE_MEDIAN
-        || !s.mad.is_finite()
-    {
+    if !has_data(s) || !sky_is_positive(s) {
         return None;
     }
     Some(s.mad / s.median)
@@ -51,6 +67,7 @@ pub fn channel_stability(s: &ImageStats) -> Option<f64> {
 
 pub fn analyze_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> WbAnalysis {
     let channels = [WbChannel::R, WbChannel::G, WbChannel::B];
+    let all = [sr, sg, sb];
     let medians = [sr.median, sg.median, sb.median];
     let stability = [
         channel_stability(sr),
@@ -60,22 +77,25 @@ pub fn analyze_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -
 
     let empty_channels: Vec<WbChannel> = channels
         .iter()
-        .enumerate()
-        .filter(|(i, _)| stability[*i].is_none())
-        .map(|(_, c)| *c)
+        .zip(all)
+        .filter(|(_, s)| !has_data(s))
+        .map(|(c, _)| *c)
+        .collect();
+
+    let sky_not_positive: Vec<WbChannel> = channels
+        .iter()
+        .zip(all)
+        .filter(|(_, s)| has_data(s) && !sky_is_positive(s))
+        .map(|(c, _)| *c)
         .collect();
 
     const TIE_BREAK_ORDER: [usize; 3] = [0, 2, 1];
 
     let reference_index = TIE_BREAK_ORDER
         .into_iter()
-        .filter(|i| stability[*i].is_some())
-        .min_by(|a, b| {
-            stability[*a]
-                .unwrap()
-                .partial_cmp(&stability[*b].unwrap())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        .filter_map(|i| stability[i].map(|st| (i, st)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i);
 
     let factors = match reference_index {
         Some(ref_idx) => {
@@ -97,6 +117,7 @@ pub fn analyze_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -
         stability: (stability[0], stability[1], stability[2]),
         reference: reference_index.map(|i| channels[i]),
         empty_channels,
+        sky_not_positive,
     }
 }
 
@@ -106,6 +127,7 @@ pub fn select_wb_reference(
     sb: &ImageStats,
 ) -> Result<(f64, f64, f64)> {
     let analysis = analyze_wb_reference(sr, sg, sb);
+    analysis.median_ratio_is_valid()?;
 
     if !analysis.has_usable_signal() {
         bail!("Auto white balance found no usable signal: R, G and B are all empty. Check the stacked channels.");
@@ -151,6 +173,33 @@ mod tests {
 
     fn empty_stats() -> ImageStats {
         ImageStats::default()
+    }
+
+    fn noisy_channel(pedestal: f32, sigma: f32, seed: u64) -> ImageStats {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let data = ndarray::Array2::from_shape_fn((128, 128), |(y, x)| {
+            let gauss = (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos();
+            let star = if y % 32 == 16 && x % 32 == 16 { 500.0 } else { 0.0 };
+            pedestal + sigma * gauss as f32 + star
+        });
+        crate::core::imaging::stats::compute_image_stats(&data)
+    }
+
+    #[test]
+    fn sky_subtracted_channels_refuse_auto_white_balance_instead_of_returning_noise_ratios() {
+        let (sr, sg, sb) = (noisy_channel(0.0, 3.0, 1), noisy_channel(0.0, 1.0, 2), noisy_channel(0.0, 2.0, 3));
+        let err = select_wb_reference(&sr, &sg, &sb).expect_err("noise ratios were returned as colour factors");
+        assert!(err.to_string().contains("sky level clearly above zero"), "unexpected error: {}", err);
+
+        let (sr, sg, sb) = (noisy_channel(100.0, 3.0, 1), noisy_channel(100.0, 1.0, 2), noisy_channel(100.0, 2.0, 3));
+        let (r, g, b) = select_wb_reference(&sr, &sg, &sb).unwrap();
+        for f in [r, g, b] {
+            assert!((f - 1.0).abs() < 0.01, "neutral channels with a sky pedestal gave {r} {g} {b}");
+        }
     }
 
     #[test]
@@ -251,19 +300,35 @@ mod tests {
     }
 
     #[test]
-    fn median_at_padding_threshold_counts_as_empty() {
-        let sr = make_stats(MIN_USABLE_MEDIAN, 0.0);
+    fn a_median_within_the_noise_of_zero_refuses_the_median_ratio() {
+        let sr = make_stats(0.001, 0.01);
         let sg = make_stats(0.5, 0.01);
-        let sb = make_stats(0.3, 0.02);
+        let sb = make_stats(-0.002, 0.02);
         let analysis = analyze_wb_reference(&sr, &sg, &sb);
 
-        assert_eq!(analysis.empty_channels, vec![WbChannel::R]);
-        assert_eq!(analysis.factors.0, 1.0);
+        assert_eq!(analysis.sky_not_positive, vec![WbChannel::R, WbChannel::B]);
+        assert!(analysis.empty_channels.is_empty());
+        assert!(analysis.stability.0.is_none());
+        let err = select_wb_reference(&sr, &sg, &sb).expect_err("a noise-level median must not be divided");
+        assert!(err.to_string().contains("channel R, B"), "unexpected error: {}", err);
+        assert!(err.to_string().contains("SPCC"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn a_tiny_flux_scale_is_balanced_like_any_other_scale() {
+        let scale = 1e-19;
+        let sr = make_stats(0.5 * scale, 0.01 * scale);
+        let sg = make_stats(0.25 * scale, 0.02 * scale);
+        let sb = make_stats(0.125 * scale, 0.03 * scale);
+        let (r, g, b) = select_wb_reference(&sr, &sg, &sb).unwrap();
+        assert!((r - 1.0).abs() < 1e-9);
+        assert!((g - 2.0).abs() < 1e-9);
+        assert!((b - 4.0).abs() < 1e-9);
     }
 
     #[test]
     fn usable_factors_stay_within_validation_bounds() {
-        let sr = make_stats(MIN_USABLE_MEDIAN * 2.0, MIN_USABLE_MEDIAN);
+        let sr = make_stats(0.001, 0.0001);
         let sg = make_stats(0.5, 0.01);
         let sb = make_stats(0.3, 0.02);
         let analysis = analyze_wb_reference(&sr, &sg, &sb);
@@ -299,14 +364,14 @@ mod tests {
 
     #[test]
     fn select_wb_reference_rejects_runaway_gain_before_it_reaches_pixels() {
-        let sr = make_stats(MIN_USABLE_MEDIAN * 2.0, MIN_USABLE_MEDIAN);
+        let sr = make_stats(0.001, 0.0001);
         let sg = make_stats(0.5, 0.01);
         let sb = make_stats(0.3, 0.02);
 
         assert!(analyze_wb_reference(&sr, &sg, &sb).factors.0 > MAX_WB_FACTOR);
 
         let err = select_wb_reference(&sr, &sg, &sb)
-            .expect_err("a 2.5e6 gain must not be handed to the pixel loop");
+            .expect_err("a 500x gain must not be handed to the pixel loop");
         assert!(err.to_string().contains("channel R"), "unexpected error: {}", err);
     }
 

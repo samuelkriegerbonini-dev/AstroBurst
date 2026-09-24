@@ -1,7 +1,7 @@
 import { useState, useCallback, useId, useMemo, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { resolveChannelPath, isNarrowbandWorkflow, type FilterDetectionRef } from "../../../utils/wizard";
+import { resolveChannelPath, isNarrowbandWorkflow, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { calibrateAndScnr, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
@@ -16,9 +16,10 @@ interface ColorBalanceStepProps {
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
   onScnrChange: (enabled: boolean, amount?: number, method?: string, preserveLuminance?: boolean) => void;
   onResult: (png: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
+  onCompositeOp: (op: CompositeOp) => void;
 }
 
-export default function ColorBalanceStep({ state, filterDetections, onWbChange, onScnrChange, onResult }: ColorBalanceStepProps) {
+export default function ColorBalanceStep({ state, filterDetections, onWbChange, onScnrChange, onResult, onCompositeOp }: ColorBalanceStepProps) {
   const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset, filterDetections), [state.bins, state.blendPreset, filterDetections]);
 
   const [localR, setLocalR] = useState(state.wbR);
@@ -32,6 +33,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
   const [emptyChannels, setEmptyChannels] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number | null>(null);
+  const [scnrApplied, setScnrApplied] = useState(false);
 
   const [scnrMethod, setScnrMethod] = useState<"average" | "maximum">(state.scnrMethod);
   const [preserveLum, setPreserveLum] = useState(state.scnrPreserveLuminance);
@@ -148,6 +150,15 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         ? { enabled: true, method: scnrMethod, amount: state.scnrAmount, preserveLuminance: preserveLum }
         : undefined;
       const res = await calibrateAndScnr(dir, appliedR, appliedG, appliedB, scnr);
+      onCompositeOp({
+        kind: "colorBalance",
+        mode: state.wbMode,
+        r: appliedR,
+        g: appliedG,
+        b: appliedB,
+        scnr: res.scnr_applied && scnr ? { method: scnr.method, amount: scnr.amount } : null,
+      });
+      setScnrApplied(res.scnr_applied);
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
         onResult(url, res.auto_stf ?? undefined);
@@ -158,7 +169,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     } finally {
       setLoading(false);
     }
-  }, [appliedR, appliedG, appliedB, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, onResult]);
+  }, [appliedR, appliedG, appliedB, state.wbMode, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, onResult, onCompositeOp]);
 
   const handleReset = useCallback(async () => {
     setLoading(true);
@@ -169,7 +180,10 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
       setLocalG(1.0);
       setLocalB(1.0);
       setEmptyChannels([]);
+      setElapsed(null);
+      setScnrApplied(false);
       onWbChange("manual", 1.0, 1.0, 1.0);
+      onCompositeOp({ kind: "resetColorBalance" });
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
         onResult(url, res.auto_stf ?? undefined);
@@ -179,7 +193,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     } finally {
       setLoading(false);
     }
-  }, [onResult, onWbChange]);
+  }, [onResult, onWbChange, onCompositeOp]);
 
   const isFactorsNeutral = appliedR === 1.0 && appliedG === 1.0 && appliedB === 1.0;
 
@@ -368,7 +382,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
 
       {elapsed !== null && (
         <div className="text-[9px] text-zinc-500">
-          {elapsed}ms{state.scnrEnabled ? " | SCNR applied" : ""}
+          {elapsed}ms{scnrApplied ? " | SCNR applied" : ""}
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

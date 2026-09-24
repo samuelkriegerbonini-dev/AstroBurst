@@ -69,7 +69,7 @@ pub struct SplineLut {
 impl SplineLut {
     pub fn from_points(points: &[(f64, f64)]) -> Self {
         let mut sorted: Vec<(f64, f64)> = points.to_vec();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
         sorted.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9);
 
         if sorted.is_empty() || sorted[0].0 > 1e-6 {

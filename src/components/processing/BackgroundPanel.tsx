@@ -4,10 +4,13 @@ import { extractBackground } from "../../services/processing";
 import { extractBackgroundDbe } from "../../services/dbe";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
+import { bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
 import { BACKGROUND_PROGRESS_EVENT } from "../../shared/types/processing";
 import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
 import { DEFAULT_DBE_CONFIG, pointSamplesFromDoc, validateDbeParams } from "../../utils/dbeSamples";
 import type { ProcessedFile } from "../../shared/types";
 import type { DbeConfig, DbeMode, DbeSample } from "../../shared/types/dbe";
@@ -35,12 +38,20 @@ interface BackgroundParams {
   mode: string;
 }
 
+interface BackgroundRun {
+  res: BackgroundResult;
+  correctedUrl: string | undefined;
+  modelUrl: string | undefined;
+  spline: boolean;
+  sampleRadius: number;
+}
+
 interface BackgroundPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | undefined) => void;
   onProcessingDone?: (result: BackgroundResult) => void;
   chainedFrom?: string | null;
+  fileKey?: string | null;
 }
 
 const ICON = (
@@ -58,7 +69,7 @@ function sampleStroke(sample: DbeSample): string {
   return sample.manual ? SAMPLE_STROKE.manual : SAMPLE_STROKE.accepted;
 }
 
-export default function BackgroundPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: BackgroundPanelProps) {
+export default function BackgroundPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, fileKey }: BackgroundPanelProps) {
   const progress = useProgress(BACKGROUND_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [model, setModel] = useState<BackgroundModel>("polynomial");
@@ -71,9 +82,9 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   });
   const [dbe, setDbe] = useState<DbeConfig>(DEFAULT_DBE_CONFIG);
   const [usePointRegions, setUsePointRegions] = useState(true);
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<BackgroundResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<BackgroundRun>("background", fileKey ?? null);
+  const { chain } = useRenderContext();
+  const result = runResult && chainHoldsOutput(chain, "background", runResult.res.corrected_fits) ? runResult : null;
   const [showModel, setShowModel] = useState(false);
   const [showSamples, setShowSamples] = useState(true);
 
@@ -116,35 +127,36 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
     return extractBackgroundDbe(path, outputDir, config);
   }, [dbe, usePointRegions, pointSamples, selectedFile, outputDir]);
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
+    const path = selectedFile.path;
+    const spline = model === "spline";
+    const sampleRadius = dbe.sampleRadius;
     resetProgress();
-    try {
-      const res = model === "spline" ? await runSpline(selectedFile.path) : await runPolynomial(selectedFile.path);
-      setResult(res);
-      onPreviewUpdate?.(res?.previewUrl);
+    void run(async () => {
+      const res = spline ? await runSpline(path) : await runPolynomial(path);
       onProcessingDone?.(res);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/cancel/i.test(msg)) setError(msg);
-    } finally {
-      setIsRunning(false);
-      resetProgress();
-    }
-  }, [selectedFile, model, runSpline, runPolynomial, resetProgress, onPreviewUpdate, onProcessingDone]);
+      const stamp = Date.now();
+      return {
+        res,
+        correctedUrl: bustPreviewUrl(res?.previewUrl, stamp),
+        modelUrl: bustPreviewUrl(res?.modelUrl, stamp),
+        spline,
+        sampleRadius,
+      };
+    }, isCancelMessage).finally(resetProgress);
+  }, [selectedFile, model, dbe.sampleRadius, runSpline, runPolynomial, resetProgress, run, onProcessingDone]);
 
   const isSpline = model === "spline";
-  const splineSamples = result?.samples;
-  const overlayDims = result?.dimensions;
-  const canOverlay = isSpline && !!splineSamples && !!overlayDims && overlayDims[0] > 0 && overlayDims[1] > 0;
+  const splineSamples = result?.res.samples;
+  const overlayDims = result?.res.dimensions;
+  const overlayRadius = result?.sampleRadius ?? 0;
+  const canOverlay = !!result?.spline && !!splineSamples && !!overlayDims && overlayDims[0] > 0 && overlayDims[1] > 0;
   const resultItems = [
-    { label: "Samples", value: result?.sample_count },
-    ...(result?.rejected_count !== undefined ? [{ label: "Rejected", value: result.rejected_count }] : []),
-    { label: "RMS", value: result?.rms_residual?.toExponential(2) },
-    { label: "Time", value: `${((result?.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
+    { label: "Samples", value: result?.res.sample_count },
+    ...(result?.res.rejected_count !== undefined ? [{ label: "Rejected", value: result.res.rejected_count }] : []),
+    { label: "RMS", value: result?.res.rms_residual?.toExponential(2) },
+    { label: "Time", value: `${((result?.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
   ];
 
   return (
@@ -212,7 +224,9 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
         </div>
       </div>
 
-      <RunButton label={isSpline ? "Extract Background (Spline)" : "Extract Background"} runningLabel="Extracting..." running={isRunning} disabled={!selectedFile} accent="emerald" onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label={isSpline ? "Extract Background (Spline)" : "Extract Background"} runningLabel="Extracting..." running={isRunning} disabled={!selectedFile || blocked} accent="emerald" onClick={handleRun} />
+      </div>
 
       {isRunning && progress.active && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
@@ -242,7 +256,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
         <div className="flex flex-col gap-3 animate-fade-in">
           <ResultGrid items={resultItems} columns={resultItems.length === 4 ? 4 : 3} />
 
-          {(result.previewUrl || result.modelUrl) && (
+          {(result.correctedUrl || result.modelUrl) && (
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <button onClick={() => setShowModel(false)} className={`text-xs px-2.5 py-1 rounded-md transition-all ${!showModel ? "bg-emerald-600/20 text-emerald-300 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:text-zinc-300"}`}>
@@ -258,16 +272,16 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
                 )}
               </div>
               <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-zinc-700/50">
-                <img src={showModel ? result.modelUrl : result.previewUrl} alt={showModel ? "Background Model" : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+                <img src={showModel ? result.modelUrl : result.correctedUrl} alt={showModel ? "Background Model" : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
                 {canOverlay && showSamples && splineSamples && overlayDims && (
                   <svg viewBox={`0 0 ${overlayDims[0]} ${overlayDims[1]}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 w-full h-full pointer-events-none">
                     {splineSamples.map((s, i) => (
                       <rect
                         key={i}
-                        x={s.x - dbe.sampleRadius}
-                        y={s.y - dbe.sampleRadius}
-                        width={2 * dbe.sampleRadius + 1}
-                        height={2 * dbe.sampleRadius + 1}
+                        x={s.x - overlayRadius}
+                        y={s.y - overlayRadius}
+                        width={2 * overlayRadius + 1}
+                        height={2 * overlayRadius + 1}
                         fill="none"
                         stroke={sampleStroke(s)}
                         strokeWidth={1}

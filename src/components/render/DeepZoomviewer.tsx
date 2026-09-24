@@ -2,65 +2,51 @@ import { useEffect, useRef, useState, useCallback, memo } from "react";
 import type { OsdViewer } from "openseadragon";
 import { ZoomIn, ZoomOut, Home, Loader2, Maximize2, Grid3X3, AlertCircle } from "lucide-react";
 import { generateTiles, generateTilesRgb } from "../../services/tiles";
-import { useFileContext, useRenderContext } from "../../context/PreviewContext";
-import { useCompositePreview } from "../../context/CompositeContext";
+import { getOutputDirTiles, getPreviewUrl } from "../../infrastructure/tauri";
+import { computeMaxLevel, createTileSlotPool, readTilePyramid, tileSlotDir, tileUrl } from "../../utils/deepZoomTiles";
 
 interface DeepZoomViewerProps {
-  filePath?: string;
+  filePath: string | null;
+  composite: boolean;
+  rgbPath?: string | null;
   imageWidth: number;
   imageHeight: number;
   tileSize?: number;
-  outputDir?: string;
+  sourceLabel?: string | null;
   className?: string;
 }
 
-let _convertFileSrc: ((path: string) => string) | null = null;
-
-async function ensureConvertFileSrc(): Promise<(path: string) => string> {
-  if (_convertFileSrc) return _convertFileSrc;
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
-  _convertFileSrc = convertFileSrc;
-  return convertFileSrc;
+interface TileSet {
+  dirUrl: string;
+  width: number;
+  height: number;
+  maxLevel: number;
+  version: number;
 }
 
-function computeMaxLevel(w: number, h: number, ts: number): number {
-  let maxDim = Math.max(w, h);
-  let level = 0;
-  while (maxDim > ts) {
-    maxDim = Math.ceil(maxDim / 2);
-    level++;
-  }
-  return level;
-}
-
-type ViewerMode = "tiles" | "image";
+let tileGeneration = Date.now();
+const tileSlots = createTileSlotPool();
 
 function DeepZoomViewer({
-                          filePath: filePathProp,
+                          filePath,
+                          composite,
+                          rgbPath = null,
                           imageWidth,
                           imageHeight,
                           tileSize = 256,
-                          outputDir = "./output/tiles",
+                          sourceLabel = null,
                           className = "",
                         }: DeepZoomViewerProps) {
-  const { file } = useFileContext();
-  const { activeImagePath, renderedPreviewUrl } = useRenderContext();
-  const { isShowingComposite } = useCompositePreview();
-
-  const rawPath = activeImagePath || filePathProp || file?.path || "";
-
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<OsdViewer | null>(null);
-  const convertRef = useRef<((path: string) => string) | null>(null);
   const [generating, setGenerating] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [tiles, setTiles] = useState<TileSet | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
-  const generatedPathRef = useRef<string | null>(null);
-  const renderedUrlRef = useRef<string | null>(null);
-  const modeRef = useRef<ViewerMode>("tiles");
+  const [retry, setRetry] = useState(0);
 
-  const hasRendered = !!renderedPreviewUrl;
+  const sourceKey = composite ? (rgbPath ? `rgb:${rgbPath}` : "composite") : filePath ? `file:${filePath}` : null;
+  const genKey = sourceKey ? `${sourceKey}|${tileSize}|${retry}` : null;
 
   const destroyViewer = useCallback(() => {
     if (viewerRef.current) {
@@ -70,74 +56,51 @@ function DeepZoomViewer({
     setViewerReady(false);
   }, []);
 
-  const isSmallImage = imageWidth > 0 && imageHeight > 0 && Math.max(imageWidth, imageHeight) <= tileSize * 2;
-
-  const runGenerate = useCallback(async () => {
-    const genKey = isShowingComposite ? `composite:${rawPath}` : rawPath;
-    if (!rawPath || generatedPathRef.current === genKey) return;
-    setGenerating(true);
+  useEffect(() => {
+    let cancelled = false;
+    setTiles(null);
     setError(null);
-    setReady(false);
-    setViewerReady(false);
-
-    try {
-      const convert = await ensureConvertFileSrc();
-      convertRef.current = convert;
-      if (isSmallImage && !isShowingComposite) {
-        generatedPathRef.current = genKey;
-        modeRef.current = "image";
-        setReady(true);
-      } else if (isShowingComposite) {
-        await generateTilesRgb(outputDir, tileSize);
-        generatedPathRef.current = genKey;
-        modeRef.current = "tiles";
-        setReady(true);
-      } else {
-        await generateTiles(rawPath, outputDir, tileSize);
-        generatedPathRef.current = genKey;
-        modeRef.current = "tiles";
-        setReady(true);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+    if (!genKey) {
       setGenerating(false);
+      return;
     }
-  }, [rawPath, outputDir, tileSize, isSmallImage, isShowingComposite]);
-
-  const setupRenderedImage = useCallback(async () => {
-    if (!renderedPreviewUrl || renderedUrlRef.current === renderedPreviewUrl) return;
-    setGenerating(false);
-    setError(null);
-    setReady(false);
-    setViewerReady(false);
-
-    try {
-      const convert = await ensureConvertFileSrc();
-      convertRef.current = convert;
-      renderedUrlRef.current = renderedPreviewUrl;
-      modeRef.current = "image";
-      setReady(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [renderedPreviewUrl]);
-
-  useEffect(() => {
-    const genKey = isShowingComposite ? `composite:${rawPath}` : rawPath;
-    if (hasRendered && !isShowingComposite) {
-      if (renderedUrlRef.current !== renderedPreviewUrl) {
-        setupRenderedImage();
+    setGenerating(true);
+    const slot = tileSlots.acquire();
+    tileSlots.hold(slot);
+    (async () => {
+      try {
+        const requestedDir = tileSlotDir(await getOutputDirTiles(), slot);
+        const result = composite
+          ? await generateTilesRgb(requestedDir, tileSize, rgbPath)
+          : await generateTiles(filePath as string, requestedDir, tileSize);
+        if (cancelled) return;
+        const info = readTilePyramid(result, requestedDir, imageWidth, imageHeight);
+        const dirUrl = await getPreviewUrl(info.dir);
+        if (cancelled) return;
+        tileGeneration += 1;
+        setTiles({
+          dirUrl,
+          width: info.width,
+          height: info.height,
+          maxLevel: info.levelCount !== null ? info.levelCount - 1 : computeMaxLevel(info.width, info.height, tileSize),
+          version: tileGeneration,
+        });
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        tileSlots.release(slot);
+        if (!cancelled) setGenerating(false);
       }
-    } else if (rawPath && generatedPathRef.current !== genKey) {
-      renderedUrlRef.current = null;
-      runGenerate();
-    }
-  }, [hasRendered, renderedPreviewUrl, rawPath, isShowingComposite, setupRenderedImage, runGenerate]);
+    })();
+    return () => {
+      cancelled = true;
+      tileSlots.release(slot);
+    };
+  }, [genKey, composite, rgbPath, filePath, tileSize, imageWidth, imageHeight]);
 
   useEffect(() => {
-    if (!ready || !containerRef.current) return;
-    if (!imageWidth || !imageHeight || imageWidth <= 0 || imageHeight <= 0) return;
+    if (!tiles || !containerRef.current) return;
+    if (tiles.width <= 0 || tiles.height <= 0) return;
 
     let destroyed = false;
 
@@ -153,46 +116,21 @@ function DeepZoomViewer({
 
       destroyViewer();
 
-      let tileSources: Record<string, unknown>;
-
-      const imageUrl = renderedPreviewUrl || (file?.result?.previewUrl ?? null);
-
-      if (modeRef.current === "image" && imageUrl) {
-        tileSources = {
-          type: "image",
-          url: imageUrl,
-          buildPyramid: true,
-        };
-      } else if (modeRef.current === "image" && rawPath && convertRef.current) {
-        const previewPath = rawPath.replace(/\.(fits?|asdf|zip)$/i, ".png");
-        tileSources = {
-          type: "image",
-          url: convertRef.current(previewPath),
-          buildPyramid: true,
-        };
-      } else {
-        const convert = convertRef.current!;
-        const ts = tileSize;
-        const maxLevel = computeMaxLevel(imageWidth, imageHeight, ts);
-
-        tileSources = {
-          width: imageWidth,
-          height: imageHeight,
-          tileSize: ts,
-          tileOverlap: 0,
-          minLevel: 0,
-          maxLevel,
-          getTileUrl(level: number, x: number, y: number): string {
-            const localPath = `${outputDir}/${level}/${x}_${y}.png`;
-            return convert(localPath);
-          },
-        };
-      }
-
+      const { dirUrl, version } = tiles;
       const viewer = OSD({
         element: containerRef.current,
         prefixUrl: "",
-        tileSources,
+        tileSources: {
+          width: tiles.width,
+          height: tiles.height,
+          tileSize,
+          tileOverlap: 0,
+          minLevel: 0,
+          maxLevel: tiles.maxLevel,
+          getTileUrl(level: number, x: number, y: number): string {
+            return tileUrl(dirUrl, level, x, y, version);
+          },
+        },
         showNavigationControl: false,
         showNavigator: false,
         showZoomControl: false,
@@ -232,14 +170,11 @@ function DeepZoomViewer({
       destroyed = true;
       destroyViewer();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, imageWidth, imageHeight, tileSize, outputDir, renderedPreviewUrl, destroyViewer]);
+  }, [tiles, tileSize, destroyViewer]);
 
   useEffect(() => {
     return () => {
       destroyViewer();
-      generatedPathRef.current = null;
-      renderedUrlRef.current = null;
     };
   }, [destroyViewer]);
 
@@ -256,10 +191,8 @@ function DeepZoomViewer({
   }, []);
 
   const handleFullExtent = useCallback(() => {
-    const v = viewerRef.current;
-    if (!v?.viewport || !imageWidth || !imageHeight) return;
-    v.viewport.goHome();
-  }, [imageWidth, imageHeight]);
+    viewerRef.current?.viewport?.goHome();
+  }, []);
 
   if (error) {
     return (
@@ -267,12 +200,7 @@ function DeepZoomViewer({
         <AlertCircle size={24} className="text-red-400/60" />
         <p className="text-xs text-red-300/80 max-w-[300px] text-center">{error}</p>
         <button
-          onClick={() => {
-            generatedPathRef.current = null;
-            renderedUrlRef.current = null;
-            if (hasRendered) setupRenderedImage();
-            else runGenerate();
-          }}
+          onClick={() => setRetry((r) => r + 1)}
           className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
         >
           Retry
@@ -297,8 +225,6 @@ function DeepZoomViewer({
       </div>
     );
   }
-
-  const modeLabel = modeRef.current === "image" ? "rendered" : "tiled";
 
   return (
     <div className={`relative bg-zinc-950 ${className}`}>
@@ -327,19 +253,18 @@ function DeepZoomViewer({
         </div>
       )}
 
-      {viewerReady && (
+      {viewerReady && tiles && (
         <div className="absolute bottom-3 left-3 z-10
           text-[10px] font-mono text-zinc-600
           bg-zinc-950/70 backdrop-blur-sm rounded px-2 py-1
           border border-zinc-800/30 select-none pointer-events-none"
         >
-          {imageWidth}x{imageHeight}
-          {modeRef.current === "tiles" && <> | {tileSize}px tiles | {computeMaxLevel(imageWidth, imageHeight, tileSize) + 1} levels</>}
-          {modeRef.current === "image" && <> | {modeLabel}</>}
+          {tiles.width}x{tiles.height} | {tileSize}px tiles | {tiles.maxLevel + 1} levels | auto STF, display settings not applied
+          {sourceLabel && <> | {sourceLabel}</>}
         </div>
       )}
 
-      {!viewerReady && !generating && ready && (
+      {!viewerReady && !generating && tiles && (
         <div className="absolute inset-0 flex items-center justify-center">
           <Loader2 size={20} className="animate-spin text-zinc-600" />
         </div>

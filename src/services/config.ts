@@ -29,6 +29,7 @@ export interface OutputDirInfo {
 export interface CleanupOutputResult {
   cleaned_files: number;
   cleaned_bytes: number;
+  cleaned_paths: string[];
   total_size: number;
   file_count: number;
   output_dir: string;
@@ -39,6 +40,6 @@ export function getOutputDirInfo(outputDir: string): Promise<OutputDirInfo> {
   return typedInvoke<OutputDirInfo>("get_output_dir_info", { outputDir });
 }
 
-export function cleanupOutput(outputDir: string, maxSizeMb?: number): Promise<CleanupOutputResult> {
-  return typedInvoke<CleanupOutputResult>("cleanup_output_cmd", { outputDir, maxSizeMb: maxSizeMb ?? null });
+export function cleanupOutput(outputDir: string, keep: readonly string[], maxSizeMb?: number): Promise<CleanupOutputResult> {
+  return typedInvoke<CleanupOutputResult>("cleanup_output_cmd", { outputDir, maxSizeMb: maxSizeMb ?? null, keep: [...keep] });
 }

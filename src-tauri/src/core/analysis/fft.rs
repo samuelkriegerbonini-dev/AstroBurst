@@ -13,27 +13,18 @@ pub struct FftResult {
     pub display_width: usize,
     pub display_height: usize,
     pub original_size: usize,
-    pub windowed: bool,
 }
 
 pub fn compute_power_spectrum(data: &Array2<f32>) -> Result<FftResult> {
-    compute_power_spectrum_opts(data, true)
-}
-
-pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Result<FftResult> {
     let (rows, cols) = data.dim();
     let fft_rows = rows.next_power_of_two();
     let fft_cols = cols.next_power_of_two();
 
     let engine = FftEngine2D::<f32>::new(fft_rows, fft_cols);
 
-    let mut buf = if apply_window {
-        let hann_row = window::hann_symmetric::<f32>(rows);
-        let hann_col = window::hann_symmetric::<f32>(cols);
-        fft::prepare_windowed_buffer(data, &hann_row, &hann_col, fft_rows, fft_cols)
-    } else {
-        fft::prepare_buffer_no_window(data, fft_rows, fft_cols)
-    };
+    let hann_row = window::hann_symmetric::<f32>(rows);
+    let hann_col = window::hann_symmetric::<f32>(cols);
+    let mut buf = fft::prepare_windowed_buffer(data, &hann_row, &hann_col, fft_rows, fft_cols);
 
     engine.forward_2d(&mut buf);
 
@@ -68,7 +59,6 @@ pub fn compute_power_spectrum_opts(data: &Array2<f32>, apply_window: bool) -> Re
         display_width: dw,
         display_height: dh,
         original_size: fft_rows.max(fft_cols),
-        windowed: apply_window,
     })
 }
 

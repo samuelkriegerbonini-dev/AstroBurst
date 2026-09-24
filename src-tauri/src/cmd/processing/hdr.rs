@@ -1,15 +1,8 @@
 use serde_json::json;
 
-use crate::cmd::common::{
-    blocking_cmd, load_cached, render_and_save, resolve_output_dir, MAX_PREVIEW_DIM,
-};
-use crate::cmd::helpers;
-use crate::cmd::processing::local_contrast::{
-    composite_png_path, load_stretched_composite, processed_fits_path, processed_header,
-    source_header,
-};
+use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir};
+use crate::cmd::processing::local_contrast::{run_composite_contrast, save_contrast_output, source_header};
 use crate::core::imaging::hdr::{hdrmt_rgb, hdrmt_with_progress, HdrConfig};
-use crate::infra::fits::writer::write_fits_mono;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH};
 
@@ -36,10 +29,8 @@ pub async fn hdrmt_cmd(
         let compressed = hdrmt_with_progress(entry.arr(), &config, Some(&progress_clone))?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save(&compressed, &path, &output_dir, SUFFIX_HDR, false)?;
-        let fits_path = processed_fits_path(&path, &output_dir, SUFFIX_HDR);
-        let out_header = processed_header(header.as_ref(), ABPROC_HDRMT);
-        write_fits_mono(&fits_path, &compressed, Some(&out_header))?;
+        let (ro, fits_path) =
+            save_contrast_output(&compressed, &path, &output_dir, SUFFIX_HDR, ABPROC_HDRMT, header.as_ref())?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
@@ -58,28 +49,14 @@ pub async fn hdrmt_composite_cmd(
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let output_dir = resolve_output_dir(&output_dir)?;
-        let (er, eg, eb) = load_stretched_composite()?;
-
-        let t0 = std::time::Instant::now();
-        let (r, g, b) = hdrmt_rgb(er.arr(), eg.arr(), eb.arr(), &config)?;
-        let elapsed_ms = t0.elapsed().as_millis() as u64;
-        let (rows, cols) = r.dim();
-
-        let png_path = composite_png_path(&output_dir, SUFFIX_HDR);
-        helpers::render_rgb_preview(&r, &g, &b, &png_path, MAX_PREVIEW_DIM)?;
-        helpers::insert_composite_stretched(r, g, b);
-
-        Ok(json!({
-            RES_PNG_PATH: png_path,
-            RES_ELAPSED_MS: elapsed_ms,
-            RES_DIMENSIONS: [cols, rows],
-        }))
+        run_composite_contrast(SUFFIX_HDR, &output_dir, move |r, g, b| hdrmt_rgb(r, g, b, &config))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::processing::local_contrast::{composite_png_path, processed_fits_path};
 
     #[test]
     fn hdr_config_deserialises_camel_case_with_defaults() {

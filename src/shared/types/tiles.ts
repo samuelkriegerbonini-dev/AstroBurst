@@ -1,6 +1,16 @@
+export interface TileLevel {
+  level: number;
+  width: number;
+  height: number;
+  cols: number;
+  rows: number;
+  scale_factor: number;
+}
+
 export interface TileResult {
-  output_dir: string;
-  levels: number;
-  tile_count: number;
-  elapsed_ms: number;
+  tile_size: number;
+  original_width: number;
+  original_height: number;
+  levels: TileLevel[];
+  base_dir: string;
 }

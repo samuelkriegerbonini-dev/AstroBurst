@@ -1,6 +1,8 @@
 // IRAF/astropy zscale auto-stretch — contributed by Jae-Joon Lee <https://github.com/leejjoon>
 use ndarray::Array2;
 
+use crate::core::imaging::stats::is_valid_pixel;
+
 const NSAMPLES: usize = 1000;
 const MAX_REJECT: f64 = 0.5;
 const MIN_NPIXELS: usize = 5;
@@ -11,8 +13,8 @@ pub const DEFAULT_CONTRAST: f64 = 0.25;
 
 pub fn zscale_limits(data: &Array2<f32>, contrast: f64) -> (f64, f64) {
     let finite: Vec<f32> = match data.as_slice() {
-        Some(s) => s.iter().copied().filter(|v| v.is_finite()).collect(),
-        None => data.iter().copied().filter(|v| v.is_finite()).collect(),
+        Some(s) => s.iter().copied().filter(|&v| is_valid_pixel(v)).collect(),
+        None => data.iter().copied().filter(|&v| is_valid_pixel(v)).collect(),
     };
     zscale_limits_from_finite(finite, contrast)
 }
@@ -30,7 +32,7 @@ fn zscale_limits_from_finite(finite: Vec<f32>, contrast: f64) -> (f64, f64) {
         .take(NSAMPLES)
         .map(|&v| v as f64)
         .collect();
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples.sort_by(|a, b| a.total_cmp(b));
 
     let npix = samples.len();
     let mut vmin = samples[0];
@@ -229,6 +231,17 @@ mod tests {
         }
         let (vmin, vmax) = zscale_limits(&img, 0.25);
         assert!(vmin.is_finite() && vmax.is_finite());
+        assert_sig4(vmin, 83.07116699);
+        assert_sig4(vmax, 130.9396412);
+    }
+
+    #[test]
+    fn excludes_zero_padding_like_nan() {
+        let mut img = synthetic_astro_image(64, 64);
+        for &(y, x) in &[(0usize, 0usize), (5, 5), (30, 30), (63, 63), (1, 2)] {
+            img[[y, x]] = 0.0;
+        }
+        let (vmin, vmax) = zscale_limits(&img, 0.25);
         assert_sig4(vmin, 83.07116699);
         assert_sig4(vmax, 130.9396412);
     }

@@ -7,6 +7,7 @@ pub fn jd_from_mjd(mjd: f64) -> f64 {
     mjd + MJD_EPOCH_JD
 }
 
+#[cfg(test)]
 pub fn mjd_from_jd(jd: f64) -> f64 {
     jd - MJD_EPOCH_JD
 }

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::region::{shape_to_pixel, shape_to_sky, RegionError, RegionShape, RegionSystem};
+use super::region::{
+    image_to_physical_shape, physical_to_image_shape, shape_to_pixel, shape_to_sky, PhysicalMap, RegionError,
+    RegionShape, RegionSystem,
+};
 use crate::core::astrometry::wcs::WcsTransform;
 
 pub const DS9_HEADER: &str = "# Region file format: DS9 version 4.1";
@@ -254,7 +257,7 @@ pub fn parse_lat(token: &str) -> Result<f64, RegionError> {
     parse_plain(t)
 }
 
-pub fn parse_size(token: &str, system: RegionSystem) -> Result<f64, RegionError> {
+pub fn parse_size(token: &str, system: RegionSystem, physical: &PhysicalMap) -> Result<f64, RegionError> {
     let t = token.trim();
     let (body, unit) = match t.chars().last() {
         Some(c @ ('"' | '\'' | 'd' | 'r' | 'i' | 'p')) => (&t[..t.len() - c.len_utf8()], Some(c)),
@@ -262,7 +265,7 @@ pub fn parse_size(token: &str, system: RegionSystem) -> Result<f64, RegionError>
     };
     let v = parse_plain(body)?;
     if system.is_sky() {
-        match unit {
+        return match unit {
             None | Some('d') => Ok(v * 3600.0),
             Some('"') => Ok(v),
             Some('\'') => Ok(v * 60.0),
@@ -270,14 +273,15 @@ pub fn parse_size(token: &str, system: RegionSystem) -> Result<f64, RegionError>
             Some(u) => Err(RegionError::Invalid(format!(
                 "size '{token}' uses pixel unit '{u}' on a sky-system line"
             ))),
-        }
-    } else {
-        match unit {
-            None | Some('i') | Some('p') => Ok(v),
-            Some(u) => Err(RegionError::Invalid(format!(
-                "size '{token}' uses angular unit '{u}' on an image-system line"
-            ))),
-        }
+        };
+    }
+    match (system, unit) {
+        (RegionSystem::Physical, Some('i')) => Ok(v / physical.scale()),
+        (RegionSystem::Image, Some('p')) => Ok(v * physical.scale()),
+        (_, None | Some('i') | Some('p')) => Ok(v),
+        (_, Some(u)) => Err(RegionError::Invalid(format!(
+            "size '{token}' uses angular unit '{u}' on an image-system line"
+        ))),
     }
 }
 
@@ -377,6 +381,7 @@ struct ArgReader<'a> {
     system: RegionSystem,
     line_no: usize,
     args: &'a [String],
+    physical: &'a PhysicalMap,
 }
 
 impl ArgReader<'_> {
@@ -400,7 +405,7 @@ impl ArgReader<'_> {
     }
 
     fn size(&self, i: usize) -> Result<f64, RegionError> {
-        parse_size(&self.args[i], self.system).map_err(|e| self.err(e))
+        parse_size(&self.args[i], self.system, self.physical).map_err(|e| self.err(e))
     }
 
     fn angle(&self, i: usize) -> Result<f64, RegionError> {
@@ -411,10 +416,11 @@ impl ArgReader<'_> {
 fn build_shapes(
     line: &ShapeLine,
     system: RegionSystem,
+    physical: &PhysicalMap,
     line_no: usize,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<RegionShape>, RegionError> {
-    let r = ArgReader { system, line_no, args: &line.args };
+    let r = ArgReader { system, line_no, args: &line.args, physical };
     let name = line.name.as_str();
     let n = line.args.len();
     let unsupported = |what: &str, warnings: &mut Vec<String>| {
@@ -484,7 +490,11 @@ fn build_shapes(
     }
 }
 
-pub fn parse_reg(text: &str, wcs: Option<&WcsTransform>) -> Result<ParsedRegions, RegionError> {
+pub fn parse_reg_with_physical(
+    text: &str,
+    wcs: Option<&WcsTransform>,
+    physical: &PhysicalMap,
+) -> Result<ParsedRegions, RegionError> {
     let mut regions = Vec::new();
     let mut warnings = Vec::new();
     let mut systems: Vec<RegionSystem> = Vec::new();
@@ -517,7 +527,7 @@ pub fn parse_reg(text: &str, wcs: Option<&WcsTransform>) -> Result<ParsedRegions
             }
             let (shape_part, props_part) = split_comment(stmt);
             let parsed = tokenize_shape(&shape_part, line_no)?;
-            let shapes = build_shapes(&parsed, system, line_no, &mut warnings)?;
+            let shapes = build_shapes(&parsed, system, physical, line_no, &mut warnings)?;
             if shapes.is_empty() {
                 continue;
             }
@@ -532,10 +542,10 @@ pub fn parse_reg(text: &str, wcs: Option<&WcsTransform>) -> Result<ParsedRegions
                 systems.push(system);
             }
             for shape in shapes {
-                let pixel = if system.is_sky() {
-                    shape_to_pixel(&shape, system, wcs)?
-                } else {
-                    shape.from_ds9_image()
+                let pixel = match system {
+                    RegionSystem::Physical => physical_to_image_shape(&shape, physical)?.from_ds9_image(),
+                    _ if system.is_sky() => shape_to_pixel(&shape, system, wcs)?,
+                    _ => shape.from_ds9_image(),
                 };
                 regions.push(Region { shape: pixel, props: props.clone() });
             }
@@ -543,6 +553,19 @@ pub fn parse_reg(text: &str, wcs: Option<&WcsTransform>) -> Result<ParsedRegions
     }
 
     Ok(ParsedRegions { regions, warnings, systems })
+}
+
+fn text_prop(text: &str) -> String {
+    let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if !clean.contains(['{', '}']) {
+        format!("text={{{clean}}}")
+    } else if !clean.contains('"') {
+        format!("text=\"{clean}\"")
+    } else if !clean.contains('\'') {
+        format!("text='{clean}'")
+    } else {
+        format!("text={{{}}}", clean.replace(['{', '}'], ""))
+    }
 }
 
 fn props_suffix(props: &RegionProperties) -> String {
@@ -561,7 +584,7 @@ fn props_suffix(props: &RegionProperties) -> String {
         parts.push("dash=1".to_string());
     }
     if let Some(t) = &props.text {
-        parts.push(format!("text={{{t}}}"));
+        parts.push(text_prop(t));
     }
     if parts.is_empty() {
         String::new()
@@ -629,11 +652,12 @@ impl Formatter {
     }
 }
 
-pub fn write_reg(
+pub fn write_reg_with_physical(
     regions: &[Region],
     system: RegionSystem,
     wcs: Option<&WcsTransform>,
     sexagesimal: bool,
+    physical: &PhysicalMap,
 ) -> Result<String, RegionError> {
     if system.is_sky() && wcs.is_none() {
         return Err(RegionError::WcsRequired);
@@ -641,10 +665,10 @@ pub fn write_reg(
     let fmt = Formatter { sky: system.is_sky(), sexagesimal };
     let mut lines = vec![DS9_HEADER.to_string(), DS9_GLOBAL.to_string(), system.name().to_string()];
     for region in regions {
-        let shape = if system.is_sky() {
-            shape_to_sky(&region.shape, system, wcs)?
-        } else {
-            region.shape.to_ds9_image()
+        let shape = match system {
+            RegionSystem::Physical => image_to_physical_shape(&region.shape.to_ds9_image(), physical)?,
+            _ if system.is_sky() => shape_to_sky(&region.shape, system, wcs)?,
+            _ => region.shape.to_ds9_image(),
         };
         let prefix = if region.props.include { "" } else { "-" };
         lines.push(format!("{prefix}{}{}", fmt.shape(&shape), props_suffix(&region.props)));
@@ -658,6 +682,19 @@ mod tests {
     use super::*;
     use crate::core::astrometry::frames::fk5_j2000_to_icrs;
     use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd, rotated_cd};
+
+    fn parse_reg(text: &str, wcs: Option<&WcsTransform>) -> Result<ParsedRegions, RegionError> {
+        parse_reg_with_physical(text, wcs, &PhysicalMap::identity())
+    }
+
+    fn write_reg(
+        regions: &[Region],
+        system: RegionSystem,
+        wcs: Option<&WcsTransform>,
+        sexagesimal: bool,
+    ) -> Result<String, RegionError> {
+        write_reg_with_physical(regions, system, wcs, sexagesimal, &PhysicalMap::identity())
+    }
 
     const IMAGE_SAMPLE: &str = "# Region file format: DS9 version 4.1\n\
 global color=green dashlist=8 3 width=1 font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n\
@@ -781,7 +818,7 @@ circle(10h00m30s,+2d12m00s,5\")\n";
         assert_eq!(parse_reg("galactic\ncircle(1,1,1)\n", None), Err(RegionError::UnsupportedSystem("galactic".into())));
         assert_eq!(parse_reg("fk5\ncircle(150,2,3\")\n", None), Err(RegionError::WcsRequired));
         let parsed = parse_reg("PHYSICAL\ncircle point(10,10)\nbox point 5 5\npoint(3,3) # point=cross\n", None).unwrap();
-        assert_eq!(parsed.systems, vec![RegionSystem::Image]);
+        assert_eq!(parsed.systems, vec![RegionSystem::Physical]);
         assert_eq!(parsed.regions.len(), 3);
         assert_eq!(parsed.regions[0].shape, RegionShape::Point { x: 9.0, y: 9.0 });
         assert_eq!(parsed.regions[1].shape, RegionShape::Point { x: 4.0, y: 4.0 });
@@ -809,17 +846,18 @@ circle(10h00m30s,+2d12m00s,5\")\n";
         assert!((parse_lat("-2d12m00s").unwrap() + 2.2).abs() < 1e-12);
         assert!((parse_lat("-00:30:00").unwrap() + 0.5).abs() < 1e-12);
         assert_eq!(parse_lat("2.2").unwrap(), 2.2);
-        assert_eq!(parse_size("3.5\"", RegionSystem::Fk5).unwrap(), 3.5);
-        assert_eq!(parse_size("0.5'", RegionSystem::Fk5).unwrap(), 30.0);
-        assert_eq!(parse_size("0.01d", RegionSystem::Fk5).unwrap(), 36.0);
-        assert!((parse_size("0.001", RegionSystem::Icrs).unwrap() - 3.6).abs() < 1e-12);
-        assert!(parse_size("3i", RegionSystem::Fk5).is_err());
-        assert!(parse_size("3p", RegionSystem::Fk5).is_err());
-        assert_eq!(parse_size("3", RegionSystem::Image).unwrap(), 3.0);
-        assert_eq!(parse_size("3i", RegionSystem::Image).unwrap(), 3.0);
-        assert_eq!(parse_size("3p", RegionSystem::Image).unwrap(), 3.0);
-        assert!(parse_size("3\"", RegionSystem::Image).is_err());
-        assert!(parse_size("3'", RegionSystem::Image).is_err());
+        let id = PhysicalMap::identity();
+        assert_eq!(parse_size("3.5\"", RegionSystem::Fk5, &id).unwrap(), 3.5);
+        assert_eq!(parse_size("0.5'", RegionSystem::Fk5, &id).unwrap(), 30.0);
+        assert_eq!(parse_size("0.01d", RegionSystem::Fk5, &id).unwrap(), 36.0);
+        assert!((parse_size("0.001", RegionSystem::Icrs, &id).unwrap() - 3.6).abs() < 1e-12);
+        assert!(parse_size("3i", RegionSystem::Fk5, &id).is_err());
+        assert!(parse_size("3p", RegionSystem::Fk5, &id).is_err());
+        assert_eq!(parse_size("3", RegionSystem::Image, &id).unwrap(), 3.0);
+        assert_eq!(parse_size("3i", RegionSystem::Image, &id).unwrap(), 3.0);
+        assert_eq!(parse_size("3p", RegionSystem::Image, &id).unwrap(), 3.0);
+        assert!(parse_size("3\"", RegionSystem::Image, &id).is_err());
+        assert!(parse_size("3'", RegionSystem::Image, &id).is_err());
         assert_eq!(parse_angle_deg("30").unwrap(), 30.0);
         assert_eq!(parse_angle_deg("30d").unwrap(), 30.0);
         assert!(parse_angle_deg("x").is_err());
@@ -898,6 +936,86 @@ circle(10h00m30s,+2d12m00s,5\")\n";
         let parts: Vec<&str> = inner.split(',').collect();
         assert_eq!(parts[0].matches(':').count(), 2);
         assert!(parts[1].starts_with('+') || parts[1].starts_with('-'));
+    }
+
+    #[test]
+    fn physical_regions_follow_the_cutout_ltv() {
+        let parent = crate::core::imaging::region::test_support::make_header(&[("NAXIS1", "400"), ("NAXIS2", "400")]);
+        let rect = crate::core::imaging::cutout::CutoutRect { x0: 100, y0: 20, width: 80, height: 60 };
+        let cutout_header = crate::core::imaging::cutout::shift_header(&parent, &rect);
+        let map = PhysicalMap::from_header(&cutout_header);
+        let text = "physical\ncircle(150,50,5)\nbox(121,31,4,2,30)\n";
+        let parsed = parse_reg_with_physical(text, None, &map).unwrap();
+        assert_eq!(parsed.systems, vec![RegionSystem::Physical]);
+        assert_eq!(parsed.regions[0].shape, RegionShape::Circle { x: 49.0, y: 29.0, r: 5.0 });
+        assert_eq!(
+            parsed.regions[1].shape,
+            RegionShape::Box { x: 20.0, y: 10.0, width: 4.0, height: 2.0, angle: 30.0 }
+        );
+        let written = write_reg_with_physical(&parsed.regions, RegionSystem::Physical, None, true, &map).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines[2], "physical");
+        assert_eq!(lines[3], "circle(150,50,5)");
+        assert_eq!(lines[4], "box(121,31,4,2,30)");
+        let binned = crate::core::imaging::region::test_support::make_header(&[
+            ("LTV1", "-10"),
+            ("LTV2", "-10"),
+            ("LTM1_1", "0.5"),
+            ("LTM2_2", "0.5"),
+        ]);
+        let parsed = parse_reg_with_physical("physical\ncircle(62,62,8)\n", None, &PhysicalMap::from_header(&binned)).unwrap();
+        assert_eq!(parsed.regions[0].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 4.0 });
+        let as_image = write_reg(&parsed.regions, RegionSystem::Image, None, true).unwrap();
+        assert_eq!(as_image.lines().nth(2), Some("image"));
+        assert_eq!(as_image.lines().nth(3), Some("circle(21,21,4)"));
+    }
+
+    #[test]
+    fn size_units_convert_between_image_and_physical_pixels() {
+        let binned = PhysicalMap::from_header(&crate::core::imaging::region::test_support::make_header(&[
+            ("LTV1", "-10"),
+            ("LTV2", "-10"),
+            ("LTM1_1", "0.5"),
+            ("LTM2_2", "0.5"),
+        ]));
+        let text = "physical\ncircle(62,62,8i)\ncircle(62,62,8p)\ncircle(62,62,8)\nannulus(62,62,2i,6)\n";
+        let parsed = parse_reg_with_physical(text, None, &binned).unwrap();
+        assert_eq!(parsed.regions[0].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 8.0 });
+        assert_eq!(parsed.regions[1].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 4.0 });
+        assert_eq!(parsed.regions[2].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 4.0 });
+        assert_eq!(parsed.regions[3].shape, RegionShape::Annulus { x: 20.0, y: 20.0, r_inner: 2.0, r_outer: 3.0 });
+
+        let parsed = parse_reg_with_physical("image\ncircle(21,21,8p)\nbox(21,21,8p,6i,0)\ncircle(21,21,5)\n", None, &binned).unwrap();
+        assert_eq!(parsed.regions[0].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 4.0 });
+        assert_eq!(
+            parsed.regions[1].shape,
+            RegionShape::Box { x: 20.0, y: 20.0, width: 4.0, height: 6.0, angle: 0.0 }
+        );
+        assert_eq!(parsed.regions[2].shape, RegionShape::Circle { x: 20.0, y: 20.0, r: 5.0 });
+
+        let unbinned = parse_reg("physical\ncircle(21,21,8i)\nimage\ncircle(21,21,8p)\n", None).unwrap();
+        assert!(unbinned.regions.iter().all(|r| r.shape == RegionShape::Circle { x: 20.0, y: 20.0, r: 8.0 }));
+    }
+
+    #[test]
+    fn labels_with_braces_survive_a_round_trip() {
+        for label in ["NGC 1275 {core}", "a}b", "x{y", "say \"hi\" {now}", "both \"'\" {}", "tab\there"] {
+            let region = Region {
+                shape: RegionShape::Circle { x: 9.0, y: 9.0, r: 2.0 },
+                props: RegionProperties { text: Some(label.to_string()), ..RegionProperties::default() },
+            };
+            let text = write_reg(std::slice::from_ref(&region), RegionSystem::Image, None, true).unwrap();
+            let back = parse_reg(&text, None).unwrap();
+            assert_eq!(back.regions.len(), 1, "{text}");
+            let got = back.regions[0].props.text.clone().unwrap_or_default();
+            let expected = match label {
+                "both \"'\" {}" => "both \"'\" ".to_string(),
+                "tab\there" => "tab here".to_string(),
+                other => other.to_string(),
+            };
+            assert_eq!(got, expected, "{text}");
+            assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+        }
     }
 
     #[test]

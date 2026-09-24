@@ -39,8 +39,6 @@ impl Default for LheConfig {
 #[derive(Debug, Clone)]
 pub struct LheResult {
     pub image: Array2<f32>,
-    pub input_min: f32,
-    pub input_max: f32,
 }
 
 struct LheParams {
@@ -364,8 +362,6 @@ pub fn lhe_with_progress(
         }
         return Ok(LheResult {
             image: image.clone(),
-            input_min,
-            input_max,
         });
     }
 
@@ -423,8 +419,6 @@ pub fn lhe_with_progress(
 
     Ok(LheResult {
         image: Array2::from_shape_vec((rows, cols), output).expect("output matches input shape"),
-        input_min,
-        input_max,
     })
 }
 
@@ -530,8 +524,6 @@ mod tests {
         image[[3, 3]] = f32::NAN;
         let out = lhe(&image, &LheConfig::default()).unwrap();
         assert_same_bits(&out.image, &image);
-        assert_eq!(out.input_min, 0.37);
-        assert_eq!(out.input_max, 0.37);
     }
 
     #[test]
@@ -548,9 +540,6 @@ mod tests {
             before,
             after
         );
-        assert_eq!(out.input_min, 0.0);
-        assert_eq!(out.input_max, 1.0);
-
         let identity = lhe(&image, &config(16, 64.0, 0.0)).unwrap();
         assert_same_bits(&identity.image, &image);
     }

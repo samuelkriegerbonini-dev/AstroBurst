@@ -161,7 +161,7 @@ fn median_of(stars: &[DetectedStar], f: impl Fn(&DetectedStar) -> f64) -> f64 {
     if vals.is_empty() {
         return 0.0;
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals.sort_by(|a, b| a.total_cmp(b));
     let mid = vals.len() / 2;
     if vals.len() % 2 == 0 {
         (vals[mid - 1] + vals[mid]) / 2.0

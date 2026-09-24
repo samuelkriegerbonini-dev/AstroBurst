@@ -7,7 +7,7 @@ export interface HeaderData {
   filter_detection: {
     filter: string;
     filter_id: string;
-    hubble_channel: string;
+    hubble_channel: string | null;
     confidence: string;
     matched_keyword: string;
     matched_value: string;

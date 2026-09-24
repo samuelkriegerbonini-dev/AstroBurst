@@ -116,24 +116,6 @@ pub fn lrgb_combine_normalized(
     Ok((rn, gn, bn))
 }
 
-pub fn synthesize_luminance(
-    r: &Array2<f32>,
-    g: &Array2<f32>,
-    b: &Array2<f32>,
-) -> Array2<f32> {
-    let mut lum = Array2::zeros(r.raw_dim());
-
-    Zip::from(&mut lum)
-        .and(r)
-        .and(g)
-        .and(b)
-        .par_for_each(|l_out, &rv, &gv, &bv| {
-            *l_out = rv * 0.2126 + gv * 0.7152 + bv * 0.0722;
-        });
-
-    lum
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,16 +159,6 @@ mod tests {
         let mut b = Array2::from_elem((10, 20), 0.5f32);
 
         assert!(apply_lrgb(&l, &mut r, &mut g, &mut b, 1.0, 1.0).is_err());
-    }
-
-    #[test]
-    fn test_synthesize_luminance() {
-        let r = Array2::from_elem((10, 10), 1.0f32);
-        let g = Array2::from_elem((10, 10), 1.0f32);
-        let b = Array2::from_elem((10, 10), 1.0f32);
-
-        let lum = synthesize_luminance(&r, &g, &b);
-        assert!((lum[[5, 5]] - 1.0).abs() < 0.001);
     }
 
     #[test]

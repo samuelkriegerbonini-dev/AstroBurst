@@ -201,12 +201,20 @@ fn is_constant_or_zero(img: &Array2<f32>) -> bool {
 }
 
 pub fn is_low_confidence(confidence: f64) -> bool {
-    confidence < CONFIDENCE_THRESHOLD
+    !(confidence >= CONFIDENCE_THRESHOLD)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_finite_confidence_counts_as_low() {
+        assert!(is_low_confidence(f64::NAN));
+        assert!(is_low_confidence(4.99));
+        assert!(!is_low_confidence(CONFIDENCE_THRESHOLD));
+        assert!(!is_low_confidence(f64::INFINITY));
+    }
 
     fn make_pattern(rows: usize, cols: usize) -> Array2<f32> {
         Array2::from_shape_fn((rows, cols), |(y, x)| {

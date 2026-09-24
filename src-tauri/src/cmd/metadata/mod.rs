@@ -2,10 +2,11 @@ use std::fs::File;
 
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, image_ref, source_path};
-use crate::core::metadata::header_discovery::{detect_filter, suggest_palette, suggest_palette_with_type, PaletteType};
+use crate::cmd::common::{blocking_cmd, cached_header, image_ref, source_path};
+use crate::core::metadata::header_discovery::{
+    detect_filter, palette_channel, suggest_palette_with_type, FilterDetection, PaletteType,
+};
 use crate::infra::asdf::converter::is_asdf_file;
-use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::image_source::{is_dq_name, is_err_name, list_planes, load_plane_header, plane_ref};
 use crate::types::constants::{
@@ -23,17 +24,38 @@ use crate::types::constants::{
 use crate::types::header::HduHeader;
 
 fn header_for(path: &str) -> anyhow::Result<HduHeader> {
-    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
-        if let Some(header) = entry.header() {
-            return Ok(header.clone());
-        }
-    }
-    if let Ok(entry) = GLOBAL_IMAGE_CACHE.upgrade_header(path, || load_plane_header(&image_ref(path))) {
-        if let Some(header) = entry.header() {
-            return Ok(header.clone());
-        }
-    }
-    load_plane_header(&image_ref(path))
+    cached_header(path)
+}
+
+fn palette_from(palette: Option<&str>) -> PaletteType {
+    palette.map(PaletteType::from_str_loose).unwrap_or_default()
+}
+
+fn detection_json(detection: &FilterDetection, palette: &PaletteType) -> serde_json::Value {
+    json!({
+        RES_FILTER: detection.filter,
+        RES_FILTER_ID: format!("{:?}", detection.filter),
+        RES_HUBBLE_CHANNEL: palette_channel(palette, detection.filter),
+        RES_CONFIDENCE: detection.confidence,
+        RES_MATCHED_KEYWORD: detection.matched_keyword,
+        RES_MATCHED_VALUE: detection.matched_value,
+    })
+}
+
+fn narrowband_detections_json(file_headers: &[(String, HduHeader)], palette: &PaletteType) -> Vec<serde_json::Value> {
+    file_headers
+        .iter()
+        .map(|(p, header)| {
+            let mut entry = match detect_filter(header) {
+                Some(detection) => detection_json(&detection, palette),
+                None => json!({ RES_FILTER: null }),
+            };
+            if let Some(fields) = entry.as_object_mut() {
+                fields.insert(RES_PATH.to_string(), json!(p));
+            }
+            entry
+        })
+        .collect()
 }
 
 pub(crate) fn extensions_json(path: &str) -> anyhow::Result<serde_json::Value> {
@@ -72,8 +94,9 @@ pub async fn get_header(path: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> {
+pub async fn get_full_header(path: String, palette: Option<String>) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let palette_type = palette_from(palette.as_deref());
         let header = header_for(&path)?;
 
         let file_name = std::path::Path::new(&source_path(&path))
@@ -126,17 +149,9 @@ pub async fn get_full_header(path: String) -> Result<serde_json::Value, String> 
             }
         }
 
-        let filter = detect_filter(&header);
-        let filter_json = filter.map(|f| json!({
-            RES_FILTER: f.filter,
-            RES_FILTER_ID: format!("{:?}", f.filter),
-            RES_HUBBLE_CHANNEL: f.hubble_channel,
-            RES_CONFIDENCE: f.confidence,
-            RES_MATCHED_KEYWORD: f.matched_keyword,
-            RES_MATCHED_VALUE: f.matched_value,
-        }));
+        let filter_json = detect_filter(&header).map(|f| detection_json(&f, &palette_type));
 
-        let palette = suggest_palette(&[(path.clone(), header.clone())]);
+        let palette = suggest_palette_with_type(&[(path.clone(), header.clone())], &palette_type);
         let filename_hint: Option<String> = if palette.is_complete {
             Some(palette.palette_name.clone())
         } else {
@@ -176,42 +191,68 @@ pub async fn get_header_by_hdu(path: String, hdu_index: usize) -> Result<serde_j
 #[tauri::command]
 pub async fn detect_narrowband_filters(paths: Vec<String>, palette: Option<String>) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let palette_type = palette
-            .as_deref()
-            .map(PaletteType::from_str_loose)
-            .unwrap_or_default();
+        let palette_type = palette_from(palette.as_deref());
 
-        let mut file_headers: Vec<(String, crate::types::header::HduHeader)> = Vec::new();
+        let mut file_headers: Vec<(String, HduHeader)> = Vec::new();
 
         for p in &paths {
             let header = load_plane_header(&image_ref(p))?;
             file_headers.push((p.clone(), header));
         }
 
-        let mut filters = Vec::new();
-        for (p, header) in &file_headers {
-            if let Some(filter) = detect_filter(header) {
-                filters.push(json!({
-                    RES_PATH: p,
-                    RES_FILTER: filter.filter,
-                    RES_HUBBLE_CHANNEL: filter.hubble_channel,
-                    RES_CONFIDENCE: filter.confidence,
-                    RES_MATCHED_KEYWORD: filter.matched_keyword,
-                    RES_MATCHED_VALUE: filter.matched_value,
-                }));
-            } else {
-                filters.push(json!({
-                    RES_PATH: p,
-                    RES_FILTER: null,
-                }));
-            }
-        }
-
         let suggestion = suggest_palette_with_type(&file_headers, &palette_type);
 
         Ok(json!({
-            RES_FILTERS: filters,
+            RES_FILTERS: narrowband_detections_json(&file_headers, &palette_type),
             RES_PALETTE: serde_json::to_value(&suggestion).unwrap_or(json!(null)),
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use ndarray::Array2;
+
+    use super::*;
+    use crate::cmd::common::load_cached_full;
+    use crate::core::imaging::region::test_support::make_header;
+    use crate::infra::fits::writer::write_fits_mono;
+
+    #[test]
+    fn the_header_explorer_reads_a_rewritten_file_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("explored.fits").to_str().unwrap().to_string();
+        write_fits_mono(&p, &Array2::zeros((4, 4)), Some(&make_header(&[("EXPTIME", "300")]))).unwrap();
+        assert!(load_cached_full(&p).unwrap().header().is_some());
+        assert_eq!(header_for(&p).unwrap().get_f64("EXPTIME"), Some(300.0));
+
+        write_fits_mono(&p, &Array2::zeros((4, 4)), Some(&make_header(&[("EXPTIME", "600")]))).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
+        drop(file);
+        assert_eq!(header_for(&p).unwrap().get_f64("EXPTIME"), Some(600.0), "the cached header of the old file was served");
+    }
+
+    #[test]
+    fn the_detected_channel_follows_the_requested_palette() {
+        let files = vec![
+            ("ha.fits".to_string(), make_header(&[("FILTER", "H-alpha")])),
+            ("sii.fits".to_string(), make_header(&[("FILTER", "SII")])),
+            ("lum.fits".to_string(), make_header(&[("FILTER", "Luminance")])),
+        ];
+        let hoo = narrowband_detections_json(&files, &palette_from(Some("HOO")));
+        assert_eq!(hoo[0][RES_HUBBLE_CHANNEL], "R");
+        assert!(hoo[1][RES_HUBBLE_CHANNEL].is_null(), "SII has no channel in HOO: {}", hoo[1]);
+        assert!(hoo[2][RES_FILTER].is_null());
+        assert_eq!(hoo[2][RES_PATH], "lum.fits");
+        assert_eq!(hoo[0][RES_PATH], "ha.fits");
+
+        let sho = narrowband_detections_json(&files, &palette_from(None));
+        assert_eq!(sho[0][RES_HUBBLE_CHANNEL], "G");
+        assert_eq!(sho[1][RES_HUBBLE_CHANNEL], "R");
+        let hos = detection_json(&detect_filter(&files[1].1).unwrap(), &palette_from(Some("hos")));
+        assert_eq!(hos[RES_HUBBLE_CHANNEL], "B");
+    }
 }

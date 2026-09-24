@@ -13,7 +13,18 @@ import {
   type CompressMefResult,
   type FitsCompression,
 } from "../../services/export";
-import { exportStem, parseImageRef } from "../../utils/imageRef";
+import { parseImageRef } from "../../utils/imageRef";
+import {
+  channelSourceLabel,
+  compositeExportName,
+  compositeRgbPngStf,
+  exportFileName,
+  exportTimestamp,
+  fileRgbPngStf,
+  mefHduSummary,
+  rgbCubeUnavailableReason,
+  rgbExportPaths,
+} from "../../utils/exportSources";
 import { getWcsInfo } from "../../services/astrometry";
 import {
   cutoutDefaultFileName,
@@ -88,14 +99,19 @@ interface CompositeStf {
   r: StfParams;
   g: StfParams;
   b: StfParams;
+  linked: boolean;
 }
 
 interface ExportPanelProps {
   filePath: string | null;
+  exportPath: string | null;
+  sourceLabel?: string;
   stfParams: StfParams | null;
   onExport: (filePath: string, outputPath: string, options: ExportOptions) => Promise<void>;
   onExportRgb?: (r: string | null, g: string | null, b: string | null, outputPath: string, options: RgbExportOptions) => Promise<void>;
   rgbChannels?: RgbChannels | null;
+  headerChannels?: RgbChannels | null;
+  rgbFilePath?: string | null;
   compositeStf?: CompositeStf | null;
   alignMethod?: string;
   isLoading?: boolean;
@@ -121,10 +137,14 @@ async function revealInExplorer(path: string) {
 
 export default function ExportPanel({
                                       filePath,
+                                      exportPath,
+                                      sourceLabel,
                                       stfParams,
                                       onExport,
                                       onExportRgb,
                                       rgbChannels,
+                                      headerChannels = null,
+                                      rgbFilePath = null,
                                       compositeStf,
                                       alignMethod,
                                       isLoading = false,
@@ -202,16 +222,15 @@ export default function ExportPanel({
   }, [quantizeLevel]);
 
   const handleExport = useCallback(async () => {
-    if (!filePath || !onExport) return;
+    if (!exportPath || !onExport) return;
 
     setError(null);
     const dir = await getExportDir();
-    const stem = exportStem(filePath);
     const suffix = applyStf ? "_stf" : "_proc";
-    const outputPath = `${dir}/${stem}${suffix}.fits`;
+    const outputPath = `${dir}/${exportFileName(exportPath, suffix, "fits", exportTimestamp(new Date()))}`;
 
     try {
-      await onExport(filePath, outputPath, {
+      await onExport(exportPath, outputPath, {
         applyStfStretch: applyStf,
         shadow: stfParams?.shadow,
         midtone: stfParams?.midtone,
@@ -232,20 +251,24 @@ export default function ExportPanel({
       console.error("Export failed:", e);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [filePath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport]);
+  }, [exportPath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport]);
 
   const handleExportRgb = useCallback(async () => {
-    if ((!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
+    if (rgbCubeUnavailableReason(rgbFilePath, rgbChannels ?? null)) return;
+    if (!rgbFilePath && (!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
     if (!onExportRgb) return;
     setError(null);
     const dir = await getExportDir();
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const outputPath = `${dir}/rgb_composite_${ts}.fits`;
+    const stamp = exportTimestamp(new Date());
+    const outputPath = rgbFilePath
+      ? `${dir}/${exportFileName(rgbFilePath, "_rgb", "fits", stamp)}`
+      : `${dir}/${compositeExportName("", "fits", stamp)}`;
+    const source = rgbExportPaths(rgbFilePath, rgbChannels ?? null);
     try {
       await onExportRgb(
-        rgbChannels?.r ?? null,
-        rgbChannels?.g ?? null,
-        rgbChannels?.b ?? null,
+        source.r,
+        source.g,
+        source.b,
         outputPath, {
           copyWcs,
           copyMetadata,
@@ -263,7 +286,7 @@ export default function ExportPanel({
       console.error("RGB FITS export failed:", e);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf]);
+  }, [rgbFilePath, rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf]);
 
   const handleCompressMef = useCallback(async () => {
     if (!filePath) return;
@@ -273,7 +296,7 @@ export default function ExportPanel({
     setMefResult(null);
     try {
       const dir = await getExportDir();
-      const outputPath = `${dir}/${exportStem(filePath)}_compressed.fits`;
+      const outputPath = `${dir}/${exportFileName(sourcePath, "_compressed", "fits", exportTimestamp(new Date()))}`;
       const parsedQuantize = parseFloat(mefQuantizeLevel);
       const result = await compressMef(sourcePath, outputPath, {
         lossless: mefLossless,
@@ -293,14 +316,14 @@ export default function ExportPanel({
   }, [filePath, mefLossless, mefQuantizeLevel, mefDropExtnames, mefRawExtnames]);
 
   const handleExportAligned = useCallback(async () => {
-    if (!rgbChannels) return;
+    if (!headerChannels) return;
     setError(null);
     setAlignedExporting(true);
     setAlignedResult(null);
     try {
       const dir = await getExportDir();
       const result = await exportAlignedChannels(
-        rgbChannels.r, rgbChannels.g, rgbChannels.b, dir,
+        headerChannels.r, headerChannels.g, headerChannels.b, `${dir}/astroburst_aligned_${exportTimestamp(new Date())}`,
         { alignMethod: alignedMethod, copyWcs, copyMetadata },
       );
       setAlignedResult(result);
@@ -315,18 +338,17 @@ export default function ExportPanel({
     } finally {
       setAlignedExporting(false);
     }
-  }, [rgbChannels, alignedMethod, copyWcs, copyMetadata]);
+  }, [headerChannels, alignedMethod, copyWcs, copyMetadata]);
 
   const handleExportPng = useCallback(async () => {
-    if (!filePath) return;
+    if (!exportPath) return;
     setError(null);
     setPngExporting(true);
     try {
       const dir = await getExportDir();
-      const stem = exportStem(filePath);
       const suffix = pngApplyStf ? "_stf" : "";
-      const outputPath = `${dir}/${stem}${suffix}.png`;
-      await exportPng(filePath, outputPath, {
+      const outputPath = `${dir}/${exportFileName(exportPath, suffix, "png", exportTimestamp(new Date()))}`;
+      await exportPng(exportPath, outputPath, {
         bitDepth: pngBitDepth,
         applyStfStretch: pngApplyStf,
         shadow: stfParams?.shadow,
@@ -345,38 +367,41 @@ export default function ExportPanel({
     } finally {
       setPngExporting(false);
     }
-  }, [filePath, pngBitDepth, pngApplyStf, stfParams]);
+  }, [exportPath, pngBitDepth, pngApplyStf, stfParams]);
 
   const handleExportRgbPng = useCallback(async () => {
-    if (!rgbChannels && !compositeStf) return;
+    if (!rgbFilePath && !rgbChannels && !compositeStf) return;
     setError(null);
     setPngExporting(true);
     try {
       const dir = await getExportDir();
-      const hasComposite = !!compositeStf;
-      const hasExplicitStf = hasComposite &&
-        compositeStf!.r.midtone !== 0.5 &&
-        compositeStf!.g.midtone !== 0.5 &&
-        compositeStf!.b.midtone !== 0.5;
-      const effectiveStf = hasExplicitStf || pngApplyStf;
-      const suffix = effectiveStf ? "_stf" : "";
-      const outputPath = `${dir}/rgb_composite${suffix}_${pngBitDepth}bit.png`;
+      const stamp = exportTimestamp(new Date());
+      if (rgbFilePath) {
+        const fileStf = fileRgbPngStf(compositeStf ?? null);
+        const filePngPath = `${dir}/${exportFileName(rgbFilePath, `_rgb${fileStf.applyStfStretch ? "_stf" : ""}_${pngBitDepth}bit`, "png", stamp)}`;
+        const planes = rgbExportPaths(rgbFilePath, null);
+        await exportRgbPng(planes.r, planes.g, planes.b, filePngPath, {
+          bitDepth: pngBitDepth,
+          ...fileStf,
+        });
+        setPngExported(true);
+        setSavedPath(filePngPath);
+        setTimeout(() => {
+          setPngExported(false);
+          setSavedPath(null);
+        }, 8000);
+        return;
+      }
+      const stfArgs = compositeRgbPngStf(compositeStf ?? null, pngApplyStf, compositeStf?.linked ?? true);
+      const suffix = stfArgs.applyStfStretch ? "_stf" : "";
+      const outputPath = `${dir}/${compositeExportName(`${suffix}_${pngBitDepth}bit`, "png", stamp)}`;
       await exportRgbPng(
         rgbChannels?.r ?? null,
         rgbChannels?.g ?? null,
         rgbChannels?.b ?? null,
         outputPath, {
           bitDepth: pngBitDepth,
-          applyStfStretch: effectiveStf,
-          shadowR: hasExplicitStf ? compositeStf!.r.shadow : undefined,
-          midtoneR: hasExplicitStf ? compositeStf!.r.midtone : undefined,
-          highlightR: hasExplicitStf ? compositeStf!.r.highlight : undefined,
-          shadowG: hasExplicitStf ? compositeStf!.g.shadow : undefined,
-          midtoneG: hasExplicitStf ? compositeStf!.g.midtone : undefined,
-          highlightG: hasExplicitStf ? compositeStf!.g.highlight : undefined,
-          shadowB: hasExplicitStf ? compositeStf!.b.shadow : undefined,
-          midtoneB: hasExplicitStf ? compositeStf!.b.midtone : undefined,
-          highlightB: hasExplicitStf ? compositeStf!.b.highlight : undefined,
+          ...stfArgs,
         });
       setPngExported(true);
       setSavedPath(outputPath);
@@ -390,7 +415,7 @@ export default function ExportPanel({
     } finally {
       setPngExporting(false);
     }
-  }, [rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
+  }, [rgbFilePath, rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
 
   const handleExportCutout = useCallback(async () => {
     if (!filePath) return;
@@ -447,7 +472,12 @@ export default function ExportPanel({
     cutoutIncludeDq,
   ]);
 
-  const hasRgb = (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) || !!compositeStf;
+  const hasRgb = (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) || !!compositeStf || !!rgbFilePath;
+  const rgbCubeBlocked = rgbCubeUnavailableReason(rgbFilePath, rgbChannels ?? null);
+  const channelLabel = !rgbFilePath && rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)
+    ? channelSourceLabel(rgbChannels)
+    : null;
+  const hasHeaderChannels = !!headerChannels && !!(headerChannels.r || headerChannels.g || headerChannels.b);
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
   const cutoutInputClass =
@@ -455,7 +485,7 @@ export default function ExportPanel({
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
-      <SectionHeader icon={ICON} title="Export FITS" />
+      <SectionHeader icon={ICON} title="Export FITS" subtitle={sourceLabel} />
 
       <div className="flex flex-col gap-1.5">
         <Toggle label="Apply current STF stretch" checked={applyStf} accent="amber" onChange={setApplyStf} />
@@ -510,7 +540,7 @@ export default function ExportPanel({
         label={exportLabel}
         runningLabel="Exporting..."
         running={isLoading}
-        disabled={!filePath || exportDone}
+        disabled={!exportPath || exportDone}
         accent="amber"
         onClick={handleExport}
       />
@@ -518,7 +548,8 @@ export default function ExportPanel({
       {hasRgb && (
         <button
           onClick={handleExportRgb}
-          disabled={isLoading}
+          disabled={isLoading || !!rgbCubeBlocked}
+          title={rgbCubeBlocked ?? channelLabel ?? (rgbFilePath ? "Source: this RGB file's own planes and header" : undefined)}
           className="w-full flex items-center justify-center gap-2 bg-pink-600/15 hover:bg-pink-600/25 text-pink-300 border border-pink-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
         >
           <FileDown size={12} />
@@ -527,7 +558,7 @@ export default function ExportPanel({
       )}
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
-        <SectionHeader icon={<ImageIcon size={14} className="text-sky-400" />} title="Export PNG" />
+        <SectionHeader icon={<ImageIcon size={14} className="text-sky-400" />} title="Export PNG" subtitle={sourceLabel} />
         <div className="flex items-center justify-between">
           <label htmlFor={`${fieldId}-png-depth`} className="text-xs text-zinc-400">Bit Depth</label>
           <select id={`${fieldId}-png-depth`} value={pngBitDepth} onChange={(e) => setPngBitDepth(Number(e.target.value))} className="ab-select">
@@ -540,7 +571,7 @@ export default function ExportPanel({
           label={pngExported ? "Saved!" : "Export as PNG"}
           runningLabel="Exporting..."
           running={pngExporting}
-          disabled={!filePath || pngExported}
+          disabled={!exportPath || pngExported}
           accent="sky"
           onClick={handleExportPng}
         />
@@ -554,9 +585,17 @@ export default function ExportPanel({
               {pngExporting ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />}
               Export RGB as PNG ({pngBitDepth}-bit)
             </button>
-            {compositeStf && (
+            {rgbFilePath ? (
               <p className="text-[10px] text-sky-400/60 px-1">
-                STF stretch auto-applied from composite preview
+                {compositeStf
+                  ? `Source: this RGB file with the ${compositeStf.linked ? "linked" : "per-channel"} STF on screen`
+                  : "Source: this RGB file with a per-channel auto STF"}
+              </p>
+            ) : channelLabel ? (
+              <p className="text-[10px] text-sky-400/60 px-1">{channelLabel}</p>
+            ) : compositeStf && (
+              <p className="text-[10px] text-sky-400/60 px-1">
+                Source: composite on screen; STF stretch auto-applied from composite preview
               </p>
             )}
           </>
@@ -704,18 +743,16 @@ export default function ExportPanel({
               {mefResult.source_size_bytes > 0 && ` (${Math.round((mefResult.output_size_bytes / mefResult.source_size_bytes) * 100)}%)`}
               , {mefResult.elapsed_ms} ms
             </p>
-            <p className="text-[10px] text-zinc-500 font-mono">
-              dropped: {mefResult.dropped.length > 0 ? mefResult.dropped.join(", ") : "none"}
-            </p>
-            <p className="text-[10px] text-zinc-500 font-mono">
-              kept raw: {mefResult.kept_raw.length > 0 ? mefResult.kept_raw.join(", ") : "none"}
-            </p>
+            {mefHduSummary(mefResult).map((line) => (
+              <p key={line} className="text-[10px] text-zinc-500 font-mono">{line}</p>
+            ))}
           </div>
         )}
       </div>
 
-      {hasRgb && rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b) && (
+      {hasHeaderChannels && headerChannels && (
         <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
+          <p className="text-[10px] text-teal-400/60 px-1">{channelSourceLabel(headerChannels)}</p>
           <div className="flex items-center justify-between">
             <label htmlFor={`${fieldId}-align-method`} className="text-xs text-zinc-400">Align Method</label>
             <select
@@ -762,7 +799,7 @@ export default function ExportPanel({
         >
           <FolderOpen size={12} className="text-emerald-400 shrink-0" />
           <div className="flex flex-col min-w-0">
-            <span className="text-[10px] font-semibold text-emerald-300">Saved to Downloads</span>
+            <span className="text-[10px] font-semibold text-emerald-300">Saved</span>
             <span className="text-[9px] text-emerald-400/70 truncate group-hover:text-emerald-300/90">
               {savedPath}
             </span>

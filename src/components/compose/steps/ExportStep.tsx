@@ -1,10 +1,18 @@
 import { useState, useCallback, useId } from "react";
 import { Download, Loader2, Check, FolderOpen, Archive } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { resolveRgbPaths } from "../../../utils/wizard";
-import { exportRgbPng, exportFitsRgb } from "../../../services/export";
+import {
+  channelExportHistory,
+  compositeHistoryLines,
+  resolveExportRgbPaths,
+  resolveRgbPaths,
+  wizardHeaderSourcePath,
+  wizardZipChannels,
+} from "../../../utils/wizard";
+import { exportRgbPng, exportFitsRgbWithHeader } from "../../../services/export";
+import { compositeRgbPngStf } from "../../../utils/exportSources";
 import { clearCompositeCache } from "../../../services/compose";
-import { getExportDir, getOutputDir } from "../../../infrastructure/tauri";
+import { getExportDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
 
@@ -25,24 +33,19 @@ async function revealInExplorer(path: string) {
   }
 }
 
-function resolveHeaderSourcePath(state: WizardState): string | null {
+function resolveCompositeChannelPath(state: WizardState): string | null {
   const { r, g, b } = resolveRgbPaths(state);
   return r ?? g ?? b ?? null;
 }
 
-function buildHistory(state: WizardState): string[] {
-  const h: string[] = [];
-  if (state.blendPreset) h.push(`Blend: ${state.blendPreset}`);
-  if (state.compositeReady) {
-    h.push(`Stretch: ${state.stretchMode} (target bg ${state.targetBackground.toFixed(2)})`);
-    h.push(`White balance: ${state.wbMode}`);
-    if (state.scnrEnabled) h.push(`SCNR: ${state.scnrMethod} ${Math.round(state.scnrAmount * 100)}%`);
-  }
-  return h;
+function buildHistory(state: WizardState, exported: (string | null)[]): string[] {
+  return state.compositeReady
+    ? compositeHistoryLines(state.compositeHistory)
+    : channelExportHistory(state, exported);
 }
 
 export default function ExportStep({ state }: ExportStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
 
   const formatId = useId();
   const bitDepthId = useId();
@@ -53,6 +56,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ file_size_bytes?: number; elapsed_ms?: number; bitpix?: number } | null>(null);
   const [error, setError] = useState("");
+  const [headerWarning, setHeaderWarning] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
   const [zipLoading, setZipLoading] = useState(false);
@@ -62,58 +66,40 @@ export default function ExportStep({ state }: ExportStepProps) {
   const handleExport = useCallback(async () => {
     setLoading(true);
     setError("");
+    setHeaderWarning(null);
     setSavedPath(null);
 
     try {
       const ts = Date.now();
-
-      let dir: string;
-      try {
-        dir = await getExportDir();
-      } catch {
-        dir = await getOutputDir();
-      }
+      const dir = await getExportDir();
 
       if (state.compositeReady) {
         if (format === "png") {
           const outputPath = `${dir}/astroburst_composite_${ts}.png`;
-          const hasExplicitStf =
-            Math.abs(compositeStfR.midtone - 0.5) > 1e-4 ||
-            Math.abs(compositeStfG.midtone - 0.5) > 1e-4 ||
-            Math.abs(compositeStfB.midtone - 0.5) > 1e-4;
           const res = await exportRgbPng(null, null, null, outputPath, {
             bitDepth,
-            applyStfStretch: hasExplicitStf,
-            shadowR: hasExplicitStf ? compositeStfR.shadow : undefined,
-            midtoneR: hasExplicitStf ? compositeStfR.midtone : undefined,
-            highlightR: hasExplicitStf ? compositeStfR.highlight : undefined,
-            shadowG: hasExplicitStf ? compositeStfG.shadow : undefined,
-            midtoneG: hasExplicitStf ? compositeStfG.midtone : undefined,
-            highlightG: hasExplicitStf ? compositeStfG.highlight : undefined,
-            shadowB: hasExplicitStf ? compositeStfB.shadow : undefined,
-            midtoneB: hasExplicitStf ? compositeStfB.midtone : undefined,
-            highlightB: hasExplicitStf ? compositeStfB.highlight : undefined,
+            ...compositeRgbPngStf({ r: compositeStfR, g: compositeStfG, b: compositeStfB }, true, compositeStfLinked),
           });
           setResult(res);
           setSavedPath(outputPath);
         } else {
           const outputPath = `${dir}/astroburst_composite_${ts}.fits`;
-          const headerSource = resolveHeaderSourcePath(state);
-          const res = await exportFitsRgb(
-            headerSource,
+          const exported = await exportFitsRgbWithHeader(
+            resolveCompositeChannelPath(state),
             null,
             null,
             outputPath,
-            { bitpix, history: buildHistory(state) },
+            { bitpix, history: buildHistory(state, []), headerPath: wizardHeaderSourcePath(state, []) },
           );
-          setResult(res);
+          setResult(exported.result);
+          setHeaderWarning(exported.headerWarning);
           setSavedPath(outputPath);
         }
 
         return;
       }
 
-      const { r, g, b } = resolveRgbPaths(state);
+      const { r, g, b, monoBinId } = resolveExportRgbPaths(state);
 
       if (!r && !g && !b) {
         throw new Error("No channel paths resolved for export");
@@ -123,13 +109,18 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       if (format === "png") {
         const outputPath = `${dir}/astroburst_rgb_${ts}.png`;
-        const res = await exportRgbPng(r, g, b, outputPath, { bitDepth });
+        const res = await exportRgbPng(r, g, b, outputPath, { bitDepth, linked: true });
         setResult(res);
         setSavedPath(outputPath);
       } else {
         const outputPath = `${dir}/astroburst_rgb_${ts}.fits`;
-        const res = await exportFitsRgb(r, g, b, outputPath, { bitpix, history: buildHistory(state) });
-        setResult(res);
+        const exported = await exportFitsRgbWithHeader(r, g, b, outputPath, {
+          bitpix,
+          history: buildHistory(state, [r, g, b]),
+          headerPath: wizardHeaderSourcePath(state, [r, g, b], monoBinId),
+        });
+        setResult(exported.result);
+        setHeaderWarning(exported.headerWarning);
         setSavedPath(outputPath);
       }
     } catch (e) {
@@ -137,7 +128,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [state, format, bitDepth, bitpix, compositeStfR, compositeStfG, compositeStfB]);
+  }, [state, format, bitDepth, bitpix, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
 
   const handleZipExport = useCallback(async () => {
     setZipLoading(true);
@@ -146,53 +137,20 @@ export default function ExportStep({ state }: ExportStepProps) {
 
     try {
       const ts = Date.now();
-
-      let dir: string;
-      try {
-        dir = await getExportDir();
-      } catch {
-        dir = await getOutputDir();
-      }
+      const dir = await getExportDir();
 
       const filesToZip: { name: string; path: string }[] = [];
-      const { r, g, b } = resolveRgbPaths(state);
-
-      if (r) {
-        const path = `${dir}/channel_r_${ts}.png`;
-        await exportRgbPng(r, null, null, path, { bitDepth: 16 });
-        filesToZip.push({ name: "channel_r.png", path });
-      }
-
-      if (g) {
-        const path = `${dir}/channel_g_${ts}.png`;
-        await exportRgbPng(null, g, null, path, { bitDepth: 16 });
-        filesToZip.push({ name: "channel_g.png", path });
-      }
-
-      if (b) {
-        const path = `${dir}/channel_b_${ts}.png`;
-        await exportRgbPng(null, null, b, path, { bitDepth: 16 });
-        filesToZip.push({ name: "channel_b.png", path });
+      for (const { name, path: source } of wizardZipChannels(state)) {
+        const path = `${dir}/${name}_${ts}.png`;
+        await exportRgbPng(source, source, source, path, { bitDepth: 16, linked: true });
+        filesToZip.push({ name: `${name}.png`, path });
       }
 
       if (state.compositeReady) {
         const path = `${dir}/composite_rgb_${ts}.png`;
-        const hasExplicitStf =
-          Math.abs(compositeStfR.midtone - 0.5) > 1e-4 ||
-          Math.abs(compositeStfG.midtone - 0.5) > 1e-4 ||
-          Math.abs(compositeStfB.midtone - 0.5) > 1e-4;
         await exportRgbPng(null, null, null, path, {
           bitDepth: 16,
-          applyStfStretch: hasExplicitStf,
-          shadowR: hasExplicitStf ? compositeStfR.shadow : undefined,
-          midtoneR: hasExplicitStf ? compositeStfR.midtone : undefined,
-          highlightR: hasExplicitStf ? compositeStfR.highlight : undefined,
-          shadowG: hasExplicitStf ? compositeStfG.shadow : undefined,
-          midtoneG: hasExplicitStf ? compositeStfG.midtone : undefined,
-          highlightG: hasExplicitStf ? compositeStfG.highlight : undefined,
-          shadowB: hasExplicitStf ? compositeStfB.shadow : undefined,
-          midtoneB: hasExplicitStf ? compositeStfB.midtone : undefined,
-          highlightB: hasExplicitStf ? compositeStfB.highlight : undefined,
+          ...compositeRgbPngStf({ r: compositeStfR, g: compositeStfG, b: compositeStfB }, true, compositeStfLinked),
         });
         filesToZip.push({ name: "composite_rgb.png", path });
       }
@@ -235,9 +193,11 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setZipLoading(false);
     }
-  }, [state, compositeStfR, compositeStfG, compositeStfB]);
+  }, [state, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
 
   const activeBins = state.bins.filter((b) => b.files.length > 0);
+  const monoBinId = state.compositeReady ? null : resolveExportRgbPaths(state).monoBinId;
+  const monoLabel = monoBinId ? state.bins.find((b) => b.id === monoBinId)?.shortLabel ?? monoBinId : null;
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -245,6 +205,12 @@ export default function ExportStep({ state }: ExportStepProps) {
       {state.compositeReady && (
         <div className="text-[10px] text-emerald-400/70 bg-emerald-500/5 border border-emerald-500/10 rounded-md px-2 py-1.5">
           PNG exports the composite as processed (stretch + curves when applied, else STF). FITS stays linear (WB + SCNR only).
+        </div>
+      )}
+
+      {monoLabel && (
+        <div className="text-[10px] text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5">
+          {monoLabel} was processed on its own, so PNG, FITS and ZIP export that channel alone, as shown on screen. Blend the channels to export colour.
         </div>
       )}
 
@@ -351,6 +317,7 @@ export default function ExportStep({ state }: ExportStepProps) {
         )}
       </button>
 
+      {headerWarning && <div className="text-[9px] text-amber-400">{headerWarning}</div>}
       {zipError && <div className="text-[9px] text-red-400">{zipError}</div>}
       {error && <div className="text-[9px] text-red-400">{error}</div>}
     </div>

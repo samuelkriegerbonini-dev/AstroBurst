@@ -21,6 +21,9 @@ pub async fn delete(
     State(state): State<AppState>,
 ) -> Result<StatusCode> {
     state.sessions.remove(&session.id);
+    for job in session.jobs.iter() {
+        job.value().set_cancelled();
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

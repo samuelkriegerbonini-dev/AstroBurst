@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use astroburst_lib::infra::cache::ImageCache;
 
-use super::config::ServerConfig;
+use super::config::{ServerConfig, MIN_CLEANUP_INTERVAL};
 use super::job::{Job, JobId};
 
 pub type SessionId = String;
@@ -80,7 +80,16 @@ impl Session {
     }
 
     pub fn has_active_jobs(&self) -> bool {
-        self.jobs.iter().any(|e| e.value().is_running())
+        self.jobs.iter().any(|e| e.value().is_active())
+    }
+
+    pub fn next_free_ref(&self, prefix: &str) -> String {
+        loop {
+            let candidate = self.v2.next_ref(prefix);
+            if !self.v2.meta.contains_key(&candidate) && !self.cache.contains(&candidate) {
+                return candidate;
+            }
+        }
     }
 
     pub fn prune_evicted_meta(&self) {
@@ -128,7 +137,7 @@ impl SessionManager {
         config: Arc<ServerConfig>,
     ) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config.cleanup_interval);
+            let mut interval = tokio::time::interval(config.cleanup_interval.max(MIN_CLEANUP_INTERVAL));
             loop {
                 interval.tick().await;
                 let now = Instant::now();

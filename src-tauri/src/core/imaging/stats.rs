@@ -1,6 +1,6 @@
 use crate::math::median::{exact_median_mut, exact_mad_mut, f32_cmp};
 use crate::types::image::{Histogram, ImageStats};
-use crate::types::constants::{PADDING_THRESHOLD, MAD_TO_SIGMA, HISTOGRAM_BINS};
+use crate::types::constants::{MAD_TO_SIGMA, HISTOGRAM_BINS};
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -8,8 +8,13 @@ const CHUNK_SIZE: usize = 65536;
 const HIST_BINS: usize = 65536;
 
 #[inline]
+pub fn is_padding(v: f32) -> bool {
+    !v.is_finite() || v == 0.0
+}
+
+#[inline]
 pub fn is_valid_pixel(v: f32) -> bool {
-    v.is_finite() && v > PADDING_THRESHOLD
+    !is_padding(v)
 }
 
 pub fn percentile(values: &mut [f32], pct: f64) -> f32 {
@@ -408,24 +413,6 @@ fn resolve_rank_in_hist(
     region_lo + hist.len() as f64 * sub_bin_width
 }
 
-pub fn compute_histogram(data: &Array2<f32>, bins: usize) -> Histogram {
-    let slice = data.as_slice().expect("Array2 must be contiguous");
-
-    let (dmin, dmax) = slice
-        .par_iter()
-        .filter(|v| is_valid_pixel(**v))
-        .fold(
-            || (f64::MAX, f64::MIN),
-            |(mn, mx), &v| (mn.min(v as f64), mx.max(v as f64)),
-        )
-        .reduce(
-            || (f64::MAX, f64::MIN),
-            |(mn1, mx1), (mn2, mx2)| (mn1.min(mn2), mx1.max(mx2)),
-        );
-
-    build_histogram(slice, bins, dmin, dmax)
-}
-
 pub fn compute_histogram_with_stats(data: &Array2<f32>, stats: &ImageStats) -> Histogram {
     let slice = data.as_slice().expect("Array2 must be contiguous");
     build_histogram(slice, HISTOGRAM_BINS, stats.min, stats.max)
@@ -433,6 +420,14 @@ pub fn compute_histogram_with_stats(data: &Array2<f32>, stats: &ImageStats) -> H
 
 pub fn build_histogram(slice: &[f32], bins: usize, dmin: f64, dmax: f64) -> Histogram {
     let range = dmax - dmin;
+    if bins == 0 {
+        return Histogram {
+            bins: Vec::new(),
+            bin_edges: vec![dmin],
+            min: dmin,
+            max: dmax,
+        };
+    }
     if range < 1e-10 {
         return Histogram {
             bins: vec![0u32; bins],
@@ -535,9 +530,60 @@ mod tests {
         assert_eq!(s.mad, 2.0);
         assert!((s.sigma - 2.0 * MAD_TO_SIGMA).abs() < 1e-12);
 
-        let legacy = compute_image_stats(&region);
-        assert_eq!(legacy.valid_count, 2);
-        assert_eq!(legacy.min, 2.0);
+        let core = compute_image_stats(&region);
+        assert_eq!(core.valid_count, 4);
+        assert_eq!(core.min, -5.0);
+        assert_eq!(core.max, 6.0);
+        assert_eq!(core.median, 0.5);
+    }
+
+    #[test]
+    fn padding_is_non_finite_or_exact_zero_and_negatives_are_data() {
+        for v in [0.0f32, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(is_padding(v), "{}", v);
+            assert!(!is_valid_pixel(v), "{}", v);
+        }
+        for v in [-5.0f32, -1e-30, 1e-30, 5e-8, 1e-7, 2.0, f32::MIN_POSITIVE, f32::MAX, f32::MIN] {
+            assert!(!is_padding(v), "{}", v);
+            assert!(is_valid_pixel(v), "{}", v);
+        }
+    }
+
+    #[test]
+    fn image_stats_on_zero_mean_sky_keep_the_negative_half() {
+        let values: Vec<f32> = (0..400).map(|i| (i as f32 - 199.5) * 0.01).collect();
+        let mut with_padding = values.clone();
+        with_padding.extend([0.0f32, 0.0, f32::NAN, 0.0]);
+        let data = Array2::from_shape_vec((4, 101), with_padding).unwrap();
+        let s = compute_image_stats(&data);
+        assert_eq!(s.valid_count, 400);
+        assert!(s.median.abs() < 1e-6, "median {}", s.median);
+        assert!((s.min - (-1.995)).abs() < 1e-6, "min {}", s.min);
+        assert!(s.mean.abs() < 1e-6, "mean {}", s.mean);
+
+        let hist = compute_histogram_with_stats(&data, &s);
+        assert_eq!(hist.bins.iter().map(|&c| c as u64).sum::<u64>(), 400);
+    }
+
+    #[test]
+    fn histogram_path_matches_exact_path_on_signed_data() {
+        let n = 2100usize * 2000;
+        let values: Vec<f32> = (0..n)
+            .map(|i| if i % 97 == 0 { 0.0 } else { ((i * 7919) % 2001) as f32 - 1000.0 })
+            .collect();
+        let exact = compute_image_stats_exact(&values);
+        let hist = compute_image_stats_hist(&values);
+        assert_eq!(exact.valid_count, hist.valid_count);
+        assert_eq!(exact.min, -1000.0);
+        assert_eq!(hist.min, -1000.0);
+        assert!((exact.median - hist.median).abs() < 1.0, "{} vs {}", exact.median, hist.median);
+    }
+
+    #[test]
+    fn build_histogram_with_zero_bins_does_not_underflow() {
+        let h = build_histogram(&[1.0, 2.0, 3.0], 0, 1.0, 3.0);
+        assert!(h.bins.is_empty());
+        assert_eq!(h.bin_edges, vec![1.0]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use ndarray::Array2;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig};
-use crate::core::imaging::stats::is_valid_pixel;
+use crate::core::imaging::stats::{is_padding, is_valid_pixel};
 
 #[derive(Debug, Clone)]
 pub struct StarRemovalConfig {
@@ -51,7 +51,7 @@ fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
     }
     let inv = 1.0 / range;
     image.mapv(|v| {
-        if !v.is_finite() {
+        if is_padding(v) {
             0.0
         } else {
             ((v - dmin) * inv).clamp(0.0, 1.0)
@@ -410,5 +410,16 @@ mod tests {
             "hole not filled with surround: {}",
             filled[[32, 32]]
         );
+    }
+
+    #[test]
+    fn normalize_maps_padding_to_black_when_data_go_negative() {
+        let img = Array2::from_shape_vec((1, 5), vec![-4.0f32, 0.0, f32::NAN, -1.0, 4.0]).unwrap();
+        let n = normalize_to_01(&img);
+        assert_eq!(n[[0, 0]], 0.0);
+        assert_eq!(n[[0, 1]], 0.0, "zero padding turned grey");
+        assert_eq!(n[[0, 2]], 0.0);
+        assert!((n[[0, 3]] - 0.375).abs() < 1e-6, "{}", n[[0, 3]]);
+        assert_eq!(n[[0, 4]], 1.0);
     }
 }

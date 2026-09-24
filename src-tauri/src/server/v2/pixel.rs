@@ -49,12 +49,20 @@ async fn target_ref(session: &Session, explicit: Option<String>) -> Result<Strin
     }
 }
 
-fn probe_error(err: ProbeError) -> AppError {
+fn nearest_pixel_centre(v: f64) -> f64 {
+    (v + 0.5).floor()
+}
+
+fn probe_error(err: ProbeError, x: f64, y: f64) -> AppError {
     match err {
         ProbeError::OutOfBounds { cols, rows, .. } => AppError::BadRequestWithHint {
             code: "pixel_out_of_bounds",
-            message: err.to_string(),
-            hint: Some(format!("x must be in [0, {cols}) and y in [0, {rows})")),
+            message: ProbeError::OutOfBounds { x, y, cols, rows }.to_string(),
+            hint: Some(format!(
+                "pixel centres are integers: x must be in [-0.5, {}) and y in [-0.5, {})",
+                cols as f64 - 0.5,
+                rows as f64 - 0.5
+            )),
         },
         ProbeError::EvenBox(_) => AppError::BadRequestWithHint {
             code: "bad_request",
@@ -75,14 +83,20 @@ pub async fn pixel(
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
 
-    let probe = probe_pixel(entry.arr(), params.x, params.y, params.box_size).map_err(probe_error)?;
+    let probe = probe_pixel(
+        entry.arr(),
+        nearest_pixel_centre(params.x),
+        nearest_pixel_centre(params.y),
+        params.box_size,
+    )
+    .map_err(|e| probe_error(e, params.x, params.y))?;
     let unit = entry.header().and_then(data_unit);
 
     let sky = entry
         .header()
         .and_then(|h| WcsTransform::from_header(h).ok())
         .map(|wcs| {
-            let c = wcs.pixel_to_world(params.x, params.y);
+            let c = wcs.pixel_to_world(probe.x as f64, probe.y as f64);
             json!({ "ra": c.ra, "dec": c.dec })
         })
         .unwrap_or(Value::Null);
@@ -126,16 +140,26 @@ mod tests {
 
     #[test]
     fn out_of_bounds_maps_to_pixel_out_of_bounds_with_extent_hint() {
-        let err = ProbeError::OutOfBounds { x: 100.0, y: 100.0, cols: 8, rows: 8 };
-        let (code, message, hint) = parts(probe_error(err));
+        let err = ProbeError::OutOfBounds { x: 100.0, y: 101.0, cols: 8, rows: 6 };
+        let (code, message, hint) = parts(probe_error(err, 99.7, 100.6));
         assert_eq!(code, "pixel_out_of_bounds");
-        assert!(message.contains("(100, 100)"), "{message}");
-        assert_eq!(hint.as_deref(), Some("x must be in [0, 8) and y in [0, 8)"));
+        assert!(message.contains("(99.7, 100.6)"), "{message}");
+        assert_eq!(
+            hint.as_deref(),
+            Some("pixel centres are integers: x must be in [-0.5, 7.5) and y in [-0.5, 5.5)")
+        );
+    }
+
+    #[test]
+    fn coordinates_snap_to_the_pixel_whose_centre_is_nearest() {
+        for (v, centre) in [(2.7, 3.0), (2.5, 3.0), (2.49, 2.0), (-0.5, 0.0), (-0.51, -1.0), (7.49, 7.0)] {
+            assert_eq!(nearest_pixel_centre(v), centre, "{v}");
+        }
     }
 
     #[test]
     fn even_box_maps_to_bad_request() {
-        let (code, message, hint) = parts(probe_error(ProbeError::EvenBox(4)));
+        let (code, message, hint) = parts(probe_error(ProbeError::EvenBox(4), 3.0, 3.0));
         assert_eq!(code, "bad_request");
         assert!(message.contains("got 4"), "{message}");
         assert!(hint.unwrap().contains("1, 3, 5"));

@@ -1,4 +1,3 @@
-pub use crate::core::analysis::star_detection::DetectedStar;
 pub use crate::core::astrometry::plate_solve::{
     FieldAnnotation, SolveConfig, SolveResult,
 };
@@ -10,48 +9,17 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 
 #[cfg(feature = "astrometry-net")]
 mod astrometry_net_impl {
-    use std::collections::HashMap;
     use anyhow::{bail, Context, Result};
-    use super::{DetectedStar, FieldAnnotation, SolveResult, SolveConfig};
+    use super::{FieldAnnotation, SolveResult, SolveConfig};
 
     const REFERER: &str = "https://nova.astrometry.net/api/login";
+    const ERROR_SNIPPET_CHARS: usize = 200;
+    const SESSION_LOG_CHARS: usize = 8;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    const POLLS_PER_LOG: u64 = 10;
 
-    const WCS_KEYS: &[&str] = &[
-        "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
-        "CD1_1", "CD1_2", "CD2_1", "CD2_2",
-        "CDELT1", "CDELT2", "CROTA2",
-        "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
-        "IMAGEW", "IMAGEH",
-        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
-    ];
-
-    fn is_wcs_key(key: &str) -> bool {
-        if WCS_KEYS.contains(&key) {
-            return true;
-        }
-        let prefixes = ["A_", "B_", "AP_", "BP_"];
-        for p in prefixes {
-            if key.starts_with(p) {
-                let rest = &key[p.len()..];
-                if rest.chars().all(|c| c.is_ascii_digit() || c == '_') && !rest.is_empty() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn extract_wcs_headers(fits_bytes: &[u8]) -> Result<HashMap<String, String>> {
-        let parsed = crate::infra::fits::reader::parse_header_at(fits_bytes, 0)
-            .context("Failed to parse WCS FITS header")?;
-
-        let mut headers = HashMap::new();
-        for (key, value) in &parsed.header.cards {
-            if is_wcs_key(key) {
-                headers.insert(key.clone(), value.clone());
-            }
-        }
-        Ok(headers)
+    pub(super) fn char_prefix(text: &str, max_chars: usize) -> &str {
+        text.char_indices().nth(max_chars).map_or(text, |(end, _)| &text[..end])
     }
 
     fn parse_annotations(json: &serde_json::Value) -> Vec<FieldAnnotation> {
@@ -86,6 +54,12 @@ mod astrometry_net_impl {
         result
     }
 
+    pub(super) fn parse_json_body(body: &str, label: &str) -> Result<serde_json::Value> {
+        serde_json::from_str(body).with_context(|| {
+            format!("{}: invalid JSON -- {}", label, char_prefix(body, ERROR_SNIPPET_CHARS))
+        })
+    }
+
     async fn parse_json_response(resp: reqwest::Response, label: &str) -> Result<serde_json::Value> {
         let status = resp.status();
         let body = resp.text().await
@@ -93,13 +67,31 @@ mod astrometry_net_impl {
         if !status.is_success() {
             bail!("{}: HTTP {} -- {}", label, status, body);
         }
-        serde_json::from_str(&body)
-            .with_context(|| format!("{}: invalid JSON -- {}", label, &body[..body.len().min(200)]))
+        parse_json_body(&body, label)
+    }
+
+    pub(super) fn first_job_id(submission: &serde_json::Value) -> Option<u64> {
+        submission["jobs"].as_array()?.iter().filter_map(|j| j.as_u64()).find(|&id| id > 0)
     }
 
     pub async fn solve_astrometry_net(
         fits_path: &str,
-        stars: &[DetectedStar],
+        image_width: usize,
+        image_height: usize,
+        config: &SolveConfig,
+    ) -> Result<SolveResult> {
+        let limit = std::time::Duration::from_secs(config.timeout_secs);
+        match tokio::time::timeout(limit, solve_before_deadline(fits_path, image_width, image_height, config)).await {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "Plate solve timed out after {} s; raise the plate-solve timeout in Settings",
+                config.timeout_secs
+            ),
+        }
+    }
+
+    async fn solve_before_deadline(
+        fits_path: &str,
         image_width: usize,
         image_height: usize,
         config: &SolveConfig,
@@ -138,7 +130,7 @@ mod astrometry_net_impl {
             .context("No session in login response")?
             .to_string();
 
-        log::info!("Astrometry.net session: {}", &session[..session.len().min(8)]);
+        log::info!("Astrometry.net session: {}", char_prefix(&session, SESSION_LOG_CHARS));
 
         let mut upload_json = serde_json::json!({
             "session": session,
@@ -200,61 +192,41 @@ mod astrometry_net_impl {
 
         log::info!("Submission {}, waiting for job...", subid);
 
-        let mut job_id: Option<u64> = None;
-        for attempt in 0..90 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
+        let mut polls: u64 = 0;
+        let jid = loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            polls += 1;
             let resp = client
                 .get(format!("{}/api/submissions/{}", base_url, subid))
                 .send()
                 .await?;
             let sub_status = parse_json_response(resp, "Submission status").await?;
-
-            if let Some(jobs) = sub_status["jobs"].as_array() {
-                for j in jobs {
-                    if let Some(id) = j.as_u64() {
-                        if id > 0 {
-                            job_id = Some(id);
-                            break;
-                        }
-                    }
-                }
+            if let Some(id) = first_job_id(&sub_status) {
+                break id;
             }
-            if job_id.is_some() {
-                break;
+            if polls % POLLS_PER_LOG == 0 {
+                log::info!("Still waiting for job after {}s...", polls * POLL_INTERVAL.as_secs());
             }
-            if attempt % 10 == 9 {
-                log::info!("Still waiting for job after {}s...", (attempt + 1) * 2);
-            }
-        }
-
-        let jid = job_id.context("Timed out waiting for astrometry.net job (180s)")?;
+        };
         log::info!("Job {} started, polling for solution...", jid);
 
-        let mut solved = false;
-        for attempt in 0..90 {
+        let mut polls: u64 = 0;
+        loop {
             let resp = client
                 .get(format!("{}/api/jobs/{}", base_url, jid))
                 .send()
                 .await?;
             let job_data = parse_json_response(resp, "Job status").await?;
-
-            let status_str = job_data["status"].as_str().unwrap_or("");
-            if status_str == "success" {
-                solved = true;
-                break;
+            match job_data["status"].as_str().unwrap_or("") {
+                "success" => break,
+                "failure" => bail!("Plate solve failed on astrometry.net (job {})", jid),
+                _ => {}
             }
-            if status_str == "failure" {
-                bail!("Plate solve failed on astrometry.net (job {})", jid);
+            tokio::time::sleep(POLL_INTERVAL).await;
+            polls += 1;
+            if polls % POLLS_PER_LOG == 0 {
+                log::info!("Job {} still solving after {}s...", jid, polls * POLL_INTERVAL.as_secs());
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if attempt % 10 == 9 {
-                log::info!("Job {} still solving after {}s...", jid, (attempt + 1) * 2);
-            }
-        }
-
-        if !solved {
-            bail!("Plate solve timed out after 180s (job {})", jid);
         }
 
         let cal_resp = client
@@ -274,42 +246,6 @@ mod astrometry_net_impl {
             "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:.1}deg FOV={:.1}'x{:.1}'",
             ra_center, dec_center, pixel_scale, orientation, field_w, field_h
         );
-
-        let wcs_url = format!(
-            "{}/wcs_file/{}",
-            base_url.trim_end_matches('/'),
-            jid
-        );
-        let wcs_headers = match client
-            .get(&wcs_url)
-            .header("Referer", REFERER)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(bytes) => {
-                        log::info!("Downloaded WCS file ({} bytes)", bytes.len());
-                        extract_wcs_headers(&bytes).unwrap_or_else(|e| {
-                            log::warn!("Failed to parse WCS FITS: {}", e);
-                            fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
-                        })
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to read WCS response body: {}", e);
-                        fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
-                    }
-                }
-            }
-            Ok(resp) => {
-                log::warn!("WCS file download returned HTTP {}", resp.status());
-                fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
-            }
-            Err(e) => {
-                log::warn!("WCS file download failed: {}", e);
-                fallback_wcs_headers(ra_center, dec_center, pixel_scale, orientation, image_width, image_height)
-            }
-        };
 
         let annotations = match client
             .get(format!("{}/api/jobs/{}/annotations", base_url, jid))
@@ -333,42 +269,128 @@ mod astrometry_net_impl {
         };
 
         Ok(SolveResult {
-            success: true,
             ra_center,
             dec_center,
             orientation,
             pixel_scale,
             field_w_arcmin: field_w,
             field_h_arcmin: field_h,
-            index_name: "astrometry.net".into(),
-            stars_used: stars.len().min(config.max_stars.unwrap_or(100)),
-            wcs_headers,
             annotations,
         })
     }
+}
 
-    fn fallback_wcs_headers(
-        ra: f64,
-        dec: f64,
-        pixel_scale: f64,
-        orientation: f64,
-        width: usize,
-        height: usize,
-    ) -> HashMap<String, String> {
-        let mut h = HashMap::new();
-        h.insert("CRVAL1".into(), format!("{:.8}", ra));
-        h.insert("CRVAL2".into(), format!("{:.8}", dec));
-        h.insert("CRPIX1".into(), format!("{:.1}", (width as f64 + 1.0) / 2.0));
-        h.insert("CRPIX2".into(), format!("{:.1}", (height as f64 + 1.0) / 2.0));
+#[cfg(all(test, feature = "astrometry-net"))]
+mod tests {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
 
-        let theta = orientation.to_radians();
-        let scale_deg = pixel_scale / 3600.0;
-        h.insert("CD1_1".into(), format!("{:.12E}", -scale_deg * theta.cos()));
-        h.insert("CD1_2".into(), format!("{:.12E}", scale_deg * theta.sin()));
-        h.insert("CD2_1".into(), format!("{:.12E}", scale_deg * theta.sin()));
-        h.insert("CD2_2".into(), format!("{:.12E}", scale_deg * theta.cos()));
-        h.insert("CTYPE1".into(), "RA---TAN".into());
-        h.insert("CTYPE2".into(), "DEC--TAN".into());
-        h
+    use super::astrometry_net_impl::{char_prefix, first_job_id, parse_json_body};
+    use super::{solve_astrometry_net, SolveConfig};
+
+    fn read_request_line(stream: &mut std::net::TcpStream) -> String {
+        let mut data: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&data[..end]).to_string();
+                let lower = head.to_ascii_lowercase();
+                let body = &data[end + 4..];
+                let complete = if lower.contains("transfer-encoding: chunked") {
+                    body.ends_with(b"0\r\n\r\n")
+                } else {
+                    let expected = lower
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    body.len() >= expected
+                };
+                if complete {
+                    return head.lines().next().unwrap_or_default().to_string();
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return String::new(),
+                Ok(n) => data.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    fn serve_a_submission_that_never_starts(seen: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let line = read_request_line(&mut stream);
+                let body = if line.starts_with("POST /api/login") {
+                    r#"{"status":"success","session":"test-session"}"#
+                } else if line.starts_with("POST /api/upload") {
+                    r#"{"status":"success","subid":7}"#
+                } else {
+                    r#"{"jobs":[]}"#
+                };
+                seen.lock().unwrap().push(line);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn the_configured_timeout_bounds_the_whole_solve() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_submission_that_never_starts(Arc::clone(&seen));
+        let dir = tempfile::tempdir().unwrap();
+        let fits = dir.path().join("upload.fits");
+        std::fs::write(&fits, vec![b' '; 2880]).unwrap();
+        let config = SolveConfig {
+            api_url,
+            api_key: "key".into(),
+            ra_hint: None,
+            dec_hint: None,
+            radius_hint: None,
+            scale_low: None,
+            scale_high: None,
+            scale_units: None,
+            timeout_secs: 1,
+        };
+
+        let started = std::time::Instant::now();
+        let err = solve_astrometry_net(fits.to_str().unwrap(), 10, 10, &config).await.unwrap_err().to_string();
+        let elapsed = started.elapsed();
+        assert!(err.contains("timed out after 1 s"), "{err}");
+        assert!(elapsed < std::time::Duration::from_secs(10), "the solve ran for {elapsed:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|l| l.starts_with("POST /api/login")), "{seen:?}");
+        assert!(seen.iter().any(|l| l.starts_with("POST /api/upload")), "{seen:?}");
+    }
+
+    #[test]
+    fn the_first_positive_job_id_is_taken() {
+        assert_eq!(first_job_id(&serde_json::json!({ "jobs": [null, 0, 42, 43] })), Some(42));
+        assert_eq!(first_job_id(&serde_json::json!({ "jobs": [] })), None);
+        assert_eq!(first_job_id(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn invalid_json_error_truncates_on_a_char_boundary() {
+        let body = format!("<html>{}\u{2014}{}</html>", "a".repeat(193), "b".repeat(300));
+        assert!(!body.is_char_boundary(200), "the em dash must straddle byte 200");
+        let err = parse_json_body(&body, "Calibration").unwrap_err();
+        let text = format!("{:#}", err);
+        assert!(text.starts_with("Calibration: invalid JSON -- <html>"), "{text}");
+        assert!(text.contains('\u{2014}'), "{text}");
+        assert!(!text.contains(&"b".repeat(200)), "the snippet is capped: {text}");
+
+        assert_eq!(char_prefix("abc", 8), "abc");
+        assert_eq!(char_prefix("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}");
+        assert_eq!(char_prefix("", 3), "");
     }
 }

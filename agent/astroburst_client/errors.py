@@ -44,7 +44,7 @@ class BadRequestError(AstroBurstError):
 
 
 class NotFoundError(AstroBurstError):
-    """404 not_found — session, slot, or job does not exist."""
+    """404 not_found — session, slot, job, or file on the server does not exist."""
 
 
 class ConflictError(AstroBurstError):

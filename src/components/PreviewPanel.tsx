@@ -1,20 +1,31 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
-  Image, Cpu, Zap, Sparkles, Loader2,
-  Layers2, FlaskConical, Settings, Download, FileText, BarChart3, X,
+  Image, Cpu, Zap, Sparkles, Loader2, RotateCcw,
+  Layers2, FlaskConical, Settings, Download, FileText, BarChart3,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
-import { cancelProgress } from "../services/progress";
+import { restretchComposite, updateCompositeChannel } from "../services/compose";
+import { getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
-import { useFileContext, useCubeContext, useRawPixelsContext, useRenderContext, useStarOverlayContext } from "../context/PreviewContext";
-import { useCompositePreview, useCompositeActions } from "../context/CompositeContext";
+import {
+  fileKeyOf,
+  useFileContext,
+  useCubeContext,
+  useDisplayedImage,
+  useRawPixelsContext,
+  useRenderActions,
+  useRenderContext,
+  useStarOverlayContext,
+} from "../context/PreviewContext";
+import { useCompositePreview, useCompositeActions, useCompositeStf } from "../context/CompositeContext";
 import { useMousePixelActions, setMousePixel, emitPixelClick, usePixelClick } from "../hooks/useMousePixelStore";
 import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum } from "../hooks/useSpectrumStore";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
-import { useProgress } from "../hooks/useProgress";
 import { loadLayout, saveLayout } from "../utils/layout";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
+import { advanceCompositeSync, compositeSyncStore, forgetCompositeSync, syncedChannelFor, wizardStepStaleAfterChannelSync } from "../utils/compositeSync";
+import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
 import { useRightTool, rightToolStore } from "../hooks/useRightTool";
 import type { ToolId, RightToolId } from "../hooks/useRightTool";
@@ -95,27 +106,6 @@ function RightToolContent({ toolId, starOverlayRef }: { toolId: RightToolId; sta
   }
 }
 
-function ProgressBarInner() {
-  const progress = useProgress("compose-progress");
-  if (!progress.active) return null;
-  return (
-    <div className="ab-compose-progress shrink-0">
-      <div className="ab-compose-progress-bar" style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress.percent)) / 100})` }} />
-      <span className="ab-compose-progress-label flex items-center gap-1.5">
-        {progress.stage} {progress.percent > 0 ? `${progress.percent}%` : ""}
-        <button
-          onClick={() => { cancelProgress("compose-progress").catch(() => {}); progress.reset(); }}
-          title="Cancel"
-          aria-label="Cancel operation"
-          className="text-zinc-500 hover:text-red-400 transition-colors pointer-events-auto"
-        >
-          <X size={10} />
-        </button>
-      </span>
-    </div>
-  );
-}
-
 export interface PreviewPanelProps {
   activeTool: ToolId | null;
 }
@@ -123,13 +113,21 @@ export interface PreviewPanelProps {
 export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { file } = useFileContext();
   const { isCube } = useCubeContext();
-  const { rawPixels, rawPixelsLoading, loadRawPixels, clearRawPixels,
+  const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
-  const { renderedPreviewUrl, processedSourcePath, processedSourceVersion } = useRenderContext();
-  const { compositePreviewUrl } = useCompositePreview();
-  const { initRgb, setCompositePreviewUrl } = useCompositeActions();
+  const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
+  const { resetProcessed } = useRenderActions();
+  const displayed = useDisplayedImage();
+  const processedSourcePath = processed?.fitsPath ?? null;
+  const processedSourceVersion = processedSourcePath ? processedVersion : 0;
+  const { compositePreviewUrl, compositeVersion } = useCompositePreview();
+  const { initRgb, setCompositePreviewUrl, clearComposite, resetComposite } = useCompositeActions();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
+  const wizardReadyRef = useRef(wizardState.compositeReady);
+  wizardReadyRef.current = wizardState.compositeReady;
   const { starOverlayRef } = useStarOverlayContext();
-  const { handleMove, handleLeave, reset: resetMouse } = useMousePixelActions();
+  const { handleLeave, reset: resetMouse } = useMousePixelActions();
 
   const [gpuPref] = useState(() => loadGpuPreference());
   const [useGpu, setUseGpu] = useState(gpuPref ?? false);
@@ -160,18 +158,19 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     if (!bottomOpen) setBottomMounted(false);
   }, [bottomOpen]);
 
-  const prevFileIdRef = useRef<string | null>(null);
-  const prevCompositeUrlRef = useRef<string | null>(null);
+  const prevFileKeyRef = useRef<string | null>(null);
   const rgbLoadKeyRef = useRef<string | null>(null);
   const gpuLoadKeyRef = useRef<string | null>(null);
   const dqCanvasRef = useRef<HTMLCanvasElement>(null);
   const specAbortRef = useRef(0);
-  const fileDimsRef = useRef<[number, number] | undefined>(undefined);
-  fileDimsRef.current = file?.result?.dimensions;
 
-  const isRgbView = compositePreviewUrl !== null;
-  const isFileRgbView = isRgbView && !!file?.result?.is_rgb && compositePreviewUrl === (file?.result?.previewUrl ?? null);
+  const fileKey = fileKeyOf(file);
+  const isRgbFile = !!file?.result?.is_rgb;
+  const isFileRgbView = compositePreviewUrl !== null && isRgbFile && compositePreviewUrl === (file?.result?.previewUrl ?? null);
+  const monoOverRgb = isFileRgbView && processed !== null;
+  const isRgbView = compositePreviewUrl !== null && !monoOverRgb;
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
+  const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
 
   const bottomHeightRef = useRef(loadLayout("bottomH", BOTTOM_DEFAULT, BOTTOM_MIN, BOTTOM_MAX));
   const bottomElRef = useRef<HTMLDivElement>(null);
@@ -275,6 +274,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       setGpuAvailable(false);
       setGpuReason(getGpuReason());
       setUseGpu(false);
+      rgbLoadKeyRef.current = null;
+      gpuLoadKeyRef.current = null;
       clearRawPixels();
       clearRgbRawPixels();
     });
@@ -282,105 +283,103 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   }, [clearRawPixels, clearRgbRawPixels]);
 
   useEffect(() => {
-    if (!file) {
-      if (prevFileIdRef.current !== null) {
-        prevFileIdRef.current = null;
-        rgbLoadKeyRef.current = null;
-        gpuLoadKeyRef.current = null;
-        clearRawPixels();
-        clearRgbRawPixels();
-      }
-      return;
-    }
-    const key = `${file.id}|${file.path}`;
-    const wantGpu = !!gpuAvailable && useGpu;
-    const isRgb = !!file.result?.is_rgb;
-    const path = file.path;
-    if (key === prevFileIdRef.current) {
-      if (wantGpu && gpuLoadKeyRef.current !== key) {
-        gpuLoadKeyRef.current = key;
-        if (isRgb) {
-          rgbLoadKeyRef.current = key;
-          loadRgbRawPixels(path);
-        } else {
-          loadRawPixels();
-        }
-      }
-      return;
-    }
-    prevFileIdRef.current = key;
+    if (fileKey === prevFileKeyRef.current) return;
+    prevFileKeyRef.current = fileKey;
     specAbortRef.current++;
     resetSpectrum();
     resetMouse();
-    clearRawPixels();
-    clearRgbRawPixels();
     rgbLoadKeyRef.current = null;
     gpuLoadKeyRef.current = null;
-    if (wantGpu) {
-      gpuLoadKeyRef.current = key;
-      queueMicrotask(() => {
-        if (prevFileIdRef.current !== key) return;
-        if (isRgb) {
-          rgbLoadKeyRef.current = key;
-          loadRgbRawPixels(path, true);
-        } else {
-          loadRawPixels(true);
-        }
-      });
-    }
-  }, [file, gpuAvailable, useGpu, clearRawPixels, clearRgbRawPixels, loadRawPixels, loadRgbRawPixels, resetMouse]);
+    clearRawPixels();
+    clearRgbRawPixels();
+  }, [fileKey, clearRawPixels, clearRgbRawPixels, resetMouse]);
+
+  const showRgbFileView = useCallback(() => {
+    const r = file?.result;
+    if (!r?.is_rgb) return;
+    if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
+    else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
+  }, [file?.result, initRgb, setCompositePreviewUrl]);
 
   useEffect(() => {
-    const prevUrl = prevCompositeUrlRef.current;
-    prevCompositeUrlRef.current = compositePreviewUrl;
-    if (compositePreviewUrl === prevUrl) return;
-    if (!file || !gpuAvailable || !useGpu) return;
-    if (compositePreviewUrl) {
-      const source = isFileRgbView ? file.path : null;
-      const key = `${file.id}|${source ?? compositePreviewUrl}`;
-      if (rgbLoadKeyRef.current === key) return;
-      rgbLoadKeyRef.current = key;
-      loadRgbRawPixels(source, true);
-    } else {
-      rgbLoadKeyRef.current = null;
-      clearRgbRawPixels();
-      loadRawPixels();
-    }
-  }, [compositePreviewUrl, file, gpuAvailable, useGpu, isFileRgbView, loadRgbRawPixels, clearRgbRawPixels, loadRawPixels]);
-
-  const processedSourceFileKeyRef = useRef<string | null>(null);
-  const prevProcessedSourceRef = useRef<string | null>(null);
-  useEffect(() => {
-    const key = file ? `${file.id}|${file.path}` : null;
-    const token = processedSourceVersion + "|" + (processedSourcePath ?? "");
-    const previous = prevProcessedSourceRef.current;
-    prevProcessedSourceRef.current = token;
-    if (processedSourceFileKeyRef.current !== key) {
-      processedSourceFileKeyRef.current = key;
+    if (!isRgbFile) return;
+    if (processed !== null) {
+      if (isFileRgbView) resetComposite();
       return;
     }
-    if (previous === token) return;
-    if (!file || !gpuAvailable || !useGpu || compositePreviewUrl || file.result?.is_rgb) return;
-    loadRawPixels(true);
-  }, [processedSourcePath, processedSourceVersion, file, gpuAvailable, useGpu, compositePreviewUrl, loadRawPixels]);
+    if (compositePreviewUrl === null) showRgbFileView();
+  }, [isRgbFile, processed, isFileRgbView, compositePreviewUrl, resetComposite, showRgbFileView]);
+
+  const wantGpu = !!gpuAvailable && useGpu;
+  const filePath = file?.path ?? null;
+  const monoLoadKey = fileKey ? `${fileKey}|${processedSourcePath ?? filePath}|${processedSourceVersion}` : null;
+  const rgbSource = isFileRgbView ? filePath : null;
+  const rgbLoadKey = fileKey && isRgbView ? `${fileKey}|${rgbSource ?? ""}|${compositeVersion}` : null;
+  const rgbFileViewPending = isRgbFile && processed === null && compositePreviewUrl === null && !!file?.result?.previewUrl;
+  const compositeOwnerRef = useRef<{ key: string | null; version: number } | null>(null);
+
+  useEffect(() => {
+    const owner = compositeOwnerRef.current;
+    if (!owner || owner.version !== compositeVersion) compositeOwnerRef.current = { key: fileKey, version: compositeVersion };
+    if (!wantGpu || !fileKey) return;
+    if (compositeOwnerRef.current?.key !== fileKey || rgbFileViewPending) return;
+    if (isRgbView) {
+      if (!rgbLoadKey || rgbLoadKeyRef.current === rgbLoadKey) return;
+      rgbLoadKeyRef.current = rgbLoadKey;
+      queueMicrotask(() => {
+        if (rgbLoadKeyRef.current === rgbLoadKey) loadRgbRawPixels(rgbSource, true);
+      });
+      return;
+    }
+    if (rgbLoadKeyRef.current !== null) {
+      rgbLoadKeyRef.current = null;
+      clearRgbRawPixels();
+    }
+    if (!monoLoadKey || gpuLoadKeyRef.current === monoLoadKey) return;
+    gpuLoadKeyRef.current = monoLoadKey;
+    queueMicrotask(() => {
+      if (gpuLoadKeyRef.current === monoLoadKey) loadRawPixels(true);
+    });
+  }, [wantGpu, fileKey, compositeVersion, rgbFileViewPending, isRgbView, rgbLoadKey, rgbSource, monoLoadKey, loadRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);
-    gpuLoadKeyRef.current = file ? `${file.id}|${file.path}` : null;
-    if (compositePreviewUrl) {
-      const source = isFileRgbView ? (file?.path ?? null) : null;
-      rgbLoadKeyRef.current = `${file?.id}|${source ?? compositePreviewUrl}`;
-      loadRgbRawPixels(source);
-    } else if (file?.result?.is_rgb) {
-      const r = file.result;
-      if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
-      else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
-      rgbLoadKeyRef.current = `${file.id}|${file.path}`;
-      loadRgbRawPixels(file.path ?? null, true);
-    } else {
-      loadRawPixels();
+  }, []);
+
+  const handleBackToFile = useCallback(() => {
+    if (isRgbFile && processed === null) {
+      showRgbFileView();
+      return;
     }
-  }, [compositePreviewUrl, isFileRgbView, file, loadRawPixels, loadRgbRawPixels, initRgb, setCompositePreviewUrl]);
+    void clearComposite();
+  }, [isRgbFile, processed, showRgbFileView, clearComposite]);
+
+  const liveCompositeUrlRef = useRef(compositePreviewUrl);
+  liveCompositeUrlRef.current = compositePreviewUrl;
+  const canReset = processed !== null || chain.psfKernel !== null;
+  const handleResetProcessed = useCallback(() => {
+    const path = file?.path ?? null;
+    const channel = path && fileKey ? syncedChannelFor(compositeSyncStore.get(), compositePreviewUrl, fileKey) : null;
+    resetProcessed();
+    if (!path || !channel) return;
+    compositeSyncStore.set(forgetCompositeSync(compositeSyncStore.get(), channel));
+    const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+    (async () => {
+      try {
+        await updateCompositeChannel(channel, path);
+        const staleStep = wizardStepStaleAfterChannelSync(wizardReadyRef.current);
+        if (staleStep) wizardDispatch({ type: "INVALIDATE_FROM", stepId: staleStep });
+        const dir = await getOutputDir();
+        const result = await restretchComposite(dir, stf.r, stf.g, stf.b, undefined, undefined, stf.linked);
+        if (!result?.png_path) return;
+        const url = compositeSyncStore.tagUrl(await getPreviewUrl(result.png_path));
+        compositeSyncStore.set(advanceCompositeSync(compositeSyncStore.get(), liveCompositeUrlRef.current, url));
+        setCompositePreviewUrl(url);
+      } catch (e) {
+        console.error("[AstroBurst] Composite channel restore failed:", e);
+      }
+    })();
+  }, [file?.path, fileKey, compositePreviewUrl, resetProcessed, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositePreviewUrl, wizardDispatch]);
 
   const handleToggleGpu = useCallback(() => {
     if (useGpu) {
@@ -445,7 +444,6 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     extractSpectrum(pixelClick.x, pixelClick.y);
   }, [pixelClick, isCube, extractSpectrum]);
 
-  const handlePreviewMouseMove = useCallback((e: React.MouseEvent<HTMLElement>) => { handleMove(e, fileDimsRef.current); }, [handleMove]);
   const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
 
   const handleBottomResize = useCallback((e: React.MouseEvent) => {
@@ -551,12 +549,21 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     return { url: `${base}${sep}_v=${file.id}`, label: "Original", width: file.result.dimensions?.[0], height: file.result.dimensions?.[1] };
   }, [file?.result?.previewUrl, file?.result?.dimensions, file?.id]);
 
+  const displayedW = displayed.dimensions?.[0];
+  const displayedH = displayed.dimensions?.[1];
+  const displayedLabel = displayed.label;
+  const displayedPreviewOnly = displayed.previewOnly;
+  const processedPreviewUrl = processed?.previewUrl ?? null;
   const processedImage = useMemo(() => {
-    if (!renderedPreviewUrl || renderedPreviewUrl === file?.result?.previewUrl) return null;
-    return { url: renderedPreviewUrl, label: "Processed", width: file?.result?.dimensions?.[0], height: file?.result?.dimensions?.[1] };
-  }, [renderedPreviewUrl, file?.result?.previewUrl, file?.result?.dimensions]);
+    if (stfPreviewUrl) {
+      return { url: stfPreviewUrl, label: `${displayedLabel ?? "Original"} · STF`, width: displayedW, height: displayedH };
+    }
+    if (!processedPreviewUrl || !displayedLabel) return null;
+    const label = displayedPreviewOnly ? `${displayedLabel} · PNG` : displayedLabel;
+    return { url: processedPreviewUrl, label, width: displayedW, height: displayedH };
+  }, [stfPreviewUrl, processedPreviewUrl, displayedLabel, displayedPreviewOnly, displayedW, displayedH]);
 
-  const useAdvancedViewer = !compositePreviewUrl && !useGpu;
+  const useAdvancedViewer = !isRgbView && !useGpu;
 
   const planeBadge = file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
 
@@ -591,19 +598,28 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
           <div className="flex items-center gap-2 shrink-0">
             {file && <DqControls />}
             {file && <DqOverlayCanvas canvasRef={dqCanvasRef} />}
+            {file && canReset && (
+              <button
+                onClick={handleResetProcessed}
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
+                style={{ border: "1px solid var(--ab-border)" }}
+                title={processed ? `Showing ${processed.label}. Reset to the original image` : "Clear the processing chain of this file"}
+              >
+                <RotateCcw size={10} />
+                Reset
+              </button>
+            )}
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu && !gpuSupported)}
-                      title={gpuAvailable === false && gpuSupported ? `${gpuReason ?? "GPU unavailable"} — click to retry` : gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
+                      title={gpuLoadError ? `GPU image load failed: ${gpuLoadError} — showing the PNG preview; click to switch to CPU` : gpuAvailable === false && gpuSupported ? `${gpuReason ?? "GPU unavailable"} — click to retry` : gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
                       className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-                      style={useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
+                      style={gpuLoadError ? { background: "rgba(245,158,11,0.15)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)" } : useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
                 {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : toggleLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
-                {gpuProbing ? "..." : toggleLoading ? "..." : gpuAvailable === false ? "CPU" : useGpu ? "GPU" : "CPU"}
+                {gpuProbing ? "..." : toggleLoading ? "..." : gpuAvailable === false ? "CPU" : gpuLoadError ? "GPU failed" : useGpu ? "GPU" : "CPU"}
               </button>
             )}
           </div>
         </div>
-
-        <ProgressBarInner />
 
         <div ref={viewportRef} className="flex-1 overflow-hidden min-h-0">
           {!file ? (
@@ -619,9 +635,17 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
               dqCanvasRef={dqCanvasRef}
             />
           ) : (
-            <div className="h-full" onMouseMove={handlePreviewMouseMove} onMouseLeave={handleLeave}>
+            <div className="h-full" onMouseLeave={handleLeave}>
               <Suspense fallback={<TabSpinner />}>
-                <PreviewTab useGpu={useGpu} rawPixels={rawPixels} rgbRawPixels={rgbRawPixels} onImageClick={handleImageClick} starOverlayRef={starOverlayRef} dqCanvasRef={dqCanvasRef} />
+                <PreviewTab
+                  useGpu={useGpu}
+                  rawPixels={rawPixels}
+                  rgbRawPixels={rgbRawPixels}
+                  onImageClick={handleImageClick}
+                  onBackToFile={handleBackToFile}
+                  starOverlayRef={starOverlayRef}
+                  dqCanvasRef={dqCanvasRef}
+                />
               </Suspense>
             </div>
           )}

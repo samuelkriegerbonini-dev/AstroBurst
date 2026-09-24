@@ -5,7 +5,6 @@ pub mod rice;
 pub mod rice_encode;
 pub mod tiles;
 
-pub use tiles::{
-    decode_compressed_image, decode_compressed_planes, is_compressed_image_hdu,
-    read_compressed_shape,
-};
+#[cfg(test)]
+pub use tiles::decode_compressed_image;
+pub use tiles::{decode_compressed_planes, is_compressed_image_hdu, read_compressed_shape};

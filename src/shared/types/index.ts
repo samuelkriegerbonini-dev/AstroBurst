@@ -22,7 +22,7 @@ export type { QueueStats, FileStatus } from "./queue";
 export type { TauriCommandError } from "./errors";
 export type { WcsInfo, PlateSolveOptions, SkyFrame, PixelToWorldResult } from "./astrometry";
 export type { AppConfig, ApiKeyResult } from "./config";
-export type { CubeDims, CubeProcessResult, CubeSpectrum } from "./cube";
+export type { CubeDims, CubeSpectrum } from "./cube";
 export type {
   ChannelStats,
   BlendResult,

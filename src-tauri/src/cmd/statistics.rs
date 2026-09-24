@@ -7,11 +7,11 @@ use serde_json::{json, Value};
 
 use crate::cmd::analysis::resolve_dq_mask;
 use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
-use crate::cmd::helpers;
+use crate::cmd::io::rgb_source_planes;
 use crate::core::imaging::pixel_probe::data_unit;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::statistics::{
-    evaluate_noise, evaluate_noise_in_region, evaluate_noise_masked, exact_statistics, finite_range,
+    evaluate_noise, evaluate_noise_in_region, evaluate_noise_masked, exact_statistics, data_range,
     statistics_for_region, ChannelStatistics, NoiseEvaluation, RegionNoise,
 };
 use crate::types::constants::{RES_DATA_MAX, RES_DATA_MIN, RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_MASKED, RES_PATH};
@@ -56,7 +56,7 @@ fn channel_body(
         },
         (true, None) => (Some(evaluate_noise_masked(arr, mask)), None),
     };
-    let (data_min, data_max) = finite_range(arr);
+    let (data_min, data_max) = data_range(arr);
     Ok(ChannelBody { statistics, noise, noise_note, data_min, data_max })
 }
 
@@ -102,12 +102,12 @@ pub async fn compute_statistics_cmd(
 }
 
 #[tauri::command]
-pub async fn compute_statistics_composite_cmd(noise: Option<bool>) -> Result<Value, String> {
+pub async fn compute_statistics_composite_cmd(noise: Option<bool>, path: Option<String>) -> Result<Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
-        let (er, eg, eb) = helpers::load_composite_rgb()?;
+        let (r, g, b) = rgb_source_planes(path.as_deref())?;
         let want_noise = noise.unwrap_or(false);
-        let bodies: Vec<ChannelBody> = [er.arr(), eg.arr(), eb.arr()]
+        let bodies: Vec<ChannelBody> = [r.as_ref(), g.as_ref(), b.as_ref()]
             .into_par_iter()
             .map(|arr| channel_body(arr, None, None, want_noise))
             .collect::<Result<Vec<_>>>()?;
@@ -171,7 +171,18 @@ mod tests {
         assert_eq!(noise.method, "k-sigma-mrs");
         let no_noise = channel_body(&data, None, None, false).unwrap();
         assert!(no_noise.noise.is_none());
-        assert_eq!(no_noise.statistics.count, 1024);
+        assert_eq!(no_noise.statistics.count, 1023);
+        assert_eq!(no_noise.statistics.padding, 1);
+    }
+
+    #[test]
+    fn the_data_range_of_a_zero_padded_frame_skips_the_padding_like_the_statistics() {
+        let data = Array2::from_shape_fn((16, 16), |(y, x)| if x < 4 { 0.0 } else { 10.0 + (y * 16 + x) as f32 });
+        let body = channel_body(&data, None, None, false).unwrap();
+        assert_eq!(body.statistics.padding, 64);
+        assert_eq!(body.data_min, 14.0);
+        assert_eq!(body.data_max, 265.0);
+        assert_eq!((body.data_min, body.data_max), (body.statistics.min, body.statistics.max));
     }
 
     #[test]
@@ -228,6 +239,38 @@ mod tests {
         assert_eq!(masked.statistics.excluded, mask.excluded);
         assert_eq!(masked.statistics.count + masked.statistics.excluded, plain.statistics.count);
         assert_eq!(plain.statistics.excluded, 0);
+    }
+
+    #[tokio::test]
+    async fn composite_statistics_of_an_rgb_file_measure_that_file_and_not_the_blend_slots() {
+        let _guard = crate::cmd::helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("osc_stats.fits").to_str().unwrap().to_string();
+        let r = Array2::from_shape_fn((5, 5), |(y, x)| 1000.0 + (y * 5 + x) as f32);
+        let g = r.mapv(|v| v + 100.0);
+        let b = r.mapv(|v| v + 200.0);
+        crate::infra::fits::writer::write_fits_rgb(&path, &r, &g, &b, None).unwrap();
+        let blend = Array2::from_elem((5, 5), 7.0f32);
+        let blend_stats = crate::core::imaging::stats::compute_image_stats(&blend);
+        crate::cmd::helpers::insert_composite_and_orig(
+            blend.clone(),
+            blend.clone(),
+            blend,
+            blend_stats.clone(),
+            blend_stats.clone(),
+            blend_stats,
+        );
+
+        let of_file = compute_statistics_composite_cmd(None, Some(path)).await;
+        let of_slots = compute_statistics_composite_cmd(None, None).await;
+        crate::cmd::helpers::clear_composite();
+        let of_file = of_file.unwrap();
+        let medians: Vec<f64> = [KEY_CHANNEL_R, KEY_CHANNEL_G, KEY_CHANNEL_B]
+            .iter()
+            .map(|k| of_file[*k][KEY_STATISTICS]["median"].as_f64().unwrap())
+            .collect();
+        assert_eq!(medians, vec![1012.0, 1112.0, 1212.0]);
+        assert_eq!(of_slots.unwrap()[KEY_CHANNEL_R][KEY_STATISTICS]["median"], 7.0);
     }
 
     #[test]

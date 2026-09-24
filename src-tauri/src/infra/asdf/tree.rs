@@ -5,7 +5,7 @@ use super::parser::AsdfError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArraySource {
     Block(usize),
-    Inline(Vec<f32>),
+    Inline(Vec<f64>),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +50,7 @@ pub struct WcsInfo {
     pub pc: [[f64; 2]; 2],
     pub ctype: [String; 2],
     pub cunit: [String; 2],
+    pub lonpole: Option<f64>,
 }
 
 fn field_usize(node: &Value, key: &str) -> Option<usize> {
@@ -107,7 +108,7 @@ pub(crate) fn untag(value: &Value) -> &Value {
     }
 }
 
-fn flatten_inline(node: &Value, out: &mut Vec<f32>, dims: &mut Vec<usize>, depth: usize) -> bool {
+fn flatten_inline(node: &Value, out: &mut Vec<f64>, dims: &mut Vec<usize>, depth: usize) -> bool {
     match untag(node) {
         Value::Sequence(seq) => {
             if dims.len() == depth {
@@ -119,28 +120,28 @@ fn flatten_inline(node: &Value, out: &mut Vec<f32>, dims: &mut Vec<usize>, depth
                 .all(|child| flatten_inline(child, out, dims, depth + 1))
         }
         Value::Number(n) => {
-            out.push(n.as_f64().unwrap_or(f64::NAN) as f32);
+            out.push(n.as_f64().unwrap_or(f64::NAN));
             true
         }
         Value::Bool(b) => {
-            out.push(u8::from(*b) as f32);
+            out.push(f64::from(u8::from(*b)));
             true
         }
         Value::Null => {
-            out.push(f32::NAN);
+            out.push(f64::NAN);
             true
         }
         Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
             "nan" | ".nan" => {
-                out.push(f32::NAN);
+                out.push(f64::NAN);
                 true
             }
             "inf" | ".inf" | "+inf" => {
-                out.push(f32::INFINITY);
+                out.push(f64::INFINITY);
                 true
             }
             "-inf" | "-.inf" => {
-                out.push(f32::NEG_INFINITY);
+                out.push(f64::NEG_INFINITY);
                 true
             }
             _ => false,
@@ -283,14 +284,6 @@ impl NdArrayMeta {
         self.dtype.byte_size()
     }
 
-    pub fn expected_byte_size(&self) -> usize {
-        self.shape.iter().product::<usize>() * self.byte_size_per_element()
-    }
-
-    pub fn element_count(&self) -> usize {
-        self.shape.iter().product()
-    }
-
     pub fn contiguous_strides(shape: &[usize], element_size: usize) -> Vec<isize> {
         let mut strides = vec![element_size as isize; shape.len()];
         let mut acc = element_size as isize;
@@ -307,118 +300,280 @@ impl NdArrayMeta {
             _ => Self::contiguous_strides(&self.shape, self.byte_size_per_element()),
         }
     }
-
-    pub fn is_contiguous(&self) -> bool {
-        self.offset == 0
-            && self.effective_strides()
-                == Self::contiguous_strides(&self.shape, self.byte_size_per_element())
-    }
 }
-
-struct GwcsParams {
-    crpix: [f64; 2],
-    crval: [f64; 2],
-    cdelt: [f64; 2],
-    pc: [[f64; 2]; 2],
-    shift_axis: usize,
-    scale_axis: usize,
-    recognized: bool,
-}
-
-type GwcsHandler = fn(&mut GwcsParams, &Value);
-
-const GWCS_HANDLERS: &[(&[&str], GwcsHandler)] = &[
-    (&["shift"], GwcsParams::apply_shift),
-    (&["scale"], GwcsParams::apply_scale),
-    (&["affine"], GwcsParams::apply_affine),
-    (&["rotat"], GwcsParams::apply_rotation),
-    (
-        &["gnomonic", "pix2sky", "tan"],
-        GwcsParams::apply_projection,
-    ),
-];
 
 const GWCS_PIXEL_ORIGIN_TO_FITS: f64 = 1.0;
+const GWCS_LONPOLE: f64 = 180.0;
+const GWCS_ANGLE_TOLERANCE_DEG: f64 = 1e-9;
+const IDENTITY_2X2: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
+const PIXEL_UNITS: &[(&str, f64)] = &[("", 1.0), ("pix", 1.0), ("pixel", 1.0)];
+const SCALE_UNITS: &[(&str, f64)] = &[
+    ("", 1.0),
+    ("deg", 1.0),
+    ("deg/pix", 1.0),
+    ("deg/pixel", 1.0),
+    ("arcsec", 1.0 / 3600.0),
+    ("arcsec/pix", 1.0 / 3600.0),
+    ("arcsec/pixel", 1.0 / 3600.0),
+];
+const ANGLE_UNITS: &[(&str, f64)] = &[
+    ("", 1.0),
+    ("deg", 1.0),
+    ("degree", 1.0),
+    ("rad", 180.0 / std::f64::consts::PI),
+];
 
-impl GwcsParams {
-    fn new() -> Self {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GwcsStage {
+    Pixel,
+    Linear,
+    Projection,
+    Celestial,
+}
+
+struct GwcsChain<'a> {
+    arrays: &'a dyn Fn(&Value) -> Option<Vec<f64>>,
+    stage: GwcsStage,
+    shifts: Vec<f64>,
+    scales: Vec<f64>,
+    matrix: Option<[[f64; 2]; 2]>,
+    scale_before_matrix: bool,
+    projected: bool,
+    crval: Option<[f64; 2]>,
+}
+
+fn gwcs_param(leaf: &Value, keys: &[&str], units: &[(&str, f64)]) -> Result<Option<f64>, String> {
+    let Some((key, node)) = keys.iter().find_map(|k| leaf.get(*k).map(|v| (*k, v))) else {
+        return Ok(None);
+    };
+    let (value, unit) = match node.as_f64() {
+        Some(v) => (v, String::new()),
+        None => {
+            let value = node
+                .get("value")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("gwcs parameter '{key}' is not a number"))?;
+            let unit: String = node
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            (value, unit)
+        }
+    };
+    let factor = units
+        .iter()
+        .find(|(u, _)| u.eq_ignore_ascii_case(&unit))
+        .map(|&(_, f)| f)
+        .ok_or_else(|| format!("gwcs parameter '{key}' has unsupported unit '{unit}'"))?;
+    let scaled = value * factor;
+    if scaled.is_finite() {
+        Ok(Some(scaled))
+    } else {
+        Err(format!("gwcs parameter '{key}' is not finite"))
+    }
+}
+
+fn gwcs_required(leaf: &Value, keys: &[&str], units: &[(&str, f64)], name: &str) -> Result<f64, String> {
+    gwcs_param(leaf, keys, units)?
+        .ok_or_else(|| format!("gwcs step '{name}' lacks '{}'", keys.join("/")))
+}
+
+fn gwcs_direction(leaf: &Value) -> String {
+    leaf.get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn push_axis(axes: &mut Vec<f64>, value: f64, name: &str) -> Result<(), String> {
+    if axes.len() == 2 {
+        return Err(format!("gwcs has more than two '{name}' steps"));
+    }
+    axes.push(value);
+    Ok(())
+}
+
+fn angle_is(value: f64, target: f64) -> bool {
+    let d = (value - target).rem_euclid(360.0);
+    d < GWCS_ANGLE_TOLERANCE_DEG || 360.0 - d < GWCS_ANGLE_TOLERANCE_DEG
+}
+
+impl<'a> GwcsChain<'a> {
+    fn new(arrays: &'a dyn Fn(&Value) -> Option<Vec<f64>>) -> Self {
         Self {
-            crpix: [1.0, 1.0],
-            crval: [0.0, 0.0],
-            cdelt: [1.0, 1.0],
-            pc: [[1.0, 0.0], [0.0, 1.0]],
-            shift_axis: 0,
-            scale_axis: 0,
-            recognized: false,
+            arrays,
+            stage: GwcsStage::Pixel,
+            shifts: Vec::new(),
+            scales: Vec::new(),
+            matrix: None,
+            scale_before_matrix: false,
+            projected: false,
+            crval: None,
         }
     }
 
-    fn apply(&mut self, leaf: &Value) {
-        let id = WcsInfo::model_id(leaf);
-        if let Some(&(_, handler)) = GWCS_HANDLERS
-            .iter()
-            .find(|(keywords, _)| keywords.iter().any(|&kw| id.contains(kw)))
-        {
-            handler(self, leaf);
+    fn enter(&mut self, stage: GwcsStage, name: &str) -> Result<(), String> {
+        if stage < self.stage {
+            return Err(format!("gwcs step '{name}' is out of FITS order"));
+        }
+        self.stage = stage;
+        Ok(())
+    }
+
+    fn apply(&mut self, leaf: &Value) -> Result<(), String> {
+        let name = WcsInfo::model_name(leaf);
+        match name.as_str() {
+            "shift" => {
+                self.enter(GwcsStage::Pixel, &name)?;
+                let offset = gwcs_required(leaf, &["offset"], PIXEL_UNITS, &name)?;
+                push_axis(&mut self.shifts, offset, &name)
+            }
+            "scale" => {
+                self.enter(GwcsStage::Linear, &name)?;
+                let factor = gwcs_required(leaf, &["factor"], SCALE_UNITS, &name)?;
+                push_axis(&mut self.scales, factor, &name)
+            }
+            "affine" | "affinetransformation" | "affinetransformation2d" => {
+                self.apply_affine(leaf, &name)
+            }
+            "gnomonic" | "tan" | "pix2sky_tan" | "pix2sky_gnomonic" => {
+                self.apply_projection(leaf, &name)
+            }
+            "rotate3d" | "rotatenative2celestial" => self.apply_rotation(leaf, &name),
+            "" => Err("gwcs step has no readable transform tag".into()),
+            other => Err(format!("gwcs step '{other}' is not TAN-convertible")),
         }
     }
 
-    fn write_next_axis(slot: &mut [f64; 2], axis: &mut usize, recognized: &mut bool, value: f64) {
-        if *axis < slot.len() {
-            slot[*axis] = value;
-            *axis += 1;
-            *recognized = true;
+    fn numbers(&self, leaf: &Value, key: &str, rank: usize) -> Result<Option<Vec<f64>>, String> {
+        let Some(node) = leaf.get(key) else {
+            return Ok(None);
+        };
+        let mut values = Vec::new();
+        let mut dims = Vec::new();
+        let plain = matches!(untag(node), Value::Sequence(_))
+            && flatten_inline(node, &mut values, &mut dims, 0)
+            && dims.len() == rank;
+        let values = if plain {
+            values
+        } else {
+            (self.arrays)(node).ok_or_else(|| format!("gwcs '{key}' values are not readable"))?
+        };
+        if values.iter().all(|v| v.is_finite()) {
+            Ok(Some(values))
+        } else {
+            Err(format!("gwcs '{key}' values are not finite"))
         }
     }
 
-    fn apply_shift(&mut self, leaf: &Value) {
-        if let Some(offset) = leaf.get("offset").and_then(Value::as_f64) {
-            Self::write_next_axis(
-                &mut self.crpix,
-                &mut self.shift_axis,
-                &mut self.recognized,
-                -offset + GWCS_PIXEL_ORIGIN_TO_FITS,
-            );
+    fn apply_affine(&mut self, leaf: &Value, name: &str) -> Result<(), String> {
+        self.enter(GwcsStage::Linear, name)?;
+        if self.matrix.is_some() || self.scales.len() == 1 {
+            return Err(format!("gwcs '{name}' cannot be folded into PC/CDELT"));
+        }
+        let values = self
+            .numbers(leaf, "matrix", 2)?
+            .ok_or_else(|| format!("gwcs '{name}' has no matrix"))?;
+        let &[a, b, c, d] = values.as_slice() else {
+            return Err(format!("gwcs '{name}' matrix is not 2x2"));
+        };
+        if let Some(translation) = self.numbers(leaf, "translation", 1)? {
+            if translation.iter().any(|v| *v != 0.0) {
+                return Err(format!("gwcs '{name}' translation is not supported"));
+            }
+        }
+        self.scale_before_matrix = self.scales.len() == 2;
+        self.matrix = Some([[a, b], [c, d]]);
+        Ok(())
+    }
+
+    fn apply_projection(&mut self, leaf: &Value, name: &str) -> Result<(), String> {
+        self.enter(GwcsStage::Projection, name)?;
+        if self.projected {
+            return Err(format!("gwcs has more than one '{name}' projection"));
+        }
+        if !matches!(gwcs_direction(leaf).as_str(), "" | "pix2sky") {
+            return Err(format!("gwcs '{name}' is not a pix2sky projection"));
+        }
+        self.projected = true;
+        let lon = gwcs_param(leaf, &["lon_0"], ANGLE_UNITS)?;
+        let lat = gwcs_param(leaf, &["lat_0"], ANGLE_UNITS)?;
+        match (lon, lat) {
+            (Some(lon), Some(lat)) => self.anchor(lon, lat, name),
+            _ => Ok(()),
         }
     }
 
-    fn apply_scale(&mut self, leaf: &Value) {
-        if let Some(factor) = leaf.get("factor").and_then(Value::as_f64) {
-            Self::write_next_axis(
-                &mut self.cdelt,
-                &mut self.scale_axis,
-                &mut self.recognized,
-                factor,
-            );
+    fn apply_rotation(&mut self, leaf: &Value, name: &str) -> Result<(), String> {
+        self.enter(GwcsStage::Celestial, name)?;
+        if !matches!(gwcs_direction(leaf).as_str(), "" | "native2celestial") {
+            return Err(format!("gwcs '{name}' is not a native-to-celestial rotation"));
         }
+        let lon = gwcs_required(leaf, &["phi", "lon"], ANGLE_UNITS, name)?;
+        let lat = gwcs_required(leaf, &["theta", "lat"], ANGLE_UNITS, name)?;
+        let pole = gwcs_param(leaf, &["psi", "lon_pole"], ANGLE_UNITS)?.unwrap_or(GWCS_LONPOLE);
+        if !angle_is(pole, GWCS_LONPOLE) {
+            return Err(format!("gwcs '{name}' pole longitude {pole} needs LONPOLE"));
+        }
+        self.anchor(lon, lat, name)
     }
 
-    fn apply_affine(&mut self, leaf: &Value) {
-        if let Some(matrix) = WcsInfo::extract_matrix(leaf, "matrix") {
-            self.pc = matrix;
-            self.recognized = true;
+    fn anchor(&mut self, lon: f64, lat: f64, name: &str) -> Result<(), String> {
+        if self.crval.is_some() {
+            return Err(format!("gwcs '{name}' sets the celestial reference twice"));
         }
+        if lat.abs() > 90.0 {
+            return Err(format!("gwcs '{name}' latitude {lat} is outside [-90, 90]"));
+        }
+        self.crval = Some([lon, lat]);
+        Ok(())
     }
 
-    fn apply_rotation(&mut self, leaf: &Value) {
-        if let Some(lon) = WcsInfo::first_f64(leaf, &["phi", "lon", "lon_0"]) {
-            self.crval[0] = lon;
-            self.recognized = true;
+    fn finish(self) -> Result<WcsInfo, String> {
+        let crval = self
+            .crval
+            .ok_or_else(|| "gwcs has no celestial reference (rotate3d phi/theta)".to_string())?;
+        if !self.projected {
+            return Err("gwcs has no gnomonic (TAN) projection".into());
         }
-        if let Some(lat) = WcsInfo::first_f64(leaf, &["theta", "lat", "lat_0"]) {
-            self.crval[1] = lat;
-            self.recognized = true;
+        let crpix = match self.shifts.as_slice() {
+            [] => [GWCS_PIXEL_ORIGIN_TO_FITS; 2],
+            &[x, y] => [GWCS_PIXEL_ORIGIN_TO_FITS - x, GWCS_PIXEL_ORIGIN_TO_FITS - y],
+            _ => return Err("gwcs shifts only one pixel axis".into()),
+        };
+        let scale = match self.scales.as_slice() {
+            [] => [1.0, 1.0],
+            &[x, y] => [x, y],
+            _ => return Err("gwcs scales only one pixel axis".into()),
+        };
+        let m = self.matrix.unwrap_or(IDENTITY_2X2);
+        let (cdelt, pc) = if self.scale_before_matrix && scale[0] != scale[1] {
+            (
+                [1.0, 1.0],
+                [
+                    [m[0][0] * scale[0], m[0][1] * scale[1]],
+                    [m[1][0] * scale[0], m[1][1] * scale[1]],
+                ],
+            )
+        } else {
+            (scale, m)
+        };
+        let det = cdelt[0] * cdelt[1] * (pc[0][0] * pc[1][1] - pc[0][1] * pc[1][0]);
+        if !det.is_finite() || det == 0.0 {
+            return Err("gwcs linear transform is singular".into());
         }
-    }
-
-    fn apply_projection(&mut self, leaf: &Value) {
-        if let Some(lon) = WcsInfo::first_f64(leaf, &["lon_0"]) {
-            self.crval[0] = lon;
-        }
-        if let Some(lat) = WcsInfo::first_f64(leaf, &["lat_0"]) {
-            self.crval[1] = lat;
-        }
-        self.recognized = true;
+        Ok(WcsInfo {
+            crpix,
+            crval,
+            cdelt,
+            pc,
+            ctype: ["RA---TAN".into(), "DEC--TAN".into()],
+            cunit: ["deg".into(), "deg".into()],
+            lonpole: Some(GWCS_LONPOLE),
+        })
     }
 }
 
@@ -443,7 +598,7 @@ impl WcsInfo {
         let crpix = Self::extract_pair(wcs, "crpix")?;
         let crval = Self::extract_pair(wcs, "crval")?;
         let cdelt = Self::extract_pair(wcs, "cdelt").unwrap_or([1.0, 1.0]);
-        let pc = Self::extract_matrix(wcs, "pc").unwrap_or([[1.0, 0.0], [0.0, 1.0]]);
+        let pc = Self::extract_matrix(wcs, "pc").unwrap_or(IDENTITY_2X2);
         let ctype = Self::extract_string_pair(wcs, "ctype")
             .unwrap_or_else(|| ["RA---TAN".into(), "DEC--TAN".into()]);
         let cunit =
@@ -456,17 +611,26 @@ impl WcsInfo {
             pc,
             ctype,
             cunit,
+            lonpole: None,
         })
     }
 
-    pub fn from_gwcs(tree: &Value) -> Option<Self> {
-        let gwcs = tree
+    pub fn from_gwcs(
+        tree: &Value,
+        arrays: &dyn Fn(&Value) -> Option<Vec<f64>>,
+    ) -> Result<Option<Self>, String> {
+        let Some(gwcs) = tree
             .get("gwcs")
             .into_iter()
             .chain(Self::wcs_nodes(tree))
-            .find(|w| w.get("steps").is_some())?;
-
-        let steps = gwcs.get("steps")?.as_sequence()?;
+            .find(|w| w.get("steps").is_some())
+        else {
+            return Ok(None);
+        };
+        let steps = gwcs
+            .get("steps")
+            .and_then(Value::as_sequence)
+            .ok_or_else(|| "gwcs steps are not a list".to_string())?;
 
         let mut leaves = Vec::new();
         for step in steps {
@@ -475,23 +639,38 @@ impl WcsInfo {
             }
         }
 
-        let mut params = GwcsParams::new();
+        let mut chain = GwcsChain::new(arrays);
         for leaf in leaves {
-            params.apply(leaf);
+            chain.apply(leaf)?;
         }
+        Self::check_world_frame(steps)?;
+        chain.finish().map(Some)
+    }
 
-        if !params.recognized {
-            return None;
+    fn check_world_frame(steps: &[Value]) -> Result<(), String> {
+        let Some(frame) = steps.last().and_then(|s| s.get("frame")) else {
+            return Ok(());
+        };
+        let axis_types: Vec<String> = frame
+            .get("axis_physical_types")
+            .and_then(Value::as_sequence)
+            .map(|types| {
+                types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if axis_types.iter().any(|t| !t.starts_with("pos.eq.")) {
+            return Err(format!("gwcs world axes {} are not RA/Dec", axis_types.join(", ")));
         }
-
-        Some(Self {
-            crpix: params.crpix,
-            crval: params.crval,
-            cdelt: params.cdelt,
-            pc: params.pc,
-            ctype: ["RA---TAN".into(), "DEC--TAN".into()],
-            cunit: ["deg".into(), "deg".into()],
-        })
+        let reference = frame.get("reference_frame").map(Self::model_name).unwrap_or_default();
+        if reference.is_empty() || reference == "icrs" || reference == "fk5" {
+            Ok(())
+        } else {
+            Err(format!("gwcs world frame '{reference}' is not ICRS"))
+        }
     }
 
     fn flatten_transform<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
@@ -520,9 +699,35 @@ impl WcsInfo {
         format!("{} {}", tag, field).to_lowercase()
     }
 
-    fn first_f64(node: &Value, keys: &[&str]) -> Option<f64> {
-        keys.iter()
-            .find_map(|k| node.get(*k).and_then(|v| v.as_f64()))
+    fn model_name(node: &Value) -> String {
+        let from_tag = match node {
+            Value::Tagged(tagged) => {
+                let tag = tagged.tag.to_string();
+                let last = tag
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('!')
+                    .trim_end_matches('>');
+                match last.rfind('-') {
+                    Some(i) if last[i + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
+                        last[..i].to_string()
+                    }
+                    _ => last.to_string(),
+                }
+            }
+            _ => String::new(),
+        };
+        let name = if from_tag.is_empty() {
+            node.get("transform_type")
+                .or_else(|| node.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        } else {
+            from_tag
+        };
+        name.trim().to_ascii_lowercase()
     }
 
     fn extract_pair(node: &Value, key: &str) -> Option<[f64; 2]> {
@@ -569,27 +774,6 @@ mod tests {
             offset: 0,
             strides: None,
         }
-    }
-
-    #[test]
-    fn test_complex64_byte_size() {
-        let meta = block_meta(vec![100, 100], DType::Complex64, ByteOrder::Little);
-        assert_eq!(meta.byte_size_per_element(), 8);
-        assert_eq!(meta.expected_byte_size(), 100 * 100 * 8);
-    }
-
-    #[test]
-    fn test_float32_byte_size() {
-        let meta = block_meta(vec![50, 50], DType::Float32, ByteOrder::Big);
-        assert_eq!(meta.byte_size_per_element(), 4);
-        assert_eq!(meta.expected_byte_size(), 50 * 50 * 4);
-    }
-
-    #[test]
-    fn test_float64_byte_size() {
-        let meta = block_meta(vec![10, 20], DType::Float64, ByteOrder::Little);
-        assert_eq!(meta.byte_size_per_element(), 8);
-        assert_eq!(meta.expected_byte_size(), 10 * 20 * 8);
     }
 
     #[test]
@@ -656,7 +840,6 @@ mod tests {
         let meta = NdArrayMeta::from_yaml(&node).unwrap();
         assert_eq!(meta.offset, 0);
         assert_eq!(meta.strides, None);
-        assert!(meta.is_contiguous());
         assert_eq!(meta.effective_strides(), vec![8]);
     }
 
@@ -669,7 +852,6 @@ mod tests {
         let meta = NdArrayMeta::from_yaml(&node).unwrap();
         assert_eq!(meta.offset, 8);
         assert_eq!(meta.strides, Some(vec![16]));
-        assert!(!meta.is_contiguous());
         assert_eq!(meta.effective_strides(), vec![16]);
     }
 
@@ -681,7 +863,7 @@ mod tests {
         .unwrap();
         let meta = NdArrayMeta::from_yaml(&node).unwrap();
         assert_eq!(meta.strides, Some(vec![-12, 4]));
-        assert!(!meta.is_contiguous());
+        assert_eq!(meta.effective_strides(), vec![-12, 4]);
     }
 
     #[test]
@@ -734,6 +916,28 @@ mod tests {
         assert!(NdArrayMeta::from_yaml(&node).is_err());
     }
 
+    fn inline_arrays(node: &Value) -> Option<Vec<f64>> {
+        match NdArrayMeta::from_yaml(node).ok()?.source {
+            ArraySource::Inline(values) => Some(values),
+            ArraySource::Block(_) => None,
+        }
+    }
+
+    fn gwcs(yaml: &str) -> Result<Option<WcsInfo>, String> {
+        let tree: Value = serde_yaml::from_str(yaml).unwrap();
+        WcsInfo::from_gwcs(&tree, &inline_arrays)
+    }
+
+    #[test]
+    fn test_inline_integers_keep_every_bit() {
+        let node: Value =
+            serde_yaml::from_str("data: [[2147483649, 16777217], [4294967295, 0]]\ndatatype: uint32\n").unwrap();
+        match NdArrayMeta::from_yaml(&node).unwrap().source {
+            ArraySource::Inline(v) => assert_eq!(v, vec![2147483649.0, 16777217.0, 4294967295.0, 0.0]),
+            other => panic!("expected inline, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_gwcs_tagged_compose_chain() {
         let yaml = r#"
@@ -755,17 +959,94 @@ meta:
             - !transform/rotate3d-1.3.0 {phi: 202.4695, theta: 47.1953, psi: 180.0, direction: native2celestial}
       - frame: {name: world}
 "#;
-        let tree: Value = serde_yaml::from_str(yaml).unwrap();
-        let wcs = WcsInfo::from_gwcs(&tree).expect("gwcs chain parsed");
+        let wcs = gwcs(yaml).unwrap().expect("gwcs chain parsed");
         assert_eq!(wcs.crpix, [1025.5, 1021.5]);
         assert_eq!(wcs.cdelt, [0.0001, 0.0002]);
         assert_eq!(wcs.pc, [[1.1, 0.2], [0.3, 1.2]]);
         assert_eq!(wcs.crval, [202.4695, 47.1953]);
         assert_eq!(wcs.ctype, ["RA---TAN".to_string(), "DEC--TAN".to_string()]);
+        assert_eq!(wcs.lonpole, Some(180.0));
     }
 
     #[test]
-    fn test_gwcs_field_type_fallback() {
+    fn test_gwcs_quantity_angles_and_ndarray_matrix_resolve() {
+        let yaml = r#"
+wcs:
+  steps:
+    - frame: detector
+      transform: !transform/compose-1.2.0
+        forward:
+          - !transform/concatenate-1.2.0
+              forward:
+                - !transform/shift-1.2.0 {offset: -99.0}
+                - !transform/shift-1.2.0 {offset: !unit/quantity-1.1.0 {value: -49.0, unit: !unit/unit-1.0.0 pixel}}
+          - !transform/affine-1.3.0
+              matrix: !core/ndarray-1.0.0 {data: [[0.0, -1.0], [1.0, 0.0]], datatype: float64, shape: [2, 2]}
+              translation: !core/ndarray-1.0.0 {data: [0.0, 0.0], datatype: float64, shape: [2]}
+          - !transform/concatenate-1.2.0
+              forward:
+                - !transform/scale-1.2.0 {factor: !unit/quantity-1.1.0 {value: 0.1, unit: !unit/unit-1.0.0 arcsec / pix}}
+                - !transform/scale-1.2.0 {factor: !unit/quantity-1.1.0 {value: 0.1, unit: !unit/unit-1.0.0 arcsec / pix}}
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate3d-1.3.0
+              direction: native2celestial
+              phi: !unit/quantity-1.1.0 {value: 270.1, unit: !unit/unit-1.0.0 deg}
+              theta: !unit/quantity-1.1.0 {value: -30.25, unit: !unit/unit-1.0.0 deg}
+              psi: !unit/quantity-1.1.0 {value: 180.0, unit: !unit/unit-1.0.0 deg}
+    - frame: !<tag:stsci.edu:gwcs/celestial_frame-1.0.0>
+        name: world
+        reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0> {frame_attributes: {}}
+      transform: null
+"#;
+        let wcs = gwcs(yaml).unwrap().expect("wcs_from_fiducial chain with quantities");
+        assert_eq!(wcs.crval, [270.1, -30.25]);
+        assert_eq!(wcs.crpix, [100.0, 50.0]);
+        assert_eq!(wcs.pc, [[0.0, -1.0], [1.0, 0.0]]);
+        assert!((wcs.cdelt[0] - 0.1 / 3600.0).abs() < 1e-18);
+        assert!((wcs.cdelt[1] - 0.1 / 3600.0).abs() < 1e-18);
+    }
+
+    #[test]
+    fn test_gwcs_scale_before_anisotropic_affine_folds_into_pc() {
+        let yaml = r#"
+wcs:
+  steps:
+    - transform: !transform/compose-1.2.0
+        forward:
+          - !transform/scale-1.2.0 {factor: 2.0}
+          - !transform/scale-1.2.0 {factor: 3.0}
+          - !transform/affine-1.3.0 {matrix: [[1.0, 0.5], [0.25, 1.0]]}
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate3d-1.3.0 {phi: 10.0, theta: 20.0, psi: 180.0}
+"#;
+        let wcs = gwcs(yaml).unwrap().unwrap();
+        assert_eq!(wcs.cdelt, [1.0, 1.0]);
+        assert_eq!(wcs.pc, [[2.0, 1.5], [0.5, 3.0]]);
+        assert_eq!(wcs.crpix, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_gwcs_field_type_chain_with_projection_and_rotation() {
+        let yaml = r#"
+meta:
+  wcs:
+    steps:
+      - transform: {transform_type: Shift, offset: -5.0}
+      - transform: {transform_type: Shift, offset: -7.0}
+      - transform: {transform_type: AffineTransformation, matrix: [[2.0, 0.0], [0.0, 3.0]]}
+      - transform: {transform_type: Pix2Sky_TAN}
+      - transform: {transform_type: RotateNative2Celestial, lon: 12.5, lat: -45.0, lon_pole: 180.0}
+      - frame: {name: world}
+"#;
+        let wcs = gwcs(yaml).unwrap().expect("gwcs field fallback parsed");
+        assert_eq!(wcs.crpix, [6.0, 8.0]);
+        assert_eq!(wcs.pc, [[2.0, 0.0], [0.0, 3.0]]);
+        assert_eq!(wcs.crval, [12.5, -45.0]);
+        assert_eq!(wcs.cdelt, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_gwcs_without_celestial_step_is_refused() {
         let yaml = r#"
 meta:
   wcs:
@@ -775,16 +1056,12 @@ meta:
       - transform: {transform_type: AffineTransformation, matrix: [[2.0, 0.0], [0.0, 3.0]]}
       - frame: {name: world}
 "#;
-        let tree: Value = serde_yaml::from_str(yaml).unwrap();
-        let wcs = WcsInfo::from_gwcs(&tree).expect("gwcs field fallback parsed");
-        assert_eq!(wcs.crpix, [6.0, 8.0]);
-        assert_eq!(wcs.pc, [[2.0, 0.0], [0.0, 3.0]]);
-        assert_eq!(wcs.crval, [0.0, 0.0]);
-        assert_eq!(wcs.cdelt, [1.0, 1.0]);
+        let reason = gwcs(yaml).expect_err("a pixel-only chain has no sky position");
+        assert!(reason.contains("celestial reference"), "{reason}");
     }
 
     #[test]
-    fn test_gwcs_under_roman_meta() {
+    fn test_gwcs_under_roman_meta_without_anchor_is_refused() {
         let yaml = r#"
 roman:
   meta:
@@ -798,13 +1075,109 @@ roman:
 "#;
         let tree: Value = serde_yaml::from_str(yaml).unwrap();
         assert!(WcsInfo::from_yaml(&tree).is_none());
-        let wcs = WcsInfo::from_gwcs(&tree).expect("roman.meta.wcs resolved");
-        assert_eq!(wcs.crpix, [2044.5, 2044.5]);
-        assert_eq!(wcs.cdelt, [0.00003, 0.00003]);
+        let reason = WcsInfo::from_gwcs(&tree, &inline_arrays).expect_err("no CRVAL anywhere in the chain");
+        assert!(reason.contains("celestial reference"), "{reason}");
     }
 
     #[test]
-    fn test_gwcs_unrecognized_returns_none() {
+    fn test_gwcs_v2v3_chain_is_refused_instead_of_faked_at_crval_zero() {
+        let yaml = r#"
+roman:
+  meta:
+    wcs:
+      steps:
+        - frame: detector
+          transform: !transform/compose-1.2.0
+            forward:
+              - !transform/concatenate-1.2.0
+                  forward:
+                    - !transform/shift-1.2.0 {offset: 1.0}
+                    - !transform/shift-1.2.0 {offset: 1.0}
+              - !transform/concatenate-1.2.0
+                  forward:
+                    - !transform/polynomial-1.2.0 {coefficients: [[0.0, 0.11], [0.11, 0.0]]}
+                    - !transform/polynomial-1.2.0 {coefficients: [[0.0, 0.11], [0.11, 0.0]]}
+        - frame: v2v3
+          transform: !transform/compose-1.2.0
+            forward:
+              - !transform/concatenate-1.2.0
+                  forward:
+                    - !transform/scale-1.2.0 {factor: 0.0002777777777777778}
+                    - !transform/scale-1.2.0 {factor: 0.0002777777777777778}
+              - !transform/spherical_cartesian-1.2.0 {transform_type: spherical_to_cartesian}
+              - !transform/rotate_sequence_3d-1.0.0 {angles: [0.1, -0.2, 60.0, -30.0, -270.0], axes_order: zyxyz}
+        - frame: world
+          transform: null
+"#;
+        let reason = gwcs(yaml).expect_err("a V2/V3 chain has no FITS TAN form");
+        assert!(reason.contains("polynomial"), "{reason}");
+    }
+
+    #[test]
+    fn test_gwcs_rotation_sequence_alone_is_not_an_anchor() {
+        let yaml = r#"
+wcs:
+  steps:
+    - transform: !transform/compose-1.2.0
+        forward:
+          - !transform/shift-1.2.0 {offset: -10.0}
+          - !transform/shift-1.2.0 {offset: -10.0}
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate_sequence_3d-1.0.0 {angles: [0.1, -0.2, 60.0, -30.0, -270.0], axes_order: zyxyz}
+"#;
+        let reason = gwcs(yaml).expect_err("angles are not phi/theta");
+        assert!(reason.contains("rotate_sequence_3d"), "{reason}");
+    }
+
+    #[test]
+    fn test_gwcs_rejects_non_default_lonpole_and_non_icrs_frame() {
+        let rotated_pole = r#"
+wcs:
+  steps:
+    - transform: !transform/compose-1.2.0
+        forward:
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate3d-1.3.0 {phi: 10.0, theta: 20.0, psi: 90.0}
+"#;
+        assert!(gwcs(rotated_pole).unwrap_err().contains("LONPOLE"));
+
+        let galactic = r#"
+wcs:
+  steps:
+    - transform: !transform/compose-1.2.0
+        forward:
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate3d-1.3.0 {phi: 10.0, theta: 20.0, psi: 180.0}
+    - frame: !<tag:stsci.edu:gwcs/celestial_frame-1.0.0>
+        axes_names: [l, b]
+        axis_physical_types: [pos.galactic.lon, pos.galactic.lat]
+        reference_frame: !<tag:astropy.org:astropy/coordinates/frames/galactic-1.0.0> {frame_attributes: {}}
+      transform: null
+"#;
+        assert!(gwcs(galactic).unwrap_err().contains("pos.galactic.lon"));
+
+        let local_tag = r#"
+wcs:
+  steps:
+    - transform: !transform/compose-1.2.0
+        forward:
+          - !transform/gnomonic-1.2.0 {direction: pix2sky}
+          - !transform/rotate3d-1.3.0 {phi: 10.0, theta: 20.0, psi: 180.0}
+    - frame:
+        reference_frame: !frames/galactic-1.0.0 {}
+      transform: null
+"#;
+        assert!(gwcs(local_tag).unwrap_err().contains("galactic"));
+
+        let equatorial = galactic
+            .replace("[l, b]", "[ra, dec]")
+            .replace("pos.galactic.lon, pos.galactic.lat", "pos.eq.ra, pos.eq.dec")
+            .replace("galactic-1.0.0", "icrs-1.1.0");
+        assert_eq!(gwcs(&equatorial).unwrap().unwrap().crval, [10.0, 20.0]);
+    }
+
+    #[test]
+    fn test_gwcs_unrecognized_is_refused_with_reason() {
         let yaml = r#"
 meta:
   wcs:
@@ -812,7 +1185,12 @@ meta:
       - transform: !transform/identity-1.2.0 {}
       - frame: {name: world}
 "#;
-        let tree: Value = serde_yaml::from_str(yaml).unwrap();
-        assert!(WcsInfo::from_gwcs(&tree).is_none());
+        let reason = gwcs(yaml).expect_err("identity carries no sky position");
+        assert!(reason.contains("identity"), "{reason}");
+    }
+
+    #[test]
+    fn test_no_gwcs_node_is_not_an_error() {
+        assert!(gwcs("meta:\n  telescope: JWST\n").unwrap().is_none());
     }
 }

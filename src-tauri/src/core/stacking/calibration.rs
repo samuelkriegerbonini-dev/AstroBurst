@@ -2,11 +2,17 @@ use anyhow::{bail, Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::core::stacking::combine::{
+    reject_and_combine_with, stack_images_cancellable, validate_frame_weights, validate_minmax_counts,
+    KernelScratch, Sample,
+};
+use crate::core::stacking::drizzle::drizzle_stack_cancellable;
+use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::{f32_cmp, median_f32_mut};
 use crate::types::constants::STAGE_LOAD_FRAME;
 use crate::types::error::AppError;
+use crate::types::image_ref::ImageRef;
 use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 pub(crate) use crate::infra::fits::reader::load_fits_image;
 
@@ -60,26 +66,6 @@ pub fn subtract_dark(
     exposure_ratio: f32,
 ) -> Array2<f32> {
     image - &(master_dark * exposure_ratio)
-}
-
-pub fn divide_flat(image: &Array2<f32>, master_flat: &Array2<f32>) -> Array2<f32> {
-    let (rows, cols) = image.dim();
-    let img_slice = image.as_slice().expect("contiguous");
-    let flat_slice = master_flat.as_slice().expect("contiguous");
-
-    let result: Vec<f32> = img_slice
-        .par_iter()
-        .zip(flat_slice.par_iter())
-        .map(|(&iv, &fv)| {
-            if fv.is_finite() && fv.abs() > 1e-4 {
-                iv / fv
-            } else {
-                iv
-            }
-        })
-        .collect();
-
-    Array2::from_shape_vec((rows, cols), result).unwrap()
 }
 
 fn ensure_master_dims(
@@ -141,7 +127,11 @@ pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Result<
     Ok(Array2::from_shape_vec((rows, cols), result).unwrap())
 }
 
-pub fn combine_master_frames(frames: &[Array2<f32>], config: &MasterConfig) -> Result<Array2<f32>> {
+pub fn combine_master_frames(
+    frames: &[Array2<f32>],
+    config: &MasterConfig,
+    cancelled: CancelCheck,
+) -> Result<Array2<f32>> {
     let Some(first) = frames.first() else {
         bail!("No frames to combine");
     };
@@ -170,6 +160,9 @@ pub fn combine_master_frames(frames: &[Array2<f32>], config: &MasterConfig) -> R
         .par_chunks_mut(cols)
         .enumerate()
         .for_each(|(y, row_buf)| {
+            if cancelled() {
+                return;
+            }
             let mut samples: Vec<Sample> = Vec::with_capacity(n);
             let mut scratch = KernelScratch::default();
             let base = y * cols;
@@ -186,6 +179,7 @@ pub fn combine_master_frames(frames: &[Array2<f32>], config: &MasterConfig) -> R
                 row_buf[x] = if out.kept == 0 { 0.0 } else { out.value };
             }
         });
+    stop_if_cancelled(cancelled)?;
 
     Array2::from_shape_vec((rows, cols), result).context("Failed to reshape combined master")
 }
@@ -220,7 +214,7 @@ pub fn scale_flats_to_first_median(frames: &mut [Array2<f32>]) {
     });
 }
 
-fn load_matching_frames(paths: &[String]) -> Result<Vec<Array2<f32>>> {
+fn load_matching_frames(paths: &[String], cancelled: CancelCheck) -> Result<Vec<Array2<f32>>> {
     let first = load_fits_image(&paths[0])?;
     let (rows, cols) = first.dim();
 
@@ -228,6 +222,7 @@ fn load_matching_frames(paths: &[String]) -> Result<Vec<Array2<f32>>> {
     frames.push(first);
 
     for path in &paths[1..] {
+        stop_if_cancelled(cancelled)?;
         let frame = load_fits_image(path)?;
         if frame.dim() != (rows, cols) {
             bail!(
@@ -241,57 +236,67 @@ fn load_matching_frames(paths: &[String]) -> Result<Vec<Array2<f32>>> {
 }
 
 pub fn create_master_bias(bias_paths: &[String]) -> Result<Array2<f32>> {
-    create_master_bias_with(bias_paths, &MasterConfig::default())
+    create_master_bias_cancellable(bias_paths, &never_cancelled)
 }
 
-pub fn create_master_bias_with(bias_paths: &[String], config: &MasterConfig) -> Result<Array2<f32>> {
+pub fn create_master_bias_cancellable(bias_paths: &[String], cancelled: CancelCheck) -> Result<Array2<f32>> {
     if bias_paths.is_empty() {
         bail!("No bias frames provided");
     }
-    let frames = load_matching_frames(bias_paths)?;
-    combine_master_frames(&frames, config).context("Failed to combine master bias")
+    let frames = load_matching_frames(bias_paths, cancelled)?;
+    combine_master_frames(&frames, &MasterConfig::default(), cancelled).context("Failed to combine master bias")
 }
 
 pub fn create_master_dark(
     dark_paths: &[String],
     master_bias: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>> {
-    create_master_dark_with(dark_paths, master_bias, &MasterConfig::default())
+    create_master_dark_cancellable(dark_paths, master_bias, &never_cancelled)
 }
 
-pub fn create_master_dark_with(
+pub fn create_master_dark_cancellable(
     dark_paths: &[String],
     master_bias: Option<&Array2<f32>>,
-    config: &MasterConfig,
+    cancelled: CancelCheck,
 ) -> Result<Array2<f32>> {
     if dark_paths.is_empty() {
         bail!("No dark frames provided");
     }
 
-    let mut frames = load_matching_frames(dark_paths)?;
+    let mut frames = load_matching_frames(dark_paths, cancelled)?;
     if let Some(bias) = master_bias {
         for frame in frames.iter_mut() {
             *frame = subtract_bias(frame, bias);
         }
     }
-    combine_master_frames(&frames, config).context("Failed to combine master dark")
+    combine_master_frames(&frames, &MasterConfig::default(), cancelled).context("Failed to combine master dark")
 }
 
-fn median_exposure_seconds(paths: &[String]) -> Option<f64> {
-    let mut vals: Vec<f64> = paths
-        .iter()
-        .filter_map(|p| {
-            let header = crate::infra::fits::reader::read_primary_header(p).ok()?;
-            header
-                .get_f64("EXPTIME")
-                .or_else(|| header.get_f64("EXPOSURE"))
-                .filter(|v| v.is_finite() && *v > 0.0)
-        })
-        .collect();
+pub fn read_exposure_seconds(path: &str) -> Option<f64> {
+    let source = ImageRef::parse(path).path;
+    let header = match crate::infra::fits::reader::read_primary_header(&source) {
+        Ok(header) => header,
+        Err(e) => {
+            log::warn!("Cannot read the exposure time of {}: {:#}", path, e);
+            return None;
+        }
+    };
+    let exposure = header
+        .get_f64("EXPTIME")
+        .or_else(|| header.get_f64("EXPOSURE"))
+        .filter(|v| v.is_finite() && *v > 0.0);
+    if exposure.is_none() {
+        log::warn!("{} has no usable EXPTIME or EXPOSURE card; exposure scaling ignores it", path);
+    }
+    exposure
+}
+
+pub fn median_exposure_seconds(paths: &[String]) -> Option<f64> {
+    let mut vals: Vec<f64> = paths.iter().filter_map(|p| read_exposure_seconds(p)).collect();
     if vals.is_empty() {
         return None;
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals.sort_by(|a, b| a.total_cmp(b));
     Some(vals[vals.len() / 2])
 }
 
@@ -310,15 +315,15 @@ pub fn create_master_flat(
     master_dark: Option<&Array2<f32>>,
     dark_exposure_seconds: Option<f64>,
 ) -> Result<Array2<f32>> {
-    create_master_flat_with(flat_paths, master_bias, master_dark, dark_exposure_seconds, &MasterConfig::default())
+    create_master_flat_cancellable(flat_paths, master_bias, master_dark, dark_exposure_seconds, &never_cancelled)
 }
 
-pub fn create_master_flat_with(
+pub fn create_master_flat_cancellable(
     flat_paths: &[String],
     master_bias: Option<&Array2<f32>>,
     master_dark: Option<&Array2<f32>>,
     dark_exposure_seconds: Option<f64>,
-    config: &MasterConfig,
+    cancelled: CancelCheck,
 ) -> Result<Array2<f32>> {
     if flat_paths.is_empty() {
         bail!("No flat frames provided");
@@ -330,7 +335,7 @@ pub fn create_master_flat_with(
         1.0
     };
 
-    let mut frames = load_matching_frames(flat_paths)?;
+    let mut frames = load_matching_frames(flat_paths, cancelled)?;
     for frame in frames.iter_mut() {
         if let Some(bias) = master_bias {
             *frame = subtract_bias(frame, bias);
@@ -342,7 +347,8 @@ pub fn create_master_flat_with(
 
     scale_flats_to_first_median(&mut frames);
 
-    let mut result = combine_master_frames(&frames, config).context("Failed to combine master flat")?;
+    let mut result =
+        combine_master_frames(&frames, &MasterConfig::default(), cancelled).context("Failed to combine master flat")?;
 
     let mut positives: Vec<f32> = result
         .iter()
@@ -414,7 +420,6 @@ pub fn calibrate_from_paths(
 
 fn load_frames_with_progress(
     paths: &[String],
-    calibration: Option<&CalibrationConfig>,
     progress: Option<&ProgressHandle>,
 ) -> Result<Vec<Array2<f32>>> {
     let mut images: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
@@ -424,11 +429,7 @@ fn load_frames_with_progress(
                 return Err(AppError::Cancelled.into());
             }
         }
-        let mut img = load_fits_image(path)?;
-        if let Some(cal) = calibration {
-            img = calibrate_image(&img, cal)?;
-        }
-        images.push(img);
+        images.push(load_fits_image(path)?);
         if let Some(p) = progress {
             p.tick_with_stage(STAGE_LOAD_FRAME);
         }
@@ -439,45 +440,33 @@ fn load_frames_with_progress(
 pub fn stack_from_paths(
     paths: &[String],
     config: &crate::types::stacking::StackConfig,
-    calibration: Option<&CalibrationConfig>,
     progress: Option<&ProgressHandle>,
 ) -> Result<crate::types::stacking::StackResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
+    validate_frame_weights(config.weights.as_deref(), paths.len())?;
+    validate_minmax_counts(config.rejection, config.minmax_low, config.minmax_high, paths.len())?;
 
-    let images = load_frames_with_progress(paths, calibration, progress)?;
+    let images = load_frames_with_progress(paths, progress)?;
 
-    if let Some(p) = progress {
-        if p.is_cancelled() {
-            return Err(AppError::Cancelled.into());
-        }
-    }
-
-    let result = crate::core::stacking::combine::stack_images(&images, config)?;
-    Ok(result)
+    let cancelled = || progress.is_some_and(|p| p.is_cancelled());
+    stack_images_cancellable(&images, config, &cancelled)
 }
 
 pub fn drizzle_from_paths(
     paths: &[String],
     config: &crate::types::stacking::DrizzleConfig,
-    calibration: Option<&CalibrationConfig>,
     progress: Option<&ProgressHandle>,
 ) -> Result<crate::types::stacking::DrizzleResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
 
-    let images = load_frames_with_progress(paths, calibration, progress)?;
+    let images = load_frames_with_progress(paths, progress)?;
 
-    if let Some(p) = progress {
-        if p.is_cancelled() {
-            return Err(AppError::Cancelled.into());
-        }
-    }
-
-    let result = crate::core::stacking::drizzle::drizzle_stack(&images, config)?;
-    Ok(result)
+    let cancelled = || progress.is_some_and(|p| p.is_cancelled());
+    drizzle_stack_cancellable(&images, config, &cancelled)
 }
 #[cfg(test)]
 mod tests {
@@ -521,27 +510,60 @@ mod tests {
     }
 
     #[test]
-    fn test_divide_flat() {
+    fn calibrate_image_skips_unusable_flat_pixels() {
         let image =
             Array2::from_shape_vec((2, 2), vec![100.0, 200.0, 300.0, 400.0]).unwrap();
-        let flat = Array2::from_shape_vec((2, 2), vec![0.5, 1.0, 1.5, 2.0]).unwrap();
-        let result = divide_flat(&image, &flat);
-        assert!((result[[0, 0]] - 200.0).abs() < 1e-4);
-        assert!((result[[0, 1]] - 200.0).abs() < 1e-4);
-        assert!((result[[1, 0]] - 200.0).abs() < 1e-4);
+        let config = CalibrationConfig {
+            master_bias: None,
+            master_dark: None,
+            master_flat: Some(Array2::from_shape_vec((2, 2), vec![0.0, 0.5, f32::NAN, 2.0]).unwrap()),
+            dark_exposure_ratio: 1.0,
+        };
+        let result = calibrate_image(&image, &config).unwrap();
+        assert!((result[[0, 0]] - 100.0).abs() < 1e-4);
+        assert!((result[[0, 1]] - 400.0).abs() < 1e-4);
+        assert!((result[[1, 0]] - 300.0).abs() < 1e-4);
         assert!((result[[1, 1]] - 200.0).abs() < 1e-4);
     }
 
+    fn write_mef_with_exposure(dir: &tempfile::TempDir, name: &str, exposure: &str, data: Vec<f32>) -> String {
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+        let path = dir.path().join(name);
+        write_test_mef(
+            &path,
+            &[("EXPTIME", exposure.to_string())],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: 2, rows: data.len() / 2, data: HduData::F32(data), extra_cards: vec![] }],
+        );
+        path.to_str().unwrap().to_string()
+    }
+
     #[test]
-    fn test_divide_flat_zero_safe() {
-        let image =
-            Array2::from_shape_vec((2, 2), vec![100.0, 200.0, 300.0, 400.0]).unwrap();
-        let flat =
-            Array2::from_shape_vec((2, 2), vec![0.0, 1.0, f32::NAN, 2.0]).unwrap();
-        let result = divide_flat(&image, &flat);
-        assert!((result[[0, 0]] - 100.0).abs() < 1e-4);
-        assert!(result[[0, 1]].is_finite());
-        assert!((result[[1, 0]] - 300.0).abs() < 1e-4);
+    fn exposure_is_read_through_an_hdu_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_mef_with_exposure(&dir, "flat.fits", "5.0", vec![1.0, 2.0, 3.0, 4.0]);
+        let reference = ImageRef::hdu(&path, 1).cache_key();
+        assert_ne!(reference, path);
+        assert_eq!(read_exposure_seconds(&reference), Some(5.0));
+        assert_eq!(read_exposure_seconds(&path), Some(5.0));
+        assert_eq!(median_exposure_seconds(&[reference.clone(), reference]), Some(5.0));
+        assert_eq!(read_exposure_seconds(&format!("{}/missing.fits#hdu=1", dir.path().display())), None);
+    }
+
+    #[test]
+    fn master_flat_from_hdu_refs_scales_the_dark_by_exposure() {
+        let dir = tempfile::tempdir().unwrap();
+        let flats: Vec<String> = (0..3)
+            .map(|i| {
+                let path = write_mef_with_exposure(&dir, &format!("flat{i}.fits"), "5.0", vec![1000.0, 2000.0, 1000.0, 2000.0]);
+                ImageRef::hdu(&path, 1).cache_key()
+            })
+            .collect();
+        let bias = Array2::from_elem((2, 2), 0.0f32);
+        let dark = Array2::from_elem((2, 2), 600.0f32);
+        let master = create_master_flat(&flats, Some(&bias), Some(&dark), Some(300.0)).unwrap();
+        let ratio = master[[0, 1]] / master[[0, 0]];
+        let expected = (2000.0 - 10.0) / (1000.0 - 10.0);
+        assert!((ratio - expected).abs() < 1e-4, "ratio {ratio}, expected {expected}");
     }
 
     #[test]
@@ -621,22 +643,22 @@ mod tests {
     fn master_combine_removes_cosmic_ray_and_keeps_level() {
         let mut frames: Vec<Array2<f32>> = (0..7).map(|_| Array2::from_elem((4, 4), 100.0)).collect();
         frames[3][[1, 2]] = 60000.0;
-        let master = combine_master_frames(&frames, &MasterConfig::default()).unwrap();
+        let master = combine_master_frames(&frames, &MasterConfig::default(), &never_cancelled).unwrap();
         assert_eq!(master.dim(), (4, 4));
         assert!((master[[1, 2]] - 100.0).abs() < 1e-3, "cosmic ray leaked: {}", master[[1, 2]]);
         assert!((master[[0, 0]] - 100.0).abs() < 1e-3);
 
         let plain_mean = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Mean, ..MasterConfig::default() };
-        let leaked = combine_master_frames(&frames, &plain_mean).unwrap();
+        let leaked = combine_master_frames(&frames, &plain_mean, &never_cancelled).unwrap();
         assert!(leaked[[1, 2]] > 8000.0);
     }
 
     #[test]
     fn master_combine_reduces_noise_like_a_mean_not_a_median() {
         let frames = gaussian_frames(7, 64, 64, 1000.0, 1.0, 20260919);
-        let mean_master = combine_master_frames(&frames, &MasterConfig::default()).unwrap();
+        let mean_master = combine_master_frames(&frames, &MasterConfig::default(), &never_cancelled).unwrap();
         let median_only = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Median, ..MasterConfig::default() };
-        let median_master = combine_master_frames(&frames, &median_only).unwrap();
+        let median_master = combine_master_frames(&frames, &median_only, &never_cancelled).unwrap();
         let expected = 1.0 / 7f64.sqrt();
         let s_mean = sample_sigma(&mean_master);
         let s_median = sample_sigma(&median_master);
@@ -647,8 +669,8 @@ mod tests {
     #[test]
     fn master_combine_rejects_shape_mismatch_and_empty_input() {
         let frames = vec![Array2::from_elem((2, 2), 1.0f32), Array2::from_elem((2, 3), 1.0f32)];
-        assert!(combine_master_frames(&frames, &MasterConfig::default()).is_err());
-        assert!(combine_master_frames(&[], &MasterConfig::default()).is_err());
+        assert!(combine_master_frames(&frames, &MasterConfig::default(), &never_cancelled).is_err());
+        assert!(combine_master_frames(&[], &MasterConfig::default(), &never_cancelled).is_err());
     }
 
     #[test]
@@ -662,6 +684,33 @@ mod tests {
                 assert!((x - y).abs() < 1e-4, "{x} vs {y}");
             }
         }
+    }
+
+    #[test]
+    fn a_cancelled_master_build_stops_with_a_cancellation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<String> = (0..3)
+            .map(|i| {
+                let path = dir.path().join(format!("frame{i}.fits")).to_str().unwrap().to_string();
+                crate::infra::fits::writer::write_fits_mono(&path, &Array2::from_elem((4, 4), 100.0f32), None).unwrap();
+                path
+            })
+            .collect();
+        let stop = || true;
+        for err in [
+            create_master_bias_cancellable(&paths, &stop).unwrap_err(),
+            create_master_dark_cancellable(&paths, None, &stop).unwrap_err(),
+            create_master_flat_cancellable(&paths, None, None, None, &stop).unwrap_err(),
+        ] {
+            assert!(crate::core::stacking::is_cancellation(&err), "{err:#}");
+        }
+
+        let frames = load_matching_frames(&paths, &never_cancelled).unwrap();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let late = || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1;
+        let err = combine_master_frames(&frames, &MasterConfig::default(), &late).unwrap_err();
+        assert!(crate::core::stacking::is_cancellation(&err), "a cancel raised during the combine was ignored");
+        assert!(create_master_bias(&paths).is_ok());
     }
 
     #[test]
@@ -680,7 +729,7 @@ mod tests {
         let master = create_master_bias(&paths).unwrap();
         assert!((master[[2, 1]] - 100.0).abs() < 1e-3);
         let plain_mean = MasterConfig { rejection: RejectionMethod::None, combine: CombineMethod::Mean, ..MasterConfig::default() };
-        let leaked = create_master_bias_with(&paths, &plain_mean).unwrap();
+        let leaked = combine_master_frames(&load_matching_frames(&paths, &never_cancelled).unwrap(), &plain_mean, &never_cancelled).unwrap();
         assert!(leaked[[2, 1]] > 8000.0);
     }
 }

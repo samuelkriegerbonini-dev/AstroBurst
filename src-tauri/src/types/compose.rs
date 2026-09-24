@@ -44,54 +44,6 @@ pub struct DimensionHarmonize {
 }
 
 #[derive(Debug, Clone)]
-pub struct RgbComposeConfig {
-    pub white_balance: WhiteBalance,
-    pub auto_stretch: bool,
-    pub stf_r: Option<StfParams>,
-    pub stf_g: Option<StfParams>,
-    pub stf_b: Option<StfParams>,
-    pub linked_stf: bool,
-    pub align: bool,
-    pub align_method: AlignMethod,
-    pub scnr: Option<ScnrConfig>,
-    pub dimension_tolerance: usize,
-}
-
-impl Default for RgbComposeConfig {
-    fn default() -> Self {
-        Self {
-            white_balance: WhiteBalance::Auto,
-            auto_stretch: true,
-            stf_r: None,
-            stf_g: None,
-            stf_b: None,
-            linked_stf: false,
-            align: true,
-            align_method: AlignMethod::PhaseCorrelation,
-            scnr: None,
-            dimension_tolerance: 100,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RgbComposeResult {
-    pub png_path: String,
-    pub stf_r: StfParams,
-    pub stf_g: StfParams,
-    pub stf_b: StfParams,
-    pub stats_r: ChannelStats,
-    pub stats_g: ChannelStats,
-    pub stats_b: ChannelStats,
-    pub offset_g: (f64, f64),
-    pub offset_b: (f64, f64),
-    pub width: usize,
-    pub height: usize,
-    pub scnr_applied: bool,
-    pub dimension_info: Option<DimensionHarmonize>,
-}
-
-#[derive(Debug, Clone)]
 pub struct DrizzleRgbConfig {
     pub drizzle: DrizzleConfig,
     pub white_balance: WhiteBalance,
@@ -134,4 +86,5 @@ pub struct DrizzleRgbResult {
     pub stats_g: ChannelStats,
     pub stats_b: ChannelStats,
     pub scnr_applied: bool,
+    pub warnings: Vec<String>,
 }

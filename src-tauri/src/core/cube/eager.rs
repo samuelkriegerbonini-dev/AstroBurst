@@ -1,65 +1,16 @@
-use std::fs;
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
-use ndarray::{Array2, Array3};
-use rayon::prelude::*;
+use ndarray::Array2;
 
 use crate::core::astrometry::spectral::spectral_axis;
-use crate::math::simd::collapse_mean_simd;
-use crate::math::median::f32_cmp;
-use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CubeResult {
-    pub dimensions: [usize; 3],
-    pub collapsed_path: String,
-    pub collapsed_median_path: String,
-    pub frames_dir: String,
-    pub frame_count: usize,
-    pub center_spectrum: Vec<f32>,
-    pub wavelengths: Option<Vec<f64>>,
-    pub elapsed_ms: u64,
-}
-
-pub fn collapse_mean(cube: &Array3<f32>) -> Array2<f32> {
-    collapse_mean_simd(cube)
-}
-
-pub fn collapse_median(cube: &Array3<f32>) -> Array2<f32> {
-    let (depth, rows, cols) = cube.dim();
-    let npix = rows * cols;
-
-    let result_data: Vec<f32> = (0..npix)
-        .into_par_iter()
-        .map(|i| {
-            let y = i / cols;
-            let x = i % cols;
-            let mut vals: Vec<f32> = (0..depth)
-                .map(|z| cube[[z, y, x]])
-                .filter(|v| v.is_finite() && *v != 0.0)
-                .collect();
-
-            if vals.is_empty() {
-                return 0.0;
-            }
-
-            let mid = vals.len() / 2;
-            vals.select_nth_unstable_by(mid, |a, b| {
-                f32_cmp(a, b)
-            });
-            vals[mid]
-        })
-        .collect();
-
-    Array2::from_shape_vec((rows, cols), result_data).unwrap()
-}
-
-pub fn extract_spectrum(cube: &Array3<f32>, y: usize, x: usize) -> Vec<f32> {
-    let depth = cube.dim().0;
-    (0..depth).map(|z| cube[[z, y, x]]).collect()
-}
+const SPECTRAL_CTYPES: [&str; 9] = ["WAVE", "FREQ", "VELO", "AWAV", "VRAD", "VOPT", "ZOPT", "BETA", "ENER"];
+const SPECTRAL_UNITS: [&str; 19] = [
+    "M", "CM", "MM", "UM", "MICRON", "MICRONS", "NM", "ANGSTROM", "ANGSTROMS", "A", "HZ", "KHZ", "MHZ",
+    "GHZ", "THZ", "M/S", "KM/S", "EV", "KEV",
+];
+const INTEGRATION_CARDS: [&str; 2] = ["NINTS", "INTSTART"];
+const NORMALIZED_VALID_FLOOR: f32 = 1e-6;
+pub(crate) const DISPLAY_ASINH_ALPHA: f32 = 10.0;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectralClassification {
@@ -89,81 +40,42 @@ pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClas
     classification
 }
 
+fn card_upper(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|s| s.trim().trim_matches('\'').trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+}
+
 fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> SpectralClassification {
-    let ctype3 = header.get("CTYPE3").map(|s| s.trim().trim_matches('\'').trim().to_uppercase());
-    let cunit3 = header.get("CUNIT3").map(|s| s.trim().trim_matches('\'').trim().to_uppercase());
+    let ctype3 = card_upper(header, "CTYPE3");
+    let cunit3 = card_upper(header, "CUNIT3");
     let has_cdelt3 = header.get_f64("CDELT3").is_some();
     let has_crval3 = header.get_f64("CRVAL3").is_some();
 
-    let spectral_ctypes = ["WAVE", "FREQ", "VELO", "AWAV", "VRAD", "VOPT", "ZOPT", "BETA", "ENER"];
-    let spectral_units = ["M", "CM", "MM", "UM", "NM", "ANGSTROM", "A", "HZ", "KHZ", "MHZ", "GHZ", "M/S", "KM/S", "EV", "KEV"];
+    let ctype_is_spectral = ctype3
+        .as_deref()
+        .is_some_and(|ct| SPECTRAL_CTYPES.iter().any(|&s| ct.contains(s)));
+    let cunit_is_spectral = cunit3.as_deref().is_some_and(|cu| SPECTRAL_UNITS.contains(&cu));
+    let integration_stack = INTEGRATION_CARDS.iter().any(|&key| header.get(key).is_some());
 
-    let ctype_is_spectral = ctype3.as_ref().map_or(false, |ct| {
-        spectral_ctypes.iter().any(|&s| ct.contains(s))
-    });
-
-    let cunit_is_spectral = cunit3.as_ref().map_or(false, |cu| {
-        spectral_units.iter().any(|&s| cu == s || cu.contains(s))
-    });
-
-    if ctype_is_spectral {
-        return SpectralClassification {
-            is_spectral: true,
-            reason: format!("CTYPE3 indicates spectral axis: {}", ctype3.as_deref().unwrap_or("")),
-            axis_type: ctype3,
-            axis_unit: cunit3,
-            axis_unit_assumed: false,
-            channel_count: naxis3,
-        };
-    }
-
-    if cunit_is_spectral && has_cdelt3 {
-        return SpectralClassification {
-            is_spectral: true,
-            reason: format!("CUNIT3 indicates spectral data: {}", cunit3.as_deref().unwrap_or("")),
-            axis_type: ctype3,
-            axis_unit: cunit3,
-            axis_unit_assumed: false,
-            channel_count: naxis3,
-        };
-    }
-
-    if naxis3 <= 4 {
-        return SpectralClassification {
-            is_spectral: false,
-            reason: format!("NAXIS3={} with no spectral keywords: likely RGB/RGBA composition", naxis3),
-            axis_type: ctype3,
-            axis_unit: cunit3,
-            axis_unit_assumed: false,
-            channel_count: naxis3,
-        };
-    }
-
-    if has_cdelt3 && has_crval3 {
-        return SpectralClassification {
-            is_spectral: true,
-            reason: format!("NAXIS3={} with CRVAL3/CDELT3 present: likely spectral cube", naxis3),
-            axis_type: ctype3,
-            axis_unit: cunit3,
-            axis_unit_assumed: false,
-            channel_count: naxis3,
-        };
-    }
-
-    if naxis3 > 10 {
-        return SpectralClassification {
-            is_spectral: true,
-            reason: format!("NAXIS3={}: high channel count suggests spectral data", naxis3),
-            axis_type: ctype3,
-            axis_unit: cunit3,
-            axis_unit_assumed: false,
-            channel_count: naxis3,
-        };
-    }
+    let (is_spectral, reason) = if ctype_is_spectral {
+        (true, format!("CTYPE3 indicates spectral axis: {}", ctype3.as_deref().unwrap_or("")))
+    } else if integration_stack {
+        (false, format!("NAXIS3={} counts integrations (NINTS/INTSTART present), not spectral channels", naxis3))
+    } else if cunit_is_spectral && has_cdelt3 {
+        (true, format!("CUNIT3 indicates spectral data: {}", cunit3.as_deref().unwrap_or("")))
+    } else if naxis3 <= 4 {
+        (false, format!("NAXIS3={} with no spectral keywords: likely RGB/RGBA composition", naxis3))
+    } else if has_cdelt3 && has_crval3 {
+        (true, format!("NAXIS3={} with CRVAL3/CDELT3 present: likely spectral cube", naxis3))
+    } else {
+        (false, format!("NAXIS3={} with no spectral metadata: ambiguous, treating as non-spectral", naxis3))
+    };
 
     SpectralClassification {
-        is_spectral: false,
-        reason: format!("NAXIS3={} with no spectral metadata: ambiguous, treating as non-spectral", naxis3),
+        is_spectral,
+        reason,
         axis_type: ctype3,
         axis_unit: cunit3,
         axis_unit_assumed: false,
@@ -184,54 +96,8 @@ pub struct GlobalCubeStats {
     pub high: f32,
 }
 
-pub fn compute_global_stats(cube: &Array3<f32>) -> GlobalCubeStats {
-    let mut finite: Vec<f32> = cube
-        .iter()
-        .filter(|v| v.is_finite() && **v != 0.0)
-        .copied()
-        .collect();
-
-    if finite.is_empty() {
-        return GlobalCubeStats {
-            median: 0.0,
-            sigma: 1.0,
-            low: 0.0,
-            high: 1.0,
-        };
-    }
-
-    let n = finite.len();
-    let mid = n / 2;
-    finite.select_nth_unstable_by(mid, |a, b| {
-        f32_cmp(a, b)
-    });
-    let median = finite[mid];
-
-    let mut deviations: Vec<f32> = finite.iter().map(|v| (v - median).abs()).collect();
-    let dev_mid = deviations.len() / 2;
-    deviations.select_nth_unstable_by(dev_mid, |a, b| {
-        f32_cmp(a, b)
-    });
-    let sigma = (deviations[dev_mid] * MAD_TO_SIGMA as f32).max(1e-10);
-
-    let low_idx = (n as f64 * 0.01) as usize;
-    let high_idx = ((n as f64 * 0.999) as usize).min(n - 1);
-    finite.select_nth_unstable_by(low_idx, |a, b| f32_cmp(a, b));
-    let low = finite[low_idx];
-    finite.select_nth_unstable_by(high_idx, |a, b| f32_cmp(a, b));
-    let high = finite[high_idx];
-
-    GlobalCubeStats {
-        median,
-        sigma,
-        low,
-        high,
-    }
-}
-
 pub fn normalize_with_global(data: &Array2<f32>, g: &GlobalCubeStats) -> Array2<f32> {
-    let alpha: f32 = 10.0;
-    let inv_sigma_alpha = alpha / g.sigma;
+    let inv_sigma_alpha = DISPLAY_ASINH_ALPHA / g.sigma;
     let lo = (inv_sigma_alpha * (g.low - g.median)).asinh();
     let hi = (inv_sigma_alpha * (g.high - g.median)).asinh();
     let inv = 1.0 / (hi - lo).max(1e-6);
@@ -242,102 +108,7 @@ pub fn normalize_with_global(data: &Array2<f32>, g: &GlobalCubeStats) -> Array2<
         }
         let clamped = v.clamp(g.low, g.high);
         let scaled = inv_sigma_alpha * (clamped - g.median);
-        ((scaled.asinh() - lo) * inv).clamp(1e-6, 1.0)
-    })
-}
-
-pub fn export_cube_frames_sampled(
-    cube: &Array3<f32>,
-    output_dir: &str,
-    step: usize,
-) -> Result<usize> {
-    let depth = cube.dim().0;
-    let step = step.max(1);
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create frames dir {}", output_dir))?;
-
-    let global = compute_global_stats(cube);
-
-    let indices: Vec<(usize, usize)> = (0..depth).step_by(step).enumerate().collect();
-
-    indices.par_iter().try_for_each(|&(count, z)| -> Result<()> {
-        let slice = cube.index_axis(ndarray::Axis(0), z).to_owned();
-        let normalized = normalize_with_global(&slice, &global);
-        let path = format!("{}/frame_{:04}.png", output_dir, count);
-        crate::infra::render::render_grayscale(&normalized, &path)
-    })?;
-
-    Ok(indices.len())
-}
-
-pub fn process_cube(
-    input_path: &str,
-    output_dir: &str,
-    frame_step: usize,
-) -> Result<CubeResult> {
-    use crate::core::imaging::normalize::robust_asinh_preview;
-    use crate::infra::fits::reader::extract_cube_mmap;
-    use crate::infra::render::render_grayscale;
-    use std::fs::File;
-
-    let t0 = std::time::Instant::now();
-
-    let (actual_fits_path, _tmp_holder) = if input_path.to_lowercase().ends_with(".zip") {
-        let resolved = crate::infra::fits::dispatcher::resolve_input(std::path::Path::new(input_path))
-            .with_context(|| format!("Failed to resolve ZIP input {}", input_path))?;
-        match resolved {
-            crate::infra::fits::dispatcher::ResolvedInput::ExtractedFromZip { files, _tmp } => {
-                let first = files
-                    .into_iter()
-                    .next()
-                    .context("No .fits in ZIP")?;
-                (first, Some(_tmp))
-            }
-            _ => unreachable!(),
-        }
-    } else {
-        (PathBuf::from(input_path), None)
-    };
-
-    let file = File::open(&actual_fits_path)
-        .with_context(|| format!("Failed to open FITS {:?}", actual_fits_path))?;
-    let result = extract_cube_mmap(&file)
-        .context("mmap cube extraction failed")?;
-
-    let cube = result.cube;
-    let header = result.header;
-    let (depth, rows, cols) = cube.dim();
-
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output dir {}", output_dir))?;
-
-    let collapsed = collapse_mean(&cube);
-    let collapsed_norm = robust_asinh_preview(&collapsed);
-    let collapsed_path = format!("{}/collapsed_mean.png", output_dir);
-    render_grayscale(&collapsed_norm, &collapsed_path)?;
-
-    let collapsed_med = collapse_median(&cube);
-    let collapsed_med_norm = robust_asinh_preview(&collapsed_med);
-    let collapsed_med_path = format!("{}/collapsed_median.png", output_dir);
-    render_grayscale(&collapsed_med_norm, &collapsed_med_path)?;
-
-    let center_y = rows / 2;
-    let center_x = cols / 2;
-    let spectrum = extract_spectrum(&cube, center_y, center_x);
-    let wavelengths = build_wavelength_axis(&header);
-
-    let frames_dir = format!("{}/frames", output_dir);
-    let frame_count = export_cube_frames_sampled(&cube, &frames_dir, frame_step)?;
-
-    Ok(CubeResult {
-        dimensions: [cols, rows, depth],
-        collapsed_path,
-        collapsed_median_path: collapsed_med_path,
-        frames_dir,
-        frame_count,
-        center_spectrum: spectrum,
-        wavelengths,
-        elapsed_ms: t0.elapsed().as_millis() as u64,
+        ((scaled.asinh() - lo) * inv).clamp(NORMALIZED_VALID_FLOOR, 1.0)
     })
 }
 
@@ -345,7 +116,7 @@ pub fn process_cube(
 mod tests {
     use super::*;
     use crate::core::imaging::region::test_support::make_header;
-    use crate::types::constants::PADDING_THRESHOLD;
+    use crate::core::imaging::stats::{is_padding, is_valid_pixel};
 
     #[test]
     fn normalize_with_global_keeps_pixels_below_median_visible() {
@@ -358,8 +129,9 @@ mod tests {
         let out = normalize_with_global(&data, &g);
 
         assert_eq!(out[[1, 2]], 0.0);
+        assert!(is_padding(out[[1, 2]]));
         for &v in out.iter().take(5) {
-            assert!(v > PADDING_THRESHOLD && v <= 1.0, "{}", v);
+            assert!(is_valid_pixel(v) && v > 0.0 && v <= 1.0, "{}", v);
         }
         assert!(out[[0, 0]] < out[[0, 1]]);
         assert!(out[[0, 1]] < out[[0, 2]]);
@@ -375,8 +147,17 @@ mod tests {
         let data = Array2::from_shape_vec((1, 2), vec![5.0, 7.0]).unwrap();
         let out = normalize_with_global(&data, &g);
         for &v in out.iter() {
-            assert!(v.is_finite() && v > PADDING_THRESHOLD && v <= 1.0, "{}", v);
+            assert!(v.is_finite() && is_valid_pixel(v) && v > 0.0 && v <= 1.0, "{}", v);
         }
+    }
+
+    #[test]
+    fn a_negative_valid_minimum_is_never_rendered_as_padding() {
+        let g = GlobalCubeStats { median: 0.0, sigma: 1.0, low: -5.0, high: 5.0 };
+        let data = Array2::from_shape_vec((1, 3), vec![-50.0, -5.0, f32::NEG_INFINITY]).unwrap();
+        let out = normalize_with_global(&data, &g);
+        assert!(is_valid_pixel(out[[0, 0]]) && is_valid_pixel(out[[0, 1]]), "{:?}", out);
+        assert!(is_padding(out[[0, 2]]));
     }
 
     #[test]
@@ -431,5 +212,32 @@ mod tests {
         assert!(c.is_spectral);
         assert!(c.axis_unit.is_none());
         assert!(!c.axis_unit_assumed);
+    }
+
+    #[test]
+    fn unit_letters_inside_other_units_and_channel_counts_do_not_make_a_cube_spectral() {
+        for unit in ["min", "ms", "arcsec", "s", "deg"] {
+            let header = make_header(&[("CTYPE3", "TIME"), ("CUNIT3", unit), ("CDELT3", "1.0")]);
+            let c = classify_spectral_cube(&header, 3);
+            assert!(!c.is_spectral, "CUNIT3='{}' read as spectral: {}", unit, c.reason);
+        }
+        let offsets = make_header(&[("CUNIT3", "arcsec"), ("CDELT3", "0.1")]);
+        assert!(!classify_spectral_cube(&offsets, 20).is_spectral);
+
+        let calints = make_header(&[("NINTS", "50"), ("INTSTART", "1"), ("BUNIT", "MJy/sr")]);
+        let c = classify_spectral_cube(&calints, 50);
+        assert!(!c.is_spectral, "{}", c.reason);
+        assert!(c.reason.contains("integrations"), "{}", c.reason);
+        let bare = make_header(&[]);
+        assert!(!classify_spectral_cube(&bare, 3000).is_spectral);
+
+        let angstrom = make_header(&[("CUNIT3", "Angstrom"), ("CDELT3", "1.25")]);
+        assert!(classify_spectral_cube(&angstrom, 3).is_spectral);
+        let a = make_header(&[("CUNIT3", "A"), ("CDELT3", "1.25")]);
+        assert!(classify_spectral_cube(&a, 3).is_spectral);
+        let freq = make_header(&[("CTYPE3", "FREQ-LSR")]);
+        assert!(classify_spectral_cube(&freq, 3).is_spectral);
+        let ramp = make_header(&[("CRVAL3", "1.0"), ("CDELT3", "1.0")]);
+        assert!(classify_spectral_cube(&ramp, 30).is_spectral);
     }
 }

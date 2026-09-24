@@ -6,6 +6,7 @@ import {
   Copy, Check, X, ClipboardCopy,
 } from "lucide-react";
 import type { ProcessedFile, HeaderData } from "../../shared/types";
+import { assignableChannel } from "../../utils/channelMapping";
 
 interface CategoryMeta {
   label: string;
@@ -384,8 +385,8 @@ function FilterDetectionBadge({
   detection: NonNullable<HeaderData["filter_detection"]>;
   onAssign?: (channel: string) => void;
 }) {
-  const ch = detection.hubble_channel;
-  const style = CHANNEL_STYLES[ch] || CHANNEL_STYLES.B;
+  const ch = assignableChannel(detection.hubble_channel);
+  const style = CHANNEL_STYLES[ch ?? "B"];
   const conf = CONFIDENCE_STYLES[detection.confidence] || CONFIDENCE_STYLES.Low;
 
   return (
@@ -396,7 +397,7 @@ function FilterDetectionBadge({
       <Sparkles size={12} style={{ color: style.text, flexShrink: 0 }} />
       <div className="flex-1 min-w-0">
         <div className="text-[11px] font-medium" style={{ color: style.text }}>
-          {detection.filter} → Channel {ch}
+          {ch ? `${detection.filter} → Channel ${ch}` : detection.filter}
         </div>
         <div className="text-[9px] text-zinc-500 font-mono truncate">
           {detection.matched_keyword}: {detection.matched_value}
@@ -408,7 +409,7 @@ function FilterDetectionBadge({
       >
         {detection.confidence}
       </span>
-      {onAssign && (
+      {onAssign && ch && (
         <button
           onClick={() => onAssign(ch)}
           className="text-[10px] font-medium px-3 py-1 rounded-md shrink-0 transition-all"

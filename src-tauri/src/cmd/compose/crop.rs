@@ -4,16 +4,32 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, output_stem, resolve_output_dir};
+use crate::cmd::common::{
+    blocking_cmd, cached_header, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir,
+    write_derived_fits, OutputValues,
+};
+use crate::core::imaging::cutout::{shift_header, CutoutRect};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
-use crate::infra::fits::writer::write_fits_mono;
+use crate::types::header::HduHeader;
 use crate::types::constants::{
     RES_PATHS, RES_CACHE_KEYS, RES_DIMENSIONS, RES_CROP_TOP, RES_CROP_BOTTOM,
     RES_CROP_LEFT, RES_CROP_RIGHT, RES_AUTO_DETECTED, RES_ELAPSED_MS,
 };
 
 const AUTO_THRESHOLD: f32 = 1e-6;
+const ABPROC_CROPPED: &str = "cropped";
+
+fn cropped_header(source: Option<&HduHeader>, top: usize, left: usize, dims: (usize, usize)) -> HduHeader {
+    let rect = CutoutRect { x0: left as i64, y0: top as i64, width: dims.1, height: dims.0 };
+    let shifted = source.map(|h| shift_header(h, &rect));
+    derived_output_header(shifted.as_ref(), ABPROC_CROPPED, OutputValues::Linear)
+}
+
+fn write_cropped(out_path: &str, cropped: &Array2<f32>, source_path: &str, top: usize, left: usize) -> anyhow::Result<()> {
+    let header = cropped_header(cached_header(source_path).ok().as_ref(), top, left, cropped.dim());
+    write_derived_fits(out_path, cropped, Some(&header))
+}
 
 fn detect_valid_region(arr: &Array2<f32>, threshold: f32) -> (usize, usize, usize, usize) {
     let (rows, cols) = arr.dim();
@@ -170,7 +186,7 @@ pub async fn crop_channels_cmd(
                 if write_disk {
                     let stem = output_stem(&paths[i]);
                     let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
-                    write_fits_mono(&out_path, &cropped, None)?;
+                    write_cropped(&out_path, &cropped, &paths[i], crop_top, crop_left)?;
                     out_paths.push(out_path);
                 } else {
                     out_paths.push(k);
@@ -179,7 +195,7 @@ pub async fn crop_channels_cmd(
                 let stem = output_stem(&paths[i]);
                 let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
                 resolve_output_dir(&output_dir)?;
-                write_fits_mono(&out_path, &cropped, None)?;
+                write_cropped(&out_path, &cropped, &paths[i], crop_top, crop_left)?;
 
                 let stats = compute_image_stats(&cropped);
                 GLOBAL_IMAGE_CACHE.insert_synthetic(&out_path, Arc::new(cropped), stats);
@@ -218,7 +234,60 @@ pub async fn crop_channels_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::manual_crop_bounds;
+    use super::*;
+    use crate::cmd::common::{load_cached_full, HEADER_ABPROC};
+    use crate::core::astrometry::wcs::WcsTransform;
+    use crate::infra::fits::writer::write_fits_mono;
+
+    fn card(header: &HduHeader, key: &str) -> Option<String> {
+        header.get(key).map(|v| v.trim().trim_matches('\'').trim().to_string())
+    }
+
+    #[tokio::test]
+    async fn a_cropped_file_keeps_the_source_header_with_the_wcs_moved_to_the_crop_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide.fits").to_str().unwrap().to_string();
+        let out = dir.path().join("out");
+        let mut header = HduHeader::empty();
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRVAL1", 150.0);
+        header.set_f64("CRVAL2", 2.0);
+        header.set_f64("CRPIX1", 20.0);
+        header.set_f64("CRPIX2", 30.0);
+        header.set_f64("CD1_1", -1e-5);
+        header.set_f64("CD2_2", 1e-5);
+        header.set("BUNIT", "MJy/sr".to_string());
+        header.set_f64("PHOTMJSR", 1.5);
+        header.set("FILTER", "F200W".to_string());
+        write_fits_mono(&src, &Array2::from_elem((40, 50), 5.0f32), Some(&header)).unwrap();
+
+        let res = crop_channels_cmd(vec![src.clone()], out.to_str().unwrap().to_string(), 2, 4, 3, 5, Some(false), None, None)
+            .await
+            .unwrap();
+        let path = res[RES_PATHS][0].as_str().unwrap().to_string();
+        let written = load_cached_full(&path).unwrap();
+        assert_eq!(written.arr().dim(), (34, 42));
+        let h = written.header().expect("header").clone();
+        assert!((h.get_f64("CRPIX1").unwrap() - 17.0).abs() < 1e-9, "CRPIX1 {:?}", h.get("CRPIX1"));
+        assert!((h.get_f64("CRPIX2").unwrap() - 28.0).abs() < 1e-9, "CRPIX2 {:?}", h.get("CRPIX2"));
+        assert_eq!(h.get_f64("LTV1"), Some(-3.0));
+        assert_eq!(h.get_f64("LTV2"), Some(-2.0));
+        assert_eq!(card(&h, "BUNIT").as_deref(), Some("MJy/sr"));
+        assert_eq!(h.get_f64("PHOTMJSR"), Some(1.5));
+        assert_eq!(card(&h, "FILTER").as_deref(), Some("F200W"));
+        assert_eq!(card(&h, HEADER_ABPROC).as_deref(), Some(ABPROC_CROPPED));
+
+        header.set("NAXIS1", "50".to_string());
+        header.set("NAXIS2", "40".to_string());
+        let parent = WcsTransform::from_header(&header).unwrap();
+        let cropped = WcsTransform::from_header(&h).unwrap();
+        for (x, y) in [(0.0, 0.0), (10.5, 20.25), (41.0, 33.0)] {
+            let a = parent.pixel_to_world(x + 3.0, y + 2.0);
+            let b = cropped.pixel_to_world(x, y);
+            assert!((a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12, "({x},{y}): {a:?} vs {b:?}");
+        }
+    }
 
     #[test]
     fn manual_crop_rejects_excessive_margins() {

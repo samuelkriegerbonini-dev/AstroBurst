@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use super::background::{apply_correction, solve_linear_system, BackgroundMode};
+use super::background::{apply_correction_with, solve_linear_system, BackgroundMode};
+use crate::core::imaging::stats::is_valid_pixel;
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::median_f32_mut;
 use crate::math::sigma_clipped_stats;
@@ -19,7 +20,6 @@ const COARSE_NODES_ALONG_SHORT_AXIS: usize = 256;
 const MIN_SAMPLES: usize = 4;
 const MIN_AUTO_CELL: usize = 4;
 const DUPLICATE_DISTANCE_PX: f64 = 1.0;
-const DIVIDE_FLOOR: f32 = 1e-10;
 const MIN_SAMPLE_WEIGHT: f64 = 1e-6;
 const PROGRESS_STAGES: u64 = 4;
 
@@ -78,7 +78,6 @@ pub struct DbeResult {
     pub rejected_count: usize,
     pub rms_residual: f64,
     pub elapsed_ms: u64,
-    pub spline: ThinPlateSpline,
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +277,7 @@ fn box_stats(image: &Array2<f32>, x: f64, y: f64, radius: usize) -> Option<BoxSt
     for yy in y0..=y1 {
         for xx in x0..=x1 {
             let v = image[[yy, xx]];
-            if v.is_finite() {
+            if is_valid_pixel(v) {
                 vals.push(v);
                 max = max.max(v as f64);
             }
@@ -392,29 +391,6 @@ fn evaluate_model(spline: &ThinPlateSpline, rows: usize, cols: usize) -> Array2<
     Array2::from_shape_vec((rows, cols), data).expect("model shape matches image")
 }
 
-fn correct(image: &Array2<f32>, model: &Array2<f32>, mode: &BackgroundMode, normalize: bool) -> Array2<f32> {
-    if normalize {
-        return apply_correction(image, model, mode);
-    }
-    let data: Vec<f32> = image
-        .as_slice()
-        .expect("contiguous image")
-        .par_iter()
-        .zip(model.as_slice().expect("contiguous model").par_iter())
-        .map(|(&img, &bg)| match mode {
-            BackgroundMode::Subtract => img - bg,
-            BackgroundMode::Divide => {
-                if bg > DIVIDE_FLOOR {
-                    img / bg
-                } else {
-                    img
-                }
-            }
-        })
-        .collect();
-    Array2::from_shape_vec(image.dim(), data).expect("corrected shape matches image")
-}
-
 fn check_cancelled(progress: Option<&ProgressHandle>) -> Result<()> {
     if let Some(p) = progress {
         if p.is_cancelled() {
@@ -512,7 +488,7 @@ pub fn extract_background_dbe(
         p.tick_with_stage("applying correction");
     }
 
-    let corrected = correct(image, &model, &cfg.mode, cfg.normalize);
+    let corrected = apply_correction_with(image, &model, &cfg.mode, cfg.normalize)?;
 
     let accepted: Vec<&DbeSample> = samples.iter().filter(|s| !s.rejected).collect();
     let sum_sq: f64 = accepted
@@ -538,7 +514,6 @@ pub fn extract_background_dbe(
         rejected_count,
         rms_residual,
         elapsed_ms: start.elapsed().as_millis() as u64,
-        spline,
     })
 }
 
@@ -652,10 +627,11 @@ mod tests {
         let res = extract_background_dbe(&image, &cfg, None).unwrap();
         assert_eq!(res.sample_count, 20);
         assert_eq!(res.rejected_count, 0);
+        let spline = fit_accepted(&res.samples, rows.max(cols) as f64, 0.0).unwrap();
         for s in &res.samples {
             assert!(!s.rejected);
             assert!(s.manual);
-            let at_centre = res.spline.evaluate(s.x, s.y);
+            let at_centre = spline.evaluate(s.x, s.y);
             assert!(
                 (at_centre - s.value).abs() < 1e-4,
                 "spline at ({}, {}) = {} but sample value is {}",
@@ -862,5 +838,40 @@ mod tests {
             ..DbeConfig::default()
         };
         assert!(extract_background_dbe(&tiny, &dense, None).is_err());
+    }
+
+    #[test]
+    fn zero_padded_band_is_rejected_as_non_finite_and_left_untouched() {
+        let rows = 400;
+        let cols = 600;
+        let band = 27;
+        let mut rng = Lcg(19);
+        let image = Array2::from_shape_fn((rows, cols), |(y, _)| {
+            let sky = (100.0 + 5.0 * rng.gaussian()) as f32;
+            if y < band { 0.0 } else { sky }
+        });
+        let res = extract_background_dbe(&image, &DbeConfig::default(), None).unwrap();
+        let top: Vec<&DbeSample> = res.samples.iter().filter(|s| s.y < band as f64).collect();
+        assert_eq!(top.len(), 10);
+        for s in &top {
+            assert!(s.rejected, "padded box at ({}, {}) accepted with value {}", s.x, s.y, s.value);
+            assert_eq!(s.reason, Some(REASON_FINITE), "padded box at ({}, {})", s.x, s.y);
+        }
+        assert!(res.corrected.slice(ndarray::s![0..band, ..]).iter().all(|&v| v == 0.0));
+        let mut below: Vec<f32> = res.corrected.slice(ndarray::s![band + 3..band + 60, ..]).iter().copied().collect();
+        let level = median_f32_mut(&mut below);
+        assert!((level - 100.0).abs() < 1.0, "sky under the band corrected to {}", level);
+    }
+
+    #[test]
+    fn divide_without_normalize_refuses_a_signed_model() {
+        let signed = Array2::from_shape_fn((96, 96), |(_, x)| -3.0 + 6.0 * x as f32 / 95.0 + 0.001);
+        let cfg = DbeConfig {
+            normalize: false,
+            mode: BackgroundMode::Divide,
+            ..DbeConfig::default()
+        };
+        let err = extract_background_dbe(&signed, &cfg, None).unwrap_err();
+        assert!(err.to_string().contains("Divide mode"), "{}", err);
     }
 }

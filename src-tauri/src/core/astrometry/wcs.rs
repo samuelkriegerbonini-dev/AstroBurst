@@ -4,7 +4,12 @@ use rayon::prelude::*;
 use serde_json::{Map, Number, Value};
 use wcs::{ImgXY, LonLat, WCSParams};
 
-use crate::types::header::HduHeader;
+use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
+use crate::types::header::{parse_fits_float, HduHeader};
+
+const J2000_EQUINOX: f64 = 2000.0;
+const EQUINOX_TOLERANCE_YEARS: f64 = 1e-3;
+const FK5_FIRST_EQUINOX: f64 = 1984.0;
 
 /// SIP distortion polynomial coefficients.
 ///
@@ -56,24 +61,6 @@ impl SipPoly {
         }
         sum
     }
-
-    pub fn terms(&self) -> &[(i32, i32, f64)] {
-        &self.terms
-    }
-}
-
-/// Legacy projection-code enum, retained for API stability.
-///
-/// The engine (wcs-rs) actually supports ~20 projections; `WcsTransform::raw_params()`
-/// returns the projection as a `&str` so codes beyond these four (e.g. "AIT", "ZEA")
-/// flow through correctly. This enum is kept only so existing callers matching on it
-/// keep compiling.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Projection {
-    Tan,
-    Sin,
-    Arc,
-    Car,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,25 +90,16 @@ impl std::fmt::Display for CelestialCoord {
     }
 }
 
-/// Funnels all pixel<->sky WCS math for the app through a single type. The linear
-/// (CD/PC/CDELT) transform and celestial projection/deprojection are delegated to
-/// the `wcs` crate (wcs-rs + mapproj); SIP distortion is applied by this wrapper
-/// itself (see `SipPoly`'s doc comment for why).
 #[derive(Debug)]
 pub struct WcsTransform {
-    /// Always constructed with any `-SIP` suffix stripped from CTYPE1/2, so its
-    /// internal (buggy) SIP path never engages -- see `SipPoly`.
     engine: wcs::WCS,
     crpix1: f64,
     crpix2: f64,
     crval1: f64,
     crval2: f64,
-    /// Effective CD matrix (from CD, or PC*CDELT, or CDELT+CROTA2 — same priority
-    /// and defaults wcs-rs itself uses) kept only for `pixel_scale_arcsec`/
-    /// `field_of_view`/`raw_params`; the engine does the actual coordinate math.
     cd: [[f64; 2]; 2],
-    /// CTYPE1 projection code (e.g. "TAN", "AIT"), parsed independently of wcs-rs's
-    /// stricter internal parsing so it's always populated for display/serialization.
+    cd_inv: [[f64; 2]; 2],
+    frame: SkyFrame,
     projection: String,
     sip_a: Option<SipPoly>,
     sip_b: Option<SipPoly>,
@@ -129,131 +107,27 @@ pub struct WcsTransform {
     sip_bp: Option<SipPoly>,
 }
 
-/// Returns true if `key` (already uppercased) is a FITS keyword forwarded to
-/// `wcs::WCSParams`. This is a whitelist, not a pass-through of the whole header:
-/// ASDF ingestion (`infra/asdf_bridge.rs`) injects arbitrary uppercased metadata
-/// cards into the header, and `serde_json::from_value::<WCSParams>` hard-fails the
-/// moment a string-valued card collides with a numeric field. Restricting to known
-/// WCSParams keys keeps the bridge total.
-fn is_wcs_param_key(key: &str) -> bool {
-    matches!(
-        key,
-        "NAXIS"
-            | "NAXIS1"
-            | "NAXIS2"
-            | "NAXIS3"
-            | "NAXIS4"
-            | "ZNAXIS1"
-            | "ZNAXIS2"
-            | "ZNAXIS3"
-            | "ZNAXIS4"
-            | "CRPIX1"
-            | "CRPIX2"
-            | "CRPIX3"
-            | "CRVAL1"
-            | "CRVAL2"
-            | "CRVAL3"
-            | "CDELT1"
-            | "CDELT2"
-            | "CDELT3"
-            | "CROTA1"
-            | "CROTA2"
-            | "CROTA3"
-            | "CTYPE1"
-            | "CTYPE2"
-            | "CTYPE3"
-            | "EPOCH"
-            | "EQUINOX"
-            | "RADESYS"
-            | "LONPOLE"
-            | "LATPOLE"
-            | "A_ORDER"
-            | "B_ORDER"
-            | "AP_ORDER"
-            | "BP_ORDER"
-    ) || is_matrix_key(key, "CD")
-        || is_matrix_key(key, "PC")
-        || key.starts_with("PV1_")
-        || key.starts_with("PV2_")
-        || is_sip_coeff_key(key, "AP_")
-        || is_sip_coeff_key(key, "BP_")
-        || is_sip_coeff_key(key, "A_")
-        || is_sip_coeff_key(key, "B_")
+fn is_projection_param_key(key: &str) -> bool {
+    matches!(key, "LONPOLE" | "LATPOLE")
+        || key
+            .strip_prefix("PV1_")
+            .or_else(|| key.strip_prefix("PV2_"))
+            .is_some_and(|m| m.parse::<u32>().is_ok())
 }
 
-/// Matches e.g. `CD1_1`..`CD3_3` / `PC1_1`..`PC3_3`: prefix + digit + '_' + digit.
-fn is_matrix_key(key: &str, prefix: &str) -> bool {
-    let bytes = key.as_bytes();
-    key.len() == prefix.len() + 3
-        && key.starts_with(prefix)
-        && bytes[prefix.len()].is_ascii_digit()
-        && bytes[prefix.len() + 1] == b'_'
-        && bytes[prefix.len() + 2].is_ascii_digit()
-}
-
-/// Matches e.g. `A_2_0`, `AP_1_3`: prefix + digit + '_' + digit (excludes `*_ORDER`,
-/// matched separately above; note this must be checked against the `AP_`/`BP_`
-/// prefixes before `A_`/`B_` since e.g. "AP_1_0" also starts with "A"... but not "A_").
-fn is_sip_coeff_key(key: &str, prefix: &str) -> bool {
-    let rest = match key.strip_prefix(prefix) {
-        Some(r) => r,
-        None => return false,
-    };
-    let mut parts = rest.split('_');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(p), Some(q), None) => p.parse::<u32>().is_ok() && q.parse::<u32>().is_ok(),
-        _ => false,
-    }
-}
-
-/// Coerces a raw FITS card string into the JSON representation `WCSParams` needs
-/// for `key`, and inserts it into `map`. Non-numeric values for numeric-only keys
-/// are dropped rather than forwarded as strings (a stray unparsable value should
-/// fall back to `WCSParams`' own `Option::None` default, not fail deserialization).
-fn insert_wcs_card(map: &mut Map<String, Value>, key: &str, raw: &str) {
+fn insert_numeric_card(map: &mut Map<String, Value>, key: &str, raw: &str) {
     let trimmed = raw.trim().trim_matches('\'').trim();
-
-    let is_string_key = matches!(key, "CTYPE1" | "CTYPE2" | "CTYPE3" | "RADESYS");
-    let is_int_key = matches!(
-        key,
-        "NAXIS" | "NAXIS1" | "NAXIS2" | "NAXIS3" | "NAXIS4"
-            | "ZNAXIS1" | "ZNAXIS2" | "ZNAXIS3" | "ZNAXIS4"
-            | "A_ORDER" | "B_ORDER" | "AP_ORDER" | "BP_ORDER"
-    );
-
-    if is_string_key {
-        map.insert(key.to_string(), Value::String(trimmed.to_string()));
-        return;
-    }
-
-    if is_int_key {
-        if let Ok(i) = trimmed.parse::<i64>() {
-            map.insert(key.to_string(), Value::Number(i.into()));
-        } else if let Ok(f) = trimmed.parse::<f64>() {
-            map.insert(key.to_string(), Value::Number((f.round() as i64).into()));
-        }
-        return;
-    }
-
-    if let Ok(f) = trimmed.parse::<f64>() {
-        if let Some(n) = Number::from_f64(f) {
-            map.insert(key.to_string(), Value::Number(n));
-        }
+    if let Some(n) = parse_fits_float(trimmed).and_then(Number::from_f64) {
+        map.insert(key.to_string(), Value::Number(n));
     }
 }
 
-/// Parses the CTYPE1 projection code the same lenient way the old hand-rolled
-/// code did (last '-'-separated segment, with any "-SIP" suffix stripped first),
-/// but returns the raw string rather than mapping onto a 4-variant enum — so
-/// `raw_params()` correctly reports any of wcs-rs's ~20 supported codes.
-fn projection_code(ctype1: &str) -> String {
-    let base = ctype1.trim().trim_end_matches("-SIP");
-    base.rsplit('-').next().unwrap_or("TAN").to_string()
+fn number(value: f64) -> Result<Value> {
+    Number::from_f64(value)
+        .map(Value::Number)
+        .context("Non-finite WCS parameter")
 }
 
-/// Synthesizes the effective CD matrix used for `pixel_scale_arcsec`/`field_of_view`,
-/// mirroring wcs-rs's own construction priority and defaults exactly (CD > PC+CDELT
-/// > CDELT+CROTA2) so these numbers stay consistent with what the engine transforms.
 fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
     let cd11 = header.get_f64("CD1_1");
     let cd12 = header.get_f64("CD1_2");
@@ -273,13 +147,9 @@ fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
     if pc11.is_some() || pc12.is_some() || pc21.is_some() || pc22.is_some() {
         let cdelt1 = header.get_f64("CDELT1").unwrap_or(1.0);
         let cdelt2 = header.get_f64("CDELT2").unwrap_or(1.0);
-        let pc11 = pc11.unwrap_or(1.0);
-        let pc12 = pc12.unwrap_or(0.0);
-        let pc21 = pc21.unwrap_or(0.0);
-        let pc22 = pc22.unwrap_or(1.0);
         return Ok([
-            [pc11 * cdelt1, pc12 * cdelt2],
-            [pc21 * cdelt1, pc22 * cdelt2],
+            [cdelt1 * pc11.unwrap_or(1.0), cdelt1 * pc12.unwrap_or(0.0)],
+            [cdelt2 * pc21.unwrap_or(0.0), cdelt2 * pc22.unwrap_or(1.0)],
         ]);
     }
 
@@ -290,13 +160,96 @@ fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
         .get_f64("CDELT2")
         .context("Missing CD matrix, PC matrix, and CDELT2")?;
     let crota2 = header.get_f64("CROTA2").unwrap_or(0.0);
-    let theta = crota2.to_radians();
-    let (sin_t, cos_t) = theta.sin_cos();
+    let (sin_t, cos_t) = crota2.to_radians().sin_cos();
 
     Ok([
         [cdelt1 * cos_t, -cdelt2 * sin_t],
         [cdelt1 * sin_t, cdelt2 * cos_t],
     ])
+}
+
+fn invert_cd(cd: &[[f64; 2]; 2]) -> Result<[[f64; 2]; 2]> {
+    let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
+    if !det.is_finite() || det.abs() < 1e-30 {
+        bail!("Singular or non-finite CD matrix");
+    }
+    Ok([
+        [cd[1][1] / det, -cd[0][1] / det],
+        [-cd[1][0] / det, cd[0][0] / det],
+    ])
+}
+
+#[inline]
+fn apply_linear(m: &[[f64; 2]; 2], a: f64, b: f64) -> (f64, f64) {
+    (m[0][0] * a + m[0][1] * b, m[1][0] * a + m[1][1] * b)
+}
+
+fn header_string(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|v| v.trim().trim_matches('\'').trim().to_ascii_uppercase())
+        .filter(|v| !v.is_empty())
+}
+
+fn is_j2000(equinox: f64) -> bool {
+    (equinox - J2000_EQUINOX).abs() <= EQUINOX_TOLERANCE_YEARS
+}
+
+fn equatorial_frame(header: &HduHeader) -> Result<SkyFrame> {
+    let equinox = header.get_f64("EQUINOX").filter(|v| v.is_finite());
+    let radesys = header_string(header, "RADESYS").or_else(|| header_string(header, "RADECSYS"));
+    match radesys.as_deref() {
+        Some("ICRS") => Ok(SkyFrame::Icrs),
+        Some("FK5") => match equinox {
+            Some(eq) if !is_j2000(eq) => {
+                bail!("FK5 coordinates of equinox {eq} are not supported; only J2000 is")
+            }
+            _ => Ok(SkyFrame::Icrs),
+        },
+        Some(other) => bail!(
+            "RADESYS '{other}' is not supported; only ICRS and FK5 J2000 celestial coordinates are"
+        ),
+        None => {
+            let legacy = header
+                .get_f64("EPOCH")
+                .filter(|v| v.is_finite() && *v < FK5_FIRST_EQUINOX);
+            match equinox.or(legacy) {
+                Some(eq) if eq < FK5_FIRST_EQUINOX => bail!(
+                    "equinox {eq} without RADESYS means FK4 (B1950-style) coordinates, which are not supported"
+                ),
+                Some(eq) if !is_j2000(eq) => {
+                    bail!("FK5 coordinates of equinox {eq} are not supported; only J2000 is")
+                }
+                _ => Ok(SkyFrame::Icrs),
+            }
+        }
+    }
+}
+
+fn celestial_frame(header: &HduHeader, axis_type: &str) -> Result<SkyFrame> {
+    match axis_type {
+        "RA" => equatorial_frame(header),
+        "GLON" => Ok(SkyFrame::Galactic),
+        "ELON" => match header.get_f64("EQUINOX").filter(|v| v.is_finite()) {
+            Some(eq) if !is_j2000(eq) => {
+                bail!("ecliptic coordinates of equinox {eq} are not supported; only J2000 is")
+            }
+            _ => Ok(SkyFrame::EclipticJ2000),
+        },
+        other => bail!(
+            "CTYPE1 axis '{other}' is not a supported celestial longitude (RA, GLON or ELON)"
+        ),
+    }
+}
+
+pub fn pixel_center(naxis1: usize, naxis2: usize) -> (f64, f64) {
+    ((naxis1 as f64 - 1.0) / 2.0, (naxis2 as f64 - 1.0) / 2.0)
+}
+
+pub fn pixel_edge_corners(naxis1: usize, naxis2: usize) -> [(f64, f64); 4] {
+    let right = naxis1 as f64 - 0.5;
+    let top = naxis2 as f64 - 0.5;
+    [(-0.5, -0.5), (right, -0.5), (right, top), (-0.5, top)]
 }
 
 impl WcsTransform {
@@ -310,23 +263,19 @@ impl WcsTransform {
         }
 
         let cd = read_effective_cd(header)?;
-        let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
-        if !det.is_finite() || det.abs() < 1e-30 {
-            bail!("Singular or non-finite CD matrix");
-        }
+        let cd_inv = invert_cd(&cd)?;
 
-        // wcs-rs slices CTYPE1[5..=7] internally to find the projection code
-        // without bounds-checking; guard the minimum FITS-standard length here so
-        // a malformed header returns an error instead of panicking (this crate's
-        // release profile uses `panic = "abort"`, which would kill the whole app).
-        let ctype1 = header.get("CTYPE1").unwrap_or("RA---TAN").trim();
-        if ctype1.len() < 8 {
+        let ctype1_raw = header.get("CTYPE1").unwrap_or("RA---TAN").trim();
+        let ctype1 = ctype1_raw.trim_end_matches("-SIP");
+        if !ctype1.is_ascii() || ctype1.len() < 8 {
             bail!(
-                "CTYPE1 '{}' is shorter than the minimum 8-character FITS WCS keyword",
-                ctype1
+                "CTYPE1 '{}' is not an 8-character ASCII FITS celestial axis type",
+                ctype1_raw
             );
         }
-        let projection = projection_code(ctype1);
+        let axis_type = ctype1[..4].trim_end_matches('-').to_ascii_uppercase();
+        let projection = ctype1[5..8].to_ascii_uppercase();
+        let frame = celestial_frame(header, &axis_type)?;
 
         let naxis1 = header.get_i64("NAXIS1").context("Missing NAXIS1")?;
         let naxis2 = header.get_i64("NAXIS2").context("Missing NAXIS2")?;
@@ -334,30 +283,23 @@ impl WcsTransform {
         let mut map: Map<String, Value> = Map::new();
         for (key, val) in &header.cards {
             let ku = key.to_uppercase();
-            if is_wcs_param_key(&ku) {
-                insert_wcs_card(&mut map, &ku, val);
+            if is_projection_param_key(&ku) {
+                insert_numeric_card(&mut map, &ku, val);
             }
         }
-        // WcsTransform only ever does 2D celestial pix<->sky (matching today's
-        // behavior of ignoring any 3rd axis), so force NAXIS=2 regardless of the
-        // file's real dimensionality (e.g. a data cube's NAXIS=3).
         map.insert("NAXIS".into(), Value::Number(2.into()));
         map.insert("NAXIS1".into(), Value::Number(naxis1.into()));
         map.insert("NAXIS2".into(), Value::Number(naxis2.into()));
-        // Always strip any "-SIP" suffix before handing CTYPE to the engine: SIP
-        // is applied by this wrapper, never by wcs-rs (see `SipPoly`'s doc comment
-        // for why). This also means A_/B_/AP_/BP_ keys forwarded into `map` above
-        // are harmless no-ops as far as the engine is concerned.
-        map.insert(
-            "CTYPE1".into(),
-            Value::String(ctype1.trim_end_matches("-SIP").to_string()),
-        );
-        if let Some(ctype2) = header.get("CTYPE2") {
-            map.insert(
-                "CTYPE2".into(),
-                Value::String(ctype2.trim().trim_end_matches("-SIP").to_string()),
-            );
-        }
+        map.insert("CTYPE1".into(), Value::String(format!("RA---{projection}")));
+        map.insert("CTYPE2".into(), Value::String(format!("DEC--{projection}")));
+        map.insert("CRVAL1".into(), number(crval1)?);
+        map.insert("CRVAL2".into(), number(crval2)?);
+        map.insert("CRPIX1".into(), number(0.0)?);
+        map.insert("CRPIX2".into(), number(0.0)?);
+        map.insert("CD1_1".into(), number(1.0)?);
+        map.insert("CD1_2".into(), number(0.0)?);
+        map.insert("CD2_1".into(), number(0.0)?);
+        map.insert("CD2_2".into(), number(1.0)?);
 
         let params: WCSParams = serde_json::from_value(Value::Object(map))
             .context("Building WCSParams from header")?;
@@ -371,6 +313,8 @@ impl WcsTransform {
             crval1,
             crval2,
             cd,
+            cd_inv,
+            frame,
             projection,
             sip_a: SipPoly::parse(header, "A"),
             sip_b: SipPoly::parse(header, "B"),
@@ -434,25 +378,17 @@ impl WcsTransform {
         )
     }
 
-    /// Pixel-to-sky. `x`/`y` are 0-based image-array pixel coordinates; wcs-rs uses
-    /// the FITS 1-based convention (`ImgXY == CRPIX` maps to `CRVAL`), hence `+1.0`.
-    /// SIP (if any) is applied here, in image space, before handing the corrected
-    /// position to the engine -- the engine's own CTYPE never carries a `-SIP`
-    /// suffix (see `SipPoly`'s doc comment), so its `dx = xy.x - crpix1` recovers
-    /// our already-corrected `u` unchanged when we pass `ImgXY::new(u + crpix1, ...)`.
     pub fn pixel_to_world(&self, x: f64, y: f64) -> CelestialCoord {
         let dx = x - self.crpix1 + 1.0;
         let dy = y - self.crpix2 + 1.0;
         let (u, v) = self.sip_forward(dx, dy);
+        let (ix, iy) = apply_linear(&self.cd, u, v);
 
-        match self
-            .engine
-            .unproj(&ImgXY::new(u + self.crpix1, v + self.crpix2))
-        {
-            Some(ll) => CelestialCoord {
-                ra: ll.lon().to_degrees().rem_euclid(360.0),
-                dec: ll.lat().to_degrees(),
-            },
+        match self.engine.unproj(&ImgXY::new(ix, iy)) {
+            Some(ll) => {
+                let (ra, dec) = convert_to_icrs(self.frame, ll.lon().to_degrees(), ll.lat().to_degrees());
+                CelestialCoord { ra, dec }
+            }
             None => CelestialCoord {
                 ra: f64::NAN,
                 dec: f64::NAN,
@@ -460,14 +396,14 @@ impl WcsTransform {
         }
     }
 
-    /// Sky-to-pixel. Returns 0-based image-array pixel coordinates (see
-    /// `pixel_to_world`). Inverts SIP (if any) on the engine's purely-linear result.
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> (f64, f64) {
-        let ll = LonLat::new(ra.to_radians(), dec.to_radians());
-        match self.engine.proj(&ll) {
+        let (lon, lat) = match self.frame {
+            SkyFrame::Icrs => (ra, dec),
+            frame => convert_from_icrs(frame, ra, dec),
+        };
+        match self.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())) {
             Some(xy) => {
-                let u_lin = xy.x() - self.crpix1;
-                let v_lin = xy.y() - self.crpix2;
+                let (u_lin, v_lin) = apply_linear(&self.cd_inv, xy.x(), xy.y());
                 let (dx, dy) = self.sip_inverse(u_lin, v_lin);
                 (dx + self.crpix1 - 1.0, dy + self.crpix2 - 1.0)
             }
@@ -540,7 +476,7 @@ mod tests {
             index.insert(k.to_string(), v.to_string());
             cards.push((k.to_string(), v.to_string()));
         }
-        HduHeader { cards, index }
+        HduHeader { cards, index, string_keys: None }
     }
 
     #[test]
@@ -858,11 +794,6 @@ mod tests {
 
     #[test]
     fn test_pc_matrix_is_honored() {
-        // The old hand-rolled `read_cd_matrix` only ever read CD1_1.. or fell back
-        // to CDELT+CROTA2 -- it silently ignored the PC matrix entirely (a real bug
-        // for ASDF/Roman-derived headers, which emit PC + CDELT, never CD). wcs-rs
-        // honors PC; assert a non-identity PC matrix actually changes the result
-        // versus the CDELT-only (PC-less) fallback, locking the fix in.
         let cdelt1 = "-0.0005";
         let cdelt2 = "0.0005";
         let with_pc = make_header(&[
@@ -1074,55 +1005,252 @@ mod tests {
         }
     }
 
-    /// End-to-end check against the repo's real test fixture (a JWST-style header:
-    /// PC matrix + CDELT, no CD; order-3 SIP with a real fitted AP/BP inverse) --
-    /// exactly the combination most at risk in this migration (PC handling, SIP
-    /// correctness). `#[ignore]`d since it depends on a filesystem path outside
-    /// this crate rather than an inline fixture like the tests above; run
-    /// explicitly with `cargo test -- --ignored`.
     #[test]
-    #[ignore = "depends on the repo-relative test_data/test.fits fixture; run explicitly"]
-    fn test_real_fixture_end_to_end() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_data/test.fits");
-        let file = std::fs::File::open(path).expect("open test.fits");
-        let result = crate::infra::fits::reader::extract_image_mmap(&file).expect("extract");
-        let wcs = WcsTransform::from_header(&result.header).expect("from_header");
+    fn pc_cdelt_sip_header_matches_the_astropy_goldens_in_both_directions() {
+        let wcs = WcsTransform::from_header(&make_header(&[
+            ("NAXIS1", "2048"),
+            ("NAXIS2", "2048"),
+            ("CRPIX1", "1024.0"),
+            ("CRPIX2", "1024.0"),
+            ("CRVAL1", "83.633"),
+            ("CRVAL2", "22.014"),
+            ("CDELT1", "-1.3889e-04"),
+            ("CDELT2", "5.5556e-04"),
+            ("PC1_1", "2.0"),
+            ("PC1_2", "0.0"),
+            ("PC2_1", "0.0"),
+            ("PC2_2", "0.5"),
+            ("CTYPE1", "RA---TAN-SIP"),
+            ("CTYPE2", "DEC--TAN-SIP"),
+            ("A_ORDER", "2"),
+            ("A_2_0", "2.5e-06"),
+            ("A_0_2", "1.2e-06"),
+            ("A_1_1", "-1.5e-06"),
+            ("B_ORDER", "2"),
+            ("B_2_0", "-1.1e-06"),
+            ("B_0_2", "2.2e-06"),
+            ("B_1_1", "0.9e-06"),
+        ]))
+        .unwrap();
+        assert_eq!(wcs.raw_params().4, [[-2.7778e-04, 0.0], [0.0, 2.7778e-04]]);
+        assert!(wcs.sip_forward_terms().0.is_some() && wcs.sip_forward_terms().1.is_some());
+        let reference = wcs.pixel_to_world(1023.0, 1023.0);
+        assert!((reference.ra - 83.633).abs() < 1e-8 && (reference.dec - 22.014).abs() < 1e-8, "{reference:?}");
 
-        let naxis1 = result.header.get_i64("NAXIS1").unwrap();
-        let naxis2 = result.header.get_i64("NAXIS2").unwrap();
-        eprintln!("naxis: {naxis1} x {naxis2}");
-
-        for &(x, y) in &[
-            (0.0, 0.0),
-            (naxis1 as f64 / 2.0, naxis2 as f64 / 2.0),
-            (naxis1 as f64 - 1.0, naxis2 as f64 - 1.0),
+        for (x, y, ra, dec) in [
+            (0.0, 0.0, 83.93821282879065, 21.730135195227888),
+            (2047.0, 2047.0, 83.32487606396182, 22.298736055023593),
+            (100.0, 1900.0, 83.90874726902706, 22.25738633082282),
         ] {
-            let coord = wcs.pixel_to_world(x, y);
-            let (px, py) = wcs.world_to_pixel(coord.ra, coord.dec);
-            eprintln!(
-                "px=({x},{y}) -> ra={:.8} dec={:.8} -> roundtrip=({:.4},{:.4}) [{}]",
-                coord.ra,
-                coord.dec,
-                px,
-                py,
-                coord.ra.is_finite() && coord.dec.is_finite()
+            let got = wcs.pixel_to_world(x, y);
+            assert!(
+                (got.ra - ra).abs() < 1e-8 && (got.dec - dec).abs() < 1e-8,
+                "({x},{y}): got ({},{}) want ({ra},{dec})",
+                got.ra,
+                got.dec
             );
-            assert!(coord.ra.is_finite() && coord.dec.is_finite());
-            // Real AP/BP coefficients are only an approximate fitted inverse (not
-            // exact like the synthetic test headers above), so this is looser than
-            // the synthetic-header tolerances -- just confirming it's in the right
-            // ballpark, not analytically exact.
-            assert!((px - x).abs() < 2.0, "px roundtrip off at ({x},{y}): got {px}");
-            assert!((py - y).abs() < 2.0, "py roundtrip off at ({x},{y}): got {py}");
+            let (px, py) = wcs.world_to_pixel(ra, dec);
+            assert!(
+                (px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX,
+                "({ra},{dec}) -> ({px},{py}) want ({x},{y})"
+            );
         }
-
-        eprintln!("pixel_scale_arcsec = {}", wcs.pixel_scale_arcsec());
-        eprintln!("raw_params = {:?}", wcs.raw_params());
     }
 
     #[test]
-    fn test_known_mapproj_bug_rotated_cd_matrix_roundtrip_error() {
-        let h = make_header(&[
+    fn projection_cards_accept_the_fortran_d_exponent() {
+        for (ctype1, ctype2, key, d_value, e_value) in [
+            ("RA---TAN", "DEC--TAN", "LONPOLE", "1.7D+02", "170.0"),
+            ("RA---AZP", "DEC--AZP", "PV2_1", "2.0D-01", "0.2"),
+        ] {
+            let transform = |value: Option<&str>| {
+                let mut cards = vec![
+                    ("NAXIS1", "200"),
+                    ("NAXIS2", "200"),
+                    ("CRPIX1", "100.5"),
+                    ("CRPIX2", "100.5"),
+                    ("CRVAL1", "150.0"),
+                    ("CRVAL2", "30.0"),
+                    ("CDELT1", "-0.05"),
+                    ("CDELT2", "0.05"),
+                    ("CTYPE1", ctype1),
+                    ("CTYPE2", ctype2),
+                ];
+                cards.extend(value.map(|v| (key, v)));
+                WcsTransform::from_header(&make_header(&cards)).unwrap()
+            };
+            let fortran = transform(Some(d_value)).pixel_to_world(10.0, 190.0);
+            let decimal = transform(Some(e_value)).pixel_to_world(10.0, 190.0);
+            let absent = transform(None).pixel_to_world(10.0, 190.0);
+            assert!(
+                (fortran.ra - decimal.ra).abs() < 1e-12 && (fortran.dec - decimal.dec).abs() < 1e-12,
+                "{key} = {d_value}: {fortran:?} vs {decimal:?}"
+            );
+            assert!(
+                (decimal.ra - absent.ra).abs() + (decimal.dec - absent.dec).abs() > 1e-6,
+                "{key} must change the transform: {decimal:?} vs {absent:?}"
+            );
+        }
+    }
+
+    const ROUND_TRIP_TOL_PX: f64 = 1e-6;
+    const ORACLE_TOL_DEG: f64 = 1e-9;
+
+    fn tan_oracle(cd: [[f64; 2]; 2], crpix: (f64, f64), crval: (f64, f64), x: f64, y: f64) -> (f64, f64) {
+        let dx = x + 1.0 - crpix.0;
+        let dy = y + 1.0 - crpix.1;
+        let xi = (cd[0][0] * dx + cd[0][1] * dy).to_radians();
+        let eta = (cd[1][0] * dx + cd[1][1] * dy).to_radians();
+        let (a0, d0) = (crval.0.to_radians(), crval.1.to_radians());
+        let denom = d0.cos() - eta * d0.sin();
+        let ra = a0 + xi.atan2(denom);
+        let dec = (d0.sin() + eta * d0.cos()).atan2((xi * xi + denom * denom).sqrt());
+        (ra.to_degrees().rem_euclid(360.0), dec.to_degrees())
+    }
+
+    fn sci(v: f64) -> String {
+        format!("{v:.17e}")
+    }
+
+    fn tan_header(cards: &[(&str, String)]) -> HduHeader {
+        let mut pairs: Vec<(&str, &str)> = vec![("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN")];
+        pairs.extend(cards.iter().map(|(k, v)| (*k, v.as_str())));
+        make_header(&pairs)
+    }
+
+    fn cd_cards(size: usize, crpix: f64, crval: (f64, f64), cd: [[f64; 2]; 2]) -> Vec<(&'static str, String)> {
+        vec![
+            ("NAXIS1", size.to_string()),
+            ("NAXIS2", size.to_string()),
+            ("CRPIX1", sci(crpix)),
+            ("CRPIX2", sci(crpix)),
+            ("CRVAL1", sci(crval.0)),
+            ("CRVAL2", sci(crval.1)),
+            ("CD1_1", sci(cd[0][0])),
+            ("CD1_2", sci(cd[0][1])),
+            ("CD2_1", sci(cd[1][0])),
+            ("CD2_2", sci(cd[1][1])),
+        ]
+    }
+
+    fn probe_points(size: usize) -> Vec<(f64, f64)> {
+        let n = size as f64 - 1.0;
+        vec![(0.0, 0.0), (n, 0.0), (0.0, n), (n, n), (0.3 * n, 0.8 * n), (0.5 * n, 0.5 * n)]
+    }
+
+    fn max_round_trip_error(wcs: &WcsTransform, points: &[(f64, f64)]) -> f64 {
+        points.iter().fold(0.0_f64, |acc, &(x, y)| {
+            let c = wcs.pixel_to_world(x, y);
+            let (px, py) = wcs.world_to_pixel(c.ra, c.dec);
+            acc.max((px - x).abs()).max((py - y).abs())
+        })
+    }
+
+    fn deg_rot(theta_deg: f64) -> (f64, f64) {
+        theta_deg.to_radians().sin_cos()
+    }
+
+    #[test]
+    fn tan_oracle_agrees_with_the_astropy_goldens() {
+        let tan_cd = [[-7.27778e-05, 0.0], [0.0, 7.27778e-05]];
+        for (x, y, ra, dec) in [
+            (0.0, 0.0, 83.71326444289475, 21.939528868238998),
+            (2047.0, 2047.0, 83.55257259192761, 22.08850475617715),
+            (300.0, 1700.0, 83.68977604406483, 22.063260765585806),
+        ] {
+            let (r, d) = tan_oracle(tan_cd, (1024.0, 1024.0), (83.633, 22.014), x, y);
+            assert!((r - ra).abs() < 1e-8 && (d - dec).abs() < 1e-8, "tan_cd ({x},{y}) -> ({r},{d})");
+        }
+        let pc_cd = [[-0.0005 * 0.98, -0.0005 * 0.05], [0.0005 * -0.03, 0.0005 * 0.99]];
+        for (x, y, ra, dec) in [
+            (0.0, 0.0, 150.30312472777297, 29.75437601817845),
+            (1023.0, 1023.0, 149.69477557201301, 30.245404726187203),
+            (700.0, 300.0, 149.8992632313001, 29.89268186218835),
+        ] {
+            let (r, d) = tan_oracle(pc_cd, (512.0, 512.0), (150.0, 30.0), x, y);
+            assert!((r - ra).abs() < 1e-8 && (d - dec).abs() < 1e-8, "pc ({x},{y}) -> ({r},{d})");
+        }
+    }
+
+    #[test]
+    fn world_to_pixel_inverts_a_mirrored_rotated_cd() {
+        let s = 0.5 / 3600.0;
+        let (sn, cs) = deg_rot(30.0);
+        let cd = [[s * cs, -s * sn], [s * sn, s * cs]];
+        assert!(cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0] > 0.0);
+        let crval = (210.0, 54.0);
+        let wcs = WcsTransform::from_header(&tan_header(&cd_cards(4096, 2048.5, crval, cd))).unwrap();
+
+        let points = probe_points(4096);
+        let err = max_round_trip_error(&wcs, &points);
+        assert!(err < ROUND_TRIP_TOL_PX, "det>0 rotated CD round trip off by {err} px");
+
+        for &(x, y) in &points {
+            let (ra, dec) = tan_oracle(cd, (2048.5, 2048.5), crval, x, y);
+            let got = wcs.pixel_to_world(x, y);
+            assert!((got.ra - ra).abs() < ORACLE_TOL_DEG && (got.dec - dec).abs() < ORACLE_TOL_DEG, "({x},{y})");
+            let (px, py) = wcs.world_to_pixel(ra, dec);
+            assert!((px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX, "({x},{y}) -> ({px},{py})");
+        }
+    }
+
+    #[test]
+    fn world_to_pixel_inverts_an_anisotropic_cd() {
+        let s = 0.2 / 3600.0;
+        let (sn, cs) = deg_rot(45.0);
+        let cd = [[-s * cs, -1.01 * s * sn], [-s * sn, 1.01 * s * cs]];
+        let crval = (35.5, -12.25);
+        let wcs = WcsTransform::from_header(&tan_header(&cd_cards(4096, 2048.5, crval, cd))).unwrap();
+
+        let points = probe_points(4096);
+        let err = max_round_trip_error(&wcs, &points);
+        assert!(err < ROUND_TRIP_TOL_PX, "anisotropic CD round trip off by {err} px");
+        for &(x, y) in &points {
+            let (ra, dec) = tan_oracle(cd, (2048.5, 2048.5), crval, x, y);
+            let (px, py) = wcs.world_to_pixel(ra, dec);
+            assert!((px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX, "({x},{y}) -> ({px},{py})");
+        }
+    }
+
+    #[test]
+    fn world_to_pixel_inverts_a_resampled_jwst_like_pc_header() {
+        let cdelt = 8.6737e-06;
+        let (sn, cs) = deg_rot(20.0);
+        let (sx, sy) = (1.0, 1.25);
+        let pc = [[-cs * sx, sn * sy], [sn * sx, cs * sy]];
+        let crval = (53.16, -27.78);
+        let h = tan_header(&[
+            ("NAXIS1", "2048".to_string()),
+            ("NAXIS2", "2048".to_string()),
+            ("CRPIX1", sci(1024.5)),
+            ("CRPIX2", sci(1024.5)),
+            ("CRVAL1", sci(crval.0)),
+            ("CRVAL2", sci(crval.1)),
+            ("CDELT1", sci(cdelt)),
+            ("CDELT2", sci(cdelt)),
+            ("PC1_1", sci(pc[0][0])),
+            ("PC1_2", sci(pc[0][1])),
+            ("PC2_1", sci(pc[1][0])),
+            ("PC2_2", sci(pc[1][1])),
+        ]);
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        let cd = [[cdelt * pc[0][0], cdelt * pc[0][1]], [cdelt * pc[1][0], cdelt * pc[1][1]]];
+
+        let points = probe_points(2048);
+        let err = max_round_trip_error(&wcs, &points);
+        assert!(err < ROUND_TRIP_TOL_PX, "JWST-like PC round trip off by {err} px");
+        for &(x, y) in &points {
+            let (ra, dec) = tan_oracle(cd, (1024.5, 1024.5), crval, x, y);
+            let got = wcs.pixel_to_world(x, y);
+            assert!((got.ra - ra).abs() < ORACLE_TOL_DEG && (got.dec - dec).abs() < ORACLE_TOL_DEG, "({x},{y})");
+            let (px, py) = wcs.world_to_pixel(ra, dec);
+            assert!((px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX, "({x},{y}) -> ({px},{py})");
+        }
+    }
+
+    #[test]
+    fn world_to_pixel_round_trips_the_skewed_hst_cd_and_the_oracle_pc_header() {
+        let hst = make_header(&[
             ("NAXIS1", "1600"),
             ("NAXIS2", "1600"),
             ("CRPIX1", "386.5"),
@@ -1136,18 +1264,219 @@ mod tests {
             ("CTYPE1", "RA---TAN"),
             ("CTYPE2", "DEC--TAN"),
         ]);
-        let wcs = WcsTransform::from_header(&h).unwrap();
+        let wcs = WcsTransform::from_header(&hst).unwrap();
+        let err = max_round_trip_error(&wcs, &[(3.0, 3.0), (100.0, 100.0), (800.0, 800.0), (0.0, 1599.0), (1599.0, 1599.0)]);
+        assert!(err < ROUND_TRIP_TOL_PX, "skewed HST CD round trip off by {err} px");
 
-        let mut max_err = 0.0_f64;
-        for &(x, y) in &[(3.0, 3.0), (100.0, 100.0), (800.0, 800.0)] {
-            let coord = wcs.pixel_to_world(x, y);
-            let (px, py) = wcs.world_to_pixel(coord.ra, coord.dec);
-            max_err = max_err.max((px - x).abs()).max((py - y).abs());
+        let pc = make_header(&[
+            ("NAXIS1", "1024"),
+            ("NAXIS2", "1024"),
+            ("CRPIX1", "512.0"),
+            ("CRPIX2", "512.0"),
+            ("CRVAL1", "150.0"),
+            ("CRVAL2", "30.0"),
+            ("CDELT1", "-0.0005"),
+            ("CDELT2", "0.0005"),
+            ("PC1_1", "0.98"),
+            ("PC1_2", "0.05"),
+            ("PC2_1", "-0.03"),
+            ("PC2_2", "0.99"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ]);
+        let wcs = WcsTransform::from_header(&pc).unwrap();
+        let err = max_round_trip_error(&wcs, &probe_points(1024));
+        assert!(err < ROUND_TRIP_TOL_PX, "oracle PC header round trip off by {err} px");
+    }
+
+    #[test]
+    fn pc_matrix_rows_are_scaled_by_cdelt() {
+        let (sn, cs) = deg_rot(30.0);
+        let (cdelt1, cdelt2) = (-1e-5, 1e-5);
+        let pc_header = tan_header(&[
+            ("NAXIS1", "512".to_string()),
+            ("NAXIS2", "512".to_string()),
+            ("CRPIX1", "256.5".to_string()),
+            ("CRPIX2", "256.5".to_string()),
+            ("CRVAL1", "10.0".to_string()),
+            ("CRVAL2", "40.0".to_string()),
+            ("CDELT1", sci(cdelt1)),
+            ("CDELT2", sci(cdelt2)),
+            ("PC1_1", sci(cs)),
+            ("PC1_2", sci(-sn)),
+            ("PC2_1", sci(sn)),
+            ("PC2_2", sci(cs)),
+        ]);
+        let expected = [[cdelt1 * cs, cdelt1 * -sn], [cdelt2 * sn, cdelt2 * cs]];
+        let cd_header = tan_header(&cd_cards(512, 256.5, (10.0, 40.0), expected));
+
+        let from_pc = WcsTransform::from_header(&pc_header).unwrap();
+        let from_cd = WcsTransform::from_header(&cd_header).unwrap();
+        let cd = from_pc.raw_params().4;
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((cd[i][j] - expected[i][j]).abs() < 1e-18, "CD{}_{} = {} want {}", i + 1, j + 1, cd[i][j], expected[i][j]);
+            }
         }
-        assert!(
-            (0.01..1.0).contains(&max_err),
-            "expected the known ~0.1-0.4px mapproj bug, got {max_err} -- if this is now \
-             ~1e-9, mapproj fixed the bug; tighten this test and update wcs-rs-sip-fix.md"
-        );
+        assert!((cd[0][1] - 5e-6).abs() < 1e-15 && (cd[1][0] - 5e-6).abs() < 1e-15, "{cd:?}");
+        let a = from_pc.pixel_to_world(10.0, 500.0);
+        let b = from_cd.pixel_to_world(10.0, 500.0);
+        assert!((a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12);
+
+        let (sn, cs) = deg_rot(45.0);
+        let skewed = tan_header(&[
+            ("NAXIS1", "100".to_string()),
+            ("NAXIS2", "100".to_string()),
+            ("CRPIX1", "50".to_string()),
+            ("CRPIX2", "50".to_string()),
+            ("CRVAL1", "10.0".to_string()),
+            ("CRVAL2", "40.0".to_string()),
+            ("CDELT1", "-1e-4".to_string()),
+            ("CDELT2", "2e-4".to_string()),
+            ("PC1_1", sci(cs)),
+            ("PC1_2", sci(-sn)),
+            ("PC2_1", sci(sn)),
+            ("PC2_2", sci(cs)),
+        ]);
+        let wcs = WcsTransform::from_header(&skewed).unwrap();
+        let per_axis = (0.5f64 * (1e-4f64.powi(2) + 2e-4f64.powi(2))).sqrt();
+        let (fov_w, fov_h) = wcs.field_of_view(100, 100);
+        assert!((fov_w - 100.0 * per_axis * 60.0).abs() < 1e-9, "fov_w {fov_w}");
+        assert!((fov_h - 100.0 * per_axis * 60.0).abs() < 1e-9, "fov_h {fov_h}");
+        assert!((wcs.pixel_scale_arcsec() - per_axis * 3600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crota2_headers_follow_the_paper_ii_matrix_in_both_directions() {
+        for (cdelt1, cdelt2, crota2) in [(2.78e-4, 2.78e-4, 30.0), (-2.78e-4, 1.01 * 2.78e-4, 45.0), (-2.78e-4, 2.78e-4, 30.0)] {
+            let h = tan_header(&[
+                ("NAXIS1", "1024".to_string()),
+                ("NAXIS2", "1024".to_string()),
+                ("CRPIX1", "512".to_string()),
+                ("CRPIX2", "512".to_string()),
+                ("CRVAL1", "150.0".to_string()),
+                ("CRVAL2", "30.0".to_string()),
+                ("CDELT1", sci(cdelt1)),
+                ("CDELT2", sci(cdelt2)),
+                ("CROTA2", sci(crota2)),
+            ]);
+            let wcs = WcsTransform::from_header(&h).unwrap();
+            let (sn, cs) = deg_rot(crota2);
+            let cd = [[cdelt1 * cs, -cdelt2 * sn], [cdelt1 * sn, cdelt2 * cs]];
+            let raw = wcs.raw_params().4;
+            for i in 0..2 {
+                for j in 0..2 {
+                    assert!((raw[i][j] - cd[i][j]).abs() < 1e-18);
+                }
+            }
+            for &(x, y) in &probe_points(1024) {
+                let (ra, dec) = tan_oracle(cd, (512.0, 512.0), (150.0, 30.0), x, y);
+                let got = wcs.pixel_to_world(x, y);
+                assert!(
+                    (got.ra - ra).abs() < ORACLE_TOL_DEG && (got.dec - dec).abs() < ORACLE_TOL_DEG,
+                    "CDELT ({cdelt1},{cdelt2}) CROTA2 {crota2} at ({x},{y}): got ({},{}) want ({ra},{dec})",
+                    got.ra,
+                    got.dec
+                );
+                let (px, py) = wcs.world_to_pixel(ra, dec);
+                assert!((px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX);
+            }
+        }
+    }
+
+    fn frame_header(ctype1: &str, ctype2: &str, crval: (&str, &str), extra: &[(&str, &str)]) -> HduHeader {
+        let mut pairs = vec![
+            ("NAXIS1", "100"),
+            ("NAXIS2", "100"),
+            ("CRPIX1", "50"),
+            ("CRPIX2", "50"),
+            ("CRVAL1", crval.0),
+            ("CRVAL2", crval.1),
+            ("CDELT1", "-0.001"),
+            ("CDELT2", "0.001"),
+            ("CTYPE1", ctype1),
+            ("CTYPE2", ctype2),
+        ];
+        pairs.extend_from_slice(extra);
+        make_header(&pairs)
+    }
+
+    #[test]
+    fn galactic_headers_convert_to_icrs_even_with_radesys_and_equinox() {
+        for extra in [&[][..], &[("RADESYS", "ICRS"), ("EQUINOX", "2000.0")][..]] {
+            let wcs = WcsTransform::from_header(&frame_header("GLON-TAN", "GLAT-TAN", ("0.0", "0.0"), extra)).unwrap();
+            let c = wcs.pixel_to_world(49.0, 49.0);
+            assert!((c.ra - 266.4049882865447).abs() < 1e-4 && (c.dec + 28.936177761791473).abs() < 1e-4, "{extra:?}: {c:?}");
+            let (px, py) = wcs.world_to_pixel(266.4049882865447, -28.936177761791473);
+            assert!((px - 49.0).abs() < 0.1 && (py - 49.0).abs() < 0.1, "{extra:?}: ({px},{py})");
+            let err = max_round_trip_error(&wcs, &probe_points(100));
+            assert!(err < ROUND_TRIP_TOL_PX, "{err}");
+        }
+    }
+
+    #[test]
+    fn ecliptic_headers_convert_to_icrs() {
+        let wcs = WcsTransform::from_header(&frame_header("ELON-TAN", "ELAT-TAN", ("90.0", "0.0"), &[])).unwrap();
+        let c = wcs.pixel_to_world(49.0, 49.0);
+        let (ra, dec) = convert_to_icrs(SkyFrame::EclipticJ2000, 90.0, 0.0);
+        assert!((c.ra - ra).abs() < 1e-9 && (c.dec - dec).abs() < 1e-9, "{c:?}");
+        assert!((c.dec - 23.4392794).abs() < 1e-4, "{c:?}");
+        let (px, py) = wcs.world_to_pixel(ra, dec);
+        assert!((px - 49.0).abs() < 1e-6 && (py - 49.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unsupported_celestial_frames_are_rejected_instead_of_labelled_icrs() {
+        for (ctype1, ctype2, extra, needle) in [
+            ("RA---TAN", "DEC--TAN", &[("RADESYS", "FK4"), ("EQUINOX", "1950.0")][..], "FK4"),
+            ("RA---TAN", "DEC--TAN", &[("EQUINOX", "1950.0")][..], "FK4"),
+            ("RA---TAN", "DEC--TAN", &[("RADESYS", "FK5"), ("EQUINOX", "1975.0")][..], "1975"),
+            ("RA---TAN", "DEC--TAN", &[("RADESYS", "GAPPT")][..], "GAPPT"),
+            ("HPLN-TAN", "HPLT-TAN", &[][..], "HPLN"),
+            ("DEC--TAN", "RA---TAN", &[][..], "DEC"),
+        ] {
+            let err = WcsTransform::from_header(&frame_header(ctype1, ctype2, ("83.0", "22.0"), extra))
+                .expect_err(ctype1)
+                .to_string();
+            assert!(err.contains(needle), "{ctype1} {extra:?}: {err}");
+        }
+        for extra in [
+            &[][..],
+            &[("RADESYS", "ICRS")][..],
+            &[("RADESYS", "FK5"), ("EQUINOX", "2000.0")][..],
+            &[("EQUINOX", "2000")][..],
+            &[("EPOCH", "2015.5")][..],
+        ] {
+            let wcs = WcsTransform::from_header(&frame_header("RA---TAN", "DEC--TAN", ("83.0", "22.0"), extra)).unwrap();
+            let c = wcs.pixel_to_world(49.0, 49.0);
+            assert!((c.ra - 83.0).abs() < 1e-9 && (c.dec - 22.0).abs() < 1e-9, "{extra:?}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_ctype1_is_an_error_not_a_panic() {
+        for ctype1 in ["RA---TA\u{FFFD}", "RA-TAN-SIP", "RA\u{FFFD}-TAN", "RA--TAN"] {
+            let h = make_header(&[
+                ("NAXIS1", "100"),
+                ("NAXIS2", "100"),
+                ("CRPIX1", "50"),
+                ("CRPIX2", "50"),
+                ("CRVAL1", "10.0"),
+                ("CRVAL2", "20.0"),
+                ("CDELT1", "-0.001"),
+                ("CDELT2", "0.001"),
+                ("CTYPE1", ctype1),
+                ("CTYPE2", "DEC--TAN"),
+            ]);
+            let err = WcsTransform::from_header(&h).expect_err(ctype1).to_string();
+            assert!(err.contains("CTYPE1"), "{ctype1}: {err}");
+        }
+    }
+
+    #[test]
+    fn pixel_center_and_edges_use_the_zero_based_pixel_centre_convention() {
+        assert_eq!(pixel_center(100, 50), (49.5, 24.5));
+        assert_eq!(pixel_center(1, 1), (0.0, 0.0));
+        assert_eq!(pixel_edge_corners(4, 2), [(-0.5, -0.5), (3.5, -0.5), (3.5, 1.5), (-0.5, 1.5)]);
     }
 }

@@ -5,8 +5,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use ndarray::Array2;
 use serde::Serialize;
 
-use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions, output_stem, source_path};
+use crate::cmd::common::{blocking_cmd, invalidate_written, load_cached_full, load_companions, output_stem, source_path};
 use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::cutout::{
     cut_int_plane, cut_plane, fraction_on_image, padding_plane, rect_from_region, reported_ltv, resolve_cutout_rect,
     shift_header, CutoutRect, CutoutRequest,
@@ -14,12 +15,11 @@ use crate::core::imaging::cutout::{
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::region::{RegionShape, RegionSystem};
 use crate::infra::asdf::converter::is_asdf_file;
-use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_header_by_index;
 use crate::infra::fits::writer::{filter_header, write_mef_images, HduData, ImageHdu};
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR};
-use crate::types::header::HduHeader;
+use crate::types::header::{is_commentary_key, HduHeader};
 
 pub const EXTNAME_SCI: &str = "SCI";
 pub const MAX_CUTOUT_PLANE_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -87,11 +87,16 @@ pub(crate) fn resolve_target_path(
     } else {
         requested.to_string()
     };
-    let source = source_path(path);
-    if comparable_path(&target) == comparable_path(&source) {
+    refuse_source_as_target(&target, path)?;
+    Ok(target)
+}
+
+pub(crate) fn refuse_source_as_target(target: &str, source_ref: &str) -> Result<()> {
+    let source = source_path(source_ref);
+    if comparable_path(target) == comparable_path(&source) {
         bail!("refusing to overwrite the source file {source}");
     }
-    Ok(target)
+    Ok(())
 }
 
 pub(crate) fn provenance_only(merged: &HduHeader) -> HduHeader {
@@ -99,10 +104,13 @@ pub(crate) fn provenance_only(merged: &HduHeader) -> HduHeader {
     let non_wcs = filter_header(merged, false, true).unwrap_or_else(HduHeader::empty);
     for (key, value) in &non_wcs.cards {
         let key = key.trim();
-        if !PLANE_ONLY_KEYS.contains(&key) {
+        if is_commentary_key(key) {
+            out.cards.push((key.to_string(), value.clone()));
+        } else if !PLANE_ONLY_KEYS.contains(&key) {
             out.set(key, value.clone());
         }
     }
+    out.inherit_string_keys(&non_wcs);
     out
 }
 
@@ -196,8 +204,11 @@ pub(crate) fn export_cutout(
         };
         hdus.push(ImageHdu { data, header: header.as_ref(), extname: EXTNAME_DQ, extver: 1 });
     }
-    write_mef_images(&target, Some(&primary), &hdus)?;
-    GLOBAL_IMAGE_CACHE.remove_prefix(&target);
+    GLOBAL_CUBE_CACHE.invalidate(&target);
+    invalidate_written(&target);
+    let written = write_mef_images(&target, Some(&primary), &hdus);
+    invalidate_written(&target);
+    written?;
 
     let (ltv1, ltv2) = reported_ltv(sci_header.as_ref(), &rect);
     Ok(CutoutExport {
@@ -240,7 +251,10 @@ pub async fn export_cutout_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
+    use crate::core::cube::lazy::test_support::write_line_cube;
+    use crate::infra::fits::reader::test_fixtures::{
+        ramp_f32, sci_err_dq_mef_with_dq_cards, write_test_mef, HduData as TestData, TestHdu,
+    };
     use crate::infra::fits::reader::{
         extract_header_by_index, extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions,
     };
@@ -275,6 +289,22 @@ mod tests {
             .to_string();
         assert!(err.contains("exceeds the memory budget"), "{err}");
         assert!(!dir.path().join("budget_cutout_-49900_-49900_100000x100000.fits").exists());
+    }
+
+    #[test]
+    fn a_cutout_can_replace_a_cube_that_is_open_in_the_cube_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = jwst_mef(&dir, "cube_src.fits");
+        let target_path = dir.path().join("open_cube.fits");
+        write_line_cube(&target_path, 0.0);
+        let target = target_path.to_str().unwrap().to_string();
+        assert!(GLOBAL_CUBE_CACHE.get_or_open(&target).is_ok());
+
+        let report = export_cutout(&format!("{src}#hdu=1"), &target, None, &overhanging_box(), false, false, false)
+            .expect("the cube cache kept the target mapped and blocked the cutout write");
+        assert_eq!(report.output_path, target);
+        let file = std::fs::File::open(&target).unwrap();
+        assert_eq!(extract_image_mmap_by_index(&file, 1).unwrap().image.dim(), (6, 6));
     }
 
     #[test]
@@ -494,5 +524,84 @@ mod tests {
             assert!(!primary.cards.iter().any(|(k, _)| k == gone), "{gone}");
         }
         assert!(provenance_only(&HduHeader::empty()).cards.is_empty());
+    }
+
+    #[test]
+    fn provenance_keeps_every_history_and_comment_line_out_of_the_keyword_index() {
+        let mut merged = HduHeader::empty();
+        merged.set("TELESCOP", "JWST".to_string());
+        for (key, line) in [("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")] {
+            merged.cards.push((key.to_string(), line.to_string()));
+        }
+        let primary = provenance_only(&merged);
+        let commentary: Vec<(&str, &str)> = primary
+            .cards
+            .iter()
+            .filter(|(k, _)| is_commentary_key(k))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            commentary,
+            vec![("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")]
+        );
+        assert!(primary.index.get("HISTORY").is_none() && primary.index.get("COMMENT").is_none());
+        assert_eq!(primary.get("TELESCOP"), Some("JWST"));
+    }
+
+    fn primary_value_field(path: &str, key: &str) -> String {
+        let bytes = std::fs::read(path).unwrap();
+        let card = bytes
+            .chunks_exact(80)
+            .take_while(|c| !c.starts_with(b"END     "))
+            .find(|c| String::from_utf8_lossy(&c[..8]).trim() == key)
+            .unwrap_or_else(|| panic!("{key} is missing from the cutout primary"));
+        String::from_utf8_lossy(&card[10..]).trim_end().to_string()
+    }
+
+    #[test]
+    fn cutout_primary_keeps_the_string_or_number_type_of_the_source_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("typed_cal.fits");
+        write_test_mef(
+            &src,
+            &[
+                ("TELESCOP", "'JWST'".into()),
+                ("EXPOSURE", "'1'".into()),
+                ("VERSION", "'6.4'".into()),
+                ("FLAGSTR", "'T'".into()),
+                ("PROGRAM", "'01234'".into()),
+                ("NGROUPS", "5".into()),
+                ("GAINFACT", "2.5".into()),
+            ],
+            &[TestHdu {
+                extname: Some("SCI"),
+                extver: Some(1),
+                cols: COLS,
+                rows: ROWS,
+                data: TestData::F32(ramp_f32(COLS, ROWS)),
+                extra_cards: vec![],
+            }],
+        );
+        let key = format!("{}#hdu=1", src.to_str().unwrap());
+        let out = dir.path().join("typed_cut.fits").to_str().unwrap().to_string();
+        export_cutout(&key, &out, None, &overhanging_box(), false, false, false).unwrap();
+
+        for (card, quoted) in [
+            ("EXPOSURE", "'1       '"),
+            ("VERSION", "'6.4     '"),
+            ("FLAGSTR", "'T       '"),
+            ("PROGRAM", "'01234   '"),
+            ("TELESCOP", "'JWST    '"),
+        ] {
+            assert_eq!(primary_value_field(&out, card), quoted, "{card}");
+        }
+        assert_eq!(primary_value_field(&out, "NGROUPS").trim_start(), "5");
+        assert_eq!(primary_value_field(&out, "GAINFACT").trim_start(), "2.5");
+
+        let file = std::fs::File::open(&out).unwrap();
+        let primary = extract_header_by_index(&file, 0).unwrap();
+        assert_eq!(primary.is_string_value("EXPOSURE"), Some(true));
+        assert_eq!(primary.is_string_value("NGROUPS"), Some(false));
+        assert_eq!(primary.get("EXPOSURE"), Some("1"));
     }
 }

@@ -21,8 +21,8 @@ export function computeStatistics(path: string, opts: StatisticsOptions = {}): P
   });
 }
 
-export function computeStatisticsComposite(noise = false): Promise<CompositeStatisticsResult> {
-  return typedInvoke<CompositeStatisticsResult>("compute_statistics_composite_cmd", { noise });
+export function computeStatisticsComposite(noise = false, rgbPath: string | null = null): Promise<CompositeStatisticsResult> {
+  return typedInvoke<CompositeStatisticsResult>("compute_statistics_composite_cmd", { noise, path: rgbPath });
 }
 
 export function evaluateNoiseBatch(paths: string[]): Promise<NoiseBatchResult> {

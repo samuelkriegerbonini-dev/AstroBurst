@@ -3,6 +3,11 @@ import { Settings, Key, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw, Har
 import { getConfig, updateConfig, saveApiKey, getApiKey, getOutputDirInfo, cleanupOutput } from "../services/config";
 import type { AppConfig, OutputDirInfo } from "../services/config";
 import { getOutputDir } from "../infrastructure/tauri";
+import { listRenderRecords, useRenderActions } from "../context/PreviewContext";
+import { useCompositePreview } from "../context/CompositeContext";
+import { useComposeWizardContext } from "../context/ComposeWizardContext";
+import { fileStore } from "../hooks/useFileStore";
+import { outputKeepList } from "../utils/outputKeep";
 
 function formatMb(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -12,9 +17,11 @@ export default function ConfigPanel() {
 
   const apiUrlId = useId();
   const timeoutId = useId();
-  const maxStarsId = useId();
-  const targetBgId = useId();
-  const shadowKId = useId();
+  const { forgetOutputs } = useRenderActions();
+  const { compositePreviewUrl } = useCompositePreview();
+  const { state: wizardState } = useComposeWizardContext();
+  const keepInputRef = useRef({ compositePreviewUrl, wizardState });
+  keepInputRef.current = { compositePreviewUrl, wizardState };
 
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [apiUrlDraft, setApiUrlDraft] = useState("");
@@ -100,7 +107,15 @@ export default function ConfigPanel() {
     setCleanResult(null);
     try {
       const dir = await getOutputDir();
-      const res = await cleanupOutput(dir);
+      const live = keepInputRef.current;
+      const keep = outputKeepList({
+        files: fileStore.getFiles(),
+        records: listRenderRecords(),
+        wizard: live.wizardState,
+        previewUrls: [live.compositePreviewUrl],
+      });
+      const res = await cleanupOutput(dir, keep);
+      if (res.cleaned_paths?.length) forgetOutputs(res.cleaned_paths);
       setStorageInfo((prev) => ({
         output_dir: res.output_dir,
         total_size: res.total_size,
@@ -117,7 +132,7 @@ export default function ConfigPanel() {
     } finally {
       setStorageBusy(false);
     }
-  }, [cleanArmed]);
+  }, [cleanArmed, forgetOutputs]);
 
   const pendingSavesRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const reqSeqRef = useRef(0);
@@ -260,69 +275,6 @@ export default function ConfigPanel() {
                 className="w-full accent-teal-500"
               />
             </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor={maxStarsId} className="text-[10px] text-zinc-400">Max Stars</label>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {config.plate_solve_max_stars}
-                </span>
-              </div>
-              <input
-                id={maxStarsId}
-                type="range"
-                min={20}
-                max={500}
-                step={10}
-                value={config.plate_solve_max_stars}
-                onChange={(e) => handleUpdateField("plate_solve_max_stars", parseInt(e.target.value))}
-                className="w-full accent-teal-500"
-              />
-            </div>
-          </div>
-
-          <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 p-4 space-y-3">
-            <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-              Auto-Stretch (STF)
-            </h4>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor={targetBgId} className="text-[10px] text-zinc-400">Target Background</label>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {config.auto_stretch_target_bg?.toFixed(2)}
-                </span>
-              </div>
-              <input
-                id={targetBgId}
-                type="range"
-                min={0.1}
-                max={0.5}
-                step={0.01}
-                value={config.auto_stretch_target_bg}
-                onChange={(e) => handleUpdateField("auto_stretch_target_bg", parseFloat(e.target.value))}
-                className="w-full accent-teal-500"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor={shadowKId} className="text-[10px] text-zinc-400">Shadow Clipping (K)</label>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {config.auto_stretch_shadow_k?.toFixed(1)}
-                </span>
-              </div>
-              <input
-                id={shadowKId}
-                type="range"
-                min={-5.0}
-                max={-0.5}
-                step={0.1}
-                value={config.auto_stretch_shadow_k}
-                onChange={(e) => handleUpdateField("auto_stretch_shadow_k", parseFloat(e.target.value))}
-                className="w-full accent-teal-500"
-              />
-            </div>
           </div>
         </>
       )}
@@ -352,8 +304,8 @@ export default function ConfigPanel() {
             </span>
             {storageInfo?.max_size != null && storageInfo.total_size > storageInfo.max_size && (
               <span className="text-[10px] text-amber-400">
-                Over the size limit. Nothing is deleted automatically — use Clean up when you no longer need
-                the oldest results.
+                Over the size limit. The limit is not enforced automatically — Clean up removes the oldest outputs that
+                no loaded file, processed result or wizard step still uses.
               </span>
             )}
             {storageInfo && (
@@ -375,7 +327,7 @@ export default function ConfigPanel() {
             }}
           >
             <Trash2 size={12} />
-            {cleanArmed ? "Confirm — deletes oldest results" : "Clean up"}
+            {cleanArmed ? "Confirm — deletes oldest unused outputs" : "Clean up"}
           </button>
         </div>
       </div>

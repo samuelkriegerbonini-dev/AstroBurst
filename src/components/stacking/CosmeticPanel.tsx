@@ -4,6 +4,7 @@ import { Slider, Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, Section
 import { cosmeticCorrect, cosmeticCorrectBatch } from "../../services/cosmetic";
 import { useDoneFilesContext } from "../../context/PreviewContext";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
+import { withVersionParam } from "../../utils/processingChain";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import type {
   CosmeticBatchResult,
@@ -12,12 +13,14 @@ import type {
   CosmeticReplacement,
   CosmeticResult,
 } from "../../shared/types/cosmetic";
+import type { RunTarget } from "./StackingTab";
 
 interface CosmeticPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | undefined) => void;
-  onProcessingDone?: (result: CosmeticResult) => void;
+  runTarget?: RunTarget | null;
+  onProcessingDone?: (result: CosmeticResult, target: RunTarget | null) => void;
+  onBatchDone?: (result: CosmeticBatchResult) => void | Promise<void>;
 }
 
 const ACCENT = "violet";
@@ -31,7 +34,7 @@ function fileLabel(path: string | undefined): string {
   return path?.split(/[/\\]/).pop() ?? "";
 }
 
-export default function CosmeticPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone }: CosmeticPanelProps) {
+export default function CosmeticPanel({ selectedFile, outputDir = "./output", runTarget = null, onProcessingDone, onBatchDone }: CosmeticPanelProps) {
   const { doneFiles } = useDoneFilesContext();
 
   const [useMasterDark, setUseMasterDark] = useState(true);
@@ -56,7 +59,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
 
   const [isRunning, setIsRunning] = useState(false);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
-  const [result, setResult] = useState<CosmeticResult | null>(null);
+  const [lastResult, setResult] = useState<CosmeticResult | null>(null);
   const [batchResult, setBatchResult] = useState<CosmeticBatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -104,21 +107,21 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
 
   const handleRun = useCallback(async () => {
     if (!selectedFile?.path || !canRun) return;
+    const target = runTarget;
     setIsRunning(true);
     setError(null);
     setResult(null);
     setBatchResult(null);
     try {
       const res = await cosmeticCorrect(selectedFile.path, outputDir, buildOptions());
-      setResult(res);
-      onPreviewUpdate?.(res.previewUrl);
-      onProcessingDone?.(res);
+      setResult(res.previewUrl ? { ...res, previewUrl: withVersionParam(res.previewUrl, Date.now()) } : res);
+      onProcessingDone?.(res, target);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
     }
-  }, [selectedFile, canRun, outputDir, buildOptions, onPreviewUpdate, onProcessingDone]);
+  }, [selectedFile, canRun, outputDir, buildOptions, runTarget, onProcessingDone]);
 
   const handleBatch = useCallback(async () => {
     if (lights.length === 0 || !canRun) return;
@@ -129,13 +132,15 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", on
     try {
       const res = await cosmeticCorrectBatch(lights.map((f) => f.path), outputDir, buildOptions());
       setBatchResult(res);
+      await onBatchDone?.(res);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsBatchRunning(false);
     }
-  }, [lights, canRun, outputDir, buildOptions]);
+  }, [lights, canRun, outputDir, buildOptions, onBatchDone]);
 
+  const result = lastResult && selectedFile?.path === lastResult.path ? lastResult : null;
   const originalUrl = selectedFile?.result?.previewUrl;
   const resultUrl = result?.previewUrl;
   const batchWarnings = batchResult?.results.filter((r) => r.dq_present).length ?? 0;

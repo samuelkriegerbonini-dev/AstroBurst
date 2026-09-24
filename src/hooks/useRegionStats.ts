@@ -38,6 +38,10 @@ export function useRegionStats(filePath: string | null, regions: Region[], exclu
   const seqRef = useRef(0);
 
   useEffect(() => {
+    setStats(EMPTY_STATS);
+  }, [filePath]);
+
+  useEffect(() => {
     if (!filePath || regions.length === 0) {
       seqRef.current += 1;
       setStats(EMPTY_STATS);

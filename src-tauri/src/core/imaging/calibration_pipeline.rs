@@ -2,6 +2,7 @@ use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::core::stacking::{never_cancelled, CancelCheck};
 use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 use crate::core::imaging::cosmetic::{
@@ -12,6 +13,7 @@ use crate::core::imaging::stretch::{arcsinh_stretch_rgb_with_stats, arcsinh_stre
 use crate::infra::image_source::{is_dq_name, list_planes};
 use crate::math::median::{exact_mad_mut, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::error::AppError;
 
 const PREVIEW_STRETCH_FACTOR: f32 = 20.0;
 pub const DQ_COSMETIC_WARNING: &str = "cosmetic correction applied to data with DQ planes";
@@ -20,6 +22,7 @@ const DARK_OPTIMIZE_SCALE_MAX: f64 = 3.0;
 const DARK_OPTIMIZE_TOLERANCE: f64 = 1e-3;
 const DARK_OPTIMIZE_MAX_EVALUATIONS: usize = 40;
 const DARK_OPTIMIZE_STAR_SIGMA: f32 = 5.0;
+const DARK_OPTIMIZE_MIN_GAIN: f64 = 0.05;
 const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_895;
 
 #[derive(Debug, Clone)]
@@ -285,37 +288,75 @@ fn golden_section_minimum(
     0.5 * (lo + hi)
 }
 
-pub fn optimize_dark_scale(light: &Array2<f32>, bias: Option<&Array2<f32>>, dark: &Array2<f32>) -> f32 {
+pub fn optimize_dark_scale(
+    light: &Array2<f32>,
+    bias: Option<&Array2<f32>>,
+    dark: &Array2<f32>,
+    fallback: f32,
+) -> f32 {
     let npix = light.len();
-    let Some(dark_slice) = master_slice(Some(dark), npix) else {
-        return 1.0;
+    let (Some(dark_slice), Some(light_slice)) = (master_slice(Some(dark), npix), light.as_slice()) else {
+        return fallback;
     };
-    let light_slice = light.as_slice().expect("contiguous");
     let sample = dark_optimize_sample(light_slice, master_slice(bias, npix), dark_slice);
     if sample.dark.len() < 2 {
-        return 1.0;
+        return fallback;
     }
     let mut work = Vec::with_capacity(sample.dark.len());
+    let mut objective = |k: f64| residual_robust_sigma(&sample.light_minus_bias, &sample.dark, k as f32, &mut work);
     let scale = golden_section_minimum(
         0.0,
         DARK_OPTIMIZE_SCALE_MAX,
         DARK_OPTIMIZE_TOLERANCE,
         DARK_OPTIMIZE_MAX_EVALUATIONS,
-        |k| residual_robust_sigma(&sample.light_minus_bias, &sample.dark, k as f32, &mut work),
+        &mut objective,
     );
-    scale as f32
+    let optimized = objective(scale);
+    let kept = objective(fallback as f64);
+    if kept.is_finite() && optimized.is_finite() && kept > optimized * (1.0 + DARK_OPTIMIZE_MIN_GAIN) {
+        scale as f32
+    } else {
+        fallback
+    }
 }
 
-fn channel_dark_scales(channel: &ChannelInput, masters: &CalibrationMasters, optimize: bool) -> Vec<f32> {
+fn channel_dark_scales(
+    channel: &ChannelInput,
+    masters: &CalibrationMasters,
+    optimize: bool,
+    cancelled: CancelCheck,
+) -> Option<Vec<f32>> {
+    let provided = |i: usize| channel.dark_scales.get(i).copied().unwrap_or(1.0);
     match masters.dark.as_ref() {
-        Some(dark) if optimize => channel
+        Some(dark) if optimize && masters.bias.is_some() => channel
             .lights
             .par_iter()
-            .map(|light| optimize_dark_scale(light, masters.bias.as_ref(), dark))
+            .enumerate()
+            .map(|(i, light)| {
+                (!cancelled()).then(|| optimize_dark_scale(light, masters.bias.as_ref(), dark, provided(i)))
+            })
             .collect(),
-        _ => (0..channel.lights.len())
-            .map(|i| channel.dark_scales.get(i).copied().unwrap_or(1.0))
-            .collect(),
+        dark => {
+            if optimize && dark.is_some() {
+                log::warn!(
+                    "Channel '{}': dark optimisation skipped because there is no master bias, so the master dark still contains the bias level; using the provided dark scales",
+                    channel.label
+                );
+            }
+            Some((0..channel.lights.len()).map(provided).collect())
+        }
+    }
+}
+
+fn cancelled_error() -> String {
+    AppError::Cancelled.to_string()
+}
+
+fn stop_if_cancelled(cancelled: CancelCheck) -> Result<(), String> {
+    if cancelled() {
+        Err(cancelled_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -413,6 +454,15 @@ pub fn run_batch_pipeline(
     masters: &CalibrationMasters,
     config: &BatchPipelineConfig,
 ) -> Result<BatchPipelineResult, String> {
+    run_batch_pipeline_cancellable(channels, masters, config, &never_cancelled)
+}
+
+pub fn run_batch_pipeline_cancellable(
+    channels: Vec<ChannelInput>,
+    masters: &CalibrationMasters,
+    config: &BatchPipelineConfig,
+    cancelled: CancelCheck,
+) -> Result<BatchPipelineResult, String> {
     if channels.is_empty() {
         return Err("No channels provided".into());
     }
@@ -462,11 +512,13 @@ pub fn run_batch_pipeline(
     };
 
     for channel in &channels {
+        stop_if_cancelled(cancelled)?;
         let channel_cosmetic = match &cosmetic_plan {
             Some(plan) => Some(plan.for_dims(channel.lights[0].dim())?),
             None => None,
         };
-        let dark_scales = channel_dark_scales(channel, masters, config.dark_optimize);
+        let dark_scales =
+            channel_dark_scales(channel, masters, config.dark_optimize, cancelled).ok_or_else(cancelled_error)?;
         let (dark_scale_min, dark_scale_max, dark_scale_mean) =
             dark_scale_summary(&dark_scales, masters.dark.is_some());
         let (calibrated, replaced_counts): (Vec<Array2<f32>>, Vec<usize>) = channel
@@ -474,8 +526,12 @@ pub fn run_batch_pipeline(
             .par_iter()
             .enumerate()
             .map(|(i, l)| {
-                calibrate_light_with_cosmetic(l, masters, dark_scales[i], channel_cosmetic.as_ref())
+                (!cancelled())
+                    .then(|| calibrate_light_with_cosmetic(l, masters, dark_scales[i], channel_cosmetic.as_ref()))
             })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(cancelled_error)?
+            .into_iter()
             .unzip();
         let cosmetic_replaced = channel_cosmetic
             .as_ref()
@@ -486,37 +542,9 @@ pub fn run_batch_pipeline(
             let reference = calibrated[0].clone();
             let rest: Vec<Array2<f32>> = calibrated[1..]
                 .par_iter()
-                .map(|target| {
-                    let pc = crate::core::alignment::pair::align_pair(
-                        &reference,
-                        target,
-                        crate::types::compose::AlignMethod::PhaseCorrelation,
-                        rows,
-                        cols,
-                    );
-                    match pc {
-                        Ok(res) if res.method_used == "phase_correlation" => {
-                            if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
-                                target.clone()
-                            } else {
-                                res.aligned
-                            }
-                        }
-                        _ => {
-                            match crate::core::alignment::pair::align_pair(
-                                &reference,
-                                target,
-                                crate::types::compose::AlignMethod::Affine,
-                                rows,
-                                cols,
-                            ) {
-                                Ok(res) => res.aligned,
-                                Err(_) => target.clone(),
-                            }
-                        }
-                    }
-                })
-                .collect();
+                .map(|target| (!cancelled()).then(|| align_to_reference(&reference, target, rows, cols)))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(cancelled_error)?;
             let mut frames = Vec::with_capacity(calibrated.len());
             frames.push(reference);
             frames.extend(rest);
@@ -525,6 +553,7 @@ pub fn run_batch_pipeline(
             calibrated
         };
 
+        stop_if_cancelled(cancelled)?;
         let normalized = if config.stack.normalize_before_stack {
             normalize_frames(&registered)
         } else {
@@ -532,7 +561,7 @@ pub fn run_batch_pipeline(
         };
 
         let (mut stacked, rejection_counts) =
-            reject_and_combine_stack(&normalized, &config.stack);
+            reject_and_combine_stack(&normalized, &config.stack, cancelled).ok_or_else(cancelled_error)?;
         stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
@@ -564,6 +593,35 @@ pub fn run_batch_pipeline(
         rgb,
         stats: pipeline_stats,
     })
+}
+
+fn align_to_reference(reference: &Array2<f32>, target: &Array2<f32>, rows: usize, cols: usize) -> Array2<f32> {
+    let pc = crate::core::alignment::pair::align_pair(
+        reference,
+        target,
+        crate::types::compose::AlignMethod::PhaseCorrelation,
+        rows,
+        cols,
+    );
+    match pc {
+        Ok(res) if res.method_used == "phase_correlation" => {
+            if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
+                target.clone()
+            } else {
+                res.aligned
+            }
+        }
+        _ => match crate::core::alignment::pair::align_pair(
+            reference,
+            target,
+            crate::types::compose::AlignMethod::Affine,
+            rows,
+            cols,
+        ) {
+            Ok(res) => res.aligned,
+            Err(_) => target.clone(),
+        },
+    }
 }
 
 fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<f32>> {
@@ -732,7 +790,11 @@ fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
     }).collect()
 }
 
-fn reject_and_combine_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -> (Array2<f32>, Vec<usize>) {
+fn reject_and_combine_stack(
+    frames: &[Array2<f32>],
+    config: &BatchStackConfig,
+    cancelled: CancelCheck,
+) -> Option<(Array2<f32>, Vec<usize>)> {
     let (h, w) = frames[0].dim();
     let n = frames.len();
     let mut result = Array2::<f32>::zeros((h, w));
@@ -745,6 +807,9 @@ fn reject_and_combine_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
 
     let rows: Vec<usize> = (0..h).collect();
     let row_data: Vec<(Vec<f32>, Vec<usize>)> = rows.par_iter().map(|&y| {
+        if cancelled() {
+            return None;
+        }
         let mut row = vec![0.0f32; w];
         let mut local_rejected = vec![0usize; n];
         let mut samples: Vec<Sample> = Vec::with_capacity(n);
@@ -768,14 +833,14 @@ fn reject_and_combine_stack(frames: &[Array2<f32>], config: &BatchStackConfig) -
             }
             row[x] = out.value;
         }
-        (row, local_rejected)
-    }).collect();
+        Some((row, local_rejected))
+    }).collect::<Option<Vec<_>>>()?;
 
     for (y, (row, local_rej)) in row_data.into_iter().enumerate() {
         for (x, val) in row.into_iter().enumerate() { result[[y, x]] = val; }
         for (i, count) in local_rej.into_iter().enumerate() { rejection_counts[i] += count; }
     }
-    (result, rejection_counts)
+    Some((result, rejection_counts))
 }
 
 #[cfg(test)]
@@ -845,7 +910,7 @@ mod tests {
     fn sigma_clip_rejects_lone_outlier_over_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 1000.0, 60000.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
         assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
     }
@@ -854,7 +919,7 @@ mod tests {
     fn sigma_clip_keeps_quantized_noise_around_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 999.0, 1001.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3);
         assert_eq!(rejections, vec![0, 0, 0, 0, 0]);
     }
@@ -876,7 +941,7 @@ mod tests {
             combine: CombineMethod::Median,
             ..Default::default()
         };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
         assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
 
@@ -887,7 +952,7 @@ mod tests {
             combine: CombineMethod::Median,
             ..Default::default()
         };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config);
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
         assert_eq!(stacked[[0, 0]], 3.0);
         assert_eq!(rejections, vec![0; 5]);
     }
@@ -1090,7 +1155,7 @@ mod tests {
     fn dark_optimization_recovers_the_scale_and_lowers_the_calibrated_noise() {
         let (light, bias, dark) = scaled_dark_scene(7);
 
-        let k = optimize_dark_scale(&light, Some(&bias), &dark);
+        let k = optimize_dark_scale(&light, Some(&bias), &dark, 1.0);
         assert!((k - 0.7).abs() <= 0.05, "recovered dark scale {k}");
 
         let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
@@ -1120,7 +1185,51 @@ mod tests {
         assert!(sample.light_minus_bias.iter().all(|&v| v < 1e5));
 
         let mismatched = Array2::from_elem((4, 4), 1.0f32);
-        assert_eq!(optimize_dark_scale(&Array2::from_elem((8, 8), 5.0f32), None, &mismatched), 1.0);
+        assert_eq!(optimize_dark_scale(&Array2::from_elem((8, 8), 5.0f32), None, &mismatched, 0.4), 0.4);
+    }
+
+    fn single_light_run(light: Array2<f32>, masters: &CalibrationMasters) -> BatchPipelineResult {
+        let channel = ChannelInput { lights: vec![light], label: "L".into(), dark_scales: vec![1.0] };
+        let config = BatchPipelineConfig {
+            stack: BatchStackConfig { normalize_before_stack: false, rejection: RejectionMethod::None, ..Default::default() },
+            align: false,
+            cosmetic: None,
+            dark_optimize: true,
+        };
+        run_batch_pipeline(vec![channel], masters, &config).unwrap()
+    }
+
+    fn master_median(res: &BatchPipelineResult) -> f32 {
+        let mut values: Vec<f32> = res.master_channels[0].1.iter().copied().collect();
+        median_f32_mut(&mut values)
+    }
+
+    #[test]
+    fn dark_optimization_is_refused_without_a_master_bias() {
+        let (light, bias, pattern) = scaled_dark_scene(5);
+        let dark_with_bias = &bias + &pattern;
+        let masters = CalibrationMasters { dark: Some(dark_with_bias), flat: None, bias: None };
+        let res = single_light_run(light.clone(), &masters);
+        let stats = &res.stats.channels[0];
+        assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (Some(1.0), Some(1.0), Some(1.0)));
+        let unit = calibrate_light(&light, &masters, 1.0).mapv(|v| v.max(0.0));
+        assert_eq!(res.master_channels[0].1, unit, "a (1 - k) * bias pedestal was left in the light");
+    }
+
+    #[test]
+    fn dark_optimization_keeps_the_provided_scale_when_the_dark_has_no_pattern() {
+        let n = 512;
+        let dark_noise = seeded_gaussian(n, n, 1.0, 21);
+        let light_noise = seeded_gaussian(n, n, 10.0, 22);
+        let hot = |y: usize, x: usize| if (y * 31 + x * 17) % 997 == 0 { 500.0f32 } else { 0.0 };
+        let bias = Array2::from_elem((n, n), 300.0f32);
+        let dark = Array2::from_shape_fn((n, n), |(y, x)| 40.0 + hot(y, x) + dark_noise[[y, x]]);
+        let light = Array2::from_shape_fn((n, n), |(y, x)| 300.0 + 1000.0 + 40.0 + hot(y, x) + light_noise[[y, x]]);
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
+        let res = single_light_run(light, &masters);
+        assert_eq!(res.stats.channels[0].dark_scale_mean, Some(1.0));
+        let sky = master_median(&res);
+        assert!((sky - 1000.0).abs() < 1.0, "dark pedestal left in the sky: {}", sky);
     }
 
     #[test]
@@ -1155,5 +1264,47 @@ mod tests {
         let res = run_batch_pipeline(vec![channel], &no_dark, &optimized).unwrap();
         let stats = &res.stats.channels[0];
         assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (None, None, None));
+    }
+
+    fn three_frame_channel() -> ChannelInput {
+        ChannelInput {
+            lights: (0..3).map(|_| light_with_hot_pixel()).collect(),
+            label: "L".into(),
+            dark_scales: vec![1.0; 3],
+        }
+    }
+
+    #[test]
+    fn cancellable_pipeline_polls_per_frame_and_per_row_and_matches_the_plain_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let masters = dark_only_masters();
+        let config = BatchPipelineConfig { align: false, ..Default::default() };
+        let calls = AtomicUsize::new(0);
+        let never = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            false
+        };
+        let polled = run_batch_pipeline_cancellable(vec![three_frame_channel()], &masters, &config, &never).unwrap();
+        let plain = run_batch_pipeline(vec![three_frame_channel()], &masters, &config).unwrap();
+        assert_eq!(polled.master_channels, plain.master_channels);
+        let (frames, rows) = (3, 16);
+        assert!(calls.load(Ordering::SeqCst) >= frames + rows, "hook polled {} times", calls.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancellable_pipeline_stops_inside_the_combine_with_a_cancel_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let masters = dark_only_masters();
+        let config = BatchPipelineConfig { align: false, ..Default::default() };
+        let checks_before_combine = 1 + 3 + 1;
+        let calls = AtomicUsize::new(0);
+        let cancel_in_combine = || calls.fetch_add(1, Ordering::SeqCst) >= checks_before_combine;
+        let err = run_batch_pipeline_cancellable(vec![three_frame_channel()], &masters, &config, &cancel_in_combine)
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("cancel"), "{err}");
+        assert!(calls.load(Ordering::SeqCst) > checks_before_combine);
+
+        let err = run_batch_pipeline_cancellable(vec![three_frame_channel()], &masters, &config, &|| true).unwrap_err();
+        assert!(err.to_lowercase().contains("cancel"), "{err}");
     }
 }

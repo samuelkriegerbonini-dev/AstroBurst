@@ -1,10 +1,11 @@
 import { useState, useCallback, useId, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
+import { wizardStackName } from "../../../utils/wizard";
 import { stackFrames, drizzleFrames } from "../../../services/stacking";
 import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton, Slider, Toggle } from "../../ui";
+import { RunButton, Slider, Toggle, WarningList } from "../../ui";
 import type { WizardAction } from "../../../context/ComposeWizardContext";
 import { resolveEffectivePath } from "../../../hooks/useFileStore";
 import type { CombineMethod, RejectionMethod } from "../../../shared/types/stacking";
@@ -21,6 +22,7 @@ interface StackDisplayResult {
   frame_count?: number;
   rejected_pixels?: number;
   elapsed_ms?: number;
+  warnings?: string[];
 }
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
@@ -116,17 +118,18 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         const byPath = new Map(subResult.subframes.map((s) => [resolveEffectivePath(s.file_path), s.weight]));
         weights = files.map((f) => byPath.get(f) ?? 1.0);
       }
+      const name = wizardStackName(binId, useDrizzle, Date.now());
       const result = useDrizzle
         ? await drizzleFrames(files, await getOutputDir(), {
             scale: drizzleScale,
             align: true,
-            name: `stacked_${binId}`,
+            name,
           })
         : await stackFrames(files, await getOutputDir(), {
             sigmaLow: 3.0,
             sigmaHigh: 3.0,
             align: true,
-            name: `stacked_${binId}`,
+            name,
             weights,
             rejection,
             combine,
@@ -342,6 +345,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
                 {result.frame_count} frames, {result.rejected_pixels ?? 0} rejected px, {result.elapsed_ms ?? "?"}ms
               </div>
             )}
+            {result && <WarningList warnings={result.warnings} />}
             {error && <div className="text-[9px] text-red-400">{error}</div>}
           </div>
         );

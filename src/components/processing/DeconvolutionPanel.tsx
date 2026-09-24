@@ -3,8 +3,11 @@ import { X } from "lucide-react";
 import { deconvolveRL } from "../../services/processing";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
+import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
+import { useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
 import { DECONV_PROGRESS_EVENT } from "../../shared/types/processing";
 
 function enforceOdd(value: number): number {
@@ -30,13 +33,23 @@ interface DeconvParams {
   useEmpiricalPsf: boolean;
 }
 
+interface DeconvRun {
+  res: DeconvResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+  requestedIterations: number;
+}
+
 interface DeconvolutionPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | undefined) => void;
   onProcessingDone?: (result: DeconvResult) => void;
   chainedFrom?: string | null;
   psfKernel?: number[][] | null;
+  inputPreviewUrl?: string | null;
+  inputLabel?: string;
+  fileKey?: string | null;
 }
 
 const ICON = (
@@ -46,8 +59,9 @@ const ICON = (
   </svg>
 );
 
-export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom, psfKernel }: DeconvolutionPanelProps) {
+export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, psfKernel, inputPreviewUrl, inputLabel, fileKey }: DeconvolutionPanelProps) {
   const progress = useProgress(DECONV_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
   const [params, setParams] = useState<DeconvParams>({
     iterations: 20,
     psfSigma: 2.0,
@@ -57,22 +71,23 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
     deringThreshold: 0.1,
     useEmpiricalPsf: false,
   });
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<DeconvResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<DeconvRun>("deconv", fileKey ?? null);
+  const { chain } = useRenderContext();
+  const result = runResult && chainHoldsOutput(chain, "deconv", runResult.res.fits_path) ? runResult : null;
 
   const update = useCallback(<K extends keyof DeconvParams>(key: K, value: DeconvParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
-    progress.reset();
-    try {
-      const res = await deconvolveRL(selectedFile.path, outputDir, {
+    const path = selectedFile.path;
+    const baseUrl = inputPreviewUrl ?? null;
+    const baseLabel = inputLabel ?? "Original";
+    const requestedIterations = params.iterations;
+    resetProgress();
+    void run(async (ctx) => {
+      const res = await deconvolveRL(path, outputDir, {
         iterations: params.iterations,
         psfSigma: params.psfSigma,
         psfSize: enforceOdd(params.psfSize),
@@ -81,20 +96,11 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
         deringThreshold: params.deringThreshold,
         useEmpiricalPsf: params.useEmpiricalPsf,
       });
-      setResult(res);
-      onPreviewUpdate?.(res?.previewUrl);
+      if (!ctx.inputUnchanged("deconv")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/cancel/i.test(msg)) setError(msg);
-    } finally {
-      setIsRunning(false);
-      progress.reset();
-    }
-  }, [selectedFile, outputDir, params, progress, onPreviewUpdate, onProcessingDone]);
-
-  const originalUrl = selectedFile?.result?.previewUrl;
-  const resultUrl = result?.previewUrl;
+      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
+    }, isCancelMessage).finally(resetProgress);
+  }, [selectedFile, outputDir, params, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -133,7 +139,9 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
         )}
       </div>
 
-      <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!selectedFile} accent="indigo" onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!selectedFile || blocked} accent="indigo" onClick={handleRun} />
+      </div>
 
       {isRunning && progress.active && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
@@ -162,19 +170,19 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
           <ResultGrid items={[
-            { label: "Iterations", value: result.iterations_run },
-            { label: "Convergence", value: result.convergence?.toExponential(2) },
-            { label: "Time", value: `${((result.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
+            { label: "Iterations", value: result.res.iterations_run },
+            { label: "Convergence", value: result.res.convergence?.toExponential(2) },
+            { label: "Time", value: `${((result.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
           ]} />
 
-          {result.iterations_run != null && result.iterations_run < params.iterations && (
+          {result.res.iterations_run != null && result.res.iterations_run < result.requestedIterations && (
             <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-1.5">
-              Early stop: converged at iteration {result.iterations_run}/{params.iterations}
+              Early stop: converged at iteration {result.res.iterations_run}/{result.requestedIterations}
             </div>
           )}
 
-          {originalUrl && resultUrl && (
-            <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Original" resultLabel="Deconvolved" accent="indigo" />
+          {result.baseUrl && result.resultUrl && (
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Deconvolved" accent="indigo" />
           )}
         </div>
       )}

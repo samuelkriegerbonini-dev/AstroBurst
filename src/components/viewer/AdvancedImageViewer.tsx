@@ -300,7 +300,8 @@ function AdvancedImageViewer({
             <div style={{ position: "absolute", top: 0, left: 0, width: `${comparePos}%`, height: "100%", overflow: "hidden", zIndex: 2 }}>
               <div style={imgStyle}>
                 <img src={origRetry.src ?? ""} alt={original.label} draggable={false}
-                  onLoad={origRetry.onLoad} onError={origRetry.onError} style={{ display: "block", maxWidth: "none", maxHeight: "none" }} />
+                  onLoad={origRetry.onLoad} onError={origRetry.onError}
+                  style={{ display: "block", maxWidth: "none", maxHeight: "none", width: renderW > 0 ? renderW : undefined, height: renderH > 0 ? renderH : undefined }} />
               </div>
             </div>
             <div className="ab-viewer-compare-line" style={{ left: `${comparePos}%`, zIndex: 3 }}>

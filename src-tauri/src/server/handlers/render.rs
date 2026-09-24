@@ -8,7 +8,7 @@ use axum::{
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use ndarray::Array2;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use astroburst_lib::core::imaging::stf::{apply_stf, auto_stf};
 use astroburst_lib::types::image::{AutoStfConfig, ImageStats, StfParams};
@@ -142,6 +142,21 @@ fn viewport_pixels(crop: &Array2<f32>, explicit: Option<StfParams>, global_stats
     }
 }
 
+fn viewport_bounds(params: &ViewportParams, cols: usize, rows: usize) -> Result<(usize, usize, usize, usize)> {
+    let (x, y, w, h) = (params.x, params.y, params.w, params.h);
+    if w == 0 || h == 0 {
+        return Err(AppError::BadRequest(format!("viewport size must be at least 1x1, got {w}x{h}")));
+    }
+    if x >= cols || y >= rows {
+        return Err(AppError::BadRequest(format!(
+            "viewport origin ({x},{y}) is outside image ({cols}×{rows})"
+        )));
+    }
+    let x_end = x.checked_add(w).ok_or_else(|| AppError::BadRequest(format!("viewport width {w} is too large")))?;
+    let y_end = y.checked_add(h).ok_or_else(|| AppError::BadRequest(format!("viewport height {h} is too large")))?;
+    Ok((x, y, x_end.min(cols), y_end.min(rows)))
+}
+
 pub async fn viewport(
     SessionExtractor(session): SessionExtractor,
     State(_state): State<AppState>,
@@ -154,23 +169,13 @@ pub async fn viewport(
 
     let arr = entry.data_arc();
     let global_stats = entry.stats().clone();
-
-    let x = params.x;
-    let y = params.y;
-    let w = params.w;
-    let h = params.h;
+    let (rows, cols) = arr.dim();
+    let (x, y, x_end, y_end) = viewport_bounds(&params, cols, rows)?;
     let shadow = params.shadow;
     let midtone = params.midtone;
     let highlight = params.highlight;
 
     let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let (rows, cols) = arr.dim();
-        let x_end = (x + w).min(cols);
-        let y_end = (y + h).min(rows);
-        if x >= cols || y >= rows {
-            anyhow::bail!("viewport origin ({x},{y}) is outside image ({cols}×{rows})");
-        }
-
         let crop: Array2<f32> = arr.slice(ndarray::s![y..y_end, x..x_end]).to_owned();
 
         let explicit = match (shadow, midtone, highlight) {
@@ -221,6 +226,24 @@ mod tests {
         let target = (AutoStfConfig::default().target_bg * 255.0).round() as i32;
         let med = median_byte(&pixels) as i32;
         assert!((med - target).abs() <= 3, "median byte {med}, expected about {target}");
+    }
+
+    #[test]
+    fn viewport_bounds_reject_empty_and_overflowing_requests_and_clamp_the_rest() {
+        let params = |x, y, w, h| ViewportParams {
+            slot: "s".into(),
+            x,
+            y,
+            w,
+            h,
+            shadow: None,
+            midtone: None,
+            highlight: None,
+        };
+        for bad in [params(0, 0, 0, 4), params(0, 0, 4, 0), params(1, 0, usize::MAX, 4), params(0, 1, 4, usize::MAX), params(8, 0, 1, 1)] {
+            assert!(matches!(viewport_bounds(&bad, 8, 6), Err(AppError::BadRequest(_))));
+        }
+        assert_eq!(viewport_bounds(&params(6, 4, 10, 10), 8, 6).unwrap(), (6, 4, 8, 6));
     }
 
     #[test]

@@ -5,6 +5,7 @@ import type { PhotometryMeasurement, StarPhotometry } from "../../services/analy
 import { usePixelClick } from "../../hooks/useMousePixelStore";
 import { useDqContext } from "../../context/PreviewContext";
 import { Toggle } from "../ui";
+import MeasurementBadge from "./MeasurementBadge";
 
 interface PhotometryPanelProps {
   filePath?: string | null;
@@ -112,6 +113,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
             Photometry
           </span>
+          <MeasurementBadge />
         </div>
         {isMeasuring && <Loader2 size={12} className="animate-spin text-yellow-400/70" />}
       </div>

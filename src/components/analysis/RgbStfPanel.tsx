@@ -1,6 +1,6 @@
 import { useCallback, memo } from "react";
 import { Slider, Toggle } from "../ui";
-import { useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
+import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
 import type { StfParams } from "../../shared/types";
 import StfHistogram from "../compose/StfHistogram";
 
@@ -13,7 +13,8 @@ const HIST_RGB = [
   { key: "__composite_b", color: "#3b82f6" },
 ];
 
-function RgbStfPanel() {
+function RgbStfPanel({ showSlotHistogram }: { showSlotHistogram: boolean }) {
+  const { compositeVersion } = useCompositePreview();
   const {
     compositeStfR, compositeStfG, compositeStfB,
     compositeStfLinked,
@@ -80,12 +81,15 @@ function RgbStfPanel() {
 
       <Toggle label="Link channels" checked={compositeStfLinked} accent="amber" onChange={handleLinkedChange} />
 
-      <StfHistogram
-        channels={HIST_RGB}
-        shadow={compositeStfR.shadow}
-        midtone={compositeStfR.midtone}
-        highlight={compositeStfR.highlight}
-      />
+      {showSlotHistogram && (
+        <StfHistogram
+          key={compositeVersion}
+          channels={HIST_RGB}
+          shadow={compositeStfR.shadow}
+          midtone={compositeStfR.midtone}
+          highlight={compositeStfR.highlight}
+        />
+      )}
 
       {compositeStfLinked ? (
         <div className="flex flex-col gap-2">

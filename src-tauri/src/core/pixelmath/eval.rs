@@ -114,31 +114,43 @@ pub struct Program {
 }
 
 impl Program {
+    #[cfg(test)]
     pub fn ops(&self) -> &[Op] {
         &self.ops
     }
 
+    #[cfg(test)]
     pub fn slot_names(&self) -> &[String] {
         &self.slot_names
     }
 
+    #[cfg(test)]
     pub fn stack_depth(&self) -> usize {
         self.stack_depth
     }
 
-    pub fn referenced_slots(&self) -> Vec<bool> {
+    fn slots_used_by(&self, uses: impl Fn(&Op) -> Option<usize>) -> Vec<bool> {
         let mut used = vec![false; self.slot_names.len()];
-        for op in &self.ops {
-            match *op {
-                Op::Load(slot) | Op::Reduce(_, slot) => {
-                    if let Some(flag) = used.get_mut(slot) {
-                        *flag = true;
-                    }
-                }
-                _ => {}
+        for slot in self.ops.iter().filter_map(uses) {
+            if let Some(flag) = used.get_mut(slot) {
+                *flag = true;
             }
         }
         used
+    }
+
+    pub fn referenced_slots(&self) -> Vec<bool> {
+        self.slots_used_by(|op| match *op {
+            Op::Load(slot) | Op::Reduce(_, slot) => Some(slot),
+            _ => None,
+        })
+    }
+
+    pub fn reduced_slots(&self) -> Vec<bool> {
+        self.slots_used_by(|op| match *op {
+            Op::Reduce(_, slot) => Some(slot),
+            _ => None,
+        })
     }
 }
 
@@ -750,6 +762,15 @@ mod tests {
         );
         assert_eq!(program.stack_depth(), 3);
         assert_eq!(program.slot_names(), &["$T".to_string(), "A".to_string()]);
+    }
+
+    #[test]
+    fn reduced_slots_lists_only_slots_passed_to_a_reducer() {
+        let program = compile("$T - med(A) + B * mean(A)", &names(&["$T", "A", "B"])).unwrap();
+        assert_eq!(program.referenced_slots(), vec![true, true, true]);
+        assert_eq!(program.reduced_slots(), vec![false, true, false]);
+        let plain = compile("$T * 2", &names(&["$T", "A"])).unwrap();
+        assert_eq!(plain.reduced_slots(), vec![false, false]);
     }
 
     #[test]

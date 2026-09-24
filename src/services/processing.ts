@@ -1,4 +1,5 @@
 import { typedInvoke, withPreview, getOutputDir } from "../infrastructure/tauri";
+import { announceCommandOutputs } from "../infrastructure/tauri/outputEvents";
 import type {
   DeconvolveResult,
   BackgroundResult,
@@ -65,9 +66,9 @@ export function extractBackground(
 }
 
 export interface BackgroundBatchResult {
-  results: { bin_id: string; cache_key: string; sample_count: number; axis?: string | null }[];
+  results: { bin_id: string; cache_key: string; sample_count: number | null; axis?: string | null }[];
   mode: string;
-  rms_residual: number;
+  rms_residual: number | null;
   dimensions: [number, number];
   elapsed_ms: number;
 }
@@ -187,12 +188,14 @@ export async function debayerBatch(
   options: { method?: "bilinear" | "superpixel"; pattern?: string } = {},
 ): Promise<DebayerBatchResult> {
   const dir = outputDir ?? await getOutputDir();
-  return typedInvoke<DebayerBatchResult>("debayer_batch_cmd", {
+  const result = await typedInvoke<DebayerBatchResult>("debayer_batch_cmd", {
     paths,
     outputDir: dir,
     method: options.method ?? "bilinear",
     pattern: options.pattern ?? null,
   });
+  announceCommandOutputs(result);
+  return result;
 }
 
 export interface GhsOptions {

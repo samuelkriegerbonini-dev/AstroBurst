@@ -26,6 +26,7 @@ const stats: ChannelStatistics = {
   variance: 1911.5,
   std_dev: Math.sqrt(1911.5),
   nan_count: 1,
+  padding: 0,
   excluded: 0,
 };
 
@@ -134,6 +135,16 @@ describe("statisticsToCsv", () => {
     expect(lines.length).toBe(STATISTIC_ROWS.length + 1);
     expect(lines.find((l) => l.startsWith("median,"))).toBe("median,3");
     expect(lines.find((l) => l.startsWith("count,"))).toBe("count,5");
+  });
+
+  it("reports the zero padding the backend leaves out, so the partition of a padded frame adds up", () => {
+    const padded: ChannelStatistics = { ...stats, total: 10, fraction: 5 / 10, nan_count: 1, padding: 4, excluded: 0 };
+    const accounted = STATISTIC_ROWS
+      .filter((row) => row.kind === "count")
+      .reduce((sum, row) => sum + Number(padded[row.key]), 0);
+    expect(accounted).toBe(padded.total);
+    const csv = statisticsToCsv([{ label: "K", stats: padded }], "raw").split("\n");
+    expect(csv.find((l) => l.startsWith("padding,"))).toBe("padding,4");
   });
 
   it("converts units and handles three channels", () => {

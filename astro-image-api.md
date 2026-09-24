@@ -85,9 +85,11 @@ Open a FITS file and create an analysis session.
 }
 ```
 
+Opening a path that does not exist is a `404` (`file not found: <path>`); an `hdu` index beyond the last HDU of the file is a `400`. The open, `hdu`, `/bin` and `/cutout` responses carry a `stats` block (`min`, `max`, `median`, `mad`, `sigma`, `mean`, `valid_count`) computed over every finite pixel of the plane, zeros and negative values included, the same rule as `/stats`.
+
 ### `GET /sessions/{id}` — session status, memory footprint, open HDU.
 ### `POST /sessions/{id}/hdu` — switch active plane: `{"hdu": 2}` for a FITS extension (e.g., move from SCI to WEIGHT or MASK) or `{"array": "dq"}` for an ASDF array. Exactly one of `hdu`/`array` is required; both or neither is a `400` ("provide exactly one of hdu or array"). The response carries the same `hdu`, `array`, `plane_ref` and `is_dq` fields as the open response.
-### `DELETE /sessions/{id}` — close and free resources.
+### `DELETE /sessions/{id}` — close and free resources. Jobs the session still runs are cancelled.
 ### `POST /sessions/{id}/keepalive` — extend TTL (default TTL 60 min idle).
 
 **Derived products.** Several endpoints (cutout, arithmetic, align) create new in-memory images. These are addressable as `image_ref` strings, e.g. `"sx_9f3a12:cutout_003"`, and accepted anywhere a session's image is implied via an optional `"image": "<image_ref>"` field. `GET /sessions/{id}/images` lists them; `POST /sessions/{id}/images/{ref}/save` writes one to FITS.
@@ -176,6 +178,7 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
 - Use `stretch: "asinh"` with small `asinh_a` (0.01–0.1) to show faint outskirts and bright cores simultaneously; `log` for nebulosity.
 - Colormaps: `gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis` (matplotlib 256-entry tables, perceptually uniform, non-decreasing luminance) and the DS9 segment maps `heat`, `cool`, `rainbow`. Names are case-insensitive; `grey` is accepted for `gray`. The same LUTs and the same byte rule (`idx = round(y * 255)`, `invert` → `255 - idx`) drive the desktop viewer, so a server PNG and the desktop display agree pixel for pixel.
 - To compare two renders fairly, hold `vmin/vmax/stretch` fixed (`user`) and vary only the region or image.
+- Auto-binning averages the finite pixels of each block; a block with no finite pixel stays NaN (drawn as a NaN pixel) instead of becoming 0. A `scalebar` longer than the PNG is clipped to the PNG width, and a scalebar whose length cannot be computed is left out.
 
 ### `POST /sessions/{id}/render/rgb`
 Compose a 3-color PNG from three aligned images (session HDUs or `image_ref`s):
@@ -217,6 +220,8 @@ Inputs must share a pixel grid; if not, call `/align` first (§14). Response for
 ```
 `clipped.std` ≈ background RMS in an emptyish region — the number to use when choosing detection thresholds or a manual `vmin ≈ median − 1σ`, `vmax ≈ median + kσ`.
 
+Limits (each violation is a `400` with a hint): `sigma_clip.sigma` must be a finite number greater than 0 and `sigma_clip.maxiters` between 1 and 100; at most 100 `percentiles` per request, each a finite value from 0 to 100 inclusive. Statistics use every finite pixel of the region. When no pixel survives the clip (for example an all-NaN region), `clipped.mean` is `null`.
+
 ### `POST /sessions/{id}/histogram`
 ```json
 {
@@ -227,6 +232,8 @@ Inputs must share a pixel grid; if not, call `/align` first (§14). Response for
   "render_png": true              // also return a plot the agent can look at
 }
 ```
+An explicit `range` must be two finite numbers with `range[0] < range[1]`; anything else is a `400`. Only pixels inside the range are counted: values below `range[0]` or above `range[1]` are left out rather than piled into the first or last bin, and a value equal to `range[1]` falls in the last bin. `bins` must be between 1 and 65536.
+
 **Response:** bin edges, counts, mode estimate, plus `image_url` of the plot when requested. Typical agent use: find where the sky mode sits and where the source tail begins, then set `vmin` just below the mode and `vmax` at the knee of the bright tail.
 
 ### `POST /sessions/{id}/pixel`
@@ -235,7 +242,7 @@ Point query: `{"x": 8123, "y": 11302, "box": 5}` → value at pixel, plus min/ma
 ```json
 {
   "ref": "img_0",
-  "x": 8123, "y": 11302,              // floor of the requested coordinates (0-based array indices)
+  "x": 8123, "y": 11302,              // the pixel whose centre is nearest to the request: pixel centres are integers, so 8122.6 and 8123.49 both give 8123 (x.5 rounds up)
   "value": 0.0312,                    // null when the pixel is NaN/Inf
   "unit": "MJy/sr",                   // header BUNIT (quotes/whitespace stripped); null when absent. ASDF files map quantity units and meta.bunit_data / meta.bunit / roman.meta.bunit to BUNIT
   "box": 5,                           // must be odd; even values are rejected with 400 bad_request
@@ -254,7 +261,7 @@ Point query: `{"x": 8123, "y": 11302, "box": 5}` → value at pixel, plus min/ma
   "err": {"value": 0.0123, "unit": "MJy/sr"}   // null when the plane has no ERR companion; value null when the ERR pixel is NaN/Inf
 }
 ```
-Out-of-range coordinates return `400` with `code: "pixel_out_of_bounds"`. The same probe (`core/imaging/pixel_probe.rs`) backs the desktop pixel readout, so both report identical numbers. Companion planes are resolved once when the plane is opened and cached in the session, so repeated probes do not touch the file; derived refs (`/bin`, `/cutout`) have no companions and always report `dq: null, err: null`.
+Pixel `(i, j)` covers `[i - 0.5, i + 0.5) × [j - 0.5, j + 0.5)`, so valid coordinates are `x` in `[-0.5, nx - 0.5)` and `y` in `[-0.5, ny - 0.5)`; outside that, the call returns `400` with `code: "pixel_out_of_bounds"` and the valid ranges in the hint. The `sky` position is that of the reported pixel centre. The same probe (`core/imaging/pixel_probe.rs`) backs the desktop pixel readout, so both report identical numbers. Companion planes are resolved once when the plane is opened and cached in the session, so repeated probes do not touch the file; derived refs (`/bin`, `/cutout`) have no companions and always report `dq: null, err: null`.
 
 ---
 
@@ -274,8 +281,10 @@ Create a true data cutout (not a PNG) as a derived image, optionally saved as FI
 
 All analysis endpoints accept the `image_ref`, so heavy work (source detection, photometry, filtering) can be done on the small cutout instead of the full mosaic. Partial-overlap behavior: pixels outside the parent frame are NaN; response includes `fraction_on_image`.
 
+A box region selects the same pixels as the desktop cutout: every pixel whose integer centre lies inside the box, edges included. A box turned by 90° swaps its width and height; any other rotation cuts the bounding rectangle of the rotated box.
+
 ### `POST /sessions/{id}/bin`
-Block-average or block-sum rebinning: `{"factor": 4, "method": "mean"}` → derived image. Useful for finding low-surface-brightness structure before zooming in at native resolution.
+Block-average or block-sum rebinning: `{"factor": 4, "method": "mean"}` → derived image. Useful for finding low-surface-brightness structure before zooming in at native resolution. A block with no finite pixel becomes NaN, not 0.
 
 ---
 
@@ -287,7 +296,7 @@ Batch-capable:
 {"points": [[8123, 11302], [10000, 10000]], "frame": "galactic"}   // pix2sky; frame optional
 {"points": [[182.6357, 39.4058]]}                                     // sky2pix (ICRS degrees)
 ```
-Response includes `on_image: true/false` per point and, for `pix2sky`, the resolved `frame`. `frame` selects the output frame of `pix2sky`: `icrs` (default), `fk5` (J2000), `galactic`, `ecliptic` (J2000, IAU 2006 mean obliquity); the conversion is applied to the WCS ICRS result with the astropy rotation matrices (`core/astrometry/frames.rs`). The per-point keys stay `ra`/`dec` for every frame and carry the frame's longitude/latitude in degrees (galactic `l`/`b`, ecliptic `λ`/`β`); longitude is wrapped into `[0, 360)`. An unknown frame is a `400 bad_request` listing the four names. `sky2pix` always takes ICRS degrees. Planned: sexagesimal strings (`"12:10:32.6 +39:24:21"`) and resolvable object names (`{"name": "NGC 4151"}`, resolved via Sesame/SIMBAD; response echoes the resolved ICRS position).
+Response includes `on_image: true/false` per point and, for `pix2sky`, the resolved `frame`. Pixel centres are integers, so `on_image` is true for `x` in `[-0.5, nx - 0.5)` and `y` in `[-0.5, ny - 0.5)`, the same rule as `/pixel`. `frame` selects the output frame of `pix2sky`: `icrs` (default), `fk5` (J2000), `galactic`, `ecliptic` (J2000, IAU 2006 mean obliquity); the conversion is applied to the WCS ICRS result with the astropy rotation matrices (`core/astrometry/frames.rs`). The per-point keys stay `ra`/`dec` for every frame and carry the frame's longitude/latitude in degrees (galactic `l`/`b`, ecliptic `λ`/`β`); longitude is wrapped into `[0, 360)`. An unknown frame is a `400 bad_request` listing the four names. `sky2pix` always takes ICRS degrees. Planned: sexagesimal strings (`"12:10:32.6 +39:24:21"`) and resolvable object names (`{"name": "NGC 4151"}`, resolved via Sesame/SIMBAD; response echoes the resolved ICRS position).
 
 ### `POST /sessions/{id}/wcs/separation`
 Angular separation and position angle between two sky points or two pixels.
@@ -519,7 +528,7 @@ Contour overlays are the standard way to compare two bands without an RGB compos
 
 ## 18. Errors & Conventions
 
-**HTTP codes:** `400` bad parameters (message names the offending field), `404` unknown session/ref/catalog, `409` grid mismatch (arith/combine on unaligned images — response suggests `/align`), `410` session expired, `413` region too large for the endpoint (response gives the limit and suggests `/bin` or a smaller region), `422` analysis failed (e.g., zero stars for PSF fit — response says why), `500` internal.
+**HTTP codes:** `400` bad parameters (message names the offending field; includes an HDU index beyond the file's last HDU), `404` unknown session/ref/catalog or a file path that does not exist, `429` job queue full for the asynchronous job endpoints (the message gives the configured maximum, `ASTROBURST_JOBS_MAX`), `409` grid mismatch (arith/combine on unaligned images — response suggests `/align`), `410` session expired, `413` region too large for the endpoint (response gives the limit and suggests `/bin` or a smaller region), `422` analysis failed (e.g., zero stars for PSF fit — response says why), `500` internal.
 
 **Error body**
 ```json

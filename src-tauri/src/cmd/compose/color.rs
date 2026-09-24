@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use ndarray::{Array2, Zip};
@@ -8,9 +9,8 @@ use crate::cmd::helpers;
 use crate::core::compose::white_balance::{analyze_wb_reference, validate_wb_factor, WbChannel};
 use crate::core::imaging::stats::{compute_image_stats, compute_image_stats_with_known_range};
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
-use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::types::image::ImageStats;
-use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_SCNR_APPLIED, RES_AUTO_STF, RES_STAB_R, RES_STAB_G, RES_STAB_B, RES_REF_CHANNEL, RES_RESET};
+use crate::types::constants::{RES_ELAPSED_MS, RES_PNG_PATH, RES_WB_APPLIED, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, RES_SCNR_APPLIED, RES_AUTO_STF, RES_STAB_R, RES_STAB_G, RES_STAB_B, RES_REF_CHANNEL, RES_RESET};
 
 use super::rgb::composite_png_path;
 
@@ -28,6 +28,7 @@ fn validated_wb_factors(r_factor: f64, g_factor: f64, b_factor: f64) -> anyhow::
 
 fn auto_wb_payload(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> anyhow::Result<serde_json::Value> {
     let analysis = analyze_wb_reference(sr, sg, sb);
+    analysis.median_ratio_is_valid()?;
 
     let reference = analysis.reference.ok_or_else(|| {
         anyhow::anyhow!("Auto white balance found no usable signal: R, G and B are all empty. Check the blend inputs.")
@@ -103,14 +104,14 @@ pub async fn reset_wb_cmd(
         let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(orig_r.arr(), orig_g.arr(), orig_b.arr(), fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
-        let arc_r = orig_r.data_arc();
-        let arc_g = orig_g.data_arc();
-        let arc_b = orig_b.data_arc();
-
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, arc_r, stats_r);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, arc_g, stats_g);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, arc_b, stats_b);
-        helpers::clear_composite_derived();
+        helpers::insert_composite_white_balanced(
+            [
+                (orig_r.data_arc(), stats_r),
+                (orig_g.data_arc(), stats_g),
+                (orig_b.data_arc(), stats_b),
+            ],
+            [1.0; 3],
+        );
 
         let elapsed = t0.elapsed().as_millis() as u64;
 
@@ -197,7 +198,10 @@ pub async fn calibrate_and_scnr_cmd(
         let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
         let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
-        helpers::insert_composite_rgb(r, g, b, stats_r, stats_g, stats_b);
+        helpers::insert_composite_white_balanced(
+            [(Arc::new(r), stats_r), (Arc::new(g), stats_g), (Arc::new(b), stats_b)],
+            [rf, gf, bf],
+        );
 
         let stf_json = helpers::stf_json(&linked_stf);
         let elapsed = t0.elapsed().as_millis() as u64;
@@ -285,6 +289,87 @@ mod tests {
         assert_eq!(payload[RES_G_FACTOR], 2.0);
         assert_eq!(payload[RES_B_FACTOR], 4.0);
         assert_eq!(payload[RES_EMPTY_CHANNELS], json!([]));
+    }
+
+    use crate::infra::cache::GLOBAL_IMAGE_CACHE;
+    use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::constants::{COMPOSITE_KEY_B, COMPOSITE_KEY_G, COMPOSITE_KEY_R, COMPOSITE_ORIG_R};
+
+    fn plane(seed: f32) -> Array2<f32> {
+        Array2::from_shape_fn((16, 16), |(y, x)| 50.0 + seed * 10.0 + ((y * 16 + x) % 23) as f32)
+    }
+
+    fn slot(key: &str) -> Array2<f32> {
+        GLOBAL_IMAGE_CACHE.get(key).expect(key).arr().clone()
+    }
+
+    fn blend(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+        let (sr, sg, sb) = (compute_image_stats(&r), compute_image_stats(&g), compute_image_stats(&b));
+        helpers::insert_composite_and_orig(r, g, b, sr, sg, sb);
+    }
+
+    fn assert_close(a: &Array2<f32>, b: &Array2<f32>, what: &str) {
+        assert_eq!(a.dim(), b.dim(), "{what}");
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() <= 1e-4 * y.abs().max(1e-3), "{what}: {x} vs {y}");
+        }
+    }
+
+    async fn apply_wb(out: &str, f: (f64, f64, f64)) {
+        calibrate_and_scnr_cmd(out.to_string(), f.0, f.1, f.2, None, None, None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn color_balance_apply_and_reset_keep_the_lrgb_result() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let l_path = dir.path().join("lum.fits").to_str().unwrap().to_string();
+        write_fits_mono(&l_path, &Array2::from_shape_fn((16, 16), |(y, x)| (y * 7 + x * 3) as f32), None).unwrap();
+
+        blend(plane(1.0), plane(2.0), plane(3.0));
+        apply_wb(&out, (2.0, 1.0, 0.5)).await;
+        assert_eq!(helpers::composite_wb_factors(), [2.0, 1.0, 0.5]);
+
+        super::super::lrgb_combine_composite_cmd(l_path, out.clone(), Some(1.0), Some(1.0)).await.unwrap();
+        let lrgb = [slot(COMPOSITE_KEY_R), slot(COMPOSITE_KEY_G), slot(COMPOSITE_KEY_B)];
+        assert_close(&slot(COMPOSITE_ORIG_R), &lrgb[0].mapv(|v| v / 2.0), "ORIG after LRGB");
+
+        reset_wb_cmd(out.clone()).await.unwrap();
+        assert_close(&slot(COMPOSITE_KEY_R), &lrgb[0].mapv(|v| v / 2.0), "reset dropped the LRGB luminance");
+        assert_close(&slot(COMPOSITE_KEY_B), &lrgb[2].mapv(|v| v / 0.5), "reset dropped the LRGB luminance");
+        assert_eq!(helpers::composite_wb_factors(), [1.0; 3]);
+
+        apply_wb(&out, (2.0, 1.0, 0.5)).await;
+        assert_close(&slot(COMPOSITE_KEY_R), &lrgb[0], "re-applying the same balance changed the LRGB result");
+        assert_close(&slot(COMPOSITE_KEY_G), &lrgb[1], "re-applying the same balance changed the LRGB result");
+        assert_close(&slot(COMPOSITE_KEY_B), &lrgb[2], "re-applying the same balance changed the LRGB result");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_channel_is_white_balanced_and_survives_a_reset() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let processed = dir.path().join("r_processed.fits").to_str().unwrap().to_string();
+        let new_r = plane(7.0);
+        write_fits_mono(&processed, &new_r, None).unwrap();
+
+        blend(plane(1.0), plane(2.0), plane(3.0));
+        apply_wb(&out, (2.0, 1.0, 1.0)).await;
+        super::super::update_composite_channel_cmd("r".to_string(), processed.clone()).await.unwrap();
+        assert_close(&slot(COMPOSITE_KEY_R), &new_r.mapv(|v| v * 2.0), "the synced channel lost its white balance");
+        assert_close(&slot(COMPOSITE_ORIG_R), &new_r, "the synced channel is missing from the unbalanced base");
+
+        reset_wb_cmd(out.clone()).await.unwrap();
+        assert_close(&slot(COMPOSITE_KEY_R), &new_r, "reset reverted the synced channel to the blend");
+
+        let bigger = dir.path().join("r_full_frame.fits").to_str().unwrap().to_string();
+        write_fits_mono(&bigger, &Array2::from_elem((20, 24), 5.0), None).unwrap();
+        let err = super::super::update_composite_channel_cmd("r".to_string(), bigger).await.unwrap_err();
+        assert!(err.contains("Re-run Blend"), "{err}");
+        assert!(err.contains("24x20") && err.contains("16x16"), "{err}");
+        assert_close(&slot(COMPOSITE_KEY_R), &new_r, "a refused channel still replaced the composite");
     }
 
     #[test]

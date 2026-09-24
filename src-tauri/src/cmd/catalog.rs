@@ -4,15 +4,17 @@ use ndarray::Array2;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::cmd::analysis::photometry_planes;
-use crate::cmd::common::{blocking_cmd, load_cached_full};
+use crate::cmd::analysis::{photometry_planes, HEADER_PROCESSING_PROVENANCE};
+use crate::cmd::common::{blocking_cmd, load_cached_full, HEADER_DISPLAY_REFERRED};
+use crate::cmd::pixelmath::DEFAULT_PIXELMATH_SUFFIX;
+use crate::cmd::processing::{ABPROC_HDRMT, ABPROC_LHE};
 use crate::core::analysis::photometry::{measure_star_full, saturation_level, PhotometryConfig, DQ_SATURATION_SOURCE};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
     cross_match, fit_zero_point, observation_epoch_year, propagate_epoch, query_gaia_cached, CatalogRow,
     ConeQuery, CrossMatch, ZeroPointFit, DEFAULT_MAX_ROWS, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
 };
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
 use crate::core::metadata::photcal::PhotCal;
 use crate::infra::cache::ImageEntry;
 use crate::math::exact_median_f64;
@@ -29,6 +31,7 @@ pub const CSV_KIND_MATCHES: &str = "matches";
 pub const RES_N: &str = "n";
 const ARCMIN_PER_DEGREE: f64 = 60.0;
 const CSV_LINE_END: &str = "\r\n";
+const UNCALIBRATED_PROVENANCE: [&str; 3] = [ABPROC_LHE, ABPROC_HDRMT, DEFAULT_PIXELMATH_SUFFIX];
 
 pub const CATALOG_CSV_COLUMNS: &[(&str, &str)] = &[
     ("id", "id"),
@@ -166,7 +169,8 @@ pub(crate) struct FieldGeometry {
 }
 
 pub(crate) fn field_geometry(wcs: &WcsTransform, cols: usize, rows: usize) -> FieldGeometry {
-    let center = wcs.pixel_to_world(cols as f64 / 2.0 - 0.5, rows as f64 / 2.0 - 0.5);
+    let (cx, cy) = pixel_center(cols, rows);
+    let center = wcs.pixel_to_world(cx, cy);
     let (fov_w, fov_h) = wcs.field_of_view(cols, rows);
     FieldGeometry {
         center_ra: center.ra,
@@ -198,7 +202,7 @@ fn wcs_for<'a>(entry: &'a ImageEntry, path: &str) -> anyhow::Result<(&'a HduHead
         .header()
         .ok_or_else(|| anyhow::anyhow!("No FITS header available for {}", path))?;
     let wcs = WcsTransform::from_header(header)
-        .map_err(|e| anyhow::anyhow!("WCS not available: {:#}. Run Plate Solve first.", e))?;
+        .map_err(|e| anyhow::anyhow!("No usable celestial WCS in the header of {}: {:#}", path, e))?;
     Ok((header, wcs))
 }
 
@@ -329,6 +333,39 @@ fn measure_sources(
     sources
 }
 
+fn header_text(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|v| v.trim().trim_matches('\'').trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub(crate) fn uncalibrated_reason(header: &HduHeader) -> Option<String> {
+    if header_text(header, HEADER_DISPLAY_REFERRED).is_some_and(|v| v.eq_ignore_ascii_case("T")) {
+        return Some(format!(
+            "header flux calibration ignored: the pixel values are display-referred ({}=T)",
+            HEADER_DISPLAY_REFERRED
+        ));
+    }
+    header_text(header, HEADER_PROCESSING_PROVENANCE)
+        .filter(|p| UNCALIBRATED_PROVENANCE.iter().any(|u| p.eq_ignore_ascii_case(u)))
+        .map(|p| format!("header flux calibration ignored: {} changed the pixel values non-linearly or rescaled them", p))
+}
+
+fn trusted_photcal(header: &HduHeader, wcs: &WcsTransform, warnings: &mut Vec<String>) -> Option<PhotCal> {
+    if let Some(provenance) = header_text(header, HEADER_PROCESSING_PROVENANCE) {
+        warnings.push(format!("photometry on processed data ({})", provenance));
+    }
+    let photcal = PhotCal::from_header(header, Some(wcs))?;
+    match uncalibrated_reason(header) {
+        Some(reason) => {
+            warnings.push(reason);
+            None
+        }
+        None => Some(photcal),
+    }
+}
+
 fn summarize_astrometry(matches: &[CrossMatch]) -> Option<AstrometrySummary> {
     if matches.is_empty() {
         return None;
@@ -360,8 +397,8 @@ pub(crate) fn crossmatch_for_path(
     let dims = entry.arr().dim();
     let (image_rows, cols) = dims;
     let mut warnings: Vec<String> = Vec::new();
-    let planes = photometry_planes(path, dims, &mut warnings);
-    let photcal = PhotCal::from_header(header, Some(&wcs));
+    let planes = photometry_planes(path, dims);
+    let photcal = trusted_photcal(header, &wcs, &mut warnings);
 
     let detection_sigma = sigma.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(DEFAULT_DETECTION_SIGMA);
     let mut stars = detect_stars(entry.arr(), detection_sigma).stars;
@@ -897,6 +934,71 @@ mod tests {
         let matches = out["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 5);
         for m in matches {
+            let mag_ab = m["star"]["mag_ab"].as_f64().unwrap();
+            let mag_inst = m["star"]["mag_inst"].as_f64().unwrap();
+            assert!((mag_ab - (mag_inst + 25.0)).abs() < 1e-6, "{m:?}");
+        }
+    }
+
+    fn warning_texts(out: &Value) -> Vec<String> {
+        out[RES_WARNINGS]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn crossmatch_ignores_header_calibration_on_rescaled_or_display_referred_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let wcs = WcsTransform::from_header(&wcs_header(&[])).unwrap();
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), catalog_rows_for_field(&wcs));
+
+        for (name, marker, processed, reason) in [
+            ("old_lhe.fits", ("ABPROC", "lhe"), Some("lhe"), "header flux calibration ignored: lhe changed"),
+            ("old_hdr.fits", ("ABPROC", "hdrmt"), Some("hdrmt"), "header flux calibration ignored: hdrmt changed"),
+            ("old_pm.fits", ("ABPROC", "pixelmath"), Some("pixelmath"), "header flux calibration ignored: pixelmath changed"),
+            ("display.fits", ("ABDISP", "T"), None, "display-referred (ABDISP=T)"),
+        ] {
+            let path = write_star_field(&dir, name, &[("MAGZERO", "30.0"), ("DATE-OBS", "2016-01-01"), marker]);
+            let out = crossmatch_for_path(&path, None, None, None, None, Some(false), None).unwrap();
+            assert_eq!(out["photcal_present"], false, "{name}");
+            let matches = out["matches"].as_array().unwrap();
+            assert_eq!(matches.len(), 5, "{name}");
+            assert!(matches.iter().all(|m| m["star"]["mag_ab"].is_null()), "{name}: {matches:?}");
+            assert!(out["sources"].as_array().unwrap().iter().all(|s| s["mag_ab"].is_null()), "{name}");
+            assert!((out["zero_point"]["zp"].as_f64().unwrap() - TEST_ZERO_POINT).abs() < 0.1, "{name}");
+            let warnings = warning_texts(&out);
+            assert!(!warnings.iter().any(|w| w.contains("flux-calibrated")), "{name}: {warnings:?}");
+            assert!(warnings.iter().any(|w| w.contains(reason)), "{name}: {warnings:?}");
+            match processed {
+                Some(p) => assert!(warnings.contains(&format!("photometry on processed data ({p})")), "{name}: {warnings:?}"),
+                None => assert!(!warnings.iter().any(|w| w.starts_with("photometry on processed data")), "{name}: {warnings:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn crossmatch_keeps_the_calibration_of_linear_processed_data_and_names_the_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let wcs = WcsTransform::from_header(&wcs_header(&[])).unwrap();
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), catalog_rows_for_field(&wcs));
+
+        let path = write_star_field(
+            &dir,
+            "resampled.fits",
+            &[("MAGZPT", "25.0"), ("BUNIT", "ADU"), ("DATE-OBS", "2016-01-01"), ("ABPROC", "resampled")],
+        );
+        let out = crossmatch_for_path(&path, None, None, None, None, None, None).unwrap();
+        assert_eq!(out["photcal_present"], true);
+        let warnings = warning_texts(&out);
+        assert!(warnings.contains(&"photometry on processed data (resampled)".to_string()), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.starts_with("image is already flux-calibrated")), "{warnings:?}");
+        assert!(!warnings.iter().any(|w| w.contains("calibration ignored")), "{warnings:?}");
+        for m in out["matches"].as_array().unwrap() {
             let mag_ab = m["star"]["mag_ab"].as_f64().unwrap();
             let mag_inst = m["star"]["mag_inst"].as_f64().unwrap();
             assert!((mag_ab - (mag_inst + 25.0)).abs() < 1e-6, "{m:?}");

@@ -91,14 +91,40 @@ export function stretchValue(n: number, t: DisplayTransfer): number {
 }
 
 export function lutIndex(y: number, invert: boolean): number {
-  if (y !== y) return 0;
-  const idx = Math.floor(clamp01(Math.fround(y)) * 255 + 0.5);
+  const idx = y !== y ? 0 : Math.floor(clamp01(Math.fround(y)) * 255 + 0.5);
   return invert ? 255 - idx : idx;
 }
 
+export function isPaddingValue(raw: number): boolean {
+  return !Number.isFinite(raw) || raw === 0;
+}
+
 export function transferByte(raw: number, t: DisplayTransfer): number {
-  if (!Number.isFinite(raw)) return 0;
+  if (isPaddingValue(raw)) return lutIndex(NaN, t.invert);
   return lutIndex(stretchValue(normalize(raw, t.vmin, t.vmax), t), t.invert);
+}
+
+export interface TransferLimits {
+  vmin: number;
+  vmax: number;
+}
+
+export function resolveTransferLimits(
+  stretch: StretchMode,
+  scaleLimits: TransferLimits | null,
+  rawRange: { min: number; max: number } | null,
+  histRange: { data_min: number; data_max: number } | null,
+): TransferLimits {
+  const histUsable =
+    histRange !== null &&
+    Number.isFinite(histRange.data_min) &&
+    Number.isFinite(histRange.data_max) &&
+    histRange.data_max > histRange.data_min;
+  const data = histUsable
+    ? { vmin: histRange.data_min, vmax: histRange.data_max }
+    : { vmin: rawRange?.min ?? 0, vmax: rawRange?.max ?? 1 };
+  if (stretch === "mtf") return data;
+  return scaleLimits ?? data;
 }
 
 export function renderRgba(pixels: Float32Array, t: DisplayTransfer, lut: Uint8Array, out: Uint8ClampedArray): void {

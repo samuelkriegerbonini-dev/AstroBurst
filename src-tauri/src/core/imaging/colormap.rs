@@ -98,10 +98,6 @@ pub fn lut_index(v: f32, invert: bool) -> usize {
     }
 }
 
-pub fn apply_colormap(values: &[f32], colormap: Colormap) -> Vec<u8> {
-    apply_colormap_inverted(values, colormap, false)
-}
-
 pub fn apply_colormap_inverted(values: &[f32], colormap: Colormap, invert: bool) -> Vec<u8> {
     let lut = colormap.lut();
     let mut out = Vec::with_capacity(values.len() * 3);
@@ -430,23 +426,23 @@ mod tests {
     #[test]
     fn gray_is_exact_round_of_v_times_255() {
         let vals: Vec<f32> = (0..=255).map(|i| i as f32 / 255.0).collect();
-        let rgb = apply_colormap(&vals, Colormap::Gray);
+        let rgb = apply_colormap_inverted(&vals, Colormap::Gray, false);
         for (i, chunk) in rgb.chunks_exact(3).enumerate() {
             let expected = (vals[i] * 255.0).round() as u8;
             assert_eq!(chunk, [expected, expected, expected], "mismatch at index {i}");
         }
-        assert_eq!(&apply_colormap(&[0.0], Colormap::Gray)[..], [0, 0, 0]);
-        assert_eq!(&apply_colormap(&[1.0], Colormap::Gray)[..], [255, 255, 255]);
-        assert_eq!(&apply_colormap(&[0.5], Colormap::Gray)[..], [128, 128, 128]);
+        assert_eq!(&apply_colormap_inverted(&[0.0], Colormap::Gray, false)[..], [0, 0, 0]);
+        assert_eq!(&apply_colormap_inverted(&[1.0], Colormap::Gray, false)[..], [255, 255, 255]);
+        assert_eq!(&apply_colormap_inverted(&[0.5], Colormap::Gray, false)[..], [128, 128, 128]);
     }
 
     #[test]
     fn values_are_clamped_and_nan_maps_low() {
-        let rgb = apply_colormap(&[-1.0, 2.0, f32::NAN], Colormap::Gray);
+        let rgb = apply_colormap_inverted(&[-1.0, 2.0, f32::NAN], Colormap::Gray, false);
         assert_eq!(&rgb[0..3], [0, 0, 0]);
         assert_eq!(&rgb[3..6], [255, 255, 255]);
         assert_eq!(&rgb[6..9], [0, 0, 0]);
-        let v = apply_colormap(&[-5.0, 5.0], Colormap::Viridis);
+        let v = apply_colormap_inverted(&[-5.0, 5.0], Colormap::Viridis, false);
         assert_eq!(&v[0..3], &VIRIDIS_LUT[0][..]);
         assert_eq!(&v[3..6], &VIRIDIS_LUT[255][..]);
     }
@@ -461,7 +457,7 @@ mod tests {
             (1.0, [253, 231, 37]),
         ];
         for (v, expected) in refs {
-            let got = apply_colormap(&[v], Colormap::Viridis);
+            let got = apply_colormap_inverted(&[v], Colormap::Viridis, false);
             for c in 0..3 {
                 let diff = (got[c] as i32 - expected[c] as i32).abs();
                 assert!(
@@ -543,17 +539,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_colormap_inverted_false_equals_apply_colormap_and_true_flips() {
+    fn apply_colormap_inverted_follows_the_lut_and_true_flips() {
         let vals: Vec<f32> = (0..=255).map(|i| i as f32 / 255.0).chain([f32::NAN]).collect();
         for cmap in Colormap::ALL {
-            assert_eq!(
-                apply_colormap_inverted(&vals, cmap, false),
-                apply_colormap(&vals, cmap),
-                "{}",
-                cmap.name()
-            );
-            let inv = apply_colormap_inverted(&vals, cmap, true);
             let lut = cmap.lut();
+            let direct = apply_colormap_inverted(&vals, cmap, false);
+            for (i, &v) in vals.iter().enumerate() {
+                assert_eq!(&direct[i * 3..i * 3 + 3], &lut[lut_index(v, false)][..], "{} idx {i}", cmap.name());
+            }
+            let inv = apply_colormap_inverted(&vals, cmap, true);
             for i in 0..=255 {
                 assert_eq!(&inv[i * 3..i * 3 + 3], &lut[255 - i][..], "{} idx {i}", cmap.name());
             }

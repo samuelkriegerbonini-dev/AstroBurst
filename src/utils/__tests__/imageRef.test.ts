@@ -38,19 +38,36 @@ describe("parseImageRef", () => {
     }
   });
 
-  it("enforces the 128-char array key limit", () => {
-    const ok = "a".repeat(128);
-    expect(parseImageRef(`a.asdf#array=${ok}`).plane.kind).toBe("array");
-    const tooLong = "a".repeat(129);
-    expect(parseImageRef(`a.asdf#array=${tooLong}`).plane.kind).toBe("auto");
+  it("accepts array keys of any length, as the backend no longer caps them", () => {
+    const long = "a".repeat(200);
+    expect(parseImageRef(`a.asdf#array=${long}`).plane).toEqual({ kind: "array", key: long });
+  });
+
+  it("decodes the %XX escapes Rust writes for array keys outside [A-Za-z0-9_.-]", () => {
+    expect(parseImageRef("x.asdf#array=sci%20image")).toEqual({ path: "x.asdf", plane: { kind: "array", key: "sci image" } });
+    expect(parseImageRef("x.asdf#array=data%282%29").plane).toEqual({ kind: "array", key: "data(2)" });
+    expect(parseImageRef("x.asdf#array=a%23b").plane).toEqual({ kind: "array", key: "a#b" });
+    expect(parseImageRef("x.asdf#array=%C3%A9t%C3%A9").plane).toEqual({ kind: "array", key: "été" });
+  });
+
+  it("refuses the escapes Rust parse_fragment refuses", () => {
+    for (const s of ["a.fits#array=a%2", "a.fits#array=a%2x", "a.fits#array=a%2f", "a.fits#array=%41", "a.fits#array=%FF", "a.fits#array=é"]) {
+      expect(parseImageRef(s)).toEqual({ path: s, plane: { kind: "auto" } });
+    }
   });
 });
 
 describe("formatImageRef", () => {
   it("round-trips canonical inputs", () => {
-    for (const s of ["a.fits", "a.fits#hdu=0", "a.fits#hdu=12", "b.asdf#array=dq", "b.asdf#array=roman.err", "C:/x/y#z/a.fits#array=var_poisson"]) {
+    for (const s of ["a.fits", "a.fits#hdu=0", "a.fits#hdu=12", "b.asdf#array=dq", "b.asdf#array=roman.err", "C:/x/y#z/a.fits#array=var_poisson", "x.asdf#array=sci%20image", "x.asdf#array=%C3%A9t%C3%A9"]) {
       expect(formatImageRef(parseImageRef(s))).toBe(s);
     }
+  });
+
+  it("encodes array keys the way Rust ImageRef::cache_key does", () => {
+    expect(arrayRef("x.asdf", "sci image")).toBe("x.asdf#array=sci%20image");
+    expect(arrayRef("x.asdf", "a#b")).toBe("x.asdf#array=a%23b");
+    expect(arrayRef("x.asdf", "a/b")).toBe("x.asdf#array=a%2Fb");
   });
 });
 
@@ -103,5 +120,9 @@ describe("planeLabel", () => {
   it("labels arrays by key", () => {
     expect(planeLabel(parseImageRef("r.asdf#array=dq"))).toBe("array dq");
     expect(planeLabel(parseImageRef("r.asdf#array=roman.dq"), "roman.dq")).toBe("array roman.dq");
+  });
+
+  it("labels an encoded array ref with its decoded key", () => {
+    expect(planeLabel(parseImageRef("x.asdf#array=sci%20image"))).toBe("array sci image");
   });
 });

@@ -8,7 +8,6 @@ pub mod dbe;
 pub mod debayer;
 pub mod dq_flags;
 pub mod masked_stretch;
-pub mod normalize;
 pub mod pixel_probe;
 pub mod psf_estimation;
 pub mod region;

@@ -1,13 +1,14 @@
 import { useState, useCallback, useEffect, useId, useRef, useMemo } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2, X } from "lucide-react";
-import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { noiseWeightsFor, stackFrames } from "../../services/stacking";
 import type { CombineMethod, NormalizationMethod, RejectionMethod, StackResult } from "../../shared/types/stacking";
 import { STACK_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
-import type { StackConfig } from "./StackingTab";
+import type { RunTarget, StackConfig } from "./StackingTab";
 import { resolveEffectivePath } from "../../hooks/useFileStore";
+import { stackOutputName } from "../../utils/stackingOutputs";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { useTimer } from "../../hooks/useTimer";
@@ -27,7 +28,8 @@ import {
 
 interface StackingPanelProps {
   files: ProcessedFile[];
-  onResult?: (result: StackResult) => void;
+  runTarget?: RunTarget | null;
+  onResult?: (result: StackResult, inputs: string[], target: RunTarget | null) => void;
   injectedPaths?: string[];
   acceptedPaths?: string[];
   stackConfig?: StackConfig;
@@ -51,6 +53,7 @@ function fileName(path: string): string {
 
 export default function StackingPanel({
   files = [],
+  runTarget = null,
   onResult,
   injectedPaths = [],
   acceptedPaths,
@@ -175,6 +178,9 @@ export default function StackingPanel({
 
   const handleStack = useCallback(async () => {
     if (selectedPaths.length < 2) return;
+    const target = runTarget;
+    const inputs = [...selectedPaths];
+    const name = stackOutputName(inputs[0], inputs.length, new Date());
     setIsStacking(true);
     setError(null);
     setResult(null);
@@ -182,7 +188,7 @@ export default function StackingPanel({
     resetTimer();
     startTimer();
     try {
-      const paths = selectedPaths.map(resolveEffectivePath);
+      const paths = inputs.map(resolveEffectivePath);
       let frameWeights = weights;
       if (noiseWeighting) {
         const noise = await noiseWeightsFor(paths);
@@ -197,6 +203,7 @@ export default function StackingPanel({
         setNoiseWeightRange(null);
       }
       const res = await stackFrames(paths, await getOutputDir(), {
+        name,
         sigmaLow,
         sigmaHigh,
         maxIterations,
@@ -214,7 +221,7 @@ export default function StackingPanel({
         rejectionMaps,
       });
       setResult(res);
-      onResult?.(res);
+      onResult?.(res, inputs, target);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!/cancel/i.test(msg)) setError(msg);
@@ -245,6 +252,7 @@ export default function StackingPanel({
     minmaxLow,
     minmaxHigh,
     rejectionMaps,
+    runTarget,
     onResult,
   ]);
 
@@ -439,6 +447,12 @@ export default function StackingPanel({
             { label: "Combine", value: result.combine ?? combine },
             { label: "Normalization", value: result.normalization ?? normalization },
           ]} />
+          <WarningList warnings={result.warnings} />
+          {result.fits_path && (
+            <div className="text-[10px] text-zinc-500 truncate" title={result.fits_path}>
+              FITS: <span className="text-zinc-300">{fileName(result.fits_path)}</span>
+            </div>
+          )}
           {(result.rejection_low_fits || result.rejection_high_fits) && (
             <div className="flex flex-col gap-0.5 text-[10px] text-zinc-500 font-mono">
               {result.rejection_low_fits && <span title={result.rejection_low_fits}>low map: {fileName(result.rejection_low_fits)}</span>}

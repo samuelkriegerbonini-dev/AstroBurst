@@ -6,7 +6,7 @@ export async function generateTiles(path: string, outputDir?: string, tileSize =
   return typedInvoke<TileResult>("generate_tiles", { path, outputDir: dir, tileSize });
 }
 
-export async function generateTilesRgb(outputDir?: string, tileSize = 256): Promise<TileResult> {
+export async function generateTilesRgb(outputDir?: string, tileSize = 256, rgbPath: string | null = null): Promise<TileResult> {
   const dir = outputDir || await getOutputDirTiles();
-  return typedInvoke<TileResult>("generate_tiles_rgb", { outputDir: dir, tileSize });
+  return typedInvoke<TileResult>("generate_tiles_rgb", { outputDir: dir, tileSize, path: rgbPath });
 }

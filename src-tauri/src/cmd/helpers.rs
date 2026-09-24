@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Context;
 use ndarray::Array2;
@@ -115,18 +115,38 @@ pub(crate) fn load_orig_or_composite() -> anyhow::Result<(ImageEntry, ImageEntry
     Ok((r, g, b))
 }
 
-pub(crate) fn insert_composite_rgb(
-    r: Array2<f32>,
-    g: Array2<f32>,
-    b: Array2<f32>,
-    stats_r: ImageStats,
-    stats_g: ImageStats,
-    stats_b: ImageStats,
-) {
-    clear_composite_derived();
-    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, Arc::new(r), stats_r);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, Arc::new(g), stats_g);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, Arc::new(b), stats_b);
+const COMPOSITE_KEYS: [&str; 3] = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B];
+const COMPOSITE_ORIG_KEYS: [&str; 3] = [COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B];
+const NEUTRAL_WB: [f32; 3] = [1.0; 3];
+
+static COMPOSITE_WB: Mutex<[f32; 3]> = Mutex::new(NEUTRAL_WB);
+
+fn lock_composite_wb() -> MutexGuard<'static, [f32; 3]> {
+    COMPOSITE_WB.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn composite_wb_factors() -> [f32; 3] {
+    *lock_composite_wb()
+}
+
+fn scaled_stats(s: &ImageStats, k: f64) -> ImageStats {
+    ImageStats {
+        min: s.min * k,
+        max: s.max * k,
+        mean: s.mean * k,
+        median: s.median * k,
+        sigma: s.sigma * k,
+        mad: s.mad * k,
+        valid_count: s.valid_count,
+    }
+}
+
+fn rescaled(arr: &Arc<Array2<f32>>, stats: &ImageStats, factor: f32) -> (Arc<Array2<f32>>, ImageStats) {
+    if factor == 1.0 {
+        return (Arc::clone(arr), stats.clone());
+    }
+    (Arc::new(arr.mapv(|v| v * factor)), scaled_stats(stats, factor as f64))
 }
 
 pub(crate) fn insert_composite_and_orig(
@@ -137,6 +157,7 @@ pub(crate) fn insert_composite_and_orig(
     stats_g: ImageStats,
     stats_b: ImageStats,
 ) {
+    let mut wb = lock_composite_wb();
     clear_composite_derived();
     let arc_r = Arc::new(r);
     let arc_g = Arc::new(g);
@@ -147,6 +168,64 @@ pub(crate) fn insert_composite_and_orig(
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_R, arc_r, stats_r);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, arc_g, stats_g);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, arc_b, stats_b);
+    *wb = NEUTRAL_WB;
+}
+
+pub(crate) fn insert_composite_white_balanced(
+    channels: [(Arc<Array2<f32>>, ImageStats); 3],
+    factors: [f32; 3],
+) {
+    let mut wb = lock_composite_wb();
+    clear_composite_derived();
+    for (key, (arr, stats)) in COMPOSITE_KEYS.into_iter().zip(channels) {
+        GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr, stats);
+    }
+    *wb = factors;
+}
+
+pub(crate) fn insert_composite_content(
+    r: Array2<f32>,
+    g: Array2<f32>,
+    b: Array2<f32>,
+    stats_r: ImageStats,
+    stats_g: ImageStats,
+    stats_b: ImageStats,
+) {
+    let wb = lock_composite_wb();
+    clear_composite_derived();
+    let channels = [(Arc::new(r), stats_r), (Arc::new(g), stats_g), (Arc::new(b), stats_b)];
+    for (i, (arr, stats)) in channels.into_iter().enumerate() {
+        let (orig, orig_stats) = rescaled(&arr, &stats, 1.0 / wb[i]);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_KEYS[i], orig, orig_stats);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEYS[i], arr, stats);
+    }
+}
+
+pub(crate) fn replace_composite_channel(index: usize, arr: Arc<Array2<f32>>, stats: ImageStats) -> anyhow::Result<()> {
+    let (Some(key), Some(orig_key)) = (COMPOSITE_KEYS.get(index), COMPOSITE_ORIG_KEYS.get(index)) else {
+        anyhow::bail!("Invalid composite channel index {}", index);
+    };
+    let wb = lock_composite_wb();
+    clear_composite_derived();
+    let (balanced, balanced_stats) = rescaled(&arr, &stats, wb[index]);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(orig_key, arr, stats);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(key, balanced, balanced_stats);
+    Ok(())
+}
+
+pub(crate) fn clear_composite() {
+    let mut wb = lock_composite_wb();
+    for key in COMPOSITE_KEYS.into_iter().chain(COMPOSITE_ORIG_KEYS) {
+        GLOBAL_IMAGE_CACHE.remove(key);
+    }
+    clear_composite_derived();
+    *wb = NEUTRAL_WB;
+}
+
+#[cfg(test)]
+pub(crate) async fn composite_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
 }
 
 fn insert_triplet(keys: [&str; 3], r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
@@ -196,6 +275,7 @@ pub(crate) fn clear_composite_toned() {
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_R);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_G);
     GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_B);
+    crate::cmd::processing::forget_composite_contrast();
 }
 
 pub(crate) fn clear_composite_derived() {
@@ -317,6 +397,14 @@ pub(crate) fn render_rgb_preview_with_stf(
 ) -> anyhow::Result<()> {
     use rayon::prelude::*;
 
+    if r.dim() != g.dim() || g.dim() != b.dim() {
+        anyhow::bail!(
+            "Composite channels differ in size (R {:?}, G {:?}, B {:?}); re-run Blend",
+            r.dim(),
+            g.dim(),
+            b.dim()
+        );
+    }
     let (rows, cols) = r.dim();
 
     let r_slice = r.as_slice().context("R not contiguous")?;
@@ -443,6 +531,60 @@ mod tests {
 
         let decoded = image::open(&path).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (8, 8));
+    }
+
+    #[test]
+    fn stf_preview_refuses_channels_of_different_sizes() {
+        let r = test_channel(8, 8, 7);
+        let g = test_channel(4, 4, 8);
+        let b = test_channel(8, 8, 9);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stf_mismatch.png");
+        let identity = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+
+        let err = render_rgb_preview_with_stf(&r, &g, &b, identity, identity, identity, path.to_str().unwrap(), 4096)
+            .expect_err("a smaller G plane was indexed past its end");
+        assert!(err.to_string().contains("re-run Blend"), "{err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn content_written_under_a_white_balance_keeps_an_unbalanced_base() {
+        let arr = Arc::new(Array2::from_elem((2, 2), 8.0f32));
+        let stats = compute_image_stats(&arr);
+        let (base, base_stats) = rescaled(&arr, &stats, 0.5);
+        assert!(base.iter().all(|v| *v == 4.0));
+        assert_eq!(base_stats.median, 4.0);
+        assert_eq!(base_stats.valid_count, stats.valid_count);
+        let (same, _) = rescaled(&arr, &stats, 1.0);
+        assert!(Arc::ptr_eq(&same, &arr), "a neutral factor copied the channel");
+        let (back, back_stats) = rescaled(&base, &base_stats, 2.0);
+        assert!(back.iter().all(|v| *v == 8.0));
+        assert_eq!(back_stats.max, stats.max);
+    }
+
+    fn contrast_plane(seed: usize) -> Array2<f32> {
+        Array2::from_shape_fn((16, 16), |(y, x)| ((y * 16 + x + seed * 5) % 37) as f32 / 40.0 + 0.05)
+    }
+
+    #[tokio::test]
+    async fn clearing_the_composite_releases_the_input_held_by_the_last_contrast_run() {
+        let _guard = composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        insert_composite_stretched(contrast_plane(1), contrast_plane(2), contrast_plane(3));
+        let input = load_composite_stretched().map(|(r, _, _)| Arc::downgrade(&r.data_arc()));
+        let config = crate::core::imaging::local_contrast::LheConfig {
+            kernel_radius: 3,
+            ..crate::core::imaging::local_contrast::LheConfig::default()
+        };
+        let run = crate::cmd::processing::lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), config).await;
+        let held_after_run = input.as_ref().is_some_and(|w| w.upgrade().is_some());
+        clear_composite();
+        let held_after_clear = input.as_ref().is_some_and(|w| w.upgrade().is_some());
+        run.unwrap();
+        assert!(input.is_some(), "precondition: the stretched composite was stored");
+        assert!(held_after_run, "precondition: the run keeps its input for a re-run");
+        assert!(!held_after_clear, "the input of the last composite LHE stayed in memory after the composite was cleared");
     }
 }
 

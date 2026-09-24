@@ -59,6 +59,37 @@ pub const JWST_FLAGS: &[DqFlag] = &[
     flag(2147483648, "REFERENCE_PIXEL"),
 ];
 
+pub const ROMAN_FLAGS: &[DqFlag] = &[
+    flag(1, "DO_NOT_USE"),
+    flag(2, "SATURATED"),
+    flag(4, "JUMP_DET"),
+    flag(8, "DROPOUT"),
+    flag(16, "GW_AFFECTED_DATA"),
+    flag(32, "PERSISTENCE"),
+    flag(64, "AD_FLOOR"),
+    flag(128, "OUTLIER"),
+    flag(256, "UNRELIABLE_ERROR"),
+    flag(512, "NON_SCIENCE"),
+    flag(1024, "DEAD"),
+    flag(2048, "HOT"),
+    flag(4096, "WARM"),
+    flag(8192, "LOW_QE"),
+    flag(32768, "TELEGRAPH"),
+    flag(65536, "NONLINEAR"),
+    flag(131072, "BAD_REF_PIXEL"),
+    flag(262144, "NO_FLAT_FIELD"),
+    flag(524288, "NO_GAIN_VALUE"),
+    flag(1048576, "NO_LIN_CORR"),
+    flag(2097152, "NO_SAT_CHECK"),
+    flag(4194304, "UNRELIABLE_BIAS"),
+    flag(8388608, "UNRELIABLE_DARK"),
+    flag(16777216, "UNRELIABLE_SLOPE"),
+    flag(33554432, "UNRELIABLE_FLAT"),
+    flag(268435456, "UNRELIABLE_RESET"),
+    flag(1073741824, "OTHER_BAD_PIXEL"),
+    flag(2147483648, "REFERENCE_PIXEL"),
+];
+
 pub const HST_FLAGS: &[DqFlag] = &[
     flag(1, "REED_SOLOMON"),
     flag(2, "REPLACED_FILL"),
@@ -111,14 +142,15 @@ impl DqTable {
     pub fn flags(self) -> &'static [DqFlag] {
         match self {
             DqTable::Hst => HST_FLAGS,
-            DqTable::Jwst | DqTable::Roman | DqTable::Unknown => JWST_FLAGS,
+            DqTable::Roman => ROMAN_FLAGS,
+            DqTable::Jwst | DqTable::Unknown => JWST_FLAGS,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             DqTable::Jwst => "jwst",
-            DqTable::Roman => "roman (JWST-convention bits)",
+            DqTable::Roman => "roman",
             DqTable::Hst => "hst",
             DqTable::Unknown => "unknown (JWST-convention bits)",
         }
@@ -312,11 +344,23 @@ mod tests {
     }
 
     #[test]
-    fn roman_and_unknown_use_jwst_convention() {
-        assert_eq!(DqTable::Roman.flags(), JWST_FLAGS);
+    fn roman_uses_its_own_table_and_unknown_uses_jwst_convention() {
+        assert_eq!(DqTable::Roman.flags(), ROMAN_FLAGS);
         assert_eq!(DqTable::Unknown.flags(), JWST_FLAGS);
         assert_eq!(DqTable::Hst.flags(), HST_FLAGS);
-        assert!(DqTable::Roman.label().contains("JWST-convention"));
+        assert_eq!(DqTable::Roman.format(128), "128: OUTLIER");
+        assert_eq!(DqTable::Roman.format(16), "16: GW_AFFECTED_DATA");
+        assert_eq!(DqTable::Roman.format(1 << 28), "268435456: UNRELIABLE_RESET");
+        assert_eq!(DqTable::Roman.decode(1 << 14), vec!["BIT14".to_string()]);
+        assert_eq!(DqTable::Roman.decode(1 << 26), vec!["BIT26".to_string()]);
+        assert_eq!(DqTable::Roman.mask_from_names(&["OUTLIER"]).unwrap(), 128);
+        assert_eq!(DqTable::Roman.mask_from_names(&["SATURATED"]).unwrap(), 2);
+        assert!(DqTable::Roman.mask_from_names(&["CHARGELOSS"]).is_err());
+        for f in ROMAN_FLAGS {
+            assert_eq!(f.bit.count_ones(), 1, "{}", f.name);
+            assert_eq!(DqTable::Roman.decode(f.bit), vec![f.name.to_string()]);
+        }
+        assert_eq!(DqTable::Roman.label(), "roman");
         assert!(DqTable::Unknown.label().contains("JWST-convention"));
         assert_eq!(DqTable::Jwst.label(), "jwst");
         assert_eq!(DqTable::Hst.label(), "hst");

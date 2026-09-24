@@ -100,11 +100,13 @@ pub fn cartesian_to_spherical(v: [f64; 3]) -> (f64, f64) {
     (lon, lat)
 }
 
-pub const OBLIQUITY_J2000_DEG: f64 = 84381.406 / 3600.0;
-
 const FK5_ETA0_DEG: f64 = -19.9e-3 / 3600.0;
 const FK5_XI0_DEG: f64 = 9.1e-3 / 3600.0;
 const FK5_DA0_DEG: f64 = -22.9e-3 / 3600.0;
+
+const IAU2006_GAMMA_BAR_J2000_DEG: f64 = -0.052928 / 3600.0;
+const IAU2006_PHI_BAR_J2000_DEG: f64 = 84381.412819 / 3600.0;
+const IAU2006_PSI_BAR_J2000_DEG: f64 = -0.041775 / 3600.0;
 
 const GAL_NGP_RA_J2000_DEG: f64 = 192.8594812065348;
 const GAL_NGP_DEC_J2000_DEG: f64 = 27.12825118085622;
@@ -127,8 +129,12 @@ pub static FK5_J2000_TO_GALACTIC: LazyLock<Mat3> = LazyLock::new(|| {
     )
 });
 
-pub static ICRS_TO_ECLIPTIC_J2000: LazyLock<Mat3> =
-    LazyLock::new(|| mat_mul(&rot_x(OBLIQUITY_J2000_DEG), &ICRS_TO_FK5_J2000));
+pub static ICRS_TO_ECLIPTIC_J2000: LazyLock<Mat3> = LazyLock::new(|| {
+    mat_mul(
+        &mat_mul(&rot_z(-IAU2006_PSI_BAR_J2000_DEG), &rot_x(IAU2006_PHI_BAR_J2000_DEG)),
+        &rot_z(IAU2006_GAMMA_BAR_J2000_DEG),
+    )
+});
 
 static ICRS_TO_GALACTIC: LazyLock<Mat3> =
     LazyLock::new(|| mat_mul(&FK5_J2000_TO_GALACTIC, &ICRS_TO_FK5_J2000));
@@ -295,6 +301,21 @@ mod tests {
         assert!((b - 90.0).abs() < 1e-5, "ecliptic pole b = {b}");
         let (l, b) = icrs_to_ecliptic_j2000(180.0, 0.0);
         assert!((l - 180.0).abs() < 1e-5 && b.abs() < 1e-5, "autumn equinox -> ({l},{b})");
+    }
+
+    #[test]
+    fn ecliptic_j2000_uses_the_iau_2006_frame_bias() {
+        let (ra, dec) = ecliptic_j2000_to_icrs(0.0, 0.0);
+        let ra_mas = (ra + 180.0).rem_euclid(360.0) * 3.6e6 - 180.0 * 3.6e6;
+        let dec_mas = dec * 3.6e6;
+        assert!((ra_mas + 14.6).abs() < 0.05, "ICRS RA of the J2000 mean equinox = {ra_mas} mas, IERS dalpha0 = -14.6 mas");
+        assert!((dec_mas - 16.617).abs() < 0.01, "ICRS Dec of the J2000 mean equinox = {dec_mas} mas, IERS -xi0 = 16.617 mas");
+
+        let (l, b) = icrs_to_ecliptic_j2000(0.0, 0.0);
+        assert!((l - 1.884_859_492e-6).abs() < 1e-12, "l = {l}");
+        assert!((b + 5.848_205_841e-6).abs() < 1e-12, "b = {b}");
+        let (l, b) = icrs_to_ecliptic_j2000(83.5, -5.25);
+        assert!((l - 82.628_586_772_530_21).abs() < 1e-10 && (b + 28.523_108_557_033_04).abs() < 1e-10, "({l},{b})");
     }
 
     #[test]

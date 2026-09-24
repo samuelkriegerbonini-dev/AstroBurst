@@ -9,11 +9,6 @@ pub fn norm<T: FftFloat>(c: Complex<T>) -> T {
 }
 
 #[inline]
-pub fn norm_sqr<T: FftFloat>(c: Complex<T>) -> T {
-    c.re * c.re + c.im * c.im
-}
-
-#[inline]
 pub fn safe_normalize<T: FftFloat>(c: Complex<T>, epsilon: T) -> Complex<T> {
     let mag = norm(c);
     if mag > epsilon {
@@ -40,19 +35,6 @@ pub fn cross_power_spectrum<T: FftFloat>(
     fa.par_iter()
         .zip(fb.par_iter())
         .map(|(&a, &b)| cross_power_element(a, b, epsilon))
-        .collect()
-}
-
-pub fn pointwise_multiply<T: FftFloat>(
-    a: &[Complex<T>],
-    b: &[Complex<T>],
-) -> Vec<Complex<T>> {
-    a.par_iter()
-        .zip(b.par_iter())
-        .map(|(&x, &y)| Complex::new(
-            x.re * y.re - x.im * y.im,
-            x.re * y.im + x.im * y.re,
-        ))
         .collect()
 }
 
@@ -90,12 +72,6 @@ mod tests {
     fn test_norm_unit() {
         let c = Complex::new(3.0f64, 4.0);
         assert!((norm(c) - 5.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_norm_sqr_exact() {
-        let c = Complex::new(3.0f64, 4.0);
-        assert!((norm_sqr(c) - 25.0).abs() < 1e-10);
     }
 
     #[test]
@@ -138,15 +114,6 @@ mod tests {
             let mag = norm(*c);
             assert!((mag - 1.0).abs() < 1e-10 || mag < 1e-10);
         }
-    }
-
-    #[test]
-    fn test_pointwise_multiply() {
-        let a = vec![Complex::new(1.0f64, 2.0), Complex::new(3.0, 4.0)];
-        let b = vec![Complex::new(5.0f64, 6.0), Complex::new(7.0, 8.0)];
-        let result = pointwise_multiply(&a, &b);
-        assert!((result[0].re - (-7.0)).abs() < 1e-10);
-        assert!((result[0].im - 16.0).abs() < 1e-10);
     }
 
     #[test]

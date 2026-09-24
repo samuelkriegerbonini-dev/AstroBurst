@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::parse_gaia_tsv;
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::header::HduHeader;
@@ -41,7 +41,6 @@ pub enum WhiteReference {
     AverageSpiral,
     G2V,
     Photopic,
-    Custom(f64, f64, f64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +88,12 @@ pub fn spcc_calibrate_rgb(
         ));
     }
 
-    let wcs = WcsTransform::from_header(header)
-        .map_err(|e| format!("WCS not available: {}. Run Plate Solve first.", e))?;
+    let wcs = WcsTransform::from_header(header).map_err(|e| {
+        format!(
+            "No usable celestial WCS in the header ({}). SPCC needs an image whose FITS header already carries a sky solution.",
+            e
+        )
+    })?;
 
     let (h, w) = r_image.dim();
 
@@ -98,22 +101,15 @@ pub fn spcc_calibrate_rgb(
     let detection = detect_stars(&luminance, 5.0);
 
     let stats = compute_image_stats(&luminance);
-    let sat_limit = (stats.max * config.saturation_limit) as f32;
+    let sat_limit = stats.max * config.saturation_limit;
 
     let mut good_stars: Vec<&DetectedStar> = detection
         .stars
         .iter()
-        .filter(|s| {
-            s.snr >= config.min_snr
-                && s.peak < sat_limit as f64
-                && s.x >= 10.0
-                && s.y >= 10.0
-                && s.x < w.saturating_sub(10) as f64
-                && s.y < h.saturating_sub(10) as f64
-        })
+        .filter(|s| passes_quality_filters(s, detection.background_median, sat_limit, config.min_snr, w, h))
         .collect();
 
-    good_stars.sort_by(|a, b| b.snr.partial_cmp(&a.snr).unwrap_or(std::cmp::Ordering::Equal));
+    good_stars.sort_by(|a, b| b.snr.total_cmp(&a.snr));
     good_stars.truncate(config.max_stars);
 
     if good_stars.len() < 5 {
@@ -127,7 +123,8 @@ pub fn spcc_calibrate_rgb(
     let world_coords = wcs.pixel_to_world_batch(&star_coords);
 
     let (fov_w, fov_h) = wcs.field_of_view(w, h);
-    let center = wcs.pixel_to_world(w as f64 / 2.0, h as f64 / 2.0);
+    let (cx, cy) = pixel_center(w, h);
+    let center = wcs.pixel_to_world(cx, cy);
     let search_radius = (fov_w.max(fov_h) / 60.0) * 0.75;
 
     let (catalog_stars, is_synthetic) = match config.catalog {
@@ -168,7 +165,6 @@ pub fn spcc_calibrate_rgb(
         WhiteReference::AverageSpiral => "Average Spiral Galaxy".into(),
         WhiteReference::G2V => "G2V (Solar)".into(),
         WhiteReference::Photopic => "Photopic (Human Eye)".into(),
-        WhiteReference::Custom(r, g, b) => format!("Custom ({:.2},{:.2},{:.2})", r, g, b),
     };
 
     let catalog_name = match &config.catalog {
@@ -187,6 +183,26 @@ pub fn spcc_calibrate_rgb(
         catalog_name,
         is_synthetic_catalog: is_synthetic,
     })
+}
+
+const SPCC_EDGE_MARGIN_PX: usize = 10;
+
+fn passes_quality_filters(
+    star: &DetectedStar,
+    background_median: f64,
+    sat_limit: f64,
+    min_snr: f64,
+    w: usize,
+    h: usize,
+) -> bool {
+    let pedestal = if background_median.is_finite() { background_median } else { 0.0 };
+    let margin = SPCC_EDGE_MARGIN_PX as f64;
+    star.snr >= min_snr
+        && star.peak + pedestal < sat_limit
+        && star.x >= margin
+        && star.y >= margin
+        && star.x < w.saturating_sub(SPCC_EDGE_MARGIN_PX) as f64
+        && star.y < h.saturating_sub(SPCC_EDGE_MARGIN_PX) as f64
 }
 
 fn synthesize_luminance(r: &Array2<f32>, g: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
@@ -255,7 +271,6 @@ fn white_reference_rgb(wr: &WhiteReference) -> (f64, f64, f64) {
             (r * 0.98, g * 1.0, b * 1.02)
         }
         WhiteReference::Photopic => (1.0, 1.0, 1.0),
-        WhiteReference::Custom(r, g, b) => (*r, *g, *b),
     }
 }
 
@@ -688,6 +703,28 @@ mod tests {
             .expect_err("an empty B channel must not be reported as a successful calibration");
 
         assert!(err.contains("measurable flux in B"), "unexpected error: {}", err);
+    }
+
+    fn star(peak: f64) -> DetectedStar {
+        DetectedStar { x: 50.0, y: 50.0, flux: peak * 10.0, fwhm: 3.0, eccentricity: 0.0, peak, npix: 20, snr: 100.0 }
+    }
+
+    #[test]
+    fn saturation_filter_compares_the_absolute_peak_with_the_limit() {
+        let image_max = 16383.0;
+        let sat_limit = 0.9 * image_max;
+        let pedestal = 2000.0;
+        let clipped = star(image_max - pedestal);
+        assert!(
+            !passes_quality_filters(&clipped, pedestal, sat_limit, 20.0, 100, 100),
+            "a core at the image maximum on a {pedestal} pedestal is saturated"
+        );
+        assert!(passes_quality_filters(&star(5000.0), pedestal, sat_limit, 20.0, 100, 100));
+        assert!(passes_quality_filters(&star(5000.0), f64::NAN, sat_limit, 20.0, 100, 100));
+        assert!(!passes_quality_filters(&star(5000.0), pedestal, sat_limit, 200.0, 100, 100));
+        let mut edge = star(5000.0);
+        edge.x = 95.0;
+        assert!(!passes_quality_filters(&edge, pedestal, sat_limit, 20.0, 100, 100));
     }
 
     #[test]

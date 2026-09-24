@@ -11,6 +11,8 @@ const TRIANGLE_TIE_MARGIN: f64 = 0.03;
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
 const RANSAC_ITERATIONS: usize = 2000;
+const RANSAC_CHUNKS: usize = 16;
+const SINGULAR_RELATIVE_DET: f64 = 1e-12;
 const RANSAC_INLIER_PX: f64 = 3.0;
 const DETECTION_SIGMA: f64 = 3.5;
 const MIN_TRIANGLE_SIDE: f64 = 15.0;
@@ -34,7 +36,7 @@ fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
     if samples.len() < 100 {
         return image.clone();
     }
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    samples.sort_by(|a, b| a.total_cmp(b));
 
     let lo = samples[samples.len() / 100] as f64;
     let hi = samples[samples.len() * 999 / 1000] as f64;
@@ -334,7 +336,7 @@ fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
                         dist(stars[j], stars[k]),
                         dist(stars[i], stars[k]),
                     ];
-                    sides.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sides.sort_by(|a, b| a.total_cmp(b));
 
                     if sides[0] < MIN_TRIANGLE_SIDE {
                         continue;
@@ -430,7 +432,7 @@ fn match_triangles(
     }
 
     let mut pairs: Vec<((usize, usize), u32)> = vote_map.into_iter().collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1));
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let mut used_ref = vec![false; ref_stars.len()];
     let mut used_tgt = vec![false; tgt_stars.len()];
@@ -466,7 +468,7 @@ fn sort_triangle_vertices(
         (j, dist(stars[i], stars[k])),
         (k, dist(stars[i], stars[j])),
     ];
-    verts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    verts.sort_by(|a, b| a.1.total_cmp(&b.1));
     [verts[0].0, verts[1].0, verts[2].0]
 }
 
@@ -480,13 +482,12 @@ fn ransac_affine(
         return None;
     }
 
-    let num_threads = rayon::current_num_threads().max(1);
-    let chunk_size = (RANSAC_ITERATIONS + num_threads - 1) / num_threads;
+    let chunk_size = RANSAC_ITERATIONS.div_ceil(RANSAC_CHUNKS);
 
-    let best = (0..num_threads)
+    let chunk_results: Vec<(usize, AffineTransform, Vec<bool>)> = (0..RANSAC_CHUNKS)
         .into_par_iter()
-        .map(|thread_id| {
-            let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64.wrapping_add(thread_id as u64 * 0x9E3779B97F4A7C15u64);
+        .map(|chunk| {
+            let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64.wrapping_add((chunk as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64));
             let inline_rand = |state: &mut u64| -> usize {
                 *state ^= *state << 13;
                 *state ^= *state >> 7;
@@ -545,7 +546,10 @@ fn ransac_affine(
 
             (local_best_inliers, local_best_transform, local_best_mask)
         })
-        .reduce_with(|a, b| if b.0 > a.0 { b } else { a })
+        .collect();
+    let best = chunk_results
+        .into_iter()
+        .reduce(|a, b| if b.0 > a.0 { b } else { a })
         .unwrap_or((0, AffineTransform::identity(), vec![false; n]));
 
     let (best_inliers, _best_transform, best_inlier_mask) = best;
@@ -613,12 +617,15 @@ fn solve_3x3_ls(
     matches: &[(f64, f64, f64, f64)],
     solve_x: bool,
 ) -> Option<((f64, f64), f64)> {
+    let count = matches.len() as f64;
+    let (sum_x, sum_y) = matches.iter().fold((0.0, 0.0), |(sx, sy), &(rx, ry, _, _)| (sx + rx, sy + ry));
+    let (mean_x, mean_y) = (sum_x / count, sum_y / count);
     let mut ata = [[0.0f64; 3]; 3];
     let mut atb = [0.0f64; 3];
 
     for &(rx, ry, tx, ty) in matches {
         let target = if solve_x { tx } else { ty };
-        let row = [rx, ry, 1.0];
+        let row = [rx - mean_x, ry - mean_y, 1.0];
 
         for i in 0..3 {
             for j in 0..3 {
@@ -629,7 +636,7 @@ fn solve_3x3_ls(
     }
 
     let x = solve_3x3(ata, atb)?;
-    Some(((x[0], x[1]), x[2]))
+    Some(((x[0], x[1]), x[2] - x[0] * mean_x - x[1] * mean_y))
 }
 
 fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
@@ -637,7 +644,11 @@ fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
 
-    if det.abs() < 1e-12 {
+    let hadamard_bound: f64 = a
+        .iter()
+        .map(|row| row.iter().map(|v| v * v).sum::<f64>().sqrt())
+        .product();
+    if !det.is_finite() || !(det.abs() > SINGULAR_RELATIVE_DET * hadamard_bound) {
         return None;
     }
 
@@ -936,6 +947,92 @@ mod tests {
             confidence: 1.0,
         };
         assert!(check_transform_sanity(&result, 100, 100).is_err());
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn unit(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn fit_affine_rejects_collinear_samples_at_image_scale() {
+        let mut rng = Xorshift(0x1234_5678_9ABC_DEF1);
+        for _ in 0..500 {
+            let (x0, y0) = (1000.0 + rng.unit() * 2000.0, 1000.0 + rng.unit() * 2000.0);
+            let angle = rng.unit() * std::f64::consts::TAU;
+            let (ux, uy) = (angle.cos(), angle.sin());
+            let matches: Vec<(f64, f64, f64, f64)> = [0.0, 317.37 + rng.unit(), 811.13 + rng.unit()]
+                .iter()
+                .map(|t| {
+                    let (rx, ry) = (x0 + t * ux, y0 + t * uy);
+                    (rx, ry, rx + 5.0, ry - 3.0)
+                })
+                .collect();
+            assert!(fit_affine(&matches).is_none(), "collinear sample solved: {matches:?}");
+        }
+        let triangle = [(1200.3, 1100.7), (2900.1, 1300.2), (1800.6, 2950.9)];
+        let matches: Vec<(f64, f64, f64, f64)> =
+            triangle.iter().map(|&(x, y)| (x, y, x + 5.0, y - 3.0)).collect();
+        let t = fit_affine(&matches).expect("triangle solves");
+        assert!((t.tx - 5.0).abs() < 1e-6 && (t.ty + 3.0).abs() < 1e-6, "{t:?}");
+        assert!((t.a - 1.0).abs() < 1e-9 && t.b.abs() < 1e-9 && t.c.abs() < 1e-9 && (t.d - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn match_triangles_is_deterministic_across_calls() {
+        let stars = vec![
+            (12.0, 15.0),
+            (97.0, 22.0),
+            (41.0, 88.0),
+            (150.0, 61.0),
+            (73.0, 140.0),
+            (180.0, 170.0),
+            (25.0, 190.0),
+            (130.0, 115.0),
+        ];
+        let tris = build_triangles(&stars);
+        let first = match_triangles(&stars, &stars, &tris, &tris);
+        assert!(first.len() >= 4);
+        for _ in 0..24 {
+            assert_eq!(match_triangles(&stars, &stars, &tris, &tris), first);
+        }
+    }
+
+    #[test]
+    fn ransac_result_does_not_depend_on_thread_count() {
+        let mut rng = Xorshift(0x0DDB_A11C_AFE0_F00D);
+        let mut matches = Vec::new();
+        for i in 0..40 {
+            let (rx, ry) = (50.0 + rng.unit() * 900.0, 50.0 + rng.unit() * 900.0);
+            let noise = if i % 5 == 0 { 40.0 } else { 6.0 };
+            let tx = rx * 1.001 + 0.02 * ry + 7.0 + (rng.unit() - 0.5) * noise;
+            let ty = -0.02 * rx + ry * 0.999 - 4.0 + (rng.unit() - 0.5) * noise;
+            matches.push((rx, ry, tx, ty));
+        }
+        let run = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| ransac_affine(&matches, AffineAlignMethod::Affine))
+                .map(|r| (r.inliers, [r.transform.a, r.transform.b, r.transform.tx, r.transform.c, r.transform.d, r.transform.ty]))
+        };
+        let single = run(1);
+        assert!(single.is_some());
+        for threads in [2, 3, 4, 8] {
+            let other = run(threads);
+            assert_eq!(
+                other.map(|(n, t)| (n, t.map(f64::to_bits))),
+                single.map(|(n, t)| (n, t.map(f64::to_bits))),
+                "{threads} threads"
+            );
+        }
     }
 
     #[test]

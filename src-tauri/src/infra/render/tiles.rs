@@ -5,15 +5,20 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+pub const MIN_TILE_SIZE: usize = 64;
+pub const MAX_TILE_SIZE: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub struct TileParams {
     pub tile_size: usize,
 }
 
-impl Default for TileParams {
-    fn default() -> Self {
-        Self { tile_size: 256 }
+fn validated_tile_size(params: &TileParams) -> Result<usize> {
+    let size = params.tile_size;
+    if !(MIN_TILE_SIZE..=MAX_TILE_SIZE).contains(&size) {
+        anyhow::bail!("tile_size must be between {MIN_TILE_SIZE} and {MAX_TILE_SIZE} pixels, got {size}");
     }
+    Ok(size)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -150,7 +155,7 @@ pub fn generate_tile_pyramid(
     params: &TileParams,
 ) -> Result<TilePyramid> {
     let (orig_rows, orig_cols) = normalized.dim();
-    let tile_size = params.tile_size;
+    let tile_size = validated_tile_size(params)?;
     let num_levels = compute_num_levels(orig_cols, orig_rows, tile_size);
 
     let (global_min, global_max) = (0.0f32, 1.0f32);
@@ -219,49 +224,6 @@ pub fn generate_tile_pyramid(
         levels,
         base_dir: output_dir.to_string(),
     })
-}
-
-fn render_tile_rgb(
-    r: &Array2<f32>,
-    g: &Array2<f32>,
-    b: &Array2<f32>,
-    tile_x: usize,
-    tile_y: usize,
-    tile_size: usize,
-    output_path: &str,
-) -> Result<()> {
-    let (rows, cols) = r.dim();
-    let r_src = r.as_slice().expect("contiguous");
-    let g_src = g.as_slice().expect("contiguous");
-    let b_src = b.as_slice().expect("contiguous");
-
-    let x_start = tile_x * tile_size;
-    let y_start = tile_y * tile_size;
-    let x_end = (x_start + tile_size).min(cols);
-    let y_end = (y_start + tile_size).min(rows);
-
-    let tile_w = x_end - x_start;
-    let tile_h = y_end - y_start;
-
-    if tile_w == 0 || tile_h == 0 {
-        return Ok(());
-    }
-
-    let mut buf = vec![0u8; tile_size * tile_size * 3];
-
-    for dy in 0..tile_h {
-        let src_row = (y_start + dy) * cols;
-        let dst_row = dy * tile_size;
-        for dx in 0..tile_w {
-            let si = src_row + x_start + dx;
-            let di = (dst_row + dx) * 3;
-            buf[di] = (r_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-            buf[di + 1] = (g_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-            buf[di + 2] = (b_src[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-    }
-
-    save_tile_rgb(&buf, tile_size, output_path)
 }
 
 fn render_tile_rgb_stf(
@@ -337,21 +299,16 @@ pub fn generate_tile_pyramid_rgb_stf(
     fn_g: impl Fn(f32) -> u8 + Send + Sync,
     fn_b: impl Fn(f32) -> u8 + Send + Sync,
 ) -> Result<TilePyramid> {
-    generate_tile_pyramid_rgb_inner(r, g, b, output_dir, params, Some(&fn_r), Some(&fn_g), Some(&fn_b))
-}
-
-fn generate_tile_pyramid_rgb_inner(
-    r: &Array2<f32>,
-    g: &Array2<f32>,
-    b: &Array2<f32>,
-    output_dir: &str,
-    params: &TileParams,
-    fn_r: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
-    fn_g: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
-    fn_b: Option<&(dyn Fn(f32) -> u8 + Send + Sync)>,
-) -> Result<TilePyramid> {
     let (orig_rows, orig_cols) = r.dim();
-    let tile_size = params.tile_size;
+    if g.dim() != r.dim() || b.dim() != r.dim() {
+        anyhow::bail!(
+            "RGB channels have mismatched dimensions: r={:?} g={:?} b={:?}",
+            r.dim(),
+            g.dim(),
+            b.dim()
+        );
+    }
+    let tile_size = validated_tile_size(params)?;
     let num_levels = compute_num_levels(orig_cols, orig_rows, tile_size);
 
     fs::create_dir_all(output_dir)
@@ -404,25 +361,18 @@ fn generate_tile_pyramid_rgb_inner(
             .flat_map(|ty| (0..tile_cols).map(move |tx| (tx, ty)))
             .collect();
 
-        if let (Some(fr), Some(fg), Some(fb)) = (fn_r, fn_g, fn_b) {
-            let r_sl = lr.as_slice().expect("contiguous");
-            let g_sl = lg.as_slice().expect("contiguous");
-            let b_sl = lb.as_slice().expect("contiguous");
-            tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
-                let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
-                render_tile_rgb_stf(
-                    r_sl, g_sl, b_sl, level_cols,
-                    tx, ty, tile_size, level_rows,
-                    fr, fg, fb,
-                    &tile_path,
-                )
-            })?;
-        } else {
-            tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
-                let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
-                render_tile_rgb(&*lr, &*lg, &*lb, tx, ty, tile_size, &tile_path)
-            })?;
-        }
+        let r_sl = lr.as_slice().context("red channel is not contiguous")?;
+        let g_sl = lg.as_slice().context("green channel is not contiguous")?;
+        let b_sl = lb.as_slice().context("blue channel is not contiguous")?;
+        tile_coords.par_iter().try_for_each(|&(tx, ty)| -> Result<()> {
+            let tile_path = format!("{}/{}_{}.png", level_dir, tx, ty);
+            render_tile_rgb_stf(
+                r_sl, g_sl, b_sl, level_cols,
+                tx, ty, tile_size, level_rows,
+                &fn_r, &fn_g, &fn_b,
+                &tile_path,
+            )
+        })?;
 
         levels.push(TileLevel {
             level,
@@ -494,8 +444,8 @@ mod tests {
         )
             .unwrap();
 
-        let dir = "/tmp/test_tiles_pyramid";
-        let _ = fs::remove_dir_all(dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
 
         let params = TileParams { tile_size: 256 };
         let pyramid = generate_tile_pyramid(&data, dir, &params).unwrap();
@@ -511,8 +461,48 @@ mod tests {
         assert!(Path::new(&format!("{}/0/0_0.png", dir)).exists());
         assert!(Path::new(&format!("{}/1/0_0.png", dir)).exists());
         assert!(Path::new(&format!("{}/1/1_1.png", dir)).exists());
+    }
 
-        let _ = fs::remove_dir_all(dir);
+    #[test]
+    fn test_tile_size_outside_the_supported_range_is_an_error_not_a_panic() {
+        let data = Array2::from_elem((300, 300), 0.5f32);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap();
+        for size in [0usize, 1, MIN_TILE_SIZE - 1, MAX_TILE_SIZE + 1, 65536] {
+            let err = generate_tile_pyramid(&data, out, &TileParams { tile_size: size })
+                .expect_err("out-of-range tile size must be rejected");
+            assert!(err.to_string().contains("tile_size"), "{err}");
+            let rgb = generate_tile_pyramid_rgb_stf(
+                &data, &data, &data, out, &TileParams { tile_size: size },
+                |_| 0, |_| 0, |_| 0,
+            );
+            assert!(rgb.is_err(), "rgb tile size {size} must be rejected");
+        }
+        assert!(generate_tile_pyramid(&data, out, &TileParams { tile_size: MIN_TILE_SIZE }).is_ok());
+    }
+
+    #[test]
+    fn test_rgb_pyramid_uses_the_stf_functions() {
+        let r = Array2::from_elem((70, 70), 0.1f32);
+        let g = Array2::from_elem((70, 70), 0.2f32);
+        let b = Array2::from_elem((70, 70), 0.3f32);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap();
+        let pyramid = generate_tile_pyramid_rgb_stf(
+            &r, &g, &b, out, &TileParams { tile_size: 64 },
+            |v| (v * 100.0) as u8, |v| (v * 100.0) as u8, |v| (v * 100.0) as u8,
+        )
+        .unwrap();
+        assert_eq!(pyramid.levels.len(), 2);
+        let tile = image::open(format!("{}/1/0_0.png", out)).unwrap().into_rgb8();
+        assert_eq!(tile.get_pixel(0, 0).0, [10, 20, 30]);
+
+        let small = Array2::from_elem((10, 10), 0.3f32);
+        assert!(generate_tile_pyramid_rgb_stf(
+            &r, &g, &small, out, &TileParams { tile_size: 64 },
+            |_| 0, |_| 0, |_| 0,
+        )
+        .is_err());
     }
 
     #[test]
@@ -521,9 +511,8 @@ mod tests {
         data[[3, 5]] = 1.0;
         data[[7, 9]] = f32::NAN;
 
-        let dir = std::env::temp_dir().join("astroburst_mono_tile_unit_range");
-        let _ = fs::remove_dir_all(&dir);
-        let dir_str = dir.to_str().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap();
 
         let params = TileParams { tile_size: 256 };
         let pyramid = generate_tile_pyramid(&data, dir_str, &params).unwrap();
@@ -533,7 +522,5 @@ mod tests {
         assert_eq!(tile.get_pixel(0, 0).0[0], 64);
         assert_eq!(tile.get_pixel(5, 3).0[0], 255);
         assert_eq!(tile.get_pixel(9, 7).0[0], 0);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 }

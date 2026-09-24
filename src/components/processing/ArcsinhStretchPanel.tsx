@@ -1,14 +1,26 @@
 import { useState, useCallback } from "react";
 import { applyArcsinhStretch } from "../../services/processing";
-import type { ArcsinhResult } from "../../shared/types/processing";
+import type { ArcsinhResult } from "../../shared/types";
+import { useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
+import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+
+interface ArcsinhRun {
+  res: ArcsinhResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+}
 
 interface ArcsinhStretchPanelProps {
   selectedFile: { path: string; result?: unknown } | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
   onProcessingDone?: (result: ArcsinhResult) => void;
   chainedFrom?: string;
+  inputPreviewUrl?: string | null;
+  inputLabel?: string;
+  fileKey?: string | null;
 }
 
 const FACTOR_MIN = 1;
@@ -30,11 +42,11 @@ const ICON = (
   </svg>
 );
 
-export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: ArcsinhStretchPanelProps) {
+export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: ArcsinhStretchPanelProps) {
   const [factor, setFactor] = useState(50.0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<ArcsinhResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<ArcsinhRun>("stretch", fileKey ?? null);
+  const { chain } = useRenderContext();
+  const result = runResult && chainHoldsOutput(chain, "stretch", runResult.res.fits_path) ? runResult : null;
 
   const logMin = linearToLog(FACTOR_MIN);
   const logMax = linearToLog(FACTOR_MAX);
@@ -44,26 +56,18 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
     setFactor(Math.round(logToLinear(v) * 10) / 10);
   }, []);
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await applyArcsinhStretch(selectedFile.path, outputDir, factor);
-      setResult(res);
-      onPreviewUpdate?.(res?.previewUrl);
+    const path = selectedFile.path;
+    const baseUrl = inputPreviewUrl ?? null;
+    const baseLabel = inputLabel ?? "Original";
+    void run(async (ctx) => {
+      const res = await applyArcsinhStretch(path, outputDir, factor);
+      if (!ctx.inputUnchanged("stretch")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setIsRunning(false);
-    }
-  }, [selectedFile?.path, factor, outputDir, onPreviewUpdate, onProcessingDone]);
-
-  const fileResult = selectedFile?.result as { previewUrl?: string } | undefined;
-  const originalUrl = fileResult?.previewUrl;
-  const stretchedUrl = result?.previewUrl;
+      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
+    });
+  }, [selectedFile?.path, factor, outputDir, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -109,19 +113,21 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
         ))}
       </div>
 
-      <RunButton label={`Apply Stretch (S=${factor.toFixed(0)})`} runningLabel="Stretching..." running={isRunning} disabled={!selectedFile} accent="amber" onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label={`Apply Stretch (S=${factor.toFixed(0)})`} runningLabel="Stretching..." running={isRunning} disabled={!selectedFile || blocked} accent="amber" onClick={handleRun} />
+      </div>
       <ErrorAlert message={error} />
 
       {result && (
         <div className="flex flex-col gap-2 animate-fade-in">
           <ResultGrid items={[
-            { label: "Factor", value: result.stretch_factor?.toFixed(1) },
-            { label: "Time", value: result.elapsed_ms ? `${(result.elapsed_ms / 1000).toFixed(2)}s` : null },
-            { label: "Size", value: result.dimensions ? `${result.dimensions[0]}x${result.dimensions[1]}` : null },
+            { label: "Factor", value: result.res.stretch_factor?.toFixed(1) },
+            { label: "Time", value: result.res.elapsed_ms ? `${(result.res.elapsed_ms / 1000).toFixed(2)}s` : null },
+            { label: "Size", value: result.res.dimensions ? `${result.res.dimensions[0]}x${result.res.dimensions[1]}` : null },
           ]} />
 
-          {originalUrl && stretchedUrl && (
-            <CompareView originalUrl={originalUrl} resultUrl={stretchedUrl} originalLabel="Original" resultLabel="Stretched" accent="amber" height={180} />
+          {result.baseUrl && result.resultUrl && (
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Stretched" accent="amber" height={180} />
           )}
         </div>
       )}

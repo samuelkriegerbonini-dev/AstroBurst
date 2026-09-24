@@ -1,7 +1,13 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { Loader2, ArrowRight, RotateCcw } from "lucide-react";
-import { useFileContext, useRenderActions, useRgbContext } from "../../context/PreviewContext";
-import { useCompositePreview, useCompositeStf, useCompositeScnr, useCompositeActions } from "../../context/CompositeContext";
+import { Loader2, ArrowRight } from "lucide-react";
+import { fileKeyOf, useFileContext, useRenderActions, useRenderContext, useRgbContext } from "../../context/PreviewContext";
+import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
+import type { ChainEntry, ChainStep, ProcessedKind, ProcessingChain } from "../../shared/types/preview";
+import { CHAIN_ORDER, inputFor, lastStep, samePath, withStep, withVersionParam } from "../../utils/processingChain";
+import { compositeSyncStore, recordCompositeSync, wizardStepStaleAfterChannelSync, type CompositeChannel } from "../../utils/compositeSync";
+import { useComposeWizardContext } from "../../context/ComposeWizardContext";
+import { beginCompositeCheck } from "../../hooks/useProcessingRun";
+import { toDims } from "../../utils/stackingOutputs";
 import { updateCompositeChannel, restretchComposite } from "../../services/compose";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -42,47 +48,84 @@ const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "pixelmath", label: "PixelMath", color: "violet" },
 ];
 
-export interface ProcessingChain {
-  backgroundFits: string | null;
-  denoiseFits: string | null;
-  deconvFits: string | null;
-  psfKernel: number[][] | null;
-  stretchFits: string | null;
-  maskedStretchFits: string | null;
-  localContrastFits: string | null;
-  pixelMathFits: string | null;
-}
+const SECTION_STEP: Partial<Record<ProcessingSection, ChainStep>> = {
+  background: "background",
+  denoise: "denoise",
+  deconvolution: "deconv",
+  stretch: "stretch",
+  masked_stretch: "maskedStretch",
+  local_contrast: "localContrast",
+  hdr: "localContrast",
+  pixelmath: "pixelMath",
+};
 
 interface StepDoneResult {
   previewUrl?: string;
   corrected_fits?: string;
   fits_path?: string;
+  dimensions?: number[];
 }
 
-const CHAIN_FITS_KEYS = [
-  "backgroundFits",
-  "denoiseFits",
-  "deconvFits",
-  "stretchFits",
-  "maskedStretchFits",
-  "localContrastFits",
-  "pixelMathFits",
-] as const;
-
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").toLowerCase();
+interface PixelMathDoneResult {
+  fits_path?: string;
+  previewUrl?: string;
+  dimensions?: number[];
 }
 
-function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; originalName: string }) {
-  const steps: string[] = [originalName];
-  if (chain.backgroundFits) steps.push("BG");
-  if (chain.denoiseFits) steps.push("Denoise");
-  if (chain.psfKernel) steps.push("PSF");
-  if (chain.deconvFits) steps.push("Deconv");
-  if (chain.stretchFits) steps.push("Stretch");
-  if (chain.maskedStretchFits) steps.push("Masked");
-  if (chain.localContrastFits) steps.push("LHE/HDRMT");
-  if (chain.pixelMathFits) steps.push("PixelMath");
+const STEP_LABELS: Record<ChainStep, string> = {
+  background: "Background",
+  denoise: "Denoise",
+  deconv: "Deconvolution",
+  stretch: "Stretch",
+  maskedStretch: "Masked stretch",
+  localContrast: "LHE / HDRMT",
+  pixelMath: "PixelMath",
+};
+
+const INDICATOR_LABELS: Record<ChainStep, string> = {
+  background: "BG",
+  denoise: "Denoise",
+  deconv: "Deconv",
+  stretch: "Stretch",
+  maskedStretch: "Masked",
+  localContrast: "LHE/HDRMT",
+  pixelMath: "PixelMath",
+};
+
+const BANNER_LABELS: Record<ChainStep, string> = {
+  background: "Background Extraction",
+  denoise: "Wavelet Denoise",
+  deconv: "Deconvolution",
+  stretch: "Arcsinh Stretch",
+  maskedStretch: "Masked Stretch",
+  localContrast: "LHE / HDRMT",
+  pixelMath: "PixelMath",
+};
+
+interface ChainInput {
+  path: string;
+  from: ChainStep | null;
+  entry: ChainEntry | null;
+}
+
+function chainInput(chain: ProcessingChain, step: ChainStep, originalPath: string): ChainInput {
+  const path = inputFor(chain, step, originalPath);
+  for (let i = CHAIN_ORDER.length - 1; i >= 0; i--) {
+    const s = CHAIN_ORDER[i];
+    const entry = chain.steps[s];
+    if (s !== step && entry && entry.fitsPath === path) return { path, from: s, entry };
+  }
+  return { path, from: null, entry: null };
+}
+
+function ChainIndicator({ chain, displayedFits, originalName }: { chain: ProcessingChain; displayedFits: string | null; originalName: string }) {
+  const steps: { label: string; current: boolean }[] = [{ label: originalName, current: false }];
+  for (const s of CHAIN_ORDER) {
+    if (s === "deconv" && chain.psfKernel) steps.push({ label: "PSF", current: false });
+    const entry = chain.steps[s];
+    if (!entry) continue;
+    steps.push({ label: INDICATOR_LABELS[s], current: displayedFits !== null && samePath(entry.fitsPath, displayedFits) });
+  }
 
   if (steps.length <= 1) return null;
 
@@ -91,8 +134,8 @@ function ChainIndicator({ chain, originalName }: { chain: ProcessingChain; origi
       {steps.map((s, i) => (
         <span key={i} className="flex items-center gap-1">
           {i > 0 && <ArrowRight size={8} className="text-zinc-700" />}
-          <span className={i === steps.length - 1 ? "text-emerald-400/80" : "text-zinc-500"}>
-            {s}
+          <span className={s.current ? "text-emerald-400/80" : "text-zinc-500"}>
+            {s.label}
           </span>
         </span>
       ))}
@@ -113,279 +156,193 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
 
 function ProcessingTabInner() {
   const { file } = useFileContext();
-  const { setRenderedPreviewUrl, setProcessedSource } = useRenderActions();
+  const { chain, processed } = useRenderContext();
+  const { publishProcessed, setChain, currentFileKey } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
   const { setCompositePreviewUrl } = useCompositeActions();
-  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
-  const { compositeScnr } = useCompositeScnr();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const { rgbChannels } = useRgbContext();
+  const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
+  const wizardReadyRef = useRef(wizardState.compositeReady);
+  wizardReadyRef.current = wizardState.compositeReady;
   const [active, setActive] = useState<ProcessingSection>("background");
-
-  const [chain, setChain] = useState<ProcessingChain>({
-    backgroundFits: null,
-    denoiseFits: null,
-    deconvFits: null,
-    psfKernel: null,
-    stretchFits: null,
-    maskedStretchFits: null,
-    localContrastFits: null,
-    pixelMathFits: null,
-  });
 
   const [compositeSyncError, setCompositeSyncError] = useState<string | null>(null);
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
-  const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB });
+  const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked });
   useEffect(() => {
-    compositeStfRef.current = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-  }, [compositeStfR, compositeStfG, compositeStfB]);
+    compositeStfRef.current = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+  }, [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
 
-  const compositeScnrRef = useRef(compositeScnr);
-  useEffect(() => {
-    compositeScnrRef.current = compositeScnr;
-  }, [compositeScnr]);
+  const liveCompositeRef = useRef({ rgbChannels, compositePreviewUrl });
+  liveCompositeRef.current = { rgbChannels, compositePreviewUrl };
 
-  const findChannel = useCallback((filePath: string | undefined | null): string | null => {
-    if (!filePath || !rgbChannels || !compositePreviewUrl) return null;
+  const findLiveChannel = useCallback((filePath: string): CompositeChannel | null => {
+    const { rgbChannels: channels, compositePreviewUrl: url } = liveCompositeRef.current;
+    if (!channels || !url) return null;
     const norm = (p: string) => p.replace(/\\/g, "/");
     const fp = norm(filePath);
-    if (rgbChannels.r && norm(rgbChannels.r) === fp) return "r";
-    if (rgbChannels.g && norm(rgbChannels.g) === fp) return "g";
-    if (rgbChannels.b && norm(rgbChannels.b) === fp) return "b";
+    if (channels.r && norm(channels.r) === fp) return "r";
+    if (channels.g && norm(channels.g) === fp) return "g";
+    if (channels.b && norm(channels.b) === fp) return "b";
     return null;
-  }, [rgbChannels, compositePreviewUrl]);
+  }, []);
 
-  const syncComposite = useCallback(async (fitsPath: string, channel: string) => {
+  const syncComposite = useCallback(async (fileKey: string, fitsPath: string, channel: CompositeChannel) => {
+    const stillSameComposite = beginCompositeCheck(currentFileKey);
     try {
       await updateCompositeChannel(channel, fitsPath);
+      const staleStep = wizardStepStaleAfterChannelSync(wizardReadyRef.current);
+      if (staleStep) wizardDispatch({ type: "INVALIDATE_FROM", stepId: staleStep });
       const stf = compositeStfRef.current;
-      const scnr = compositeScnrRef.current;
       const dir = await getOutputDir();
-      const result = await restretchComposite(dir, stf.r, stf.g, stf.b, scnr?.enabled ? scnr : undefined);
+      const result = await restretchComposite(dir, stf.r, stf.g, stf.b, undefined, undefined, stf.linked);
+      if (!stillSameComposite()) return;
       if (result?.png_path) {
-        const url = await getPreviewUrl(result.png_path);
+        const url = compositeSyncStore.tagUrl(await getPreviewUrl(result.png_path));
+        if (!stillSameComposite()) return;
+        const liveUrl = liveCompositeRef.current.compositePreviewUrl;
+        compositeSyncStore.set(recordCompositeSync(compositeSyncStore.get(), liveUrl, url, channel, fileKey));
         setCompositePreviewUrl(url);
       }
       setCompositeSyncError(null);
     } catch (e) {
       console.error("[AstroBurst] Composite channel sync failed:", e);
-      setCompositeSyncError(e instanceof Error ? e.message : String(e));
+      if (stillSameComposite()) setCompositeSyncError(e instanceof Error ? e.message : String(e));
     }
-  }, [setCompositePreviewUrl]);
+  }, [setCompositePreviewUrl, currentFileKey, wizardDispatch]);
 
-  const handlePreviewUpdate = useCallback(
-    (url: string | null | undefined) => {
-      if (!url) return;
-      const bust = `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
-      setRenderedPreviewUrl(bust);
-    },
-    [setRenderedPreviewUrl],
-  );
+  const runKey = fileKeyOf(file);
+  const runPath = file?.path ?? null;
+  const compositeAtRun = compositePreviewUrl !== null;
 
-  const handleBackgroundDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.corrected_fits) {
-        const fits = result.corrected_fits;
-        setChain((prev) => ({
-          ...prev,
-          backgroundFits: fits,
-          denoiseFits: null,
-          deconvFits: null,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
+  const inputs = useMemo(() => {
+    const original = runPath ?? "";
+    return {
+      denoise: chainInput(chain, "denoise", original),
+      deconv: chainInput(chain, "deconv", original),
+      stretch: chainInput(chain, "stretch", original),
+      localContrast: chainInput(chain, "localContrast", original),
+    };
+  }, [chain, runPath]);
 
-  const handleDenoiseDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.fits_path) {
-        const fits = result.fits_path;
-        setChain((prev) => ({
-          ...prev,
-          denoiseFits: fits,
-          deconvFits: null,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
-
-  const handleDeconvDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.fits_path) {
-        const fits = result.fits_path;
-        setChain((prev) => ({
-          ...prev,
-          deconvFits: fits,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
-
-  const handlePsfReady = useCallback((kernel: number[][]) => {
-    setChain((prev) => ({ ...prev, psfKernel: kernel }));
-  }, []);
-
-  const handleStretchDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.fits_path) {
-        const fits = result.fits_path;
-        setChain((prev) => ({
-          ...prev,
-          stretchFits: fits,
-          localContrastFits: null,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
-
-  const handleMaskedStretchDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.fits_path) {
-        const fits = result.fits_path;
-        setChain((prev) => ({
-          ...prev,
-          maskedStretchFits: fits,
-          localContrastFits: null,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
-
-  const handleLocalContrastDone = useCallback(
-    (result: StepDoneResult) => {
-      handlePreviewUpdate(result?.previewUrl);
-      if (result?.fits_path) {
-        const fits = result.fits_path;
-        setChain((prev) => ({
-          ...prev,
-          localContrastFits: fits,
-        }));
-        setProcessedSource(fits);
-        const ch = findChannel(file?.path);
-        if (ch) syncComposite(fits, ch);
-      }
-    },
-    [handlePreviewUpdate, file?.path, findChannel, syncComposite, setProcessedSource],
-  );
-
-  const handlePixelMathDone = useCallback(
-    (result: { fits_path?: string; previewUrl?: string; cleaned_paths?: string[] }) => {
-      if (!result?.fits_path) return;
-      setProcessedSource(result.fits_path);
-      const deleted = new Set((result.cleaned_paths ?? []).map(normalizePath));
-      setChain((prev) => {
-        const next: ProcessingChain = { ...prev, pixelMathFits: result.fits_path ?? null };
-        if (deleted.size === 0) return next;
-        for (const key of CHAIN_FITS_KEYS) {
-          const value = next[key];
-          if (value && deleted.has(normalizePath(value))) next[key] = null;
+  const makeStepDone = useCallback(
+    (step: ChainStep, label: string, inputPath: string | null, actsOnComposite: boolean) =>
+      (result: StepDoneResult) => {
+        if (!runKey || !runPath || !result) return;
+        if (actsOnComposite) return;
+        const fits = (step === "background" ? result.corrected_fits : result.fits_path) ?? null;
+        const previewUrl = result.previewUrl ?? null;
+        const dimensions = toDims(result.dimensions);
+        const kind: ProcessedKind = "processing";
+        const input = inputPath ?? runPath;
+        if (!fits) {
+          if (previewUrl) publishProcessed(runKey, { fitsPath: null, previewUrl, dimensions: null, label, kind, inputPath: input });
+          return;
         }
-        return next;
-      });
-    },
-    [setProcessedSource],
+        const entry: ChainEntry = {
+          fitsPath: fits,
+          previewUrl: previewUrl ? withVersionParam(previewUrl, Date.now()) : null,
+          dimensions,
+        };
+        publishProcessed(runKey, { fitsPath: fits, previewUrl, dimensions, label, kind, inputPath: input }, (c) => withStep(c, step, entry));
+        if (currentFileKey() !== runKey) return;
+        const ch = findLiveChannel(runPath);
+        if (ch) syncComposite(runKey, fits, ch);
+      },
+    [runKey, runPath, publishProcessed, currentFileKey, findLiveChannel, syncComposite],
   );
 
-  const clearChain = useCallback(() => {
-    setChain({ backgroundFits: null, denoiseFits: null, deconvFits: null, psfKernel: null, stretchFits: null, maskedStretchFits: null, localContrastFits: null, pixelMathFits: null });
-  }, []);
+  const handleBackgroundDone = useMemo(
+    () => makeStepDone("background", STEP_LABELS.background, runPath, false),
+    [makeStepDone, runPath],
+  );
+  const handleDenoiseDone = useMemo(
+    () => makeStepDone("denoise", STEP_LABELS.denoise, inputs.denoise.path, false),
+    [makeStepDone, inputs.denoise.path],
+  );
+  const handleDeconvDone = useMemo(
+    () => makeStepDone("deconv", STEP_LABELS.deconv, inputs.deconv.path, false),
+    [makeStepDone, inputs.deconv.path],
+  );
+  const handleStretchDone = useMemo(
+    () => makeStepDone("stretch", STEP_LABELS.stretch, inputs.stretch.path, false),
+    [makeStepDone, inputs.stretch.path],
+  );
+  const handleMaskedStretchDone = useMemo(
+    () => makeStepDone("maskedStretch", STEP_LABELS.maskedStretch, inputs.stretch.path, false),
+    [makeStepDone, inputs.stretch.path],
+  );
+  const handleLheDone = useMemo(
+    () => makeStepDone("localContrast", "LHE", inputs.localContrast.path, compositeAtRun),
+    [makeStepDone, inputs.localContrast.path, compositeAtRun],
+  );
+  const handleHdrDone = useMemo(
+    () => makeStepDone("localContrast", "HDRMT", inputs.localContrast.path, compositeAtRun),
+    [makeStepDone, inputs.localContrast.path, compositeAtRun],
+  );
 
-  const handleResetChain = useCallback(() => {
-    clearChain();
-    setProcessedSource(null);
-    setRenderedPreviewUrl(null);
-  }, [clearChain, setProcessedSource, setRenderedPreviewUrl]);
+  const displayedPath = processed?.fitsPath ?? runPath;
+  const handlePixelMathDone = useCallback(
+    (result: PixelMathDoneResult) => {
+      if (!runKey || !runPath || !result?.fits_path) return;
+      const fits = result.fits_path;
+      const previewUrl = result.previewUrl ?? null;
+      const dimensions = toDims(result.dimensions);
+      const entry: ChainEntry = {
+        fitsPath: fits,
+        previewUrl: previewUrl ? withVersionParam(previewUrl, Date.now()) : null,
+        dimensions,
+      };
+      publishProcessed(
+        runKey,
+        { fitsPath: fits, previewUrl, dimensions, label: STEP_LABELS.pixelMath, kind: "pixelmath", inputPath: displayedPath ?? runPath },
+        (c) => withStep(c, "pixelMath", entry),
+      );
+    },
+    [runKey, runPath, displayedPath, publishProcessed],
+  );
 
-  const chainFileIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (chainFileIdRef.current === (file?.id ?? null)) return;
-    chainFileIdRef.current = file?.id ?? null;
-    clearChain();
-  }, [file?.id, clearChain]);
+  const handleDebayerPreview = useCallback(
+    (url: string | null | undefined) => {
+      if (!runKey || !runPath || !url) return;
+      publishProcessed(runKey, { fitsPath: null, previewUrl: url, dimensions: null, label: "Debayer", kind: "debayer", inputPath: runPath });
+    },
+    [runKey, runPath, publishProcessed],
+  );
 
-  const backgroundInput = file;
+  const handlePsfReady = useCallback(
+    (kernel: number[][]) => {
+      if (!runKey) return;
+      setChain(runKey, (c) => ({ ...c, psfKernel: kernel }));
+    },
+    [runKey, setChain],
+  );
 
-  const denoiseInput = useMemo(() => {
-    if (!file) return null;
-    if (chain.backgroundFits) {
-      return { ...file, path: chain.backgroundFits };
-    }
-    return file;
-  }, [file, chain.backgroundFits]);
+  const originalPreviewUrl = file?.result?.previewUrl ?? null;
+  const inputPreviewOf = (input: ChainInput): string | null => input.entry?.previewUrl ?? (input.from ? null : originalPreviewUrl);
+  const inputLabelOf = (input: ChainInput): string => (input.from ? STEP_LABELS[input.from] : "Original");
+  const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : undefined);
 
-  const deconvInput = useMemo(() => {
-    if (!file) return null;
-    const path = chain.denoiseFits || chain.backgroundFits || file.path;
-    return { ...file, path };
-  }, [file, chain.denoiseFits, chain.backgroundFits]);
+  const withPath = useCallback(
+    (path: string) => (file ? (path === file.path ? file : { ...file, path }) : null),
+    [file],
+  );
+  const denoiseInput = useMemo(() => withPath(inputs.denoise.path), [withPath, inputs.denoise.path]);
+  const deconvInput = useMemo(() => withPath(inputs.deconv.path), [withPath, inputs.deconv.path]);
+  const stretchInput = useMemo(() => withPath(inputs.stretch.path), [withPath, inputs.stretch.path]);
+  const nonLinearInput = useMemo(() => withPath(inputs.localContrast.path), [withPath, inputs.localContrast.path]);
 
-  const stretchInput = useMemo(() => {
-    if (!file) return null;
-    const path = chain.deconvFits || chain.denoiseFits || chain.backgroundFits || file.path;
-    return { ...file, path };
-  }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
+  const latest = lastStep(chain);
+  const latestEntry = latest ? chain.steps[latest] : undefined;
+  const pixelMathChainNotice =
+    latest && latestEntry && !(processed?.fitsPath && samePath(processed.fitsPath, latestEntry.fitsPath))
+      ? BANNER_LABELS[latest].toLowerCase()
+      : undefined;
 
-  const maskedStretchInput = useMemo(() => {
-    if (!file) return null;
-    const path = chain.deconvFits || chain.denoiseFits || chain.backgroundFits || file.path;
-    return { ...file, path };
-  }, [file, chain.deconvFits, chain.denoiseFits, chain.backgroundFits]);
-
-  const nonLinearInput = useMemo(() => {
-    if (!file) return null;
-    const path = chain.localContrastFits || chain.maskedStretchFits || chain.stretchFits || file.path;
-    return { ...file, path };
-  }, [file, chain.localContrastFits, chain.maskedStretchFits, chain.stretchFits]);
-
-  const nonLinearChainedFrom = chain.localContrastFits
-    ? "LHE / HDRMT"
-    : chain.maskedStretchFits
-      ? "masked_stretch"
-      : chain.stretchFits
-        ? "stretch"
-        : undefined;
-
-  const pixelMathChainNotice = chain.localContrastFits
-    ? "LHE / HDRMT"
-    : chain.maskedStretchFits
-      ? "masked stretch"
-      : chain.stretchFits
-        ? "stretch"
-        : chain.deconvFits
-          ? "deconvolution"
-          : chain.denoiseFits
-            ? "denoise"
-            : chain.backgroundFits
-              ? "background extraction"
-              : undefined;
-
-  const hasChain = chain.backgroundFits || chain.denoiseFits || chain.deconvFits || chain.psfKernel || chain.stretchFits || chain.maskedStretchFits || chain.localContrastFits || chain.pixelMathFits;
+  const displayedFits = processed?.fitsPath ?? null;
 
   return (
     <div className="flex flex-col h-full">
@@ -393,15 +350,8 @@ function ProcessingTabInner() {
         <div className="flex gap-1 flex-1 flex-wrap">
           {SECTIONS.map((s) => {
             const isActive = active === s.id;
-            const hasResult =
-              (s.id === "background" && chain.backgroundFits) ||
-              (s.id === "denoise" && chain.denoiseFits) ||
-              (s.id === "psf" && chain.psfKernel) ||
-              (s.id === "deconvolution" && chain.deconvFits) ||
-              (s.id === "stretch" && chain.stretchFits) ||
-              (s.id === "masked_stretch" && chain.maskedStretchFits) ||
-              ((s.id === "local_contrast" || s.id === "hdr") && chain.localContrastFits) ||
-              (s.id === "pixelmath" && chain.pixelMathFits);
+            const step = SECTION_STEP[s.id];
+            const hasResult = s.id === "psf" ? chain.psfKernel !== null : step ? chain.steps[step] !== undefined : false;
             const colors = COLOR_MAP[s.color];
             return (
               <button
@@ -418,19 +368,11 @@ function ProcessingTabInner() {
             );
           })}
         </div>
-        {hasChain && (
-          <button
-            onClick={handleResetChain}
-            className="p-1.5 rounded-md text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800/40 transition-all"
-            title="Reset processing chain"
-          >
-            <RotateCcw size={13} />
-          </button>
-        )}
       </div>
 
       <ChainIndicator
         chain={chain}
+        displayedFits={displayedFits}
         originalName={file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original"}
       />
 
@@ -461,83 +403,91 @@ function ProcessingTabInner() {
             <DebayerPanel
               selectedFile={file}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
+              onPreviewUpdate={handleDebayerPreview}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "background" ? "block" : "none" }}>
             <BackgroundPanel
-              selectedFile={backgroundInput}
+              selectedFile={file}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleBackgroundDone}
               chainedFrom={undefined}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "denoise" ? "block" : "none" }}>
             <WaveletPanel
               selectedFile={denoiseInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleDenoiseDone}
-              chainedFrom={chain.backgroundFits ? "background" : undefined}
+              chainedFrom={bannerOf(inputs.denoise)}
+              inputPreviewUrl={inputPreviewOf(inputs.denoise)}
+              inputLabel={inputLabelOf(inputs.denoise)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "psf" ? "block" : "none" }}>
             <PsfPanel
               selectedFile={deconvInput}
               onPsfReady={handlePsfReady}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "deconvolution" ? "block" : "none" }}>
             <DeconvolutionPanel
               selectedFile={deconvInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleDeconvDone}
-              chainedFrom={
-                chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
-              }
+              chainedFrom={bannerOf(inputs.deconv)}
               psfKernel={chain.psfKernel}
+              inputPreviewUrl={inputPreviewOf(inputs.deconv)}
+              inputLabel={inputLabelOf(inputs.deconv)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "stretch" ? "block" : "none" }}>
             <ArcsinhStretchPanel
               selectedFile={stretchInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleStretchDone}
-              chainedFrom={
-                chain.deconvFits ? "deconv" : chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
-              }
+              chainedFrom={bannerOf(inputs.stretch)}
+              inputPreviewUrl={inputPreviewOf(inputs.stretch)}
+              inputLabel={inputLabelOf(inputs.stretch)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "masked_stretch" ? "block" : "none" }}>
             <MaskedStretchPanel
-              selectedFile={maskedStretchInput}
+              selectedFile={stretchInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handleMaskedStretchDone}
-              chainedFrom={
-                chain.deconvFits ? "deconv" : chain.denoiseFits ? "denoise" : chain.backgroundFits ? "background" : undefined
-              }
+              chainedFrom={bannerOf(inputs.stretch)}
+              inputPreviewUrl={inputPreviewOf(inputs.stretch)}
+              inputLabel={inputLabelOf(inputs.stretch)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "local_contrast" ? "block" : "none" }}>
             <LocalContrastPanel
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
-              onProcessingDone={handleLocalContrastDone}
-              chainedFrom={nonLinearChainedFrom}
+              onProcessingDone={handleLheDone}
+              chainedFrom={bannerOf(inputs.localContrast)}
+              inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
+              inputLabel={inputLabelOf(inputs.localContrast)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "hdr" ? "block" : "none" }}>
             <HdrPanel
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
-              onPreviewUpdate={handlePreviewUpdate}
-              onProcessingDone={handleLocalContrastDone}
-              chainedFrom={nonLinearChainedFrom}
+              onProcessingDone={handleHdrDone}
+              chainedFrom={bannerOf(inputs.localContrast)}
+              inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
+              inputLabel={inputLabelOf(inputs.localContrast)}
+              fileKey={runKey}
             />
           </div>
           <div style={{ display: active === "pixelmath" ? "block" : "none" }}>
@@ -545,8 +495,10 @@ function ProcessingTabInner() {
               selectedFile={file}
               outputDir={resolvedDir}
               chainedFrom={pixelMathChainNotice}
-              onPreviewUpdate={handlePreviewUpdate}
               onProcessingDone={handlePixelMathDone}
+              inputPreviewUrl={processed?.previewUrl ?? originalPreviewUrl}
+              inputLabel={processed?.label ?? "Original"}
+              fileKey={runKey}
             />
           </div>
         </div>

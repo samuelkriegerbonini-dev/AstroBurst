@@ -3,9 +3,11 @@ import { Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
 import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
-import { useFileContext, useHistContext, useRgbContext, useCubeContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useRgbContext, useCubeContext, useDisplayedImage } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
+import { exportSourceLabel, resolveRgbExportSource } from "../../utils/exportSources";
+import { exportStem } from "../../utils/imageRef";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
@@ -13,8 +15,9 @@ function ExportTabInner() {
   const { file } = useFileContext();
   const { stfParams } = useHistContext();
   const { rgbChannels } = useRgbContext();
-  const { isShowingComposite } = useCompositePreview();
-  const { compositeStfR, compositeStfG, compositeStfB } = useCompositeStf();
+  const { compositePreviewUrl } = useCompositePreview();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const displayed = useDisplayedImage();
   const { isCube, cubeDims } = useCubeContext();
 
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
@@ -78,7 +81,7 @@ function ExportTabInner() {
     setCubeExportProgress(0);
     setCubeExportResult(null);
 
-    const stem = (file.name || "cube").replace(/\.(fits?|asdf|zip)$/i, "");
+    const stem = exportStem(file.name || "cube", "cube");
     const dir = await getExportDir();
     let exported = 0;
 
@@ -102,16 +105,30 @@ function ExportTabInner() {
 
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
 
+  const rgbSource = useMemo(
+    () =>
+      resolveRgbExportSource({
+        rgbChannels,
+        compositePreviewUrl,
+        filePath: file?.path ?? null,
+        fileIsRgb: file?.result?.is_rgb === true,
+        filePreviewUrl: file?.result?.previewUrl ?? null,
+      }),
+    [rgbChannels, compositePreviewUrl, file?.path, file?.result?.is_rgb, file?.result?.previewUrl],
+  );
+
   const compositeStf = useMemo(() => {
-    if (!isShowingComposite) return null;
-    return { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-  }, [isShowingComposite, compositeStfR, compositeStfG, compositeStfB]);
+    if (!compositePreviewUrl || rgbSource?.kind === "channels") return null;
+    return { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+  }, [compositePreviewUrl, rgbSource, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
 
   const effectiveRgbChannels = useMemo(() => {
-    if (rgbChannels) return rgbChannels;
-    if (isShowingComposite) return { r: null, g: null, b: null };
+    if (rgbSource?.kind === "channels") return rgbSource.channels;
+    if (rgbSource?.kind === "composite") return { r: null, g: null, b: null };
     return null;
-  }, [rgbChannels, isShowingComposite]);
+  }, [rgbSource]);
+
+  const sourceLabel = exportSourceLabel(displayed);
 
   return (
     <Suspense
@@ -124,10 +141,14 @@ function ExportTabInner() {
       <div className="flex flex-col gap-4 p-3">
         <ExportPanel
           filePath={file?.path ?? null}
+          exportPath={displayed.path}
+          sourceLabel={sourceLabel}
           stfParams={stfParams}
           onExport={handleExportFits}
           onExportRgb={handleExportFitsRgb}
           rgbChannels={effectiveRgbChannels}
+          headerChannels={rgbChannels}
+          rgbFilePath={rgbSource?.kind === "file" ? rgbSource.path : null}
           compositeStf={compositeStf}
           isLoading={exportLoading}
           lastResult={exportResult}

@@ -398,6 +398,7 @@ pub fn air_formula_applies(lambda_um: f64) -> bool {
     lambda_um >= AIR_FORMULA_MIN_UM
 }
 
+#[cfg(test)]
 pub fn vacuum_to_air_um(lambda_vacuum_um: f64) -> f64 {
     if !air_formula_applies(lambda_vacuum_um) {
         return lambda_vacuum_um;
@@ -460,6 +461,7 @@ pub fn velocity_kms(observed_um: f64, rest_um: f64, convention: VelocityConventi
     }
 }
 
+#[cfg(test)]
 pub fn wavelength_from_velocity_um(velocity_kms: f64, rest_um: f64, convention: VelocityConvention) -> f64 {
     let beta = velocity_kms / SPEED_OF_LIGHT_KMS;
     match convention {
@@ -469,6 +471,7 @@ pub fn wavelength_from_velocity_um(velocity_kms: f64, rest_um: f64, convention: 
     }
 }
 
+#[cfg(test)]
 pub fn frequency_ghz_from_wavelength_um(wavelength_um: f64) -> f64 {
     SPEED_OF_LIGHT_KMS / wavelength_um
 }

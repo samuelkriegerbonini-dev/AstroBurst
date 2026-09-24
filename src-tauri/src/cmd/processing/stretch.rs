@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save_as, resolve_output_dir, OutputValues, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
 use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb, GhsParams};
 use crate::core::imaging::masked_stretch::{masked_stretch, masked_stretch_rgb_shared, MaskedStretchConfig};
@@ -21,7 +21,7 @@ pub async fn apply_arcsinh_stretch_cmd(
     factor: f64,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
         let image = entry.arr();
@@ -32,7 +32,7 @@ pub async fn apply_arcsinh_stretch_cmd(
         let stretched = arcsinh_stretch(image, clamped_factor);
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save(&stretched, &path, &output_dir, "arcsinh", true)?;
+        let ro = render_and_save_as(&stretched, &path, &output_dir, "arcsinh", true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
@@ -73,7 +73,7 @@ pub async fn apply_ghs_stretch_cmd(
     highlight_protect: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
         let image = entry.arr();
@@ -90,7 +90,7 @@ pub async fn apply_ghs_stretch_cmd(
         let stretched = ghs_stretch(image, &params);
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save(&stretched, &path, &output_dir, "ghs", true)?;
+        let ro = render_and_save_as(&stretched, &path, &output_dir, "ghs", true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
@@ -117,7 +117,7 @@ pub async fn ghs_stretch_composite_cmd(
     highlight_protect: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let (er, eg, eb) = helpers::load_composite_rgb()?;
 
@@ -170,7 +170,7 @@ pub async fn masked_stretch_cmd(
     max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
         let image = entry.arr();
@@ -191,7 +191,7 @@ pub async fn masked_stretch_cmd(
         let result = masked_stretch(image, &config).map_err(|e| anyhow::anyhow!(e))?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save(&result.image, &path, &output_dir, SUFFIX_MASKED_STRETCH, true)?;
+        let ro = render_and_save_as(&result.image, &path, &output_dir, SUFFIX_MASKED_STRETCH, true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
@@ -214,7 +214,7 @@ pub async fn arcsinh_stretch_composite_cmd(
     factor: f64,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let (er, eg, eb) = helpers::load_composite_rgb()?;
         let clamped_factor = (factor as f32).clamp(1.0, 500.0);
@@ -264,7 +264,7 @@ pub async fn masked_stretch_composite_cmd(
     max_eccentricity: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let (er, eg, eb) = helpers::load_composite_rgb()?;
 
@@ -342,4 +342,55 @@ pub async fn masked_stretch_composite_cmd(
             RES_DIMENSIONS: [cols, rows],
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::Array2;
+
+    use super::*;
+    use crate::cmd::common::{cached_header, extract_image_resolved};
+    use crate::cmd::processing::local_contrast::is_display_referred;
+    use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::header::HduHeader;
+
+    fn starry_field() -> Array2<f32> {
+        Array2::from_shape_fn((48, 48), |(y, x)| {
+            let mut v = 200.0 + ((y * 31 + x * 17) % 13) as f32;
+            for (cy, cx) in [(12.0f32, 12.0f32), (30.0, 18.0), (24.0, 38.0)] {
+                let d2 = (y as f32 - cy).powi(2) + (x as f32 - cx).powi(2);
+                v += 5000.0 * (-d2 / 4.5).exp();
+            }
+            v
+        })
+    }
+
+    fn assert_shown_as_computed(result: &serde_json::Value) {
+        let fits = result[RES_FITS_PATH].as_str().unwrap();
+        let header = cached_header(fits).unwrap();
+        assert!(is_display_referred(Some(&header)), "{fits} is not flagged display-referred");
+        assert!(header.get("BUNIT").is_none(), "{fits} still claims the source unit");
+        assert_eq!(header.get("CRVAL1").map(str::trim), Some("83.8"), "{fits} lost its WCS");
+        let values = extract_image_resolved(fits).unwrap().arr;
+        let as_computed: Vec<u8> = values.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+        let png = image::open(result[RES_PNG_PATH].as_str().unwrap()).unwrap().to_luma8().into_raw();
+        assert_eq!(png, as_computed, "the preview of {fits} was auto-stretched again");
+    }
+
+    #[tokio::test]
+    async fn stretch_outputs_are_previewed_and_flagged_as_the_computed_stretch() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("stretch_src.fits").to_str().unwrap().to_string();
+        let mut header = HduHeader::empty();
+        for (k, v) in [("BUNIT", "'MJy/sr'"), ("CTYPE1", "'RA---TAN'"), ("CRVAL1", "83.8"), ("CRPIX1", "24.0")] {
+            header.set(k, v.to_string());
+        }
+        write_fits_mono(&src, &starry_field(), Some(&header)).unwrap();
+
+        assert_shown_as_computed(&apply_arcsinh_stretch_cmd(src.clone(), out.clone(), 50.0).await.unwrap());
+        assert_shown_as_computed(&apply_ghs_stretch_cmd(src.clone(), out.clone(), 5.0, None, None, None, None).await.unwrap());
+        let masked = masked_stretch_cmd(src, out, Some(3), None, None, None, None, None, None, None).await.unwrap();
+        assert_shown_as_computed(&masked);
+    }
 }

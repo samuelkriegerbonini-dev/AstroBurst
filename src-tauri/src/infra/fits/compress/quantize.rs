@@ -73,7 +73,7 @@ fn estimate_noise(row: &[f32]) -> Option<(f32, f32, f64)> {
         if v.is_empty() {
             return 0.0;
         }
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         v[(v.len() - 1) / 2]
     }
 
@@ -128,7 +128,7 @@ pub fn quantize_tile(
     tile_index: usize,
 ) -> QuantizeResult {
     let nx = pixels.len();
-    if nx <= 1 {
+    if nx <= 1 || !(quantize_level.is_finite() && quantize_level > 0.0) {
         return QuantizeResult::Overflow;
     }
 
@@ -142,7 +142,7 @@ pub fn quantize_tile(
     }
 
     let delta = stdev / quantize_level;
-    if delta == 0.0 {
+    if !(delta.is_finite() && delta > 0.0) {
         return QuantizeResult::Overflow;
     }
 
@@ -162,6 +162,9 @@ pub fn quantize_tile(
     } else {
         (minval + maxval) / 2.0
     };
+    if !zeropt.is_finite() {
+        return QuantizeResult::Overflow;
+    }
 
     let mut dither = TileDither::new(dither_seed, tile_index);
 
@@ -244,6 +247,20 @@ mod tests {
             }
             QuantizeResult::Overflow => panic!("expected mostly-finite tile to quantize"),
         }
+    }
+
+    #[test]
+    fn a_level_that_is_not_positive_and_finite_stores_the_tile_losslessly() {
+        let pixels: Vec<f32> = (0..64).map(|i| 50.0 + (i as f32 * 0.37).sin() * 5.0).collect();
+        for level in [0.0, -0.0, -4.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE * 1e-10] {
+            assert!(
+                matches!(quantize_tile(&pixels, level, 1, 0), QuantizeResult::Overflow),
+                "quantize_level {level} must not produce a quantized tile"
+            );
+        }
+        let mut with_null = pixels.clone();
+        with_null[3] = f32::NAN;
+        assert!(matches!(quantize_tile(&with_null, 0.0, 1, 0), QuantizeResult::Overflow));
     }
 
     #[test]

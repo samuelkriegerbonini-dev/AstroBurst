@@ -6,8 +6,6 @@ import {
   collapseCubeRange,
   computeMomentMaps,
   getCubeSpectrumRegion,
-  processCube,
-  processCubeLazy,
 } from "../../services/cube";
 import { getSpectralAxis } from "../../services/spectral";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -43,14 +41,23 @@ import {
   channelRangeFromDrag,
   defaultContinuumWindows,
   formatRangeLabel,
+  fullCubeCollapse,
   nearestChannel,
   parseChannelInput,
   pixelToAxisValue,
   rangePixelSpan,
   windowsAreValid,
   type ChannelRange,
+  type FullCollapseMode,
   type PlotMapping,
 } from "../../utils/spectrumRange";
+
+export interface CubeResult {
+  label: string;
+  previewUrl: string;
+  fitsPath: string | null;
+  dimensions: [number, number] | null;
+}
 
 interface SpectroscopyPanelProps {
   spectrum?: number[];
@@ -62,7 +69,7 @@ interface SpectroscopyPanelProps {
   error?: string | null;
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number) => void;
-  onCollapsePreview?: (previewUrl: string) => void;
+  onCubeResult?: (result: CubeResult) => void;
 }
 
 type BrushTarget = "range" | "left" | "right";
@@ -142,16 +149,16 @@ function SpectroscopyPanel({
   error = null,
   filePath,
   onFramePreview,
-  onCollapsePreview,
+  onCubeResult,
 }: SpectroscopyPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
-  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms?: number; elapsed?: number } | null>(null);
+  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms: number } | null>(null);
   const [collapseError, setCollapseError] = useState<string | null>(null);
-  const [collapseMode, setCollapseMode] = useState<"sum" | "median">("sum");
+  const [collapseMode, setCollapseMode] = useState<FullCollapseMode>("mean");
   const regionSeqRef = useRef(0);
   const collapseSeqRef = useRef(0);
   const rangeSeqRef = useRef(0);
@@ -502,8 +509,9 @@ function SpectroscopyPanel({
   }, []);
 
   const handleCollapse = useCallback(
-    async (mode: "sum" | "median") => {
-      if (!filePath) return;
+    async (mode: FullCollapseMode) => {
+      const request = fullCubeCollapse(totalFrames, mode);
+      if (!filePath || !request) return;
       const seq = ++collapseSeqRef.current;
       setCollapseLoading(true);
       setCollapseMode(mode);
@@ -511,21 +519,24 @@ function SpectroscopyPanel({
       setCollapseError(null);
       try {
         const dir = await getOutputDir();
-        const result = mode === "sum" ? await processCube(filePath, dir, 1) : await processCubeLazy(filePath, dir, 1);
+        const result = await collapseCubeRange(filePath, dir, request.z0, request.z1, request.mode);
         if (collapseSeqRef.current !== seq) return;
         setCollapseResult(result);
-        const url =
-          mode === "median"
-            ? (result.collapsedMedianPreviewUrl ?? result.collapsedPreviewUrl)
-            : result.collapsedPreviewUrl;
-        if (url && onCollapsePreview) onCollapsePreview(url);
+        if (result.previewUrl && onCubeResult) {
+          onCubeResult({
+            label: mode === "median" ? "Collapse median" : "Collapse mean",
+            previewUrl: result.previewUrl,
+            fitsPath: result.fits_path || null,
+            dimensions: result.dimensions ?? null,
+          });
+        }
       } catch (e) {
         if (collapseSeqRef.current === seq) setCollapseError(e instanceof Error ? e.message : String(e));
       } finally {
         setCollapseLoading(false);
       }
     },
-    [filePath, onCollapsePreview],
+    [filePath, totalFrames, onCubeResult],
   );
 
   const handleRegionSpectrum = useCallback(async () => {
@@ -551,21 +562,35 @@ function SpectroscopyPanel({
       const dir = await getOutputDir();
       const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode);
       if (rangeSeqRef.current !== seq) return;
-      if (result.previewUrl && onCollapsePreview) onCollapsePreview(result.previewUrl);
+      if (result.previewUrl && onCubeResult) {
+        onCubeResult({
+          label: `Collapse ${result.mode} · ch ${result.z0}-${result.z1}`,
+          previewUrl: result.previewUrl,
+          fitsPath: result.fits_path || null,
+          dimensions: result.dimensions ?? null,
+        });
+      }
     } catch (e) {
       if (rangeSeqRef.current === seq) setRangeError(e instanceof Error ? e.message : String(e));
     } finally {
       setRangeLoading(false);
     }
-  }, [filePath, range, rangeMode, onCollapsePreview]);
+  }, [filePath, range, rangeMode, onCubeResult]);
 
   const showMoment = useCallback(
     (result: MomentMapsResult, kind: MomentKind) => {
       setMomentKind(kind);
-      const url = result[kind].previewUrl;
-      if (url && onCollapsePreview) onCollapsePreview(url);
+      const map = result[kind];
+      if (map.previewUrl && onCubeResult) {
+        onCubeResult({
+          label: `Moment ${kind} · ${result.n_channels} ch`,
+          previewUrl: map.previewUrl,
+          fitsPath: map.fits_path || null,
+          dimensions: result.dimensions ?? null,
+        });
+      }
     },
-    [onCollapsePreview],
+    [onCubeResult],
   );
 
   const handleMoments = useCallback(async () => {
@@ -815,10 +840,10 @@ function SpectroscopyPanel({
         <div className="px-3 pb-2 flex items-center gap-2 flex-wrap" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
           <CollapseBtn
             label="Collapse Mean"
-            loading={collapseLoading && collapseMode === "sum"}
+            loading={collapseLoading && collapseMode === "mean"}
             disabled={collapseLoading}
             color="var(--ab-violet)"
-            onClick={() => handleCollapse("sum")}
+            onClick={() => handleCollapse("mean")}
           />
           <CollapseBtn
             label="Collapse Median"
@@ -830,7 +855,7 @@ function SpectroscopyPanel({
           {regionButton}
           {collapseResult && !collapseLoading && (
             <span className="text-[10px] font-mono text-zinc-500 ml-auto">
-              {collapseResult.elapsed_ms ?? collapseResult.elapsed}ms
+              {collapseResult.elapsed_ms}ms
             </span>
           )}
           {collapseError && (

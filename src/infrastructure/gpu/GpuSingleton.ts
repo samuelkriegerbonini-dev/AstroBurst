@@ -54,9 +54,9 @@ fn mtf(m: f32, x: f32) -> f32 {
     return a / b;
 }
 
-fn is_non_finite_bits(v: f32) -> bool {
+fn is_padding_bits(v: f32) -> bool {
     let bits = bitcast<u32>(v);
-    return (bits & 0x7F800000u) == 0x7F800000u;
+    return (bits & 0x7F800000u) == 0x7F800000u || (bits & 0x7FFFFFFFu) == 0u;
 }
 
 fn stretch(n: f32) -> f32 {
@@ -90,15 +90,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         u32(clamp(uv.y * params.tex_h, 0.0, params.tex_h - 1.0)),
     );
     let val = textureLoad(raw_tex, px, 0).r;
-    if (is_non_finite_bits(val)) {
-        return vec4<f32>(textureLoad(lut_tex, vec2<u32>(0u, 0u), 0).rgb, 1.0);
+    var idx = 0u;
+    if (!is_padding_bits(val)) {
+        let range = params.vmax - params.vmin;
+        let n = select(0.0, clamp((val - params.vmin) / range, 0.0, 1.0), range > 0.0);
+        let y = stretch(n);
+        idx = u32(floor(y * 255.0 + 0.5));
     }
-
-    let range = params.vmax - params.vmin;
-    let n = select(0.0, clamp((val - params.vmin) / range, 0.0, 1.0), range > 0.0);
-    let y = stretch(n);
-
-    var idx = u32(floor(y * 255.0 + 0.5));
     if (params.invert == 1u) {
         idx = 255u - idx;
     }
@@ -153,13 +151,13 @@ fn mtf(m: f32, x: f32) -> f32 {
     return a / b;
 }
 
-fn is_nan_bits(v: f32) -> bool {
+fn is_padding_bits(v: f32) -> bool {
     let bits = bitcast<u32>(v);
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+    return (bits & 0x7F800000u) == 0x7F800000u || (bits & 0x7FFFFFFFu) == 0u;
 }
 
 fn stf_channel(c: vec4<f32>, high: f32, val: f32) -> f32 {
-    if (is_nan_bits(val)) { return 0.0; }
+    if (is_padding_bits(val)) { return 0.0; }
     let norm = (val - c.x) / max(c.y - c.x, 1e-8);
     let range = high - c.z;
     var x = (norm - c.z) / max(range, 1e-8);

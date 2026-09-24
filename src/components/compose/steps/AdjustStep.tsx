@@ -6,6 +6,7 @@ import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { toneRunSummary } from "../../../utils/wizard";
 
 interface AdjustStepProps {
   state: WizardState;
@@ -192,8 +193,7 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
 
       {result && (
         <div className="text-[9px] text-zinc-500">
-          {result.elapsed_ms}ms
-          {result.curves_applied && " | curves applied"}
+          {toneRunSummary(result)}
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

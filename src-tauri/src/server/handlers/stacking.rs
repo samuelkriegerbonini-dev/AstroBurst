@@ -5,12 +5,15 @@ use axum::{extract::State, http::StatusCode, Json};
 use ndarray::Array2;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
 use astroburst_lib::core::imaging::stats::compute_image_stats;
-use astroburst_lib::core::stacking::calibration::{drizzle_from_paths, stack_from_paths};
+use astroburst_lib::core::stacking::combine::{stack_images_cancellable, validate_frame_weights};
+use astroburst_lib::core::stacking::drizzle::drizzle_stack_cancellable;
+use astroburst_lib::core::stacking::CancelCheck;
 use astroburst_lib::infra::cache::ImageCache;
+use astroburst_lib::infra::fits::reader::load_fits_image;
 use astroburst_lib::types::compose::AlignMethod;
+use astroburst_lib::types::error::AppError as CoreError;
 use astroburst_lib::types::stacking::{
     CombineMethod, DrizzleConfig, DrizzleKernel, NormalizationMethod, RejectionMethod,
     RejectionNormalization, StackConfig,
@@ -18,8 +21,10 @@ use astroburst_lib::types::stacking::{
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::job::{new_job, Job, SseEvent};
+use crate::job::{new_job, spawn_job, Job};
 use crate::state::AppState;
+
+const LOAD_PCT: usize = 60;
 
 fn parse_kernel(s: Option<&str>) -> DrizzleKernel {
     match s {
@@ -29,30 +34,91 @@ fn parse_kernel(s: Option<&str>) -> DrizzleKernel {
     }
 }
 
-fn publish_result(
-    job: &Job,
-    tx: &mpsc::Sender<SseEvent>,
-    cache: &ImageCache,
-    slot: &str,
-    outcome: anyhow::Result<Array2<f32>>,
-) {
-    if job.cancel.is_cancelled() {
-        return;
+pub(crate) fn require_finite(name: &str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("{name} must be a finite number")))
     }
+}
+
+pub(crate) fn require_positive(name: &str, value: f64) -> Result<()> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("{name} must be a finite number greater than 0, got {value}")))
+    }
+}
+
+fn validate_stack_config(config: &StackConfig, frames: usize) -> Result<()> {
+    require_positive("sigma_low", config.sigma_low as f64)?;
+    require_positive("sigma_high", config.sigma_high as f64)?;
+    require_finite("winsor_cutoff", config.winsor_cutoff as f64)?;
+    require_finite("percentile_low", config.percentile_low as f64)?;
+    require_finite("percentile_high", config.percentile_high as f64)?;
+    validate_frame_weights(config.weights.as_deref(), frames).map_err(|e| AppError::BadRequest(format!("{e:#}")))?;
+    let rejected = config.minmax_low.checked_add(config.minmax_high).ok_or_else(|| {
+        AppError::BadRequest("minmax_low + minmax_high is too large".into())
+    })?;
+    if config.rejection == RejectionMethod::MinMax && rejected >= frames {
+        return Err(AppError::BadRequest(format!(
+            "minmax_low + minmax_high ({rejected}) must be smaller than the number of frames ({frames})"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_drizzle_config(config: &DrizzleConfig) -> Result<()> {
+    require_positive("scale", config.scale)?;
+    require_positive("pixfrac", config.pixfrac)?;
+    require_positive("sigma_low", config.sigma_low as f64)?;
+    require_positive("sigma_high", config.sigma_high as f64)
+}
+
+pub(crate) fn stop_if_cancelled(cancelled: CancelCheck) -> anyhow::Result<()> {
+    if cancelled() {
+        return Err(CoreError::Cancelled.into());
+    }
+    Ok(())
+}
+
+fn load_frames(job: &Job, paths: &[String], cancelled: CancelCheck) -> anyhow::Result<Vec<Array2<f32>>> {
+    job.progress(0, "loading");
+    let mut frames = Vec::with_capacity(paths.len());
+    for (i, path) in paths.iter().enumerate() {
+        stop_if_cancelled(cancelled)?;
+        frames.push(load_fits_image(path)?);
+        job.progress(((i + 1) * LOAD_PCT / paths.len().max(1)) as u32, "loading");
+    }
+    stop_if_cancelled(cancelled)?;
+    Ok(frames)
+}
+
+fn stack_frames(job: &Job, paths: &[String], config: &StackConfig, cancelled: CancelCheck) -> anyhow::Result<Array2<f32>> {
+    let frames = load_frames(job, paths, cancelled)?;
+    job.progress(LOAD_PCT as u32, "stacking");
+    Ok(stack_images_cancellable(&frames, config, cancelled)?.image)
+}
+
+fn drizzle_frames(job: &Job, paths: &[String], config: &DrizzleConfig, cancelled: CancelCheck) -> anyhow::Result<Array2<f32>> {
+    let frames = load_frames(job, paths, cancelled)?;
+    job.progress(LOAD_PCT as u32, "drizzling");
+    Ok(drizzle_stack_cancellable(&frames, config, cancelled)?.image)
+}
+
+fn publish_result(job: &Job, cache: &ImageCache, slot: &str, outcome: anyhow::Result<Array2<f32>>) {
     match outcome {
         Ok(image) => {
-            job.set_pct(90);
-            tx.blocking_send(SseEvent::Progress { pct: 90, stage: "storing".into() }).ok();
-
+            job.progress(90, "storing");
+            if !job.begin_commit() {
+                return;
+            }
             let stats = compute_image_stats(&image);
             cache.insert_synthetic(slot, Arc::new(image), stats);
-
             job.set_done();
-            tx.blocking_send(SseEvent::Complete).ok();
         }
         Err(e) => {
-            job.set_error();
-            tx.blocking_send(SseEvent::Error { message: format!("{:#}", e) }).ok();
+            job.set_error(format!("{:#}", e));
         }
     }
 }
@@ -108,12 +174,6 @@ pub async fn stack(
         return Err(AppError::BadRequest("paths must not be empty".into()));
     }
 
-    let permit = state
-        .job_semaphore
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AppError::TooManyRequests)?;
-
     let defaults = StackConfig::default();
     let config = StackConfig {
         sigma_low: params.sigma_low.unwrap_or(defaults.sigma_low),
@@ -144,24 +204,28 @@ pub async fn stack(
         minmax_high: params.minmax_high.unwrap_or(defaults.minmax_high),
         rejection_maps: params.rejection_maps.unwrap_or(false),
     };
+    validate_stack_config(&config, params.paths.len())?;
+
+    let permit = state
+        .job_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::TooManyRequests(state.config.jobs_max))?;
 
     let result_slot = params.result_slot.unwrap_or_else(|| "stacked".into());
     let paths = params.paths;
 
-    let (job, tx) = new_job("stack");
+    let job = new_job("stack");
     let job_id = job.id.clone();
     session.jobs.insert(job_id.clone(), Arc::clone(&job));
 
     let cache = Arc::clone(&session.cache);
     let slot = result_slot.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-
-        tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
-
-        let outcome = stack_from_paths(&paths, &config, None, None).map(|r| r.image);
-        publish_result(&job, &tx, &cache, &slot, outcome);
+    spawn_job(job, permit, move |job| {
+        let cancelled = || job.cancel.is_cancelled();
+        let outcome = stack_frames(job, &paths, &config, &cancelled);
+        publish_result(job, &cache, &slot, outcome);
     });
 
     Ok((
@@ -179,12 +243,6 @@ pub async fn drizzle(
         return Err(AppError::BadRequest("paths must not be empty".into()));
     }
 
-    let permit = state
-        .job_semaphore
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AppError::TooManyRequests)?;
-
     let config = DrizzleConfig {
         scale: params.scale.unwrap_or(2.0),
         pixfrac: params.pixfrac.unwrap_or(0.7),
@@ -199,24 +257,28 @@ pub async fn drizzle(
         )?,
         ..DrizzleConfig::default()
     };
+    validate_drizzle_config(&config)?;
+
+    let permit = state
+        .job_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::TooManyRequests(state.config.jobs_max))?;
 
     let result_slot = params.result_slot.unwrap_or_else(|| "drizzled".into());
     let paths = params.paths;
 
-    let (job, tx) = new_job("drizzle");
+    let job = new_job("drizzle");
     let job_id = job.id.clone();
     session.jobs.insert(job_id.clone(), Arc::clone(&job));
 
     let cache = Arc::clone(&session.cache);
     let slot = result_slot.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-
-        tx.blocking_send(SseEvent::Progress { pct: 0, stage: "loading".into() }).ok();
-
-        let outcome = drizzle_from_paths(&paths, &config, None, None).map(|r| r.image);
-        publish_result(&job, &tx, &cache, &slot, outcome);
+    spawn_job(job, permit, move |job| {
+        let cancelled = || job.cancel.is_cancelled();
+        let outcome = drizzle_frames(job, &paths, &config, &cancelled);
+        publish_result(job, &cache, &slot, outcome);
     });
 
     Ok((
@@ -229,13 +291,15 @@ pub async fn drizzle(
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::*;
-    use crate::job::JobStatus;
+    use tokio::sync::mpsc;
 
-    fn setup() -> (Arc<Job>, mpsc::Sender<SseEvent>, mpsc::Receiver<SseEvent>, ImageCache) {
-        let (job, tx) = new_job("stack");
+    use super::*;
+    use crate::job::{cancel_after_stage_started, JobStatus, SseEvent};
+
+    fn setup() -> (Arc<Job>, mpsc::Receiver<SseEvent>, ImageCache) {
+        let job = new_job("stack");
         let rx = job.rx.lock().unwrap().take().unwrap();
-        (job, tx, rx, ImageCache::new(4, 1 << 20))
+        (job, rx, ImageCache::new(4, 1 << 20))
     }
 
     fn drain(rx: &mut mpsc::Receiver<SseEvent>) -> Vec<SseEvent> {
@@ -248,35 +312,33 @@ mod tests {
 
     #[test]
     fn cancelled_job_ignores_ok_result() {
-        let (job, tx, mut rx, cache) = setup();
-        job.cancel.cancel();
+        let (job, mut rx, cache) = setup();
         job.set_cancelled();
 
-        publish_result(&job, &tx, &cache, "stacked", Ok(Array2::<f32>::zeros((4, 4))));
+        publish_result(&job, &cache, "stacked", Ok(Array2::<f32>::zeros((4, 4))));
 
         assert_eq!(job.current_status(), JobStatus::Cancelled);
         assert_ne!(job.pct.load(Ordering::Relaxed), 100);
         assert!(cache.get("stacked").is_none());
-        assert!(drain(&mut rx).is_empty());
+        assert!(matches!(drain(&mut rx).as_slice(), [SseEvent::Cancelled]));
     }
 
     #[test]
     fn cancelled_job_ignores_error_result() {
-        let (job, tx, mut rx, cache) = setup();
-        job.cancel.cancel();
+        let (job, mut rx, cache) = setup();
         job.set_cancelled();
 
-        publish_result(&job, &tx, &cache, "stacked", Err(anyhow::anyhow!("boom")));
+        publish_result(&job, &cache, "stacked", Err(anyhow::anyhow!("boom")));
 
         assert_eq!(job.current_status(), JobStatus::Cancelled);
-        assert!(drain(&mut rx).is_empty());
+        assert!(matches!(drain(&mut rx).as_slice(), [SseEvent::Cancelled]));
     }
 
     #[test]
     fn running_job_stores_result_and_completes() {
-        let (job, tx, mut rx, cache) = setup();
+        let (job, mut rx, cache) = setup();
 
-        publish_result(&job, &tx, &cache, "stacked", Ok(Array2::<f32>::ones((4, 4))));
+        publish_result(&job, &cache, "stacked", Ok(Array2::<f32>::ones((4, 4))));
 
         assert_eq!(job.current_status(), JobStatus::Done);
         assert_eq!(job.pct.load(Ordering::Relaxed), 100);
@@ -286,12 +348,98 @@ mod tests {
 
     #[test]
     fn running_job_reports_error() {
-        let (job, tx, mut rx, cache) = setup();
+        let (job, mut rx, cache) = setup();
 
-        publish_result(&job, &tx, &cache, "stacked", Err(anyhow::anyhow!("boom")));
+        publish_result(&job, &cache, "stacked", Err(anyhow::anyhow!("boom")));
 
         assert_eq!(job.current_status(), JobStatus::Error);
         assert!(cache.get("stacked").is_none());
         assert!(matches!(drain(&mut rx).last(), Some(SseEvent::Error { .. })));
+    }
+
+    fn is_cancellation(err: &anyhow::Error) -> bool {
+        matches!(err.downcast_ref::<CoreError>(), Some(CoreError::Cancelled))
+    }
+
+    fn write_frames(dir: &tempfile::TempDir, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("frame{i}.fits"));
+                crate::tests::v2_fixtures::write_pixels_fits(&path, 8, 8, &[100.0 + i as f32; 64]);
+                path.to_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frame_loading_stops_at_the_next_frame_once_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, _rx, _cache) = setup();
+        job.set_cancelled();
+        let missing = dir.path().join("missing.fits").to_str().unwrap().to_string();
+        let err = load_frames(&job, &[missing], &|| job.cancel.is_cancelled()).unwrap_err();
+        assert!(is_cancellation(&err), "{err:#}");
+    }
+
+    #[test]
+    fn a_cancel_raised_while_frames_are_combined_stops_the_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_frames(&dir, 3);
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let (job, _rx, _cache) = setup();
+        let err = stack_frames(&job, &paths, &config, &cancel_after_stage_started(&job, LOAD_PCT as u32)).unwrap_err();
+        assert!(is_cancellation(&err), "{err:#}");
+
+        let (fresh, _rx, _cache) = setup();
+        assert_eq!(stack_frames(&fresh, &paths, &config, &|| false).unwrap().dim(), (8, 8));
+    }
+
+    #[test]
+    fn a_cancel_raised_while_frames_are_drizzled_stops_the_drizzle() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_frames(&dir, 3);
+        let config = DrizzleConfig { align: false, ..DrizzleConfig::default() };
+        let (job, _rx, _cache) = setup();
+        let err = drizzle_frames(&job, &paths, &config, &cancel_after_stage_started(&job, LOAD_PCT as u32)).unwrap_err();
+        assert!(is_cancellation(&err), "{err:#}");
+
+        let (fresh, _rx, _cache) = setup();
+        assert!(drizzle_frames(&fresh, &paths, &config, &|| false).is_ok());
+    }
+
+    #[test]
+    fn minmax_counts_are_checked_before_any_work_starts() {
+        let config = |low, high| StackConfig {
+            rejection: RejectionMethod::MinMax,
+            minmax_low: low,
+            minmax_high: high,
+            ..StackConfig::default()
+        };
+        assert!(validate_stack_config(&config(usize::MAX, 1), 3).is_err());
+        assert!(validate_stack_config(&config(2, 1), 3).is_err());
+        assert!(validate_stack_config(&config(1, 1), 3).is_ok());
+        let other = StackConfig { minmax_low: 5, minmax_high: 5, ..StackConfig::default() };
+        assert!(validate_stack_config(&other, 3).is_ok());
+        let nan_sigma = StackConfig { sigma_low: f32::NAN, ..StackConfig::default() };
+        assert!(validate_stack_config(&nan_sigma, 3).is_err());
+    }
+
+    #[test]
+    fn weight_count_is_checked_before_any_frame_is_loaded() {
+        let weighted = |weights: Vec<f64>| StackConfig { weights: Some(weights), ..StackConfig::default() };
+        assert!(validate_stack_config(&weighted(vec![1.0, 1.0]), 3).is_err());
+        assert!(validate_stack_config(&weighted(vec![1.0, 1.0, 1.0, 1.0]), 3).is_err());
+        assert!(validate_stack_config(&weighted(vec![1.0, f64::NAN, 1.0]), 3).is_err());
+        assert!(validate_stack_config(&weighted(vec![1.0, -1.0, 1.0]), 3).is_err());
+        assert!(validate_stack_config(&weighted(vec![1.0, 0.5, 2.0]), 3).is_ok());
+    }
+
+    #[test]
+    fn drizzle_scale_and_pixfrac_must_be_positive_numbers() {
+        for (scale, pixfrac) in [(f64::NAN, 0.7), (2.0, f64::INFINITY), (0.0, 0.7), (2.0, -1.0)] {
+            let config = DrizzleConfig { scale, pixfrac, ..DrizzleConfig::default() };
+            assert!(validate_drizzle_config(&config).is_err(), "{scale} {pixfrac}");
+        }
+        assert!(validate_drizzle_config(&DrizzleConfig::default()).is_ok());
     }
 }

@@ -95,7 +95,7 @@ fn load_wcs(session: &Session, image_ref: &str) -> Result<(WcsTransform, usize, 
 }
 
 fn on_image(x: f64, y: f64, w: usize, h: usize) -> bool {
-    x >= 0.0 && x < w as f64 && y >= 0.0 && y < h as f64
+    x >= -0.5 && x < w as f64 - 0.5 && y >= -0.5 && y < h as f64 - 0.5
 }
 
 fn separation_body(deg: f64) -> Value {
@@ -227,6 +227,17 @@ pub async fn separation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_image_uses_the_pixel_edges_around_integer_centres() {
+        assert!(on_image(-0.5, 0.0, 8, 8));
+        assert!(on_image(-0.3, 7.49, 8, 8));
+        assert!(!on_image(-0.51, 0.0, 8, 8));
+        assert!(!on_image(7.5, 0.0, 8, 8));
+        assert!(on_image(7.3, 0.0, 8, 8));
+        assert!(!on_image(0.0, 7.7, 8, 8));
+        assert!(!on_image(f64::NAN, 0.0, 8, 8));
+    }
 
     #[test]
     fn parse_frame_defaults_to_icrs_and_accepts_the_four_names() {

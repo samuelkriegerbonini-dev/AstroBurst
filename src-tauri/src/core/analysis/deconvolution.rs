@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 
+use crate::core::imaging::stats::is_padding;
 use crate::infra::progress::ProgressHandle;
 use crate::math::complex;
 use crate::math::fft::FftEngine2D;
@@ -11,7 +12,7 @@ use crate::types::stacking::{RLConfig, RLResult};
 
 pub fn generate_gaussian_psf(size: usize, sigma: f32) -> Array2<f32> {
     let mut psf = Array2::<f32>::zeros((size, size));
-    let center = (size - 1) as f32 / 2.0;
+    let center = size.saturating_sub(1) as f32 / 2.0;
     let sigma2 = 2.0 * sigma * sigma;
     let mut sum = 0.0f32;
 
@@ -150,23 +151,64 @@ impl FftConvolver {
     }
 }
 
-#[cfg(test)]
-fn compute_l2_delta(prev: &Array2<f32>, curr: &Array2<f32>) -> f64 {
-    let n = prev.len() as f64;
-    let sum_sq: f64 = prev
-        .as_slice()
-        .unwrap()
-        .par_iter()
-        .zip(curr.as_slice().unwrap().par_iter())
-        .map(|(&a, &b)| {
-            let d = (b - a) as f64;
-            d * d
+const PEDESTAL_MARGIN: f32 = 1e-3;
+
+fn validate_psf_kernel(psf: &Array2<f32>) -> Result<()> {
+    let (rows, cols) = psf.dim();
+    if rows == 0 || cols == 0 || rows % 2 == 0 || cols % 2 == 0 {
+        bail!("The PSF kernel must have an odd size so it has a centre pixel; got {}x{}", cols, rows);
+    }
+    let mut sum = 0.0f64;
+    for &v in psf.iter() {
+        if !v.is_finite() {
+            bail!("The PSF kernel contains a non-finite value; check the PSF sigma");
+        }
+        sum += v as f64;
+    }
+    if sum <= 0.0 {
+        bail!("The PSF kernel sums to {sum}; it needs a positive total to deconvolve");
+    }
+    Ok(())
+}
+
+fn valid_range(image: &Array2<f32>) -> Option<(f32, f32)> {
+    image
+        .iter()
+        .copied()
+        .filter(|v| !is_padding(*v))
+        .fold(None, |acc, v| match acc {
+            None => Some((v, v)),
+            Some((lo, hi)) => Some((lo.min(v), hi.max(v))),
         })
-        .sum();
-    (sum_sq / n).sqrt()
+}
+
+fn non_negative_pedestal(image: &Array2<f32>) -> f32 {
+    match valid_range(image) {
+        Some((lo, hi)) if lo < 0.0 => -lo + PEDESTAL_MARGIN * (hi - lo),
+        _ => 0.0,
+    }
 }
 
 pub fn richardson_lucy(
+    image: &Array2<f32>,
+    psf: &Array2<f32>,
+    config: &RLConfig,
+    progress: Option<&ProgressHandle>,
+) -> Result<RLResult> {
+    validate_psf_kernel(psf)?;
+    let pedestal = non_negative_pedestal(image);
+    if pedestal <= 0.0 {
+        return richardson_lucy_non_negative(image, psf, config, progress);
+    }
+    let shifted = image.mapv(|v| if is_padding(v) { pedestal } else { v + pedestal });
+    let mut result = richardson_lucy_non_negative(&shifted, psf, config, progress)?;
+    Zip::from(&mut result.image).and(image).par_for_each(|out, &orig| {
+        *out = if is_padding(orig) { 0.0 } else { *out - pedestal };
+    });
+    Ok(result)
+}
+
+fn richardson_lucy_non_negative(
     image: &Array2<f32>,
     psf: &Array2<f32>,
     config: &RLConfig,
@@ -339,11 +381,8 @@ mod tests {
 
         let config = RLConfig {
             iterations: 5,
-            psf_sigma: 1.0,
-            psf_size: 5,
-            regularization: 0.001,
             deringing: false,
-            deringing_threshold: 0.1,
+            ..RLConfig::default()
         };
 
         let result = richardson_lucy(&image, &psf, &config, None).unwrap();
@@ -369,18 +408,89 @@ mod tests {
         assert!((estimate[[0, 0]] - 100.0).abs() < 1e-4);
     }
 
-    #[test]
-    fn test_l2_delta_identical() {
-        let a = Array2::from_elem((10, 10), 1.0f32);
-        let delta = compute_l2_delta(&a, &a);
-        assert!(delta < 1e-10);
+    fn rl_config(iterations: usize, deringing: bool) -> RLConfig {
+        RLConfig {
+            iterations,
+            deringing,
+            ..RLConfig::default()
+        }
+    }
+
+    fn sky_subtracted_field(size: usize, seed: u64) -> Array2<f32> {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let stars = [(30.0f64, 30.0f64, 200.0f64), (60.0, 70.0, 80.0)];
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let noise = (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos();
+            let signal: f64 = stars
+                .iter()
+                .map(|(sy, sx, a)| a * (-((x as f64 - sx).powi(2) + (y as f64 - sy).powi(2)) / 8.0).exp())
+                .sum();
+            (noise + signal) as f32
+        })
+    }
+
+    fn far_from_the_stars(y: usize, x: usize) -> bool {
+        let d1 = (y as f64 - 30.0).hypot(x as f64 - 30.0);
+        let d2 = (y as f64 - 60.0).hypot(x as f64 - 70.0);
+        d1 > 12.0 && d2 > 12.0
     }
 
     #[test]
-    fn test_l2_delta_different() {
-        let a = Array2::from_elem((10, 10), 1.0f32);
-        let b = Array2::from_elem((10, 10), 2.0f32);
-        let delta = compute_l2_delta(&a, &b);
-        assert!((delta - 1.0).abs() < 1e-10);
+    fn a_sky_subtracted_frame_keeps_its_background_through_richardson_lucy() {
+        let image = sky_subtracted_field(96, 11);
+        let psf = generate_gaussian_psf(15, 2.0);
+        for deringing in [true, false] {
+            let result = richardson_lucy(&image, &psf, &rl_config(20, deringing), None).unwrap();
+            let zeros = result.image.iter().filter(|v| **v == 0.0).count() as f64 / result.image.len() as f64;
+            assert!(zeros < 0.01, "deringing={deringing}: {:.0}% of the frame clamped to 0", zeros * 100.0);
+            let mut sky: Vec<f32> = result
+                .image
+                .indexed_iter()
+                .filter(|((y, x), _)| far_from_the_stars(*y, *x))
+                .map(|(_, v)| *v)
+                .collect();
+            sky.sort_by(|a, b| a.total_cmp(b));
+            let median = sky[sky.len() / 2];
+            assert!(median.abs() < 0.3, "deringing={deringing}: sky median moved to {median}");
+            assert!(sky[0] < 0.0, "deringing={deringing}: no negative sky pixel survived");
+        }
+    }
+
+    #[test]
+    fn padding_stays_padding_when_a_pedestal_is_added() {
+        let mut image = sky_subtracted_field(64, 5);
+        image.slice_mut(ndarray::s![.., ..8]).fill(0.0);
+        image[[40, 40]] = f32::NAN;
+        let psf = generate_gaussian_psf(7, 1.5);
+        let result = richardson_lucy(&image, &psf, &rl_config(5, true), None).unwrap();
+        assert!(result.image.slice(ndarray::s![.., ..8]).iter().all(|v| *v == 0.0));
+        assert_eq!(result.image[[40, 40]], 0.0);
+    }
+
+    #[test]
+    fn a_positive_image_is_deconvolved_without_a_pedestal() {
+        let image = Array2::from_shape_fn((32, 32), |(y, x)| ((y * 32 + x) as f32 / 1024.0) + 0.01);
+        assert_eq!(non_negative_pedestal(&image), 0.0);
+        let psf = generate_gaussian_psf(5, 1.0);
+        let result = richardson_lucy(&image, &psf, &rl_config(3, false), None).unwrap();
+        assert!(result.image.iter().all(|v| v.is_finite() && *v >= 0.0));
+    }
+
+    #[test]
+    fn a_degenerate_psf_is_rejected_instead_of_blanking_or_shifting_the_image() {
+        let image = Array2::from_elem((33, 33), 1.0f32);
+        let config = rl_config(3, true);
+        for (size, sigma) in [(0usize, 2.0f32), (4, 2.0), (5, 0.0), (5, f32::NAN)] {
+            let psf = generate_gaussian_psf(size, sigma);
+            assert!(
+                richardson_lucy(&image, &psf, &config, None).is_err(),
+                "psf size {size} sigma {sigma} was accepted"
+            );
+        }
+        assert!(richardson_lucy(&image, &generate_gaussian_psf(5, 1.0), &config, None).is_ok());
     }
 }

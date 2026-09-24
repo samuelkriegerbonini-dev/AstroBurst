@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { estimatePsf } from "../../services/processing";
-import type { PsfEstimate } from "../../shared/types/processing";
+import { useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
 
 interface PsfResult {
@@ -16,9 +16,7 @@ interface PsfResult {
 interface PsfPanelProps {
   selectedFile: { path: string; result?: unknown } | null;
   onPsfReady?: (kernel: number[][]) => void;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
-  onProcessingDone?: (result: PsfEstimate) => void;
-  chainedFrom?: string;
+  fileKey?: string | null;
 }
 
 const ICON = (
@@ -29,10 +27,8 @@ const ICON = (
   </svg>
 );
 
-export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
-  const [result, setResult] = useState<PsfResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanelProps) {
+  const { running: loading, blocked, busyTitle, result, error, run } = useProcessingRun<PsfResult>("psf", fileKey ?? null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [numStars, setNumStars] = useState(30);
@@ -40,27 +36,22 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
   const [maxEllipticity, setMaxEllipticity] = useState(0.3);
   const [satThreshold, setSatThreshold] = useState(0.95);
 
-  const handleEstimate = useCallback(async () => {
+  const handleEstimate = useCallback(() => {
     if (!selectedFile?.path) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await estimatePsf(selectedFile.path, {
+    const path = selectedFile.path;
+    void run(async () => {
+      const res = await estimatePsf(path, {
         numStars,
         cutoutRadius,
         maxEllipticity,
         saturationThreshold: satThreshold,
       }) as PsfResult;
-      setResult(res);
       if (res && onPsfReady) {
         onPsfReady(res.kernel);
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, onPsfReady]);
+      return res ?? null;
+    });
+  }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, onPsfReady, run]);
 
   useEffect(() => {
     if (!result || !canvasRef.current) return;
@@ -105,7 +96,9 @@ export default function PsfPanel({ selectedFile, onPsfReady }: PsfPanelProps) {
         <Slider label="Saturation threshold" value={satThreshold} min={0.5} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setSatThreshold} />
       </div>
 
-      <RunButton label="Estimate PSF" runningLabel="Estimating..." running={loading} disabled={!selectedFile} accent="violet" onClick={handleEstimate} />
+      <div title={busyTitle}>
+        <RunButton label="Estimate PSF" runningLabel="Estimating..." running={loading} disabled={!selectedFile || blocked} accent="violet" onClick={handleEstimate} />
+      </div>
       <ErrorAlert message={error} />
 
       {result && (

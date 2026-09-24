@@ -323,6 +323,12 @@ export interface AutoMapResult {
   mappedCount: number;
 }
 
+export type RgbChannelLetter = "R" | "G" | "B";
+
+export function assignableChannel(hubbleChannel: string | null | undefined): RgbChannelLetter | null {
+  return hubbleChannel === "R" || hubbleChannel === "G" || hubbleChannel === "B" ? hubbleChannel : null;
+}
+
 export function detectionTargetBin(detection: AutoMapDetection): string | null {
   if (!detection.filter) return null;
   const filterValue = String(detection.filter);

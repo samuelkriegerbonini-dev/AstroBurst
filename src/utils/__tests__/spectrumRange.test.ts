@@ -7,6 +7,7 @@ import {
   clampRange,
   defaultContinuumWindows,
   formatRangeLabel,
+  fullCubeCollapse,
   nearestChannel,
   parseChannelInput,
   pixelToAxisValue,
@@ -175,5 +176,17 @@ describe("parseChannelInput", () => {
     expect(parseChannelInput("-1", 40)).toBeNull();
     expect(parseChannelInput("1.5", 40)).toBeNull();
     expect(parseChannelInput("abc", 40)).toBeNull();
+  });
+});
+
+describe("fullCubeCollapse", () => {
+  it("asks for one collapse over every channel instead of the per-frame preview pipeline", () => {
+    expect(fullCubeCollapse(3681, "mean")).toEqual({ z0: 0, z1: 3680, mode: "mean" });
+    expect(fullCubeCollapse(2, "median")).toEqual({ z0: 0, z1: 1, mode: "median" });
+  });
+
+  it("refuses a cube with no known channel count", () => {
+    expect(fullCubeCollapse(0, "mean")).toBeNull();
+    expect(fullCubeCollapse(Number.NaN, "mean")).toBeNull();
   });
 });

@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::core::imaging::region::RegionShape;
+use crate::core::imaging::stats::is_valid_pixel;
 use crate::core::imaging::wavelet::k_sigma_noise;
 use crate::math::median::exact_median_mut;
 
@@ -32,7 +33,28 @@ pub struct ChannelStatistics {
     pub variance: f64,
     pub std_dev: f64,
     pub nan_count: u64,
+    pub padding: u64,
     pub excluded: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PixelTally {
+    total: u64,
+    nan_count: u64,
+    padding: u64,
+    excluded: u64,
+}
+
+impl PixelTally {
+    fn take(&mut self, v: f32, values: &mut Vec<f32>) {
+        if is_valid_pixel(v) {
+            values.push(v);
+        } else if v.is_finite() {
+            self.padding += 1;
+        } else {
+            self.nan_count += 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -69,10 +91,10 @@ impl RegionNoise {
 }
 
 impl ChannelStatistics {
-    pub fn empty(total: u64, nan_count: u64, excluded: u64) -> Self {
+    fn empty(tally: PixelTally) -> Self {
         Self {
             count: 0,
-            total,
+            total: tally.total,
             fraction: 0.0,
             mean: 0.0,
             median: 0.0,
@@ -84,8 +106,9 @@ impl ChannelStatistics {
             sum: 0.0,
             variance: 0.0,
             std_dev: 0.0,
-            nan_count,
-            excluded,
+            nan_count: tally.nan_count,
+            padding: tally.padding,
+            excluded: tally.excluded,
         }
     }
 }
@@ -132,10 +155,15 @@ fn biweight_midvariance(values: &[f32], median: f64, mad: f64) -> f64 {
     (values.len() as f64 * num / (den * den)).max(0.0)
 }
 
-pub fn statistics_from_finite(mut values: Vec<f32>, total: u64, nan_count: u64, excluded: u64) -> ChannelStatistics {
+pub fn statistics_from_finite(values: Vec<f32>, total: u64, nan_count: u64, excluded: u64) -> ChannelStatistics {
+    statistics_from_tally(values, PixelTally { total, nan_count, padding: 0, excluded })
+}
+
+fn statistics_from_tally(mut values: Vec<f32>, tally: PixelTally) -> ChannelStatistics {
+    let PixelTally { total, nan_count, padding, excluded } = tally;
     let count = values.len() as u64;
     if count == 0 {
-        return ChannelStatistics::empty(total, nan_count, excluded);
+        return ChannelStatistics::empty(tally);
     }
     let (min, max, sum) = reduce_values(
         &values,
@@ -180,42 +208,36 @@ pub fn statistics_from_finite(mut values: Vec<f32>, total: u64, nan_count: u64, 
         variance,
         std_dev,
         nan_count,
+        padding,
         excluded,
     }
 }
 
-fn collect_finite(data: &Array2<f32>, excluded: Option<&Array2<u8>>) -> (Vec<f32>, u64, u64) {
+fn collect_valid(data: &Array2<f32>, excluded: Option<&Array2<u8>>) -> (Vec<f32>, PixelTally) {
     let mut values = Vec::with_capacity(data.len());
-    let mut nan_count = 0u64;
-    let mut excluded_count = 0u64;
+    let mut tally = PixelTally { total: data.len() as u64, ..PixelTally::default() };
     match excluded {
         Some(mask) if mask.dim() == data.dim() => {
             for (&v, &m) in data.iter().zip(mask.iter()) {
                 if m != 0 {
-                    excluded_count += 1;
-                } else if v.is_finite() {
-                    values.push(v);
+                    tally.excluded += 1;
                 } else {
-                    nan_count += 1;
+                    tally.take(v, &mut values);
                 }
             }
         }
         _ => {
             for &v in data.iter() {
-                if v.is_finite() {
-                    values.push(v);
-                } else {
-                    nan_count += 1;
-                }
+                tally.take(v, &mut values);
             }
         }
     }
-    (values, nan_count, excluded_count)
+    (values, tally)
 }
 
 pub fn exact_statistics(data: &Array2<f32>, excluded: Option<&Array2<u8>>) -> ChannelStatistics {
-    let (values, nan_count, excluded_count) = collect_finite(data, excluded);
-    statistics_from_finite(values, data.len() as u64, nan_count, excluded_count)
+    let (values, tally) = collect_valid(data, excluded);
+    statistics_from_tally(values, tally)
 }
 
 pub fn statistics_for_region(
@@ -228,10 +250,15 @@ pub fn statistics_for_region(
     if mv.n_inside == 0 {
         bail!("{} region covers no image pixels", shape.kind());
     }
-    Ok(statistics_from_finite(mv.values, mv.n_inside, mv.n_nan, mv.n_excluded))
+    let mut tally = PixelTally { total: mv.n_inside, nan_count: mv.n_nan, padding: 0, excluded: mv.n_excluded };
+    let mut values = Vec::with_capacity(mv.values.len());
+    for v in mv.values {
+        tally.take(v, &mut values);
+    }
+    Ok(statistics_from_tally(values, tally))
 }
 
-pub fn finite_range(data: &Array2<f32>) -> (f64, f64) {
+pub fn data_range(data: &Array2<f32>) -> (f64, f64) {
     let contiguous: Vec<f32>;
     let values: &[f32] = match data.as_slice() {
         Some(s) => s,
@@ -244,7 +271,7 @@ pub fn finite_range(data: &Array2<f32>) -> (f64, f64) {
         values,
         (f64::INFINITY, f64::NEG_INFINITY),
         |(lo, hi), v| {
-            if v.is_finite() {
+            if is_valid_pixel(v) {
                 let vf = v as f64;
                 (lo.min(vf), hi.max(vf))
             } else {
@@ -366,7 +393,7 @@ mod tests {
 
     fn hand_biweight_midvariance(values: &[f64], c: f64) -> f64 {
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         let n = sorted.len();
         let median = if n % 2 == 0 {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
@@ -374,7 +401,7 @@ mod tests {
             sorted[n / 2]
         };
         let mut devs: Vec<f64> = values.iter().map(|v| (v - median).abs()).collect();
-        devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        devs.sort_by(|a, b| a.total_cmp(b));
         let mad = if n % 2 == 0 {
             (devs[n / 2 - 1] + devs[n / 2]) / 2.0
         } else {
@@ -419,14 +446,53 @@ mod tests {
     }
 
     #[test]
-    fn exact_statistics_keeps_values_below_the_padding_threshold_and_negatives() {
+    fn exact_statistics_counts_exact_zero_as_padding_and_keeps_tiny_and_negative_values() {
         let data = arr(1, 5, vec![-3.0, 0.0, 1e-9, 2.0, 5.0]);
         let s = exact_statistics(&data, None);
-        assert_eq!(s.count, 5);
+        assert_eq!(s.count, 4);
+        assert_eq!(s.padding, 1);
+        assert_eq!(s.nan_count, 0);
+        assert_eq!(s.total, 5);
+        assert!((s.fraction - 0.8).abs() < 1e-12);
         assert_eq!(s.min, -3.0);
         assert_eq!(s.max, 5.0);
-        assert!((s.median - 1e-9).abs() < 1e-15);
-        assert!((s.mean - 0.8).abs() < 1e-9);
+        let tiny = 1e-9f32 as f64;
+        assert!((s.median - (tiny + 2.0) / 2.0).abs() < 1e-12, "median {}", s.median);
+        assert!((s.mean - (-3.0 + tiny + 2.0 + 5.0) / 4.0).abs() < 1e-12, "mean {}", s.mean);
+    }
+
+    #[test]
+    fn exact_statistics_partitions_every_pixel_into_data_nan_padding_or_excluded() {
+        let data = arr(2, 4, vec![0.0, 0.0, f32::NAN, 4.0, -1.0, 0.0, f32::INFINITY, 6.0]);
+        let mut mask = Array2::<u8>::zeros((2, 4));
+        mask[[0, 1]] = 1;
+        mask[[1, 3]] = 1;
+        let s = exact_statistics(&data, Some(&mask));
+        assert_eq!(s.count, 2);
+        assert_eq!(s.padding, 2);
+        assert_eq!(s.nan_count, 2);
+        assert_eq!(s.excluded, 2);
+        assert_eq!(s.count + s.padding + s.nan_count + s.excluded, s.total);
+        assert_eq!(s.min, -1.0);
+        assert_eq!(s.max, 4.0);
+        assert_eq!(s.median, 1.5);
+    }
+
+    #[test]
+    fn exact_statistics_median_matches_the_histogram_path_on_a_zero_padded_frame() {
+        let mut data = Array2::from_shape_fn((20, 20), |(y, x)| (y * 20 + x) as f32 - 150.0 + 0.5);
+        for y in 0..20 {
+            for x in 0..6 {
+                data[[y, x]] = 0.0;
+            }
+        }
+        let exact = exact_statistics(&data, None);
+        let histogram = crate::core::imaging::stats::compute_image_stats(&data);
+        assert_eq!(exact.padding, 120);
+        assert_eq!(exact.count, histogram.valid_count);
+        assert!((exact.median - histogram.median).abs() < 1e-6, "{} vs {}", exact.median, histogram.median);
+        assert_eq!(exact.min, histogram.min);
+        assert_eq!(exact.max, histogram.max);
     }
 
     #[test]
@@ -497,14 +563,17 @@ mod tests {
         let values: Vec<f32> = (0..n).map(|i| ((i * 7919) % 1000) as f32 - 500.0).collect();
         let data = arr(600, 1000, values.clone());
         let s = exact_statistics(&data, None);
-        let sum: f64 = values.iter().map(|&v| v as f64).sum();
-        assert_eq!(s.count, n as u64);
+        let valid: Vec<f32> = values.iter().copied().filter(|&v| v != 0.0).collect();
+        let m = valid.len();
+        let sum: f64 = valid.iter().map(|&v| v as f64).sum();
+        assert_eq!(s.count, m as u64);
+        assert_eq!(s.padding, (n - m) as u64);
         assert!((s.sum - sum).abs() < 1e-3);
         assert_eq!(s.min, -500.0);
         assert_eq!(s.max, 499.0);
-        let mut sorted = values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = (sorted[n / 2 - 1] as f64 + sorted[n / 2] as f64) / 2.0;
+        let mut sorted = valid.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = (sorted[m / 2 - 1] as f64 + sorted[m / 2] as f64) / 2.0;
         assert_eq!(s.median, median);
     }
 
@@ -519,17 +588,40 @@ mod tests {
         assert_eq!(s.count, 29);
         let expected_sum: f64 = mv.values.iter().map(|&v| v as f64).sum();
         assert!((s.sum - expected_sum).abs() < 1e-6);
-        assert_eq!(s.min, *mv.values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap() as f64);
+        assert_eq!(s.min, *mv.values.iter().min_by(|a, b| a.total_cmp(b)).unwrap() as f64);
         assert_eq!(s.median, 210.0);
     }
 
     #[test]
     fn statistics_for_region_rejects_off_image_and_invalid_shapes() {
-        let data = Array2::<f32>::zeros((8, 8));
+        let data = Array2::<f32>::from_elem((8, 8), 1.0);
         assert!(statistics_for_region(&data, &RegionShape::Circle { x: 50.0, y: 50.0, r: 2.0 }, None).is_err());
         assert!(statistics_for_region(&data, &RegionShape::Circle { x: 4.0, y: 4.0, r: -1.0 }, None).is_err());
         let ok = statistics_for_region(&data, &RegionShape::Circle { x: 4.0, y: 4.0, r: 1.0 }, None).unwrap();
         assert_eq!(ok.count, 5);
+    }
+
+    #[test]
+    fn statistics_for_region_counts_exact_zero_as_padding() {
+        let mut data = Array2::from_shape_fn((12, 12), |(y, x)| (y * 12 + x) as f32 - 80.0);
+        data[[4, 4]] = 0.0;
+        data[[5, 4]] = 0.0;
+        data[[5, 5]] = f32::NAN;
+        let shape = RegionShape::Box { x: 5.0, y: 5.0, width: 3.0, height: 3.0, angle: 0.0 };
+        let s = statistics_for_region(&data, &shape, None).unwrap();
+        assert_eq!(s.total, 9);
+        assert_eq!(s.nan_count, 1);
+        assert_eq!(s.padding, 2);
+        assert_eq!(s.count, 6);
+        assert_eq!(s.count + s.padding + s.nan_count + s.excluded, s.total);
+        assert_eq!(s.min, -27.0);
+        assert_eq!(s.max, -2.0);
+
+        let blank = Array2::<f32>::zeros((8, 8));
+        let empty = statistics_for_region(&blank, &RegionShape::Circle { x: 4.0, y: 4.0, r: 1.0 }, None).unwrap();
+        assert_eq!(empty.count, 0);
+        assert_eq!(empty.padding, 5);
+        assert_eq!(empty.fraction, 0.0);
     }
 
     #[test]
@@ -544,12 +636,17 @@ mod tests {
     }
 
     #[test]
-    fn finite_range_ignores_non_finite_and_keeps_negatives() {
+    fn data_range_ignores_non_finite_and_padding_and_keeps_negatives() {
         let data = arr(1, 5, vec![-2.5, f32::NAN, 0.0, 7.5, f32::INFINITY]);
-        assert_eq!(finite_range(&data), (-2.5, 7.5));
-        let empty = arr(1, 2, vec![f32::NAN, f32::NAN]);
-        let (lo, hi) = finite_range(&empty);
-        assert!(lo.is_nan() && hi.is_nan());
+        assert_eq!(data_range(&data), (-2.5, 7.5));
+        let padded = arr(1, 5, vec![0.0, 3.0, 0.0, 7.5, -0.0]);
+        assert_eq!(data_range(&padded), (3.0, 7.5));
+        let negative = arr(1, 3, vec![-4.0, 0.0, -1.0]);
+        assert_eq!(data_range(&negative), (-4.0, -1.0));
+        for empty in [arr(1, 2, vec![f32::NAN, f32::NAN]), arr(1, 2, vec![0.0, 0.0])] {
+            let (lo, hi) = data_range(&empty);
+            assert!(lo.is_nan() && hi.is_nan());
+        }
     }
 
     #[test]

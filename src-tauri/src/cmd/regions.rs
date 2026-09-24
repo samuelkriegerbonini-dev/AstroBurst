@@ -10,9 +10,9 @@ use crate::cmd::analysis::{resolve_dq_mask, DqMask};
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::region::{
-    line_cut, radial_profile, region_stats, RegionShape, RegionSystem, SigmaClip,
+    line_cut, radial_profile, region_data_stats, PhysicalMap, RegionShape, RegionSystem, SigmaClip,
 };
-use crate::core::imaging::region_file::{parse_reg, write_reg, Region};
+use crate::core::imaging::region_file::{parse_reg_with_physical, write_reg_with_physical, Region};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
     RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_ERROR, RES_HAS_WCS, RES_ID, RES_MASKED, RES_REGIONS,
@@ -21,6 +21,7 @@ use crate::types::constants::{
 
 const MAX_REGIONS_PER_CALL: usize = 512;
 const MAX_REG_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SIGMA_CLIP_ITERS: usize = 100;
 
 #[derive(Deserialize)]
 pub struct RegionStatsRequest {
@@ -32,6 +33,23 @@ pub struct RegionStatsRequest {
 
 fn entry_wcs(entry: &ImageEntry) -> Option<WcsTransform> {
     entry.header().and_then(|h| WcsTransform::from_header(h).ok())
+}
+
+fn entry_physical(entry: &ImageEntry) -> PhysicalMap {
+    entry.header().map(PhysicalMap::from_header).unwrap_or_else(PhysicalMap::identity)
+}
+
+fn sigma_clip_params(sigma: Option<f32>, maxiters: Option<usize>) -> anyhow::Result<SigmaClip> {
+    let defaults = SigmaClip::default();
+    let sigma = sigma.unwrap_or(defaults.sigma);
+    let maxiters = maxiters.unwrap_or(defaults.maxiters);
+    if !(sigma.is_finite() && sigma > 0.0) {
+        bail!("sigma must be a finite number greater than 0, got {}", sigma);
+    }
+    if !(1..=MAX_SIGMA_CLIP_ITERS).contains(&maxiters) {
+        bail!("maxiters must be between 1 and {}, got {}", MAX_SIGMA_CLIP_ITERS, maxiters);
+    }
+    Ok(SigmaClip { sigma, maxiters })
 }
 
 pub(crate) fn companion_err(path: &str, dims: (usize, usize)) -> Option<ImageEntry> {
@@ -63,7 +81,7 @@ pub(crate) fn stats_for_entry(
     regions
         .iter()
         .map(|req| {
-            match region_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, err, clip) {
+            match region_data_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, err, clip) {
                 Ok(stats) => json!({ RES_ID: req.id, RES_STATS: stats, RES_ERROR: Value::Null }),
                 Err(e) => json!({ RES_ID: req.id, RES_STATS: Value::Null, RES_ERROR: e.to_string() }),
             }
@@ -73,7 +91,7 @@ pub(crate) fn stats_for_entry(
 
 pub(crate) fn import_for_entry(entry: &ImageEntry, reg_text: &str) -> anyhow::Result<Value> {
     let wcs = entry_wcs(entry);
-    let parsed = parse_reg(reg_text, wcs.as_ref())?;
+    let parsed = parse_reg_with_physical(reg_text, wcs.as_ref(), &entry_physical(entry))?;
     Ok(json!({
         RES_REGIONS: parsed.regions,
         RES_WARNINGS: parsed.warnings,
@@ -88,7 +106,7 @@ pub(crate) fn export_for_entry(
     sexagesimal: bool,
 ) -> anyhow::Result<String> {
     let wcs = entry_wcs(entry);
-    Ok(write_reg(regions, system, wcs.as_ref(), sexagesimal)?)
+    Ok(write_reg_with_physical(regions, system, wcs.as_ref(), sexagesimal, &entry_physical(entry))?)
 }
 
 #[tauri::command]
@@ -104,13 +122,9 @@ pub async fn region_stats_cmd(
         if regions.len() > MAX_REGIONS_PER_CALL {
             bail!("too many regions in one call ({}); the limit is {}", regions.len(), MAX_REGIONS_PER_CALL);
         }
+        let clip = sigma_clip_params(sigma, maxiters)?;
         let entry = load_cached_full(&path)?;
         let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
-        let defaults = SigmaClip::default();
-        let clip = SigmaClip {
-            sigma: sigma.unwrap_or(defaults.sigma),
-            maxiters: maxiters.unwrap_or(defaults.maxiters),
-        };
         let err_entry = companion_err(&path, entry.arr().dim());
         let entries = stats_for_entry(&entry, &regions, mask.as_ref(), err_entry.as_ref().map(|e| e.arr()), clip);
         Ok(json!({
@@ -228,14 +242,16 @@ mod tests {
         assert_eq!(out[0][RES_ID], "all");
         assert!(out[0][RES_ERROR].is_null());
         assert_eq!(out[0][RES_STATS]["n_excluded"], 2);
-        assert_eq!(out[0][RES_STATS]["count"], 14);
+        assert_eq!(out[0][RES_STATS]["n_padding"], 1);
+        assert_eq!(out[0][RES_STATS]["count"], 13);
         assert_eq!(out[1][RES_ID], "empty");
         assert!(out[1][RES_STATS].is_null());
         assert!(out[1][RES_ERROR].as_str().unwrap().contains("no finite pixels"));
 
         let unmasked = stats_for_entry(&entry, &regions[..1], None, None, SigmaClip::default());
         assert_eq!(unmasked[0][RES_STATS]["n_excluded"], 0);
-        assert_eq!(unmasked[0][RES_STATS]["count"], 16);
+        assert_eq!(unmasked[0][RES_STATS]["n_padding"], 1);
+        assert_eq!(unmasked[0][RES_STATS]["count"], 15);
         assert_eq!(unmasked[0][RES_STATS]["sum"], 120.0);
 
         let invalid = stats_for_entry(
@@ -285,6 +301,28 @@ mod tests {
 
         assert!(companion_err(&key, (8, 8)).is_none());
         assert!(companion_err(&format!("{}#hdu=4", path.to_str().unwrap()), (4, 4)).is_none());
+    }
+
+    #[test]
+    fn region_stats_agree_with_the_statistics_region_mode_on_a_zero_padded_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drz_edge.fits");
+        let arr = Array2::from_shape_fn((12, 12), |(y, x)| if x < 5 { 0.0 } else { ((x + 3 * y) % 7) as f32 - 3.5 });
+        write_fits_mono(path.to_str().unwrap(), &arr, None).unwrap();
+        let entry = load_cached_full(path.to_str().unwrap()).unwrap();
+        let shape = RegionShape::Box { x: 5.5, y: 5.5, width: 12.0, height: 12.0, angle: 0.0 };
+
+        let out = stats_for_entry(&entry, &[req("frame", shape.clone())], None, None, SigmaClip::default());
+        let region = &out[0][RES_STATS];
+        let statistics = crate::core::imaging::statistics::statistics_for_region(entry.arr(), &shape, None).unwrap();
+        assert_eq!(region["count"], statistics.count);
+        assert_eq!(region["n_padding"], statistics.padding);
+        assert_eq!(region["count"], 84);
+        assert_eq!(region["median"].as_f64().unwrap(), statistics.median);
+        assert_eq!(region["min"].as_f64().unwrap(), statistics.min);
+        assert_eq!(region["max"].as_f64().unwrap(), statistics.max);
+        assert!((region["mean"].as_f64().unwrap() - statistics.mean).abs() < 1e-12);
+        assert_eq!(statistics.min, -3.5);
     }
 
     #[test]
@@ -354,6 +392,50 @@ mod tests {
         let err = import_for_entry(&entry, "fk5\ncircle(150,2,3\")\n").unwrap_err();
         assert!(err.to_string().contains("requires a WCS"));
         assert!(export_for_entry(&entry, &[], RegionSystem::Icrs, true).is_err());
+    }
+
+    #[test]
+    fn physical_regions_follow_the_ltv_offset_of_a_cutout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cutout.fits");
+        let arr = Array2::<f32>::from_elem((64, 64), 1.0);
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set_f64("LTV1", -10.0);
+        header.set_f64("LTV2", -20.0);
+        write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
+        let entry = load_cached_full(path.to_str().unwrap()).unwrap();
+
+        let back = import_for_entry(&entry, "physical\ncircle(31,51,2)\n").unwrap();
+        let shapes: Vec<Region> = serde_json::from_value(back[RES_REGIONS].clone()).unwrap();
+        assert_eq!(shapes[0].shape, RegionShape::Circle { x: 20.0, y: 30.0, r: 2.0 });
+
+        let text = export_for_entry(&entry, &shapes, RegionSystem::Physical, true).unwrap();
+        assert_eq!(text.lines().nth(2), Some("physical"));
+        assert!(text.lines().nth(3).unwrap().starts_with("circle(31,51,2)"), "{text}");
+        let image = export_for_entry(&entry, &shapes, RegionSystem::Image, true).unwrap();
+        assert!(image.lines().nth(3).unwrap().starts_with("circle(21,31,2)"), "{image}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_cmd_rejects_a_non_positive_sigma_and_an_unbounded_maxiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.fits");
+        let data = Array2::<f32>::from_shape_fn((8, 8), |(y, x)| (y * 8 + x) as f32 + 1.0);
+        write_fits_mono(path.to_str().unwrap(), &data, None).unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let regions = || vec![req("all", RegionShape::Box { x: 3.5, y: 3.5, width: 8.0, height: 8.0, angle: 0.0 })];
+
+        for sigma in [-1.0f32, 0.0, f32::NAN, f32::INFINITY] {
+            let err = region_stats_cmd(key.clone(), regions(), None, Some(sigma), None).await.unwrap_err();
+            assert!(err.contains("sigma must be a finite number greater than 0"), "{err}");
+        }
+        for maxiters in [0usize, MAX_SIGMA_CLIP_ITERS + 1] {
+            let err = region_stats_cmd(key.clone(), regions(), None, None, Some(maxiters)).await.unwrap_err();
+            assert!(err.contains("maxiters must be between 1 and 100"), "{err}");
+        }
+        let ok = region_stats_cmd(key, regions(), None, Some(2.5), Some(MAX_SIGMA_CLIP_ITERS)).await.unwrap();
+        assert!(ok[RES_REGIONS][0][RES_ERROR].is_null(), "{ok}");
+        assert_eq!(ok[RES_REGIONS][0][RES_STATS]["count"], 64);
     }
 
     #[tokio::test]

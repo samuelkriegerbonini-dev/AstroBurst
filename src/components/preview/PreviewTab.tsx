@@ -1,9 +1,18 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo, lazy, Suspense } from "react";
 import { Image, Loader2, X, SlidersHorizontal, RotateCcw } from "lucide-react";
-import { useFileContext, useHistContext, useCubeContext, useRenderContext, useDisplayContext } from "../../context/PreviewContext";
+import {
+  fileKeyOf,
+  useFileContext,
+  useHistContext,
+  useCubeContext,
+  useRenderContext,
+  useDisplayContext,
+  useDisplayedImage,
+} from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
-import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
-import { GRAY_LUT_RGBA, toDisplayTransfer } from "../../utils/displayTransfer";
+import type { HistogramData, RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
+import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
+import { emitPixelClick, pixelFromRect, setMousePixel } from "../../hooks/useMousePixelStore";
 
 import ZoomPanView from "../ui/ZoomPanView";
 import GpuViewport from "../render/GpuViewport";
@@ -18,6 +27,7 @@ interface PreviewTabProps {
   rawPixels: RawPixelData | null;
   rgbRawPixels?: RawRgbPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLElement>) => void;
+  onBackToFile: () => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
   dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }
@@ -25,6 +35,15 @@ interface PreviewTabProps {
 const MAX_RETRIES = 2;
 const RETRY_DELAYS = [300, 800] as const;
 const IDENTITY_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
+const PNG_ONLY_TITLE = "PNG-only result; reset to use display controls";
+
+function sameStf(a: StfParams, b: StfParams): boolean {
+  return a.shadow === b.shadow && a.midtone === b.midtone && a.highlight === b.highlight;
+}
+
+function clearMousePixel() {
+  setMousePixel(null);
+}
 
 const Overlay = memo(function Overlay({
                                         starOverlayRef,
@@ -58,6 +77,17 @@ const Overlay = memo(function Overlay({
   );
 });
 
+const ProcessedBadge = memo(function ProcessedBadge({ label, pngOnly }: { label: string; pngOnly: boolean }) {
+  return (
+    <div
+      className="absolute bottom-2 left-2 z-10 pointer-events-none text-[10px] px-2 py-0.5 rounded bg-black/60 text-emerald-300/90"
+      title={pngOnly ? PNG_ONLY_TITLE : "Showing a processed result; use Reset in the preview header to return to the original"}
+    >
+      {pngOnly ? `${label} · PNG` : label}
+    </div>
+  );
+});
+
 interface ImageBox {
   left: number;
   top: number;
@@ -69,6 +99,7 @@ const ImagePreview = memo(function ImagePreview({
   src,
   alt,
   isCube,
+  dims,
   onClick,
   onError,
   starOverlayRef,
@@ -77,6 +108,7 @@ const ImagePreview = memo(function ImagePreview({
   src: string;
   alt: string | undefined;
   isCube: boolean;
+  dims: [number, number] | null;
   onClick: (e: React.MouseEvent<HTMLElement>) => void;
   onError: () => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
@@ -108,6 +140,14 @@ const ImagePreview = memo(function ImagePreview({
     return () => ro.disconnect();
   }, [measure, src]);
 
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLImageElement>) => {
+      const coord = pixelFromRect(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect(), dims);
+      if (coord) setMousePixel(coord);
+    },
+    [dims],
+  );
+
   return (
     <div ref={frameRef} className="relative flex-1 min-h-0 flex items-center justify-center">
       <img
@@ -118,6 +158,8 @@ const ImagePreview = memo(function ImagePreview({
         onClick={onClick}
         onError={onError}
         onLoad={measure}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={clearMousePixel}
         loading="eager"
         decoding="async"
       />
@@ -131,13 +173,14 @@ const ImagePreview = memo(function ImagePreview({
   );
 });
 
-function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
+function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
-  const { stfParams } = useHistContext();
+  const { stfParams, histData } = useHistContext();
   const { isCube } = useCubeContext();
-  const { renderedPreviewUrl } = useRenderContext();
+  const { processed, stfPreviewUrl } = useRenderContext();
+  const displayed = useDisplayedImage();
   const { compositePreviewUrl } = useCompositePreview();
-  const { clearComposite, setCompositeStf, setCompositeStfLinked } = useCompositeActions();
+  const { setCompositeStf, setCompositeStfLinked } = useCompositeActions();
   const {
     compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
@@ -146,15 +189,27 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   const { display, limits, lut } = useDisplayContext();
   const regionKey = useRegionKey();
 
-  const fitsW = file?.result?.dimensions?.[0];
-  const fitsH = file?.result?.dimensions?.[1];
-  const regionsOnCurrentFile = !!fitsW && !!fitsH && regionKey !== null && regionKey === (file?.path ?? null);
+  const fileKey = fileKeyOf(file);
+  const isFileRgbView =
+    !!compositePreviewUrl && !!file?.result?.is_rgb && compositePreviewUrl === (file?.result?.previewUrl ?? null);
+  const showComposite = !!compositePreviewUrl && !(isFileRgbView && processed !== null);
 
+  const fileDims = file?.result?.dimensions ?? null;
+  const displayedDims = displayed.dimensions;
+  const regionsOnDisplayed = !!displayedDims && regionKey !== null;
+  const regionsOnRgbFile = isFileRgbView && !!fileDims && regionKey !== null;
+
+  const histKey = `${fileKey ?? ""}|${displayed.path ?? ""}`;
+  const [histOwner, setHistOwner] = useState<{ hist: HistogramData | null; key: string }>({ hist: histData, key: histKey });
+  if (histOwner.hist !== histData) setHistOwner({ hist: histData, key: histKey });
+  const histForDisplayed = histOwner.hist === histData && histOwner.key === histKey ? histData : null;
+
+  const rawMin = rawPixels?.min;
+  const rawMax = rawPixels?.max;
   const transfer = useMemo(() => {
-    const dataLimits = { vmin: rawPixels?.min ?? 0, vmax: rawPixels?.max ?? 1 };
-    const resolved = display.stretch === "mtf" ? dataLimits : (limits ?? dataLimits);
-    return toDisplayTransfer(display, stfParams, resolved);
-  }, [display, stfParams, limits, rawPixels?.min, rawPixels?.max]);
+    const rawRange = rawMin !== undefined && rawMax !== undefined ? { min: rawMin, max: rawMax } : null;
+    return toDisplayTransfer(display, stfParams, resolveTransferLimits(display.stretch, limits, rawRange, histForDisplayed));
+  }, [display, stfParams, limits, rawMin, rawMax, histForDisplayed]);
   const lutBytes = lut ?? GRAY_LUT_RGBA;
 
   const updateStf = useCallback((ch: "r" | "g" | "b", param: keyof StfParams, val: number) => {
@@ -170,14 +225,21 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     }
   }, [compositeStfLinked, compositeStfR, compositeStfG, compositeStfB, setCompositeStf]);
 
+  const toggleStfLinked = useCallback(() => {
+    const next = !compositeStfLinked;
+    setCompositeStfLinked(next);
+    if (next) setCompositeStf(compositeStfR, compositeStfR, compositeStfR);
+  }, [compositeStfLinked, compositeStfR, setCompositeStf, setCompositeStfLinked]);
+
   const resetStfToAuto = useCallback(() => {
     if (compositeAutoStfR && compositeAutoStfG && compositeAutoStfB) {
       setCompositeStf(compositeAutoStfR, compositeAutoStfG, compositeAutoStfB);
+      setCompositeStfLinked(sameStf(compositeAutoStfR, compositeAutoStfG) && sameStf(compositeAutoStfG, compositeAutoStfB));
     } else {
       const d = { shadow: 0, midtone: 0.5, highlight: 1 };
       setCompositeStf(d, d, d);
     }
-  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeStf]);
+  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB, setCompositeStf, setCompositeStfLinked]);
 
   const [previewError, setPreviewError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
@@ -186,11 +248,13 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     count: 0,
   });
 
+  const baseUrl = stfPreviewUrl ?? displayed.previewUrl;
+
   useEffect(() => {
     setPreviewError(false);
     setRetryKey(0);
     retryRef.current.count = 0;
-  }, [file?.id, renderedPreviewUrl]);
+  }, [fileKey, baseUrl]);
 
   useEffect(() => {
     const r = retryRef.current;
@@ -214,15 +278,27 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     }
   }, []);
 
-  const baseUrl = renderedPreviewUrl || file?.result?.previewUrl;
-
   const previewUrl = useMemo(() => {
     if (!baseUrl) return null;
     if (retryKey === 0) return baseUrl;
     return `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}t=${retryKey}`;
   }, [baseUrl, retryKey]);
 
-  if (compositePreviewUrl) {
+  const handleRgbFileMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const img = e.currentTarget.querySelector("img");
+      if (!img) return;
+      const coord = pixelFromRect(e.clientX, e.clientY, img.getBoundingClientRect(), fileDims);
+      if (coord) setMousePixel(coord);
+    },
+    [fileDims],
+  );
+
+  const handleViewerMousePixel = useCallback((x: number, y: number) => {
+    setMousePixel({ x, y });
+  }, []);
+
+  if (showComposite) {
     const rgbOnGpu = useGpu && !!rgbRawPixels;
     const displayReferred = !!rgbRawPixels?.displayReferred;
     const stfRow = (label: string, color: string, stf: StfParams, ch: "r" | "g" | "b") => (
@@ -249,7 +325,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     return (
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-violet-900/30 border-b border-violet-600/20">
-          <span className="text-[10px] text-violet-300">RGB Composite{rgbOnGpu ? " · GPU" : ""}</span>
+          <span className="text-[10px] text-violet-300">{isFileRgbView ? "RGB" : "RGB Composite"}{rgbOnGpu ? " · GPU" : ""}</span>
           {rgbOnGpu && displayReferred && (
             <span
               className="text-[9px] px-1.5 py-0.5 rounded text-emerald-300/90 bg-emerald-600/15"
@@ -268,19 +344,21 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               STF
             </button>
           )}
-          <button
-            onClick={clearComposite}
-            className="ml-auto flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
-          >
-            Back to file
-            <X size={10} />
-          </button>
+          {!isFileRgbView && (
+            <button
+              onClick={onBackToFile}
+              className="ml-auto flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              Back to file
+              <X size={10} />
+            </button>
+          )}
         </div>
         {rgbOnGpu && stfOpen && !displayReferred && (
           <div className="flex flex-col gap-1 px-3 py-2 border-b border-violet-600/15" style={{ background: "rgba(46,16,101,0.25)" }}>
             <div className="flex items-center justify-between">
               <button
-                onClick={() => setCompositeStfLinked(!compositeStfLinked)}
+                onClick={toggleStfLinked}
                 className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${compositeStfLinked ? "text-violet-200 bg-violet-600/25" : "text-zinc-400 bg-zinc-800/60 hover:text-zinc-200"}`}
                 title={compositeStfLinked ? "Channels linked — click to adjust R/G/B independently" : "Independent channels — click to link"}
               >
@@ -312,9 +390,13 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               <GpuViewport
                 renderW={rgbRawPixels.width}
                 renderH={rgbRawPixels.height}
-                fitsW={regionsOnCurrentFile ? fitsW : undefined}
-                fitsH={regionsOnCurrentFile ? fitsH : undefined}
-                regionsEnabled={regionsOnCurrentFile}
+                fitsW={regionsOnRgbFile && fileDims ? fileDims[0] : undefined}
+                fitsH={regionsOnRgbFile && fileDims ? fileDims[1] : undefined}
+                regionsEnabled={regionsOnRgbFile}
+                crosshairEnabled={isFileRgbView}
+                onMousePixel={isFileRgbView ? handleViewerMousePixel : undefined}
+                onPixelClick={isFileRgbView ? emitPixelClick : undefined}
+                onMouseLeave={clearMousePixel}
               >
                 <GpuRgbRenderer
                   rgb={rgbRawPixels}
@@ -327,19 +409,28 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
             </Suspense>
           </div>
         ) : (
-          <ZoomPanView
-            src={compositePreviewUrl}
-            alt="RGB composite"
-            className="flex-1 min-h-0"
-          />
+          <div
+            className="flex-1 min-h-0 flex flex-col"
+            onMouseMove={isFileRgbView ? handleRgbFileMouseMove : undefined}
+            onMouseLeave={clearMousePixel}
+          >
+            <ZoomPanView
+              src={compositePreviewUrl}
+              alt="RGB composite"
+              className="flex-1 min-h-0"
+            />
+          </div>
         )}
       </div>
     );
   }
 
-  const cubeFrameActive = isCube && !!renderedPreviewUrl && renderedPreviewUrl.includes("cube_frame_");
+  const previewOnly = displayed.previewOnly;
+  const badge = displayed.isProcessed && displayed.label
+    ? <ProcessedBadge label={displayed.label} pngOnly={previewOnly} />
+    : null;
 
-  if (useGpu && rawPixels && !cubeFrameActive) {
+  if (useGpu && rawPixels && !previewOnly) {
     return (
       <div className="flex flex-col h-full">
         <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} />
@@ -348,12 +439,16 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
             <GpuViewport
               renderW={rawPixels.width}
               renderH={rawPixels.height}
-              fitsW={fitsW}
-              fitsH={fitsH}
+              fitsW={displayedDims?.[0]}
+              fitsH={displayedDims?.[1]}
+              crosshairEnabled
+              onMousePixel={handleViewerMousePixel}
+              onPixelClick={emitPixelClick}
+              onMouseLeave={clearMousePixel}
               overlayCanvasRef={starOverlayRef}
               dqCanvasRef={dqCanvasRef}
               onCanvasClick={isCube ? onImageClick : undefined}
-              regionsEnabled={regionsOnCurrentFile}
+              regionsEnabled={regionsOnDisplayed}
             >
               <GpuRenderer
                 rawData={rawPixels.data}
@@ -364,6 +459,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
               />
             </GpuViewport>
           </Suspense>
+          {badge}
           {isCube && (
             <div className="absolute bottom-2 right-2 bg-black/60 text-[10px] text-purple-300 px-2 py-1 rounded pointer-events-none">
               Click to extract spectrum
@@ -374,19 +470,31 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
     );
   }
 
+  const controls = previewOnly ? (
+    <div title={PNG_ONLY_TITLE}>
+      <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
+    </div>
+  ) : (
+    <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
+  );
+
   if (previewUrl && !previewError) {
     return (
       <div className="flex flex-col h-full">
-        <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
-        <ImagePreview
-          src={previewUrl}
-          alt={file?.name}
-          isCube={isCube}
-          onClick={onImageClick}
-          onError={handlePreviewError}
-          starOverlayRef={starOverlayRef}
-          dqCanvasRef={dqCanvasRef}
-        />
+        {controls}
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          <ImagePreview
+            src={previewUrl}
+            alt={file?.name}
+            isCube={isCube}
+            dims={displayedDims}
+            onClick={onImageClick}
+            onError={handlePreviewError}
+            starOverlayRef={starOverlayRef}
+            dqCanvasRef={dqCanvasRef}
+          />
+          {badge}
+        </div>
       </div>
     );
   }
@@ -394,7 +502,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, starOv
   if (previewError) {
     return (
       <div className="flex flex-col h-full">
-        <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
+        {controls}
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-zinc-600">
           <Image size={32} strokeWidth={1} />
           <p className="text-xs">Preview unavailable</p>

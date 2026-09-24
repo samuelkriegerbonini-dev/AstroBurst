@@ -2,6 +2,7 @@ use anyhow::Result;
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::imaging::stats::is_valid_pixel;
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::median_f32_mut;
 use crate::types::constants::MAD_TO_SIGMA;
@@ -66,7 +67,7 @@ pub fn wavelet_denoise(
 
     let mut decomposition = atrous_decompose_with_progress(image, num_scales, progress)?;
 
-    let noise_sigma = noise_sigma_mad(&decomposition.layers[0]) / noise_scaling_for_layer(0);
+    let noise_sigma = mad_sigma_of_finite(detail_over_data(&decomposition.layers[0], image)) / noise_scaling_for_layer(0);
 
     for (scale_idx, layer) in decomposition.layers.iter_mut().enumerate() {
         if let Some(p) = progress {
@@ -159,10 +160,6 @@ fn atrous_decompose_with_progress(
     })
 }
 
-pub fn atrous_reconstruct(layers: &AtrousLayers) -> Array2<f32> {
-    atrous_reconstruct_with_bias(layers, &[])
-}
-
 pub fn atrous_reconstruct_with_bias(layers: &AtrousLayers, layer_bias: &[f32]) -> Array2<f32> {
     let (rows, cols) = layers.residual.dim();
     let gains: Vec<f32> = (0..layers.layers.len())
@@ -234,8 +231,12 @@ fn atrous_smooth_buffers(
     });
 }
 
-pub fn noise_sigma_mad(layer0: &Array2<f32>) -> f64 {
-    mad_sigma_of_finite(layer0.iter().copied())
+fn detail_over_data<'a>(layer: &'a Array2<f32>, source: &'a Array2<f32>) -> impl Iterator<Item = f32> + 'a {
+    layer
+        .iter()
+        .zip(source.iter())
+        .filter(|&(_, &s)| is_valid_pixel(s))
+        .map(|(&w, _)| w)
 }
 
 #[cfg(test)]
@@ -265,10 +266,9 @@ pub fn noise_scaling_for_layer(k: usize) -> f64 {
 
 pub fn k_sigma_noise(image: &Array2<f32>, k: f64, max_iter: usize) -> NoiseEstimate {
     let decomposition = atrous_decompose(image, 1);
-    let finite: Vec<f64> = decomposition.layers[0]
-        .iter()
+    let finite: Vec<f64> = detail_over_data(&decomposition.layers[0], image)
         .filter(|v| v.is_finite())
-        .map(|&v| v as f64)
+        .map(|v| v as f64)
         .collect();
 
     if finite.is_empty() {
@@ -279,7 +279,7 @@ pub fn k_sigma_noise(image: &Array2<f32>, k: f64, max_iter: usize) -> NoiseEstim
         };
     }
 
-    let mut sigma_layer = noise_sigma_mad(&decomposition.layers[0]);
+    let mut sigma_layer = mad_sigma_of_finite(finite.iter().map(|&v| v as f32));
     let mut kept = finite.len();
     let mut iterations = 0usize;
 
@@ -585,7 +585,7 @@ mod tests {
             layer_bias: None,
         };
         let denoised = wavelet_denoise(&image, &config, None).unwrap().denoised;
-        let rebuilt = atrous_reconstruct(&atrous_decompose(&image, 4));
+        let rebuilt = atrous_reconstruct_with_bias(&atrous_decompose(&image, 4), &[]);
         for y in 0..64 {
             for x in 0..64 {
                 assert_eq!(denoised[[y, x]], rebuilt[[y, x]]);
@@ -606,7 +606,7 @@ mod tests {
         assert!(decomposition.layers[0][[5, 5]].is_nan());
         assert!(decomposition.residual[[5, 5]].is_finite());
         assert!(decomposition.layers[0][[5, 6]].is_finite());
-        let rebuilt = atrous_reconstruct(&decomposition);
+        let rebuilt = atrous_reconstruct_with_bias(&decomposition, &[]);
         assert!(rebuilt[[5, 5]].is_nan());
         assert!((rebuilt[[5, 6]] - 10.0).abs() < 1e-4);
     }
@@ -618,15 +618,6 @@ mod tests {
         assert!((noise_scaling_for_layer(6) - 0.0051).abs() < 1e-12);
         assert!((noise_scaling_for_layer(7) - 0.00255).abs() < 1e-12);
         assert!((noise_scaling_for_layer(8) - 0.001275).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_noise_sigma_mad_matches_slice_estimator() {
-        let noise: Vec<f32> = (0..4096).map(|i| pseudo_noise(i as u64)).collect();
-        let expected = estimate_noise_sigma(&noise);
-        let layer = Array2::from_shape_vec((64, 64), noise).unwrap();
-        assert_eq!(noise_sigma_mad(&layer), expected);
-        assert!(expected > 0.0);
     }
 
     #[test]
@@ -749,5 +740,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn noise_estimates_ignore_zero_padding() {
+        let mut image = gaussian_noise_image(256, 256, 2.0, 9).mapv(|v| v + 100.0);
+        image.slice_mut(ndarray::s![.., 0..103]).fill(0.0);
+        let denoised = wavelet_denoise(&image, &WaveletConfig::default(), None).unwrap();
+        assert!(
+            (denoised.noise_estimate - 2.0).abs() / 2.0 < 0.1,
+            "denoise noise estimate {} with 40% padding",
+            denoised.noise_estimate
+        );
+        let estimate = k_sigma_noise(&image, 3.0, 10);
+        assert!(
+            (estimate.sigma - 2.0).abs() / 2.0 < 0.1,
+            "k-sigma noise {} with 40% padding",
+            estimate.sigma
+        );
+        assert!(estimate.fraction_used > 0.9, "fraction used {}", estimate.fraction_used);
     }
 }

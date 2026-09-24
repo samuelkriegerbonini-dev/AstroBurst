@@ -1,11 +1,8 @@
-use std::collections::HashMap;
-
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResult {
-    pub success: bool,
     #[serde(rename = "center_ra")]
     pub ra_center: f64,
     #[serde(rename = "center_dec")]
@@ -17,9 +14,6 @@ pub struct SolveResult {
     pub field_w_arcmin: f64,
     #[serde(rename = "field_of_view_h_arcmin")]
     pub field_h_arcmin: f64,
-    pub index_name: String,
-    pub stars_used: usize,
-    pub wcs_headers: HashMap<String, String>,
     #[serde(default)]
     pub annotations: Vec<FieldAnnotation>,
 }
@@ -44,23 +38,7 @@ pub struct SolveConfig {
     pub scale_low: Option<f64>,
     pub scale_high: Option<f64>,
     pub scale_units: Option<String>,
-    pub max_stars: Option<usize>,
-}
-
-impl Default for SolveConfig {
-    fn default() -> Self {
-        Self {
-            api_url: "https://nova.astrometry.net".into(),
-            api_key: String::new(),
-            ra_hint: None,
-            dec_hint: None,
-            radius_hint: Some(10.0),
-            scale_low: None,
-            scale_high: None,
-            scale_units: None,
-            max_stars: Some(100),
-        }
-    }
+    pub timeout_secs: u64,
 }
 
 pub fn solve_offline_placeholder() -> Result<SolveResult> {

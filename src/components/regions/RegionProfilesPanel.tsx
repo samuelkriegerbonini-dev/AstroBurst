@@ -1,14 +1,16 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Loader2 } from "lucide-react";
-import type { RadialProfile, LineCut, RegionShape } from "../../shared/types/regions";
+import type { RadialProfile, LineCut, RegionShape } from "../../shared/types";
 import { radialProfile, lineCut } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useDqContext } from "../../context/PreviewContext";
 import { shapeSummary } from "../../utils/regionGeometry";
 import ProfilePlot, { type ProfileSeries } from "./ProfilePlot";
+import MeasurementBadge from "../analysis/MeasurementBadge";
 
 interface RegionProfilesPanelProps {
   filePath: string | null;
+  measurePath: string | null;
 }
 
 const PROFILE_DEBOUNCE_MS = 250;
@@ -34,7 +36,7 @@ function requestFor(shape: RegionShape | undefined, background: RegionShape | un
   return null;
 }
 
-function RegionProfilesPanel({ filePath }: RegionProfilesPanelProps) {
+function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
   const [result, setResult] = useState<ProfileResult | null>(null);
@@ -48,8 +50,12 @@ function RegionProfilesPanel({ filePath }: RegionProfilesPanelProps) {
   const requestKey = request ? JSON.stringify(request) : null;
 
   useEffect(() => {
+    setResult(null);
+  }, [measurePath]);
+
+  useEffect(() => {
     const seq = ++seqRef.current;
-    if (!filePath || !requestKey) {
+    if (!measurePath || !requestKey) {
       setResult(null);
       setError(null);
       setLoading(false);
@@ -63,9 +69,9 @@ function RegionProfilesPanel({ filePath }: RegionProfilesPanelProps) {
           req.kind === "radial"
             ? {
                 kind: "radial",
-                data: await radialProfile(filePath, req.x, req.y, req.maxRadius, { background: req.background, excludeDq }),
+                data: await radialProfile(measurePath, req.x, req.y, req.maxRadius, { background: req.background, excludeDq }),
               }
-            : { kind: "cut", data: await lineCut(filePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
+            : { kind: "cut", data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
         if (seqRef.current !== seq) return;
         setResult(res);
         setError(null);
@@ -77,7 +83,7 @@ function RegionProfilesPanel({ filePath }: RegionProfilesPanelProps) {
       }
     }, PROFILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [filePath, requestKey, excludeDq]);
+  }, [measurePath, requestKey, excludeDq]);
 
   const series = useMemo<ProfileSeries[]>(() => {
     if (!result) return [];
@@ -102,6 +108,7 @@ function RegionProfilesPanel({ filePath }: RegionProfilesPanelProps) {
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
             {request.kind === "radial" ? "Radial profile" : "Line cut"}
           </span>
+          <MeasurementBadge />
         </div>
         <div className="flex items-center gap-2">
           {result?.data.masked && (

@@ -65,12 +65,6 @@ pub fn next_power_of_two(n: usize) -> usize {
     n.next_power_of_two()
 }
 
-pub fn transpose<T: FftFloat>(data: &[Complex<T>], rows: usize, cols: usize) -> Vec<Complex<T>> {
-    let mut out = Vec::new();
-    transpose_into(data, &mut out, rows, cols);
-    out
-}
-
 pub fn transpose_into<T: FftFloat>(
     data: &[Complex<T>],
     out: &mut Vec<Complex<T>>,
@@ -126,10 +120,6 @@ impl<T: FftFloat> FftEngine2D<T> {
             inv_row: planner.plan_fft_inverse(fft_cols),
             inv_col: planner.plan_fft_inverse(fft_rows),
         }
-    }
-
-    pub fn from_image_dims(rows: usize, cols: usize) -> Self {
-        Self::new(next_power_of_two(rows), next_power_of_two(cols))
     }
 
     pub fn from_padded_dims(rows: usize, cols: usize, pad_rows: usize, pad_cols: usize) -> Self {
@@ -217,6 +207,7 @@ pub fn prepare_windowed_buffer<T: FftFloat>(
     buf
 }
 
+#[cfg(test)]
 pub fn prepare_buffer_no_window<T: FftFloat>(
     image: &ndarray::Array2<f32>,
     fft_rows: usize,
@@ -256,6 +247,12 @@ pub fn find_peak<T: FftFloat>(surface: &[T], cols: usize) -> (usize, usize, T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn transpose(data: &[Complex<f64>], rows: usize, cols: usize) -> Vec<Complex<f64>> {
+        let mut out = Vec::new();
+        transpose_into(data, &mut out, rows, cols);
+        out
+    }
 
     #[test]
     fn test_next_power_of_two() {
@@ -369,13 +366,6 @@ mod tests {
                 b.re
             );
         }
-    }
-
-    #[test]
-    fn test_from_image_dims() {
-        let engine = FftEngine2D::<f64>::from_image_dims(100, 200);
-        assert_eq!(engine.fft_rows, 128);
-        assert_eq!(engine.fft_cols, 256);
     }
 
     #[test]

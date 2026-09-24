@@ -3,8 +3,10 @@ import { Loader2 } from "lucide-react";
 import { useFileContext, useHistContext, useStarOverlayContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
+import { useAnalysisTarget, useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import WcsReadout from "../header/WcsReadout";
 import PixelReadout from "../header/PixelReadout";
+import MeasurementBadge from "../analysis/MeasurementBadge";
 
 const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
@@ -21,6 +23,8 @@ export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
   const { histData, stfParams } = useHistContext();
   const mousePixel = useMousePixel();
+  const { path: probePath } = useAnalysisTarget();
+  const valueSource = useMeasurementSource(false);
   if (!file) return <div className="px-3 py-4 text-[10px] text-zinc-600">No file selected</div>;
   return (
     <div className="flex flex-col gap-3 px-3 py-2 text-[10px] font-mono text-zinc-500">
@@ -33,9 +37,15 @@ export const InfoPanel = memo(function InfoPanel() {
           mouseY={mousePixel?.y ?? null}
         />
       )}
-      {file.path && (
+      {valueSource && (
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-600">Values from</span>
+          <MeasurementBadge />
+        </div>
+      )}
+      {probePath && (
         <PixelReadout
-          filePath={file.path}
+          filePath={probePath}
           mouseX={mousePixel?.x ?? null}
           mouseY={mousePixel?.y ?? null}
         />

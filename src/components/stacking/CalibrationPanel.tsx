@@ -9,6 +9,7 @@ import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
 import type { ProcessedFile } from "../../shared/types";
+import type { RunTarget } from "./StackingTab";
 
 export interface CalibrationMasters {
   darkPaths: string[];
@@ -18,8 +19,8 @@ export interface CalibrationMasters {
 
 interface CalibrationPanelProps {
   files: ProcessedFile[];
-  onPreviewUpdate?: (url: string | null | undefined) => void;
-  onCalibrationDone?: (result: CalibrateResult, masters: CalibrationMasters) => void;
+  runTarget?: RunTarget | null;
+  onCalibrationDone?: (result: CalibrateResult, masters: CalibrationMasters, sciencePath: string, target: RunTarget | null) => void;
 }
 
 function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
@@ -34,7 +35,7 @@ function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
   }));
 }
 
-export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibrationDone }: CalibrationPanelProps) {
+export default function CalibrationPanel({ files = [], runTarget = null, onCalibrationDone }: CalibrationPanelProps) {
   const [darkExposureRatio, setDarkExposureRatio] = useState(1.0);
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [result, setResult] = useState<CalibrateResult | null>(null);
@@ -47,6 +48,8 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
 
   const handleCalibrate = useCallback(async (assignments: CalibAssignment) => {
     if (!assignments.science) return;
+    const target = runTarget;
+    const sciencePath = assignments.science.path;
     setLastAssignment(assignments);
     setIsCalibrating(true);
     setError(null);
@@ -58,22 +61,21 @@ export default function CalibrationPanel({ files = [], onPreviewUpdate, onCalibr
       biasPaths: assignments.bias.map((f) => f.path),
     };
     try {
-      const res = await calibrate(assignments.science.path, await getOutputDir(), {
+      const res = await calibrate(sciencePath, await getOutputDir(), {
         biasPaths: masters.biasPaths.length > 0 ? masters.biasPaths : undefined,
         darkPaths: masters.darkPaths.length > 0 ? masters.darkPaths : undefined,
         flatPaths: masters.flatPaths.length > 0 ? masters.flatPaths : undefined,
         darkExposureRatio,
       });
       setResult(res);
-      onPreviewUpdate?.(res?.previewUrl);
-      onCalibrationDone?.(res, masters);
+      onCalibrationDone?.(res, masters, sciencePath, target);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsCalibrating(false);
       resetProgress();
     }
-  }, [darkExposureRatio, resetProgress, onPreviewUpdate, onCalibrationDone]);
+  }, [darkExposureRatio, resetProgress, runTarget, onCalibrationDone]);
 
   const hasDarks = lastAssignment ? lastAssignment.dark.length > 0 : false;
 

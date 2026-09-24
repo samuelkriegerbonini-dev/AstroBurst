@@ -1,5 +1,3 @@
-use std::fmt;
-
 pub mod eval;
 pub mod lexer;
 pub mod parser;
@@ -42,17 +40,6 @@ impl PixelMathError {
         }
     }
 }
-
-impl fmt::Display for PixelMathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.position {
-            Some(position) => write!(f, "{} at {}", self.message, position),
-            None => write!(f, "{}", self.message),
-        }
-    }
-}
-
-impl std::error::Error for PixelMathError {}
 
 #[cfg(test)]
 mod tests {
@@ -436,11 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn error_display_includes_position() {
+    fn positioned_errors_cover_at_least_one_character() {
         let err = PixelMathError::at("unexpected token '*'", Span::new(4, 1));
-        assert_eq!(err.to_string(), "unexpected token '*' at 4");
+        assert_eq!((err.position, err.length), (Some(4), Some(1)));
         let plain = PixelMathError::new("no slots");
-        assert_eq!(plain.to_string(), "no slots");
+        assert_eq!((plain.position, plain.length), (None, None));
         assert_eq!(PixelMathError::at("end", Span::new(3, 0)).length, Some(1));
     }
 }

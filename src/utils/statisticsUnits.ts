@@ -24,6 +24,7 @@ export const STATISTIC_ROWS: readonly StatisticRow[] = [
   { key: "max", label: "maximum", kind: "location" },
   { key: "sum", label: "sum", kind: "sum" },
   { key: "nan_count", label: "NaN", kind: "count" },
+  { key: "padding", label: "padding (0)", kind: "count" },
   { key: "excluded", label: "excluded", kind: "count" },
 ];
 

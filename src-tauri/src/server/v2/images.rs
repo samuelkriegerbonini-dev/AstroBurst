@@ -4,10 +4,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::core::imaging::stats::finite_slice_stats;
 use astroburst_lib::infra::cache::{ImageCache, ImageEntry, PlaneLoad};
 use astroburst_lib::infra::image_source::{load_plane, LoadedPlane, PlaneInfo};
 use astroburst_lib::types::image_ref::{ImageRef, PlaneSelector};
 use astroburst_lib::types::ImageStats;
+use ndarray::Array2;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -54,6 +56,11 @@ fn stats_json(s: &ImageStats) -> Value {
     })
 }
 
+pub(crate) fn finite_stats_json(arr: &Array2<f32>) -> Value {
+    let mut finite: Vec<f32> = arr.iter().copied().filter(|v| v.is_finite()).collect();
+    stats_json(&finite_slice_stats(&mut finite))
+}
+
 fn selector_parts(kind: &PlaneSelector) -> (Option<usize>, Option<String>) {
     match kind {
         PlaneSelector::Hdu(n) => (Some(*n), None),
@@ -71,9 +78,19 @@ pub(crate) fn plane_selection(hdu: Option<usize>, array: Option<String>) -> Resu
     }
 }
 
-pub(crate) fn plane_load_error(e: anyhow::Error) -> AppError {
+pub(crate) fn plane_load_error(e: anyhow::Error, path: &str) -> AppError {
+    if !std::path::Path::new(path).exists() {
+        return AppError::NotFound(format!("file not found: {path}"));
+    }
     let text = format!("{:#}", e);
-    if text.contains("no ASDF arrays") || text.contains("no HDU index") {
+    let io_not_found = e.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if io_not_found {
+        AppError::NotFound(text)
+    } else if text.contains("no ASDF arrays") || text.contains("no HDU index") || text.contains("out of range (file has") {
         AppError::BadRequest(text)
     } else {
         AppError::Internal(e)
@@ -86,8 +103,9 @@ pub(crate) fn register_and_respond(
     source: Option<String>,
     hdu: Option<usize>,
     entry: &ImageEntry,
+    stats: Value,
 ) -> Value {
-    register_plane_and_respond(session, image_ref, source, hdu, None, entry)
+    register_plane_and_respond(session, image_ref, source, hdu, None, entry, stats)
 }
 
 pub(crate) fn register_plane_and_respond(
@@ -97,9 +115,9 @@ pub(crate) fn register_plane_and_respond(
     hdu: Option<usize>,
     plane: Option<(&ImageRef, &PlaneInfo)>,
     entry: &ImageEntry,
+    stats: Value,
 ) -> Value {
     let (rows, cols) = entry.arr().dim();
-    let stats = entry.stats();
     let header = entry.header();
 
     let wcs_present = header
@@ -148,7 +166,7 @@ pub(crate) fn register_plane_and_respond(
         "is_dq": is_dq,
         "extname": extname,
         "wcs_present": wcs_present,
-        "stats": stats_json(stats),
+        "stats": stats,
         "header": header_map,
     })
 }
@@ -157,18 +175,21 @@ async fn open_ref(session: &Session, image_ref: String, source: String, r: Image
     let sess = session.cache.clone();
     let ref_for_load = image_ref.clone();
     let r_for_load = r.clone();
-    let entry = tokio::task::spawn_blocking(move || {
-        load_replacing(&sess, &ref_for_load, || load_ref(&r_for_load))
+    let (entry, stats) = tokio::task::spawn_blocking(move || {
+        load_replacing(&sess, &ref_for_load, || load_ref(&r_for_load)).map(|entry| {
+            let stats = finite_stats_json(entry.arr());
+            (entry, stats)
+        })
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
-    .map_err(plane_load_error)?;
+    .map_err(|e| plane_load_error(e, &r.path))?;
 
     let info = entry
         .plane_info()
         .cloned()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("plane info missing after load")))?;
-    let body = register_plane_and_respond(session, image_ref.clone(), Some(source), None, Some((&r, &info)), &entry);
+    let body = register_plane_and_respond(session, image_ref.clone(), Some(source), None, Some((&r, &info)), &entry, stats);
     *session.v2.active_ref.write().await = Some(image_ref);
     Ok(Json(body))
 }
@@ -181,7 +202,7 @@ pub async fn open(
     let image_ref = params
         .name
         .clone()
-        .unwrap_or_else(|| session.v2.next_ref("img"));
+        .unwrap_or_else(|| session.next_free_ref("img"));
     let plane = plane_selection(params.hdu, params.array)?.unwrap_or(PlaneSelector::Auto);
     let r = ImageRef { path: params.path.clone(), plane };
     open_ref(&session, image_ref, params.path, r).await
@@ -210,7 +231,7 @@ pub async fn switch_hdu(
     let image_ref = params
         .name
         .clone()
-        .unwrap_or_else(|| session.v2.next_ref("img"));
+        .unwrap_or_else(|| session.next_free_ref("img"));
     let r = ImageRef { path: source.clone(), plane };
     open_ref(&session, image_ref, source, r).await
 }

@@ -74,7 +74,14 @@ class Job:
         return JobStatus.from_dict(data)
 
     async def cancel(self) -> JobStatus:
-        """Cancel the job.  No-op if already finished."""
+        """
+        Cancel the job.  No-op if already finished.
+
+        The status becomes ``cancelled`` at once and a ``stream()`` in
+        progress ends with a ``{"type": "cancelled"}`` event.  The server
+        worker stops at its next cancellation check and frees its queue slot
+        when it exits, so a new job may briefly get ``TooManyRequestsError``.
+        """
         data = await self._client._request_json(
             "DELETE", f"/sessions/{self._sid}/jobs/{self.job_id}"
         )
@@ -133,8 +140,11 @@ class Job:
         - ``{"type": "progress", "pct": 42, "stage": "aligning"}``
         - ``{"type": "complete"}``
         - ``{"type": "error", "message": "..."}``
+        - ``{"type": "cancelled"}``
 
-        Stops automatically after a ``complete`` or ``error`` event.
+        Stops automatically after the terminal ``complete``, ``error`` or
+        ``cancelled`` event.  Progress events may be skipped when the reader
+        is slow; the terminal event is always delivered.
 
         **Only one subscriber per job is allowed.**  A second concurrent call
         to ``stream()`` on the same job returns a ``ConflictError`` (409).
@@ -170,7 +180,7 @@ class Job:
                 except _json.JSONDecodeError:
                     continue
                 yield event
-                if event.get("type") in {"complete", "error"}:
+                if event.get("type") in {"complete", "error", "cancelled"}:
                     return
 
 
@@ -331,6 +341,18 @@ class Session:
             Absolute paths on the server machine.
         result_slot:
             Cache key for the stacked result (default: ``"stacked"``).
+        sigma_low, sigma_high:
+            Finite numbers greater than 0.
+        weights:
+            Exactly one finite, non-negative weight per path.
+
+        Raises
+        ------
+        BadRequestError
+            If a parameter breaks the limits above; checked before the job
+            is queued.
+        TooManyRequestsError
+            If ``ASTROBURST_JOBS_MAX`` jobs are already running.
         """
         body: Dict[str, Any] = {"paths": paths}
         if result_slot is not None:
@@ -376,6 +398,8 @@ class Session:
         ----------
         kernel:
             One of ``"square"`` (default), ``"gaussian"``, ``"lanczos3"``.
+        scale, pixfrac, sigma_low, sigma_high:
+            Finite numbers greater than 0; otherwise ``BadRequestError``.
         """
         body: Dict[str, Any] = {"paths": paths}
         if result_slot is not None:

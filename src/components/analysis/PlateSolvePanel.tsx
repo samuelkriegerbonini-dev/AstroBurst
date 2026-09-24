@@ -3,6 +3,8 @@ import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag 
 import { plateSolve, getWcsInfo } from "../../services/astrometry";
 import type { WcsInfo } from "../../services/astrometry";
 import { getApiKey, getConfig } from "../../services/config";
+import { fitImageToCanvas, fitsPixelToCanvas, imagePointToCanvas } from "../../utils/starOverlay";
+import { withDeadline } from "../../utils/deadline";
 
 export interface Star {
   x: number;
@@ -87,6 +89,42 @@ interface PlateSolvePanelProps {
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   filePath?: string | null;
   detectError?: string | null;
+  sourceBadge?: React.ReactNode;
+}
+
+function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
+  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!ref) {
+      setCanvas(null);
+      return;
+    }
+    const sync = () => {
+      const el = ref.current;
+      setCanvas(el && el.isConnected ? el : null);
+    };
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [ref]);
+  return canvas;
+}
+
+function useElementSize(el: HTMLElement | null): string {
+  const [size, setSize] = useState("");
+  useEffect(() => {
+    if (!el) {
+      setSize("");
+      return;
+    }
+    const measure = () => setSize(`${el.clientWidth}x${el.clientHeight}`);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return size;
 }
 
 function PlateSolvePanel({
@@ -101,7 +139,10 @@ function PlateSolvePanel({
                                           overlayCanvasRef,
                                           filePath,
                                           detectError = null,
+                                          sourceBadge,
                                         }: PlateSolvePanelProps) {
+  const overlayCanvas = useLiveCanvas(overlayCanvasRef);
+  const overlayHostSize = useElementSize(overlayCanvas?.parentElement ?? null);
 
   const sigmaId = useId();
   const scaleLowId = useId();
@@ -186,7 +227,7 @@ function PlateSolvePanel({
   const annotations = solveResult?.annotations ?? EMPTY_ANNOTATIONS;
 
   useEffect(() => {
-    const canvas = overlayCanvasRef?.current;
+    const canvas = overlayCanvas;
     if (!canvas) return;
 
     const hide = () => {
@@ -219,18 +260,14 @@ function PlateSolvePanel({
     if (!ctx) return;
     ctx.clearRect(0, 0, W, H);
 
-    const iw = imageWidth || 1;
-    const ih = imageHeight || 1;
-    const scale = Math.min(W / iw, H / ih);
-    const ox = (W - iw * scale) / 2;
-    const oy = (H - ih * scale) / 2;
+    const fit = fitImageToCanvas(W, H, imageWidth || 1, imageHeight || 1);
+    const scale = fit.scale;
 
     if (drawStars) {
       const maxFlux = stars[0].flux || 1;
 
       stars.forEach((star, i) => {
-        const sx = ox + star.x * scale;
-        const sy = oy + star.y * scale;
+        const { x: sx, y: sy } = imagePointToCanvas(star.x, star.y, fit);
         const radius = Math.max(3, (star.fwhm || 3) * scale * 1.5);
         const brightness = Math.min(1, 0.3 + (star.flux / maxFlux) * 0.7);
 
@@ -254,8 +291,7 @@ function PlateSolvePanel({
 
       if (selectedStar !== null && selectedStar < stars.length) {
         const s = stars[selectedStar];
-        const sx = ox + s.x * scale;
-        const sy = oy + s.y * scale;
+        const { x: sx, y: sy } = imagePointToCanvas(s.x, s.y, fit);
         const radius = Math.max(6, (s.fwhm || 3) * scale * 2);
 
         ctx.strokeStyle = "rgba(100, 200, 255, 1)";
@@ -280,8 +316,7 @@ function PlateSolvePanel({
       ctx.font = "10px monospace";
 
       for (const ann of annotations) {
-        const ax = ox + ann.pixelx * scale;
-        const ay = oy + ann.pixely * scale;
+        const { x: ax, y: ay } = fitsPixelToCanvas(ann.pixelx, ann.pixely, fit);
         if (ax < -20 || ay < -20 || ax > W + 20 || ay > H + 20) continue;
 
         const r = Math.max(10, (ann.radius ?? 12) * scale);
@@ -303,7 +338,9 @@ function PlateSolvePanel({
     }
 
     return hide;
-  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvasRef, filePath]);
+  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvas, overlayHostSize, filePath]);
+
+  const overlayUnavailable = overlayCanvas === null && (stars.length > 0 || annotations.length > 0);
 
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
@@ -320,15 +357,23 @@ function PlateSolvePanel({
     setSolveError(null);
     setSolveResult(null);
     try {
-      const result = await plateSolve(filePath, {
-        scaleLower: scaleLow,
-        scaleUpper: scaleHigh,
-        scaleUnits,
-        downsampleFactor: downsample > 1 ? downsample : undefined,
-        centerRa: positionHint ? centerRa : undefined,
-        centerDec: positionHint ? centerDec : undefined,
-        radius: positionHint && radius !== null ? radius : undefined,
-      }) as SolveResult;
+      const cfg = await getConfig().catch(() => null);
+      const limitSecs = cfg?.plate_solve_timeout_secs || DEFAULT_SOLVE_TIMEOUT_SECS;
+      if (solveSeqRef.current !== seq) return;
+      setTimeoutSecs(limitSecs);
+      const result = await withDeadline(
+        plateSolve(filePath, {
+          scaleLower: scaleLow,
+          scaleUpper: scaleHigh,
+          scaleUnits,
+          downsampleFactor: downsample > 1 ? downsample : undefined,
+          centerRa: positionHint ? centerRa : undefined,
+          centerDec: positionHint ? centerDec : undefined,
+          radius: positionHint && radius !== null ? radius : undefined,
+        }),
+        limitSecs * 1000,
+        `Plate solve gave up after ${formatDuration(limitSecs * 1000)} (Settings > Timeout). astrometry.net may still finish the job; try again later.`,
+      ) as SolveResult;
       if (solveSeqRef.current !== seq) return;
       setSolveResult(result);
       getWcsInfo(filePath)
@@ -362,15 +407,23 @@ function PlateSolvePanel({
             <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
               Star Detection
             </span>
+            {sourceBadge}
           </div>
           <div className="flex items-center gap-2">
             {stars.length > 0 && (
               <button
                 onClick={() => setShowOverlay(!showOverlay)}
-                className="text-zinc-500 hover:text-zinc-300 transition-colors"
-                title={showOverlay ? "Hide overlay" : "Show overlay"}
+                disabled={overlayUnavailable}
+                className="text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title={
+                  overlayUnavailable
+                    ? "The current view has no star overlay layer"
+                    : showOverlay
+                      ? "Hide overlay"
+                      : "Show overlay"
+                }
               >
-                {showOverlay ? <Eye size={12} /> : <EyeOff size={12} />}
+                {showOverlay && !overlayUnavailable ? <Eye size={12} /> : <EyeOff size={12} />}
               </button>
             )}
           </div>
@@ -411,6 +464,12 @@ function PlateSolvePanel({
           {detectError && (
             <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
               Star detection failed: {detectError}
+            </div>
+          )}
+
+          {overlayUnavailable && (
+            <div className="text-[10px] text-zinc-500">
+              The current view has no overlay layer, so rings and labels are not drawn on it.
             </div>
           )}
 

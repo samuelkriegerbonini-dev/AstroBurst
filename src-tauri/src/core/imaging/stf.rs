@@ -144,16 +144,6 @@ pub(crate) fn make_stf_u8_fn(params: &StfParams, stats: &ImageStats) -> impl Fn(
     }
 }
 
-pub fn apply_stf_inplace(data: &mut Array2<f32>, params: &StfParams, stats: &ImageStats) {
-    let tx = StfTransform::new(params, stats);
-    data.par_mapv_inplace(|v| {
-        if !is_valid_pixel(v) {
-            return 0.0;
-        }
-        tx.apply(v as f64) as f32
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +231,36 @@ mod tests {
         let buf = apply_stf(&data, &params, &st);
         for i in 0..8 {
             assert_eq!(buf[i], 0, "padding pixel {} should be black", i);
+        }
+    }
+
+    #[test]
+    fn auto_stf_keeps_the_negative_half_of_a_zero_sky_background() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut uniform = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut data = Array2::from_shape_fn((200, 200), |_| (0..12).map(|_| uniform()).sum::<f32>() - 6.0);
+        data[[0, 0]] = 0.0;
+        data[[0, 1]] = f32::NAN;
+        let (st, _) = analyze(&data);
+        let params = auto_stf(&st, &AutoStfConfig::default());
+        let buf = apply_stf(&data, &params, &st);
+        let black = buf.iter().skip(2).filter(|&&b| b == 0).count() as f64 / (buf.len() - 2) as f64;
+        assert!(black < 0.02, "{:.1}% of a zero-sky background rendered black", black * 100.0);
+        let mut sky = buf[2..].to_vec();
+        sky.sort_unstable();
+        let median = sky[sky.len() / 2];
+        assert!((50..=80).contains(&median), "sky median byte {}", median);
+        assert_eq!((buf[0], buf[1]), (0, 0));
+        let f = make_stf_u8_fn(&params, &st);
+        let mapped = apply_stf_f32(&data, &params, &st);
+        for (i, &v) in data.iter().enumerate().take(500) {
+            assert_eq!(f(v), buf[i]);
+            assert!((mapped.as_slice().unwrap()[i] * 255.0 - buf[i] as f32).abs() <= 0.5 + 1e-3);
         }
     }
 

@@ -1,11 +1,21 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::types::config::AppConfig;
 use crate::types::constants::DEFAULT_ASTROMETRY_API_URL;
 
 pub const FIELD_ASTROMETRY_API_URL: &str = "astrometry_api_url";
+
+const CONFIG_TEMP_EXTENSION: &str = "json.tmp";
+const CONFIG_BACKUP_EXTENSION: &str = "json.bad";
+
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_config() -> MutexGuard<'static, ()> {
+    CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
@@ -17,7 +27,7 @@ fn config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn config_path() -> Result<PathBuf> {
+pub(crate) fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }
 
@@ -25,23 +35,89 @@ fn api_key_path(service: &str) -> Result<PathBuf> {
     Ok(config_dir()?.join(format!("{}_api_key.txt", service)))
 }
 
-pub fn load_config() -> Result<AppConfig> {
-    let path = config_path()?;
+fn parse_config(content: &str) -> Result<AppConfig> {
+    let stored: serde_json::Value = serde_json::from_str(content).context("Failed to parse config")?;
+    let stored = stored
+        .as_object()
+        .ok_or_else(|| anyhow!("config is not a JSON object"))?;
+    let mut merged = serde_json::to_value(AppConfig::default()).context("Failed to serialize config")?;
+    let base = merged
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("default config is not a JSON object"))?;
+    for (key, value) in stored {
+        base.insert(key.clone(), value.clone());
+    }
+    serde_json::from_value(merged).context("Failed to parse config")
+}
+
+fn write_config_file(path: &Path, config: &AppConfig) -> Result<()> {
+    let content = serde_json::to_string_pretty(config).context("Failed to serialize config")?;
+    let temp = path.with_extension(CONFIG_TEMP_EXTENSION);
+    fs::write(&temp, content).context("Failed to write config")?;
+    fs::rename(&temp, path).context("Failed to replace config")?;
+    Ok(())
+}
+
+fn load_config_at(path: &Path) -> Result<AppConfig> {
     if !path.exists() {
         let default = AppConfig::default();
-        save_config(&default)?;
+        write_config_file(path, &default)?;
         return Ok(default);
     }
-    let content = fs::read_to_string(&path).context("Failed to read config")?;
-    let config: AppConfig = serde_json::from_str(&content).context("Failed to parse config")?;
-    Ok(config)
+    let bytes = fs::read(path).context("Failed to read config")?;
+    match parse_config(&String::from_utf8_lossy(&bytes)) {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            let backup = path.with_extension(CONFIG_BACKUP_EXTENSION);
+            match fs::rename(path, &backup) {
+                Ok(()) => log::warn!(
+                    "config {} was unreadable ({:#}); kept it as {} and continued with defaults",
+                    path.display(),
+                    e,
+                    backup.display()
+                ),
+                Err(move_err) => log::warn!(
+                    "config {} was unreadable ({:#}) and could not be moved aside ({}); continued with defaults",
+                    path.display(),
+                    e,
+                    move_err
+                ),
+            }
+            Ok(AppConfig::default())
+        }
+    }
+}
+
+fn update_config_field_at(path: &Path, field: &str, value: serde_json::Value) -> Result<AppConfig> {
+    let config = load_config_at(path)?;
+    let mut map = serde_json::to_value(&config).context("Failed to serialize config")?;
+    let obj = map
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("config is not a JSON object"))?;
+    if !obj.contains_key(field) {
+        let mut valid: Vec<&str> = obj.keys().map(String::as_str).collect();
+        valid.sort_unstable();
+        bail!("Unknown config field {:?}; valid fields: {}", field, valid.join(", "));
+    }
+    obj.insert(field.to_string(), value);
+    let updated: AppConfig = serde_json::from_value(map).context("Failed to deserialize updated config")?;
+    write_config_file(path, &updated)?;
+    Ok(updated)
+}
+
+pub fn load_config() -> Result<AppConfig> {
+    load_config_from(&config_path()?)
+}
+
+pub(crate) fn load_config_from(path: &Path) -> Result<AppConfig> {
+    let _guard = lock_config();
+    load_config_at(path)
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = config_path()?;
-    let content = serde_json::to_string_pretty(config).context("Failed to serialize config")?;
-    fs::write(&path, content).context("Failed to write config")?;
-    Ok(())
+    let _guard = lock_config();
+    write_config_file(&path, config)
 }
 
 fn https_host_of(url: &str) -> Option<&str> {
@@ -85,17 +161,9 @@ pub fn update_config_field(field: &str, value: serde_json::Value) -> Result<AppC
             .ok_or_else(|| anyhow!("{} must be a string", FIELD_ASTROMETRY_API_URL))?;
         ensure_https_api_url(candidate)?;
     }
-
-    let mut config = load_config()?;
-    let mut map = serde_json::to_value(&config).context("Failed to serialize config")?;
-
-    if let Some(obj) = map.as_object_mut() {
-        obj.insert(field.to_string(), value);
-    }
-
-    config = serde_json::from_value(map).context("Failed to deserialize updated config")?;
-    save_config(&config)?;
-    Ok(config)
+    let path = config_path()?;
+    let _guard = lock_config();
+    update_config_field_at(&path, field, value)
 }
 
 pub fn save_api_key(key: &str, service: &str) -> Result<()> {
@@ -133,8 +201,16 @@ pub fn load_api_key(service: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_https_api_url, update_config_field, FIELD_ASTROMETRY_API_URL};
+    use super::{
+        ensure_https_api_url, load_config_at, update_config_field, update_config_field_at, write_config_file,
+        CONFIG_BACKUP_EXTENSION, CONFIG_TEMP_EXTENSION, FIELD_ASTROMETRY_API_URL,
+    };
+    use crate::types::config::AppConfig;
     use serde_json::json;
+
+    fn config_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("config.json")
+    }
 
     #[test]
     fn accepts_https_urls_with_a_host() {
@@ -179,5 +255,58 @@ mod tests {
     #[test]
     fn update_config_field_refuses_a_non_string_api_url() {
         assert!(update_config_field(FIELD_ASTROMETRY_API_URL, json!(42)).is_err());
+    }
+
+    #[test]
+    fn a_truncated_config_is_set_aside_and_the_app_keeps_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        let torn = "{\n  \"plate_solve_timeout_secs\": 300\n}\n}tail of an older write";
+        std::fs::write(&path, torn).unwrap();
+
+        let loaded = load_config_at(&path).expect("a corrupt config must not break get_config");
+        assert_eq!(loaded.plate_solve_timeout_secs, AppConfig::default().plate_solve_timeout_secs);
+        let backup = path.with_extension(CONFIG_BACKUP_EXTENSION);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), torn, "the unreadable file was not kept");
+
+        let updated = update_config_field_at(&path, "plate_solve_timeout_secs", json!(250)).unwrap();
+        assert_eq!(updated.plate_solve_timeout_secs, 250);
+        assert_eq!(load_config_at(&path).unwrap().plate_solve_timeout_secs, 250);
+    }
+
+    #[test]
+    fn a_config_written_before_a_field_existed_keeps_its_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        std::fs::write(&path, "{\"plate_solve_timeout_secs\": 300, \"retired_setting\": true}").unwrap();
+        let loaded = load_config_at(&path).unwrap();
+        assert_eq!(loaded.plate_solve_timeout_secs, 300);
+        assert_eq!(loaded.astrometry_api_url, AppConfig::default().astrometry_api_url);
+        assert!(!path.with_extension(CONFIG_BACKUP_EXTENSION).exists());
+    }
+
+    #[test]
+    fn an_unknown_field_is_an_error_that_names_the_valid_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        let err = update_config_field_at(&path, "plate_solve_timeout", json!(300))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plate_solve_timeout"), "{err}");
+        assert!(err.contains("plate_solve_timeout_secs"), "{err}");
+        assert_eq!(load_config_at(&path).unwrap().plate_solve_timeout_secs, AppConfig::default().plate_solve_timeout_secs);
+    }
+
+    #[test]
+    fn saving_replaces_the_file_through_a_temporary_and_leaves_no_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        let mut config = AppConfig::default();
+        config.plate_solve_timeout_secs = 42;
+        write_config_file(&path, &config).unwrap();
+        config.plate_solve_timeout_secs = 7;
+        write_config_file(&path, &config).unwrap();
+        assert_eq!(load_config_at(&path).unwrap().plate_solve_timeout_secs, 7);
+        assert!(!path.with_extension(CONFIG_TEMP_EXTENSION).exists());
     }
 }

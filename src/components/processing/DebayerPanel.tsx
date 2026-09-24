@@ -3,12 +3,14 @@ import { Grid3X3, CheckCircle2, Layers } from "lucide-react";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 import { debayerFits, debayerBatch } from "../../services/processing";
 import type { DebayerResult, DebayerBatchResult } from "../../services/processing";
-import { useDoneFilesContext } from "../../context/PreviewContext";
+import { useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
+import { useProcessingRun } from "../../hooks/useProcessingRun";
 
 interface DebayerPanelProps {
   selectedFile: { path: string; name?: string } | null;
   outputDir: string;
   onPreviewUpdate?: (url: string | null | undefined) => void;
+  fileKey?: string | null;
 }
 
 const PATTERNS = [
@@ -26,42 +28,39 @@ const METHODS = [
 
 const ICON = <Grid3X3 size={14} className="text-orange-400" />;
 
-export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate }: DebayerPanelProps) {
+export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate, fileKey }: DebayerPanelProps) {
   const { doneFiles } = useDoneFilesContext();
   const [pattern, setPattern] = useState("");
   const [method, setMethod] = useState<"bilinear" | "superpixel">("bilinear");
-  const [isRunning, setIsRunning] = useState(false);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run, clearError } = useProcessingRun<DebayerResult>("debayer", fileKey ?? null);
+  const { processed } = useRenderContext();
+  const result = runResult && processed?.kind === "debayer" ? runResult : null;
   const [isBatchRunning, setIsBatchRunning] = useState(false);
-  const [result, setResult] = useState<DebayerResult | null>(null);
   const [batchResult, setBatchResult] = useState<DebayerBatchResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [batchError, setBatchError] = useState<string | null>(null);
   const patternId = useId();
   const methodId = useId();
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
+    const path = selectedFile.path;
+    setBatchError(null);
     setBatchResult(null);
-    try {
-      const res = await debayerFits(selectedFile.path, outputDir, {
+    void run(async () => {
+      const res = await debayerFits(path, outputDir, {
         method,
         pattern: pattern || undefined,
       });
-      setResult(res);
       onPreviewUpdate?.(res.previewUrl);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setIsRunning(false);
-    }
-  }, [selectedFile, outputDir, method, pattern, onPreviewUpdate]);
+      return res;
+    });
+  }, [selectedFile, outputDir, method, pattern, onPreviewUpdate, run]);
 
   const handleBatch = useCallback(async () => {
     if (doneFiles.length === 0) return;
     setIsBatchRunning(true);
-    setError(null);
+    clearError();
+    setBatchError(null);
     setBatchResult(null);
     try {
       const res = await debayerBatch(
@@ -71,11 +70,11 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
       );
       setBatchResult(res);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      setBatchError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsBatchRunning(false);
     }
-  }, [doneFiles, outputDir, method, pattern]);
+  }, [doneFiles, outputDir, method, pattern, clearError]);
 
   const fileName = selectedFile?.name || selectedFile?.path?.split(/[/\\]/).pop();
 
@@ -127,14 +126,16 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
         </select>
       </div>
 
-      <RunButton
-        label="Debayer Current File"
-        runningLabel="Debayering..."
-        running={isRunning}
-        disabled={!selectedFile?.path || isBatchRunning}
-        accent="amber"
-        onClick={handleRun}
-      />
+      <div title={busyTitle}>
+        <RunButton
+          label="Debayer Current File"
+          runningLabel="Debayering..."
+          running={isRunning}
+          disabled={!selectedFile?.path || isBatchRunning || blocked}
+          accent="amber"
+          onClick={handleRun}
+        />
+      </div>
 
       <RunButton
         label={`Debayer All Loaded (${doneFiles.length})`}
@@ -147,7 +148,7 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate 
         onClick={handleBatch}
       />
 
-      <ErrorAlert message={error} />
+      <ErrorAlert message={error ?? batchError} />
 
       {result && (
         <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">

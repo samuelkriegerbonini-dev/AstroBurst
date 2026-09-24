@@ -5,32 +5,141 @@ use anyhow::{Context, Result};
 use ndarray::Array2;
 
 use crate::infra::asdf::converter::{
-    auto_data_key, is_asdf_file, is_interleaved_layout, list_arrays, plane_geometry, shape_label,
+    auto_data_key, is_interleaved_layout, list_arrays, plane_geometry, shape_label,
     AsdfArrayInfo, AsdfImage,
 };
 use crate::infra::asdf::AsdfFile;
 use crate::infra::fits::reader::{HduInfo, MmapImageResult};
 use crate::types::constants::HEADER_BUNIT;
-use crate::types::image::IntPlane;
 use crate::types::HduHeader;
 
-const BUNIT_METADATA_KEYS: [&str; 4] = ["meta.bunit_data", "meta.bunit", "roman.meta.bunit", "header.BUNIT"];
+const SCIENCE_BUNIT_KEYS: [&str; 4] = ["meta.bunit_data", "meta.bunit", "roman.meta.bunit", "header.BUNIT"];
+const ERROR_BUNIT_KEYS: [&str; 1] = ["meta.bunit_err"];
+const SCIENCE_ARRAY_NAMES: [&str; 4] = ["data", "sci", "science", "image"];
+const NON_SCIENCE_ARRAY_NAMES: [&str; 2] = ["dq", "mask"];
 
 pub const ASDF_SELECTED_PLANE: &str = "ASDFPLAN";
 pub const ASDF_PLANE_COUNT: &str = "ASDFNPLN";
+pub const ASDF_DATA_KEY_CARD: &str = "ASDFKEY";
+pub const ASDF_WCS_NOTE_CARD: &str = "ASDFWCS";
 
-fn resolve_bunit(asdf_img: &AsdfImage) -> Option<String> {
+struct FitsAlias {
+    card: &'static str,
+    sources: &'static [&'static str],
+    numeric: bool,
+    photometric: bool,
+}
+
+const FITS_ALIASES: [FitsAlias; 6] = [
+    FitsAlias {
+        card: "TELESCOP",
+        sources: &["meta.telescope", "roman.meta.telescope", "header.TELESCOP"],
+        numeric: false,
+        photometric: false,
+    },
+    FitsAlias {
+        card: "INSTRUME",
+        sources: &["meta.instrument.name", "roman.meta.instrument.name", "header.INSTRUME"],
+        numeric: false,
+        photometric: false,
+    },
+    FitsAlias {
+        card: "EXPTIME",
+        sources: &["meta.exposure.exposure_time", "roman.meta.exposure.exposure_time", "header.EXPTIME"],
+        numeric: true,
+        photometric: false,
+    },
+    FitsAlias {
+        card: "PHOTMJSR",
+        sources: &[
+            "meta.photometry.conversion_megajanskys",
+            "roman.meta.photometry.conversion_megajanskys",
+            "header.PHOTMJSR",
+        ],
+        numeric: true,
+        photometric: true,
+    },
+    FitsAlias {
+        card: "PIXAR_SR",
+        sources: &[
+            "meta.photometry.pixelarea_steradians",
+            "roman.meta.photometry.pixelarea_steradians",
+            "header.PIXAR_SR",
+        ],
+        numeric: true,
+        photometric: true,
+    },
+    FitsAlias {
+        card: "PIXAR_A2",
+        sources: &[
+            "meta.photometry.pixelarea_arcsecsq",
+            "roman.meta.photometry.pixelarea_arcsecsq",
+            "header.PIXAR_A2",
+        ],
+        numeric: true,
+        photometric: true,
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayRole {
+    Science,
+    Error,
+    Other,
+}
+
+fn named(last: &str, names: &[&str]) -> bool {
+    names.iter().any(|n| last.eq_ignore_ascii_case(n))
+}
+
+fn array_role(key: &str, auto_key: Option<&str>) -> ArrayRole {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    if last.eq_ignore_ascii_case("err") {
+        ArrayRole::Error
+    } else if named(last, &NON_SCIENCE_ARRAY_NAMES) || last.to_ascii_lowercase().starts_with("var") {
+        ArrayRole::Other
+    } else if auto_key == Some(key) || named(last, &SCIENCE_ARRAY_NAMES) {
+        ArrayRole::Science
+    } else {
+        ArrayRole::Other
+    }
+}
+
+fn resolve_bunit(asdf_img: &AsdfImage, role: ArrayRole) -> Option<String> {
+    let fallbacks: &[&[&str]] = match role {
+        ArrayRole::Science => &[&SCIENCE_BUNIT_KEYS],
+        ArrayRole::Error => &[&ERROR_BUNIT_KEYS, &SCIENCE_BUNIT_KEYS],
+        ArrayRole::Other => &[],
+    };
     asdf_img
         .unit
         .iter()
         .map(String::as_str)
         .chain(
-            BUNIT_METADATA_KEYS
+            fallbacks
                 .iter()
+                .flat_map(|keys| keys.iter())
                 .filter_map(|k| asdf_img.metadata.get(*k).map(String::as_str)),
         )
         .map(str::trim)
         .find(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn metadata_value<'a>(metadata: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    metadata
+        .get(key)
+        .or_else(|| metadata.get(&format!("{key}.value")))
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+}
+
+fn alias_value(metadata: &HashMap<String, String>, alias: &FitsAlias) -> Option<String> {
+    alias
+        .sources
+        .iter()
+        .filter_map(|k| metadata_value(metadata, k))
+        .find(|v| !alias.numeric || v.parse::<f64>().is_ok_and(f64::is_finite))
         .map(str::to_string)
 }
 
@@ -75,11 +184,6 @@ pub fn list_asdf_arrays(path: &Path) -> Result<Vec<HduInfo>> {
         .collect())
 }
 
-pub fn extract_int_plane_from_asdf(path: &Path, key: &str) -> Result<Option<IntPlane>> {
-    let asdf = AsdfFile::open(path).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
-    AsdfImage::load_array_int(&asdf, key).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))
-}
-
 pub fn companion_key(data_key: &str, suffix: &str) -> String {
     match data_key.rfind('.') {
         Some(pos) => format!("{}.{}", &data_key[..pos], suffix),
@@ -95,8 +199,9 @@ pub fn extract_plane_from_asdf(path: &Path, key: Option<&str>) -> Result<MmapIma
 pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Result<MmapImageResult> {
     let arrays = list_arrays(asdf);
     let explicit = key.is_some();
+    let auto_key = auto_data_key(asdf);
     if !explicit {
-        if let Some(info) = auto_data_key(asdf)
+        if let Some(info) = auto_key
             .as_deref()
             .and_then(|k| arrays.iter().find(|a| a.key == k))
         {
@@ -126,7 +231,8 @@ pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Resul
         return Err(multi_plane_refusal(&data_key, &asdf_img.shape, plane_count));
     }
 
-    let header = synthesise_header(&asdf_img, &data_key, plane_count);
+    let role = array_role(&data_key, auto_key.as_deref());
+    let header = synthesise_header(&asdf_img, &data_key, plane_count, role);
     let image = asdf_img
         .into_plane(0)
         .with_context(|| format!("ASDF array '{data_key}' has no readable first plane"))?;
@@ -136,14 +242,11 @@ pub fn extract_plane_from_open_asdf(asdf: &AsdfFile, key: Option<&str>) -> Resul
         .enumerate()
         .map(|(i, a)| array_info_to_hdu(i, a))
         .collect();
-    let extension_count = extensions.len();
 
     Ok(MmapImageResult {
         header,
         image,
-        is_mef: false,
         selected_extension: Some(data_key),
-        extension_count,
         extensions,
     })
 }
@@ -179,7 +282,7 @@ pub fn try_extract_rgb_from_asdf(path: &Path) -> Result<Option<AsdfRgbResult>> {
     let asdf_img = AsdfImage::load_array(&asdf, &key)
         .map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
     let plane_count = asdf_img.plane_count();
-    let header = synthesise_header(&asdf_img, &key, plane_count);
+    let header = synthesise_header(&asdf_img, &key, plane_count, ArrayRole::Science);
     let channel = |i: usize| {
         asdf_img
             .plane(i)
@@ -193,7 +296,7 @@ pub fn try_extract_rgb_from_asdf(path: &Path) -> Result<Option<AsdfRgbResult>> {
     }))
 }
 
-fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize) -> HduHeader {
+fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize, role: ArrayRole) -> HduHeader {
     let (width, height) = (asdf_img.width, asdf_img.height);
     let rank = asdf_img.shape.len();
 
@@ -209,10 +312,14 @@ fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize) -
     }
     push_card(&mut cards, &mut index, "BITPIX", "-32".into());
     push_card(&mut cards, &mut index, "EXTNAME", data_key.to_string());
-    push_card(&mut cards, &mut index, "ASDF_DATA_KEY", data_key.to_string());
+    push_card(&mut cards, &mut index, ASDF_DATA_KEY_CARD, data_key.to_string());
     if plane_count > 1 {
         push_card(&mut cards, &mut index, ASDF_SELECTED_PLANE, "1".into());
         push_card(&mut cards, &mut index, ASDF_PLANE_COUNT, plane_count.to_string());
+    }
+
+    if let (None, Some(note)) = (&asdf_img.wcs, &asdf_img.wcs_note) {
+        push_card(&mut cards, &mut index, ASDF_WCS_NOTE_CARD, note.clone());
     }
 
     if let Some(ref wcs) = asdf_img.wcs {
@@ -235,9 +342,25 @@ fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize) -
         for (k, v) in wcs_entries {
             push_card(&mut cards, &mut index, k, v);
         }
+        if let Some(lonpole) = wcs.lonpole {
+            push_card(&mut cards, &mut index, "LONPOLE", lonpole.to_string());
+        }
     }
 
-    let mut extra: Vec<(&String, &String)> = asdf_img.metadata.iter().collect();
+    for alias in &FITS_ALIASES {
+        if alias.photometric && role == ArrayRole::Other {
+            continue;
+        }
+        if let Some(value) = alias_value(&asdf_img.metadata, alias) {
+            push_card(&mut cards, &mut index, alias.card, value);
+        }
+    }
+
+    let mut extra: Vec<(&String, &String)> = asdf_img
+        .metadata
+        .iter()
+        .filter(|(k, _)| k.as_str() != "ASDF_DATA_KEY")
+        .collect();
     extra.sort();
     for (k, v) in extra {
         let fits_key = k
@@ -252,14 +375,14 @@ fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize) -
     }
 
     if !index.contains_key(HEADER_BUNIT) {
-        if let Some(unit) = resolve_bunit(asdf_img) {
+        if let Some(unit) = resolve_bunit(asdf_img, role) {
             push_card(&mut cards, &mut index, HEADER_BUNIT, unit);
         }
     }
 
     push_card(&mut cards, &mut index, "ASDF_SRC", "true".into());
 
-    HduHeader { cards, index }
+    HduHeader { cards, index, string_keys: None }
 }
 
 fn push_card(
@@ -272,13 +395,28 @@ fn push_card(
     cards.push((key.to_string(), value));
 }
 
-pub fn is_asdf_path(path: &Path) -> bool {
-    is_asdf_file(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::metadata::photcal::PhotCal;
+    use crate::types::image::IntPlane;
+
+    fn int_plane(path: &Path, key: &str) -> Result<Option<IntPlane>> {
+        let asdf = AsdfFile::open(path).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
+        AsdfImage::load_array_int(&asdf, key).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))
+    }
+
+    fn fits_legal(header: &HduHeader) -> HduHeader {
+        let mut legal = HduHeader::empty();
+        for (k, v) in &header.cards {
+            let keyword = k.len() <= 8
+                && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+            if keyword {
+                legal.set(k, v.clone());
+            }
+        }
+        legal
+    }
 
     fn write_asdf(dir: &tempfile::TempDir, tree_yaml: &str) -> std::path::PathBuf {
         let mut bytes = Vec::new();
@@ -330,8 +468,9 @@ mod tests {
         let path = write_asdf(&dir, DQ_TREE);
         let result = extract_plane_from_asdf(&path, Some("dq")).unwrap();
         assert_eq!(result.header.get("EXTNAME"), Some("dq"));
-        assert_eq!(result.header.get("ASDF_DATA_KEY"), Some("dq"));
+        assert_eq!(result.header.get(ASDF_DATA_KEY_CARD), Some("dq"));
         assert_eq!(result.header.get("META_TELESCOPE"), Some("JWST"));
+        assert_eq!(result.header.get("TELESCOP"), Some("JWST"));
         assert_eq!(result.selected_extension.as_deref(), Some("dq"));
         assert_eq!(result.image[[1, 0]], 3.0);
         assert_eq!(result.extensions.len(), 3);
@@ -347,7 +486,7 @@ mod tests {
 
         let auto = extract_plane_from_asdf(&path, None).unwrap();
         assert_eq!(auto.header.get("EXTNAME"), Some("data"));
-        assert_eq!(auto.extension_count, 3);
+        assert_eq!(auto.extensions.len(), 3);
         assert!(extract_plane_from_asdf(&path, Some("nope")).is_err());
     }
 
@@ -358,11 +497,11 @@ mod tests {
         let arrays = list_asdf_arrays(&path).unwrap();
         assert_eq!(arrays.len(), 3);
         assert_eq!(arrays[2].extname.as_deref(), Some("err"));
-        let plane = extract_int_plane_from_asdf(&path, "dq").unwrap().unwrap();
+        let plane = int_plane(&path, "dq").unwrap().unwrap();
         assert_eq!(plane.bits[[1, 0]], 3);
         assert_eq!(plane.bits[[0, 1]], 1);
-        assert!(extract_int_plane_from_asdf(&path, "data").unwrap().is_none());
-        assert!(extract_int_plane_from_asdf(&path, "missing").is_err());
+        assert!(int_plane(&path, "data").unwrap().is_none());
+        assert!(int_plane(&path, "missing").is_err());
     }
 
     #[test]
@@ -400,7 +539,7 @@ mod tests {
             "the bare key is the ASDF data key that companion resolution consumes"
         );
 
-        let dq = extract_int_plane_from_asdf(&path, "roman.dq").unwrap().unwrap();
+        let dq = int_plane(&path, "roman.dq").unwrap().unwrap();
         assert_eq!(dq.bits.dim(), (2, 2));
         assert_eq!(
             dq.bits.as_slice().unwrap(),
@@ -410,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deep_nested_cube_is_refused_after_loading_when_the_array_list_misses_it() {
+    fn a_deep_nested_cube_is_listed_refused_and_reopened_by_its_dotted_key() {
         let dir = tempfile::tempdir().unwrap();
         let values: Vec<String> = (0..60).map(|v| v.to_string()).collect();
         let tree = format!(
@@ -419,18 +558,116 @@ mod tests {
         );
         let path = write_asdf(&dir, &tree);
 
-        assert!(
-            list_asdf_arrays(&path).unwrap().is_empty(),
-            "the pre-load guard cannot see an array nested below a top-level key"
-        );
+        let listed = list_asdf_arrays(&path).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].extname.as_deref(), Some("products.sci.data"));
+        assert_eq!(listed[0].naxis3, 6);
 
         let refused = extract_plane_from_asdf(&path, None)
             .err()
             .expect("a nested ramp must not load as an image either");
         let msg = format!("{refused:#}");
-        assert!(msg.contains("'products'"), "{msg}");
+        assert!(msg.contains("'products.sci.data'"), "{msg}");
         assert!(msg.contains("3D array [6x2x5] of 6 planes"), "{msg}");
         assert!(msg.contains("not a single 2D image"), "{msg}");
+
+        let reopened = extract_plane_from_asdf(&path, Some("products.sci.data"))
+            .expect("the key named in the refusal opens the first plane");
+        assert_eq!(reopened.image.dim(), (2, 5));
+        assert_eq!(reopened.image[[1, 4]], 9.0);
+        assert_eq!(reopened.selected_extension.as_deref(), Some("products.sci.data"));
+        assert_eq!(companion_key("products.sci.data", "dq"), "products.sci.dq");
+    }
+
+    const JWST_PLANES: &str = "meta:\n  telescope: JWST\n  bunit_data: MJy/sr\n  bunit_err: uJy/arcsec^2\n  photometry:\n    pixelarea_steradians: 2.1e-13\ndata: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\ndq: !core/ndarray-1.0.0\n  data: [[0, 1024], [0, 0]]\n  datatype: uint32\nerr: !core/ndarray-1.0.0\n  data: [[0.1, 0.2], [0.3, 0.4]]\n  datatype: float32\nvar_poisson: !core/ndarray-1.0.0\n  data: [[0.01, 0.04], [0.09, 0.16]]\n  datatype: float32\n";
+
+    #[test]
+    fn science_unit_is_not_stamped_on_dq_and_variance_planes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, JWST_PLANES);
+        let header = |key: Option<&str>| extract_plane_from_asdf(&path, key).unwrap().header;
+
+        assert_eq!(header(None).get(HEADER_BUNIT), Some("MJy/sr"));
+        assert_eq!(header(Some("data")).get(HEADER_BUNIT), Some("MJy/sr"));
+        assert_eq!(header(Some("data")).get("PIXAR_SR"), Some("2.1e-13"));
+        assert_eq!(header(Some("err")).get(HEADER_BUNIT), Some("uJy/arcsec^2"));
+
+        let dq = header(Some("dq"));
+        assert_eq!(dq.get(HEADER_BUNIT), None, "a DQ bitmask has no physical unit");
+        assert_eq!(dq.get("PIXAR_SR"), None);
+        assert_eq!(dq.get("TELESCOP"), Some("JWST"));
+        assert_eq!(header(Some("var_poisson")).get(HEADER_BUNIT), None, "variance is not in MJy/sr");
+    }
+
+    #[test]
+    fn a_unit_on_the_array_node_itself_is_kept_for_any_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = "meta:\n  bunit_data: MJy/sr\nvar_rnoise: !unit/quantity-1.1.0\n  value: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  unit: MJy2 / sr2\n";
+        let result = extract_plane_from_asdf(&write_asdf(&dir, tree), Some("var_rnoise")).unwrap();
+        assert_eq!(result.header.get(HEADER_BUNIT), Some("MJy2 / sr2"));
+    }
+
+    #[test]
+    fn roman_calibration_and_provenance_survive_the_fits_keyword_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = "roman:\n  meta:\n    telescope: ROMAN\n    instrument: {name: WFI}\n    exposure: {exposure_time: 107.0}\n    bunit: DN / s\n    photometry:\n      conversion_megajanskys: !unit/quantity-1.1.0\n        value: 0.3324\n        unit: !unit/unit-1.0.0 MJy.sr**-1\n      pixelarea_steradians: !unit/quantity-1.1.0\n        value: 2.8e-13\n        unit: !unit/unit-1.0.0 sr\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n";
+        let loaded = extract_image_from_asdf(&write_asdf(&dir, tree)).unwrap();
+        let legal = fits_legal(&loaded.header);
+
+        assert_eq!(legal.get(ASDF_DATA_KEY_CARD), Some("roman.data"));
+        assert_eq!(legal.get("TELESCOP"), Some("ROMAN"));
+        assert_eq!(legal.get("INSTRUME"), Some("WFI"));
+        assert_eq!(legal.get("EXPTIME"), Some("107.0"));
+        assert_eq!(legal.get(HEADER_BUNIT), Some("DN / s"));
+
+        let full = PhotCal::from_header(&loaded.header, None).expect("ASDF header calibrates");
+        let written = PhotCal::from_header(&legal, None).expect("FITS-legal cards still calibrate");
+        let one = |cal: &PhotCal| cal.calibrate(1.0, None).map(|f| f.flux_jy).unwrap();
+        assert!((one(&full) - 0.3324 * 2.8e-13 * 1e6).abs() < 1e-18);
+        assert!((one(&written) - one(&full)).abs() < 1e-18);
+    }
+
+    #[test]
+    fn a_gwcs_without_sky_anchor_leaves_no_wcs_cards_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = format!(
+            "roman:\n  meta:\n    wcs:\n      steps:\n        - transform: {{transform_type: Shift, offset: -2043.5}}\n        - transform: {{transform_type: Shift, offset: -2043.5}}\n        - transform: {{transform_type: Scale, factor: 0.00003}}\n        - transform: {{transform_type: Scale, factor: 0.00003}}\n        - frame: {{name: world}}\n{INLINE_DATA}"
+        );
+        let header = extract_image_from_asdf(&write_asdf(&dir, &tree)).unwrap().header;
+        for card in ["CTYPE1", "CRVAL1", "CRVAL2", "CRPIX1", "CDELT1", "PC1_1"] {
+            assert_eq!(header.get(card), None, "{card} must not be fabricated");
+        }
+        let note = header.get(ASDF_WCS_NOTE_CARD).expect("the reason is kept in the header");
+        assert!(note.contains("celestial reference"), "{note}");
+        assert!(note.len() <= 67, "{note}");
+    }
+
+    #[test]
+    fn a_gwcs_anchored_on_the_pole_keeps_its_pole_longitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = format!(
+            "wcs:\n  steps:\n    - transform: !transform/compose-1.2.0\n        forward:\n          - !transform/shift-1.2.0 {{offset: -10.0}}\n          - !transform/shift-1.2.0 {{offset: -10.0}}\n          - !transform/scale-1.2.0 {{factor: 0.001}}\n          - !transform/scale-1.2.0 {{factor: 0.001}}\n          - !transform/gnomonic-1.2.0 {{direction: pix2sky}}\n          - !transform/rotate3d-1.3.0 {{phi: 0.0, theta: 90.0, psi: 180.0, direction: native2celestial}}\n    - frame: {{name: world}}\n{INLINE_DATA}"
+        );
+        let header = extract_image_from_asdf(&write_asdf(&dir, &tree)).unwrap().header;
+        assert_eq!(header.get("CRVAL2"), Some("90"));
+        assert_eq!(header.get_f64("LONPOLE"), Some(180.0));
+
+        let wcs = crate::core::astrometry::wcs::WcsTransform::from_header(&header).unwrap();
+        let sky = wcs.pixel_to_world(20.0, 10.0);
+        assert!((sky.ra - 90.0).abs() < 1e-9, "gwcs puts +x at RA 90 on the pole, got {}", sky.ra);
+        assert!((sky.dec - 89.99).abs() < 1e-6, "{}", sky.dec);
+    }
+
+    #[test]
+    fn an_err_plane_without_its_own_unit_takes_the_science_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let science_only = "meta:\n  bunit_data: MJy/sr\ndata: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\nerr: !core/ndarray-1.0.0\n  data: [[0.1, 0.2], [0.3, 0.4]]\n  datatype: float32\n";
+        let err = extract_plane_from_asdf(&write_asdf(&dir, science_only), Some("err")).unwrap();
+        assert_eq!(err.header.get(HEADER_BUNIT), Some("MJy/sr"));
+
+        let roman = "roman:\n  meta:\n    bunit: DN / s\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  err: !core/ndarray-1.0.0\n    data: [[0.1, 0.2], [0.3, 0.4]]\n    datatype: float32\n";
+        let err = extract_plane_from_asdf(&write_asdf(&dir, roman), Some("roman.err")).unwrap();
+        assert_eq!(err.header.get(HEADER_BUNIT), Some("DN / s"));
     }
 
     fn interleaved_tree() -> String {

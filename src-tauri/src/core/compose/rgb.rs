@@ -4,10 +4,7 @@ use ndarray::{Array2, Zip};
 use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::imaging::resample::resample_image;
 
-pub use crate::types::compose::{
-    AlignMethod, WhiteBalance, ChannelStats, DimensionHarmonize,
-    RgbComposeConfig, RgbComposeResult,
-};
+pub use crate::types::compose::{AlignMethod, WhiteBalance, ChannelStats, DimensionHarmonize};
 
 pub fn harmonize_dimensions(
     r: Option<&Array2<f32>>,
@@ -119,7 +116,9 @@ pub(crate) fn align_channels(
     r: Option<&Array2<f32>>, g: Option<&Array2<f32>>, b: Option<&Array2<f32>>,
     rows: usize, cols: usize, method: AlignMethod,
 ) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>, (f64, f64), (f64, f64))> {
-    let ref_ch = r.or(g).or(b).unwrap();
+    let Some(ref_ch) = r.or(g).or(b) else {
+        bail!("No channel provided: assign at least one of R, G or B.");
+    };
 
     let align_to_ref = |ch: Option<&Array2<f32>>,
                         label: &str|
@@ -148,4 +147,30 @@ pub(crate) fn align_channels(
     };
 
     Ok((r_img, g_img, b_img, off_g, off_b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aligning_without_any_channel_is_an_error_not_a_panic() {
+        let (none_r, none_g, none_b, rows, cols, info) = harmonize_dimensions(None, None, None, 8.0).unwrap();
+        assert!(none_r.is_none() && none_g.is_none() && none_b.is_none() && info.is_none());
+        let err = align_channels(None, None, None, rows, cols, AlignMethod::PhaseCorrelation)
+            .expect_err("three missing channels must be refused");
+        assert!(err.to_string().contains("No channel provided"), "{err}");
+    }
+
+    #[test]
+    fn a_single_channel_is_its_own_reference_and_fills_the_others() {
+        let only_g = Array2::from_shape_fn((8, 8), |(y, x)| (y * 8 + x) as f32);
+        let (r, g, b, off_g, off_b) =
+            align_channels(None, Some(&only_g), None, 8, 8, AlignMethod::PhaseCorrelation).unwrap();
+        assert_eq!(g, only_g);
+        assert_eq!(r, only_g);
+        assert_eq!(b, only_g);
+        assert_eq!(off_g, (0.0, 0.0));
+        assert_eq!(off_b, (0.0, 0.0));
+    }
 }

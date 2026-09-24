@@ -8,7 +8,6 @@ use ndarray::s;
 use serde::Deserialize;
 use serde_json::json;
 
-use astroburst_lib::core::alignment::downsample::area_downsample;
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::colormap::{apply_colormap_inverted, encode_png_rgb8, Colormap};
 use astroburst_lib::core::imaging::scale::{
@@ -19,6 +18,7 @@ use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
+use super::super::bin::nan_area_downsample;
 use super::super::region::{resolve_region_clamped, RegionSpec, ResolvedRegion};
 
 #[derive(Deserialize, Default)]
@@ -113,8 +113,9 @@ fn build_overlays(
                 let length_arcsec = ov.get("length_arcsec").and_then(|v| v.as_f64());
                 if let (Some(len), Some(scale)) = (length_arcsec, pixel_scale_arcsec) {
                     let png_scale = scale * factor as f64;
-                    if png_scale > 0.0 && len > 0.0 {
-                        ops.push(DrawOp::Scalebar { length_display_px: len / png_scale });
+                    let length_display_px = len / png_scale;
+                    if png_scale.is_finite() && png_scale > 0.0 && len > 0.0 && length_display_px.is_finite() {
+                        ops.push(DrawOp::Scalebar { length_display_px });
                     }
                 }
             }
@@ -155,10 +156,10 @@ fn draw_overlays(
                 }
             }
             DrawOp::Scalebar { length_display_px } => {
-                let len = (length_display_px.round() as i64).max(1);
+                let len = length_display_px.round().clamp(1.0, (w as f64).max(1.0)) as i64;
                 let margin = 4i64;
                 let x0 = margin;
-                let x1 = margin + len;
+                let x1 = margin.saturating_add(len).min(w as i64 - 1);
                 let y_base = h as i64 - 1 - margin;
                 for t in 0..3i64 {
                     for x in x0..=x1 {
@@ -261,7 +262,7 @@ pub async fn render(
         let display = if factor > 1 {
             let out_rows = resolved_c.height.div_ceil(factor).max(1);
             let out_cols = resolved_c.width.div_ceil(factor).max(1);
-            area_downsample(&region_arr, out_rows, out_cols)
+            nan_area_downsample(&region_arr, out_rows, out_cols)
         } else {
             region_arr
         };
@@ -271,7 +272,7 @@ pub async fn render(
 
         let data = display
             .as_slice()
-            .expect("display array is standard-layout after area_downsample/to_owned");
+            .expect("display array is standard-layout after nan_area_downsample/to_owned");
         let (norm, valid, below, above) =
             normalize_and_stretch(data, vmin, vmax, stretch_kind, asinh_a, power);
 
@@ -354,6 +355,33 @@ mod tests {
         for cmap in Colormap::ALL {
             assert!(hint.contains(cmap.name()), "{hint} lacks {}", cmap.name());
         }
+    }
+
+    #[test]
+    fn scalebar_longer_than_the_image_is_clamped_to_the_image_width() {
+        let (w, h) = (16usize, 12usize);
+        let full = ResolvedRegion { x: 0, y: 0, width: w, height: h, clipped: false };
+        for length in [f64::MAX, 1e13, 9.3e18, f64::INFINITY] {
+            let mut buf = vec![0u8; w * h * 3];
+            draw_overlays(&mut buf, w, h, &full, 1, &[DrawOp::Scalebar { length_display_px: length }]);
+            let row = h - 1 - 4;
+            for x in 4..w {
+                assert_eq!(&buf[(row * w + x) * 3..(row * w + x) * 3 + 3], &SCALEBAR_COLOR, "length {length} x {x}");
+            }
+            assert_eq!(&buf[(row * w + 3) * 3..(row * w + 3) * 3 + 3], &[0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn scalebar_overlay_rejects_non_finite_lengths() {
+        let overlays = vec![
+            serde_json::json!({"type": "scalebar", "length_arcsec": 30.0}),
+            serde_json::json!({"type": "scalebar", "length_arcsec": -5.0}),
+        ];
+        let ops = build_overlays(&overlays, None, Some(0.1), 1);
+        assert_eq!(ops.len(), 1);
+        assert!(build_overlays(&overlays, None, Some(f64::INFINITY), 1).is_empty());
+        assert!(build_overlays(&overlays, None, Some(0.0), 1).is_empty());
     }
 
     #[test]

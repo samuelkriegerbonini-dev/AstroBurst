@@ -1,6 +1,7 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save, resolve_output_dir};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir};
+use crate::cmd::processing::local_contrast::render_linear_output;
 use crate::core::analysis::deconvolution::{generate_gaussian_psf, richardson_lucy};
 use crate::core::imaging::psf_estimation::{estimate_psf, psf_to_kernel, PsfEstimationConfig};
 use crate::infra::progress::ProgressHandle;
@@ -29,7 +30,7 @@ pub async fn deconvolve_rl_cmd(
     let progress_clone = ProgressHandle::new(&app, EVENT_DECONV_PROGRESS, iterations as u64).clone();
 
     blocking_cmd!({
-        resolve_output_dir(&output_dir)?;
+        let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
         let image = entry.arr();
@@ -51,16 +52,15 @@ pub async fn deconvolve_rl_cmd(
 
         let rl_config = RLConfig {
             iterations,
-            psf_sigma,
-            psf_size,
             regularization,
             deringing,
             deringing_threshold: dering_threshold as f32,
+            ..RLConfig::default()
         };
 
         let rl_result = richardson_lucy(image, &psf_kernel, &rl_config, Some(&progress_clone))?;
 
-        let ro = render_and_save(&rl_result.image, &path, &output_dir, SUFFIX_DECONV, true)?;
+        let ro = render_linear_output(&rl_result.image, &path, &entry, &output_dir, SUFFIX_DECONV)?;
         let (rows, cols) = ro.dims;
 
         progress_clone.emit_complete();

@@ -18,7 +18,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::job::{Job, JobStatus, SseEvent};
+use crate::job::{Job, SseEvent};
 use crate::state::AppState;
 
 fn job_json(job: &Arc<Job>) -> Value {
@@ -28,7 +28,7 @@ fn job_json(job: &Arc<Job>) -> Value {
         "status": job.current_status(),
         "pct": job.pct.load(std::sync::atomic::Ordering::Relaxed),
         "started_at": job.started_at,
-        "completed_at": *job.completed_at.lock().unwrap(),
+        "completed_at": job.completed_at(),
     })
 }
 
@@ -45,6 +45,7 @@ fn sse_event_type(evt: &SseEvent) -> &'static str {
         SseEvent::Progress { .. } => "progress",
         SseEvent::Complete => "complete",
         SseEvent::Error { .. } => "error",
+        SseEvent::Cancelled => "cancelled",
     }
 }
 
@@ -68,12 +69,7 @@ pub async fn cancel_job(
         .get("jid")
         .ok_or_else(|| AppError::BadRequest("missing :jid".into()))?;
     let job = resolve_job(&session, jid)?;
-
-    if job.current_status() == JobStatus::Running {
-        job.cancel.cancel();
-        job.set_cancelled();
-    }
-
+    job.set_cancelled();
     Ok(Json(job_json(&job)))
 }
 

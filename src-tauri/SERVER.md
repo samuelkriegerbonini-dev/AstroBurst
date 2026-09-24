@@ -75,7 +75,7 @@ All knobs are set via environment variables. Unset variables use the defaults sh
 | `ASTROBURST_JOBS_MAX` | `4` | Maximum concurrent CPU-bound jobs |
 | `ASTROBURST_CACHE_MAX_ENTRIES` | `32` | Per-session image cache slot limit |
 | `ASTROBURST_CACHE_MAX_BYTES` | `2147483648` | Per-session image cache memory limit (bytes) |
-| `ASTROBURST_CLEANUP_INTERVAL` | `60` | Seconds between idle-session sweep runs |
+| `ASTROBURST_CLEANUP_INTERVAL` | `60` | Seconds between idle-session sweep runs (values below 1 are raised to 1) |
 | `ASTROBURST_LOG_LEVEL` | `info` | Log level (`trace`/`debug`/`info`/`warn`/`error`) |
 
 `RUST_LOG` takes precedence over `ASTROBURST_LOG_LEVEL` when both are set.
@@ -98,7 +98,7 @@ Every client starts with `POST /sessions` to obtain a `session_id`. All subseque
 - An **image cache** (LRU, configurable size) — loaded images live here under a slot key.
 - A **job registry** — long-running operations (stacking, drizzle, pipeline) create a job and return immediately; the caller polls or streams progress.
 
-Sessions expire after `ASTROBURST_SESSION_TTL` seconds of inactivity. Sessions with at least one running job are never evicted. The maximum number of concurrent sessions is `ASTROBURST_SESSION_MAX`; a `POST /sessions` when the cap is reached returns `503 Service Unavailable`.
+Sessions expire after `ASTROBURST_SESSION_TTL` seconds of inactivity. Sessions with at least one running job are never evicted; this includes a cancelled job whose worker has not exited yet. The maximum number of concurrent sessions is `ASTROBURST_SESSION_MAX`; a `POST /sessions` when the cap is reached returns `503 Service Unavailable`. `DELETE /v2/sessions/:sid` removes the session and cancels every job it still runs.
 
 ---
 
@@ -118,10 +118,10 @@ Errors use standard HTTP status codes:
 
 | Status | Code | Meaning |
 |---|---|---|
-| 400 | `bad_request` | Missing or invalid parameter |
-| 404 | `not_found` | Session, slot, or job does not exist |
+| 400 | `bad_request` | Missing or invalid parameter (including an out-of-range HDU and an empty or out-of-image viewport) |
+| 404 | `not_found` | Session, slot, job, or file on disk does not exist |
 | 409 | `conflict` | SSE stream already has a subscriber |
-| 429 | `too_many_requests` | All job semaphore slots occupied |
+| 429 | `too_many_requests` | All job semaphore slots occupied; the message is `job queue full (max N concurrent)` with N = `ASTROBURST_JOBS_MAX` |
 | 503 | `service_unavailable` | Session cap reached |
 | 500 | `internal_error` | Unexpected server error |
 
@@ -175,7 +175,9 @@ Load a FITS or ASDF file from the server's filesystem into the session cache.
 }
 ```
 
-`slot` is the cache key used by subsequent endpoints. Defaults to `path` if omitted.
+`slot` is the cache key used by subsequent endpoints. Defaults to `path` if omitted. A path that does not exist returns `404`. Opening an existing slot again reloads it from disk.
+
+`stats` is computed over every finite pixel (exact zeros and negative values included), the same rule as `/v2/.../stats`. `stf` is derived from the valid-pixel statistics, which leave out NaN/Inf and exact-zero padding.
 
 **Response `200`:**
 ```json
@@ -240,6 +242,8 @@ Render a pixel-coordinate crop as a PNG.
 { "slot": "ha", "x": 512, "y": 512, "w": 256, "h": 256 }
 ```
 
+`w` and `h` must be at least 1 and `(x, y)` must lie inside the image; otherwise the request is a `400`. A crop that runs past the right or bottom edge is clipped to the image.
+
 ---
 
 ### Jobs
@@ -266,7 +270,9 @@ Poll job status.
 
 #### `DELETE /sessions/:sid/jobs/:jid`
 
-Cancel a running job. No-op if already finished. Returns the same shape as GET.
+Cancel a running job. Returns the same shape as GET. The status becomes `cancelled` at once and the job's SSE stream receives its terminal `cancelled` event. The worker stops at its next cancellation check: between frames while frames or calibration masters load, and inside the combine (per frame, per row chunk and per channel for stacking, drizzle and the pipeline). The job's queue slot is released when the worker exits, so a new job may briefly get `429` right after a cancel.
+
+No-op if the job already finished (`done`, `error` or `cancelled`): the status is not changed. A cancel that arrives while the finished result is being stored is also ignored and the job ends `done`.
 
 #### `GET /sessions/:sid/jobs/:jid/stream`
 
@@ -274,14 +280,19 @@ Subscribe to real-time SSE progress. Events have a `type` field:
 
 ```
 event: progress
-data: {"type":"progress","pct":45,"stage":"aligning"}
+data: {"type":"progress","pct":45,"stage":"loading"}
 
 event: complete
 data: {"type":"complete"}
 
 event: error
 data: {"type":"error","message":"file not found: /data/bad.fits"}
+
+event: cancelled
+data: {"type":"cancelled"}
 ```
+
+Every job ends with exactly one terminal event (`complete`, `error` or `cancelled`), after which the server closes the stream. Progress events can be dropped when the client reads slowly; the terminal event is always delivered. A worker that panics ends with an `error` event whose message starts with `job worker panicked:`.
 
 Only one subscriber per job is allowed. A second `GET` to the same stream returns `409 Conflict`.
 
@@ -289,7 +300,7 @@ Only one subscriber per job is allowed. A second `GET` to the same stream return
 
 ### Stacking
 
-Both endpoints return `202 Accepted` and start a background job.
+Both endpoints return `202 Accepted` and start a background job. Parameters are validated before the job is queued, so a bad request gets `400` even when the queue is full. Progress stages: `loading` (0 to 60 %), `stacking` or `drizzling` (60 %), `storing` (90 %).
 
 #### `POST /sessions/:sid/stacking/stack`
 
@@ -309,8 +320,13 @@ Sigma-clip stack a list of FITS files.
 ```
 
 All fields except `paths` are optional. `result_slot` defaults to `"stacked"`.
-`weights` is an optional per-frame weight array (same length as `paths`); if the
-lengths differ it is silently ignored and uniform weighting is used.
+
+Further optional fields: `align_method` (`"affine"`; any other value uses phase correlation), `rejection` (`none`, `sigma_clip`, `winsorized_sigma_clip`, `linear_fit_clip`, `percentile_clip`, `min_max`), `combine` (`mean`, `median`, `min`, `max`), `normalization` (`none`, `additive`, `multiplicative`, `additive_scaling`, `multiplicative_scaling`), `rejection_normalization` (`none`, `scale_offset`), `winsor_cutoff`, `percentile_low`, `percentile_high`, `minmax_low`, `minmax_high`, `rejection_maps`. An unknown method name is a `400` that lists the supported names.
+
+Limits (each violation is a `400`):
+- `sigma_low` and `sigma_high` must be finite numbers greater than 0; `winsor_cutoff`, `percentile_low` and `percentile_high` must be finite.
+- `weights`, when given, must hold exactly one weight per path, each finite and not negative.
+- With `rejection: "min_max"`, `minmax_low + minmax_high` must be smaller than the number of frames.
 
 **Response `202`:**
 ```json
@@ -336,7 +352,8 @@ Drizzle-combine a list of FITS files.
 ```
 
 All fields except `paths` are optional. `result_slot` defaults to `"drizzled"`.
-`kernel` is one of: `"square"` (default), `"gaussian"`, `"lanczos3"`.
+`kernel` is one of: `"square"` (default), `"gaussian"`, `"lanczos3"`. `rejection` takes the same names as the stack endpoint.
+`scale`, `pixfrac`, `sigma_low` and `sigma_high` must be finite numbers greater than 0 (`400` otherwise). Drizzle needs at least 2 frames; with one frame the job ends in `error`.
 
 **Response `202`:**
 ```json
@@ -370,7 +387,13 @@ Calibrate and stack one or more narrowband channels in a single pass. Builds cal
 
 All calibration arrays and numeric fields are optional. `result_prefix` prepends a string to each channel label to form the cache slot key (e.g. `"pipe/Ha"`, `"pipe/OIII"`).
 
+Further optional fields: `align` (default `true`), `rejection` and `combine` (same names as the stack endpoint), `cosmetic` (cosmetic-correction settings) and `dark_optimize` (default `false`). `sigma_low` and `sigma_high` must be finite numbers greater than 0, and an unknown method name or an invalid `cosmetic` block is a `400`; all of this is checked before the job is queued.
+
+Progress stages: `building masters` (5 %), `loading lights` (15 %), `stacking` (25 %), `storing` (90 %). A cancel stops the job between master and light frames and inside the per-channel combine.
+
 **Response `202`:**
 ```json
-{ "job_id": "...", "status": "running", "slots": ["pipe/Ha", "pipe/OIII"] }
+{ "job_id": "...", "status": "running", "slots": ["pipe/Ha", "pipe/OIII"], "warnings": [] }
 ```
+
+`warnings` is non-empty when `cosmetic` is set and some lights carry a DQ plane.

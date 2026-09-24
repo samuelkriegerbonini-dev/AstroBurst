@@ -63,10 +63,23 @@ impl BayerPattern {
     pub fn detect(header: &HduHeader) -> Option<Self> {
         let raw = header.get("BAYERPAT").or_else(|| header.get("COLORTYP"))?;
         let base = Self::parse(raw)?;
-        let xoff = header.get_f64("XBAYROFF").unwrap_or(0.0).round() as i64;
-        let yoff = header.get_f64("YBAYROFF").unwrap_or(0.0).round() as i64;
+        let xoff = (header.get_f64("XBAYROFF").unwrap_or(0.0).round() as i64).rem_euclid(2);
+        let mut yoff = (header.get_f64("YBAYROFF").unwrap_or(0.0).round() as i64).rem_euclid(2);
+        if is_bottom_up(header) {
+            let rows = header
+                .get_i64("ZNAXIS2")
+                .or_else(|| header.get_i64("NAXIS2"))
+                .filter(|&r| r > 0)?;
+            yoff += (rows - 1).rem_euclid(2);
+        }
         Some(base.with_offsets(xoff, yoff))
     }
+}
+
+fn is_bottom_up(header: &HduHeader) -> bool {
+    header
+        .get("ROWORDER")
+        .is_some_and(|v| v.trim().trim_matches('\'').trim().eq_ignore_ascii_case("BOTTOM-UP"))
 }
 
 pub fn debayer_bilinear(
@@ -205,7 +218,7 @@ mod tests {
             index.insert(k.to_string(), v.to_string());
             cards.push((k.to_string(), v.to_string()));
         }
-        HduHeader { cards, index }
+        HduHeader { cards, index, string_keys: None }
     }
 
     fn mosaic(h: usize, w: usize, pattern: BayerPattern, rv: f32, gv: f32, bv: f32) -> Array2<f32> {
@@ -244,6 +257,37 @@ mod tests {
 
         let h3 = make_header(&[("OBJECT", "M42")]);
         assert_eq!(BayerPattern::detect(&h3), None);
+    }
+
+    #[test]
+    fn detect_accounts_for_bottom_up_row_order() {
+        let bottom_up = |rows: &str, extra: &[(&str, &str)]| {
+            let mut pairs = vec![("BAYERPAT", "'RGGB'"), ("ROWORDER", "'BOTTOM-UP'"), ("NAXIS2", rows)];
+            pairs.extend_from_slice(extra);
+            BayerPattern::detect(&make_header(&pairs))
+        };
+        assert_eq!(bottom_up("3520", &[]), Some(BayerPattern::Gbrg));
+        assert_eq!(bottom_up("3519", &[]), Some(BayerPattern::Rggb));
+        assert_eq!(bottom_up("3520", &[("YBAYROFF", "1")]), Some(BayerPattern::Rggb));
+        let top_down = make_header(&[("BAYERPAT", "RGGB"), ("ROWORDER", "TOP-DOWN"), ("NAXIS2", "3520")]);
+        assert_eq!(BayerPattern::detect(&top_down), Some(BayerPattern::Rggb));
+        let no_height = make_header(&[("BAYERPAT", "RGGB"), ("ROWORDER", "BOTTOM-UP")]);
+        assert_eq!(BayerPattern::detect(&no_height), None);
+        let huge = make_header(&[("BAYERPAT", "RGGB"), ("YBAYROFF", "1e300"), ("XBAYROFF", "-1e300")]);
+        assert!(BayerPattern::detect(&huge).is_some());
+
+        let sensor = mosaic(6, 6, BayerPattern::Rggb, 0.8, 0.5, 0.2);
+        let stored = Array2::from_shape_fn((6, 6), |(y, x)| sensor[[5 - y, x]]);
+        let pattern = BayerPattern::detect(&make_header(&[
+            ("BAYERPAT", "RGGB"),
+            ("ROWORDER", "BOTTOM-UP"),
+            ("NAXIS2", "6"),
+        ]))
+        .unwrap();
+        let (r, g, b) = debayer_bilinear(&stored, pattern);
+        assert!(r.iter().all(|&v| (v - 0.8).abs() < 1e-6), "R channel {:?}", r);
+        assert!(g.iter().all(|&v| (v - 0.5).abs() < 1e-6), "G channel {:?}", g);
+        assert!(b.iter().all(|&v| (v - 0.2).abs() < 1e-6), "B channel {:?}", b);
     }
 
     #[test]

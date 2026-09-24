@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::json;
 
@@ -7,27 +6,53 @@ use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, res
 use crate::cmd::helpers;
 use crate::core::compose::lrgb::lrgb_combine_normalized;
 use crate::core::imaging::resample::resample_image;
-use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig, StfParams, apply_stf_f32};
+use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::scnr::apply_scnr_inplace;
-use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
-use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B, RES_CHANNEL, RES_UPDATED};
+use crate::infra::cache::ImageEntry;
+use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED, RES_CHANNEL, RES_UPDATED};
+
+const COMPOSITE_PNG_PREFIX: &str = "rgb_composite";
+const COMPOSITE_PNG_GRACE: Duration = Duration::from_secs(600);
+
+fn is_stale_composite_png(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    if !name.starts_with(COMPOSITE_PNG_PREFIX) || !name.ends_with(".png") {
+        return false;
+    }
+    entry
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age > COMPOSITE_PNG_GRACE)
+}
 
 pub(super) fn composite_png_path(output_dir: &str) -> String {
+    let now = SystemTime::now();
     if let Ok(entries) = std::fs::read_dir(output_dir) {
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("rgb_composite") && name_str.ends_with(".png") {
+            if is_stale_composite_png(&entry, now) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
-    let ts = std::time::SystemTime::now()
+    let ts = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("{}/rgb_composite_{}.png", output_dir, ts)
+    format!("{}/{}_{}.png", output_dir, COMPOSITE_PNG_PREFIX, ts)
+}
+
+pub(crate) fn stf_is_linked(linked: Option<bool>, stfs: [&StfParams; 3]) -> bool {
+    linked.unwrap_or_else(|| {
+        let [r, g, b] = stfs;
+        let same = |a: &StfParams, o: &StfParams| {
+            a.shadow == o.shadow && a.midtone == o.midtone && a.highlight == o.highlight
+        };
+        same(r, g) && same(g, b)
+    })
 }
 
 pub(super) fn load_entry(path: &Option<String>) -> anyhow::Result<Option<ImageEntry>> {
@@ -90,7 +115,7 @@ pub async fn lrgb_combine_composite_cmd(
         let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
         helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
 
-        helpers::insert_composite_rgb(r, g, b, stats_r, stats_g, stats_b);
+        helpers::insert_composite_content(r, g, b, stats_r, stats_g, stats_b);
 
         Ok(json!({
             RES_PNG_PATH: png_path,
@@ -111,6 +136,7 @@ pub async fn restretch_composite_cmd(
     scnr_method: Option<String>,
     scnr_amount: Option<f64>,
     cache_result: Option<bool>,
+    linked: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -123,14 +149,7 @@ pub async fn restretch_composite_cmd(
         let stf_g = StfParams { shadow: shadow_g, midtone: midtone_g, highlight: highlight_g };
         let stf_b = StfParams { shadow: shadow_b, midtone: midtone_b, highlight: highlight_b };
 
-        let identical_params = shadow_r == shadow_g
-            && shadow_g == shadow_b
-            && midtone_r == midtone_g
-            && midtone_g == midtone_b
-            && highlight_r == highlight_g
-            && highlight_g == highlight_b;
-
-        let linked_stats = if identical_params {
+        let linked_stats = if stf_is_linked(linked, [&stf_r, &stf_g, &stf_b]) {
             Some(crate::core::imaging::stats::combine_channel_stats(
                 entry_r.stats(),
                 entry_g.stats(),
@@ -169,14 +188,17 @@ pub async fn restretch_composite_cmd(
 
 #[tauri::command]
 pub async fn clear_composite_cache_cmd() -> Result<(), String> {
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_R);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_G);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_KEY_B);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_R);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_G);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_ORIG_B);
-    helpers::clear_composite_derived();
+    helpers::clear_composite();
     Ok(())
+}
+
+fn composite_channel_index(channel: &str) -> anyhow::Result<usize> {
+    match channel.to_lowercase().as_str() {
+        "r" => Ok(0),
+        "g" => Ok(1),
+        "b" => Ok(2),
+        _ => anyhow::bail!("Invalid channel: {}. Must be r, g, or b.", channel),
+    }
 }
 
 #[tauri::command]
@@ -185,38 +207,96 @@ pub async fn update_composite_channel_cmd(
     path: String,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let key = match channel.to_lowercase().as_str() {
-            "r" => COMPOSITE_KEY_R,
-            "g" => COMPOSITE_KEY_G,
-            "b" => COMPOSITE_KEY_B,
-            _ => anyhow::bail!("Invalid channel: {}. Must be r, g, or b.", channel),
-        };
+        let index = composite_channel_index(&channel)?;
 
-        let has_composite = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R).is_some()
-            && GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G).is_some()
-            && GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B).is_some();
-
-        if !has_composite {
-            anyhow::bail!("No active composite. Compose RGB first.");
-        }
-
-        let target_dim = GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R)
-            .map(|e| e.arr().dim())
-            .ok_or_else(|| anyhow::anyhow!("Reference channel not found in cache"))?;
+        let (er, _, _) = helpers::load_composite_rgb()
+            .map_err(|_| anyhow::anyhow!("No active composite. Compose RGB first."))?;
+        let target_dim = er.arr().dim();
 
         let entry = load_from_cache_or_disk(&path)?;
-        let (arr_arc, stats) = if entry.arr().dim() != target_dim {
-            let resampled = crate::core::imaging::resample::resample_image(entry.arr(), target_dim.0, target_dim.1)?;
-            let s = compute_image_stats(&resampled);
-            (Arc::new(resampled), s)
-        } else {
-            let s = entry.stats().clone();
-            (entry.data_arc(), s)
-        };
+        let dim = entry.arr().dim();
+        if dim != target_dim {
+            anyhow::bail!(
+                "{} is {}x{} but the composite is {}x{}: the processed file is not aligned and cropped like the composite channels. Re-run Blend (with Align and Crop) to include it.",
+                path,
+                dim.1,
+                dim.0,
+                target_dim.1,
+                target_dim.0
+            );
+        }
 
-        GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr_arc, stats);
-        helpers::clear_composite_derived();
+        helpers::replace_composite_channel(index, entry.data_arc(), entry.stats().clone())?;
 
         Ok(json!({ RES_CHANNEL: channel, RES_UPDATED: true }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::imaging::stats::combine_channel_stats;
+    use ndarray::Array2;
+
+    fn stf(shadow: f64, midtone: f64) -> StfParams {
+        StfParams { shadow, midtone, highlight: 1.0 }
+    }
+
+    #[test]
+    fn an_explicit_linked_flag_wins_over_the_value_heuristic() {
+        let same = stf(0.1, 0.3);
+        let other = stf(0.2, 0.3);
+        assert!(!stf_is_linked(Some(false), [&same, &same, &same]));
+        assert!(stf_is_linked(Some(true), [&same, &other, &same]));
+        assert!(stf_is_linked(None, [&same, &same, &same]));
+        assert!(!stf_is_linked(None, [&same, &other, &same]));
+    }
+
+    #[tokio::test]
+    async fn per_channel_restretch_with_equal_values_normalises_each_channel_on_its_own() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let r = Array2::from_shape_fn((8, 8), |(y, x)| 10.0 + (y * 8 + x) as f32);
+        let g = r.mapv(|v| v * 4.0);
+        let b = r.mapv(|v| v * 0.25);
+        let (sr, sg, sb) = (compute_image_stats(&r), compute_image_stats(&g), compute_image_stats(&b));
+        helpers::insert_composite_and_orig(r.clone(), g.clone(), b.clone(), sr.clone(), sg.clone(), sb.clone());
+        let p = stf(0.0, 0.5);
+
+        let restretch = |linked: Option<bool>| {
+            restretch_composite_cmd(
+                out.clone(), 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, None, None, None, Some(true), linked,
+            )
+        };
+        restretch(Some(false)).await.unwrap();
+        let (cr, cg, _) = helpers::load_composite_stretched().expect("stretched cache");
+        assert_eq!(cr.arr(), &apply_stf_f32(&r, &p, &sr));
+        assert_eq!(cg.arr(), &apply_stf_f32(&g, &p, &sg), "the per-channel choice was overridden by equal values");
+
+        restretch(None).await.unwrap();
+        let combined = combine_channel_stats(&sr, &sg, &sb);
+        let (_, cg, _) = helpers::load_composite_stretched().expect("stretched cache");
+        assert_eq!(cg.arr(), &apply_stf_f32(&g, &p, &combined), "without a flag, equal values still mean linked");
+    }
+
+    #[test]
+    fn a_new_composite_png_does_not_delete_one_that_is_still_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap();
+        let fresh = dir.path().join("rgb_composite_1.png");
+        let stale = dir.path().join("rgb_composite_0.png");
+        let other = dir.path().join("keep_me.png");
+        for p in [&fresh, &stale, &other] {
+            std::fs::write(p, b"png").unwrap();
+        }
+        let old = SystemTime::now() - COMPOSITE_PNG_GRACE - Duration::from_secs(60);
+        std::fs::OpenOptions::new().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+
+        let next = composite_png_path(out);
+        assert!(next.starts_with(out) && next.contains("rgb_composite_"));
+        assert!(fresh.exists(), "a composite PNG another command just returned was deleted");
+        assert!(!stale.exists(), "old composite PNGs are no longer cleaned up");
+        assert!(other.exists());
+    }
 }

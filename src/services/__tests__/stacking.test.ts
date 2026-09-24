@@ -1,4 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
+import {
+  DRIZZLE_ALIGNMENT_METHODS,
+  type DrizzleRgbResult,
+  type StackFrameAlignment,
+  type StackResult,
+} from "../../shared/types/stacking";
 
 const { withPreviewMock, typedInvokeMock } = vi.hoisted(() => ({
   withPreviewMock: vi.fn(),
@@ -55,5 +61,29 @@ describe("drizzleRgbStack", () => {
 
     const args = withPreviewMock.mock.calls[0][2] as { rPaths: string[] | null };
     expect(args.rPaths).toEqual(["r1.fits", "r2.fits"]);
+  });
+
+  it("sends star-based alignment as affine, the method the backend runs", async () => {
+    await drizzleRgbStack(["r1.fits", "r2.fits"], [], [], undefined, { alignmentMethod: "affine" });
+
+    const args = withPreviewMock.mock.calls[0][2] as { alignmentMethod: string | null };
+    expect(args.alignmentMethod).toBe("affine");
+  });
+});
+
+describe("drizzle alignment choices", () => {
+  it("name the star-based option after the affine fit it runs, not a ZNCC search that does not exist", () => {
+    expect(DRIZZLE_ALIGNMENT_METHODS.map((m) => m.value)).toEqual(["phase_correlation", "affine"]);
+    expect(DRIZZLE_ALIGNMENT_METHODS.some((m) => /zncc/i.test(m.label))).toBe(false);
+  });
+});
+
+describe("stack result payload types", () => {
+  it("types offsets as the {dy, dx} objects Rust emits and declares the alignment and warning reports", () => {
+    expectTypeOf<NonNullable<StackResult["offsets"]>[number]>().toEqualTypeOf<{ dy: number; dx: number }>();
+    expectTypeOf<NonNullable<StackResult["alignment"]>[number]>().toEqualTypeOf<StackFrameAlignment>();
+    expectTypeOf<StackFrameAlignment["confidence"]>().toEqualTypeOf<number | null>();
+    expectTypeOf<StackResult["warnings"]>().toEqualTypeOf<string[] | undefined>();
+    expectTypeOf<DrizzleRgbResult["warnings"]>().toEqualTypeOf<string[] | undefined>();
   });
 });

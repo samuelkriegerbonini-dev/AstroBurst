@@ -2,14 +2,19 @@ import { useState, useCallback, useEffect, memo } from "react";
 import { Grid3X3, X, Maximize2 } from "lucide-react";
 import { Slider } from "../ui";
 import DeepZoomViewer from "../render/DeepZoomviewer";
+import MeasurementBadge from "./MeasurementBadge";
+import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
 
 interface TileViewerPanelProps {
   filePath: string | null;
+  composite: boolean;
+  rgbPath: string | null;
   imageWidth?: number;
   imageHeight?: number;
 }
 
-function TileViewerPanelInner({ filePath, imageWidth, imageHeight }: TileViewerPanelProps) {
+function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageHeight }: TileViewerPanelProps) {
+  const source = useMeasurementSource(true);
   const [tileSize, setTileSize] = useState(256);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -44,6 +49,7 @@ function TileViewerPanelInner({ filePath, imageWidth, imageHeight }: TileViewerP
             <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
               Deep Zoom
             </span>
+            <MeasurementBadge measuresComposite />
           </div>
           <span className="text-[10px] font-mono text-zinc-600">
             {imageWidth}\u00d7{imageHeight}
@@ -52,7 +58,8 @@ function TileViewerPanelInner({ filePath, imageWidth, imageHeight }: TileViewerP
 
         <div className="px-3 py-3 flex flex-col gap-3">
           <p className="text-[10px] text-zinc-500">
-            Pan and zoom at full resolution on large images.
+            Pan and zoom at full resolution on large images. Tiles use an automatic STF, not the current display
+            stretch, colormap or STF sliders.
           </p>
 
           <Slider
@@ -82,9 +89,12 @@ function TileViewerPanelInner({ filePath, imageWidth, imageHeight }: TileViewerP
         <div className="fixed inset-0 z-[90] bg-zinc-950">
           <DeepZoomViewer
             filePath={filePath}
+            composite={composite}
+            rgbPath={rgbPath}
             imageWidth={imageWidth || 0}
             imageHeight={imageHeight || 0}
             tileSize={tileSize}
+            sourceLabel={source?.text ?? null}
             className="w-full h-full"
           />
 

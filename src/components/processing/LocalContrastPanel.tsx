@@ -3,18 +3,40 @@ import { X } from "lucide-react";
 import { applyLhe, applyLheComposite } from "../../services/localContrast";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
+import {
+  COMPOSITE_CHANGED_MESSAGE,
+  INPUT_CHANGED_MESSAGE,
+  bustPreviewUrl,
+  isCancelMessage,
+  useCompositeRunGuard,
+  useProcessingRun,
+} from "../../hooks/useProcessingRun";
 import { useCompositeActions, useCompositePreview } from "../../context/CompositeContext";
+import { useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import { DEFAULT_LHE_CONFIG, LHE_LIMITS, LHE_PROGRESS_EVENT } from "../../shared/types/localContrast";
 import type { LheConfig, LheHistogramBits, LocalContrastResult } from "../../shared/types/localContrast";
 
+interface LheRun {
+  res: LocalContrastResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+  composite: boolean;
+  kernelRadius: number;
+  contrastLimit: number;
+}
+
 interface LocalContrastPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
   onProcessingDone?: (result: LocalContrastResult) => void;
   chainedFrom?: string;
+  inputPreviewUrl?: string | null;
+  inputLabel?: string;
+  fileKey?: string | null;
 }
 
 const ACCENT = "teal";
@@ -27,15 +49,16 @@ const ICON = (
   </svg>
 );
 
-export default function LocalContrastPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: LocalContrastPanelProps) {
+export default function LocalContrastPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: LocalContrastPanelProps) {
   const { isShowingComposite } = useCompositePreview();
   const { setCompositePreviewUrl } = useCompositeActions();
+  const beginCompositeRun = useCompositeRunGuard();
   const progress = useProgress(LHE_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [config, setConfig] = useState<LheConfig>(DEFAULT_LHE_CONFIG);
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<LocalContrastResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<LheRun>("lhe", fileKey ?? null);
+  const { chain } = useRenderContext();
+  const result = runResult && (runResult.composite || chainHoldsOutput(chain, "localContrast", runResult.res.fits_path)) ? runResult : null;
 
   const update = useCallback(<K extends keyof LheConfig>(key: K, value: LheConfig[K]) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -43,35 +66,35 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
 
   const canRun = isShowingComposite || !!selectedFile?.path;
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!canRun) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
+    const composite = isShowingComposite;
+    const path = selectedFile?.path ?? null;
+    if (!composite && !path) return;
+    const runConfig = config;
+    const snapshot = {
+      baseUrl: inputPreviewUrl ?? null,
+      baseLabel: inputLabel ?? "Original",
+      composite,
+      kernelRadius: runConfig.kernelRadius,
+      contrastLimit: runConfig.contrastLimit,
+    };
+    const compositeStillCurrent = beginCompositeRun();
     resetProgress();
-    try {
-      if (isShowingComposite) {
-        const res = await applyLheComposite(outputDir, config);
-        setResult(res);
+    void run(async (ctx) => {
+      if (composite) {
+        const res = await applyLheComposite(outputDir, runConfig);
+        if (!compositeStillCurrent()) throw new Error(COMPOSITE_CHANGED_MESSAGE);
         if (res.previewUrl) setCompositePreviewUrl(res.previewUrl);
-        onProcessingDone?.(res);
-      } else if (selectedFile?.path) {
-        const res = await applyLhe(selectedFile.path, outputDir, config);
-        setResult(res);
-        onPreviewUpdate?.(res.previewUrl);
-        onProcessingDone?.(res);
+        return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()) };
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/cancel/i.test(msg)) setError(msg);
-    } finally {
-      setIsRunning(false);
-      resetProgress();
-    }
-  }, [canRun, isShowingComposite, selectedFile?.path, outputDir, config, resetProgress, setCompositePreviewUrl, onPreviewUpdate, onProcessingDone]);
-
-  const originalUrl = selectedFile?.result?.previewUrl;
-  const resultUrl = result?.previewUrl;
+      if (!path) return null;
+      const res = await applyLhe(path, outputDir, runConfig);
+      if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
+      onProcessingDone?.(res);
+      return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()) };
+    }, isCancelMessage).finally(resetProgress);
+  }, [canRun, isShowingComposite, selectedFile?.path, outputDir, config, inputPreviewUrl, inputLabel, beginCompositeRun, resetProgress, run, setCompositePreviewUrl, onProcessingDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -115,7 +138,9 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
         <Toggle label="Circular Kernel" checked={config.circular} disabled={isRunning} accent={ACCENT} onChange={(v) => update("circular", v)} />
       </div>
 
-      <RunButton label="Run Local Contrast" runningLabel="Equalizing..." running={isRunning} disabled={!canRun} accent={ACCENT} onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label="Run Local Contrast" runningLabel="Equalizing..." running={isRunning} disabled={!canRun || blocked} accent={ACCENT} onClick={handleRun} />
+      </div>
 
       {isRunning && !isShowingComposite && progress.active && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
@@ -144,14 +169,14 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
           <ResultGrid items={[
-            { label: "Kernel", value: `${config.kernelRadius}px` },
-            { label: "Limit", value: config.contrastLimit.toFixed(1) },
-            { label: "Time", value: result.elapsed_ms != null ? `${(result.elapsed_ms / 1000).toFixed(2)}s` : null },
-            { label: "Size", value: result.dimensions ? `${result.dimensions[0]}x${result.dimensions[1]}` : null },
+            { label: "Kernel", value: `${result.kernelRadius}px` },
+            { label: "Limit", value: result.contrastLimit.toFixed(1) },
+            { label: "Time", value: result.res.elapsed_ms != null ? `${(result.res.elapsed_ms / 1000).toFixed(2)}s` : null },
+            { label: "Size", value: result.res.dimensions ? `${result.res.dimensions[0]}x${result.res.dimensions[1]}` : null },
           ]} columns={4} />
 
-          {!isShowingComposite && originalUrl && resultUrl && (
-            <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Original" resultLabel="Equalized" accent={ACCENT} />
+          {!result.composite && result.baseUrl && result.resultUrl && (
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Equalized" accent={ACCENT} />
           )}
         </div>
       )}

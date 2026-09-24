@@ -1,4 +1,6 @@
-export type RegionSystem = "image" | "fk5" | "icrs";
+export type RegionSystem = "image" | "physical" | "fk5" | "icrs";
+
+export const REGION_SYSTEMS: readonly RegionSystem[] = ["image", "physical", "fk5", "icrs"];
 
 export type RegionShape =
   | { shape: "circle"; x: number; y: number; r: number }
@@ -60,6 +62,7 @@ export interface RegionStats {
   count: number;
   n_nan: number;
   n_excluded: number;
+  n_padding: number;
   area: number;
   bounds: PixelBounds;
   clipped: boolean;
@@ -71,9 +74,9 @@ export interface RegionStats {
   std: number;
   min: number;
   max: number;
-  clipped_mean: number;
-  clipped_median: number;
-  clipped_sigma: number;
+  clipped_mean: number | null;
+  clipped_median: number | null;
+  clipped_sigma: number | null;
   n_rejected: number;
   background: BackgroundEstimate | null;
   net_sum: number | null;

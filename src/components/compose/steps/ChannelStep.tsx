@@ -13,6 +13,7 @@ import {
   shortName,
 } from "../../../utils/channelMapping";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
+import type { NarrowbandFilterDetection } from "../../../services/header";
 
 interface NarrowbandPalette {
   palette_name: string;
@@ -23,14 +24,7 @@ interface NarrowbandPalette {
   unmapped?: { file_path: string; file_name: string; detection?: unknown }[];
 }
 
-interface FilterDetection {
-  path: string;
-  filter: string | null;
-  hubble_channel?: string | null;
-  confidence?: number;
-  matched_keyword?: string;
-  matched_value?: string;
-}
+type FilterDetection = NarrowbandFilterDetection;
 
 interface ChannelStepProps {
   state: WizardState;
@@ -239,7 +233,7 @@ export default function ChannelStep({
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
         multiple: true,
-        filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "FITS", "FIT", "FTS", "asdf"] }],
+        filters: [{ name: "FITS", extensions: ["fits", "fit", "fts", "fz", "FITS", "FIT", "FTS", "FZ", "asdf"] }],
       });
       if (!selected) return;
       const paths = Array.isArray(selected) ? selected : [selected];

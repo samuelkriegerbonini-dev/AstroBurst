@@ -36,27 +36,43 @@ pub fn filter_header(header: &HduHeader, copy_wcs: bool, copy_metadata: bool) ->
     if copy_wcs && copy_metadata {
         return Some(header.clone());
     }
-    let filtered_cards: Vec<_> = header
-        .cards
-        .iter()
-        .filter(|card| {
-            let key = card.0.trim();
-            if copy_wcs && !copy_metadata {
-                is_wcs_card(key)
-            } else {
-                !is_wcs_card(key)
+    let mut filtered = HduHeader::empty();
+    for (key, value) in &header.cards {
+        if is_wcs_card(key.trim()) == copy_wcs {
+            filtered.cards.push((key.clone(), value.clone()));
+            if !matches!(key.trim(), "HISTORY" | "COMMENT" | "") {
+                filtered.index.insert(key.clone(), value.clone());
             }
-        })
-        .cloned()
-        .collect();
-
-    if filtered_cards.is_empty() {
-        return None;
+        }
     }
+    filtered.inherit_string_keys(header);
+    if filtered.cards.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
 
-    let mut filtered = header.clone();
-    filtered.cards = filtered_cards;
-    Some(filtered)
+const LAYOUT_CARDS: &[&str] = &[
+    "SIMPLE", "XTENSION", "BITPIX", "NAXIS", "EXTEND", "PCOUNT", "GCOUNT", "BZERO", "BSCALE",
+    "BLANK", "END", "CHECKSUM", "DATASUM", "TFIELDS", "THEAP",
+    "ZIMAGE", "ZCMPTYPE", "ZBITPIX", "ZNAXIS", "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSIMPLE",
+    "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZPCOUNT", "ZGCOUNT", "ZHECKSUM", "ZDATASUM", "ZSCALE",
+    "ZZERO", "ZBLANK",
+];
+
+const LAYOUT_INDEXED_PREFIXES: &[&str] = &[
+    "NAXIS", "TTYPE", "TFORM", "TUNIT", "TDIM", "TNULL", "TSCAL", "TZERO", "TDISP", "TBCOL",
+    "ZNAXIS", "ZTILE", "ZNAME", "ZVAL",
+];
+
+fn has_index_suffix(key: &str, prefix: &str) -> bool {
+    key.strip_prefix(prefix)
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+pub(crate) fn is_layout_card(key: &str) -> bool {
+    LAYOUT_CARDS.contains(&key) || LAYOUT_INDEXED_PREFIXES.iter().any(|p| has_index_suffix(key, p))
 }
 
 fn pad_to_block(writer: &mut BufWriter<File>, bytes_written: usize, fill: u8) -> Result<()> {
@@ -185,8 +201,11 @@ fn compute_bzero_bscale_slices(slices: &[&[f32]]) -> (f64, f64) {
             }
         }
     }
-    if !dmin.is_finite() || !dmax.is_finite() || (dmax - dmin).abs() < 1e-30 {
+    if !dmin.is_finite() || !dmax.is_finite() {
         return (32768.0, 1.0);
+    }
+    if dmax - dmin < 1e-30 {
+        return (dmin, 1.0);
     }
     let bscale = (dmax - dmin) / 65534.0;
     let bzero = dmin + bscale * 32767.0;
@@ -256,8 +275,64 @@ fn truncate_str_bytes(s: &str, max: usize) -> &[u8] {
     &s.as_bytes()[..end]
 }
 
-fn is_fits_numeric(value: &str) -> bool {
-    value == "T" || value == "F" || value.parse::<f64>().is_ok()
+const CARD_LEN: usize = 80;
+const VALUE_START: usize = 10;
+const FIXED_VALUE_END: usize = 30;
+const MIN_QUOTED_LEN: usize = 9;
+const MAX_STRING_CONTENT: usize = 68;
+
+fn is_fits_number(text: &str, allow_zero_padding: bool) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.find(['E', 'e', 'D', 'd']) {
+        Some(i) => (&unsigned[..i], Some(&unsigned[i + 1..])),
+        None => (unsigned, None),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (mantissa, None),
+    };
+    let mantissa_ok = digits(int_part)
+        && frac_part.is_none_or(digits)
+        && (!int_part.is_empty() || frac_part.is_some_and(|f| !f.is_empty()));
+    let exponent_ok = exponent.is_none_or(|e| {
+        let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+        !e.is_empty() && digits(e)
+    });
+    let zero_padded = int_part.len() > 1 && int_part.starts_with('0');
+    mantissa_ok && exponent_ok && (allow_zero_padding || !zero_padded)
+}
+
+fn fits_literal_text(value: &str, allow_zero_padding: bool) -> Option<String> {
+    let text = value.trim();
+    if text == "T" || text == "F" {
+        return Some(text.to_string());
+    }
+    if !is_fits_number(text, allow_zero_padding) {
+        return None;
+    }
+    if text.len() <= CARD_LEN - VALUE_START {
+        return Some(text.to_string());
+    }
+    let v: f64 = text.replace(['D', 'd'], "E").parse().ok()?;
+    v.is_finite().then(|| format!("{v:E}"))
+}
+
+fn quoted_fits_string(value: &str) -> Vec<u8> {
+    let mut out = vec![b'\''];
+    let mut utf8 = [0u8; 4];
+    for ch in value.chars() {
+        let unit: &[u8] = if ch == '\'' { b"''" } else { ch.encode_utf8(&mut utf8).as_bytes() };
+        if out.len() - 1 + unit.len() > MAX_STRING_CONTENT {
+            break;
+        }
+        out.extend_from_slice(unit);
+    }
+    while out.len() < MIN_QUOTED_LEN {
+        out.push(b' ');
+    }
+    out.push(b'\'');
+    out
 }
 
 fn is_fits_keyword(key: &str) -> bool {
@@ -267,14 +342,35 @@ fn is_fits_keyword(key: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
+#[derive(Clone, Copy)]
+enum ValueType {
+    Inferred,
+    Text,
+    Literal,
+}
+
+fn source_value_type(source: &HduHeader, key: &str) -> ValueType {
+    match source.is_string_value(key) {
+        None => ValueType::Inferred,
+        Some(true) => ValueType::Text,
+        Some(false) => ValueType::Literal,
+    }
+}
+
 fn push_header_card(out: &mut Vec<u8>, key: &str, value: &str) {
+    push_typed_card(out, key, value, ValueType::Inferred);
+}
+
+fn push_source_card(out: &mut Vec<u8>, key: &str, value: &str, source: &HduHeader) {
+    push_typed_card(out, key, value, source_value_type(source, key));
+}
+
+fn push_typed_card(out: &mut Vec<u8>, key: &str, value: &str, value_type: ValueType) {
     if !is_fits_keyword(key) {
         return;
     }
-    let mut card = [b' '; 80];
-    let kb = key.as_bytes();
-    let klen = kb.len();
-    card[..klen].copy_from_slice(kb);
+    let mut card = [b' '; CARD_LEN];
+    card[..key.len()].copy_from_slice(key.as_bytes());
 
     if matches!(key, "COMMENT" | "HISTORY" | "") {
         let tb = truncate_str_bytes(value, 72);
@@ -284,19 +380,22 @@ fn push_header_card(out: &mut Vec<u8>, key: &str, value: &str) {
     }
 
     card[8] = b'=';
-    card[9] = b' ';
-
-    if is_fits_numeric(value) {
-        let vb = truncate_str_bytes(value, 20);
-        let start = 30 - vb.len();
-        card[start..30].copy_from_slice(vb);
-    } else {
-        card[10] = b'\'';
-        let vb = truncate_str_bytes(value, 67);
-        card[11..11 + vb.len()].copy_from_slice(vb);
-        let close = (11 + vb.len()).max(19);
-        card[close] = b'\'';
-    }
+    let literal = match value_type {
+        ValueType::Text => None,
+        ValueType::Inferred => fits_literal_text(value, false),
+        ValueType::Literal => fits_literal_text(value, true),
+    };
+    let field: Vec<u8> = match literal {
+        Some(number) if number.len() <= FIXED_VALUE_END - VALUE_START => {
+            let mut right_justified = vec![b' '; FIXED_VALUE_END - VALUE_START - number.len()];
+            right_justified.extend_from_slice(number.as_bytes());
+            right_justified
+        }
+        Some(number) => number.into_bytes(),
+        None => quoted_fits_string(value),
+    };
+    let field = &field[..field.len().min(CARD_LEN - VALUE_START)];
+    card[VALUE_START..VALUE_START + field.len()].copy_from_slice(field);
 
     out.extend_from_slice(&card);
 }
@@ -304,27 +403,42 @@ fn push_header_card(out: &mut Vec<u8>, key: &str, value: &str) {
 fn write_extra_header_cards(
     writer: &mut BufWriter<File>,
     hdr: &HduHeader,
-    skip: &[&str],
+    skip: impl Fn(&str) -> bool,
 ) -> Result<usize> {
     let mut buf: Vec<u8> = Vec::new();
     for card in &hdr.cards {
         let key = card.0.trim();
-        if skip.iter().any(|&s| s == key) {
+        if skip(key) {
             continue;
         }
-        push_header_card(&mut buf, key, &card.1);
+        push_source_card(&mut buf, key, &card.1, hdr);
     }
     writer.write_all(&buf)?;
     Ok(buf.len())
 }
 
-fn write_provenance(writer: &mut BufWriter<File>) -> Result<usize> {
+fn push_provenance(out: &mut Vec<u8>, header: Option<&HduHeader>) {
     let version = env!("CARGO_PKG_VERSION");
+    let source_names_its_program =
+        header.is_some_and(|h| h.cards.iter().any(|(k, _)| k.trim() == "PROGRAM"));
+    if !source_names_its_program {
+        push_header_card(out, "PROGRAM", &format!("AstroBurst {version}"));
+    }
+    push_header_card(out, "HISTORY", &format!("Processed with AstroBurst {version}"));
+}
+
+fn write_provenance(writer: &mut BufWriter<File>, header: Option<&HduHeader>) -> Result<usize> {
     let mut buf = Vec::new();
-    push_header_card(&mut buf, "PROGRAM", &format!("AstroBurst {}", version));
-    push_header_card(&mut buf, "HISTORY", &format!("Processed with AstroBurst {}", version));
+    push_provenance(&mut buf, header);
     writer.write_all(&buf)?;
     Ok(buf.len())
+}
+
+pub(crate) fn validate_quantize_level(quantize_level: f64) -> Result<()> {
+    if !(quantize_level.is_finite() && quantize_level > 0.0) {
+        bail!("quantize_level must be a finite number greater than 0 (got {quantize_level})");
+    }
+    Ok(())
 }
 
 pub fn write_fits_mono(
@@ -370,14 +484,10 @@ pub fn write_fits_mono_bitpix(
     }
 
     if let Some(hdr) = header {
-        static SKIP_MONO: &[&str] = &[
-            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4",
-            "BZERO", "BSCALE", "BLANK", "END",
-        ];
-        bytes += write_extra_header_cards(&mut writer, hdr, SKIP_MONO)?;
+        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
     }
 
-    bytes += write_provenance(&mut writer)?;
+    bytes += write_provenance(&mut writer, header)?;
 
     write_header_end(&mut writer, bytes)?;
 
@@ -447,14 +557,10 @@ pub fn write_fits_rgb_bitpix(
     }
 
     if let Some(hdr) = header {
-        static SKIP_RGB: &[&str] = &[
-            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4", "CTYPE3",
-            "BZERO", "BSCALE", "BLANK", "END",
-        ];
-        bytes += write_extra_header_cards(&mut writer, hdr, SKIP_RGB)?;
+        bytes += write_extra_header_cards(&mut writer, hdr, |key| is_layout_card(key) || key == "CTYPE3")?;
     }
 
-    bytes += write_provenance(&mut writer)?;
+    bytes += write_provenance(&mut writer, header)?;
 
     write_header_end(&mut writer, bytes)?;
 
@@ -486,12 +592,10 @@ pub(crate) fn write_primary_hdu_stub(
     if let Some(hdr) = extra_header {
         for card in &hdr.cards {
             let key = card.0.trim();
-            if matches!(key, "SIMPLE" | "BITPIX" | "EXTEND" | "END" | "PCOUNT" | "GCOUNT")
-                || key.starts_with("NAXIS")
-            {
+            if is_layout_card(key) {
                 continue;
             }
-            push_header_card(&mut buf, key, &card.1);
+            push_source_card(&mut buf, key, &card.1, hdr);
         }
     }
     writer.write_all(&buf)?;
@@ -557,35 +661,6 @@ fn encode_quantized_row(row: &[f32], quantize_level: f64, tile_index: usize) -> 
             false,
         ),
     }
-}
-
-fn is_reserved_bintable_key(key: &str) -> bool {
-    if matches!(
-        key,
-        "XTENSION" | "BITPIX" | "NAXIS" | "NAXIS1" | "NAXIS2" | "NAXIS3" | "NAXIS4"
-            | "PCOUNT" | "GCOUNT"
-            | "TFIELDS" | "BZERO" | "BSCALE" | "BLANK" | "THEAP" | "END"
-    ) || key.starts_with("TTYPE")
-        || key.starts_with("TFORM")
-    {
-        return true;
-    }
-    if matches!(
-        key,
-        "ZIMAGE" | "ZCMPTYPE" | "ZBITPIX" | "ZNAXIS" | "ZQUANTIZ" | "ZDITHER0"
-            | "ZMASKCMP" | "ZSIMPLE" | "ZTENSION" | "ZEXTEND" | "ZBLOCKED"
-            | "ZPCOUNT" | "ZGCOUNT" | "ZHECKSUM" | "ZDATASUM"
-    ) {
-        return true;
-    }
-    for prefix in ["ZNAXIS", "ZTILE", "ZNAME", "ZVAL"] {
-        if let Some(rest) = key.strip_prefix(prefix) {
-            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -673,16 +748,14 @@ fn write_compressed_bintable(
     if let Some(hdr) = header {
         for card in &hdr.cards {
             let key = card.0.trim();
-            if is_reserved_bintable_key(key) || (colour_axis && key == "CTYPE3") {
+            if is_layout_card(key) || (colour_axis && key == "CTYPE3") {
                 continue;
             }
-            push_header_card(&mut buf, key, &card.1);
+            push_source_card(&mut buf, key, &card.1, hdr);
         }
     }
 
-    let version = env!("CARGO_PKG_VERSION");
-    push_header_card(&mut buf, "PROGRAM", &format!("AstroBurst {}", version));
-    push_header_card(&mut buf, "HISTORY", &format!("Processed with AstroBurst {}", version));
+    push_provenance(&mut buf, header);
 
     writer.write_all(&buf)?;
     write_header_end(writer, buf.len())?;
@@ -741,6 +814,9 @@ pub fn write_fits_mono_rice(
     let (nrows, ncols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
     let quantized = bitpix == -32;
+    if quantized {
+        validate_quantize_level(quantize_level)?;
+    }
 
     let (bzero, bscale) =
         if quantized { (0.0, 1.0) } else { compute_bzero_bscale_array(data) };
@@ -789,6 +865,9 @@ pub fn write_fits_rgb_rice(
         );
     }
     let quantized = bitpix == -32;
+    if quantized {
+        validate_quantize_level(quantize_level)?;
+    }
 
     let (bzero, bscale) = if quantized {
         (0.0, 1.0)
@@ -838,6 +917,7 @@ pub(crate) fn write_planes_quantized(
     header: Option<&HduHeader>,
     quantize_level: f64,
 ) -> Result<()> {
+    validate_quantize_level(quantize_level)?;
     let (nrows, ncols) = planes.first().context("at least one plane required")?.dim();
     for p in &planes[1..] {
         if p.dim() != (nrows, ncols) {
@@ -977,13 +1057,7 @@ pub struct ImageHdu<'a> {
 const U32_BZERO: i64 = 2147483648;
 
 fn is_mef_structural_key(key: &str) -> bool {
-    matches!(
-        key,
-        "SIMPLE" | "XTENSION" | "BITPIX" | "NAXIS" | "EXTEND" | "PCOUNT" | "GCOUNT" | "EXTNAME" | "EXTVER"
-            | "BZERO" | "BSCALE" | "BLANK" | "CHECKSUM" | "DATASUM" | "ZBITPIX" | "ZIMAGE" | "ZCMPTYPE"
-            | "END"
-    ) || key.starts_with("NAXIS")
-        || key.starts_with("ZNAXIS")
+    is_layout_card(key) || matches!(key, "EXTNAME" | "EXTVER")
 }
 
 fn without_structural_cards(header: &HduHeader) -> HduHeader {
@@ -995,6 +1069,7 @@ fn without_structural_cards(header: &HduHeader) -> HduHeader {
             out.index.insert(key.to_string(), value.clone());
         }
     }
+    out.inherit_string_keys(header);
     out
 }
 
@@ -1026,7 +1101,7 @@ fn write_image_extension(writer: &mut BufWriter<File>, hdu: &ImageHdu) -> Result
         for card in &hdr.cards {
             let key = card.0.trim();
             if !is_mef_structural_key(key) {
-                push_header_card(&mut buf, key, &card.1);
+                push_source_card(&mut buf, key, &card.1, hdr);
             }
         }
     }
@@ -1081,21 +1156,20 @@ pub fn write_mef_images(
 mod tests {
     use super::*;
     use crate::infra::fits::reader::parse_header_at;
-    use std::collections::HashMap;
 
     fn mk_header(pairs: &[(&str, &str)]) -> HduHeader {
-        let mut index = HashMap::new();
-        let mut cards = Vec::new();
+        let mut header = HduHeader::empty();
         for (k, v) in pairs {
-            index.insert(k.to_string(), v.to_string());
-            cards.push((k.to_string(), v.to_string()));
+            header.index.insert(k.to_string(), v.to_string());
+            header.cards.push((k.to_string(), v.to_string()));
         }
-        HduHeader { cards, index }
+        header
     }
 
     #[test]
     fn header_string_and_numeric_roundtrip() {
-        let path = std::env::temp_dir().join("ab_writer_roundtrip.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_writer_roundtrip.fits");
         let p = path.to_str().unwrap();
         let data = Array2::<f32>::zeros((4, 4));
         let hdr = mk_header(&[
@@ -1115,19 +1189,18 @@ mod tests {
         assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
         assert_eq!(parsed.header.get_f64("CRVAL1"), Some(202.4695));
         assert_eq!(parsed.header.get_i64("CRPIX1"), Some(512));
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn provenance_stamp_is_written() {
-        let path = std::env::temp_dir().join("ab_writer_provenance.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_writer_provenance.fits");
         let p = path.to_str().unwrap();
         let data = Array2::<f32>::zeros((4, 4));
         write_fits_mono(p, &data, None).unwrap();
         let bytes = std::fs::read(p).unwrap();
         let parsed = parse_header_at(&bytes, 0).unwrap();
         assert!(parsed.header.get("PROGRAM").unwrap().starts_with("AstroBurst"));
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
@@ -1203,7 +1276,8 @@ mod tests {
 
     #[test]
     fn rice_mono_int16_roundtrip() {
-        let path = std::env::temp_dir().join("ab_rice_mono_i16.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_mono_i16.fits");
         let p = path.to_str().unwrap();
         let data = smooth_test_image(16, 40);
 
@@ -1224,12 +1298,12 @@ mod tests {
                 "orig={orig} dec={dec} bscale={bscale}"
             );
         }
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn rice_mono_quantized_float_roundtrip() {
-        let path = std::env::temp_dir().join("ab_rice_mono_f32.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_mono_f32.fits");
         let p = path.to_str().unwrap();
         let data = smooth_test_image(16, 40);
 
@@ -1244,13 +1318,14 @@ mod tests {
         for (orig, dec) in data.iter().zip(decoded.iter()) {
             assert!((orig - dec).abs() < 2.0, "orig={orig} dec={dec}");
         }
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn rice_mono_nan_roundtrip_both_bitpix() {
         for bitpix in [16i32, -32] {
-            let path = std::env::temp_dir()
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
                 .join(format!("ab_rice_mono_nan_{}.fits", bitpix.abs()));
             let p = path.to_str().unwrap();
             let mut data = smooth_test_image(12, 32);
@@ -1267,7 +1342,6 @@ mod tests {
             assert!(decoded[[10, 20]].is_nan(), "bitpix={bitpix}");
             let finite_count = decoded.iter().filter(|v| v.is_finite()).count();
             assert_eq!(finite_count, 12 * 32 - 2, "bitpix={bitpix}");
-            let _ = std::fs::remove_file(p);
         }
     }
 
@@ -1277,7 +1351,8 @@ mod tests {
         // range while the MAD-based noise estimate (robust to a single
         // spike) stays small -- forces `quantize_tile` to return
         // `Overflow`, exercising the GZIP_COMPRESSED_DATA fallback column.
-        let path = std::env::temp_dir().join("ab_rice_mono_gzip_fallback.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_mono_gzip_fallback.fits");
         let p = path.to_str().unwrap();
         let mut data = smooth_test_image(10, 40);
         data[[4, 20]] = 1.0e15;
@@ -1291,12 +1366,12 @@ mod tests {
         for (orig, dec) in data.row(4).iter().zip(decoded.row(4).iter()) {
             assert_eq!(orig, dec, "fallback row should round-trip exactly");
         }
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn rice_rgb_cube_roundtrip() {
-        let path = std::env::temp_dir().join("ab_rice_rgb.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_rgb.fits");
         let p = path.to_str().unwrap();
         let r = smooth_test_image(10, 24);
         let g = r.mapv(|v| v * 0.5);
@@ -1318,14 +1393,14 @@ mod tests {
                 assert!((o - d).abs() < 2.0, "orig={o} dec={d}");
             }
         }
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn rice_rgb_cube_reloads_through_the_colour_gate() {
         use crate::infra::fits::reader::try_extract_rgb_mmap;
 
-        let path = std::env::temp_dir().join("ab_rice_rgb_colour_gate.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_rgb_colour_gate.fits");
         let p = path.to_str().unwrap();
         let r = smooth_test_image(9, 21);
         let g = r.mapv(|v| v * 0.5);
@@ -1351,14 +1426,14 @@ mod tests {
             }
         }
         drop(file);
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn uncompressed_rgb_cube_marks_its_colour_axis_and_reloads() {
         use crate::infra::fits::reader::try_extract_rgb_mmap;
 
-        let path = std::env::temp_dir().join("ab_rgb_colour_axis.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rgb_colour_axis.fits");
         let p = path.to_str().unwrap();
         let r = smooth_test_image(6, 8);
         let g = r.mapv(|v| v * 2.0);
@@ -1377,12 +1452,12 @@ mod tests {
             .expect("an exported RGB cube must reload as a colour image");
         assert_eq!(rgb.g, g);
         drop(file);
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn mono_output_never_declares_an_axis_beyond_its_own_naxis() {
-        let path = std::env::temp_dir().join("ab_mono_axis_cards.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_mono_axis_cards.fits");
         let p = path.to_str().unwrap();
         let data = Array2::<f32>::zeros((4, 5));
         let cube_header = mk_header(&[
@@ -1399,7 +1474,6 @@ mod tests {
         assert_eq!(parsed.header.get("NAXIS3"), None);
         assert_eq!(parsed.header.get("NAXIS4"), None);
         assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
-        let _ = std::fs::remove_file(p);
     }
 
     fn find_card(bytes: &[u8], key: &str) -> String {
@@ -1419,7 +1493,8 @@ mod tests {
 
     #[test]
     fn the_colour_marker_is_written_as_a_quoted_fits_string() {
-        let path = std::env::temp_dir().join("ab_rgb_ctype3_encoding.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rgb_ctype3_encoding.fits");
         let p = path.to_str().unwrap();
         let r = smooth_test_image(4, 6);
 
@@ -1433,9 +1508,8 @@ mod tests {
             "a FITS character value opens with a quote at column 11: {card:?}"
         );
         assert_eq!(card.trim_end(), "CTYPE3  = 'RGB     '");
-        let _ = std::fs::remove_file(p);
 
-        let rice_path = std::env::temp_dir().join("ab_rgb_ctype3_encoding_rice.fits");
+        let rice_path = dir.path().join("ab_rgb_ctype3_encoding_rice.fits");
         let rp = rice_path.to_str().unwrap();
         write_fits_rgb_rice(rp, &r, &r, &r, None, -32, 16.0).unwrap();
         let compressed = std::fs::read(rp).unwrap();
@@ -1446,12 +1520,12 @@ mod tests {
             card.trim_end(),
             "both writers must encode the colour marker identically"
         );
-        let _ = std::fs::remove_file(rp);
     }
 
     #[test]
     fn rgb_output_never_declares_a_fourth_axis() {
-        let path = std::env::temp_dir().join("ab_rgb_axis_cards.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rgb_axis_cards.fits");
         let p = path.to_str().unwrap();
         let r = smooth_test_image(4, 5);
         let ramp_header = mk_header(&[("NAXIS3", "5"), ("NAXIS4", "2"), ("OBJECT", "M16")]);
@@ -1464,12 +1538,12 @@ mod tests {
         assert_eq!(parsed.header.get_i64("NAXIS3"), Some(3));
         assert_eq!(parsed.header.get("NAXIS4"), None);
         assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn compressed_mono_output_never_declares_an_axis_beyond_its_own_naxis() {
-        let path = std::env::temp_dir().join("ab_rice_mono_axis_cards.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_mono_axis_cards.fits");
         let p = path.to_str().unwrap();
         let data = smooth_test_image(6, 10);
         let ramp_header = mk_header(&[("NAXIS3", "5"), ("NAXIS4", "2"), ("OBJECT", "M16")]);
@@ -1480,12 +1554,12 @@ mod tests {
         assert_eq!(header.get("NAXIS3"), None);
         assert_eq!(header.get("NAXIS4"), None);
         assert_eq!(header.get("OBJECT"), Some("M16"));
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn a_non_colour_plane_stack_keeps_its_own_third_axis_type() {
-        let path = std::env::temp_dir().join("ab_planes_spectral_axis.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_planes_spectral_axis.fits");
         let p = path.to_str().unwrap();
         let planes = vec![
             smooth_test_image(5, 9),
@@ -1520,13 +1594,13 @@ mod tests {
             "a spectral cube must not reload as an RGB composite"
         );
         drop(file);
-        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn rice_rejects_unsupported_bitpix() {
         let data = Array2::<f32>::zeros((10, 10));
-        let path = std::env::temp_dir().join("ab_rice_bad_bitpix.fits");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_rice_bad_bitpix.fits");
         let p = path.to_str().unwrap();
         assert!(write_fits_mono_rice(p, &data, None, -64, 16.0).is_err());
     }
@@ -1659,5 +1733,363 @@ mod tests {
         let path = dir.path().join("empty.fits");
         assert!(write_mef_images(path.to_str().unwrap(), None, &[]).is_err());
         assert!(!path.exists());
+    }
+
+    fn hdu_keys(bytes: &[u8]) -> Vec<String> {
+        let mut keys = Vec::new();
+        for card in bytes.chunks_exact(80) {
+            let key = String::from_utf8_lossy(&card[0..8]).trim().to_string();
+            if key == "END" {
+                break;
+            }
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn card_of(key: &str, value: &str) -> String {
+        let mut buf = Vec::new();
+        push_header_card(&mut buf, key, value);
+        assert_eq!(buf.len(), 80, "{key} = {value:?}");
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn reparsed(cards: &[(&str, &str)]) -> HduHeader {
+        let mut block = Vec::new();
+        for (k, v) in cards {
+            push_header_card(&mut block, k, v);
+        }
+        block.extend_from_slice(format!("{:<80}", "END").as_bytes());
+        block.resize(FITS_BLOCK_SIZE, b' ');
+        parse_header_at(&block, 0).unwrap().header
+    }
+
+    #[test]
+    fn filter_header_drops_filtered_keys_from_the_lookup_index() {
+        let h = mk_header(&[("CRPIX1", "12.5"), ("CTYPE1", "RA---TAN"), ("OBJECT", "M16"), ("BUNIT", "MJy/sr")]);
+
+        let metadata_only = filter_header(&h, false, true).unwrap();
+        assert_eq!(metadata_only.get("CRPIX1"), None);
+        assert_eq!(metadata_only.get_f64("CRPIX1"), None);
+        assert_eq!(metadata_only.get("CTYPE1"), None);
+        assert_eq!(metadata_only.get("OBJECT"), Some("M16"));
+        assert_eq!(metadata_only.index.len(), metadata_only.cards.len());
+
+        let wcs_only = filter_header(&h, true, false).unwrap();
+        assert_eq!(wcs_only.get("OBJECT"), None);
+        assert_eq!(wcs_only.get("BUNIT"), None);
+        assert_eq!(wcs_only.get_f64("CRPIX1"), Some(12.5));
+    }
+
+    #[test]
+    fn a_quote_inside_a_string_value_is_doubled_and_reads_back_whole() {
+        let card = card_of("OBJECT", "Hubble's Variable Nebula");
+        assert!(card.starts_with("OBJECT  = 'Hubble''s Variable Nebula'"), "{card:?}");
+
+        let long_quotes = "'".repeat(40);
+        let long_card = card_of("OBSERVER", &long_quotes);
+        assert_eq!(long_card.as_bytes()[10], b'\'');
+        assert_eq!(long_card.as_bytes()[79], b'\'');
+        assert_eq!(long_card[11..79].matches("''").count(), 34);
+
+        let fits = format!("{}'", "x".repeat(66));
+        let fits_card = card_of("TARGNAME", &fits);
+        assert!(fits_card.ends_with("x'''"), "{fits_card:?}");
+        let overflows = format!("{}'", "x".repeat(67));
+        let overflow_card = card_of("TARGNAM2", &overflows);
+        assert!(overflow_card.ends_with("x' "), "a doubled quote is never split: {overflow_card:?}");
+
+        let back = reparsed(&[
+            ("OBJECT", "Hubble's Variable Nebula"),
+            ("OBSERVER", "O'Brien"),
+            ("OBSERVE2", &long_quotes),
+            ("TARGNAME", &fits),
+            ("TARGNAM2", &overflows),
+        ]);
+        assert_eq!(back.get("OBJECT"), Some("Hubble's Variable Nebula"));
+        assert_eq!(back.get("OBSERVER"), Some("O'Brien"));
+        assert_eq!(back.get("OBSERVE2"), Some("'".repeat(34).as_str()));
+        assert_eq!(back.get("TARGNAME"), Some(fits.as_str()));
+        assert_eq!(back.get("TARGNAM2"), Some("x".repeat(67).as_str()));
+    }
+
+    #[test]
+    fn numeric_values_longer_than_twenty_characters_are_written_whole() {
+        let values = [
+            "-1.234567890123457E-05",
+            "-2.77777777777778E-04",
+            "-1.23456789012345E-10",
+            "0.000013888888888888889",
+        ];
+        let cards: Vec<(&str, &str)> =
+            ["CD1_1", "CD1_2", "CD2_1", "CD2_2"].into_iter().zip(values).collect();
+        let back = reparsed(&cards);
+        for (key, text) in cards {
+            let card = card_of(key, text);
+            assert_ne!(card.as_bytes()[10], b'\'', "{card:?}");
+            assert!(card.contains(text), "{card:?}");
+            assert_eq!(back.get_f64(key), Some(text.parse::<f64>().unwrap()), "{key}");
+        }
+    }
+
+    #[test]
+    fn strings_that_only_look_numeric_stay_strings_and_real_numbers_stay_numbers() {
+        for text in ["01234", "001", "02", "01.001", "-01", "inf", "NaN", "Infinity", "-inf", "1-2", "."] {
+            let card = card_of("PROGRAM", text);
+            assert_eq!(card.as_bytes()[10], b'\'', "{text:?} must be written as a string: {card:?}");
+            assert_eq!(reparsed(&[("PROGRAM", text)]).get("PROGRAM"), Some(text));
+        }
+        for text in ["1.234D-05", "0.5", "-3", "+7", "0", "5.", ".25", "1E5", "6.02e23", "T", "F"] {
+            let card = card_of("EXPTIME", text);
+            assert_ne!(card.as_bytes()[10], b'\'', "{text:?} must stay numeric: {card:?}");
+            assert_eq!(&card[30 - text.len()..30], text, "{card:?}");
+        }
+    }
+
+    #[test]
+    fn a_known_source_type_overrides_the_numeric_guess() {
+        let cards = [
+            ("SEQ_ID", "1"),
+            ("VERSION", "6.4"),
+            ("FLAGSTR", "T"),
+            ("CCD-TEMP", "-010.00"),
+            ("OBSNUM", "007"),
+            ("EXPTIME", "12.5"),
+            ("BINNED", "F"),
+            ("BADNUM", "inf"),
+            ("BADTEXT", "abc"),
+        ];
+        let untyped = mk_header(&cards);
+        let mut typed = mk_header(&cards);
+        typed.string_keys = Some(["SEQ_ID", "VERSION", "FLAGSTR"].into_iter().map(String::from).collect());
+        let card = |header: &HduHeader, key: &str| {
+            let mut buf = Vec::new();
+            push_source_card(&mut buf, key, header.get(key).unwrap(), header);
+            assert_eq!(buf.len(), 80, "{key}");
+            String::from_utf8(buf).unwrap()
+        };
+
+        for key in ["SEQ_ID", "VERSION", "FLAGSTR"] {
+            assert_eq!(card(&typed, key).as_bytes()[10], b'\'', "{key}");
+            assert_ne!(card(&untyped, key).as_bytes()[10], b'\'', "without source types {key} stays a guess");
+        }
+        for key in ["CCD-TEMP", "OBSNUM", "EXPTIME", "BINNED"] {
+            let value = typed.get(key).unwrap();
+            let written = card(&typed, key);
+            assert_eq!(&written[30 - value.len()..30], value, "{written:?}");
+        }
+        for key in ["BADNUM", "BADTEXT"] {
+            assert_eq!(card(&typed, key).as_bytes()[10], b'\'', "{key} is not a FITS literal");
+        }
+        assert_eq!(card(&untyped, "OBSNUM").as_bytes()[10], b'\'');
+    }
+
+    fn assert_source_types_kept(header_bytes: &[u8], writer: &str) {
+        for key in ["PROGRAM", "OBSERVTN", "EXPOSURE", "VERSION", "FLAGSTR", "BUNIT"] {
+            let card = find_card(header_bytes, key);
+            assert_eq!(card.as_bytes()[10], b'\'', "{writer}: {key} was a string in the source: {card:?}");
+        }
+        for (key, text) in [("CCD-TEMP", "-010.00"), ("OBSNUM", "007"), ("EXPTIME", "12.5")] {
+            let card = find_card(header_bytes, key);
+            assert_eq!(&card[30 - text.len()..30], text, "{writer}: {key} was a number in the source: {card:?}");
+        }
+    }
+
+    #[test]
+    fn every_writer_keeps_the_string_or_number_type_of_a_loaded_header() {
+        use crate::infra::fits::reader::extract_image_mmap;
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData as FixtureData, TestHdu};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("jwst_like.fits");
+        let primary: Vec<(&str, String)> = [
+            ("PROGRAM", "'01234   '"),
+            ("OBSERVTN", "'001     '"),
+            ("EXPOSURE", "'1       '"),
+            ("VERSION", "'6.4     '"),
+            ("FLAGSTR", "'T       '"),
+            ("CCD-TEMP", "-010.00"),
+            ("OBSNUM", "007"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+        let sci = TestHdu {
+            extname: Some("SCI"),
+            extver: Some(1),
+            cols: 6,
+            rows: 4,
+            data: FixtureData::F32(vec![1.0; 24]),
+            extra_cards: vec![("BUNIT", "'MJy/sr  '".into()), ("EXPTIME", "12.5".into())],
+        };
+        write_test_mef(&source, &primary, &[sci]);
+        let loaded = extract_image_mmap(&File::open(&source).unwrap()).unwrap();
+        let header = &loaded.header;
+        assert_eq!(header.get("PROGRAM"), Some("01234"));
+        assert_eq!(header.get("OBSNUM"), Some("007"));
+        let data = smooth_test_image(4, 6);
+
+        let mono = dir.path().join("mono.fits");
+        write_fits_mono(mono.to_str().unwrap(), &data, Some(header)).unwrap();
+        assert_source_types_kept(&std::fs::read(&mono).unwrap(), "mono");
+
+        let rgb = dir.path().join("rgb.fits");
+        write_fits_rgb(rgb.to_str().unwrap(), &data, &data, &data, Some(header)).unwrap();
+        assert_source_types_kept(&std::fs::read(&rgb).unwrap(), "rgb");
+
+        let metadata_only = filter_header(header, false, true).unwrap();
+        let filtered = dir.path().join("filtered.fits");
+        write_fits_mono_bitpix(filtered.to_str().unwrap(), &data, Some(&metadata_only), 16).unwrap();
+        assert_source_types_kept(&std::fs::read(&filtered).unwrap(), "metadata-only");
+
+        let mono_rice = dir.path().join("mono_rice.fits");
+        write_fits_mono_rice(mono_rice.to_str().unwrap(), &data, Some(header), -32, 16.0).unwrap();
+        let bytes = std::fs::read(&mono_rice).unwrap();
+        let stub = parse_header_at(&bytes, 0).unwrap();
+        assert_source_types_kept(&bytes[stub.next_hdu_offset..], "mono rice");
+
+        let rgb_rice = dir.path().join("rgb_rice.fits");
+        write_fits_rgb_rice(rgb_rice.to_str().unwrap(), &data, &data, &data, Some(header), 16, 16.0).unwrap();
+        let bytes = std::fs::read(&rgb_rice).unwrap();
+        let stub = parse_header_at(&bytes, 0).unwrap();
+        assert_source_types_kept(&bytes[stub.next_hdu_offset..], "rgb rice");
+
+        let mef = dir.path().join("mef.fits");
+        let hdus = [ImageHdu { data: HduData::F32(&data), header: Some(header), extname: "SCI", extver: 1 }];
+        write_mef_images(mef.to_str().unwrap(), Some(header), &hdus).unwrap();
+        let bytes = std::fs::read(&mef).unwrap();
+        assert_source_types_kept(&bytes, "mef primary");
+        let primary_hdu = parse_header_at(&bytes, 0).unwrap();
+        assert_source_types_kept(&bytes[primary_hdu.next_hdu_offset..], "mef extension");
+    }
+
+    #[test]
+    fn a_source_program_card_is_not_duplicated_by_the_provenance_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("program.fits");
+        let p = path.to_str().unwrap();
+        let data = Array2::<f32>::zeros((4, 4));
+        write_fits_mono(p, &data, Some(&mk_header(&[("PROGRAM", "01234")]))).unwrap();
+        let bytes = std::fs::read(p).unwrap();
+        let keys = hdu_keys(&bytes);
+        assert_eq!(keys.iter().filter(|k| *k == "PROGRAM").count(), 1, "{keys:?}");
+        assert_eq!(find_card(&bytes, "PROGRAM").trim_end(), "PROGRAM = '01234   '");
+        assert!(keys.iter().any(|k| k == "HISTORY"));
+    }
+
+    #[test]
+    fn bitpix16_exports_keep_a_constant_image_value() {
+        for c in [0.0f32, -5.0, 3.7, 70000.0, 1.0e-3, -2.5e6] {
+            let dir = tempfile::tempdir().unwrap();
+            let data = Array2::from_elem((5, 6), c);
+
+            let plain = dir.path().join("plain16.fits");
+            write_fits_mono_bitpix(plain.to_str().unwrap(), &data, None, 16).unwrap();
+            let file = File::open(&plain).unwrap();
+            let back = extract_image_mmap_by_index(&file, 0).unwrap().image;
+            assert!(back.iter().all(|&v| v == c), "BITPIX 16 constant {c} read back as {:?}", back[[0, 0]]);
+            drop(file);
+
+            let rice = dir.path().join("rice16.fits");
+            write_fits_mono_rice(rice.to_str().unwrap(), &data, None, 16, 16.0).unwrap();
+            let (_, decoded) = read_back_mono(rice.to_str().unwrap());
+            assert!(decoded.iter().all(|&v| v == c), "Rice int16 constant {c} read back as {:?}", decoded[[0, 0]]);
+        }
+    }
+
+    #[test]
+    fn outputs_drop_the_stale_checksums_and_storage_cards_of_their_source() {
+        let source = mk_header(&[
+            ("SIMPLE", "T"),
+            ("EXTEND", "T"),
+            ("XTENSION", "BINTABLE"),
+            ("PCOUNT", "1234"),
+            ("GCOUNT", "1"),
+            ("CHECKSUM", "9aHCA7GB9aGBA7GB"),
+            ("DATASUM", "3141592653"),
+            ("TFIELDS", "3"),
+            ("TTYPE1", "COMPRESSED_DATA"),
+            ("TFORM1", "1PB(52)"),
+            ("TUNIT1", "adu"),
+            ("THEAP", "2880"),
+            ("ZIMAGE", "T"),
+            ("ZCMPTYPE", "GZIP_2"),
+            ("ZBITPIX", "16"),
+            ("ZNAXIS1", "999"),
+            ("ZTILE1", "999"),
+            ("ZQUANTIZ", "NO_DITHER"),
+            ("ZSCALE", "0.5"),
+            ("ZZERO", "100"),
+            ("ZBLANK", "-32768"),
+            ("ZHECKSUM", "x"),
+            ("ZDATASUM", "0"),
+            ("OBJECT", "M16"),
+        ]);
+        let stale = [
+            "SIMPLE", "EXTEND", "XTENSION", "PCOUNT", "GCOUNT", "CHECKSUM", "DATASUM", "TFIELDS", "TTYPE1",
+            "TFORM1", "TUNIT1", "THEAP", "ZIMAGE", "ZCMPTYPE", "ZBITPIX", "ZNAXIS1", "ZTILE1", "ZQUANTIZ",
+            "ZSCALE", "ZZERO", "ZBLANK", "ZHECKSUM", "ZDATASUM",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let data = smooth_test_image(6, 12);
+
+        let mono = dir.path().join("mono.fits");
+        write_fits_mono(mono.to_str().unwrap(), &data, Some(&source)).unwrap();
+        let keys = hdu_keys(&std::fs::read(&mono).unwrap());
+        assert_eq!(keys.iter().filter(|k| *k == "SIMPLE").count(), 1);
+        for key in stale.iter().filter(|k| **k != "SIMPLE") {
+            assert!(!keys.iter().any(|k| k == key), "plain output kept {key}: {keys:?}");
+        }
+        assert!(keys.iter().any(|k| k == "OBJECT"));
+
+        let rgb = dir.path().join("rgb.fits");
+        write_fits_rgb(rgb.to_str().unwrap(), &data, &data, &data, Some(&source)).unwrap();
+        let keys = hdu_keys(&std::fs::read(&rgb).unwrap());
+        for key in stale.iter().filter(|k| **k != "SIMPLE") {
+            assert!(!keys.iter().any(|k| k == key), "RGB output kept {key}: {keys:?}");
+        }
+
+        let rice = dir.path().join("rice.fits");
+        write_fits_mono_rice(rice.to_str().unwrap(), &data, Some(&source), -32, 16.0).unwrap();
+        let bytes = std::fs::read(&rice).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let table_keys = hdu_keys(&bytes[primary.next_hdu_offset..]);
+        for key in ["SIMPLE", "EXTEND", "CHECKSUM", "DATASUM", "TUNIT1", "ZSCALE", "ZZERO", "ZBLANK", "ZHECKSUM"] {
+            assert!(!table_keys.iter().any(|k| k == key), "compressed output kept {key}: {table_keys:?}");
+        }
+        for key in ["ZCMPTYPE", "ZBITPIX", "TFIELDS", "ZQUANTIZ"] {
+            assert_eq!(table_keys.iter().filter(|k| *k == key).count(), 1, "{key}: {table_keys:?}");
+        }
+        let (header, decoded) = read_back_mono(rice.to_str().unwrap());
+        assert_eq!(header.get("ZCMPTYPE"), Some("RICE_1"));
+        assert_eq!(header.get("OBJECT"), Some("M16"));
+        assert!(decoded.iter().zip(data.iter()).all(|(d, o)| (d - o).abs() < 2.0));
+
+        let stub = dir.path().join("stub.fits");
+        {
+            let mut writer = BufWriter::new(File::create(&stub).unwrap());
+            write_primary_hdu_stub(&mut writer, Some(&mk_header(&[("CHECKSUM", "x"), ("DATASUM", "7"), ("BZERO", "32768"), ("BLANK", "-1"), ("TELESCOP", "JWST")]))).unwrap();
+            writer.flush().unwrap();
+        }
+        let keys = hdu_keys(&std::fs::read(&stub).unwrap());
+        assert_eq!(keys, ["SIMPLE", "BITPIX", "NAXIS", "EXTEND", "TELESCOP"]);
+    }
+
+    #[test]
+    fn a_quantize_level_that_is_not_a_positive_finite_number_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = smooth_test_image(6, 40);
+        for q in [0.0, -4.0, f64::NAN, f64::INFINITY] {
+            let mono = dir.path().join("q_mono.fits");
+            let err = write_fits_mono_rice(mono.to_str().unwrap(), &data, None, -32, q).unwrap_err();
+            assert!(err.to_string().contains("quantize_level"), "{err}");
+            assert!(!mono.exists());
+
+            let rgb = dir.path().join("q_rgb.fits");
+            assert!(write_fits_rgb_rice(rgb.to_str().unwrap(), &data, &data, &data, None, -32, q).is_err());
+            assert!(!rgb.exists());
+        }
+        let int16 = dir.path().join("q_int16.fits");
+        write_fits_mono_rice(int16.to_str().unwrap(), &data, None, 16, 0.0).unwrap();
     }
 }

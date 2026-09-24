@@ -1,7 +1,10 @@
 import { useState, useCallback } from "react";
 import { maskedStretch } from "../../services/processing";
+import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
+import { useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
 
 interface MaskedStretchResult {
   previewUrl?: string;
@@ -24,12 +27,22 @@ interface MaskedStretchParams {
   luminanceProtect: boolean;
 }
 
+interface MaskedStretchRun {
+  res: MaskedStretchResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+  requestedIterations: number;
+}
+
 interface MaskedStretchPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
   onProcessingDone?: (result: MaskedStretchResult) => void;
   chainedFrom?: string;
+  inputPreviewUrl?: string | null;
+  inputLabel?: string;
+  fileKey?: string | null;
 }
 
 const ICON = (
@@ -47,7 +60,7 @@ const BG_PRESETS = [
   { label: "Bright", value: 0.35 },
 ];
 
-export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onPreviewUpdate, onProcessingDone, chainedFrom }: MaskedStretchPanelProps) {
+export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: MaskedStretchPanelProps) {
   const [params, setParams] = useState<MaskedStretchParams>({
     iterations: 10,
     targetBackground: 0.25,
@@ -56,21 +69,22 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
     protectionAmount: 0.85,
     luminanceProtect: true,
   });
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<MaskedStretchResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<MaskedStretchRun>("maskedStretch", fileKey ?? null);
+  const { chain } = useRenderContext();
+  const result = runResult && chainHoldsOutput(chain, "maskedStretch", runResult.res.fits_path) ? runResult : null;
 
   const update = useCallback(<K extends keyof MaskedStretchParams>(key: K, value: MaskedStretchParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await maskedStretch(selectedFile.path, outputDir, {
+    const path = selectedFile.path;
+    const baseUrl = inputPreviewUrl ?? null;
+    const baseLabel = inputLabel ?? "Original";
+    const requestedIterations = params.iterations;
+    void run(async (ctx) => {
+      const res = await maskedStretch(path, outputDir, {
         iterations: params.iterations,
         targetBackground: params.targetBackground,
         maskGrowth: params.maskGrowth,
@@ -78,18 +92,11 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
         protectionAmount: params.protectionAmount,
         luminanceProtect: params.luminanceProtect,
       });
-      setResult(res);
-      onPreviewUpdate?.(res?.previewUrl);
+      if (!ctx.inputUnchanged("maskedStretch")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsRunning(false);
-    }
-  }, [selectedFile, outputDir, params, onPreviewUpdate, onProcessingDone]);
-
-  const originalUrl = selectedFile?.result?.previewUrl;
-  const resultUrl = result?.previewUrl;
+      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
+    });
+  }, [selectedFile, outputDir, params, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -132,28 +139,30 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
         <Toggle label="Luminance Protection" checked={params.luminanceProtect} disabled={isRunning} accent="rose" onChange={(v) => update("luminanceProtect", v)} />
       </div>
 
-      <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!selectedFile} accent="rose" onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!selectedFile || blocked} accent="rose" onClick={handleRun} />
+      </div>
       <ErrorAlert message={error} />
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
           <ResultGrid items={[
-            { label: "Iterations", value: result.iterations_run },
-            { label: "Background", value: result.final_background != null ? `${(result.final_background * 100).toFixed(1)}%` : null },
-            { label: "Stars Masked", value: result.stars_masked },
-            { label: "Mask Coverage", value: result.mask_coverage != null ? `${(result.mask_coverage * 100).toFixed(1)}%` : null },
-            { label: "Converged", value: result.converged ? "Yes" : "No" },
-            { label: "Time", value: result.elapsed_ms ? `${(result.elapsed_ms / 1000).toFixed(1)}s` : null },
+            { label: "Iterations", value: result.res.iterations_run },
+            { label: "Background", value: result.res.final_background != null ? `${(result.res.final_background * 100).toFixed(1)}%` : null },
+            { label: "Stars Masked", value: result.res.stars_masked },
+            { label: "Mask Coverage", value: result.res.mask_coverage != null ? `${(result.res.mask_coverage * 100).toFixed(1)}%` : null },
+            { label: "Converged", value: result.res.converged ? "Yes" : "No" },
+            { label: "Time", value: result.res.elapsed_ms ? `${(result.res.elapsed_ms / 1000).toFixed(1)}s` : null },
           ]} />
 
-          {result.converged && (
+          {result.res.converged && (
             <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-1.5">
-              Converged at iteration {result.iterations_run}/{params.iterations}
+              Converged at iteration {result.res.iterations_run}/{result.requestedIterations}
             </div>
           )}
 
-          {originalUrl && resultUrl && (
-            <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Original" resultLabel="Masked Stretch" accent="rose" />
+          {result.baseUrl && result.resultUrl && (
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Masked Stretch" accent="rose" />
           )}
         </div>
       )}

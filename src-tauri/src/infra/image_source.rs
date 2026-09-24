@@ -55,7 +55,6 @@ pub struct PlaneInfo {
     pub extver: Option<i64>,
     pub is_dq: bool,
     pub is_err: bool,
-    pub bitpix: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,7 +69,6 @@ pub struct LoadedPlane {
     pub info: PlaneInfo,
     pub int_plane: Option<IntPlane>,
     pub companions: Companions,
-    pub extensions: Vec<HduInfo>,
     pub _tmp: Option<tempfile::TempDir>,
 }
 
@@ -118,7 +116,6 @@ fn plane_info_for(kind: PlaneSelector, ext: Option<&HduInfo>) -> PlaneInfo {
         is_dq: is_dq_name(name),
         is_err: is_err_name(name),
         extver: ext.and_then(|e| e.extver),
-        bitpix: ext.map(|e| e.bitpix).unwrap_or(0),
         extname,
     }
 }
@@ -184,7 +181,9 @@ fn fits_plane(file: &File, index: usize, want_int: bool) -> Result<(MmapImageRes
     let result = extract_image_mmap_by_index(file, index)?;
     let info = plane_info_for(PlaneSelector::Hdu(index), result.extensions.get(index));
     let int_plane = if want_int && info.is_dq {
-        extract_int_plane_by_index(file, index).ok()
+        extract_int_plane_by_index(file, index)
+            .map_err(|e| log::warn!("DQ plane HDU {} has no lossless integer form: {:#}", index, e))
+            .ok()
     } else {
         None
     };
@@ -213,7 +212,6 @@ fn fits_loaded(
         info,
         int_plane,
         companions,
-        extensions: result.extensions,
         _tmp: tmp,
     })
 }
@@ -236,7 +234,6 @@ fn asdf_loaded(source: &Path, key: Option<&str>, tmp: Option<tempfile::TempDir>,
         info,
         int_plane,
         companions,
-        extensions: result.extensions,
         _tmp: tmp,
     })
 }
@@ -380,8 +377,8 @@ pub fn plane_ref(path: &str, info: &HduInfo, is_asdf: bool) -> ImageRef {
 mod tests {
     use super::*;
     use crate::infra::fits::reader::test_fixtures::{
-        cube_hdu, empty_primary_cards, ramp_f32, sci_err_dq_mef, write_raw_hdus, write_test_mef,
-        HduData, TestHdu,
+        cube_hdu, empty_primary_cards, plane_hdu, ramp_f32, sci_err_dq_mef, write_raw_hdus,
+        write_test_mef, HduData, TestHdu,
     };
 
     fn mef_path(dir: &tempfile::TempDir) -> String {
@@ -488,6 +485,62 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_byte_dq_companion_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("int8_companion.fits");
+        let dq_cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", "4".into()),
+            ("NAXIS2", "3".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("BZERO", "-128".into()),
+            ("BSCALE", "1".into()),
+            ("EXTNAME", "'DQ      '".into()),
+        ];
+        let dq_bytes: Vec<u8> = (0..12u8).map(|v| v + 128).collect();
+        write_raw_hdus(
+            &path,
+            &[(empty_primary_cards(), Vec::new()), sci_2d_hdu(4, 3), (dq_cards, dq_bytes)],
+        );
+        let p = path.to_str().unwrap().to_string();
+        let cache = ImageCache::new(8, usize::MAX);
+        let active = cache.get_or_load_plane(&p, || plane_load(&ImageRef::auto(&p))).unwrap();
+        let comps = load_companions_into(&cache, &active, plane_load);
+        let (dq, _) = comps.dq.expect("a signed-byte DQ plane is a usable companion");
+        assert_eq!(dq.int_plane().unwrap().value_at(0, 1), 1);
+        assert_eq!(dq.int_plane().unwrap().value_at(2, 3), 11);
+    }
+
+    #[test]
+    fn a_mono_load_of_an_rgb_file_does_not_fall_through_to_another_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rgb_and_mask.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                cube_hdu("SCI", 4, 3, 3, &[("CTYPE3", "'RGB     '".into())]),
+                plane_hdu("MASK", 4, 3),
+            ],
+        );
+        let p = path.to_str().unwrap().to_string();
+
+        let err = load_plane(&ImageRef::auto(&p)).err().expect("Auto must not read the mask");
+        assert!(format!("{err:#}").contains("RGB colour cube"), "{err:#}");
+        let header = load_plane_header(&ImageRef::auto(&p)).expect("the header of a colour file is its cube's");
+        assert_eq!(header.get("EXTNAME"), Some("SCI"));
+        assert_eq!(header.get_i64("NAXIS3"), Some(3));
+        assert!(resolve_plane_info(&ImageRef::auto(&p)).is_err());
+
+        let mask = load_plane(&ImageRef::hdu(&p, 2)).unwrap();
+        assert_eq!(mask.info.extname.as_deref(), Some("MASK"));
+        assert_eq!(mask.arr.dim(), (3, 4));
+    }
+
+    #[test]
     fn load_plane_decodes_int_plane_only_for_dq() {
         let dir = tempfile::tempdir().unwrap();
         let p = mef_path(&dir);
@@ -497,12 +550,10 @@ mod tests {
         assert_eq!(dq.info.kind, PlaneSelector::Hdu(3));
         assert_eq!(dq.info.extname.as_deref(), Some("DQ"));
         assert_eq!(dq.info.extver, Some(1));
-        assert_eq!(dq.info.bitpix, 32);
         let plane = dq.int_plane.as_ref().unwrap();
         assert_eq!(plane.bits[[0, 0]], 1);
         assert_eq!(plane.bits[[0, 3]], 3);
         assert_eq!(dq.arr[[0, 3]], 3.0);
-        assert_eq!(dq.extensions.len(), 5);
 
         let sci = load_plane(&ImageRef::hdu(&p, 1)).unwrap();
         assert!(sci.int_plane.is_none());
@@ -613,9 +664,7 @@ mod tests {
         let loaded = load_plane(&ImageRef::array(&p, "dq")).unwrap();
         assert!(loaded.info.is_dq);
         assert_eq!(loaded.info.kind, PlaneSelector::Array("dq".into()));
-        assert_eq!(loaded.info.bitpix, 32);
         assert_eq!(loaded.int_plane.as_ref().unwrap().bits[[0, 1]], 1);
-        assert_eq!(loaded.extensions.len(), 3);
 
         let auto = load_plane(&ImageRef::auto(&p)).unwrap();
         assert_eq!(auto.info.kind, PlaneSelector::Array("data".into()));
@@ -657,7 +706,6 @@ mod tests {
         assert_eq!(auto.extver, Some(1));
         let dq = resolve_plane_info(&ImageRef::hdu(&p, 3)).unwrap();
         assert!(dq.is_dq);
-        assert_eq!(dq.bitpix, 32);
         assert!(resolve_plane_info(&ImageRef::hdu(&p, 8)).is_err());
 
         let a = write_asdf(&dir, "c.asdf", ROMAN_TREE);
@@ -666,7 +714,6 @@ mod tests {
         assert_eq!(info.extname.as_deref(), Some("roman.data"));
         let info = resolve_plane_info(&ImageRef::array(&a, "roman.dq")).unwrap();
         assert!(info.is_dq);
-        assert_eq!(info.bitpix, 32);
         assert!(resolve_plane_info(&ImageRef::hdu(&a, 0)).is_err());
     }
 

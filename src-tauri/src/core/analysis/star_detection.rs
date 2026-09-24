@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::analysis::confidence;
+use crate::core::imaging::stats::is_valid_pixel;
 use crate::math::{sigma_clipped_stats, f64_cmp};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +54,7 @@ pub fn estimate_background(image: &Array2<f32>, tile_size: usize) -> (f64, f64) 
             for r in ty..ye {
                 for c in tx..xe {
                     let v = image[[r, c]];
-                    if v.is_finite() && v > 1e-7 {
+                    if is_valid_pixel(v) {
                         vals.push(v);
                     }
                 }
@@ -161,7 +162,7 @@ fn deblend_component(
         return vec![component.to_vec()];
     }
 
-    maxima.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    maxima.sort_by(|a, b| b.2.total_cmp(&a.2));
     let top = maxima[0].2.max(1e-12);
     let mut kept: Vec<(usize, usize, f64)> = Vec::new();
     for m in maxima {
@@ -204,11 +205,25 @@ fn deblend_component(
     subs
 }
 
+fn truncated_second_moment_fraction(peak: f64, cut: f64) -> f64 {
+    if cut <= 0.0 {
+        return 1.0;
+    }
+    let peak_over_cut = peak / cut;
+    if !peak_over_cut.is_finite() || peak_over_cut <= 1.0 {
+        return 0.0;
+    }
+    let u = peak_over_cut.ln();
+    let tail = (-u).exp();
+    (1.0 - tail * (1.0 + u)) / (1.0 - tail)
+}
+
 fn measure_component(
     image: &Array2<f32>,
     component: &[(usize, usize)],
     bg_median: f64,
     bg_sigma: f64,
+    cut_above_bg: f64,
 ) -> Option<DetectedStar> {
     let npix = component.len();
     if npix < 3 {
@@ -248,7 +263,11 @@ fn measure_component(
         sum_yy += dy * dy * v;
         sum_xy += dx * dy * v;
     }
-    let sigma_star = (sum_r2 / (2.0 * sum_flux)).sqrt();
+    let kept_fraction = truncated_second_moment_fraction(peak_val, cut_above_bg);
+    if kept_fraction <= 0.0 {
+        return None;
+    }
+    let sigma_star = (sum_r2 / (2.0 * sum_flux * kept_fraction)).sqrt();
     let fwhm = sigma_star * 2.3548200450309493;
 
     if fwhm < 0.5 || fwhm > 30.0 {
@@ -345,14 +364,14 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
             }
 
             for pixels in deblend_component(image, &component, bg_median) {
-                if let Some(star) = measure_component(image, &pixels, bg_median, bg_sigma) {
+                if let Some(star) = measure_component(image, &pixels, bg_median, bg_sigma, threshold - bg_median) {
                     stars.push(star);
                 }
             }
         }
     }
 
-    stars.sort_by(|a, b| b.flux.partial_cmp(&a.flux).unwrap_or(std::cmp::Ordering::Equal));
+    stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
 
     let dedup_radius = 3.0f64;
     let dedup_r2 = dedup_radius * dedup_radius;
@@ -525,6 +544,56 @@ mod tests {
         assert!((near[0].x - 60.0).abs() < 1.0, "X centroid off: {}", near[0].x);
         assert!((near[0].y - 150.0).abs() < 1.0, "Y centroid off: {}", near[0].y);
         assert!(near[0].eccentricity < 0.3, "eccentricity too high: {}", near[0].eccentricity);
+    }
+
+    fn gaussian_noise(rows: usize, cols: usize, sigma: f64, seed: u64) -> Array2<f32> {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        Array2::from_shape_fn((rows, cols), |_| {
+            let g = (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos();
+            (sigma * g) as f32
+        })
+    }
+
+    fn noise_free_star(size: usize, bg: f32, amp: f64, sigma: f64) -> Array2<f32> {
+        let c = (size / 2) as f64;
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let d2 = (x as f64 - c).powi(2) + (y as f64 - c).powi(2);
+            bg + (amp * (-d2 / (2.0 * sigma * sigma)).exp()) as f32
+        })
+    }
+
+    #[test]
+    fn fwhm_of_a_threshold_truncated_star_does_not_depend_on_its_brightness() {
+        let sigma = 2.5;
+        let true_fwhm = 2.3548200450309493 * sigma;
+        let cut = 50.0;
+        for peak_over_cut in [2.0, 3.0, 10.0, 100.0] {
+            let img = noise_free_star(41, 100.0, cut * peak_over_cut, sigma);
+            let component = component_above(&img, 100.0 + cut as f32);
+            let star = measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured");
+            assert!(
+                (star.fwhm - true_fwhm).abs() / true_fwhm < 0.05,
+                "peak {peak_over_cut}x the cut gave FWHM {} for a true {true_fwhm}",
+                star.fwhm
+            );
+        }
+    }
+
+    #[test]
+    fn sky_subtracted_background_keeps_its_negative_half() {
+        let img = gaussian_noise(256, 256, 10.0, 7);
+        let (median, sigma) = estimate_background(&img, 64);
+        assert!(median.abs() < 1.0, "sky median {median} of a zero-mean sky");
+        assert!((sigma - 10.0).abs() < 1.0, "sky sigma {sigma} for a true sigma of 10");
+
+        let mut padded = img.clone();
+        padded.slice_mut(ndarray::s![.., ..64]).fill(0.0);
+        let (median, sigma) = estimate_background(&padded, 64);
+        assert!(median.abs() < 1.0 && (sigma - 10.0).abs() < 1.0, "zero padding biased the sky: {median} {sigma}");
     }
 
     #[test]

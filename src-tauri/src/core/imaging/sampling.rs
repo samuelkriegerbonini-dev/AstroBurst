@@ -13,41 +13,6 @@ pub fn catmull_rom(t: f64) -> f64 {
 }
 
 #[inline]
-pub fn nearest_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
-    if rows == 0 || cols == 0 || slice.is_empty() {
-        return 0.0;
-    }
-    let iy = clamp_index(y.round() as i64, rows);
-    let ix = clamp_index(x.round() as i64, cols);
-    slice[iy * cols + ix]
-}
-
-#[inline]
-pub fn bilinear_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
-    if rows == 0 || cols == 0 || slice.is_empty() {
-        return 0.0;
-    }
-    let ix0 = x.floor() as i64;
-    let iy0 = y.floor() as i64;
-    let fx = x - ix0 as f64;
-    let fy = y - iy0 as f64;
-
-    let r0 = clamp_index(iy0, rows);
-    let r1 = clamp_index(iy0 + 1, rows);
-    let c0 = clamp_index(ix0, cols);
-    let c1 = clamp_index(ix0 + 1, cols);
-
-    let v00 = slice[r0 * cols + c0] as f64;
-    let v01 = slice[r0 * cols + c1] as f64;
-    let v10 = slice[r1 * cols + c0] as f64;
-    let v11 = slice[r1 * cols + c1] as f64;
-
-    let top = v00 + (v01 - v00) * fx;
-    let bot = v10 + (v11 - v10) * fx;
-    (top + (bot - top) * fy) as f32
-}
-
-#[inline]
 pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
     if rows == 0 || cols == 0 || slice.is_empty() {
         return 0.0;
@@ -167,27 +132,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nearest_center() {
-        let data = vec![1.0, 2.0, 3.0, 4.0];
-        assert!((nearest_sample(&data, 2, 2, 0.0, 0.0) - 1.0).abs() < 1e-6);
-        assert!((nearest_sample(&data, 2, 2, 0.0, 0.6) - 2.0).abs() < 1e-6);
+    fn test_catmull_rom_at_two() {
+        assert!(catmull_rom(2.0).abs() < 1e-10);
     }
 
     #[test]
-    fn test_nearest_empty() {
-        assert!((nearest_sample(&[], 0, 0, 0.0, 0.0)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_bilinear_center() {
-        let data = vec![0.0, 10.0, 0.0, 10.0];
-        let v = bilinear_sample(&data, 2, 2, 0.0, 0.5);
-        assert!((v - 5.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn test_bilinear_empty() {
-        assert!((bilinear_sample(&[], 0, 0, 1.0, 1.0)).abs() < 1e-6);
+    fn test_catmull_rom_partition_of_unity() {
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let sum = catmull_rom(t + 1.0) + catmull_rom(t) + catmull_rom(t - 1.0) + catmull_rom(t - 2.0);
+            assert!((sum - 1.0).abs() < 1e-10, "partition of unity failed at t={}: sum={}", t, sum);
+        }
     }
 
     #[test]

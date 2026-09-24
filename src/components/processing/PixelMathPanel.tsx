@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
-import { useDoneFilesContext } from "../../context/PreviewContext";
-import { useRegionKey } from "../../hooks/useRegionKey";
+import { useDisplayedImage, useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
+import { chainHoldsOutput } from "../../utils/processingChain";
+import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { runPixelMath, validatePixelMath } from "../../services/pixelmath";
 import type { PixelMathResult, PixelMathSlot, PixelMathValidation } from "../../shared/types/pixelmath";
 import type { ProcessedFile } from "../../shared/types/fits.types";
@@ -23,8 +24,17 @@ interface PixelMathPanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   chainedFrom?: string;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
   onProcessingDone?: (result: PixelMathResult) => void;
+  inputPreviewUrl?: string | null;
+  inputLabel?: string;
+  fileKey?: string | null;
+}
+
+interface PixelMathRun {
+  res: PixelMathResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
 }
 
 const VALIDATION_DEBOUNCE_MS = 300;
@@ -38,7 +48,6 @@ interface RetainedPanelState {
   rescale: boolean;
   outputName: string;
   slotsTouched: boolean;
-  result: PixelMathResult | null;
 }
 
 const retained = new Map<string, RetainedPanelState>();
@@ -84,58 +93,58 @@ export default function PixelMathPanel({
   selectedFile,
   outputDir = "./output",
   chainedFrom,
-  onPreviewUpdate,
   onProcessingDone,
+  inputPreviewUrl,
+  inputLabel,
+  fileKey,
 }: PixelMathPanelProps) {
   const { doneFiles } = useDoneFilesContext();
-  const regionKey = useRegionKey();
-  const targetPath = regionKey ?? selectedFile?.path ?? null;
+  const displayed = useDisplayedImage();
+  const targetPath = selectedFile ? displayed.path ?? selectedFile.path : null;
+  const retainKey = fileKey ?? null;
+  const targetBaseUrl = displayed.previewOnly ? selectedFile?.result?.previewUrl ?? null : inputPreviewUrl ?? selectedFile?.result?.previewUrl ?? null;
+  const targetBaseLabel = displayed.previewOnly ? "Original" : inputLabel ?? "Original";
 
-  const initial = retainedFor(targetPath);
+  const initial = retainedFor(retainKey);
   const [expression, setExpression] = useState(initial?.expression ?? "");
   const [slots, setSlots] = useState<PixelMathSlot[]>(initial?.slots ?? []);
   const [truncate, setTruncate] = useState(initial?.truncate ?? false);
   const [rescale, setRescale] = useState(initial?.rescale ?? false);
   const [outputName, setOutputName] = useState(initial?.outputName ?? "");
   const [validation, setValidation] = useState<PixelMathValidation | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<PixelMathResult | null>(initial?.result ?? null);
-  const [error, setError] = useState<string | null>(null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PixelMathRun>("pixelmath", retainKey);
+  const { chain } = useRenderContext();
+  const result = runResult && chainHoldsOutput(chain, "pixelMath", runResult.res.fits_path) ? runResult : null;
   const validationSeq = useRef(0);
   const expressionId = useId();
   const outputNameId = useId();
 
   const slotsTouchedRef = useRef(initial?.slotsTouched ?? false);
-  const restoredForRef = useRef(targetPath);
-  const targetPathRef = useRef(targetPath);
-  targetPathRef.current = targetPath;
+  const restoredForRef = useRef(retainKey);
 
   useEffect(() => {
-    if (restoredForRef.current === targetPath) return;
-    restoredForRef.current = targetPath;
-    const saved = retainedFor(targetPath);
+    if (restoredForRef.current === retainKey) return;
+    restoredForRef.current = retainKey;
+    const saved = retainedFor(retainKey);
     slotsTouchedRef.current = saved?.slotsTouched ?? false;
     setExpression(saved?.expression ?? "");
     setSlots(saved?.slots ?? []);
     setTruncate(saved?.truncate ?? false);
     setRescale(saved?.rescale ?? false);
     setOutputName(saved?.outputName ?? "");
-    setResult(saved?.result ?? null);
     setValidation(null);
-    setError(null);
-  }, [targetPath]);
+  }, [retainKey]);
 
   useEffect(() => {
-    retain(targetPath, {
+    retain(retainKey, {
       expression,
       slots,
       truncate,
       rescale,
       outputName,
       slotsTouched: slotsTouchedRef.current,
-      result,
     });
-  }, [targetPath, expression, slots, truncate, rescale, outputName, result]);
+  }, [retainKey, expression, slots, truncate, rescale, outputName]);
 
   useEffect(() => {
     if (slotsTouchedRef.current || doneFiles.length === 0) return;
@@ -232,14 +241,13 @@ export default function PixelMathPanel({
     [bindUnbound],
   );
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(() => {
     if (!targetPath) return;
     const ranOn = targetPath;
     const referenced = referencedSymbols(expression);
-    setIsRunning(true);
-    setError(null);
-    setResult(null);
-    try {
+    const baseUrl = targetBaseUrl;
+    const baseLabel = targetBaseLabel;
+    void run(async (ctx) => {
       const res = await runPixelMath(ranOn, outputDir, expression, {
         slots: slots
           .map((s) => ({ name: s.name.trim(), path: s.path }))
@@ -248,17 +256,11 @@ export default function PixelMathPanel({
         rescale,
         name: outputName,
       });
-      if (ranOn !== targetPathRef.current) return;
-      setResult(res);
-      onPreviewUpdate?.(res.previewUrl);
+      if (!ctx.displayedUnchanged()) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-    } catch (err: unknown) {
-      if (ranOn !== targetPathRef.current) return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsRunning(false);
-    }
-  }, [targetPath, outputDir, expression, slots, truncate, rescale, outputName, onPreviewUpdate, onProcessingDone]);
+      return { res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
+    });
+  }, [targetPath, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, outputName, run, onProcessingDone]);
 
   const validationError = validation && !validation.ok ? validation : null;
   const caret =
@@ -267,11 +269,8 @@ export default function PixelMathPanel({
       : null;
   const canRun = !!targetPath && expression.trim().length > 0 && !hasSlotErrors && !validationError;
 
-  const originalUrl =
-    selectedFile?.path === targetPath
-      ? selectedFile?.result?.previewUrl
-      : doneFiles.find((f) => f.path === targetPath)?.result?.previewUrl;
-  const resultUrl = result?.previewUrl;
+  const originalUrl = result?.baseUrl ?? null;
+  const resultUrl = result?.resultUrl;
   const [targetPreviewBroken, setTargetPreviewBroken] = useState(false);
   useEffect(() => setTargetPreviewBroken(false), [originalUrl]);
 
@@ -289,7 +288,7 @@ export default function PixelMathPanel({
       )}
       {targetPath && chainedFrom && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-          {TARGET_SYMBOL} is the file as loaded. PixelMath does not consume the processing chain, so the
+          {TARGET_SYMBOL} is the displayed image, not the latest processing output, so the
           <span className="font-medium"> {chainedFrom} </span>
           result is not part of this expression — bind it to a slot if you want it.
         </div>
@@ -423,7 +422,9 @@ export default function PixelMathPanel({
         </div>
       </div>
 
-      <RunButton label="Run PixelMath" runningLabel="Evaluating..." running={isRunning} disabled={!canRun} accent={ACCENT} onClick={handleRun} />
+      <div title={busyTitle}>
+        <RunButton label="Run PixelMath" runningLabel="Evaluating..." running={isRunning} disabled={!canRun || blocked} accent={ACCENT} onClick={handleRun} />
+      </div>
       <ErrorAlert message={error} />
 
       {result && (
@@ -431,32 +432,25 @@ export default function PixelMathPanel({
           <ResultGrid
             columns={4}
             items={[
-              { label: "Size", value: `${result.dimensions[0]}x${result.dimensions[1]}` },
-              { label: "Min", value: formatValue(result.stats?.min) },
-              { label: "Max", value: formatValue(result.stats?.max) },
-              { label: "Mean", value: formatValue(result.stats?.mean) },
-              { label: "Median", value: formatValue(result.stats?.median) },
-              { label: "Non-finite", value: result.non_finite_count },
-              { label: "Time", value: `${(result.elapsed_ms / 1000).toFixed(2)}s` },
-              { label: "Output", value: baseName(result.fits_path) },
+              { label: "Size", value: `${result.res.dimensions[0]}x${result.res.dimensions[1]}` },
+              { label: "Min", value: formatValue(result.res.stats?.min) },
+              { label: "Max", value: formatValue(result.res.stats?.max) },
+              { label: "Mean", value: formatValue(result.res.stats?.mean) },
+              { label: "Median", value: formatValue(result.res.stats?.median) },
+              { label: "Non-finite", value: result.res.non_finite_count },
+              { label: "Time", value: `${(result.res.elapsed_ms / 1000).toFixed(2)}s` },
+              { label: "Output", value: baseName(result.res.fits_path) },
             ]}
           />
-          {result.warnings?.map((w) => (
+          {result.res.warnings?.map((w) => (
             <div key={w} className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
               {w}
             </div>
           ))}
-          {!!result.cleaned_files && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-              Output cleanup removed {result.cleaned_files} older file(s) (
-              {((result.cleaned_bytes ?? 0) / 1048576).toFixed(0)} MB) to stay under the size cap. Inputs of this run
-              were kept.
-            </div>
-          )}
           {originalUrl && resultUrl && !targetPreviewBroken && (
             <>
               <img src={originalUrl} alt="" className="hidden" onError={() => setTargetPreviewBroken(true)} />
-              <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel="Target" resultLabel="PixelMath" accent={ACCENT} />
+              <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel={result.baseLabel} resultLabel="PixelMath" accent={ACCENT} />
             </>
           )}
           {originalUrl && resultUrl && targetPreviewBroken && (

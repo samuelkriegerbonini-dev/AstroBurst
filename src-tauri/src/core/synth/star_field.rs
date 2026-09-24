@@ -1,4 +1,7 @@
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+
+const MAX_KING_ATTEMPTS_PER_STAR: u64 = 1_000_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Star {
@@ -65,20 +68,34 @@ pub fn uniform_field(cfg: &FieldConfig) -> Vec<Star> {
         .collect()
 }
 
-pub fn king_cluster(cfg: &FieldConfig, core_radius: f64, tidal_radius: f64) -> Vec<Star> {
+pub fn king_cluster(cfg: &FieldConfig, core_radius: f64, tidal_radius: f64) -> Result<Vec<Star>> {
+    let valid = |v: f64| v.is_finite() && v > 0.0;
+    if !valid(core_radius) || !valid(tidal_radius) {
+        bail!("King cluster radii must be positive: core {core_radius}, tidal {tidal_radius}");
+    }
     let mut rng = rng_from_seed(cfg.seed);
     let cx = cfg.width as f64 * 0.5;
     let cy = cfg.height as f64 * 0.5;
     let c = tidal_radius / core_radius;
     let king_norm = 1.0 / (1.0 + c * c).sqrt();
     let mut stars = Vec::with_capacity(cfg.n_stars);
+    let mut misses = 0u64;
     while stars.len() < cfg.n_stars {
+        if misses >= MAX_KING_ATTEMPTS_PER_STAR {
+            bail!(
+                "King cluster with core radius {core_radius} and tidal radius {tidal_radius} accepts almost no stars; placed {} of {}. Use a tidal radius closer to or above the core radius.",
+                stars.len(),
+                cfg.n_stars
+            );
+        }
         let r = rng.gen::<f64>() * tidal_radius;
         let profile = (1.0 / (1.0 + (r / core_radius).powi(2)).sqrt() - king_norm)
             .max(0.0)
             .powi(2);
         let accept = profile * (r / tidal_radius);
+        misses += 1;
         if rng.gen::<f64>() < accept {
+            misses = 0;
             let theta = rng.gen::<f64>() * 2.0 * PI;
             let flux = power_law_flux(&mut rng, cfg.flux_min, cfg.flux_max);
             stars.push(Star {
@@ -90,7 +107,7 @@ pub fn king_cluster(cfg: &FieldConfig, core_radius: f64, tidal_radius: f64) -> V
             });
         }
     }
-    stars
+    Ok(stars)
 }
 
 pub fn exponential_disk(

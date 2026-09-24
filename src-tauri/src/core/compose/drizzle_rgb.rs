@@ -37,9 +37,22 @@ pub struct ProcessedDrizzleRgb {
     pub stats_g: ChannelStats,
     pub stats_b: ChannelStats,
     pub scnr_applied: bool,
+    pub warnings: Vec<String>,
 }
 
 const CHANNEL_LABELS: [&str; 3] = ["R", "G", "B"];
+
+fn channel_warnings(results: [Option<&DrizzleResult>; 3]) -> Vec<String> {
+    CHANNEL_LABELS
+        .iter()
+        .zip(results)
+        .flat_map(|(label, result)| {
+            result
+                .into_iter()
+                .flat_map(move |r| r.warnings.iter().map(move |w| format!("channel {label}: {w}")))
+        })
+        .collect()
+}
 
 fn mean_of(a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
     let mut out = Array2::<f32>::zeros(a.raw_dim());
@@ -91,20 +104,31 @@ pub fn process_drizzle_rgb(
         channels.b.as_ref().map(|img| crop(img)),
     ];
 
+    let mut warnings = Vec::new();
     if config.align {
         let reference_idx = planes.iter().position(|p| p.is_some()).unwrap_or(0);
         let reference = planes[reference_idx].clone();
         if let Some(reference) = reference {
+            let ref_label = CHANNEL_LABELS[reference_idx];
             for idx in (reference_idx + 1)..planes.len() {
                 if let Some(img) = planes[idx].as_mut() {
                     let label = CHANNEL_LABELS[idx];
                     match align_pair_with_label(&reference, img, config.align_method, out_rows, out_cols, label) {
-                        Ok(res) => *img = res.aligned,
-                        Err(e) => log::warn!("Drizzle RGB: channel '{}' registration failed: {}", label, e),
+                        Ok(res) if res.registered => *img = res.aligned,
+                        Ok(res) => warnings.push(format!(
+                            "channel {label} could not be registered to channel {ref_label} ({}, confidence {:.2}); it is combined without registration",
+                            res.method_used, res.confidence
+                        )),
+                        Err(e) => warnings.push(format!(
+                            "channel {label} registration to channel {ref_label} failed ({e:#}); it is combined without registration"
+                        )),
                     }
                 }
             }
         }
+    }
+    for w in &warnings {
+        log::warn!("Drizzle RGB: {}", w);
     }
 
     let [r_plane, g_plane, b_plane] = planes;
@@ -206,6 +230,7 @@ pub fn process_drizzle_rgb(
         stats_g: stats_g_raw,
         stats_b: stats_b_raw,
         scnr_applied,
+        warnings,
     })
 }
 
@@ -218,7 +243,7 @@ use crate::infra::fits::writer as fits_writer;
 use crate::types::stacking::{DrizzleConfig, DrizzleResult};
 
 fn drizzle_channel(paths: &[String], config: &DrizzleConfig) -> Result<DrizzleResult> {
-    drizzle_from_paths(paths, config, None, None)
+    drizzle_from_paths(paths, config, None)
 }
 
 pub fn drizzle_rgb(
@@ -305,6 +330,8 @@ pub fn drizzle_rgb(
 
     let processed = process_drizzle_rgb(&channels, config)?;
     let (out_rows, out_cols) = processed.output_dims;
+    let mut warnings = channel_warnings([r_result.as_ref(), g_result.as_ref(), b_result.as_ref()]);
+    warnings.extend(processed.warnings.iter().cloned());
 
     let mut pixels = vec![0u8; out_rows * out_cols * 3];
     pixels
@@ -359,6 +386,7 @@ pub fn drizzle_rgb(
         stats_g: processed.stats_g,
         stats_b: processed.stats_b,
         scnr_applied: processed.scnr_applied,
+        warnings,
     })
 }
 
@@ -444,6 +472,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok.r_wb, arr2(&[[4.0f32, 4.0], [4.0, 4.0]]));
+    }
+
+    fn blobs(size: usize) -> Array2<f32> {
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let blob = |cy: f64, cx: f64| 1000.0 * (-((y as f64 - cy).powi(2) + (x as f64 - cx).powi(2)) / 4.0).exp();
+            (10.0 + blob(10.0, 20.0) + blob(22.0, 8.0) + blob(25.0, 25.0)) as f32
+        })
+    }
+
+    #[test]
+    fn a_channel_that_cannot_be_registered_is_reported_instead_of_combined_silently() {
+        let r = blobs(32);
+        let g = Array2::from_elem((32, 32), 5.0f32);
+        let config = DrizzleRgbConfig { align: true, ..config_without_stretch() };
+        let processed = process_drizzle_rgb(&channels(Some(r.clone()), Some(g), Some(r)), &config).unwrap();
+        assert_eq!(processed.warnings.len(), 1, "{:?}", processed.warnings);
+        assert!(processed.warnings[0].contains("channel G could not be registered to channel R"), "{:?}", processed.warnings);
+
+        let unaligned = process_drizzle_rgb(&channels(Some(blobs(32)), Some(blobs(32)), None), &config_without_stretch()).unwrap();
+        assert!(unaligned.warnings.is_empty());
+    }
+
+    fn drizzled(warnings: &[&str]) -> DrizzleResult {
+        DrizzleResult {
+            image: Array2::zeros((2, 2)),
+            frame_count: 2,
+            output_scale: 1.0,
+            input_dims: (2, 2),
+            output_dims: (2, 2),
+            offsets: Vec::new(),
+            rejected_pixels: 0,
+            alignment: Vec::new(),
+            warnings: warnings.iter().map(|w| w.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn per_channel_stack_warnings_are_kept_with_their_channel() {
+        let r = drizzled(&["frame a.fits dropped: alignment failed"]);
+        let b = drizzled(&["frame c.fits dropped: size mismatch", "frame d.fits dropped: unreadable"]);
+        let warnings = channel_warnings([Some(&r), None, Some(&b)]);
+        assert_eq!(
+            warnings,
+            vec![
+                "channel R: frame a.fits dropped: alignment failed".to_string(),
+                "channel B: frame c.fits dropped: size mismatch".to_string(),
+                "channel B: frame d.fits dropped: unreadable".to_string(),
+            ]
+        );
     }
 
     #[test]
