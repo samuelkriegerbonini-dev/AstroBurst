@@ -415,3 +415,56 @@ pub const RES_WARNINGS: &str = "warnings";
 pub const RES_HAS_WCS: &str = "has_wcs";
 pub const RES_ID: &str = "id";
 pub const RES_SYSTEM: &str = "system";
+pub const RES_CALIBRATED: &str = "calibrated";
+pub const RES_CALIBRATION_WARNINGS: &str = "calibration_warnings";
+pub const RES_PIXEL_AREA_ARCSEC2: &str = "pixel_area_arcsec2";
+
+pub const RES_ROWS: &str = "rows";
+pub const RES_N_MEASURED: &str = "n_measured";
+pub const RES_N_FAILED: &str = "n_failed";
+
+pub const RES_ROTATION_DEG: &str = "rotation_deg";
+pub const RES_FLIPPED: &str = "flipped";
+pub const RES_PARITY: &str = "parity";
+pub const RES_PIXEL_SCALE_X_ARCSEC: &str = "pixel_scale_x_arcsec";
+pub const RES_PIXEL_SCALE_Y_ARCSEC: &str = "pixel_scale_y_arcsec";
+pub const RES_PROJECTION: &str = "projection";
+pub const RES_SIP_PRESENT: &str = "sip_present";
+pub const RES_NORTH_VEC: &str = "north_vec";
+pub const RES_EAST_VEC: &str = "east_vec";
+pub const RES_ON_IMAGE: &str = "on_image";
+pub const RES_A_SKY: &str = "a_sky";
+pub const RES_B_SKY: &str = "b_sky";
+pub const RES_SEPARATION_DEG: &str = "separation_deg";
+pub const RES_SEPARATION_ARCMIN: &str = "separation_arcmin";
+pub const RES_POSITION_ANGLE_DEG: &str = "position_angle_deg";
+pub const RES_PIXEL_LENGTH: &str = "pixel_length";
+
+pub const RES_SOURCE: &str = "source";
+
+pub const RES_CONTOUR_LEVELS: &str = "levels";
+pub const RES_CONTOUR_BIN: &str = "bin";
+pub const RES_CONTOUR_POLYLINES: &str = "polylines";
+pub const RES_CONTOUR_CLOSED: &str = "closed";
+pub const RES_N_POINTS: &str = "n_points";
+pub const RES_BACKGROUND_MEDIAN: &str = "background_median";
+pub const RES_BACKGROUND_SIGMA: &str = "background_sigma";
+pub const RES_NOTES: &str = "notes";
+
+pub const RES_SMA_ARCSEC: &str = "sma_arcsec";
+pub const RES_MU_AB: &str = "mu_ab";
+pub const RES_MU_ERR: &str = "mu_err";
+pub const RES_MAG_AB_CUMULATIVE: &str = "mag_ab_cumulative";
+pub const RES_R50_PX: &str = "r50_px";
+pub const RES_R80_PX: &str = "r80_px";
+pub const RES_R90_PX: &str = "r90_px";
+pub const RES_PETROSIAN_RADIUS_PX: &str = "petrosian_radius_px";
+pub const RES_SKY_PA_DEG: &str = "sky_pa_deg";
+pub const RES_TOTAL_MAG_AB: &str = "total_mag_ab";
+pub const EVENT_TIME_SERIES_PROGRESS: &str = "time-series-progress";
+pub const RES_VALUES: &str = "values";
+pub const RES_SIZE: &str = "size";
+pub const RES_X0: &str = "x0";
+pub const RES_Y0: &str = "y0";
+pub const RES_DQ_NAMES: &str = "dq_names";
+pub const RES_N_FINITE: &str = "n_finite";

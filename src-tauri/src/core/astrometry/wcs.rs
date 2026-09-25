@@ -1,6 +1,7 @@
 // WCS engine migration to the CDS wcs-rs crate (full FITS projection coverage, wrapper-side SIP) — contributed by Jae-Joon Lee <https://github.com/leejjoon>
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
+use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use wcs::{ImgXY, LonLat, WCSParams};
 
@@ -383,6 +384,12 @@ impl WcsTransform {
         let dy = y - self.crpix2 + 1.0;
         let (u, v) = self.sip_forward(dx, dy);
         let (ix, iy) = apply_linear(&self.cd, u, v);
+        if !(ix * ix + iy * iy).is_finite() {
+            return CelestialCoord {
+                ra: f64::NAN,
+                dec: f64::NAN,
+            };
+        }
 
         match self.engine.unproj(&ImgXY::new(ix, iy)) {
             Some(ll) => {
@@ -397,6 +404,9 @@ impl WcsTransform {
     }
 
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> (f64, f64) {
+        if !ra.is_finite() || !dec.is_finite() {
+            return (f64::NAN, f64::NAN);
+        }
         let (lon, lat) = match self.frame {
             SkyFrame::Icrs => (ra, dec),
             frame => convert_from_icrs(frame, ra, dec),
@@ -462,6 +472,104 @@ pub fn angular_separation(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
     let a =
         (d_dec / 2.0).sin().powi(2) + dec1.cos() * dec2.cos() * (d_ra / 2.0).sin().powi(2);
     (2.0 * a.sqrt().clamp(-1.0, 1.0).asin()).to_degrees()
+}
+
+pub fn position_angle_deg(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
+    let d_ra = (ra2 - ra1).to_radians();
+    let dec1 = dec1.to_radians();
+    let dec2 = dec2.to_radians();
+    let y = d_ra.sin() * dec2.cos();
+    let x = dec1.cos() * dec2.sin() - dec1.sin() * dec2.cos() * d_ra.cos();
+    y.atan2(x).to_degrees().rem_euclid(360.0)
+}
+
+const ORIENTATION_STEP_PIXELS: f64 = 10.0;
+const ORIENTATION_MAX_FOV_FRACTION: f64 = 0.25;
+const MIN_COS_DEC: f64 = 1e-9;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WcsOrientation {
+    pub rotation_deg: f64,
+    pub flipped: bool,
+    pub pixel_scale_x_arcsec: f64,
+    pub pixel_scale_y_arcsec: f64,
+    pub projection: String,
+    pub sip_present: bool,
+    pub north_vec: Option<(f64, f64)>,
+    pub east_vec: Option<(f64, f64)>,
+}
+
+fn unit_vector_from(origin: (f64, f64), point: (f64, f64), sign: f64) -> Option<(f64, f64)> {
+    let dx = (point.0 - origin.0) * sign;
+    let dy = (point.1 - origin.1) * sign;
+    let len = dx.hypot(dy);
+    if !len.is_finite() || len <= 0.0 {
+        return None;
+    }
+    Some((dx / len, dy / len))
+}
+
+impl WcsTransform {
+    pub fn orientation(&self, naxis1: usize, naxis2: usize) -> WcsOrientation {
+        let cd = self.cd;
+        let (cd11, cd12, cd21, cd22) = (cd[0][0], cd[0][1], cd[1][0], cd[1][1]);
+        let pixel_scale_x_arcsec = (cd11 * cd11 + cd21 * cd21).sqrt() * 3600.0;
+        let pixel_scale_y_arcsec = (cd12 * cd12 + cd22 * cd22).sqrt() * 3600.0;
+        let rotation_deg = (-cd12).atan2(cd22).to_degrees();
+        let flipped = cd11 * cd22 - cd12 * cd21 > 0.0;
+        let (sip_a, sip_b) = self.sip_forward_terms();
+        let sip_present = sip_a.is_some() || sip_b.is_some();
+
+        let (north_vec, east_vec) = self.cardinal_vectors(naxis1, naxis2);
+
+        WcsOrientation {
+            rotation_deg,
+            flipped,
+            pixel_scale_x_arcsec,
+            pixel_scale_y_arcsec,
+            projection: self.projection.clone(),
+            sip_present,
+            north_vec,
+            east_vec,
+        }
+    }
+
+    fn cardinal_vectors(&self, naxis1: usize, naxis2: usize) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+        let has_dims = naxis1 > 0 && naxis2 > 0;
+        let centre = if has_dims {
+            pixel_center(naxis1, naxis2)
+        } else {
+            (self.crpix1 - 1.0, self.crpix2 - 1.0)
+        };
+        let sky0 = self.pixel_to_world(centre.0, centre.1);
+        if !sky0.ra.is_finite() || !sky0.dec.is_finite() {
+            return (None, None);
+        }
+        let mut step_deg = ORIENTATION_STEP_PIXELS * self.pixel_scale_arcsec() / 3600.0;
+        if has_dims {
+            let (fov_w, fov_h) = self.field_of_view(naxis1, naxis2);
+            let quarter_fov_deg = fov_w.min(fov_h) / 60.0 * ORIENTATION_MAX_FOV_FRACTION;
+            step_deg = step_deg.min(quarter_fov_deg);
+        }
+        if !step_deg.is_finite() || step_deg <= 0.0 {
+            return (None, None);
+        }
+
+        let (north_dec, north_sign) = if sky0.dec + step_deg > 90.0 {
+            (sky0.dec - step_deg, -1.0)
+        } else {
+            (sky0.dec + step_deg, 1.0)
+        };
+        let north_vec = unit_vector_from(centre, self.world_to_pixel(sky0.ra, north_dec), north_sign);
+
+        let cos_dec = sky0.dec.to_radians().cos();
+        let east_vec = if cos_dec.abs() < MIN_COS_DEC {
+            None
+        } else {
+            unit_vector_from(centre, self.world_to_pixel(sky0.ra + step_deg / cos_dec, sky0.dec), 1.0)
+        };
+        (north_vec, east_vec)
+    }
 }
 
 #[cfg(test)]
@@ -1478,5 +1586,113 @@ mod tests {
         assert_eq!(pixel_center(100, 50), (49.5, 24.5));
         assert_eq!(pixel_center(1, 1), (0.0, 0.0));
         assert_eq!(pixel_edge_corners(4, 2), [(-0.5, -0.5), (3.5, -0.5), (3.5, 1.5), (-0.5, 1.5)]);
+    }
+
+    fn assert_close(actual: f64, expected: f64, tol: f64, what: &str) {
+        assert!((actual - expected).abs() < tol, "{what}: {actual} vs {expected}");
+    }
+
+    fn assert_vec_close(actual: Option<(f64, f64)>, expected: (f64, f64), what: &str) {
+        let (x, y) = actual.unwrap_or_else(|| panic!("{what} is None"));
+        assert_close(x, expected.0, 1e-6, what);
+        assert_close(y, expected.1, 1e-6, what);
+    }
+
+    #[test]
+    fn position_angle_is_measured_east_of_north_from_zero_to_360() {
+        let step_east = 0.01 / 20f64.to_radians().cos();
+        assert_close(position_angle_deg(10.0, 20.0, 10.0, 21.0), 0.0, 1e-9, "north");
+        assert_close(position_angle_deg(10.0, 20.0, 10.0 + step_east, 20.0), 90.0, 0.01, "east");
+        assert_close(position_angle_deg(10.0, 20.0, 10.0, 19.0), 180.0, 1e-9, "south");
+        assert_close(position_angle_deg(10.0, 20.0, 10.0 - step_east, 20.0), 270.0, 0.01, "west");
+        assert_close(position_angle_deg(10.0, 20.0, 11.0, 21.0), 42.9531, 0.01, "astropy golden");
+        assert_close(position_angle_deg(359.5, 0.0, 0.5, 0.0), 90.0, 1e-9, "east across the RA wrap");
+        assert!(position_angle_deg(10.0, 20.0, 10.0, 20.0).is_finite(), "coincident points stay finite");
+    }
+
+    #[test]
+    fn non_finite_inputs_give_nan_instead_of_panicking_in_both_directions() {
+        use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
+        let wcs = WcsTransform::from_header(&header_with_cd(north_up_cd())).unwrap();
+        for (x, y) in [(f64::NAN, 1.0), (1.0, f64::INFINITY), (f64::MAX, f64::MAX)] {
+            let c = wcs.pixel_to_world(x, y);
+            assert!(c.ra.is_nan() && c.dec.is_nan(), "({x}, {y}) gave ({}, {})", c.ra, c.dec);
+        }
+        for (ra, dec) in [(f64::NAN, 2.0), (150.0, f64::NEG_INFINITY)] {
+            let (px, py) = wcs.world_to_pixel(ra, dec);
+            assert!(px.is_nan() && py.is_nan(), "({ra}, {dec}) gave ({px}, {py})");
+        }
+    }
+
+    #[test]
+    fn orientation_of_a_north_up_east_left_header_has_zero_rotation_and_normal_parity() {
+        use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
+        let wcs = WcsTransform::from_header(&header_with_cd(north_up_cd())).unwrap();
+        let o = wcs.orientation(100, 100);
+        assert_close(o.rotation_deg, 0.0, 1e-6, "rotation");
+        assert!(!o.flipped);
+        assert_close(o.pixel_scale_x_arcsec, 1.0, 1e-9, "scale x");
+        assert_close(o.pixel_scale_y_arcsec, 1.0, 1e-9, "scale y");
+        assert_eq!(o.projection, "TAN");
+        assert!(!o.sip_present);
+        assert_vec_close(o.north_vec, (0.0, 1.0), "north");
+        assert_vec_close(o.east_vec, (-1.0, 0.0), "east");
+    }
+
+    #[test]
+    fn orientation_of_a_rotated_header_rotates_the_cardinal_vectors() {
+        use crate::core::imaging::region::test_support::{header_with_cd, rotated_cd};
+        let wcs = WcsTransform::from_header(&header_with_cd(rotated_cd(30.0))).unwrap();
+        let o = wcs.orientation(100, 100);
+        assert_close(o.rotation_deg, 30.0, 1e-6, "rotation");
+        assert!(!o.flipped);
+        let (sn, cs) = 30f64.to_radians().sin_cos();
+        assert_vec_close(o.north_vec, (-sn, cs), "north");
+        assert_vec_close(o.east_vec, (-cs, -sn), "east");
+    }
+
+    #[test]
+    fn orientation_of_a_positive_determinant_header_reports_flipped_parity_with_east_right() {
+        use crate::core::imaging::region::test_support::header_with_cd;
+        let s = 1.0 / 3600.0;
+        let wcs = WcsTransform::from_header(&header_with_cd([[s, 0.0], [0.0, s]])).unwrap();
+        let o = wcs.orientation(100, 100);
+        assert!(o.flipped);
+        assert_close(o.rotation_deg, 0.0, 1e-6, "rotation");
+        assert_vec_close(o.north_vec, (0.0, 1.0), "north");
+        assert_vec_close(o.east_vec, (1.0, 0.0), "east");
+    }
+
+    #[test]
+    fn orientation_without_image_dimensions_falls_back_to_the_reference_pixel() {
+        use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
+        let wcs = WcsTransform::from_header(&header_with_cd(north_up_cd())).unwrap();
+        let o = wcs.orientation(0, 0);
+        assert_vec_close(o.north_vec, (0.0, 1.0), "north");
+        assert_vec_close(o.east_vec, (-1.0, 0.0), "east");
+    }
+
+    #[test]
+    fn orientation_near_the_celestial_pole_still_yields_unit_vectors() {
+        let h = make_header(&[
+            ("NAXIS1", "100"),
+            ("NAXIS2", "100"),
+            ("CRPIX1", "50.5"),
+            ("CRPIX2", "50.5"),
+            ("CRVAL1", "150.0"),
+            ("CRVAL2", "89.999"),
+            ("CD1_1", "-2.777777777778e-4"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "2.777777777778e-4"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+        ]);
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        let o = wcs.orientation(100, 100);
+        let (nx, ny) = o.north_vec.expect("north");
+        assert_close(nx.hypot(ny), 1.0, 1e-9, "north length");
+        let (ex, ey) = o.east_vec.expect("east");
+        assert_close(ex.hypot(ey), 1.0, 1e-9, "east length");
     }
 }

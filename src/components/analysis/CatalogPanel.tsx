@@ -10,6 +10,7 @@ import { generateId } from "../../utils/format";
 import { catalogCsvFileName, catalogRowsCsv, matchesCsv, sourcesCsv } from "../../utils/catalogCsv";
 import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../viewer/painters/catalogPainter";
 import { ErrorAlert, RunButton, Toggle } from "../ui";
+import CrossMatchPlots from "./CrossMatchPlots";
 
 interface CatalogPanelProps {
   filePath: string | null;
@@ -365,6 +366,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
             </div>
           </div>
         )}
+        {cross && <CrossMatchPlots cross={cross} />}
 
         {warnings.length > 0 && (
           <div className="text-[9px] text-amber-300/90 bg-amber-900/15 border border-amber-800/30 rounded px-2 py-1 space-y-0.5">

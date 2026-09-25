@@ -10,6 +10,7 @@ import type {
   RegionImportResult,
   RegionExportResult,
 } from "../shared/types";
+import type { SbProfile } from "../shared/types/regions";
 
 export interface RegionStatsRequest {
   id: string;
@@ -63,6 +64,22 @@ export function lineCut(
   excludeDq = false,
 ): Promise<LineCut> {
   return typedInvoke<LineCut>("line_cut_cmd", { path, x1, y1, x2, y2, excludeDq });
+}
+
+export interface SbProfileOptions {
+  binWidth?: number | null;
+  background?: RegionShape | null;
+  excludeDq?: boolean;
+}
+
+export function sbProfile(path: string, shape: RegionShape, opts: SbProfileOptions = {}): Promise<SbProfile> {
+  return typedInvoke<SbProfile>("sb_profile_cmd", {
+    path,
+    shape,
+    binWidth: opts.binWidth ?? null,
+    background: opts.background ?? null,
+    excludeDq: opts.excludeDq ?? false,
+  });
 }
 
 export function importRegions(path: string, regText: string): Promise<RegionImportResult> {

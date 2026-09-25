@@ -1,3 +1,6 @@
+mod time_series;
+pub use time_series::*;
+
 use std::time::Instant;
 
 use serde_json::json;
@@ -15,6 +18,7 @@ use crate::types::constants::{
     RES_PHOTOMETRY, RES_SKY, RES_GAIA,
     RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
     RES_MASKED, RES_DQ_EXCLUDED, RES_LABEL, RES_WARNINGS,
+    RES_ROWS, RES_INDEX, RES_ERROR, RES_N_MEASURED, RES_N_FAILED,
 };
 use crate::types::image::{AutoStfConfig, ImageStats, StfParams};
 use crate::core::analysis::fft::compute_power_spectrum;
@@ -29,6 +33,8 @@ use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
 
 const PAR_THRESHOLD: usize = 1_000_000;
+const MAX_BATCH_POINTS: usize = 5000;
+const PAR_BATCH_POINTS: usize = 64;
 const FFT_WINDOWED_FLAG: u32 = 1;
 const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
 
@@ -296,7 +302,7 @@ pub(crate) fn photometry_planes(path: &str, dims: (usize, usize)) -> PhotometryP
     PhotometryPlanes { err, saturated }
 }
 
-fn apply_calibration(phot: &mut StarPhotometry, cal: &PhotCal) {
+pub(crate) fn apply_calibration(phot: &mut StarPhotometry, cal: &PhotCal) {
     if let Some(c) = cal.calibrate(phot.net_flux, Some(phot.flux_err)) {
         phot.flux_jy = Some(c.flux_jy);
         phot.flux_err_jy = c.flux_err_jy;
@@ -344,78 +350,143 @@ fn gaia_match_json(coord_ra: f64, coord_dec: f64) -> serde_json::Value {
     }
 }
 
-pub(crate) fn photometry_for_path(
-    path: &str,
-    x: f64,
-    y: f64,
-    aperture_radius: Option<f64>,
-    gaia_match: bool,
-    exclude_dq: bool,
-    gain: Option<f64>,
-) -> anyhow::Result<serde_json::Value> {
-    let t0 = Instant::now();
+pub(crate) struct PhotometryContext {
+    pub entry: ImageEntry,
+    pub mask: Option<DqMask>,
+    pub planes: PhotometryPlanes,
+    pub wcs: Option<WcsTransform>,
+    pub photcal: Option<PhotCal>,
+    pub warnings: Vec<String>,
+}
+
+pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result<PhotometryContext> {
     let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
     let dims = entry.arr().dim();
     let mask = resolve_dq_mask(path, exclude_dq, dims);
-    let mut warnings: Vec<String> = Vec::new();
     let planes = photometry_planes(path, dims);
     let header = entry.header();
     let wcs = header.and_then(|h| WcsTransform::from_header(h).ok());
     let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
-
-    let config = PhotometryConfig {
-        aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
-        saturation: Some(saturation_level(header, entry.stats().max)),
-        gain: gain.filter(|g| g.is_finite() && *g > 0.0),
-        ..PhotometryConfig::default()
-    };
-
-    let mut phot = measure_star_full(
-        entry.arr(),
-        planes.err.as_ref().map(|e| e.arr()),
-        mask.as_ref().map(|m| &m.map),
-        planes.saturated.as_ref(),
-        x,
-        y,
-        &config,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-
+    let mut warnings: Vec<String> = Vec::new();
     match &photcal {
-        Some(cal) => {
-            apply_calibration(&mut phot, cal);
-            warnings.extend(cal.warnings.iter().cloned());
-        }
+        Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
         None => warnings.push(missing_calibration_reason(header)),
     }
     if let Some(provenance) = header.and_then(|h| h.get(HEADER_PROCESSING_PROVENANCE)) {
         warnings.push(format!("photometry on processed data ({})", provenance.trim().trim_matches('\'').trim()));
     }
+    Ok(PhotometryContext { entry, mask, planes, wcs, photcal, warnings })
+}
 
-    let mut sky = serde_json::Value::Null;
-    let mut gaia = serde_json::Value::Null;
-    if let Some(wcs) = &wcs {
-        let coord = wcs.pixel_to_world(phot.x, phot.y);
-        sky = json!({ RES_RA: coord.ra, RES_DEC: coord.dec });
-        if gaia_match {
-            gaia = gaia_match_json(coord.ra, coord.dec);
+impl PhotometryContext {
+    fn config(&self, aperture_radius: Option<f64>, sky_annulus: Option<(f64, f64)>, gain: Option<f64>) -> PhotometryConfig {
+        PhotometryConfig {
+            aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
+            saturation: Some(saturation_level(self.entry.header(), self.entry.stats().max)),
+            gain: gain.filter(|g| g.is_finite() && *g > 0.0),
+            sky_annulus,
+            ..PhotometryConfig::default()
         }
     }
 
-    let photcal_value = match &photcal {
-        Some(cal) => photcal_json(cal)?,
-        None => serde_json::Value::Null,
+    fn measure(&self, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
+        let mut phot = measure_star_full(
+            self.entry.arr(),
+            self.planes.err.as_ref().map(|e| e.arr()),
+            self.mask.as_ref().map(|m| &m.map),
+            self.planes.saturated.as_ref(),
+            x,
+            y,
+            config,
+        )?;
+        if let Some(cal) = &self.photcal {
+            apply_calibration(&mut phot, cal);
+        }
+        Ok(phot)
+    }
+
+    fn sky_json(&self, phot: &StarPhotometry) -> serde_json::Value {
+        match &self.wcs {
+            Some(wcs) => {
+                let coord = wcs.pixel_to_world(phot.x, phot.y);
+                if coord.ra.is_finite() && coord.dec.is_finite() {
+                    json!({ RES_RA: coord.ra, RES_DEC: coord.dec })
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn photcal_json(&self) -> anyhow::Result<serde_json::Value> {
+        match &self.photcal {
+            Some(cal) => photcal_json(cal),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+}
+
+pub(crate) fn photometry_for_path(
+    path: &str,
+    x: f64,
+    y: f64,
+    aperture_radius: Option<f64>,
+    sky_annulus: Option<(f64, f64)>,
+    gaia_match: bool,
+    exclude_dq: bool,
+    gain: Option<f64>,
+) -> anyhow::Result<serde_json::Value> {
+    let t0 = Instant::now();
+    let ctx = photometry_context(path, exclude_dq)?;
+    let config = ctx.config(aperture_radius, sky_annulus, gain);
+    let phot = ctx.measure(x, y, &config).map_err(|e| anyhow::anyhow!(e))?;
+
+    let sky = ctx.sky_json(&phot);
+    let gaia = match (&ctx.wcs, gaia_match) {
+        (Some(wcs), true) => {
+            let coord = wcs.pixel_to_world(phot.x, phot.y);
+            gaia_match_json(coord.ra, coord.dec)
+        }
+        _ => serde_json::Value::Null,
     };
 
     Ok(json!({
         RES_PHOTOMETRY: serde_json::to_value(&phot)?,
         RES_SKY: sky,
         RES_GAIA: gaia,
-        RES_PHOTCAL: photcal_value,
-        RES_WARNINGS: warnings,
+        RES_PHOTCAL: ctx.photcal_json()?,
+        RES_WARNINGS: ctx.warnings,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-        RES_MASKED: mask.is_some(),
+        RES_MASKED: ctx.mask.is_some(),
     }))
+}
+
+fn annulus_arg(inner: Option<f64>, outer: Option<f64>) -> anyhow::Result<Option<(f64, f64)>> {
+    let (i, o) = match (inner, outer) {
+        (None, None) => return Ok(None),
+        (Some(i), Some(o)) => (i, o),
+        _ => anyhow::bail!("sky annulus needs both an inner and an outer radius"),
+    };
+    if !i.is_finite() || i <= 0.0 {
+        anyhow::bail!("sky annulus inner radius {i} must be a positive finite number of pixels");
+    }
+    if !o.is_finite() || o <= 0.0 {
+        anyhow::bail!("sky annulus outer radius {o} must be a positive finite number of pixels");
+    }
+    if o <= i {
+        anyhow::bail!("sky annulus outer radius {o} must be larger than the inner radius {i}");
+    }
+    Ok(Some((i, o)))
+}
+
+fn check_annulus_clears_aperture(aperture_radius: Option<f64>, sky_annulus: Option<(f64, f64)>) -> anyhow::Result<()> {
+    if let (Some(r_ap), Some((r_in, _))) = (aperture_radius.filter(|r| r.is_finite() && *r > 0.0), sky_annulus) {
+        if r_in <= r_ap {
+            anyhow::bail!("sky annulus inner radius {r_in} must be larger than the aperture radius {r_ap}");
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -424,20 +495,107 @@ pub async fn measure_photometry_cmd(
     x: f64,
     y: f64,
     aperture_radius: Option<f64>,
+    annulus_inner: Option<f64>,
+    annulus_outer: Option<f64>,
     gaia_match: Option<bool>,
     exclude_dq: Option<bool>,
     gain: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        if !x.is_finite() || !y.is_finite() {
+            anyhow::bail!("photometry position ({x}, {y}) must be finite");
+        }
+        let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
+        check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
         photometry_for_path(
             &path,
             x,
             y,
             aperture_radius,
+            sky_annulus,
             gaia_match.unwrap_or(true),
             exclude_dq.unwrap_or(false),
             gain,
         )
+    })
+}
+
+#[tauri::command]
+pub async fn measure_photometry_batch_cmd(
+    path: String,
+    points: Vec<(f64, f64)>,
+    aperture_radius: Option<f64>,
+    annulus_inner: Option<f64>,
+    annulus_outer: Option<f64>,
+    gain: Option<f64>,
+    exclude_dq: Option<bool>,
+    with_growth_curve: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        if points.is_empty() {
+            anyhow::bail!("batch photometry needs at least one point");
+        }
+        if points.len() > MAX_BATCH_POINTS {
+            anyhow::bail!("batch photometry of {} points exceeds the limit of {MAX_BATCH_POINTS}", points.len());
+        }
+        if let Some((i, (x, y))) = points.iter().enumerate().find(|(_, (x, y))| !x.is_finite() || !y.is_finite()) {
+            anyhow::bail!("batch photometry point {i} ({x}, {y}) must be finite");
+        }
+        if let Some(r) = aperture_radius {
+            if !r.is_finite() || r <= 0.0 {
+                anyhow::bail!("aperture radius {r} must be a positive finite number of pixels");
+            }
+        }
+        let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
+        check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
+        let with_growth_curve = with_growth_curve.unwrap_or(false);
+
+        let ctx = photometry_context(&path, exclude_dq.unwrap_or(false))?;
+        let config = ctx.config(aperture_radius, sky_annulus, gain);
+        let measure = |&(x, y): &(f64, f64)| ctx.measure(x, y, &config);
+        let measured: Vec<Result<StarPhotometry, String>> = if points.len() > PAR_BATCH_POINTS {
+            points.par_iter().map(measure).collect()
+        } else {
+            points.iter().map(measure).collect()
+        };
+
+        let mut n_measured = 0usize;
+        let mut rows = Vec::with_capacity(measured.len());
+        for (index, outcome) in measured.into_iter().enumerate() {
+            match outcome {
+                Ok(mut phot) => {
+                    n_measured += 1;
+                    if !with_growth_curve {
+                        phot.growth_curve.clear();
+                    }
+                    let sky = ctx.sky_json(&phot);
+                    rows.push(json!({
+                        RES_INDEX: index,
+                        RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+                        RES_SKY: sky,
+                        RES_ERROR: serde_json::Value::Null,
+                    }));
+                }
+                Err(e) => rows.push(json!({
+                    RES_INDEX: index,
+                    RES_PHOTOMETRY: serde_json::Value::Null,
+                    RES_SKY: serde_json::Value::Null,
+                    RES_ERROR: e,
+                })),
+            }
+        }
+        let n_failed = rows.len() - n_measured;
+
+        Ok(json!({
+            RES_ROWS: rows,
+            RES_PHOTCAL: ctx.photcal_json()?,
+            RES_WARNINGS: ctx.warnings,
+            RES_MASKED: ctx.mask.is_some(),
+            RES_N_MEASURED: n_measured,
+            RES_N_FAILED: n_failed,
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
     })
 }
 
@@ -557,7 +715,7 @@ mod tests {
     fn photometry_for_path_calibrates_with_err_and_dq_companions() {
         let dir = tempfile::tempdir().unwrap();
         let key = jwst_star_mef(&dir.path().join("jwst_star.fits"), vec![]);
-        let out = photometry_for_path(&key, 32.0, 32.0, None, false, true, None).unwrap();
+        let out = photometry_for_path(&key, 32.0, 32.0, None, None, false, true, None).unwrap();
         let phot = &out[RES_PHOTOMETRY];
         assert_eq!(out[RES_MASKED], true);
         assert_eq!(phot["err_used"], true);
@@ -580,7 +738,7 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(out[RES_SKY].is_null() && out[RES_GAIA].is_null());
 
-        let unmasked = photometry_for_path(&key, 32.0, 32.0, None, false, false, None).unwrap();
+        let unmasked = photometry_for_path(&key, 32.0, 32.0, None, None, false, false, None).unwrap();
         assert_eq!(unmasked[RES_MASKED], false);
         assert_eq!(unmasked[RES_PHOTOMETRY]["n_masked"], 0);
         assert_eq!(unmasked[RES_PHOTOMETRY]["n_saturated"], 1);
@@ -593,7 +751,7 @@ mod tests {
             &dir.path().join("processed.fits"),
             vec![("ABPROC", "'ghs_stretch'".to_string())],
         );
-        let out = photometry_for_path(&key, 32.0, 32.0, Some(5.0), false, false, None).unwrap();
+        let out = photometry_for_path(&key, 32.0, 32.0, Some(5.0), None, false, false, None).unwrap();
         let warnings = out[RES_WARNINGS].as_array().unwrap();
         assert!(
             warnings.iter().any(|w| w.as_str().unwrap() == "photometry on processed data (ghs_stretch)"),
@@ -608,7 +766,7 @@ mod tests {
             arr[[i / size, i % size]] = v;
         }
         crate::infra::fits::writer::write_fits_mono(plain.to_str().unwrap(), &arr, None).unwrap();
-        let out = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, false, false, Some(2.0)).unwrap();
+        let out = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, None, false, false, Some(2.0)).unwrap();
         assert!(out[RES_PHOTCAL].is_null());
         let phot = &out[RES_PHOTOMETRY];
         assert!(phot["flux_jy"].is_null() && phot["mag_ab"].is_null());
@@ -622,7 +780,7 @@ mod tests {
             "{warnings:?}"
         );
         let with_gain = phot["flux_err"].as_f64().unwrap();
-        let without = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, false, false, None).unwrap();
+        let without = photometry_for_path(plain.to_str().unwrap(), 32.0, 32.0, None, None, false, false, None).unwrap();
         assert!(with_gain > without[RES_PHOTOMETRY]["flux_err"].as_f64().unwrap());
     }
 
@@ -638,7 +796,7 @@ mod tests {
         header.set("SATURATE", "1000".to_string());
         let path = dir.path().join("saturate.fits");
         crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
-        let out = photometry_for_path(path.to_str().unwrap(), 32.0, 32.0, None, false, false, None).unwrap();
+        let out = photometry_for_path(path.to_str().unwrap(), 32.0, 32.0, None, None, false, false, None).unwrap();
         let phot = &out[RES_PHOTOMETRY];
         assert_eq!(phot["peak"], 1100.0);
         assert_eq!(phot["saturated"], true);
@@ -646,7 +804,7 @@ mod tests {
         assert_eq!(phot["n_saturated"], 0);
 
         let key = jwst_star_mef(&dir.path().join("dq.fits"), vec![("SATURATE", "1000".to_string())]);
-        let with_dq = photometry_for_path(&key, 32.0, 32.0, None, false, false, None).unwrap();
+        let with_dq = photometry_for_path(&key, 32.0, 32.0, None, None, false, false, None).unwrap();
         assert_eq!(with_dq[RES_PHOTOMETRY]["saturation_source"], "DQ SATURATED");
         assert_eq!(with_dq[RES_PHOTOMETRY]["n_saturated"], 1);
     }
@@ -830,5 +988,116 @@ mod tests {
         let (x, y) = (stars[0]["x"].as_f64().unwrap(), stars[0]["y"].as_f64().unwrap());
         assert!((x - 32.0).abs() < 1.0 && (y - 32.0).abs() < 1.0, "brightest star at ({x}, {y})");
         assert!(of_slots.unwrap()["stars"].as_array().unwrap().is_empty());
+    }
+
+    fn gaussian_fits(dir: &std::path::Path, name: &str) -> String {
+        let size = 64;
+        let mut arr = ndarray::Array2::<f32>::zeros((size, size));
+        for (i, v) in gaussian_pixels(size, 1000.0, 2.0, 100.0).into_iter().enumerate() {
+            arr[[i / size, i % size]] = v;
+        }
+        let path = dir.join(name);
+        crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &arr, None).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_of_one_point_equals_the_single_measurement_field_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "batch.fits");
+        let single = measure_photometry_cmd(path.clone(), 31.0, 33.0, Some(5.0), Some(10.0), Some(15.0), Some(false), None, Some(2.0))
+            .await
+            .unwrap();
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(31.0, 33.0)], Some(5.0), Some(10.0), Some(15.0), Some(2.0), None, Some(true))
+            .await
+            .unwrap();
+        let rows = batch[RES_ROWS].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][RES_INDEX], 0);
+        assert!(rows[0][RES_ERROR].is_null());
+        assert_eq!(rows[0][RES_PHOTOMETRY], single[RES_PHOTOMETRY]);
+        assert_eq!(rows[0][RES_SKY], single[RES_SKY]);
+        assert_eq!(batch[RES_PHOTCAL], single[RES_PHOTCAL]);
+        assert_eq!(batch[RES_WARNINGS], single[RES_WARNINGS]);
+        assert_eq!(batch[RES_MASKED], false);
+        assert_eq!(batch[RES_N_MEASURED], 1);
+        assert_eq!(batch[RES_N_FAILED], 0);
+        let phot = &rows[0][RES_PHOTOMETRY];
+        assert_eq!(phot["sky_inner"], 10.0);
+        assert_eq!(phot["sky_outer"], 15.0);
+        assert!(!phot["growth_curve"].as_array().unwrap().is_empty());
+        assert!(phot["growth_curve"][0]["r"].is_number() && phot["growth_curve"][0]["flux"].is_number());
+
+        let mixed = measure_photometry_batch_cmd(path, vec![(32.0, 32.0), (5.0, 5.0)], None, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(mixed[RES_N_MEASURED], 2);
+        assert_eq!(mixed[RES_ROWS][1][RES_INDEX], 1);
+    }
+
+    #[tokio::test]
+    async fn a_sky_annulus_inside_the_aperture_is_refused_by_both_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "refused.fits");
+        let sentence = "sky annulus inner radius 5 must be larger than the aperture radius 5";
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), Some(5.0), Some(10.0), Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(single.contains(sentence), "{single}");
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(5.0), Some(5.0), Some(10.0), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(batch.contains(sentence), "{batch}");
+
+        let auto_radius = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, Some(2.0), Some(4.0), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(auto_radius[RES_N_FAILED], 1);
+        assert!(auto_radius[RES_ROWS][0][RES_ERROR].as_str().unwrap().contains("must be larger than the aperture radius"));
+        assert!(auto_radius[RES_ROWS][0][RES_PHOTOMETRY].is_null());
+
+        let half = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(8.0), None, Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(half.contains("sky annulus needs both an inner and an outer radius"), "{half}");
+        let inverted = measure_photometry_cmd(path, 32.0, 32.0, None, Some(12.0), Some(8.0), Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(inverted.contains("sky annulus outer radius 8 must be larger than the inner radius 12"), "{inverted}");
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_refuses_too_many_empty_or_non_finite_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "limits.fits");
+        let too_many = vec![(32.0, 32.0); 6000];
+        let err = measure_photometry_batch_cmd(path.clone(), too_many, None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("6000 points exceeds the limit of 5000"), "{err}");
+        let empty = measure_photometry_batch_cmd(path.clone(), vec![], None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(empty.contains("at least one point"), "{empty}");
+        let nan = measure_photometry_batch_cmd(path, vec![(32.0, f64::NAN)], None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(nan.contains("point 0"), "{nan}");
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_without_growth_curves_still_reports_encircled_energy_radii() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "growth.fits");
+        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(6.0), None, None, None, None, Some(false))
+            .await
+            .unwrap();
+        let phot = &out[RES_ROWS][0][RES_PHOTOMETRY];
+        assert_eq!(phot["growth_curve"].as_array().unwrap().len(), 0);
+        assert!(phot["flux_total"].is_number(), "{phot}");
+        let ee50 = phot["ee50_radius"].as_f64().expect("EE50");
+        let ee80 = phot["ee80_radius"].as_f64().expect("EE80");
+        assert!((ee50 - 1.1774 * 2.0).abs() / (1.1774 * 2.0) < 0.05, "EE50 {ee50}");
+        assert!(ee80 > ee50);
     }
 }

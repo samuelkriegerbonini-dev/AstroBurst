@@ -1,3 +1,6 @@
+use std::time::Instant;
+
+use anyhow::bail;
 use serde_json::json;
 
 use tauri::ipc::Response;
@@ -12,7 +15,8 @@ use crate::cmd::processing::is_display_referred;
 use crate::core::imaging::colormap::Colormap;
 use crate::core::imaging::dq_flags::{mask_preview_or, DqTable};
 use crate::core::imaging::pixel_probe::{
-    data_unit, probe_companions, probe_json_with_companions, probe_pixel,
+    data_unit, grid_origin, grid_stats, grid_stats_json, int_grid, int_value_grid, pixel_grid,
+    probe_companions, probe_json_with_companions, probe_pixel,
 };
 use crate::core::imaging::scale::{resolve_limits, LimitMode};
 use crate::core::imaging::stats::compute_image_stats;
@@ -21,14 +25,44 @@ use crate::infra::ipc::encode_mask_with_header;
 use crate::infra::render::tiles;
 use crate::types::constants::{
     DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_COLORMAPS,
-    RES_DEFAULT_MASK, RES_DQ_REF, RES_ERR_REF, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT,
-    RES_LABEL, RES_MIDTONE, RES_NAME, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_TABLE, RES_VMAX,
-    RES_VMIN,
+    RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
+    RES_ERR_REF, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL, RES_MIDTONE, RES_NAME,
+    RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE, RES_STATS, RES_TABLE, RES_UNIT, RES_VALUES,
+    RES_VMAX, RES_VMIN, RES_X, RES_X0, RES_Y, RES_Y0,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
 
 pub(crate) const NO_DQ_PLANE: &str = "No DQ plane available for this image";
+pub(crate) const MIN_PIXEL_TABLE_SIZE: usize = 3;
+pub(crate) const MAX_PIXEL_TABLE_SIZE: usize = 15;
+const DEFAULT_PIXEL_TABLE_SIZE: usize = 7;
+
+fn pixel_table_size(size: Option<usize>) -> anyhow::Result<usize> {
+    let size = size.unwrap_or(DEFAULT_PIXEL_TABLE_SIZE);
+    if !(MIN_PIXEL_TABLE_SIZE..=MAX_PIXEL_TABLE_SIZE).contains(&size) || size.is_multiple_of(2) {
+        bail!(
+            "size must be an odd number between {} and {}, got {}",
+            MIN_PIXEL_TABLE_SIZE,
+            MAX_PIXEL_TABLE_SIZE,
+            size
+        );
+    }
+    Ok(size)
+}
+
+fn dq_name_grid(bits: &[Vec<Option<u32>>], table: DqTable) -> Vec<Vec<Option<String>>> {
+    bits.iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| match cell {
+                    Some(b) if *b != 0 => Some(table.decode(*b).join(" | ")),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
 
 fn display_limits(data: &ndarray::Array2<f32>, header: Option<&HduHeader>, mode: LimitMode) -> (f64, f64) {
     match mode {
@@ -161,6 +195,56 @@ pub async fn probe_pixel_cmd(
         let err_unit = comps.err.as_ref().and_then(|e| e.header().and_then(data_unit));
         let companions = probe_companions(dq, comps.err.as_ref().map(|e| e.arr()), probe.x, probe.y);
         Ok(probe_json_with_companions(&probe, unit.as_deref(), err_unit.as_deref(), &companions))
+    })
+}
+
+#[tauri::command]
+pub async fn pixel_table_cmd(
+    path: String,
+    x: i64,
+    y: i64,
+    size: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        let size = pixel_table_size(size)?;
+        let entry = load_cached_full(&path)?;
+        let values = pixel_grid(entry.arr(), x, y, size);
+        let stats = grid_stats(entry.arr(), x, y, size);
+        let unit = entry.header().and_then(data_unit);
+        let (x0, y0) = grid_origin(x, y, size);
+        let comps = load_companions(&path).unwrap_or_else(|e| {
+            log::warn!("companion lookup failed for {}: {:#}", path, e);
+            LoadedCompanions::default()
+        });
+        let err = comps.err.as_ref().map(|e| pixel_grid(e.arr(), x, y, size));
+        let dq = comps
+            .dq
+            .as_ref()
+            .and_then(|(e, table)| e.int_plane().map(|plane| (plane, *table)));
+        let (dq_values, dq_names, dq_table) = match dq {
+            Some((plane, table)) => (
+                Some(int_value_grid(plane, x, y, size)),
+                Some(dq_name_grid(&int_grid(&plane.bits, x, y, size), table)),
+                Some(table.label()),
+            ),
+            None => (None, None, None),
+        };
+        Ok(json!({
+            RES_X: x,
+            RES_Y: y,
+            RES_SIZE: size,
+            RES_X0: x0,
+            RES_Y0: y0,
+            RES_VALUES: values,
+            RES_ERR: err,
+            RES_DQ: dq_values,
+            RES_DQ_NAMES: dq_names,
+            RES_DQ_TABLE: dq_table,
+            RES_UNIT: unit,
+            RES_STATS: grid_stats_json(&stats),
+            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+        }))
     })
 }
 
@@ -382,6 +466,78 @@ mod tests {
         }
         let user = compute_scale_limits_cmd(stretched, "user".into(), Some(0.3), Some(0.4), None, None).await.unwrap();
         assert_eq!((user[RES_VMIN].as_f64(), user[RES_VMAX].as_f64()), (Some(0.3), Some(0.4)));
+    }
+
+
+    #[tokio::test]
+    async fn pixel_table_reports_the_grid_the_companions_and_the_stats_with_null_padding_at_the_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut dq = vec![-2147483648i32; 16];
+        dq[5] = -2147483645;
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let t = pixel_table_cmd(key.clone(), 0, 1, Some(3)).await.unwrap();
+        assert_eq!(t[RES_X], 0);
+        assert_eq!(t[RES_Y], 1);
+        assert_eq!(t[RES_SIZE], 3);
+        assert_eq!(t[RES_X0], -1);
+        assert_eq!(t[RES_Y0], 0);
+        assert_eq!(t[RES_VALUES], json!([[null, 0.0, 1.0], [null, 4.0, 5.0], [null, 8.0, 9.0]]));
+        assert_eq!(t[RES_ERR], json!([[null, 0.0, 0.5], [null, 2.0, 2.5], [null, 4.0, 4.5]]));
+        assert_eq!(t[RES_DQ], json!([[null, 0, 0], [null, 0, 3], [null, 0, 0]]));
+        assert_eq!(t[RES_DQ_NAMES], json!([[null, null, null], [null, null, "DO_NOT_USE | SATURATED"], [null, null, null]]));
+        assert_eq!(t[RES_DQ_TABLE], "jwst");
+        assert_eq!(t[RES_UNIT], "MJy/sr");
+        assert_eq!(t[RES_STATS]["min"], 0.0);
+        assert_eq!(t[RES_STATS]["max"], 9.0);
+        assert_eq!(t[RES_STATS]["mean"], 4.5);
+        assert_eq!(t[RES_STATS]["median"], 4.5);
+        assert_eq!(t[RES_STATS]["n_finite"], 6);
+        assert_eq!(t[RES_STATS]["n_nan"], 0);
+        assert!(t[RES_ELAPSED_MS].is_number());
+
+        let far = pixel_table_cmd(key.clone(), 100, -100, None).await.unwrap();
+        assert_eq!(far[RES_SIZE], 7);
+        assert_eq!(far[RES_VALUES].as_array().unwrap().len(), 7);
+        assert!(far[RES_VALUES].as_array().unwrap().iter().flat_map(|r| r.as_array().unwrap()).all(|c| c.is_null()));
+        assert_eq!(far[RES_STATS]["n_finite"], 0);
+        assert!(far[RES_STATS]["median"].is_null());
+
+        let plain = dir.path().join("plain.fits").to_str().unwrap().to_string();
+        let data = ndarray::Array2::from_shape_fn((5, 5), |(y, x)| (y * 5 + x) as f32);
+        crate::infra::fits::writer::write_fits_mono(&plain, &data, None).unwrap();
+        let p = pixel_table_cmd(plain, 2, 2, Some(3)).await.unwrap();
+        assert_eq!(p[RES_VALUES][1][1], 12.0);
+        assert!(p[RES_ERR].is_null());
+        assert!(p[RES_DQ].is_null());
+        assert!(p[RES_DQ_NAMES].is_null());
+        assert!(p[RES_DQ_TABLE].is_null());
+        assert!(p[RES_UNIT].is_null());
+    }
+
+    #[tokio::test]
+    async fn pixel_table_refuses_even_and_out_of_range_sizes_before_loading_the_image() {
+        let missing = "/nonexistent/pixel_table.fits".to_string();
+        for bad in [4usize, 17, 1, 0, 2, 16] {
+            let err = pixel_table_cmd(missing.clone(), 0, 0, Some(bad)).await.unwrap_err();
+            assert!(err.contains("size must be an odd number between 3 and 15"), "{bad}: {err}");
+            assert!(err.contains(&format!("got {bad}")), "{bad}: {err}");
+        }
+        assert_eq!(pixel_table_size(None).unwrap(), 7);
+        assert_eq!(pixel_table_size(Some(15)).unwrap(), 15);
+        assert_eq!(pixel_table_size(Some(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn dq_name_grid_decodes_set_bits_and_leaves_good_and_off_image_cells_null() {
+        let bits = vec![vec![None, Some(0), Some(1)], vec![Some(6), Some(1 << 20), None]];
+        let names = dq_name_grid(&bits, DqTable::Jwst);
+        assert_eq!(names[0], vec![None, None, Some("DO_NOT_USE".to_string())]);
+        assert_eq!(names[1][0].as_deref(), Some("SATURATED | JUMP_DET"));
+        assert!(names[1][1].is_some());
+        assert_eq!(names[1][2], None);
     }
 
     #[test]

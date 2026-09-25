@@ -5,8 +5,10 @@ import type {
   PixelToWorldResult,
   PointingOverlapResult,
   SkyFrame,
+  SkySeparationResult,
   WcsGridError,
   WcsGridResult,
+  WorldToPixelResult,
 } from "../shared/types/astrometry";
 
 export type {
@@ -15,9 +17,11 @@ export type {
   PixelToWorldResult,
   PointingOverlapResult,
   SkyFrame,
+  SkySeparationResult,
   WcsGrid,
   WcsGridError,
   WcsGridResult,
+  WorldToPixelResult,
 } from "../shared/types/astrometry";
 
 export const DEFAULT_GRID_DENSITY = 3;
@@ -74,4 +78,21 @@ export function pixelToWorld(
   frame: SkyFrame = "icrs",
 ): Promise<PixelToWorldResult> {
   return typedInvoke<PixelToWorldResult>("pixel_to_world_cmd", { path, points, frame });
+}
+
+export function worldToPixel(
+  path: string,
+  points: [number, number][],
+  frame: SkyFrame = "icrs",
+): Promise<WorldToPixelResult> {
+  return typedInvoke<WorldToPixelResult>("world_to_pixel_cmd", { path, points, frame });
+}
+
+export function skySeparation(
+  path: string | null,
+  a: [number, number],
+  b: [number, number],
+  pixel: boolean,
+): Promise<SkySeparationResult> {
+  return typedInvoke<SkySeparationResult>("sky_separation_cmd", { path, a, b, pixel });
 }

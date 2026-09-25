@@ -3,6 +3,7 @@ pub mod sigma_clip;
 pub mod simd;
 
 pub mod fft;
+pub mod gauss_newton;
 pub mod complex;
 pub mod normalization;
 pub mod window;

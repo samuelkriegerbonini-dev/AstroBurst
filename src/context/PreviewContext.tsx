@@ -181,6 +181,7 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
     grid: r.grid === true,
     gridFrame,
     gridDensity: clampGridDensity(finiteOr(r.gridDensity, d.gridDensity)),
+    compass: r.compass === true,
   };
 }
 

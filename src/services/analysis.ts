@@ -1,6 +1,6 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import { toUint8Array, parseFftBuffer } from "../infrastructure/tauri/parsers";
-import type { HistogramData, FftData } from "../shared/types/analysis";
+import type { HistogramData, FftData, TimeSeriesResult, TimeSeriesTarget, PixelTableResult } from "../shared/types/analysis";
 import type { StarDetectionResult } from "../shared/types/processing";
 
 export function computeHistogram(path: string, excludeDq = false): Promise<HistogramData> {
@@ -119,6 +119,16 @@ export interface StarPhotometry {
   mag_ab_err: number | null;
   mag_ab_total: number | null;
   st_mag: number | null;
+  sky_inner: number;
+  sky_outer: number;
+  growth_curve: GrowthPoint[];
+  ee50_radius: number | null;
+  ee80_radius: number | null;
+}
+
+export interface GrowthPoint {
+  r: number;
+  flux: number;
 }
 
 export type FluxConvention =
@@ -155,6 +165,8 @@ export interface PhotometryMeasurement {
 
 export interface PhotometryOptions {
   apertureRadius?: number;
+  annulusInner?: number;
+  annulusOuter?: number;
   gaiaMatch?: boolean;
   excludeDq?: boolean;
   gain?: number;
@@ -177,9 +189,80 @@ export async function measurePhotometry(
     x,
     y,
     apertureRadius: options.apertureRadius ?? null,
+    annulusInner: options.annulusInner ?? null,
+    annulusOuter: options.annulusOuter ?? null,
     gaiaMatch: options.gaiaMatch ?? true,
     excludeDq: options.excludeDq ?? false,
     gain: options.gain ?? null,
   });
   return { ...res, sky: finiteSky(res.sky) };
+}
+
+export interface BatchPhotometryRow {
+  index: number;
+  photometry: StarPhotometry | null;
+  sky: { ra: number; dec: number } | null;
+  error: string | null;
+}
+
+export interface BatchPhotometryResult {
+  rows: BatchPhotometryRow[];
+  photcal: PhotCal | null;
+  warnings: string[];
+  masked: boolean;
+  n_measured: number;
+  n_failed: number;
+  elapsed_ms: number;
+}
+
+export interface BatchPhotometryOptions extends Omit<PhotometryOptions, "gaiaMatch"> {
+  withGrowthCurve?: boolean;
+}
+
+export async function measurePhotometryBatch(
+  path: string,
+  points: [number, number][],
+  options: BatchPhotometryOptions = {},
+): Promise<BatchPhotometryResult> {
+  const res = await typedInvoke<BatchPhotometryResult>("measure_photometry_batch_cmd", {
+    path,
+    points,
+    apertureRadius: options.apertureRadius ?? null,
+    annulusInner: options.annulusInner ?? null,
+    annulusOuter: options.annulusOuter ?? null,
+    gain: options.gain ?? null,
+    excludeDq: options.excludeDq ?? false,
+    withGrowthCurve: options.withGrowthCurve ?? false,
+  });
+  return { ...res, rows: res.rows.map((row) => ({ ...row, sky: finiteSky(row.sky) })) };
+}
+
+export interface TimeSeriesOptions {
+  apertureRadius: number;
+  annulusInner?: number | null;
+  annulusOuter?: number | null;
+  gain?: number | null;
+  excludeDq?: boolean;
+  trackDrift?: boolean;
+}
+
+export function timeSeriesPhotometry(
+  paths: string[],
+  targets: TimeSeriesTarget[],
+  opts: TimeSeriesOptions,
+): Promise<TimeSeriesResult> {
+  return typedInvoke<TimeSeriesResult>("time_series_photometry_cmd", {
+    paths,
+    targets,
+    apertureRadius: opts.apertureRadius,
+    annulusInner: opts.annulusInner ?? null,
+    annulusOuter: opts.annulusOuter ?? null,
+    gain: opts.gain ?? null,
+    excludeDq: opts.excludeDq ?? false,
+    trackDrift: opts.trackDrift ?? true,
+  });
+}
+
+export function pixelTable(path: string, x: number, y: number, size = 7): Promise<PixelTableResult> {
+  return typedInvoke<PixelTableResult>("pixel_table_cmd", { path, x, y, size });
 }

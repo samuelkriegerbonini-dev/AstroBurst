@@ -1131,12 +1131,12 @@ pub fn wcs_north_angle_deg(wcs: &WcsTransform) -> f64 {
     cd[0][1].atan2(cd[1][1]).to_degrees()
 }
 
-fn wcs_is_east_right(wcs: &WcsTransform) -> bool {
+pub(crate) fn wcs_is_east_right(wcs: &WcsTransform) -> bool {
     let (_, _, _, _, cd, _) = wcs.raw_params();
     cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0] > 0.0
 }
 
-fn image_to_sky_angle(angle: f64, north: f64, east_right: bool) -> f64 {
+pub(crate) fn image_to_sky_angle(angle: f64, north: f64, east_right: bool) -> f64 {
     if east_right {
         180.0 - angle + north
     } else {
@@ -1272,6 +1272,224 @@ pub fn shape_to_sky(
         &|px| px * scale,
         &|a| image_to_sky_angle(a, north, east_right),
     )
+}
+
+pub const MIN_SB_BIN_WIDTH: f64 = 0.5;
+pub const MAX_SB_BIN_WIDTH: f64 = 64.0;
+pub const MAX_SB_ELLIPTICITY: f64 = 0.95;
+pub const PETROSIAN_ETA: f64 = 0.2;
+const MAJOR_AXIS_SWAP_DEG: f64 = 90.0;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EllipticalBin {
+    pub sma_inner: f64,
+    pub sma_outer: f64,
+    pub sma: f64,
+    pub count: u64,
+    pub cumulative_count: u64,
+    pub mean: Option<f64>,
+    pub median: Option<f64>,
+    pub std: Option<f64>,
+    pub cumulative_sum: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EllipticalProfile {
+    pub x: f64,
+    pub y: f64,
+    pub sma_max: f64,
+    pub ellipticity: f64,
+    pub angle_deg: f64,
+    pub bin_width: f64,
+    pub background: Option<BackgroundEstimate>,
+    pub bins: Vec<EllipticalBin>,
+}
+
+pub fn ellipse_geometry(shape: &RegionShape) -> Result<(f64, f64, f64, f64, f64), RegionError> {
+    shape.validate()?;
+    match shape {
+        RegionShape::Circle { x, y, r } => Ok((*x, *y, *r, 0.0, 0.0)),
+        RegionShape::Ellipse { x, y, rx, ry, angle } => {
+            if rx >= ry {
+                Ok((*x, *y, *rx, 1.0 - ry / rx, *angle))
+            } else {
+                Ok((*x, *y, *ry, 1.0 - rx / ry, angle + MAJOR_AXIS_SWAP_DEG))
+            }
+        }
+        other => Err(RegionError::Invalid(format!(
+            "surface-brightness profile needs a circle or ellipse region, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+pub fn background_from_shape(
+    arr: &Array2<f32>,
+    shape: &RegionShape,
+    excluded: Option<&Array2<u8>>,
+) -> Result<BackgroundEstimate, RegionError> {
+    shape.validate()?;
+    let mv = shape.masked_values(arr, excluded);
+    background_estimate(mv.values).ok_or_else(|| RegionError::Invalid("background region is empty".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn elliptical_profile(
+    arr: &Array2<f32>,
+    x: f64,
+    y: f64,
+    sma_max: f64,
+    ellipticity: f64,
+    angle_deg: f64,
+    bin_width: f64,
+    background: Option<&RegionShape>,
+    excluded: Option<&Array2<u8>>,
+) -> Result<EllipticalProfile, RegionError> {
+    require_finite("x", x)?;
+    require_finite("y", y)?;
+    require_finite("angle", angle_deg)?;
+    if !sma_max.is_finite() || sma_max <= 0.0 || sma_max > MAX_RADIAL_RADIUS {
+        return Err(RegionError::Invalid(format!("sma_max must be in (0, {MAX_RADIAL_RADIUS}], got {sma_max}")));
+    }
+    if !ellipticity.is_finite() || !(0.0..=MAX_SB_ELLIPTICITY).contains(&ellipticity) {
+        return Err(RegionError::Invalid(format!(
+            "ellipticity must be in [0, {MAX_SB_ELLIPTICITY}], got {ellipticity}"
+        )));
+    }
+    if !bin_width.is_finite() || !(MIN_SB_BIN_WIDTH..=MAX_SB_BIN_WIDTH).contains(&bin_width) {
+        return Err(RegionError::Invalid(format!(
+            "bin_width must be in [{MIN_SB_BIN_WIDTH}, {MAX_SB_BIN_WIDTH}] px, got {bin_width}"
+        )));
+    }
+    let bg = background.map(|shape| background_from_shape(arr, shape, excluded)).transpose()?;
+    let offset = bg.as_ref().map_or(0.0, |b| b.median);
+    let axis_ratio = 1.0 - ellipticity;
+
+    let nbins = (sma_max / bin_width).ceil() as usize;
+    let mut per_bin: Vec<Vec<f32>> = vec![Vec::new(); nbins];
+    let (rows, cols) = arr.dim();
+    let b = RegionShape::Ellipse { x, y, rx: sma_max, ry: sma_max, angle: 0.0 }.bounds();
+    let x0 = b.x0.max(0);
+    let y0 = b.y0.max(0);
+    let x1 = b.x1.min(cols as i64 - 1);
+    let y1 = b.y1.min(rows as i64 - 1);
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let (u, v) = rot_index_to_local(px as f64 - x, py as f64 - y, angle_deg);
+            let r_ell = u.hypot(v / axis_ratio);
+            let k = (r_ell / bin_width).floor() as usize;
+            if k >= nbins {
+                continue;
+            }
+            let (ux, uy) = (px as usize, py as usize);
+            if excluded.is_some_and(|m| m[[uy, ux]] != 0) {
+                continue;
+            }
+            let value = arr[[uy, ux]];
+            if value.is_finite() {
+                per_bin[k].push(value);
+            }
+        }
+    }
+
+    let mut cumulative_sum = 0.0;
+    let mut cumulative_count = 0u64;
+    let bins = per_bin
+        .into_iter()
+        .enumerate()
+        .map(|(k, mut vals)| {
+            let sma_inner = k as f64 * bin_width;
+            let sma_outer = (k + 1) as f64 * bin_width;
+            let sma = (k as f64 + 0.5) * bin_width;
+            let count = vals.len() as u64;
+            cumulative_count += count;
+            if count == 0 {
+                return EllipticalBin {
+                    sma_inner,
+                    sma_outer,
+                    sma,
+                    count,
+                    cumulative_count,
+                    mean: None,
+                    median: None,
+                    std: None,
+                    cumulative_sum,
+                };
+            }
+            let sum: f64 = vals.iter().map(|&v| v as f64 - offset).sum();
+            cumulative_sum += sum;
+            let mean = sum / count as f64;
+            let std = sample_std(&vals, mean + offset);
+            let median = exact_median_mut(&mut vals) - offset;
+            EllipticalBin {
+                sma_inner,
+                sma_outer,
+                sma,
+                count,
+                cumulative_count,
+                mean: Some(mean),
+                median: Some(median),
+                std: Some(std),
+                cumulative_sum,
+            }
+        })
+        .collect();
+
+    Ok(EllipticalProfile { x, y, sma_max, ellipticity, angle_deg, bin_width, background: bg, bins })
+}
+
+pub fn encircled_radius_from_bins(bins: &[EllipticalBin], fraction: f64) -> Option<f64> {
+    let total = bins.last()?.cumulative_sum;
+    if total.is_nan() || total <= 0.0 || !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
+        return None;
+    }
+    let mut prev_radius = 0.0;
+    let mut prev_fraction = 0.0;
+    for bin in bins {
+        let enclosed = bin.cumulative_sum / total;
+        if enclosed >= fraction {
+            let span = enclosed - prev_fraction;
+            let t = if span > 0.0 { (fraction - prev_fraction) / span } else { 1.0 };
+            return Some(prev_radius + t * (bin.sma_outer - prev_radius));
+        }
+        prev_radius = bin.sma_outer;
+        prev_fraction = enclosed;
+    }
+    None
+}
+
+fn petrosian_eta(bins: &[EllipticalBin], index: usize) -> Option<f64> {
+    let bin = &bins[index];
+    let mean = bin.mean?;
+    let (prev_sum, prev_count) = match index.checked_sub(1) {
+        Some(p) => (bins[p].cumulative_sum, bins[p].cumulative_count),
+        None => (0.0, 0),
+    };
+    let interior_count = prev_count + bin.cumulative_count;
+    if interior_count == 0 {
+        return None;
+    }
+    let interior_mean = (prev_sum + bin.cumulative_sum) / interior_count as f64;
+    (interior_mean > 0.0).then(|| mean / interior_mean)
+}
+
+pub fn petrosian_radius(bins: &[EllipticalBin], eta: f64) -> Option<f64> {
+    if !eta.is_finite() || eta <= 0.0 {
+        return None;
+    }
+    let mut previous: Option<(f64, f64)> = None;
+    for index in 0..bins.len() {
+        let Some(ratio) = petrosian_eta(bins, index) else { continue };
+        let sma = bins[index].sma;
+        if ratio < eta {
+            let (prev_sma, prev_ratio) = previous?;
+            let span = prev_ratio - ratio;
+            let t = if span > 0.0 { (prev_ratio - eta) / span } else { 1.0 };
+            return Some(prev_sma + t * (sma - prev_sma));
+        }
+        previous = Some((sma, ratio));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2169,5 +2387,170 @@ mod tests {
         let wcs = WcsTransform::from_header(&header_with_cd(north_up_cd())).unwrap();
         let far = RegionShape::Circle { x: 330.0, y: -2.0, r: 3.5 };
         assert_eq!(shape_to_pixel(&far, RegionSystem::Icrs, Some(&wcs)), Err(RegionError::OffImage));
+    }
+
+    const SB_FRAME: usize = 256;
+    const SB_CENTRE: f64 = 128.0;
+    const SB_SCALE_LENGTH: f64 = 12.0;
+    const SB_PEAK: f64 = 1000.0;
+    const SB_AXIS_RATIO: f64 = 0.6;
+    const SB_ANGLE_DEG: f64 = 30.0;
+    const R50_PER_SCALE_LENGTH: f64 = 1.678;
+    const PETROSIAN_PER_EFFECTIVE_RADIUS: f64 = 2.16;
+
+    fn exponential_disk(axis_ratio: f64, angle_deg: f64) -> Array2<f32> {
+        Array2::from_shape_fn((SB_FRAME, SB_FRAME), |(y, x)| {
+            let (u, v) = rot_index_to_local(x as f64 - SB_CENTRE, y as f64 - SB_CENTRE, angle_deg);
+            let r_ell = u.hypot(v / axis_ratio);
+            (SB_PEAK * (-r_ell / SB_SCALE_LENGTH).exp()) as f32
+        })
+    }
+
+    fn inclined_disk_profile(shape: &RegionShape) -> EllipticalProfile {
+        let arr = exponential_disk(SB_AXIS_RATIO, SB_ANGLE_DEG);
+        let (x, y, sma, e, angle) = ellipse_geometry(shape).unwrap();
+        elliptical_profile(&arr, x, y, sma, e, angle, 1.0, None, None).unwrap()
+    }
+
+    #[test]
+    fn elliptical_profile_recovers_the_scale_length_of_an_inclined_exponential_disk() {
+        let sma_max = 64.0;
+        let shape = RegionShape::Ellipse {
+            x: SB_CENTRE,
+            y: SB_CENTRE,
+            rx: sma_max,
+            ry: sma_max * SB_AXIS_RATIO,
+            angle: SB_ANGLE_DEG,
+        };
+        let profile = inclined_disk_profile(&shape);
+        assert_eq!(profile.bins.len(), 64);
+        assert!((profile.ellipticity - (1.0 - SB_AXIS_RATIO)).abs() < 1e-12);
+        assert_eq!(profile.angle_deg, SB_ANGLE_DEG);
+
+        let fit: Vec<(f64, f64)> = profile
+            .bins
+            .iter()
+            .filter(|b| b.sma >= 4.0 && b.sma <= 60.0)
+            .map(|b| (b.sma, b.mean.unwrap().ln()))
+            .collect();
+        let n = fit.len() as f64;
+        let mean_x = fit.iter().map(|p| p.0).sum::<f64>() / n;
+        let mean_y = fit.iter().map(|p| p.1).sum::<f64>() / n;
+        let sxy: f64 = fit.iter().map(|p| (p.0 - mean_x) * (p.1 - mean_y)).sum();
+        let sxx: f64 = fit.iter().map(|p| (p.0 - mean_x).powi(2)).sum();
+        let h = -sxx / sxy;
+        assert!((h - SB_SCALE_LENGTH).abs() / SB_SCALE_LENGTH < 0.02, "fitted scale length {h}");
+
+        for b in profile.bins.iter().filter(|b| b.sma > 3.0) {
+            let expected = SB_PEAK * (-b.sma / SB_SCALE_LENGTH).exp();
+            let mean = b.mean.unwrap();
+            assert!((mean - expected).abs() / expected < 0.01, "sma {} mean {mean} expected {expected}", b.sma);
+            assert!(b.count > 0 && b.cumulative_count >= b.count);
+        }
+        let last = profile.bins.last().unwrap();
+        assert_eq!(last.cumulative_count, profile.bins.iter().map(|b| b.count).sum::<u64>());
+    }
+
+    #[test]
+    fn ellipse_geometry_swaps_the_axes_so_a_tall_ellipse_gives_the_same_bins() {
+        let sma_max = 64.0;
+        let wide = RegionShape::Ellipse {
+            x: SB_CENTRE,
+            y: SB_CENTRE,
+            rx: sma_max,
+            ry: sma_max * SB_AXIS_RATIO,
+            angle: SB_ANGLE_DEG,
+        };
+        let tall = RegionShape::Ellipse {
+            x: SB_CENTRE,
+            y: SB_CENTRE,
+            rx: sma_max * SB_AXIS_RATIO,
+            ry: sma_max,
+            angle: SB_ANGLE_DEG - 90.0,
+        };
+        assert_eq!(ellipse_geometry(&wide).unwrap(), ellipse_geometry(&tall).unwrap());
+        assert_eq!(inclined_disk_profile(&wide).bins, inclined_disk_profile(&tall).bins);
+        assert_eq!(
+            ellipse_geometry(&RegionShape::Circle { x: 1.0, y: 2.0, r: 3.0 }).unwrap(),
+            (1.0, 2.0, 3.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn encircled_and_petrosian_radii_of_a_pure_exponential_match_the_analytic_multiples() {
+        let arr = exponential_disk(1.0, 0.0);
+        let sma_max = 8.0 * SB_SCALE_LENGTH;
+        let profile = elliptical_profile(&arr, SB_CENTRE, SB_CENTRE, sma_max, 0.0, 0.0, 1.0, None, None).unwrap();
+        let r50 = encircled_radius_from_bins(&profile.bins, 0.5).unwrap();
+        let expected_r50 = R50_PER_SCALE_LENGTH * SB_SCALE_LENGTH;
+        assert!((r50 - expected_r50).abs() / expected_r50 < 0.03, "r50 {r50} expected {expected_r50}");
+        let petrosian = petrosian_radius(&profile.bins, PETROSIAN_ETA).unwrap();
+        let expected_petrosian = PETROSIAN_PER_EFFECTIVE_RADIUS * expected_r50;
+        assert!(
+            (petrosian - expected_petrosian).abs() / expected_petrosian < 0.03,
+            "petrosian {petrosian} expected {expected_petrosian}"
+        );
+        let r80 = encircled_radius_from_bins(&profile.bins, 0.8).unwrap();
+        let r90 = encircled_radius_from_bins(&profile.bins, 0.9).unwrap();
+        assert!(r50 < r80 && r80 < r90 && r90 < sma_max, "{r50} {r80} {r90}");
+        assert_eq!(encircled_radius_from_bins(&profile.bins, 0.0), None);
+        assert_eq!(encircled_radius_from_bins(&profile.bins, 1.5), None);
+        assert_eq!(encircled_radius_from_bins(&[], 0.5), None);
+    }
+
+    #[test]
+    fn elliptical_profile_drops_excluded_pixels_from_the_count_but_not_the_mean() {
+        let arr = Array2::<f32>::from_elem((64, 64), 5.0);
+        let excluded = Array2::from_shape_fn((64, 64), |(y, x)| u8::from((x + y) % 3 == 0));
+        let full = elliptical_profile(&arr, 32.0, 32.0, 10.0, 0.2, 45.0, 2.0, None, None).unwrap();
+        let masked = elliptical_profile(&arr, 32.0, 32.0, 10.0, 0.2, 45.0, 2.0, None, Some(&excluded)).unwrap();
+        assert_eq!(full.bins.len(), 5);
+        assert_eq!(masked.bins.len(), 5);
+        for (a, b) in full.bins.iter().zip(&masked.bins) {
+            assert!(b.count < a.count, "bin {} count {} vs {}", a.sma, b.count, a.count);
+            assert_eq!(a.mean, Some(5.0));
+            assert_eq!(b.mean, Some(5.0));
+            assert_eq!(b.median, Some(5.0));
+            assert_eq!(b.std, Some(0.0));
+            assert_eq!(a.sma_outer - a.sma_inner, 2.0);
+        }
+        assert_eq!(petrosian_radius(&full.bins, PETROSIAN_ETA), None);
+        let empty = elliptical_profile(&Array2::<f32>::zeros((0, 0)), 3.0, 3.0, 4.0, 0.0, 0.0, 1.0, None, None).unwrap();
+        assert!(empty.bins.iter().all(|b| b.count == 0 && b.mean.is_none()));
+        assert_eq!(encircled_radius_from_bins(&empty.bins, 0.5), None);
+    }
+
+    #[test]
+    fn elliptical_profile_subtracts_the_median_of_any_background_region() {
+        let arr = Array2::from_shape_fn((64, 64), |(y, x)| if (x as f64 - 32.0).hypot(y as f64 - 32.0) < 6.0 { 12.0 } else { 2.0 });
+        let bg = RegionShape::Box { x: 10.0, y: 10.0, width: 8.0, height: 8.0, angle: 0.0 };
+        let profile = elliptical_profile(&arr, 32.0, 32.0, 4.0, 0.0, 0.0, 1.0, Some(&bg), None).unwrap();
+        assert_eq!(profile.background.as_ref().map(|b| b.median), Some(2.0));
+        assert!(profile.bins.iter().all(|b| b.mean == Some(10.0) && b.median == Some(10.0)));
+        let off = RegionShape::Circle { x: 500.0, y: 500.0, r: 2.0 };
+        let err = elliptical_profile(&arr, 32.0, 32.0, 4.0, 0.0, 0.0, 1.0, Some(&off), None).unwrap_err();
+        assert_eq!(err, RegionError::Invalid("background region is empty".into()));
+    }
+
+    #[test]
+    fn elliptical_profile_refuses_out_of_range_bin_widths_and_ellipse_geometry_refuses_boxes() {
+        let arr = Array2::<f32>::from_elem((16, 16), 1.0);
+        for bin_width in [0.25, 100.0, f64::NAN] {
+            let err = elliptical_profile(&arr, 8.0, 8.0, 5.0, 0.0, 0.0, bin_width, None, None).unwrap_err();
+            assert!(err.to_string().contains("bin_width must be in [0.5, 64] px"), "{err}");
+        }
+        for ellipticity in [-0.1, 0.96, f64::INFINITY] {
+            let err = elliptical_profile(&arr, 8.0, 8.0, 5.0, ellipticity, 0.0, 1.0, None, None).unwrap_err();
+            assert!(err.to_string().contains("ellipticity must be in [0, 0.95]"), "{err}");
+        }
+        assert!(elliptical_profile(&arr, 8.0, 8.0, 0.0, 0.0, 0.0, 1.0, None, None).is_err());
+        assert!(elliptical_profile(&arr, 8.0, 8.0, MAX_RADIAL_RADIUS + 1.0, 0.0, 0.0, 1.0, None, None).is_err());
+        assert!(elliptical_profile(&arr, f64::NAN, 8.0, 5.0, 0.0, 0.0, 1.0, None, None).is_err());
+        assert!(elliptical_profile(&arr, 8.0, 8.0, 5.0, 0.0, f64::NAN, 1.0, None, None).is_err());
+        let boxed = RegionShape::Box { x: 8.0, y: 8.0, width: 4.0, height: 2.0, angle: 0.0 };
+        let err = ellipse_geometry(&boxed).unwrap_err();
+        assert!(err.to_string().contains("needs a circle or ellipse region, got box"), "{err}");
+        assert!(ellipse_geometry(&RegionShape::Ellipse { x: 8.0, y: 8.0, rx: 0.0, ry: 2.0, angle: 0.0 }).is_err());
+        assert_eq!(petrosian_radius(&[], PETROSIAN_ETA), None);
     }
 }

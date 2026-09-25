@@ -1,13 +1,14 @@
 import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "react";
 import { Activity, BarChart3, CircleDot, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
+import LineMeasurementSection from "./LineMeasurementSection";
 import SpectralAxisControls from "./SpectralAxisControls";
 import {
   collapseCubeRange,
   computeMomentMaps,
   getCubeSpectrumRegion,
 } from "../../services/cube";
-import { getSpectralAxis } from "../../services/spectral";
+import { getSpectralAxis, measureSpectralLine } from "../../services/spectral";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -29,15 +30,34 @@ import { COLLAPSE_RANGE_MODES, MOMENT_KINDS } from "../../shared/types/cube";
 import type { Region, RegionShape } from "../../shared/types/regions";
 import type {
   CorrectionFrame,
+  LineMeasurement,
+  LineModel,
   RadialVelocityCorrectionResult,
   SpectralAxisInfo,
   SpectralAxisMode,
+  SpectrumSource,
   VelocityConvention,
 } from "../../shared/types/spectral";
+import {
+  lineOverlayPolylines,
+  measurementAxisValues,
+  spectrumSourceKey,
+  type PlotPoint,
+} from "../../utils/lineMeasure";
 import { applyCorrectionKms, formatAxis, formatAxisValue } from "../../utils/spectralAxis";
+import {
+  FRAME_KEY_HINT,
+  channelFromPlotPixel,
+  clampFrame,
+  formatFrameDelta,
+  formatFrameLabel,
+  frameAxisValue,
+  frameFromKey,
+} from "../../utils/cubeNavigation";
 import { formatAxisTick } from "../../utils/plotScale";
 import {
   axisValueToPixel,
+  channelAxisValue,
   channelRangeFromDrag,
   defaultContinuumWindows,
   formatRangeLabel,
@@ -68,7 +88,7 @@ interface SpectroscopyPanelProps {
   elapsed?: number;
   error?: string | null;
   filePath?: string;
-  onFramePreview?: (previewUrl: string, frameIndex: number) => void;
+  onFramePreview?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
   onCubeResult?: (result: CubeResult) => void;
 }
 
@@ -79,6 +99,24 @@ interface AxisX {
   values: number[] | null;
   label: string;
   unit: string;
+}
+
+interface LineRun {
+  key: string;
+  measurementAxis: number[];
+  result: LineMeasurement;
+}
+
+function strokeDashed(ctx: CanvasRenderingContext2D, points: PlotPoint[], color: string, dash: number[]) {
+  if (points.length < 2) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.setLineDash(dash);
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function arrayMinMax(arr: number[]): [number, number] {
@@ -128,6 +166,14 @@ const PAD = { top: 10, bottom: 24, left: 50, right: 12 } as const;
 const N_GRID_Y = 4;
 const DEFAULT_SNR = 3;
 const LABEL_MAPPING_WIDTH = 400;
+const MEASURED_SERIES_VIEW: RegionView = "sum";
+const LINE_CONTINUUM_COLOR = "rgba(245,158,11,0.9)";
+const LINE_MODEL_COLOR = "rgba(250,250,250,0.9)";
+const LINE_CONTINUUM_DASH = [5, 3];
+const LINE_MODEL_DASH = [2, 2];
+const FRAME_MARKER_COLOR = "rgba(167,139,250,0.95)";
+const FRAME_MARKER_HALO = "rgba(9,9,11,0.8)";
+const FRAME_MARKER_LABEL_PAD = 3;
 const BRUSH_COLORS: Record<BrushTarget, string> = {
   range: "rgba(168,85,247,0.22)",
   left: "rgba(245,158,11,0.18)",
@@ -163,6 +209,7 @@ function SpectroscopyPanel({
   const collapseSeqRef = useRef(0);
   const rangeSeqRef = useRef(0);
   const momentSeqRef = useRef(0);
+  const lineSeqRef = useRef(0);
   const previousFileRef = useRef<string | undefined>(filePath);
 
   const { region, regionLoading, regionError } = useSpectrum();
@@ -196,12 +243,24 @@ function SpectroscopyPanel({
   const [momentError, setMomentError] = useState<string | null>(null);
   const [momentResult, setMomentResult] = useState<MomentMapsResult | null>(null);
   const [momentKind, setMomentKind] = useState<MomentKind>("m0");
+  const [lineModel, setLineModel] = useState<LineModel>("gaussian");
+  const [lineResult, setLineResult] = useState<LineRun | null>(null);
+  const [lineLoading, setLineLoading] = useState(false);
+  const [lineError, setLineError] = useState<string | null>(null);
+  const [frame, setFrame] = useState(0);
+  const [frameFile, setFrameFile] = useState(filePath);
+  const [loopPlayback, setLoopPlayback] = useState(false);
+  if (frameFile !== filePath) {
+    setFrameFile(filePath);
+    setFrame(0);
+  }
 
   useEffect(() => {
     regionSeqRef.current++;
     collapseSeqRef.current++;
     rangeSeqRef.current++;
     momentSeqRef.current++;
+    lineSeqRef.current++;
     setRange(null);
     setWindows(null);
     setMomentResult(null);
@@ -212,6 +271,9 @@ function SpectroscopyPanel({
     setCollapseLoading(false);
     setRangeLoading(false);
     setMomentLoading(false);
+    setLineResult(null);
+    setLineError(null);
+    setLineLoading(false);
     if (previousFileRef.current !== filePath) {
       previousFileRef.current = filePath;
       setRegionView("sum");
@@ -246,6 +308,7 @@ function SpectroscopyPanel({
   const n = series.length;
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
   const channelCount = totalFrames > 0 ? totalFrames : n;
+  const frameLinked = totalFrames > 1;
 
   const formatted = useMemo(() => formatAxis(axis, mode, restUm, convention), [axis, mode, restUm, convention]);
 
@@ -264,6 +327,13 @@ function SpectroscopyPanel({
     return { values: null, label: "Channel", unit: "ch" };
   }, [formatted, n, mode, correction, correctionResult, wavelengths, cubeDims]);
 
+  const frameLabel = useMemo(
+    () => (frameLinked ? formatFrameLabel(frame, totalFrames, frameAxisValue(frame, axisX.values), axisX.unit) : null),
+    [frameLinked, frame, totalFrames, axisX],
+  );
+
+  const requestFrame = useCallback((idx: number) => setFrame(clampFrame(idx, totalFrames)), [totalFrames]);
+
   const plotParams = useMemo(() => {
     if (n === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const [xMin, xMax] = axisX.values ? arrayMinMax(axisX.values) : [0, n - 1];
@@ -272,6 +342,16 @@ function SpectroscopyPanel({
     const yPad = span > 0 ? span * 0.05 : Math.max(Math.abs(rawYMax), 1) * 0.05;
     return { xMin, xMax, yMin: rawYMin - yPad, yMax: rawYMax + yPad };
   }, [series, axisX, n]);
+
+  const currentSource = useMemo<SpectrumSource | null>(() => {
+    if (region) {
+      if (!picked.target) return null;
+      return { kind: "region", shape: picked.target.shape, background: picked.background?.shape ?? null };
+    }
+    return pixelCoord ? { kind: "pixel", x: pixelCoord.x, y: pixelCoord.y } : null;
+  }, [region, picked, pixelCoord]);
+  const currentSpectrumKey = currentSource ? spectrumSourceKey(currentSource, region ? regionView : MEASURED_SERIES_VIEW) : null;
+  const lineOverlayVisible = lineResult !== null && currentSpectrumKey === lineResult.key;
 
   const mappingFor = useCallback(
     (width: number): PlotMapping => ({
@@ -381,6 +461,32 @@ function SpectroscopyPanel({
       const live = channelRangeFromDrag(drag.start, drag.current, m);
       if (live) shade(live, brushTarget === "range" ? "rgba(168,85,247,0.35)" : "rgba(245,158,11,0.3)");
     }
+    if (lineResult && lineOverlayVisible) {
+      const frame = { top: plotTop, height: plotBottom - plotTop, yMin: plotParams.yMin, yMax: plotParams.yMax };
+      const curves = lineOverlayPolylines(lineResult.result, lineResult.measurementAxis, m, frame);
+      strokeDashed(ctx, curves.continuum, LINE_CONTINUUM_COLOR, LINE_CONTINUUM_DASH);
+      strokeDashed(ctx, curves.model, LINE_MODEL_COLOR, LINE_MODEL_DASH);
+    }
+    if (frameLinked && frame >= 0 && frame < n) {
+      const fx = axisValueToPixel(channelAxisValue(frame, m), m);
+      if (Number.isFinite(fx) && fx >= PAD.left && fx <= W - PAD.right) {
+        ctx.strokeStyle = FRAME_MARKER_COLOR;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(fx, plotTop);
+        ctx.lineTo(fx, plotBottom);
+        ctx.stroke();
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        const markerText = `ch ${frame}`;
+        const mw = ctx.measureText(markerText).width;
+        const mx = Math.min(Math.max(fx - mw / 2, PAD.left), W - PAD.right - mw);
+        ctx.fillStyle = FRAME_MARKER_HALO;
+        ctx.fillRect(mx - FRAME_MARKER_LABEL_PAD, plotTop, mw + FRAME_MARKER_LABEL_PAD * 2, 12);
+        ctx.fillStyle = FRAME_MARKER_COLOR;
+        ctx.fillText(markerText, mx, plotTop + 9);
+      }
+    }
 
     if (hoveredIdx === null || hoveredIdx < 0 || hoveredIdx >= n) return;
     const plotH = H - PAD.top - PAD.bottom;
@@ -411,9 +517,10 @@ function SpectroscopyPanel({
     ctx.fill();
 
     ctx.font = "10px 'JetBrains Mono', monospace";
+    const delta = frameLinked ? `, ${formatFrameDelta(hoveredIdx, frame)}` : "";
     const label = axisX.values
-      ? `ch ${hoveredIdx} · ${formatAxisValue(x, axisX.unit)} ${axisX.unit} → ${y.toFixed(3)}`
-      : `ch ${hoveredIdx} → ${y.toFixed(3)}`;
+      ? `ch ${hoveredIdx}${delta} · ${formatAxisValue(x, axisX.unit)} ${axisX.unit} → ${y.toFixed(3)}`
+      : `ch ${hoveredIdx}${delta} → ${y.toFixed(3)}`;
     const tw = ctx.measureText(label).width;
     const tx = Math.min(cx + 8, W - tw - 8);
     const ty = Math.max(cy - 8, 16);
@@ -421,7 +528,7 @@ function SpectroscopyPanel({
     ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
     ctx.fillStyle = "#fafafa";
     ctx.fillText(label, tx, ty);
-  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget]);
+  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, frame]);
 
   useEffect(() => {
     drawPlot();
@@ -467,9 +574,32 @@ function SpectroscopyPanel({
       const px = canvasX(e);
       if (px === null || n === 0 || e.button !== 0) return;
       e.preventDefault();
+      containerRef.current?.focus({ preventScroll: true });
       setDrag({ start: px, current: px });
     },
     [canvasX, n],
+  );
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      const px = canvasX(e);
+      if (!canvas || px === null || n === 0 || !frameLinked) return;
+      const channel = channelFromPlotPixel(px, mappingFor(canvas.width), totalFrames);
+      if (channel !== null) requestFrame(channel);
+    },
+    [canvasX, n, frameLinked, mappingFor, totalFrames, requestFrame],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!frameLinked) return;
+      const next = frameFromKey(e.key, e.shiftKey, frame, totalFrames);
+      if (next === null) return;
+      e.preventDefault();
+      requestFrame(next);
+    },
+    [frameLinked, frame, totalFrames, requestFrame],
   );
 
   const commitBrush = useCallback(
@@ -628,6 +758,40 @@ function SpectroscopyPanel({
     }
   }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, showMoment]);
 
+  const handleMeasureLine = useCallback(async () => {
+    if (!filePath || !range || !currentSource) return;
+    if (windows && !windowsAreValid(windows, channelCount)) {
+      setLineError(`continuum windows must be channel ranges inside 0-${Math.max(channelCount - 1, 0)}`);
+      return;
+    }
+    const measurementAxis = measurementAxisValues(axis);
+    if (!measurementAxis) {
+      setLineError("no spectral axis for this cube: the line measurement needs a wavelength, frequency or velocity axis");
+      return;
+    }
+    const seq = ++lineSeqRef.current;
+    setLineLoading(true);
+    setLineError(null);
+    try {
+      const shift = correction !== "none" && correctionResult ? applyCorrectionKms([0], correctionResult, correction)[0] : null;
+      const result = await measureSpectralLine(filePath, currentSource, {
+        z0: range.z0,
+        z1: range.z1,
+        continuum: windows,
+        restUm,
+        convention,
+        model: lineModel,
+        velocityShiftKms: shift,
+      });
+      if (lineSeqRef.current !== seq) return;
+      setLineResult({ key: spectrumSourceKey(currentSource, MEASURED_SERIES_VIEW), measurementAxis, result });
+    } catch (e) {
+      if (lineSeqRef.current === seq) setLineError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (lineSeqRef.current === seq) setLineLoading(false);
+    }
+  }, [filePath, range, currentSource, windows, channelCount, axis, correction, correctionResult, restUm, convention, lineModel]);
+
   const updateRangeEdge = useCallback(
     (edge: "z0" | "z1", text: string) => {
       const value = parseChannelInput(text, channelCount);
@@ -666,6 +830,14 @@ function SpectroscopyPanel({
   const regionAvailable = !!filePath && !!picked.target && totalFrames > 1;
   const velocityReady = mode === "velocity" || axis?.kind === "vrad" || axis?.kind === "vopt" || axis?.kind === "velo";
   const momentsReady = !!range && (restUm !== null || (axis?.rest_wavelength_um ?? null) !== null || velocityReady);
+  const lineHint = !range
+    ? "brush a line range first"
+    : !axis
+      ? "no spectral axis for this cube"
+      : !currentSource
+        ? "click the preview or pick a region first"
+        : null;
+  const lineDisabled = lineLoading || lineHint !== null || !filePath;
 
   const regionButton = regionAvailable && (
     <button
@@ -764,7 +936,13 @@ function SpectroscopyPanel({
         </p>
       )}
 
-      <div ref={containerRef} className="p-2">
+      <div
+        ref={containerRef}
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        title={frameLinked ? FRAME_KEY_HINT : undefined}
+        className="p-2 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-violet-500/50"
+      >
         {isLoading ? (
           <div
             className="flex items-center justify-center rounded-md"
@@ -786,6 +964,7 @@ function SpectroscopyPanel({
               onMouseDown={handleMouseDown}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseLeave}
+              onDoubleClick={handleDoubleClick}
             />
             <canvas
               ref={overlayRef}
@@ -1045,8 +1224,30 @@ function SpectroscopyPanel({
       )}
 
       {filePath && cubeDims && totalFrames > 1 && (
+        <LineMeasurementSection
+          result={lineResult?.result ?? null}
+          loading={lineLoading}
+          error={lineError}
+          model={lineModel}
+          onModelChange={setLineModel}
+          onMeasure={handleMeasureLine}
+          disabled={lineDisabled}
+          disabledHint={lineHint}
+        />
+      )}
+
+      {filePath && cubeDims && totalFrames > 1 && (
         <div className="px-2 pb-2">
-          <CubeFrameNav filePath={filePath} totalFrames={totalFrames} onFrameChange={onFramePreview} />
+          <CubeFrameNav
+            filePath={filePath}
+            totalFrames={totalFrames}
+            frame={frame}
+            onFrameRequest={requestFrame}
+            frameLabel={frameLabel}
+            loop={loopPlayback}
+            onLoopChange={setLoopPlayback}
+            onFrameChange={onFramePreview}
+          />
         </div>
       )}
     </div>

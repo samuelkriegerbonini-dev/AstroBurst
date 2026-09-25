@@ -80,6 +80,7 @@ declare module "lucide-react" {
   export const Play: Icon;
   export const Plus: Icon;
   export const RefreshCw: Icon;
+  export const Repeat: Icon;
   export const RotateCcw: Icon;
   export const Save: Icon;
   export const Search: Icon;

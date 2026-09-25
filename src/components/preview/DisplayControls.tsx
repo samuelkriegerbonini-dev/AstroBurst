@@ -262,6 +262,15 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
           />
           <span className={LABEL_CLASS}>grid</span>
         </label>
+        <label className="flex items-center gap-1 cursor-pointer" title="north/east compass and scale bar overlay (needs a WCS)">
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            checked={display.compass}
+            onChange={(e) => setDisplay({ compass: e.target.checked })}
+          />
+          <span className={LABEL_CLASS}>compass</span>
+        </label>
 
         {display.grid && (
           <>

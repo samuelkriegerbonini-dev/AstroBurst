@@ -212,33 +212,26 @@ pub async fn wcs(
         }
     };
 
-    let (crpix1, crpix2, crval1, crval2, cd, proj) = wcs.raw_params();
+    let (crpix1, crpix2, crval1, crval2, cd, _) = wcs.raw_params();
     let (cd11, cd12, cd21, cd22) = (cd[0][0], cd[0][1], cd[1][0], cd[1][1]);
-
-    let scale_x = (cd11 * cd11 + cd21 * cd21).sqrt() * 3600.0;
-    let scale_y = (cd12 * cd12 + cd22 * cd22).sqrt() * 3600.0;
-
-    let rotation_deg = (-cd12).atan2(cd22).to_degrees();
-
-    let det = cd11 * cd22 - cd12 * cd21;
-    let flipped = det > 0.0;
-
-    let (sip_a, sip_b) = wcs.sip_forward_terms();
-    let sip_present = sip_a.is_some() || sip_b.is_some();
+    let (rows, cols) = entry.arr().dim();
+    let orientation = wcs.orientation(cols, rows);
 
     Ok(Json(json!({
         "ref": target,
         "present": true,
-        "projection": proj,
+        "projection": orientation.projection,
         "crpix": [crpix1, crpix2],
         "crval": [crval1, crval2],
         "cd": [[cd11, cd12], [cd21, cd22]],
-        "pixel_scale_arcsec": (scale_x + scale_y) / 2.0,
-        "pixel_scale_x_arcsec": scale_x,
-        "pixel_scale_y_arcsec": scale_y,
-        "rotation_deg": rotation_deg,
-        "flipped": flipped,
-        "parity": if flipped { "flipped" } else { "normal" },
-        "sip_present": sip_present,
+        "pixel_scale_arcsec": (orientation.pixel_scale_x_arcsec + orientation.pixel_scale_y_arcsec) / 2.0,
+        "pixel_scale_x_arcsec": orientation.pixel_scale_x_arcsec,
+        "pixel_scale_y_arcsec": orientation.pixel_scale_y_arcsec,
+        "rotation_deg": orientation.rotation_deg,
+        "flipped": orientation.flipped,
+        "parity": if orientation.flipped { "flipped" } else { "normal" },
+        "sip_present": orientation.sip_present,
+        "north_vec": orientation.north_vec,
+        "east_vec": orientation.east_vec,
     })))
 }

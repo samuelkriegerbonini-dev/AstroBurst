@@ -5,8 +5,8 @@ use crate::core::imaging::dq_flags::DqTable;
 use crate::math::exact_median_f64;
 use crate::types::constants::{
     HEADER_BUNIT, RES_BITS, RES_BOX, RES_DQ, RES_ERR, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN,
-    RES_NAMES, RES_NEIGHBORHOOD, RES_N_NAN, RES_N_PIXELS, RES_TABLE, RES_TEXT, RES_UNIT,
-    RES_VALUE, RES_X, RES_Y,
+    RES_NAMES, RES_NEIGHBORHOOD, RES_N_FINITE, RES_N_NAN, RES_N_PIXELS, RES_TABLE, RES_TEXT,
+    RES_UNIT, RES_VALUE, RES_X, RES_Y,
 };
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
@@ -200,6 +200,110 @@ pub fn probe_pixel(
     })
 }
 
+pub fn grid_origin(x: i64, y: i64, size: usize) -> (i64, i64) {
+    let half = (size / 2) as i64;
+    (x.saturating_sub(half), y.saturating_sub(half))
+}
+
+fn grid_map<T>(
+    rows: usize,
+    cols: usize,
+    x: i64,
+    y: i64,
+    size: usize,
+    cell: impl Fn(usize, usize) -> Option<T>,
+) -> Vec<Vec<Option<T>>> {
+    let (x0, y0) = grid_origin(x, y, size);
+    (0..size)
+        .map(|dy| {
+            (0..size)
+                .map(|dx| {
+                    let xx = x0.checked_add(dx as i64)?;
+                    let yy = y0.checked_add(dy as i64)?;
+                    let (r, c) = in_bounds(rows, cols, xx, yy)?;
+                    cell(r, c)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn pixel_grid(arr: &Array2<f32>, x: i64, y: i64, size: usize) -> Vec<Vec<Option<f32>>> {
+    let (rows, cols) = arr.dim();
+    grid_map(rows, cols, x, y, size, |r, c| {
+        let v = arr[[r, c]];
+        v.is_finite().then_some(v)
+    })
+}
+
+pub fn int_grid(bits: &Array2<u32>, x: i64, y: i64, size: usize) -> Vec<Vec<Option<u32>>> {
+    let (rows, cols) = bits.dim();
+    grid_map(rows, cols, x, y, size, |r, c| Some(bits[[r, c]]))
+}
+
+pub fn int_value_grid(plane: &IntPlane, x: i64, y: i64, size: usize) -> Vec<Vec<Option<i64>>> {
+    let (rows, cols) = plane.bits.dim();
+    grid_map(rows, cols, x, y, size, |r, c| Some(plane.value_at(r, c)))
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GridStats {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub mean: Option<f64>,
+    pub median: Option<f64>,
+    pub n_finite: u64,
+    pub n_nan: u64,
+}
+
+pub fn grid_stats(arr: &Array2<f32>, x: i64, y: i64, size: usize) -> GridStats {
+    let (rows, cols) = arr.dim();
+    let mut finite: Vec<f64> = Vec::with_capacity(size * size);
+    let mut n_nan: u64 = 0;
+    for row in grid_map(rows, cols, x, y, size, |r, c| Some(arr[[r, c]] as f64)) {
+        for v in row.into_iter().flatten() {
+            if v.is_finite() {
+                finite.push(v);
+            } else {
+                n_nan += 1;
+            }
+        }
+    }
+    let n_finite = finite.len() as u64;
+    if n_finite == 0 {
+        return GridStats {
+            min: None,
+            max: None,
+            mean: None,
+            median: None,
+            n_finite,
+            n_nan,
+        };
+    }
+    let min = finite.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mean = finite.iter().sum::<f64>() / n_finite as f64;
+    GridStats {
+        min: Some(min),
+        max: Some(max),
+        mean: Some(mean),
+        median: Some(exact_median_f64(&finite)),
+        n_finite,
+        n_nan,
+    }
+}
+
+pub fn grid_stats_json(stats: &GridStats) -> Value {
+    json!({
+        RES_MIN: stats.min,
+        RES_MAX: stats.max,
+        RES_MEAN: stats.mean,
+        RES_MEDIAN: stats.median,
+        RES_N_FINITE: stats.n_finite,
+        RES_N_NAN: stats.n_nan,
+    })
+}
+
 pub fn data_unit(header: &HduHeader) -> Option<String> {
     let raw = header.get(HEADER_BUNIT)?.trim();
     let stripped = raw
@@ -338,6 +442,99 @@ mod tests {
             ProbeError::OutOfBounds { x: 100.0, y: 100.0, cols: 7, rows: 7 }.to_string(),
             "pixel (100, 100) is outside the image extent 7×7"
         );
+    }
+
+    fn ramp_5x5() -> Array2<f32> {
+        Array2::from_shape_fn((5, 5), |(y, x)| (y * 5 + x) as f32)
+    }
+
+    #[test]
+    fn a_three_by_three_grid_at_the_corner_pads_with_nulls_outside_the_image() {
+        let grid = pixel_grid(&ramp_5x5(), 0, 0, 3);
+        assert_eq!(grid.len(), 3);
+        assert!(grid.iter().all(|row| row.len() == 3));
+        assert_eq!(grid[0], vec![None, None, None]);
+        assert_eq!(grid[1], vec![None, Some(0.0), Some(1.0)]);
+        assert_eq!(grid[2], vec![None, Some(5.0), Some(6.0)]);
+        assert_eq!(grid_origin(0, 0, 3), (-1, -1));
+    }
+
+    #[test]
+    fn the_centre_cell_of_the_grid_is_the_requested_pixel() {
+        let arr = ramp_5x5();
+        for size in [3usize, 5, 7, 15] {
+            let grid = pixel_grid(&arr, 3, 2, size);
+            assert_eq!(grid[size / 2][size / 2], Some(arr[[2, 3]]), "size {size}");
+        }
+        let full = pixel_grid(&arr, 2, 2, 5);
+        for (y, row) in full.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                assert_eq!(*cell, Some(arr[[y, x]]));
+            }
+        }
+    }
+
+    #[test]
+    fn nan_and_infinite_pixels_become_null_cells_and_are_counted_by_the_stats() {
+        let mut arr = ramp_5x5();
+        arr[[2, 2]] = f32::NAN;
+        arr[[1, 1]] = f32::INFINITY;
+        let grid = pixel_grid(&arr, 2, 2, 3);
+        assert_eq!(grid[1][1], None);
+        assert_eq!(grid[0][0], None);
+        assert_eq!(grid[0][1], Some(7.0));
+        let stats = grid_stats(&arr, 2, 2, 3);
+        assert_eq!(stats.n_finite, 7);
+        assert_eq!(stats.n_nan, 2);
+        assert_eq!(stats.min, Some(7.0));
+        assert_eq!(stats.max, Some(18.0));
+        let finite = [7.0, 8.0, 11.0, 13.0, 16.0, 17.0, 18.0];
+        assert_eq!(stats.mean, Some(finite.iter().sum::<f64>() / 7.0));
+        assert_eq!(stats.median, Some(13.0));
+    }
+
+    #[test]
+    fn grid_stats_over_the_whole_ramp_match_the_analytic_values() {
+        let stats = grid_stats(&ramp_5x5(), 2, 2, 5);
+        assert_eq!(stats, GridStats { min: Some(0.0), max: Some(24.0), mean: Some(12.0), median: Some(12.0), n_finite: 25, n_nan: 0 });
+        let j = grid_stats_json(&stats);
+        assert_eq!(j[RES_MIN], 0.0);
+        assert_eq!(j[RES_MAX], 24.0);
+        assert_eq!(j[RES_N_FINITE], 25);
+        assert_eq!(j[RES_N_NAN], 0);
+    }
+
+    #[test]
+    fn grids_entirely_off_the_image_or_at_extreme_coordinates_are_all_null() {
+        let arr = ramp_5x5();
+        for (x, y) in [(-10, 0), (0, 40), (i64::MIN, i64::MIN), (i64::MAX, i64::MAX), (i64::MIN, 2)] {
+            let grid = pixel_grid(&arr, x, y, 5);
+            assert!(grid.iter().flatten().all(Option::is_none), "({x}, {y})");
+            let stats = grid_stats(&arr, x, y, 5);
+            assert_eq!(stats.n_finite, 0);
+            assert_eq!(stats.median, None);
+        }
+        let empty = Array2::<f32>::zeros((0, 0));
+        assert!(pixel_grid(&empty, 0, 0, 3).iter().flatten().all(Option::is_none));
+        let one = Array2::from_elem((1, 1), 4.5f32);
+        let grid = pixel_grid(&one, 0, 0, 3);
+        assert_eq!(grid[1][1], Some(4.5));
+        assert_eq!(grid.iter().flatten().filter(|c| c.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn integer_grids_keep_the_raw_bits_and_the_signed_value() {
+        let plane = dq_plane(true);
+        let bits = int_grid(&plane.bits, 1, 1, 3);
+        assert_eq!(bits[1][1], Some(3));
+        assert_eq!(bits[2][2], Some(0xFFFF_FFFF));
+        assert_eq!(bits[0][0], Some(0));
+        let values = int_value_grid(&plane, 1, 1, 3);
+        assert_eq!(values[2][2], Some(-1));
+        assert_eq!(values[1][1], Some(3));
+        let edge = int_grid(&plane.bits, 2, 2, 3);
+        assert_eq!(edge[2], vec![None, None, None]);
+        assert_eq!(edge[1][1], Some(0xFFFF_FFFF));
     }
 
     fn header_with(key: &str, value: &str) -> HduHeader {

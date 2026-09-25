@@ -6,6 +6,7 @@ import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender }
 import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
+import { formatFrameLabel, frameAxisValue } from "../../utils/cubeNavigation";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { cpuStfRenderAllowed, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
@@ -18,11 +19,16 @@ const FFTPanel = lazy(() => import("./FFTPanel"));
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PlateSolvePanel = lazy(() => import("./PlateSolvePanel"));
 const PhotometryPanel = lazy(() => import("./PhotometryPanel"));
+const PhotometryTablePanel = lazy(() => import("./PhotometryTablePanel"));
+const TimeSeriesPanel = lazy(() => import("./TimeSeriesPanel"));
 const TileViewerPanel = lazy(() => import("./TileViewerPanel"));
 const RegionsPanel = lazy(() => import("../regions/RegionsPanel"));
 const RegionProfilesPanel = lazy(() => import("../regions/RegionProfilesPanel"));
+const ContourPanel = lazy(() => import("./ContourPanel"));
 const StatisticsPanel = lazy(() => import("./StatisticsPanel"));
+const PixelTablePanel = lazy(() => import("./PixelTablePanel"));
 const CatalogPanel = lazy(() => import("./CatalogPanel"));
+const TargetsPanel = lazy(() => import("./TargetsPanel"));
 
 const EMPTY_STARS: Star[] = [];
 
@@ -203,17 +209,21 @@ function AnalysisTabInner({
 
   const frameSeqRef = useRef(0);
   const handleFramePreview = useCallback(
-    async (outputPath: string, frameIndex: number) => {
+    async (outputPath: string, frameIndex: number, fitsPath?: string) => {
       const seq = ++frameSeqRef.current;
       try {
         const url = await getPreviewUrl(outputPath);
         if (frameSeqRef.current !== seq) return;
-        publishCube({ label: `Cube frame ${frameIndex + 1}`, previewUrl: url, fitsPath: null, dimensions: null });
+        const total = cubeDims?.frames ?? 0;
+        const axis = cubeDims?.spectral_axis ?? null;
+        const label = formatFrameLabel(frameIndex, total, frameAxisValue(frameIndex, axis?.values), axis?.unit ?? "");
+        const dimensions: [number, number] | null = fitsPath && cubeDims ? [cubeDims.width, cubeDims.height] : null;
+        publishCube({ label, previewUrl: url, fitsPath: fitsPath ?? null, dimensions });
       } catch (e) {
         console.error("Frame preview failed:", e);
       }
     },
-    [publishCube],
+    [publishCube, cubeDims],
   );
 
   const hasHist = histData !== null;
@@ -286,13 +296,23 @@ function AnalysisTabInner({
 
         <PhotometryPanel filePath={effectivePath} />
 
+        <PhotometryTablePanel filePath={effectivePath} overlayKey={regionKey} stars={stars} />
+
+        <TimeSeriesPanel filePath={regionKey} />
+
         <CatalogPanel filePath={regionKey} />
 
+        <TargetsPanel filePath={regionKey} />
+
         <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={target.rgbPath} />
+
+        <PixelTablePanel filePath={effectivePath} />
 
         <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
 
         <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
+
+        <ContourPanel filePath={effectivePath} overlayKey={regionKey} imageWidth={targetWidth} imageHeight={targetHeight} />
 
         {effectivePath && !isCube && (targetWidth ?? 0) >= 64 && (
           <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />

@@ -26,6 +26,25 @@ const HOVER_DEBOUNCE_MS = 40;
 const SELECT_CLASS =
   "bg-transparent border border-zinc-800 rounded px-0.5 text-[9px] text-zinc-400 focus:border-zinc-600";
 
+const SCALE_DIGITS = 3;
+const ROTATION_DIGITS = 1;
+
+function orientationLine(info: WcsInfo): string | null {
+  const { projection, pixel_scale_x_arcsec, pixel_scale_y_arcsec, rotation_deg, flipped, sip_present } = info;
+  if (
+    !projection ||
+    pixel_scale_x_arcsec === undefined ||
+    pixel_scale_y_arcsec === undefined ||
+    rotation_deg === undefined ||
+    flipped === undefined
+  ) {
+    return null;
+  }
+  const scale = `${pixel_scale_x_arcsec.toFixed(SCALE_DIGITS)}"/px x ${pixel_scale_y_arcsec.toFixed(SCALE_DIGITS)}"/px`;
+  const east = flipped ? "right" : "left";
+  return `${projection} - ${scale} - rot ${rotation_deg.toFixed(ROTATION_DIGITS)} deg - E ${east}${sip_present ? " - SIP" : ""}`;
+}
+
 function loadReadoutPreference(): ReadoutPreference {
   try {
     const text = window.localStorage.getItem(READOUT_STORAGE_KEY);
@@ -137,6 +156,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const [lonLabel, latLabel] = frameAxisLabels(pref.frame);
   const hours = frameLonInHours(pref.frame);
   const shown = coord ?? center;
+  const orientation = orientationLine(wcsInfo);
 
   return (
     <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "rgba(52,211,153,0.6)" }}>
@@ -181,6 +201,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           </span>
         )}
       </div>
+      {orientation && <div className="text-zinc-600">{orientation}</div>}
     </div>
   );
 }

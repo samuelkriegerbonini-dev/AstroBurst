@@ -2,12 +2,13 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type R
 import { useDisplayContext } from "../../context/PreviewContext";
 import { useOverlayDoc } from "../../hooks/useOverlayStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
-import { gridLines, isWcsGridError } from "../../services/astrometry";
+import { getWcsInfo, gridLines, isWcsGridError } from "../../services/astrometry";
 import type { GridFrame } from "../../shared/types/display";
 import { overlayStore, type OverlayPaintContext } from "../../utils/overlayStore";
 import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMapping";
 import { isRegionMappingUsable, regionPointToScreen, resolveRegionHost, type RegionMapping } from "../../utils/regionCoords";
 import type { Pt } from "../../utils/regionGeometry";
+import { COMPASS_LAYER_ID, COMPASS_LAYER_KIND, createCompassPainter } from "./painters/compassPainter";
 import { createGridPainter, GRID_LAYER_ID, GRID_LAYER_KIND } from "./painters/gridPainter";
 
 interface OverlayLayerProps {
@@ -48,6 +49,39 @@ function useWcsGridLayer(fileKey: string | null, grid: boolean, frame: GridFrame
   }, [fileKey, grid, frame, density]);
 }
 
+function useCompassLayer(fileKey: string | null, compass: boolean): void {
+  useEffect(() => {
+    if (!fileKey || !compass) return;
+    let cancelled = false;
+    getWcsInfo(fileKey)
+      .then((info) => {
+        if (cancelled) return;
+        if (!info.north_vec || !info.east_vec || !Number.isFinite(info.pixel_scale_arcsec)) {
+          console.warn("[AstroBurst] compass unavailable: the WCS has no usable orientation");
+          return;
+        }
+        overlayStore.add(fileKey, {
+          id: COMPASS_LAYER_ID,
+          kind: COMPASS_LAYER_KIND,
+          visible: true,
+          paint: createCompassPainter({
+            northVec: info.north_vec,
+            eastVec: info.east_vec,
+            pixelScaleArcsec: info.pixel_scale_arcsec,
+            imageCentre: { x: (info.naxis1 - 1) / 2, y: (info.naxis2 - 1) / 2 },
+          }),
+        });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) console.warn("[AstroBurst] compass unavailable:", err);
+      });
+    return () => {
+      cancelled = true;
+      overlayStore.remove(fileKey, COMPASS_LAYER_ID);
+    };
+  }, [fileKey, compass]);
+}
+
 function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH, enabled }: OverlayLayerProps) {
   const regionKey = useRegionKey();
   const fileKey = enabled ? regionKey : null;
@@ -62,6 +96,7 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   mappingRef.current = mapping;
 
   useWcsGridLayer(active ? fileKey : null, display.grid, display.gridFrame, display.gridDensity);
+  useCompassLayer(active ? fileKey : null, display.compass);
   const doc = useOverlayDoc(fileKey);
   const hasLayers = doc.layers.some((l) => l.visible);
 

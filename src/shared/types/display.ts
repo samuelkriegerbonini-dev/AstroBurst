@@ -48,6 +48,7 @@ export interface DisplaySettings {
   grid: boolean;
   gridFrame: GridFrame;
   gridDensity: number;
+  compass: boolean;
 }
 
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
@@ -65,6 +66,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   grid: false,
   gridFrame: "icrs",
   gridDensity: GRID_DENSITY_DEFAULT,
+  compass: false,
 };
 
 export interface ScaleLimits {

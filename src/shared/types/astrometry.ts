@@ -1,4 +1,4 @@
-export interface WcsInfo {
+export interface WcsInfo extends WcsOrientationInfo {
   center_ra: number;
   center_dec: number;
   pixel_scale_arcsec: number;
@@ -83,4 +83,37 @@ export interface PlateSolveOptions {
   centerRa?: number;
   centerDec?: number;
   radius?: number;
+}
+
+export type WcsParity = "normal" | "flipped";
+
+export interface WcsOrientationInfo {
+  rotation_deg?: number;
+  flipped?: boolean;
+  parity?: WcsParity;
+  pixel_scale_x_arcsec?: number;
+  pixel_scale_y_arcsec?: number;
+  projection?: string;
+  sip_present?: boolean;
+  north_vec?: [number, number] | null;
+  east_vec?: [number, number] | null;
+}
+
+export interface WorldToPixelResult {
+  points: ([number, number] | null)[];
+  on_image: boolean[];
+  frame: SkyFrame;
+  naxis1: number;
+  naxis2: number;
+}
+
+export interface SkySeparationResult {
+  a_sky: [number, number];
+  b_sky: [number, number];
+  separation_deg: number;
+  separation_arcmin: number;
+  separation_arcsec: number;
+  position_angle_deg: number;
+  pixel_length: number | null;
+  pixel_scale_arcsec: number | null;
 }

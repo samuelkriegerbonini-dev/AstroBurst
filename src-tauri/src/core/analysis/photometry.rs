@@ -11,6 +11,10 @@ pub const SKY_ANNULUS_INNER_FACTOR: f64 = 2.0;
 pub const SKY_ANNULUS_OUTER_FACTOR: f64 = 3.0;
 pub const GROWTH_CURVE_REACH_FACTOR: f64 = 4.0;
 pub const GROWTH_PLATEAU_TOLERANCE: f64 = 0.01;
+pub const GROWTH_CURVE_STEP: f64 = 0.5;
+pub const GROWTH_CURVE_MAX_POINTS: usize = 160;
+const GROWTH_PLATEAU_LOOKBACK: f64 = 2.0;
+const GROWTH_PLATEAU_MIN_RADIUS: f64 = 3.0;
 pub const SATURATION_KEYWORDS: [&str; 5] = ["SATURATE", "SATLEVEL", "SATURATION", "MAXLIN", "DATAMAX"];
 const DATAMAX_KEYWORD: &str = "DATAMAX";
 const DATAMAX_IS_IMAGE_MAX_TOLERANCE: f64 = 1e-6;
@@ -43,6 +47,7 @@ pub struct PhotometryConfig {
     pub saturation: Option<(f64, &'static str)>,
     pub subsamples: u8,
     pub gain: Option<f64>,
+    pub sky_annulus: Option<(f64, f64)>,
 }
 
 impl Default for PhotometryConfig {
@@ -53,6 +58,7 @@ impl Default for PhotometryConfig {
             saturation: None,
             subsamples: 5,
             gain: None,
+            sky_annulus: None,
         }
     }
 }
@@ -118,6 +124,17 @@ pub struct StarPhotometry {
     pub mag_ab_err: Option<f64>,
     pub mag_ab_total: Option<f64>,
     pub st_mag: Option<f64>,
+    pub sky_inner: f64,
+    pub sky_outer: f64,
+    pub growth_curve: Vec<GrowthPoint>,
+    pub ee50_radius: Option<f64>,
+    pub ee80_radius: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct GrowthPoint {
+    pub r: f64,
+    pub flux: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -273,36 +290,74 @@ struct GrowthPlateau {
     flux: f64,
 }
 
-fn growth_curve_plateau(
+pub fn growth_curve(
     image: &Array2<f32>,
     excluded: Option<&Array2<u8>>,
     x: f64,
     y: f64,
-    r_ap: f64,
+    r_max: f64,
     sky_mean: f64,
     subsamples: u8,
-) -> Option<GrowthPlateau> {
-    let (h, w) = image.dim();
-    let r_max = (GROWTH_CURVE_REACH_FACTOR * r_ap).ceil().max(0.0) as usize;
-    let annulus_inner = SKY_ANNULUS_INNER_FACTOR * r_ap;
-    let mut cumulative = Vec::with_capacity(r_max + 1);
-    cumulative.push(0.0);
-    for r in 1..=r_max {
-        let ring = weighted_sum(image, &circular_aperture(h, w, x, y, r as f64, subsamples), excluded);
-        cumulative.push(ring.sum - sky_mean * ring.weight);
+) -> Vec<GrowthPoint> {
+    if !r_max.is_finite() || r_max <= 0.0 || !x.is_finite() || !y.is_finite() {
+        return Vec::new();
     }
-    let start = (r_ap.floor() as usize + 1).max(3);
-    for r in start..=r_max {
-        let flux = cumulative[r];
-        let two_steps_back = cumulative[r - 2];
-        if flux > 0.0 && (flux - two_steps_back).abs() < GROWTH_PLATEAU_TOLERANCE * flux {
-            if r as f64 >= annulus_inner {
+    let (h, w) = image.dim();
+    let step = GROWTH_CURVE_STEP.max(r_max / GROWTH_CURVE_MAX_POINTS as f64);
+    let n = ((r_max / step).floor() as usize).min(GROWTH_CURVE_MAX_POINTS);
+    (1..=n)
+        .map(|k| {
+            let r = k as f64 * step;
+            let ring = weighted_sum(image, &circular_aperture(h, w, x, y, r, subsamples), excluded);
+            GrowthPoint { r, flux: ring.sum - sky_mean * ring.weight }
+        })
+        .collect()
+}
+
+fn flux_nearest_radius(curve: &[GrowthPoint], before: usize, target: f64) -> f64 {
+    let mut best_flux = 0.0;
+    let mut best_distance = target.abs();
+    for point in &curve[..before] {
+        let distance = (point.r - target).abs();
+        if distance < best_distance {
+            best_distance = distance;
+            best_flux = point.flux;
+        }
+    }
+    best_flux
+}
+
+fn growth_plateau(curve: &[GrowthPoint], r_ap: f64, sky_inner: f64) -> Option<GrowthPlateau> {
+    let start_radius = (r_ap.floor() + 1.0).max(GROWTH_PLATEAU_MIN_RADIUS);
+    for (i, point) in curve.iter().enumerate() {
+        if point.r < start_radius {
+            continue;
+        }
+        let earlier = flux_nearest_radius(curve, i, point.r - GROWTH_PLATEAU_LOOKBACK);
+        if point.flux > 0.0 && (point.flux - earlier).abs() < GROWTH_PLATEAU_TOLERANCE * point.flux {
+            if point.r >= sky_inner {
                 return None;
             }
-            return Some(GrowthPlateau { radius: r as f64, flux });
+            return Some(GrowthPlateau { radius: point.r, flux: point.flux });
         }
     }
     None
+}
+
+pub fn encircled_radius(curve: &[GrowthPoint], total: f64, fraction: f64) -> Option<f64> {
+    if !(total.is_finite() && total > 0.0 && fraction.is_finite()) {
+        return None;
+    }
+    let target = fraction * total;
+    let hit = curve.iter().position(|p| p.flux >= target)?;
+    let (r0, f0) = if hit == 0 { (0.0, 0.0) } else { (curve[hit - 1].r, curve[hit - 1].flux) };
+    let (r1, f1) = (curve[hit].r, curve[hit].flux);
+    let span = f1 - f0;
+    if !(span > 0.0) || !span.is_finite() {
+        return Some(r1);
+    }
+    let t = ((target - f0) / span).clamp(0.0, 1.0);
+    Some(r0 + t * (r1 - r0))
 }
 
 pub fn measure_star_full(
@@ -381,14 +436,19 @@ pub fn measure_star_full(
         .unwrap_or(1.5 * fwhm_eff)
         .clamp(2.0, 60.0);
 
-    let sky = annulus_stats(
-        working,
-        x,
-        y,
-        r_ap * SKY_ANNULUS_INNER_FACTOR,
-        r_ap * SKY_ANNULUS_OUTER_FACTOR,
-        config.subsamples,
-    );
+    let (sky_inner, sky_outer) = match config.sky_annulus {
+        Some((r_in, r_out)) => {
+            if !(r_in.is_finite() && r_in > r_ap) {
+                return Err(format!("sky annulus inner radius {r_in} must be larger than the aperture radius {r_ap}"));
+            }
+            if !(r_out.is_finite() && r_out > r_in) {
+                return Err(format!("sky annulus outer radius {r_out} must be larger than the inner radius {r_in}"));
+            }
+            (r_in, r_out)
+        }
+        None => (r_ap * SKY_ANNULUS_INNER_FACTOR, r_ap * SKY_ANNULUS_OUTER_FACTOR),
+    };
+    let sky = annulus_stats(working, x, y, sky_inner, sky_outer, config.subsamples);
 
     let pixels = circular_aperture(h, w, x, y, r_ap, config.subsamples);
     let ap = weighted_sum(image, &pixels, excluded);
@@ -439,12 +499,15 @@ pub fn measure_star_full(
         (None, None) => (false, NO_SATURATION_SOURCE),
     };
 
-    let plateau = growth_curve_plateau(image, excluded, x, y, r_ap, sky.mean, config.subsamples)
+    let curve = growth_curve(image, excluded, x, y, GROWTH_CURVE_REACH_FACTOR * r_ap, sky.mean, config.subsamples);
+    let plateau = growth_plateau(&curve, r_ap, sky_inner)
         .filter(|_| net_flux > 0.0)
         .filter(|p| (net_flux / p.flux).is_finite() && net_flux / p.flux > 0.0);
     let aperture_correction = plateau.map(|p| net_flux / p.flux);
     let flux_total = plateau.map(|p| p.flux);
     let plateau_radius = plateau.map(|p| p.radius);
+    let ee50_radius = flux_total.and_then(|total| encircled_radius(&curve, total, 0.5));
+    let ee80_radius = flux_total.and_then(|total| encircled_radius(&curve, total, 0.8));
 
     Ok(StarPhotometry {
         x,
@@ -475,6 +538,11 @@ pub fn measure_star_full(
         mag_ab_err: None,
         mag_ab_total: None,
         st_mag: None,
+        sky_inner,
+        sky_outer,
+        growth_curve: curve,
+        ee50_radius,
+        ee80_radius,
     })
 }
 
@@ -1058,5 +1126,138 @@ mod tests {
         let cfg = PhotometryConfig { aperture_radius: Some(8.0), ..PhotometryConfig::default() };
         let none = measure_star(&flat, 64.0, 64.0, &cfg).unwrap();
         assert!(none.aperture_correction.is_none());
+    }
+
+    #[test]
+    fn growth_curve_of_a_noiseless_gaussian_is_non_decreasing_and_ends_near_the_total_flux() {
+        let sigma = 3.0;
+        let amp = 1000.0;
+        let img = gaussian_scene(128, 128, 64.0, 64.0, amp, sigma, 10.0);
+        let curve = growth_curve(&img, None, 64.0, 64.0, 24.0, 10.0, 5);
+        assert_eq!(curve.len(), 48);
+        assert!((curve[0].r - GROWTH_CURVE_STEP).abs() < 1e-12);
+        for pair in curve.windows(2) {
+            assert!(pair[1].flux >= pair[0].flux - 1e-6, "flux fell from {} to {}", pair[0].flux, pair[1].flux);
+            assert!(pair[1].r > pair[0].r);
+        }
+        let true_flux = 2.0 * std::f64::consts::PI * amp * sigma * sigma;
+        let last = curve.last().unwrap().flux;
+        assert!((last - true_flux).abs() / true_flux < 0.01, "last={last} vs {true_flux}");
+        assert!(growth_curve(&img, None, 64.0, 64.0, 0.0, 10.0, 5).is_empty());
+        assert!(growth_curve(&img, None, 64.0, 64.0, f64::NAN, 10.0, 5).is_empty());
+        let wide = growth_curve(&img, None, 64.0, 64.0, 240.0, 10.0, 1);
+        assert!(wide.len() <= GROWTH_CURVE_MAX_POINTS);
+        assert!((wide[0].r - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn encircled_energy_radii_of_a_gaussian_match_the_analytic_values() {
+        let sigma = 3.0;
+        let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, sigma, 10.0);
+        let cfg = PhotometryConfig { aperture_radius: Some(8.0), ..PhotometryConfig::default() };
+        let res = measure_star(&img, 64.0, 64.0, &cfg).unwrap();
+        assert!(res.flux_total.is_some());
+        let ee50 = res.ee50_radius.expect("EE50");
+        let ee80 = res.ee80_radius.expect("EE80");
+        let expected50 = 1.1774 * sigma;
+        let expected80 = 1.7941 * sigma;
+        assert!((ee50 - expected50).abs() / expected50 < 0.03, "EE50 {ee50} vs {expected50}");
+        assert!((ee80 - expected80).abs() / expected80 < 0.03, "EE80 {ee80} vs {expected80}");
+        assert!(ee50 < ee80);
+        assert_eq!(res.growth_curve.len(), 64);
+        assert!((res.sky_inner - 16.0).abs() < 1e-12 && (res.sky_outer - 24.0).abs() < 1e-12);
+
+        let narrow = PhotometryConfig { aperture_radius: Some(4.0), ..PhotometryConfig::default() };
+        let no_plateau = measure_star(&img, 64.0, 64.0, &narrow).unwrap();
+        assert!(no_plateau.flux_total.is_none());
+        assert!(no_plateau.ee50_radius.is_none() && no_plateau.ee80_radius.is_none());
+        assert!(!no_plateau.growth_curve.is_empty());
+    }
+
+    #[test]
+    fn encircled_radius_interpolates_and_rejects_unreachable_fractions() {
+        let curve = [
+            GrowthPoint { r: 1.0, flux: 10.0 },
+            GrowthPoint { r: 2.0, flux: 30.0 },
+            GrowthPoint { r: 3.0, flux: 40.0 },
+        ];
+        assert!((encircled_radius(&curve, 40.0, 0.5).unwrap() - 1.5).abs() < 1e-12);
+        assert!((encircled_radius(&curve, 40.0, 0.125).unwrap() - 0.5).abs() < 1e-12);
+        assert!((encircled_radius(&curve, 40.0, 1.0).unwrap() - 3.0).abs() < 1e-12);
+        assert!(encircled_radius(&curve, 40.0, 1.5).is_none());
+        assert!(encircled_radius(&curve, 0.0, 0.5).is_none());
+        assert!(encircled_radius(&curve, f64::NAN, 0.5).is_none());
+        assert!(encircled_radius(&[], 40.0, 0.5).is_none());
+        let flat = [GrowthPoint { r: 1.0, flux: 5.0 }, GrowthPoint { r: 2.0, flux: 5.0 }];
+        assert!((encircled_radius(&flat, 5.0, 1.0).unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_explicit_sky_annulus_equal_to_the_auto_factors_reproduces_the_auto_path() {
+        let mut img = gaussian_scene(96, 96, 48.3, 47.6, 2000.0, 2.5, 100.0);
+        deterministic_noise(&mut img);
+        let r_ap = 6.0;
+        let auto = PhotometryConfig { aperture_radius: Some(r_ap), ..PhotometryConfig::default() };
+        let explicit = PhotometryConfig {
+            aperture_radius: Some(r_ap),
+            sky_annulus: Some((SKY_ANNULUS_INNER_FACTOR * r_ap, SKY_ANNULUS_OUTER_FACTOR * r_ap)),
+            ..PhotometryConfig::default()
+        };
+        let a = measure_star(&img, 48.0, 48.0, &auto).unwrap();
+        let b = measure_star(&img, 48.0, 48.0, &explicit).unwrap();
+        assert!((a.net_flux - b.net_flux).abs() < 1e-9);
+        assert!((a.flux_err - b.flux_err).abs() < 1e-9);
+        assert!((a.bg_mean - b.bg_mean).abs() < 1e-9);
+        assert_eq!(a.plateau_radius, b.plateau_radius);
+        assert_eq!(a.sky_inner, b.sky_inner);
+        assert_eq!(a.sky_outer, b.sky_outer);
+
+        let wider = PhotometryConfig {
+            aperture_radius: Some(r_ap),
+            sky_annulus: Some((20.0, 30.0)),
+            ..PhotometryConfig::default()
+        };
+        let c = measure_star(&img, 48.0, 48.0, &wider).unwrap();
+        assert_eq!((c.sky_inner, c.sky_outer), (20.0, 30.0));
+        assert_ne!(c.bg_pixels, a.bg_pixels);
+    }
+
+    #[test]
+    fn a_sky_annulus_inside_the_aperture_or_with_no_width_is_refused() {
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let inside = PhotometryConfig {
+            aperture_radius: Some(5.0),
+            sky_annulus: Some((5.0, 10.0)),
+            ..PhotometryConfig::default()
+        };
+        let err = measure_star(&img, 32.0, 32.0, &inside).unwrap_err();
+        assert_eq!(err, "sky annulus inner radius 5 must be larger than the aperture radius 5");
+
+        let empty = PhotometryConfig {
+            aperture_radius: Some(5.0),
+            sky_annulus: Some((8.0, 8.0)),
+            ..PhotometryConfig::default()
+        };
+        let err = measure_star(&img, 32.0, 32.0, &empty).unwrap_err();
+        assert_eq!(err, "sky annulus outer radius 8 must be larger than the inner radius 8");
+
+        let nan = PhotometryConfig {
+            aperture_radius: Some(5.0),
+            sky_annulus: Some((f64::NAN, 12.0)),
+            ..PhotometryConfig::default()
+        };
+        assert!(measure_star(&img, 32.0, 32.0, &nan).is_err());
+    }
+
+    #[test]
+    fn growth_plateau_keeps_the_integer_step_semantics_of_the_previous_search() {
+        let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 3.0, 10.0);
+        let r_ap = 8.0;
+        let curve = growth_curve(&img, None, 64.0, 64.0, GROWTH_CURVE_REACH_FACTOR * r_ap, 10.0, 5);
+        let plateau = growth_plateau(&curve, r_ap, SKY_ANNULUS_INNER_FACTOR * r_ap).expect("plateau");
+        assert!(plateau.radius >= 11.0 && plateau.radius <= 12.0, "plateau at {}", plateau.radius);
+        assert!((plateau.radius / GROWTH_CURVE_STEP).fract().abs() < 1e-12);
+        assert!(growth_plateau(&curve, r_ap, plateau.radius).is_none());
+        assert!(growth_plateau(&[], r_ap, 16.0).is_none());
     }
 }

@@ -2,6 +2,7 @@ pub mod background;
 pub mod boundary;
 pub mod calibration_pipeline;
 pub mod colormap;
+pub mod contour;
 pub mod cosmetic;
 pub mod curves;
 pub mod dbe;

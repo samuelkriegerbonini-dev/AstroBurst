@@ -11,6 +11,18 @@ const MAX_SYNTH_DIM: u32 = 16384;
 const MAX_SYNTH_STARS: usize = 1_000_000;
 const MAX_SYNTH_FRAMES: u32 = 1024;
 const FRAME_UNIT: &str = "ADU";
+const DEFAULT_CADENCE_SECONDS: f64 = 60.0;
+const EPOCH_MJD: f64 = 60310.0;
+const EPOCH_DAYS_SINCE_UNIX: i64 = 19723;
+const SECONDS_PER_DAY: f64 = 86400.0;
+const SECONDS_PER_HOUR: f64 = 3600.0;
+const SECONDS_PER_MINUTE: f64 = 60.0;
+const UNIX_EPOCH_DAY_OFFSET: i64 = 719_468;
+const DAYS_PER_400_YEARS: i64 = 146_097;
+
+fn default_cadence() -> f64 {
+    DEFAULT_CADENCE_SECONDS
+}
 
 pub type SynthFrame = (Array2<f32>, Array2<f32>, Vec<Star>);
 pub type SynthStack = (Vec<Array2<f32>>, Array2<f32>, Vec<Star>);
@@ -44,6 +56,8 @@ pub struct SynthConfig {
     pub apply_vignette: bool,
     pub vignette_strength: f64,
     pub n_frames: u32,
+    #[serde(default = "default_cadence")]
+    pub cadence_seconds: f64,
 }
 
 impl Default for SynthConfig {
@@ -56,6 +70,7 @@ impl Default for SynthConfig {
             apply_vignette: false,
             vignette_strength: 0.3,
             n_frames: 1,
+            cadence_seconds: DEFAULT_CADENCE_SECONDS,
         }
     }
 }
@@ -129,6 +144,7 @@ impl SynthConfig {
         if self.apply_vignette && !(0.0..=1.0).contains(&self.vignette_strength) {
             bail!("Vignette strength must be within 0..1, got {}", self.vignette_strength);
         }
+        require_positive("Cadence", self.cadence_seconds)?;
         Ok(())
     }
 }
@@ -138,11 +154,38 @@ fn to_frame_units(electrons: &Array2<f32>, noise: &NoiseParams) -> Array2<f32> {
     electrons.mapv(|e| e / gain)
 }
 
-pub fn frame_header(noise: &NoiseParams) -> HduHeader {
+fn civil_from_unix_days(days: i64) -> (i64, u32, u32) {
+    let z = days + UNIX_EPOCH_DAY_OFFSET;
+    let era = if z >= 0 { z } else { z - (DAYS_PER_400_YEARS - 1) } / DAYS_PER_400_YEARS;
+    let day_of_era = z - era * DAYS_PER_400_YEARS;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 } as u32;
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn observation_date(seconds_since_epoch: f64) -> String {
+    let total = if seconds_since_epoch.is_finite() { seconds_since_epoch.max(0.0) } else { 0.0 };
+    let days = (total / SECONDS_PER_DAY).floor();
+    let remainder = total - days * SECONDS_PER_DAY;
+    let hours = (remainder / SECONDS_PER_HOUR).floor();
+    let minutes = ((remainder - hours * SECONDS_PER_HOUR) / SECONDS_PER_MINUTE).floor();
+    let seconds = remainder - hours * SECONDS_PER_HOUR - minutes * SECONDS_PER_MINUTE;
+    let (year, month, day) = civil_from_unix_days(EPOCH_DAYS_SINCE_UNIX + days as i64);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{seconds:06.3}", hours as u32, minutes as u32)
+}
+
+pub fn frame_header(noise: &NoiseParams, frame_index: usize, cadence_seconds: f64) -> HduHeader {
+    let seconds_since_epoch = frame_index as f64 * cadence_seconds;
     let mut header = HduHeader::empty();
     header.set_f64("EXPTIME", noise.exposure_time);
     header.set_f64("GAIN", noise.gain);
     header.set("BUNIT", FRAME_UNIT.to_string());
+    header.set("DATE-OBS", observation_date(seconds_since_epoch));
+    header.set_f64("MJD-OBS", EPOCH_MJD + seconds_since_epoch / SECONDS_PER_DAY);
     header
 }
 
@@ -298,6 +341,34 @@ mod tests {
         assert!(generate_stack(&stack).unwrap_err().to_string().contains("Frame count 0"));
         stack.n_frames = 2;
         assert_eq!(generate_stack(&stack).unwrap().0.len(), 2);
+        stack.cadence_seconds = 0.0;
+        assert!(generate_stack(&stack).unwrap_err().to_string().contains("Cadence"));
+    }
+
+    #[test]
+    fn stack_frame_headers_carry_increasing_observation_times_from_a_fixed_epoch() {
+        use crate::core::astrometry::time::{jd_from_mjd, parse_fits_datetime};
+        let mut config = quiet_config();
+        config.n_frames = 4;
+        config.cadence_seconds = 90.0;
+        let (frames, _, _) = generate_stack(&config).unwrap();
+        let headers: Vec<HduHeader> =
+            (0..frames.len()).map(|i| frame_header(&config.noise, i, config.cadence_seconds)).collect();
+        assert_eq!(headers[0].get("DATE-OBS"), Some("2024-01-01T00:00:00.000"));
+        assert_eq!(headers[0].get_f64("MJD-OBS"), Some(EPOCH_MJD));
+        assert_eq!(headers[0].get_f64("EXPTIME"), Some(config.noise.exposure_time));
+        for pair in headers.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let step_days = b.get_f64("MJD-OBS").unwrap() - a.get_f64("MJD-OBS").unwrap();
+            assert!((step_days - 90.0 / SECONDS_PER_DAY).abs() < 1e-9, "step {step_days}");
+            assert!(a.get("DATE-OBS").unwrap() < b.get("DATE-OBS").unwrap());
+            let jd_from_date = parse_fits_datetime(b.get("DATE-OBS").unwrap()).unwrap();
+            let jd_from_mjd_card = jd_from_mjd(b.get_f64("MJD-OBS").unwrap());
+            assert!((jd_from_date - jd_from_mjd_card).abs() < 1e-8, "{jd_from_date} vs {jd_from_mjd_card}");
+        }
+        assert_eq!(observation_date(25.0 * 3600.0 + 61.5), "2024-01-02T01:01:01.500");
+        assert_eq!(observation_date(366.0 * 86400.0), "2025-01-01T00:00:00.000");
+        assert_eq!(civil_from_unix_days(0), (1970, 1, 1));
     }
 
     #[test]

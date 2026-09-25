@@ -17,7 +17,7 @@ pub struct GenerateSynthArgs {
 #[command]
 pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, String> {
     let config = args.config;
-    let header = pipeline::frame_header(&config.noise);
+    let header = pipeline::frame_header(&config.noise, 0, config.cadence_seconds);
     let noise = config.noise.clone();
 
     let (noisy, ground_truth, stars) =
@@ -61,7 +61,8 @@ pub struct GenerateStackArgs {
 #[command]
 pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthResult, String> {
     let config = args.config;
-    let header = pipeline::frame_header(&config.noise);
+    let noise = config.noise.clone();
+    let cadence_seconds = config.cadence_seconds;
     let (width, height) = (config.field.width, config.field.height);
 
     let (frames, _gt, stars) =
@@ -75,6 +76,7 @@ pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthRe
 
     for (i, frame) in frames.iter().enumerate() {
         let path = dir.join(format!("{}_{:04}.fits", args.prefix, i));
+        let header = pipeline::frame_header(&noise, i, cadence_seconds);
         write_derived_fits(path.to_str().unwrap_or("frame.fits"), frame, Some(&header))
             .map_err(|e| format!("Failed to save frame {}: {}", i, e))?;
     }

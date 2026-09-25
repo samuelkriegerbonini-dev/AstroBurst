@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Science measurement Features **
+  - Interactive `ProfilePlot`: hover readout, wheel zoom and drag pan on x, log and inverted y, points, error bars, dashed model curves, labelled reference lines, CSV and PNG export; cross-match residual and zero-point plots in the Gaia catalog panel
+  - Aperture photometry controls (aperture radius, sky annulus, gain), curve of growth with EE50/EE80 radii (`PhotometryConfig.sky_annulus`, `StarPhotometry.growth_curve`, `ee50_radius`, `ee80_radius`), and `measure_photometry_batch_cmd` behind a Photometry table panel that measures detected stars, Point regions or pasted positions, draws the apertures on the image and exports CSV
+  - Calibrated region statistics: every region reports flux in Jy, AB magnitude, surface brightness in mag/arcsec^2, area in arcsec^2, RA/Dec of the centre and the sky position angle (`RegionStats.calibrated`, `entry_calibration`), with sigma-clipping controls and a region CSV in the Regions panel
+  - Sky geometry: `world_to_pixel_cmd`, `sky_separation_cmd` (separation and position angle east of north), `WcsTransform::orientation` (rotation, parity, per-axis scale, projection, SIP, north and east vectors) reported by `get_wcs_info` and the server `wcs` route; a Targets panel that overlays a pasted or CSV RA/Dec list; separation and position angle for line regions; a compass and scale bar overlay
+  - Spectral line measurement over the brushed range (`measure_spectral_line_cmd`): flux, equivalent width, centroid, sigma/FWHM, SNR, velocities, an optional Gaussian fit with formal errors from the new bounded Gauss-Newton fitter (`math::gauss_newton`), and the continuum and model drawn on the spectrum
+  - Contour overlay (`contour_lines_cmd`, `core::imaging::contour`): marching squares with NaN-aware binning and smoothing, list/linear/log/sqrt/sigma levels, per-level visibility, export of closed contours to Polygon regions
+  - Elliptical surface-brightness profile (`sb_profile_cmd`, `elliptical_profile`): mag/arcsec^2 against semi-major axis in arcsec, R50/R80/R90, Petrosian radius, total AB magnitude, in the Radial profile panel
+  - Time-series aperture photometry across loaded frames (`time_series_photometry_cmd`) with drift tracking, a differential light curve against a comparison ensemble, per-frame table and CSV; the synthetic stack writes DATE-OBS and MJD-OBS with a cadence
+  - Pixel table panel (`pixel_table_cmd`): N x N raw values with ERR and decoded DQ flag names, on click or following the cursor
+  - Spectrum-linked channel navigation: the displayed channel is marked on the spectrum, double-click and arrow keys change it, playback loops, and a committed channel is published as a FITS frame so regions, statistics, photometry and contours work on it
+
+### Changed
+- `WcsTransform::pixel_to_world` and `world_to_pixel` return NaN for non-finite input instead of reaching the projection engine
+
 ## [0.6.0-preview] - 2026-09-20
 
 Preview of the 0.6 line: the viewer maturity phases (0 to 3), the processing-parity round (Phase 4) and the science round (Phase 5) below, plus the fixes to their review findings. The Windows bundle reports 0.6.0 because MSI versions cannot carry a pre-release identifier.

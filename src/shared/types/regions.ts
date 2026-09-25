@@ -1,3 +1,5 @@
+import type { PhotCal } from "../../services/analysis";
+
 export type RegionSystem = "image" | "physical" | "fk5" | "icrs";
 
 export const REGION_SYSTEMS: readonly RegionSystem[] = ["image", "physical", "fk5", "icrs"];
@@ -83,6 +85,26 @@ export interface RegionStats {
   net_snr: number | null;
   sum_err?: number | null;
   weighted_mean?: number | null;
+  calibrated?: RegionCalibrated | null;
+}
+
+export type RegionFluxSource = "net" | "sum";
+
+export interface RegionCalibrated {
+  flux_source: RegionFluxSource;
+  flux_native: number;
+  flux_err_native: number | null;
+  flux_jy: number;
+  flux_err_jy: number | null;
+  mag_ab: number | null;
+  mag_ab_err: number | null;
+  st_mag: number | null;
+  area_arcsec2: number | null;
+  geometric_area_arcsec2: number | null;
+  sb_mag_arcsec2: number | null;
+  ra: number | null;
+  dec: number | null;
+  pa_sky_deg: number | null;
 }
 
 export interface RegionStatsEntry {
@@ -96,6 +118,9 @@ export interface RegionStatsResult {
   masked: boolean;
   dq_excluded: number | null;
   elapsed_ms: number;
+  photcal?: PhotCal | null;
+  calibration_warnings?: string[];
+  pixel_area_arcsec2?: number | null;
 }
 
 export interface RadialBin {
@@ -141,4 +166,44 @@ export interface RegionImportResult {
 export interface RegionExportResult {
   reg_text: string;
   system: RegionSystem;
+}
+
+export interface SbBin {
+  sma_inner: number;
+  sma_outer: number;
+  sma: number;
+  count: number;
+  cumulative_count: number;
+  mean: number | null;
+  median: number | null;
+  std: number | null;
+  cumulative_sum: number;
+  sma_arcsec: number | null;
+  mu_ab: number | null;
+  mu_err: number | null;
+  mag_ab_cumulative: number | null;
+}
+
+export interface SbProfile {
+  x: number;
+  y: number;
+  sma_max: number;
+  ellipticity: number;
+  angle_deg: number;
+  bin_width: number;
+  background: BackgroundEstimate | null;
+  bins: SbBin[];
+  r50_px: number | null;
+  r80_px: number | null;
+  r90_px: number | null;
+  petrosian_radius_px: number | null;
+  pixel_scale_arcsec: number | null;
+  pixel_area_arcsec2: number | null;
+  sky_pa_deg: number | null;
+  photcal: PhotCal | null;
+  calibration_warnings: string[];
+  total_mag_ab: number | null;
+  notes: string[];
+  masked: boolean;
+  elapsed_ms: number;
 }

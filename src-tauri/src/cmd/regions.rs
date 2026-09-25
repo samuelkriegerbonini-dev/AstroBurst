@@ -6,22 +6,54 @@ use serde_json::{json, Value};
 
 use ndarray::Array2;
 
-use crate::cmd::analysis::{resolve_dq_mask, DqMask};
+use crate::cmd::analysis::{resolve_dq_mask, DqMask, HEADER_PROCESSING_PROVENANCE, RES_PHOTCAL};
+use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::region::{
-    line_cut, radial_profile, region_data_stats, PhysicalMap, RegionShape, RegionSystem, SigmaClip,
+    ellipse_geometry, elliptical_profile, encircled_radius_from_bins, image_to_sky_angle, line_cut,
+    petrosian_radius, radial_profile, region_data_stats, wcs_is_east_right, wcs_north_angle_deg, EllipticalBin,
+    EllipticalProfile, PhysicalMap, RegionShape, RegionStats, RegionSystem, SigmaClip, MAX_SB_BIN_WIDTH,
+    MIN_SB_BIN_WIDTH, PETROSIAN_ETA,
 };
 use crate::core::imaging::region_file::{parse_reg_with_physical, write_reg_with_physical, Region};
+use crate::core::metadata::photcal::{missing_calibration_reason, FluxConvention, PhotCal, AB_MAG_ZERO_POINT};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
-    RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_ERROR, RES_HAS_WCS, RES_ID, RES_MASKED, RES_REGIONS,
-    RES_REG_TEXT, RES_STATS, RES_SYSTEM, RES_WARNINGS,
+    RES_BINS, RES_CALIBRATED, RES_CALIBRATION_WARNINGS, RES_DEC, RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_ERROR,
+    RES_HAS_WCS, RES_ID, RES_LABEL, RES_MAG_AB_CUMULATIVE, RES_MASKED, RES_MU_AB, RES_MU_ERR, RES_NOTES,
+    RES_PETROSIAN_RADIUS_PX, RES_PIXEL_AREA_ARCSEC2, RES_PIXEL_SCALE_ARCSEC, RES_R50_PX, RES_R80_PX, RES_R90_PX,
+    RES_RA, RES_REGIONS, RES_REG_TEXT, RES_SKY_PA_DEG, RES_SMA_ARCSEC, RES_STATS, RES_SYSTEM, RES_TOTAL_MAG_AB,
+    RES_WARNINGS,
 };
+use crate::types::header::HduHeader;
 
 const MAX_REGIONS_PER_CALL: usize = 512;
 const MAX_REG_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SIGMA_CLIP_ITERS: usize = 100;
+const PIXEL_SCALE_ANISOTROPY_TOLERANCE: f64 = 0.01;
+const ARCSEC_PER_DEGREE: f64 = 3600.0;
+const SKY_ANGLE_TO_POSITION_ANGLE_DEG: f64 = 90.0;
+const POSITION_ANGLE_PERIOD_DEG: f64 = 180.0;
+const FLUX_SOURCE_NET: &str = "net";
+const FLUX_SOURCE_SUM: &str = "sum";
+const RES_FLUX_SOURCE: &str = "flux_source";
+const RES_FLUX_NATIVE: &str = "flux_native";
+const RES_FLUX_ERR_NATIVE: &str = "flux_err_native";
+const RES_FLUX_JY: &str = "flux_jy";
+const RES_FLUX_ERR_JY: &str = "flux_err_jy";
+const RES_MAG_AB: &str = "mag_ab";
+const RES_MAG_AB_ERR: &str = "mag_ab_err";
+const RES_ST_MAG: &str = "st_mag";
+const RES_AREA_ARCSEC2: &str = "area_arcsec2";
+const RES_GEOMETRIC_AREA_ARCSEC2: &str = "geometric_area_arcsec2";
+const RES_SB_MAG_ARCSEC2: &str = "sb_mag_arcsec2";
+const RES_PA_SKY_DEG: &str = "pa_sky_deg";
+const DEFAULT_SB_BIN_WIDTH: f64 = 1.0;
+const SB_COARSE_BIN_NOTE: &str = "integer-lattice membership: bins below 3 px are biased";
+const SB_NO_BACKGROUND_NOTE: &str = "no background subtracted";
+const SB_AXES_SWAPPED_NOTE: &str =
+    "ellipse normalised: ry exceeded rx, so the major axis is ry and the position angle was rotated by 90 deg";
 
 #[derive(Deserialize)]
 pub struct RegionStatsRequest {
@@ -62,6 +94,147 @@ pub(crate) fn companion_err(path: &str, dims: (usize, usize)) -> Option<ImageEnt
     }
 }
 
+pub(crate) struct EntryCalibration {
+    pub photcal: Option<PhotCal>,
+    pub wcs: Option<WcsTransform>,
+    pub pixel_area_arcsec2: Option<f64>,
+    pub warnings: Vec<String>,
+}
+
+impl EntryCalibration {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn none() -> Self {
+        Self { photcal: None, wcs: None, pixel_area_arcsec2: None, warnings: Vec::new() }
+    }
+}
+
+fn header_card_text(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|v| v.trim().trim_matches('\'').trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn axis_pixel_scales_arcsec(wcs: &WcsTransform) -> (f64, f64) {
+    let cd = wcs.raw_params().4;
+    let scale_x = (cd[0][0].powi(2) + cd[1][0].powi(2)).sqrt() * ARCSEC_PER_DEGREE;
+    let scale_y = (cd[0][1].powi(2) + cd[1][1].powi(2)).sqrt() * ARCSEC_PER_DEGREE;
+    (scale_x, scale_y)
+}
+
+fn anisotropy_warning(wcs: &WcsTransform) -> Option<String> {
+    let (scale_x, scale_y) = axis_pixel_scales_arcsec(wcs);
+    let larger = scale_x.max(scale_y);
+    if !(larger.is_finite() && larger > 0.0) {
+        return None;
+    }
+    ((scale_x - scale_y).abs() / larger > PIXEL_SCALE_ANISOTROPY_TOLERANCE).then(|| {
+        format!(
+            "pixel scales differ per axis ({scale_x:.5} x {scale_y:.5} arcsec); the pixel area uses their mean"
+        )
+    })
+}
+
+fn positive_finite(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+pub(crate) fn entry_calibration(entry: &ImageEntry) -> EntryCalibration {
+    let wcs = entry_wcs(entry);
+    let header = entry.header();
+    let mut warnings = Vec::new();
+    let photcal = header.and_then(|h| {
+        let cal = PhotCal::from_header(h, wcs.as_ref())?;
+        match uncalibrated_reason(h) {
+            Some(reason) => {
+                warnings.push(reason);
+                None
+            }
+            None => {
+                warnings.extend(cal.warnings.iter().cloned());
+                Some(cal)
+            }
+        }
+    });
+    if photcal.is_none() && warnings.is_empty() {
+        warnings.push(missing_calibration_reason(header));
+    }
+    if let Some(provenance) = header.and_then(|h| header_card_text(h, HEADER_PROCESSING_PROVENANCE)) {
+        warnings.push(format!("photometry on processed data ({provenance})"));
+    }
+    let pixel_area_arcsec2 = match &photcal {
+        Some(PhotCal { convention: FluxConvention::JwstMjySr { pixar_a2: Some(a2), .. }, .. }) => positive_finite(*a2),
+        _ => wcs.as_ref().and_then(|w| {
+            warnings.extend(anisotropy_warning(w));
+            positive_finite(w.pixel_scale_arcsec().powi(2))
+        }),
+    };
+    EntryCalibration { photcal, wcs, pixel_area_arcsec2, warnings }
+}
+
+fn sky_centre(shape: &RegionShape, wcs: Option<&WcsTransform>) -> (Option<f64>, Option<f64>) {
+    let Some(wcs) = wcs else { return (None, None) };
+    let (x, y) = shape.centre();
+    let coord = wcs.pixel_to_world(x, y);
+    if coord.ra.is_finite() && coord.dec.is_finite() {
+        (Some(coord.ra), Some(coord.dec))
+    } else {
+        (None, None)
+    }
+}
+
+fn sky_position_angle_deg(shape: &RegionShape, wcs: Option<&WcsTransform>) -> Option<f64> {
+    let angle = match shape {
+        RegionShape::Ellipse { angle, .. } | RegionShape::Box { angle, .. } => *angle,
+        _ => return None,
+    };
+    let wcs = wcs?;
+    let sky = image_to_sky_angle(angle, wcs_north_angle_deg(wcs), wcs_is_east_right(wcs));
+    let pa = (sky + SKY_ANGLE_TO_POSITION_ANGLE_DEG).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
+    if !pa.is_finite() {
+        return None;
+    }
+    Some(if pa >= POSITION_ANGLE_PERIOD_DEG { 0.0 } else { pa })
+}
+
+fn surface_brightness_mag_arcsec2(flux_jy: f64, area_arcsec2: Option<f64>) -> Option<f64> {
+    let area = area_arcsec2.filter(|a| *a > 0.0)?;
+    (flux_jy > 0.0).then(|| -2.5 * (flux_jy / area).log10() + AB_MAG_ZERO_POINT)
+}
+
+pub(crate) fn calibrated_flux_json(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibration) -> Value {
+    let Some(photcal) = &cal.photcal else { return Value::Null };
+    let flux_native = stats.net_sum.unwrap_or(stats.sum);
+    let Some(c) = photcal.calibrate(flux_native, stats.sum_err) else { return Value::Null };
+    let area_arcsec2 = cal.pixel_area_arcsec2.map(|a| stats.count as f64 * a);
+    let geometric_area_arcsec2 = cal.pixel_area_arcsec2.map(|a| stats.area * a);
+    let (ra, dec) = sky_centre(shape, cal.wcs.as_ref());
+    json!({
+        RES_FLUX_SOURCE: if stats.net_sum.is_some() { FLUX_SOURCE_NET } else { FLUX_SOURCE_SUM },
+        RES_FLUX_NATIVE: flux_native,
+        RES_FLUX_ERR_NATIVE: stats.sum_err,
+        RES_FLUX_JY: c.flux_jy,
+        RES_FLUX_ERR_JY: c.flux_err_jy,
+        RES_MAG_AB: c.mag_ab,
+        RES_MAG_AB_ERR: c.mag_ab_err,
+        RES_ST_MAG: c.st_mag,
+        RES_AREA_ARCSEC2: area_arcsec2,
+        RES_GEOMETRIC_AREA_ARCSEC2: geometric_area_arcsec2,
+        RES_SB_MAG_ARCSEC2: surface_brightness_mag_arcsec2(c.flux_jy, area_arcsec2),
+        RES_RA: ra,
+        RES_DEC: dec,
+        RES_PA_SKY_DEG: sky_position_angle_deg(shape, cal.wcs.as_ref()),
+    })
+}
+
+fn photcal_json(cal: &PhotCal) -> anyhow::Result<Value> {
+    let mut val = serde_json::to_value(cal)?;
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert(RES_LABEL.to_string(), json!(cal.label()));
+    }
+    Ok(val)
+}
+
 fn with_timing(mut body: Value, masked: bool, t0: Instant) -> Value {
     if let Some(obj) = body.as_object_mut() {
         obj.insert(RES_MASKED.to_string(), json!(masked));
@@ -76,14 +249,24 @@ pub(crate) fn stats_for_entry(
     mask: Option<&DqMask>,
     err: Option<&Array2<f32>>,
     clip: SigmaClip,
+    cal: &EntryCalibration,
 ) -> Vec<Value> {
     let excluded = mask.map(|m| &m.map);
     regions
         .iter()
         .map(|req| {
-            match region_data_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, err, clip) {
-                Ok(stats) => json!({ RES_ID: req.id, RES_STATS: stats, RES_ERROR: Value::Null }),
-                Err(e) => json!({ RES_ID: req.id, RES_STATS: Value::Null, RES_ERROR: e.to_string() }),
+            let stats = region_data_stats(entry.arr(), &req.shape, req.background.as_ref(), excluded, err, clip)
+                .map_err(|e| e.to_string())
+                .and_then(|stats| {
+                    let mut value = serde_json::to_value(&stats).map_err(|e| e.to_string())?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(RES_CALIBRATED.to_string(), calibrated_flux_json(&stats, &req.shape, cal));
+                    }
+                    Ok(value)
+                });
+            match stats {
+                Ok(value) => json!({ RES_ID: req.id, RES_STATS: value, RES_ERROR: Value::Null }),
+                Err(e) => json!({ RES_ID: req.id, RES_STATS: Value::Null, RES_ERROR: e }),
             }
         })
         .collect()
@@ -126,12 +309,21 @@ pub async fn region_stats_cmd(
         let entry = load_cached_full(&path)?;
         let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
         let err_entry = companion_err(&path, entry.arr().dim());
-        let entries = stats_for_entry(&entry, &regions, mask.as_ref(), err_entry.as_ref().map(|e| e.arr()), clip);
+        let cal = entry_calibration(&entry);
+        let entries =
+            stats_for_entry(&entry, &regions, mask.as_ref(), err_entry.as_ref().map(|e| e.arr()), clip, &cal);
+        let photcal = match &cal.photcal {
+            Some(photcal) => photcal_json(photcal)?,
+            None => Value::Null,
+        };
         Ok(json!({
             RES_REGIONS: entries,
             RES_MASKED: mask.is_some(),
             RES_DQ_EXCLUDED: mask.as_ref().map(|m| m.excluded),
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
+            RES_PHOTCAL: photcal,
+            RES_CALIBRATION_WARNINGS: cal.warnings,
+            RES_PIXEL_AREA_ARCSEC2: cal.pixel_area_arcsec2,
         }))
     })
 }
@@ -176,6 +368,122 @@ pub async fn line_cut_cmd(
         let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
         let cut = line_cut(entry.arr(), x1, y1, x2, y2, mask.as_ref().map(|m| &m.map))?;
         Ok(with_timing(serde_json::to_value(cut)?, mask.is_some(), t0))
+    })
+}
+
+fn sb_bin_surface_brightness(bin: &EllipticalBin, photcal: Option<&PhotCal>, pixel_area: Option<f64>) -> (Option<f64>, Option<f64>) {
+    let (Some(photcal), Some(mean), Some(std)) = (photcal, bin.mean, bin.std) else { return (None, None) };
+    if bin.count == 0 {
+        return (None, None);
+    }
+    let mean_err = std / (bin.count as f64).sqrt();
+    let Some(c) = photcal.calibrate(mean, Some(mean_err)) else { return (None, None) };
+    let mu_ab = surface_brightness_mag_arcsec2(c.flux_jy, pixel_area);
+    (mu_ab, mu_ab.and(c.mag_ab_err))
+}
+
+fn sb_bin_json(bin: &EllipticalBin, cal: &EntryCalibration, pixel_scale: Option<f64>) -> anyhow::Result<Value> {
+    let mut value = serde_json::to_value(bin)?;
+    let obj = value.as_object_mut().ok_or_else(|| anyhow!("profile bin did not serialise to an object"))?;
+    let (mu_ab, mu_err) = sb_bin_surface_brightness(bin, cal.photcal.as_ref(), cal.pixel_area_arcsec2);
+    let cumulative = cal.photcal.as_ref().and_then(|p| p.calibrate(bin.cumulative_sum, None)).and_then(|c| c.mag_ab);
+    obj.insert(RES_SMA_ARCSEC.to_string(), json!(pixel_scale.map(|s| bin.sma * s)));
+    obj.insert(RES_MU_AB.to_string(), json!(mu_ab));
+    obj.insert(RES_MU_ERR.to_string(), json!(mu_err));
+    obj.insert(RES_MAG_AB_CUMULATIVE.to_string(), json!(cumulative));
+    Ok(value)
+}
+
+fn sb_profile_notes(shape: &RegionShape, background: Option<&RegionShape>) -> Vec<String> {
+    let mut notes = vec![SB_COARSE_BIN_NOTE.to_string()];
+    notes.push(match background {
+        Some(bg) => format!("background from {} region", bg.kind()),
+        None => SB_NO_BACKGROUND_NOTE.to_string(),
+    });
+    if let RegionShape::Ellipse { rx, ry, .. } = shape {
+        if rx < ry {
+            notes.push(SB_AXES_SWAPPED_NOTE.to_string());
+        }
+    }
+    notes
+}
+
+pub(crate) fn sb_profile_json(
+    profile: &EllipticalProfile,
+    shape: &RegionShape,
+    background: Option<&RegionShape>,
+    cal: &EntryCalibration,
+    masked: bool,
+    t0: Instant,
+) -> anyhow::Result<Value> {
+    let pixel_scale = cal.wcs.as_ref().map(|w| w.pixel_scale_arcsec()).and_then(positive_finite);
+    let bins = profile.bins.iter().map(|b| sb_bin_json(b, cal, pixel_scale)).collect::<anyhow::Result<Vec<Value>>>()?;
+    let total_mag_ab = profile
+        .bins
+        .last()
+        .and_then(|b| cal.photcal.as_ref().and_then(|p| p.calibrate(b.cumulative_sum, None)))
+        .and_then(|c| c.mag_ab);
+    let major_axis = RegionShape::Ellipse {
+        x: profile.x,
+        y: profile.y,
+        rx: profile.sma_max,
+        ry: profile.sma_max * (1.0 - profile.ellipticity),
+        angle: profile.angle_deg,
+    };
+    let photcal = match &cal.photcal {
+        Some(photcal) => photcal_json(photcal)?,
+        None => Value::Null,
+    };
+    let mut body = serde_json::to_value(profile)?;
+    let obj = body.as_object_mut().ok_or_else(|| anyhow!("profile did not serialise to an object"))?;
+    obj.insert(RES_BINS.to_string(), Value::Array(bins));
+    obj.insert(RES_R50_PX.to_string(), json!(encircled_radius_from_bins(&profile.bins, 0.5)));
+    obj.insert(RES_R80_PX.to_string(), json!(encircled_radius_from_bins(&profile.bins, 0.8)));
+    obj.insert(RES_R90_PX.to_string(), json!(encircled_radius_from_bins(&profile.bins, 0.9)));
+    obj.insert(RES_PETROSIAN_RADIUS_PX.to_string(), json!(petrosian_radius(&profile.bins, PETROSIAN_ETA)));
+    obj.insert(RES_PIXEL_SCALE_ARCSEC.to_string(), json!(pixel_scale));
+    obj.insert(RES_PIXEL_AREA_ARCSEC2.to_string(), json!(cal.pixel_area_arcsec2));
+    obj.insert(RES_SKY_PA_DEG.to_string(), json!(sky_position_angle_deg(&major_axis, cal.wcs.as_ref())));
+    obj.insert(RES_PHOTCAL.to_string(), photcal);
+    obj.insert(RES_CALIBRATION_WARNINGS.to_string(), json!(cal.warnings));
+    obj.insert(RES_TOTAL_MAG_AB.to_string(), json!(total_mag_ab));
+    obj.insert(RES_NOTES.to_string(), json!(sb_profile_notes(shape, background)));
+    Ok(with_timing(body, masked, t0))
+}
+
+#[tauri::command]
+pub async fn sb_profile_cmd(
+    path: String,
+    shape: RegionShape,
+    bin_width: Option<f64>,
+    background: Option<RegionShape>,
+    exclude_dq: Option<bool>,
+) -> Result<Value, String> {
+    blocking_cmd!({
+        let t0 = Instant::now();
+        let bin_width = bin_width.unwrap_or(DEFAULT_SB_BIN_WIDTH);
+        if !bin_width.is_finite() || !(MIN_SB_BIN_WIDTH..=MAX_SB_BIN_WIDTH).contains(&bin_width) {
+            bail!("bin_width must be between {} and {} px, got {}", MIN_SB_BIN_WIDTH, MAX_SB_BIN_WIDTH, bin_width);
+        }
+        let (x, y, sma_max, ellipticity, angle_deg) = ellipse_geometry(&shape)?;
+        if let Some(bg) = &background {
+            bg.validate()?;
+        }
+        let entry = load_cached_full(&path)?;
+        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
+        let profile = elliptical_profile(
+            entry.arr(),
+            x,
+            y,
+            sma_max,
+            ellipticity,
+            angle_deg,
+            bin_width,
+            background.as_ref(),
+            mask.as_ref().map(|m| &m.map),
+        )?;
+        let cal = entry_calibration(&entry);
+        sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.is_some(), t0)
     })
 }
 
@@ -237,7 +545,7 @@ mod tests {
             req("all", whole.clone()),
             req("empty", RegionShape::Circle { x: 100.0, y: 100.0, r: 2.0 }),
         ];
-        let out = stats_for_entry(&entry, &regions, Some(&mask), None, SigmaClip::default());
+        let out = stats_for_entry(&entry, &regions, Some(&mask), None, SigmaClip::default(), &EntryCalibration::none());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0][RES_ID], "all");
         assert!(out[0][RES_ERROR].is_null());
@@ -248,7 +556,7 @@ mod tests {
         assert!(out[1][RES_STATS].is_null());
         assert!(out[1][RES_ERROR].as_str().unwrap().contains("no finite pixels"));
 
-        let unmasked = stats_for_entry(&entry, &regions[..1], None, None, SigmaClip::default());
+        let unmasked = stats_for_entry(&entry, &regions[..1], None, None, SigmaClip::default(), &EntryCalibration::none());
         assert_eq!(unmasked[0][RES_STATS]["n_excluded"], 0);
         assert_eq!(unmasked[0][RES_STATS]["n_padding"], 1);
         assert_eq!(unmasked[0][RES_STATS]["count"], 15);
@@ -260,6 +568,7 @@ mod tests {
             None,
             None,
             SigmaClip::default(),
+            &EntryCalibration::none(),
         );
         assert!(invalid[0][RES_ERROR].as_str().unwrap().contains("invalid region"));
     }
@@ -279,14 +588,14 @@ mod tests {
 
         let whole = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
         let regions = vec![req("all", whole)];
-        let out = stats_for_entry(&entry, &regions, None, Some(err.arr()), SigmaClip::default());
+        let out = stats_for_entry(&entry, &regions, None, Some(err.arr()), SigmaClip::default(), &EntryCalibration::none());
         let sum_err = out[0][RES_STATS]["sum_err"].as_f64().unwrap();
         let expected: f64 = (0..16).map(|i| (0.5 * i as f64).powi(2)).sum::<f64>().sqrt();
         assert!((sum_err - expected).abs() < 1e-6, "sum_err={sum_err} expected={expected}");
         assert!(out[0][RES_STATS]["weighted_mean"].as_f64().unwrap().is_finite());
 
         let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
-        let masked = stats_for_entry(&entry, &regions, Some(&mask), Some(err.arr()), SigmaClip::default());
+        let masked = stats_for_entry(&entry, &regions, Some(&mask), Some(err.arr()), SigmaClip::default(), &EntryCalibration::none());
         let expected_masked: f64 = (0..16)
             .filter(|i| *i != 1 && *i != 6)
             .map(|i| (0.5 * i as f64).powi(2))
@@ -295,7 +604,7 @@ mod tests {
         let masked_err = masked[0][RES_STATS]["sum_err"].as_f64().unwrap();
         assert!((masked_err - expected_masked).abs() < 1e-6, "sum_err={masked_err} expected={expected_masked}");
 
-        let without = stats_for_entry(&entry, &regions, None, None, SigmaClip::default());
+        let without = stats_for_entry(&entry, &regions, None, None, SigmaClip::default(), &EntryCalibration::none());
         assert!(without[0][RES_STATS]["sum_err"].is_null());
         assert!(without[0][RES_STATS]["weighted_mean"].is_null());
 
@@ -312,7 +621,7 @@ mod tests {
         let entry = load_cached_full(path.to_str().unwrap()).unwrap();
         let shape = RegionShape::Box { x: 5.5, y: 5.5, width: 12.0, height: 12.0, angle: 0.0 };
 
-        let out = stats_for_entry(&entry, &[req("frame", shape.clone())], None, None, SigmaClip::default());
+        let out = stats_for_entry(&entry, &[req("frame", shape.clone())], None, None, SigmaClip::default(), &EntryCalibration::none());
         let region = &out[0][RES_STATS];
         let statistics = crate::core::imaging::statistics::statistics_for_region(entry.arr(), &shape, None).unwrap();
         assert_eq!(region["count"], statistics.count);
@@ -438,11 +747,312 @@ mod tests {
         assert_eq!(ok[RES_REGIONS][0][RES_STATS]["count"], 64);
     }
 
+    const JWST_PIXAR_SR: f64 = 2.0e-14;
+    const JWST_PIXAR_A2: f64 = 8.5e-4;
+    const DISC_RADIUS: f64 = 10.0;
+    const DISC_VALUE: f32 = 4.0;
+    const FLOOR_VALUE: f32 = 1.0;
+    const DISC_CENTRE: f64 = 50.0;
+
+    fn jwst_north_up_cd() -> [[f64; 2]; 2] {
+        let s = JWST_PIXAR_SR.sqrt().to_degrees();
+        [[-s, 0.0], [0.0, s]]
+    }
+
+    fn jwst_header(extra: &[(&str, &str)]) -> crate::types::header::HduHeader {
+        let mut header = header_with_cd(jwst_north_up_cd());
+        header.set("BUNIT", "MJy/sr".into());
+        header.set_f64("PIXAR_SR", JWST_PIXAR_SR);
+        header.set_f64("PIXAR_A2", JWST_PIXAR_A2);
+        for (k, v) in extra {
+            header.set(k, (*v).to_string());
+        }
+        header
+    }
+
+    fn disc_frame() -> Array2<f32> {
+        Array2::from_shape_fn((100, 100), |(y, x)| {
+            let dx = x as f64 - DISC_CENTRE;
+            let dy = y as f64 - DISC_CENTRE;
+            if dx * dx + dy * dy <= DISC_RADIUS * DISC_RADIUS { DISC_VALUE } else { FLOOR_VALUE }
+        })
+    }
+
+    fn lattice_count(shape: &RegionShape) -> u64 {
+        (0..100).flat_map(|y| (0..100).map(move |x| (x, y))).filter(|(x, y)| shape.contains(*x as f64, *y as f64)).count() as u64
+    }
+
+    fn write_jwst_disc(dir: &std::path::Path, name: &str, extra: &[(&str, &str)]) -> String {
+        let path = dir.join(name);
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&jwst_header(extra))).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn circle(r: f64) -> RegionShape {
+        RegionShape::Circle { x: DISC_CENTRE, y: DISC_CENTRE, r }
+    }
+
+    #[tokio::test]
+    async fn region_stats_calibrate_a_jwst_mjy_sr_disc_to_jansky_ab_and_surface_brightness() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_jwst_disc(dir.path(), "jwst_disc.fits", &[]);
+        let annulus = RegionShape::Annulus { x: DISC_CENTRE, y: DISC_CENTRE, r_inner: 14.0, r_outer: 18.0 };
+        let ellipse = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 6.0, ry: 3.0, angle: 0.0 };
+        let regions = vec![
+            req("r4", circle(4.0)),
+            req("r6", circle(6.0)),
+            RegionStatsRequest { id: "net".into(), shape: circle(4.0), background: Some(annulus) },
+            req("ellipse", ellipse.clone()),
+            req("polygon", RegionShape::Polygon { points: vec![[45.0, 45.0], [55.0, 45.0], [50.0, 55.0]] }),
+        ];
+        let out = region_stats_cmd(key.clone(), regions, None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"), "{out}");
+        assert_eq!(out[RES_PHOTCAL]["convention"]["kind"], "jwst_mjy_sr");
+        assert!(out[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{out}");
+        assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - JWST_PIXAR_A2).abs() < 1e-15);
+
+        let entries = out[RES_REGIONS].as_array().unwrap();
+        let r4 = &entries[0][RES_STATS];
+        let count = lattice_count(&circle(4.0));
+        assert_eq!(count, 49);
+        assert_eq!(r4["count"], count);
+        let cal = &r4[RES_CALIBRATED];
+        assert_eq!(cal["flux_source"], "sum");
+        let expected_jy = DISC_VALUE as f64 * count as f64 * JWST_PIXAR_SR * 1e6;
+        let flux_jy = cal["flux_jy"].as_f64().unwrap();
+        assert!((flux_jy - expected_jy).abs() / expected_jy < 1e-9, "flux_jy={flux_jy} expected={expected_jy}");
+        assert!((cal["flux_native"].as_f64().unwrap() - DISC_VALUE as f64 * count as f64).abs() < 1e-6);
+        assert!(cal["flux_err_native"].is_null() && cal["flux_err_jy"].is_null() && cal["mag_ab_err"].is_null());
+        let mag_ab = cal["mag_ab"].as_f64().unwrap();
+        assert!((mag_ab - (-2.5 * flux_jy.log10() + 8.90)).abs() < 1e-9, "mag_ab={mag_ab}");
+        assert!(cal["st_mag"].is_null());
+        let area = cal["area_arcsec2"].as_f64().unwrap();
+        assert!((area - count as f64 * JWST_PIXAR_A2).abs() < 1e-12, "area={area}");
+        let geometric = cal["geometric_area_arcsec2"].as_f64().unwrap();
+        assert!((geometric - std::f64::consts::PI * 16.0 * JWST_PIXAR_A2).abs() < 1e-12, "geometric={geometric}");
+        let sb = cal["sb_mag_arcsec2"].as_f64().unwrap();
+        assert!((sb - (-2.5 * (flux_jy / area).log10() + 8.90)).abs() < 1e-9, "sb={sb}");
+
+        let r6 = &entries[1][RES_STATS][RES_CALIBRATED];
+        assert_eq!(entries[1][RES_STATS]["count"], lattice_count(&circle(6.0)));
+        let sb6 = r6["sb_mag_arcsec2"].as_f64().unwrap();
+        assert!((sb6 - sb).abs() < 1e-6, "sb r4={sb} r6={sb6}");
+        assert!(r6["flux_jy"].as_f64().unwrap() > flux_jy);
+
+        let net = &entries[2][RES_STATS][RES_CALIBRATED];
+        assert_eq!(net["flux_source"], "net");
+        let net_jy = net["flux_jy"].as_f64().unwrap();
+        let expected_net = (DISC_VALUE - FLOOR_VALUE) as f64 * count as f64 * JWST_PIXAR_SR * 1e6;
+        assert!((net_jy - expected_net).abs() / expected_net < 1e-9, "net_jy={net_jy} expected={expected_net}");
+
+        let entry = load_cached_full(&key).unwrap();
+        let wcs = entry_wcs(&entry).expect("wcs");
+        let centre = wcs.pixel_to_world(DISC_CENTRE, DISC_CENTRE);
+        for e in entries {
+            let cal = &e[RES_STATS][RES_CALIBRATED];
+            assert!(cal.is_object(), "{e}");
+            if e[RES_ID] == "polygon" {
+                assert!(cal["pa_sky_deg"].is_null());
+                continue;
+            }
+            assert!((cal["ra"].as_f64().unwrap() - centre.ra).abs() < 1e-9, "{e}");
+            assert!((cal["dec"].as_f64().unwrap() - centre.dec).abs() < 1e-9, "{e}");
+        }
+        let pa = entries[3][RES_STATS][RES_CALIBRATED]["pa_sky_deg"].as_f64().unwrap();
+        assert!((pa - 90.0).abs() < 1e-9, "an east-west major axis on a north-up frame has PA 90, got {pa}");
+        assert!(entries[0][RES_STATS][RES_CALIBRATED]["pa_sky_deg"].is_null());
+
+        let rotated = RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width: 8.0, height: 4.0, angle: 30.0 };
+        let cal = entry_calibration(&entry);
+        let stats = region_data_stats(entry.arr(), &rotated, None, None, None, SigmaClip::default()).unwrap();
+        let value = calibrated_flux_json(&stats, &rotated, &cal);
+        let pa = value["pa_sky_deg"].as_f64().unwrap();
+        assert!((pa - 120.0).abs() < 1e-9, "a box rotated 30 deg counter-clockwise from east-west has PA 120, got {pa}");
+        assert_eq!(value["flux_source"], "sum");
+    }
+
+    #[tokio::test]
+    async fn region_stats_refuse_calibration_on_display_referred_or_processed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_jwst_disc(dir.path(), "stretched.fits", &[("ABDISP", "T"), ("ABPROC", "arcsinh_stretch")]);
+        let out = region_stats_cmd(key, vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL].is_null(), "{out}");
+        let warnings: Vec<&str> = out[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert!(warnings[0].contains("display-referred"), "{warnings:?}");
+        assert!(warnings.iter().any(|w| *w == "photometry on processed data (arcsinh_stretch)"), "{warnings:?}");
+        let stats = &out[RES_REGIONS][0][RES_STATS];
+        assert!(stats[RES_CALIBRATED].is_null(), "{stats}");
+        assert_eq!(stats["count"], 49);
+        let wcs_area = JWST_PIXAR_SR * crate::core::metadata::photcal::ARCSEC_PER_RADIAN.powi(2);
+        let area = out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap();
+        assert!((area - wcs_area).abs() / wcs_area < 1e-9, "refused calibration falls back to the WCS pixel area: {area} vs {wcs_area}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_without_calibration_cards_report_null_photcal_and_the_missing_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain_disc.fits");
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), None).unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL].is_null());
+        assert!(out[RES_PIXEL_AREA_ARCSEC2].is_null());
+        let warnings = out[RES_CALIBRATION_WARNINGS].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].as_str().unwrap().contains("BUNIT"), "{warnings:?}");
+        let stats = &out[RES_REGIONS][0][RES_STATS];
+        assert!(stats.get(RES_CALIBRATED).is_some_and(Value::is_null), "{stats}");
+        assert_eq!(stats["count"], 49);
+
+        let entry = load_cached_full(&key).unwrap();
+        let cal = entry_calibration(&entry);
+        assert!(cal.photcal.is_none() && cal.wcs.is_none() && cal.pixel_area_arcsec2.is_none());
+        let regions = vec![req("r4", circle(4.0)), req("r6", circle(6.0))];
+        let with_none = stats_for_entry(&entry, &regions, None, None, SigmaClip::default(), &EntryCalibration::none());
+        let with_entry = stats_for_entry(&entry, &regions, None, None, SigmaClip::default(), &cal);
+        assert_eq!(with_none, with_entry);
+        assert_eq!(with_none[0][RES_STATS]["sum"], DISC_VALUE as f64 * 49.0);
+    }
+
+    #[test]
+    fn entry_calibration_warns_about_anisotropic_pixel_scales_and_uses_their_mean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anisotropic.fits");
+        let s = 1.0 / 3600.0;
+        let header = header_with_cd([[-s, 0.0], [0.0, 1.05 * s]]);
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+        let entry = load_cached_full(path.to_str().unwrap()).unwrap();
+        let cal = entry_calibration(&entry);
+        assert!(cal.photcal.is_none());
+        assert!(cal.warnings.iter().any(|w| w.contains("pixel scales differ per axis")), "{:?}", cal.warnings);
+        let expected = (1.025f64).powi(2);
+        assert!((cal.pixel_area_arcsec2.unwrap() - expected).abs() < 1e-9, "{:?}", cal.pixel_area_arcsec2);
+
+        let isotropic = header_with_cd(north_up_cd());
+        let path = dir.path().join("isotropic.fits");
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&isotropic)).unwrap();
+        let entry = load_cached_full(path.to_str().unwrap()).unwrap();
+        let cal = entry_calibration(&entry);
+        assert!(!cal.warnings.iter().any(|w| w.contains("pixel scales differ")), "{:?}", cal.warnings);
+        assert!((cal.pixel_area_arcsec2.unwrap() - 1.0).abs() < 1e-9);
+    }
+
     #[tokio::test]
     async fn export_cmd_rejects_unsupported_system() {
         let err = regions_export_cmd("nowhere.fits".into(), vec![], "galactic".into(), None)
             .await
             .unwrap_err();
         assert!(err.contains("unsupported coordinate system 'galactic'"), "{err}");
+    }
+
+    const SB_DISC_VALUE: f32 = 3.0;
+    const SB_DISC_RADIUS: f64 = 10.0;
+    const SB_PIXAR_A2: f64 = 0.0009;
+
+    fn one_arcsec_pixel_sr() -> f64 {
+        (1.0f64 / 3600.0).to_radians().powi(2)
+    }
+
+    fn write_flat_sb_disc(dir: &std::path::Path) -> String {
+        let arr = Array2::from_shape_fn((100, 100), |(y, x)| {
+            let dx = x as f64 - DISC_CENTRE;
+            let dy = y as f64 - DISC_CENTRE;
+            if dx * dx + dy * dy <= SB_DISC_RADIUS * SB_DISC_RADIUS { SB_DISC_VALUE } else { 0.0 }
+        });
+        let mut header = header_with_cd(north_up_cd());
+        header.set("BUNIT", "MJy/sr".into());
+        header.set_f64("PIXAR_SR", one_arcsec_pixel_sr());
+        header.set_f64("PIXAR_A2", SB_PIXAR_A2);
+        let path = dir.join("sb_disc.fits");
+        write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn sb_profile_cmd_calibrates_a_flat_jwst_disc_to_a_constant_surface_brightness() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_flat_sb_disc(dir.path());
+        let shape = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 24.0, ry: 12.0, angle: 30.0 };
+        let out = sb_profile_cmd(key.clone(), shape, None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"), "{out}");
+        assert!(out[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{out}");
+        assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - SB_PIXAR_A2).abs() < 1e-15);
+        assert!((out[RES_PIXEL_SCALE_ARCSEC].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(out["bin_width"], 1.0);
+        assert_eq!(out["ellipticity"], 0.5);
+        assert_eq!(out["angle_deg"], 30.0);
+        assert_eq!(out[RES_MASKED], false);
+        assert!(out["background"].is_null());
+
+        let expected_mu = -2.5 * (SB_DISC_VALUE as f64 * 1e6 * one_arcsec_pixel_sr() / SB_PIXAR_A2).log10() + 8.90;
+        let bins = out[RES_BINS].as_array().unwrap();
+        assert_eq!(bins.len(), 24);
+        let mut inside = 0;
+        for bin in bins {
+            let sma = bin["sma"].as_f64().unwrap();
+            assert!((bin[RES_SMA_ARCSEC].as_f64().unwrap() - sma).abs() < 1e-9, "{bin}");
+            if bin["sma_outer"].as_f64().unwrap() <= SB_DISC_RADIUS {
+                inside += 1;
+                let mu = bin[RES_MU_AB].as_f64().unwrap();
+                assert!((mu - expected_mu).abs() < 1e-6, "sma {sma}: mu {mu} expected {expected_mu}");
+                assert_eq!(bin[RES_MU_ERR], 0.0);
+                assert!(bin[RES_MAG_AB_CUMULATIVE].as_f64().unwrap().is_finite());
+            }
+        }
+        assert_eq!(inside, 10);
+        assert!(bins.last().unwrap()[RES_MU_AB].is_null(), "an all-zero outer bin has no surface brightness");
+        assert!(bins.last().unwrap()[RES_MU_ERR].is_null());
+        assert_eq!(bins.last().unwrap()["mean"], 0.0);
+        assert!(out[RES_TOTAL_MAG_AB].as_f64().unwrap().is_finite());
+        assert!(out[RES_R50_PX].as_f64().unwrap() > 0.0);
+        assert!(out[RES_R80_PX].as_f64().unwrap() > out[RES_R50_PX].as_f64().unwrap());
+        assert!(out[RES_R90_PX].as_f64().unwrap() > out[RES_R80_PX].as_f64().unwrap());
+        assert!(out[RES_PETROSIAN_RADIUS_PX].as_f64().unwrap() > 0.0);
+        let notes: Vec<&str> = out[RES_NOTES].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        assert_eq!(notes, vec![SB_COARSE_BIN_NOTE, SB_NO_BACKGROUND_NOTE]);
+    }
+
+    #[tokio::test]
+    async fn sb_profile_sky_position_angle_matches_the_calibrated_region_block_on_a_north_up_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_flat_sb_disc(dir.path());
+        let wide = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 16.0, ry: 8.0, angle: 30.0 };
+        let out = sb_profile_cmd(key.clone(), wide.clone(), Some(2.0), None, None).await.unwrap();
+        let pa = out[RES_SKY_PA_DEG].as_f64().unwrap();
+        assert!((pa - 120.0).abs() < 1e-9, "major axis 30 deg from the x axis on a north-up frame has PA 120, got {pa}");
+
+        let entry = load_cached_full(&key).unwrap();
+        let cal = entry_calibration(&entry);
+        let stats = region_data_stats(entry.arr(), &wide, None, None, None, SigmaClip::default()).unwrap();
+        let region_pa = calibrated_flux_json(&stats, &wide, &cal)["pa_sky_deg"].as_f64().unwrap();
+        assert!((pa - region_pa).abs() < 1e-9, "profile {pa} vs region block {region_pa}");
+
+        let tall = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 8.0, ry: 16.0, angle: -60.0 };
+        let swapped = sb_profile_cmd(key.clone(), tall, Some(2.0), None, None).await.unwrap();
+        assert!((swapped[RES_SKY_PA_DEG].as_f64().unwrap() - 120.0).abs() < 1e-9, "{swapped}");
+        assert_eq!(swapped["angle_deg"], 30.0);
+        assert_eq!(swapped[RES_BINS], out[RES_BINS]);
+        let notes = swapped[RES_NOTES].as_array().unwrap();
+        assert_eq!(notes.last().unwrap(), SB_AXES_SWAPPED_NOTE);
+
+        let annulus = RegionShape::Annulus { x: DISC_CENTRE, y: DISC_CENTRE, r_inner: 20.0, r_outer: 30.0 };
+        let with_bg = sb_profile_cmd(key, circle(12.0), Some(1.0), Some(annulus), None).await.unwrap();
+        assert_eq!(with_bg["background"]["median"], 0.0);
+        assert!(with_bg[RES_SKY_PA_DEG].as_f64().unwrap().abs() - 90.0 < 1e-9);
+        assert_eq!(with_bg[RES_NOTES][1], "background from annulus region");
+    }
+
+    #[tokio::test]
+    async fn sb_profile_cmd_rejects_bad_bin_widths_and_non_elliptical_shapes_before_loading() {
+        let boxed = RegionShape::Box { x: 5.0, y: 5.0, width: 4.0, height: 2.0, angle: 0.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), boxed, None, None, None).await.unwrap_err();
+        assert!(err.contains("needs a circle or ellipse region, got box"), "{err}");
+        for bin_width in [0.25, 100.0, f64::NAN] {
+            let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), Some(bin_width), None, None).await.unwrap_err();
+            assert!(err.contains("bin_width must be between 0.5 and 64 px"), "{err}");
+        }
+        let bad_bg = RegionShape::Circle { x: 1.0, y: 1.0, r: -2.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), None, Some(bad_bg), None).await.unwrap_err();
+        assert!(err.contains("invalid region"), "{err}");
     }
 }

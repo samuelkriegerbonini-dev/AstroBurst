@@ -1,21 +1,28 @@
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, image_ref, source_path};
-use crate::core::astrometry::frames::{convert_from_icrs, SkyFrame};
+use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
-use crate::core::astrometry::wcs::{angular_separation, pixel_center, pixel_edge_corners, WcsTransform};
+use crate::core::astrometry::wcs::{
+    angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsTransform,
+};
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::types::constants::{
-    DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1,
-    HEADER_NAXIS2, RES_CENTER_DEC, RES_CENTER_RA, RES_FOV_ARCMIN,
-    RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
-    RES_PIXEL_SCALE_ARCSEC, RES_POINTS,
+    DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
+    RES_CENTER_RA, RES_EAST_VEC, RES_FLIPPED, RES_FOV_ARCMIN, RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN,
+    RES_FRAME, RES_NAXIS1, RES_NAXIS2, RES_NORTH_VEC, RES_ON_IMAGE, RES_PARITY,
+    RES_PIXEL_LENGTH, RES_PIXEL_SCALE_ARCSEC, RES_PIXEL_SCALE_X_ARCSEC, RES_PIXEL_SCALE_Y_ARCSEC,
+    RES_POINTS, RES_POSITION_ANGLE_DEG, RES_PROJECTION, RES_ROTATION_DEG, RES_SEPARATION_ARCMIN,
+    RES_SEPARATION_ARCSEC, RES_SEPARATION_DEG, RES_SIP_PRESENT,
 };
 use crate::types::config::AppConfig;
 
 const MAX_UPLOAD_DIM: usize = 2048;
+const MAX_SKY_POINTS: usize = 20_000;
+const PARITY_NORMAL: &str = "normal";
+const PARITY_FLIPPED: &str = "flipped";
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let header = load_plane_header(&image_ref(path))?;
@@ -311,6 +318,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
         let (fov_w, fov_h) = wcs.field_of_view(naxis1, naxis2);
         let (cx, cy) = pixel_center(naxis1, naxis2);
         let center = wcs.pixel_to_world(cx, cy);
+        let orientation = wcs.orientation(naxis1, naxis2);
 
         Ok(json!({
             RES_CENTER_RA: center.ra,
@@ -321,6 +329,15 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_FOV_ARCMIN: [fov_w, fov_h],
             RES_NAXIS1: naxis1,
             RES_NAXIS2: naxis2,
+            RES_ROTATION_DEG: orientation.rotation_deg,
+            RES_FLIPPED: orientation.flipped,
+            RES_PARITY: if orientation.flipped { PARITY_FLIPPED } else { PARITY_NORMAL },
+            RES_PIXEL_SCALE_X_ARCSEC: orientation.pixel_scale_x_arcsec,
+            RES_PIXEL_SCALE_Y_ARCSEC: orientation.pixel_scale_y_arcsec,
+            RES_PROJECTION: orientation.projection,
+            RES_SIP_PRESENT: orientation.sip_present,
+            RES_NORTH_VEC: orientation.north_vec,
+            RES_EAST_VEC: orientation.east_vec,
         }))
     })
 }
@@ -348,6 +365,107 @@ pub async fn pixel_to_world_cmd(
             })
             .collect();
         Ok(json!({ RES_POINTS: out, RES_FRAME: frame.name() }))
+    })
+}
+
+fn pixel_on_image(x: f64, y: f64, naxis1: usize, naxis2: usize) -> bool {
+    x >= -0.5 && x < naxis1 as f64 - 0.5 && y >= -0.5 && y < naxis2 as f64 - 0.5
+}
+
+fn finite_pair(name: &str, p: (f64, f64)) -> anyhow::Result<()> {
+    if !p.0.is_finite() || !p.1.is_finite() {
+        anyhow::bail!("point {} must have finite coordinates, got ({}, {})", name, p.0, p.1);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn world_to_pixel_cmd(
+    path: String,
+    points: Vec<(f64, f64)>,
+    frame: Option<String>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        if points.len() > MAX_SKY_POINTS {
+            anyhow::bail!(
+                "points holds {} entries, more than the {} allowed per call",
+                points.len(),
+                MAX_SKY_POINTS
+            );
+        }
+        let frame = SkyFrame::from_name(frame.as_deref().unwrap_or("icrs"))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let cached = load_wcs_with_dims_cached(&path)?;
+        let icrs: Vec<(f64, f64)> = points
+            .iter()
+            .map(|&(lon, lat)| {
+                if lon.is_finite() && lat.is_finite() {
+                    convert_to_icrs(frame, lon, lat)
+                } else {
+                    (f64::NAN, f64::NAN)
+                }
+            })
+            .collect();
+        let pixels = cached.wcs.world_to_pixel_batch(&icrs);
+        let mut out = Vec::with_capacity(pixels.len());
+        let mut on_image = Vec::with_capacity(pixels.len());
+        for &(x, y) in &pixels {
+            if x.is_finite() && y.is_finite() {
+                out.push(json!([x, y]));
+                on_image.push(pixel_on_image(x, y, cached.naxis1, cached.naxis2));
+            } else {
+                out.push(serde_json::Value::Null);
+                on_image.push(false);
+            }
+        }
+        Ok(json!({
+            RES_POINTS: out,
+            RES_ON_IMAGE: on_image,
+            RES_FRAME: frame.name(),
+            RES_NAXIS1: cached.naxis1,
+            RES_NAXIS2: cached.naxis2,
+        }))
+    })
+}
+
+#[tauri::command]
+pub async fn sky_separation_cmd(
+    path: Option<String>,
+    a: (f64, f64),
+    b: (f64, f64),
+    pixel: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        finite_pair("a", a)?;
+        finite_pair("b", b)?;
+        let (a_sky, b_sky, pixel_length, pixel_scale) = if pixel.unwrap_or(false) {
+            let path = match path.as_deref().filter(|p| !p.is_empty()) {
+                Some(p) => p,
+                None => anyhow::bail!("pixel points need a file path, but path is empty"),
+            };
+            let wcs = load_wcs_cached(path)?;
+            let ca = wcs.pixel_to_world(a.0, a.1);
+            let cb = wcs.pixel_to_world(b.0, b.1);
+            if !(ca.ra.is_finite() && ca.dec.is_finite() && cb.ra.is_finite() && cb.dec.is_finite()) {
+                anyhow::bail!("one of the pixel points does not project onto the sky");
+            }
+            let length = (b.0 - a.0).hypot(b.1 - a.1);
+            ((ca.ra, ca.dec), (cb.ra, cb.dec), json!(length), json!(wcs.pixel_scale_arcsec()))
+        } else {
+            (a, b, serde_json::Value::Null, serde_json::Value::Null)
+        };
+        let separation_deg = angular_separation(a_sky.0, a_sky.1, b_sky.0, b_sky.1);
+        let position_angle = position_angle_deg(a_sky.0, a_sky.1, b_sky.0, b_sky.1);
+        Ok(json!({
+            RES_A_SKY: [a_sky.0, a_sky.1],
+            RES_B_SKY: [b_sky.0, b_sky.1],
+            RES_SEPARATION_DEG: separation_deg,
+            RES_SEPARATION_ARCMIN: separation_deg * 60.0,
+            RES_SEPARATION_ARCSEC: separation_deg * 3600.0,
+            RES_POSITION_ANGLE_DEG: position_angle,
+            RES_PIXEL_LENGTH: pixel_length,
+            RES_PIXEL_SCALE_ARCSEC: pixel_scale,
+        }))
     })
 }
 
@@ -695,5 +813,137 @@ mod tests {
         let b = footprint(100.0 + 0.1 / 80.0f64.to_radians().cos(), 80.0, 0.2);
         let f = footprint_overlap_fraction(&a, &b);
         assert!(f > 0.3 && f < 0.7, "expected partial overlap, got {}", f);
+    }
+
+    fn sky_of(v: &serde_json::Value, key: &str) -> (f64, f64) {
+        (v[key][0].as_f64().unwrap(), v[key][1].as_f64().unwrap())
+    }
+
+    fn pair_at(v: &serde_json::Value, i: usize) -> (f64, f64) {
+        (v[i][0].as_f64().unwrap(), v[i][1].as_f64().unwrap())
+    }
+
+    fn angle_diff(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    #[tokio::test]
+    async fn world_to_pixel_round_trips_pixel_to_world_and_flags_off_image_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roundtrip.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+
+        let pixels = vec![(12.25, 77.5), (0.0, 0.0), (99.0, 99.0)];
+        let sky = super::pixel_to_world_cmd(path.clone(), pixels.clone(), None).await.unwrap();
+        let sky_points: Vec<(f64, f64)> = (0..pixels.len()).map(|i| pair_at(&sky["points"], i)).collect();
+
+        let mut points = sky_points.clone();
+        points.push((sky_points[0].0 + 10.0, sky_points[0].1));
+        points.push((f64::NAN, 2.0));
+        let back = super::world_to_pixel_cmd(path, points, Some("icrs".into())).await.unwrap();
+        assert_eq!(back["frame"], "icrs");
+        assert_eq!(back["naxis1"], 100);
+        assert_eq!(back["naxis2"], 100);
+        for (i, &(px, py)) in pixels.iter().enumerate() {
+            let (x, y) = pair_at(&back["points"], i);
+            assert!((x - px).abs() < 1e-6 && (y - py).abs() < 1e-6, "point {i}: ({x}, {y}) vs ({px}, {py})");
+            assert_eq!(back["on_image"][i], true);
+        }
+        assert_eq!(back["on_image"][3], false);
+        assert!(back["points"][4].is_null());
+        assert_eq!(back["on_image"][4], false);
+    }
+
+    #[tokio::test]
+    async fn world_to_pixel_rejects_too_many_points_and_unknown_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 10);
+        let too_many = vec![(150.0, 2.0); super::MAX_SKY_POINTS + 1];
+        let err = super::world_to_pixel_cmd(path.clone(), too_many, None).await.unwrap_err();
+        assert!(err.contains("20000"), "{err}");
+        let err = super::world_to_pixel_cmd(path, vec![(150.0, 2.0)], Some("supergalactic".into())).await.unwrap_err();
+        assert!(err.contains("supergalactic"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn galactic_input_lands_where_its_icrs_equivalent_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("galactic.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+        let (l, b) = crate::core::astrometry::frames::icrs_to_galactic(150.0, 2.0);
+        assert!((l - 236.9546).abs() < 0.01 && (b - 41.9051).abs() < 0.01, "galactic ({l}, {b})");
+
+        let gal = super::world_to_pixel_cmd(path.clone(), vec![(l, b)], Some("galactic".into())).await.unwrap();
+        let icrs = super::world_to_pixel_cmd(path, vec![(150.0, 2.0)], None).await.unwrap();
+        assert_eq!(gal["frame"], "galactic");
+        let (gx, gy) = pair_at(&gal["points"], 0);
+        let (ix, iy) = pair_at(&icrs["points"], 0);
+        assert!((gx - ix).abs() < 1e-6 && (gy - iy).abs() < 1e-6, "({gx}, {gy}) vs ({ix}, {iy})");
+        assert!((ix - 49.5).abs() < 1e-6 && (iy - 49.5).abs() < 1e-6, "centre ({ix}, {iy})");
+    }
+
+    #[tokio::test]
+    async fn pixel_mode_separation_measures_a_vertical_line_with_north_up_position_angles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sep.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+
+        let up = super::sky_separation_cmd(Some(path.clone()), (49.5, 40.0), (49.5, 50.0), Some(true)).await.unwrap();
+        assert!((up["separation_arcsec"].as_f64().unwrap() - 10.0).abs() < 1e-6, "{}", up["separation_arcsec"]);
+        assert!((up["separation_arcmin"].as_f64().unwrap() - 10.0 / 60.0).abs() < 1e-7);
+        assert!((up["separation_deg"].as_f64().unwrap() - 10.0 / 3600.0).abs() < 1e-9);
+        let pa_up = up["position_angle_deg"].as_f64().unwrap();
+        assert!(angle_diff(pa_up, 0.0) < 1e-6, "{pa_up}");
+        assert!((up["pixel_length"].as_f64().unwrap() - 10.0).abs() < 1e-12);
+        assert!((up["pixel_scale_arcsec"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        let (ra, dec) = sky_of(&up, "a_sky");
+        assert!((ra - 150.0).abs() < 1e-6 && (dec - 2.0 + 9.5 / 3600.0).abs() < 1e-9, "a_sky ({ra}, {dec})");
+
+        let down = super::sky_separation_cmd(Some(path.clone()), (49.5, 50.0), (49.5, 40.0), Some(true)).await.unwrap();
+        let pa_down = down["position_angle_deg"].as_f64().unwrap();
+        assert!(angle_diff(pa_down, 180.0) < 1e-6, "{pa_down}");
+
+        let left = super::sky_separation_cmd(Some(path), (49.5, 49.5), (39.5, 49.5), Some(true)).await.unwrap();
+        let pa_left = left["position_angle_deg"].as_f64().unwrap();
+        assert!(angle_diff(pa_left, 90.0) < 1e-6, "{pa_left}");
+    }
+
+    #[tokio::test]
+    async fn sky_mode_separation_needs_no_path_and_pixel_mode_validates_its_inputs() {
+        let sky = super::sky_separation_cmd(None, (10.0, 20.0), (11.0, 21.0), None).await.unwrap();
+        assert!((sky["position_angle_deg"].as_f64().unwrap() - 42.9531).abs() < 0.01);
+        assert!(sky["pixel_length"].is_null() && sky["pixel_scale_arcsec"].is_null());
+        assert_eq!(sky["a_sky"], serde_json::json!([10.0, 20.0]));
+
+        let err = super::sky_separation_cmd(None, (0.0, 0.0), (1.0, 1.0), Some(true)).await.unwrap_err();
+        assert!(err.contains("pixel points need a file path"), "{err}");
+        let err = super::sky_separation_cmd(None, (f64::NAN, 0.0), (1.0, 1.0), None).await.unwrap_err();
+        assert!(err.contains("point a"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offsky.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 10);
+        let err = super::sky_separation_cmd(Some(path), (0.0, 0.0), (f64::MAX, f64::MAX), Some(true)).await.unwrap_err();
+        assert!(err.contains("does not project onto the sky"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wcs_info_reports_the_orientation_of_a_north_up_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("info.fits").to_string_lossy().to_string();
+        write_north_up_fits(&path, 100);
+        let info = super::get_wcs_info(path).await.unwrap();
+        assert_eq!(info["projection"], "TAN");
+        assert_eq!(info["parity"], "normal");
+        assert_eq!(info["flipped"], false);
+        assert_eq!(info["sip_present"], false);
+        assert!(info["rotation_deg"].as_f64().unwrap().abs() < 1e-6);
+        assert!((info["pixel_scale_x_arcsec"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        let (nx, ny) = sky_of(&info, "north_vec");
+        assert!(nx.abs() < 1e-6 && (ny - 1.0).abs() < 1e-6, "north ({nx}, {ny})");
+        let (ex, ey) = sky_of(&info, "east_vec");
+        assert!((ex + 1.0).abs() < 1e-6 && ey.abs() < 1e-6, "east ({ex}, {ey})");
     }
 }
