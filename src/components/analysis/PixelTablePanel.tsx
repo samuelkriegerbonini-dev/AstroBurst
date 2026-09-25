@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useId, memo } from "react";
-import { Crosshair, Grid3X3, Loader2 } from "lucide-react";
+import { Crosshair, Grid3X3, Plus, Loader2 } from "lucide-react";
 import { pixelTable } from "../../services/analysis";
 import type { PixelTableResult } from "../../shared/types/analysis";
 import { useMousePixel, usePixelClick } from "../../hooks/useMousePixelStore";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { measurementLog, pixelEntry } from "../../utils/measurementLog";
 import { Toggle } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
@@ -65,6 +67,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const click = usePixelClick();
+  const provenance = useMeasurementProvenance();
   const mouse = useMousePixel();
   const requestSeqRef = useRef(0);
   const busyRef = useRef(false);
@@ -267,6 +270,17 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
               <Toggle label="Show ERR" checked={showErr} disabled={result.err == null} accent="sky" onChange={setShowErr} />
               <button type="button" onClick={copyCsv} className={BUTTON_CLASS}>
                 Copy CSV
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (result) measurementLog.append(pixelEntry(provenance, result));
+                }}
+                disabled={!result}
+                className={`${BUTTON_CLASS} inline-flex items-center gap-1`}
+                title="Log the centre pixel with its ERR value and DQ flag names"
+              >
+                <Plus size={11} /> Log
               </button>
             </div>
             {notice && <div className="text-[9px] text-emerald-400/90">{notice}</div>}

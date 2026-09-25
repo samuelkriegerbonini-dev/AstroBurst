@@ -35,6 +35,9 @@ const StatisticsPanel = lazy(() => import("./StatisticsPanel"));
 const PixelTablePanel = lazy(() => import("./PixelTablePanel"));
 const CatalogPanel = lazy(() => import("./CatalogPanel"));
 const TargetsPanel = lazy(() => import("./TargetsPanel"));
+const MeasurementLogPanel = lazy(() => import("./MeasurementLogPanel"));
+const ObservationGeometryPanel = lazy(() => import("./ObservationGeometryPanel"));
+const PvPanel = lazy(() => import("./PvPanel"));
 
 const EMPTY_STARS: Star[] = [];
 
@@ -320,6 +323,8 @@ function AnalysisTabInner({
 
         <TimeSeriesPanel filePath={regionKey} />
 
+        <ObservationGeometryPanel filePath={regionKey} />
+
         <CatalogPanel filePath={regionKey} />
 
         <TargetsPanel filePath={regionKey} measurePath={effectivePath} />
@@ -358,6 +363,7 @@ function AnalysisTabInner({
             onFramePreview={handleFramePreview}
           />
         )}
+        {isCube && <PvPanel filePath={filePath} fileKey={fileKey} cubeDims={cubeDims} />}
 
         <TileViewerPanel
           filePath={effectivePath}
@@ -366,6 +372,7 @@ function AnalysisTabInner({
           imageWidth={targetWidth}
           imageHeight={targetHeight}
         />
+        <MeasurementLogPanel />
       </div>
     </Suspense>
   );

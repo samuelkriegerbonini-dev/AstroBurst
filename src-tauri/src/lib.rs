@@ -221,6 +221,8 @@ pub fn run() {
             cmd::output::get_output_dir_info,
             cmd::output::cleanup_output_cmd,
             cmd::output::cancel_progress_cmd,
+            cmd::geometry::observation_geometry_cmd,
+            cmd::pv::pv_diagram_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

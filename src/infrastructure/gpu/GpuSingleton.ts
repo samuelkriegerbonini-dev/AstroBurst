@@ -1,4 +1,21 @@
-const RENDER_STF_SHADER = `
+export const STF_UNIFORM_WORD = {
+  vmin: 0,
+  vmax: 1,
+  shadow: 2,
+  midtone: 3,
+  highlight: 4,
+  asinh_a: 5,
+  power: 6,
+  tex_w: 7,
+  tex_h: 8,
+  nodata_r: 9,
+  nodata_g: 10,
+  nodata_b: 11,
+  stretch_kind: 12,
+  invert: 13,
+} as const;
+
+export const RENDER_STF_SHADER = `
 struct Uniforms {
     vmin: f32,
     vmax: f32,
@@ -9,9 +26,9 @@ struct Uniforms {
     power: f32,
     tex_w: f32,
     tex_h: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    nodata_r: f32,
+    nodata_g: f32,
+    nodata_b: f32,
     stretch_kind: u32,
     invert: u32,
     _pad3: u32,
@@ -90,13 +107,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         u32(clamp(uv.y * params.tex_h, 0.0, params.tex_h - 1.0)),
     );
     let val = textureLoad(raw_tex, px, 0).r;
-    var idx = 0u;
-    if (!is_padding_bits(val)) {
-        let range = params.vmax - params.vmin;
-        let n = select(0.0, clamp((val - params.vmin) / range, 0.0, 1.0), range > 0.0);
-        let y = stretch(n);
-        idx = u32(floor(y * 255.0 + 0.5));
+    if (is_padding_bits(val)) {
+        return vec4<f32>(params.nodata_r, params.nodata_g, params.nodata_b, 1.0);
     }
+    let range = params.vmax - params.vmin;
+    let n = select(0.0, clamp((val - params.vmin) / range, 0.0, 1.0), range > 0.0);
+    let y = stretch(n);
+    var idx = u32(floor(y * 255.0 + 0.5));
     if (params.invert == 1u) {
         idx = 255u - idx;
     }

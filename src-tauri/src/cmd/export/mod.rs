@@ -992,6 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn wizard_channels_held_only_in_memory_export_as_fits_with_the_requested_header() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
         let keys = ["r", "g", "b"].map(|c| crate::types::constants::wizard_bg_key(&format!("export_test_{c}")));
         let planes = [ramp(3.0), ramp(30.0), ramp(300.0)];

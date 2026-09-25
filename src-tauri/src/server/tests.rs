@@ -2193,7 +2193,7 @@ async fn v2_render_every_colormap_is_accepted_and_inferno_is_colored() {
     let state = AppState::new(cfg());
     seed_synthetic_image(&state, "s-rc", "img_0", render_ramp_8x8());
 
-    for name in ["gray", "grey", "viridis", "inferno", "magma", "plasma", "cividis", "heat", "cool", "rainbow"] {
+    for name in ["gray", "grey", "viridis", "inferno", "magma", "plasma", "cividis", "heat", "cool", "rainbow", "rdbu", "coolwarm", "bwr", "seismic"] {
         let body = format!(r#"{{"scale":{{"algorithm":"minmax","stretch":"linear"}},"colormap":"{name}"}}"#);
         let resp = post_json(build_router(state.clone()), "/v2/sessions/s-rc/render", &body).await;
         assert_eq!(resp.status(), StatusCode::OK, "colormap {name}");
@@ -2215,6 +2215,195 @@ async fn v2_render_every_colormap_is_accepted_and_inferno_is_colored() {
     }
     assert_eq!(img.get_pixel(0, 0).0, [0, 0, 4]);
     assert_eq!(img.get_pixel(7, 7).0, [252, 255, 164]);
+}
+
+#[tokio::test]
+async fn v2_render_symmetric_limits_mirror_the_pair_about_the_centre_and_echo_it() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-rsym", "img_0", render_ramp_8x8());
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsym/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"centre":0}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["vmin"], -63.0);
+    assert_eq!(hdr["vmax"], 63.0);
+    assert_eq!(hdr["symmetric"], true);
+    assert_eq!(hdr["centre"], 0.0);
+    assert_eq!(hdr["notes"], serde_json::json!([]));
+    assert_eq!(hdr["scale_algorithm"], "minmax");
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsym/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"center":32}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["vmin"], 1.0);
+    assert_eq!(hdr["vmax"], 63.0);
+    assert_eq!(hdr["centre"], 32.0);
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsym/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"centre":1e308}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rsym/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear"}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["vmin"], 1.0);
+    assert_eq!(hdr["vmax"], 63.0);
+    assert_eq!(hdr["symmetric"], false);
+    assert!(hdr["centre"].is_null());
+    assert_eq!(hdr["notes"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn v2_render_symmetric_fallback_on_a_constant_image_is_reported_in_notes() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-rsf", "img_0", ndarray::Array2::from_elem((8, 8), 3.0));
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsf/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"centre":3}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["vmin"], 2.0);
+    assert_eq!(hdr["vmax"], 4.0);
+    assert_eq!(hdr["symmetric"], true);
+    assert_eq!(hdr["centre"], 3.0);
+    let notes = hdr["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{hdr}");
+    assert!(notes[0].as_str().unwrap().contains("half-width"), "{hdr}");
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rsf/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"centre":0}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["vmin"], -3.0);
+    assert_eq!(hdr["vmax"], 3.0);
+    assert_eq!(hdr["notes"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn v2_render_symmetric_under_a_non_linear_stretch_notes_that_the_centre_leaves_the_colormap_centre() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-rsnl", "img_0", render_ramp_8x8());
+
+    for stretch in ["log", "sqrt", "asinh", "power"] {
+        let resp = post_json(
+            build_router(state.clone()),
+            "/v2/sessions/s-rsnl/render",
+            &format!(r#"{{"scale":{{"algorithm":"minmax","stretch":"{stretch}","symmetric":true,"centre":0}}}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{stretch}");
+        let hdr = resolved_header(&resp);
+        assert_eq!(hdr["symmetric"], true, "{stretch}");
+        assert_eq!(hdr["stretch"], stretch);
+        let notes = hdr["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "{stretch}: {hdr}");
+        assert!(notes[0].as_str().unwrap().contains("linear stretch"), "{stretch}: {hdr}");
+    }
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsnl/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"log","symmetric":true,"centre":32},"colormap":"bwr"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!((hdr["vmin"].as_f64(), hdr["vmax"].as_f64()), (Some(1.0), Some(63.0)));
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 4).0, [255, 52, 52]);
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rsnl/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear","symmetric":true,"centre":32},"colormap":"bwr"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["notes"], serde_json::json!([]));
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 4).0, [255, 254, 254]);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rsnl/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"log"}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hdr = resolved_header(&resp);
+    assert_eq!(hdr["symmetric"], false);
+    assert_eq!(hdr["notes"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn v2_render_paints_padding_with_the_no_data_colour_under_a_diverging_map() {
+    let state = AppState::new(cfg());
+    seed_synthetic_image(&state, "s-rnd", "img_0", render_ramp_8x8());
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rnd/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear"},"colormap":"bwr"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 0).0, [64, 64, 64]);
+    assert_eq!(img.get_pixel(1, 0).0, [0, 0, 255]);
+    assert_eq!(img.get_pixel(7, 7).0, [255, 0, 0]);
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-rnd/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear"},"colormap":"bwr","invert_cmap":true}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 0).0, [64, 64, 64]);
+    assert_eq!(img.get_pixel(1, 0).0, [255, 0, 0]);
+    assert_eq!(img.get_pixel(7, 7).0, [0, 0, 255]);
+
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-rnd/render",
+        r#"{"scale":{"algorithm":"minmax","stretch":"linear"},"colormap":"gray","invert_cmap":true}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let img = decode_rgb(&body_bytes(resp).await);
+    assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0]);
+    assert_eq!(img.get_pixel(1, 0).0, [255, 255, 255]);
 }
 
 #[tokio::test]

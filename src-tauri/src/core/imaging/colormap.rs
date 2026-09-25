@@ -16,10 +16,14 @@ pub enum Colormap {
     Heat,
     Cool,
     Rainbow,
+    RdBu,
+    Coolwarm,
+    Bwr,
+    Seismic,
 }
 
 impl Colormap {
-    pub const ALL: [Colormap; 9] = [
+    pub const ALL: [Colormap; 13] = [
         Colormap::Gray,
         Colormap::Viridis,
         Colormap::Inferno,
@@ -29,6 +33,10 @@ impl Colormap {
         Colormap::Heat,
         Colormap::Cool,
         Colormap::Rainbow,
+        Colormap::RdBu,
+        Colormap::Coolwarm,
+        Colormap::Bwr,
+        Colormap::Seismic,
     ];
 
     pub fn from_name(name: &str) -> Result<Self, String> {
@@ -42,8 +50,12 @@ impl Colormap {
             "heat" => Ok(Colormap::Heat),
             "cool" => Ok(Colormap::Cool),
             "rainbow" => Ok(Colormap::Rainbow),
+            "rdbu" => Ok(Colormap::RdBu),
+            "coolwarm" => Ok(Colormap::Coolwarm),
+            "bwr" => Ok(Colormap::Bwr),
+            "seismic" => Ok(Colormap::Seismic),
             other => Err(format!(
-                "unknown colormap '{other}' (supported: gray, viridis, inferno, magma, plasma, cividis, heat, cool, rainbow)"
+                "unknown colormap '{other}' (supported: gray, viridis, inferno, magma, plasma, cividis, heat, cool, rainbow, rdbu, coolwarm, bwr, seismic)"
             )),
         }
     }
@@ -59,6 +71,10 @@ impl Colormap {
             Colormap::Heat => "heat",
             Colormap::Cool => "cool",
             Colormap::Rainbow => "rainbow",
+            Colormap::RdBu => "rdbu",
+            Colormap::Coolwarm => "coolwarm",
+            Colormap::Bwr => "bwr",
+            Colormap::Seismic => "seismic",
         }
     }
 
@@ -73,6 +89,17 @@ impl Colormap {
             Colormap::Heat => &HEAT_LUT,
             Colormap::Cool => &COOL_LUT,
             Colormap::Rainbow => &RAINBOW_LUT,
+            Colormap::RdBu => &RDBU_LUT,
+            Colormap::Coolwarm => &COOLWARM_LUT,
+            Colormap::Bwr => &BWR_LUT,
+            Colormap::Seismic => &SEISMIC_LUT,
+        }
+    }
+
+    pub fn nodata_rgb(self) -> [u8; 3] {
+        match self {
+            Colormap::RdBu | Colormap::Coolwarm | Colormap::Bwr | Colormap::Seismic => NODATA_DIVERGING_RGB,
+            _ => self.lut()[0],
         }
     }
 
@@ -100,9 +127,14 @@ pub fn lut_index(v: f32, invert: bool) -> usize {
 
 pub fn apply_colormap_inverted(values: &[f32], colormap: Colormap, invert: bool) -> Vec<u8> {
     let lut = colormap.lut();
+    let nodata = colormap.nodata_rgb();
     let mut out = Vec::with_capacity(values.len() * 3);
     for &v in values {
-        out.extend_from_slice(&lut[lut_index(v, invert)]);
+        if !v.is_finite() {
+            out.extend_from_slice(&nodata);
+        } else {
+            out.extend_from_slice(&lut[lut_index(v, invert)]);
+        }
     }
     out
 }
@@ -118,6 +150,8 @@ pub fn encode_png_rgb8(rgb: &[u8], width: usize, height: usize) -> anyhow::Resul
     encoder.write_image(rgb, width as u32, height as u32, ColorType::Rgb8.into())?;
     Ok(buf)
 }
+
+pub const NODATA_DIVERGING_RGB: [u8; 3] = [64, 64, 64];
 
 type Knots = &'static [(f64, f64)];
 
@@ -137,6 +171,168 @@ const RAINBOW_KNOTS: [Knots; 3] = [
     &[(0.0, 1.0), (0.2, 0.0), (0.6, 0.0), (0.8, 1.0), (1.0, 1.0)],
     &[(0.0, 0.0), (0.2, 0.0), (0.4, 1.0), (0.8, 1.0), (1.0, 0.0)],
     &[(0.0, 1.0), (0.4, 1.0), (0.6, 0.0), (1.0, 0.0)],
+];
+
+const BWR_KNOTS: [Knots; 3] = [
+    &[(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)],
+    &[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)],
+    &[(0.0, 1.0), (0.5, 1.0), (1.0, 0.0)],
+];
+
+const SEISMIC_KNOTS: [Knots; 3] = [
+    &[(0.0, 0.0), (0.25, 0.0), (0.5, 1.0), (0.75, 1.0), (1.0, 0.5)],
+    &[(0.0, 0.0), (0.25, 0.0), (0.5, 1.0), (0.75, 0.0), (1.0, 0.0)],
+    &[(0.0, 0.3), (0.25, 1.0), (0.5, 1.0), (0.75, 0.0), (1.0, 0.0)],
+];
+
+const RDBU_KNOTS: [Knots; 3] = [
+    &[
+        (0.0, 103.0 / 255.0),
+        (0.1, 178.0 / 255.0),
+        (0.2, 214.0 / 255.0),
+        (0.3, 244.0 / 255.0),
+        (0.4, 253.0 / 255.0),
+        (0.5, 247.0 / 255.0),
+        (0.6, 209.0 / 255.0),
+        (0.7, 146.0 / 255.0),
+        (0.8, 67.0 / 255.0),
+        (0.9, 33.0 / 255.0),
+        (1.0, 5.0 / 255.0),
+    ],
+    &[
+        (0.0, 0.0),
+        (0.1, 24.0 / 255.0),
+        (0.2, 96.0 / 255.0),
+        (0.3, 165.0 / 255.0),
+        (0.4, 219.0 / 255.0),
+        (0.5, 247.0 / 255.0),
+        (0.6, 229.0 / 255.0),
+        (0.7, 197.0 / 255.0),
+        (0.8, 147.0 / 255.0),
+        (0.9, 102.0 / 255.0),
+        (1.0, 48.0 / 255.0),
+    ],
+    &[
+        (0.0, 31.0 / 255.0),
+        (0.1, 43.0 / 255.0),
+        (0.2, 77.0 / 255.0),
+        (0.3, 130.0 / 255.0),
+        (0.4, 199.0 / 255.0),
+        (0.5, 247.0 / 255.0),
+        (0.6, 240.0 / 255.0),
+        (0.7, 222.0 / 255.0),
+        (0.8, 195.0 / 255.0),
+        (0.9, 172.0 / 255.0),
+        (1.0, 97.0 / 255.0),
+    ],
+];
+
+const COOLWARM_KNOTS: [Knots; 3] = [
+    &[
+        (0.0, 0.229806),
+        (0.03125, 0.266234),
+        (0.0625, 0.303869),
+        (0.09375, 0.342804),
+        (0.125, 0.383013),
+        (0.15625, 0.424370),
+        (0.1875, 0.466667),
+        (0.21875, 0.509635),
+        (0.25, 0.552953),
+        (0.28125, 0.596262),
+        (0.3125, 0.639176),
+        (0.34375, 0.681291),
+        (0.375, 0.722193),
+        (0.40625, 0.761465),
+        (0.4375, 0.798692),
+        (0.46875, 0.833467),
+        (0.5, 0.865395),
+        (0.53125, 0.897787),
+        (0.5625, 0.924128),
+        (0.59375, 0.944469),
+        (0.625, 0.958853),
+        (0.65625, 0.967328),
+        (0.6875, 0.969954),
+        (0.71875, 0.966811),
+        (0.75, 0.958003),
+        (0.78125, 0.943661),
+        (0.8125, 0.923945),
+        (0.84375, 0.899046),
+        (0.875, 0.869187),
+        (0.90625, 0.834621),
+        (0.9375, 0.795632),
+        (0.96875, 0.752535),
+        (1.0, 0.705673),
+    ],
+    &[
+        (0.0, 0.298718),
+        (0.03125, 0.353095),
+        (0.0625, 0.406535),
+        (0.09375, 0.458758),
+        (0.125, 0.509419),
+        (0.15625, 0.558148),
+        (0.1875, 0.604563),
+        (0.21875, 0.648281),
+        (0.25, 0.688929),
+        (0.28125, 0.726149),
+        (0.3125, 0.759600),
+        (0.34375, 0.788965),
+        (0.375, 0.813953),
+        (0.40625, 0.834303),
+        (0.4375, 0.849786),
+        (0.46875, 0.860208),
+        (0.5, 0.865410),
+        (0.53125, 0.848937),
+        (0.5625, 0.827385),
+        (0.59375, 0.800927),
+        (0.625, 0.769768),
+        (0.65625, 0.734133),
+        (0.6875, 0.694267),
+        (0.71875, 0.650421),
+        (0.75, 0.602842),
+        (0.78125, 0.551751),
+        (0.8125, 0.497309),
+        (0.84375, 0.439559),
+        (0.875, 0.378313),
+        (0.90625, 0.312874),
+        (0.9375, 0.241284),
+        (0.96875, 0.157246),
+        (1.0, 0.015556),
+    ],
+    &[
+        (0.0, 0.753683),
+        (0.03125, 0.801467),
+        (0.0625, 0.844959),
+        (0.09375, 0.883726),
+        (0.125, 0.917388),
+        (0.15625, 0.945620),
+        (0.1875, 0.968155),
+        (0.21875, 0.984788),
+        (0.25, 0.995376),
+        (0.28125, 0.999836),
+        (0.3125, 0.998151),
+        (0.34375, 0.990363),
+        (0.375, 0.976575),
+        (0.40625, 0.956945),
+        (0.4375, 0.931689),
+        (0.46875, 0.901069),
+        (0.5, 0.865396),
+        (0.53125, 0.820881),
+        (0.5625, 0.774508),
+        (0.59375, 0.726736),
+        (0.625, 0.678008),
+        (0.65625, 0.628752),
+        (0.6875, 0.579375),
+        (0.71875, 0.530264),
+        (0.75, 0.481776),
+        (0.78125, 0.434244),
+        (0.8125, 0.387970),
+        (0.84375, 0.343230),
+        (0.875, 0.300267),
+        (0.90625, 0.259301),
+        (0.9375, 0.220526),
+        (0.96875, 0.184190),
+        (1.0, 0.150233),
+    ],
 ];
 
 fn piecewise_linear(knots: &[(f64, f64)], t: f64) -> f64 {
@@ -182,6 +378,12 @@ static HEAT_LUT: LazyLock<[[u8; 3]; 256]> = LazyLock::new(|| build_segment_lut(&
 static COOL_LUT: LazyLock<[[u8; 3]; 256]> = LazyLock::new(|| build_segment_lut(&COOL_KNOTS));
 static RAINBOW_LUT: LazyLock<[[u8; 3]; 256]> =
     LazyLock::new(|| build_segment_lut(&RAINBOW_KNOTS));
+static RDBU_LUT: LazyLock<[[u8; 3]; 256]> = LazyLock::new(|| build_segment_lut(&RDBU_KNOTS));
+static COOLWARM_LUT: LazyLock<[[u8; 3]; 256]> =
+    LazyLock::new(|| build_segment_lut(&COOLWARM_KNOTS));
+static BWR_LUT: LazyLock<[[u8; 3]; 256]> = LazyLock::new(|| build_segment_lut(&BWR_KNOTS));
+static SEISMIC_LUT: LazyLock<[[u8; 3]; 256]> =
+    LazyLock::new(|| build_segment_lut(&SEISMIC_KNOTS));
 
 #[rustfmt::skip]
 static VIRIDIS_LUT: [[u8; 3]; 256] = [
@@ -498,7 +700,7 @@ mod tests {
 
     #[test]
     fn all_names_round_trip_through_from_name() {
-        assert_eq!(Colormap::ALL.len(), 9);
+        assert_eq!(Colormap::ALL.len(), 13);
         for cmap in Colormap::ALL {
             assert_eq!(Colormap::from_name(cmap.name()).unwrap(), cmap);
             assert_eq!(Colormap::from_name(&cmap.name().to_uppercase()).unwrap(), cmap);
@@ -543,16 +745,93 @@ mod tests {
         let vals: Vec<f32> = (0..=255).map(|i| i as f32 / 255.0).chain([f32::NAN]).collect();
         for cmap in Colormap::ALL {
             let lut = cmap.lut();
+            let nodata = cmap.nodata_rgb();
             let direct = apply_colormap_inverted(&vals, cmap, false);
-            for (i, &v) in vals.iter().enumerate() {
+            for (i, &v) in vals.iter().enumerate().take(256) {
                 assert_eq!(&direct[i * 3..i * 3 + 3], &lut[lut_index(v, false)][..], "{} idx {i}", cmap.name());
             }
+            assert_eq!(&direct[256 * 3..256 * 3 + 3], &nodata[..], "{} nan", cmap.name());
             let inv = apply_colormap_inverted(&vals, cmap, true);
             for i in 0..=255 {
                 assert_eq!(&inv[i * 3..i * 3 + 3], &lut[255 - i][..], "{} idx {i}", cmap.name());
             }
-            assert_eq!(&inv[256 * 3..256 * 3 + 3], &lut[0][..], "{} nan", cmap.name());
+            assert_eq!(&inv[256 * 3..256 * 3 + 3], &nodata[..], "{} nan inverted", cmap.name());
         }
+    }
+
+    #[test]
+    fn diverging_maps_match_matplotlib_anchors() {
+        assert_close(Colormap::Bwr, 0.0, [0, 0, 255]);
+        assert_close(Colormap::Bwr, 0.25, [128, 128, 255]);
+        assert_close(Colormap::Bwr, 0.5, [255, 255, 255]);
+        assert_close(Colormap::Bwr, 1.0, [255, 0, 0]);
+        assert_close(Colormap::Seismic, 0.0, [0, 0, 77]);
+        assert_close(Colormap::Seismic, 0.25, [0, 0, 255]);
+        assert_close(Colormap::Seismic, 0.5, [255, 255, 255]);
+        assert_close(Colormap::Seismic, 0.75, [255, 0, 0]);
+        assert_close(Colormap::Seismic, 1.0, [128, 0, 0]);
+        assert_close(Colormap::RdBu, 0.0, [103, 0, 31]);
+        assert_close(Colormap::RdBu, 0.2, [214, 96, 77]);
+        assert_close(Colormap::RdBu, 0.4, [253, 219, 199]);
+        assert_close(Colormap::RdBu, 0.5, [247, 247, 247]);
+        assert_close(Colormap::RdBu, 0.6, [209, 229, 240]);
+        assert_close(Colormap::RdBu, 0.8, [67, 147, 195]);
+        assert_close(Colormap::RdBu, 1.0, [5, 48, 97]);
+        assert_close(Colormap::Coolwarm, 0.0, [59, 76, 192]);
+        assert_close(Colormap::Coolwarm, 0.25, [141, 176, 254]);
+        assert_close(Colormap::Coolwarm, 0.5, [221, 221, 221]);
+        assert_close(Colormap::Coolwarm, 1.0, [180, 4, 38]);
+    }
+
+    #[test]
+    fn bwr_is_mirror_symmetric_with_red_and_blue_swapped() {
+        let lut = Colormap::Bwr.lut();
+        for i in 0..256 {
+            let [r, g, b] = lut[i];
+            let [mr, mg, mb] = lut[255 - i];
+            for (got, want) in [(r, mb), (g, mg), (b, mr)] {
+                assert!((got as i32 - want as i32).abs() <= 1, "bwr entry {i}: {:?} vs mirror {:?}", lut[i], lut[255 - i]);
+            }
+        }
+    }
+
+    #[test]
+    fn diverging_maps_are_lightest_at_the_centre() {
+        let lum = |c: &[u8; 3]| 0.299 * c[0] as f64 + 0.587 * c[1] as f64 + 0.114 * c[2] as f64;
+        for cmap in [Colormap::RdBu, Colormap::Coolwarm, Colormap::Bwr, Colormap::Seismic] {
+            let lut = cmap.lut();
+            for centre in [127usize, 128] {
+                for end in [0usize, 255] {
+                    assert!(
+                        lum(&lut[centre]) > lum(&lut[end]) + 50.0,
+                        "{} entry {centre} ({:?}) is not much lighter than entry {end} ({:?})",
+                        cmap.name(),
+                        lut[centre],
+                        lut[end]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_data_colour_is_the_first_lut_entry_for_sequential_maps_and_neutral_grey_for_diverging() {
+        let diverging = [Colormap::RdBu, Colormap::Coolwarm, Colormap::Bwr, Colormap::Seismic];
+        for cmap in Colormap::ALL {
+            let lut = cmap.lut();
+            if diverging.contains(&cmap) {
+                assert_eq!(cmap.nodata_rgb(), [64, 64, 64], "{}", cmap.name());
+                assert_eq!(cmap.nodata_rgb(), NODATA_DIVERGING_RGB);
+                for entry in [lut[0], lut[128], lut[255]] {
+                    assert_ne!(cmap.nodata_rgb(), entry, "{} no-data colour collides with a data colour", cmap.name());
+                }
+            } else {
+                assert_eq!(cmap.nodata_rgb(), lut[0], "{}", cmap.name());
+            }
+        }
+        assert_eq!(Colormap::Gray.nodata_rgb(), [0, 0, 0]);
+        assert_eq!(Colormap::Viridis.nodata_rgb(), [71, 1, 85]);
+        assert_eq!(Colormap::Rainbow.nodata_rgb(), [255, 0, 255]);
     }
 
     fn assert_close(cmap: Colormap, v: f32, expected: [u8; 3]) {

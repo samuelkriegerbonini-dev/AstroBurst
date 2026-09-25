@@ -8,6 +8,7 @@ import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { generateId } from "../../utils/format";
 import { catalogCsvFileName, catalogRowsCsv, matchesCsv, sourcesCsv } from "../../utils/catalogCsv";
+import { crossMatchEntry, measurementLog } from "../../utils/measurementLog";
 import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../viewer/painters/catalogPainter";
 import { ErrorAlert, RunButton, Toggle } from "../ui";
 import CrossMatchPlots from "./CrossMatchPlots";
@@ -148,6 +149,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
       if (requestSeqRef.current !== seq) return;
       matched = true;
       setCross(result);
+      measurementLog.append(crossMatchEntry(filePath, result, { sigma: DEFAULT_DETECTION_SIGMA, maxStars: DEFAULT_MAX_STARS, colourTerm }));
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {

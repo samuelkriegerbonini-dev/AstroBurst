@@ -365,10 +365,26 @@ impl ImageCache {
     }
 
     pub fn insert_synthetic(&self, key: &str, arr: Arc<Array2<f32>>, stats: ImageStats) {
+        self.insert_synthetic_with_header(key, arr, stats, None);
+    }
+
+    pub fn insert_synthetic_with_header(
+        &self,
+        key: &str,
+        arr: Arc<Array2<f32>>,
+        stats: ImageStats,
+        header: Option<HduHeader>,
+    ) {
+        let header = header.map(|mut header| {
+            let (rows, cols) = arr.dim();
+            header.set("NAXIS1", cols.to_string());
+            header.set("NAXIS2", rows.to_string());
+            header
+        });
         let entry = Arc::new(CachedImage {
             arr,
             stats,
-            header: None,
+            header,
             int_plane: None,
             info: None,
             companions: None,
@@ -417,6 +433,12 @@ const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
 pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> = LazyLock::new(|| {
     ImageCache::with_pinned_prefixes(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_BYTES, APP_PINNED_PREFIXES)
 });
+
+#[cfg(test)]
+pub(crate) fn lock_wizard_entries() -> std::sync::MutexGuard<'static, ()> {
+    static WIZARD_ENTRIES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WIZARD_ENTRIES.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[cfg(test)]
 mod tests {
@@ -779,6 +801,29 @@ mod tests {
         cache.get_or_load("c.fits", || Ok(make_test_entry(2, 2))).unwrap();
         assert!(cache.get("a.fits#hdu=2").is_none());
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn a_synthetic_entry_can_carry_a_header_that_describes_its_own_grid() {
+        let cache = ImageCache::new(4, usize::MAX);
+        let (arr, stats) = make_test_entry(3, 5);
+        let mut header = HduHeader::empty();
+        header.set_f64("CRVAL1", 12.5);
+        header.set("NAXIS1", "999".to_string());
+        cache.insert_synthetic_with_header("__wizard_ch_r_aligned", Arc::new(arr), stats, Some(header));
+        let carried = cache.get("__wizard_ch_r_aligned").unwrap();
+        let h = carried.header().expect("header stored with the synthetic entry");
+        assert_eq!(h.get_f64("CRVAL1"), Some(12.5));
+        assert_eq!(h.get_i64("NAXIS1"), Some(5), "NAXIS1 must describe the entry's own columns");
+        assert_eq!(h.get_i64("NAXIS2"), Some(3), "NAXIS2 must describe the entry's own rows");
+        assert_eq!(cache.memory_estimate_bytes(), 3 * 5 * 4);
+
+        let (arr, stats) = make_test_entry(2, 2);
+        cache.insert_synthetic("__wizard_ch_g_aligned", Arc::new(arr), stats);
+        assert!(cache.get("__wizard_ch_g_aligned").unwrap().header().is_none());
+        let (arr, stats) = make_test_entry(2, 2);
+        cache.insert_synthetic_with_header("__wizard_ch_b_aligned", Arc::new(arr), stats, None);
+        assert!(cache.get("__wizard_ch_b_aligned").unwrap().header().is_none());
     }
 
     #[test]

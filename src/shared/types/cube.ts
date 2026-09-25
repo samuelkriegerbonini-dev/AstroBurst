@@ -22,6 +22,7 @@ export interface CubeSpectrum {
   x: number;
   y: number;
   is_spectral?: boolean;
+  flux_jy?: number[] | null;
 }
 
 export interface RegionSpectrum {

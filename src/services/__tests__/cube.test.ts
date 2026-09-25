@@ -9,7 +9,7 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: vi.fn(),
 }));
 
-import { releaseCubes } from "../cube";
+import { getCubeSpectrum, getCubeSpectrumRegion, releaseCubes } from "../cube";
 
 describe("releaseCubes", () => {
   beforeEach(() => {
@@ -31,5 +31,35 @@ describe("releaseCubes", () => {
     await expect(releaseCubes(["a.fits", "b.fits"])).resolves.toBeUndefined();
     expect(typedInvokeMock).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+});
+
+describe("cube spectrum services", () => {
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+  });
+
+  it("getCubeSpectrum invokes get_cube_spectrum with path, x and y and keeps flux_jy", async () => {
+    typedInvokeMock.mockResolvedValueOnce({ spectrum: [2], wavelengths: [1.02], is_spectral: true, flux_jy: [1e-6] });
+    const calibrated = await getCubeSpectrum("C:/d/cube.fits", 3, 4);
+    expect(typedInvokeMock).toHaveBeenCalledWith("get_cube_spectrum", { path: "C:/d/cube.fits", x: 3, y: 4 });
+    expect(calibrated.values).toEqual([2]);
+    expect(calibrated.flux_jy).toEqual([1e-6]);
+    expect(calibrated.x).toBe(3);
+    expect(calibrated.y).toBe(4);
+
+    typedInvokeMock.mockResolvedValueOnce({ spectrum: [2], wavelengths: [1.02], is_spectral: true });
+    const plain = await getCubeSpectrum("C:/d/cube.fits", 3, 4);
+    expect(plain.flux_jy).toBeNull();
+  });
+
+  it("getCubeSpectrumRegion invokes get_cube_spectrum_region_cmd with path, shape and background", async () => {
+    typedInvokeMock.mockResolvedValueOnce({ sum: [], mean: [] });
+    await getCubeSpectrumRegion("C:/d/cube.fits", { shape: "circle", x: 20, y: 20, r: 3 }, null);
+    expect(typedInvokeMock).toHaveBeenCalledWith("get_cube_spectrum_region_cmd", {
+      path: "C:/d/cube.fits",
+      shape: { shape: "circle", x: 20, y: 20, r: 3 },
+      background: null,
+    });
   });
 });

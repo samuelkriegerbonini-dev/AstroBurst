@@ -5,9 +5,10 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, cached_header, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir,
+    blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir,
     write_derived_fits, OutputValues,
 };
+use crate::cmd::processing::source_header;
 use crate::core::imaging::cutout::{shift_header, CutoutRect};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
@@ -24,11 +25,6 @@ fn cropped_header(source: Option<&HduHeader>, top: usize, left: usize, dims: (us
     let rect = CutoutRect { x0: left as i64, y0: top as i64, width: dims.1, height: dims.0 };
     let shifted = source.map(|h| shift_header(h, &rect));
     derived_output_header(shifted.as_ref(), ABPROC_CROPPED, OutputValues::Linear)
-}
-
-fn write_cropped(out_path: &str, cropped: &Array2<f32>, source_path: &str, top: usize, left: usize) -> anyhow::Result<()> {
-    let header = cropped_header(cached_header(source_path).ok().as_ref(), top, left, cropped.dim());
-    write_derived_fits(out_path, cropped, Some(&header))
 }
 
 fn detect_valid_region(arr: &Array2<f32>, threshold: f32) -> (usize, usize, usize, usize) {
@@ -175,18 +171,19 @@ pub async fn crop_channels_cmd(
         for (i, entry) in entries.iter().enumerate() {
             let arr = entry.arr();
             let cropped = crop_array(arr, crop_top, crop_bottom, crop_left, crop_right);
+            let header = cropped_header(source_header(&paths[i], entry).as_ref(), crop_top, crop_left, cropped.dim());
 
             if use_bin_ids {
                 let bid = &bin_ids.as_ref().unwrap()[i];
                 let k = crate::types::constants::wizard_cropped_key(bid);
                 let stats = compute_image_stats(&cropped);
-                GLOBAL_IMAGE_CACHE.insert_synthetic(&k, Arc::new(cropped.clone()), stats);
+                GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&k, Arc::new(cropped.clone()), stats, Some(header.clone()));
                 cache_keys.push(k.clone());
 
                 if write_disk {
                     let stem = output_stem(&paths[i]);
                     let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
-                    write_cropped(&out_path, &cropped, &paths[i], crop_top, crop_left)?;
+                    write_derived_fits(&out_path, &cropped, Some(&header))?;
                     out_paths.push(out_path);
                 } else {
                     out_paths.push(k);
@@ -195,7 +192,7 @@ pub async fn crop_channels_cmd(
                 let stem = output_stem(&paths[i]);
                 let out_path = format!("{}/{}_cropped.fits", output_dir, stem);
                 resolve_output_dir(&output_dir)?;
-                write_cropped(&out_path, &cropped, &paths[i], crop_top, crop_left)?;
+                write_derived_fits(&out_path, &cropped, Some(&header))?;
 
                 let stats = compute_image_stats(&cropped);
                 GLOBAL_IMAGE_CACHE.insert_synthetic(&out_path, Arc::new(cropped), stats);
@@ -275,6 +272,67 @@ mod tests {
         assert_eq!(h.get_f64("LTV2"), Some(-2.0));
         assert_eq!(card(&h, "BUNIT").as_deref(), Some("MJy/sr"));
         assert_eq!(h.get_f64("PHOTMJSR"), Some(1.5));
+        assert_eq!(card(&h, "FILTER").as_deref(), Some("F200W"));
+        assert_eq!(card(&h, HEADER_ABPROC).as_deref(), Some(ABPROC_CROPPED));
+
+        header.set("NAXIS1", "50".to_string());
+        header.set("NAXIS2", "40".to_string());
+        let parent = WcsTransform::from_header(&header).unwrap();
+        let cropped = WcsTransform::from_header(&h).unwrap();
+        for (x, y) in [(0.0, 0.0), (10.5, 20.25), (41.0, 33.0)] {
+            let a = parent.pixel_to_world(x + 3.0, y + 2.0);
+            let b = cropped.pixel_to_world(x, y);
+            assert!((a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12, "({x},{y}): {a:?} vs {b:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wizard_crop_carries_the_input_header_moved_to_the_crop_origin() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let input = crate::types::constants::wizard_aligned_key("crop_r");
+        let mut header = HduHeader::empty();
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRVAL1", 150.0);
+        header.set_f64("CRVAL2", 2.0);
+        header.set_f64("CRPIX1", 20.0);
+        header.set_f64("CRPIX2", 30.0);
+        header.set_f64("CD1_1", -1e-5);
+        header.set_f64("CD2_2", 1e-5);
+        header.set("FILTER", "F200W".to_string());
+        let arr = Array2::from_elem((40, 50), 5.0f32);
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&input, Arc::new(arr.clone()), compute_image_stats(&arr), Some(header.clone()));
+
+        let res = crop_channels_cmd(
+            vec![input.clone()],
+            dir.path().join("out").to_str().unwrap().to_string(),
+            2,
+            4,
+            3,
+            5,
+            Some(false),
+            Some(vec!["crop_r".to_string()]),
+            None,
+        )
+        .await
+        .unwrap();
+        let key = res[RES_CACHE_KEYS][0].as_str().unwrap().to_string();
+        let entry = GLOBAL_IMAGE_CACHE.get(&key);
+        GLOBAL_IMAGE_CACHE.remove(&input);
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        assert_eq!(key, crate::types::constants::wizard_cropped_key("crop_r"));
+        assert_eq!(res[RES_PATHS][0], key);
+        assert!(!dir.path().join("out").exists(), "a wizard crop must not write to the disk");
+        let entry = entry.expect("cropped wizard entry");
+        assert_eq!(entry.arr().dim(), (34, 42));
+        let h = entry.header().cloned().expect("a cropped wizard channel carries the header of its grid");
+        assert!((h.get_f64("CRPIX1").unwrap() - 17.0).abs() < 1e-9, "CRPIX1 {:?}", h.get("CRPIX1"));
+        assert!((h.get_f64("CRPIX2").unwrap() - 28.0).abs() < 1e-9, "CRPIX2 {:?}", h.get("CRPIX2"));
+        assert_eq!(h.get_f64("LTV1"), Some(-3.0));
+        assert_eq!(h.get_f64("LTV2"), Some(-2.0));
+        assert_eq!(h.get_i64("NAXIS1"), Some(42));
+        assert_eq!(h.get_i64("NAXIS2"), Some(34));
         assert_eq!(card(&h, "FILTER").as_deref(), Some("F200W"));
         assert_eq!(card(&h, HEADER_ABPROC).as_deref(), Some(ABPROC_CROPPED));
 

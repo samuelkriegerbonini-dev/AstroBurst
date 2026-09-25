@@ -38,7 +38,7 @@ import {
   type ScaleLimits,
 } from "../shared/types/display";
 import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
-import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
+import { GRAY_LUT_RGBA, reconcileDisplayPatch } from "../utils/displayTransfer";
 import { clampGridDensity } from "../utils/gridSteps";
 import { EMPTY_CHAIN, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
 
@@ -166,7 +166,7 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
   const limits = LIMIT_MODES.find((l) => l === r.limits) ?? d.limits;
   const colormap = COLORMAP_NAMES.find((c) => c === r.colormap) ?? d.colormap;
   const gridFrame = GRID_FRAMES.find((f) => f === r.gridFrame) ?? d.gridFrame;
-  return {
+  const candidate: DisplaySettings = {
     stretch,
     limits,
     percentileLow: finiteOr(r.percentileLow, d.percentileLow),
@@ -182,7 +182,10 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
     gridFrame,
     gridDensity: clampGridDensity(finiteOr(r.gridDensity, d.gridDensity)),
     compass: r.compass === true,
+    symmetric: r.symmetric === true,
+    centre: finiteOr(r.centre, d.centre),
   };
+  return reconcileDisplayPatch(candidate, {});
 }
 
 function loadDisplaySettings(): DisplaySettings {
@@ -480,7 +483,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const setDisplay = useCallback((patch: Partial<DisplaySettings>) => {
     setDisplayRaw((prev) => {
-      const next = { ...prev, ...patch };
+      const next = reconcileDisplayPatch(prev, patch);
       saveDisplaySettings(next);
       return next;
     });
@@ -496,6 +499,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     userLo,
     userHi,
     colormap: displayColormap,
+    symmetric: displaySymmetric,
+    centre: displayCentre,
   } = display;
 
   useEffect(() => {
@@ -515,6 +520,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         zscaleContrast,
         userLo,
         userHi,
+        symmetric: displaySymmetric,
+        centre: displayCentre,
       })
         .then((res) => {
           if (limitsSeqRef.current !== seq) return;
@@ -534,7 +541,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [filePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi]);
+  }, [filePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi, displaySymmetric, displayCentre]);
 
   useEffect(() => {
     let cancelled = false;

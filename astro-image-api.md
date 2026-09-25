@@ -132,10 +132,12 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
     "percentile": [1.0, 99.5],        // used when algorithm = percentile
     "asinh_a": 0.1,                   // softening for asinh
     "power": 2.0,                     // exponent for power stretch
-    "zscale_contrast": 0.25
+    "zscale_contrast": 0.25,
+    "symmetric": false,               // mirror vmin/vmax about centre: a = max(|vmin - c|, |vmax - c|)
+    "centre": 0.0                     // alias center; |centre| at most 1e38
   },
-  "colormap": "heat",                 // gray (alias grey) | viridis | inferno | magma | plasma | cividis | heat | cool | rainbow
-  "invert_cmap": false,               // flips the LUT index (255 - idx); NaN pixels always take LUT[0]
+  "colormap": "heat",                 // gray (alias grey) | viridis | inferno | magma | plasma | cividis | heat | cool | rainbow | rdbu | coolwarm | bwr | seismic
+  "invert_cmap": false,               // flips the LUT index (255 - idx) for data pixels; NaN, infinite and exact-0 pixels always take the colormap's no-data colour, never inverted
   "output": {
     "max_px": 1024,                   // long side of the PNG; server bins/interp as needed
     "return_base64": false,
@@ -149,7 +151,7 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
     {"type": "crosshair", "ra": 182.6357, "dec": 39.4058},
     {"type": "markers", "source": "detections:run_007", "shape": "circle", "radius_px": 8, "label": "id"}
   ],
-  "mask": {"nan_color": "#404040", "apply_dq_mask": false}
+  "mask": {"nan_color": "#404040", "apply_dq_mask": false}   // not implemented: ignored; no-data pixels take the colormap's fixed no-data colour (first LUT entry for the sequential maps, #404040 for rdbu, coolwarm, bwr, seismic)
 }
 ```
 
@@ -162,6 +164,7 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
     "region_px": [8000, 11200, 1024, 1024],
     "region_sky": {"center": {"ra": 182.6401, "dec": 39.4212}, "size_arcmin": [4.49, 4.49]},
     "vmin": -0.0123, "vmax": 0.4871,        // ← actual values zscale chose
+    "symmetric": false, "centre": null, "notes": [],
     "stretch": "linear",
     "binning_applied": 1,                    // 1 = native resolution
     "png_scale_arcsec_per_px": 0.263,
@@ -174,9 +177,10 @@ The workhorse endpoint. Designed for the iterative look-adjust-look loop.
 **Notes for agents**
 - `resolved.vmin/vmax` is the key feedback signal. If a zscale render looks washed out or too hard, take these numbers, consult `/histogram`, and re-render with `algorithm: "user"` and adjusted `vmin`/`vmax`. This is *the* canonical loop (see §19, Workflow A).
 - `resolved.scale_algorithm` echoes the canonical name: a request sent with `"manual"` is reported back as `"user"`.
+- `symmetric: true` mirrors the resolved pair about `centre` (alias `center`, default 0, refused with 400 when non-finite or beyond ±1e38): `a = max(|vmin - c|, |vmax - c|)`, `vmin = c - a`, `vmax = c + a`. When the mirrored pair is degenerate (constant image, bounds equal to the centre, or a width invisible in f32) the server uses a fallback half-width of `max(1, |centre| * 2^-20)` and says so in `resolved.notes`; `resolved.symmetric`, `resolved.centre` (null when off) and `resolved.notes` (empty when nothing happened) echo what was applied. The centre lands on the colormap's central entry only under `stretch: "linear"`: the stretch is applied after normalisation, so the centre's n = 0.5 becomes y = stretch(0.5) (0.90 under `log`, 0.71 under `sqrt`, 0.77 under `asinh` with a = 0.1) and a diverging map paints it as a strong positive; `resolved.notes` says so whenever `symmetric: true` meets a stretch other than `linear`.
 - `clipped_fraction` tells you how much of the pixel distribution is saturated to pure black/white in the PNG — a large `above_vmax` with a faint-target science case means you are probably fine; a large `below_vmin` means faint structure may be hidden.
 - Use `stretch: "asinh"` with small `asinh_a` (0.01–0.1) to show faint outskirts and bright cores simultaneously; `log` for nebulosity.
-- Colormaps: `gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis` (matplotlib 256-entry tables, perceptually uniform, non-decreasing luminance) and the DS9 segment maps `heat`, `cool`, `rainbow`. Names are case-insensitive; `grey` is accepted for `gray`. The same LUTs and the same byte rule (`idx = round(y * 255)`, `invert` → `255 - idx`) drive the desktop viewer, so a server PNG and the desktop display agree pixel for pixel.
+- Colormaps, sequential group: `gray`, `viridis`, `inferno`, `magma`, `plasma`, `cividis` (matplotlib 256-entry tables, perceptually uniform, non-decreasing luminance) and the DS9 segment maps `heat`, `cool`, `rainbow`. Diverging group: `rdbu` (ColorBrewer RdBu), `coolwarm` (Moreland), `bwr` and `seismic` (matplotlib knots), lightest at the centre and meant for `symmetric: true` with `stretch: "linear"`. Names are case-insensitive; `grey` is accepted for `gray`. The same LUTs and the same byte rule (`idx = round(y * 255)`, `invert` → `255 - idx`) drive the desktop viewer, so a server PNG and the desktop display agree pixel for pixel; no-data pixels take the colormap's no-data colour on the server and the desktop alike, independent of `invert_cmap`.
 - To compare two renders fairly, hold `vmin/vmax/stretch` fixed (`user`) and vary only the region or image.
 - Auto-binning averages the finite pixels of each block; a block with no finite pixel stays NaN (drawn as a NaN pixel) instead of becoming 0. A `scalebar` longer than the PNG is clipped to the PNG width, and a scalebar whose length cannot be computed is left out.
 

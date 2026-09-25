@@ -1,6 +1,6 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesRole, TimeSeriesTarget } from "../shared/types/analysis";
 
-export type TimeAxis = "jd" | "index";
+export type TimeAxis = "jd" | "bjd" | "index";
 
 export interface LightCurvePoint {
   frameIndex: number;
@@ -58,6 +58,11 @@ export const LIGHT_CURVE_CSV_COLUMNS = [
   "exptime",
   "filter",
   "airmass",
+  "bjd_tdb",
+  "hjd_utc",
+  "airmass_computed",
+  "altitude_deg",
+  "parallactic_angle_deg",
   "diff_mag",
   "diff_err",
   "target_flux",
@@ -110,13 +115,32 @@ export function hasCompleteTimeAxis(result: TimeSeriesResult): boolean {
   return measured.length > 0 && measured.every((f) => isFiniteNumber(f.jd_mid));
 }
 
+export function hasCompleteBjdAxis(result: TimeSeriesResult): boolean {
+  const measured = result.frames.filter((f) => f.skipped === null);
+  return measured.length > 0 && measured.every((f) => isFiniteNumber(f.geometry?.bjd_tdb));
+}
+
+export interface TimeAxisAvailability {
+  jd: boolean;
+  bjd: boolean;
+  any: boolean;
+}
+
+export function timeAxisAvailability(result: TimeSeriesResult): TimeAxisAvailability {
+  const jd = hasCompleteTimeAxis(result);
+  const bjd = hasCompleteBjdAxis(result);
+  return { jd, bjd, any: jd || bjd };
+}
+
 export function resolveTimeAxis(result: TimeSeriesResult, requested: TimeAxis): TimeAxis {
-  return requested === "jd" && hasCompleteTimeAxis(result) ? "jd" : "index";
+  if (requested === "bjd" && hasCompleteBjdAxis(result)) return "bjd";
+  return requested !== "index" && hasCompleteTimeAxis(result) ? "jd" : "index";
 }
 
 function frameTime(frame: TimeSeriesFrame, axis: TimeAxis): number {
   if (axis === "index") return frame.index;
-  return isFiniteNumber(frame.jd_mid) ? frame.jd_mid : NaN;
+  const value = axis === "bjd" ? frame.geometry?.bjd_tdb : frame.jd_mid;
+  return isFiniteNumber(value) ? value : NaN;
 }
 
 export interface TimelinePoint {
@@ -282,8 +306,9 @@ export function lightCurveExtras(result: TimeSeriesResult, targetIdx: number, co
     const target = frame.targets[targetIdx] ?? null;
     const ens = frame.skipped === null ? ensembleFlux(frame, comps) : null;
     const errors = frameMeasurementErrors(frame, result.targets, targetIdx, comps);
+    const computedAirmass = frame.geometry?.airmass_computed;
     return {
-      airmass: isFiniteNumber(frame.airmass) ? frame.airmass : null,
+      airmass: isFiniteNumber(frame.airmass) ? frame.airmass : isFiniteNumber(computedAirmass) ? computedAirmass : null,
       fwhm: target && isFiniteNumber(target.fwhm) ? target.fwhm : null,
       sky: target && isFiniteNumber(target.bg_mean) ? target.bg_mean : null,
       dx: frame.offset && isFiniteNumber(frame.offset.dx) ? frame.offset.dx : null,
@@ -324,6 +349,11 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
         csvCell(frame.exptime),
         csvCell(frame.filter),
         csvCell(frame.airmass, 4),
+        csvCell(frame.geometry?.bjd_tdb ?? null, 6),
+        csvCell(frame.geometry?.hjd_utc ?? null, 6),
+        csvCell(frame.geometry?.airmass_computed ?? null, 4),
+        csvCell(frame.geometry?.altitude_deg ?? null, 3),
+        csvCell(frame.geometry?.parallactic_angle_deg ?? null, 2),
         csvCell(row.mag, 5),
         csvCell(row.err, 5),
         csvCell(row.flux, 3),
@@ -377,9 +407,9 @@ export function inFrameOrder(result: TimeSeriesResult, framePaths: string[]): Ti
   return { ...result, frames };
 }
 
-export function frameJdLabel(jdMid: number | null | undefined, axis: TimeAxis, jd0: number): string {
-  if (!isFiniteNumber(jdMid)) return "--";
-  return axis === "jd" ? (jdMid - jd0).toFixed(RELATIVE_JD_DIGITS) : jdMid.toFixed(FRAME_JD_DIGITS);
+export function frameJdLabel(value: number | null | undefined, axis: TimeAxis, jd0: number): string {
+  if (!isFiniteNumber(value)) return "--";
+  return axis !== "index" ? (value - jd0).toFixed(RELATIVE_JD_DIGITS) : value.toFixed(FRAME_JD_DIGITS);
 }
 
 export function jdOffsetLabel(value: number, step?: number): string {
@@ -391,6 +421,7 @@ export function jdOffsetLabel(value: number, step?: number): string {
 }
 
 export function timeAxisLabel(axis: TimeAxis, jd0: number): string {
+  if (axis === "bjd") return `BJD_TDB - ${jd0}`;
   return axis === "jd" ? `JD (header time, not barycentric) - ${jd0}` : "frame index";
 }
 

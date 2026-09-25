@@ -1,7 +1,13 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { renderStfInWorker, cancelPendingRenders, setWorkerPixels, clearWorkerPixels } from "../../utils/stfworker";
-import { getGpuSingleton, getGpuState, onGpuLost, type GpuResources as GpuSingleton } from "../../infrastructure/gpu/GpuSingleton";
-import { LUT_BYTES, type DisplayTransfer } from "../../utils/displayTransfer";
+import {
+  STF_UNIFORM_WORD,
+  getGpuSingleton,
+  getGpuState,
+  onGpuLost,
+  type GpuResources as GpuSingleton,
+} from "../../infrastructure/gpu/GpuSingleton";
+import { LUT_BYTES, lutNodataRgb, type DisplayTransfer } from "../../utils/displayTransfer";
 
 interface GpuResources {
   uniformBuffer: GPUBuffer;
@@ -33,22 +39,29 @@ function makeScratch(): UniformScratch {
   return { buffer, f32: new Float32Array(buffer), u32: new Uint32Array(buffer) };
 }
 
-function fillUniforms(s: UniformScratch, t: DisplayTransfer, w: number, h: number): void {
+function fillUniforms(
+  s: UniformScratch,
+  t: DisplayTransfer,
+  w: number,
+  h: number,
+  nodata: readonly [number, number, number],
+): void {
   const { f32, u32 } = s;
-  f32[0] = t.vmin;
-  f32[1] = t.vmax;
-  f32[2] = t.shadow;
-  f32[3] = t.midtone;
-  f32[4] = t.highlight;
-  f32[5] = t.asinhA;
-  f32[6] = t.power;
-  f32[7] = w;
-  f32[8] = h;
-  f32[9] = 0;
-  f32[10] = 0;
-  f32[11] = 0;
-  u32[12] = t.stretchKind;
-  u32[13] = t.invert ? 1 : 0;
+  const word = STF_UNIFORM_WORD;
+  f32[word.vmin] = t.vmin;
+  f32[word.vmax] = t.vmax;
+  f32[word.shadow] = t.shadow;
+  f32[word.midtone] = t.midtone;
+  f32[word.highlight] = t.highlight;
+  f32[word.asinh_a] = t.asinhA;
+  f32[word.power] = t.power;
+  f32[word.tex_w] = w;
+  f32[word.tex_h] = h;
+  f32[word.nodata_r] = nodata[0] / 255;
+  f32[word.nodata_g] = nodata[1] / 255;
+  f32[word.nodata_b] = nodata[2] / 255;
+  u32[word.stretch_kind] = t.stretchKind;
+  u32[word.invert] = t.invert ? 1 : 0;
   u32[14] = 0;
   u32[15] = 0;
 }
@@ -218,7 +231,7 @@ export default function GpuRenderer({
       scratch = makeScratch();
       uniformScratchRef.current = scratch;
     }
-    fillUniforms(scratch, transfer, w, h);
+    fillUniforms(scratch, transfer, w, h, lutNodataRgb(lut));
 
     const last = lastUniformWriteRef.current;
     let unchanged = last !== null;

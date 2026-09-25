@@ -469,3 +469,18 @@ pub const RES_Y0: &str = "y0";
 pub const RES_DQ_NAMES: &str = "dq_names";
 pub const RES_N_FINITE: &str = "n_finite";
 pub const RES_ERR_STATS: &str = "err_stats";
+
+pub const RES_GEOMETRY: &str = "geometry";
+pub const RES_TARGET: &str = "target";
+pub const RES_SITE: &str = "site";
+pub const RES_TIME_SOURCE: &str = "time_source";
+pub const RES_AIRMASS_HEADER: &str = "airmass_header";
+
+pub const RES_SYMMETRIC: &str = "symmetric";
+pub const RES_CENTRE: &str = "centre";
+pub const RES_NODATA: &str = "nodata";
+
+pub const RES_SUMMARY: &str = "summary";
+pub const RES_SPECTRAL_VALUES: &str = "spectral_values";
+pub const RES_SPECTRAL_UNIT: &str = "spectral_unit";
+pub const RES_OFFSET_UNIT: &str = "offset_unit";

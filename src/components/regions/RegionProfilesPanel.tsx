@@ -1,10 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { Activity, Loader2 } from "lucide-react";
+import { Activity, Plus, Loader2 } from "lucide-react";
 import type { RadialProfile, LineCut, RegionShape } from "../../shared/types";
 import type { SbProfile } from "../../shared/types/regions";
 import { radialProfile, lineCut, sbProfile } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useDqContext } from "../../context/PreviewContext";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { lineCutEntry, measurementLog, profileLogReady, radialProfileEntry, sbProfileEntry } from "../../utils/measurementLog";
 import { shapeSummary } from "../../utils/regionGeometry";
 import {
   SB_X_UNITS,
@@ -50,6 +52,7 @@ const SEGMENT_ACTIVE_CLASS = "px-1.5 py-0.5 rounded text-[9px] font-mono text-sk
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const SMALL_BUTTON_CLASS =
   "px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
+const LOG_BUTTON_CLASS = `${SMALL_BUTTON_CLASS} inline-flex items-center gap-1`;
 
 type ProfileMode = "radial" | "sb";
 const PROFILE_MODES: readonly ProfileMode[] = ["radial", "sb"];
@@ -61,10 +64,11 @@ type ProfileRequest =
   | { kind: "sb"; shape: RegionShape; background: RegionShape | null; binWidth: number }
   | { kind: "cut"; x1: number; y1: number; x2: number; y2: number };
 
-type ProfileResult =
+type ProfileResult = { requestKey: string; excludeDq: boolean } & (
   | { kind: "radial"; data: RadialProfile }
   | { kind: "sb"; data: SbProfile }
-  | { kind: "cut"; data: LineCut };
+  | { kind: "cut"; data: LineCut }
+);
 
 const NO_PROFILE: ProfileFetchState<ProfileResult> = { result: null, error: null };
 
@@ -142,6 +146,7 @@ function Card({ label, value, title }: { label: string; value: string; title?: s
 function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
+  const provenance = useMeasurementProvenance();
   const [{ result, error }, dispatch] = useReducer(profileFetchReducer<ProfileResult>, NO_PROFILE);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<ProfileMode>("radial");
@@ -181,15 +186,19 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
         if (req.kind === "radial") {
           res = {
             kind: "radial",
+            requestKey,
+            excludeDq,
             data: await radialProfile(measurePath, req.x, req.y, req.maxRadius, { background: req.background, excludeDq }),
           };
         } else if (req.kind === "sb") {
           res = {
             kind: "sb",
+            requestKey,
+            excludeDq,
             data: await sbProfile(measurePath, req.shape, { binWidth: req.binWidth, background: req.background, excludeDq }),
           };
         } else {
-          res = { kind: "cut", data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
+          res = { kind: "cut", requestKey, excludeDq, data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
         }
         if (seqRef.current !== seq) return;
         dispatch({ type: "success", result: res });
@@ -232,6 +241,19 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
     setCopied(true);
     window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
   }, [sb]);
+
+  const logReady = profileLogReady(result, requestKey, excludeDq);
+  const handleLog = useCallback(() => {
+    if (!logReady || !result || !selected) return;
+    const req = JSON.parse(result.requestKey) as ProfileRequest;
+    if (result.kind === "radial" && req.kind === "radial") {
+      measurementLog.append(radialProfileEntry(provenance, result.data, result.excludeDq, req, selected));
+    } else if (result.kind === "sb" && req.kind === "sb") {
+      measurementLog.append(sbProfileEntry(provenance, result.data, result.excludeDq, req, selected));
+    } else if (result.kind === "cut") {
+      measurementLog.append(lineCutEntry(provenance, result.data, result.excludeDq, selected));
+    }
+  }, [logReady, result, selected, provenance]);
 
   if (!selected || !request) return null;
 
@@ -358,6 +380,9 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
               <button type="button" onClick={handleCopyCsv} className={SMALL_BUTTON_CLASS} title="Copy every bin as CSV">
                 {copied ? "copied" : "Copy CSV"}
               </button>
+              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+                <Plus size={10} /> Log
+              </button>
             </div>
             <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-500">
               <span>{sb.bins.length} bins</span>
@@ -392,6 +417,9 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
             {result.data.bins.length > 0 && (
               <span>cum {result.data.bins[result.data.bins.length - 1].cumulative_sum.toExponential(3)}</span>
             )}
+            <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+              <Plus size={10} /> Log
+            </button>
           </div>
         )}
         {result?.kind === "cut" && (
@@ -399,6 +427,9 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
             <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-500">
               <span>length {result.data.length.toFixed(1)} px</span>
               <span>{result.data.n_samples} samples</span>
+              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+                <Plus size={10} /> Log
+              </button>
             </div>
             <LineSkyReadout measurePath={measurePath} shape={selected.shape} />
           </div>

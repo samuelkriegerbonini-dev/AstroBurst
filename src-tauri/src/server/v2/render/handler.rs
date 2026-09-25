@@ -11,7 +11,9 @@ use serde_json::json;
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::colormap::{apply_colormap_inverted, encode_png_rgb8, Colormap};
 use astroburst_lib::core::imaging::scale::{
-    normalize_and_stretch, resolve_limits, LimitMode, StretchKind, DEFAULT_ASINH_A, DEFAULT_POWER,
+    normalize_and_stretch, resolve_limits, symmetric_about, validate_symmetric_centre, LimitMode,
+    StretchKind, DEFAULT_ASINH_A, DEFAULT_POWER, DEFAULT_SYMMETRIC_CENTRE, MAX_ABS_SYMMETRIC_CENTRE,
+    SYMMETRIC_FALLBACK_NOTE, SYMMETRIC_NONLINEAR_STRETCH_NOTE,
 };
 
 use crate::error::{AppError, Result};
@@ -57,6 +59,10 @@ pub struct ScaleSpec {
     pub power: Option<f64>,
     #[serde(default)]
     pub zscale_contrast: Option<f64>,
+    #[serde(default)]
+    pub symmetric: Option<bool>,
+    #[serde(default, alias = "center")]
+    pub centre: Option<f64>,
 }
 
 async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
@@ -208,8 +214,26 @@ fn parse_limit_mode(scale: &ScaleSpec) -> Result<LimitMode> {
     .map_err(|message| AppError::BadRequestWithHint {
         code: "bad_request",
         message,
-        hint: Some("supported algorithms: minmax, zscale, percentile, user (alias: manual)".into()),
+        hint: Some(
+            "supported algorithms: minmax, zscale, percentile, user (alias: manual); add symmetric: true and centre (alias center, default 0) to mirror the limits about the centre"
+                .into(),
+        ),
     })
+}
+
+fn parse_symmetric_centre(scale: &ScaleSpec) -> Result<Option<f64>> {
+    if scale.symmetric != Some(true) {
+        return Ok(None);
+    }
+    validate_symmetric_centre(scale.centre.unwrap_or(DEFAULT_SYMMETRIC_CENTRE))
+        .map(Some)
+        .map_err(|message| AppError::BadRequestWithHint {
+            code: "bad_request",
+            message,
+            hint: Some(format!(
+                "scale.centre is the value the limits are mirrored about (alias center, default 0, |centre| at most {MAX_ABS_SYMMETRIC_CENTRE:e})"
+            )),
+        })
 }
 
 pub async fn render(
@@ -244,6 +268,7 @@ pub async fn render(
 
     let scale = params.scale.unwrap_or_default();
     let mode = parse_limit_mode(&scale)?;
+    let symmetric_centre = parse_symmetric_centre(&scale)?;
     let stretch_kind = parse_stretch(scale.stretch.as_deref().unwrap_or("linear"))?;
     let cmap = parse_colormap(params.colormap.as_deref().unwrap_or("gray"))?;
 
@@ -258,7 +283,7 @@ pub async fn render(
     let overlays = build_overlays(&params.overlays, wcs.as_ref(), pixel_scale, factor);
 
     let resolved_c = resolved.clone();
-    let (png, vmin, vmax, below_frac, above_frac) = tokio::task::spawn_blocking(move || {
+    let (png, vmin, vmax, below_frac, above_frac, symmetric_fallback) = tokio::task::spawn_blocking(move || {
         let display = if factor > 1 {
             let out_rows = resolved_c.height.div_ceil(factor).max(1);
             let out_cols = resolved_c.width.div_ceil(factor).max(1);
@@ -269,6 +294,13 @@ pub async fn render(
         let (disp_rows, disp_cols) = display.dim();
 
         let (vmin, vmax) = resolve_limits(&display, mode);
+        let (vmin, vmax, symmetric_fallback) = match symmetric_centre {
+            Some(c) => {
+                let s = symmetric_about(c, vmin, vmax);
+                (s.vmin, s.vmax, s.fallback)
+            }
+            None => (vmin, vmax, false),
+        };
 
         let data = display
             .as_slice()
@@ -285,12 +317,19 @@ pub async fn render(
         } else {
             (0.0, 0.0)
         };
-        Ok::<_, AppError>((png, vmin, vmax, below_frac, above_frac))
+        Ok::<_, AppError>((png, vmin, vmax, below_frac, above_frac, symmetric_fallback))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))??;
 
     let png_scale = pixel_scale.map(|s| s * factor as f64);
+    let mut notes: Vec<&str> = Vec::new();
+    if symmetric_fallback {
+        notes.push(SYMMETRIC_FALLBACK_NOTE);
+    }
+    if symmetric_centre.is_some() && stretch_kind != StretchKind::Linear {
+        notes.push(SYMMETRIC_NONLINEAR_STRETCH_NOTE);
+    }
 
     let resolved_json = json!({
         "ref": target,
@@ -299,6 +338,9 @@ pub async fn render(
         "vmin": vmin,
         "vmax": vmax,
         "scale_algorithm": mode.name(),
+        "symmetric": symmetric_centre.is_some(),
+        "centre": symmetric_centre,
+        "notes": notes,
         "stretch": stretch_kind.name(),
         "colormap": cmap.name(),
         "binning_applied": factor,
@@ -343,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_colormap_accepts_all_nine_and_maps_errors_to_bad_request() {
+    fn parse_colormap_accepts_every_listed_map_and_maps_errors_to_bad_request() {
         for cmap in Colormap::ALL {
             assert_eq!(parse_colormap(cmap.name()).unwrap(), cmap);
         }
@@ -405,5 +447,24 @@ mod tests {
         assert_eq!(code, "bad_request");
         assert!(message.contains("bogus"), "{message}");
         assert!(hint.unwrap().contains("manual"));
+    }
+
+    #[test]
+    fn parse_symmetric_centre_defaults_to_zero_and_rejects_a_bad_centre() {
+        let on = ScaleSpec { symmetric: Some(true), ..ScaleSpec::default() };
+        assert_eq!(parse_symmetric_centre(&on).unwrap(), Some(0.0));
+        let unused = ScaleSpec { symmetric: None, centre: Some(f64::NAN), ..ScaleSpec::default() };
+        assert_eq!(parse_symmetric_centre(&unused).unwrap(), None);
+        let off = ScaleSpec { symmetric: Some(false), centre: Some(5.0), ..ScaleSpec::default() };
+        assert_eq!(parse_symmetric_centre(&off).unwrap(), None);
+        let shifted = ScaleSpec { symmetric: Some(true), centre: Some(-2.5), ..ScaleSpec::default() };
+        assert_eq!(parse_symmetric_centre(&shifted).unwrap(), Some(-2.5));
+        for bad in [f64::NAN, f64::INFINITY, 1e308] {
+            let spec = ScaleSpec { symmetric: Some(true), centre: Some(bad), ..ScaleSpec::default() };
+            let (code, message, hint) = bad_request_parts(parse_symmetric_centre(&spec).unwrap_err());
+            assert_eq!(code, "bad_request", "{bad}");
+            assert!(message.contains("centre must be"), "{message}");
+            assert!(hint.expect("hint present").contains("scale.centre"));
+        }
     }
 }

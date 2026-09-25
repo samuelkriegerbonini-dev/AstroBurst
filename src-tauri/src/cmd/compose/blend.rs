@@ -6,6 +6,7 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, cached_header, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir, write_derived_fits, OutputValues, MAX_PREVIEW_DIM};
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::cmd::helpers;
+use crate::cmd::processing::source_header;
 use crate::core::alignment::pair::align_pair_with_label;
 use crate::core::compose::rgb::{harmonize_dimensions, align_channels};
 use crate::core::analysis::photometry::SATURATION_KEYWORDS;
@@ -350,22 +351,22 @@ pub async fn align_channels_cmd(
 
         let mut channel_results = Vec::new();
 
+        let ref_header = source_header(&paths[0], &entries[0]);
+        let header0 = derived_output_header(ref_header.as_ref(), ABPROC_ALIGNED, OutputValues::Linear);
+
         let ref_key = if use_bin_ids {
             let bid = &bin_ids.as_ref().unwrap()[0];
             let k = crate::types::constants::wizard_aligned_key(bid);
             let stats = entries[0].stats().clone();
-            GLOBAL_IMAGE_CACHE.insert_synthetic(&k, entries[0].data_arc(), stats);
+            GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&k, entries[0].data_arc(), stats, Some(header0.clone()));
             k
         } else {
             String::new()
         };
 
-        let ref_header = if write_disk { cached_header(&paths[0]).ok() } else { None };
-
         if write_disk {
             let stem0 = output_stem(&paths[0]);
             let out0 = format!("{}/{}_aligned.fits", output_dir, stem0);
-            let header0 = derived_output_header(ref_header.as_ref(), ABPROC_ALIGNED, OutputValues::Linear);
             write_derived_fits(&out0, ref_arr, Some(&header0))?;
             channel_results.push(json!({
                 RES_OFFSET: [0.0, 0.0],
@@ -400,11 +401,24 @@ pub async fn align_channels_cmd(
                 &label,
             )?;
 
+            let header = registered_channel_header(
+                source_header(&paths[i], entry).as_ref(),
+                ref_header.as_ref(),
+                (tr, tc),
+                (rows, cols),
+                result.registered,
+            );
+
             let cache_key = if use_bin_ids {
                 let bid = &bin_ids.as_ref().unwrap()[i];
                 let k = crate::types::constants::wizard_aligned_key(bid);
                 let stats = compute_image_stats(&result.aligned);
-                GLOBAL_IMAGE_CACHE.insert_synthetic(&k, std::sync::Arc::new(result.aligned.clone()), stats);
+                GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(
+                    &k,
+                    std::sync::Arc::new(result.aligned.clone()),
+                    stats,
+                    Some(header.clone()),
+                );
                 k
             } else {
                 String::new()
@@ -422,13 +436,6 @@ pub async fn align_channels_cmd(
 
             if write_disk {
                 let out_path = format!("{}/{}_aligned.fits", output_dir, label);
-                let header = registered_channel_header(
-                    cached_header(&paths[i]).ok().as_ref(),
-                    ref_header.as_ref(),
-                    (tr, tc),
-                    (rows, cols),
-                    result.registered,
-                );
                 write_derived_fits(&out_path, &result.aligned, Some(&header))?;
                 entry_json.as_object_mut().unwrap().insert(RES_PATH.to_string(), json!(out_path));
             }
@@ -648,6 +655,67 @@ mod tests {
         }
         assert_eq!(card(&headers[0], "FILTER").as_deref(), Some("F444W"));
         assert_eq!(card(&headers[0], "BUNIT").as_deref(), Some("MJy/sr"));
+        assert_eq!(card(&headers[1], "FILTER").as_deref(), Some("F200W"));
+    }
+
+    #[tokio::test]
+    async fn wizard_aligned_entries_carry_the_header_of_the_reference_grid() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let reference_path = dir.path().join("ref.fits").to_str().unwrap().to_string();
+        let target_path = dir.path().join("tgt.fits").to_str().unwrap().to_string();
+        let mut ref_header = wcs_header(16.0, 1e-5, 1e-14);
+        ref_header.set("FILTER", "F444W".to_string());
+        let mut tgt_header = wcs_header(18.0, 1e-5, 1e-14);
+        tgt_header.set("FILTER", "F200W".to_string());
+        write_fits_mono(&reference_path, &star_field(0.0, 0.0), Some(&ref_header)).unwrap();
+        write_fits_mono(&target_path, &star_field(2.0, -3.0), Some(&tgt_header)).unwrap();
+
+        let res = align_channels_cmd(
+            vec![reference_path.clone(), target_path],
+            dir.path().join("out").to_str().unwrap().to_string(),
+            None,
+            Some(vec!["align_r".to_string(), "align_g".to_string()]),
+            None,
+        )
+        .await
+        .unwrap();
+        let channels = res[CHANNELS].as_array().unwrap();
+        assert_eq!(channels[1][RES_METHOD_USED], "phase_correlation", "{res}");
+        let keys = [
+            crate::types::constants::wizard_aligned_key("align_r"),
+            crate::types::constants::wizard_aligned_key("align_g"),
+        ];
+        assert_eq!(channels[0][RES_CACHE_KEY], keys[0]);
+        assert_eq!(channels[1][RES_CACHE_KEY], keys[1]);
+        let headers: Vec<Option<HduHeader>> = keys
+            .iter()
+            .map(|k| GLOBAL_IMAGE_CACHE.get(k).unwrap().header().cloned())
+            .collect();
+        for k in &keys {
+            GLOBAL_IMAGE_CACHE.remove(k);
+        }
+        assert!(!dir.path().join("out").exists(), "a wizard alignment must not write to the disk");
+        let reference_wcs =
+            WcsTransform::from_header(load_cached_full(&reference_path).unwrap().header().expect("header")).unwrap();
+        let headers: Vec<HduHeader> = headers
+            .into_iter()
+            .map(|h| h.expect("a wizard channel carries the header of its grid"))
+            .collect();
+        for h in &headers {
+            assert_eq!(card(h, crate::cmd::common::HEADER_ABPROC).as_deref(), Some(ABPROC_ALIGNED));
+            assert!((h.get_f64("CRPIX1").unwrap() - 16.0).abs() < 1e-9, "CRPIX1 {:?}", h.get("CRPIX1"));
+            assert!((h.get_f64("CD2_2").unwrap() - 1e-5).abs() < 1e-18);
+            assert_eq!(h.get_i64("NAXIS1"), Some(64));
+            assert_eq!(h.get_i64("NAXIS2"), Some(64));
+            let wcs = WcsTransform::from_header(h).unwrap();
+            for (x, y) in [(0.0, 0.0), (30.5, 20.25), (63.0, 1.0)] {
+                let a = reference_wcs.pixel_to_world(x, y);
+                let b = wcs.pixel_to_world(x, y);
+                assert!((a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12, "({x},{y}): {a:?} vs {b:?}");
+            }
+        }
+        assert_eq!(card(&headers[0], "FILTER").as_deref(), Some("F444W"));
         assert_eq!(card(&headers[1], "FILTER").as_deref(), Some("F200W"));
     }
 

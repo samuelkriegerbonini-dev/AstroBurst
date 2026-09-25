@@ -310,16 +310,20 @@ fn cube_frame_json(
     }))
 }
 
+const KEY_FLUX_JY: &str = "flux_jy";
+
 fn cube_spectrum_json(path: &str, x: usize, y: usize) -> anyhow::Result<serde_json::Value> {
     let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
     let spectrum = cube.extract_spectrum_at(y, x)?;
     let axis = cube.spectral_axis().ok();
     let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
+    let flux_jy = mjy_per_sr_to_jy_factor(&cube.header).map(|f| spectrum.iter().map(|&v| v as f64 * f).collect::<Vec<f64>>());
     Ok(json!({
         RES_SPECTRUM: spectrum,
         RES_WAVELENGTHS: axis.as_ref().map(|a| a.header_values()),
         RES_UNIT: axis.map(|a| a.header_unit),
         RES_IS_SPECTRAL: classification.is_spectral,
+        KEY_FLUX_JY: flux_jy,
     }))
 }
 
@@ -740,6 +744,32 @@ mod tests {
         assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_AXIS_UNIT], "M");
         GLOBAL_CUBE_CACHE.invalidate(key);
         GLOBAL_CUBE_CACHE.invalidate(bare.to_str().unwrap());
+    }
+
+    #[test]
+    fn point_spectrum_reports_flux_in_jy_only_for_mjy_per_sr_cubes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, _) = open_cube(&dir, "line.fits", 0.0);
+        let plain = cube_spectrum_json(&key, 16, 16).unwrap();
+        assert!(plain[KEY_FLUX_JY].is_null(), "Jy reported for a Jy/beam cube: {}", plain[KEY_FLUX_JY]);
+
+        let mjy_path = dir.path().join("mjy.fits");
+        write_line_cube_with_cards(&mjy_path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        let mjy_key = mjy_path.to_str().unwrap();
+        let response = cube_spectrum_json(mjy_key, 16, 16).unwrap();
+        let spectrum = response[RES_SPECTRUM].as_array().unwrap();
+        let flux = response[KEY_FLUX_JY].as_array().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = spectrum[z].as_f64().unwrap() * 3.0461742e-12 * JY_PER_MJY;
+            let got = flux[z].as_f64().unwrap();
+            assert!((got - expected).abs() <= 1e-12 * expected.abs().max(1.0), "z={} got={} expected={}", z, got, expected);
+        }
+        let pinned = 2.0 * 3.0461742e-12 * JY_PER_MJY;
+        let got = flux[20].as_f64().unwrap();
+        assert!((got - pinned).abs() <= 1e-12 * pinned, "channel 20: got={} expected={}", got, pinned);
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+        GLOBAL_CUBE_CACHE.invalidate(mjy_key);
     }
 
     #[test]

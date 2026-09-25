@@ -1,9 +1,11 @@
-import { useState, useCallback, useEffect, memo } from "react";
+import { useState, useCallback, useEffect, useRef, memo } from "react";
+import { createPortal } from "react-dom";
 import { Grid3X3, X, Maximize2 } from "lucide-react";
 import { Slider } from "../ui";
 import DeepZoomViewer from "../render/DeepZoomviewer";
 import MeasurementBadge from "./MeasurementBadge";
 import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
+import { FOCUSABLE_SELECTOR, focusTrapTarget } from "../../utils/focusTrap";
 
 interface TileViewerPanelProps {
   filePath: string | null;
@@ -17,6 +19,9 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
   const source = useMeasurementSource(true);
   const [tileSize, setTileSize] = useState(256);
   const [isOpen, setIsOpen] = useState(false);
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   const isLargeImage = (imageWidth || 0) > 4096 || (imageHeight || 0) > 4096;
 
@@ -30,12 +35,33 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
   }, []);
 
   useEffect(() => {
+    setIsOpen(false);
+  }, [filePath]);
+
+  useEffect(() => {
     if (!isOpen) return;
+    const openButton = openButtonRef.current;
+    closeButtonRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsOpen(false);
+      if (e.key === "Escape") {
+        setIsOpen(false);
+        return;
+      }
+      const overlay = overlayRef.current;
+      if (e.key !== "Tab" || !overlay) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && !overlay.contains(active)) return;
+      const focusables = Array.from(overlay.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      const target = focusTrapTarget(focusables.length, focusables.indexOf(active as HTMLElement), e.shiftKey);
+      if (target === null) return;
+      e.preventDefault();
+      focusables[target].focus();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      openButton?.focus();
+    };
   }, [isOpen]);
 
   if (!filePath || !isLargeImage) return null;
@@ -52,7 +78,7 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
             <MeasurementBadge measuresComposite />
           </div>
           <span className="text-[10px] font-mono text-zinc-600">
-            {imageWidth}\u00d7{imageHeight}
+            {imageWidth}×{imageHeight}
           </span>
         </div>
 
@@ -74,6 +100,7 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
           />
 
           <button
+            ref={openButtonRef}
             onClick={handleOpen}
             className="ab-run-btn"
             data-accent="teal"
@@ -85,8 +112,14 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
         </div>
       </div>
 
-      {isOpen && filePath && (
-        <div className="fixed inset-0 z-[90] bg-zinc-950">
+      {isOpen && filePath && createPortal(
+        <div
+          ref={overlayRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Deep Zoom viewer"
+          className="fixed inset-0 z-[90] bg-zinc-950"
+        >
           <DeepZoomViewer
             filePath={filePath}
             composite={composite}
@@ -99,7 +132,9 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
           />
 
           <button
+            ref={closeButtonRef}
             onClick={handleClose}
+            aria-label="Close Deep Zoom viewer"
             className="absolute top-4 left-4 z-50 w-9 h-9 flex items-center justify-center rounded-lg text-zinc-400 hover:text-white transition-all duration-150 active:scale-95"
             style={{
               background: "rgba(24,24,32,0.8)",
@@ -121,7 +156,8 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
           >
             Scroll to zoom | Double-click to zoom in | Drag to pan
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

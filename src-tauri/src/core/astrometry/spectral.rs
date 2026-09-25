@@ -13,10 +13,10 @@ pub const CORRECTION_ACCURACY_KMS: f64 = 0.02;
 
 const AIR_VACUUM_TOLERANCE_UM: f64 = 1e-10;
 const AIR_VACUUM_MAX_ITERATIONS: usize = 50;
-const AU_KM: f64 = 149597870.7;
+pub(crate) const AU_KM: f64 = 149597870.7;
 const EARTH_ROTATION_RAD_PER_S: f64 = 7.292115e-5;
-const WGS84_A_M: f64 = 6378137.0;
-const WGS84_F: f64 = 1.0 / 298.257223563;
+pub(crate) const WGS84_A_M: f64 = 6378137.0;
+pub(crate) const WGS84_F: f64 = 1.0 / 298.257223563;
 const OBLIQUITY_J2000_DEG: f64 = 23.4392911;
 const MOON_TO_EARTH_MASS_RATIO_INVERSE: f64 = 81.30056;
 const VELOCITY_FINITE_DIFFERENCE_DAYS: f64 = 1.0 / 48.0;
@@ -630,11 +630,12 @@ pub fn header_target_coordinates(header: &HduHeader) -> Option<(f64, f64, &'stat
             }
         }
     }
-    let degree_pairs: [(&str, &str, &'static str); 4] = [
+    let degree_pairs: [(&str, &str, &'static str); 5] = [
         ("RA_TARG", "DEC_TARG", "RA_TARG/DEC_TARG"),
         ("TARG_RA", "TARG_DEC", "TARG_RA/TARG_DEC"),
         ("RA", "DEC", "RA/DEC"),
         ("OBJRA", "OBJDEC", "OBJRA/OBJDEC"),
+        ("RA_OBJ", "DEC_OBJ", "RA_OBJ/DEC_OBJ"),
     ];
     for (ra_key, dec_key, label) in degree_pairs {
         let (Some(ra_raw), Some(dec_raw)) = (header.get(ra_key), header.get(dec_key)) else {
@@ -768,7 +769,7 @@ fn earth_moon_barycentre_heliocentric_ecliptic_au(jd_tt: f64) -> [f64; 3] {
     [radius_au * earth_longitude.cos(), radius_au * earth_longitude.sin(), 0.0]
 }
 
-fn moon_geocentric_ecliptic_au(jd_tt: f64) -> [f64; 3] {
+pub(crate) fn moon_geocentric_ecliptic_au(jd_tt: f64) -> [f64; 3] {
     let t = julian_centuries_j2000(jd_tt);
     let lp = 218.3164477 + 481267.88123421 * t;
     let d = (297.8501921 + 445267.1114034 * t).to_radians();
@@ -842,6 +843,21 @@ pub fn sun_barycentric_velocity_kms(jd_tt: f64) -> [f64; 3] {
     rotate_x(au_per_day_to_kms(v), OBLIQUITY_J2000_DEG)
 }
 
+pub fn earth_heliocentric_position_au(jd_tt: f64) -> [f64; 3] {
+    ecliptic_of_date_to_equatorial_j2000(earth_heliocentric_ecliptic_of_date_au(jd_tt), jd_tt)
+}
+
+pub fn sun_barycentric_position_au(jd_tt: f64) -> [f64; 3] {
+    let t = julian_centuries_j2000(jd_tt);
+    let mut r = [0.0; 3];
+    for (_, sun_to_planet_mass, semi_major_au, l0_deg, rate_deg_per_century) in GIANT_PLANETS {
+        let longitude = (l0_deg + rate_deg_per_century * t).to_radians();
+        let planet_position = [longitude.cos() * semi_major_au, longitude.sin() * semi_major_au, 0.0];
+        r = add(r, scale(planet_position, -1.0 / sun_to_planet_mass));
+    }
+    rotate_x(r, OBLIQUITY_J2000_DEG)
+}
+
 pub fn diurnal_velocity_kms(site: &SiteLocation, jd_ut: f64) -> [f64; 3] {
     let lat = site.lat_deg.to_radians();
     let e2 = 2.0 * WGS84_F - WGS84_F * WGS84_F;
@@ -867,7 +883,7 @@ pub struct RadialVelocityCorrection {
     pub notes: Vec<String>,
 }
 
-fn is_spacecraft(telescop: &str) -> bool {
+pub(crate) fn is_spacecraft(telescop: &str) -> bool {
     SPACECRAFT_TELESCOPES.iter().any(|s| telescop.contains(s))
 }
 
@@ -898,7 +914,7 @@ pub fn header_spectral_frame(header: &HduHeader) -> Option<(String, String)> {
     })
 }
 
-fn longitude_sign_is_ambiguous(site_source: &str) -> bool {
+pub(crate) fn longitude_sign_is_ambiguous(site_source: &str) -> bool {
     !site_source.starts_with("OBSGEO")
 }
 
@@ -1472,6 +1488,29 @@ mod tests {
         let solar = sun_barycentric_velocity_kms(jd);
         let solar_speed = dot(solar, solar).sqrt();
         assert!(solar_speed > 0.004 && solar_speed < 0.018, "{solar_speed}");
+    }
+
+    #[test]
+    fn sun_and_earth_barycentric_positions_are_consistent_with_their_velocities() {
+        let jd = jd_from_gregorian(2026, 9, 19.0);
+        let dt = VELOCITY_FINITE_DIFFERENCE_DAYS;
+        let central_difference_kms = |position: fn(f64) -> [f64; 3]| {
+            let after = position(jd + dt);
+            let before = position(jd - dt);
+            au_per_day_to_kms(scale(add(after, scale(before, -1.0)), 1.0 / (2.0 * dt)))
+        };
+        let earth = earth_heliocentric_position_au(jd);
+        let earth_distance = dot(earth, earth).sqrt();
+        assert!((0.983..=1.017).contains(&earth_distance), "{earth_distance}");
+        let earth_velocity = earth_heliocentric_velocity_kms(jd);
+        let earth_difference = add(central_difference_kms(earth_heliocentric_position_au), scale(earth_velocity, -1.0));
+        assert!(dot(earth_difference, earth_difference).sqrt() < 0.05, "{earth_difference:?}");
+        let sun = sun_barycentric_position_au(jd);
+        let sun_distance = dot(sun, sun).sqrt();
+        assert!((0.003..=0.009).contains(&sun_distance), "{sun_distance}");
+        let sun_velocity = sun_barycentric_velocity_kms(jd);
+        let sun_difference = add(central_difference_kms(sun_barycentric_position_au), scale(sun_velocity, -1.0));
+        assert!(dot(sun_difference, sun_difference).sqrt() < 1e-4, "{sun_difference:?}");
     }
 
     #[test]

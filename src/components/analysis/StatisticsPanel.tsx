@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
-import { Grid3X3, Copy, Check, Loader2 } from "lucide-react";
+import { Grid3X3, Copy, Check, Plus, Loader2 } from "lucide-react";
 import { computeStatistics, computeStatisticsComposite } from "../../services/statistics";
 import type {
   ChannelStatistics,
@@ -9,6 +9,8 @@ import type {
 } from "../../shared/types/statistics";
 import type { RegionShape } from "../../shared/types";
 import { useDqContext } from "../../context/PreviewContext";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { measurementLog, statisticsEntry, statisticsLogReady } from "../../utils/measurementLog";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { Toggle, RunButton, ErrorAlert } from "../ui";
@@ -41,6 +43,10 @@ interface PanelResult {
   dqExcluded: number | null;
   elapsedMs: number;
   regionKind: RegionShape["shape"] | null;
+  composite: boolean;
+  noise: boolean;
+  excludeDq: boolean;
+  region: RegionShape | null;
 }
 
 const UNITS: readonly StatisticsUnit[] = ["raw", "normalized", "16bit"];
@@ -52,6 +58,7 @@ function channelRange(body: ChannelStatisticsBody): DataRange {
 
 function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: StatisticsPanelProps) {
   const { excludeDq } = useDqContext();
+  const provenance = useMeasurementProvenance(true);
   const regionKey = useRegionKey();
   const doc = useRegionDoc(regionKey);
   const selectedShape = useMemo<RegionShape | null>(
@@ -88,6 +95,10 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
           dqExcluded: null,
           elapsedMs: res.elapsed_ms,
           regionKind: null,
+          composite: true,
+          noise,
+          excludeDq,
+          region: null,
         });
       } else if (filePath) {
         const region = useRegion ? selectedShape : null;
@@ -100,6 +111,10 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
           dqExcluded: res.dq_excluded,
           elapsedMs: res.elapsed_ms,
           regionKind: region?.shape ?? null,
+          composite: false,
+          noise,
+          excludeDq,
+          region,
         });
       }
     } catch (e: unknown) {
@@ -166,6 +181,17 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
     setCopied(true);
     window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
   }, [result, converted, noiseSigmas, unit]);
+
+  const logReady = statisticsLogReady(result, {
+    composite: isShowingComposite,
+    noise,
+    excludeDq,
+    region: useRegion && !isShowingComposite ? selectedShape : null,
+  });
+  const handleLog = useCallback(() => {
+    if (!logReady || !result) return;
+    measurementLog.append(statisticsEntry(provenance, result));
+  }, [logReady, result, provenance]);
 
   const hasTarget = Boolean(filePath) || isShowingComposite;
 
@@ -243,6 +269,16 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
               >
                 {copied ? <Check size={10} className="text-emerald-400" /> : <Copy size={10} />}
                 <span>{copied ? "Copied" : "CSV"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLog}
+                disabled={loading || !logReady}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors disabled:opacity-40"
+                title="Log the raw statistics on screen"
+              >
+                <Plus size={10} />
+                <span>Log</span>
               </button>
             </div>
 

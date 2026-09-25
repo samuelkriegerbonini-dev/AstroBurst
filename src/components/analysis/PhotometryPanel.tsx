@@ -5,6 +5,8 @@ import type { PhotometryMeasurement, StarPhotometry } from "../../services/analy
 import { getWcsInfo } from "../../services/astrometry";
 import { usePixelClick } from "../../hooks/useMousePixelStore";
 import { useDqContext } from "../../context/PreviewContext";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { measurementLog, photometryEntry } from "../../utils/measurementLog";
 import { Toggle } from "../ui";
 import ProfilePlot from "../regions/ProfilePlot";
 import type { ProfileSeries } from "../regions/ProfilePlot";
@@ -111,6 +113,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const click = usePixelClick();
   const { excludeDq } = useDqContext();
+  const provenance = useMeasurementProvenance();
   const lastSeqRef = useRef(0);
   const busyRef = useRef(false);
   const requestSeqRef = useRef(0);
@@ -168,6 +171,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
         });
         if (requestSeqRef.current !== seq) return;
         setResult(res);
+        measurementLog.append(photometryEntry(provenance, res, { apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq }));
         setHistory((prev) => [res, ...prev].slice(0, 4));
       } catch (e: unknown) {
         if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
@@ -176,7 +180,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
         if (requestSeqRef.current === seq) setIsMeasuring(false);
       }
     },
-    [filePath, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq],
+    [filePath, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq, provenance],
   );
 
   useEffect(() => {

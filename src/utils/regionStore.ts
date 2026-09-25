@@ -1,4 +1,4 @@
-import type { Region, RegionShape, RegionTool } from "../shared/types";
+import type { Region, RegionShape, RegionShapeKind, RegionTool } from "../shared/types";
 import { loadRegions, saveRegions, type RegionStorage } from "./regionPersistence";
 
 export interface RegionDoc {
@@ -143,6 +143,17 @@ export class RegionStoreCore {
     this.commit(fileKey, { regions, selectedId }, true);
   }
 
+  removeShapeKind(fileKey: string, kind: RegionShapeKind): void {
+    const doc = this.getDoc(fileKey);
+    const removed = new Set(doc.regions.filter((r) => r.shape.shape === kind).map((r) => r.id));
+    if (removed.size === 0) return;
+    const regions = doc.regions
+      .filter((r) => !removed.has(r.id))
+      .map((r) => (r.backgroundId !== null && removed.has(r.backgroundId) ? { ...r, backgroundId: null } : r));
+    const selectedId = doc.selectedId !== null && removed.has(doc.selectedId) ? null : doc.selectedId;
+    this.commit(fileKey, { regions, selectedId }, true);
+  }
+
   select(fileKey: string, id: string | null): void {
     const doc = this.getDoc(fileKey);
     const target = id !== null && doc.regions.some((r) => r.id === id) ? id : null;
@@ -169,6 +180,10 @@ export class RegionStoreCore {
   getLastSavedAt(): number | null {
     return this.lastSavedAt;
   }
+}
+
+export function shapeKindKey(regions: readonly Region[], kind: RegionShapeKind): string {
+  return JSON.stringify(regions.filter((r) => r.shape.shape === kind).map((r) => r.id).sort());
 }
 
 function browserStorage(): RegionStorage | null {

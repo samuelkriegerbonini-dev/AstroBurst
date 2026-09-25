@@ -1,8 +1,10 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { useDisplayContext } from "../../context/PreviewContext";
 import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLimits";
+import { centreDraftFor, parseCentreDraft, symmetricStretchNote } from "../../utils/displayTransfer";
 import {
+  COLORMAP_LABELS,
   COLORMAP_NAMES,
   DEFAULT_DISPLAY_SETTINGS,
   GRID_DENSITIES,
@@ -42,8 +44,21 @@ function parseNullable(text: string): number | null | undefined {
 }
 
 function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsProps) {
-  const { display, setDisplay, limitsLoading, limitsError } = useDisplayContext();
+  const { display, setDisplay, limits, limitsLoading, limitsError } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
+  const stretchNote = symmetricStretchNote(display);
+
+  const [centreDraft, setCentreDraft] = useState(() => String(display.centre));
+  useEffect(() => {
+    setCentreDraft((draft) => centreDraftFor(draft, display.centre));
+  }, [display.centre]);
+
+  const onCentreChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const text = e.target.value;
+    setCentreDraft(text);
+    const n = parseCentreDraft(text);
+    if (n !== null && n !== display.centre) setDisplay({ centre: n });
+  };
 
   const commitPercentiles = () => {
     const [lo, hi] = normalizePercentiles(display.percentileLow, display.percentileHigh);
@@ -225,10 +240,49 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
             />
           </label>
         )}
+
+        <label
+          className="flex items-center gap-1 cursor-pointer"
+          title="Mirror vmin/vmax about a centre: vmin = c - a, vmax = c + a with a = max(|lo - c|, |hi - c|) from the chosen limits; enabling it under mtf switches the stretch to linear"
+        >
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            checked={display.symmetric}
+            onChange={(e) => setDisplay({ symmetric: e.target.checked })}
+          />
+          <span className={LABEL_CLASS}>symmetric</span>
+        </label>
+        {isMtf && <span className="text-[9px] text-zinc-500">(sets stretch to linear)</span>}
+
+        {display.symmetric && (
+          <label
+            className="flex items-center gap-1"
+            title="Centre c of the symmetric limits, in data units (default 0). Pixels that are exactly 0 are padding and take the no-data colour, not the centre colour; the centre lands on the colormap centre only under a linear stretch"
+          >
+            <span className={LABEL_CLASS}>centre</span>
+            <input
+              type="number"
+              step="any"
+              aria-label="Symmetric limits centre"
+              className={INPUT_CLASS}
+              value={centreDraft}
+              onChange={onCentreChange}
+            />
+          </label>
+        )}
+        {stretchNote && (
+          <span className="text-[9px] text-amber-400/80" title={stretchNote}>
+            ({stretchNote})
+          </span>
+        )}
       </div>
 
       <div className={GROUP_CLASS}>
-        <label className="flex items-center gap-1" title="colour lookup table">
+        <label
+          className="flex items-center gap-1"
+          title="colour lookup table; RdBu, coolwarm, bwr and seismic are diverging: pair them with symmetric limits and a linear stretch"
+        >
           <span className={LABEL_CLASS}>cmap</span>
           <select
             className={SELECT_CLASS}
@@ -236,7 +290,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
             onChange={(e) => setDisplay({ colormap: e.target.value as ColormapName })}
           >
             {COLORMAP_NAMES.map((c) => (
-              <option key={c} value={c}>{c}</option>
+              <option key={c} value={c}>{COLORMAP_LABELS[c]}</option>
             ))}
           </select>
         </label>
@@ -303,7 +357,13 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
       </div>
 
       <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
-        {limitsLoading ? "…" : `${formatLimit(vmin)} … ${formatLimit(vmax)}`}
+        {limitsLoading
+          ? "…"
+          : `${formatLimit(vmin)} … ${formatLimit(vmax)}${
+              !isMtf && limits?.symmetric === true && limits.centre !== null
+                ? ` · c ${formatLimit(limits.centre)}`
+                : ""
+            }`}
       </span>
 
       <button
@@ -318,6 +378,11 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
       {!isMtf && limitsError && (
         <span className="w-full text-[9px] text-red-400/80 truncate" title={limitsError}>
           {limitsError}
+        </span>
+      )}
+      {!isMtf && limits && limits.notes.length > 0 && (
+        <span className="w-full text-[9px] text-amber-400/80 truncate" title={limits.notes.join("; ")}>
+          {limits.notes.join("; ")}
         </span>
       )}
     </fieldset>

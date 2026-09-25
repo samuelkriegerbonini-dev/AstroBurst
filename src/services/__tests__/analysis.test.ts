@@ -127,7 +127,17 @@ describe("finiteSky", () => {
 describe("timeSeriesPhotometry", () => {
   beforeEach(() => typedInvokeMock.mockReset());
 
-  const SERIES = { reference_path: "/a.fits", targets: [], frames: [], n_frames: 2, n_skipped: 0, warnings: [], elapsed_ms: 4 };
+  const SERIES = {
+    reference_path: "/a.fits",
+    targets: [],
+    frames: [],
+    n_frames: 2,
+    n_skipped: 0,
+    warnings: [],
+    geometry_target: null,
+    geometry_notes: [],
+    elapsed_ms: 4,
+  };
   const TARGETS = [
     { x: 10, y: 20, label: "T", role: "target" as const },
     { x: 30, y: 40, label: "C1", role: "comp" as const },
@@ -145,8 +155,32 @@ describe("timeSeriesPhotometry", () => {
       gain: null,
       excludeDq: false,
       trackDrift: true,
+      targetRa: null,
+      targetDec: null,
+      siteLat: null,
+      siteLon: null,
+      siteHeight: null,
     });
     expect(res).toBe(SERIES);
+  });
+
+  it("forwards the site and target overrides of the time series", async () => {
+    typedInvokeMock.mockResolvedValue(SERIES);
+    await timeSeriesPhotometry(["/a.fits"], TARGETS, {
+      apertureRadius: 5,
+      targetRa: 150.5,
+      targetDec: -2.25,
+      siteLat: 19.82,
+      siteLon: -155.47,
+      siteHeight: 4200,
+    });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({
+      targetRa: 150.5,
+      targetDec: -2.25,
+      siteLat: 19.82,
+      siteLon: -155.47,
+      siteHeight: 4200,
+    });
   });
 
   it("forwards the annulus, gain, DQ exclusion and drift flags", async () => {

@@ -1,15 +1,24 @@
 import { describe, it, expect } from "vitest";
 import {
   GRAY_LUT_RGBA,
+  LUT_WITH_NODATA_BYTES,
+  NODATA_INDEX,
   STRETCH_KIND,
+  SYMMETRIC_NONLINEAR_STRETCH_NOTE,
+  centreDraftFor,
   isPaddingValue,
   lutIndex,
+  lutNodataRgb,
   normalize,
+  parseCentreDraft,
+  reconcileDisplayPatch,
   renderRgba,
   resolveTransferLimits,
   stretchValue,
+  symmetricStretchNote,
   toDisplayTransfer,
   transferByte,
+  withNodataEntry,
   type DisplayTransfer,
 } from "../displayTransfer";
 import { DEFAULT_DISPLAY_SETTINGS } from "../../shared/types/display";
@@ -27,6 +36,8 @@ const BASE: DisplayTransfer = {
 };
 
 const GOLDEN_X = [0, 0.25, 0.5, 0.75, 1];
+const GOLDEN_WINDOW = { vmin: 1, vmax: 2 };
+const GOLDEN_RAW = GOLDEN_X.map((x) => x + GOLDEN_WINDOW.vmin);
 const GOLDEN: Record<Exclude<keyof typeof STRETCH_KIND, "mtf">, number[]> = {
   linear: [0, 64, 128, 191, 255],
   log: [0, 204, 229, 244, 255],
@@ -37,6 +48,10 @@ const GOLDEN: Record<Exclude<keyof typeof STRETCH_KIND, "mtf">, number[]> = {
 
 function withKind(kind: DisplayTransfer["stretchKind"], invert = false): DisplayTransfer {
   return { ...BASE, stretchKind: kind, invert };
+}
+
+function goldenKind(kind: DisplayTransfer["stretchKind"], invert = false): DisplayTransfer {
+  return { ...withKind(kind, invert), ...GOLDEN_WINDOW };
 }
 
 function oldStfTransfer(
@@ -71,7 +86,7 @@ function shaderMtf(m: number, x: number): number {
 }
 
 function shaderByte(val: number, t: DisplayTransfer): number {
-  if (!Number.isFinite(val) || val === 0) return t.invert ? 255 : 0;
+  if (!Number.isFinite(val) || val === 0) return NODATA_INDEX;
   const vmin = f(t.vmin);
   const vmax = f(t.vmax);
   const range = f(vmax - vmin);
@@ -124,13 +139,13 @@ describe("normalize", () => {
 describe("golden stretch bytes", () => {
   for (const name of Object.keys(GOLDEN) as (keyof typeof GOLDEN)[]) {
     it(`${name} matches the shared golden vector`, () => {
-      const t = withKind(STRETCH_KIND[name]);
-      const bytes = GOLDEN_X.map((x) => transferByte(x, t));
+      const t = goldenKind(STRETCH_KIND[name]);
+      const bytes = GOLDEN_RAW.map((x) => transferByte(x, t));
       expect(bytes).toEqual(GOLDEN[name]);
     });
     it(`${name} inverted equals 255 - byte`, () => {
-      const t = withKind(STRETCH_KIND[name], true);
-      const bytes = GOLDEN_X.map((x) => transferByte(x, t));
+      const t = goldenKind(STRETCH_KIND[name], true);
+      const bytes = GOLDEN_RAW.map((x) => transferByte(x, t));
       expect(bytes).toEqual(GOLDEN[name].map((b) => 255 - b));
     });
   }
@@ -139,10 +154,10 @@ describe("golden stretch bytes", () => {
 describe("non-finite pixels", () => {
   const values = [NaN, Infinity, -Infinity];
   for (const kind of [0, 1, 2, 3, 4, 5] as const) {
-    it(`kind ${kind} maps NaN/Inf to LUT index 0 before inversion`, () => {
+    it(`kind ${kind} maps NaN/Inf to the no-data index regardless of invert`, () => {
       for (const v of values) {
-        expect(transferByte(v, withKind(kind))).toBe(0);
-        expect(transferByte(v, withKind(kind, true))).toBe(255);
+        expect(transferByte(v, withKind(kind))).toBe(NODATA_INDEX);
+        expect(transferByte(v, withKind(kind, true))).toBe(NODATA_INDEX);
       }
     });
   }
@@ -159,7 +174,7 @@ describe("non-finite pixels", () => {
     for (const kind of [0, 1, 2, 3, 4, 5] as const) {
       for (const invert of [false, true]) {
         const t: DisplayTransfer = { ...BASE, vmin: -3.5, vmax: 1200.25, stretchKind: kind, invert, shadow: 0, midtone: 0.5 };
-        const noData = invert ? 255 : 0;
+        const noData = NODATA_INDEX;
         for (const v of [0, -0]) {
           expect(transferByte(v, t)).toBe(noData);
           expect(shaderByte(v, t)).toBe(noData);
@@ -190,12 +205,14 @@ describe("MTF kind", () => {
     const invRange = 1 / Math.max(dataMax - dataMin, 1e-8);
     const clipRange = Math.max(highlight - shadow, 1e-8);
     const raw = [120, 150, 300, 512, 777, 1024, 1500, 2048, 3000, 3999, 4200, NaN];
-    const expected = raw.map((v) => (oldStfTransfer(v, invRange, dataMin, shadow, clipRange, midtone) * 255 + 0.5) | 0);
+    const expected = raw.map((v) =>
+      Number.isFinite(v) ? (oldStfTransfer(v, invRange, dataMin, shadow, clipRange, midtone) * 255 + 0.5) | 0 : NODATA_INDEX,
+    );
     expect(raw.map((v) => transferByte(v, t))).toEqual(expected);
   });
   it("is identity for midtone 0.5 with full range", () => {
-    const t = withKind(0);
-    expect(GOLDEN_X.map((x) => transferByte(x, t))).toEqual(GOLDEN.linear);
+    const t = goldenKind(0);
+    expect(GOLDEN_RAW.map((x) => transferByte(x, t))).toEqual(GOLDEN.linear);
   });
 });
 
@@ -247,6 +264,124 @@ describe("renderRgba", () => {
       128, 127, (128 * 7) & 255, 255,
       0, 255, 0, 255,
     ]);
+  });
+  it("paints padding with the trailing no-data entry and never inverts it", () => {
+    const lut = new Uint8Array(LUT_WITH_NODATA_BYTES);
+    for (let i = 0; i < 256; i++) {
+      lut[i * 4] = i;
+      lut[i * 4 + 1] = 255 - i;
+      lut[i * 4 + 2] = 9;
+      lut[i * 4 + 3] = 255;
+    }
+    lut.set([64, 64, 64, 255], 1024);
+    const pixels = new Float32Array([0, 0.5, NaN]);
+    const out = new Uint8ClampedArray(12);
+    renderRgba(pixels, withKind(1), lut, out);
+    expect(Array.from(out)).toEqual([
+      64, 64, 64, 255,
+      128, 127, 9, 255,
+      64, 64, 64, 255,
+    ]);
+    renderRgba(pixels, withKind(1, true), lut, out);
+    expect(Array.from(out)).toEqual([
+      64, 64, 64, 255,
+      127, 128, 9, 255,
+      64, 64, 64, 255,
+    ]);
+  });
+  it("lutNodataRgb falls back to the first entry for a bare LUT", () => {
+    expect(lutNodataRgb(GRAY_LUT_RGBA)).toEqual([0, 0, 0]);
+    const bare = new Uint8Array(1024);
+    bare.set([7, 8, 9, 255], 0);
+    expect(lutNodataRgb(bare)).toEqual([7, 8, 9]);
+    const withTail = new Uint8Array(LUT_WITH_NODATA_BYTES);
+    withTail.set([7, 8, 9, 255], 0);
+    withTail.set([64, 65, 66, 255], 1024);
+    expect(lutNodataRgb(withTail)).toEqual([64, 65, 66]);
+  });
+  it("withNodataEntry builds 1028 bytes with alpha 255", () => {
+    const rgba = Array.from({ length: 1024 }, (_, i) => i & 255);
+    const lut = withNodataEntry(rgba, [64, 64, 64]);
+    expect(lut.length).toBe(LUT_WITH_NODATA_BYTES);
+    expect(Array.from(lut.subarray(0, 8))).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(Array.from(lut.subarray(1020, 1024))).toEqual([252, 253, 254, 255]);
+    expect(Array.from(lut.subarray(1024))).toEqual([64, 64, 64, 255]);
+  });
+});
+
+describe("reconcileDisplayPatch", () => {
+  const linear = { ...DEFAULT_DISPLAY_SETTINGS, stretch: "linear" as const };
+  it("enabling symmetric under mtf switches the stretch to linear", () => {
+    expect(DEFAULT_DISPLAY_SETTINGS.stretch).toBe("mtf");
+    const next = reconcileDisplayPatch(DEFAULT_DISPLAY_SETTINGS, { symmetric: true });
+    expect(next).toMatchObject({ symmetric: true, stretch: "linear" });
+  });
+  it("selecting mtf turns symmetric off", () => {
+    const next = reconcileDisplayPatch({ ...linear, symmetric: true }, { stretch: "mtf" });
+    expect(next).toMatchObject({ symmetric: false, stretch: "mtf" });
+  });
+  it("a patch carrying both symmetric and mtf keeps mtf and drops symmetric", () => {
+    const next = reconcileDisplayPatch(linear, { symmetric: true, stretch: "mtf" });
+    expect(next).toMatchObject({ symmetric: false, stretch: "mtf" });
+  });
+  it("passes a plain patch through under a non-mtf stretch", () => {
+    const next = reconcileDisplayPatch(linear, { symmetric: true, centre: 0.25, colormap: "bwr" });
+    expect(next).toEqual({ ...linear, symmetric: true, centre: 0.25, colormap: "bwr" });
+  });
+  it("the Reset patch restores the defaults from a symmetric state", () => {
+    const next = reconcileDisplayPatch({ ...linear, symmetric: true, centre: 3 }, DEFAULT_DISPLAY_SETTINGS);
+    expect(next).toEqual(DEFAULT_DISPLAY_SETTINGS);
+    expect(next.symmetric).toBe(false);
+    expect(next.centre).toBe(0);
+  });
+  it("sanitises a stored symmetric flag under the default mtf stretch to symmetric off", () => {
+    const next = reconcileDisplayPatch({ ...DEFAULT_DISPLAY_SETTINGS, symmetric: true }, {});
+    expect(next).toMatchObject({ symmetric: false, stretch: "mtf" });
+  });
+});
+
+describe("symmetricStretchNote", () => {
+  it("is silent under a linear stretch and whenever symmetric is off", () => {
+    expect(symmetricStretchNote({ symmetric: true, stretch: "linear" })).toBeNull();
+    for (const stretch of ["mtf", "linear", "log", "sqrt", "asinh", "power"] as const) {
+      expect(symmetricStretchNote({ symmetric: false, stretch })).toBeNull();
+    }
+  });
+  it("says the centre leaves the colormap centre under every non-linear stretch", () => {
+    for (const stretch of ["log", "sqrt", "asinh", "power"] as const) {
+      expect(symmetricStretchNote({ symmetric: true, stretch })).toBe(SYMMETRIC_NONLINEAR_STRETCH_NOTE);
+    }
+    expect(SYMMETRIC_NONLINEAR_STRETCH_NOTE).toContain("linear stretch");
+  });
+  it("names the byte the centre gets: a normalised 0.5 stretched by log rounds to 229, not 128", () => {
+    const centre = { ...BASE, vmin: -1, vmax: 1 };
+    expect(transferByte(1e-9, { ...centre, stretchKind: STRETCH_KIND.linear })).toBe(128);
+    expect(transferByte(1e-9, { ...centre, stretchKind: STRETCH_KIND.log })).toBe(229);
+    expect(transferByte(1e-9, { ...centre, stretchKind: STRETCH_KIND.sqrt })).toBe(180);
+    expect(transferByte(1e-9, { ...centre, stretchKind: STRETCH_KIND.asinh })).toBe(197);
+  });
+});
+
+describe("centre draft", () => {
+  it("keeps a partial, empty or non-finite entry out of the settings", () => {
+    for (const text of ["", " ", "-", "1e", "1e-", "-.", "abc", "Infinity", "NaN"]) {
+      expect(parseCentreDraft(text), JSON.stringify(text)).toBeNull();
+    }
+  });
+  it("parses signed, fractional and exponent entries", () => {
+    expect(parseCentreDraft("-300")).toBe(-300);
+    expect(parseCentreDraft("1e-5")).toBe(1e-5);
+    expect(parseCentreDraft("-3.05")).toBe(-3.05);
+    expect(parseCentreDraft("0")).toBe(0);
+    expect(parseCentreDraft(" 2.5 ")).toBe(2.5);
+  });
+  it("follows an external centre only when the draft does not already spell it", () => {
+    expect(centreDraftFor("-3.0", -3)).toBe("-3.0");
+    expect(centreDraftFor("1e-5", 0.00001)).toBe("1e-5");
+    expect(centreDraftFor("-300", 0)).toBe("0");
+    expect(centreDraftFor("", 0)).toBe("0");
+    expect(centreDraftFor("-", -300)).toBe("-300");
+    expect(centreDraftFor("5", 5)).toBe("5");
   });
 });
 
@@ -317,10 +452,10 @@ describe("WGSL fragment port parity", () => {
   });
   it("matches the CPU chain byte-exactly on the golden vectors", () => {
     for (const name of Object.keys(GOLDEN) as (keyof typeof GOLDEN)[]) {
-      const t = withKind(STRETCH_KIND[name]);
-      expect(GOLDEN_X.map((x) => shaderByte(x, t))).toEqual(GOLDEN[name]);
-      const inv = withKind(STRETCH_KIND[name], true);
-      expect(GOLDEN_X.map((x) => shaderByte(x, inv))).toEqual(GOLDEN[name].map((b) => 255 - b));
+      const t = goldenKind(STRETCH_KIND[name]);
+      expect(GOLDEN_RAW.map((x) => shaderByte(x, t))).toEqual(GOLDEN[name]);
+      const inv = goldenKind(STRETCH_KIND[name], true);
+      expect(GOLDEN_RAW.map((x) => shaderByte(x, inv))).toEqual(GOLDEN[name].map((b) => 255 - b));
     }
   });
   it("agrees with transferByte within f32 rounding across a sweep for every kind", () => {

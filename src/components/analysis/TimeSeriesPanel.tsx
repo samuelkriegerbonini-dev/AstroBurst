@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "
 import { ClipboardCopy, Clock, Download, Loader2, X } from "lucide-react";
 import ProfilePlot, { type PlotHit, type ProfileSeries } from "../regions/ProfilePlot";
 import { timeSeriesPhotometry } from "../../services/analysis";
+import { measurementLog, timeSeriesEntry } from "../../utils/measurementLog";
 import { cancelProgress } from "../../services/progress";
 import {
   TIME_SERIES_PROGRESS_EVENT,
@@ -25,7 +26,6 @@ import {
   frameJdLabel,
   frameMeasurementErrors,
   frameTimes,
-  hasCompleteTimeAxis,
   inFrameOrder,
   jdOffsetLabel,
   jdZero,
@@ -35,13 +35,16 @@ import {
   lightCurveExtras,
   measuredTargets,
   referenceTimeSource,
+  resolveTimeAxis,
   resultCoversPath,
   seriesRms,
+  timeAxisAvailability,
   timeAxisLabel,
   timeSeriesRoleHint,
   type LightCurvePoint,
   type TimeAxis,
 } from "../../utils/differentialPhotometry";
+import { loadSiteOverride } from "../../utils/observationGeometry";
 import {
   APERTURE_RANGE_HINT,
   MAX_APERTURE_RADIUS_PX,
@@ -77,6 +80,8 @@ const STARS_HINT =
   "Draw Point regions on the target and comparison stars, or use Add as Point regions in the photometry table.";
 const FRAMES_HINT = "Load the other frames of the sequence; only done files with the same dimensions are measured.";
 const NO_PLOT_HINT = "No frame has a positive target and comparison flux to plot.";
+const BJD_AXIS_HINT = "BJD_TDB needs a time, a target and no skipped-geometry frame";
+const AIRMASS_COLUMN_TITLE = "header AIRMASS, else Kasten & Young 1989";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
@@ -125,7 +130,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [gainText, setGainText] = useState("");
   const [trackDrift, setTrackDrift] = useState(true);
   const [seriesKey, setSeriesKey] = useState(SERIES_TARGET);
-  const [timeAxis, setTimeAxis] = useState<TimeAxis>("jd");
+  const [timeAxis, setTimeAxis] = useState<TimeAxis>("bjd");
   const [result, setResult] = useState<TimeSeriesResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -211,6 +216,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     setSavedPath(null);
     resetProgress();
     try {
+      const site = loadSiteOverride(window.localStorage);
       const res = await timeSeriesPhotometry(frames.map(pathOf), sent, {
         apertureRadius,
         annulusInner,
@@ -218,9 +224,13 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
         gain,
         excludeDq,
         trackDrift,
+        siteLat: site?.lat ?? null,
+        siteLon: site?.lon ?? null,
+        siteHeight: site?.height ?? null,
       });
       if (!isCurrentRun(runRef.current, seq)) return;
       setResult(inFrameOrder(res, storeOrder));
+      measurementLog.append(timeSeriesEntry(res, { apertureRadius, annulusInner, annulusOuter, gain, excludeDq, trackDrift }));
       setSeriesKey(SERIES_TARGET);
     } catch (e: unknown) {
       if (isCurrentRun(runRef.current, seq)) setError(e instanceof Error ? e.message : String(e));
@@ -247,7 +257,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     const targetIdx = echo.findIndex((t) => t.role === "target");
     const compIdx = echo.map((t, i) => (t.role === "comp" ? i : -1)).filter((i) => i >= 0);
     const checkIdx = echo.map((t, i) => (t.role === "check" ? i : -1)).filter((i) => i >= 0);
-    const axis: TimeAxis = timeAxis === "jd" && hasCompleteTimeAxis(result) ? "jd" : "index";
+    const axis = resolveTimeAxis(result, timeAxis);
     const targetCurve = targetIdx >= 0 ? lightCurve(result, targetIdx, compIdx, axis) : [];
     const checkCurves = checkIdx.map((i) => lightCurve(result, i, compIdx, axis));
     const compCurves = compIdx.length >= 2 ? compIdx.map((i) => checkStarCurve(result, i, compIdx, axis)) : [];
@@ -258,7 +268,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     if (compIdx.length > 0) options.push({ key: SERIES_RAW, label: "raw comps" });
     const reference = checkReference(result, compIdx, checkIdx, axis);
     const timeline = frameTimes(result, axis);
-    const jd0 = axis === "jd" ? jdZero(timeline) : 0;
+    const jd0 = axis !== "index" ? jdZero(timeline) : 0;
     return {
       targetIdx,
       compIdx,
@@ -284,7 +294,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const series = useMemo((): ProfileSeries[] => {
     if (!result || !analysis) return [];
     const { axis, jd0 } = analysis;
-    const xOf = (p: { t: number }) => (axis === "jd" ? p.t - jd0 : p.t);
+    const xOf = (p: { t: number }) => (axis !== "index" ? p.t - jd0 : p.t);
     const fromCurve = (points: LightCurvePoint[], label: string, color: string): ProfileSeries => ({
       x: points.map(xOf),
       y: points.map((p) => p.mag),
@@ -363,8 +373,9 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   }, [result, csvText]);
 
   const xLabel = timeAxisLabel(analysis?.axis ?? "index", analysis?.jd0 ?? 0);
+  const axes = useMemo(() => (result ? timeAxisAvailability(result) : { jd: false, bjd: false, any: false }), [result]);
   const yLabel = activeKey === SERIES_RAW ? "inst mag" : "diff mag";
-  const xTickFormat = analysis?.axis === "jd" ? jdOffsetLabel : undefined;
+  const xTickFormat = analysis && analysis.axis !== "index" ? jdOffsetLabel : undefined;
   const plottable = series.some((s) => s.y.some((v) => v !== null && Number.isFinite(v)));
   const shownFrames = result ? result.frames.slice(0, TABLE_ROW_LIMIT) : [];
   const targetLabel = analysis && analysis.targetIdx >= 0 ? result?.targets[analysis.targetIdx].label : null;
@@ -526,6 +537,16 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
 
         <ErrorAlert message={error} />
         <WarningList warnings={result?.warnings} />
+        {result && result.geometry_notes.length > 0 && (
+          <details className="text-[9px] text-zinc-500">
+            <summary className="cursor-pointer select-none">Geometry notes</summary>
+            <ul className="mt-1 space-y-0.5 list-disc pl-4">
+              {result.geometry_notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </details>
+        )}
 
         {result && analysis && (
           <>
@@ -550,13 +571,19 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 <select
                   id={axisId}
                   value={analysis.axis}
-                  disabled={!hasCompleteTimeAxis(result)}
+                  disabled={!axes.any}
                   onChange={(e) => setTimeAxis(e.target.value as TimeAxis)}
                   className={SELECT_CLASS}
                 >
-                  <option value="jd">JD - JD0 (header time)</option>
+                  <option value="jd" disabled={!axes.jd}>
+                    JD - JD0 (header time)
+                  </option>
+                  <option value="bjd" disabled={!axes.bjd}>
+                    BJD_TDB - BJD0
+                  </option>
                   <option value="index">frame index</option>
                 </select>
+                {!axes.bjd && <div className="text-[9px] text-zinc-600">{BJD_AXIS_HINT}</div>}
               </div>
             </div>
 
@@ -595,8 +622,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 </div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">JD0</div>
-                <div className="text-zinc-300 font-mono">{analysis.axis === "jd" ? analysis.jd0 : "no frame time"}</div>
+                <div className="text-zinc-500">{analysis.axis === "bjd" ? "BJD0 (TDB)" : "JD0"}</div>
+                <div className="text-zinc-300 font-mono">{analysis.axis !== "index" ? analysis.jd0 : "no frame time"}</div>
                 {analysis.timeSource && (
                   <div className="text-[9px] text-zinc-500 truncate" title={analysis.timeSource}>
                     {analysis.timeSource}
@@ -613,7 +640,10 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                     <th className="text-right px-1.5 py-0.5">#</th>
                     <th className="text-left px-1.5 py-0.5">file</th>
                     <th className="text-right px-1.5 py-0.5">JD</th>
-                    <th className="text-right px-1.5 py-0.5">airmass</th>
+                    <th className="text-right px-1.5 py-0.5">BJD_TDB</th>
+                    <th className="text-right px-1.5 py-0.5" title={AIRMASS_COLUMN_TITLE}>
+                      airmass
+                    </th>
                     <th className="text-right px-1.5 py-0.5">diff mag</th>
                     <th className="text-right px-1.5 py-0.5">SNR</th>
                     <th className="text-right px-1.5 py-0.5">FWHM</th>
@@ -639,9 +669,14 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                           {frame.file_name}
                         </td>
                         <td className="text-right px-1.5 py-0.5">
-                          {frameJdLabel(frame.jd_mid, analysis.axis, analysis.jd0)}
+                          {frameJdLabel(frame.jd_mid, analysis.axis === "jd" ? "jd" : "index", analysis.jd0)}
                         </td>
-                        <td className="text-right px-1.5 py-0.5">{fmt(frame.airmass, 3)}</td>
+                        <td className="text-right px-1.5 py-0.5">
+                          {frameJdLabel(frame.geometry?.bjd_tdb ?? null, analysis.axis === "bjd" ? "bjd" : "index", analysis.jd0)}
+                        </td>
+                        <td className="text-right px-1.5 py-0.5" title={AIRMASS_COLUMN_TITLE}>
+                          {fmt(frame.airmass ?? frame.geometry?.airmass_computed ?? null, 3)}
+                        </td>
                         <td className="text-right px-1.5 py-0.5">
                           {point && point.mag !== null ? `${fmt(point.mag, 4)} +/- ${fmt(point.err, 4)}` : "--"}
                         </td>

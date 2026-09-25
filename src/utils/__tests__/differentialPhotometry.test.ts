@@ -10,6 +10,7 @@ import {
   frameJdLabel,
   frameMeasurementErrors,
   frameTimes,
+  hasCompleteBjdAxis,
   inFrameOrder,
   jdOffsetLabel,
   jdZero,
@@ -22,6 +23,7 @@ import {
   resolveTimeAxis,
   resultCoversPath,
   seriesRms,
+  timeAxisAvailability,
   timeAxisLabel,
   timeSeriesRoleHint,
   LIGHT_CURVE_CSV_COLUMNS,
@@ -32,6 +34,7 @@ import {
 import { niceTicks } from "../plotScale";
 import type { StarPhotometry } from "../../services/analysis";
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../../shared/types/analysis";
+import type { FrameGeometry } from "../../shared/types/geometry";
 
 function star(x: number, y: number, flux: number, err: number, extra: Partial<StarPhotometry> = {}): StarPhotometry {
   return {
@@ -82,11 +85,36 @@ function frame(index: number, targets: (StarPhotometry | null)[], extra: Partial
     exptime: 60,
     filter: "V",
     airmass: 1.2,
+    geometry: null,
     offset: index === 0 ? null : { dx: 0, dy: 0, confidence: 20, registered: true },
     photcal_label: null,
     targets,
     errors: targets.map(() => null),
     skipped: null,
+    ...extra,
+  };
+}
+
+function geometry(extra: Partial<FrameGeometry> = {}): FrameGeometry {
+  return {
+    jd_utc: 2460310.5,
+    jd_tt: 2460310.5008,
+    jd_tdb: 2460310.5008,
+    bjd_tdb: 2460310.5041234,
+    hjd_utc: 2460310.5033211,
+    bjd_source: "computed",
+    lst_deg: 100,
+    hour_angle_deg: 10,
+    altitude_deg: 65.4321,
+    azimuth_deg: 200,
+    airmass_computed: 1.09876,
+    airmass_formula: "Kasten & Young 1989",
+    parallactic_angle_deg: -23.456,
+    sun_altitude_deg: -30,
+    moon_altitude_deg: 5,
+    moon_illumination: 0.5,
+    moon_separation_deg: 80,
+    time_scale_notes: [],
     ...extra,
   };
 }
@@ -103,6 +131,8 @@ function result(frames: TimeSeriesFrame[]): TimeSeriesResult {
     n_frames: frames.length,
     n_skipped: frames.filter((f) => f.skipped !== null).length,
     warnings: [],
+    geometry_target: null,
+    geometry_notes: [],
     elapsed_ms: 5,
   };
 }
@@ -223,24 +253,42 @@ describe("lightCurveCsv", () => {
     const lines = csv.trimEnd().split("\n");
     expect(lines[0]).toBe(LIGHT_CURVE_CSV_COLUMNS.join(","));
     expect(lines[0]).toBe(
-      "index,file,jd_mid,time_source,exptime,filter,airmass,diff_mag,diff_err,target_flux,target_err,target_snr,ensemble_flux,fwhm,bg_mean,dx,dy,registered,saturated,centroid_jump,skipped,errors",
+      "index,file,jd_mid,time_source,exptime,filter,airmass,bjd_tdb,hjd_utc,airmass_computed,altitude_deg,parallactic_angle_deg,diff_mag,diff_err,target_flux,target_err,target_snr,ensemble_flux,fwhm,bg_mean,dx,dy,registered,saturated,centroid_jump,skipped,errors",
     );
     expect(lines).toHaveLength(4);
     const first = lines[1].split(",");
     expect(first[0]).toBe("0");
     expect(first[1]).toBe("f0.fits");
     expect(first[2]).toBe("2460310.500000");
-    expect(first[7]).toBe("1.50515");
-    expect(first[9]).toBe("500.000");
-    expect(first[12]).toBe("2000.000");
-    expect(first[15]).toBe("");
-    expect(first[17]).toBe("");
-    expect(first[18]).toBe("false");
-    expect(first[19]).toBe("false");
-    expect(lines[2]).toBe("1,f1.fits,,,60,V,,,,,,,,,,,,,,,dimensions 64 x 64 differ from the reference 128 x 128,");
+    expect(first[12]).toBe("1.50515");
+    expect(first[14]).toBe("500.000");
+    expect(first[17]).toBe("2000.000");
+    expect(first[20]).toBe("");
+    expect(first[22]).toBe("");
+    expect(first[23]).toBe("false");
+    expect(first[24]).toBe("false");
+    expect(lines[2]).toBe("1,f1.fits,,,60,V,,,,,,,,,,,,,,,,,,,,dimensions 64 x 64 differ from the reference 128 x 128,");
     const third = lines[3];
     expect(third).toContain('"R, wide"');
     expect(third.endsWith(",1.500,-0.250,true,true,false,,")).toBe(true);
+  });
+
+  it("lightCurveCsv writes the geometry cells with 6, 6, 4, 3 and 2 digits", () => {
+    const res = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [T, C1, C2], { geometry: geometry({ bjd_tdb: null, hjd_utc: null, airmass_computed: null }) })]);
+    const rows = lightCurve(res, 0, [1, 2], "jd");
+    const lines = lightCurveCsv(res, rows, lightCurveExtras(res, 0, [1, 2])).trimEnd().split("\n");
+    const header = lines[0].split(",");
+    const at = (line: string, name: string) => line.split(",")[header.indexOf(name)];
+    expect(at(lines[1], "bjd_tdb")).toBe("2460310.504123");
+    expect(at(lines[1], "hjd_utc")).toBe("2460310.503321");
+    expect(at(lines[1], "airmass_computed")).toBe("1.0988");
+    expect(at(lines[1], "altitude_deg")).toBe("65.432");
+    expect(at(lines[1], "parallactic_angle_deg")).toBe("-23.46");
+    expect(at(lines[1], "airmass")).toBe("1.2000");
+    expect(at(lines[2], "bjd_tdb")).toBe("");
+    expect(at(lines[2], "hjd_utc")).toBe("");
+    expect(at(lines[2], "airmass_computed")).toBe("");
+    expect(at(lines[2], "altitude_deg")).toBe("65.432");
   });
 
   it("names the failed comparison star of a frame whose differential magnitude is missing", () => {
@@ -514,6 +562,59 @@ describe("time scale labels", () => {
     expect(label).toContain("2460310");
     expect(label).not.toMatch(/UTC|geocentric/);
     expect(timeAxisLabel("index", 0)).toBe("frame index");
+  });
+
+  it("timeAxisLabel bjd names BJD_TDB and not header time", () => {
+    const label = timeAxisLabel("bjd", 2460310);
+    expect(label).toBe("BJD_TDB - 2460310");
+    expect(label).not.toContain("header time");
+    expect(timeAxisLabel("jd", 2460310)).toContain("header time");
+  });
+
+  it("resolves bjd to bjd only when every measured frame has a BJD and falls back to jd then index", () => {
+    const complete = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [T, C1, C2], { geometry: geometry({ bjd_tdb: 2460310.5048 }) })]);
+    expect(hasCompleteBjdAxis(complete)).toBe(true);
+    expect(resolveTimeAxis(complete, "bjd")).toBe("bjd");
+    expect(resolveTimeAxis(complete, "jd")).toBe("jd");
+    expect(lightCurve(complete, 0, [1, 2], "bjd").map((p) => p.t)).toEqual([2460310.5041234, 2460310.5048]);
+    expect(frameJdLabel(2460310.5041234, "bjd", 2460310)).toBe("0.5041");
+    const partial = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [T, C1, C2], { geometry: geometry({ bjd_tdb: null }) })]);
+    expect(hasCompleteBjdAxis(partial)).toBe(false);
+    expect(resolveTimeAxis(partial, "bjd")).toBe("jd");
+    expect(lightCurve(partial, 0, [1, 2], "bjd").map((p) => p.t)).toEqual([2460310.5, 2460310.5 + 1 / 1440]);
+    const none = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2], { jd_mid: null })]);
+    expect(hasCompleteBjdAxis(none)).toBe(false);
+    expect(resolveTimeAxis(none, "bjd")).toBe("index");
+    const skippedOnly = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [null, null, null], { geometry: null, skipped: "failed to load" })]);
+    expect(hasCompleteBjdAxis(skippedOnly)).toBe(true);
+    expect(resolveTimeAxis(skippedOnly, "bjd")).toBe("bjd");
+    expect(hasCompleteBjdAxis(result([]))).toBe(false);
+  });
+
+  it("timeAxisAvailability offers BJD_TDB alone for BJDREF-style frames without a header JD", () => {
+    const tess = result([
+      frame(0, [T, C1, C2], { jd_mid: null, geometry: geometry({ bjd_source: "header" }) }),
+      frame(1, [T, C1, C2], { jd_mid: null, geometry: geometry({ bjd_tdb: 2460310.5048, bjd_source: "header" }) }),
+    ]);
+    expect(timeAxisAvailability(tess)).toEqual({ jd: false, bjd: true, any: true });
+    expect(resolveTimeAxis(tess, "bjd")).toBe("bjd");
+    expect(resolveTimeAxis(tess, "jd")).toBe("index");
+    const plain = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2])]);
+    expect(timeAxisAvailability(plain)).toEqual({ jd: true, bjd: false, any: true });
+    const untimed = result([frame(0, [T, C1, C2], { jd_mid: null }), frame(1, [T, C1, C2], { jd_mid: null })]);
+    expect(timeAxisAvailability(untimed)).toEqual({ jd: false, bjd: false, any: false });
+    const both = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [T, C1, C2], { geometry: geometry() })]);
+    expect(timeAxisAvailability(both)).toEqual({ jd: true, bjd: true, any: true });
+  });
+
+  it("lightCurveExtras uses the header airmass when present and the computed one otherwise", () => {
+    const res = result([
+      frame(0, [T, C1, C2], { airmass: 1.3, geometry: geometry({ airmass_computed: 1.5 }) }),
+      frame(1, [T, C1, C2], { airmass: null, geometry: geometry({ airmass_computed: 1.5 }) }),
+      frame(2, [T, C1, C2], { airmass: null, geometry: geometry({ airmass_computed: null }) }),
+      frame(3, [T, C1, C2], { airmass: null, geometry: null }),
+    ]);
+    expect(lightCurveExtras(res, 0, [1, 2]).map((e) => e.airmass)).toEqual([1.3, 1.5, null, null]);
   });
 
   it("reads the time source of the reference frame even after the frames are put back in store order", () => {

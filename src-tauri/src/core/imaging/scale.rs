@@ -16,6 +16,18 @@ pub const DEFAULT_POWER: f64 = 2.0;
 
 pub const DEFAULT_PERCENTILES: [f64; 2] = [1.0, 99.5];
 
+pub const DEFAULT_SYMMETRIC_CENTRE: f64 = 0.0;
+
+pub const MAX_ABS_SYMMETRIC_CENTRE: f64 = 1.0e38;
+
+pub const SYMMETRIC_FALLBACK_HALF_WIDTH: f64 = 1.0;
+
+pub const SYMMETRIC_FALLBACK_RELATIVE: f64 = 9.5367431640625e-7;
+
+pub const SYMMETRIC_FALLBACK_NOTE: &str = "symmetric half-width is degenerate (zero, non-finite or not distinct in f32 about the centre); using a fallback half-width";
+
+pub const SYMMETRIC_NONLINEAR_STRETCH_NOTE: &str = "the centre maps to the colormap centre only under a linear stretch";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StretchKind {
     Linear,
@@ -191,6 +203,45 @@ pub fn resolve_limits(data: &Array2<f32>, mode: LimitMode) -> (f64, f64) {
             (vmin, vmax)
         }
     }
+}
+
+pub fn validate_symmetric_centre(centre: f64) -> Result<f64, String> {
+    if !centre.is_finite() {
+        return Err(format!("centre must be finite, got {centre}"));
+    }
+    if centre.abs() > MAX_ABS_SYMMETRIC_CENTRE {
+        return Err(format!(
+            "centre must be within +-{MAX_ABS_SYMMETRIC_CENTRE:e} (the f32 data range), got {centre:e}"
+        ));
+    }
+    Ok(centre)
+}
+
+pub fn symmetric_fallback_half_width(centre: f64) -> f64 {
+    SYMMETRIC_FALLBACK_HALF_WIDTH.max(centre.abs() * SYMMETRIC_FALLBACK_RELATIVE)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SymmetricLimits {
+    pub vmin: f64,
+    pub vmax: f64,
+    pub half_width: f64,
+    pub fallback: bool,
+}
+
+pub fn symmetric_about(centre: f64, lo: f64, hi: f64) -> SymmetricLimits {
+    let a = (lo - centre).abs().max((hi - centre).abs());
+    let (vmin, vmax) = (centre - a, centre + a);
+    let usable = a.is_finite()
+        && a > 0.0
+        && (vmin as f32).is_finite()
+        && (vmax as f32).is_finite()
+        && (vmin as f32) < (vmax as f32);
+    if usable {
+        return SymmetricLimits { vmin, vmax, half_width: a, fallback: false };
+    }
+    let a = symmetric_fallback_half_width(centre);
+    SymmetricLimits { vmin: centre - a, vmax: centre + a, half_width: a, fallback: true }
 }
 
 pub fn normalize_and_stretch(
@@ -515,6 +566,86 @@ mod tests {
         ] {
             assert_eq!(resolve_limits(&padding_only, mode), (0.0, 1.0), "{mode:?}");
         }
+    }
+
+    #[test]
+    fn symmetric_about_uses_the_larger_distance_from_the_centre() {
+        let (lo, hi) = resolve_limits(&fixture(), LimitMode::MinMax);
+        assert_eq!((lo, hi), (-5000.0, 5000.0));
+        let s = symmetric_about(0.0, lo, hi);
+        assert_eq!((s.vmin, s.vmax, s.half_width, s.fallback), (-5000.0, 5000.0, 5000.0, false));
+        let s = symmetric_about(1000.0, lo, hi);
+        assert_eq!((s.vmin, s.vmax, s.half_width, s.fallback), (-5000.0, 7000.0, 6000.0, false));
+        let s = symmetric_about(0.0, -1.0, 9.0);
+        assert_eq!((s.vmin, s.vmax), (-9.0, 9.0));
+        let s = symmetric_about(1.0, 2.0, 8.0);
+        assert_eq!((s.vmin, s.vmax), (-6.0, 8.0));
+    }
+
+    #[test]
+    fn symmetric_about_a_degenerate_pair_falls_back_with_a_half_width_that_survives_f32() {
+        let s = symmetric_about(5.0, 5.0, 5.0);
+        assert_eq!((s.vmin, s.vmax, s.half_width, s.fallback), (4.0, 6.0, 1.0, true));
+        let s = symmetric_about(0.0, f64::NAN, f64::NAN);
+        assert_eq!((s.vmin, s.vmax, s.fallback), (-1.0, 1.0, true));
+
+        assert_eq!((3e7 - 1.0) as f32, (3e7 + 1.0) as f32);
+        let s = symmetric_about(3e7, 3e7, 3e7);
+        assert!(s.fallback);
+        assert_eq!(s.half_width, 3e7 * 9.5367431640625e-7);
+        assert_eq!(s.half_width, 28.6102294921875);
+        assert!((s.vmin as f32) < (s.vmax as f32), "{s:?}");
+        let s = symmetric_about(3e7, 3e7 - 1e-3, 3e7 + 1e-3);
+        assert!(s.fallback, "{s:?}");
+        assert_eq!(s.half_width, 28.6102294921875);
+        assert!((s.vmin as f32) < (s.vmax as f32), "{s:?}");
+
+        let s = symmetric_about(0.0, -1e39, 1e39);
+        assert_eq!((s.vmin, s.vmax, s.fallback), (-1.0, 1.0, true));
+    }
+
+    #[test]
+    fn symmetric_about_keeps_the_centre_at_the_midpoint() {
+        for (c, lo, hi) in [(0.3, -2.5, 7.25), (-40.0, -100.0, -50.0), (1e6, 0.0, 1.0)] {
+            let s = symmetric_about(c, lo, hi);
+            assert!(((s.vmin + s.vmax) / 2.0 - c).abs() < 1e-9, "centre {c} from ({lo}, {hi}): {s:?}");
+            assert!(s.vmin < s.vmax, "{s:?}");
+            assert!((s.vmin as f32) < (s.vmax as f32), "{s:?}");
+            assert!(!s.fallback, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn validate_symmetric_centre_accepts_the_f32_data_range_and_refuses_the_rest() {
+        for c in [0.0, -1e38, 1e38] {
+            assert_eq!(validate_symmetric_centre(c), Ok(c));
+        }
+        for c in [1e308, -1e39] {
+            let err = validate_symmetric_centre(c).unwrap_err();
+            assert!(err.contains("centre must be within"), "{err}");
+        }
+        for c in [f64::NAN, f64::INFINITY] {
+            let err = validate_symmetric_centre(c).unwrap_err();
+            assert!(err.contains("centre must be finite"), "{err}");
+        }
+        assert_eq!(symmetric_fallback_half_width(0.0), 1.0);
+        assert_eq!(symmetric_fallback_half_width(1e38), 1e38 * 9.5367431640625e-7);
+    }
+
+    #[test]
+    fn only_the_linear_stretch_keeps_the_symmetric_centre_on_the_lut_centre() {
+        let byte = |kind: StretchKind| {
+            (apply_stretch(0.5, kind, DEFAULT_ASINH_A, DEFAULT_POWER) as f64 * 255.0).round() as u8
+        };
+        assert_eq!(byte(StretchKind::Linear), 128);
+        assert_eq!(byte(StretchKind::Log), 229);
+        assert_eq!(byte(StretchKind::Sqrt), 180);
+        assert_eq!(byte(StretchKind::Asinh), 197);
+        assert_eq!(byte(StretchKind::Power), 64);
+        for kind in [StretchKind::Log, StretchKind::Sqrt, StretchKind::Asinh, StretchKind::Power] {
+            assert_ne!(byte(kind), 128, "{kind:?} lands on the LUT centre");
+        }
+        assert!(SYMMETRIC_NONLINEAR_STRETCH_NOTE.contains("linear stretch"));
     }
 
     fn padded_sky() -> (Array2<f32>, Array2<f32>) {

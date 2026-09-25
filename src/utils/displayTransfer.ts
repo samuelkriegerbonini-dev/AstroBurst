@@ -18,6 +18,25 @@ export interface DisplayTransfer {
 }
 
 export const LUT_BYTES = 1024;
+export const LUT_NODATA_OFFSET = 1024;
+export const LUT_WITH_NODATA_BYTES = 1028;
+export const NODATA_INDEX = -1;
+
+export function withNodataEntry(rgba: ArrayLike<number>, nodata: ArrayLike<number>): Uint8Array {
+  const out = new Uint8Array(LUT_WITH_NODATA_BYTES);
+  const n = Math.min(rgba.length, LUT_BYTES);
+  for (let i = 0; i < n; i++) out[i] = rgba[i];
+  for (let c = 0; c < 3; c++) out[LUT_NODATA_OFFSET + c] = nodata[c];
+  out[LUT_NODATA_OFFSET + 3] = 255;
+  return out;
+}
+
+export function lutNodataRgb(lut: Uint8Array): [number, number, number] {
+  if (lut.length >= LUT_WITH_NODATA_BYTES) {
+    return [lut[LUT_NODATA_OFFSET], lut[LUT_NODATA_OFFSET + 1], lut[LUT_NODATA_OFFSET + 2]];
+  }
+  return [lut[0], lut[1], lut[2]];
+}
 
 function buildGrayLut(): Uint8Array {
   const lut = new Uint8Array(LUT_BYTES);
@@ -100,7 +119,7 @@ export function isPaddingValue(raw: number): boolean {
 }
 
 export function transferByte(raw: number, t: DisplayTransfer): number {
-  if (isPaddingValue(raw)) return lutIndex(NaN, t.invert);
+  if (isPaddingValue(raw)) return NODATA_INDEX;
   return lutIndex(stretchValue(normalize(raw, t.vmin, t.vmax), t), t.invert);
 }
 
@@ -128,13 +147,21 @@ export function resolveTransferLimits(
 }
 
 export function renderRgba(pixels: Float32Array, t: DisplayTransfer, lut: Uint8Array, out: Uint8ClampedArray): void {
+  const [nr, ng, nb] = lutNodataRgb(lut);
   const len = pixels.length;
   for (let i = 0; i < len; i++) {
-    const src = transferByte(pixels[i], t) * 4;
+    const idx = transferByte(pixels[i], t);
     const off = i * 4;
-    out[off] = lut[src];
-    out[off + 1] = lut[src + 1];
-    out[off + 2] = lut[src + 2];
+    if (idx < 0) {
+      out[off] = nr;
+      out[off + 1] = ng;
+      out[off + 2] = nb;
+    } else {
+      const src = idx * 4;
+      out[off] = lut[src];
+      out[off + 1] = lut[src + 1];
+      out[off + 2] = lut[src + 2];
+    }
     out[off + 3] = 255;
   }
 }
@@ -155,4 +182,32 @@ export function toDisplayTransfer(
     power: settings.power,
     invert: settings.invert,
   };
+}
+
+export function reconcileDisplayPatch(prev: DisplaySettings, patch: Partial<DisplaySettings>): DisplaySettings {
+  const next = { ...prev, ...patch };
+  if (next.symmetric && next.stretch === "mtf") {
+    if (patch.symmetric === true && patch.stretch === undefined) {
+      next.stretch = "linear";
+    } else {
+      next.symmetric = false;
+    }
+  }
+  return next;
+}
+
+export const SYMMETRIC_NONLINEAR_STRETCH_NOTE = "the centre maps to the colormap centre only under a linear stretch";
+
+export function symmetricStretchNote(settings: Pick<DisplaySettings, "symmetric" | "stretch">): string | null {
+  return settings.symmetric && settings.stretch !== "linear" ? SYMMETRIC_NONLINEAR_STRETCH_NOTE : null;
+}
+
+export function parseCentreDraft(text: string): number | null {
+  if (text.trim() === "") return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function centreDraftFor(draft: string, centre: number): string {
+  return parseCentreDraft(draft) === centre ? draft : String(centre);
 }

@@ -82,3 +82,4 @@ export type {
   RegionExportResult,
 } from "./regions";
 export { REGION_SHAPE_KINDS } from "./regions";
+export type { FrameGeometry, GeometryTarget, GeometrySite, ObservationGeometryResult, GeometryOverrides } from "./geometry";

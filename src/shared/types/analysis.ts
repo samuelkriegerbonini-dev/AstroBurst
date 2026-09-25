@@ -1,5 +1,6 @@
 import type { StfParams } from "./fits.types";
 import type { DqProbe, ErrProbe } from "./dq";
+import type { FrameGeometry, GeometryTarget } from "./geometry";
 import type { StarPhotometry } from "../../services/analysis";
 
 export interface HistogramData {
@@ -97,6 +98,7 @@ export interface TimeSeriesFrame {
   exptime: number | null;
   filter: string | null;
   airmass: number | null;
+  geometry: FrameGeometry | null;
   offset: TimeSeriesFrameOffset | null;
   photcal_label: string | null;
   targets: (StarPhotometry | null)[];
@@ -111,6 +113,8 @@ export interface TimeSeriesResult {
   n_frames: number;
   n_skipped: number;
   warnings: string[];
+  geometry_target: GeometryTarget | null;
+  geometry_notes: string[];
   elapsed_ms: number;
 }
 

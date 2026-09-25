@@ -2,15 +2,19 @@ import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "
 import { Activity, BarChart3, CircleDot, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
+import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
+import SpectrumComparisonSection from "./SpectrumComparisonSection";
 import {
   collapseCubeRange,
   computeMomentMaps,
+  getCubeSpectrum,
   getCubeSpectrumRegion,
 } from "../../services/cube";
 import { getSpectralAxis, measureSpectralLine } from "../../services/spectral";
+import { lineEntry, measurementLog, spectrumExportEntry } from "../../utils/measurementLog";
 import { getOutputDir } from "../../infrastructure/tauri";
-import { useRenderContext } from "../../context/PreviewContext";
+import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import {
@@ -48,6 +52,32 @@ import {
   type PlotPoint,
 } from "../../utils/lineMeasure";
 import { applyCorrectionKms, formatAxis, formatAxisValue } from "../../utils/spectralAxis";
+import { pixelToWorld } from "../../services/astrometry";
+import { shapeCentre } from "../../utils/regionGeometry";
+import {
+  fileBaseName,
+  regionForShape,
+  regionForSource,
+  saveCsvDialog,
+  spectrumCsv,
+  spectrumCsvFileName,
+  type SpectrumExportInput,
+} from "../../utils/spectrumExport";
+import {
+  LINE_FAMILIES,
+  LINE_PICK_TOLERANCE_PX,
+  displayConvention,
+  lineById,
+  lineClickHint,
+  lineClickSetsRest,
+  lineListAvailability,
+  lineMarks,
+  nearestLineMark,
+  pickedLineLabel,
+  placeLineMarks,
+  redshiftFrameLabel,
+  type LineFamily,
+} from "../../utils/lineList";
 import {
   FRAME_KEY_HINT,
   channelFromPlotPixel,
@@ -181,6 +211,13 @@ const LINE_MODEL_DASH = [2, 2];
 const FRAME_MARKER_COLOR = "rgba(167,139,250,0.95)";
 const FRAME_MARKER_HALO = "rgba(9,9,11,0.8)";
 const FRAME_MARKER_LABEL_PAD = 3;
+const LINE_LIST_COLOR = "rgba(34,211,238,0.6)";
+const LINE_LIST_PICKED_COLOR = "rgba(34,211,238,1)";
+const LINE_LIST_DASH = [2, 3];
+const LINE_LIST_FONT = "9px 'JetBrains Mono', monospace";
+const LINE_LIST_LABEL_H = 12;
+const LINE_PICK_DOUBLE_CLICK_GUARD_MS = 400;
+const EXPORT_NOTICE_MS = 2500;
 const BRUSH_COLORS: Record<BrushTarget, string> = {
   range: "rgba(168,85,247,0.22)",
   left: "rgba(245,158,11,0.18)",
@@ -221,11 +258,17 @@ function SpectroscopyPanel({
 
   const { region, regionSource, regionLoading, regionError } = useSpectrum();
   const { processed } = useRenderContext();
+  const { file } = useFileContext();
+  const bunit = file?.result?.header?.BUNIT ?? null;
   const shownFrame = displayedChannel(processed, filePath);
   const regionKey = useRegionKey();
   const regionDoc = useRegionDoc(regionKey);
   const picked = useMemo(() => pickRegion(regionDoc.regions, regionDoc.selectedId), [regionDoc]);
   const [regionView, setRegionView] = useState<RegionView>("sum");
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const exportSeqRef = useRef(0);
+  const exportNoticeTimerRef = useRef<number | null>(null);
 
   const headerAxis = cubeDims?.spectral_axis ?? null;
   const [headerFallbackAxis, setHeaderFallbackAxis] = useState<SpectralAxisInfo | null>(null);
@@ -236,6 +279,11 @@ function SpectroscopyPanel({
   const [convention, setConvention] = useState<VelocityConvention>("optical");
   const [correction, setCorrection] = useState<CorrectionFrame>("none");
   const [correctionResult, setCorrectionResult] = useState<RadialVelocityCorrectionResult | null>(null);
+  const [lineListVisible, setLineListVisible] = useState(true);
+  const [redshift, setRedshift] = useState(0);
+  const [lineFamilies, setLineFamilies] = useState<LineFamily[]>([...LINE_FAMILIES]);
+  const [pickedLineId, setPickedLineId] = useState<string | null>(null);
+  const lastLinePickRef = useRef(0);
 
   const brushTargetId = useId();
   const snrId = useId();
@@ -297,6 +345,8 @@ function SpectroscopyPanel({
     if (previousFileRef.current !== filePath) {
       previousFileRef.current = filePath;
       setRegionView("sum");
+      setRestUm(null);
+      setCorrectionResult(null);
       clearRegionSpectrum();
     }
   }, [filePath]);
@@ -390,6 +440,33 @@ function SpectroscopyPanel({
     () => (correction !== "none" && correctionResult ? applyCorrectionKms([0], correctionResult, correction)[0] : null),
     [correction, correctionResult],
   );
+
+  const lineConvention = displayConvention(axis, convention);
+  const lineAvailability = useMemo(
+    () => lineListAvailability(axis, mode, restUm, formatted, n),
+    [axis, mode, restUm, formatted, n],
+  );
+  const lineMarksShown = useMemo(
+    () =>
+      lineListVisible && lineAvailability.ok && axis
+        ? lineMarks({
+            axis,
+            mode,
+            restUm,
+            convention,
+            shiftKms: lineShiftKms,
+            redshift,
+            families: lineFamilies,
+            xMin: plotParams.xMin,
+            xMax: plotParams.xMax,
+          })
+        : [],
+    [lineListVisible, lineAvailability, axis, mode, restUm, convention, lineShiftKms, redshift, lineFamilies, plotParams],
+  );
+  const pickedLine = useMemo(() => (pickedLineId === null ? null : lineById(pickedLineId)), [pickedLineId]);
+  const pickedShown = pickedLine !== null && restUm === pickedLine.vacuumUm ? pickedLine : null;
+  const pickedMarkId = pickedShown?.id ?? null;
+  const lineFrameLabel = redshiftFrameLabel(correction, correctionResult?.method ?? null, axis?.specsys ?? null);
 
   const mappingFor = useCallback(
     (width: number): PlotMapping => ({
@@ -505,6 +582,25 @@ function SpectroscopyPanel({
       strokeDashed(ctx, curves.continuum, LINE_CONTINUUM_COLOR, LINE_CONTINUUM_DASH);
       strokeDashed(ctx, curves.model, LINE_MODEL_COLOR, LINE_MODEL_DASH);
     }
+    for (const mark of placeLineMarks(lineMarksShown, m)) {
+      if (mark.px < PAD.left || mark.px > W - PAD.right) continue;
+      const pickedMark = mark.id === pickedMarkId;
+      const color = pickedMark ? LINE_LIST_PICKED_COLOR : LINE_LIST_COLOR;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = pickedMark ? 1.5 : 1;
+      ctx.setLineDash(pickedMark ? [] : LINE_LIST_DASH);
+      ctx.beginPath();
+      ctx.moveTo(mark.px, plotTop);
+      ctx.lineTo(mark.px, plotBottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (!mark.labelShown) continue;
+      ctx.fillStyle = FRAME_MARKER_HALO;
+      ctx.fillRect(mark.labelX - 2, plotBottom - LINE_LIST_LABEL_H, mark.labelWidth + 4, LINE_LIST_LABEL_H);
+      ctx.font = LINE_LIST_FONT;
+      ctx.fillStyle = color;
+      ctx.fillText(mark.label, mark.labelX, plotBottom - 3);
+    }
     if (frameLinked && shownFrame !== null && shownFrame < n) {
       const fx = axisValueToPixel(channelAxisValue(shownFrame, m), m);
       if (Number.isFinite(fx) && fx >= PAD.left && fx <= W - PAD.right) {
@@ -566,7 +662,7 @@ function SpectroscopyPanel({
     ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
     ctx.fillStyle = "#fafafa";
     ctx.fillText(label, tx, ty);
-  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, shownFrame]);
+  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, shownFrame, lineMarksShown, pickedMarkId]);
 
   useEffect(() => {
     drawPlot();
@@ -623,6 +719,7 @@ function SpectroscopyPanel({
       const canvas = canvasRef.current;
       const px = canvasX(e);
       if (!canvas || px === null || n === 0 || !frameLinked) return;
+      if (performance.now() - lastLinePickRef.current < LINE_PICK_DOUBLE_CLICK_GUARD_MS) return;
       const channel = channelFromPlotPixel(px, mappingFor(canvas.width), totalFrames);
       if (channel !== null) requestFrame(channel);
     },
@@ -664,11 +761,21 @@ function SpectroscopyPanel({
         return;
       }
       const end = px ?? drag.current;
-      const selected = channelRangeFromDrag(drag.start, end, mappingFor(canvas.width));
+      const m = mappingFor(canvas.width);
+      const selected = channelRangeFromDrag(drag.start, end, m);
       setDrag(null);
-      if (selected && Math.abs(end - drag.start) >= 2) commitBrush(selected);
+      if (Math.abs(end - drag.start) >= 2) {
+        if (selected) commitBrush(selected);
+        return;
+      }
+      if (!lineClickSetsRest(axis)) return;
+      const hit = nearestLineMark(lineMarksShown, m, end, LINE_PICK_TOLERANCE_PX);
+      if (!hit) return;
+      lastLinePickRef.current = performance.now();
+      setRestUm(hit.restVacuumUm);
+      setPickedLineId(hit.id);
     },
-    [canvasX, drag, mappingFor, commitBrush],
+    [canvasX, drag, mappingFor, commitBrush, axis, lineMarksShown],
   );
 
   const handleMouseLeave = useCallback(() => {
@@ -721,6 +828,80 @@ function SpectroscopyPanel({
       if (regionSeqRef.current === seq) failRegionSpectrum(e instanceof Error ? e.message : String(e));
     }
   }, [filePath, picked]);
+
+  const handleExportSpectrum = useCallback(
+    async (destination: "copy" | "save") => {
+      if (!filePath || !currentSource || n === 0) return;
+      const seq = ++exportSeqRef.current;
+      const notify = (text: string) => {
+        if (exportNoticeTimerRef.current !== null) window.clearTimeout(exportNoticeTimerRef.current);
+        setExportNotice(text);
+        exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), EXPORT_NOTICE_MS);
+      };
+      setExportBusy(true);
+      try {
+        let pixelFluxJy: number[] | null = null;
+        let pixelFluxJyError: string | null = null;
+        if (currentSource.kind === "pixel") {
+          try {
+            pixelFluxJy = (await getCubeSpectrum(filePath, currentSource.x, currentSource.y)).flux_jy ?? null;
+          } catch (e) {
+            pixelFluxJyError = e instanceof Error ? e.message : String(e);
+          }
+        }
+        const centre = currentSource.kind === "pixel" ? { x: currentSource.x, y: currentSource.y } : shapeCentre(currentSource.shape);
+        let sky: { ra: number; dec: number } | null = null;
+        try {
+          const point = (await pixelToWorld(filePath, [[centre.x, centre.y]], "icrs")).points[0] ?? null;
+          if (point) sky = { ra: point[0], dec: point[1] };
+        } catch {
+          sky = null;
+        }
+        if (exportSeqRef.current !== seq) return;
+        const match = regionForSource(regionDoc.regions, currentSource);
+        const backgroundId =
+          currentSource.kind === "region" && currentSource.background
+            ? (regionForShape(regionDoc.regions, currentSource.background)?.id ?? null)
+            : null;
+        const exportInput: SpectrumExportInput = {
+          fileName: fileBaseName(filePath),
+          axis,
+          mode,
+          restUm,
+          convention,
+          correction,
+          correctionResult,
+          source: currentSource,
+          regionId: match?.id ?? null,
+          regionText: match?.props.text ?? null,
+          backgroundId,
+          view: region ? (regionView === "jy" && !region.flux_jy ? "sum" : regionView) : "sum",
+          bunit,
+          values: series,
+          region,
+          pixelFluxJy,
+          pixelFluxJyError,
+          sky,
+          exportedAtUtc: new Date().toISOString(),
+        };
+        const csv = spectrumCsv(exportInput);
+        if (destination === "copy") {
+          await navigator.clipboard.writeText(csv);
+          measurementLog.append(spectrumExportEntry(filePath, exportInput, null));
+          notify("copied");
+        } else {
+          const saved = await saveCsvDialog(csv, spectrumCsvFileName(filePath, currentSource), "Save spectrum CSV");
+          if (saved) notify(`saved: ${saved}`);
+          if (saved) measurementLog.append(spectrumExportEntry(filePath, exportInput, saved));
+        }
+      } catch (e) {
+        if (exportSeqRef.current === seq) notify(`export failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        if (exportSeqRef.current === seq) setExportBusy(false);
+      }
+    },
+    [filePath, currentSource, n, regionDoc.regions, axis, mode, restUm, convention, correction, correctionResult, region, regionView, bunit, series],
+  );
 
   const handleCollapseRange = useCallback(async () => {
     if (!filePath || !range) return;
@@ -823,6 +1004,7 @@ function SpectroscopyPanel({
       });
       if (lineSeqRef.current !== seq) return;
       setLineResult({ key: spectrumSourceKey(currentSource, MEASURED_SERIES_VIEW), measurementAxis, result });
+      measurementLog.append(lineEntry(filePath, result, lineModel));
     } catch (e) {
       if (lineSeqRef.current === seq) setLineError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -919,6 +1101,23 @@ function SpectroscopyPanel({
             Region spectrum failed: {regionError}
           </p>
         )}
+        {filePath && cubeDims && totalFrames > 1 && (
+          <SpectrumComparisonSection
+            filePath={filePath}
+            regionDoc={regionDoc}
+            axis={axis}
+            mode={mode}
+            restUm={restUm}
+            convention={convention}
+            correction={correction}
+            correctionResult={correctionResult}
+            pixelCoord={pixelCoord ?? null}
+            view={regionView}
+            bunit={bunit}
+            channelCount={totalFrames}
+            windows={windows}
+          />
+        )}
       </div>
     );
   }
@@ -966,6 +1165,21 @@ function SpectroscopyPanel({
         correction={correction}
         onCorrectionChange={setCorrection}
         onCorrectionLoaded={setCorrectionResult}
+      />
+
+      <LineListControls
+        visible={lineListVisible}
+        onVisibleChange={setLineListVisible}
+        redshift={redshift}
+        onRedshiftChange={setRedshift}
+        convention={lineConvention}
+        families={lineFamilies}
+        onFamiliesChange={setLineFamilies}
+        frameLabel={lineFrameLabel}
+        availability={lineAvailability}
+        clickHint={lineClickHint(axis)}
+        pickedLabel={pickedShown ? pickedLineLabel(pickedShown) : null}
+        drawnCount={lineMarksShown.length}
       />
 
       {!axis && axisError && (
@@ -1044,6 +1258,29 @@ function SpectroscopyPanel({
         <p className="mx-3 mb-2 text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
           Region spectrum failed: {regionError}
         </p>
+      )}
+
+      {n > 0 && filePath && currentSource && (
+        <div className="px-3 pb-2 flex items-center gap-2 text-[10px] font-mono">
+          <span className="text-zinc-500">Export</span>
+          <button
+            onClick={() => void handleExportSpectrum("copy")}
+            disabled={exportBusy}
+            className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
+            style={{ borderColor: "var(--ab-border)", color: "#71717a" }}
+          >
+            Copy CSV
+          </button>
+          <button
+            onClick={() => void handleExportSpectrum("save")}
+            disabled={exportBusy}
+            className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
+            style={{ borderColor: "var(--ab-border)", color: "#71717a" }}
+          >
+            Save CSV
+          </button>
+          {exportNotice && <span className="text-zinc-600 truncate">{exportNotice}</span>}
+        </div>
       )}
 
       {cubeDims && (
@@ -1272,6 +1509,24 @@ function SpectroscopyPanel({
           onMeasure={handleMeasureLine}
           disabled={lineDisabled}
           disabledHint={lineHint}
+        />
+      )}
+
+      {filePath && cubeDims && totalFrames > 1 && (
+        <SpectrumComparisonSection
+          filePath={filePath}
+          regionDoc={regionDoc}
+          axis={axis}
+          mode={mode}
+          restUm={restUm}
+          convention={convention}
+          correction={correction}
+          correctionResult={correctionResult}
+          pixelCoord={pixelCoord ?? null}
+          view={regionView}
+          bunit={bunit}
+          channelCount={totalFrames}
+          windows={windows}
         />
       )}
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Region, RegionStatsEntry, RegionStatsResult } from "../shared/types/regions";
 import type { PhotCal } from "../services/analysis";
 import { regionStats, type RegionStatsRequest } from "../services/regions";
+import type { RegionStatsMeasured } from "../utils/measurementLog";
 
 export const STATS_DEBOUNCE_MS = 250;
 export const MAX_REGIONS_PER_STATS_CALL = 512;
@@ -48,6 +49,7 @@ export interface RegionStatsState extends RegionCalibrationState {
   stats: Map<string, RegionStatsEntry>;
   loading: boolean;
   error: string | null;
+  measured: RegionStatsMeasured | null;
 }
 
 const NO_CALIBRATION: RegionCalibrationState = { photcal: null, calibrationWarnings: [], pixelAreaArcsec2: null };
@@ -57,6 +59,14 @@ export function calibrationOf(res: RegionStatsResult): RegionCalibrationState {
     photcal: res.photcal ?? null,
     calibrationWarnings: res.calibration_warnings ?? [],
     pixelAreaArcsec2: res.pixel_area_arcsec2 ?? null,
+  };
+}
+
+export function measuredOfChunks(responses: readonly RegionStatsResult[]): { masked: boolean; dqExcluded: number | null; elapsedMs: number } {
+  return {
+    masked: responses.some((r) => r.masked),
+    dqExcluded: responses.find((r) => typeof r.dq_excluded === "number")?.dq_excluded ?? null,
+    elapsedMs: responses.reduce((sum, r) => sum + r.elapsed_ms, 0),
   };
 }
 
@@ -77,6 +87,7 @@ export function useRegionStats(
 ): RegionStatsState {
   const [stats, setStats] = useState<Map<string, RegionStatsEntry>>(EMPTY_STATS);
   const [calibration, setCalibration] = useState<RegionCalibrationState>(NO_CALIBRATION);
+  const [measured, setMeasured] = useState<RegionStatsMeasured | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
@@ -86,6 +97,7 @@ export function useRegionStats(
   useEffect(() => {
     setStats(EMPTY_STATS);
     setCalibration(NO_CALIBRATION);
+    setMeasured(null);
   }, [filePath]);
 
   useEffect(() => {
@@ -93,6 +105,7 @@ export function useRegionStats(
       seqRef.current += 1;
       setStats(EMPTY_STATS);
       setCalibration(NO_CALIBRATION);
+      setMeasured(null);
       setLoading(false);
       setError(null);
       return;
@@ -103,6 +116,7 @@ export function useRegionStats(
       try {
         const merged = new Map<string, RegionStatsEntry>();
         let last: RegionCalibrationState = NO_CALIBRATION;
+        const responses: RegionStatsResult[] = [];
         for (const chunk of chunkStatsRequests(buildStatsRequests(regions))) {
           const res = await regionStats(filePath, chunk, {
             excludeDq,
@@ -110,11 +124,13 @@ export function useRegionStats(
             maxiters: maxiters ?? undefined,
           });
           if (seqRef.current !== seq) return;
+          responses.push(res);
           for (const entry of res.regions) merged.set(entry.id, entry);
           last = calibrationOf(res);
         }
         setStats(merged);
         setCalibration(last);
+        setMeasured({ regions, excludeDq, sigma, maxiters, ...measuredOfChunks(responses) });
         setError(null);
       } catch (e) {
         if (seqRef.current !== seq) return;
@@ -126,5 +142,5 @@ export function useRegionStats(
     return () => clearTimeout(timer);
   }, [filePath, regions, excludeDq, sigma, maxiters]);
 
-  return { stats, loading, error, ...calibration };
+  return { stats, loading, error, measured, ...calibration };
 }

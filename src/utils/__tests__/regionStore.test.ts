@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { RegionStoreCore, EMPTY_DOC, SAVE_DEBOUNCE_MS } from "../regionStore";
+import { RegionStoreCore, EMPTY_DOC, SAVE_DEBOUNCE_MS, shapeKindKey } from "../regionStore";
 import { STORAGE_PREFIX, DEFAULT_REGION_PROPS } from "../regionPersistence";
 import type { Region, RegionShape } from "../../shared/types/regions";
 
@@ -24,6 +24,10 @@ function annulus(id: string): Region {
     props: { ...DEFAULT_REGION_PROPS },
     backgroundId: null,
   };
+}
+
+function point(id: string): Region {
+  return { id, shape: { shape: "point", x: 4, y: 6 }, props: { ...DEFAULT_REGION_PROPS }, backgroundId: null };
 }
 
 describe("RegionStoreCore", () => {
@@ -242,5 +246,101 @@ describe("RegionStoreCore", () => {
     store.setDraft("b", b);
     expect(store.getDraftFor("a")).toBeNull();
     expect(store.getDraftFor("b")).toBe(b);
+  });
+
+  describe("removeShapeKind", () => {
+    it("removes every point of the file in one commit and leaves the other shapes untouched", () => {
+      const store = new RegionStoreCore(new MemoryStorage());
+      store.add("f", point("p1"));
+      store.add("f", region("c1"));
+      store.add("f", point("p2"));
+      store.add("f", annulus("bg"));
+      store.add("f", point("p3"));
+      store.add("g", point("other"));
+      const listener = vi.fn();
+      store.subscribe(listener);
+      const versionBefore = store.getDoc("f").version;
+      store.removeShapeKind("f", "point");
+      const doc = store.getDoc("f");
+      expect(doc.regions.map((r) => r.id)).toEqual(["c1", "bg"]);
+      expect(doc.version).toBe(versionBefore + 1);
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(store.getDoc("g").regions.map((r) => r.id)).toEqual(["other"]);
+    });
+
+    it("clears the selection and the backgroundId references that pointed to a removed region", () => {
+      const store = new RegionStoreCore(new MemoryStorage());
+      store.add("f", point("p1"));
+      store.add("f", region("c1", "p1"));
+      store.add("f", annulus("bg"));
+      store.add("f", region("c2", "bg"));
+      store.select("f", "p1");
+      store.removeShapeKind("f", "point");
+      const doc = store.getDoc("f");
+      expect(doc.selectedId).toBeNull();
+      expect(doc.regions.find((r) => r.id === "c1")?.backgroundId).toBeNull();
+      expect(doc.regions.find((r) => r.id === "c2")?.backgroundId).toBe("bg");
+    });
+
+    it("keeps a selection that points to a surviving region", () => {
+      const store = new RegionStoreCore(new MemoryStorage());
+      store.add("f", point("p1"));
+      store.add("f", region("c1"));
+      store.select("f", "c1");
+      store.removeShapeKind("f", "point");
+      expect(store.getDoc("f").selectedId).toBe("c1");
+    });
+
+    it("is a no-op without a region of that kind", () => {
+      const store = new RegionStoreCore(new MemoryStorage());
+      store.add("f", region("c1"));
+      store.select("f", "c1");
+      const listener = vi.fn();
+      store.subscribe(listener);
+      const before = store.getDoc("f");
+      store.removeShapeKind("f", "point");
+      expect(store.getDoc("f")).toBe(before);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it("persists the surviving regions with a single write", () => {
+      const storage = new MemoryStorage();
+      let writes = 0;
+      const counting = {
+        getItem: (k: string) => storage.getItem(k),
+        setItem: (k: string, v: string) => { writes += 1; storage.setItem(k, v); },
+      };
+      const store = new RegionStoreCore(counting);
+      store.add("f", point("p1"));
+      store.add("f", point("p2"));
+      store.add("f", region("c1"));
+      store.flush();
+      expect(writes).toBe(1);
+      store.removeShapeKind("f", "point");
+      vi.advanceTimersByTime(SAVE_DEBOUNCE_MS);
+      expect(writes).toBe(2);
+      const saved = JSON.parse(storage.data.get(`${STORAGE_PREFIX}f`) as string) as Region[];
+      expect(saved.map((r) => r.id)).toEqual(["c1"]);
+      expect(new RegionStoreCore(storage).getDoc("f").regions.map((r) => r.id)).toEqual(["c1"]);
+    });
+  });
+});
+
+describe("shapeKindKey", () => {
+  it("changes when the points are removed and different points are added", () => {
+    const armed = shapeKindKey([point("p1"), point("p2")], "point");
+    expect(shapeKindKey([], "point")).not.toBe(armed);
+    expect(shapeKindKey([point("p3")], "point")).not.toBe(armed);
+    expect(shapeKindKey([point("p1"), point("p2"), point("p3")], "point")).not.toBe(armed);
+  });
+
+  it("ignores other shapes, the order of the regions and the point positions", () => {
+    const armed = shapeKindKey([point("p1"), region("c1"), point("p2")], "point");
+    const moved: Region = { ...point("p1"), shape: { shape: "point", x: 50, y: 60 } };
+    expect(shapeKindKey([point("p2"), annulus("bg"), moved], "point")).toBe(armed);
+  });
+
+  it("does not confuse one id containing a separator with two ids", () => {
+    expect(shapeKindKey([point("a,b")], "point")).not.toBe(shapeKindKey([point("a"), point("b")], "point"));
   });
 });

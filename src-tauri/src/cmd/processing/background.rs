@@ -4,6 +4,7 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir, save_auto_stf_preview_png, write_derived_fits, OutputValues};
+use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::processing::local_contrast::source_header;
 use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, deband_axis_name, detect_band_axis, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
 use crate::core::imaging::stats::compute_image_stats;
@@ -70,17 +71,17 @@ fn run_extract_background(
     save_auto_stf_preview_png(&bg_result.model, &model_png)?;
 
     let corrected_fits = format!("{}/{}_bg_corrected.fits", output_dir, stem);
-    let cache_key = match bin_id {
-        Some(bid) => crate::types::constants::wizard_bg_key(bid),
+    let header = derived_output_header(source_header(path, &entry).as_ref(), ABPROC_BG_CORRECTED, OutputValues::Linear);
+    let (cache_key, entry_header) = match bin_id {
+        Some(bid) => (crate::types::constants::wizard_bg_key(bid), Some(header)),
         None => {
-            let header = derived_output_header(source_header(path, &entry).as_ref(), ABPROC_BG_CORRECTED, OutputValues::Linear);
             write_derived_fits(&corrected_fits, &bg_result.corrected, Some(&header))?;
-            corrected_fits
+            (corrected_fits, None)
         }
     };
 
     let stats = compute_image_stats(&bg_result.corrected);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(bg_result.corrected), stats);
+    GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&cache_key, Arc::new(bg_result.corrected), stats, entry_header);
 
     Ok(json!({
         RES_CORRECTED_PNG: corrected_png,
@@ -163,14 +164,19 @@ pub async fn extract_background_batch_cmd(
         let neutralize = mode.as_str() == "neutralize";
 
         let mut loaded: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
+        let mut headers = Vec::with_capacity(paths.len());
         for p in &paths {
             let entry = load_from_cache_or_disk(p)?;
+            headers.push(source_header(p, &entry));
             loaded.push(entry.arr().to_owned());
         }
 
         let (rows, cols) = loaded[0].dim();
-        for ch in loaded.iter_mut().skip(1) {
+        for (ch, header) in loaded.iter_mut().zip(headers.iter_mut()).skip(1) {
             if ch.dim() != (rows, cols) {
+                if let Some(header) = header {
+                    rescale_header_to_grid(header, ch.dim(), (rows, cols));
+                }
                 *ch = crate::core::imaging::resample::resample_image(ch, rows, cols)?;
             }
         }
@@ -225,7 +231,8 @@ pub async fn extract_background_batch_cmd(
             let img = &corrected[i];
             let cache_key = crate::types::constants::wizard_bg_key(bin_id);
             let stats = compute_image_stats(img);
-            GLOBAL_IMAGE_CACHE.insert_synthetic(&cache_key, Arc::new(img.clone()), stats);
+            let header = derived_output_header(headers[i].as_ref(), ABPROC_BG_CORRECTED, OutputValues::Linear);
+            GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&cache_key, Arc::new(img.clone()), stats, Some(header));
             results.push(json!({
                 "bin_id": bin_id,
                 RES_CACHE_KEY: cache_key,
@@ -381,6 +388,87 @@ mod tests {
         let stats = compute_image_stats(&corrected);
         let stf = auto_stf(&stats, &AutoStfConfig::default());
         assert_matches_gpu_view(value[RES_CORRECTED_PNG].as_str().unwrap(), &corrected, &stf, &stats);
+    }
+
+    fn solved_header(crpix: f64, cd: f64) -> crate::types::header::HduHeader {
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRVAL1", 83.8);
+        header.set_f64("CRVAL2", -5.4);
+        header.set_f64("CRPIX1", crpix);
+        header.set_f64("CRPIX2", crpix);
+        header.set_f64("CD1_1", -cd);
+        header.set_f64("CD2_2", cd);
+        header.set("BUNIT", "MJy/sr".to_string());
+        header
+    }
+
+    #[tokio::test]
+    async fn wizard_background_entries_carry_the_header_of_their_grid() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = ["__bg_wcs_input_r".to_string(), "__bg_wcs_input_g".to_string()];
+        let bins = ["bgw_r".to_string(), "bgw_g".to_string()];
+        let full = sky(0);
+        let half = Array2::from_shape_fn((32, 32), |(y, x)| full[[2 * y, 2 * x]]);
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&inputs[0], Arc::new(full.clone()), compute_image_stats(&full), Some(solved_header(10.0, 1e-5)));
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&inputs[1], Arc::new(half.clone()), compute_image_stats(&half), Some(solved_header(10.0, 2e-5)));
+
+        let value = extract_background_batch_cmd(
+            inputs.to_vec(),
+            bins.to_vec(),
+            dir.path().to_str().unwrap().to_string(),
+            8,
+            2,
+            3.0,
+            3,
+            "subtract".to_string(),
+            None,
+        )
+        .await;
+        let headers: Vec<Option<crate::types::header::HduHeader>> = bins
+            .iter()
+            .map(|b| GLOBAL_IMAGE_CACHE.get(&wizard_bg_key(b)).and_then(|e| e.header().cloned()))
+            .collect();
+        for key in inputs.iter().cloned().chain(bins.iter().map(|b| wizard_bg_key(b))) {
+            GLOBAL_IMAGE_CACHE.remove(&key);
+        }
+        value.unwrap();
+
+        let r = headers[0].clone().expect("a wizard background channel carries the header of its grid");
+        assert_eq!(r.get_f64("CRVAL1"), Some(83.8));
+        assert!((r.get_f64("CRPIX1").unwrap() - 10.0).abs() < 1e-9, "CRPIX1 {:?}", r.get("CRPIX1"));
+        assert!((r.get_f64("CD2_2").unwrap() - 1e-5).abs() < 1e-18);
+        assert_eq!(r.get_i64("NAXIS1"), Some(64));
+        assert_eq!(r.get_i64("NAXIS2"), Some(64));
+        assert_eq!(r.get("BUNIT"), Some("MJy/sr"));
+        assert_eq!(r.get(crate::cmd::common::HEADER_ABPROC), Some(ABPROC_BG_CORRECTED));
+
+        let g = headers[1].clone().expect("a resampled wizard background channel carries the header of its grid");
+        assert!((g.get_f64("CRPIX1").unwrap() - 19.5).abs() < 1e-9, "CRPIX1 of the 32 px input was not moved to the 64 px grid: {:?}", g.get("CRPIX1"));
+        assert!((g.get_f64("CD2_2").unwrap() - 1e-5).abs() < 1e-18, "CD of the 32 px input was not halved on the 64 px grid: {:?}", g.get("CD2_2"));
+        assert_eq!(g.get_i64("NAXIS1"), Some(64));
+        assert_eq!(g.get_i64("NAXIS2"), Some(64));
+    }
+
+    #[test]
+    fn a_wizard_background_of_a_file_carries_its_header() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let src = sky_file(&dir, "bg_wizard_header.fits");
+        let value = run_extract_background(&src, dir.path().to_str().unwrap(), &config(8), Some("bgw_single"), None).unwrap();
+        let key = wizard_bg_key("bgw_single");
+        let header = GLOBAL_IMAGE_CACHE.get(&key).and_then(|e| e.header().cloned());
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        assert_eq!(value[RES_CACHE_KEY], key);
+        let header = header.expect("a wizard background channel carries the header of its grid");
+        assert_eq!(header.get_f64("CRVAL1"), Some(83.8));
+        assert_eq!(header.get("BUNIT").map(|v| v.trim().trim_matches('\'').trim()), Some("MJy/sr"));
+        assert_eq!(header.get_f64("PHOTMJSR"), Some(1.5));
+        assert_eq!(header.get_i64("NAXIS1"), Some(64));
+        assert_eq!(header.get_i64("NAXIS2"), Some(64));
+        assert_eq!(header.get(crate::cmd::common::HEADER_ABPROC), Some(ABPROC_BG_CORRECTED));
     }
 
     #[tokio::test]

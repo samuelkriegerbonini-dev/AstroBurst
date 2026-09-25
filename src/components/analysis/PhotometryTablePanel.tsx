@@ -3,6 +3,8 @@ import { ClipboardCopy, Download, Loader2, Shapes, Aperture } from "lucide-react
 import { measurePhotometryBatch } from "../../services/analysis";
 import type { BatchPhotometryResult } from "../../services/analysis";
 import { useDqContext } from "../../context/PreviewContext";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { batchPhotometryEntry, measurementLog } from "../../utils/measurementLog";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { overlayStore } from "../../utils/overlayStore";
 import { regionStore } from "../../utils/regionStore";
@@ -149,6 +151,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
   const [sortDir, setSortDir] = useState<SortDirection>("asc");
   const [highlightIndex, setHighlightIndex] = useState<number | null>(null);
   const { excludeDq } = useDqContext();
+  const provenance = useMeasurementProvenance();
   const regionDoc = useRegionDoc(overlayKey);
   const requestSeqRef = useRef(0);
   const stars = starsElsewhere ? NO_STARS : detectedStars;
@@ -206,12 +209,13 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
       });
       if (requestSeqRef.current !== seq) return;
       setRun({ result, labels });
+      measurementLog.append(batchPhotometryEntry(provenance, result, { apertureRadius, annulusInner, annulusOuter, gain, excludeDq, from: source }));
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (requestSeqRef.current === seq) setRunning(false);
     }
-  }, [filePath, input, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, excludeDq]);
+  }, [filePath, input, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, provenance, source]);
 
   const rows = useMemo(
     (): PhotometryTableRow[] =>

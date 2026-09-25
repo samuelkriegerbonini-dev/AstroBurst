@@ -1,16 +1,18 @@
-import { memo, useCallback, useMemo, useState } from "react";
-import { Shapes, FileUp, FileDown, ClipboardCopy, Trash2, Loader2 } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Shapes, FileUp, FileDown, ClipboardCopy, Plus, Trash2, Loader2 } from "lucide-react";
 import type { Region, RegionStatsEntry, RegionSystem } from "../../shared/types";
 import { REGION_SYSTEMS, type RegionSky } from "../../shared/types/regions";
 import { importRegions, exportRegions, toWire } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma, useRegionStats } from "../../hooks/useRegionStats";
-import { regionStore } from "../../utils/regionStore";
+import { regionStore, shapeKindKey } from "../../utils/regionStore";
 import { normalizeProps } from "../../utils/regionPersistence";
 import { shapeSummary, isRegionShape } from "../../utils/regionGeometry";
 import { regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../../utils/regionCsv";
 import { formatLat, formatLon } from "../../utils/coordFormat";
 import { useDqContext } from "../../context/PreviewContext";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { measurementLog, regionLogReady, regionStatsEntries } from "../../utils/measurementLog";
 import { generateId } from "../../utils/format";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 
@@ -32,6 +34,8 @@ const CLIP_INPUT_CLASS =
   "w-9 bg-zinc-900 border rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono text-right focus:outline-none focus:border-sky-500/60";
 const HEADER_BUTTON_CLASS =
   "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 disabled:opacity-40";
+const DANGER_BUTTON_CLASS = "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-400 hover:text-red-300";
+const DELETE_POINTS_CONFIRM_MS = 5000;
 
 function formatJansky(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";
@@ -197,12 +201,13 @@ function RegionRow({
 function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
+  const provenance = useMeasurementProvenance();
   const [sigmaText, setSigmaText] = useState(DEFAULT_CLIP_SIGMA_TEXT);
   const [itersText, setItersText] = useState(DEFAULT_CLIP_ITERS_TEXT);
   const sigma = parseClipSigma(sigmaText);
   const maxiters = parseClipIters(itersText);
   const clip = useMemo(() => ({ sigma, maxiters }), [sigma, maxiters]);
-  const { stats, loading, error: statsError, photcal, calibrationWarnings } = useRegionStats(
+  const { stats, loading, error: statsError, photcal, calibrationWarnings, measured: statsMeasured } = useRegionStats(
     measurePath,
     doc.regions,
     excludeDq,
@@ -212,8 +217,13 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const [busy, setBusy] = useState(false);
   const [ioError, setIoError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [armedPointsKey, setArmedPointsKey] = useState<string | null>(null);
 
   const annuli = doc.regions.filter((r) => r.shape.shape === "annulus");
+  const pointCount = doc.regions.filter((r) => r.shape.shape === "point").length;
+  const pointsKey = useMemo(() => shapeKindKey(doc.regions, "point"), [doc.regions]);
+  const confirmingDeletePoints = armedPointsKey !== null && armedPointsKey === pointsKey;
+  if (armedPointsKey !== null && !confirmingDeletePoints) setArmedPointsKey(null);
   const measured = doc.regions.length > 0 && stats.size > 0;
 
   const handleSelect = useCallback(
@@ -234,6 +244,21 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
     },
     [filePath],
   );
+
+  useEffect(() => {
+    setArmedPointsKey(null);
+  }, [filePath]);
+
+  useEffect(() => {
+    if (!confirmingDeletePoints) return;
+    const timer = setTimeout(() => setArmedPointsKey(null), DELETE_POINTS_CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [confirmingDeletePoints]);
+
+  const handleDeletePoints = useCallback(() => {
+    setArmedPointsKey(null);
+    if (filePath) regionStore.removeShapeKind(filePath, "point");
+  }, [filePath]);
 
   const handleImport = useCallback(async () => {
     if (!filePath || busy) return;
@@ -321,6 +346,12 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
       setBusy(false);
     }
   }, [filePath, measurePath, busy, doc.regions, stats]);
+
+  const logReady = regionLogReady(statsMeasured, { regions: doc.regions, excludeDq, sigma, maxiters });
+  const handleLogRows = useCallback(() => {
+    if (!logReady || !statsMeasured) return;
+    measurementLog.appendAll(regionStatsEntries(provenance, statsMeasured, stats, photcal));
+  }, [logReady, statsMeasured, provenance, stats, photcal]);
 
   const calibrationBadge = measured ? (
     photcal ? (
@@ -418,6 +449,36 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
           >
             <FileDown size={11} /> Save CSV
           </button>
+          <button
+            type="button"
+            onClick={handleLogRows}
+            disabled={!logReady || loading}
+            className={HEADER_BUTTON_CLASS}
+            title="Log one row per region with the statistics on screen; enabled once they match the regions, clipping and DQ settings"
+          >
+            <Plus size={11} /> Log
+          </button>
+          {confirmingDeletePoints && pointCount > 0 ? (
+            <span role="group" aria-label="Confirm deleting the point regions" className="flex items-center gap-1 text-[10px] text-zinc-300">
+              Delete {pointCount} point{pointCount === 1 ? "" : "s"}?
+              <button type="button" onClick={handleDeletePoints} className={DANGER_BUTTON_CLASS} title="Remove every Point region of this file">
+                Confirm
+              </button>
+              <button type="button" onClick={() => setArmedPointsKey(null)} className={HEADER_BUTTON_CLASS} title="Keep the point regions">
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setArmedPointsKey(pointsKey)}
+              disabled={!filePath || pointCount === 0}
+              className={HEADER_BUTTON_CLASS}
+              title="Remove every Point region of this file at once (points added from the photometry table, targets or catalog); asks for confirmation first"
+            >
+              <Trash2 size={11} /> Delete points ({pointCount})
+            </button>
+          )}
         </div>
       </div>
       <div className="px-3 py-2 space-y-1.5">

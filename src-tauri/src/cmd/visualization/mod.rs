@@ -18,21 +18,27 @@ use crate::core::imaging::pixel_probe::{
     data_unit, grid_origin, grid_stats, grid_stats_json, int_grid, int_value_grid, pixel_grid,
     probe_companions, probe_json_with_companions, probe_pixel,
 };
-use crate::core::imaging::scale::{resolve_limits, LimitMode};
+use crate::core::imaging::scale::{
+    resolve_limits, symmetric_about, validate_symmetric_centre, LimitMode, DEFAULT_SYMMETRIC_CENTRE,
+    SYMMETRIC_FALLBACK_NOTE,
+};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{apply_stf_f32, auto_stf, make_stf_u8_fn, AutoStfConfig, ImageStats, StfParams};
 use crate::infra::ipc::encode_mask_with_header;
 use crate::infra::render::tiles;
 use crate::types::constants::{
-    DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_COLORMAPS,
+    DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_CENTRE, RES_COLORMAPS,
     RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
     RES_ERR_REF, RES_ERR_STATS, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL,
-    RES_MIDTONE, RES_NAME, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE, RES_STATS, RES_TABLE,
-    RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_X, RES_X0, RES_Y, RES_Y0,
+    RES_MIDTONE, RES_NAME, RES_NODATA, RES_NOTES, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE,
+    RES_STATS, RES_SYMMETRIC, RES_TABLE, RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_X, RES_X0,
+    RES_Y, RES_Y0,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
 
+const SYMMETRIC_SKIPPED_DISPLAY_REFERRED_NOTE: &str =
+    "symmetric limits skipped: the image is display-referred (ABDISP=T)";
 pub(crate) const NO_DQ_PLANE: &str = "No DQ plane available for this image";
 pub(crate) const MIN_PIXEL_TABLE_SIZE: usize = 3;
 pub(crate) const MAX_PIXEL_TABLE_SIZE: usize = 15;
@@ -70,6 +76,41 @@ fn display_limits(data: &ndarray::Array2<f32>, header: Option<&HduHeader>, mode:
         _ if is_display_referred(header) => (0.0, 1.0),
         _ => resolve_limits(data, mode),
     }
+}
+
+pub(crate) fn scale_limits_json(
+    path: &str,
+    mode: LimitMode,
+    symmetric: bool,
+    centre: Option<f64>,
+) -> anyhow::Result<serde_json::Value> {
+    let centre = centre.unwrap_or(DEFAULT_SYMMETRIC_CENTRE);
+    if symmetric {
+        validate_symmetric_centre(centre).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    let cached = load_cached(path)?;
+    let header = cached_header(path).ok();
+    let (mut lo, mut hi) = display_limits(cached.arr(), header.as_ref(), mode);
+    let mut notes: Vec<&str> = Vec::new();
+    let mut applied = false;
+    if symmetric && is_display_referred(header.as_ref()) {
+        notes.push(SYMMETRIC_SKIPPED_DISPLAY_REFERRED_NOTE);
+    } else if symmetric {
+        let s = symmetric_about(centre, lo, hi);
+        (lo, hi) = (s.vmin, s.vmax);
+        applied = true;
+        if s.fallback {
+            notes.push(SYMMETRIC_FALLBACK_NOTE);
+        }
+    }
+    Ok(json!({
+        RES_VMIN: lo,
+        RES_VMAX: hi,
+        RES_ALGORITHM: mode.name(),
+        RES_SYMMETRIC: applied,
+        RES_CENTRE: applied.then_some(centre),
+        RES_NOTES: notes,
+    }))
 }
 
 pub(crate) fn resolve_overlay_mask(table: DqTable, requested: Option<u32>) -> u32 {
@@ -144,18 +185,13 @@ pub async fn compute_scale_limits_cmd(
     vmax: Option<f64>,
     percentile: Option<[f64; 2]>,
     zscale_contrast: Option<f64>,
+    symmetric: Option<bool>,
+    centre: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let mode = LimitMode::from_parts(&algorithm, vmin, vmax, percentile, zscale_contrast)
             .map_err(|e| anyhow::anyhow!(e))?;
-        let cached = load_cached(&path)?;
-        let header = cached_header(&path).ok();
-        let (lo, hi) = display_limits(cached.arr(), header.as_ref(), mode);
-        Ok(json!({
-            RES_VMIN: lo,
-            RES_VMAX: hi,
-            RES_ALGORITHM: mode.name(),
-        }))
+        scale_limits_json(&path, mode, symmetric.unwrap_or(false), centre)
     })
 }
 
@@ -167,6 +203,7 @@ pub async fn get_colormap_lut_cmd(name: String) -> Result<serde_json::Value, Str
         Ok(json!({
             RES_NAME: cmap.name(),
             RES_RGBA: cmap.lut_rgba().to_vec(),
+            RES_NODATA: cmap.nodata_rgb().to_vec(),
             RES_COLORMAPS: names,
         }))
     })
@@ -464,13 +501,134 @@ mod tests {
         crate::infra::fits::writer::write_fits_mono(&linear, &data, None).unwrap();
 
         for algorithm in ["minmax", "zscale", "percentile"] {
-            let limits = compute_scale_limits_cmd(stretched.clone(), algorithm.into(), None, None, None, None).await.unwrap();
+            let limits = compute_scale_limits_cmd(stretched.clone(), algorithm.into(), None, None, None, None, None, None).await.unwrap();
             assert_eq!((limits[RES_VMIN].as_f64(), limits[RES_VMAX].as_f64()), (Some(0.0), Some(1.0)), "{algorithm}");
-            let own = compute_scale_limits_cmd(linear.clone(), algorithm.into(), None, None, None, None).await.unwrap();
+            let own = compute_scale_limits_cmd(linear.clone(), algorithm.into(), None, None, None, None, None, None).await.unwrap();
             assert!(own[RES_VMIN].as_f64().unwrap() > 0.1, "{algorithm} on linear data: {own}");
         }
-        let user = compute_scale_limits_cmd(stretched, "user".into(), Some(0.3), Some(0.4), None, None).await.unwrap();
+        let user = compute_scale_limits_cmd(stretched, "user".into(), Some(0.3), Some(0.4), None, None, None, None).await.unwrap();
         assert_eq!((user[RES_VMIN].as_f64(), user[RES_VMAX].as_f64()), (Some(0.3), Some(0.4)));
+    }
+
+    fn write_ramp_16x16(dir: &std::path::Path, name: &str, header: Option<&HduHeader>) -> String {
+        let data = ndarray::Array2::from_shape_fn((16, 16), |(y, x)| 0.2 + (y * 16 + x) as f32 / 640.0);
+        let path = dir.join(name).to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&path, &data, header).unwrap();
+        path
+    }
+
+    fn display_referred_header() -> HduHeader {
+        let mut flagged = HduHeader::empty();
+        flagged.set(crate::cmd::common::HEADER_DISPLAY_REFERRED, "T".to_string());
+        flagged
+    }
+
+    #[test]
+    fn symmetric_limits_mirror_the_base_pair_about_the_centre() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_ramp_16x16(dir.path(), "sym_ramp.fits", None);
+
+        let plain = scale_limits_json(&path, LimitMode::MinMax, false, None).unwrap();
+        let hi = plain[RES_VMAX].as_f64().unwrap();
+        assert_eq!(plain[RES_VMIN].as_f64().unwrap(), 0.2f32 as f64);
+        assert_eq!(hi, (0.2f32 + 0.3984375f32) as f64);
+        assert_eq!(plain[RES_SYMMETRIC], false);
+        assert!(plain[RES_CENTRE].is_null());
+        assert_eq!(plain[RES_NOTES], json!([]));
+
+        let sym = scale_limits_json(&path, LimitMode::MinMax, true, None).unwrap();
+        assert_eq!(sym[RES_VMIN].as_f64().unwrap(), -hi);
+        assert_eq!(sym[RES_VMAX].as_f64().unwrap(), hi);
+        assert_eq!(sym[RES_SYMMETRIC], true);
+        assert_eq!(sym[RES_CENTRE], 0.0);
+        assert_eq!(sym[RES_NOTES], json!([]));
+        assert_eq!(sym[RES_ALGORITHM], "minmax");
+
+        let shifted = scale_limits_json(&path, LimitMode::MinMax, true, Some(0.4)).unwrap();
+        let lo = 0.2f32 as f64;
+        assert!((shifted[RES_VMIN].as_f64().unwrap() - lo).abs() < 1e-12, "{shifted}");
+        assert!((shifted[RES_VMAX].as_f64().unwrap() - (0.8 - lo)).abs() < 1e-12, "{shifted}");
+        assert_eq!(shifted[RES_CENTRE], 0.4);
+        assert_eq!(shifted[RES_SYMMETRIC], true);
+    }
+
+    #[test]
+    fn user_mode_with_one_bound_symmetrises_the_filled_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_ramp_16x16(dir.path(), "sym_user.fits", None);
+        let hi = scale_limits_json(&path, LimitMode::MinMax, false, None).unwrap()[RES_VMAX].as_f64().unwrap();
+        let mode = LimitMode::User { vmin: Some(-0.1), vmax: None };
+        let sym = scale_limits_json(&path, mode, true, Some(0.0)).unwrap();
+        assert_eq!(sym[RES_VMIN].as_f64().unwrap(), -hi);
+        assert_eq!(sym[RES_VMAX].as_f64().unwrap(), hi);
+        assert_eq!(sym[RES_ALGORITHM], "user");
+        assert_eq!(sym[RES_SYMMETRIC], true);
+    }
+
+    #[test]
+    fn symmetric_limits_are_skipped_on_a_display_referred_image_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_ramp_16x16(dir.path(), "sym_abdisp.fits", Some(&display_referred_header()));
+        let auto = scale_limits_json(&path, LimitMode::MinMax, true, None).unwrap();
+        assert_eq!((auto[RES_VMIN].as_f64(), auto[RES_VMAX].as_f64()), (Some(0.0), Some(1.0)));
+        let user = LimitMode::User { vmin: Some(0.3), vmax: Some(0.4) };
+        let own = scale_limits_json(&path, user, true, Some(0.0)).unwrap();
+        assert_eq!((own[RES_VMIN].as_f64(), own[RES_VMAX].as_f64()), (Some(0.3), Some(0.4)));
+        for reply in [auto, own] {
+            assert_eq!(reply[RES_SYMMETRIC], false, "{reply}");
+            assert!(reply[RES_CENTRE].is_null(), "{reply}");
+            let notes = reply[RES_NOTES].as_array().unwrap();
+            assert_eq!(notes.len(), 1, "{reply}");
+            let note = notes[0].as_str().unwrap();
+            assert!(note.contains("display-referred"), "{note}");
+            assert!(!note.contains("0..1"), "{note}");
+        }
+    }
+
+    #[test]
+    fn symmetric_limits_on_a_constant_image_fall_back_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("flat3.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&small, &ndarray::Array2::from_elem((8, 8), 3.0f32), None).unwrap();
+        let reply = scale_limits_json(&small, LimitMode::MinMax, true, Some(3.0)).unwrap();
+        assert_eq!((reply[RES_VMIN].as_f64(), reply[RES_VMAX].as_f64()), (Some(2.0), Some(4.0)));
+        assert_eq!(reply[RES_SYMMETRIC], true);
+        assert_eq!(reply[RES_CENTRE], 3.0);
+        assert!(reply[RES_NOTES][0].as_str().unwrap().contains("half-width"), "{reply}");
+
+        let large = dir.path().join("flat3e7.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&large, &ndarray::Array2::from_elem((8, 8), 3e7f32), None).unwrap();
+        let reply = scale_limits_json(&large, LimitMode::MinMax, true, Some(3e7)).unwrap();
+        let (vmin, vmax) = (reply[RES_VMIN].as_f64().unwrap(), reply[RES_VMAX].as_f64().unwrap());
+        assert!((vmin as f32) < (vmax as f32), "{reply}");
+        assert!(((vmin + vmax) / 2.0 - 3e7).abs() < 1e-6, "{reply}");
+        assert!(reply[RES_NOTES][0].as_str().unwrap().contains("half-width"), "{reply}");
+    }
+
+    #[test]
+    fn a_non_finite_or_out_of_range_centre_is_refused_before_loading() {
+        let err = scale_limits_json("missing.fits", LimitMode::MinMax, true, Some(f64::NAN)).unwrap_err().to_string();
+        assert!(err.contains("centre must be finite"), "{err}");
+        let err = scale_limits_json("missing.fits", LimitMode::MinMax, true, Some(1e308)).unwrap_err().to_string();
+        assert!(err.contains("centre must be within"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_ramp_16x16(dir.path(), "sym_unused_centre.fits", None);
+        let reply = scale_limits_json(&path, LimitMode::MinMax, false, Some(1e308)).unwrap();
+        assert_eq!(reply[RES_SYMMETRIC], false);
+        assert!(reply[RES_CENTRE].is_null());
+        assert_eq!(reply[RES_NOTES], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_colormap_lut_reports_the_no_data_colour() {
+        let bwr = get_colormap_lut_cmd("bwr".into()).await.unwrap();
+        assert_eq!(bwr[RES_NODATA], json!([64, 64, 64]));
+        assert_eq!(bwr[RES_RGBA].as_array().unwrap().len(), 1024);
+        assert_eq!(bwr[RES_COLORMAPS].as_array().unwrap().len(), 13);
+        assert_eq!(bwr[RES_NAME], "bwr");
+        let gray = get_colormap_lut_cmd("gray".into()).await.unwrap();
+        assert_eq!(gray[RES_NODATA], json!([0, 0, 0]));
     }
 
 

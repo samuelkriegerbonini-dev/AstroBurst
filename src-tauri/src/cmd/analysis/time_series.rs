@@ -14,6 +14,10 @@ use crate::core::alignment::phase_correlation::{is_low_confidence, phase_correla
 use crate::core::analysis::photometry::{
     measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry,
 };
+use crate::core::astrometry::geometry::{
+    frame_geometry, geometry_method_notes, header_time, resolve_series_target, resolve_site, FrameGeometry,
+    GeometryOverrides, ResolvedTarget,
+};
 use crate::core::astrometry::spectral::mid_exposure_jd;
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::metadata::photcal::PhotCal;
@@ -39,6 +43,8 @@ const AIRMASS_KEY: &str = "AIRMASS";
 const FILTER_KEY: &str = "FILTER";
 const TIMESYS_KEY: &str = "TIMESYS";
 const UTC_SCALE: &str = "UTC";
+const FRAME_WITHOUT_TIME_REASON: &str = "no observation time in the header";
+const NO_SERIES_TARGET_NOTE: &str = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TimeSeriesTarget {
@@ -66,6 +72,7 @@ pub struct TimeSeriesFrame {
     pub exptime: Option<f64>,
     pub filter: Option<String>,
     pub airmass: Option<f64>,
+    pub geometry: Option<FrameGeometry>,
     pub offset: Option<FrameOffset>,
     pub photcal_label: Option<String>,
     pub targets: Vec<Option<StarPhotometry>>,
@@ -81,6 +88,8 @@ pub struct TimeSeriesResult {
     pub n_frames: usize,
     pub n_skipped: usize,
     pub warnings: Vec<String>,
+    pub geometry_target: Option<ResolvedTarget>,
+    pub geometry_notes: Vec<String>,
     pub elapsed_ms: u64,
 }
 
@@ -126,6 +135,7 @@ fn skipped_frame(index: usize, path: &str, n_targets: usize, reason: String) -> 
         exptime: None,
         filter: None,
         airmass: None,
+        geometry: None,
         offset: None,
         photcal_label: None,
         targets: (0..n_targets).map(|_| None).collect(),
@@ -153,6 +163,35 @@ fn time_source_with_scale(header: &HduHeader, source: String) -> String {
         Some(scale) if scale.eq_ignore_ascii_case(UTC_SCALE) => format!("{source}; time scale {scale} (TIMESYS)"),
         Some(scale) => format!("{source}; time scale {scale} (TIMESYS), not converted to UTC"),
     }
+}
+
+pub(crate) struct SeriesGeometry {
+    target: Option<ResolvedTarget>,
+    overrides: GeometryOverrides,
+    notes: Vec<String>,
+}
+
+fn series_geometry(reference: Option<&HduHeader>, targets: &[TimeSeriesTarget], overrides: &GeometryOverrides) -> SeriesGeometry {
+    let empty = HduHeader::empty();
+    let header = reference.unwrap_or(&empty);
+    let target_star = targets
+        .iter()
+        .find(|t| t.role == ROLE_TARGET)
+        .map(|t| (t.x, t.y, t.label.as_str()));
+    let target = resolve_series_target(header, target_star, overrides);
+    let mut notes = match &target {
+        Some(t) => vec![format!("target {} held constant for every frame", t.source)],
+        None => vec![NO_SERIES_TARGET_NOTE.to_string()],
+    };
+    notes.extend(geometry_method_notes(header, target.as_ref(), resolve_site(header, overrides).as_ref()));
+    SeriesGeometry { target, overrides: *overrides, notes }
+}
+
+fn frame_geometry_of(header: Option<&HduHeader>, series: &SeriesGeometry) -> Option<FrameGeometry> {
+    header.map(|h| match header_time(h) {
+        Some(time) => frame_geometry(h, &time, series.target.as_ref(), resolve_site(h, &series.overrides).as_ref()),
+        None => FrameGeometry::without_time(FRAME_WITHOUT_TIME_REASON),
+    })
 }
 
 struct FrameShift {
@@ -222,6 +261,7 @@ fn measure_frame(
     exclude_dq: bool,
     track_drift: bool,
     warnings: &mut Vec<String>,
+    series: &SeriesGeometry,
 ) -> TimeSeriesFrame {
     let file_name = file_name_of(path);
     let dims = entry.arr().dim();
@@ -248,6 +288,7 @@ fn measure_frame(
     };
     let tracked_config = PhotometryConfig { search_radius: TRACKED_SEARCH_RADIUS_PX, ..config.clone() };
     let timing = header.and_then(|h| mid_exposure_jd(h).map(|(jd, source)| (jd, time_source_with_scale(h, source))));
+    let geometry = frame_geometry_of(header, series);
     let shift = if track_drift && index > 0 {
         track_frame(reference, entry, &file_name, warnings)
     } else {
@@ -314,6 +355,7 @@ fn measure_frame(
         exptime: header.and_then(|h| finite_card(h, EXPTIME_KEY)),
         filter: header.and_then(|h| header_string(h, FILTER_KEY)),
         airmass: header.and_then(|h| finite_card(h, AIRMASS_KEY)),
+        geometry,
         offset: shift.offset,
         photcal_label: photcal.as_ref().map(|cal| cal.label()),
         targets: measured,
@@ -322,6 +364,7 @@ fn measure_frame(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn measure_time_series(
     paths: &[String],
     targets: &[TimeSeriesTarget],
@@ -330,11 +373,24 @@ pub(crate) fn measure_time_series(
     track_drift: bool,
     progress: Option<&ProgressHandle>,
 ) -> anyhow::Result<TimeSeriesResult> {
+    measure_time_series_with(paths, targets, config_base, exclude_dq, track_drift, progress, &GeometryOverrides::default())
+}
+
+pub(crate) fn measure_time_series_with(
+    paths: &[String],
+    targets: &[TimeSeriesTarget],
+    config_base: &PhotometryConfig,
+    exclude_dq: bool,
+    track_drift: bool,
+    progress: Option<&ProgressHandle>,
+    overrides: &GeometryOverrides,
+) -> anyhow::Result<TimeSeriesResult> {
     let t0 = Instant::now();
     let Some(reference_path) = paths.first() else {
         bail!("time series needs at least one frame path, got 0");
     };
     let reference = load_entry(reference_path)?;
+    let series = series_geometry(reference.header(), targets, overrides);
     let mut warnings: Vec<String> = Vec::new();
     let mut anchors: Vec<Option<(f64, f64)>> = Vec::new();
     let mut frames: Vec<TimeSeriesFrame> = Vec::with_capacity(paths.len());
@@ -353,6 +409,7 @@ pub(crate) fn measure_time_series(
                 exclude_dq,
                 track_drift,
                 &mut warnings,
+                &series,
             ),
             Err(e) => skipped_frame(index, path, targets.len(), format!("failed to load: {e:#}")),
         };
@@ -388,6 +445,8 @@ pub(crate) fn measure_time_series(
         n_skipped,
         frames,
         warnings,
+        geometry_target: series.target,
+        geometry_notes: series.notes,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
@@ -448,18 +507,26 @@ pub async fn time_series_photometry_cmd(
     gain: Option<f64>,
     exclude_dq: Option<bool>,
     track_drift: Option<bool>,
+    target_ra: Option<f64>,
+    target_dec: Option<f64>,
+    site_lat: Option<f64>,
+    site_lon: Option<f64>,
+    site_height: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     let config = validate_time_series_args(&paths, &targets, aperture_radius, annulus_inner, annulus_outer, gain)
         .map_err(|e| format!("{e:#}"))?;
+    let overrides = GeometryOverrides { target_ra, target_dec, site_lat, site_lon, site_height };
+    crate::cmd::geometry::validate_geometry_overrides(&overrides).map_err(|e| format!("{e:#}"))?;
     let progress = ProgressHandle::new(&app, EVENT_TIME_SERIES_PROGRESS, paths.len() as u64);
     blocking_cmd!({
-        let result = measure_time_series(
+        let result = measure_time_series_with(
             &paths,
             &targets,
             &config,
             exclude_dq.unwrap_or(false),
             track_drift.unwrap_or(true),
             Some(&progress),
+            &overrides,
         )?;
         progress.emit_complete();
         Ok(serde_json::to_value(result)?)
@@ -949,5 +1016,128 @@ mod tests {
         assert!(source(&plain).starts_with("DATE-OBS"), "{}", source(&plain));
         assert_eq!(tt.frames[0].jd_mid, plain.frames[0].jd_mid);
         assert_eq!(utc.frames[1].jd_mid, plain.frames[1].jd_mid);
+    }
+
+    fn sited_wcs_cards(header: &mut HduHeader) {
+        header.set_f64("SITELAT", 19.82);
+        header.set_f64("SITELONG", -155.47);
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRPIX1", 64.5);
+        header.set_f64("CRPIX2", 64.5);
+        header.set_f64("CRVAL1", 150.0);
+        header.set_f64("CRVAL2", 2.0);
+        header.set_f64("CD1_1", -2.7778e-4);
+        header.set_f64("CD1_2", 0.0);
+        header.set_f64("CD2_1", 0.0);
+        header.set_f64("CD2_2", 2.7778e-4);
+    }
+
+    #[test]
+    fn frames_carry_bjd_tdb_from_the_reference_wcs_target_when_the_headers_have_a_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "sited", 4, |_, header| sited_wcs_cards(header));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        let mut light_time_seconds: Vec<f64> = Vec::new();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            let jd_utc = geometry.jd_utc.expect("JD_UTC");
+            let bjd = geometry.bjd_tdb.expect("BJD_TDB");
+            assert!((bjd - jd_utc).abs() * 86400.0 < 600.0, "{}", (bjd - jd_utc) * 86400.0);
+            assert_eq!(geometry.bjd_source.as_deref(), Some("computed"));
+            assert!(geometry.hjd_utc.is_some());
+            let altitude = geometry.altitude_deg.expect("altitude from the site and the WCS target");
+            assert!(geometry.lst_deg.is_some() && geometry.azimuth_deg.is_some() && geometry.parallactic_angle_deg.is_some());
+            assert_eq!(geometry.airmass_computed.is_some(), altitude >= 0.0, "airmass only above the horizon: altitude {altitude}");
+            light_time_seconds.push((bjd - jd_utc) * 86400.0);
+        }
+        let max = light_time_seconds.iter().cloned().fold(f64::MIN, f64::max);
+        let min = light_time_seconds.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(max - min < 0.1, "{light_time_seconds:?}");
+        let target = out.geometry_target.as_ref().expect("series target");
+        assert!(target.source.starts_with("WCS at"), "{}", target.source);
+        assert!(target.source.contains("reference frame"), "{}", target.source);
+        assert!((target.ra_deg - 150.0).abs() < 0.05 && (target.dec_deg - 2.0).abs() < 0.05, "{target:?}");
+        assert!(!out.geometry_notes.is_empty());
+        assert!(out.geometry_notes.iter().any(|n| n.contains("held constant")), "{:?}", out.geometry_notes);
+    }
+
+    #[test]
+    fn spacecraft_frames_keep_the_persisted_site_override_out_of_the_topocentric_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "jwst", 3, |_, header| {
+            sited_wcs_cards(header);
+            header.set("TELESCOP", "JWST".to_string());
+        });
+        let overrides = GeometryOverrides { site_lat: Some(19.82), site_lon: Some(-155.47), ..GeometryOverrides::default() };
+        let out = measure_time_series_with(&paths, &targets, &base_config(), false, true, None, &overrides).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.jd_utc.is_some());
+            assert_eq!(geometry.bjd_tdb, None);
+            assert_eq!(geometry.lst_deg, None);
+            assert_eq!(geometry.altitude_deg, None);
+            assert_eq!(geometry.airmass_computed, None);
+            assert_eq!(geometry.parallactic_angle_deg, None);
+            assert_eq!(geometry.sun_altitude_deg, None);
+            assert_eq!(geometry.moon_altitude_deg, None);
+            assert_eq!(geometry.moon_separation_deg, None);
+            assert!(geometry.time_scale_notes.iter().any(|n| n.contains("site from user not applied")), "{:?}", geometry.time_scale_notes);
+        }
+        assert!(out.geometry_target.as_ref().is_some_and(|t| t.source.starts_with("WCS at")), "{:?}", out.geometry_target);
+    }
+
+    #[test]
+    fn a_plain_stack_has_time_scales_but_no_target_and_no_site_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let out = measure_time_series(&stack.paths[..2], &stack.targets, &base_config(), false, true, None).unwrap();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.jd_utc.is_some() && geometry.jd_tt.is_some() && geometry.jd_tdb.is_some());
+            assert_eq!(geometry.bjd_tdb, None);
+            assert_eq!(geometry.hjd_utc, None);
+            assert_eq!(geometry.altitude_deg, None);
+            assert_eq!(geometry.airmass_computed, None);
+            assert!(geometry.moon_illumination.is_some());
+        }
+        assert!(out.geometry_target.is_none());
+        assert!(out.geometry_notes.iter().any(|n| n.contains("no target coordinates")), "{:?}", out.geometry_notes);
+    }
+
+    #[test]
+    fn site_and_target_overrides_supply_the_geometry_for_a_plain_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let overrides = GeometryOverrides {
+            target_ra: Some(150.0),
+            target_dec: Some(2.0),
+            site_lat: Some(19.82),
+            site_lon: Some(-155.47),
+            site_height: None,
+        };
+        let out = measure_time_series_with(&stack.paths[..2], &stack.targets, &base_config(), false, true, None, &overrides).unwrap();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.altitude_deg.is_some() && geometry.bjd_tdb.is_some() && geometry.lst_deg.is_some());
+        }
+        assert_eq!(out.geometry_target.as_ref().unwrap().source, "user");
+        assert!(out.geometry_notes.iter().any(|n| n.contains("site from user")), "{:?}", out.geometry_notes);
+    }
+
+    #[test]
+    fn skipped_frames_carry_no_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let small = dir.path().join("small.fits");
+        write_fits_mono(small.to_str().unwrap(), &Array2::<f32>::zeros((64, 64)), None).unwrap();
+        let mut paths = stack.paths[..2].to_vec();
+        paths.push(small.to_str().unwrap().to_string());
+        let out = measure_time_series(&paths, &stack.targets, &base_config(), false, true, None).unwrap();
+        assert!(out.frames[2].skipped.is_some());
+        assert!(out.frames[2].geometry.is_none());
+        assert!(out.frames[..2].iter().all(|f| f.geometry.is_some()));
     }
 }

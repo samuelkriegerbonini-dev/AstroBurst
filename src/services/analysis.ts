@@ -244,6 +244,11 @@ export interface TimeSeriesOptions {
   gain?: number | null;
   excludeDq?: boolean;
   trackDrift?: boolean;
+  targetRa?: number | null;
+  targetDec?: number | null;
+  siteLat?: number | null;
+  siteLon?: number | null;
+  siteHeight?: number | null;
 }
 
 export function timeSeriesPhotometry(
@@ -260,6 +265,11 @@ export function timeSeriesPhotometry(
     gain: opts.gain ?? null,
     excludeDq: opts.excludeDq ?? false,
     trackDrift: opts.trackDrift ?? true,
+    targetRa: opts.targetRa ?? null,
+    targetDec: opts.targetDec ?? null,
+    siteLat: opts.siteLat ?? null,
+    siteLon: opts.siteLon ?? null,
+    siteHeight: opts.siteHeight ?? null,
   });
 }
 

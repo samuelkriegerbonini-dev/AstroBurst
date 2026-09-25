@@ -109,7 +109,7 @@ export function createShape(kind: Exclude<RegionShapeKind, "polygon">, start: Pt
   }
 }
 
-function centreOf(shape: RegionShape): Pt {
+export function shapeCentre(shape: RegionShape): Pt {
   switch (shape.shape) {
     case "polygon": {
       const n = shape.points.length;
@@ -442,7 +442,7 @@ export function shapeSummary(shape: RegionShape): string {
     case "annulus":
       return `annulus (${f1(shape.x)}, ${f1(shape.y)}) r=${f1(shape.r_inner)}–${f1(shape.r_outer)}`;
     case "polygon": {
-      const c = centreOf(shape);
+      const c = shapeCentre(shape);
       return `polygon n=${shape.points.length} (${f1(c.x)}, ${f1(c.y)})`;
     }
     case "line":
