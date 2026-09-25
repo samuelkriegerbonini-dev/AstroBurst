@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { frameStem, framesLabel, resultsForRecipients, showsOutput, sourceLabel, stackOutputName, toDims } from "../stackingOutputs";
+import { displaysFileGrid, frameStem, framesLabel, otherGridHint, resultsForRecipients, showsOutput, sourceLabel, stackOutputName, toDims } from "../stackingOutputs";
 import type { ProcessedResult } from "../../shared/types/preview";
 
 function result(fitsPath: string | null, previewUrl: string | null): ProcessedResult {
@@ -95,6 +95,37 @@ describe("resultsForRecipients", () => {
   it("gives every recipient the same label when the label does not depend on the file", () => {
     const planned = resultsForRecipients(light1, [light2], { ...calibrated2, inputPath: light1.path }, () => framesLabel("Stack", 12));
     expect(new Set(planned.map((p) => p.result.label))).toEqual(new Set(["Stack · 12 frames"]));
+  });
+});
+
+describe("displaysFileGrid", () => {
+  const stack = { kind: "stacking" as const, inputPath: "/d/frame_01.fits" };
+
+  it("rejects a stack referenced to another frame as the file's pixel grid", () => {
+    expect(displaysFileGrid(stack, "/d/frame_08.fits")).toBe(false);
+  });
+
+  it("accepts a stack whose reference is the viewed frame, including Windows separators", () => {
+    expect(displaysFileGrid(stack, "/d/frame_01.fits")).toBe(true);
+    expect(displaysFileGrid({ ...stack, inputPath: "\\d\\frame_01.fits" }, "/d/frame_01.fits")).toBe(true);
+  });
+
+  it("rejects a calibrated frame of another science file", () => {
+    expect(displaysFileGrid({ kind: "stacking", inputPath: "/d/frame_03.fits" }, "/d/frame_08.fits")).toBe(false);
+  });
+
+  it("accepts the unprocessed file and geometry-preserving processing steps", () => {
+    expect(displaysFileGrid(null, "/d/frame_08.fits")).toBe(true);
+    expect(displaysFileGrid({ kind: "processing", inputPath: "/o/frame_08_bg.fits" }, "/d/frame_08.fits")).toBe(true);
+  });
+
+  it("tells the user that a reset alone leaves Points drawn on the stack in the stack's grid", () => {
+    const hint = otherGridHint("Stack · 8 frames");
+    expect(hint).toContain("Stack · 8 frames");
+    expect(hint).toContain("stay in that grid after a reset");
+    expect(hint).toMatch(/reset the preview, then place the Points on this frame before measuring/);
+    expect(hint).not.toMatch(/Reset the preview to measure/);
+    expect(otherGridHint(null)).toContain("The preview shows a result");
   });
 });
 

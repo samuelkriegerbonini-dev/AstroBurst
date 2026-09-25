@@ -81,7 +81,9 @@ describe("contour painter", () => {
     expect(ctx.moveTo).toHaveBeenNthCalledWith(1, 10, 20);
     expect(ctx.lineTo).toHaveBeenNthCalledWith(1, 20, 20);
     expect(ctx.lineTo).toHaveBeenNthCalledWith(2, 20, 30);
-    expect(ctx.closePath).toHaveBeenCalledTimes(1);
+    expect(ctx.closePath).not.toHaveBeenCalled();
+    expect(ctx.lineTo).toHaveBeenNthCalledWith(3, 10, 20);
+    expect(ctx.lineTo).toHaveBeenCalledTimes(4);
     expect(strokes).toEqual([
       { style: "hsl(220 90% 60%)", width: 1.5 },
       { style: "#ffffff", width: 2 },
@@ -111,5 +113,75 @@ describe("contour painter", () => {
     expect(ctx.moveTo).toHaveBeenCalledTimes(1);
     expect(ctx.moveTo).toHaveBeenCalledWith(12, 22);
     expect(strokes).toEqual([{ style: "#14b8a6", width: 1 }]);
+  });
+
+  it("closes every ring with a segment back to its first vertex inside one shared path, never with closePath", () => {
+    const levels = [
+      level(
+        1,
+        [
+          [
+            [0, 0],
+            [5, 0],
+            [5, 5],
+          ],
+          [
+            [10, 10],
+            [12, 10],
+            [12, 12],
+          ],
+        ],
+        [true, true],
+      ),
+    ];
+    const { ctx, strokes } = fakeContext();
+    paint(createContourPainter({ levels, hidden: new Set(), highlightIndex: null, colourMode: "ramp", lineWidth: 1 }), ctx);
+    expect(ctx.closePath).not.toHaveBeenCalled();
+    expect(ctx.beginPath).toHaveBeenCalledTimes(1);
+    expect(ctx.moveTo).toHaveBeenNthCalledWith(1, 10, 20);
+    expect(ctx.lineTo).toHaveBeenNthCalledWith(3, 10, 20);
+    expect(ctx.moveTo).toHaveBeenNthCalledWith(2, 30, 40);
+    expect(ctx.lineTo).toHaveBeenNthCalledWith(6, 30, 40);
+    expect(ctx.lineTo).toHaveBeenCalledTimes(6);
+    expect(strokes).toHaveLength(1);
+  });
+
+  const ring = (cx: number, cy: number, r: number, n: number): [number, number][] =>
+    Array.from({ length: n }, (_, k) => [cx + r * Math.cos((2 * Math.PI * k) / n), cy + r * Math.sin((2 * Math.PI * k) / n)]);
+
+  function paintAt(levels: ContourLevel[], scale: number, width: number, height: number) {
+    const { ctx } = fakeContext();
+    createContourPainter({ levels, hidden: new Set(), highlightIndex: null, colourMode: "ramp", lineWidth: 1 })({
+      ctx,
+      toScreen: (p: Pt) => ({ x: p.x * scale, y: p.y * scale }),
+      width,
+      height,
+      screenPxPerImagePx: scale,
+    } as unknown as OverlayPaintContext);
+    return ctx;
+  }
+
+  it("emits about one vertex per screen pixel at fit zoom and keeps sub-pixel rings as dots", () => {
+    const small = Array.from({ length: 1000 }, (_, i) => ring((i % 40) * 5 + 2, Math.floor(i / 40) * 5 + 2, 1, 12));
+    const big = ring(1000, 1000, 200, 4000);
+    const ctx = paintAt([level(1, [...small, big], [...small.map(() => true), true])], 0.39, 1200, 800);
+    expect(ctx.moveTo).toHaveBeenCalledTimes(1001);
+    expect(ctx.closePath).not.toHaveBeenCalled();
+    expect(ctx.lineTo.mock.calls.length).toBeLessThan(3000);
+    expect(ctx.lineTo.mock.calls.length).toBeGreaterThanOrEqual(2 * 1000 + 400);
+  });
+
+  it("does not decimate when vertices are more than a screen pixel apart", () => {
+    const big = ring(1000, 1000, 200, 4000);
+    const ctx = paintAt([level(1, [big], [true])], 20, 100000, 100000);
+    expect(ctx.lineTo).toHaveBeenCalledTimes(4000);
+  });
+
+  it("culls polylines entirely off the canvas from bounds computed when the painter is built", () => {
+    const inside = ring(50, 50, 10, 64);
+    const outside = ring(5000, 5000, 10, 64);
+    const ctx = paintAt([level(1, [outside, inside], [true, true])], 1, 200, 200);
+    expect(ctx.moveTo).toHaveBeenCalledTimes(1);
+    expect(ctx.moveTo).toHaveBeenCalledWith(inside[0][0], inside[0][1]);
   });
 });

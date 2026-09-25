@@ -11,7 +11,7 @@ use crate::core::imaging::contour::{
 };
 use crate::types::constants::{RES_ELAPSED_MS, RES_MASKED};
 
-const DEFAULT_SIGMA_MULTIPLES: [f64; 5] = [1.0, 2.0, 3.0, 5.0, 10.0];
+const DEFAULT_SIGMA_MULTIPLES: [f64; 3] = [3.0, 5.0, 10.0];
 const DEFAULT_MODE: &str = "sigma";
 const DEFAULT_BIN: usize = 1;
 const DEFAULT_SMOOTH_SIGMA: f64 = 0.0;
@@ -98,8 +98,8 @@ mod tests {
     use super::*;
     use crate::infra::fits::writer::write_fits_mono;
     use crate::types::constants::{
-        RES_BACKGROUND_MEDIAN, RES_CONTOUR_BIN, RES_CONTOUR_CLOSED, RES_CONTOUR_LEVELS,
-        RES_CONTOUR_POLYLINES, RES_N_POINTS, RES_NOTES, RES_VALUE,
+        RES_BACKGROUND_MEDIAN, RES_BACKGROUND_SIGMA, RES_CONTOUR_BIN, RES_CONTOUR_CLOSED,
+        RES_CONTOUR_LEVELS, RES_CONTOUR_POLYLINES, RES_N_POINTS, RES_NOTES, RES_VALUE,
     };
     use ndarray::Array2;
 
@@ -169,5 +169,38 @@ mod tests {
         assert_eq!(line.len(), level[RES_N_POINTS].as_u64().unwrap() as usize);
         assert_eq!(out[RES_N_POINTS], level[RES_N_POINTS]);
         assert_eq!(line[0].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_default_sigma_levels_start_at_three_sigma_and_leave_a_noise_frame_almost_free_of_contours() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noise.fits");
+        let mut rng = StdRng::seed_from_u64(7);
+        let data = Array2::from_shape_fn((256, 256), |_| {
+            let u1: f64 = rng.gen::<f64>().max(1e-30);
+            let u2: f64 = rng.gen::<f64>();
+            (100.0 + 10.0 * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
+        });
+        write_fits_mono(path.to_str().unwrap(), &data, None).unwrap();
+        let out = contour_lines_cmd(path.to_str().unwrap().to_string(), Some("sigma".into()), None, None, None, None, None, Some(1.0), Some(1), Some(false))
+            .await
+            .unwrap();
+        let median = out[RES_BACKGROUND_MEDIAN].as_f64().unwrap();
+        let sigma = out[RES_BACKGROUND_SIGMA].as_f64().unwrap();
+        assert!(sigma > 0.0, "{sigma}");
+        let values: Vec<f64> = out[RES_CONTOUR_LEVELS]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l[RES_VALUE].as_f64().unwrap())
+            .collect();
+        assert_eq!(values.len(), 3, "{values:?}");
+        for (value, k) in values.iter().zip([3.0, 5.0, 10.0]) {
+            assert!((value - (median + k * sigma)).abs() < 1e-9, "{value} vs {} + {k} x {}", median, sigma);
+        }
+        let cells = 255.0 * 255.0;
+        assert!((out[RES_N_POINTS].as_u64().unwrap() as f64) < 0.02 * cells, "{}", out[RES_N_POINTS]);
     }
 }

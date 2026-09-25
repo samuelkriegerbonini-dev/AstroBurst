@@ -6,12 +6,14 @@ import { overlayStore } from "../../utils/overlayStore";
 import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { generateId } from "../../utils/format";
-import { parseSkyCsv, type SkyTarget } from "../../utils/skyList";
+import { frameLonInHours } from "../../utils/coordFormat";
+import { parseSkyCsv, targetProjectionPath, type SkyTarget } from "../../utils/skyList";
 import { TARGET_LAYER_ID, TARGET_LAYER_KIND, createTargetPainter, type PlacedTarget } from "../viewer/painters/targetPainter";
 import { ErrorAlert, RunButton, Toggle } from "../ui";
 
 interface TargetsPanelProps {
   filePath: string | null;
+  measurePath?: string | null;
 }
 
 interface PlacedRow {
@@ -52,7 +54,8 @@ function placeRows(targets: SkyTarget[], result: WorldToPixelResult | null): Pla
   });
 }
 
-function TargetsPanel({ filePath }: TargetsPanelProps) {
+function TargetsPanel({ filePath, measurePath = null }: TargetsPanelProps) {
+  const wcsPath = targetProjectionPath(filePath, measurePath);
   const textId = useId();
   const frameId = useId();
   const [text, setText] = useState("");
@@ -70,9 +73,12 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
     setError(null);
     setLoading(false);
     setHoverIndex(null);
-  }, [filePath]);
+  }, [filePath, wcsPath]);
 
-  const parsed = useMemo(() => (text.trim() ? parseSkyCsv(text) : { targets: [], errors: [] }), [text]);
+  const parsed = useMemo(
+    () => (text.trim() ? parseSkyCsv(text, frameLonInHours(frame)) : { targets: [], errors: [] }),
+    [text, frame],
+  );
 
   const rows = useMemo(() => (placed ? placeRows(placed.targets, placed.result) : []), [placed]);
   const onImageRows = useMemo(() => rows.filter((r) => r.onImage && r.x !== null && r.y !== null), [rows]);
@@ -95,7 +101,7 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
   }, [filePath, markers, placed, painted, hoverIndex]);
 
   const place = useCallback(async () => {
-    if (!filePath) return;
+    if (!wcsPath) return;
     const targets = parsed.targets;
     if (targets.length === 0) {
       setError("No targets to place: enter at least one 'RA Dec [label]' line.");
@@ -106,7 +112,7 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
     setError(null);
     try {
       const result = await worldToPixel(
-        filePath,
+        wcsPath,
         targets.map((t): [number, number] => [t.lon, t.lat]),
         frame,
       );
@@ -118,7 +124,7 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
     } finally {
       if (requestSeqRef.current === seq) setLoading(false);
     }
-  }, [filePath, parsed, frame]);
+  }, [wcsPath, parsed, frame]);
 
   const loadCsv = useCallback(async () => {
     setError(null);
@@ -207,7 +213,7 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
           label="Place"
           runningLabel="Projecting..."
           running={loading}
-          disabled={!filePath || parsed.targets.length === 0}
+          disabled={!wcsPath || parsed.targets.length === 0}
           accent="cyan"
           icon={<Pin size={12} />}
           onClick={() => void place()}
@@ -286,7 +292,8 @@ function TargetsPanel({ filePath }: TargetsPanelProps) {
 
         {!placed && !error && (
           <div className="text-[10px] text-zinc-600">
-            Paste RA/Dec pairs (sexagesimal RA is hours, decimal RA is degrees) or load a CSV, pick the input frame and
+            Paste RA/Dec pairs (sexagesimal RA is hours unless written with d or °, decimal is degrees; galactic and
+            ecliptic longitudes are degrees unless written with h) or load a CSV, pick the input frame and
             place them on the image through its WCS. The table shows the interpreted degrees, the pixel position and
             whether each target lands on the image.
           </div>

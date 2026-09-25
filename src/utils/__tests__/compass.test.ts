@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { compassArrows, formatScaleBarLabel, niceScaleBarLength, scaleBarPixels, screenDirection } from "../compass";
+import {
+  compassArrows,
+  formatScaleBarLabel,
+  horizontalPixelScaleArcsec,
+  niceScaleBarLength,
+  overlayWcsPath,
+  scaleBarPixels,
+  screenDirection,
+} from "../compass";
 
 describe("niceScaleBarLength", () => {
   it("picks the largest round length that fits", () => {
@@ -40,5 +48,31 @@ describe("scaleBarPixels", () => {
   it("converts arcseconds to screen pixels through the pixel scale and zoom", () => {
     expect(scaleBarPixels(30, 0.5, 2)).toBe(120);
     expect(scaleBarPixels(30, 0, 2)).toBe(0);
+  });
+});
+
+describe("horizontalPixelScaleArcsec", () => {
+  it("sizes the horizontal scale bar with the image-x scale of an anisotropic WCS", () => {
+    const info = { pixel_scale_arcsec: 0.1283, pixel_scale_x_arcsec: 0.1355, pixel_scale_y_arcsec: 0.1211 };
+    const ps = horizontalPixelScaleArcsec(info);
+    expect(ps).toBe(0.1355);
+    const zoom = 1.5;
+    const barPx = scaleBarPixels(10, ps, zoom);
+    expect((barPx / zoom) * info.pixel_scale_x_arcsec).toBeCloseTo(10, 9);
+  });
+
+  it("falls back to the mean scale when the per-axis scale is missing or unusable", () => {
+    expect(horizontalPixelScaleArcsec({ pixel_scale_arcsec: 0.2 })).toBe(0.2);
+    expect(horizontalPixelScaleArcsec({ pixel_scale_arcsec: 0.2, pixel_scale_x_arcsec: null })).toBe(0.2);
+    expect(horizontalPixelScaleArcsec({ pixel_scale_arcsec: 0.2, pixel_scale_x_arcsec: 0 })).toBe(0.2);
+    expect(horizontalPixelScaleArcsec({ pixel_scale_arcsec: 0.2, pixel_scale_x_arcsec: Number.NaN })).toBe(0.2);
+  });
+});
+
+describe("overlayWcsPath", () => {
+  it("reads the WCS of the image on screen, not the loaded file", () => {
+    expect(overlayWcsPath("/data/light_001.fits", "/out/light_001_drizzle_arcsinh.fits")).toBe("/out/light_001_drizzle_arcsinh.fits");
+    expect(overlayWcsPath("/data/light_001.fits", null)).toBe("/data/light_001.fits");
+    expect(overlayWcsPath(null, "/out/x.fits")).toBeNull();
   });
 });

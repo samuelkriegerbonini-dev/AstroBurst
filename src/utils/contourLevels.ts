@@ -1,4 +1,5 @@
 import type { Pt } from "./regionGeometry";
+import type { MeasurementSource } from "./analysisTarget";
 import type { ContourLevel, ContourMode, ContourOptions } from "../shared/types/contours";
 
 export type ContourColourMode = "single" | "ramp";
@@ -8,6 +9,11 @@ export const MAX_CONTOUR_BIN = 8;
 export const DEFAULT_BIN_TARGET_DIM = 2048;
 export const DEFAULT_POLYGON_MAX_VERTICES = 512;
 export const SINGLE_CONTOUR_COLOUR = "#14b8a6";
+export const DEFAULT_SIGMA_MULTIPLES_TEXT = "3, 5, 10";
+export const CONTOUR_HINT_ON_SCREEN =
+  "Contours are traced on the image on screen; contours from another file need reprojection (not available).";
+export const CONTOUR_HINT_OTHER_SOURCE =
+  "Contours are traced on the image named by the badge, not on the view on screen; contours from another file need reprojection (not available).";
 const MIN_POLYGON_VERTICES = 3;
 const RAMP_HUE_START = 220;
 const RAMP_HUE_END = 40;
@@ -54,13 +60,9 @@ export function levelColour(index: number, n: number, mode: ContourColourMode): 
   return `hsl(${hue} ${RAMP_SATURATION}% ${RAMP_LIGHTNESS}%)`;
 }
 
-export function cullPolyline(
-  points: ReadonlyArray<readonly [number, number]>,
-  toScreen: (p: Pt) => Pt,
-  width: number,
-  height: number,
-): boolean {
-  if (points.length === 0) return true;
+export type PolylineBounds = readonly [number, number, number, number];
+
+export function polylineBounds(points: ReadonlyArray<readonly [number, number]>): PolylineBounds {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
@@ -71,6 +73,12 @@ export function cullPolyline(
     if (y < minY) minY = y;
     if (y > maxY) maxY = y;
   }
+  return [minX, minY, maxX, maxY];
+}
+
+export function boundsOffScreen(bounds: PolylineBounds, toScreen: (p: Pt) => Pt, width: number, height: number): boolean {
+  const [minX, minY, maxX, maxY] = bounds;
+  if (!(minX <= maxX && minY <= maxY)) return true;
   const corners = [
     toScreen({ x: minX, y: minY }),
     toScreen({ x: maxX, y: minY }),
@@ -88,6 +96,15 @@ export function cullPolyline(
     if (c.y > sMaxY) sMaxY = c.y;
   }
   return sMaxX < 0 || sMaxY < 0 || sMinX > width || sMinY > height;
+}
+
+export function cullPolyline(
+  points: ReadonlyArray<readonly [number, number]>,
+  toScreen: (p: Pt) => Pt,
+  width: number,
+  height: number,
+): boolean {
+  return boundsOffScreen(polylineBounds(points), toScreen, width, height);
 }
 
 export function contourToPolygon(
@@ -114,7 +131,11 @@ export function formatLevelValue(value: number): string {
   const magnitude = Math.abs(value);
   if (magnitude === 0) return "0";
   if (magnitude >= 1e5 || magnitude < 1e-3) return value.toExponential(3);
-  return value.toPrecision(5).replace(/\.?0+$/, "");
+  return String(Number(value.toPrecision(5)));
+}
+
+export function contourHint(source: MeasurementSource | null): string {
+  return source?.tone === "original" ? CONTOUR_HINT_OTHER_SOURCE : CONTOUR_HINT_ON_SCREEN;
 }
 
 export type ContourBinChoice = "auto" | "1" | "2" | "4" | "8";
@@ -192,25 +213,32 @@ export interface ContourPolygonPick {
   skipped: number;
 }
 
+function ringArea(points: readonly (readonly [number, number])[]): number {
+  let twice = 0;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    twice += points[j][0] * points[i][1] - points[i][0] * points[j][1];
+  }
+  return Math.abs(twice) / 2;
+}
+
 export function closedContourPolygons(
   levels: readonly ContourLevel[],
   hidden: ReadonlySet<number>,
   maxPolygons = MAX_REGION_POLYGONS,
 ): ContourPolygonPick {
-  const polygons: ContourPolygon[] = [];
-  let skipped = 0;
+  const candidates: { value: number; polyline: [number, number][]; area: number }[] = [];
   levels.forEach((level, li) => {
     if (hidden.has(li)) return;
     level.polylines.forEach((polyline, pi) => {
-      if (!level.closed[pi]) return;
-      const points = contourToPolygon(polyline);
-      if (!points) return;
-      if (polygons.length >= maxPolygons) {
-        skipped++;
-        return;
-      }
-      polygons.push({ value: level.value, points });
+      if (!level.closed[pi] || polyline.length < MIN_POLYGON_VERTICES) return;
+      candidates.push({ value: level.value, polyline, area: ringArea(polyline) });
     });
   });
-  return { polygons, skipped };
+  candidates.sort((a, b) => b.value - a.value || b.area - a.area);
+  const polygons: ContourPolygon[] = [];
+  for (const candidate of candidates.slice(0, Math.max(0, maxPolygons))) {
+    const points = contourToPolygon(candidate.polyline);
+    if (points) polygons.push({ value: candidate.value, points });
+  }
+  return { polygons, skipped: candidates.length - polygons.length };
 }

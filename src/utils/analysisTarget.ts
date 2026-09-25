@@ -32,6 +32,28 @@ export function rgbMeasurePath(input: RgbMeasureInput): string | null {
   return input.composite && input.fileRgbView ? input.filePath : null;
 }
 
+export interface DetectedStarsInput {
+  compositeOnScreen: boolean;
+  measuresFilePlanes: boolean;
+}
+
+export function detectedStarsOnMeasuredImage(input: DetectedStarsInput): boolean {
+  return !input.compositeOnScreen || input.measuresFilePlanes;
+}
+
+export interface MeasureKeyInput {
+  path: string | null;
+  composite: boolean;
+  processedFitsPath: string | null;
+  processedVersion: number;
+}
+
+export function analysisMeasureKey(input: MeasureKeyInput): string | null {
+  if (!input.path) return null;
+  if (input.composite || input.processedFitsPath !== input.path) return input.path;
+  return `${input.path}@${input.processedVersion}`;
+}
+
 export interface MeasurementSourceInput {
   measuresComposite: boolean;
   compositeOnScreen: boolean;

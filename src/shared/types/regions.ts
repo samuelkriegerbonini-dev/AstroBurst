@@ -86,6 +86,15 @@ export interface RegionStats {
   sum_err?: number | null;
   weighted_mean?: number | null;
   calibrated?: RegionCalibrated | null;
+  sky?: RegionSky | null;
+}
+
+export interface RegionSky {
+  ra: number | null;
+  dec: number | null;
+  pa_sky_deg: number | null;
+  area_arcsec2: number | null;
+  geometric_area_arcsec2: number | null;
 }
 
 export type RegionFluxSource = "net" | "sum";

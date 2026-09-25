@@ -136,5 +136,6 @@ export interface PixelTableResult {
   dq_table: string | null;
   unit: string | null;
   stats: PixelTableStats;
+  err_stats: PixelTableStats | null;
   elapsed_ms: number;
 }

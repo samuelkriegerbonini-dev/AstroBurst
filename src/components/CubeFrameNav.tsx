@@ -5,12 +5,16 @@ import {
   PLAYBACK_SPEEDS,
   clampFrame,
   cubeFrameOutputPaths,
+  drainFrameRequest,
+  formatFrameLabel,
+  frameLoadPlan,
   isPlaybackSpeed,
   mergeFrameRequest,
   nextPlaybackFrame,
   playbackIntervalMs,
   playbackStartFrame,
   type FrameLoadRequest,
+  type FramePublishGate,
   type PlaybackSpeed,
 } from "../utils/cubeNavigation";
 
@@ -21,26 +25,34 @@ const DEFAULT_SPEED: PlaybackSpeed = "normal";
 
 type FrameKind = "transient" | "committed";
 
+function publishAllowed(gate: FramePublishGate | undefined): boolean {
+  return gate?.isCurrent() ?? true;
+}
+
 interface CubeFrameNavProps {
   filePath: string;
   totalFrames: number;
   frame: number;
+  requestSeq: number;
   onFrameRequest: (idx: number) => void;
   frameLabel?: string | null;
   loop?: boolean;
   onLoopChange?: (loop: boolean) => void;
   onFrameChange?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
+  publishGate?: FramePublishGate;
 }
 
 function CubeFrameNavInner({
   filePath,
   totalFrames,
   frame,
+  requestSeq,
   onFrameRequest,
   frameLabel = null,
   loop,
   onLoopChange,
   onFrameChange,
+  publishGate,
 }: CubeFrameNavProps) {
   const speedId = useId();
   const [dragValue, setDragValue] = useState<number | null>(null);
@@ -61,6 +73,8 @@ function CubeFrameNavInner({
   onFrameChangeRef.current = onFrameChange;
   const onFrameRequestRef = useRef(onFrameRequest);
   onFrameRequestRef.current = onFrameRequest;
+  const publishGateRef = useRef(publishGate);
+  publishGateRef.current = publishGate;
 
   const playingRef = useRef(false);
   const seqRef = useRef(0);
@@ -120,7 +134,7 @@ function CubeFrameNavInner({
       const png = pngCacheRef.current.get(idx);
       const fits = fitsCacheRef.current.get(idx);
       if (png && (!withFits || fits)) {
-        onFrameChangeRef.current?.(png, idx, withFits ? fits : undefined);
+        if (publishAllowed(publishGateRef.current)) onFrameChangeRef.current?.(png, idx, withFits ? fits : undefined);
         return;
       }
       if (loadingRef.current) {
@@ -137,7 +151,9 @@ function CubeFrameNavInner({
         if (seqRef.current !== seq) return;
         pngCacheRef.current.set(idx, result.output_path);
         if (result.fits_path) fitsCacheRef.current.set(idx, result.fits_path);
-        if (frameRef.current === idx) onFrameChangeRef.current?.(result.output_path, idx, result.fits_path ?? undefined);
+        if (frameRef.current === idx && publishAllowed(publishGateRef.current)) {
+          onFrameChangeRef.current?.(result.output_path, idx, result.fits_path ?? undefined);
+        }
       } catch (e) {
         if (seqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
         console.error("Frame load failed:", e);
@@ -145,7 +161,7 @@ function CubeFrameNavInner({
         if (seqRef.current === seq) {
           loadingRef.current = false;
           setLoading(false);
-          const pending = pendingRef.current;
+          const pending = drainFrameRequest(pendingRef.current, frameRef.current);
           pendingRef.current = null;
           if (pending) loadFrameRef.current(pending.idx, pending.withFits);
         }
@@ -159,7 +175,7 @@ function CubeFrameNavInner({
     if (fitsTimerRef.current) clearTimeout(fitsTimerRef.current);
     fitsTimerRef.current = setTimeout(() => {
       fitsTimerRef.current = null;
-      if (frameRef.current === idx) loadFrameRef.current(idx, true);
+      if (frameRef.current === idx && publishAllowed(publishGateRef.current)) loadFrameRef.current(idx, true);
     }, FITS_COMMIT_DEBOUNCE_MS);
   }, []);
 
@@ -170,19 +186,25 @@ function CubeFrameNavInner({
       skipNextLoadRef.current = false;
       return;
     }
+    const idx = frameRef.current;
+    publishGateRef.current?.commit();
     if (fitsTimerRef.current) {
       clearTimeout(fitsTimerRef.current);
       fitsTimerRef.current = null;
     }
-    loadFrameRef.current(frame, false);
-    if (kind === "committed") scheduleFits(frame);
-  }, [frame, filePath, scheduleFits]);
+    const plan = frameLoadPlan(kind === "committed", fitsCacheRef.current.has(idx));
+    loadFrameRef.current(idx, plan.withFits);
+    if (plan.deferFits) scheduleFits(idx);
+  }, [requestSeq, filePath, scheduleFits]);
 
   const requestFrame = useCallback(
     (idx: number, kind: FrameKind) => {
       const target = clampFrame(idx, totalFrames);
       if (target === frameRef.current) {
-        if (kind === "committed") scheduleFits(target);
+        if (kind === "committed") {
+          publishGateRef.current?.commit();
+          scheduleFits(target);
+        }
         return;
       }
       pendingKindRef.current = kind;
@@ -287,7 +309,7 @@ function CubeFrameNavInner({
   if (totalFrames <= 1) return null;
 
   const shown = dragValue ?? frame;
-  const headerText = dragValue === null && frameLabel ? frameLabel : `${shown + 1} / ${totalFrames}`;
+  const headerText = dragValue === null && frameLabel ? frameLabel : formatFrameLabel(shown, totalFrames, null, "");
 
   return (
     <div className="bg-zinc-950/50 rounded-lg border border-purple-500/20 p-3">

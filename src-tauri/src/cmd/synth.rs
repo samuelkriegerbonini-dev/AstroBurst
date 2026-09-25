@@ -14,8 +14,26 @@ pub struct GenerateSynthArgs {
     pub ground_truth_path: Option<String>,
 }
 
+fn validate_output_paths(args: &GenerateSynthArgs) -> anyhow::Result<()> {
+    let catalog = args.catalog_path.as_deref().filter(|_| args.save_catalog);
+    let truth = args.ground_truth_path.as_deref().filter(|_| args.save_ground_truth);
+    if catalog == Some(args.output_path.as_str()) {
+        anyhow::bail!("Catalog path {} is the same as the output path; choose a different catalog file name.", args.output_path);
+    }
+    if truth == Some(args.output_path.as_str()) {
+        anyhow::bail!("Ground truth path {} is the same as the output path; choose a different ground truth file name.", args.output_path);
+    }
+    if let (Some(catalog), Some(truth)) = (catalog, truth) {
+        if catalog == truth {
+            anyhow::bail!("Catalog path and ground truth path are both {}; choose different file names.", catalog);
+        }
+    }
+    Ok(())
+}
+
 #[command]
 pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, String> {
+    validate_output_paths(&args).map_err(|e| format!("{:#}", e))?;
     let config = args.config;
     let header = pipeline::frame_header(&config.noise, 0, config.cadence_seconds);
     let noise = config.noise.clone();
@@ -157,5 +175,57 @@ mod tests {
             assert_eq!(header.get_f64("GAIN"), Some(1.5));
             assert_eq!(header.get("BUNIT").map(|v| v.trim().trim_matches('\'').trim()), Some("ADU"));
         }
+    }
+
+    #[tokio::test]
+    async fn a_catalog_path_equal_to_the_output_path_is_refused_and_the_image_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("field1").to_str().unwrap().to_string();
+        let args = GenerateSynthArgs {
+            config: small_config(),
+            output_path: out.clone(),
+            save_catalog: true,
+            catalog_path: Some(out.clone()),
+            save_ground_truth: false,
+            ground_truth_path: None,
+        };
+        let err = generate_synth_cmd(args).await.expect_err("a catalog path equal to the output path must be refused");
+        assert!(err.contains("Catalog path"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "nothing may be written when the paths collide");
+    }
+
+    #[tokio::test]
+    async fn a_ground_truth_path_equal_to_the_output_path_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("field1.fits").to_str().unwrap().to_string();
+        let args = GenerateSynthArgs {
+            config: small_config(),
+            output_path: out.clone(),
+            save_catalog: false,
+            catalog_path: None,
+            save_ground_truth: true,
+            ground_truth_path: Some(out.clone()),
+        };
+        let err = generate_synth_cmd(args).await.expect_err("a ground truth path equal to the output path must be refused");
+        assert!(err.contains("Ground truth path"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "nothing may be written when the paths collide");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_path_equal_to_the_ground_truth_path_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("field1.fits").to_str().unwrap().to_string();
+        let shared = dir.path().join("field1_side").to_str().unwrap().to_string();
+        let args = GenerateSynthArgs {
+            config: small_config(),
+            output_path: out.clone(),
+            save_catalog: true,
+            catalog_path: Some(shared.clone()),
+            save_ground_truth: true,
+            ground_truth_path: Some(shared.clone()),
+        };
+        let err = generate_synth_cmd(args).await.expect_err("one path for catalog and ground truth must be refused");
+        assert!(err.contains("both"), "{err}");
+        assert!(!std::path::Path::new(&out).exists() && !std::path::Path::new(&shared).exists(), "nothing may be written when the paths collide");
     }
 }

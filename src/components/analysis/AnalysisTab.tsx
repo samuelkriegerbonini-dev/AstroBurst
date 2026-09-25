@@ -5,11 +5,17 @@ import MeasurementBadge from "./MeasurementBadge";
 import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
-import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
-import { formatFrameLabel, frameAxisValue } from "../../utils/cubeNavigation";
+import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext } from "../../context/PreviewContext";
+import { frameRecordLabel } from "../../utils/cubeNavigation";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
-import { cpuStfRenderAllowed, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
+import {
+  analysisMeasureKey,
+  cpuStfRenderAllowed,
+  detectedStarsOnMeasuredImage,
+  histogramStfLock,
+  rgbStfPanelMode,
+} from "../../utils/analysisTarget";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
 import type { CubeResult } from "./SpectroscopyPanel";
@@ -66,6 +72,7 @@ function AnalysisTabInner({
   const { histData, stfParams, setStfParams } = useHistContext();
   const { isCube, cubeDims } = useCubeContext();
   const { publishProcessed, setStfPreviewUrl } = useRenderActions();
+  const { processed, processedVersion } = useRenderContext();
   const { rawPixels, rawPixelsLoading, rgbRawPixels, rgbRawPixelsLoading } = useRawPixelsContext();
   const { display } = useDisplayContext();
 
@@ -78,6 +85,12 @@ function AnalysisTabInner({
   const compositeOnScreen = target.composite;
   const rgbPath = target.rgbPath;
   const regionKey = useRegionKey();
+  const measureKey = analysisMeasureKey({
+    path: effectivePath,
+    composite: compositeOnScreen,
+    processedFitsPath: processed?.fitsPath ?? null,
+    processedVersion,
+  });
   const stfLock = histogramStfLock({
     stretch: display.stretch,
     compositeOnScreen,
@@ -202,6 +215,7 @@ function AnalysisTabInner({
         label: result.label,
         kind: "cube",
         inputPath: filePath,
+        frameIndex: result.frameIndex,
       });
     },
     [publishProcessed, fileKey, filePath],
@@ -214,11 +228,9 @@ function AnalysisTabInner({
       try {
         const url = await getPreviewUrl(outputPath);
         if (frameSeqRef.current !== seq) return;
-        const total = cubeDims?.frames ?? 0;
-        const axis = cubeDims?.spectral_axis ?? null;
-        const label = formatFrameLabel(frameIndex, total, frameAxisValue(frameIndex, axis?.values), axis?.unit ?? "");
+        const label = frameRecordLabel(frameIndex, cubeDims?.frames ?? 0, cubeDims?.spectral_axis ?? null);
         const dimensions: [number, number] | null = fitsPath && cubeDims ? [cubeDims.width, cubeDims.height] : null;
-        publishCube({ label, previewUrl: url, fitsPath: fitsPath ?? null, dimensions });
+        publishCube({ label, previewUrl: url, fitsPath: fitsPath ?? null, dimensions, frameIndex });
       } catch (e) {
         console.error("Frame preview failed:", e);
       }
@@ -239,6 +251,8 @@ function AnalysisTabInner({
   );
 
   const stars = starResult?.stars || EMPTY_STARS;
+  const starsOnMeasuredImage = detectedStarsOnMeasuredImage({ compositeOnScreen, measuresFilePlanes: rgbPath !== null });
+  const tableStars = starsOnMeasuredImage ? stars : EMPTY_STARS;
   const rgbStfMode = rgbStfPanelMode({
     compositeOnScreen,
     hasRgbRawPixels: rgbRawPixels !== null,
@@ -296,23 +310,35 @@ function AnalysisTabInner({
 
         <PhotometryPanel filePath={effectivePath} />
 
-        <PhotometryTablePanel filePath={effectivePath} overlayKey={regionKey} stars={stars} />
+        <PhotometryTablePanel
+          filePath={effectivePath}
+          overlayKey={regionKey}
+          stars={tableStars}
+          starsElsewhere={!starsOnMeasuredImage && stars.length > 0}
+          measureKey={measureKey}
+        />
 
         <TimeSeriesPanel filePath={regionKey} />
 
         <CatalogPanel filePath={regionKey} />
 
-        <TargetsPanel filePath={regionKey} />
+        <TargetsPanel filePath={regionKey} measurePath={effectivePath} />
 
         <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={target.rgbPath} />
 
-        <PixelTablePanel filePath={effectivePath} />
+        <PixelTablePanel filePath={effectivePath} measureKey={measureKey} />
 
         <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
 
         <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
 
-        <ContourPanel filePath={effectivePath} overlayKey={regionKey} imageWidth={targetWidth} imageHeight={targetHeight} />
+        <ContourPanel
+          filePath={effectivePath}
+          overlayKey={regionKey}
+          imageWidth={targetWidth}
+          imageHeight={targetHeight}
+          measureKey={measureKey}
+        />
 
         {effectivePath && !isCube && (targetWidth ?? 0) >= 64 && (
           <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />

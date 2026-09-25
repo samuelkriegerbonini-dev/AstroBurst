@@ -1,4 +1,10 @@
-import type { GaussianFitResult, LineMeasurement, SpectralAxisInfo, SpectrumSource } from "../shared/types/spectral";
+import type {
+  CorrectionFrame,
+  GaussianFitResult,
+  LineMeasurement,
+  SpectralAxisInfo,
+  SpectrumSource,
+} from "../shared/types/spectral";
 import { airToVacuumUm } from "./spectralAxis";
 import { axisValueToPixel, channelAxisValue, type PlotMapping } from "./spectrumRange";
 
@@ -46,9 +52,15 @@ const GENERAL_DIGITS = 4;
 const EXPONENT_BELOW = 1e-3;
 const EXPONENT_ABOVE = 1e6;
 const AXIS_DECIMALS = 5;
+const MAX_AXIS_DECIMALS = 10;
 const VELOCITY_DECIMALS = 1;
+const UNDECLARED_AXIS_FRAME = "axis frame not declared (no SPECSYS)";
 
 export const CSV_COLUMNS = [
+  "source_kind",
+  "source_x",
+  "source_y",
+  "source_region",
   "z0",
   "z1",
   "n_channels",
@@ -75,6 +87,7 @@ export const CSV_COLUMNS = [
   "velocity_rest_um",
   "velocity_convention",
   "velocity_shift_applied_kms",
+  "velocity_axis_frame",
   "fit_amplitude",
   "fit_centre",
   "fit_sigma",
@@ -98,8 +111,13 @@ export function formatQuantity(value: number | null | undefined, digits: number 
   return value.toPrecision(digits);
 }
 
-export function formatAxisQuantity(value: number | null | undefined): string {
-  return finite(value) ? value.toFixed(AXIS_DECIMALS) : UNAVAILABLE;
+export function formatAxisQuantity(value: number | null | undefined, resolution?: number | null): string {
+  if (!finite(value)) return UNAVAILABLE;
+  const decimals =
+    finite(resolution) && resolution > 0
+      ? Math.min(MAX_AXIS_DECIMALS, Math.max(AXIS_DECIMALS, 1 - Math.floor(Math.log10(resolution))))
+      : AXIS_DECIMALS;
+  return value.toFixed(decimals);
 }
 
 export function formatVelocity(value: number | null | undefined): string {
@@ -142,6 +160,21 @@ export function measurementAxisValues(axis: SpectralAxisInfo | null): number[] |
 
 export function spectrumSourceKey(source: SpectrumSource, view: string): string {
   return `${source.kind}:${view}:${JSON.stringify(source)}`;
+}
+
+export function spectrumSourceLabel(source: SpectrumSource): string {
+  if (source.kind === "pixel") return `pixel (${source.x}, ${source.y})`;
+  return `${source.shape.shape} region${source.background ? " with background" : ""}`;
+}
+
+export function runForSource<T extends { key: string }>(run: T | null, source: SpectrumSource | null, view: string): T | null {
+  return run && source && spectrumSourceKey(source, view) === run.key ? run : null;
+}
+
+export function momentVelocityFrameNote(specsys: string | null, correction: CorrectionFrame, lineShiftKms: number | null): string {
+  const frame = specsys ? `header frame ${specsys}` : "header frame (no SPECSYS)";
+  if (correction === "none" || !finite(lineShiftKms) || lineShiftKms === 0) return `M1 in the ${frame}`;
+  return `M1 in the ${frame}, without the ${correction} shift of ${formatVelocity(lineShiftKms)} that the line velocity includes`;
 }
 
 export function measurementSpan(m: LineMeasurement): { first: number; last: number } {
@@ -218,8 +251,8 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
     { label: "Flux", value: `${formatQuantity(m.flux)} ${PLUS_MINUS} ${formatQuantity(m.flux_err)} ${m.flux_unit}` },
     { label: "Equivalent width", value: `${formatQuantity(m.equivalent_width)} ${unit}` },
     { label: "Centroid", value: withVelocity(`${formatAxisQuantity(m.centroid)} ${unit}`, v?.centroid_kms, v !== null) },
-    { label: "Sigma", value: withVelocity(`${formatAxisQuantity(m.sigma)} ${unit}`, v?.sigma_kms, v !== null) },
-    { label: "FWHM", value: withVelocity(`${formatAxisQuantity(m.fwhm)} ${unit}`, v?.fwhm_kms, v !== null) },
+    { label: "Sigma", value: withVelocity(`${formatQuantity(m.sigma)} ${unit}`, v?.sigma_kms, v !== null) },
+    { label: "FWHM", value: withVelocity(`${formatQuantity(m.fwhm)} ${unit}`, v?.fwhm_kms, v !== null) },
     { label: "Peak", value: `${formatQuantity(m.peak)} at ch ${m.peak_channel}` },
     { label: "SNR", value: finite(m.snr) ? m.snr.toFixed(1) : UNAVAILABLE },
     {
@@ -228,16 +261,18 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
     },
   ];
   if (v) {
+    const frame = v.axis_frame ? `axis frame ${v.axis_frame}` : UNDECLARED_AXIS_FRAME;
+    const shift = v.shift_applied_kms !== 0 ? `, shift ${formatVelocity(v.shift_applied_kms)}` : "";
     rows.push({
       label: "Velocity frame",
-      value: `${v.convention}, rest ${formatAxisQuantity(v.rest_um)} um${v.shift_applied_kms !== 0 ? `, shift ${formatVelocity(v.shift_applied_kms)}` : ", topocentric"}`,
+      value: `${v.convention}, rest ${formatAxisQuantity(v.rest_um)} um, ${frame}${shift}`,
     });
   }
   if (m.fit) {
     const f = m.fit;
     rows.push({
       label: "Gaussian fit",
-      value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(f.centre)} ${PLUS_MINUS} ${formatAxisQuantity(f.centre_err)}, s ${formatAxisQuantity(f.sigma)} ${PLUS_MINUS} ${formatAxisQuantity(f.sigma_err)} ${unit}, chi2/dof ${formatQuantity(f.chi2)}/${f.dof}, ${f.iterations} it`,
+      value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(f.centre, f.centre_err)} ${PLUS_MINUS} ${formatQuantity(f.centre_err)}, s ${formatQuantity(f.sigma)} ${PLUS_MINUS} ${formatQuantity(f.sigma_err)} ${unit}, chi2/dof ${formatQuantity(f.chi2)}/${f.dof}, ${f.iterations} it`,
     });
   }
   return rows;
@@ -254,7 +289,12 @@ function csvCell(value: unknown): string {
 export function lineMeasurementCsv(m: LineMeasurement): string {
   const v = m.velocity;
   const f = m.fit;
+  const s = m.source;
   const values: unknown[] = [
+    s.kind,
+    s.kind === "pixel" ? s.x : null,
+    s.kind === "pixel" ? s.y : null,
+    s.kind === "region" ? JSON.stringify({ shape: s.shape, background: s.background }) : null,
     m.z0,
     m.z1,
     m.n_channels,
@@ -281,6 +321,7 @@ export function lineMeasurementCsv(m: LineMeasurement): string {
     v?.rest_um ?? null,
     v?.convention ?? null,
     v?.shift_applied_kms ?? null,
+    v?.axis_frame ?? null,
     f?.amplitude ?? null,
     f?.centre ?? null,
     f?.sigma ?? null,

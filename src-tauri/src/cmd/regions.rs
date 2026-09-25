@@ -9,12 +9,11 @@ use ndarray::Array2;
 use crate::cmd::analysis::{resolve_dq_mask, DqMask, HEADER_PROCESSING_PROVENANCE, RES_PHOTCAL};
 use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{position_angle_deg, WcsTransform};
 use crate::core::imaging::region::{
-    ellipse_geometry, elliptical_profile, encircled_radius_from_bins, image_to_sky_angle, line_cut,
-    petrosian_radius, radial_profile, region_data_stats, wcs_is_east_right, wcs_north_angle_deg, EllipticalBin,
-    EllipticalProfile, PhysicalMap, RegionShape, RegionStats, RegionSystem, SigmaClip, MAX_SB_BIN_WIDTH,
-    MIN_SB_BIN_WIDTH, PETROSIAN_ETA,
+    ellipse_geometry, elliptical_profile, encircled_radius_from_bins, line_cut, major_axis_angle_deg,
+    petrosian_radius, radial_profile, region_data_stats, EllipticalBin, EllipticalProfile, PhysicalMap,
+    RegionShape, RegionStats, RegionSystem, SigmaClip, MAX_SB_BIN_WIDTH, MIN_SB_BIN_WIDTH, PETROSIAN_ETA,
 };
 use crate::core::imaging::region_file::{parse_reg_with_physical, write_reg_with_physical, Region};
 use crate::core::metadata::photcal::{missing_calibration_reason, FluxConvention, PhotCal, AB_MAG_ZERO_POINT};
@@ -23,8 +22,8 @@ use crate::types::constants::{
     RES_BINS, RES_CALIBRATED, RES_CALIBRATION_WARNINGS, RES_DEC, RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_ERROR,
     RES_HAS_WCS, RES_ID, RES_LABEL, RES_MAG_AB_CUMULATIVE, RES_MASKED, RES_MU_AB, RES_MU_ERR, RES_NOTES,
     RES_PETROSIAN_RADIUS_PX, RES_PIXEL_AREA_ARCSEC2, RES_PIXEL_SCALE_ARCSEC, RES_R50_PX, RES_R80_PX, RES_R90_PX,
-    RES_RA, RES_REGIONS, RES_REG_TEXT, RES_SKY_PA_DEG, RES_SMA_ARCSEC, RES_STATS, RES_SYSTEM, RES_TOTAL_MAG_AB,
-    RES_WARNINGS,
+    RES_RA, RES_REGIONS, RES_REG_TEXT, RES_SKY, RES_SKY_PA_DEG, RES_SMA_ARCSEC, RES_STATS, RES_SYSTEM,
+    RES_TOTAL_MAG_AB, RES_WARNINGS,
 };
 use crate::types::header::HduHeader;
 
@@ -33,7 +32,7 @@ const MAX_REG_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SIGMA_CLIP_ITERS: usize = 100;
 const PIXEL_SCALE_ANISOTROPY_TOLERANCE: f64 = 0.01;
 const ARCSEC_PER_DEGREE: f64 = 3600.0;
-const SKY_ANGLE_TO_POSITION_ANGLE_DEG: f64 = 90.0;
+const POSITION_ANGLE_PROBE_PX: f64 = 1.0;
 const POSITION_ANGLE_PERIOD_DEG: f64 = 180.0;
 const FLUX_SOURCE_NET: &str = "net";
 const FLUX_SOURCE_SUM: &str = "sum";
@@ -151,8 +150,9 @@ pub(crate) fn entry_calibration(entry: &ImageEntry) -> EntryCalibration {
                 None
             }
             None => {
+                warnings.extend(cal.jansky_unavailable_reason());
                 warnings.extend(cal.warnings.iter().cloned());
-                Some(cal)
+                cal.converts_to_jansky().then_some(cal)
             }
         }
     });
@@ -184,13 +184,15 @@ fn sky_centre(shape: &RegionShape, wcs: Option<&WcsTransform>) -> (Option<f64>, 
 }
 
 fn sky_position_angle_deg(shape: &RegionShape, wcs: Option<&WcsTransform>) -> Option<f64> {
-    let angle = match shape {
-        RegionShape::Ellipse { angle, .. } | RegionShape::Box { angle, .. } => *angle,
-        _ => return None,
-    };
     let wcs = wcs?;
-    let sky = image_to_sky_angle(angle, wcs_north_angle_deg(wcs), wcs_is_east_right(wcs));
-    let pa = (sky + SKY_ANGLE_TO_POSITION_ANGLE_DEG).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
+    let (sin, cos) = major_axis_angle_deg(shape)?.to_radians().sin_cos();
+    let (x, y) = shape.centre();
+    let from = wcs.pixel_to_world(x, y);
+    let to = wcs.pixel_to_world(x + POSITION_ANGLE_PROBE_PX * cos, y + POSITION_ANGLE_PROBE_PX * sin);
+    if ![from.ra, from.dec, to.ra, to.dec].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let pa = position_angle_deg(from.ra, from.dec, to.ra, to.dec).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
     if !pa.is_finite() {
         return None;
     }
@@ -202,13 +204,44 @@ fn surface_brightness_mag_arcsec2(flux_jy: f64, area_arcsec2: Option<f64>) -> Op
     (flux_jy > 0.0).then(|| -2.5 * (flux_jy / area).log10() + AB_MAG_ZERO_POINT)
 }
 
+struct RegionSky {
+    ra: Option<f64>,
+    dec: Option<f64>,
+    pa_sky_deg: Option<f64>,
+    area_arcsec2: Option<f64>,
+    geometric_area_arcsec2: Option<f64>,
+}
+
+fn region_sky(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibration) -> RegionSky {
+    let (ra, dec) = sky_centre(shape, cal.wcs.as_ref());
+    RegionSky {
+        ra,
+        dec,
+        pa_sky_deg: sky_position_angle_deg(shape, cal.wcs.as_ref()),
+        area_arcsec2: cal.pixel_area_arcsec2.map(|a| stats.count as f64 * a),
+        geometric_area_arcsec2: cal.pixel_area_arcsec2.map(|a| stats.area * a),
+    }
+}
+
+fn region_sky_json(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibration) -> Value {
+    if cal.wcs.is_none() && cal.pixel_area_arcsec2.is_none() {
+        return Value::Null;
+    }
+    let sky = region_sky(stats, shape, cal);
+    json!({
+        RES_RA: sky.ra,
+        RES_DEC: sky.dec,
+        RES_PA_SKY_DEG: sky.pa_sky_deg,
+        RES_AREA_ARCSEC2: sky.area_arcsec2,
+        RES_GEOMETRIC_AREA_ARCSEC2: sky.geometric_area_arcsec2,
+    })
+}
+
 pub(crate) fn calibrated_flux_json(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibration) -> Value {
     let Some(photcal) = &cal.photcal else { return Value::Null };
     let flux_native = stats.net_sum.unwrap_or(stats.sum);
     let Some(c) = photcal.calibrate(flux_native, stats.sum_err) else { return Value::Null };
-    let area_arcsec2 = cal.pixel_area_arcsec2.map(|a| stats.count as f64 * a);
-    let geometric_area_arcsec2 = cal.pixel_area_arcsec2.map(|a| stats.area * a);
-    let (ra, dec) = sky_centre(shape, cal.wcs.as_ref());
+    let sky = region_sky(stats, shape, cal);
     json!({
         RES_FLUX_SOURCE: if stats.net_sum.is_some() { FLUX_SOURCE_NET } else { FLUX_SOURCE_SUM },
         RES_FLUX_NATIVE: flux_native,
@@ -218,12 +251,12 @@ pub(crate) fn calibrated_flux_json(stats: &RegionStats, shape: &RegionShape, cal
         RES_MAG_AB: c.mag_ab,
         RES_MAG_AB_ERR: c.mag_ab_err,
         RES_ST_MAG: c.st_mag,
-        RES_AREA_ARCSEC2: area_arcsec2,
-        RES_GEOMETRIC_AREA_ARCSEC2: geometric_area_arcsec2,
-        RES_SB_MAG_ARCSEC2: surface_brightness_mag_arcsec2(c.flux_jy, area_arcsec2),
-        RES_RA: ra,
-        RES_DEC: dec,
-        RES_PA_SKY_DEG: sky_position_angle_deg(shape, cal.wcs.as_ref()),
+        RES_AREA_ARCSEC2: sky.area_arcsec2,
+        RES_GEOMETRIC_AREA_ARCSEC2: sky.geometric_area_arcsec2,
+        RES_SB_MAG_ARCSEC2: surface_brightness_mag_arcsec2(c.flux_jy, sky.area_arcsec2),
+        RES_RA: sky.ra,
+        RES_DEC: sky.dec,
+        RES_PA_SKY_DEG: sky.pa_sky_deg,
     })
 }
 
@@ -261,6 +294,7 @@ pub(crate) fn stats_for_entry(
                     let mut value = serde_json::to_value(&stats).map_err(|e| e.to_string())?;
                     if let Some(obj) = value.as_object_mut() {
                         obj.insert(RES_CALIBRATED.to_string(), calibrated_flux_json(&stats, &req.shape, cal));
+                        obj.insert(RES_SKY.to_string(), region_sky_json(&stats, &req.shape, cal));
                     }
                     Ok(value)
                 });
@@ -372,12 +406,9 @@ pub async fn line_cut_cmd(
 }
 
 fn sb_bin_surface_brightness(bin: &EllipticalBin, photcal: Option<&PhotCal>, pixel_area: Option<f64>) -> (Option<f64>, Option<f64>) {
-    let (Some(photcal), Some(mean), Some(std)) = (photcal, bin.mean, bin.std) else { return (None, None) };
-    if bin.count == 0 {
-        return (None, None);
-    }
-    let mean_err = std / (bin.count as f64).sqrt();
-    let Some(c) = photcal.calibrate(mean, Some(mean_err)) else { return (None, None) };
+    let (Some(photcal), Some(mean)) = (photcal, bin.mean) else { return (None, None) };
+    let mean_err = bin.std.map(|std| std / (bin.count as f64).sqrt());
+    let Some(c) = photcal.calibrate(mean, mean_err) else { return (None, None) };
     let mu_ab = surface_brightness_mag_arcsec2(c.flux_jy, pixel_area);
     (mu_ab, mu_ab.and(c.mag_ab_err))
 }
@@ -423,13 +454,6 @@ pub(crate) fn sb_profile_json(
         .last()
         .and_then(|b| cal.photcal.as_ref().and_then(|p| p.calibrate(b.cumulative_sum, None)))
         .and_then(|c| c.mag_ab);
-    let major_axis = RegionShape::Ellipse {
-        x: profile.x,
-        y: profile.y,
-        rx: profile.sma_max,
-        ry: profile.sma_max * (1.0 - profile.ellipticity),
-        angle: profile.angle_deg,
-    };
     let photcal = match &cal.photcal {
         Some(photcal) => photcal_json(photcal)?,
         None => Value::Null,
@@ -443,7 +467,7 @@ pub(crate) fn sb_profile_json(
     obj.insert(RES_PETROSIAN_RADIUS_PX.to_string(), json!(petrosian_radius(&profile.bins, PETROSIAN_ETA)));
     obj.insert(RES_PIXEL_SCALE_ARCSEC.to_string(), json!(pixel_scale));
     obj.insert(RES_PIXEL_AREA_ARCSEC2.to_string(), json!(cal.pixel_area_arcsec2));
-    obj.insert(RES_SKY_PA_DEG.to_string(), json!(sky_position_angle_deg(&major_axis, cal.wcs.as_ref())));
+    obj.insert(RES_SKY_PA_DEG.to_string(), json!(sky_position_angle_deg(shape, cal.wcs.as_ref())));
     obj.insert(RES_PHOTCAL.to_string(), photcal);
     obj.insert(RES_CALIBRATION_WARNINGS.to_string(), json!(cal.warnings));
     obj.insert(RES_TOTAL_MAG_AB.to_string(), json!(total_mag_ab));
@@ -851,6 +875,9 @@ mod tests {
         for e in entries {
             let cal = &e[RES_STATS][RES_CALIBRATED];
             assert!(cal.is_object(), "{e}");
+            for key in [RES_RA, RES_DEC, RES_PA_SKY_DEG, RES_AREA_ARCSEC2, RES_GEOMETRIC_AREA_ARCSEC2] {
+                assert_eq!(e[RES_STATS][RES_SKY][key], cal[key], "{key}: {e}");
+            }
             if e[RES_ID] == "polygon" {
                 assert!(cal["pa_sky_deg"].is_null());
                 continue;
@@ -859,7 +886,7 @@ mod tests {
             assert!((cal["dec"].as_f64().unwrap() - centre.dec).abs() < 1e-9, "{e}");
         }
         let pa = entries[3][RES_STATS][RES_CALIBRATED]["pa_sky_deg"].as_f64().unwrap();
-        assert!((pa - 90.0).abs() < 1e-9, "an east-west major axis on a north-up frame has PA 90, got {pa}");
+        assert!((pa - 90.0).abs() < 1e-6, "an east-west major axis on a north-up frame has PA 90, got {pa}");
         assert!(entries[0][RES_STATS][RES_CALIBRATED]["pa_sky_deg"].is_null());
 
         let rotated = RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width: 8.0, height: 4.0, angle: 30.0 };
@@ -867,7 +894,7 @@ mod tests {
         let stats = region_data_stats(entry.arr(), &rotated, None, None, None, SigmaClip::default()).unwrap();
         let value = calibrated_flux_json(&stats, &rotated, &cal);
         let pa = value["pa_sky_deg"].as_f64().unwrap();
-        assert!((pa - 120.0).abs() < 1e-9, "a box rotated 30 deg counter-clockwise from east-west has PA 120, got {pa}");
+        assert!((pa - 120.0).abs() < 1e-6, "a box rotated 30 deg counter-clockwise from east-west has PA 120, got {pa}");
         assert_eq!(value["flux_source"], "sum");
     }
 
@@ -886,6 +913,8 @@ mod tests {
         let wcs_area = JWST_PIXAR_SR * crate::core::metadata::photcal::ARCSEC_PER_RADIAN.powi(2);
         let area = out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap();
         assert!((area - wcs_area).abs() / wcs_area < 1e-9, "refused calibration falls back to the WCS pixel area: {area} vs {wcs_area}");
+        assert!(stats[RES_SKY][RES_RA].is_f64() && stats[RES_SKY][RES_DEC].is_f64(), "{stats}");
+        assert!((stats[RES_SKY][RES_AREA_ARCSEC2].as_f64().unwrap() - 49.0 * area).abs() < 1e-12, "{stats}");
     }
 
     #[tokio::test]
@@ -902,6 +931,7 @@ mod tests {
         assert!(warnings[0].as_str().unwrap().contains("BUNIT"), "{warnings:?}");
         let stats = &out[RES_REGIONS][0][RES_STATS];
         assert!(stats.get(RES_CALIBRATED).is_some_and(Value::is_null), "{stats}");
+        assert!(stats.get(RES_SKY).is_some_and(Value::is_null), "{stats}");
         assert_eq!(stats["count"], 49);
 
         let entry = load_cached_full(&key).unwrap();
@@ -947,25 +977,36 @@ mod tests {
 
     const SB_DISC_VALUE: f32 = 3.0;
     const SB_DISC_RADIUS: f64 = 10.0;
-    const SB_PIXAR_A2: f64 = 0.0009;
+    const SB_DISC_FLOOR: f32 = -0.01;
+    const SB_PIXEL_SCALE_ARCSEC: f64 = 0.03;
 
-    fn one_arcsec_pixel_sr() -> f64 {
-        (1.0f64 / 3600.0).to_radians().powi(2)
+    fn square_arcsec_sr() -> f64 {
+        (1.0f64 / ARCSEC_PER_DEGREE).to_radians().powi(2)
+    }
+
+    fn sb_north_up_cd() -> [[f64; 2]; 2] {
+        let s = SB_PIXEL_SCALE_ARCSEC / ARCSEC_PER_DEGREE;
+        [[-s, 0.0], [0.0, s]]
     }
 
     fn write_flat_sb_disc(dir: &std::path::Path) -> String {
         let arr = Array2::from_shape_fn((100, 100), |(y, x)| {
             let dx = x as f64 - DISC_CENTRE;
             let dy = y as f64 - DISC_CENTRE;
-            if dx * dx + dy * dy <= SB_DISC_RADIUS * SB_DISC_RADIUS { SB_DISC_VALUE } else { 0.0 }
+            if dx * dx + dy * dy <= SB_DISC_RADIUS * SB_DISC_RADIUS { SB_DISC_VALUE } else { SB_DISC_FLOOR }
         });
-        let mut header = header_with_cd(north_up_cd());
+        let mut header = header_with_cd(sb_north_up_cd());
         header.set("BUNIT", "MJy/sr".into());
-        header.set_f64("PIXAR_SR", one_arcsec_pixel_sr());
-        header.set_f64("PIXAR_A2", SB_PIXAR_A2);
+        header.set_f64("PIXAR_SR", square_arcsec_sr() * SB_PIXEL_SCALE_ARCSEC.powi(2));
+        header.set_f64("PIXAR_A2", SB_PIXEL_SCALE_ARCSEC.powi(2));
         let path = dir.join("sb_disc.fits");
         write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    fn axis_angle_gap_deg(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
+        d.min(POSITION_ANGLE_PERIOD_DEG - d)
     }
 
     #[tokio::test]
@@ -976,33 +1017,38 @@ mod tests {
         let out = sb_profile_cmd(key.clone(), shape, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"), "{out}");
         assert!(out[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{out}");
-        assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - SB_PIXAR_A2).abs() < 1e-15);
-        assert!((out[RES_PIXEL_SCALE_ARCSEC].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - SB_PIXEL_SCALE_ARCSEC.powi(2)).abs() < 1e-15);
+        assert!((out[RES_PIXEL_SCALE_ARCSEC].as_f64().unwrap() - SB_PIXEL_SCALE_ARCSEC).abs() < 1e-9);
         assert_eq!(out["bin_width"], 1.0);
         assert_eq!(out["ellipticity"], 0.5);
         assert_eq!(out["angle_deg"], 30.0);
         assert_eq!(out[RES_MASKED], false);
         assert!(out["background"].is_null());
 
-        let expected_mu = -2.5 * (SB_DISC_VALUE as f64 * 1e6 * one_arcsec_pixel_sr() / SB_PIXAR_A2).log10() + 8.90;
+        let expected_mu = -2.5 * (SB_DISC_VALUE as f64 * 1e6 * square_arcsec_sr()).log10() + 8.90;
+        assert!((expected_mu - 19.279_32).abs() < 1e-4, "3 MJy/sr is 19.279 mag/arcsec^2, got {expected_mu}");
         let bins = out[RES_BINS].as_array().unwrap();
         assert_eq!(bins.len(), 24);
         let mut inside = 0;
         for bin in bins {
             let sma = bin["sma"].as_f64().unwrap();
-            assert!((bin[RES_SMA_ARCSEC].as_f64().unwrap() - sma).abs() < 1e-9, "{bin}");
+            assert!((bin[RES_SMA_ARCSEC].as_f64().unwrap() - sma * SB_PIXEL_SCALE_ARCSEC).abs() < 1e-9, "{bin}");
             if bin["sma_outer"].as_f64().unwrap() <= SB_DISC_RADIUS {
                 inside += 1;
                 let mu = bin[RES_MU_AB].as_f64().unwrap();
                 assert!((mu - expected_mu).abs() < 1e-6, "sma {sma}: mu {mu} expected {expected_mu}");
-                assert_eq!(bin[RES_MU_ERR], 0.0);
+                if bin["count"] == 1 {
+                    assert!(bin[RES_MU_ERR].is_null(), "{bin}");
+                } else {
+                    assert_eq!(bin[RES_MU_ERR], 0.0, "{bin}");
+                }
                 assert!(bin[RES_MAG_AB_CUMULATIVE].as_f64().unwrap().is_finite());
             }
         }
         assert_eq!(inside, 10);
-        assert!(bins.last().unwrap()[RES_MU_AB].is_null(), "an all-zero outer bin has no surface brightness");
+        assert!(bins.last().unwrap()[RES_MU_AB].is_null(), "a negative outer bin has no surface brightness");
         assert!(bins.last().unwrap()[RES_MU_ERR].is_null());
-        assert_eq!(bins.last().unwrap()["mean"], 0.0);
+        assert!((bins.last().unwrap()["mean"].as_f64().unwrap() - SB_DISC_FLOOR as f64).abs() < 1e-9);
         assert!(out[RES_TOTAL_MAG_AB].as_f64().unwrap().is_finite());
         assert!(out[RES_R50_PX].as_f64().unwrap() > 0.0);
         assert!(out[RES_R80_PX].as_f64().unwrap() > out[RES_R50_PX].as_f64().unwrap());
@@ -1019,7 +1065,7 @@ mod tests {
         let wide = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 16.0, ry: 8.0, angle: 30.0 };
         let out = sb_profile_cmd(key.clone(), wide.clone(), Some(2.0), None, None).await.unwrap();
         let pa = out[RES_SKY_PA_DEG].as_f64().unwrap();
-        assert!((pa - 120.0).abs() < 1e-9, "major axis 30 deg from the x axis on a north-up frame has PA 120, got {pa}");
+        assert!((pa - 120.0).abs() < 1e-6, "major axis 30 deg from the x axis on a north-up frame has PA 120, got {pa}");
 
         let entry = load_cached_full(&key).unwrap();
         let cal = entry_calibration(&entry);
@@ -1029,7 +1075,7 @@ mod tests {
 
         let tall = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 8.0, ry: 16.0, angle: -60.0 };
         let swapped = sb_profile_cmd(key.clone(), tall, Some(2.0), None, None).await.unwrap();
-        assert!((swapped[RES_SKY_PA_DEG].as_f64().unwrap() - 120.0).abs() < 1e-9, "{swapped}");
+        assert!((swapped[RES_SKY_PA_DEG].as_f64().unwrap() - 120.0).abs() < 1e-6, "{swapped}");
         assert_eq!(swapped["angle_deg"], 30.0);
         assert_eq!(swapped[RES_BINS], out[RES_BINS]);
         let notes = swapped[RES_NOTES].as_array().unwrap();
@@ -1037,9 +1083,215 @@ mod tests {
 
         let annulus = RegionShape::Annulus { x: DISC_CENTRE, y: DISC_CENTRE, r_inner: 20.0, r_outer: 30.0 };
         let with_bg = sb_profile_cmd(key, circle(12.0), Some(1.0), Some(annulus), None).await.unwrap();
-        assert_eq!(with_bg["background"]["median"], 0.0);
-        assert!(with_bg[RES_SKY_PA_DEG].as_f64().unwrap().abs() - 90.0 < 1e-9);
+        assert!((with_bg["background"]["median"].as_f64().unwrap() - SB_DISC_FLOOR as f64).abs() < 1e-9, "{with_bg}");
+        assert!(with_bg[RES_SKY_PA_DEG].is_null(), "a circle has no major axis: {with_bg}");
         assert_eq!(with_bg[RES_NOTES][1], "background from annulus region");
+    }
+
+    #[tokio::test]
+    async fn region_stats_report_sky_centre_pa_and_area_on_a_wcs_only_frame_without_flux_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wcs_only.fits");
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header_with_cd(jwst_north_up_cd()))).unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let ellipse = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 6.0, ry: 3.0, angle: 0.0 };
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0)), req("e", ellipse)], None, None, None)
+            .await
+            .unwrap();
+        assert!(out[RES_PHOTCAL].is_null(), "{out}");
+        let pixel_area = out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap();
+        let expected_area = JWST_PIXAR_SR * crate::core::metadata::photcal::ARCSEC_PER_RADIAN.powi(2);
+        assert!((pixel_area - expected_area).abs() / expected_area < 1e-9, "{pixel_area} vs {expected_area}");
+
+        let centre = entry_wcs(&load_cached_full(&key).unwrap()).unwrap().pixel_to_world(DISC_CENTRE, DISC_CENTRE);
+        let r4 = &out[RES_REGIONS][0][RES_STATS];
+        assert!(r4[RES_CALIBRATED].is_null(), "{r4}");
+        let sky = &r4[RES_SKY];
+        assert!((sky[RES_RA].as_f64().unwrap() - centre.ra).abs() < 1e-9, "{sky}");
+        assert!((sky[RES_DEC].as_f64().unwrap() - centre.dec).abs() < 1e-9, "{sky}");
+        assert!(sky[RES_PA_SKY_DEG].is_null(), "{sky}");
+        assert!((sky[RES_AREA_ARCSEC2].as_f64().unwrap() - 49.0 * pixel_area).abs() < 1e-12, "{sky}");
+        let geometric = std::f64::consts::PI * 16.0 * pixel_area;
+        assert!((sky[RES_GEOMETRIC_AREA_ARCSEC2].as_f64().unwrap() - geometric).abs() < 1e-12, "{sky}");
+
+        let pa = out[RES_REGIONS][1][RES_STATS][RES_SKY][RES_PA_SKY_DEG].as_f64().unwrap();
+        assert!((pa - 90.0).abs() < 1e-6, "an east-west ellipse on a north-up frame has PA 90, got {pa}");
+    }
+
+    #[tokio::test]
+    async fn region_position_angle_follows_the_major_axis_of_tall_ellipses_and_boxes_like_the_sb_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_flat_sb_disc(dir.path());
+        let entry = load_cached_full(&key).unwrap();
+        let cal = entry_calibration(&entry);
+        let region_pa = |shape: &RegionShape| {
+            let stats = region_data_stats(entry.arr(), shape, None, None, None, SigmaClip::default()).unwrap();
+            calibrated_flux_json(&stats, shape, &cal)[RES_PA_SKY_DEG].as_f64().unwrap()
+        };
+        let ellipse = |rx: f64, ry: f64, angle: f64| RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx, ry, angle };
+        let tall_ellipses = [
+            (ellipse(8.0, 16.0, -60.0), 120.0),
+            (ellipse(8.0, 16.0, 300.0), 120.0),
+            (ellipse(3.0, 8.0, 0.0), 0.0),
+        ];
+        for (tall, expected) in tall_ellipses {
+            let pa = region_pa(&tall);
+            assert!(axis_angle_gap_deg(pa, expected) < 1e-6, "{tall:?}: major-axis PA {expected}, got {pa}");
+            let profile = sb_profile_cmd(key.clone(), tall.clone(), Some(2.0), None, None).await.unwrap();
+            assert_eq!(profile[RES_SKY_PA_DEG].as_f64().unwrap(), pa, "{tall:?}");
+        }
+        let boxed = |width: f64, height: f64, angle: f64| RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width, height, angle };
+        let boxes = [(boxed(4.0, 8.0, 0.0), 0.0), (boxed(8.0, 4.0, 30.0), 120.0), (boxed(4.0, 8.0, -60.0), 120.0)];
+        for (shape, expected) in boxes {
+            let pa = region_pa(&shape);
+            assert!(axis_angle_gap_deg(pa, expected) < 1e-6, "{shape:?}: major-axis PA {expected}, got {pa}");
+        }
+    }
+
+    #[tokio::test]
+    async fn position_angles_on_galactic_and_ecliptic_images_are_measured_from_equatorial_north() {
+        use crate::core::astrometry::frames::{ecliptic_j2000_to_icrs, galactic_to_icrs};
+        let dir = tempfile::tempdir().unwrap();
+        let reference_pixel = 49.5;
+        let along_x = RegionShape::Ellipse { x: reference_pixel, y: reference_pixel, rx: 10.0, ry: 3.0, angle: 0.0 };
+        let cases = [
+            ("GLON-TAN", "GLAT-TAN", galactic_to_icrs(0.0, 90.0), 31.40),
+            ("ELON-TAN", "ELAT-TAN", ecliptic_j2000_to_icrs(0.0, 90.0), 90.0 - 23.4393),
+        ];
+        for (ctype1, ctype2, pole, approximate) in cases {
+            let mut header = header_with_cd(north_up_cd());
+            header.set("CTYPE1", ctype1.into());
+            header.set("CTYPE2", ctype2.into());
+            header.set_f64("CRVAL1", 0.0);
+            header.set_f64("CRVAL2", 0.0);
+            header.set("BUNIT", "MJy/sr".into());
+            let path = dir.path().join(format!("{ctype1}.fits"));
+            write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+            let key = path.to_str().unwrap().to_string();
+            let wcs = entry_wcs(&load_cached_full(&key).unwrap()).expect("wcs");
+            let centre = wcs.pixel_to_world(reference_pixel, reference_pixel);
+            let native_north = position_angle_deg(centre.ra, centre.dec, pole.0, pole.1);
+            let expected = (native_north + 90.0).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
+            assert!((expected - approximate).abs() < 0.01, "{ctype1}: native equator at the reference point has PA {expected}");
+
+            let out = region_stats_cmd(key.clone(), vec![req("e", along_x.clone())], None, None, None).await.unwrap();
+            let stats = &out[RES_REGIONS][0][RES_STATS];
+            let pa = stats[RES_CALIBRATED][RES_PA_SKY_DEG].as_f64().unwrap();
+            assert!(axis_angle_gap_deg(pa, expected) < 1e-6, "{ctype1}: the pixel x axis has equatorial PA {expected}, got {pa}");
+            assert_eq!(stats[RES_SKY][RES_PA_SKY_DEG], stats[RES_CALIBRATED][RES_PA_SKY_DEG]);
+
+            let far = wcs.pixel_to_world(reference_pixel + 20.0, reference_pixel);
+            let line_pa = position_angle_deg(centre.ra, centre.dec, far.ra, far.dec);
+            assert!(axis_angle_gap_deg(pa, line_pa) < 1e-6, "{ctype1}: region {pa} vs a line along the same axis {line_pa}");
+
+            let sb = sb_profile_cmd(key, along_x.clone(), None, None, None).await.unwrap();
+            assert_eq!(sb[RES_SKY_PA_DEG].as_f64().unwrap(), pa, "{ctype1}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_circle_a_round_ellipse_or_a_square_box_has_no_sky_position_angle_in_either_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_flat_sb_disc(dir.path());
+        let round = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 10.0, ry: 10.0, angle: 37.0 };
+        let square = RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width: 8.0, height: 8.0, angle: 20.0 };
+        for shape in [circle(10.0), round.clone()] {
+            let out = sb_profile_cmd(key.clone(), shape.clone(), Some(2.0), None, None).await.unwrap();
+            assert!(out[RES_SKY_PA_DEG].is_null(), "{shape:?}: {}", out[RES_SKY_PA_DEG]);
+        }
+        let regions = vec![req("circle", circle(10.0)), req("round", round), req("square", square)];
+        let out = region_stats_cmd(key, regions, None, None, None).await.unwrap();
+        for entry in out[RES_REGIONS].as_array().unwrap() {
+            assert!(entry[RES_STATS][RES_CALIBRATED].is_object(), "{entry}");
+            assert!(entry[RES_STATS][RES_CALIBRATED][RES_PA_SKY_DEG].is_null(), "{entry}");
+            assert!(entry[RES_STATS][RES_SKY][RES_PA_SKY_DEG].is_null(), "{entry}");
+            assert!(entry[RES_STATS][RES_SKY][RES_RA].is_f64(), "{entry}");
+        }
+    }
+
+    #[tokio::test]
+    async fn region_stats_and_sb_profile_treat_hst_counts_without_exptime_as_uncalibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut header = header_with_cd(north_up_cd());
+        header.set("BUNIT", "COUNTS".into());
+        header.set_f64("PHOTFLAM", 1.5e-19);
+        header.set_f64("PHOTPLAM", 5921.0);
+        let path = dir.path().join("hst_counts_no_exptime.fits");
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL].is_null(), "a PhotCal that cannot reach Jy must not be reported as calibration: {out}");
+        assert!(out[RES_REGIONS][0][RES_STATS][RES_CALIBRATED].is_null(), "{out}");
+        let first = out[RES_CALIBRATION_WARNINGS][0].as_str().unwrap();
+        assert!(first.starts_with("EXPTIME missing"), "{first}");
+        assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - 1.0).abs() < 1e-9, "{out}");
+        let sb = sb_profile_cmd(key, circle(8.0), None, None, None).await.unwrap();
+        assert!(sb[RES_PHOTCAL].is_null(), "{sb}");
+        assert!(sb[RES_CALIBRATION_WARNINGS][0].as_str().unwrap().starts_with("EXPTIME missing"), "{sb}");
+
+        header.set_f64("EXPTIME", 500.0);
+        let path = dir.path().join("hst_counts_with_exptime.fits");
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+        let out = region_stats_cmd(path.to_str().unwrap().into(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL].is_object(), "{out}");
+        assert!(out[RES_REGIONS][0][RES_STATS][RES_CALIBRATED]["flux_jy"].as_f64().is_some(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_calibration_names_its_missing_jansky_factor_before_the_derived_pixel_area_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, photmjsr) in [("photmjsr_zero", 0.0), ("photmjsr_negative", -1.2)] {
+            let mut header = header_with_cd(north_up_cd());
+            header.set("BUNIT", "DN/s".into());
+            header.set_f64("PHOTMJSR", photmjsr);
+            let path = dir.path().join(format!("{name}.fits"));
+            write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+            let key = path.to_str().unwrap().to_string();
+            let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+            assert!(out[RES_PHOTCAL].is_null(), "{name}: {out}");
+            let warnings: Vec<&str> =
+                out[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+            assert!(warnings[0].contains("no finite positive conversion to Jy"), "{name}: {warnings:?}");
+            assert!(warnings.iter().any(|w| w.contains("pixel area derived from the WCS")), "{name}: {warnings:?}");
+            let sb = sb_profile_cmd(key, circle(8.0), None, None, None).await.unwrap();
+            assert!(sb[RES_PHOTCAL].is_null(), "{name}: {sb}");
+            let first = sb[RES_CALIBRATION_WARNINGS][0].as_str().unwrap();
+            assert!(first.contains("no finite positive conversion to Jy"), "{name}: {first}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sb_profile_single_pixel_bin_keeps_its_surface_brightness_but_has_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_flat_sb_disc(dir.path());
+        let out = sb_profile_cmd(key, circle(8.0), Some(1.0), None, None).await.unwrap();
+        let first = &out[RES_BINS][0];
+        assert_eq!(first["count"], 1, "{first}");
+        assert!(first["std"].is_null(), "{first}");
+        assert!(first[RES_MU_ERR].is_null(), "{first}");
+        assert!(first[RES_MU_AB].as_f64().unwrap().is_finite(), "{first}");
+        let second = &out[RES_BINS][1];
+        assert!(second["count"].as_u64().unwrap() > 1, "{second}");
+        assert_eq!(second["std"], 0.0, "{second}");
+        assert_eq!(second[RES_MU_ERR], 0.0, "{second}");
+    }
+
+    #[tokio::test]
+    async fn sb_profile_cmd_rejects_too_elongated_or_too_large_regions_before_loading() {
+        let thin = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 100.0, ry: 4.0, angle: 0.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), thin, None, None, None).await.unwrap_err();
+        assert!(err.contains("rx = 100, ry = 4") && err.contains("too elongated"), "{err}");
+        let tall = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 4.0, ry: 100.0, angle: 0.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), tall, None, None, None).await.unwrap_err();
+        assert!(err.contains("rx = 4, ry = 100") && err.contains("too elongated"), "{err}");
+        let huge = RegionShape::Circle { x: 5.0, y: 5.0, r: 5000.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), huge, None, None, None).await.unwrap_err();
+        assert!(err.contains("circle radius r must be at most 4096 px") && err.contains("got 5000 px"), "{err}");
+        let wide = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 3000.0, ry: 5000.0, angle: 0.0 };
+        let err = sb_profile_cmd("nowhere.fits".into(), wide, None, None, None).await.unwrap_err();
+        assert!(err.contains("semi-major axis") && err.contains("got 5000 px"), "{err}");
+        let at_limit = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 100.0, ry: 5.0, angle: 0.0 };
+        assert_eq!(ellipse_geometry(&at_limit).unwrap().3, 0.95);
     }
 
     #[tokio::test]

@@ -215,28 +215,6 @@ pub fn block_mean_nan(arr: &Array2<f32>, bin: usize) -> Array2<f32> {
     from_row_major(out_rows, out_cols, buf, arr)
 }
 
-fn block_any_excluded(mask: &Array2<u8>, bin: usize) -> Array2<u8> {
-    let (rows, cols) = mask.dim();
-    if bin <= 1 || rows == 0 || cols == 0 {
-        return mask.clone();
-    }
-    let out_rows = rows.div_ceil(bin);
-    let out_cols = cols.div_ceil(bin);
-    let src = row_major(mask);
-    let mut buf = vec![0u8; out_rows * out_cols];
-    buf.par_chunks_mut(out_cols).enumerate().for_each(|(by, out)| {
-        let y0 = by * bin;
-        let y1 = (y0 + bin).min(rows);
-        for (bx, px) in out.iter_mut().enumerate() {
-            let x0 = bx * bin;
-            let x1 = (x0 + bin).min(cols);
-            let any = (y0..y1).any(|y| src[y * cols + x0..y * cols + x1].iter().any(|&v| v != 0));
-            *px = u8::from(any);
-        }
-    });
-    from_row_major(out_rows, out_cols, buf, mask)
-}
-
 fn blur_line(values: impl Fn(usize) -> f32, centre: usize, len: usize, weights: &[f64], radius: usize) -> f32 {
     let lo = centre.saturating_sub(radius);
     let hi = (centre + radius).min(len - 1);
@@ -347,6 +325,84 @@ fn cell_segments(case: u8, centre_high: bool, i: usize, j: usize, out: &mut Vec<
     }
 }
 
+fn segments_in_case(case: u8) -> usize {
+    match case {
+        0 | 15 => 0,
+        5 | 10 => 2,
+        _ => 1,
+    }
+}
+
+fn trace_bands(rows: usize) -> Vec<(usize, usize)> {
+    (0..rows.saturating_sub(1))
+        .step_by(TRACE_BAND_ROWS)
+        .map(|start| (start, (start + TRACE_BAND_ROWS).min(rows - 1)))
+        .collect()
+}
+
+fn visit_band(
+    src: &[f32],
+    mask: Option<&[u8]>,
+    cols: usize,
+    levels: &[f64],
+    band: (usize, usize),
+    mut visit: impl FnMut(usize, u8, bool, usize, usize),
+) {
+    for i in band.0..band.1 {
+        let top = &src[i * cols..(i + 1) * cols];
+        let bottom = &src[(i + 1) * cols..(i + 2) * cols];
+        let mask_rows = mask.map(|m| (&m[i * cols..(i + 1) * cols], &m[(i + 1) * cols..(i + 2) * cols]));
+        for j in 0..cols - 1 {
+            let a = top[j];
+            let b = top[j + 1];
+            let c = bottom[j + 1];
+            let d = bottom[j];
+            if !(is_valid_pixel(a) && is_valid_pixel(b) && is_valid_pixel(c) && is_valid_pixel(d)) {
+                continue;
+            }
+            if let Some((mt, mb)) = mask_rows {
+                if mt[j] != 0 || mt[j + 1] != 0 || mb[j] != 0 || mb[j + 1] != 0 {
+                    continue;
+                }
+            }
+            let lo = a.min(b).min(c).min(d) as f64;
+            let hi = a.max(b).max(c).max(d) as f64;
+            let start = levels.partition_point(|&l| l <= lo);
+            let end = levels.partition_point(|&l| l <= hi);
+            if start >= end {
+                continue;
+            }
+            let centre = 0.25 * (a as f64 + b as f64 + c as f64 + d as f64);
+            for (li, &level) in levels.iter().enumerate().take(end).skip(start) {
+                let case = u8::from(a as f64 >= level)
+                    | u8::from(b as f64 >= level) << 1
+                    | u8::from(c as f64 >= level) << 2
+                    | u8::from(d as f64 >= level) << 3;
+                visit(li, case, centre >= level, i, j);
+            }
+        }
+    }
+}
+
+fn count_segments(plane: &Array2<f32>, levels: &[f64], excluded: Option<&Array2<u8>>) -> usize {
+    let (rows, cols) = plane.dim();
+    if rows < 2 || cols < 2 || levels.is_empty() {
+        return 0;
+    }
+    let src = row_major(plane);
+    let mask = excluded.filter(|m| m.dim() == plane.dim()).map(row_major);
+    trace_bands(rows)
+        .par_iter()
+        .map(|&band| {
+            let mut total = 0usize;
+            visit_band(&src, mask.as_deref(), cols, levels, band, |_, case, _, _, _| {
+                total += segments_in_case(case);
+            });
+            total
+        })
+        .sum()
+}
+
 fn collect_segments(
     plane: &Array2<f32>,
     levels: &[f64],
@@ -359,50 +415,15 @@ fn collect_segments(
     }
     let src = row_major(plane);
     let mask = excluded.filter(|m| m.dim() == plane.dim()).map(row_major);
-    let bands: Vec<(usize, usize)> = (0..rows - 1)
-        .step_by(TRACE_BAND_ROWS)
-        .map(|start| (start, (start + TRACE_BAND_ROWS).min(rows - 1)))
-        .collect();
-    let per_band: Vec<Vec<Vec<(u64, u64)>>> = bands
+    let per_band: Vec<Vec<Vec<(u64, u64)>>> = trace_bands(rows)
         .par_iter()
-        .map(|&(r0, r1)| {
+        .map(|&band| {
             let mut out: Vec<Vec<(u64, u64)>> = vec![Vec::new(); n];
-            for i in r0..r1 {
-                let top = &src[i * cols..(i + 1) * cols];
-                let bottom = &src[(i + 1) * cols..(i + 2) * cols];
-                let mask_rows = mask
-                    .as_deref()
-                    .map(|m| (&m[i * cols..(i + 1) * cols], &m[(i + 1) * cols..(i + 2) * cols]));
-                for j in 0..cols - 1 {
-                    let a = top[j];
-                    let b = top[j + 1];
-                    let c = bottom[j + 1];
-                    let d = bottom[j];
-                    if !(is_valid_pixel(a) && is_valid_pixel(b) && is_valid_pixel(c) && is_valid_pixel(d)) {
-                        continue;
-                    }
-                    if let Some((mt, mb)) = mask_rows {
-                        if mt[j] != 0 || mt[j + 1] != 0 || mb[j] != 0 || mb[j + 1] != 0 {
-                            continue;
-                        }
-                    }
-                    let lo = a.min(b).min(c).min(d) as f64;
-                    let hi = a.max(b).max(c).max(d) as f64;
-                    let start = levels.partition_point(|&l| l <= lo);
-                    let end = levels.partition_point(|&l| l <= hi);
-                    if start >= end {
-                        continue;
-                    }
-                    let centre = 0.25 * (a as f64 + b as f64 + c as f64 + d as f64);
-                    for (li, &level) in levels.iter().enumerate().take(end).skip(start) {
-                        let case = u8::from(a as f64 >= level)
-                            | u8::from(b as f64 >= level) << 1
-                            | u8::from(c as f64 >= level) << 2
-                            | u8::from(d as f64 >= level) << 3;
-                        cell_segments(case, centre >= level, i, j, &mut out[li]);
-                    }
+            visit_band(&src, mask.as_deref(), cols, levels, band, |li, case, centre_high, i, j| {
+                if let Some(segs) = out.get_mut(li) {
+                    cell_segments(case, centre_high, i, j, segs);
                 }
-            }
+            });
             out
         })
         .collect();
@@ -527,6 +548,21 @@ fn required_bin(rows: usize, cols: usize) -> usize {
     ratio.sqrt().ceil().max(1.0) as usize
 }
 
+fn block_centre(k: usize, bin: usize, n: usize) -> f64 {
+    let width = bin.min(n.saturating_sub(k * bin)).max(1);
+    k as f64 * bin as f64 + (width as f64 - 1.0) / 2.0
+}
+
+fn unbin_axis(v: f64, bin: usize, n: usize) -> f64 {
+    let last = n.saturating_sub(1) / bin.max(1);
+    let k = (v.floor().max(0.0) as usize).min(last);
+    if k == last {
+        return block_centre(last, bin, n);
+    }
+    let c0 = block_centre(k, bin, n);
+    c0 + (v - k as f64) * (block_centre(k + 1, bin, n) - c0)
+}
+
 pub fn contour_lines(
     arr: &Array2<f32>,
     cfg: &ContourConfig,
@@ -565,20 +601,17 @@ pub fn contour_lines(
     };
     let clean = sanitized(arr, excluded);
     let binned = block_mean_nan(&clean, bin);
-    let binned_mask = excluded.map(|m| block_any_excluded(m, bin));
-    let smoothed = gaussian_blur_nan(&binned, cfg.smooth_sigma_px);
+    let smoothed = gaussian_blur_nan(&binned, cfg.smooth_sigma_px / bin as f64);
     let (median, sigma) = estimate_background(&smoothed, BACKGROUND_TILE);
     let levels = contour_levels(&cfg.spec, median, sigma)?;
-    let segments = collect_segments(&smoothed, &levels, binned_mask.as_ref());
-    let estimated_points: usize = segments.iter().map(Vec::len).sum();
+    let estimated_points = count_segments(&smoothed, &levels, None);
     if estimated_points > MAX_CONTOUR_POINTS {
         return Err(format!(
             "the contours would have about {} points, above the limit of {}; {}",
             estimated_points, MAX_CONTOUR_POINTS, POINTS_HINT
         ));
     }
-    let scale = bin as f64;
-    let offset = (bin as f64 - 1.0) / 2.0;
+    let segments = collect_segments(&smoothed, &levels, None);
     let traced: Vec<ContourLevel> = levels
         .par_iter()
         .zip(segments.par_iter())
@@ -587,7 +620,7 @@ pub fn contour_lines(
             if bin > 1 {
                 for polyline in &mut traced.polylines {
                     for p in polyline.iter_mut() {
-                        *p = (p.0 * scale + offset, p.1 * scale + offset);
+                        *p = (unbin_axis(p.0, bin, cols), unbin_axis(p.1, bin, rows));
                     }
                 }
             }
@@ -817,22 +850,28 @@ mod tests {
     }
 
     #[test]
-    fn an_excluded_block_is_skipped_when_binning_and_edge_cases_do_not_panic() {
+    fn a_dq_flagged_pixel_inside_a_binned_block_behaves_like_a_nan_pixel_and_keeps_the_ring_closed() {
         let plane = gaussian_plane();
-        let mut mask = Array2::<u8>::zeros(plane.dim());
         let centre = (GAUSS_SIZE as f64 - 1.0) / 2.0;
         let hole_x = (centre + expected_half_max_radius()).round() as usize;
         let hole_y = centre.round() as usize;
+        let mut mask = Array2::<u8>::zeros(plane.dim());
         mask[[hole_y, hole_x]] = 1;
+        let mut nan_plane = plane.clone();
+        nan_plane[[hole_y, hole_x]] = f32::NAN;
         let level = [half_max_level()];
-        let set = contour_lines(
-            &plane,
-            &ContourConfig { spec: list_spec(&level), smooth_sigma_px: 0.0, bin: 2 },
-            Some(&mask),
-        )
-        .unwrap();
-        assert!(set.levels[0].closed.iter().all(|&c| !c));
+        let cfg = ContourConfig { spec: list_spec(&level), smooth_sigma_px: 0.0, bin: 2 };
+        let flagged = contour_lines(&plane, &cfg, Some(&mask)).unwrap();
+        let as_nan = contour_lines(&nan_plane, &cfg, None).unwrap();
+        assert_eq!(flagged.levels[0].polylines.len(), 1);
+        assert!(flagged.levels[0].closed[0]);
+        assert_eq!(flagged.levels[0].polylines, as_nan.levels[0].polylines);
+    }
 
+    #[test]
+    fn edge_cases_do_not_panic_and_bad_bin_or_sigma_are_refused() {
+        let plane = gaussian_plane();
+        let level = [half_max_level()];
         let tiny = Array2::from_elem((1, 1), 1.0f32);
         assert!(contour_lines(&tiny, &ContourConfig { spec: list_spec(&level), smooth_sigma_px: 0.0, bin: 1 }, None).is_err());
         assert!(trace_contours(&tiny, &level, None)[0].polylines.is_empty());
@@ -862,5 +901,93 @@ mod tests {
         assert_eq!(set.levels.len(), 1);
         assert!((set.levels[0].value - (set.background_median + 3.0 * set.background_sigma)).abs() < 1e-9);
         assert!(set.notes.is_empty());
+    }
+
+    #[test]
+    fn smoothing_sigma_is_in_image_pixels_whatever_the_bin_factor() {
+        let plane = gaussian_plane();
+        let centre = (GAUSS_SIZE as f64 - 1.0) / 2.0;
+        let smooth = 6.0;
+        let effective_var = GAUSS_SIGMA * GAUSS_SIGMA + smooth * smooth;
+        let level = [GAUSS_BACKGROUND + 0.5 * GAUSS_AMPLITUDE * GAUSS_SIGMA * GAUSS_SIGMA / effective_var];
+        let expected = (2.0 * std::f64::consts::LN_2 * effective_var).sqrt();
+        for bin in [1usize, 2, 4] {
+            let set = contour_lines(&plane, &ContourConfig { spec: list_spec(&level), smooth_sigma_px: smooth, bin }, None)
+                .unwrap();
+            assert_eq!(set.levels[0].polylines.len(), 1, "bin {}", bin);
+            let line = &set.levels[0].polylines[0];
+            let mean = radii(line, centre).iter().sum::<f64>() / line.len() as f64;
+            assert!((mean - expected).abs() < 0.15, "bin {} radius {} expected {}", bin, mean, expected);
+        }
+    }
+
+    fn checkerboard_plane(size: usize) -> Array2<f32> {
+        Array2::from_shape_fn((size, size), |(y, x)| if (x + y) % 2 == 0 { 1.0 } else { 2.0 })
+    }
+
+    fn dense_levels() -> Vec<f64> {
+        (0..32).map(|i| 1.01 + 0.98 * i as f64 / 31.0).collect()
+    }
+
+    #[test]
+    fn the_segment_count_matches_the_segments_that_are_collected() {
+        let mut plane = gaussian_plane();
+        plane[[64, 70]] = f32::NAN;
+        let mut mask = Array2::<u8>::zeros(plane.dim());
+        mask[[20, 20]] = 1;
+        let levels = [150.0, 600.0, 1000.0];
+        for m in [None, Some(&mask)] {
+            let collected: usize = collect_segments(&plane, &levels, m).iter().map(Vec::len).sum();
+            assert!(collected > 0);
+            assert_eq!(count_segments(&plane, &levels, m), collected);
+        }
+        let board = checkerboard_plane(64);
+        let dense = dense_levels();
+        let collected: usize = collect_segments(&board, &dense, None).iter().map(Vec::len).sum();
+        assert_eq!(collected, 63 * 63 * 64);
+        assert_eq!(count_segments(&board, &dense, None), collected);
+    }
+
+    #[test]
+    fn a_request_over_the_point_cap_is_refused_from_the_segment_count_before_collection() {
+        let plane = checkerboard_plane(256);
+        let levels = dense_levels();
+        assert_eq!(count_segments(&plane, &levels, None), 255 * 255 * 64);
+        let err = contour_lines(&plane, &ContourConfig { spec: list_spec(&levels), smooth_sigma_px: 0.0, bin: 1 }, None)
+            .unwrap_err();
+        assert!(err.contains("about 4161600 points, above the limit of 2000000"), "{err}");
+    }
+
+    #[test]
+    fn a_ramp_contour_in_the_trailing_partial_block_lands_on_its_true_column_inside_the_image() {
+        let plane = Array2::from_shape_fn((17, 129), |(_, x)| 1000.0 + x as f32);
+        let level = [1126.0];
+        let set = contour_lines(&plane, &ContourConfig { spec: list_spec(&level), smooth_sigma_px: 0.0, bin: 8 }, None)
+            .unwrap();
+        assert_eq!(set.bin, 8);
+        assert_eq!(set.levels[0].polylines.len(), 1);
+        let line = &set.levels[0].polylines[0];
+        assert!(line.iter().all(|&(x, _)| (x - 126.0).abs() < 1e-6), "{:?}", line);
+        let max_y = line.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(max_y, 16.0);
+    }
+
+    #[test]
+    fn unbinning_keeps_full_block_centres_and_never_leaves_the_image() {
+        for bin in 2..=MAX_BIN {
+            for n in 2..200usize {
+                let last = (n - 1) / bin;
+                for step in 0..=(last * 8) {
+                    let v = step as f64 / 8.0;
+                    let x = unbin_axis(v, bin, n);
+                    assert!((0.0..=(n - 1) as f64).contains(&x), "bin {} n {} v {} gives {}", bin, n, v, x);
+                    if (v.floor() as usize + 2) * bin <= n {
+                        let full = v * bin as f64 + (bin as f64 - 1.0) / 2.0;
+                        assert!((x - full).abs() < 1e-9, "bin {} n {} v {} gives {} not {}", bin, n, v, x, full);
+                    }
+                }
+                assert_eq!(unbin_axis(last as f64, bin, n), block_centre(last, bin, n));
+            }
+        }
     }
 }

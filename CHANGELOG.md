@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Science measurement Features **
+- **Science measurement features**
   - Interactive `ProfilePlot`: hover readout, wheel zoom and drag pan on x, log and inverted y, points, error bars, dashed model curves, labelled reference lines, CSV and PNG export; cross-match residual and zero-point plots in the Gaia catalog panel
   - Aperture photometry controls (aperture radius, sky annulus, gain), curve of growth with EE50/EE80 radii (`PhotometryConfig.sky_annulus`, `StarPhotometry.growth_curve`, `ee50_radius`, `ee80_radius`), and `measure_photometry_batch_cmd` behind a Photometry table panel that measures detected stars, Point regions or pasted positions, draws the apertures on the image and exports CSV
   - Calibrated region statistics: every region reports flux in Jy, AB magnitude, surface brightness in mag/arcsec^2, area in arcsec^2, RA/Dec of the centre and the sky position angle (`RegionStats.calibrated`, `entry_calibration`), with sigma-clipping controls and a region CSV in the Regions panel

@@ -8,6 +8,7 @@ import { exportRegions, regionStats, sbProfile } from "../regions";
 import {
   REGION_SYSTEMS,
   type RegionCalibrated,
+  type RegionSky,
   type RegionStats,
   type RegionStatsResult,
   type SbBin,
@@ -92,6 +93,17 @@ describe("RegionCalibrated payload", () => {
     expectTypeOf<RegionStatsResult["photcal"]>().toEqualTypeOf<PhotCal | null | undefined>();
     expectTypeOf<RegionStatsResult["calibration_warnings"]>().toEqualTypeOf<string[] | undefined>();
   });
+
+  it("types the WCS-only sky block that is sent with or without flux calibration", () => {
+    expectTypeOf<RegionStats["sky"]>().toEqualTypeOf<RegionSky | null | undefined>();
+    expectTypeOf<RegionSky>().toEqualTypeOf<{
+      ra: number | null;
+      dec: number | null;
+      pa_sky_deg: number | null;
+      area_arcsec2: number | null;
+      geometric_area_arcsec2: number | null;
+    }>();
+  });
 });
 
 describe("sbProfile", () => {
@@ -127,6 +139,8 @@ describe("sbProfile", () => {
 
   it("types the calibrated bin columns and derived radii as nullable", () => {
     expectTypeOf<SbBin["mu_ab"]>().toEqualTypeOf<number | null>();
+    expectTypeOf<SbBin["mu_err"]>().toEqualTypeOf<number | null>();
+    expectTypeOf<SbBin["std"]>().toEqualTypeOf<number | null>();
     expectTypeOf<SbBin["sma_arcsec"]>().toEqualTypeOf<number | null>();
     expectTypeOf<SbProfile["r50_px"]>().toEqualTypeOf<number | null>();
     expectTypeOf<SbProfile["petrosian_radius_px"]>().toEqualTypeOf<number | null>();

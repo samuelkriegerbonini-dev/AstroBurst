@@ -664,23 +664,66 @@ pub fn mid_exposure_jd(header: &HduHeader) -> Option<(f64, String)> {
             return Some((jd, "mid-exposure from DATE-AVG".to_string()));
         }
     }
-    let exposure = first_f64(header, &["EXPTIME", "EXPOSURE"]);
+    if let Some((start, end)) = observation_window_jd(header) {
+        return Some(((start + end) / 2.0, "mid-exposure from (DATE-OBS + DATE-END)/2".to_string()));
+    }
+    let exposure = exposure_seconds(header);
     let half_exposure_days = exposure.map(|(s, _)| s / 2.0 / SECONDS_PER_DAY).unwrap_or(0.0);
     let exposure_note = match exposure {
         Some((s, key)) => format!("+ {}/2 ({} s)", key, s),
         None => "(EXPTIME missing: exposure start used)".to_string(),
     };
-    if let Some(date_obs) = card_string(header, "DATE-OBS") {
-        let time_obs = card_string(header, "TIME-OBS");
-        if let Ok(jd) = parse_fits_date_and_time(&date_obs, time_obs.as_deref()) {
-            let source = if time_obs.is_some() && !date_obs.contains('T') { "DATE-OBS+TIME-OBS" } else { "DATE-OBS" };
+    let date_obs = card_string(header, "DATE-OBS");
+    let time_obs = card_string(header, "TIME-OBS");
+    let mjd_obs = first_f64(header, &["MJD-OBS"]);
+    let date_only = date_obs.as_deref().is_some_and(|d| !has_time_of_day(d, time_obs.as_deref()));
+    if let Some(date_obs) = date_obs.as_deref().filter(|_| !(date_only && mjd_obs.is_some())) {
+        if let Ok(jd) = parse_fits_date_and_time(date_obs, time_obs.as_deref()) {
+            let source = if date_only {
+                "DATE-OBS (date only, 0h UT assumed)"
+            } else if time_obs.is_some() && !date_obs.contains('T') {
+                "DATE-OBS+TIME-OBS"
+            } else {
+                "DATE-OBS"
+            };
             return Some((jd + half_exposure_days, format!("{} {}", source, exposure_note)));
         }
     }
-    if let Some((mjd, _)) = first_f64(header, &["MJD-OBS"]) {
+    if let Some((mjd, _)) = mjd_obs {
         return Some((jd_from_mjd(mjd) + half_exposure_days, format!("MJD-OBS {}", exposure_note)));
     }
     None
+}
+
+const EXPOSURE_UNIT_SECONDS: [(&str, f64); 4] = [("s", 1.0), ("min", 60.0), ("h", 3600.0), ("d", SECONDS_PER_DAY)];
+
+fn exposure_seconds(header: &HduHeader) -> Option<(f64, &'static str)> {
+    if let Some(found) = first_f64(header, &["EXPTIME"]) {
+        return Some(found);
+    }
+    let (value, key) = first_f64(header, &["EXPOSURE"])?;
+    let unit = card_string(header, "TIMEUNIT").map_or_else(|| "s".to_string(), |u| u.to_ascii_lowercase());
+    EXPOSURE_UNIT_SECONDS
+        .iter()
+        .find(|(name, _)| *name == unit)
+        .map(|(_, seconds)| (value * seconds, key))
+}
+
+fn has_time_of_day(date: &str, time: Option<&str>) -> bool {
+    date.contains('T') || date.contains(' ') || time.is_some()
+}
+
+fn observation_window_jd(header: &HduHeader) -> Option<(f64, f64)> {
+    let date_obs = card_string(header, "DATE-OBS")?;
+    let date_end = card_string(header, "DATE-END")?;
+    let time_obs = card_string(header, "TIME-OBS");
+    let time_end = card_string(header, "TIME-END");
+    if !has_time_of_day(&date_obs, time_obs.as_deref()) || !has_time_of_day(&date_end, time_end.as_deref()) {
+        return None;
+    }
+    let start = parse_fits_date_and_time(&date_obs, time_obs.as_deref()).ok()?;
+    let end = parse_fits_date_and_time(&date_end, time_end.as_deref()).ok()?;
+    (end >= start).then_some((start, end))
 }
 
 fn rotate_z(v: [f64; 3], angle_deg: f64) -> [f64; 3] {
@@ -1334,6 +1377,57 @@ mod tests {
         let (jd, _) = mid_exposure_jd(&h).unwrap();
         assert_eq!(jd, jd_from_mjd(61120.5));
         assert!(mid_exposure_jd(&axis_header(&[("OBJECT", "M31")])).is_none());
+    }
+
+    #[test]
+    fn a_date_only_date_obs_defers_to_mjd_obs_and_is_labelled_when_it_is_all_there_is() {
+        let h = axis_header(&[("DATE-OBS", "2019-05-20"), ("UTC", "08:12:34.56"), ("MJD-OBS", "58623.3420"), ("EXPTIME", "30")]);
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        assert!((jd - (jd_from_mjd(58623.3420) + 15.0 / SECONDS_PER_DAY)).abs() < 1e-9, "{jd}");
+        assert!(source.starts_with("MJD-OBS"), "{source}");
+        let h = axis_header(&[("DATE-OBS", "2019-05-20"), ("EXPTIME", "30")]);
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        assert!((jd - (jd_from_gregorian(2019, 5, 20.0) + 15.0 / SECONDS_PER_DAY)).abs() < 1e-9);
+        assert!(source.contains("date only"), "{source}");
+        let h = axis_header(&[("DATE-OBS", "2019-05-20T08:00:00"), ("MJD-OBS", "58623.9")]);
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        assert!((jd - jd_from_gregorian(2019, 5, 20.0 + 8.0 / 24.0)).abs() < 1e-9);
+        assert!(source.starts_with("DATE-OBS"), "{source}");
+        let h = axis_header(&[("DATE-OBS", "2019-05-20"), ("TIME-OBS", "08:00:00"), ("MJD-OBS", "58623.9")]);
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        assert!((jd - jd_from_gregorian(2019, 5, 20.0 + 8.0 / 24.0)).abs() < 1e-9);
+        assert!(source.starts_with("DATE-OBS+TIME-OBS"), "{source}");
+    }
+
+    #[test]
+    fn exposure_in_days_is_converted_and_a_tess_window_gives_its_midpoint() {
+        let h = axis_header(&[
+            ("TIMEUNIT", "d"),
+            ("TELAPSE", "0.0208333333333333"),
+            ("EXPOSURE", "0.0165"),
+            ("DATE-OBS", "2018-07-25T19:01:42.708Z"),
+            ("DATE-END", "2018-07-25T19:31:42.708Z"),
+        ]);
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        let start = parse_fits_datetime("2018-07-25T19:01:42.708").unwrap();
+        assert!(((jd - start) * SECONDS_PER_DAY - 900.0).abs() < 0.01, "{}", (jd - start) * SECONDS_PER_DAY);
+        assert!(source.contains("DATE-END"), "{source}");
+
+        let start = jd_from_gregorian(2026, 3, 21.0 + 10.0 / 24.0);
+        for (unit, exposure, half_seconds) in [("d", "0.0125", 540.0), ("h", "0.5", 900.0), ("min", "10", 300.0), ("s", "60", 30.0)] {
+            let h = axis_header(&[("TIMEUNIT", unit), ("EXPOSURE", exposure), ("DATE-OBS", "2026-03-21T10:00:00")]);
+            let (jd, _) = mid_exposure_jd(&h).unwrap();
+            assert!(((jd - start) * SECONDS_PER_DAY - half_seconds).abs() < 0.01, "TIMEUNIT {unit}");
+        }
+        let h = axis_header(&[("TIMEUNIT", "d"), ("EXPTIME", "600"), ("EXPOSURE", "0.5"), ("DATE-OBS", "2026-03-21T10:00:00")]);
+        let (jd, _) = mid_exposure_jd(&h).unwrap();
+        assert!(((jd - start) * SECONDS_PER_DAY - 300.0).abs() < 0.01, "EXPTIME is always in seconds");
+        let h = axis_header(&[("DATE-OBS", "2026-03-21"), ("TIME-OBS", "10:00:00"), ("DATE-END", "2026-03-21"), ("EXPTIME", "600")]);
+        let (jd, _) = mid_exposure_jd(&h).unwrap();
+        assert!(((jd - start) * SECONDS_PER_DAY - 300.0).abs() < 0.01, "a date-only DATE-END is ignored");
+        let h = axis_header(&[("DATE-OBS", "2026-03-21T10:00:00"), ("DATE-END", "2026-03-21T09:00:00"), ("EXPTIME", "600")]);
+        let (jd, _) = mid_exposure_jd(&h).unwrap();
+        assert!(((jd - start) * SECONDS_PER_DAY - 300.0).abs() < 0.01, "an end before the start is ignored");
     }
 
     #[test]

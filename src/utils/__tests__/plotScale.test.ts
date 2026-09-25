@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { niceTicks, linearScale, finiteExtent, formatAxisTick } from "../plotScale";
+import {
+  niceTicks,
+  linearScale,
+  finiteExtent,
+  formatAxisTick,
+  formatTickLabels,
+  formatLogTickLabel,
+  tickLabels,
+} from "../plotScale";
 
 describe("niceTicks", () => {
   it("chooses round steps covering the domain", () => {
@@ -52,6 +60,91 @@ describe("formatAxisTick", () => {
     expect(formatAxisTick(4.2e6, 1e6)).toBe("4.20e+6");
     expect(formatAxisTick(NaN, 1)).toBe("");
     expect(formatAxisTick(2, 0)).toBe("2.00");
+  });
+});
+
+describe("formatTickLabels", () => {
+  it("labels a flat light curve axis at the tick step instead of repeating values", () => {
+    expect(formatTickLabels(niceTicks(-1.2105, -1.1895, 5))).toEqual([
+      "-1.215",
+      "-1.210",
+      "-1.205",
+      "-1.200",
+      "-1.195",
+      "-1.190",
+      "-1.185",
+    ]);
+  });
+
+  it("keeps zoomed, sub-0.01, large-value and deep-zoom ticks distinct and readable back to the tick", () => {
+    const axes: [number, number, number][] = [
+      [15.0, 15.12, 6],
+      [0, 0.0049, 6],
+      [100000, 100500, 5],
+      [-0.012, 0.009, 5],
+      [1.0e-4, 1.1e-4, 5],
+      [2, 2.01, 6],
+      [15.2, 15.20000003, 6],
+      [0, 0.0009, 5],
+    ];
+    for (const [lo, hi, n] of axes) {
+      const ticks = niceTicks(lo, hi, n);
+      const step = ticks[1] - ticks[0];
+      const labels = formatTickLabels(ticks);
+      expect(new Set(labels).size).toBe(ticks.length);
+      labels.forEach((l, i) => expect(Math.abs(Number(l) - ticks[i])).toBeLessThanOrEqual(step * 1e-6));
+    }
+  });
+
+  it("uses no more decimals than the step needs", () => {
+    expect(formatTickLabels(niceTicks(0, 97, 5))).toEqual(["0", "20", "40", "60", "80", "100"]);
+    expect(formatTickLabels(niceTicks(0, 0.0049, 6))).toEqual(["0", "0.001", "0.002", "0.003", "0.004", "0.005"]);
+    expect(formatTickLabels([15, 15.02, 15.04])).toEqual(["15.00", "15.02", "15.04"]);
+  });
+
+  it("falls back to a range-free label for a single tick", () => {
+    expect(formatTickLabels([5])).toEqual(["5.00"]);
+    expect(formatTickLabels([])).toEqual([]);
+  });
+});
+
+describe("formatLogTickLabel", () => {
+  it("labels log ticks by value and never as 0.00", () => {
+    expect([1e-5, 1e-3, 2e-3, 5e-3, 0.01, 1, 1000, 2e5].map(formatLogTickLabel)).toEqual([
+      "1e-5",
+      "0.001",
+      "0.002",
+      "0.005",
+      "0.01",
+      "1",
+      "1000",
+      "2e+5",
+    ]);
+  });
+
+  it("returns an empty label for a non-positive value", () => {
+    expect(formatLogTickLabel(0)).toBe("");
+    expect(formatLogTickLabel(-1)).toBe("");
+  });
+});
+
+describe("tickLabels", () => {
+  it("passes the tick spacing to a custom formatter so it can size its decimals", () => {
+    const steps: number[] = [];
+    const labels = tickLabels([0.503, 0.5035, 0.504], (v, step) => {
+      steps.push(step);
+      return v.toFixed(Math.ceil(-Math.log10(step) - 1e-6));
+    });
+    expect(labels).toEqual(["0.5030", "0.5035", "0.5040"]);
+    steps.forEach((s) => expect(s).toBeCloseTo(0.0005, 12));
+  });
+
+  it("passes NaN as the step when there is a single tick", () => {
+    expect(tickLabels([0.5], (v, step) => `${v}:${step}`)).toEqual(["0.5:NaN"]);
+  });
+
+  it("uses the step-aware default when no formatter is given", () => {
+    expect(tickLabels(niceTicks(-1.2105, -1.1895, 5))).toEqual(formatTickLabels(niceTicks(-1.2105, -1.1895, 5)));
   });
 });
 

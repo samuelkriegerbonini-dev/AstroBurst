@@ -3,6 +3,7 @@ import {
   CSV_COLUMNS,
   continuumModel,
   convergedFit,
+  formatAxisQuantity,
   formatQuantity,
   gaussianModel,
   lineMeasurementCsv,
@@ -10,7 +11,10 @@ import {
   lineOverlayPolylines,
   measurementAxisValues,
   measurementSpan,
+  momentVelocityFrameNote,
+  runForSource,
   spectrumSourceKey,
+  spectrumSourceLabel,
   type PlotFrame,
 } from "../lineMeasure";
 import { airToVacuumUm } from "../spectralAxis";
@@ -52,6 +56,7 @@ function measurement(overrides: Partial<LineMeasurement> = {}): LineMeasurement 
       rest_um: 1.02,
       convention: "optical",
       shift_applied_kms: 0,
+      axis_frame: null,
     },
     fit: {
       amplitude: 1.0,
@@ -138,6 +143,57 @@ describe("lineMeasurementCsv", () => {
     const csv = lineMeasurementCsv(measurement({ flux_unit: "MJy/sr, summed x um" }));
     expect(csv.split("\n")[1]).toContain('"MJy/sr, summed x um"');
   });
+
+  it("writes the axis frame of the velocities", () => {
+    const base = measurement();
+    const cells = lineMeasurementCsv(measurement({ velocity: { ...base.velocity!, axis_frame: "LSRK" } }))
+      .split("\n")[1]
+      .split(",");
+    expect(cells[CSV_COLUMNS.indexOf("velocity_axis_frame")]).toBe("LSRK");
+  });
+});
+
+describe("line measurement provenance", () => {
+  it("writes the measured source into the CSV row", () => {
+    const cells = lineMeasurementCsv(measurement()).split("\n")[1].split(",");
+    expect(cells[CSV_COLUMNS.indexOf("source_kind")]).toBe("pixel");
+    expect(cells[CSV_COLUMNS.indexOf("source_x")]).toBe("16");
+    expect(cells[CSV_COLUMNS.indexOf("source_y")]).toBe("16");
+    expect(cells[CSV_COLUMNS.indexOf("source_region")]).toBe("");
+    const disk = { shape: "circle", x: 16, y: 16, r: 4 } as const;
+    const row = lineMeasurementCsv(measurement({ source: { kind: "region", shape: disk, background: null } })).split("\n")[1];
+    expect(row.startsWith('region,,,"{""shape"":{""shape"":""circle""')).toBe(true);
+  });
+
+  it("drops a run measured on another pixel or region and labels the source", () => {
+    const run = { key: spectrumSourceKey({ kind: "pixel", x: 16, y: 16 }, "sum") };
+    expect(runForSource(run, { kind: "pixel", x: 2, y: 2 }, "sum")).toBeNull();
+    expect(runForSource(run, { kind: "pixel", x: 16, y: 16 }, "sum")).toBe(run);
+    expect(runForSource(run, { kind: "pixel", x: 16, y: 16 }, "mean")).toBeNull();
+    expect(runForSource(run, null, "sum")).toBeNull();
+    expect(runForSource(null, { kind: "pixel", x: 16, y: 16 }, "sum")).toBeNull();
+    const small = { shape: "circle", x: 20, y: 20, r: 3 } as const;
+    const large = { shape: "circle", x: 20, y: 20, r: 6 } as const;
+    const regionRun = { key: spectrumSourceKey({ kind: "region", shape: small, background: null }, "sum") };
+    expect(runForSource(regionRun, { kind: "region", shape: large, background: null }, "sum")).toBeNull();
+    expect(spectrumSourceLabel({ kind: "pixel", x: 16, y: 16 })).toBe("pixel (16, 16)");
+    expect(spectrumSourceLabel({ kind: "region", shape: small, background: null })).toBe("circle region");
+    const annulus = { shape: "annulus", x: 20, y: 20, r_inner: 5, r_outer: 8 } as const;
+    expect(spectrumSourceLabel({ kind: "region", shape: small, background: annulus })).toBe("circle region with background");
+  });
+});
+
+describe("momentVelocityFrameNote", () => {
+  it("names the header frame of M1", () => {
+    expect(momentVelocityFrameNote("BARYCENT", "none", null)).toBe("M1 in the header frame BARYCENT");
+    expect(momentVelocityFrameNote(null, "barycentric", 0)).toBe("M1 in the header frame (no SPECSYS)");
+  });
+
+  it("says M1 lacks the frame shift that the line velocity includes", () => {
+    expect(momentVelocityFrameNote("TOPOCENT", "barycentric", 25.3)).toBe(
+      "M1 in the header frame TOPOCENT, without the barycentric shift of 25.3 km/s that the line velocity includes",
+    );
+  });
 });
 
 describe("lineMeasurementRows", () => {
@@ -160,7 +216,58 @@ describe("lineMeasurementRows", () => {
     expect(rows[2].value).toBe("1.02000 um / 0.2 km/s");
     expect(rows[5].value).toBe("1.000 at ch 20");
     expect(rows[6].value).toBe("150.4");
-    expect(rows[8].value).toBe("optical, rest 1.02000 um, topocentric");
+    expect(rows[8].value).toBe("optical, rest 1.02000 um, axis frame not declared (no SPECSYS)");
+  });
+
+  it("names the axis frame instead of assuming topocentric, and adds a frame shift when one was applied", () => {
+    const base = measurement();
+    const velocity = base.velocity!;
+    const frameRow = (m: LineMeasurement) => lineMeasurementRows(m).find((r) => r.label === "Velocity frame")?.value;
+    expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: "BARYCENT", shift_applied_kms: 0 } }))).toBe(
+      "optical, rest 1.02000 um, axis frame BARYCENT",
+    );
+    expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: null, shift_applied_kms: 0 } }))).not.toContain("topocentric");
+    expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: "TOPOCENT", shift_applied_kms: 25.3 } }))).toBe(
+      "optical, rest 1.02000 um, axis frame TOPOCENT, shift 25.3 km/s",
+    );
+  });
+
+  it("keeps significant digits of narrow fit widths and their uncertainties", () => {
+    const rows = lineMeasurementRows(
+      measurement({
+        sigma: 1.1e-4,
+        fwhm: 2.59e-4,
+        velocity: null,
+        fit: {
+          amplitude: 1,
+          centre: 0.6550412,
+          sigma: 1.1e-4,
+          amplitude_err: 0.025,
+          centre_err: 3.09e-6,
+          sigma_err: 3.25e-6,
+          chi2: 20.5,
+          dof: 22,
+          iterations: 6,
+          converged: true,
+        },
+      }),
+    );
+    const fit = rows.find((r) => r.label === "Gaussian fit")?.value ?? "";
+    expect(fit).toContain("c 0.6550412 ± 3.090e-6");
+    expect(fit).toContain("s 1.100e-4 ± 3.250e-6 um");
+    expect(fit).not.toContain("0.00000");
+    expect(rows.find((r) => r.label === "Sigma")?.value).toBe("1.100e-4 um");
+    expect(rows.find((r) => r.label === "FWHM")?.value).toBe("2.590e-4 um");
+  });
+
+  it("chooses axis decimals from the resolution and keeps five decimals otherwise", () => {
+    expect(formatAxisQuantity(1.02)).toBe("1.02000");
+    expect(formatAxisQuantity(1.02, 0.01)).toBe("1.02000");
+    expect(formatAxisQuantity(0.6550412, 3.09e-6)).toBe("0.6550412");
+    expect(formatAxisQuantity(0.5, 1e-15)).toBe("0.5000000000");
+    expect(formatAxisQuantity(1.02, 0)).toBe("1.02000");
+    expect(formatAxisQuantity(1.02, NaN)).toBe("1.02000");
+    expect(formatAxisQuantity(null, 1e-6)).toBe("n/a");
   });
 
   it("marks unavailable values and drops the velocity and fit rows when absent", () => {

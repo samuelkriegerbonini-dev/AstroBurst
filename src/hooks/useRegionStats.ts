@@ -5,6 +5,7 @@ import { regionStats, type RegionStatsRequest } from "../services/regions";
 
 export const STATS_DEBOUNCE_MS = 250;
 export const MAX_REGIONS_PER_STATS_CALL = 512;
+export const MAX_CLIP_ITERS = 100;
 
 const EMPTY_STATS: Map<string, RegionStatsEntry> = new Map();
 
@@ -20,6 +21,21 @@ export function chunkStatsRequests(requests: RegionStatsRequest[]): RegionStatsR
 export interface RegionStatsClip {
   sigma: number | null;
   maxiters: number | null;
+}
+
+export function parseClipIters(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const v = Number(trimmed);
+  return Number.isInteger(v) && v >= 1 && v <= MAX_CLIP_ITERS ? v : null;
+}
+
+export function parseClipSigma(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const v = Number(trimmed);
+  const asF32 = Math.fround(v);
+  return Number.isFinite(asF32) && asF32 > 0 ? v : null;
 }
 
 export interface RegionCalibrationState {

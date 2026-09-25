@@ -8,7 +8,15 @@ import { useDqContext } from "../../context/PreviewContext";
 import { Toggle } from "../ui";
 import ProfilePlot from "../regions/ProfilePlot";
 import type { ProfileSeries } from "../regions/ProfilePlot";
-import { growthReferenceLines } from "../../utils/photometryTable";
+import {
+  APERTURE_RANGE_HINT,
+  MAX_APERTURE_RADIUS_PX,
+  MAX_SKY_OUTER_RADIUS_PX,
+  MIN_APERTURE_RADIUS_PX,
+  apertureRadiusInRange,
+  growthReferenceLines,
+  plateauCaption,
+} from "../../utils/photometryTable";
 import MeasurementBadge from "./MeasurementBadge";
 
 interface PhotometryPanelProps {
@@ -140,10 +148,11 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const annulusOuter = parseOptionalNumber(skyOutText);
   const gain = parseOptionalNumber(gainText);
   const annulusHalfFilled = (annulusInner === undefined) !== (annulusOuter === undefined);
+  const apertureOutOfRange = !apertureRadiusInRange(apertureRadius);
 
   const measure = useCallback(
     async (x: number, y: number) => {
-      if (!filePath || busyRef.current) return;
+      if (!filePath || busyRef.current || apertureOutOfRange) return;
       const seq = ++requestSeqRef.current;
       busyRef.current = true;
       setIsMeasuring(true);
@@ -167,7 +176,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
         if (requestSeqRef.current === seq) setIsMeasuring(false);
       }
     },
-    [filePath, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq],
+    [filePath, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq],
   );
 
   useEffect(() => {
@@ -209,8 +218,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
               <input
                 id={apertureId}
                 type="number"
-                min={1}
-                max={60}
+                min={MIN_APERTURE_RADIUS_PX}
+                max={MAX_APERTURE_RADIUS_PX}
                 step={0.5}
                 value={apertureText}
                 placeholder="auto 1.5 x FWHM"
@@ -241,6 +250,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 id={skyOutId}
                 type="number"
                 min={1}
+                max={MAX_SKY_OUTER_RADIUS_PX}
                 step={0.5}
                 value={skyOutText}
                 placeholder="3 x r_ap"
@@ -265,6 +275,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
             </div>
           </div>
           {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
+          {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
         </div>
 
         <Toggle label="Match Gaia DR3 (online)" checked={gaiaMatch} accent="amber" onChange={setGaiaMatch} />
@@ -370,7 +381,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
               <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
                 <div className="text-zinc-500">
                   Aperture correction
-                  {phot.plateau_radius != null ? ` (growth curve plateau at r=${phot.plateau_radius.toFixed(0)} px)` : ""}
+                  {plateauCaption(phot.plateau_radius)}
                 </div>
                 <div className="text-zinc-300 font-mono">
                   {phot.aperture_correction.toFixed(4)}

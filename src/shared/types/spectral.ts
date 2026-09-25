@@ -59,6 +59,7 @@ export interface LineVelocity {
   rest_um: number;
   convention: VelocityConvention;
   shift_applied_kms: number;
+  axis_frame: string | null;
 }
 
 export interface GaussianFitResult {

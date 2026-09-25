@@ -54,3 +54,17 @@ export function scaleBarPixels(arcsec: number, pixelScaleArcsec: number, screenP
   if (!Number.isFinite(pixelScaleArcsec) || pixelScaleArcsec <= 0) return 0;
   return (arcsec / pixelScaleArcsec) * screenPxPerImagePx;
 }
+
+export interface PixelScaleInfo {
+  pixel_scale_arcsec: number;
+  pixel_scale_x_arcsec?: number | null;
+}
+
+export function horizontalPixelScaleArcsec(info: PixelScaleInfo): number {
+  const sx = info.pixel_scale_x_arcsec;
+  return typeof sx === "number" && Number.isFinite(sx) && sx > 0 ? sx : info.pixel_scale_arcsec;
+}
+
+export function overlayWcsPath(fileKey: string | null, displayedPath: string | null): string | null {
+  return fileKey === null ? null : (displayedPath ?? fileKey);
+}

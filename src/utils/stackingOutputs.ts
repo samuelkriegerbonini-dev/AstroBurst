@@ -47,6 +47,14 @@ export function resultsForRecipients(
   return recipients.map((r) => ({ key: r.key, result: { ...output, label: labelFor(r.path) } }));
 }
 
+export function displaysFileGrid(processed: Pick<ProcessedResult, "kind" | "inputPath"> | null, filePath: string): boolean {
+  return !processed || processed.kind !== "stacking" || samePath(processed.inputPath, filePath);
+}
+
+export function otherGridHint(label: string | null): string {
+  return `The preview shows ${label ?? "a result"}, built on another frame's pixel grid. Points drawn on it stay in that grid after a reset: reset the preview, then place the Points on this frame before measuring.`;
+}
+
 export function toDims(dims: readonly number[] | null | undefined): [number, number] | null {
   return dims && dims.length === 2 && dims[0] > 0 && dims[1] > 0 ? [dims[0], dims[1]] : null;
 }

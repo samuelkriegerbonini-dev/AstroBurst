@@ -1,6 +1,7 @@
 import type { StarPhotometry } from "../services/analysis";
 import type { PlotReferenceLine } from "../components/regions/ProfilePlot";
 import { buildCsv, type CsvCell, type CsvColumn } from "./catalogCsv";
+import { parseImageRef } from "./imageRef";
 
 export interface PhotometryTableRow {
   index: number;
@@ -44,6 +45,16 @@ export const PHOTOMETRY_COLUMN_KEYS = [
 
 export type PhotometryColumnKey = (typeof PHOTOMETRY_COLUMN_KEYS)[number];
 export type SortDirection = "asc" | "desc";
+
+export const PEAK_SEARCH_RADIUS_PX = 8;
+export const MIN_APERTURE_RADIUS_PX = 2;
+export const MAX_APERTURE_RADIUS_PX = 60;
+export const MAX_SKY_OUTER_RADIUS_PX = 512;
+export const APERTURE_RANGE_HINT = `Aperture radius must be between ${MIN_APERTURE_RADIUS_PX} and ${MAX_APERTURE_RADIUS_PX} px.`;
+const PEAK_SEARCH_BOX_PX = 2 * PEAK_SEARCH_RADIUS_PX + 1;
+export const BATCH_SEMANTICS_TEXT = `Each position snaps to the brightest pixel in the ${PEAK_SEARCH_BOX_PX} x ${PEAK_SEARCH_BOX_PX} px box around it (${PEAK_SEARCH_RADIUS_PX} px each way) and is then recentred on that light, so a brighter neighbour beyond ${PEAK_SEARCH_RADIUS_PX} px can take over the input; check the measured x/y. Two inputs on one star measure the same star (flagged as duplicates). The aperture radius is fixed for every source (leave it blank for 1.5 x FWHM per star). When the curve of growth has no plateau before the sky annulus, the correction, total flux and EE radii are empty.`;
+export const STARS_ELSEWHERE_NOTICE =
+  "The detected stars came from the RGB composite, not from the image this table measures, so they are not offered here; go back to the file and detect again.";
 
 const POSITION_SEPARATOR = /[\s,;]+/;
 const COMMENT_PREFIX = "#";
@@ -172,9 +183,17 @@ export function medianSnr(rows: PhotometryTableRow[]): number | null {
 }
 
 export function photometryCsvFileName(filePath: string): string {
-  const base = filePath.split(/[\\/]/).pop() ?? "image";
+  const base = parseImageRef(filePath).path.split(/[\\/]/).pop() ?? "image";
   const stem = base.replace(/\.(fits?|fts|asdf)(\.gz)?$/i, "");
   return `${stem}_photometry.csv`;
+}
+
+export function apertureRadiusInRange(radius: number | undefined): boolean {
+  return radius === undefined || (radius >= MIN_APERTURE_RADIUS_PX && radius <= MAX_APERTURE_RADIUS_PX);
+}
+
+export function plateauCaption(plateauRadius: number | null | undefined): string {
+  return plateauRadius != null && Number.isFinite(plateauRadius) ? ` (growth curve plateau at r=${plateauRadius.toFixed(2)} px)` : "";
 }
 
 const APERTURE_LINE_COLOR = "#fbbf24";

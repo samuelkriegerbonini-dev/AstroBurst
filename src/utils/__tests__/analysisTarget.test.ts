@@ -3,8 +3,10 @@ import {
   STF_LOCK_PNG,
   STF_LOCK_RGB,
   STF_LOCK_STRETCH,
+  analysisMeasureKey,
   cpuStfRenderAllowed,
   describeMeasurementSource,
+  detectedStarsOnMeasuredImage,
   histogramStfLock,
   isCompositeOnScreen,
   isFileRgbView,
@@ -103,6 +105,41 @@ describe("rgbMeasurePath", () => {
   it("uses the composite slot for a wizard Blend, and nothing when no RGB view is on screen", () => {
     expect(rgbMeasurePath({ composite: true, fileRgbView: false, filePath: "D:/M31_osc.fits" })).toBeNull();
     expect(rgbMeasurePath({ composite: false, fileRgbView: true, filePath: "D:/M31_osc.fits" })).toBeNull();
+  });
+});
+
+describe("detectedStarsOnMeasuredImage", () => {
+  it("refuses stars detected on a wizard composite for a table that measures the selected file", () => {
+    expect(detectedStarsOnMeasuredImage({ compositeOnScreen: true, measuresFilePlanes: false })).toBe(false);
+  });
+
+  it("keeps stars detected on the planes of the RGB file the table measures", () => {
+    expect(detectedStarsOnMeasuredImage({ compositeOnScreen: true, measuresFilePlanes: true })).toBe(true);
+  });
+
+  it("keeps stars detected on the mono image the table measures", () => {
+    expect(detectedStarsOnMeasuredImage({ compositeOnScreen: false, measuresFilePlanes: false })).toBe(true);
+  });
+});
+
+describe("analysisMeasureKey", () => {
+  it("changes when a step re-publishes the same FITS path", () => {
+    const first = analysisMeasureKey({ path: "out/R_arcsinh.fits", composite: false, processedFitsPath: "out/R_arcsinh.fits", processedVersion: 1 });
+    const second = analysisMeasureKey({ path: "out/R_arcsinh.fits", composite: false, processedFitsPath: "out/R_arcsinh.fits", processedVersion: 2 });
+    expect(second).not.toBe(first);
+  });
+
+  it("stays stable across PNG-only publishes and while the composite is measured", () => {
+    expect(analysisMeasureKey({ path: "cube.fits", composite: false, processedFitsPath: null, processedVersion: 3 })).toBe(
+      analysisMeasureKey({ path: "cube.fits", composite: false, processedFitsPath: null, processedVersion: 4 }),
+    );
+    expect(analysisMeasureKey({ path: "rgb.fits", composite: true, processedFitsPath: "rgb.fits", processedVersion: 5 })).toBe(
+      analysisMeasureKey({ path: "rgb.fits", composite: true, processedFitsPath: "rgb.fits", processedVersion: 6 }),
+    );
+  });
+
+  it("is null without a path", () => {
+    expect(analysisMeasureKey({ path: null, composite: false, processedFitsPath: null, processedVersion: 7 })).toBeNull();
   });
 });
 

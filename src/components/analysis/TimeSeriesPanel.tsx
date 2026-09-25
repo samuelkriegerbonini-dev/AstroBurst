@@ -9,25 +9,48 @@ import {
   type TimeSeriesRole,
   type TimeSeriesTarget,
 } from "../../shared/types/analysis";
-import { useDqContext, useFileContext } from "../../context/PreviewContext";
+import { useDqContext, useFileContext, useRenderContext } from "../../context/PreviewContext";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useProgress } from "../../hooks/useProgress";
+import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { orderWithReferenceFirst, pathOf, useMatchingFrames } from "../../hooks/useFrameSet";
 import { fileStore } from "../../hooks/useFileStore";
 import {
+  MAX_TIME_SERIES_TARGETS,
   centroidJumps,
+  checkReference,
+  checkRmsLabel,
   checkStarCurve,
+  frameFilesNotice,
+  frameJdLabel,
+  frameMeasurementErrors,
   frameTimes,
   hasCompleteTimeAxis,
+  inFrameOrder,
+  jdOffsetLabel,
   jdZero,
   lightCurve,
   lightCurveCsv,
   lightCurveCsvFileName,
   lightCurveExtras,
+  measuredTargets,
+  referenceTimeSource,
+  resultCoversPath,
   seriesRms,
+  timeAxisLabel,
+  timeSeriesRoleHint,
   type LightCurvePoint,
   type TimeAxis,
 } from "../../utils/differentialPhotometry";
+import {
+  APERTURE_RANGE_HINT,
+  MAX_APERTURE_RADIUS_PX,
+  MAX_SKY_OUTER_RADIUS_PX,
+  MIN_APERTURE_RADIUS_PX,
+  apertureRadiusInRange,
+} from "../../utils/photometryTable";
+import { displaysFileGrid, otherGridHint } from "../../utils/stackingOutputs";
+import { abandonRun, beginRun, createRunTracker, isCurrentRun, settleRun } from "../../utils/runTracker";
 import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
 
 interface TimeSeriesPanelProps {
@@ -43,7 +66,6 @@ const DEFAULT_APERTURE_RADIUS_PX = "5";
 const TABLE_ROW_LIMIT = 300;
 const SAVED_NOTICE_MS = 6000;
 const PLOT_HEIGHT_PX = 170;
-const JD_TICK_DIGITS = 3;
 const ROLE_OPTIONS: TimeSeriesRole[] = ["target", "comp", "check", "ignore"];
 const SERIES_TARGET = "target";
 const SERIES_RAW = "raw";
@@ -54,6 +76,7 @@ const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius"
 const STARS_HINT =
   "Draw Point regions on the target and comparison stars, or use Add as Point regions in the photometry table.";
 const FRAMES_HINT = "Load the other frames of the sequence; only done files with the same dimensions are measured.";
+const NO_PLOT_HINT = "No frame has a positive target and comparison flux to plot.";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
@@ -90,6 +113,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const axisId = useId();
   const { file } = useFileContext();
   const { excludeDq } = useDqContext();
+  const { processed } = useRenderContext();
+  const analysisTarget = useAnalysisTarget();
   const regionDoc = useRegionDoc(filePath);
   const progress = useProgress(TIME_SERIES_PROGRESS_EVENT);
   const resetProgress = progress.reset;
@@ -105,17 +130,29 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
-  const requestSeqRef = useRef(0);
+  const runRef = useRef(createRunTracker());
+  const resultRef = useRef<TimeSeriesResult | null>(null);
+
+  const abandon = useCallback(() => {
+    if (abandonRun(runRef.current)) cancelProgress(TIME_SERIES_PROGRESS_EVENT).catch(() => {});
+  }, []);
 
   useEffect(() => {
-    requestSeqRef.current++;
+    resultRef.current = result;
+  }, [result]);
+
+  useEffect(() => {
+    if (resultCoversPath(resultRef.current, filePath)) return;
+    abandon();
     setResult(null);
     setError(null);
     setRunning(false);
     setSavedPath(null);
     setRoles({});
     setSeriesKey(SERIES_TARGET);
-  }, [filePath]);
+  }, [filePath, abandon]);
+
+  useEffect(() => abandon, [abandon]);
 
   const dims = file?.result?.dimensions ?? null;
   const matching = useMatchingFrames(dims);
@@ -146,35 +183,55 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const annulusOuter = parseOptionalNumber(skyOutText);
   const gain = parseOptionalNumber(gainText);
   const annulusHalfFilled = (annulusInner === undefined) !== (annulusOuter === undefined);
-  const hasTarget = targets.some((t) => t.target.role === "target");
+  const apertureValid = apertureRadius !== undefined && apertureRadiusInRange(apertureRadius);
+  const sent = useMemo(() => measuredTargets(targets.map((t) => t.target)), [targets]);
+  const overLimit = sent.length > MAX_TIME_SERIES_TARGETS;
+  const roleHint = timeSeriesRoleHint(targets.map((t) => t.target.role));
+  const onFileGrid = !!filePath && displaysFileGrid(processed, filePath);
+  const sourceNotice = frameFilesNotice({
+    compositeOnScreen: analysisTarget.composite,
+    processedLabel: analysisTarget.displayed.isProcessed ? analysisTarget.displayed.label : null,
+  });
   const canMeasure =
-    !!filePath && referenceLoaded && hasTarget && apertureRadius !== undefined && !annulusHalfFilled && !running;
+    !!filePath &&
+    referenceLoaded &&
+    onFileGrid &&
+    roleHint === null &&
+    apertureValid &&
+    !annulusHalfFilled &&
+    !overLimit &&
+    !running;
 
   const measure = useCallback(async () => {
-    if (!filePath || !referenceLoaded || apertureRadius === undefined || targets.length === 0) return;
-    const seq = ++requestSeqRef.current;
+    if (!canMeasure || apertureRadius === undefined) return;
+    const seq = beginRun(runRef.current);
+    const storeOrder = matching.map(pathOf);
     setRunning(true);
     setError(null);
     setSavedPath(null);
     resetProgress();
     try {
-      const res = await timeSeriesPhotometry(
-        frames.map(pathOf),
-        targets.map((t) => t.target),
-        { apertureRadius, annulusInner, annulusOuter, gain, excludeDq, trackDrift },
-      );
-      if (requestSeqRef.current !== seq) return;
-      setResult(res);
+      const res = await timeSeriesPhotometry(frames.map(pathOf), sent, {
+        apertureRadius,
+        annulusInner,
+        annulusOuter,
+        gain,
+        excludeDq,
+        trackDrift,
+      });
+      if (!isCurrentRun(runRef.current, seq)) return;
+      setResult(inFrameOrder(res, storeOrder));
       setSeriesKey(SERIES_TARGET);
     } catch (e: unknown) {
-      if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
+      if (isCurrentRun(runRef.current, seq)) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (requestSeqRef.current === seq) {
+      settleRun(runRef.current, seq);
+      if (isCurrentRun(runRef.current, seq)) {
         setRunning(false);
         resetProgress();
       }
     }
-  }, [filePath, referenceLoaded, apertureRadius, targets, frames, annulusInner, annulusOuter, gain, excludeDq, trackDrift, resetProgress]);
+  }, [canMeasure, apertureRadius, matching, frames, sent, annulusInner, annulusOuter, gain, excludeDq, trackDrift, resetProgress]);
 
   const cancel = useCallback(() => {
     cancelProgress(TIME_SERIES_PROGRESS_EVENT).catch(() => {});
@@ -199,7 +256,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     checkIdx.forEach((i) => options.push({ key: `check:${i}`, label: `check star ${echo[i].label}` }));
     if (compCurves.length > 0) compIdx.forEach((i) => options.push({ key: `comp:${i}`, label: `comp ${echo[i].label} vs others` }));
     if (compIdx.length > 0) options.push({ key: SERIES_RAW, label: "raw comps" });
-    const checkReference = compCurves[0] ?? checkCurves[0] ?? null;
+    const reference = checkReference(result, compIdx, checkIdx, axis);
     const timeline = frameTimes(result, axis);
     const jd0 = axis === "jd" ? jdZero(timeline) : 0;
     return {
@@ -214,7 +271,9 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
       jd0,
       timeline,
       targetRms: seriesRms(targetCurve),
-      checkRms: checkReference ? seriesRms(checkReference) : null,
+      checkRms: reference ? seriesRms(reference.curve) : null,
+      checkLabel: checkRmsLabel(reference, echo),
+      timeSource: referenceTimeSource(result),
       used: targetCurve.filter((p) => p.mag !== null).length,
       jumps: new Set(centroidJumps(result)),
     };
@@ -303,9 +362,10 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     }
   }, [result, csvText]);
 
-  const xLabel = analysis?.axis === "jd" ? `JD - ${analysis.jd0}` : "frame index";
+  const xLabel = timeAxisLabel(analysis?.axis ?? "index", analysis?.jd0 ?? 0);
   const yLabel = activeKey === SERIES_RAW ? "inst mag" : "diff mag";
-  const xTickFormat = useMemo(() => (analysis?.axis === "jd" ? (v: number) => v.toFixed(JD_TICK_DIGITS) : undefined), [analysis?.axis]);
+  const xTickFormat = analysis?.axis === "jd" ? jdOffsetLabel : undefined;
+  const plottable = series.some((s) => s.y.some((v) => v !== null && Number.isFinite(v)));
   const shownFrames = result ? result.frames.slice(0, TABLE_ROW_LIMIT) : [];
   const targetLabel = analysis && analysis.targetIdx >= 0 ? result?.targets[analysis.targetIdx].label : null;
 
@@ -347,7 +407,12 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 </select>
               </div>
             ))}
-            {!hasTarget && <div className="text-[9px] text-amber-400/90">Mark one star as the target.</div>}
+            {roleHint && <div className="text-[9px] text-amber-400/90">{roleHint}</div>}
+            {overLimit && (
+              <div className="text-[9px] text-amber-400/90">
+                {`${sent.length} stars are not ignored; set the others to ignore (limit ${MAX_TIME_SERIES_TARGETS}).`}
+              </div>
+            )}
           </div>
         )}
 
@@ -360,6 +425,11 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
         {!referenceLoaded && !!filePath && (
           <div className="text-[9px] text-amber-400/90">The current file is not a done frame, so it cannot be the reference.</div>
         )}
+        {!onFileGrid && !!filePath ? (
+          <div className="text-[9px] text-amber-400/90">{otherGridHint(processed?.label ?? null)}</div>
+        ) : (
+          sourceNotice && <div className="text-[9px] text-amber-400/90">{sourceNotice}</div>
+        )}
 
         <div className="grid grid-cols-4 gap-1.5">
           <div className="flex flex-col gap-0.5">
@@ -369,8 +439,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             <input
               id={apertureId}
               type="number"
-              min={2}
-              max={60}
+              min={MIN_APERTURE_RADIUS_PX}
+              max={MAX_APERTURE_RADIUS_PX}
               step={0.5}
               value={apertureText}
               onChange={(e) => setApertureText(e.target.value)}
@@ -400,6 +470,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
               id={skyOutId}
               type="number"
               min={1}
+              max={MAX_SKY_OUTER_RADIUS_PX}
               step={0.5}
               value={skyOutText}
               placeholder="3 x r_ap"
@@ -424,7 +495,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
           </div>
         </div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
-        {apertureRadius === undefined && <div className="text-[9px] text-amber-400/90">Aperture radius must be between 2 and 60 px.</div>}
+        {!apertureValid && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 
         <Toggle label="Track drift (phase correlation)" checked={trackDrift} accent="amber" onChange={setTrackDrift} />
 
@@ -483,13 +554,13 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                   onChange={(e) => setTimeAxis(e.target.value as TimeAxis)}
                   className={SELECT_CLASS}
                 >
-                  <option value="jd">JD - JD0</option>
+                  <option value="jd">JD - JD0 (header time)</option>
                   <option value="index">frame index</option>
                 </select>
               </div>
             </div>
 
-            {series.length > 0 ? (
+            {plottable ? (
               <ProfilePlot
                 series={series}
                 xLabel={xLabel}
@@ -497,13 +568,14 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 height={PLOT_HEIGHT_PX}
                 invertY
                 toolbar
+                logToggle={false}
                 onSelect={showFrame}
                 selected={selected}
                 csvName="lightcurve"
                 xTickFormat={xTickFormat}
               />
             ) : (
-              <div className="text-[10px] text-zinc-600">No series to plot: mark a target and at least one comparison star.</div>
+              <div className="text-[10px] text-zinc-600">{NO_PLOT_HINT}</div>
             )}
 
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
@@ -512,7 +584,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 <div className="text-amber-300 font-mono">{fmt(analysis.targetRms, 4)} mag</div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Check-star rms</div>
+                <div className="text-zinc-500">{analysis.checkLabel}</div>
                 <div className="text-zinc-300 font-mono">{fmt(analysis.checkRms, 4)} mag</div>
               </div>
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
@@ -525,6 +597,11 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
               <div className="bg-zinc-900/80 rounded px-2 py-1.5">
                 <div className="text-zinc-500">JD0</div>
                 <div className="text-zinc-300 font-mono">{analysis.axis === "jd" ? analysis.jd0 : "no frame time"}</div>
+                {analysis.timeSource && (
+                  <div className="text-[9px] text-zinc-500 truncate" title={analysis.timeSource}>
+                    {analysis.timeSource}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -552,6 +629,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                     const lowConfidence = frame.offset !== null && !frame.offset.registered;
                     const jump = analysis.jumps.has(frame.index);
                     const isCurrent = frame.index === currentFrameIndex;
+                    const measurementErrors =
+                      analysis.targetIdx >= 0 ? frameMeasurementErrors(frame, result.targets, analysis.targetIdx, analysis.compIdx) : [];
                     const tone = frame.skipped ? "text-zinc-500" : isCurrent ? "text-amber-200" : "text-zinc-300";
                     return (
                       <tr key={frame.index} className={`${tone} ${isCurrent ? "bg-zinc-800/60" : ""}`}>
@@ -560,7 +639,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                           {frame.file_name}
                         </td>
                         <td className="text-right px-1.5 py-0.5">
-                          {frame.jd_mid === null ? "--" : analysis.axis === "jd" ? fmt(frame.jd_mid - analysis.jd0, 4) : fmt(frame.jd_mid, 3)}
+                          {frameJdLabel(frame.jd_mid, analysis.axis, analysis.jd0)}
                         </td>
                         <td className="text-right px-1.5 py-0.5">{fmt(frame.airmass, 3)}</td>
                         <td className="text-right px-1.5 py-0.5">
@@ -581,11 +660,11 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                               {frame.skipped}
                             </span>
                           )}
-                          {!frame.skipped && analysis.targetIdx >= 0 && frame.errors[analysis.targetIdx] && (
-                            <span className={`${CHIP_CLASS} bg-red-900/50 text-red-300`} title={frame.errors[analysis.targetIdx] ?? undefined}>
-                              {frame.errors[analysis.targetIdx]}
+                          {measurementErrors.map((message) => (
+                            <span key={message} className={`${CHIP_CLASS} bg-red-900/50 text-red-300`} title={message}>
+                              {message}
                             </span>
-                          )}
+                          ))}
                         </td>
                       </tr>
                     );

@@ -11,27 +11,31 @@ import { generateId } from "../../utils/format";
 import {
   buildContourRequest,
   closedContourPolygons,
+  contourHint,
   formatLevelValue,
   levelColour,
   levelsText,
   suggestBin,
   CONTOUR_BIN_CHOICES,
+  DEFAULT_SIGMA_MULTIPLES_TEXT,
   MAX_REGION_POLYGONS,
   type ContourBinChoice,
   type ContourColourMode,
 } from "../../utils/contourLevels";
+import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import { CONTOUR_LAYER_ID, CONTOUR_LAYER_KIND, createContourPainter } from "../viewer/painters/contourPainter";
 import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import MeasurementBadge from "./MeasurementBadge";
 
 interface ContourPanelProps {
   filePath: string | null;
   overlayKey: string | null;
   imageWidth?: number;
   imageHeight?: number;
+  measureKey?: string | null;
 }
 
 const DEFAULT_MODE: ContourMode = "sigma";
-const DEFAULT_SIGMA_MULTIPLES = "1, 2, 3, 5, 10";
 const DEFAULT_N_LEVELS = "5";
 const DEFAULT_SMOOTH_SIGMA = "1";
 const DEFAULT_COLOUR_MODE: ContourColourMode = "ramp";
@@ -39,8 +43,6 @@ const DEFAULT_LINE_WIDTH = "1";
 const LINE_WIDTHS = ["1", "1.5", "2"] as const;
 const COLOUR_MODES: readonly ContourColourMode[] = ["single", "ramp"];
 const NOTICE_MS = 6000;
-const HINT_TEXT =
-  "Contours are traced on the image on screen; contours from another file need reprojection (not available).";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-teal-500/50 w-full";
@@ -61,7 +63,7 @@ function fmt(v: number, digits = 2): string {
   return Number.isFinite(v) ? v.toFixed(digits) : "--";
 }
 
-function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: ContourPanelProps) {
+function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKey }: ContourPanelProps) {
   const modeId = useId();
   const levelsId = useId();
   const nLevelsId = useId();
@@ -73,6 +75,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
   const colourId = useId();
   const widthId = useId();
   const { excludeDq } = useDqContext();
+  const source = useMeasurementSource(false);
 
   const [show, setShow] = useState(true);
   const [mode, setMode] = useState<ContourMode>(DEFAULT_MODE);
@@ -80,7 +83,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
   const [nLevelsText, setNLevelsText] = useState(DEFAULT_N_LEVELS);
   const [loText, setLoText] = useState("");
   const [hiText, setHiText] = useState("");
-  const [sigmaText, setSigmaText] = useState(DEFAULT_SIGMA_MULTIPLES);
+  const [sigmaText, setSigmaText] = useState(DEFAULT_SIGMA_MULTIPLES_TEXT);
   const [smoothText, setSmoothText] = useState(DEFAULT_SMOOTH_SIGMA);
   const [binChoice, setBinChoice] = useState<ContourBinChoice>("auto");
   const [colourMode, setColourMode] = useState<ContourColourMode>(DEFAULT_COLOUR_MODE);
@@ -103,7 +106,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
     setHidden(new Set());
     setHighlightIndex(null);
     setNotice(null);
-  }, [filePath]);
+  }, [filePath, measureKey]);
 
   useEffect(
     () => () => {
@@ -217,6 +220,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
         <div className="flex items-center gap-2">
           <Layers size={12} className="text-teal-400" />
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Contours</span>
+          <MeasurementBadge />
         </div>
         {loading && <Loader2 size={12} className="animate-spin text-teal-400/70" />}
       </div>
@@ -294,7 +298,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
               id={sigmaId}
               type="text"
               value={sigmaText}
-              placeholder={DEFAULT_SIGMA_MULTIPLES}
+              placeholder={DEFAULT_SIGMA_MULTIPLES_TEXT}
               onChange={(e) => setSigmaText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -414,7 +418,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
                 onClick={toRegions}
                 disabled={!overlayKey || closedCount === 0}
                 className={SMALL_BUTTON_CLASS}
-                title={`Add the closed contours of the visible levels as Polygon regions (at most ${MAX_REGION_POLYGONS})`}
+                title={`Add the closed contours of the visible levels as Polygon regions (at most ${MAX_REGION_POLYGONS}, highest level and largest ring first)`}
               >
                 <Shapes size={10} />
                 To regions
@@ -425,7 +429,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight }: Contour
 
         {notice && <div className="text-[9px] text-emerald-400/90">{notice}</div>}
 
-        <div className="text-[10px] text-zinc-600">{HINT_TEXT}</div>
+        <div className="text-[10px] text-zinc-600">{contourHint(source)}</div>
       </div>
     </div>
   );

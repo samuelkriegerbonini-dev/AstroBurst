@@ -22,7 +22,10 @@ use crate::types::constants::{
 };
 use crate::types::image::{AutoStfConfig, ImageStats, StfParams};
 use crate::core::analysis::fft::compute_power_spectrum;
-use crate::core::analysis::photometry::{measure_star_full, saturation_level, PhotometryConfig, StarPhotometry};
+use crate::core::analysis::photometry::{
+    measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry, MAX_APERTURE_RADIUS,
+    MIN_APERTURE_RADIUS,
+};
 use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
 use crate::core::astrometry::spcc::query_gaia_vizier;
 use crate::core::astrometry::wcs::WcsTransform;
@@ -31,10 +34,12 @@ use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_st
 use crate::core::imaging::stf::auto_stf;
 use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
+use crate::types::header::HduHeader;
 
 const PAR_THRESHOLD: usize = 1_000_000;
 const MAX_BATCH_POINTS: usize = 5000;
 const PAR_BATCH_POINTS: usize = 64;
+const MAX_SKY_ANNULUS_RADIUS: f64 = 512.0;
 const FFT_WINDOWED_FLAG: u32 = 1;
 const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
 
@@ -372,10 +377,13 @@ pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result
         Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
         None => warnings.push(missing_calibration_reason(header)),
     }
-    if let Some(provenance) = header.and_then(|h| h.get(HEADER_PROCESSING_PROVENANCE)) {
-        warnings.push(format!("photometry on processed data ({})", provenance.trim().trim_matches('\'').trim()));
-    }
+    warnings.extend(processed_data_warning(header));
     Ok(PhotometryContext { entry, mask, planes, wcs, photcal, warnings })
+}
+
+pub(crate) fn processed_data_warning(header: Option<&HduHeader>) -> Option<String> {
+    let provenance = header?.get(HEADER_PROCESSING_PROVENANCE)?;
+    Some(format!("photometry on processed data ({})", provenance.trim().trim_matches('\'').trim()))
 }
 
 impl PhotometryContext {
@@ -389,11 +397,14 @@ impl PhotometryContext {
         }
     }
 
-    fn measure(&self, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
-        let mut phot = measure_star_full(
-            self.entry.arr(),
+    fn masked_image(&self) -> Result<MaskedImage<'_>, String> {
+        MaskedImage::new(self.entry.arr(), self.mask.as_ref().map(|m| &m.map))
+    }
+
+    fn measure(&self, source: &MaskedImage, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
+        let mut phot = measure_star_prepared(
+            source,
             self.planes.err.as_ref().map(|e| e.arr()),
-            self.mask.as_ref().map(|m| &m.map),
             self.planes.saturated.as_ref(),
             x,
             y,
@@ -440,7 +451,8 @@ pub(crate) fn photometry_for_path(
     let t0 = Instant::now();
     let ctx = photometry_context(path, exclude_dq)?;
     let config = ctx.config(aperture_radius, sky_annulus, gain);
-    let phot = ctx.measure(x, y, &config).map_err(|e| anyhow::anyhow!(e))?;
+    let source = ctx.masked_image().map_err(anyhow::Error::msg)?;
+    let phot = ctx.measure(&source, x, y, &config).map_err(|e| anyhow::anyhow!(e))?;
 
     let sky = ctx.sky_json(&phot);
     let gaia = match (&ctx.wcs, gaia_match) {
@@ -474,10 +486,22 @@ fn annulus_arg(inner: Option<f64>, outer: Option<f64>) -> anyhow::Result<Option<
     if !o.is_finite() || o <= 0.0 {
         anyhow::bail!("sky annulus outer radius {o} must be a positive finite number of pixels");
     }
+    if o > MAX_SKY_ANNULUS_RADIUS {
+        anyhow::bail!("sky annulus outer radius {o} must be at most {MAX_SKY_ANNULUS_RADIUS} pixels");
+    }
     if o <= i {
         anyhow::bail!("sky annulus outer radius {o} must be larger than the inner radius {i}");
     }
     Ok(Some((i, o)))
+}
+
+fn aperture_radius_arg(aperture_radius: Option<f64>) -> anyhow::Result<Option<f64>> {
+    if let Some(r) = aperture_radius {
+        if !(MIN_APERTURE_RADIUS..=MAX_APERTURE_RADIUS).contains(&r) {
+            anyhow::bail!("aperture radius {r} must be between {MIN_APERTURE_RADIUS} and {MAX_APERTURE_RADIUS} pixels");
+        }
+    }
+    Ok(aperture_radius)
 }
 
 fn check_annulus_clears_aperture(aperture_radius: Option<f64>, sky_annulus: Option<(f64, f64)>) -> anyhow::Result<()> {
@@ -505,6 +529,7 @@ pub async fn measure_photometry_cmd(
         if !x.is_finite() || !y.is_finite() {
             anyhow::bail!("photometry position ({x}, {y}) must be finite");
         }
+        let aperture_radius = aperture_radius_arg(aperture_radius)?;
         let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
         check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
         photometry_for_path(
@@ -542,18 +567,15 @@ pub async fn measure_photometry_batch_cmd(
         if let Some((i, (x, y))) = points.iter().enumerate().find(|(_, (x, y))| !x.is_finite() || !y.is_finite()) {
             anyhow::bail!("batch photometry point {i} ({x}, {y}) must be finite");
         }
-        if let Some(r) = aperture_radius {
-            if !r.is_finite() || r <= 0.0 {
-                anyhow::bail!("aperture radius {r} must be a positive finite number of pixels");
-            }
-        }
+        let aperture_radius = aperture_radius_arg(aperture_radius)?;
         let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
         check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
         let with_growth_curve = with_growth_curve.unwrap_or(false);
 
         let ctx = photometry_context(&path, exclude_dq.unwrap_or(false))?;
         let config = ctx.config(aperture_radius, sky_annulus, gain);
-        let measure = |&(x, y): &(f64, f64)| ctx.measure(x, y, &config);
+        let source = ctx.masked_image().map_err(anyhow::Error::msg)?;
+        let measure = |&(x, y): &(f64, f64)| ctx.measure(&source, x, y, &config);
         let measured: Vec<Result<StarPhotometry, String>> = if points.len() > PAR_BATCH_POINTS {
             points.par_iter().map(measure).collect()
         } else {
@@ -1099,5 +1121,100 @@ mod tests {
         let ee80 = phot["ee80_radius"].as_f64().expect("EE80");
         assert!((ee50 - 1.1774 * 2.0).abs() / (1.1774 * 2.0) < 0.05, "EE50 {ee50}");
         assert!(ee80 > ee50);
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_reports_positions_outside_the_image_as_failed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "outside.fits");
+        let points = vec![(32.0, 32.0), (3000.0, 3000.0), (-500.0, 10.0), (70.0, 32.0)];
+        let out = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, None, None, None).await.unwrap();
+        assert_eq!(out[RES_N_MEASURED], 1);
+        assert_eq!(out[RES_N_FAILED], 3);
+        for i in [1usize, 2, 3] {
+            let row = &out[RES_ROWS][i];
+            assert!(row[RES_PHOTOMETRY].is_null(), "{row}");
+            assert!(row[RES_ERROR].as_str().unwrap().contains("lies outside the 64 x 64 image"), "{row}");
+        }
+        assert_eq!(out[RES_ROWS][2][RES_ERROR], "position (-500, 10) lies outside the 64 x 64 image");
+    }
+
+    #[tokio::test]
+    async fn a_sky_annulus_wider_than_the_limit_is_refused_by_every_photometry_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "wide_annulus.fits");
+        let sentence = "sky annulus outer radius 3000 must be at most 512 pixels";
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(20.0), Some(3000.0), Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(single.contains(sentence), "{single}");
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 100], Some(5.0), Some(20.0), Some(3000.0), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(batch.contains(sentence), "{batch}");
+        assert_eq!(annulus_arg(Some(20.0), Some(MAX_SKY_ANNULUS_RADIUS)).unwrap(), Some((20.0, MAX_SKY_ANNULUS_RADIUS)));
+        assert!(annulus_arg(Some(20.0), Some(512.5)).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_aperture_radius_outside_the_measurable_range_is_refused_once_by_both_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "aperture_range.fits");
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(1.5), None, None, Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(single.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{single}");
+        let small = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 3], Some(1.5), Some(1.8), Some(4.0), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(small.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{small}");
+        let large = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(100.0), None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{large}");
+        let single_large = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(100.0), None, None, Some(false), None, None)
+            .await
+            .unwrap_err();
+        assert!(single_large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{single_large}");
+        let nan = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(f64::NAN), None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(nan.contains("aperture radius NaN"), "{nan}");
+        let edge = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(2.0), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(edge[RES_N_MEASURED], 1);
+        assert_eq!(edge[RES_ROWS][0][RES_PHOTOMETRY]["aperture_radius"], 2.0);
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_reports_a_sky_annulus_with_no_usable_pixel_as_a_failed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "thin_annulus.fits");
+        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), Some(10.0), Some(10.3), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(out[RES_N_FAILED], 1);
+        assert!(out[RES_ROWS][0][RES_PHOTOMETRY].is_null());
+        let error = out[RES_ROWS][0][RES_ERROR].as_str().unwrap();
+        assert!(error.starts_with("sky annulus 10.0 - 10.3 px around (32.0, 32.0) has no usable pixel"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_with_dq_exclusion_equals_the_single_measurement_for_every_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = jwst_star_mef(&dir.path().join("jwst_batch_dq.fits"), vec![]);
+        let points: Vec<(f64, f64)> = (0..70).map(|i| (24.0 + (i % 10) as f64 * 1.7, 24.0 + (i / 10) as f64 * 2.3)).collect();
+        assert!(points.len() > PAR_BATCH_POINTS);
+        let batch = measure_photometry_batch_cmd(key.clone(), points.clone(), None, None, None, None, Some(true), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(batch[RES_MASKED], true);
+        assert_eq!(batch[RES_N_MEASURED], 70);
+        for (i, &(x, y)) in points.iter().enumerate() {
+            let single = photometry_for_path(&key, x, y, None, None, false, true, None).unwrap();
+            assert_eq!(batch[RES_ROWS][i][RES_PHOTOMETRY], single[RES_PHOTOMETRY], "point {i}");
+        }
+        assert_eq!(batch[RES_ROWS][0][RES_PHOTOMETRY]["n_masked"], 1);
     }
 }

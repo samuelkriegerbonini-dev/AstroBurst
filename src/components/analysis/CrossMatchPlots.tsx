@@ -12,6 +12,7 @@ const MEDIAN_COLOR = "#a1a1aa";
 const FITTED_COLOR = "#22d3ee";
 const MODEL_COLOR = "#e4e4e7";
 const OUTLIER_COLOR = "#fbbf24";
+const NO_COLOUR_COLOR = "#a1a1aa";
 const PLOT_HEIGHT = 170;
 const RESIDUALS_CSV = "residuals";
 const ZERO_POINT_CSV = "zero_point";
@@ -26,6 +27,11 @@ function catalogueMag(row: MatchedCatalogRow, band: GaiaBand): number | null {
 
 function fmtArcsec(v: number): string {
   return Number.isFinite(v) ? `${v.toFixed(RMS_DIGITS)}"` : "--";
+}
+
+function colourCorrectedLabel(coeff: number): string {
+  const sign = coeff < 0 ? "-" : "+";
+  return `mag_inst ${sign} ${Math.abs(coeff).toFixed(RMS_DIGITS)}(BP-RP)`;
 }
 
 function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
@@ -53,11 +59,14 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
 
   const zeroPoint = useMemo(() => {
     const zp = cross.zero_point;
+    const coeff = zp ? zp.colour_coeff : null;
     const split = splitZeroPointPoints(
       cross.matches.map((m) => catalogueMag(m.row, cross.band)),
       cross.matches.map((m) => m.star.mag_inst),
       zp ? zp.zp : null,
       zp ? zp.rms : null,
+      cross.matches.map((m) => m.row.bp_rp),
+      coeff,
     );
     const series: ProfileSeries[] = [
       { x: split.fitted.x, y: split.fitted.y, color: FITTED_COLOR, label: "matched stars", mode: "points" },
@@ -75,7 +84,16 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
     if (split.outliers.x.length > 0) {
       series.push({ x: split.outliers.x, y: split.outliers.y, color: OUTLIER_COLOR, label: "outside fit", mode: "points" });
     }
-    const yLabel = zp && zp.colour_coeff !== null ? "mag_inst (colour term not drawn)" : "mag_inst";
+    if (split.noColour.x.length > 0) {
+      series.push({
+        x: split.noColour.x,
+        y: split.noColour.y,
+        color: NO_COLOUR_COLOR,
+        label: "no BP-RP (not in colour fit)",
+        mode: "points",
+      });
+    }
+    const yLabel = coeff !== null && Number.isFinite(coeff) ? colourCorrectedLabel(coeff) : "mag_inst";
     return { series, yLabel };
   }, [cross]);
 
@@ -90,6 +108,7 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
           height={PLOT_HEIGHT}
           referenceLines={residualLines}
           toolbar
+          logToggle={false}
           csvName={RESIDUALS_CSV}
         />
       </div>
@@ -101,6 +120,7 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
           yLabel={zeroPoint.yLabel}
           height={PLOT_HEIGHT}
           toolbar
+          logToggle={false}
           csvName={ZERO_POINT_CSV}
         />
       </div>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CSV_LINE_END } from "../catalogCsv";
-import { REGION_CSV_COLUMNS, regionsCsvFileName, regionsTableCsv } from "../regionCsv";
-import type { Region, RegionCalibrated, RegionStats, RegionStatsEntry } from "../../shared/types/regions";
+import { REGION_CSV_COLUMNS, regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../regionCsv";
+import type { Region, RegionCalibrated, RegionSky, RegionStats, RegionStatsEntry } from "../../shared/types/regions";
 
 const EXPECTED_HEADER =
   "id,shape,text,include,n,n_excluded,area_px,mean,median,sigma,std,min,max,sum,sum_err,net_sum,net_snr," +
@@ -68,6 +68,14 @@ function calibrated(overrides: Partial<RegionCalibrated> = {}): RegionCalibrated
   };
 }
 
+function sky(overrides: Partial<RegionSky> = {}): RegionSky {
+  return { ra: 150, dec: 2, pa_sky_deg: 90, area_arcsec2: 0.04, geometric_area_arcsec2: 0.05, ...overrides };
+}
+
+function lastCells(row: string, count: number): string[] {
+  return row.split(",").slice(-count);
+}
+
 function entry(id: string, s: RegionStats | null, error: string | null = null): RegionStatsEntry {
   return { id, stats: s, error };
 }
@@ -118,6 +126,39 @@ describe("regionsTableCsv", () => {
       'box,"box (50.0, 50.0) 8.0×4.0 θ=30.0°","core, inner",false,49,2,50.27,4,4,0,0.5,3,5,196,3.5,147,41.2,' +
         "net,0.00000392,7e-8,22.417,0.02,18.967,0.04165,150.001,2.002,120",
     );
+  });
+
+  it("writes the sky centre, PA and area of a plate-solved image that has no flux calibration", () => {
+    const rows = lines(regionsTableCsv([region("a")], new Map([["a", entry("a", stats({ calibrated: null, sky: sky() }))]])));
+    expect(lastCells(rows[1], 10)).toEqual(["", "", "", "", "", "", "0.04", "150", "2", "90"]);
+  });
+
+  it("leaves the PA cell blank when the region has no major axis", () => {
+    const s = stats({ calibrated: calibrated({ pa_sky_deg: null }), sky: sky({ pa_sky_deg: null }) });
+    const rows = lines(regionsTableCsv([region("a")], new Map([["a", entry("a", s)]])));
+    expect(lastCells(rows[1], 4)).toEqual(["0.04", "150", "2", ""]);
+  });
+});
+
+describe("regionSkyOf", () => {
+  it("reads the sky block, which the backend sends independently of flux calibration", () => {
+    expect(regionSkyOf(stats({ calibrated: null, sky: sky() }))).toEqual(sky());
+    expect(regionSkyOf(stats({ calibrated: calibrated({ ra: 1, dec: 1 }), sky: sky() }))?.ra).toBe(150);
+  });
+
+  it("falls back to the calibrated block when the response has no sky block", () => {
+    const cal = calibrated({ pa_sky_deg: 120 });
+    const fallback = regionSkyOf(stats({ calibrated: cal }));
+    expect(fallback?.ra).toBe(150.001);
+    expect(fallback?.pa_sky_deg).toBe(120);
+    expect(fallback?.area_arcsec2).toBe(0.04165);
+  });
+
+  it("returns null when the image has neither a WCS nor a pixel area or the statistics are missing", () => {
+    expect(regionSkyOf(stats({ sky: null }))).toBeNull();
+    expect(regionSkyOf(stats())).toBeNull();
+    expect(regionSkyOf(null)).toBeNull();
+    expect(regionSkyOf(undefined)).toBeNull();
   });
 });
 

@@ -1,11 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  boundsOffScreen,
   buildContourRequest,
   closedContourPolygons,
+  contourHint,
   contourToPolygon,
   cullPolyline,
+  polylineBounds,
   resolveBin,
   CONTOUR_BIN_CHOICES,
+  CONTOUR_HINT_ON_SCREEN,
+  CONTOUR_HINT_OTHER_SOURCE,
+  DEFAULT_SIGMA_MULTIPLES_TEXT,
   formatLevelValue,
   levelColour,
   levelsText,
@@ -15,6 +21,7 @@ import {
   SINGLE_CONTOUR_COLOUR,
   type ContourForm,
 } from "../contourLevels";
+import { describeMeasurementSource } from "../analysisTarget";
 import type { Pt } from "../regionGeometry";
 import type { ContourLevel } from "../../shared/types/contours";
 
@@ -35,6 +42,12 @@ describe("parseLevelList and parseSigmaMultiples", () => {
     expect(parseLevelList("Infinity")).toBeNull();
     expect(parseLevelList("")).toBeNull();
     expect(parseSigmaMultiples("   ")).toBeNull();
+  });
+
+  it("starts the default sigma levels at 3 sigma so they sit outside the sky noise", () => {
+    const multiples = parseSigmaMultiples(DEFAULT_SIGMA_MULTIPLES_TEXT);
+    expect(multiples).toEqual([3, 5, 10]);
+    expect(Math.min(...(multiples as number[]))).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -95,6 +108,20 @@ describe("cullPolyline", () => {
     expect(cullPolyline(line, scaled, 100, 40)).toBe(true);
     expect(cullPolyline(line, scaled, 130, 60)).toBe(false);
   });
+
+  it("computes the bounds once and tests them against the canvas on their own", () => {
+    const line: [number, number][] = [
+      [3, 8],
+      [-2, 4],
+      [7, -1],
+    ];
+    const bounds = polylineBounds(line);
+    expect(bounds).toEqual([-2, -1, 7, 8]);
+    expect(boundsOffScreen(bounds, identity, 100, 100)).toBe(false);
+    expect(boundsOffScreen(bounds, scaled, 90, 100)).toBe(true);
+    expect(boundsOffScreen(polylineBounds([]), identity, 100, 100)).toBe(true);
+    expect(boundsOffScreen([Number.NaN, 0, 1, 1], identity, 100, 100)).toBe(true);
+  });
 });
 
 describe("contourToPolygon", () => {
@@ -136,6 +163,46 @@ describe("levelsText and formatLevelValue", () => {
     expect(formatLevelValue(1234567)).toBe("1.235e+6");
     expect(formatLevelValue(0)).toBe("0");
     expect(formatLevelValue(Number.NaN)).toBe("--");
+  });
+
+  it("keeps the integer zeros of levels between 1e4 and 1e5", () => {
+    expect(formatLevelValue(10000)).toBe("10000");
+    expect(formatLevelValue(20000)).toBe("20000");
+    expect(formatLevelValue(12340)).toBe("12340");
+    expect(formatLevelValue(-20000)).toBe("-20000");
+    expect(formatLevelValue(9999.95)).toBe("10000");
+    expect(formatLevelValue(1000)).toBe("1000");
+    expect(formatLevelValue(100)).toBe("100");
+    expect(formatLevelValue(0.0012)).toBe("0.0012");
+    expect(formatLevelValue(110.5)).toBe("110.5");
+  });
+});
+
+describe("contourHint", () => {
+  const base = {
+    measuresComposite: false,
+    compositeOnScreen: false,
+    measuresFilePlanes: false,
+    fileName: "R.fits",
+    processedLabel: null,
+    previewOnly: false,
+  };
+
+  it("does not claim the image on screen when the selected mono file is traced under an RGB composite", () => {
+    const hint = contourHint(describeMeasurementSource({ ...base, compositeOnScreen: true }));
+    expect(hint).toBe(CONTOUR_HINT_OTHER_SOURCE);
+    expect(hint).not.toContain("image on screen");
+  });
+
+  it("does not claim the image on screen when a PNG-only result such as Debayer is on screen", () => {
+    const hint = contourHint(describeMeasurementSource({ ...base, processedLabel: "Debayer", previewOnly: true }));
+    expect(hint).toBe(CONTOUR_HINT_OTHER_SOURCE);
+    expect(hint).not.toContain("image on screen");
+  });
+
+  it("keeps the on-screen hint for the original file and for a processed FITS", () => {
+    expect(contourHint(describeMeasurementSource(base))).toBe(CONTOUR_HINT_ON_SCREEN);
+    expect(contourHint(describeMeasurementSource({ ...base, processedLabel: "Denoise" }))).toBe(CONTOUR_HINT_ON_SCREEN);
   });
 });
 
@@ -208,7 +275,7 @@ describe("closedContourPolygons", () => {
 
   it("keeps only closed polylines of visible levels and caps the count", () => {
     const all = closedContourPolygons(levels, new Set());
-    expect(all.polygons.map((p) => p.value)).toEqual([1, 2, 2]);
+    expect(all.polygons.map((p) => p.value)).toEqual([2, 2, 1]);
     expect(all.skipped).toBe(0);
     const hidden = closedContourPolygons(levels, new Set([0]));
     expect(hidden.polygons.map((p) => p.value)).toEqual([2, 2]);
@@ -217,5 +284,27 @@ describe("closedContourPolygons", () => {
     expect(capped.skipped).toBe(1);
     expect(capped.polygons[0].points).toEqual(ring);
     expect(capped.polygons[0].points).not.toBe(ring);
+  });
+
+  it("keeps the highest level and the largest rings first when the cap is reached", () => {
+    const square = (x: number, y: number, s: number): [number, number][] => [
+      [x, y],
+      [x + s, y],
+      [x + s, y + s],
+      [x, y + s],
+    ];
+    const noise = Array.from({ length: 250 }, (_, i) => square(i * 2, 0, 1));
+    const halo = square(1000, 1000, 20);
+    const core = square(1005, 1005, 6);
+    const ranked: ContourLevel[] = [
+      { value: 1, polylines: [...noise, halo], closed: [...noise.map(() => true), true], n_points: 0 },
+      { value: 5, polylines: [core], closed: [true], n_points: 0 },
+    ];
+    const pick = closedContourPolygons(ranked, new Set());
+    expect(pick.polygons).toHaveLength(200);
+    expect(pick.skipped).toBe(52);
+    expect(pick.polygons[0].value).toBe(5);
+    expect(pick.polygons[1].points[0]).toEqual([1000, 1000]);
+    expect(pick.polygons.filter((p) => p.value === 1)).toHaveLength(199);
   });
 });

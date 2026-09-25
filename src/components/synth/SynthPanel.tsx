@@ -7,6 +7,7 @@ import {
   type FieldType,
   type PsfType,
 } from "../../services/synth";
+import { synthOutputPaths } from "../../utils/synthPaths";
 import { Slider, RunButton, ErrorAlert, SectionHeader, Toggle } from "../ui";
 
 const ICON = (
@@ -116,10 +117,9 @@ export default function SynthPanel() {
       } else {
         const path = await save({ title: "Save synthetic FITS", defaultPath: "synthetic.fits", filters: [{ name: "FITS", extensions: ["fits", "fit"] }] });
         if (!path) { setLoading(false); return; }
-        const catPath = saveCatalog ? path.replace(/\.fits?$/i, "_catalog.csv") : undefined;
-        const gtPath = saveGt ? path.replace(/\.fits?$/i, "_groundtruth.fits") : undefined;
-        const res = await generateSynth(config, path, saveCatalog, catPath, saveGt, gtPath);
-        setResult({ stars: res.star_count, path: res.output_path ?? path });
+        const out = synthOutputPaths(path);
+        const res = await generateSynth(config, out.fits, saveCatalog, saveCatalog ? out.catalog : undefined, saveGt, saveGt ? out.groundTruth : undefined);
+        setResult({ stars: res.star_count, path: res.output_path ?? out.fits });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

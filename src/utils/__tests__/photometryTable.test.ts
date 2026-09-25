@@ -1,13 +1,19 @@
 import { describe, it, expect } from "vitest";
 import {
+  BATCH_SEMANTICS_TEXT,
+  MAX_APERTURE_RADIUS_PX,
+  MAX_SKY_OUTER_RADIUS_PX,
+  MIN_APERTURE_RADIUS_PX,
   PHOTOMETRY_COLUMN_KEYS,
   PHOTOMETRY_CSV_COLUMNS,
+  apertureRadiusInRange,
   flagDuplicates,
   growthReferenceLines,
   medianSnr,
   parsePositions,
   photometryCsvFileName,
   photometryTableCsv,
+  plateauCaption,
   rowValue,
   sortRows,
   type PhotometryTableRow,
@@ -167,6 +173,53 @@ describe("photometryCsvFileName", () => {
   it("derives the name from the image stem", () => {
     expect(photometryCsvFileName("/data/ngc1234_cal.fits")).toBe("ngc1234_cal_photometry.csv");
     expect(photometryCsvFileName("C:\\img\\m31.fit.gz")).toBe("m31_photometry.csv");
+  });
+
+  it("drops a #hdu= or #array= plane fragment but keeps '#' that belongs to the path", () => {
+    expect(photometryCsvFileName("C:\\data\\jw02733_cal.fits#hdu=1")).toBe("jw02733_cal_photometry.csv");
+    expect(photometryCsvFileName("/data/r0000.asdf#array=roman.dq")).toBe("r0000_photometry.csv");
+    expect(photometryCsvFileName("/data/run#2/m51.fits")).toBe("m51_photometry.csv");
+    expect(photometryCsvFileName("/data/obs#1.fits")).toBe("obs#1_photometry.csv");
+  });
+});
+
+describe("plateauCaption", () => {
+  it("shows the growth-curve plateau radius at the precision of the reference line", () => {
+    expect(plateauCaption(11.5)).toBe(" (growth curve plateau at r=11.50 px)");
+    expect(plateauCaption((21.3 / 40) * 50)).toBe(" (growth curve plateau at r=26.63 px)");
+    expect(plateauCaption(12)).toBe(" (growth curve plateau at r=12.00 px)");
+    expect(plateauCaption(null)).toBe("");
+    expect(plateauCaption(Number.NaN)).toBe("");
+    const p = phot({ aperture_radius: 10.6, sky_inner: 21.2, sky_outer: 31.8, plateau_radius: 11.5, ee50_radius: 3.53 });
+    const line = growthReferenceLines(p).find((l) => l.label === "plateau");
+    expect(plateauCaption(p.plateau_radius)).toContain(`r=${line!.value.toFixed(2)} px`);
+  });
+});
+
+describe("apertureRadiusInRange", () => {
+  it("accepts a blank radius and the inclusive 2 to 60 px range the measurement uses without clamping", () => {
+    expect(apertureRadiusInRange(undefined)).toBe(true);
+    expect(apertureRadiusInRange(MIN_APERTURE_RADIUS_PX)).toBe(true);
+    expect(apertureRadiusInRange(MAX_APERTURE_RADIUS_PX)).toBe(true);
+    expect(apertureRadiusInRange(5)).toBe(true);
+  });
+
+  it("refuses the radii the core would silently clamp", () => {
+    expect(apertureRadiusInRange(1.5)).toBe(false);
+    expect(apertureRadiusInRange(70)).toBe(false);
+    expect([MIN_APERTURE_RADIUS_PX, MAX_APERTURE_RADIUS_PX]).toEqual([2, 60]);
+  });
+
+  it("caps the sky annulus outer radius at the 512 px the commands accept", () => {
+    expect(MAX_SKY_OUTER_RADIUS_PX).toBe(512);
+  });
+});
+
+describe("BATCH_SEMANTICS_TEXT", () => {
+  it("states the square peak-search box and that recentring can reach beyond 8 px", () => {
+    expect(BATCH_SEMANTICS_TEXT).toContain("17 x 17 px box");
+    expect(BATCH_SEMANTICS_TEXT).toMatch(/beyond 8 px/);
+    expect(BATCH_SEMANTICS_TEXT).not.toMatch(/within 8 px/);
   });
 });
 

@@ -26,9 +26,9 @@ use crate::infra::render::tiles;
 use crate::types::constants::{
     DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_COLORMAPS,
     RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
-    RES_ERR_REF, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL, RES_MIDTONE, RES_NAME,
-    RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE, RES_STATS, RES_TABLE, RES_UNIT, RES_VALUES,
-    RES_VMAX, RES_VMIN, RES_X, RES_X0, RES_Y, RES_Y0,
+    RES_ERR_REF, RES_ERR_STATS, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL,
+    RES_MIDTONE, RES_NAME, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE, RES_STATS, RES_TABLE,
+    RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_X, RES_X0, RES_Y, RES_Y0,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
@@ -218,6 +218,10 @@ pub async fn pixel_table_cmd(
             LoadedCompanions::default()
         });
         let err = comps.err.as_ref().map(|e| pixel_grid(e.arr(), x, y, size));
+        let err_stats = comps
+            .err
+            .as_ref()
+            .map(|e| grid_stats_json(&grid_stats(e.arr(), x, y, size)));
         let dq = comps
             .dq
             .as_ref()
@@ -243,6 +247,7 @@ pub async fn pixel_table_cmd(
             RES_DQ_TABLE: dq_table,
             RES_UNIT: unit,
             RES_STATS: grid_stats_json(&stats),
+            RES_ERR_STATS: err_stats,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
@@ -496,6 +501,10 @@ mod tests {
         assert_eq!(t[RES_STATS]["median"], 4.5);
         assert_eq!(t[RES_STATS]["n_finite"], 6);
         assert_eq!(t[RES_STATS]["n_nan"], 0);
+        assert_eq!(
+            t[RES_ERR_STATS],
+            json!({ "min": 0.0, "max": 4.5, "mean": 2.25, "median": 2.25, "n_finite": 6, "n_nan": 0 })
+        );
         assert!(t[RES_ELAPSED_MS].is_number());
 
         let far = pixel_table_cmd(key.clone(), 100, -100, None).await.unwrap();
@@ -511,10 +520,58 @@ mod tests {
         let p = pixel_table_cmd(plain, 2, 2, Some(3)).await.unwrap();
         assert_eq!(p[RES_VALUES][1][1], 12.0);
         assert!(p[RES_ERR].is_null());
+        assert!(p[RES_ERR_STATS].is_null());
         assert!(p[RES_DQ].is_null());
         assert!(p[RES_DQ_NAMES].is_null());
         assert!(p[RES_DQ_TABLE].is_null());
         assert!(p[RES_UNIT].is_null());
+    }
+
+    #[tokio::test]
+    async fn pixel_table_err_stats_come_from_the_err_plane_including_its_own_nan_count() {
+        use crate::infra::fits::reader::test_fixtures::{
+            ramp_f32, write_test_mef, HduData, TestHdu,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("err_nan.fits");
+        let mut err = ramp_f32(4, 4).iter().map(|v| v * 0.5).collect::<Vec<f32>>();
+        err[5] = f32::NAN;
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu {
+                    extname: Some("SCI"),
+                    extver: Some(1),
+                    cols: 4,
+                    rows: 4,
+                    data: HduData::F32(ramp_f32(4, 4)),
+                    extra_cards: vec![],
+                },
+                TestHdu {
+                    extname: Some("ERR"),
+                    extver: Some(1),
+                    cols: 4,
+                    rows: 4,
+                    data: HduData::F32(err),
+                    extra_cards: vec![],
+                },
+            ],
+        );
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let t = pixel_table_cmd(key, 0, 1, Some(3)).await.unwrap();
+        assert_eq!(
+            t[RES_ERR],
+            json!([[null, 0.0, 0.5], [null, 2.0, null], [null, 4.0, 4.5]])
+        );
+        assert_eq!(
+            t[RES_ERR_STATS],
+            json!({ "min": 0.0, "max": 4.5, "mean": 2.2, "median": 2.0, "n_finite": 5, "n_nan": 1 })
+        );
+        assert_eq!(t[RES_STATS]["max"], 9.0);
+        assert_eq!(t[RES_STATS]["n_finite"], 6);
+        assert_eq!(t[RES_STATS]["n_nan"], 0);
     }
 
     #[tokio::test]

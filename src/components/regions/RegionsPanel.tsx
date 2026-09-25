@@ -1,14 +1,14 @@
 import { memo, useCallback, useMemo, useState } from "react";
 import { Shapes, FileUp, FileDown, ClipboardCopy, Trash2, Loader2 } from "lucide-react";
 import type { Region, RegionStatsEntry, RegionSystem } from "../../shared/types";
-import { REGION_SYSTEMS, type RegionCalibrated } from "../../shared/types/regions";
+import { REGION_SYSTEMS, type RegionSky } from "../../shared/types/regions";
 import { importRegions, exportRegions, toWire } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
-import { useRegionStats } from "../../hooks/useRegionStats";
+import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma, useRegionStats } from "../../hooks/useRegionStats";
 import { regionStore } from "../../utils/regionStore";
 import { normalizeProps } from "../../utils/regionPersistence";
 import { shapeSummary, isRegionShape } from "../../utils/regionGeometry";
-import { regionsCsvFileName, regionsTableCsv } from "../../utils/regionCsv";
+import { regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../../utils/regionCsv";
 import { formatLat, formatLon } from "../../utils/coordFormat";
 import { useDqContext } from "../../context/PreviewContext";
 import { generateId } from "../../utils/format";
@@ -27,17 +27,11 @@ const SURFACE_BRIGHTNESS_DECIMALS = 2;
 const AREA_DECIMALS = 3;
 const POSITION_ANGLE_DECIMALS = 1;
 const MISSING_CALIBRATION_REASON = "no flux calibration in the header";
+const MISSING_VALUE = "--";
 const CLIP_INPUT_CLASS =
   "w-9 bg-zinc-900 border rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono text-right focus:outline-none focus:border-sky-500/60";
 const HEADER_BUTTON_CLASS =
   "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 disabled:opacity-40";
-
-function parsePositive(text: string): number | null {
-  const trimmed = text.trim();
-  if (trimmed === "") return null;
-  const v = Number(trimmed);
-  return Number.isFinite(v) && v > 0 ? v : null;
-}
 
 function formatJansky(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";
@@ -58,16 +52,18 @@ function formatMagnitude(v: number | null, err: number | null, decimals: number)
   return err != null && Number.isFinite(err) ? `${base} ± ${err.toFixed(decimals)}` : base;
 }
 
-function formatArea(cal: RegionCalibrated, count: number): string {
-  return cal.area_arcsec2 != null && Number.isFinite(cal.area_arcsec2)
-    ? `${cal.area_arcsec2.toFixed(AREA_DECIMALS)}"^2`
-    : `${count} px`;
+function formatArea(areaArcsec2: number | null | undefined): string | null {
+  return areaArcsec2 != null && Number.isFinite(areaArcsec2) ? `${areaArcsec2.toFixed(AREA_DECIMALS)}"^2` : null;
 }
 
-function skyLine(cal: RegionCalibrated): string | null {
-  if (cal.ra == null || cal.dec == null) return null;
-  const centre = `RA ${formatLon(cal.ra, { hours: true, format: "sexagesimal" })} Dec ${formatLat(cal.dec, { format: "sexagesimal" })}`;
-  return cal.pa_sky_deg != null ? `${centre} PA ${cal.pa_sky_deg.toFixed(POSITION_ANGLE_DECIMALS)}° E of N` : centre;
+function skyLine(sky: RegionSky | null): string | null {
+  if (sky?.ra == null || sky.dec == null) return null;
+  const centre = `RA ${formatLon(sky.ra, { hours: true, format: "sexagesimal" })} Dec ${formatLat(sky.dec, { format: "sexagesimal" })}`;
+  const pa =
+    sky.pa_sky_deg != null && Number.isFinite(sky.pa_sky_deg)
+      ? `${sky.pa_sky_deg.toFixed(POSITION_ANGLE_DECIMALS)}° E of N`
+      : MISSING_VALUE;
+  return `${centre} PA ${pa}`;
 }
 
 function fileStem(path: string): string {
@@ -110,6 +106,9 @@ function RegionRow({
   onDelete: (id: string) => void;
 }) {
   const s = entry?.stats ?? null;
+  const sky = regionSkyOf(s);
+  const area = formatArea(sky?.area_arcsec2);
+  const skyText = skyLine(sky);
   const canBackground = region.shape.shape !== "line" && region.shape.shape !== "point";
   return (
     <div
@@ -162,15 +161,15 @@ function RegionRow({
               <StatCell label="Jy" value={formatJanskyWithError(s.calibrated.flux_jy, s.calibrated.flux_err_jy)} />
               <StatCell label="AB" value={formatMagnitude(s.calibrated.mag_ab, s.calibrated.mag_ab_err, MAG_DECIMALS)} />
               <StatCell label="SB" value={formatMagnitude(s.calibrated.sb_mag_arcsec2, null, SURFACE_BRIGHTNESS_DECIMALS)} />
-              <StatCell label="area" value={formatArea(s.calibrated, s.count)} />
             </>
           )}
+          {area && <StatCell label="area" value={area} />}
           {s.clipped && <span className="text-amber-400/80">clipped</span>}
         </div>
       )}
-      {s?.calibrated && skyLine(s.calibrated) && (
+      {skyText && (
         <div className="mt-0.5 text-[9px] font-mono text-zinc-400 whitespace-nowrap overflow-hidden text-ellipsis">
-          {skyLine(s.calibrated)}
+          {skyText}
         </div>
       )}
       {canBackground && annuli.length > 0 && (
@@ -200,8 +199,8 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const { excludeDq } = useDqContext();
   const [sigmaText, setSigmaText] = useState(DEFAULT_CLIP_SIGMA_TEXT);
   const [itersText, setItersText] = useState(DEFAULT_CLIP_ITERS_TEXT);
-  const sigma = parsePositive(sigmaText);
-  const maxiters = parsePositive(itersText);
+  const sigma = parseClipSigma(sigmaText);
+  const maxiters = parseClipIters(itersText);
   const clip = useMemo(() => ({ sigma, maxiters }), [sigma, maxiters]);
   const { stats, loading, error: statsError, photcal, calibrationWarnings } = useRegionStats(
     measurePath,
@@ -368,7 +367,7 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
               className={`${CLIP_INPUT_CLASS} ${sigma === null && sigmaText.trim() !== "" ? "border-amber-500/60" : "border-zinc-800"}`}
             />
           </label>
-          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title="Maximum sigma-clipping iterations (blank or invalid uses the default 5)">
+          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title={`Maximum sigma-clipping iterations, a whole number from 1 to ${MAX_CLIP_ITERS} (blank or invalid uses the default 5)`}>
             iters
             <input
               type="text"

@@ -17,6 +17,7 @@ use crate::types::constants::{HEADER_BUNIT, RES_SOURCE};
 
 pub const MAX_LINE_CHANNEL: usize = 1 << 24;
 pub const NATIVE_FLUX_UNIT: &str = "native";
+pub const REGION_SUM_UNIT_SUFFIX: &str = " x pix";
 pub const DEFAULT_CONVENTION: &str = "optical";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,12 +103,24 @@ pub(crate) fn measure_line_json(path: &str, source: &SpectrumSource, request: &L
         measure_line(&axis_values, &spectrum, (request.z0, request.z1), request.continuum, request.model)
             .map_err(anyhow::Error::msg)?;
     m.axis_unit = axis.unit.clone();
-    m.flux_unit = format!("{} x {}", bunit(&cube).unwrap_or_else(|| NATIVE_FLUX_UNIT.to_string()), axis.unit);
+    let native_unit = bunit(&cube).unwrap_or_else(|| NATIVE_FLUX_UNIT.to_string());
+    let spectrum_unit = match source {
+        SpectrumSource::Pixel { .. } => native_unit,
+        SpectrumSource::Region { .. } => format!("{}{}", native_unit, REGION_SUM_UNIT_SUFFIX),
+    };
+    m.flux_unit = format!("{} x {}", spectrum_unit, axis.unit);
     notes.append(&mut m.notes);
     m.notes = notes;
     match (request.rest_um.or(axis.rest_wavelength_um), axis.kind) {
         (Some(rest), AxisKind::Wave | AxisKind::Awav | AxisKind::Freq) => {
-            with_velocity(&mut m, rest, request.convention, axis.kind, request.velocity_shift_kms);
+            with_velocity(
+                &mut m,
+                rest,
+                request.convention,
+                axis.kind,
+                axis.specsys.as_deref(),
+                request.velocity_shift_kms,
+            );
         }
         (None, AxisKind::Wave | AxisKind::Awav | AxisKind::Freq) => {
             m.notes.push("no rest wavelength: velocities not computed".to_string());
@@ -292,6 +305,43 @@ mod tests {
         assert_eq!(region[RES_SOURCE]["kind"], "region");
         assert_eq!(region[RES_SOURCE]["shape"]["shape"], "circle");
         assert!(region["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("flux summed over")));
+    }
+
+    #[test]
+    fn a_barycentric_cube_measured_without_a_shift_is_reported_in_its_own_frame_and_not_as_topocentric() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "bary.fits", 0.0);
+        let value = measure_line_json(&path, &centre_pixel(), &request(LineModel::None)).unwrap();
+        let notes: Vec<&str> = value["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        let velocity_note = notes.iter().find(|n| n.starts_with("line velocity")).expect("velocity note");
+        assert!(!velocity_note.contains("topocentric"), "{}", velocity_note);
+        assert!(velocity_note.contains("axis frame BARYCENT"), "{}", velocity_note);
+        assert_eq!(value["velocity"]["axis_frame"], "BARYCENT");
+        assert_eq!(number(&value["velocity"], "shift_applied_kms"), 0.0);
+
+        let undeclared = dir.path().join("undeclared.fits");
+        write_line_cube_with_cards(&undeclared, &[("SPECSYS", "")]);
+        let value = measure_line_json(undeclared.to_str().unwrap(), &centre_pixel(), &request(LineModel::None)).unwrap();
+        assert!(value["velocity"]["axis_frame"].is_null(), "{}", value["velocity"]);
+        let notes: Vec<&str> = value["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        let velocity_note = notes.iter().find(|n| n.starts_with("line velocity")).expect("velocity note");
+        assert!(!velocity_note.contains("topocentric"), "{}", velocity_note);
+        assert!(velocity_note.contains("no SPECSYS"), "{}", velocity_note);
+    }
+
+    #[test]
+    fn a_region_source_labels_its_flux_as_a_sum_over_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sb.fits");
+        write_line_cube_with_cards(&path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        let path = path.to_str().unwrap();
+        let disk = RegionShape::Circle { x: LINE_DISK_CENTRE, y: LINE_DISK_CENTRE, r: LINE_DISK_RADIUS };
+        let region =
+            measure_line_json(path, &SpectrumSource::Region { shape: disk, background: None }, &request(LineModel::None))
+                .unwrap();
+        assert_eq!(region["flux_unit"], "MJy/sr x pix x um");
+        let pixel = measure_line_json(path, &centre_pixel(), &request(LineModel::None)).unwrap();
+        assert_eq!(pixel["flux_unit"], "MJy/sr x um");
     }
 
     #[test]

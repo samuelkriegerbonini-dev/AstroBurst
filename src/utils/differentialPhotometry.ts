@@ -1,4 +1,4 @@
-import type { TimeSeriesFrame, TimeSeriesResult } from "../shared/types/analysis";
+import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesRole, TimeSeriesTarget } from "../shared/types/analysis";
 
 export type TimeAxis = "jd" | "index";
 
@@ -27,10 +27,28 @@ export interface LightCurveExtra {
   ensembleFlux: number | null;
   registered: boolean | null;
   saturated: boolean | null;
+  centroidJump: boolean | null;
+  errors: string | null;
+}
+
+export interface CheckReference {
+  index: number;
+  kind: "check" | "comp";
+  curve: LightCurvePoint[];
 }
 
 export const MAG_ERR_FACTOR = 1.0857;
 export const DEFAULT_CENTROID_JUMP_PX = 2;
+export const MAX_TIME_SERIES_TARGETS = 64;
+export const FRAME_JD_DIGITS = 5;
+export const RELATIVE_JD_DIGITS = 4;
+export const NO_TARGET_HINT = "Mark one star as the target.";
+export const NO_COMP_HINT = "Mark at least one star as comp; the differential light curve divides the target by the comparison stars.";
+
+const JD_TICK_MIN_DIGITS = 3;
+const JD_READOUT_DIGITS = 6;
+const JD_MAX_DIGITS = 12;
+const STEP_LOG_TOLERANCE = 1e-6;
 
 export const LIGHT_CURVE_CSV_COLUMNS = [
   "index",
@@ -52,7 +70,9 @@ export const LIGHT_CURVE_CSV_COLUMNS = [
   "dy",
   "registered",
   "saturated",
+  "centroid_jump",
   "skipped",
+  "errors",
 ] as const;
 
 function isFiniteNumber(v: number | null | undefined): v is number {
@@ -149,6 +169,18 @@ export function checkStarCurve(
   );
 }
 
+export function checkReference(result: TimeSeriesResult, compIdx: number[], checkIdx: number[], timeAxis: TimeAxis): CheckReference | null {
+  if (checkIdx.length > 0) return { index: checkIdx[0], kind: "check", curve: lightCurve(result, checkIdx[0], compIdx, timeAxis) };
+  if (compIdx.length >= 2) return { index: compIdx[0], kind: "comp", curve: checkStarCurve(result, compIdx[0], compIdx, timeAxis) };
+  return null;
+}
+
+export function checkRmsLabel(reference: Pick<CheckReference, "index" | "kind"> | null, targets: TimeSeriesTarget[]): string {
+  const label = reference ? targets[reference.index]?.label : undefined;
+  if (!reference || label === undefined) return "Check-star rms";
+  return reference.kind === "check" ? `Check-star rms (${label})` : `${label} vs other comps rms`;
+}
+
 export function seriesRms(points: LightCurvePoint[]): number | null {
   const mags = points.map((p) => p.mag).filter(isFiniteNumber);
   if (mags.length < 2) return null;
@@ -168,36 +200,88 @@ function offsetOf(frame: TimeSeriesFrame): { dx: number; dy: number } {
   return { dx: 0, dy: 0 };
 }
 
+function correctedCentroid(frame: TimeSeriesFrame | null, targetIdx: number): { x: number; y: number } | null {
+  const star = frame?.targets[targetIdx] ?? null;
+  if (!frame || !star || !isFiniteNumber(star.x) || !isFiniteNumber(star.y)) return null;
+  const off = offsetOf(frame);
+  return { x: star.x - off.dx, y: star.y - off.dy };
+}
+
+function driftKnown(frame: TimeSeriesFrame, referencePath: string): boolean {
+  return frame.path === referencePath || (frame.offset !== null && frame.offset.registered);
+}
+
+function beyond(a: { x: number; y: number }, b: { x: number; y: number }, thresholdPx: number): boolean {
+  const distance = Math.hypot(a.x - b.x, a.y - b.y);
+  return Number.isFinite(distance) && distance > thresholdPx;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function strayFromCommonMotion(displacements: { x: number; y: number }[], thresholdPx: number): boolean {
+  return displacements.some((own, k) => {
+    const others = displacements.filter((_, j) => j !== k);
+    if (others.length === 0) return false;
+    const common = { x: median(others.map((d) => d.x)), y: median(others.map((d) => d.y)) };
+    return beyond(own, common, thresholdPx);
+  });
+}
+
 export function centroidJumps(result: TimeSeriesResult, thresholdPx = DEFAULT_CENTROID_JUMP_PX): number[] {
-  const flagged = new Set<number>();
   const measured = result.frames.filter((f) => f.skipped === null);
-  for (let k = 1; k < measured.length; k++) {
-    const prev = measured[k - 1];
-    const cur = measured[k];
-    const prevOff = offsetOf(prev);
-    const curOff = offsetOf(cur);
-    const n = Math.min(prev.targets.length, cur.targets.length);
-    for (let i = 0; i < n; i++) {
-      const a = prev.targets[i];
-      const b = cur.targets[i];
-      if (!a || !b) continue;
-      const dx = b.x - curOff.dx - (a.x - prevOff.dx);
-      const dy = b.y - curOff.dy - (a.y - prevOff.dy);
-      const distance = Math.hypot(dx, dy);
-      if (Number.isFinite(distance) && distance > thresholdPx) {
-        flagged.add(cur.index);
-        break;
+  const reference = measured.find((f) => f.path === result.reference_path) ?? null;
+  const anchors = new Map<number, { x: number; y: number }>();
+  result.targets.forEach((_, i) => {
+    const anchor = correctedCentroid(reference, i);
+    if (anchor) anchors.set(i, anchor);
+  });
+  const flagged: number[] = [];
+  for (const frame of measured) {
+    const known = driftKnown(frame, result.reference_path);
+    const displacements: { x: number; y: number }[] = [];
+    let jump = false;
+    for (let i = 0; i < frame.targets.length; i++) {
+      const here = correctedCentroid(frame, i);
+      if (!here) continue;
+      const anchor = anchors.get(i);
+      if (!anchor) {
+        if (known) anchors.set(i, here);
+      } else if (known) {
+        jump = jump || beyond(here, anchor, thresholdPx);
+      } else {
+        displacements.push({ x: here.x - anchor.x, y: here.y - anchor.y });
       }
     }
+    if (jump || strayFromCommonMotion(displacements, thresholdPx)) flagged.push(frame.index);
   }
-  return [...flagged].sort((a, b) => a - b);
+  return flagged;
+}
+
+export function frameMeasurementErrors(
+  frame: TimeSeriesFrame,
+  targets: readonly TimeSeriesTarget[],
+  targetIdx: number,
+  compIdx: readonly number[],
+): string[] {
+  if (frame.skipped !== null) return [];
+  const used = [targetIdx, ...compIdx.filter((i) => i !== targetIdx)].filter((i) => i >= 0);
+  return used.flatMap((i) => {
+    const error = frame.errors[i];
+    return error ? [`${targets[i]?.label ?? `#${i}`}: ${error}`] : [];
+  });
 }
 
 export function lightCurveExtras(result: TimeSeriesResult, targetIdx: number, compIdx: number[]): LightCurveExtra[] {
   const comps = compIdx.filter((i) => i !== targetIdx);
+  const jumps = new Set(centroidJumps(result));
   return result.frames.map((frame) => {
     const target = frame.targets[targetIdx] ?? null;
     const ens = frame.skipped === null ? ensembleFlux(frame, comps) : null;
+    const errors = frameMeasurementErrors(frame, result.targets, targetIdx, comps);
     return {
       airmass: isFiniteNumber(frame.airmass) ? frame.airmass : null,
       fwhm: target && isFiniteNumber(target.fwhm) ? target.fwhm : null,
@@ -209,6 +293,8 @@ export function lightCurveExtras(result: TimeSeriesResult, targetIdx: number, co
       ensembleFlux: ens ? ens.flux : null,
       registered: frame.offset ? frame.offset.registered : null,
       saturated: target ? target.saturated : null,
+      centroidJump: frame.skipped === null ? jumps.has(frame.index) : null,
+      errors: errors.length > 0 ? errors.join("; ") : null,
     };
   });
 }
@@ -250,7 +336,9 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
         csvCell(e?.dy ?? null, 3),
         csvCell(e?.registered ?? null),
         csvCell(e?.saturated ?? null),
+        csvCell(e?.centroidJump ?? null),
         csvCell(frame.skipped),
+        csvCell(e?.errors ?? null),
       ].join(","),
     );
   });
@@ -261,4 +349,57 @@ export function lightCurveCsvFileName(referencePath: string): string {
   const base = referencePath.split(/[\\/]/).pop() ?? "frames";
   const stem = base.replace(/#.*$/, "").replace(/\.[^.]+$/, "") || "frames";
   return `${stem}_lightcurve.csv`;
+}
+
+export function resultCoversPath(result: Pick<TimeSeriesResult, "frames"> | null, path: string | null): boolean {
+  return !!result && !!path && result.frames.some((f) => f.path === path);
+}
+
+export function measuredTargets(targets: TimeSeriesTarget[]): TimeSeriesTarget[] {
+  return targets.filter((t) => t.role !== "ignore");
+}
+
+export function timeSeriesRoleHint(roles: readonly TimeSeriesRole[]): string | null {
+  if (!roles.includes("target")) return NO_TARGET_HINT;
+  if (!roles.includes("comp")) return NO_COMP_HINT;
+  return null;
+}
+
+export function inFrameOrder(result: TimeSeriesResult, framePaths: string[]): TimeSeriesResult {
+  const rank = new Map<string, number>();
+  framePaths.forEach((p, i) => {
+    if (!rank.has(p)) rank.set(p, i);
+  });
+  const last = framePaths.length;
+  const frames = [...result.frames]
+    .sort((a, b) => (rank.get(a.path) ?? last) - (rank.get(b.path) ?? last))
+    .map((frame, index) => ({ ...frame, index }));
+  return { ...result, frames };
+}
+
+export function frameJdLabel(jdMid: number | null | undefined, axis: TimeAxis, jd0: number): string {
+  if (!isFiniteNumber(jdMid)) return "--";
+  return axis === "jd" ? (jdMid - jd0).toFixed(RELATIVE_JD_DIGITS) : jdMid.toFixed(FRAME_JD_DIGITS);
+}
+
+export function jdOffsetLabel(value: number, step?: number): string {
+  const digits =
+    step !== undefined && Number.isFinite(step) && step > 0
+      ? Math.min(JD_MAX_DIGITS, Math.max(JD_TICK_MIN_DIGITS, Math.ceil(-Math.log10(step) - STEP_LOG_TOLERANCE)))
+      : JD_READOUT_DIGITS;
+  return value.toFixed(digits);
+}
+
+export function timeAxisLabel(axis: TimeAxis, jd0: number): string {
+  return axis === "jd" ? `JD (header time, not barycentric) - ${jd0}` : "frame index";
+}
+
+export function referenceTimeSource(result: TimeSeriesResult): string | null {
+  return result.frames.find((f) => f.path === result.reference_path)?.time_source ?? null;
+}
+
+export function frameFilesNotice(input: { compositeOnScreen: boolean; processedLabel: string | null }): string | null {
+  if (input.compositeOnScreen) return "Measured on the loaded frame files, not on the RGB view on screen";
+  if (input.processedLabel) return `Measured on the loaded frame files; ${input.processedLabel} on screen is not used`;
+  return null;
 }

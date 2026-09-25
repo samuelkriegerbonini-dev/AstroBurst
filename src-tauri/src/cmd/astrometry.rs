@@ -21,6 +21,7 @@ use crate::types::config::AppConfig;
 
 const MAX_UPLOAD_DIM: usize = 2048;
 const MAX_SKY_POINTS: usize = 20_000;
+const MAX_LATITUDE_DEG: f64 = 90.0;
 const PARITY_NORMAL: &str = "normal";
 const PARITY_FLIPPED: &str = "flipped";
 
@@ -379,6 +380,19 @@ fn finite_pair(name: &str, p: (f64, f64)) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn latitude_within_poles(name: &str, lat: f64) -> anyhow::Result<()> {
+    if lat.is_finite() && lat.abs() > MAX_LATITUDE_DEG {
+        anyhow::bail!(
+            "{} latitude {} must be within -{} and {} degrees",
+            name,
+            lat,
+            MAX_LATITUDE_DEG,
+            MAX_LATITUDE_DEG
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn world_to_pixel_cmd(
     path: String,
@@ -392,6 +406,9 @@ pub async fn world_to_pixel_cmd(
                 points.len(),
                 MAX_SKY_POINTS
             );
+        }
+        for (i, &(_, lat)) in points.iter().enumerate() {
+            latitude_within_poles(&format!("points[{}]", i), lat)?;
         }
         let frame = SkyFrame::from_name(frame.as_deref().unwrap_or("icrs"))
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -452,6 +469,8 @@ pub async fn sky_separation_cmd(
             let length = (b.0 - a.0).hypot(b.1 - a.1);
             ((ca.ra, ca.dec), (cb.ra, cb.dec), json!(length), json!(wcs.pixel_scale_arcsec()))
         } else {
+            latitude_within_poles("point a", a.1)?;
+            latitude_within_poles("point b", b.1)?;
             (a, b, serde_json::Value::Null, serde_json::Value::Null)
         };
         let separation_deg = angular_separation(a_sky.0, a_sky.1, b_sky.0, b_sky.1);
@@ -927,6 +946,41 @@ mod tests {
         write_north_up_fits(&path, 10);
         let err = super::sky_separation_cmd(Some(path), (0.0, 0.0), (f64::MAX, f64::MAX), Some(true)).await.unwrap_err();
         assert!(err.contains("does not project onto the sky"), "{err}");
+    }
+
+    fn write_fits_centred_at_dec_88(path: &str) {
+        let cards: Vec<(String, String)> = wcs_cards(north_up_cd())
+            .into_iter()
+            .map(|(k, v)| if k == "CRVAL2" { (k, "88.0".to_string()) } else { (k, v) })
+            .collect();
+        let pairs: Vec<(&str, &str)> = cards.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let arr = ndarray::Array2::<f32>::zeros((100, 100));
+        crate::infra::fits::writer::write_fits_mono(path, &arr, Some(&make_header(&pairs))).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sky_latitudes_beyond_the_poles_are_refused_while_pixel_rows_above_ninety_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("polar.fits").to_string_lossy().to_string();
+        write_fits_centred_at_dec_88(&path);
+
+        let err = super::world_to_pixel_cmd(path.clone(), vec![(150.0, 88.0), (150.0, 95.0)], None).await.unwrap_err();
+        assert!(err.contains("points[1]") && err.contains("95"), "{err}");
+        let err = super::world_to_pixel_cmd(path.clone(), vec![(10.0, -90.5)], Some("galactic".into())).await.unwrap_err();
+        assert!(err.contains("points[0]") && err.contains("-90.5"), "{err}");
+        let pole = super::world_to_pixel_cmd(path.clone(), vec![(150.0, 90.0), (f64::NAN, 2.0), (150.0, f64::INFINITY)], None).await.unwrap();
+        assert!(pole["points"][0].is_array(), "{}", pole["points"][0]);
+        assert!(pole["points"][1].is_null() && pole["points"][2].is_null(), "{}", pole["points"]);
+
+        let err = super::sky_separation_cmd(None, (10.0, 95.0), (10.0, 20.0), None).await.unwrap_err();
+        assert!(err.contains("point a") && err.contains("95"), "{err}");
+        let err = super::sky_separation_cmd(None, (10.0, 20.0), (10.0, -91.0), Some(false)).await.unwrap_err();
+        assert!(err.contains("point b") && err.contains("-91"), "{err}");
+        let at_pole = super::sky_separation_cmd(None, (10.0, 90.0), (10.0, 20.0), None).await.unwrap();
+        assert!((at_pole["separation_deg"].as_f64().unwrap() - 70.0).abs() < 1e-9, "{}", at_pole["separation_deg"]);
+
+        let pixel_rows = super::sky_separation_cmd(Some(path), (49.5, 95.0), (49.5, 40.0), Some(true)).await.unwrap();
+        assert!((pixel_rows["pixel_length"].as_f64().unwrap() - 55.0).abs() < 1e-12, "{}", pixel_rows["pixel_length"]);
     }
 
     #[tokio::test]

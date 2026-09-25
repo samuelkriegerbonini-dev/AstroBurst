@@ -468,3 +468,4 @@ pub const RES_X0: &str = "x0";
 pub const RES_Y0: &str = "y0";
 pub const RES_DQ_NAMES: &str = "dq_names";
 pub const RES_N_FINITE: &str = "n_finite";
+pub const RES_ERR_STATS: &str = "err_stats";

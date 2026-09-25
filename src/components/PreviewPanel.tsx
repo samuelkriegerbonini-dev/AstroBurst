@@ -24,6 +24,7 @@ import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadLayout, saveLayout } from "../utils/layout";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
+import { monoPixelsAction } from "../utils/gpuMonoPixels";
 import { advanceCompositeSync, compositeSyncStore, forgetCompositeSync, syncedChannelFor, wizardStepStaleAfterChannelSync } from "../utils/compositeSync";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
@@ -313,6 +314,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const wantGpu = !!gpuAvailable && useGpu;
   const filePath = file?.path ?? null;
   const monoLoadKey = fileKey ? `${fileKey}|${processedSourcePath ?? filePath}|${processedSourceVersion}` : null;
+  const pngOnlyRecord = displayed.previewOnly;
   const rgbSource = isFileRgbView ? filePath : null;
   const rgbLoadKey = fileKey && isRgbView ? `${fileKey}|${rgbSource ?? ""}|${compositeVersion}` : null;
   const rgbFileViewPending = isRgbFile && processed === null && compositePreviewUrl === null && !!file?.result?.previewUrl;
@@ -335,12 +337,19 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       rgbLoadKeyRef.current = null;
       clearRgbRawPixels();
     }
-    if (!monoLoadKey || gpuLoadKeyRef.current === monoLoadKey) return;
+    const action = monoPixelsAction(pngOnlyRecord, monoLoadKey, gpuLoadKeyRef.current, isCube);
+    if (action === "clear") {
+      gpuLoadKeyRef.current = null;
+      clearRawPixels();
+      return;
+    }
+    if (action === "keep") return;
+    if (action === "reload") clearRawPixels();
     gpuLoadKeyRef.current = monoLoadKey;
     queueMicrotask(() => {
       if (gpuLoadKeyRef.current === monoLoadKey) loadRawPixels(true);
     });
-  }, [wantGpu, fileKey, compositeVersion, rgbFileViewPending, isRgbView, rgbLoadKey, rgbSource, monoLoadKey, loadRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
+  }, [wantGpu, fileKey, compositeVersion, rgbFileViewPending, isRgbView, rgbLoadKey, rgbSource, monoLoadKey, pngOnlyRecord, isCube, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);

@@ -44,4 +44,18 @@ describe("filterMatchingFrames", () => {
     expect(orderWithReferenceFirst(files, "/run/missing.fits")).toBe(files);
     expect(orderWithReferenceFirst(files, null)).toBe(files);
   });
+
+  it("measures a file loaded twice only once, keeping the first store entry", () => {
+    const twice = [
+      file("a", "/run/f0.fits", [64, 64]),
+      file("b", "/run/f1.fits", [64, 64]),
+      file("c", "/run/f0.fits", [64, 64]),
+      file("d", "/run/f1.fits", [64, 64]),
+    ];
+    const frames = orderWithReferenceFirst(filterMatchingFrames(twice, [64, 64]), "/run/f1.fits");
+    expect(frames.map(pathOf)).toEqual(["/run/f1.fits", "/run/f0.fits"]);
+    expect(frames.map((f) => f.id)).toEqual(["b", "a"]);
+    const staleFirst = [file("x", "/run/f0.fits", [32, 32]), file("y", "/run/f0.fits", [64, 64])];
+    expect(filterMatchingFrames(staleFirst, [64, 64]).map((f) => f.id)).toEqual(["y"]);
+  });
 });

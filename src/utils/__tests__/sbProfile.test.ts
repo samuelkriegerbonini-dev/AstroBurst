@@ -4,6 +4,7 @@ import {
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
+  profileFetchReducer,
   sbProfileCsv,
   sbReferenceLines,
   sbSeries,
@@ -121,6 +122,24 @@ describe("sbSeries", () => {
     expect(sbSeries(p, "mean", "px").series[0].yErr).toEqual([null]);
     expect(sbSeries(p, "mu", "px").series[0].y).toEqual([null]);
   });
+
+  it("keeps the value of a single-pixel bin but draws no error bar for it", () => {
+    const single = bin({ sma: 0.5, count: 1, std: null, mu_err: null });
+    const p = profile({ bins: [single, bin({ sma: 1.5 })] });
+    const mean = sbSeries(p, "mean", "px").series[0];
+    expect(mean.y[0]).toBe(200);
+    expect(mean.yErr).toEqual([null, 4 / Math.sqrt(10)]);
+    const mu = sbSeries(p, "mu", "px").series[0];
+    expect(mu.y).toEqual([20.05, 20.15]);
+    expect(mu.yErr).toEqual([null, 0.01]);
+    expect(firstSurfaceBrightness(p)).toBe(20.05);
+  });
+
+  it("draws no error bar for a single-pixel bin even when the payload carries a zero spread", () => {
+    const p = profile({ bins: [bin({ sma: 0.5, count: 1, std: 0, mu_err: 0 })] });
+    expect(sbSeries(p, "mean", "px").series[0].yErr).toEqual([null]);
+    expect(sbSeries(p, "mu", "px").series[0].yErr).toEqual([null]);
+  });
 });
 
 describe("sbReferenceLines", () => {
@@ -166,6 +185,14 @@ describe("sbProfileCsv", () => {
     expect(lines[1]).toBe("1.5,,1,2,0,,,,0,,,");
     expect(lines[2]).toBe("");
   });
+
+  it("leaves std and mu_err blank for a single-pixel bin while keeping its surface brightness", () => {
+    const p = profile({ bins: [bin({ sma: 0.5, count: 1, cumulative_count: 1, std: null, mu_err: null })] });
+    const cells = sbProfileCsv(p).split(CSV_LINE_END)[1].split(",");
+    expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "std")]).toBe("");
+    expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "mu_err")]).toBe("");
+    expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "mu_ab")]).toBe("20.05");
+  });
 });
 
 describe("formatting helpers", () => {
@@ -177,12 +204,41 @@ describe("formatting helpers", () => {
   });
 
   it("formats the image and sky position angles together", () => {
-    expect(formatPositionAngles(42, 118.3)).toBe("PA 42.0 deg image, 118.3 deg E of N");
-    expect(formatPositionAngles(42, null)).toBe("PA 42.0 deg image");
+    expect(formatPositionAngles(42, 118.3, 0.4)).toBe("PA 42.0 deg image, 118.3 deg E of N");
+    expect(formatPositionAngles(42, null, 0.4)).toBe("PA 42.0 deg image");
+  });
+
+  it("shows no position angle for a circle or a round ellipse, which have no major axis", () => {
+    expect(formatPositionAngles(0, 90, 0)).toBe("--");
+    expect(formatPositionAngles(37, null, 0)).toBe("--");
+    expect(formatPositionAngles(37, 127, Number.NaN)).toBe("--");
   });
 
   it("reads the central surface brightness from the first bin", () => {
     expect(firstSurfaceBrightness(profile())).toBe(20.05);
     expect(firstSurfaceBrightness(profile({ bins: [] }))).toBeNull();
+  });
+});
+
+describe("profileFetchReducer", () => {
+  const empty = { result: null, error: null };
+
+  it("drops the previous region's profile when the request for the newly selected region fails", () => {
+    const shown = profileFetchReducer(empty, { type: "success", result: profile({ r50_px: 12.3, total_mag_ab: 17.8 }) });
+    const failed = profileFetchReducer(shown, { type: "failure", message: "ellipticity must be in [0, 0.95], got 0.96" });
+    expect(failed.result).toBeNull();
+    expect(failed.error).toBe("ellipticity must be in [0, 0.95], got 0.96");
+  });
+
+  it("replaces an earlier error with the new result on success", () => {
+    const b = profile({ r50_px: 4 });
+    const failed = { result: null, error: "background region is empty" };
+    expect(profileFetchReducer(failed, { type: "success", result: b })).toEqual({ result: b, error: null });
+  });
+
+  it("clears both the result and the error on reset and keeps an already empty state", () => {
+    const shown = profileFetchReducer(empty, { type: "success", result: profile() });
+    expect(profileFetchReducer(shown, { type: "reset" })).toEqual(empty);
+    expect(profileFetchReducer(empty, { type: "reset" })).toBe(empty);
   });
 });

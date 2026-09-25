@@ -1,14 +1,19 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { niceTicks, linearScale, finiteExtent } from "../../utils/plotScale";
+import { niceTicks, linearScale, finiteExtent, formatLogTickLabel, formatTickLabels, tickLabels } from "../../utils/plotScale";
 import {
   clampDomain,
+  emptyPlotMessage,
+  errorBarSpan,
   logDomain,
+  logHiddenCount,
   logTicks,
   nearestHit,
   panDomain,
+  savePngWith,
   seriesToCsv,
   seriesYExtent,
   zoomDomain,
+  zoomScopeKey,
   type Domain,
 } from "../../utils/plotInteraction";
 
@@ -54,8 +59,11 @@ export interface ProfilePlotProps {
   selected?: { seriesIndex: number; index: number } | null;
   toolbar?: boolean;
   csvName?: string;
-  xTickFormat?: (v: number) => string;
+  xTickFormat?: XTickFormat;
+  logToggle?: boolean;
 }
+
+export type XTickFormat = (v: number, step: number) => string;
 
 const MARGIN = { top: 8, right: 10, bottom: 26, left: 52 };
 const AXIS_COLOR = "rgba(161,161,170,0.35)";
@@ -89,15 +97,6 @@ const DECADE_TOLERANCE = 1e-9;
 const TOOLBAR_BUTTON_CLASS =
   "px-1.5 rounded text-[9px] font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 disabled:opacity-40 disabled:cursor-not-allowed";
 const TOOLBAR_ACTIVE_CLASS = "px-1.5 rounded text-[9px] font-mono text-cyan-300 bg-zinc-800/80";
-
-function fmtTick(v: number): string {
-  const a = Math.abs(v);
-  if (a === 0) return "0";
-  if (a >= 1e5 || a < 1e-3) return v.toExponential(1);
-  if (a >= 100) return v.toFixed(0);
-  if (a >= 10) return v.toFixed(1);
-  return v.toFixed(2);
-}
 
 function fmtValue(v: number): string {
   const a = Math.abs(v);
@@ -160,6 +159,7 @@ interface PlotLayout {
   sx: (v: number) => number;
   sy: (v: number) => number;
   xOf: (px: number) => number;
+  yFloorPx: number;
 }
 
 function computeLayout(
@@ -204,7 +204,7 @@ function computeLayout(
   const syRaw = linearScale(yDomainT, invertY ? [MARGIN.top, MARGIN.top + plotH] : [MARGIN.top + plotH, MARGIN.top]);
   const sy = logY ? (v: number) => (v > 0 ? syRaw(Math.log10(v)) : NaN) : syRaw;
   const xOf = (px: number) => xDomain[0] + ((px - MARGIN.left) / plotW) * (xDomain[1] - xDomain[0]);
-  return { plotW, plotH, xDomain, xExtent, xTicks, yTicks, logY, sx, sy, xOf };
+  return { plotW, plotH, xDomain, xExtent, xTicks, yTicks, logY, sx, sy, xOf, yFloorPx: syRaw(yDomainT[0]) };
 }
 
 function drawBase(
@@ -216,7 +216,8 @@ function drawBase(
   yLabel: string,
   layout: PlotLayout | null,
   referenceLines: PlotReferenceLine[],
-  xTickFormat: (v: number) => string,
+  xTickFormat: XTickFormat | undefined,
+  emptyMessage: string,
 ) {
   ctx.clearRect(0, 0, width, height);
   ctx.font = AXIS_FONT;
@@ -224,10 +225,10 @@ function drawBase(
     ctx.fillStyle = TEXT_COLOR;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("no data", width / 2, height / 2);
+    ctx.fillText(emptyMessage, width / 2, height / 2);
     return;
   }
-  const { plotW, plotH, xTicks, yTicks, sx, sy, logY } = layout;
+  const { plotW, plotH, xTicks, yTicks, sx, sy, logY, yFloorPx } = layout;
   const left = MARGIN.left;
   const top = MARGIN.top;
   const right = left + plotW;
@@ -253,14 +254,17 @@ function drawBase(
   ctx.fillStyle = TEXT_COLOR;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
-  const labelledY = logY && yTicks.length > Y_TICK_COUNT * 2 ? yTicks.filter(isDecade) : yTicks;
-  for (const t of labelledY) {
+  const yText = logY ? yTicks.map(formatLogTickLabel) : formatTickLabels(yTicks);
+  const decadesOnly = logY && yTicks.length > Y_TICK_COUNT * 2;
+  yTicks.forEach((t, i) => {
+    if (decadesOnly && !isDecade(t)) return;
     const y = sy(t);
-    if (Number.isFinite(y)) ctx.fillText(fmtTick(t), left - 4, y);
-  }
+    if (Number.isFinite(y)) ctx.fillText(yText[i], left - 4, y);
+  });
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  for (const t of xTicks) ctx.fillText(xTickFormat(t), sx(t), bottom + 3);
+  const xText = tickLabels(xTicks, xTickFormat);
+  xTicks.forEach((t, i) => ctx.fillText(xText[i], sx(t), bottom + 3));
   ctx.fillText(xLabel, left + plotW / 2, height - 11);
   ctx.save();
   ctx.translate(9, top + plotH / 2);
@@ -283,15 +287,19 @@ function drawBase(
         const v = s.y[i];
         const e = s.yErr[i];
         if (!isFiniteValue(v) || !isFiniteValue(e)) continue;
+        const span = errorBarSpan(v, e, logY);
+        if (!span) continue;
         const px = sx(s.x[i]);
-        const y0 = sy(v - Math.abs(e));
-        const y1 = sy(v + Math.abs(e));
+        const y0 = span.lower === null ? yFloorPx : sy(span.lower);
+        const y1 = sy(span.upper);
         if (!Number.isFinite(px) || !Number.isFinite(y0) || !Number.isFinite(y1)) continue;
         ctx.beginPath();
         ctx.moveTo(px, y0);
         ctx.lineTo(px, y1);
-        ctx.moveTo(px - ERROR_CAP_PX, y0);
-        ctx.lineTo(px + ERROR_CAP_PX, y0);
+        if (span.lower !== null) {
+          ctx.moveTo(px - ERROR_CAP_PX, y0);
+          ctx.lineTo(px + ERROR_CAP_PX, y0);
+        }
         ctx.moveTo(px - ERROR_CAP_PX, y1);
         ctx.lineTo(px + ERROR_CAP_PX, y1);
         ctx.stroke();
@@ -386,10 +394,10 @@ function drawBase(
   }
 }
 
-function tooltipLines(series: ProfileSeries[], hit: PlotHit, logY: boolean, xFormat: (v: number) => string): string[] {
+function tooltipLines(series: ProfileSeries[], hit: PlotHit, logY: boolean, xTickFormat: XTickFormat | undefined): string[] {
   const hitSeries = series[hit.seriesIndex];
   if (!hitSeries) return [];
-  const lines = [`x ${xFormat(hit.x)}`];
+  const lines = [`x ${xTickFormat ? xTickFormat(hit.x, NaN) : fmtValue(hit.x)}`];
   if (hitSeries.mode === "points") {
     const e = hitSeries.yErr?.[hit.index];
     lines.push(`${hitSeries.label} ${fmtValue(hit.y)}${isFiniteValue(e) ? ` ± ${fmtValue(Math.abs(e))}` : ""}`);
@@ -415,7 +423,7 @@ function drawOverlay(
   layout: PlotLayout | null,
   hover: PlotHit | null,
   selected: { seriesIndex: number; index: number } | null,
-  xFormat: (v: number) => string,
+  xTickFormat: XTickFormat | undefined,
 ) {
   ctx.clearRect(0, 0, width, height);
   if (!layout) return;
@@ -464,7 +472,7 @@ function drawOverlay(
   ctx.arc(cx, cy, POINT_RADIUS_PX + 1.5, 0, Math.PI * 2);
   ctx.fill();
 
-  const lines = tooltipLines(series, hover, layout.logY, xFormat);
+  const lines = tooltipLines(series, hover, layout.logY, xTickFormat);
   if (lines.length === 0) return;
   ctx.font = HALO_FONT;
   const tw = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -515,24 +523,32 @@ function ProfilePlot(props: ProfilePlotProps) {
     toolbar = false,
     csvName = DEFAULT_CSV_NAME,
     xTickFormat,
+    logToggle = true,
   } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
   const [ownDomain, setOwnDomain] = useState<Domain | null>(null);
+  const zoomScope = useMemo(() => zoomScopeKey(series, xLabel), [series, xLabel]);
+  const [ownDomainScope, setOwnDomainScope] = useState(zoomScope);
+  if (ownDomainScope !== zoomScope) {
+    setOwnDomainScope(zoomScope);
+    setOwnDomain(null);
+  }
   const [logOverride, setLogOverride] = useState<boolean | null>(null);
   const [hover, setHover] = useState<PlotHit | null>(null);
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pngNotice, setPngNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const hoverRef = useRef<PlotHit | null>(null);
 
   const interactive = Boolean(onHover || onSelect || toolbar);
-  const logY = logOverride ?? props.logY ?? false;
+  const logOffered = toolbar && logToggle;
+  const logY = (logOffered ? logOverride : null) ?? props.logY ?? false;
   const controlled = xDomainProp !== undefined;
   const zoom = controlled ? xDomainProp : ownDomain;
-  const xFormat = xTickFormat ?? fmtTick;
 
   const layout = useMemo(
     () => (width > 0 ? computeLayout(series, width, height, logY, invertY, zoom ?? null) : null),
@@ -540,6 +556,8 @@ function ProfilePlot(props: ProfilePlotProps) {
   );
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
+  const emptyMessage = useMemo(() => emptyPlotMessage(series, logY), [series, logY]);
+  const logHidden = useMemo(() => (logY ? logHiddenCount(series) : null), [series, logY]);
 
   const setDomain = useCallback(
     (d: Domain | null) => {
@@ -566,16 +584,16 @@ function ProfilePlot(props: ProfilePlotProps) {
     if (!canvas || width <= 0) return;
     const ctx = sizeCanvas(canvas, width, height);
     if (!ctx) return;
-    drawBase(ctx, width, height, series, xLabel, yLabel, layout, referenceLines ?? [], xFormat);
-  }, [series, xLabel, yLabel, width, height, layout, referenceLines, xFormat]);
+    drawBase(ctx, width, height, series, xLabel, yLabel, layout, referenceLines ?? [], xTickFormat, emptyMessage);
+  }, [series, xLabel, yLabel, width, height, layout, referenceLines, xTickFormat, emptyMessage]);
 
   useEffect(() => {
     const canvas = overlayRef.current;
     if (!canvas || width <= 0) return;
     const ctx = sizeCanvas(canvas, width, height);
     if (!ctx) return;
-    drawOverlay(ctx, width, height, series, layout, hover, selected, xFormat);
-  }, [series, width, height, layout, hover, selected, xFormat]);
+    drawOverlay(ctx, width, height, series, layout, hover, selected, xTickFormat);
+  }, [series, width, height, layout, hover, selected, xTickFormat]);
 
   useEffect(() => {
     hoverRef.current = null;
@@ -589,12 +607,13 @@ function ProfilePlot(props: ProfilePlotProps) {
     const onWheel = (e: WheelEvent) => {
       const l = layoutRef.current;
       if (!l || e.deltaY === 0) return;
-      e.preventDefault();
       const rect = canvas.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const anchor = l.xOf(Math.min(Math.max(px, MARGIN.left), MARGIN.left + l.plotW));
       const factor = e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
       const next = zoomDomain(l.xDomain, l.xExtent, anchor, factor);
+      if (next[0] === l.xDomain[0] && next[1] === l.xDomain[1]) return;
+      e.preventDefault();
       const isExtent = next[0] === l.xExtent[0] && next[1] === l.xExtent[1];
       setDomainRef.current(isExtent ? null : next);
     };
@@ -611,7 +630,7 @@ function ProfilePlot(props: ProfilePlotProps) {
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
       const pointsMode = series.map((s) => s.mode === "points");
-      return nearestHit(series, l.sx, l.sy, px, py, HIT_DISTANCE_PX, pointsMode);
+      return nearestHit(series, l.sx, l.sy, px, py, HIT_DISTANCE_PX, pointsMode, l.xDomain);
     },
     [series],
   );
@@ -687,23 +706,32 @@ function ProfilePlot(props: ProfilePlotProps) {
   const handleSavePng = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || saving) return;
+    setPngNotice(null);
     setSaving(true);
-    try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        defaultPath: `${csvName}.png`,
-        filters: [{ name: "PNG image", extensions: ["png"] }],
-        title: "Save plot as PNG",
-      });
-      if (!target) return;
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-      if (!blob) return;
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      const { writeFile } = await import("@tauri-apps/plugin-fs");
-      await writeFile(target, bytes);
-    } catch {
-    } finally {
-      setSaving(false);
+    const outcome = await savePngWith(
+      async () => {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        return save({
+          defaultPath: `${csvName}.png`,
+          filters: [{ name: "PNG image", extensions: ["png"] }],
+          title: "Save plot as PNG",
+        });
+      },
+      async () => {
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+        return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+      },
+      async (path, bytes) => {
+        const { writeFile } = await import("@tauri-apps/plugin-fs");
+        await writeFile(path, bytes);
+      },
+    );
+    setSaving(false);
+    if (outcome.kind === "saved") {
+      setPngNotice({ ok: true, text: outcome.path });
+      window.setTimeout(() => setPngNotice((n) => (n?.ok ? null : n)), COPIED_FEEDBACK_MS);
+    } else if (outcome.kind === "failed") {
+      setPngNotice({ ok: false, text: outcome.message });
     }
   }, [csvName, saving]);
 
@@ -731,15 +759,17 @@ function ProfilePlot(props: ProfilePlotProps) {
         />
       </div>
       {toolbar && (
-        <div className="flex items-center gap-1 px-1" style={{ height: TOOLBAR_H }}>
-          <button
-            type="button"
-            onClick={() => setLogOverride(!logY)}
-            className={logY ? TOOLBAR_ACTIVE_CLASS : TOOLBAR_BUTTON_CLASS}
-            title="Toggle a logarithmic y axis"
-          >
-            log y
-          </button>
+        <div className="flex items-center gap-1 px-1 min-w-0" style={{ height: TOOLBAR_H }}>
+          {logOffered && (
+            <button
+              type="button"
+              onClick={() => setLogOverride(!logY)}
+              className={logY ? TOOLBAR_ACTIVE_CLASS : TOOLBAR_BUTTON_CLASS}
+              title="Toggle a logarithmic y axis"
+            >
+              log y
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setDomain(null)}
@@ -757,10 +787,20 @@ function ProfilePlot(props: ProfilePlotProps) {
             onClick={() => void handleSavePng()}
             disabled={saving}
             className={TOOLBAR_BUTTON_CLASS}
-            title="Save the plot as a PNG image"
+            title={pngNotice?.ok ? `Saved ${pngNotice.text}` : "Save the plot as a PNG image"}
           >
-            PNG
+            {pngNotice?.ok ? "saved" : "PNG"}
           </button>
+          {pngNotice && !pngNotice.ok && (
+            <span className="text-[9px] font-mono text-red-400 truncate min-w-0" title={pngNotice.text}>
+              PNG not saved: {pngNotice.text}
+            </span>
+          )}
+          {logHidden && logHidden.hidden > 0 && (
+            <span className="text-[9px] font-mono text-zinc-500 truncate min-w-0">
+              {`${logHidden.hidden} of ${logHidden.total} values <= 0 hidden`}
+            </span>
+          )}
         </div>
       )}
     </div>

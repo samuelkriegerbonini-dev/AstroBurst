@@ -249,6 +249,22 @@ impl PhotCal {
         }
     }
 
+    pub fn converts_to_jansky(&self) -> bool {
+        self.jansky_per_native_unit().is_some()
+    }
+
+    pub fn jansky_unavailable_reason(&self) -> Option<String> {
+        let exptime_warning_is_the_reason =
+            matches!(self.convention, FluxConvention::HstCounts { per_second: false, exptime: None, .. });
+        if self.converts_to_jansky() || exptime_warning_is_the_reason {
+            return None;
+        }
+        Some(format!(
+            "{} gives no finite positive conversion to Jy, so the data are treated as uncalibrated",
+            self.label()
+        ))
+    }
+
     fn jansky_per_native_unit(&self) -> Option<f64> {
         let factor = match &self.convention {
             FluxConvention::JwstMjySr { pixar_sr, .. } => pixar_sr * JY_PER_MJY,
@@ -447,6 +463,38 @@ mod tests {
         assert!(matches!(cal.convention, FluxConvention::HstCounts { per_second: false, exptime: None, .. }));
         assert!(cal.warnings.iter().any(|w| w.contains("EXPTIME")), "{:?}", cal.warnings);
         assert!(cal.calibrate(100.0, None).is_none());
+    }
+
+    #[test]
+    fn only_a_calibration_with_a_finite_positive_jansky_factor_converts_to_jansky() {
+        let no_exptime = make_header(&[("BUNIT", "COUNTS"), ("PHOTFLAM", "1.5E-19"), ("PHOTPLAM", "5921")]);
+        assert!(!PhotCal::from_header(&no_exptime, None).unwrap().converts_to_jansky());
+        let with_exptime =
+            make_header(&[("BUNIT", "COUNTS"), ("PHOTFLAM", "1.5E-19"), ("PHOTPLAM", "5921"), ("EXPTIME", "500")]);
+        assert!(PhotCal::from_header(&with_exptime, None).unwrap().converts_to_jansky());
+        let underflowing_zero_point = make_header(&[("BUNIT", "ADU"), ("MAGZPT", "1000")]);
+        assert!(!PhotCal::from_header(&underflowing_zero_point, None).unwrap().converts_to_jansky());
+        assert!(PhotCal::from_header(&jwst_mjy_sr_header(), None).unwrap().converts_to_jansky());
+    }
+
+    #[test]
+    fn a_calibration_without_a_jansky_factor_gives_its_own_reason_unless_the_exptime_warning_already_does() {
+        let no_exptime = make_header(&[("BUNIT", "COUNTS"), ("PHOTFLAM", "1.5E-19"), ("PHOTPLAM", "5921")]);
+        assert_eq!(PhotCal::from_header(&no_exptime, None).unwrap().jansky_unavailable_reason(), None);
+        assert_eq!(PhotCal::from_header(&jwst_mjy_sr_header(), None).unwrap().jansky_unavailable_reason(), None);
+        let zero_photmjsr = make_header(&[("BUNIT", "DN/s"), ("PHOTMJSR", "0"), ("PIXAR_SR", "2.1E-13")]);
+        let reason = PhotCal::from_header(&zero_photmjsr, None).unwrap().jansky_unavailable_reason().unwrap();
+        assert!(reason.starts_with("JWST DN/s via PHOTMJSR and PIXAR_SR gives no finite positive conversion to Jy"), "{reason}");
+        let underflowing_zero_point = make_header(&[("BUNIT", "ADU"), ("MAGZPT", "1000")]);
+        let reason = PhotCal::from_header(&underflowing_zero_point, None).unwrap().jansky_unavailable_reason().unwrap();
+        assert!(reason.contains("MAGZPT"), "{reason}");
+        let negative_roman = make_header(&[
+            ("BUNIT", "DN / s"),
+            ("ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS", "-0.3324"),
+            ("ROMAN_META_PHOTOMETRY_PIXELAREA_STERADIANS", "2.8E-13"),
+        ]);
+        let reason = PhotCal::from_header(&negative_roman, None).unwrap().jansky_unavailable_reason().unwrap();
+        assert!(reason.starts_with("Roman DN/s"), "{reason}");
     }
 
     #[test]

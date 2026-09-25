@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useId, memo } from "react";
 import { Crosshair, Grid3X3, Loader2 } from "lucide-react";
 import { pixelTable } from "../../services/analysis";
-import type { PixelTableResult, PixelTableStats } from "../../shared/types/analysis";
+import type { PixelTableResult } from "../../shared/types/analysis";
 import { useMousePixel, usePixelClick } from "../../hooks/useMousePixelStore";
 import { Toggle } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
@@ -10,6 +10,7 @@ import {
   PIXEL_TABLE_SIZES,
   cellTone,
   columnIndices,
+  displayedPlane,
   formatCell,
   pixelTableCsv,
   rowIndices,
@@ -18,6 +19,7 @@ import {
 
 interface PixelTablePanelProps {
   filePath: string | null;
+  measureKey?: string | null;
 }
 
 const FOLLOW_DEBOUNCE_MS = 80;
@@ -39,7 +41,6 @@ const CELL_TONE_CLASS: Record<CellTone, string> = {
 const CENTRE_CLASS = "outline outline-1 outline-sky-400 -outline-offset-1";
 const AXIS_CLASS = "px-1 py-0.5 text-zinc-500 whitespace-nowrap";
 const CENTRE_AXIS_CLASS = "px-1 py-0.5 text-sky-400 whitespace-nowrap";
-const EMPTY_STATS: PixelTableStats = { min: null, max: null, mean: null, median: null, n_finite: 0, n_nan: 0 };
 
 function parseSize(text: string): number {
   const n = Number(text);
@@ -53,7 +54,7 @@ function cellTitle(x: number, y: number, value: number | null, err: number | nul
   return parts.join("\n");
 }
 
-function PixelTablePanel({ filePath }: PixelTablePanelProps) {
+function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const sizeId = useId();
   const [armed, setArmed] = useState(false);
   const [follow, setFollow] = useState(false);
@@ -85,7 +86,7 @@ function PixelTablePanel({ filePath }: PixelTablePanelProps) {
     setResult(null);
     setError(null);
     setLoading(false);
-  }, [filePath]);
+  }, [filePath, measureKey]);
 
   useEffect(() => {
     return () => {
@@ -149,24 +150,24 @@ function PixelTablePanel({ filePath }: PixelTablePanelProps) {
     if (centre) fetchRef.current(centre.x, centre.y);
   }, [size]);
 
+  const shown = useMemo(() => (result ? displayedPlane(result, showErr) : null), [result, showErr]);
+
   const copyCsv = useCallback(async () => {
-    if (!result) return;
-    const grid = showErr && result.err ? result.err : result.values;
+    if (!result || !shown) return;
     try {
-      await navigator.clipboard.writeText(pixelTableCsv(result, grid));
-      showNotice(`${showErr && result.err ? "ERR" : "Pixel"} table copied to the clipboard as CSV`);
+      await navigator.clipboard.writeText(pixelTableCsv(result, shown.grid));
+      showNotice(`${shown.plane === "ERR" ? "ERR" : "Pixel"} table copied to the clipboard as CSV`);
     } catch (e: unknown) {
       setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [result, showErr, showNotice]);
+  }, [result, shown, showNotice]);
 
   const cols = useMemo(() => (result ? columnIndices(result) : []), [result]);
   const rows = useMemo(() => (result ? rowIndices(result) : []), [result]);
-  const errShown = showErr && result?.err != null;
-  const grid = errShown && result?.err ? result.err : result?.values ?? [];
-  const toneStats = errShown ? EMPTY_STATS : result?.stats ?? EMPTY_STATS;
   const half = result ? Math.floor(result.size / 2) : 0;
-  const stats = result?.stats;
+  const grid = shown?.grid ?? [];
+  const stats = shown?.stats;
+  const plane = shown?.plane;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -230,7 +231,7 @@ function PixelTablePanel({ filePath }: PixelTablePanelProps) {
                       {cols.map((x, c) => {
                         const v = grid[r]?.[c] ?? null;
                         const dqNames = result.dq_names?.[r]?.[c] ?? null;
-                        const tone = cellTone(v, toneStats, dqNames);
+                        const tone = cellTone(v, stats, dqNames);
                         const centre = r === half && c === half;
                         return (
                           <td
@@ -249,6 +250,7 @@ function PixelTablePanel({ filePath }: PixelTablePanelProps) {
             </div>
 
             <div className="text-[9px] text-zinc-500 font-mono flex flex-wrap gap-x-2">
+              {result.err != null && <span>{plane}</span>}
               {result.unit && <span>unit {result.unit}</span>}
               <span>min {formatCell(stats.min, SUMMARY_DIGITS)}</span>
               <span>max {formatCell(stats.max, SUMMARY_DIGITS)}</span>

@@ -562,11 +562,14 @@ impl WcsTransform {
         };
         let north_vec = unit_vector_from(centre, self.world_to_pixel(sky0.ra, north_dec), north_sign);
 
-        let cos_dec = sky0.dec.to_radians().cos();
+        let (sin_dec, cos_dec) = sky0.dec.to_radians().sin_cos();
         let east_vec = if cos_dec.abs() < MIN_COS_DEC {
             None
         } else {
-            unit_vector_from(centre, self.world_to_pixel(sky0.ra + step_deg / cos_dec, sky0.dec), 1.0)
+            let (sin_step, cos_step) = step_deg.to_radians().sin_cos();
+            let east_ra = sky0.ra + sin_step.atan2(cos_dec * cos_step).to_degrees();
+            let east_dec = (sin_dec * cos_step).atan2((cos_dec * cos_step).hypot(sin_step)).to_degrees();
+            unit_vector_from(centre, self.world_to_pixel(east_ra, east_dec), 1.0)
         };
         (north_vec, east_vec)
     }
@@ -1672,27 +1675,66 @@ mod tests {
         assert_vec_close(o.east_vec, (-1.0, 0.0), "east");
     }
 
-    #[test]
-    fn orientation_near_the_celestial_pole_still_yields_unit_vectors() {
+    fn centred_tan_orientation(axes: (&str, &str), crval: (f64, f64), cd: [[f64; 2]; 2], naxis: usize) -> WcsOrientation {
+        let n = naxis.to_string();
+        let crpix = (naxis as f64 / 2.0 + 0.5).to_string();
+        let (crval1, crval2) = (crval.0.to_string(), crval.1.to_string());
+        let cd_cards: Vec<String> = [cd[0][0], cd[0][1], cd[1][0], cd[1][1]].iter().map(|v| format!("{v:.12e}")).collect();
         let h = make_header(&[
-            ("NAXIS1", "100"),
-            ("NAXIS2", "100"),
-            ("CRPIX1", "50.5"),
-            ("CRPIX2", "50.5"),
-            ("CRVAL1", "150.0"),
-            ("CRVAL2", "89.999"),
-            ("CD1_1", "-2.777777777778e-4"),
-            ("CD1_2", "0.0"),
-            ("CD2_1", "0.0"),
-            ("CD2_2", "2.777777777778e-4"),
-            ("CTYPE1", "RA---TAN"),
-            ("CTYPE2", "DEC--TAN"),
+            ("NAXIS1", &n),
+            ("NAXIS2", &n),
+            ("CRPIX1", &crpix),
+            ("CRPIX2", &crpix),
+            ("CRVAL1", &crval1),
+            ("CRVAL2", &crval2),
+            ("CD1_1", &cd_cards[0]),
+            ("CD1_2", &cd_cards[1]),
+            ("CD2_1", &cd_cards[2]),
+            ("CD2_2", &cd_cards[3]),
+            ("CTYPE1", axes.0),
+            ("CTYPE2", axes.1),
         ]);
-        let wcs = WcsTransform::from_header(&h).unwrap();
-        let o = wcs.orientation(100, 100);
+        WcsTransform::from_header(&h).unwrap().orientation(naxis, naxis)
+    }
+
+    const EQUATORIAL_TAN: (&str, &str) = ("RA---TAN", "DEC--TAN");
+
+    #[test]
+    fn orientation_near_a_celestial_pole_points_east_along_the_local_tangent_for_both_parities() {
+        let s = 1.0 / 3600.0;
+        for dec in [89.9, 89.99, 89.999, 89.9995, -89.999] {
+            for east_x in [-1.0, 1.0] {
+                let o = centred_tan_orientation(EQUATORIAL_TAN, (150.0, dec), [[east_x * s, 0.0], [0.0, s]], 100);
+                let what = format!("dec {dec}, CD1_1 sign {east_x}");
+                assert_eq!(o.flipped, east_x > 0.0, "{what}");
+                assert_vec_close(o.north_vec, (0.0, 1.0), &format!("north at {what}"));
+                assert_vec_close(o.east_vec, (east_x, 0.0), &format!("east at {what}"));
+            }
+        }
+    }
+
+    #[test]
+    fn orientation_of_wide_or_rotated_polar_fields_keeps_east_a_quarter_turn_from_north() {
+        let wide = 10.0 / 3600.0;
+        let o = centred_tan_orientation(EQUATORIAL_TAN, (150.0, 89.9), [[-wide, 0.0], [0.0, wide]], 2000);
+        assert_vec_close(o.north_vec, (0.0, 1.0), "wide field north");
+        assert_vec_close(o.east_vec, (-1.0, 0.0), "wide field east");
+
+        let s = 1.0 / 3600.0;
+        let (sn, cs) = 30f64.to_radians().sin_cos();
+        let o = centred_tan_orientation(EQUATORIAL_TAN, (150.0, 89.99), [[-cs * s, -sn * s], [-sn * s, cs * s]], 100);
+        assert_vec_close(o.north_vec, (-sn, cs), "rotated north");
+        assert_vec_close(o.east_vec, (-cs, -sn), "rotated east");
+    }
+
+    #[test]
+    fn orientation_of_a_galactic_frame_centred_near_the_equatorial_pole_keeps_icrs_east_perpendicular_to_icrs_north() {
+        let s = 1.0 / 3600.0;
+        let (l, b) = crate::core::astrometry::frames::icrs_to_galactic(150.0, 89.999);
+        let o = centred_tan_orientation(("GLON-TAN", "GLAT-TAN"), (l, b), [[-s, 0.0], [0.0, s]], 100);
         let (nx, ny) = o.north_vec.expect("north");
         assert_close(nx.hypot(ny), 1.0, 1e-9, "north length");
-        let (ex, ey) = o.east_vec.expect("east");
-        assert_close(ex.hypot(ey), 1.0, 1e-9, "east length");
+        assert!(ny.abs() < 0.999, "ICRS north must be rotated against the galactic grid, got ({nx}, {ny})");
+        assert_vec_close(o.east_vec, (-ny, nx), "east is north turned a quarter anticlockwise for normal parity");
     }
 }

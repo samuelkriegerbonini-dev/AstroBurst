@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { CubeSpectrum, RegionSpectrum } from "../shared/types/cube";
+import type { SpectrumSource } from "../shared/types/spectral";
 
 export interface SpectrumState {
   spectrum: number[];
@@ -9,6 +10,7 @@ export interface SpectrumState {
   elapsed: number;
   error: string | null;
   region: RegionSpectrum | null;
+  regionSource: SpectrumSource | null;
   regionLoading: boolean;
   regionError: string | null;
 }
@@ -21,13 +23,14 @@ const EMPTY: SpectrumState = {
   elapsed: 0,
   error: null,
   region: null,
+  regionSource: null,
   regionLoading: false,
   regionError: null,
 };
 
 type Listener = () => void;
 
-class SpectrumStore {
+export class SpectrumStore {
   private value: SpectrumState = EMPTY;
   private listeners = new Set<Listener>();
 
@@ -46,7 +49,7 @@ class SpectrumStore {
   }
 
   begin(coord: { x: number; y: number }) {
-    this.emit({ ...this.value, coord, loading: true, error: null, region: null, regionError: null });
+    this.emit({ ...this.value, coord, loading: true, error: null, region: null, regionSource: null, regionError: null });
   }
 
   commit(result: CubeSpectrum, elapsed: number) {
@@ -59,6 +62,7 @@ class SpectrumStore {
       elapsed,
       error: null,
       region: null,
+      regionSource: null,
     });
   }
 
@@ -70,10 +74,11 @@ class SpectrumStore {
     this.emit({ ...this.value, regionLoading: true, regionError: null });
   }
 
-  commitRegion(result: RegionSpectrum) {
+  commitRegion(result: RegionSpectrum, source: SpectrumSource) {
     this.emit({
       ...this.value,
       region: result,
+      regionSource: source,
       regionLoading: false,
       regionError: null,
       elapsed: result.elapsed_ms,
@@ -86,7 +91,7 @@ class SpectrumStore {
 
   clearRegion() {
     if (!this.value.region && !this.value.regionError && !this.value.regionLoading) return;
-    this.emit({ ...this.value, region: null, regionError: null, regionLoading: false });
+    this.emit({ ...this.value, region: null, regionSource: null, regionError: null, regionLoading: false });
   }
 
   reset() {
@@ -113,8 +118,8 @@ export function beginRegionSpectrum() {
   store.beginRegion();
 }
 
-export function commitRegionSpectrum(result: RegionSpectrum) {
-  store.commitRegion(result);
+export function commitRegionSpectrum(result: RegionSpectrum, source: SpectrumSource) {
+  store.commitRegion(result, source);
 }
 
 export function failRegionSpectrum(error: string) {

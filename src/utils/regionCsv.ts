@@ -1,4 +1,4 @@
-import type { Region, RegionStatsEntry } from "../shared/types/regions";
+import type { Region, RegionSky, RegionStats, RegionStatsEntry } from "../shared/types/regions";
 import { buildCsv, type CsvColumn } from "./catalogCsv";
 import { shapeSummary } from "./regionGeometry";
 
@@ -9,6 +9,11 @@ export interface RegionCsvRow {
 
 const DEFAULT_FILE_NAME = "regions.csv";
 const CSV_SUFFIX = "_regions.csv";
+
+export function regionSkyOf(stats: RegionStats | null | undefined): RegionSky | null {
+  if (!stats) return null;
+  return stats.sky !== undefined ? stats.sky : (stats.calibrated ?? null);
+}
 
 export const REGION_CSV_COLUMNS: CsvColumn<RegionCsvRow>[] = [
   { header: "id", value: (r) => r.region.id },
@@ -34,10 +39,10 @@ export const REGION_CSV_COLUMNS: CsvColumn<RegionCsvRow>[] = [
   { header: "mag_ab", value: (r) => r.entry?.stats?.calibrated?.mag_ab },
   { header: "mag_ab_err", value: (r) => r.entry?.stats?.calibrated?.mag_ab_err },
   { header: "sb_mag_arcsec2", value: (r) => r.entry?.stats?.calibrated?.sb_mag_arcsec2 },
-  { header: "area_arcsec2", value: (r) => r.entry?.stats?.calibrated?.area_arcsec2 },
-  { header: "ra", value: (r) => r.entry?.stats?.calibrated?.ra },
-  { header: "dec", value: (r) => r.entry?.stats?.calibrated?.dec },
-  { header: "pa_sky_deg", value: (r) => r.entry?.stats?.calibrated?.pa_sky_deg },
+  { header: "area_arcsec2", value: (r) => regionSkyOf(r.entry?.stats)?.area_arcsec2 },
+  { header: "ra", value: (r) => regionSkyOf(r.entry?.stats)?.ra },
+  { header: "dec", value: (r) => regionSkyOf(r.entry?.stats)?.dec },
+  { header: "pa_sky_deg", value: (r) => regionSkyOf(r.entry?.stats)?.pa_sky_deg },
 ];
 
 export function regionsTableCsv(regions: Region[], stats: ReadonlyMap<string, RegionStatsEntry>): string {

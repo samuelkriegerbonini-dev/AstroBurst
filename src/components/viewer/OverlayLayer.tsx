@@ -1,9 +1,10 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { useDisplayContext } from "../../context/PreviewContext";
+import { useDisplayContext, useDisplayedImage } from "../../context/PreviewContext";
 import { useOverlayDoc } from "../../hooks/useOverlayStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { getWcsInfo, gridLines, isWcsGridError } from "../../services/astrometry";
 import type { GridFrame } from "../../shared/types/display";
+import { horizontalPixelScaleArcsec, overlayWcsPath } from "../../utils/compass";
 import { overlayStore, type OverlayPaintContext } from "../../utils/overlayStore";
 import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMapping";
 import { isRegionMappingUsable, regionPointToScreen, resolveRegionHost, type RegionMapping } from "../../utils/regionCoords";
@@ -21,11 +22,17 @@ interface OverlayLayerProps {
   enabled: boolean;
 }
 
-function useWcsGridLayer(fileKey: string | null, grid: boolean, frame: GridFrame, density: number): void {
+function useWcsGridLayer(
+  fileKey: string | null,
+  wcsPath: string | null,
+  grid: boolean,
+  frame: GridFrame,
+  density: number,
+): void {
   useEffect(() => {
-    if (!fileKey || !grid) return;
+    if (!fileKey || !wcsPath || !grid) return;
     let cancelled = false;
-    gridLines(fileKey, frame, density)
+    gridLines(wcsPath, frame, density)
       .then((result) => {
         if (cancelled) return;
         if (isWcsGridError(result)) {
@@ -46,17 +53,18 @@ function useWcsGridLayer(fileKey: string | null, grid: boolean, frame: GridFrame
       cancelled = true;
       overlayStore.remove(fileKey, GRID_LAYER_ID);
     };
-  }, [fileKey, grid, frame, density]);
+  }, [fileKey, wcsPath, grid, frame, density]);
 }
 
-function useCompassLayer(fileKey: string | null, compass: boolean): void {
+function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass: boolean): void {
   useEffect(() => {
-    if (!fileKey || !compass) return;
+    if (!fileKey || !wcsPath || !compass) return;
     let cancelled = false;
-    getWcsInfo(fileKey)
+    getWcsInfo(wcsPath)
       .then((info) => {
         if (cancelled) return;
-        if (!info.north_vec || !info.east_vec || !Number.isFinite(info.pixel_scale_arcsec)) {
+        const scaleX = horizontalPixelScaleArcsec(info);
+        if (!info.north_vec || !info.east_vec || !Number.isFinite(scaleX)) {
           console.warn("[AstroBurst] compass unavailable: the WCS has no usable orientation");
           return;
         }
@@ -67,7 +75,7 @@ function useCompassLayer(fileKey: string | null, compass: boolean): void {
           paint: createCompassPainter({
             northVec: info.north_vec,
             eastVec: info.east_vec,
-            pixelScaleArcsec: info.pixel_scale_arcsec,
+            pixelScaleArcsec: scaleX,
             imageCentre: { x: (info.naxis1 - 1) / 2, y: (info.naxis2 - 1) / 2 },
           }),
         });
@@ -79,13 +87,15 @@ function useCompassLayer(fileKey: string | null, compass: boolean): void {
       cancelled = true;
       overlayStore.remove(fileKey, COMPASS_LAYER_ID);
     };
-  }, [fileKey, compass]);
+  }, [fileKey, wcsPath, compass]);
 }
 
 function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH, enabled }: OverlayLayerProps) {
   const regionKey = useRegionKey();
   const fileKey = enabled ? regionKey : null;
   const { display } = useDisplayContext();
+  const displayed = useDisplayedImage();
+  const wcsPath = overlayWcsPath(fileKey, displayed.path);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hostEl, setHostEl] = useState<HTMLElement | null>(null);
@@ -95,8 +105,8 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const mappingRef = useRef(mapping);
   mappingRef.current = mapping;
 
-  useWcsGridLayer(active ? fileKey : null, display.grid, display.gridFrame, display.gridDensity);
-  useCompassLayer(active ? fileKey : null, display.compass);
+  useWcsGridLayer(active ? fileKey : null, wcsPath, display.grid, display.gridFrame, display.gridDensity);
+  useCompassLayer(active ? fileKey : null, wcsPath, display.compass);
   const doc = useOverlayDoc(fileKey);
   const hasLayers = doc.layers.some((l) => l.visible);
 

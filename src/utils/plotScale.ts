@@ -61,6 +61,43 @@ export function formatAxisTick(value: number, range: number): string {
   return value.toFixed(decimals);
 }
 
+const TICK_FIXED_MIN = 1e-3;
+const STEP_LABEL_MAX_DECIMALS = 12;
+const STEP_LOG_EPSILON = 1e-9;
+
+export function formatTickLabels(ticks: number[]): string[] {
+  let step = Infinity;
+  let maxAbs = 0;
+  for (let i = 0; i < ticks.length; i++) {
+    if (Number.isFinite(ticks[i])) maxAbs = Math.max(maxAbs, Math.abs(ticks[i]));
+    if (i === 0) continue;
+    const d = Math.abs(ticks[i] - ticks[i - 1]);
+    if (d > 0 && d < step) step = d;
+  }
+  if (!Number.isFinite(step)) return ticks.map((v) => formatAxisTick(v, NaN));
+  const stepExp = Math.floor(Math.log10(step) + STEP_LOG_EPSILON);
+  const exponential = maxAbs >= TICK_EXPONENTIAL_ABOVE || maxAbs < TICK_FIXED_MIN;
+  return ticks.map((v) => {
+    if (!Number.isFinite(v)) return "";
+    if (v === 0) return "0";
+    if (!exponential) return v.toFixed(Math.min(STEP_LABEL_MAX_DECIMALS, Math.max(0, -stepExp)));
+    const digits = Math.floor(Math.log10(Math.abs(v)) + STEP_LOG_EPSILON) - stepExp;
+    return v.toExponential(Math.min(STEP_LABEL_MAX_DECIMALS, Math.max(1, digits)));
+  });
+}
+
+export function tickLabels(ticks: number[], format?: (v: number, step: number) => string): string[] {
+  if (!format) return formatTickLabels(ticks);
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : NaN;
+  return ticks.map((t) => format(t, step));
+}
+
+export function formatLogTickLabel(v: number): string {
+  if (!(v > 0) || !Number.isFinite(v)) return "";
+  if (v >= TICK_EXPONENTIAL_ABOVE || v < TICK_FIXED_MIN) return v.toExponential(0);
+  return String(Number(v.toPrecision(1)));
+}
+
 export function finiteExtent(values: (number | null)[]): [number, number] | null {
   let lo = Infinity;
   let hi = -Infinity;

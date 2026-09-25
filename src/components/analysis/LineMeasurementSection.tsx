@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
 import { Activity, Copy } from "lucide-react";
 import type { LineMeasurement, LineModel } from "../../shared/types/spectral";
 import { LINE_MODELS } from "../../shared/types/spectral";
-import { lineMeasurementCsv, lineMeasurementRows } from "../../utils/lineMeasure";
+import { lineMeasurementCsv, lineMeasurementRows, spectrumSourceLabel } from "../../utils/lineMeasure";
 
 interface LineMeasurementSectionProps {
   result: LineMeasurement | null;
@@ -149,8 +149,9 @@ function LineMeasurementSection({
           </div>
           <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-2 flex-wrap">
             <span>
-              ch {result.z0}-{result.z1}, {result.n_channels} channels, continuum {result.continuum_windows[0][0]}-
-              {result.continuum_windows[0][1]} and {result.continuum_windows[1][0]}-{result.continuum_windows[1][1]}
+              {spectrumSourceLabel(result.source)}, ch {result.z0}-{result.z1}, {result.n_channels} channels, continuum{" "}
+              {result.continuum_windows[0][0]}-{result.continuum_windows[0][1]} and {result.continuum_windows[1][0]}-
+              {result.continuum_windows[1][1]}
             </span>
             <span className="ml-auto">{result.elapsed_ms}ms</span>
           </div>

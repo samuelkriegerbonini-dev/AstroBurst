@@ -1,3 +1,6 @@
+import type { ProcessedResult } from "../shared/types/preview";
+import type { SpectralAxisInfo } from "../shared/types/spectral";
+import { measurementAxisValues } from "./lineMeasure";
 import { formatAxisValue } from "./spectralAxis";
 import { nearestChannel, pixelToAxisValue, type PlotMapping } from "./spectrumRange";
 
@@ -53,9 +56,28 @@ export function frameAxisValue(idx: number, values: number[] | null | undefined)
 }
 
 export function formatFrameLabel(idx: number, total: number, axisValue: number | null, unit: string): string {
-  const channel = `Channel ${idx + 1}/${total}`;
+  const channel = `ch ${idx} (0–${Math.max(total - 1, 0)})`;
   if (axisValue === null || !Number.isFinite(axisValue) || !unit || unit === "ch") return channel;
   return `${channel} - ${formatAxisValue(axisValue, unit)} ${unit}`;
+}
+
+export function frameRecordLabel(idx: number, total: number, axis: SpectralAxisInfo | null): string {
+  return formatFrameLabel(idx, total, frameAxisValue(idx, measurementAxisValues(axis)), axis?.unit ?? "");
+}
+
+export function displayedChannel(
+  record: Pick<ProcessedResult, "kind" | "inputPath" | "frameIndex"> | null,
+  filePath: string | null | undefined,
+): number | null {
+  if (!filePath) return null;
+  if (record === null) return 0;
+  if (record.kind !== "cube" || record.inputPath !== filePath) return null;
+  const idx = record.frameIndex;
+  return typeof idx === "number" && Number.isInteger(idx) && idx >= 0 ? idx : null;
+}
+
+export function channelRequestNeeded(target: number, cursor: number, displayed: number | null, displayedPngOnly: boolean): boolean {
+  return target !== cursor || displayed !== target || displayedPngOnly;
 }
 
 export function formatFrameDelta(hovered: number, displayed: number): string {
@@ -83,6 +105,34 @@ export interface FrameLoadRequest {
 export function mergeFrameRequest(pending: FrameLoadRequest | null, next: FrameLoadRequest): FrameLoadRequest {
   if (pending && pending.idx === next.idx) return { idx: next.idx, withFits: pending.withFits || next.withFits };
   return next;
+}
+
+export function drainFrameRequest(pending: FrameLoadRequest | null, currentFrame: number): FrameLoadRequest | null {
+  return pending !== null && pending.idx === currentFrame ? pending : null;
+}
+
+export function frameLoadPlan(committed: boolean, fitsCached: boolean): { withFits: boolean; deferFits: boolean } {
+  return { withFits: committed && fitsCached, deferFits: committed && !fitsCached };
+}
+
+export interface FramePublishGate {
+  commit(): void;
+  supersede(): void;
+  isCurrent(): boolean;
+}
+
+export function createFramePublishGate(): FramePublishGate {
+  let epoch = 0;
+  let committed = 0;
+  return {
+    commit: () => {
+      committed = epoch;
+    },
+    supersede: () => {
+      epoch++;
+    },
+    isCurrent: () => committed === epoch,
+  };
 }
 
 function pathHash(path: string): string {

@@ -147,6 +147,17 @@ pub fn channel_widths(velocities: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+fn velocity_frame_note(axis: &SpectralAxis) -> String {
+    let frame = match axis.specsys.as_deref() {
+        Some(frame) => format!("axis frame {}", frame),
+        None => "axis frame, which the header does not state (no SPECSYS)".to_string(),
+    };
+    format!(
+        "M1 velocities are in the {}: no barycentric or heliocentric correction is applied to the moment maps",
+        frame
+    )
+}
+
 fn velocities_for(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<String>) -> Result<Vec<f64>> {
     if !axis.kind.is_spectral() {
         bail!(
@@ -159,6 +170,7 @@ fn velocities_for(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<Strin
             "velocity axis {} used as stored in {} (rest wavelength and convention ignored)",
             axis.ctype, axis.unit
         ));
+        notes.push(velocity_frame_note(axis));
         return Ok(axis.values.clone());
     }
     let rest_um = match cfg.rest_um.filter(|r| r.is_finite() && *r > 0.0).or(axis.rest_wavelength_um) {
@@ -172,6 +184,7 @@ fn velocities_for(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<Strin
         cfg.convention.name(),
         rest_um
     ));
+    notes.push(velocity_frame_note(axis));
     Ok(velocity.values_kms)
 }
 
@@ -592,6 +605,43 @@ mod tests {
         assert!((maps.m2[[3, 3]] as f64 - 60.0).abs() < 6.0, "m2={}", maps.m2[[3, 3]]);
         assert!(maps.m0[[3, 3]].is_finite());
         assert!(maps.notes.iter().any(|n| n.contains("velocity axis")));
+    }
+
+    #[test]
+    fn moment_notes_name_the_axis_velocity_frame_and_say_no_correction_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let topocentric = dir.path().join("topo.fits");
+        write_line_cube_with_cards(&topocentric, &[("SPECSYS", "'TOPOCENT'")]);
+        let cube = LazyCube::open(topocentric.to_str().unwrap()).unwrap();
+        let maps = moment_maps(&cube, &line_config()).unwrap();
+        assert!(
+            maps.notes
+                .iter()
+                .any(|n| n.contains("axis frame TOPOCENT") && n.contains("no barycentric or heliocentric correction")),
+            "{:?}",
+            maps.notes
+        );
+
+        let undeclared = dir.path().join("undeclared.fits");
+        write_line_cube_with_cards(&undeclared, &[("SPECSYS", "")]);
+        let cube = LazyCube::open(undeclared.to_str().unwrap()).unwrap();
+        let maps = moment_maps(&cube, &line_config()).unwrap();
+        assert!(
+            maps.notes.iter().any(|n| n.contains("no SPECSYS") && n.contains("no barycentric or heliocentric correction")),
+            "{:?}",
+            maps.notes
+        );
+
+        let velocity_axis = dir.path().join("vrad.fits");
+        let cards = [("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("CRVAL3", "-300.0"), ("CDELT3", "40.0"), ("SPECSYS", "'LSRK'")];
+        write_cube(&velocity_axis, 8, 8, 16, &cards, |z, _, _| {
+            let d = z as f64 - 7.0;
+            (2.0 * (-d * d / (2.0 * 1.5 * 1.5)).exp()) as f32
+        });
+        let cube = LazyCube::open(velocity_axis.to_str().unwrap()).unwrap();
+        let cfg = MomentConfig { z0: 1, z1: 13, continuum: None, ..line_config() };
+        let maps = moment_maps(&cube, &cfg).unwrap();
+        assert!(maps.notes.iter().any(|n| n.contains("axis frame LSRK")), "{:?}", maps.notes);
     }
 
     #[test]

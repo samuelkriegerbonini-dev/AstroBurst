@@ -62,6 +62,7 @@ pub struct LineVelocity {
     pub rest_um: f64,
     pub convention: VelocityConvention,
     pub shift_applied_kms: f64,
+    pub axis_frame: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -159,7 +160,13 @@ fn automatic_windows(line: (usize, usize), depth: usize, notes: &mut Vec<String>
     Ok(windows)
 }
 
-fn fit_continuum(axis: &[f64], flux: &[f32], windows: ContinuumWindows, x_ref: f64) -> Result<ContinuumFit, String> {
+fn fit_continuum(
+    axis: &[f64],
+    flux: &[f32],
+    windows: ContinuumWindows,
+    x_ref: f64,
+    notes: &mut Vec<String>,
+) -> Result<ContinuumFit, String> {
     let mut channels: Vec<usize> = (windows.0 .0..=windows.0 .1).chain(windows.1 .0..=windows.1 .1).collect();
     channels.sort_unstable();
     channels.dedup();
@@ -173,7 +180,17 @@ fn fit_continuum(axis: &[f64], flux: &[f32], windows: ContinuumWindows, x_ref: f
     }
     let xs: Vec<f64> = samples.iter().map(|s| s.0).collect();
     let ys: Vec<f64> = samples.iter().map(|s| s.1).collect();
-    let linear = windows.0 != windows.1 && samples.len() >= 3;
+    let empty_window = [windows.0, windows.1]
+        .into_iter()
+        .find(|w| !(w.0..=w.1).any(|z| flux.get(z).is_some_and(|v| v.is_finite())))
+        .filter(|_| windows.0 != windows.1);
+    if let Some(w) = empty_window {
+        notes.push(format!(
+            "continuum window {}..={} has no finite flux: a constant was fitted to the other window instead of extrapolating a slope",
+            w.0, w.1
+        ));
+    }
+    let linear = windows.0 != windows.1 && empty_window.is_none() && samples.len() >= 3;
     let (intercept, slope) = fit_linear(&xs, &ys, !linear);
     let mut residuals: Vec<f32> = xs.iter().zip(&ys).map(|(x, y)| (y - (intercept + slope * x)) as f32).collect();
     Ok(ContinuumFit { intercept, slope, sigma: robust_sigma(&mut residuals), channels: samples.len(), linear })
@@ -314,7 +331,7 @@ pub fn measure_line(
     let mut notes = Vec::new();
     let windows = resolve_windows(continuum, line, depth, &mut notes)?;
     let x_ref = axis[(line.0 + line.1) / 2];
-    let cont = fit_continuum(axis, flux, windows, x_ref)?;
+    let cont = fit_continuum(axis, flux, windows, x_ref, &mut notes)?;
     let widths = channel_widths(axis);
 
     let samples: Vec<LineSample> = (line.0..=line.1)
@@ -335,9 +352,10 @@ pub fn measure_line(
 
     let flux_total: f64 = samples.iter().map(|s| s.excess * s.dx).sum();
     let mean_dx = samples.iter().map(|s| s.dx).sum::<f64>() / n_channels as f64;
-    let continuum_crosses_zero = samples.iter().any(|s| s.continuum == 0.0);
+    let continuum_crosses_zero =
+        samples.iter().any(|s| s.continuum <= 0.0) && samples.iter().any(|s| s.continuum >= 0.0);
     let equivalent_width = if continuum_crosses_zero {
-        notes.push("continuum is zero inside the line: equivalent width undefined".to_string());
+        notes.push("continuum reaches or crosses zero inside the line: equivalent width undefined".to_string());
         f64::NAN
     } else {
         samples.iter().map(|s| -s.excess / s.continuum * s.dx).sum()
@@ -354,7 +372,10 @@ pub fn measure_line(
         .unwrap_or((axis[line.0], f64::NAN));
 
     let emission = flux_total > 0.0;
-    let (centroid, sigma) = if emission {
+    let (centroid, sigma) = if flux_total != 0.0 {
+        if !emission {
+            notes.push("flux is negative: centroid and sigma are weighted by the absorbed flux".to_string());
+        }
         let centroid = samples.iter().map(|s| s.excess * s.x * s.dx).sum::<f64>() / flux_total;
         let variance = samples.iter().map(|s| s.excess * (s.x - centroid) * (s.x - centroid) * s.dx).sum::<f64>() / flux_total;
         if variance < 0.0 {
@@ -431,6 +452,7 @@ pub fn with_velocity(
     rest_um: f64,
     convention: VelocityConvention,
     axis_kind: AxisKind,
+    axis_frame: Option<&str>,
     shift_kms: Option<f64>,
 ) {
     let to_um: fn(f64) -> f64 = match axis_kind {
@@ -452,11 +474,16 @@ pub fn with_velocity(
     } else {
         f64::NAN
     };
+    let frame_text = match axis_frame {
+        Some(frame) => format!("axis frame {}", frame),
+        None => "axis frame not stated in the header (no SPECSYS)".to_string(),
+    };
     m.notes.push(format!(
-        "line velocity from the {} convention with rest wavelength {} um{}",
+        "line velocity from the {} convention with rest wavelength {} um, {}{}",
         convention.name(),
         rest_um,
-        if shift != 0.0 { format!(", shifted by {:.3} km/s (frame correction)", shift) } else { ", topocentric".to_string() }
+        frame_text,
+        if shift != 0.0 { format!(", shifted by {:.3} km/s (frame correction)", shift) } else { ", no frame shift applied".to_string() }
     ));
     m.velocity = Some(LineVelocity {
         centroid_kms: centroid_kms + shift,
@@ -465,6 +492,7 @@ pub fn with_velocity(
         rest_um,
         convention,
         shift_applied_kms: shift,
+        axis_frame: axis_frame.map(str::to_string),
     });
 }
 
@@ -542,25 +570,32 @@ mod tests {
         let (axis, flux) = centre_spectrum(0.0);
         let mut m = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
         assert!(m.fit.is_none());
-        with_velocity(&mut m, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Wave, None);
+        with_velocity(&mut m, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Wave, Some("BARYCENT"), None);
         let v = m.velocity.clone().expect("velocity");
         assert!(v.centroid_kms.abs() < 0.1, "v={}", v.centroid_kms);
         let expected_sigma_kms = 299792.458 * 0.003 / LINE_REST_UM;
         assert!(close(v.sigma_kms, expected_sigma_kms, 0.03), "sigma_kms={}", v.sigma_kms);
         assert!(close(v.fwhm_kms, v.sigma_kms * FWHM_PER_SIGMA, 1e-12));
         assert_eq!(v.shift_applied_kms, 0.0);
+        assert_eq!(v.axis_frame.as_deref(), Some("BARYCENT"));
+        let unshifted_note = m.notes.last().expect("velocity note");
+        assert!(unshifted_note.contains("axis frame BARYCENT, no frame shift applied"), "{}", unshifted_note);
 
-        with_velocity(&mut m, LINE_REST_UM, VelocityConvention::Radio, AxisKind::Wave, Some(12.5));
+        with_velocity(&mut m, LINE_REST_UM, VelocityConvention::Radio, AxisKind::Wave, None, Some(12.5));
         let shifted = m.velocity.clone().expect("velocity");
         assert!((shifted.centroid_kms - 12.5).abs() < 0.1, "v={}", shifted.centroid_kms);
         assert_eq!(shifted.shift_applied_kms, 12.5);
         assert_eq!(shifted.convention, VelocityConvention::Radio);
+        assert!(shifted.axis_frame.is_none());
+        let shifted_note = m.notes.last().expect("velocity note");
+        assert!(shifted_note.contains("no SPECSYS") && shifted_note.contains("shifted by 12.500 km/s"), "{}", shifted_note);
+        assert!(m.notes.iter().all(|n| !n.contains("topocentric")), "{:?}", m.notes);
 
         let freq_axis: Vec<f64> = axis.iter().map(|w| 299792.458 / w).collect();
         let mut on_freq = m.clone();
         on_freq.centroid = 299792.458 / LINE_REST_UM;
         on_freq.sigma = f64::NAN;
-        with_velocity(&mut on_freq, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Freq, None);
+        with_velocity(&mut on_freq, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Freq, Some("LSRK"), None);
         let on_freq_velocity = on_freq.velocity.expect("velocity");
         assert!(on_freq_velocity.centroid_kms.abs() < 1e-6);
         assert!(on_freq_velocity.sigma_kms.is_nan());
@@ -568,7 +603,7 @@ mod tests {
 
         let mut on_velocity_axis = m.clone();
         on_velocity_axis.velocity = None;
-        with_velocity(&mut on_velocity_axis, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Vrad, None);
+        with_velocity(&mut on_velocity_axis, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Vrad, None, None);
         assert!(on_velocity_axis.velocity.is_none());
         assert!(on_velocity_axis.notes.iter().any(|n| n.contains("not a wavelength or frequency")));
     }
@@ -636,6 +671,74 @@ mod tests {
         assert!(LineModel::parse("sideways").unwrap_err().contains("unknown line model"));
         assert_eq!(LineModel::parse("Gaussian").unwrap(), LineModel::Gaussian);
         assert_eq!(LineModel::parse("").unwrap(), LineModel::None);
+    }
+
+    #[test]
+    fn an_unresolved_emission_line_brushed_generously_still_converges() {
+        let step_um = 1.25e-4;
+        let centre_um = 0.6528;
+        let axis: Vec<f64> = (0..60).map(|i| centre_um - 30.0 * step_um + i as f64 * step_um).collect();
+        let flux: Vec<f32> = axis
+            .iter()
+            .enumerate()
+            .map(|(z, &x)| {
+                let d = (x - centre_um) / 1.1e-4;
+                (300.0 + 800.0 * (-0.5 * d * d).exp()) as f32 + deterministic_noise(z, 0, 9, 20.0 * 3f32.sqrt())
+            })
+            .collect();
+        let m = measure_line(&axis, &flux, (10, 50), Some(((0, 7), (53, 59))), LineModel::Gaussian).unwrap();
+        let fit = m.fit.expect("gaussian fit");
+        assert!(fit.converged, "{:?}", fit);
+        assert!((fit.centre - centre_um).abs() < 3.0 * fit.centre_err, "{:?}", fit);
+        assert!((fit.amplitude - 800.0).abs() < 3.0 * fit.amplitude_err, "{:?}", fit);
+    }
+
+    #[test]
+    fn a_continuum_crossing_zero_between_channels_leaves_the_equivalent_width_undefined() {
+        let axis: Vec<f64> = (0..40).map(|i| 1.0 + i as f64 * 0.001).collect();
+        for zero_at in [1.0203, 1.0197] {
+            let flux: Vec<f32> = axis
+                .iter()
+                .map(|&x| ((-(x - 1.02) * (x - 1.02) / (2.0 * 0.003 * 0.003)).exp() - 5.0 * (x - zero_at)) as f32)
+                .collect();
+            let m = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+            assert!(close(m.flux, EXPECTED_FLUX, 0.01), "flux={}", m.flux);
+            assert!(m.equivalent_width.is_nan(), "ew={}", m.equivalent_width);
+            assert!(m.notes.iter().any(|n| n.contains("equivalent width undefined")), "{:?}", m.notes);
+        }
+    }
+
+    #[test]
+    fn an_absorption_line_has_its_centroid_and_velocity_at_the_trough() {
+        let axis: Vec<f64> = (0..LINE_CUBE_DEPTH).map(|z| 1.0 + z as f64 * LINE_CDELT_UM).collect();
+        let flux: Vec<f32> = (0..LINE_CUBE_DEPTH).map(|z| LINE_CONTINUUM - 0.5 * line_profile(z)).collect();
+        let mut m = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::Gaussian).unwrap();
+        assert!(m.flux < 0.0, "flux={}", m.flux);
+        assert!((m.centroid - LINE_REST_UM).abs() < 1e-6, "centroid={}", m.centroid);
+        assert!(close(m.sigma, LINE_SIGMA_CHANNELS * LINE_CDELT_UM, 0.02), "sigma={}", m.sigma);
+        assert!((m.continuum_level - LINE_CONTINUUM as f64).abs() < CONTINUUM_LEVEL_TOLERANCE, "level={}", m.continuum_level);
+        assert!(m.notes.iter().any(|n| n.contains("weighted by the absorbed flux")), "{:?}", m.notes);
+        let fit = m.fit.as_ref().expect("gaussian fit");
+        assert!(fit.converged && (fit.centre - LINE_REST_UM).abs() < 1e-4, "{:?}", fit);
+        with_velocity(&mut m, LINE_REST_UM, VelocityConvention::Optical, AxisKind::Wave, None, None);
+        let v = m.velocity.expect("velocity");
+        assert!(v.centroid_kms.abs() < 0.1, "v={}", v.centroid_kms);
+        assert!(v.sigma_kms.is_finite(), "sigma_kms={}", v.sigma_kms);
+    }
+
+    #[test]
+    fn a_continuum_window_without_finite_flux_falls_back_to_a_constant() {
+        let (axis, flux) = centre_spectrum(0.05);
+        let mut blanked = flux.clone();
+        for z in WINDOWS.1 .0..=WINDOWS.1 .1 {
+            blanked[z] = f32::NAN;
+        }
+        let m = measure_line(&axis, &blanked, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert!(!m.continuum_linear);
+        assert_eq!(m.continuum_slope, 0.0);
+        assert_eq!(m.continuum_channels, 6);
+        assert!(close(m.flux, EXPECTED_FLUX, 0.02), "flux={}", m.flux);
+        assert!(m.notes.iter().any(|n| n.contains("34..=39 has no finite flux")), "{:?}", m.notes);
     }
 
     #[test]

@@ -12,7 +12,13 @@ export function sameDimensions(a: [number, number] | null | undefined, b: [numbe
 
 export function filterMatchingFrames(files: ProcessedFile[], referenceDims: [number, number] | null): ProcessedFile[] {
   if (!referenceDims) return [];
-  return files.filter((f) => sameDimensions(f.result?.dimensions, referenceDims));
+  const seen = new Set<string>();
+  return files.filter((f) => {
+    const path = pathOf(f);
+    if (!sameDimensions(f.result?.dimensions, referenceDims) || seen.has(path)) return false;
+    seen.add(path);
+    return true;
+  });
 }
 
 export function orderWithReferenceFirst(files: ProcessedFile[], referencePath: string | null): ProcessedFile[] {

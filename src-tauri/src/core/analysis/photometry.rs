@@ -27,6 +27,8 @@ pub const NO_SATURATION_SOURCE: &str = "none";
 const HEADER_SATURATION_FRACTION: f64 = 0.95;
 const FLAT_TOP_TOLERANCE: f64 = 1e-3;
 const FLAT_TOP_MIN_PIXELS: usize = 2;
+pub const MIN_APERTURE_RADIUS: f64 = 2.0;
+pub const MAX_APERTURE_RADIUS: f64 = 60.0;
 
 fn sorted_median(vals: &[f64]) -> f64 {
     let n = vals.len();
@@ -360,6 +362,27 @@ pub fn encircled_radius(curve: &[GrowthPoint], total: f64, fraction: f64) -> Opt
     Some(r0 + t * (r1 - r0))
 }
 
+pub struct MaskedImage<'a> {
+    image: &'a Array2<f32>,
+    excluded: Option<&'a Array2<u8>>,
+    masked: Option<Array2<f32>>,
+}
+
+impl<'a> MaskedImage<'a> {
+    pub fn new(image: &'a Array2<f32>, excluded: Option<&'a Array2<u8>>) -> Result<Self, String> {
+        let excluded = excluded.filter(|m| m.dim() == image.dim());
+        let masked = excluded
+            .map(|mask| apply_exclusion(image, mask))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        Ok(Self { image, excluded, masked })
+    }
+
+    fn working(&self) -> &Array2<f32> {
+        self.masked.as_ref().unwrap_or(self.image)
+    }
+}
+
 pub fn measure_star_full(
     image: &Array2<f32>,
     err: Option<&Array2<f32>>,
@@ -369,17 +392,29 @@ pub fn measure_star_full(
     click_y: f64,
     config: &PhotometryConfig,
 ) -> Result<StarPhotometry, String> {
-    let dims = image.dim();
-    let err = err.filter(|e| e.dim() == dims);
-    let excluded = excluded.filter(|m| m.dim() == dims);
-    let saturated = saturated.filter(|s| s.dim() == dims);
-    let masked_owned = match excluded {
-        Some(mask) => Some(apply_exclusion(image, mask).map_err(|e| e.to_string())?),
-        None => None,
-    };
-    let working = masked_owned.as_ref().unwrap_or(image);
+    measure_star_prepared(&MaskedImage::new(image, excluded)?, err, saturated, click_x, click_y, config)
+}
 
+pub fn measure_star_prepared(
+    source: &MaskedImage,
+    err: Option<&Array2<f32>>,
+    saturated: Option<&Array2<u8>>,
+    click_x: f64,
+    click_y: f64,
+    config: &PhotometryConfig,
+) -> Result<StarPhotometry, String> {
+    let image = source.image;
+    let excluded = source.excluded;
+    let working = source.working();
+    let dims = image.dim();
     let (h, w) = dims;
+    let on_image = click_x >= -0.5 && click_x < w as f64 - 0.5 && click_y >= -0.5 && click_y < h as f64 - 0.5;
+    if !on_image {
+        return Err(format!("position ({click_x}, {click_y}) lies outside the {w} x {h} image"));
+    }
+    let err = err.filter(|e| e.dim() == dims);
+    let saturated = saturated.filter(|s| s.dim() == dims);
+
     if h < 16 || w < 16 {
         return Err("Image too small for photometry".into());
     }
@@ -434,7 +469,7 @@ pub fn measure_star_full(
     let r_ap = config
         .aperture_radius
         .unwrap_or(1.5 * fwhm_eff)
-        .clamp(2.0, 60.0);
+        .clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS);
 
     let (sky_inner, sky_outer) = match config.sky_annulus {
         Some((r_in, r_out)) => {
@@ -449,6 +484,11 @@ pub fn measure_star_full(
         None => (r_ap * SKY_ANNULUS_INNER_FACTOR, r_ap * SKY_ANNULUS_OUTER_FACTOR),
     };
     let sky = annulus_stats(working, x, y, sky_inner, sky_outer, config.subsamples);
+    if sky.count == 0 {
+        return Err(format!(
+            "sky annulus {sky_inner:.1} - {sky_outer:.1} px around ({x:.1}, {y:.1}) has no usable pixel: none with at least half its area inside it is on the image, finite and unmasked"
+        ));
+    }
 
     let pixels = circular_aperture(h, w, x, y, r_ap, config.subsamples);
     let ap = weighted_sum(image, &pixels, excluded);
@@ -604,6 +644,22 @@ mod tests {
             .iter()
             .map(|p| (p.weight as f64).powi(2))
             .sum()
+    }
+
+    #[test]
+    fn a_brighter_neighbour_beyond_the_eight_pixel_search_takes_over_the_measurement() {
+        let mut img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 2.0, 100.0);
+        let row = gaussian_scene(128, 128, 74.0, 64.0, 2000.0, 2.0, 0.0);
+        img.zip_mut_with(&row, |a, b| *a += *b);
+        let res = measure_star(&img, 64.0, 64.0, &PhotometryConfig::default()).unwrap();
+        assert!((res.x - 74.0).abs() < 0.2 && (res.y - 64.0).abs() < 0.2, "({}, {})", res.x, res.y);
+
+        let mut diag = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 2.0, 100.0);
+        let corner = gaussian_scene(128, 128, 73.0, 73.0, 2000.0, 2.0, 0.0);
+        diag.zip_mut_with(&corner, |a, b| *a += *b);
+        let res = measure_star(&diag, 64.0, 64.0, &PhotometryConfig::default()).unwrap();
+        assert!((res.x - 73.0).abs() < 0.2 && (res.y - 73.0).abs() < 0.2, "({}, {})", res.x, res.y);
+        assert_eq!(PhotometryConfig::default().search_radius, 8);
     }
 
     #[test]
@@ -1259,5 +1315,83 @@ mod tests {
         assert!((plateau.radius / GROWTH_CURVE_STEP).fract().abs() < 1e-12);
         assert!(growth_plateau(&curve, r_ap, plateau.radius).is_none());
         assert!(growth_plateau(&[], r_ap, 16.0).is_none());
+    }
+
+    #[test]
+    fn a_position_outside_the_image_is_refused_instead_of_measuring_the_nearest_edge_star() {
+        let img = gaussian_scene(64, 64, 60.0, 32.0, 1000.0, 2.0, 100.0);
+        let cfg = PhotometryConfig::default();
+        let inside = measure_star(&img, 60.0, 32.0, &cfg).unwrap();
+        assert!((inside.x - 60.0).abs() < 0.5, "x={}", inside.x);
+        let err = measure_star(&img, 3000.0, 32.0, &cfg).unwrap_err();
+        assert_eq!(err, "position (3000, 32) lies outside the 64 x 64 image");
+        assert!(measure_star(&img, -500.0, 10.0, &cfg).is_err());
+        assert!(measure_star(&img, 63.5, 32.0, &cfg).is_err());
+        assert!(measure_star(&img, 32.0, -0.51, &cfg).is_err());
+        assert!(measure_star(&img, f64::NAN, 32.0, &cfg).is_err());
+        assert!(measure_star(&img, 63.4, 32.0, &cfg).is_ok());
+        assert!(measure_star(&img, -0.5, 32.0, &cfg).is_ok());
+    }
+
+    #[test]
+    fn an_explicit_sky_annulus_with_no_usable_pixel_is_refused_instead_of_skipping_the_sky() {
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let with_annulus = |r_in: f64, r_out: f64| PhotometryConfig {
+            aperture_radius: Some(5.0),
+            sky_annulus: Some((r_in, r_out)),
+            ..PhotometryConfig::default()
+        };
+        let err = measure_star(&img, 32.0, 32.0, &with_annulus(10.0, 10.3)).unwrap_err();
+        assert!(err.starts_with("sky annulus 10.0 - 10.3 px around (32.0, 32.0) has no usable pixel"), "{err}");
+        let off_image = measure_star(&img, 32.0, 32.0, &with_annulus(100.0, 110.0)).unwrap_err();
+        assert!(off_image.starts_with("sky annulus 100.0 - 110.0 px"), "{off_image}");
+        let half_pixel = measure_star(&img, 32.0, 32.0, &with_annulus(10.0, 10.5)).unwrap();
+        assert!(half_pixel.bg_pixels > 0);
+        assert!((half_pixel.bg_mean - 100.0).abs() < 0.01, "bg_mean={}", half_pixel.bg_mean);
+        let enclosed = 2.0 * std::f64::consts::PI * 1000.0 * 4.0 * (1.0 - (-25.0f64 / 8.0).exp());
+        assert!((half_pixel.net_flux - enclosed).abs() / enclosed < 0.01, "net={}", half_pixel.net_flux);
+    }
+
+    #[test]
+    fn an_automatic_sky_annulus_on_masked_or_blank_pixels_is_refused() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        for ((y, x), v) in img.indexed_iter_mut() {
+            if (x as f64 - 32.0).hypot(y as f64 - 32.0) > 11.0 {
+                *v = f32::NAN;
+            }
+        }
+        let cfg = PhotometryConfig { aperture_radius: Some(6.0), ..PhotometryConfig::default() };
+        let err = measure_star(&img, 32.0, 32.0, &cfg).unwrap_err();
+        assert!(err.starts_with("sky annulus 12.0 - 18.0 px around"), "{err}");
+
+        let clean = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let ring: Array2<u8> = Array2::from_shape_fn((64, 64), |(y, x)| u8::from((x as f64 - 32.0).hypot(y as f64 - 32.0) > 10.0));
+        let masked = measure_star_masked(&clean, 32.0, 32.0, &cfg, Some(&ring)).unwrap_err();
+        assert!(masked.starts_with("sky annulus 12.0 - 18.0 px around"), "{masked}");
+        assert!(measure_star_masked(&clean, 32.0, 32.0, &cfg, None).unwrap().bg_pixels > 0);
+    }
+
+    #[test]
+    fn a_prepared_masked_image_is_built_once_and_measures_exactly_like_the_full_call() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        deterministic_noise(&mut img);
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        mask[[31, 33]] = 1;
+        mask[[32, 44]] = 1;
+        let prepared = MaskedImage::new(&img, Some(&mask)).unwrap();
+        let working = prepared.working();
+        assert!(working[[31, 33]].is_nan() && working[[32, 44]].is_nan());
+        assert_eq!(working[[32, 32]], img[[32, 32]]);
+        let cfg = PhotometryConfig { aperture_radius: Some(5.0), sky_annulus: Some((10.0, 15.0)), ..PhotometryConfig::default() };
+        for (x, y) in [(32.0, 32.0), (31.2, 33.4), (20.0, 45.0)] {
+            let once = measure_star_prepared(&prepared, None, None, x, y, &cfg).unwrap();
+            let every_call = measure_star_full(&img, None, Some(&mask), None, x, y, &cfg).unwrap();
+            assert_eq!(serde_json::to_value(&once).unwrap(), serde_json::to_value(&every_call).unwrap(), "({x}, {y})");
+        }
+        assert_eq!(measure_star_prepared(&prepared, None, None, 32.0, 32.0, &cfg).unwrap().n_masked, 1);
+
+        let wrong = Array2::<u8>::ones((8, 8));
+        let ignored = MaskedImage::new(&img, Some(&wrong)).unwrap();
+        assert!(ignored.masked.is_none() && ignored.excluded.is_none());
     }
 }

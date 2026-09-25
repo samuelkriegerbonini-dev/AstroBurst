@@ -138,10 +138,6 @@ where
     chi2
 }
 
-fn norm(values: &[f64]) -> f64 {
-    values.iter().map(|v| v * v).sum::<f64>().sqrt()
-}
-
 fn formal_errors(normal: &[Vec<f64>], chi2: f64, dof: usize) -> Vec<f64> {
     let np = normal.len();
     let scale = if dof > 0 { chi2 / dof as f64 } else { 1.0 };
@@ -238,11 +234,13 @@ where
         }
     };
 
+    let mut damping_scale: Vec<f64> = (0..np).map(|i| current.normal[i][i]).collect();
     while iterations < max_iter && lambda <= LAMBDA_MAX {
         iterations += 1;
         let mut damped = current.normal.clone();
         for (i, row) in damped.iter_mut().enumerate() {
-            row[i] *= 1.0 + lambda;
+            damping_scale[i] = damping_scale[i].max(row[i]);
+            row[i] += lambda * damping_scale[i];
         }
         let mut rhs = current.gradient.clone();
         let Some(step) = solve_linear(&mut damped, &mut rhs) else {
@@ -262,7 +260,7 @@ where
         let actual_step: Vec<f64> = trial.iter().zip(&params).map(|(t, p)| t - p).collect();
         let improvement = current.chi2 - trial_chi2;
         let small_chi2 = improvement <= CHI2_TOLERANCE * current.chi2;
-        let small_step = norm(&actual_step) <= STEP_TOLERANCE * norm(&trial);
+        let small_step = actual_step.iter().zip(&trial).all(|(s, t)| s.abs() <= STEP_TOLERANCE * t.abs());
         params = trial;
         current = next;
         lambda /= LAMBDA_GROWTH;
@@ -273,7 +271,8 @@ where
     }
 
     let errors = formal_errors(&current.normal, current.chi2, dof);
-    Ok(FitResult { params, errors, chi2: current.chi2, dof, iterations, converged })
+    let determined = errors.iter().all(|e| e.is_finite());
+    Ok(FitResult { params, errors, chi2: current.chi2, dof, iterations, converged: converged && determined })
 }
 
 #[cfg(test)]
@@ -364,6 +363,94 @@ mod tests {
         assert!(!fit.converged, "{:?}", fit);
         assert!(fit.iterations <= 50);
         assert!(fit.params.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn an_amplitude_clamped_to_its_zero_bound_recovers_and_converges() {
+        let x = sample_axis();
+        let narrow = [1.0, 1.020, 0.001];
+        let mut row = [0.0; 3];
+        let y: Vec<f64> = x.iter().map(|&xi| gaussian(xi, &narrow, &mut row)).collect();
+        let weights = vec![1.0; y.len()];
+        let fit = fit_least_squares(
+            &x,
+            &y,
+            &weights,
+            &[1.0, 1.0225, 0.001],
+            &[0.0, 1.0, 0.00025],
+            &[f64::INFINITY, 1.039, 0.039],
+            50,
+            gaussian,
+        )
+        .unwrap();
+        assert!(fit.converged, "{:?}", fit);
+        for (found, expected) in fit.params.iter().zip(narrow) {
+            assert!((found - expected).abs() < 1e-6, "{:?}", fit);
+        }
+    }
+
+    #[test]
+    fn a_fit_trapped_at_zero_amplitude_is_not_reported_as_converged() {
+        let x = sample_axis();
+        let mut row = [0.0; 3];
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| gaussian(xi, &[1.0, 1.020, 0.002], &mut row) - 0.02 * gaussian(xi, &[1.0, 1.028, 0.0015], &mut row))
+            .collect();
+        let weights = vec![1.0; y.len()];
+        let fit = fit_least_squares(
+            &x,
+            &y,
+            &weights,
+            &[0.5, 1.028, 0.0015],
+            &[0.0, 1.0, 0.00025],
+            &[f64::INFINITY, 1.039, 0.039],
+            50,
+            gaussian,
+        )
+        .unwrap();
+        assert!(!(fit.converged && fit.params[0] == 0.0), "{:?}", fit);
+        assert!(!fit.converged || fit.errors.iter().all(|e| e.is_finite()), "{:?}", fit);
+    }
+
+    #[test]
+    fn the_fit_does_not_depend_on_the_flux_unit() {
+        let x = sample_axis();
+        let unit = 1e-20;
+        let mut row = [0.0; 3];
+        let narrow = [1.0, 1.020, 0.001];
+        let y: Vec<f64> = x.iter().map(|&xi| unit * gaussian(xi, &narrow, &mut row)).collect();
+        let weights = vec![1.0; y.len()];
+        let fit = fit_least_squares(
+            &x,
+            &y,
+            &weights,
+            &[unit, 1.0225, 0.001],
+            &[0.0, 1.0, 0.00025],
+            &[f64::INFINITY, 1.039, 0.039],
+            50,
+            gaussian,
+        )
+        .unwrap();
+        assert!(fit.converged, "{:?}", fit);
+        assert!((fit.params[0] / unit - 1.0).abs() < 1e-6, "{:?}", fit);
+        assert!((fit.params[1] - 1.020).abs() < 1e-6 && (fit.params[2] - 0.001).abs() < 1e-6, "{:?}", fit);
+
+        let y3: Vec<f64> = x.iter().map(|&xi| unit * gaussian(xi, &TRUE_PARAMS, &mut row)).collect();
+        let fit3 = fit_least_squares(
+            &x,
+            &y3,
+            &weights,
+            &[0.8 * unit, 1.018, 0.004],
+            &[0.0, 1.0, 0.0002],
+            &[f64::INFINITY, 1.04, 0.05],
+            50,
+            gaussian,
+        )
+        .unwrap();
+        assert!(fit3.converged, "{:?}", fit3);
+        assert!((fit3.params[0] / unit - 1.0).abs() < 1e-6, "{:?}", fit3);
+        assert!((fit3.params[1] - 1.020).abs() < 1e-6 && (fit3.params[2] - 0.003).abs() < 1e-6, "{:?}", fit3);
     }
 
     #[test]

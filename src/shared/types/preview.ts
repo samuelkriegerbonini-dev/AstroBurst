@@ -20,6 +20,7 @@ export interface ProcessedResult {
   label: string;
   kind: ProcessedKind;
   inputPath: string;
+  frameIndex?: number;
 }
 
 export interface FileRenderState {

@@ -26,6 +26,7 @@ const RADIUS_PX_DIGITS = 1;
 const RADIUS_ARCSEC_DIGITS = 2;
 const PA_DIGITS = 1;
 const NON_FINITE = "--";
+const MIN_PIXELS_FOR_ERROR = 2;
 
 function finiteOrNull(v: number | null | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -43,8 +44,12 @@ function xOf(bin: SbBin, radiusPx: number, arcsec: boolean, scale: number | null
 
 function meanError(bin: SbBin): number | null {
   const std = finiteOrNull(bin.std);
-  if (std === null || bin.count <= 0) return null;
+  if (std === null || bin.count < MIN_PIXELS_FOR_ERROR) return null;
   return std / Math.sqrt(bin.count);
+}
+
+function surfaceBrightnessError(bin: SbBin): number | null {
+  return bin.count < MIN_PIXELS_FOR_ERROR ? null : finiteOrNull(bin.mu_err);
 }
 
 export function sbTotalFlux(profile: SbProfile): number | null {
@@ -64,7 +69,7 @@ export function sbSeries(profile: SbProfile, yMode: SbYMode, xUnit: SbXUnit): Sb
         {
           x: bins.map((b) => xOf(b, b.sma, arcsec, scale)),
           y: bins.map((b) => finiteOrNull(b.mu_ab)),
-          yErr: bins.map((b) => finiteOrNull(b.mu_err)),
+          yErr: bins.map(surfaceBrightnessError),
           color: MU_COLOR,
           label: "mu_AB",
           mode: "both",
@@ -155,7 +160,8 @@ export function formatRadius(px: number | null | undefined, scale: number | null
   return `${base} (${(radius * arcsecPerPx).toFixed(RADIUS_ARCSEC_DIGITS)}")`;
 }
 
-export function formatPositionAngles(imageDeg: number, skyDeg: number | null | undefined): string {
+export function formatPositionAngles(imageDeg: number, skyDeg: number | null | undefined, ellipticity: number): string {
+  if (!(ellipticity > 0) || !Number.isFinite(imageDeg)) return NON_FINITE;
   const image = `PA ${imageDeg.toFixed(PA_DIGITS)} deg image`;
   const sky = finiteOrNull(skyDeg);
   return sky === null ? image : `${image}, ${sky.toFixed(PA_DIGITS)} deg E of N`;
@@ -163,4 +169,20 @@ export function formatPositionAngles(imageDeg: number, skyDeg: number | null | u
 
 export function firstSurfaceBrightness(profile: SbProfile): number | null {
   return finiteOrNull(profile.bins[0]?.mu_ab);
+}
+
+export interface ProfileFetchState<R> {
+  result: R | null;
+  error: string | null;
+}
+
+export type ProfileFetchEvent<R> =
+  | { type: "success"; result: R }
+  | { type: "failure"; message: string }
+  | { type: "reset" };
+
+export function profileFetchReducer<R>(state: ProfileFetchState<R>, event: ProfileFetchEvent<R>): ProfileFetchState<R> {
+  if (event.type === "success") return { result: event.result, error: null };
+  if (event.type === "failure") return { result: null, error: event.message };
+  return state.result === null && state.error === null ? state : { result: null, error: null };
 }

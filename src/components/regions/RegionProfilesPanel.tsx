@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Activity, Loader2 } from "lucide-react";
 import type { RadialProfile, LineCut, RegionShape } from "../../shared/types";
 import type { SbProfile } from "../../shared/types/regions";
@@ -12,9 +12,11 @@ import {
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
+  profileFetchReducer,
   sbProfileCsv,
   sbReferenceLines,
   sbSeries,
+  type ProfileFetchState,
   type SbXUnit,
   type SbYMode,
 } from "../../utils/sbProfile";
@@ -63,6 +65,8 @@ type ProfileResult =
   | { kind: "radial"; data: RadialProfile }
   | { kind: "sb"; data: SbProfile }
   | { kind: "cut"; data: LineCut };
+
+const NO_PROFILE: ProfileFetchState<ProfileResult> = { result: null, error: null };
 
 function parseBinWidth(text: string): number | null {
   const v = parseFloat(text);
@@ -138,9 +142,8 @@ function Card({ label, value, title }: { label: string; value: string; title?: s
 function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
-  const [result, setResult] = useState<ProfileResult | null>(null);
+  const [{ result, error }, dispatch] = useReducer(profileFetchReducer<ProfileResult>, NO_PROFILE);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ProfileMode>("radial");
   const [binWidthText, setBinWidthText] = useState(DEFAULT_BIN_WIDTH_TEXT);
   const [xUnit, setXUnit] = useState<SbXUnit>("px");
@@ -159,16 +162,14 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
 
   useEffect(() => {
     seqRef.current++;
-    setResult(null);
-    setError(null);
+    dispatch({ type: "reset" });
     setLoading(false);
   }, [measurePath]);
 
   useEffect(() => {
     const seq = ++seqRef.current;
     if (!measurePath || !requestKey) {
-      setResult(null);
-      setError(null);
+      dispatch({ type: "reset" });
       setLoading(false);
       return;
     }
@@ -191,11 +192,10 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
           res = { kind: "cut", data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
         }
         if (seqRef.current !== seq) return;
-        setResult(res);
-        setError(null);
+        dispatch({ type: "success", result: res });
       } catch (e) {
         if (seqRef.current !== seq) return;
-        setError(e instanceof Error ? e.message : String(e));
+        dispatch({ type: "failure", message: e instanceof Error ? e.message : String(e) });
       } finally {
         if (seqRef.current === seq) setLoading(false);
       }
@@ -316,12 +316,14 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
         )}
         {result && (
           <ProfilePlot
+            key={result.kind}
             series={series}
             xLabel={xLabel}
             yLabel={yLabel}
             invertY={sbLayout?.invertY ?? false}
             referenceLines={referenceLines}
             toolbar
+            logToggle={!(result.kind === "sb" && effectiveYMode === "mu")}
             csvName={CSV_NAME[result.kind]}
           />
         )}
@@ -335,7 +337,7 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
               <Card label="mu_0" value={formatMag(firstSurfaceBrightness(sb))} title="Surface brightness of the innermost bin in mag/arcsec^2" />
               <Card label="total AB" value={formatMag(sb.total_mag_ab)} title="AB magnitude of the flux enclosed by the outermost bin" />
               <Card label="ellipticity" value={sb.ellipticity.toFixed(ELLIPTICITY_DIGITS)} />
-              <Card label="position angle" value={formatPositionAngles(sb.angle_deg, sb.sky_pa_deg)} />
+              <Card label="position angle" value={formatPositionAngles(sb.angle_deg, sb.sky_pa_deg, sb.ellipticity)} />
             </div>
             <div className="flex flex-wrap items-center justify-between gap-1">
               {sb.photcal ? (

@@ -1,15 +1,20 @@
 import { describe, it, expect } from "vitest";
 import {
   clampDomain,
+  emptyPlotMessage,
   errorBarExtent,
+  errorBarSpan,
   logDomain,
+  logHiddenCount,
   logTicks,
   nearestHit,
   panDomain,
+  savePngWith,
   seriesToCsv,
   seriesYExtent,
   splitZeroPointPoints,
   zoomDomain,
+  zoomScopeKey,
   type Domain,
 } from "../plotInteraction";
 import { CSV_LINE_END } from "../catalogCsv";
@@ -54,6 +59,39 @@ describe("zoomDomain", () => {
     expect(zoomDomain([5, 5], EXTENT, 5, 0.5)).toEqual(EXTENT);
     expect(zoomDomain([0, 10], [3, 3], 5, 0.5)).toEqual([3, 3]);
     expect(zoomDomain([0, 10], EXTENT, NaN, 0.5)[1] - zoomDomain([0, 10], EXTENT, NaN, 0.5)[0]).toBeCloseTo(5, 9);
+  });
+
+  it("returns exactly the extent when zooming out from the full extent at any anchor", () => {
+    const ext: Domain = [0.001, 0.0035];
+    for (let i = 0; i <= 1000; i++) {
+      const a = ext[0] + ((ext[1] - ext[0]) * i) / 1000;
+      expect(zoomDomain(ext, ext, a, 1.15)).toEqual(ext);
+    }
+  });
+});
+
+describe("zoomScopeKey", () => {
+  const jd = [0.50017, 0.50087, 0.50156, 0.50226, 0.50295, 0.50365, 0.50434, 0.50503];
+
+  it("changes when the x quantity changes from JD offset to frame index", () => {
+    expect(zoomScopeKey([{ x: jd }], "JD - 2460310")).not.toBe(zoomScopeKey([{ x: jd.map((_, k) => k) }], "frame index"));
+  });
+  it("changes when the SB axis switches from arcsec to px", () => {
+    const px = Array.from({ length: 30 }, (_, i) => i + 0.5);
+    expect(zoomScopeKey([{ x: px.map((v) => v * 0.05) }], "semi-major axis (arcsec)")).not.toBe(
+      zoomScopeKey([{ x: px }], "semi-major axis (px)"),
+    );
+  });
+
+  it("changes when a new region brings a different radial extent under the same label", () => {
+    const bins = (n: number) => [{ x: Array.from({ length: n }, (_, i) => i + 0.5), y: Array(n).fill(1) }];
+    expect(zoomScopeKey(bins(50), "radius (px)")).not.toBe(zoomScopeKey(bins(15), "radius (px)"));
+  });
+
+  it("stays the same when only y changes on the same frames", () => {
+    const diff: ProfileSeries[] = [{ x: jd, y: jd.map(() => 0.01), color: "#fff", label: "diff mag" }];
+    const raw: ProfileSeries[] = [{ x: jd, y: jd.map(() => -10.5), color: "#fff", label: "raw comps" }];
+    expect(zoomScopeKey(diff, "JD - 2460310")).toBe(zoomScopeKey(raw, "JD - 2460310"));
   });
 });
 
@@ -175,6 +213,85 @@ describe("nearestHit", () => {
     const hit = nearestHit([{ x: [0, 1], y: [-1, 10] }], identity, logSy, 0.2, 0, 12, [false]);
     expect(hit).toEqual({ seriesIndex: 0, index: 1, x: 1, y: 10 });
   });
+
+  it("gives a point within reach priority over a line vertex at the same x", () => {
+    const series = [
+      { x: [12, 14], y: [124.96, 90] },
+      { x: [12, 17.5], y: [124.57, 40] },
+    ];
+    const hit = nearestHit(series, identity, identity, 13, 126.96, 12, [true, false]);
+    expect(hit).toEqual({ seriesIndex: 0, index: 0, x: 12, y: 124.96 });
+  });
+
+  it("does not let a later line series displace a point hit", () => {
+    const series = [{ x: [0], y: [0] }, { x: [0], y: [50] }, { x: [30], y: [0] }];
+    expect(nearestHit(series, identity, identity, 1, 2, 12, [true, false, true])).toEqual({ seriesIndex: 0, index: 0, x: 0, y: 0 });
+  });
+
+  it("falls back to the line hit when no point is within reach", () => {
+    const series = [{ x: [100], y: [100] }, { x: [0, 50], y: [0, 50] }];
+    expect(nearestHit(series, identity, identity, 3, 40, 12, [true, false])).toEqual({ seriesIndex: 1, index: 0, x: 0, y: 0 });
+  });
+
+  it("skips points outside the zoomed x domain", () => {
+    const zoom: Domain = [10, 20];
+    const sx = (v: number) => 52 + ((v - zoom[0]) / (zoom[1] - zoom[0])) * 238;
+    const bins = [{ x: [9.5, 10.5, 11.5], y: [900, 30, 20] }];
+    expect(nearestHit(bins, sx, identity, 45, 60, 12, [false], zoom)).toBeNull();
+    expect(nearestHit(bins, sx, identity, 60, 60, 12, [false], zoom)).toEqual({ seriesIndex: 0, index: 1, x: 10.5, y: 30 });
+  });
+
+  it("does not select a hidden frame from inside the plot edge in points mode", () => {
+    const zoom: Domain = [4.2, 10];
+    const sx = (v: number) => 52 + ((v - zoom[0]) / (zoom[1] - zoom[0])) * 238;
+    const frames = [{ x: [3, 4, 5], y: [12, 12, 12] }];
+    expect(nearestHit(frames, sx, identity, 53, 12, 12, [true], zoom)).toBeNull();
+    expect(nearestHit(frames, sx, identity, 53, 12, 12, [true])).toEqual({ seriesIndex: 0, index: 1, x: 4, y: 12 });
+  });
+});
+
+describe("errorBarSpan", () => {
+  it("keeps the upper half of a log-axis bar whose lower end is not positive and marks the lower end as clipped", () => {
+    const span = errorBarSpan(0.4, 0.7, true);
+    expect(span).not.toBeNull();
+    expect(span?.lower).toBeNull();
+    expect(span?.upper).toBeCloseTo(1.1, 12);
+    expect(errorBarSpan(0.5, -0.5, true)).toEqual({ lower: null, upper: 1 });
+  });
+
+  it("keeps both ends of a log-axis bar that stays positive", () => {
+    expect(errorBarSpan(50, 2, true)).toEqual({ lower: 48, upper: 52 });
+  });
+
+  it("draws no bar for a non-positive value on a log axis", () => {
+    expect(errorBarSpan(-0.1, 0.7, true)).toBeNull();
+    expect(errorBarSpan(0, 0.7, true)).toBeNull();
+  });
+
+  it("keeps a negative lower end on a linear axis and uses the absolute error", () => {
+    const span = errorBarSpan(0.4, -0.7, false);
+    expect(span?.lower).toBeCloseTo(-0.3, 12);
+    expect(span?.upper).toBeCloseTo(1.1, 12);
+  });
+
+  it("draws no bar for a non-finite value or error", () => {
+    expect(errorBarSpan(NaN, 1, false)).toBeNull();
+    expect(errorBarSpan(1, Infinity, false)).toBeNull();
+  });
+});
+
+describe("log y empty state and hidden count", () => {
+  it("reports no positive values instead of no data for an all-negative magnitude series", () => {
+    const s = [{ x: [0, 1, 2], y: [-10.1, -10.0, -10.2] }];
+    expect(emptyPlotMessage(s, true)).toBe("no positive values for log y");
+    expect(emptyPlotMessage(s, false)).toBe("no data");
+    expect(emptyPlotMessage([{ x: [], y: [] }], true)).toBe("no data");
+  });
+
+  it("counts finite values at or below zero hidden by a log axis", () => {
+    const s = [{ x: [0, 1, 2, 3, 4], y: [-0.01, 0.02, 0, null, 0.005] }, { x: [0], y: [NaN] }];
+    expect(logHiddenCount(s)).toEqual({ hidden: 2, total: 4 });
+  });
 });
 
 describe("seriesToCsv", () => {
@@ -224,5 +341,91 @@ describe("splitZeroPointPoints", () => {
   it("does not flag outliers when the rms is zero and returns no line without points", () => {
     expect(splitZeroPointPoints([10], [-10.5], 20, 0).outliers.x).toEqual([]);
     expect(splitZeroPointPoints([null], [null], 20, 0.1).line).toBeNull();
+  });
+
+  it("applies the fitted colour term so stars on the colour relation are fitted and lie on the line", () => {
+    const cat = [12, 13, 14, 15];
+    const bpRp = [0.5, 1, 2, 2.5];
+    const inst = cat.map((g, i) => g - 25 - 0.3 * bpRp[i]);
+    const split = splitZeroPointPoints(cat, inst, 25, 0.02, bpRp, 0.3);
+    expect(split.outliers.x).toEqual([]);
+    expect(split.noColour.x).toEqual([]);
+    expect(split.fitted.x).toEqual(cat);
+    split.fitted.y.forEach((y, i) => expect(y).toBeCloseTo(cat[i] - 25, 12));
+    expect(split.line).toEqual({ x: [12, 15], y: [-13, -10] });
+  });
+
+  it("sets rows without BP-RP aside, uncorrected, when a colour term was fitted", () => {
+    const split = splitZeroPointPoints([12, 13, 14], [-13.3, -12, -11.6], 25, 0.02, [1, null, NaN], 0.3);
+    expect(split.fitted.x).toEqual([12]);
+    expect(split.fitted.y[0]).toBeCloseTo(-13, 12);
+    expect(split.outliers.x).toEqual([]);
+    expect(split.noColour).toEqual({ x: [13, 14], y: [-12, -11.6] });
+    expect(split.line).toEqual({ x: [12, 12], y: [-13, -13] });
+  });
+
+  it("still flags a real outlier after the colour correction", () => {
+    const split = splitZeroPointPoints([14, 15], [14 - 25 - 0.3 + 0.5, 15 - 25 - 0.3], 25, 0.02, [1, 1], 0.3);
+    expect(split.outliers.x).toEqual([14]);
+    expect(split.fitted.x).toEqual([15]);
+  });
+
+  it("ignores the colour column when no colour term was fitted", () => {
+    const split = splitZeroPointPoints([12, 13], [-13, -12], 25, 0.02, [1, null], null);
+    expect(split.fitted).toEqual({ x: [12, 13], y: [-13, -12] });
+    expect(split.noColour).toEqual({ x: [], y: [] });
+  });
+});
+
+describe("savePngWith", () => {
+  it("reports the write error instead of dropping it", async () => {
+    const out = await savePngWith(
+      async () => "C:/data/plot.png",
+      async () => new Uint8Array([137, 80, 78, 71]),
+      async () => {
+        throw new Error("The process cannot access the file (os error 32)");
+      },
+    );
+    expect(out).toEqual({ kind: "failed", message: "The process cannot access the file (os error 32)" });
+  });
+
+  it("reports a string rejection from the dialog as a failure", async () => {
+    const out = await savePngWith(
+      () => Promise.reject("dialog plugin unavailable"),
+      async () => new Uint8Array([1]),
+      async () => {},
+    );
+    expect(out).toEqual({ kind: "failed", message: "dialog plugin unavailable" });
+  });
+
+  it("reports a PNG encoding failure as a failure, not a silent return", async () => {
+    let wrote = false;
+    const out = await savePngWith(
+      async () => "C:/data/plot.png",
+      async () => null,
+      async () => {
+        wrote = true;
+      },
+    );
+    expect(out.kind).toBe("failed");
+    expect(wrote).toBe(false);
+  });
+
+  it("treats a cancelled dialog as cancelled and never writes", async () => {
+    let wrote = false;
+    const out = await savePngWith(
+      async () => null,
+      async () => new Uint8Array([1]),
+      async () => {
+        wrote = true;
+      },
+    );
+    expect(out).toEqual({ kind: "cancelled" });
+    expect(wrote).toBe(false);
+  });
+
+  it("returns the saved path on success", async () => {
+    const out = await savePngWith(async () => "C:/data/plot.png", async () => new Uint8Array([1]), async () => {});
+    expect(out).toEqual({ kind: "saved", path: "C:/data/plot.png" });
   });
 });

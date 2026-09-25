@@ -9,6 +9,13 @@ import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { generateId } from "../../utils/format";
 import {
+  APERTURE_RANGE_HINT,
+  BATCH_SEMANTICS_TEXT,
+  MAX_APERTURE_RADIUS_PX,
+  MAX_SKY_OUTER_RADIUS_PX,
+  MIN_APERTURE_RADIUS_PX,
+  STARS_ELSEWHERE_NOTICE,
+  apertureRadiusInRange,
   flagDuplicates,
   medianSnr,
   parsePositions,
@@ -20,7 +27,7 @@ import {
   type SortDirection,
 } from "../../utils/photometryTable";
 import { APERTURE_LAYER_ID, APERTURE_LAYER_KIND, createAperturePainter, type ApertureMarker } from "../viewer/painters/aperturePainter";
-import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { ErrorAlert, RunButton, WarningList } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import type { Star } from "./PlateSolvePanel";
 
@@ -28,6 +35,8 @@ interface PhotometryTablePanelProps {
   filePath: string | null;
   overlayKey: string | null;
   stars: Star[];
+  starsElsewhere?: boolean;
+  measureKey?: string | null;
 }
 
 type PositionSource = "stars" | "regions" | "pasted";
@@ -49,8 +58,7 @@ const DUPLICATE_TOLERANCE_PX = 1;
 const SAVED_NOTICE_MS = 6000;
 const PASTE_ROWS = 4;
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
-const SEMANTICS_TEXT =
-  "Each position snaps to the brightest pixel within 8 px, so two inputs on one star measure the same star (flagged as duplicates). The aperture radius is fixed for every source (leave it blank for 1.5 x FWHM per star). When the curve of growth has no plateau before the sky annulus, the correction, total flux and EE radii are empty.";
+const NO_STARS: Star[] = [];
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
@@ -120,7 +128,7 @@ function rowFlags(row: PhotometryTableRow, duplicate: boolean): string {
   return flags.join(", ");
 }
 
-function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePanelProps) {
+function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, starsElsewhere = false, measureKey = null }: PhotometryTablePanelProps) {
   const sourceId = useId();
   const apertureId = useId();
   const skyInId = useId();
@@ -132,7 +140,6 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
   const [skyInText, setSkyInText] = useState("");
   const [skyOutText, setSkyOutText] = useState("");
   const [gainText, setGainText] = useState("");
-  const [withGrowthCurve, setWithGrowthCurve] = useState(false);
   const [pastedText, setPastedText] = useState("");
   const [run, setRun] = useState<BatchRun | null>(null);
   const [running, setRunning] = useState(false);
@@ -144,6 +151,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
   const { excludeDq } = useDqContext();
   const regionDoc = useRegionDoc(overlayKey);
   const requestSeqRef = useRef(0);
+  const stars = starsElsewhere ? NO_STARS : detectedStars;
 
   useEffect(() => {
     requestSeqRef.current++;
@@ -152,7 +160,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
     setRunning(false);
     setHighlightIndex(null);
     setSavedPath(null);
-  }, [filePath]);
+  }, [filePath, measureKey]);
 
   const pointRegions = useMemo(() => regionDoc.regions.filter((r) => r.shape.shape === "point"), [regionDoc]);
   const pasted = useMemo(() => parsePositions(pastedText), [pastedText]);
@@ -179,9 +187,10 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
   const annulusOuter = parseOptionalNumber(skyOutText);
   const gain = parseOptionalNumber(gainText);
   const annulusHalfFilled = (annulusInner === undefined) !== (annulusOuter === undefined);
+  const apertureOutOfRange = !apertureRadiusInRange(apertureRadius);
 
   const measure = useCallback(async () => {
-    if (!filePath || input.points.length === 0) return;
+    if (!filePath || input.points.length === 0 || apertureOutOfRange) return;
     const seq = ++requestSeqRef.current;
     const labels = input.labels;
     setRunning(true);
@@ -194,7 +203,6 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
         annulusOuter,
         gain,
         excludeDq,
-        withGrowthCurve,
       });
       if (requestSeqRef.current !== seq) return;
       setRun({ result, labels });
@@ -203,7 +211,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
     } finally {
       if (requestSeqRef.current === seq) setRunning(false);
     }
-  }, [filePath, input, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, withGrowthCurve]);
+  }, [filePath, input, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, excludeDq]);
 
   const rows = useMemo(
     (): PhotometryTableRow[] =>
@@ -298,7 +306,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
 
   const result = run?.result ?? null;
   const calibration = result ? (result.photcal ? result.photcal.label : "uncalibrated") : null;
-  const canMeasure = !!filePath && input.points.length > 0 && !annulusHalfFilled;
+  const canMeasure = !!filePath && input.points.length > 0 && !annulusHalfFilled && !apertureOutOfRange;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -321,6 +329,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
             <option value="regions">Point regions ({pointRegions.length})</option>
             <option value="pasted">Pasted positions</option>
           </select>
+          {starsElsewhere && source === "stars" && <div className="text-[9px] text-amber-400/90">{STARS_ELSEWHERE_NOTICE}</div>}
         </div>
 
         {source === "pasted" && (
@@ -356,8 +365,8 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
             <input
               id={apertureId}
               type="number"
-              min={1}
-              max={60}
+              min={MIN_APERTURE_RADIUS_PX}
+              max={MAX_APERTURE_RADIUS_PX}
               step={0.5}
               value={apertureText}
               placeholder="auto 1.5 x FWHM"
@@ -388,6 +397,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
               id={skyOutId}
               type="number"
               min={1}
+              max={MAX_SKY_OUTER_RADIUS_PX}
               step={0.5}
               value={skyOutText}
               placeholder="3 x r_ap"
@@ -412,8 +422,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
           </div>
         </div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
-
-        <Toggle label="Growth curves" checked={withGrowthCurve} accent="amber" onChange={setWithGrowthCurve} />
+        {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 
         <RunButton
           label={`Measure ${input.points.length}`}
@@ -533,7 +542,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars }: PhotometryTablePa
 
         {savedPath && <div className="text-[9px] text-emerald-400/90 break-all">Saved {savedPath}</div>}
 
-        {!result && !error && <div className="text-[10px] text-zinc-600">{SEMANTICS_TEXT}</div>}
+        {!result && !error && <div className="text-[10px] text-zinc-600">{BATCH_SEMANTICS_TEXT}</div>}
       </div>
     </div>
   );
