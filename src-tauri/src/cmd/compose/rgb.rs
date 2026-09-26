@@ -73,8 +73,7 @@ pub async fn lrgb_combine_composite_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let (er, eg, eb) = helpers::load_composite_rgb()
-            .map_err(|_| anyhow::anyhow!("Composite not in cache. Run Blend first."))?;
+        let (er, eg, eb) = helpers::load_composite_rgb()?;
 
         let l_entry = load_from_cache_or_disk(&l_path)?;
         let (rows, cols) = er.arr().dim();
@@ -142,8 +141,7 @@ pub async fn restretch_composite_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let (entry_r, entry_g, entry_b) = helpers::load_composite_rgb()
-            .map_err(|_| anyhow::anyhow!("Composite not in cache. Please recompose first."))?;
+        let (entry_r, entry_g, entry_b) = helpers::load_composite_rgb()?;
 
         let stf_r = StfParams { shadow: shadow_r, midtone: midtone_r, highlight: highlight_r };
         let stf_g = StfParams { shadow: shadow_g, midtone: midtone_g, highlight: highlight_g };
@@ -209,8 +207,7 @@ pub async fn update_composite_channel_cmd(
     blocking_cmd!({
         let index = composite_channel_index(&channel)?;
 
-        let (er, _, _) = helpers::load_composite_rgb()
-            .map_err(|_| anyhow::anyhow!("No active composite. Compose RGB first."))?;
+        let (er, _, _) = helpers::load_composite_rgb()?;
         let target_dim = er.arr().dim();
 
         let entry = load_from_cache_or_disk(&path)?;
@@ -278,6 +275,32 @@ mod tests {
         let combined = combine_channel_stats(&sr, &sg, &sb);
         let (_, cg, _) = helpers::load_composite_stretched().expect("stretched cache");
         assert_eq!(cg.arr(), &apply_stf_f32(&g, &p, &combined), "without a flag, equal values still mean linked");
+    }
+
+    #[tokio::test]
+    async fn every_command_on_a_cleared_composite_says_to_run_blend_again() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        helpers::clear_composite();
+        let expected = "The colour composite is no longer in memory; run Blend again.";
+
+        let lrgb = lrgb_combine_composite_cmd(out.clone(), out.clone(), None, None)
+            .await
+            .expect_err("LRGB on a cleared composite must fail");
+        assert_eq!(lrgb, expected);
+
+        let restretch = restretch_composite_cmd(
+            out.clone(), 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, None, None, None, None, None,
+        )
+        .await
+        .expect_err("restretch on a cleared composite must fail");
+        assert_eq!(restretch, expected);
+
+        let update = update_composite_channel_cmd("r".to_string(), out)
+            .await
+            .expect_err("a channel update on a cleared composite must fail");
+        assert_eq!(update, expected);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import type { CosmeticConfig } from "../../shared/types/cosmetic";
 import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { detectChannel } from "../../utils/channelMapping";
+import { formatCount } from "../../utils/formatCount";
 import type { ProcessedFile } from "../../shared/types";
 import type { CalibrationState, StackConfig } from "./StackingTab";
 
@@ -466,7 +467,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
             {result.stats.channels.map((ch) => (
               <div key={ch.label}>
                 {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
-                {ch.cosmetic_replaced != null && `, ${ch.cosmetic_replaced.toLocaleString()} px repaired`}
+                {ch.cosmetic_replaced != null && `, ${formatCount(ch.cosmetic_replaced)} px repaired`}
                 {ch.dark_scale_mean != null && `, dark scale ${ch.dark_scale_mean.toFixed(3)}`}
                 {ch.dark_scale_min != null && ch.dark_scale_max != null && ch.dark_scale_max - ch.dark_scale_min > 1e-3 && ` (${ch.dark_scale_min.toFixed(3)}..${ch.dark_scale_max.toFixed(3)})`}
               </div>

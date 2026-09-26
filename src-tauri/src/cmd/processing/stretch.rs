@@ -346,12 +346,17 @@ pub async fn masked_stretch_composite_cmd(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use ndarray::Array2;
 
     use super::*;
     use crate::cmd::common::{cached_header, extract_image_resolved};
     use crate::cmd::processing::local_contrast::is_display_referred;
+    use crate::core::imaging::stats::compute_image_stats;
+    use crate::infra::cache::{lock_wizard_entries, GLOBAL_IMAGE_CACHE};
     use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::constants::wizard_bg_key;
     use crate::types::header::HduHeader;
 
     fn starry_field() -> Array2<f32> {
@@ -392,5 +397,37 @@ mod tests {
         assert_shown_as_computed(&apply_ghs_stretch_cmd(src.clone(), out.clone(), 5.0, None, None, None, None).await.unwrap());
         let masked = masked_stretch_cmd(src, out, Some(3), None, None, None, None, None, None, None).await.unwrap();
         assert_shown_as_computed(&masked);
+    }
+
+    #[tokio::test]
+    async fn a_wizard_channel_held_in_memory_keeps_its_wcs_and_observation_cards_through_the_stretch() {
+        let _wizard = lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let key = wizard_bg_key("stretch_test_r");
+        let mut header = HduHeader::empty();
+        for (k, v) in [
+            ("BUNIT", "'MJy/sr'"),
+            ("CTYPE1", "'RA---TAN'"),
+            ("CRVAL1", "83.8"),
+            ("CRPIX1", "24.0"),
+            ("DATE-OBS", "'2024-01-02T03:04:05'"),
+            ("FILTER", "'F656N'"),
+        ] {
+            header.set(k, v.to_string());
+        }
+        let field = starry_field();
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&key, Arc::new(field.clone()), compute_image_stats(&field), Some(header));
+
+        let result = apply_arcsinh_stretch_cmd(key.clone(), out, 50.0).await;
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        let result = result.unwrap();
+        assert_shown_as_computed(&result);
+        let written = cached_header(result[RES_FITS_PATH].as_str().unwrap()).unwrap();
+        let unquoted = |key: &str| written.get(key).map(|v| v.trim().trim_matches('\'').trim().to_string());
+        assert_eq!(unquoted("DATE-OBS").as_deref(), Some("2024-01-02T03:04:05"), "the observation date was dropped");
+        assert_eq!(unquoted("FILTER").as_deref(), Some("F656N"), "the filter was dropped");
+        assert_eq!(written.get_f64("CRVAL1"), Some(83.8), "the WCS reference value was dropped");
+        assert_eq!(unquoted("CTYPE1").as_deref(), Some("RA---TAN"), "the WCS axis type was dropped");
     }
 }

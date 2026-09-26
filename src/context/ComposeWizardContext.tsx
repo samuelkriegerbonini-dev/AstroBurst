@@ -143,20 +143,34 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
   }
 }
 
+export interface WizardStackRun {
+  binId: string;
+  startedAt: number;
+  batch: { current: number; total: number; label: string } | null;
+}
+
 interface ComposeWizardContextValue {
   state: WizardState;
   dispatch: Dispatch<WizardAction>;
   activeStep: string;
   setActiveStep: (step: string) => void;
   setOutputForgetter: (forget: (paths: string[]) => void) => void;
+  setCompositeDims: (dims: [number, number]) => void;
+  stackRun: WizardStackRun | null;
+  setStackRun: (run: WizardStackRun | null) => void;
 }
 
 const ComposeWizardCtx = createContext<ComposeWizardContextValue | null>(null);
+const WizardCompositeDimsCtx = createContext<[number, number] | null>(null);
 
 export function useComposeWizardContext(): ComposeWizardContextValue {
   const val = useContext(ComposeWizardCtx);
   if (!val) throw new Error("useComposeWizardContext must be used within ComposeWizardProvider");
   return val;
+}
+
+export function useWizardCompositeDims(): [number, number] | null {
+  return useContext(WizardCompositeDimsCtx);
 }
 
 interface Props {
@@ -166,6 +180,8 @@ interface Props {
 export function ComposeWizardProvider({ children }: Props) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const [activeStep, setActiveStepRaw] = useState("channels");
+  const [compositeDims, setCompositeDims] = useState<[number, number] | null>(null);
+  const [stackRun, setStackRun] = useState<WizardStackRun | null>(null);
   const { clearComposite } = useCompositeActions();
   const wasReadyRef = useRef(state.compositeReady);
 
@@ -197,11 +213,16 @@ export function ComposeWizardProvider({ children }: Props) {
     activeStep,
     setActiveStep,
     setOutputForgetter,
-  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter]);
+    setCompositeDims,
+    stackRun,
+    setStackRun,
+  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter, stackRun]);
 
   return (
     <ComposeWizardCtx.Provider value={value}>
-      {children}
+      <WizardCompositeDimsCtx.Provider value={state.compositeReady ? compositeDims : null}>
+        {children}
+      </WizardCompositeDimsCtx.Provider>
     </ComposeWizardCtx.Provider>
   );
 }

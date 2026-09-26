@@ -10,6 +10,7 @@ use crate::types::header::HduHeader;
 const MAX_SYNTH_DIM: u32 = 16384;
 const MAX_SYNTH_STARS: usize = 1_000_000;
 const MAX_SYNTH_FRAMES: u32 = 1024;
+pub const SYNTH_PIXEL_BUDGET: u64 = 1 << 30;
 const FRAME_UNIT: &str = "ADU";
 const DEFAULT_CADENCE_SECONDS: f64 = 60.0;
 const EPOCH_MJD: f64 = 60310.0;
@@ -211,34 +212,72 @@ pub fn generate(config: &SynthConfig) -> Result<SynthFrame> {
     Ok((noisy, to_frame_units(&ground_truth, &config.noise), stars))
 }
 
-pub fn generate_stack(config: &SynthConfig) -> Result<SynthStack> {
+pub fn check_stack_pixel_budget(width: u32, height: u32, n_frames: u32) -> Result<()> {
+    let total = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(u64::from(n_frames));
+    if total > SYNTH_PIXEL_BUDGET {
+        bail!(
+            "A stack of {n_frames} frames of {width}x{height} pixels holds {total} pixels; the limit is {SYNTH_PIXEL_BUDGET} pixels, so reduce the frame count or the field size."
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct StackPlan {
+    config: SynthConfig,
+    ground_truth: Array2<f32>,
+    pub stars: Vec<Star>,
+}
+
+impl StackPlan {
+    pub fn n_frames(&self) -> u32 {
+        self.config.n_frames
+    }
+
+    pub fn ground_truth_in_frame_units(&self) -> Array2<f32> {
+        to_frame_units(&self.ground_truth, &self.config.noise)
+    }
+
+    pub fn header(&self, frame_index: u32) -> HduHeader {
+        frame_header(&self.config.noise, frame_index as usize, self.config.cadence_seconds)
+    }
+
+    pub fn frame(&self, frame_index: u32) -> Array2<f32> {
+        let mut img = self.ground_truth.clone();
+        if self.config.apply_vignette {
+            let flat = noise::generate_flat_field(
+                self.config.field.width,
+                self.config.field.height,
+                self.config.noise.seed.wrapping_add(999).wrapping_add(u64::from(frame_index)),
+                self.config.vignette_strength,
+            );
+            noise::apply_vignette(&mut img, &flat);
+        }
+        let mut np = self.config.noise.clone();
+        np.seed = self.config.noise.seed.wrapping_add(u64::from(frame_index).wrapping_mul(7919));
+        noise::apply_noise(&img, &np)
+    }
+}
+
+pub fn prepare_stack(config: &SynthConfig) -> Result<StackPlan> {
     config.validate()?;
     if config.n_frames == 0 || config.n_frames > MAX_SYNTH_FRAMES {
         bail!("Frame count {} is outside 1..{}", config.n_frames, MAX_SYNTH_FRAMES);
     }
+    check_stack_pixel_budget(config.field.width, config.field.height, config.n_frames)?;
     let stars = gen_field(config)?;
     let psf_model = make_psf(&config.psf_type);
-    let gt = psf::render_stars(&stars, psf_model.as_ref(), config.field.width, config.field.height);
+    let ground_truth =
+        psf::render_stars(&stars, psf_model.as_ref(), config.field.width, config.field.height);
+    Ok(StackPlan { config: config.clone(), ground_truth, stars })
+}
 
-    let frames: Vec<Array2<f32>> = (0..config.n_frames)
-        .map(|i| {
-            let mut img = gt.clone();
-            if config.apply_vignette {
-                let flat = noise::generate_flat_field(
-                    config.field.width,
-                    config.field.height,
-                    config.noise.seed + 999 + i as u64,
-                    config.vignette_strength,
-                );
-                noise::apply_vignette(&mut img, &flat);
-            }
-            let mut np = config.noise.clone();
-            np.seed = config.noise.seed + i as u64 * 7919;
-            noise::apply_noise(&img, &np)
-        })
-        .collect();
-
-    Ok((frames, to_frame_units(&gt, &config.noise), stars))
+pub fn generate_stack(config: &SynthConfig) -> Result<SynthStack> {
+    let plan = prepare_stack(config)?;
+    let frames: Vec<Array2<f32>> = (0..plan.n_frames()).map(|i| plan.frame(i)).collect();
+    Ok((frames, plan.ground_truth_in_frame_units(), plan.stars))
 }
 
 pub fn catalog_csv(stars: &[Star], noise: &NoiseParams) -> String {
@@ -369,6 +408,48 @@ mod tests {
         assert_eq!(observation_date(25.0 * 3600.0 + 61.5), "2024-01-02T01:01:01.500");
         assert_eq!(observation_date(366.0 * 86400.0), "2025-01-01T00:00:00.000");
         assert_eq!(civil_from_unix_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn the_pixel_budget_accepts_a_stack_at_the_limit_and_refuses_one_pixel_more() {
+        assert_eq!(SYNTH_PIXEL_BUDGET, 1_073_741_824);
+        assert!(check_stack_pixel_budget(16384, 16384, 4).is_ok());
+        let err = check_stack_pixel_budget(16384, 16384, 5).unwrap_err().to_string();
+        assert!(err.contains("5 frames of 16384x16384 pixels"), "{err}");
+        assert!(err.contains("the limit is 1073741824 pixels"), "{err}");
+        assert!(check_stack_pixel_budget(u32::MAX, u32::MAX, u32::MAX).is_err());
+        assert!(check_stack_pixel_budget(0, 16384, 1024).is_ok());
+    }
+
+    #[test]
+    fn a_stack_over_the_pixel_budget_is_refused_before_any_frame_is_rendered() {
+        let mut config = quiet_config();
+        config.field.width = 16384;
+        config.field.height = 16384;
+        config.n_frames = 1024;
+        let err = prepare_stack(&config).expect_err("16384x16384x1024 is over the budget").to_string();
+        assert!(err.contains("the limit is"), "{err}");
+        assert!(generate_stack(&config).unwrap_err().to_string().contains("the limit is"));
+    }
+
+    #[test]
+    fn a_stack_plan_renders_each_frame_on_demand_and_deterministically() {
+        let mut config = quiet_config();
+        config.n_frames = 3;
+        config.noise.readout_noise = 2.0;
+        config.apply_vignette = true;
+        let plan = prepare_stack(&config).unwrap();
+        assert_eq!(plan.n_frames(), 3);
+        assert_eq!(plan.stars.len(), 3);
+        assert_eq!(plan.frame(1), plan.frame(1));
+        assert_ne!(plan.frame(0), plan.frame(1));
+        assert_eq!(plan.frame(2).dim(), (64, 64));
+        let (frames, truth, stars) = generate_stack(&config).unwrap();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[2], plan.frame(2));
+        assert_eq!(truth, plan.ground_truth_in_frame_units());
+        assert_eq!(stars.len(), plan.stars.len());
+        assert_eq!(plan.header(2).get_f64("MJD-OBS"), frame_header(&config.noise, 2, config.cadence_seconds).get_f64("MJD-OBS"));
     }
 
     #[test]

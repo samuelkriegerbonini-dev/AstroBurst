@@ -2,11 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { Activity } from "lucide-react";
 import type { FftData } from "../../shared/types";
 import MeasurementBadge from "./MeasurementBadge";
-
-interface FftDataExtended extends FftData {
-  original_size?: number;
-  windowed?: boolean;
-}
+import { fftFrequencyReadout, fftGridTitle, fftSizeLabel } from "../../utils/analysisLabels";
 
 interface HoveredCoord {
   fx: string;
@@ -15,33 +11,41 @@ interface HoveredCoord {
 
 interface FFTPanelProps {
   filePath: string | null;
-  computeFftSpectrum: (path: string) => Promise<FftDataExtended>;
+  computeFftSpectrum: (path: string) => Promise<FftData>;
 }
 
 function FFTPanel({ filePath, computeFftSpectrum }: FFTPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [fftData, setFftData] = useState<FftDataExtended | null>(null);
+  const [fftData, setFftData] = useState<FftData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoveredCoord, setHoveredCoord] = useState<HoveredCoord | null>(null);
+  const seqRef = useRef(0);
 
   const handleCompute = useCallback(async () => {
     if (!filePath || !computeFftSpectrum) return;
+    const seq = ++seqRef.current;
     setLoading(true);
     setError(null);
     try {
-      setFftData(await computeFftSpectrum(filePath));
+      const data = await computeFftSpectrum(filePath);
+      if (seqRef.current !== seq) return;
+      setFftData(data);
     } catch (e) {
+      if (seqRef.current !== seq) return;
       console.error("FFT computation failed:", e);
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (seqRef.current === seq) setLoading(false);
     }
   }, [filePath, computeFftSpectrum]);
 
   useEffect(() => {
+    seqRef.current++;
     setFftData(null);
     setError(null);
+    setLoading(false);
+    setHoveredCoord(null);
   }, [filePath]);
 
   useEffect(() => {
@@ -153,15 +157,23 @@ function FFTPanel({ filePath, computeFftSpectrum }: FFTPanelProps) {
             className="flex items-center justify-between px-3 py-1.5 text-[10px] font-mono text-zinc-500"
             style={{ borderTop: "1px solid var(--ab-border)" }}
           >
-            <span>
-              {fftData.width}\u00d7{fftData.height}
-              {fftData.original_size && fftData.original_size !== fftData.width && (
-                <span className="text-zinc-600"> (from {fftData.original_size}\u00d7{fftData.original_size})</span>
-              )}
+            <span
+              title={fftGridTitle({
+                gridWidth: fftData.grid_width ?? fftData.width,
+                gridHeight: fftData.grid_height ?? fftData.height,
+              })}
+            >
+              {fftSizeLabel({
+                width: fftData.width,
+                height: fftData.height,
+                imageWidth: fftData.image_width ?? fftData.width,
+                imageHeight: fftData.image_height ?? fftData.height,
+                downsampled: fftData.downsampled === true,
+              })}
             </span>
             {hoveredCoord && (
-              <span style={{ color: "var(--ab-cyan)" }}>
-                freq ({hoveredCoord.fx}, {hoveredCoord.fy})
+              <span style={{ color: "var(--ab-cyan)" }} title="Spatial frequency from the centre (DC) in cycles per image pixel; ±0.5 is Nyquist">
+                {fftFrequencyReadout(hoveredCoord.fx, hoveredCoord.fy)}
               </span>
             )}
             <span className="text-zinc-600">{fftData.elapsed_ms}ms</span>

@@ -19,7 +19,11 @@ import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 interface BlendStepProps {
   state: WizardState;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
-  onCompositeReady: (previewUrl: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
+  onCompositeReady: (
+    previewUrl: string | null,
+    autoStf?: { shadow: number; midtone: number; highlight: number },
+    dimensions?: [number, number],
+  ) => void;
   onCompositeOp: (op: CompositeOp) => void;
 }
 
@@ -185,7 +189,7 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       const autoStf = res.auto_stf ?? undefined;
       onCompositeOp({ kind: "blend", preset: state.blendPreset });
-      onCompositeReady(previewUrl, autoStf);
+      onCompositeReady(previewUrl, autoStf, res.dimensions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

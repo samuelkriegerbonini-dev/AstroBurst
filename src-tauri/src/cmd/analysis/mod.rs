@@ -11,26 +11,28 @@ use crate::cmd::common::{
     blocking_cmd, cached_header, dq_exclusion, load_cached, load_cached_full, load_companions, HEADER_DISPLAY_REFERRED,
 };
 use crate::types::constants::{
-    HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
+    HISTOGRAM_BINS, HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
     RES_AUTO_STF, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, RES_ELAPSED_MS,
     RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
     RES_PHOTOMETRY, RES_SKY, RES_GAIA,
     RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
     RES_MASKED, RES_DQ_EXCLUDED, RES_LABEL, RES_WARNINGS,
-    RES_ROWS, RES_INDEX, RES_ERROR, RES_N_MEASURED, RES_N_FAILED,
+    RES_ROWS, RES_INDEX, RES_ERROR, RES_N_MEASURED, RES_N_FAILED, RES_N_DETECTED,
 };
-use crate::types::image::{AutoStfConfig, ImageStats, StfParams};
-use crate::core::analysis::fft::compute_power_spectrum;
+use crate::types::image::{AutoStfConfig, Histogram, ImageStats, StfParams};
+use crate::core::analysis::fft::{compute_power_spectrum, FftResult};
 use crate::core::analysis::photometry::{
     measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry, MAX_APERTURE_RADIUS,
     MIN_APERTURE_RADIUS,
 };
-use crate::core::analysis::star_detection::detect_stars as detect_stars_core;
-use crate::core::astrometry::spcc::query_gaia_vizier;
+use crate::core::analysis::star_detection::{detect_stars as detect_stars_core, DetectionResult};
+use crate::core::astrometry::spcc::{query_gaia_vizier, CatalogStar};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
-use crate::core::imaging::stats::{compute_histogram_with_stats, compute_image_stats, downsample_histogram};
+use crate::core::imaging::stats::{
+    build_histogram, compute_histogram_with_stats, compute_image_stats, downsample_histogram, is_valid_pixel,
+};
 use crate::core::imaging::stf::auto_stf;
 use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
@@ -41,7 +43,13 @@ const MAX_BATCH_POINTS: usize = 5000;
 const PAR_BATCH_POINTS: usize = 64;
 const MAX_SKY_ANNULUS_RADIUS: f64 = 512.0;
 const FFT_WINDOWED_FLAG: u32 = 1;
+const FFT_DOWNSAMPLED_FLAG: u32 = 2;
+const FFT_HEADER_BYTES: usize = 40;
+const GAIA_MATCH_RADIUS_ARCSEC: f64 = 5.0;
+const GAIA_MATCH_CONE_DEG: f64 = 0.01;
 const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
+const HISTOGRAM_CHUNK: usize = 65536;
+const MIN_HISTOGRAM_WINDOW: f64 = 1e-10;
 
 fn is_display_referred(path: &str) -> bool {
     cached_header(path)
@@ -91,10 +99,69 @@ fn reexpress_stf(stf: &StfParams, from: &ImageStats, to: &ImageStats) -> StfPara
     StfParams { shadow: map(stf.shadow), midtone: stf.midtone, highlight: map(stf.highlight) }
 }
 
+fn histogram_window_arg(lo: Option<f64>, hi: Option<f64>) -> anyhow::Result<Option<(f64, f64)>> {
+    let (lo, hi) = match (lo, hi) {
+        (None, None) => return Ok(None),
+        (Some(lo), Some(hi)) => (lo, hi),
+        _ => anyhow::bail!("histogram window needs both lo and hi"),
+    };
+    if !lo.is_finite() || !hi.is_finite() {
+        anyhow::bail!("histogram window ({lo}, {hi}) must be finite");
+    }
+    if hi <= lo {
+        anyhow::bail!("histogram window hi {hi} must be larger than lo {lo}");
+    }
+    if hi - lo < MIN_HISTOGRAM_WINDOW {
+        anyhow::bail!("histogram window from lo {lo} to hi {hi} is narrower than {MIN_HISTOGRAM_WINDOW}");
+    }
+    Ok(Some((lo, hi)))
+}
+
+fn windowed_histogram(arr: &ndarray::Array2<f32>, lo: f64, hi: f64) -> Histogram {
+    let mut hist = build_histogram(&[], HISTOGRAM_BINS, lo, hi);
+    let range = hi - lo;
+    if hist.bins.is_empty() || range < MIN_HISTOGRAM_WINDOW {
+        return hist;
+    }
+    let bins = hist.bins.len();
+    let last = bins - 1;
+    let inv_bin_width = bins as f64 / range;
+    let bin_of = |v: f32| -> Option<usize> {
+        let vd = v as f64;
+        (is_valid_pixel(v) && vd >= lo && vd <= hi).then(|| (((vd - lo) * inv_bin_width) as usize).min(last))
+    };
+    let count_into = |mut local: Vec<u32>, v: f32| {
+        if let Some(i) = bin_of(v) {
+            local[i] += 1;
+        }
+        local
+    };
+    hist.bins = match arr.as_slice() {
+        Some(slice) => slice
+            .par_chunks(HISTOGRAM_CHUNK)
+            .fold(|| vec![0u32; bins], |local, chunk| chunk.iter().copied().fold(local, count_into))
+            .reduce_with(|mut a, b| {
+                for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                    *ai += bi;
+                }
+                a
+            })
+            .unwrap_or_else(|| vec![0u32; bins]),
+        None => arr.iter().copied().fold(vec![0u32; bins], count_into),
+    };
+    hist
+}
+
 #[tauri::command]
-pub async fn compute_histogram(path: String, exclude_dq: Option<bool>) -> Result<serde_json::Value, String> {
+pub async fn compute_histogram(
+    path: String,
+    exclude_dq: Option<bool>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
+        let window = histogram_window_arg(lo, hi)?;
         let cached = load_cached(&path)?;
         let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), cached.arr().dim());
 
@@ -112,7 +179,10 @@ pub async fn compute_histogram(path: String, exclude_dq: Option<bool>) -> Result
             display_frame(stats, cached.stats())
         };
 
-        let hist = compute_histogram_with_stats(arr, &frame);
+        let hist = match window {
+            Some((lo, hi)) => windowed_histogram(arr, lo, hi),
+            None => compute_histogram_with_stats(arr, &frame),
+        };
         let display_bins = downsample_histogram(&hist, HISTOGRAM_BINS_DISPLAY);
         let stf_params = if display_referred {
             IDENTITY_STF
@@ -144,6 +214,23 @@ pub async fn compute_histogram(path: String, exclude_dq: Option<bool>) -> Result
     })
 }
 
+fn fft_header(fft: &FftResult, dc: f32, max_val: f32, elapsed_ms: u32) -> Vec<u8> {
+    let (rows, cols) = fft.spectrum.dim();
+    let mut buf = Vec::with_capacity(FFT_HEADER_BYTES + rows * cols);
+    buf.extend_from_slice(&(cols as u32).to_le_bytes());
+    buf.extend_from_slice(&(rows as u32).to_le_bytes());
+    buf.extend_from_slice(&dc.to_le_bytes());
+    buf.extend_from_slice(&max_val.to_le_bytes());
+    buf.extend_from_slice(&elapsed_ms.to_le_bytes());
+    buf.extend_from_slice(&(fft.padded_cols as u32).to_le_bytes());
+    buf.extend_from_slice(&(fft.padded_rows as u32).to_le_bytes());
+    let flags = FFT_WINDOWED_FLAG | if fft.downsampled { FFT_DOWNSAMPLED_FLAG } else { 0 };
+    buf.extend_from_slice(&flags.to_le_bytes());
+    buf.extend_from_slice(&(fft.image_cols as u32).to_le_bytes());
+    buf.extend_from_slice(&(fft.image_rows as u32).to_le_bytes());
+    buf
+}
+
 #[tauri::command]
 pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
@@ -168,18 +255,7 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         let inv_range = 255.0 / range;
         let dc = spectrum[[rows / 2, cols / 2]];
         let elapsed_ms = t0.elapsed().as_millis() as u32;
-
-        let header_size = 32;
-        let mut buf = Vec::with_capacity(header_size + pixel_count);
-
-        buf.extend_from_slice(&(cols as u32).to_le_bytes());
-        buf.extend_from_slice(&(rows as u32).to_le_bytes());
-        buf.extend_from_slice(&dc.to_le_bytes());
-        buf.extend_from_slice(&max_val.to_le_bytes());
-        buf.extend_from_slice(&elapsed_ms.to_le_bytes());
-        buf.extend_from_slice(&(fft_result.original_size as u32).to_le_bytes());
-        buf.extend_from_slice(&FFT_WINDOWED_FLAG.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
+        let mut buf = fft_header(&fft_result, dc, max_val, elapsed_ms);
 
         let pixels: Vec<u8> = if pixel_count > PAR_THRESHOLD {
             slice.par_iter().map(|&v| ((v - min_val) * inv_range) as u8).collect()
@@ -195,6 +271,17 @@ pub async fn compute_fft_spectrum(path: String) -> Result<Response, String> {
         .map_err(|e| format!("{:#}", e))
 }
 
+fn capped_detection_json(mut result: DetectionResult, max_stars: usize, t0: Instant) -> anyhow::Result<serde_json::Value> {
+    let n_detected = result.stars.len();
+    result.stars.truncate(max_stars);
+    let mut val = serde_json::to_value(&result)?;
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert(RES_N_DETECTED.to_string(), json!(n_detected));
+        obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
+    }
+    Ok(val)
+}
+
 #[tauri::command]
 pub async fn detect_stars(
     path: String,
@@ -203,13 +290,7 @@ pub async fn detect_stars(
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
-        let mut result = detect_stars_core(load_cached(&path)?.arr(), sigma);
-        result.stars.truncate(max_stars);
-        let mut val = serde_json::to_value(&result)?;
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
-        }
-        Ok(val)
+        capped_detection_json(detect_stars_core(load_cached(&path)?.arr(), sigma), max_stars, t0)
     })
 }
 
@@ -271,13 +352,7 @@ pub async fn detect_stars_composite(
         let lum = ndarray::Array2::from_shape_vec((rows, cols), normalized)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let mut result = detect_stars_core(&lum, sigma);
-        result.stars.truncate(max_stars);
-        let mut val = serde_json::to_value(&result)?;
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
-        }
-        Ok(val)
+        capped_detection_json(detect_stars_core(&lum, sigma), max_stars, t0)
     })
 }
 
@@ -329,9 +404,14 @@ fn photcal_json(cal: &PhotCal) -> anyhow::Result<serde_json::Value> {
     Ok(val)
 }
 
-fn gaia_match_json(coord_ra: f64, coord_dec: f64) -> serde_json::Value {
-    let Ok(stars) = query_gaia_vizier(coord_ra, coord_dec, 0.01, 1) else {
-        return serde_json::Value::Null;
+fn gaia_match_outcome(
+    coord_ra: f64,
+    coord_dec: f64,
+    query: Result<Vec<CatalogStar>, String>,
+) -> (serde_json::Value, Option<String>) {
+    let stars = match query {
+        Ok(stars) => stars,
+        Err(reason) => return (serde_json::Value::Null, Some(format!("Gaia query failed: {reason}"))),
     };
     let cos_dec = coord_dec.to_radians().cos();
     let mut best: Option<(f64, usize)> = None;
@@ -341,17 +421,23 @@ fn gaia_match_json(coord_ra: f64, coord_dec: f64) -> serde_json::Value {
             dra = 360.0 - dra;
         }
         let sep = ((dra * cos_dec).powi(2) + (coord_dec - s.dec).powi(2)).sqrt() * 3600.0;
-        if sep < 5.0 && best.map_or(true, |(bd, _)| sep < bd) {
+        if sep < GAIA_MATCH_RADIUS_ARCSEC && best.map_or(true, |(bd, _)| sep < bd) {
             best = Some((sep, i));
         }
     }
     match best {
-        Some((sep, i)) => json!({
-            RES_GMAG: stars[i].gmag,
-            RES_BP_RP: stars[i].bp_rp,
-            RES_SEPARATION_ARCSEC: sep,
-        }),
-        None => serde_json::Value::Null,
+        Some((sep, i)) => (
+            json!({
+                RES_GMAG: stars[i].gmag,
+                RES_BP_RP: stars[i].bp_rp,
+                RES_SEPARATION_ARCSEC: sep,
+            }),
+            None,
+        ),
+        None => (
+            serde_json::Value::Null,
+            Some(format!("Gaia: no G<17 star within {GAIA_MATCH_RADIUS_ARCSEC}\"")),
+        ),
     }
 }
 
@@ -455,12 +541,25 @@ pub(crate) fn photometry_for_path(
     let phot = ctx.measure(&source, x, y, &config).map_err(|e| anyhow::anyhow!(e))?;
 
     let sky = ctx.sky_json(&phot);
+    let mut warnings = ctx.warnings.clone();
     let gaia = match (&ctx.wcs, gaia_match) {
         (Some(wcs), true) => {
             let coord = wcs.pixel_to_world(phot.x, phot.y);
-            gaia_match_json(coord.ra, coord.dec)
+            if coord.ra.is_finite() && coord.dec.is_finite() {
+                let query = query_gaia_vizier(coord.ra, coord.dec, GAIA_MATCH_CONE_DEG, 0);
+                let (gaia, warning) = gaia_match_outcome(coord.ra, coord.dec, query);
+                warnings.extend(warning);
+                gaia
+            } else {
+                warnings.push("Gaia match skipped: the position has no sky coordinate".into());
+                serde_json::Value::Null
+            }
         }
-        _ => serde_json::Value::Null,
+        (None, true) => {
+            warnings.push("Gaia match skipped: the file has no celestial WCS".into());
+            serde_json::Value::Null
+        }
+        (_, false) => serde_json::Value::Null,
     };
 
     Ok(json!({
@@ -468,7 +567,7 @@ pub(crate) fn photometry_for_path(
         RES_SKY: sky,
         RES_GAIA: gaia,
         RES_PHOTCAL: ctx.photcal_json()?,
-        RES_WARNINGS: ctx.warnings,
+        RES_WARNINGS: warnings,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         RES_MASKED: ctx.mask.is_some(),
     }))
@@ -538,7 +637,7 @@ pub async fn measure_photometry_cmd(
             y,
             aperture_radius,
             sky_annulus,
-            gaia_match.unwrap_or(true),
+            gaia_match.unwrap_or(false),
             exclude_dq.unwrap_or(false),
             gain,
         )
@@ -881,7 +980,7 @@ mod tests {
     async fn a_dq_masked_auto_stf_renders_the_same_through_the_unmasked_range() {
         let dir = tempfile::tempdir().unwrap();
         let key = hot_pixel_mef(&dir.path().join("hot.fits"));
-        let out = compute_histogram(key.clone(), Some(true)).await.unwrap();
+        let out = compute_histogram(key.clone(), Some(true), None, None).await.unwrap();
         assert_eq!(out[RES_MASKED], true);
         let entry = load_cached(&key).unwrap();
         let full = entry.stats();
@@ -913,7 +1012,7 @@ mod tests {
         data.slice_mut(ndarray::s![.., ..16]).fill(0.0);
         crate::infra::fits::writer::write_fits_mono(&path, &data, None).unwrap();
 
-        let out = compute_histogram(path, None).await.unwrap();
+        let out = compute_histogram(path, None, None, None).await.unwrap();
         let median = out[RES_MEDIAN].as_f64().unwrap();
         assert!(median.abs() < 0.3, "sky median {median} of a zero-mean sky");
         assert!(out[RES_DATA_MIN].as_f64().unwrap() < -5.0, "the negative half of the sky is missing");
@@ -936,7 +1035,7 @@ mod tests {
         let linear = dir.path().join("m31_linear.fits").to_str().unwrap().to_string();
         crate::infra::fits::writer::write_fits_mono(&linear, &data, None).unwrap();
 
-        let out = compute_histogram(stretched, None).await.unwrap();
+        let out = compute_histogram(stretched, None, None, None).await.unwrap();
         let stf = &out[RES_AUTO_STF];
         assert_eq!(
             (stf[RES_SHADOW].as_f64(), stf[RES_MIDTONE].as_f64(), stf[RES_HIGHLIGHT].as_f64()),
@@ -949,7 +1048,7 @@ mod tests {
         assert_eq!(out[RES_MAX].as_f64(), Some(1.0));
         assert!((out[RES_MEDIAN].as_f64().unwrap() - 0.4).abs() < 0.01);
 
-        let plain = compute_histogram(linear, None).await.unwrap();
+        let plain = compute_histogram(linear, None, None, None).await.unwrap();
         assert_eq!(plain[RES_DATA_MIN].as_f64(), Some(0.2f32 as f64));
         assert_ne!(plain[RES_AUTO_STF][RES_MIDTONE].as_f64(), Some(0.5));
     }
@@ -1007,6 +1106,7 @@ mod tests {
         let of_file = of_file.unwrap();
         let stars = of_file["stars"].as_array().unwrap();
         assert!(!stars.is_empty(), "the star in the RGB file was not found");
+        assert_eq!(of_file[RES_N_DETECTED].as_u64(), Some(stars.len() as u64));
         let (x, y) = (stars[0]["x"].as_f64().unwrap(), stars[0]["y"].as_f64().unwrap());
         assert!((x - 32.0).abs() < 1.0 && (y - 32.0).abs() < 1.0, "brightest star at ({x}, {y})");
         assert!(of_slots.unwrap()["stars"].as_array().unwrap().is_empty());
@@ -1216,5 +1316,204 @@ mod tests {
             assert_eq!(batch[RES_ROWS][i][RES_PHOTOMETRY], single[RES_PHOTOMETRY], "point {i}");
         }
         assert_eq!(batch[RES_ROWS][0][RES_PHOTOMETRY]["n_masked"], 1);
+    }
+
+    #[test]
+    fn a_capped_detection_reports_the_count_before_the_cap() {
+        let star = |flux: f64| crate::core::analysis::star_detection::DetectedStar {
+            x: 1.0,
+            y: 1.0,
+            flux,
+            fwhm: 2.0,
+            eccentricity: 0.0,
+            peak: flux,
+            npix: 5,
+            snr: 10.0,
+        };
+        let result = DetectionResult {
+            stars: (0..5).map(|i| star(100.0 - i as f64)).collect(),
+            background_median: 0.0,
+            background_sigma: 1.0,
+            threshold_sigma: 5.0,
+            image_width: 4,
+            image_height: 4,
+        };
+        let capped = capped_detection_json(result.clone(), 2, Instant::now()).unwrap();
+        assert_eq!(capped[RES_N_DETECTED], 5);
+        assert_eq!(capped["stars"].as_array().unwrap().len(), 2);
+        assert_eq!(capped["stars"][0]["flux"], 100.0);
+        assert!(capped[RES_ELAPSED_MS].is_number());
+        let uncapped = capped_detection_json(result, 200, Instant::now()).unwrap();
+        assert_eq!(uncapped[RES_N_DETECTED], 5);
+        assert_eq!(uncapped["stars"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn the_fft_header_carries_the_padded_size_per_axis_and_the_downsampled_flag() {
+        let fft = FftResult {
+            spectrum: ndarray::Array2::from_elem((2, 3), 0.5f32),
+            display_width: 3,
+            display_height: 2,
+            padded_rows: 2048,
+            padded_cols: 4096,
+            downsampled: true,
+            image_rows: 1025,
+            image_cols: 20,
+        };
+        let header = fft_header(&fft, 1.5, 7.0, 42);
+        assert_eq!((header.len(), FFT_HEADER_BYTES), (40, 40));
+        let u32_at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().unwrap());
+        let f32_at = |o: usize| f32::from_le_bytes(header[o..o + 4].try_into().unwrap());
+        assert_eq!((u32_at(0), u32_at(4)), (3, 2));
+        assert_eq!((f32_at(8), f32_at(12)), (1.5, 7.0));
+        assert_eq!(u32_at(16), 42);
+        assert_eq!((u32_at(20), u32_at(24)), (4096, 2048));
+        assert_eq!(u32_at(28), FFT_WINDOWED_FLAG | FFT_DOWNSAMPLED_FLAG);
+        assert_eq!((u32_at(32), u32_at(36)), (20, 1025));
+        let plain = fft_header(&FftResult { downsampled: false, ..fft }, 1.5, 7.0, 42);
+        assert_eq!(u32::from_le_bytes(plain[28..32].try_into().unwrap()), FFT_WINDOWED_FLAG);
+    }
+
+    #[tokio::test]
+    async fn a_histogram_window_bins_only_the_pixels_inside_it_and_keeps_the_full_statistics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.fits").to_str().unwrap().to_string();
+        let mut data = ndarray::Array2::from_shape_vec((64, 64), noise(64 * 64, 3.0, 21)).unwrap();
+        for (y, x) in [(3usize, 5usize), (40, 41), (50, 12), (60, 60)] {
+            data[[y, x]] = 1000.0;
+        }
+        crate::infra::fits::writer::write_fits_mono(&path, &data, None).unwrap();
+
+        let full = compute_histogram(path.clone(), None, None, None).await.unwrap();
+        let windowed = compute_histogram(path, None, Some(-15.0), Some(15.0)).await.unwrap();
+        assert_eq!(windowed[RES_MIN], -15.0);
+        assert_eq!(windowed[RES_MAX], 15.0);
+        assert_eq!(full[RES_MAX], 1000.0);
+        for key in [RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS, RES_AUTO_STF] {
+            assert_eq!(windowed[key], full[key], "{key}");
+        }
+        let count = |out: &serde_json::Value| out[RES_BINS].as_array().unwrap().iter().map(|b| b.as_u64().unwrap()).sum::<u64>();
+        assert_eq!(count(&full), 64 * 64);
+        assert_eq!(count(&windowed), 64 * 64 - 4, "pixels outside the window were piled into the edge bins");
+        assert_eq!(windowed[RES_BIN_COUNT], HISTOGRAM_BINS_DISPLAY);
+    }
+
+    #[test]
+    fn a_windowed_histogram_bins_in_place_exactly_what_a_filtered_copy_would_bin() {
+        let mut values = noise(64 * 64, 3.0, 7);
+        values[0] = f32::NAN;
+        values[1] = 0.0;
+        values[2] = f32::INFINITY;
+        values[3] = -15.0;
+        values[4] = 15.0;
+        values[5] = 15.000001;
+        values[6] = -400.0;
+        values[7] = 400.0;
+        let arr = ndarray::Array2::from_shape_vec((64, 64), values.clone()).unwrap();
+        let hist = windowed_histogram(&arr, -15.0, 15.0);
+        let copied: Vec<f32> = values.iter().copied().filter(|&v| (-15.0..=15.0).contains(&v)).collect();
+        let expected = build_histogram(&copied, HISTOGRAM_BINS, -15.0, 15.0);
+        assert_eq!(hist.bins, expected.bins);
+        assert_eq!(hist.bin_edges, expected.bin_edges);
+        assert_eq!((hist.min, hist.max), (-15.0, 15.0));
+        let inside = values.iter().filter(|&&v| v.is_finite() && v != 0.0 && (-15.0..=15.0).contains(&v)).count();
+        assert_eq!(hist.bins.iter().map(|&b| b as usize).sum::<usize>(), inside);
+        assert!(hist.bins[0] >= 1, "the lower edge belongs to the first bin");
+        assert!(hist.bins[hist.bins.len() - 1] >= 1, "the upper edge belongs to the last bin");
+        let transposed = arr.reversed_axes();
+        assert!(transposed.as_slice().is_none());
+        assert_eq!(windowed_histogram(&transposed, -15.0, 15.0).bins, hist.bins);
+        let degenerate = windowed_histogram(&transposed, 1.0, 1.0 + 1e-12);
+        assert!(degenerate.bins.iter().all(|&b| b == 0));
+        assert_eq!(degenerate.bins.len(), HISTOGRAM_BINS);
+    }
+
+    #[tokio::test]
+    async fn a_half_specified_inverted_or_non_finite_histogram_window_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "window_refused.fits");
+        let half = compute_histogram(path.clone(), None, Some(1.0), None).await.unwrap_err();
+        assert!(half.contains("histogram window needs both lo and hi"), "{half}");
+        let inverted = compute_histogram(path.clone(), None, Some(5.0), Some(5.0)).await.unwrap_err();
+        assert!(inverted.contains("histogram window hi 5 must be larger than lo 5"), "{inverted}");
+        let nan = compute_histogram(path, None, Some(f64::NAN), Some(1.0)).await.unwrap_err();
+        assert!(nan.contains("histogram window (NaN, 1) must be finite"), "{nan}");
+    }
+
+    #[tokio::test]
+    async fn a_histogram_window_narrower_than_the_minimum_is_refused_before_binning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "window_narrow.fits");
+        let narrow = compute_histogram(path, None, Some(2.0), Some(2.0 + 1e-11)).await.unwrap_err();
+        assert!(narrow.contains("histogram window from lo 2 to hi 2.00000000001 is narrower than"), "{narrow}");
+    }
+
+    #[test]
+    fn a_gaia_failure_or_an_empty_cone_becomes_a_warning_and_the_nearest_star_within_five_arcsec_matches() {
+        let star = |ra: f64, dec: f64, gmag: f64| CatalogStar { ra, dec, bp_rp: 0.8, gmag: Some(gmag) };
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, Err("VizieR request failed: timeout".into()));
+        assert!(value.is_null());
+        assert_eq!(warning.as_deref(), Some("Gaia query failed: VizieR request failed: timeout"));
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![]));
+        assert!(value.is_null());
+        assert_eq!(warning.as_deref(), Some("Gaia: no G<17 star within 5\""));
+        let far = star(10.0, 20.0 + 10.0 / 3600.0, 11.0);
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![far.clone()]));
+        assert!(value.is_null());
+        assert_eq!(warning.as_deref(), Some("Gaia: no G<17 star within 5\""));
+        let near = star(10.0 + 3.0 / 3600.0 / 20.0f64.to_radians().cos(), 20.0, 12.5);
+        let nearer = star(10.0, 20.0 - 2.0 / 3600.0, 13.0);
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![far, near, nearer]));
+        assert!(warning.is_none(), "{warning:?}");
+        assert_eq!(value[RES_GMAG], 13.0);
+        assert!((value[RES_SEPARATION_ARCSEC].as_f64().unwrap() - 2.0).abs() < 1e-6, "{value}");
+        let (wrapped, _) = gaia_match_outcome(359.9995, 0.0, Ok(vec![star(0.0005, 0.0, 9.0)]));
+        assert!((wrapped[RES_SEPARATION_ARCSEC].as_f64().unwrap() - 3.6).abs() < 1e-6, "{wrapped}");
+    }
+
+    fn wcs_gaussian_fits(dir: &std::path::Path, name: &str) -> String {
+        let size = 64;
+        let mut arr = ndarray::Array2::<f32>::zeros((size, size));
+        for (i, v) in gaussian_pixels(size, 1000.0, 2.0, 100.0).into_iter().enumerate() {
+            arr[[i / size, i % size]] = v;
+        }
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRPIX1", 32.5);
+        header.set_f64("CRPIX2", 32.5);
+        header.set_f64("CRVAL1", 180.0);
+        header.set_f64("CRVAL2", 45.0);
+        header.set_f64("CD1_1", -2.7778e-4);
+        header.set_f64("CD1_2", 0.0);
+        header.set_f64("CD2_1", 0.0);
+        header.set_f64("CD2_2", 2.7778e-4);
+        let path = dir.join(name);
+        crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn click_photometry_skips_the_gaia_match_unless_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = wcs_gaussian_fits(dir.path(), "wcs.fits");
+        let out = measure_photometry_cmd(path, 32.0, 32.0, None, None, None, None, None, None).await.unwrap();
+        assert!(out[RES_SKY][RES_RA].is_number(), "{}", out[RES_SKY]);
+        assert!(out[RES_GAIA].is_null());
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(!warnings.iter().any(|w| w.as_str().unwrap().starts_with("Gaia")), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_gaia_match_without_a_wcs_is_reported_as_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "nowcs.fits");
+        let out = photometry_for_path(&path, 32.0, 32.0, None, None, true, false, None).unwrap();
+        assert!(out[RES_GAIA].is_null());
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap() == "Gaia match skipped: the file has no celestial WCS"),
+            "{warnings:?}"
+        );
     }
 }

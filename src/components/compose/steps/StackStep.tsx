@@ -1,4 +1,4 @@
-import { useState, useCallback, useId, useMemo } from "react";
+import { useState, useCallback, useEffect, useId, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { wizardStackName } from "../../../utils/wizard";
@@ -6,16 +6,23 @@ import { stackFrames, drizzleFrames } from "../../../services/stacking";
 import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider, Toggle, WarningList } from "../../ui";
-import type { WizardAction } from "../../../context/ComposeWizardContext";
+import { useComposeWizardContext, type WizardAction, type WizardStackRun } from "../../../context/ComposeWizardContext";
 import { resolveEffectivePath } from "../../../hooks/useFileStore";
-import type { CombineMethod, RejectionMethod } from "../../../shared/types/stacking";
-import { COMBINE_OPTIONS, REJECTION_OPTIONS } from "../../../utils/stackingRejection";
+import { STACK_PROGRESS_EVENT, type CombineMethod, type RejectionMethod } from "../../../shared/types/stacking";
+import { COMBINE_OPTIONS, REJECTION_OPTIONS, stackProgressText } from "../../../utils/stackingRejection";
+import { cancelProgress } from "../../../services/progress";
+import { useProgress } from "../../../hooks/useProgress";
+import { formatTime } from "../../../utils/format";
+
+const ELAPSED_TICK_MS = 100;
 
 interface StackStepProps {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
   onStacked: (channelId: string, path: string) => void;
 }
+
+type StackOutcome = "done" | "cancelled" | "failed";
 
 interface StackDisplayResult {
   fits_path?: string;
@@ -26,10 +33,13 @@ interface StackDisplayResult {
 }
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
-  const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [stackAllProgress, setStackAllProgress] = useState<{ current: number; total: number; label: string } | null>(null);
+  const { stackRun, setStackRun } = useComposeWizardContext();
+  const [now, setNow] = useState(() => Date.now());
   const [results, setResults] = useState<Record<string, StackDisplayResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [cancelled, setCancelled] = useState<Record<string, boolean>>({});
+  const progress = useProgress(STACK_PROGRESS_EVENT);
+  const resetProgress = progress.reset;
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
   const [analyzeErrors, setAnalyzeErrors] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, Record<string, boolean>>>({});
@@ -103,14 +113,20 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     dispatch({ type: "SET_EXCLUDED_FILES", binId, files: rejected });
   }, [state.subframeResults, overrides, dispatch]);
 
-  const handleStack = useCallback(async (binId: string, allFiles: string[]) => {
+  const handleStack = useCallback(async (
+    binId: string,
+    allFiles: string[],
+    batch: WizardStackRun["batch"] = null,
+  ): Promise<StackOutcome> => {
     const files = getEffectiveFiles(binId, allFiles)?.map(resolveEffectivePath);
     if (!files || files.length < 2) {
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files?.length ?? 0}` }));
-      return;
+      return "failed";
     }
-    setLoading((prev) => ({ ...prev, [binId]: true }));
+    setStackRun({ binId, startedAt: Date.now(), batch });
     setErrors((prev) => ({ ...prev, [binId]: "" }));
+    setCancelled((prev) => ({ ...prev, [binId]: false }));
+    resetProgress();
     try {
       const subResult = state.subframeResults[binId];
       let weights: number[] | undefined;
@@ -138,23 +154,38 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
       }
+      return "done";
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (/cancel/i.test(msg)) {
+        setCancelled((prev) => ({ ...prev, [binId]: true }));
+        return "cancelled";
+      }
       console.error(`[AstroBurst] Stack failed for ${binId}:`, msg);
       setErrors((prev) => ({ ...prev, [binId]: msg }));
+      return "failed";
     } finally {
-      setLoading((prev) => ({ ...prev, [binId]: false }));
+      setStackRun(null);
+      resetProgress();
     }
-  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine]);
+  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
     for (let i = 0; i < bins.length; i++) {
-      setStackAllProgress({ current: i + 1, total: bins.length, label: bins[i].shortLabel });
-      await handleStack(bins[i].id, bins[i].files);
+      const batch = { current: i + 1, total: bins.length, label: bins[i].shortLabel };
+      if (await handleStack(bins[i].id, bins[i].files, batch) === "cancelled") break;
     }
-    setStackAllProgress(null);
   }, [stackableBins, handleStack]);
+
+  useEffect(() => {
+    if (!stackRun) return;
+    const id = setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS);
+    return () => clearInterval(id);
+  }, [stackRun]);
+
+  const anyLoading = stackRun !== null;
+  const elapsed = formatTime(stackRun ? Math.max(0, now - stackRun.startedAt) : 0);
 
   if (stackableBins.length === 0) {
     return (
@@ -177,13 +208,35 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         </span>
         <RunButton
           label="Stack All"
-          runningLabel={stackAllProgress ? `Stacking ${stackAllProgress.label} — ${stackAllProgress.current}/${stackAllProgress.total}` : "Stacking..."}
-          running={Object.values(loading).some(Boolean)}
+          runningLabel={stackRun?.batch ? `Stacking ${stackRun.batch.label} — ${stackRun.batch.current}/${stackRun.batch.total}` : "Stacking..."}
+          running={anyLoading}
           accent="blue"
           onClick={handleStackAll}
           small
         />
       </div>
+
+      {anyLoading && (
+        <div className="flex flex-col gap-1.5">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div className="h-full rounded-full bg-blue-500 transition-all duration-300" style={{ width: `${progress.percent}%` }} />
+          </div>
+          <div className="flex justify-between items-center text-[10px] text-zinc-500">
+            <span>{stackProgressText(progress.stage, progress.current, progress.total)}</span>
+            <span className="flex items-center gap-2">
+              <span className="font-mono">{elapsed}</span>
+              <button
+                onClick={() => { cancelProgress(STACK_PROGRESS_EVENT).catch(() => {}); }}
+                title="Cancel stacking"
+                aria-label="Cancel stacking"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <Toggle label="Drizzle" checked={useDrizzle} accent="blue" onChange={setUseDrizzle} />
@@ -239,7 +292,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       )}
 
       {stackableBins.map((bin) => {
-        const isLoading = loading[bin.id];
+        const isLoading = stackRun?.binId === bin.id;
         const result = results[bin.id];
         const error = errors[bin.id];
         const isStacked = !!state.stackedPaths[bin.id] || !!result;
@@ -272,8 +325,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
                   Analyze
                 </button>
                 <button
-                  onClick={() => handleStack(bin.id, bin.files)}
-                  disabled={isLoading}
+                  onClick={() => { void handleStack(bin.id, bin.files); }}
+                  disabled={anyLoading}
                   className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 disabled:opacity-40 transition-all"
                 >
                   {isLoading ? <Loader2 size={9} className="animate-spin" /> : null}
@@ -346,6 +399,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
               </div>
             )}
             {result && <WarningList warnings={result.warnings} />}
+            {cancelled[bin.id] && <div className="text-[9px] text-zinc-500">Stacking cancelled.</div>}
             {error && <div className="text-[9px] text-red-400">{error}</div>}
           </div>
         );

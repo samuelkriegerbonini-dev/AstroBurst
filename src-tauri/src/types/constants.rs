@@ -308,6 +308,7 @@ pub const RES_METHOD_USED: &str = "method_used";
 pub const RES_MATCHED_STARS: &str = "matched_stars";
 pub const RES_INLIERS: &str = "inliers";
 pub const RES_RESIDUAL_PX: &str = "residual_px";
+pub const RES_REGISTERED: &str = "registered";
 
 pub const RES_RESET: &str = "reset";
 pub const RES_UPDATED: &str = "updated";
@@ -484,3 +485,7 @@ pub const RES_SUMMARY: &str = "summary";
 pub const RES_SPECTRAL_VALUES: &str = "spectral_values";
 pub const RES_SPECTRAL_UNIT: &str = "spectral_unit";
 pub const RES_OFFSET_UNIT: &str = "offset_unit";
+
+pub const RES_WCS_WRITTEN: &str = "wcs_written";
+
+pub const RES_N_DETECTED: &str = "n_detected";

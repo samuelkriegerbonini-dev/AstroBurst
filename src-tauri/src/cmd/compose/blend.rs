@@ -17,7 +17,7 @@ use crate::core::metadata::photcal::{GENERIC_ZERO_POINT_KEYS, ROMAN_PIXEL_AREA_S
 use crate::infra::fits::writer::filter_header;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::types::header::HduHeader;
-use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX};
+use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX, RES_REGISTERED};
 
 use super::rgb::{composite_png_path, load_entry};
 
@@ -370,12 +370,14 @@ pub async fn align_channels_cmd(
             write_derived_fits(&out0, ref_arr, Some(&header0))?;
             channel_results.push(json!({
                 RES_OFFSET: [0.0, 0.0],
+                RES_REGISTERED: true,
                 RES_PATH: out0,
                 RES_CACHE_KEY: ref_key,
             }));
         } else {
             channel_results.push(json!({
                 RES_OFFSET: [0.0, 0.0],
+                RES_REGISTERED: true,
                 RES_CACHE_KEY: ref_key,
             }));
         }
@@ -426,6 +428,7 @@ pub async fn align_channels_cmd(
 
             let mut entry_json = json!({
                 RES_OFFSET: [result.offset.0, result.offset.1],
+                RES_REGISTERED: result.registered,
                 RES_CONFIDENCE: result.confidence,
                 RES_METHOD_USED: result.method_used,
                 RES_MATCHED_STARS: result.matched_stars,
@@ -460,6 +463,7 @@ mod tests {
     use crate::cmd::common::load_cached_full;
     use crate::core::astrometry::wcs::WcsTransform;
     use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::constants::ALIGN_METHOD_AFFINE;
 
     fn blobs(size: usize, scale: f64) -> Array2<f32> {
         Array2::from_shape_fn((size, size), |(y, x)| {
@@ -777,5 +781,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("No channel to export"), "{err}");
+    }
+
+    fn lone_blob(size: usize, cx: f32) -> Array2<f32> {
+        let cy = size as f32 * 0.5;
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let (dy, dx) = (y as f32 - cy, x as f32 - cx);
+            100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
+        })
+    }
+
+    #[tokio::test]
+    async fn each_aligned_channel_says_whether_it_was_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out").to_str().unwrap().to_string();
+        let write = |name: &str, data: &Array2<f32>| {
+            let path = dir.path().join(name).to_str().unwrap().to_string();
+            write_fits_mono(&path, data, None).unwrap();
+            path
+        };
+        let reference = write("ref.fits", &star_field(0.0, 0.0));
+        let shifted = write("shifted.fits", &star_field(2.0, -3.0));
+        let far_reference = write("far_ref.fits", &lone_blob(300, 50.0));
+        let far_target = write("far_tgt.fits", &lone_blob(300, 250.0));
+
+        let res = align_channels_cmd(vec![reference, shifted], out.clone(), None, None, None).await.unwrap();
+        let channels = res[CHANNELS].as_array().unwrap();
+        assert_eq!(channels[0][RES_REGISTERED], true, "{res}");
+        assert_eq!(channels[1][RES_REGISTERED], true, "{res}");
+
+        let res = align_channels_cmd(vec![far_reference.clone(), far_target.clone()], out.clone(), None, None, None)
+            .await
+            .unwrap();
+        let channels = res[CHANNELS].as_array().unwrap();
+        assert_eq!(channels[1][RES_METHOD_USED], "phase_correlation_identity", "{res}");
+        assert_eq!(channels[1][RES_REGISTERED], false, "{res}");
+        assert_eq!(channels[1][RES_OFFSET], json!([0.0, 0.0]));
+
+        let res = align_channels_cmd(vec![far_reference, far_target], out, Some(ALIGN_METHOD_AFFINE.to_string()), None, None)
+            .await
+            .unwrap();
+        let channels = res[CHANNELS].as_array().unwrap();
+        assert_eq!(channels[1][RES_METHOD_USED], "identity", "{res}");
+        assert_eq!(channels[1][RES_REGISTERED], false, "{res}");
     }
 }

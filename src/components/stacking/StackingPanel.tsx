@@ -13,6 +13,7 @@ import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { useTimer } from "../../hooks/useTimer";
 import { combineFrameWeights, formatWeightRange } from "../../utils/noiseWeights";
+import { formatCount } from "../../utils/formatCount";
 import {
   appendMissingPaths,
   COMBINE_OPTIONS,
@@ -442,7 +443,7 @@ export default function StackingPanel({
           <ResultGrid columns={3} items={[
             { label: "Dimensions", value: result.dimensions ? `${result.dimensions[0]}×${result.dimensions[1]}` : "--" },
             { label: "Frames", value: result.frame_count },
-            { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
+            { label: "Rejected", value: result.rejected_pixels ? formatCount(result.rejected_pixels) : "0" },
             { label: "Rejection", value: result.rejection ?? rejection },
             { label: "Combine", value: result.combine ?? combine },
             { label: "Normalization", value: result.normalization ?? normalization },

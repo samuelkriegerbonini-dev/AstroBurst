@@ -9,6 +9,7 @@ import {
   exclusivelyAssignedPaths,
   filenameChannelSlot,
   groupByWavelength,
+  headerFilterValues,
   resolveFileFilter,
   resolveFilterFromName,
   mapFilesByWavelength,
@@ -95,6 +96,59 @@ describe("detectChannel on the real MAST file", () => {
   it("resolves the filter from the MAST filename when no header is loaded", () => {
     expect(resolveFilterFromName(NIRCAM_NAME)).toEqual({ code: "F444W", nm: 4440 });
     expect(resolveFilterFromName("jw06565_t001_miri_f1130w_i2d.fits")).toEqual({ code: "F1130W", nm: 11300 });
+  });
+});
+
+describe("HST filter wheels", () => {
+  const WFPC2_656 = { FILTNAM1: "F656N", FILTNAM2: "", FILTER1: "31", FILTER2: "0", INSTRUME: "WFPC2" };
+
+  it("shows the WFPC2 filter name instead of the wheel number", () => {
+    expect(displayFilterValue(fileWithHeader("656nmos.fits", WFPC2_656))).toBe("F656N");
+    expect(displayFilterValue(fileWithHeader("502nmos.fits", { ...WFPC2_656, FILTNAM1: "F502N", FILTER1: "23" }))).toBe("F502N");
+  });
+
+  it("resolves the WFPC2 filter wavelength from FILTNAM1", () => {
+    expect(resolveFileFilter(fileWithHeader("673nmos.fits", { ...WFPC2_656, FILTNAM1: "F673N", FILTER1: "33" }))).toEqual({ code: "F673N", nm: 673 });
+  });
+
+  it("skips purely numeric wheel positions", () => {
+    expect(displayFilterValue(fileWithHeader("x.fits", { FILTER1: "31", FILTER2: "0" }))).toBeNull();
+    expect(displayFilterValue(fileWithHeader("x.fits", { FILTER: "3" }))).toBeNull();
+  });
+
+  it("keeps an unresolvable filter name when the wheel number is the only other value", () => {
+    expect(displayFilterValue(fileWithHeader("x.fits", { FILTNAM1: "F555W", FILTER1: "17" }))).toBe("F555W");
+  });
+
+  it("keeps the ACS filter from FILTER1 and ignores its clear slot", () => {
+    expect(displayFilterValue(fileWithHeader("j_flt.fits", { FILTER1: "F658N", FILTER2: "CLEAR2L", INSTRUME: "ACS" }))).toBe("F658N");
+  });
+
+  it("drops the three WFPC2 sample wheel numbers and keeps only the filter names", () => {
+    for (const [name, wheel] of [["F502N", "23"], ["F656N", "31"], ["F673N", "33"]]) {
+      expect(headerFilterValues(fileWithHeader("x.fits", { ...WFPC2_656, FILTNAM1: name, FILTER1: wheel }))).toEqual([name]);
+    }
+  });
+});
+
+describe("numeric FILTER values", () => {
+  it("still reads a central wavelength in FILTER as its narrowband channel", () => {
+    for (const [value, bin] of [["656", "ha"], ["656.3", "ha"], ["5007", "oiii"], ["502", "oiii"], ["673.1", "sii"]]) {
+      expect(detectChannelByHeader(fileWithHeader("light_0001.fits", { FILTER: value }))).toBe(bin);
+    }
+  });
+
+  it("shows a numeric wavelength as the filter value", () => {
+    expect(displayFilterValue(fileWithHeader("light_0001.fits", { FILTER: "656.3" }))).toBe("656.3");
+    expect(displayFilterValue(fileWithHeader("light_0001.fits", { FILTER: "5007" }))).toBe("5007");
+    expect(displayFilterValue(fileWithHeader("light_0001.fits", { FILTER: "486.1" }))).toBe("486.1");
+  });
+
+  it("maps a frame whose only hint is a numeric FILTER into the Ha bin", () => {
+    const file = fileWithHeader("light_0001.fits", { FILTER: "656.3" });
+    const result = mapFilesByWavelength(DEFAULT_BINS, [file], new Set());
+    expect(result.bins.find((b) => b.id === "ha")?.files).toEqual([file.path]);
+    expect(result.headerMapped).toBe(1);
   });
 });
 

@@ -70,6 +70,7 @@ export interface ExportResult {
   bitpix?: number;
   compress?: string;
   quantize_level?: number;
+  wcs_written?: boolean;
   channels?: Array<{ path: string; channel: string }>;
 }
 

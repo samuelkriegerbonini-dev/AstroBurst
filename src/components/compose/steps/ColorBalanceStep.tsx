@@ -1,7 +1,8 @@
 import { useState, useCallback, useId, useMemo, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { resolveChannelPath, isNarrowbandWorkflow, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
+import { isNarrowbandWorkflow, spccBlockReason, spccInputs, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
+import type { ProcessedFile } from "../../../shared/types";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { calibrateAndScnr, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
@@ -12,6 +13,7 @@ const SpccPanel = lazy(() => import("../SpccPanel"));
 
 interface ColorBalanceStepProps {
   state: WizardState;
+  doneFiles: ProcessedFile[];
   filterDetections?: FilterDetectionRef[];
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
   onScnrChange: (enabled: boolean, amount?: number, method?: string, preserveLuminance?: boolean) => void;
@@ -19,8 +21,9 @@ interface ColorBalanceStepProps {
   onCompositeOp: (op: CompositeOp) => void;
 }
 
-export default function ColorBalanceStep({ state, filterDetections, onWbChange, onScnrChange, onResult, onCompositeOp }: ColorBalanceStepProps) {
+export default function ColorBalanceStep({ state, doneFiles, filterDetections, onWbChange, onScnrChange, onResult, onCompositeOp }: ColorBalanceStepProps) {
   const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset, filterDetections), [state.bins, state.blendPreset, filterDetections]);
+  const spccBlocked = useMemo(() => spccBlockReason(state, doneFiles, filterDetections), [state, doneFiles, filterDetections]);
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -40,9 +43,10 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
 
   const defaultsSet = useRef(false);
 
-  const rPath = resolveChannelPath(state, "r") ?? resolveChannelPath(state, "ha");
-  const gPath = resolveChannelPath(state, "g") ?? resolveChannelPath(state, "oiii");
-  const bPath = resolveChannelPath(state, "b") ?? resolveChannelPath(state, "sii");
+  const spccPaths = spccInputs(state);
+  const rPath = spccPaths.r?.path ?? null;
+  const gPath = spccPaths.g?.path ?? null;
+  const bPath = spccPaths.b?.path ?? null;
 
   useEffect(() => {
     if (defaultsSet.current || !state.compositeReady) return;
@@ -113,7 +117,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
     setLocalR(r);
     setLocalG(g);
     setLocalB(b);
-    onWbChange("manual", r, g, b);
+    onWbChange("spcc", r, g, b);
   }, [onWbChange]);
 
   const handleToggleScnr = useCallback((val: boolean) => {
@@ -225,11 +229,17 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         <label htmlFor={wbModeId} className="text-xs text-zinc-400">White Balance</label>
         <select id={wbModeId} value={state.wbMode} onChange={(e) => handleModeChange(e.target.value as WizardState["wbMode"])} className="ab-select">
           <option value="auto">Auto (Stability)</option>
-          <option value="spcc">SPCC (Spectrophotometric)</option>
+          <option value="spcc" disabled={spccBlocked !== null}>
+            {spccBlocked ? "SPCC (broadband RGB only)" : "SPCC (Spectrophotometric)"}
+          </option>
           <option value="manual">Manual</option>
           <option value="none">None</option>
         </select>
       </div>
+
+      {spccBlocked && (
+        <div className="text-[9px] text-zinc-500 -mt-2">{spccBlocked}</div>
+      )}
 
       {(state.wbMode === "manual" || state.wbMode === "auto") && (
         <div className="flex flex-col gap-2 pl-2">
@@ -271,7 +281,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         </div>
       )}
 
-      {state.wbMode === "spcc" && rPath && gPath && bPath && (
+      {state.wbMode === "spcc" && !spccBlocked && rPath && gPath && bPath && (
         <Suspense fallback={<div className="flex items-center gap-2 py-4 text-zinc-600 text-xs"><Loader2 size={12} className="animate-spin" /> Loading SPCC...</div>}>
           <SpccPanel
             rPath={rPath}
@@ -282,9 +292,9 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
         </Suspense>
       )}
 
-      {state.wbMode === "spcc" && (!rPath || !gPath || !bPath) && (
+      {state.wbMode === "spcc" && !spccBlocked && (!rPath || !gPath || !bPath) && (
         <div className="text-[10px] text-amber-400/80 py-2">
-          SPCC needs R/G/B (or Ha/OIII/SII) channels assigned and processed.
+          SPCC needs R/G/B channels assigned and processed.
         </div>
       )}
 
@@ -364,6 +374,7 @@ export default function ColorBalanceStep({ state, filterDetections, onWbChange, 
               }
               runningLabel="Applying..."
               running={loading}
+              disabled={state.wbMode === "spcc" && spccBlocked !== null}
               accent="cyan"
               onClick={handleApply}
             />

@@ -44,6 +44,26 @@ describe("compositeReducer", () => {
     expect(s.linked).toBe(true);
   });
 
+  it("hiding the composite with SET_PREVIEW_URL null keeps the Blend STF that Export and Stretch read", () => {
+    let blended = compositeReducer(INITIAL_COMPOSITE_STATE, { type: "SET_PREVIEW_URL", url: "blend" });
+    blended = compositeReducer(blended, { type: "SET_AUTO_STF", r: R, g: G, b: B });
+    blended = compositeReducer(blended, { type: "SET_STF", r: R, g: G, b: B });
+    const hidden = compositeReducer(blended, { type: "SET_PREVIEW_URL", url: null });
+    expect(hidden.previewUrl).toBeNull();
+    expect(hidden.version).toBeGreaterThan(blended.version);
+    expect(hidden.stf).toEqual({ r: R, g: G, b: B });
+    expect(hidden.autoStf).toEqual({ r: R, g: G, b: B });
+    expect(hidden.linked).toBe(false);
+  });
+
+  it("RESET discards the composite STF, so it must not serve as a display-only hide", () => {
+    let blended = compositeReducer(INITIAL_COMPOSITE_STATE, { type: "SET_AUTO_STF", r: R, g: G, b: B });
+    blended = compositeReducer(blended, { type: "SET_STF", r: R, g: G, b: B });
+    const reset = compositeReducer(blended, { type: "RESET" });
+    expect(reset.stf).toEqual(INITIAL_COMPOSITE_STATE.stf);
+    expect(reset.autoStf).toEqual({ r: null, g: null, b: null });
+  });
+
   it("live STF edits do not bump the version", () => {
     const s = compositeReducer(INITIAL_COMPOSITE_STATE, { type: "SET_STF", r: R, g: R, b: R });
     expect(s.version).toBe(INITIAL_COMPOSITE_STATE.version);

@@ -8,6 +8,7 @@ import type { ProcessedFile } from "../../shared/types";
 import type { DrizzleAlignmentMethod, DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
 import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
+import { formatCount } from "../../utils/formatCount";
 import type { RunTarget } from "./StackingTab";
 
 type Channel = "r" | "g" | "b";
@@ -381,7 +382,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
             { label: "R frames", value: result.frame_count_r },
             { label: "G frames", value: result.frame_count_g },
             { label: "B frames", value: result.frame_count_b },
-            { label: "Rejected", value: result.rejected_pixels ? result.rejected_pixels.toLocaleString() : "0" },
+            { label: "Rejected", value: result.rejected_pixels ? formatCount(result.rejected_pixels) : "0" },
           ]} />
           <WarningList warnings={result.warnings} />
           {result.fits_path && (

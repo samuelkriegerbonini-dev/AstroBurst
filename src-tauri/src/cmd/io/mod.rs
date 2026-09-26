@@ -267,8 +267,7 @@ pub(crate) fn rgb_source_planes(path: Option<&str>) -> anyhow::Result<RgbPlanes>
     match path {
         Some(p) => load_rgb_file_planes(p),
         None => {
-            let (r, g, b) = helpers::load_composite_rgb()
-                .map_err(|_| anyhow::anyhow!("RGB composite not available. Run Compose RGB first."))?;
+            let (r, g, b) = helpers::load_composite_rgb()?;
             Ok((r.data_arc(), g.data_arc(), b.data_arc()))
         }
     }
@@ -496,6 +495,14 @@ mod tests {
         let mono = dir.path().join("mono.fits").to_str().unwrap().to_string();
         write_fits_mono(&mono, &Array2::from_elem((4, 5), 1.0), None).unwrap();
         assert!(use_rgb_file_as_composite_cmd(mono).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_rgb_source_of_a_cleared_composite_says_to_run_blend_again() {
+        let _guard = helpers::composite_test_lock().await;
+        helpers::clear_composite();
+        let err = rgb_source_planes(None).expect_err("the composite was cleared");
+        assert_eq!(err.to_string(), "The colour composite is no longer in memory; run Blend again.");
     }
 
     #[test]

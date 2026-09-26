@@ -76,6 +76,9 @@ const TARGET_COLOR = "#fbbf24";
 const CHECK_COLOR = "#67e8f9";
 const RAW_COLORS = ["#fbbf24", "#67e8f9", "#a5b4fc", "#86efac", "#f9a8d4", "#fdba74"];
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
+const SKY_DEFAULTS_CAPTION = "blank sky: 2–3 × r_ap";
+const SKY_IN_TITLE = "Inner sky radius in pixels; blank uses 2 × r_ap";
+const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
 const STARS_HINT =
   "Draw Point regions on the target and comparison stars, or use Add as Point regions in the photometry table.";
 const FRAMES_HINT = "Load the other frames of the sequence; only done files with the same dimensions are measured.";
@@ -468,7 +471,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
               min={1}
               step={0.5}
               value={skyInText}
-              placeholder="2 x r_ap"
+              placeholder="2×r"
+              title={SKY_IN_TITLE}
               onChange={(e) => setSkyInText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -484,7 +488,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
               max={MAX_SKY_OUTER_RADIUS_PX}
               step={0.5}
               value={skyOutText}
-              placeholder="3 x r_ap"
+              placeholder="3×r"
+              title={SKY_OUT_TITLE}
               onChange={(e) => setSkyOutText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -505,6 +510,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             />
           </div>
         </div>
+        <div className="text-[9px] text-zinc-600">{SKY_DEFAULTS_CAPTION}</div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
         {!apertureValid && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 

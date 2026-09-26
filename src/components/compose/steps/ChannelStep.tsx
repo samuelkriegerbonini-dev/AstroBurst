@@ -1,8 +1,18 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, useId } from "react";
+import { createPortal } from "react-dom";
 import { Wand2, FolderOpen, ChevronDown, X, Sparkles, AlertTriangle } from "lucide-react";
 import type { ProcessedFile } from "../../../shared/types";
 import { ingestFiles } from "../../../hooks/useFileIngest";
-import {DEFAULT_BINS, FrequencyBin, WizardState} from "../../../utils/wizard";
+import {
+  BIN_MENU_MAX_HEIGHT,
+  BIN_MENU_WIDTH,
+  binMenuKeyAction,
+  binMenuPlacement,
+  DEFAULT_BINS,
+  type FrequencyBin,
+  type MenuPlacement,
+  type WizardState,
+} from "../../../utils/wizard";
 import {
   UnmappedFile,
   assignedPaths,
@@ -46,16 +56,81 @@ interface BinDropdownProps {
 }
 
 function BinDropdown({ bin, files, assignedSet, onSelect }: BinDropdownProps) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<MenuPlacement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+  const open = placement !== null;
+
+  const closeToButton = useCallback(() => {
+    setPlacement(null);
+    buttonRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const menuItems = useCallback(
+    () => Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemcheckbox]") ?? []),
+    [],
+  );
 
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    const target = menuItems()[0] ?? menuRef.current;
+    target?.focus({ preventScroll: true });
+  }, [open, menuItems]);
+
+  const onMenuKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = menuItems();
+    const current = items.findIndex((item) => item === document.activeElement);
+    const action = binMenuKeyAction(e.key, current, items.length);
+    if (!action) return;
+    e.stopPropagation();
+    if (action.type === "close") {
+      if (action.preventDefault) e.preventDefault();
+      closeToButton();
+      return;
+    }
+    e.preventDefault();
+    items[action.index]?.focus();
+  }, [menuItems, closeToButton]);
+
+  const onMenuBlur = useCallback((e: React.FocusEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget;
+    if (!(next instanceof Node)) return;
+    if (menuRef.current?.contains(next) || buttonRef.current?.contains(next)) return;
+    setPlacement(null);
+  }, []);
+
+  const toggle = useCallback(() => {
+    if (placement) {
+      setPlacement(null);
+      return;
+    }
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (rect) setPlacement(binMenuPlacement(rect, { width: window.innerWidth, height: window.innerHeight }));
+  }, [placement]);
+
+  useEffect(() => {
+    if (!open) return;
+    const insideMenu = (target: EventTarget | null) => target instanceof Node && !!menuRef.current?.contains(target);
+    const close = () => {
+      const focusInside = insideMenu(document.activeElement);
+      setPlacement(null);
+      if (focusInside) buttonRef.current?.focus({ preventScroll: true });
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    const onPointerDown = (e: MouseEvent) => {
+      if (!insideMenu(e.target) && !(e.target instanceof Node && buttonRef.current?.contains(e.target))) close();
+    };
+    const onScroll = (e: Event) => {
+      if (!insideMenu(e.target)) close();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
+    };
   }, [open]);
 
   const available = bin.id === "l"
@@ -63,16 +138,37 @@ function BinDropdown({ bin, files, assignedSet, onSelect }: BinDropdownProps) {
     : files.filter((f) => !assignedSet.has(f.path) || bin.files.includes(f.path));
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative">
       <button
-        onClick={() => setOpen((v) => !v)}
+        ref={buttonRef}
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        aria-label={`Select files for ${bin.shortLabel}`}
         className="flex items-center gap-1 text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors"
       >
         <ChevronDown size={10} className={open ? "rotate-180 transition-transform" : "transition-transform"} />
         Select
       </button>
-      {open && (
-        <div className="absolute z-50 top-full left-0 mt-1 min-w-[200px] max-h-[180px] overflow-y-auto bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl">
+      {placement && createPortal(
+        <div
+          ref={menuRef}
+          id={menuId}
+          role="menu"
+          aria-label={`Files for ${bin.shortLabel}`}
+          tabIndex={-1}
+          onKeyDown={onMenuKeyDown}
+          onBlur={onMenuBlur}
+          className="fixed z-50 overflow-y-auto bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl outline-none"
+          style={{
+            left: placement.left,
+            top: placement.top ?? undefined,
+            bottom: placement.bottom ?? undefined,
+            width: BIN_MENU_WIDTH,
+            maxHeight: BIN_MENU_MAX_HEIGHT,
+          }}
+        >
           {available.length === 0 ? (
             <div className="px-3 py-2 text-[10px] text-zinc-600">No files available</div>
           ) : (
@@ -82,11 +178,15 @@ function BinDropdown({ bin, files, assignedSet, onSelect }: BinDropdownProps) {
               return (
                 <button
                   key={f.path}
+                  role="menuitemcheckbox"
+                  aria-checked={isInBin}
+                  tabIndex={-1}
                   onClick={() => {
                     onSelect(bin.id, f.path);
-                    setOpen(false);
+                    closeToButton();
                   }}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[10px] transition-colors ${
+                  title={f.name || f.path}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[10px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-violet-400/70 ${
                     isInBin
                       ? "bg-zinc-800 text-zinc-200"
                       : "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
@@ -106,12 +206,13 @@ function BinDropdown({ bin, files, assignedSet, onSelect }: BinDropdownProps) {
                       {filterInfo}
                     </span>
                   )}
-                  {isInBin && <span className="text-[8px] text-emerald-400">✓</span>}
+                  {isInBin && <span aria-hidden="true" className="text-[8px] text-emerald-400">✓</span>}
                 </button>
               );
             })
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -168,7 +168,7 @@ function row(key: string, label: string, value: string, unit: string, hint?: str
 
 export function geometryRows(result: ObservationGeometryResult): GeometryRow[] {
   const g = result.geometry;
-  const lst = isFiniteNumber(g.lst_deg) ? `${g.lst_deg.toFixed(ANGLE_DIGITS)} (${formatHours(g.lst_deg)})` : NULL_VALUE;
+  const lst = isFiniteNumber(g.lst_deg) ? `${g.lst_deg.toFixed(ANGLE_DIGITS)} deg (${formatHours(g.lst_deg)} h)` : NULL_VALUE;
   const hourAngle = isFiniteNumber(g.hour_angle_deg) ? (g.hour_angle_deg / DEGREES_PER_HOUR).toFixed(HOUR_ANGLE_DIGITS) : NULL_VALUE;
   const illumination = isFiniteNumber(g.moon_illumination) ? (g.moon_illumination * 100).toFixed(PERCENT_DIGITS) : NULL_VALUE;
   return [
@@ -177,7 +177,7 @@ export function geometryRows(result: ObservationGeometryResult): GeometryRow[] {
     row("jd_tdb", "JD_TDB", fixed(g.jd_tdb, JD_DIGITS), "d"),
     row("bjd_tdb", "BJD_TDB", fixed(g.bjd_tdb, JD_DIGITS), "d", isFiniteNumber(g.bjd_tdb) && g.bjd_source ? g.bjd_source : undefined),
     row("hjd_utc", "HJD_UTC", fixed(g.hjd_utc, JD_DIGITS), "d"),
-    row("lst", "Local sidereal time", lst, "deg"),
+    row("lst", "Local sidereal time", lst, ""),
     row("hour_angle", "Hour angle", hourAngle, "h"),
     row("altitude", "Altitude", fixed(g.altitude_deg, ANGLE_DIGITS), "deg"),
     row("azimuth", "Azimuth", fixed(g.azimuth_deg, ANGLE_DIGITS), "deg"),

@@ -37,7 +37,7 @@ describe("measurePhotometry arguments", () => {
       apertureRadius: 5,
       annulusInner: null,
       annulusOuter: null,
-      gaiaMatch: true,
+      gaiaMatch: false,
       excludeDq: false,
       gain: null,
     });
@@ -45,8 +45,8 @@ describe("measurePhotometry arguments", () => {
 
   it("forwards explicit annulus radii and gain", async () => {
     typedInvokeMock.mockResolvedValue({ ...BASE, sky: null });
-    await measurePhotometry("/a.fits", 1, 2, { annulusInner: 8, annulusOuter: 12, gain: 1.5, gaiaMatch: false });
-    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ annulusInner: 8, annulusOuter: 12, gain: 1.5, gaiaMatch: false });
+    await measurePhotometry("/a.fits", 1, 2, { annulusInner: 8, annulusOuter: 12, gain: 1.5, gaiaMatch: true });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ annulusInner: 8, annulusOuter: 12, gain: 1.5, gaiaMatch: true });
   });
 });
 

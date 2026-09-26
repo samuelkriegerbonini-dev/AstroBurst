@@ -2,6 +2,7 @@ import { useState, useEffect, memo } from "react";
 import { Crosshair } from "lucide-react";
 import { probePixel } from "../../services/display";
 import type { PixelProbeResult } from "../../shared/types/analysis";
+import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
 
 interface PixelReadoutProps {
   filePath: string | null;
@@ -59,8 +60,8 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
           {probe.unit ? ` ${probe.unit}` : ""}
           {err ? ` ± ${fmt(err.value)}${err.unit ? ` ${err.unit}` : ""}` : ""}
         </span>
-        <span className="text-zinc-600">
-          px({probe.x},{probe.y})
+        <span className="text-zinc-600" title={ZERO_BASED_PIXEL_TITLE}>
+          {zeroBasedPixelText(probe.x, probe.y)}
         </span>
       </div>
       {probe.dq && (

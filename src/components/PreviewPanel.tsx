@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
-  Image, Cpu, Zap, Sparkles, Loader2, RotateCcw,
+  Image, Cpu, Zap, Sparkles, Loader2, SkipBack,
   Layers2, FlaskConical, Settings, Download, FileText, BarChart3,
 } from "lucide-react";
 
@@ -32,6 +32,10 @@ import { useRightTool, rightToolStore } from "../hooks/useRightTool";
 import type { ToolId, RightToolId } from "../hooks/useRightTool";
 import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
+import ViewerStatusStrip from "./preview/ViewerStatusStrip";
+import DisplayControls from "./preview/DisplayControls";
+import { ToolHostContext } from "../context/ToolHostContext";
+import { KEPT_RIGHT_TOOL, backToFileAction, gpuAfterProbe, gpuDisplayOnScreen, keptToolFileKey, rightToolSlots } from "../utils/previewShell";
 
 const PreviewTab = lazy(() => import("./preview/PreviewTab"));
 const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
@@ -173,6 +177,16 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
   const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
 
+  const [keptFileKey, setKeptFileKey] = useState<string | null>(null);
+  const nextKeptFileKey = keptToolFileKey(rightTool, fileKey, keptFileKey);
+  if (nextKeptFileKey !== keptFileKey) setKeptFileKey(nextKeptFileKey);
+  const slots = rightToolSlots({ rightTool, displayTool, columnMounted: rightTool !== null || rightMounted, fileKey, keptFileKey: nextKeptFileKey });
+  const gpuDisplay = gpuDisplayOnScreen({ hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly });
+  const keptActive = slots.kept?.active ?? false;
+  const transientActive = slots.transient?.active ?? false;
+  const keptHost = useMemo(() => ({ active: keptActive, gpuDisplay }), [keptActive, gpuDisplay]);
+  const transientHost = useMemo(() => ({ active: transientActive, gpuDisplay }), [transientActive, gpuDisplay]);
+
   const bottomHeightRef = useRef(loadLayout("bottomH", BOTTOM_DEFAULT, BOTTOM_MIN, BOTTOM_MAX));
   const bottomElRef = useRef<HTMLDivElement>(null);
   const bottomOuterRef = useRef<HTMLDivElement>(null);
@@ -266,7 +280,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       setGpuAvailable(ok);
       setGpuReason(getGpuReason());
       setGpuProbing(false);
-      if (ok && gpuPref === null) setUseGpu(true);
+      setUseGpu((current) => gpuAfterProbe(ok, gpuPref, current));
     });
   }, [gpuPref]);
 
@@ -356,12 +370,17 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   }, []);
 
   const handleBackToFile = useCallback(() => {
-    if (isRgbFile && processed === null) {
+    const action = backToFileAction({ isRgbFile, hasProcessed: processed !== null, wizardCompositeReady: wizardReadyRef.current });
+    if (action === "rgb-file") {
       showRgbFileView();
       return;
     }
+    if (action === "display-only") {
+      setCompositePreviewUrl(null);
+      return;
+    }
     void clearComposite();
-  }, [isRgbFile, processed, showRgbFileView, clearComposite]);
+  }, [isRgbFile, processed, showRgbFileView, setCompositePreviewUrl, clearComposite]);
 
   const liveCompositeUrlRef = useRef(compositePreviewUrl);
   liveCompositeUrlRef.current = compositePreviewUrl;
@@ -400,7 +419,6 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
       clearRgbRawPixels();
       return;
     }
-    saveGpuPreference(true);
     if (gpuAvailable === false) {
       setGpuProbing(true);
       probeGpu().then(() => {
@@ -408,10 +426,13 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
         setGpuAvailable(ok);
         setGpuReason(getGpuReason());
         setGpuProbing(false);
-        if (ok) enableGpu();
+        if (!ok) return;
+        saveGpuPreference(true);
+        enableGpu();
       });
       return;
     }
+    saveGpuPreference(true);
     enableGpu();
   }, [useGpu, gpuAvailable, enableGpu, clearRawPixels, clearRgbRawPixels]);
 
@@ -433,8 +454,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
 
   const handleImageClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
     if (!isCube || !file?.path) return;
-    const target = e.target as HTMLElement;
-    if (!(target instanceof HTMLImageElement) && !(target instanceof HTMLCanvasElement)) return;
+    const target = e.currentTarget;
+    if (!(target instanceof HTMLImageElement)) return;
     const rect = target.getBoundingClientRect();
     const dims = file.result?.dimensions;
     if (!dims || rect.width <= 0 || rect.height <= 0) return;
@@ -443,6 +464,12 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     if (pixelX < 0 || pixelX >= dims[0] || pixelY < 0 || pixelY >= dims[1]) return;
     extractSpectrum(pixelX, pixelY);
   }, [isCube, file?.path, file?.result?.dimensions, extractSpectrum]);
+
+  const handleCubePixelClick = useCallback((x: number, y: number) => {
+    const dims = file?.result?.dimensions;
+    if (!isCube || !dims || x < 0 || x >= dims[0] || y < 0 || y >= dims[1]) return;
+    extractSpectrum(x, y);
+  }, [isCube, file?.result?.dimensions, extractSpectrum]);
 
   const pixelClick = usePixelClick();
   const spectrumClickSeqRef = useRef(0);
@@ -612,10 +639,10 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
                 onClick={handleResetProcessed}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
                 style={{ border: "1px solid var(--ab-border)" }}
-                title={processed ? `Showing ${processed.label}. Reset to the original image` : "Clear the processing chain of this file"}
+                title={processed ? `Showing ${processed.label}. Revert to the original image; step outputs stay on disk` : "Clear the processing chain of this file"}
               >
-                <RotateCcw size={10} />
-                Reset
+                <SkipBack size={10} />
+                Revert to original
               </button>
             )}
             {file && (
@@ -634,15 +661,20 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
           {!file ? (
             <AdvancedImageViewer original={null} processed={null} />
           ) : useAdvancedViewer ? (
-            <AdvancedImageViewer
-              original={originalImage}
-              processed={processedImage}
-              onMousePixel={handleViewerMousePixel}
-              onPixelClick={emitPixelClick}
-              onMouseLeave={handleLeave}
-              overlayCanvasRef={starOverlayRef}
-              dqCanvasRef={dqCanvasRef}
-            />
+            <div className="flex flex-col h-full">
+              <DisplayControls vmin={Number.NaN} vmax={Number.NaN} renderOnlyDisabled />
+              <div className="flex-1 min-h-0">
+                <AdvancedImageViewer
+                  original={originalImage}
+                  processed={processedImage}
+                  onMousePixel={handleViewerMousePixel}
+                  onPixelClick={emitPixelClick}
+                  onMouseLeave={handleLeave}
+                  overlayCanvasRef={starOverlayRef}
+                  dqCanvasRef={dqCanvasRef}
+                />
+              </div>
+            </div>
           ) : (
             <div className="h-full" onMouseLeave={handleLeave}>
               <Suspense fallback={<TabSpinner />}>
@@ -651,6 +683,7 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
                   rawPixels={rawPixels}
                   rgbRawPixels={rgbRawPixels}
                   onImageClick={handleImageClick}
+                  onCubePixelClick={handleCubePixelClick}
                   onBackToFile={handleBackToFile}
                   starOverlayRef={starOverlayRef}
                   dqCanvasRef={dqCanvasRef}
@@ -659,6 +692,8 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
             </div>
           )}
         </div>
+
+        {file && <ViewerStatusStrip />}
 
         {file && (
           <>
@@ -718,11 +753,22 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
               style={{ width: `min(${rightWidthRef.current}px, 60vw)`, borderLeft: "1px solid var(--ab-border)", background: "rgba(5,5,16,0.55)" }}
             >
               <div className="flex-1 overflow-y-auto min-h-0">
-                {(rightTool || rightMounted) && displayTool && (
-                  <div key={displayTool} className="ab-tool-fade">
-                    <Suspense fallback={<TabSpinner />}>
-                      <RightToolContent toolId={displayTool} starOverlayRef={starOverlayRef} />
-                    </Suspense>
+                {slots.kept && (
+                  <div hidden={!slots.kept.visible} inert={!slots.kept.visible} className="ab-tool-fade">
+                    <ToolHostContext.Provider value={keptHost}>
+                      <Suspense fallback={<TabSpinner />}>
+                        <RightToolContent toolId={KEPT_RIGHT_TOOL} starOverlayRef={starOverlayRef} />
+                      </Suspense>
+                    </ToolHostContext.Provider>
+                  </div>
+                )}
+                {slots.transient && (
+                  <div key={slots.transient.id} className="ab-tool-fade">
+                    <ToolHostContext.Provider value={transientHost}>
+                      <Suspense fallback={<TabSpinner />}>
+                        <RightToolContent toolId={slots.transient.id} starOverlayRef={starOverlayRef} />
+                      </Suspense>
+                    </ToolHostContext.Provider>
                   </div>
                 )}
               </div>

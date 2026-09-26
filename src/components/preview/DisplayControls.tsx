@@ -1,8 +1,9 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useState, useSyncExternalStore } from "react";
 import { RotateCcw } from "lucide-react";
 import { useDisplayContext } from "../../context/PreviewContext";
 import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLimits";
 import { centreDraftFor, parseCentreDraft, symmetricStretchNote } from "../../utils/displayTransfer";
+import { wcsOverlayNote, wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
 import {
   COLORMAP_LABELS,
   COLORMAP_NAMES,
@@ -21,7 +22,10 @@ interface DisplayControlsProps {
   vmin: number;
   vmax: number;
   disabled?: boolean;
+  renderOnlyDisabled?: boolean;
 }
+
+const RENDER_ONLY_TITLE = "needs GPU rendering";
 
 const SELECT_CLASS =
   "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] text-zinc-200 focus:border-zinc-500";
@@ -43,10 +47,15 @@ function parseNullable(text: string): number | null | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsProps) {
+function DisplayControlsInner({ vmin, vmax, disabled = false, renderOnlyDisabled = false }: DisplayControlsProps) {
   const { display, setDisplay, limits, limitsLoading, limitsError } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
   const stretchNote = symmetricStretchNote(display);
+  const wcsErrors = useSyncExternalStore(wcsOverlayStatus.subscribe, wcsOverlayStatus.get, wcsOverlayStatus.get);
+  const wcsNote = wcsOverlayNote({ grid: display.grid, compass: display.compass }, wcsErrors);
+  const renderTitle = (title: string) => (renderOnlyDisabled ? RENDER_ONLY_TITLE : title);
+  const renderGroupClass = `${GROUP_CLASS} ${renderOnlyDisabled ? "opacity-50" : ""}`;
+  const renderGroupTitle = renderOnlyDisabled ? RENDER_ONLY_TITLE : undefined;
 
   const [centreDraft, setCentreDraft] = useState(() => String(display.centre));
   useEffect(() => {
@@ -99,8 +108,8 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
       className={`flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap ${disabled ? "opacity-50" : ""}`}
       style={{ background: "rgba(24,24,27,0.6)", minInlineSize: 0 }}
     >
-      <div className={GROUP_CLASS}>
-        <label className="flex items-center gap-1" title="Stretch curve applied after normalisation">
+      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
+        <label className="flex items-center gap-1" title={renderTitle("Stretch curve applied after normalisation")}>
           <span className={LABEL_CLASS}>stretch</span>
           <select
             className={SELECT_CLASS}
@@ -114,7 +123,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
         </label>
 
         {display.stretch === "asinh" && (
-          <label className="flex items-center gap-1" title="asinh softening parameter a">
+          <label className="flex items-center gap-1" title={renderTitle("asinh softening parameter a")}>
             <span className={LABEL_CLASS}>a</span>
             <input
               type="number"
@@ -129,7 +138,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
         )}
 
         {display.stretch === "power" && (
-          <label className="flex items-center gap-1" title="power-law exponent">
+          <label className="flex items-center gap-1" title={renderTitle("power-law exponent")}>
             <span className={LABEL_CLASS}>p</span>
             <input
               type="number"
@@ -142,12 +151,12 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
             />
           </label>
         )}
-      </div>
+      </fieldset>
 
-      <div className={GROUP_CLASS}>
+      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
         <label
           className={`flex items-center gap-1 ${isMtf ? "opacity-40" : ""}`}
-          title={isMtf ? "Limits are the data min/max while stretch is mtf" : "How vmin/vmax are chosen"}
+          title={renderTitle(isMtf ? "Limits are the data min/max while stretch is mtf" : "How vmin/vmax are chosen")}
         >
           <span className={LABEL_CLASS}>limits</span>
           <select
@@ -164,7 +173,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
 
         {!isMtf && display.limits === "percentile" && (
           <>
-            <label className="flex items-center gap-1" title="lower percentile (%)">
+            <label className="flex items-center gap-1" title={renderTitle("lower percentile (%)")}>
               <span className={LABEL_CLASS}>lo%</span>
               <input
                 type="number"
@@ -178,7 +187,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
                 onKeyDown={onCommitKey(commitPercentiles)}
               />
             </label>
-            <label className="flex items-center gap-1" title="upper percentile (%)">
+            <label className="flex items-center gap-1" title={renderTitle("upper percentile (%)")}>
               <span className={LABEL_CLASS}>hi%</span>
               <input
                 type="number"
@@ -197,7 +206,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
 
         {!isMtf && display.limits === "user" && (
           <>
-            <label className="flex items-center gap-1" title="vmin (empty = data min)">
+            <label className="flex items-center gap-1" title={renderTitle("vmin (empty = data min)")}>
               <span className={LABEL_CLASS}>lo</span>
               <input
                 type="number"
@@ -210,7 +219,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
                 onKeyDown={onCommitKey(commitUserLimits)}
               />
             </label>
-            <label className="flex items-center gap-1" title="vmax (empty = data max)">
+            <label className="flex items-center gap-1" title={renderTitle("vmax (empty = data max)")}>
               <span className={LABEL_CLASS}>hi</span>
               <input
                 type="number"
@@ -227,7 +236,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
         )}
 
         {!isMtf && display.limits === "zscale" && (
-          <label className="flex items-center gap-1" title="zscale contrast">
+          <label className="flex items-center gap-1" title={renderTitle("zscale contrast")}>
             <span className={LABEL_CLASS}>contrast</span>
             <input
               type="number"
@@ -243,7 +252,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
 
         <label
           className="flex items-center gap-1 cursor-pointer"
-          title="Mirror vmin/vmax about a centre: vmin = c - a, vmax = c + a with a = max(|lo - c|, |hi - c|) from the chosen limits; enabling it under mtf switches the stretch to linear"
+          title={renderTitle("Mirror vmin/vmax about a centre: vmin = c - a, vmax = c + a with a = max(|lo - c|, |hi - c|) from the chosen limits; enabling it under mtf switches the stretch to linear")}
         >
           <input
             type="checkbox"
@@ -258,7 +267,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
         {display.symmetric && (
           <label
             className="flex items-center gap-1"
-            title="Centre c of the symmetric limits, in data units (default 0). Pixels that are exactly 0 are padding and take the no-data colour, not the centre colour; the centre lands on the colormap centre only under a linear stretch"
+            title={renderTitle("Centre c of the symmetric limits, in data units (default 0). Pixels that are exactly 0 are padding and take the no-data colour, not the centre colour; the centre lands on the colormap centre only under a linear stretch")}
           >
             <span className={LABEL_CLASS}>centre</span>
             <input
@@ -276,12 +285,12 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
             ({stretchNote})
           </span>
         )}
-      </div>
+      </fieldset>
 
-      <div className={GROUP_CLASS}>
+      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
         <label
           className="flex items-center gap-1"
-          title="colour lookup table; RdBu, coolwarm, bwr and seismic are diverging: pair them with symmetric limits and a linear stretch"
+          title={renderTitle("colour lookup table; RdBu, coolwarm, bwr and seismic are diverging: pair them with symmetric limits and a linear stretch")}
         >
           <span className={LABEL_CLASS}>cmap</span>
           <select
@@ -295,7 +304,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
           </select>
         </label>
 
-        <label className="flex items-center gap-1 cursor-pointer" title="invert the lookup table">
+        <label className="flex items-center gap-1 cursor-pointer" title={renderTitle("invert the lookup table")}>
           <input
             type="checkbox"
             className="accent-zinc-400"
@@ -304,7 +313,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
           />
           <span className={LABEL_CLASS}>invert</span>
         </label>
-      </div>
+      </fieldset>
 
       <div className={GROUP_CLASS}>
         <label className="flex items-center gap-1 cursor-pointer" title="WCS coordinate grid overlay (needs a plate-solved image)">
@@ -325,6 +334,11 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
           />
           <span className={LABEL_CLASS}>compass</span>
         </label>
+        {wcsNote && (
+          <span className="text-[9px] text-amber-400/80" title={wcsNote.title}>
+            ({wcsNote.text})
+          </span>
+        )}
 
         {display.grid && (
           <>
@@ -356,31 +370,33 @@ function DisplayControlsInner({ vmin, vmax, disabled = false }: DisplayControlsP
         )}
       </div>
 
-      <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
-        {limitsLoading
-          ? "…"
-          : `${formatLimit(vmin)} … ${formatLimit(vmax)}${
-              !isMtf && limits?.symmetric === true && limits.centre !== null
-                ? ` · c ${formatLimit(limits.centre)}`
-                : ""
-            }`}
-      </span>
+      {!renderOnlyDisabled && (
+        <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
+          {limitsLoading
+            ? "…"
+            : `${formatLimit(vmin)} … ${formatLimit(vmax)}${
+                !isMtf && limits?.symmetric === true && limits.centre !== null
+                  ? ` · c ${formatLimit(limits.centre)}`
+                  : ""
+              }`}
+        </span>
+      )}
 
       <button
         onClick={() => setDisplay(DEFAULT_DISPLAY_SETTINGS)}
-        className="flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors"
-        title="Reset display settings"
+        className={`flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors ${renderOnlyDisabled ? "ml-auto" : ""}`}
+        title="Reset display settings (stretch, limits, colormap, grid and compass)"
       >
         <RotateCcw size={9} />
-        Reset
+        Reset display
       </button>
 
-      {!isMtf && limitsError && (
+      {!renderOnlyDisabled && !isMtf && limitsError && (
         <span className="w-full text-[9px] text-red-400/80 truncate" title={limitsError}>
           {limitsError}
         </span>
       )}
-      {!isMtf && limits && limits.notes.length > 0 && (
+      {!renderOnlyDisabled && !isMtf && limits && limits.notes.length > 0 && (
         <span className="w-full text-[9px] text-amber-400/80 truncate" title={limits.notes.join("; ")}>
           {limits.notes.join("; ")}
         </span>

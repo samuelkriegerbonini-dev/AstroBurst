@@ -1,4 +1,5 @@
 import { useSyncExternalStore, useCallback } from "react";
+import { displayFilterValue, type ChannelSource } from "../utils/channelMapping";
 
 type Listener = () => void;
 export type FilterMode = "or" | "and";
@@ -19,17 +20,35 @@ export function detectProductTypes(filenames: string[]): string[] {
   return Array.from(types).sort();
 }
 
-function singleMatch(filename: string, filter: string): boolean {
-  const pt = extractProductType(filename);
-  if (pt === filter) return true;
-  return filename.toLowerCase().includes(filter.toLowerCase());
+export interface FilterableFile {
+  name: string;
+  filter?: string | null;
+  instrument?: string | null;
 }
 
-export function matchesActiveFilters(filename: string, filters: string[], mode: FilterMode): boolean {
+export function metadataFilterable(file: { name: string; metadata?: { filter?: string; instrument?: string } }): FilterableFile {
+  return { name: file.name, filter: file.metadata?.filter, instrument: file.metadata?.instrument };
+}
+
+export function processedFilterable(file: ChannelSource & { name: string }): FilterableFile {
+  return { name: file.name, filter: displayFilterValue(file), instrument: file.result?.header?.INSTRUME };
+}
+
+export function fileSearchText(file: FilterableFile): string {
+  return [file.name, file.filter, file.instrument].filter(Boolean).join("\n").toLowerCase();
+}
+
+function singleMatch(file: FilterableFile, filter: string): boolean {
+  const pt = extractProductType(file.name);
+  if (pt === filter) return true;
+  return fileSearchText(file).includes(filter.toLowerCase());
+}
+
+export function matchesActiveFilters(file: FilterableFile, filters: string[], mode: FilterMode): boolean {
   if (filters.length === 0) return true;
   return mode === "or"
-    ? filters.some((f) => singleMatch(filename, f))
-    : filters.every((f) => singleMatch(filename, f));
+    ? filters.some((f) => singleMatch(file, f))
+    : filters.every((f) => singleMatch(file, f));
 }
 
 export interface FilterState {

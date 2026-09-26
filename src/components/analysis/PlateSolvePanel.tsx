@@ -5,6 +5,14 @@ import type { WcsInfo } from "../../services/astrometry";
 import { getApiKey, getConfig } from "../../services/config";
 import { fitImageToCanvas, fitsPixelToCanvas, imagePointToCanvas } from "../../utils/starOverlay";
 import { withDeadline } from "../../utils/deadline";
+import {
+  DEFAULT_SCALE_HIGH_TEXT,
+  DEFAULT_SCALE_LOW_TEXT,
+  parseScaleRange,
+  scaleHintFromPixelScale,
+} from "../../utils/plateSolveScale";
+import { starCountLabel } from "../../utils/analysisLabels";
+import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 
 export interface Star {
   x: number;
@@ -90,6 +98,7 @@ interface PlateSolvePanelProps {
   filePath?: string | null;
   detectError?: string | null;
   sourceBadge?: React.ReactNode;
+  detectedTotal?: number | null;
 }
 
 function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
@@ -140,6 +149,7 @@ function PlateSolvePanel({
                                           filePath,
                                           detectError = null,
                                           sourceBadge,
+                                          detectedTotal = null,
                                         }: PlateSolvePanelProps) {
   const overlayCanvas = useLiveCanvas(overlayCanvasRef);
   const overlayHostSize = useElementSize(overlayCanvas?.parentElement ?? null);
@@ -161,8 +171,8 @@ function PlateSolvePanel({
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
   const [solveError, setSolveError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [scaleLow, setScaleLow] = useState(0.1);
-  const [scaleHigh, setScaleHigh] = useState(10.0);
+  const [scaleLowText, setScaleLowText] = useState(DEFAULT_SCALE_LOW_TEXT);
+  const [scaleHighText, setScaleHighText] = useState(DEFAULT_SCALE_HIGH_TEXT);
   const [scaleUnits, setScaleUnits] = useState<"arcsecperpix" | "arcminwidth" | "degwidth">("arcsecperpix");
   const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
@@ -183,6 +193,12 @@ function PlateSolvePanel({
   }, []);
 
   const applyWcsHints = useCallback((info: WcsInfo) => {
+    const scaleHint = scaleHintFromPixelScale(info.pixel_scale_arcsec);
+    if (scaleHint) {
+      setScaleLowText(scaleHint.low);
+      setScaleHighText(scaleHint.high);
+      setScaleUnits("arcsecperpix");
+    }
     if (!Number.isFinite(info.center_ra) || !Number.isFinite(info.center_dec)) return;
     setCenterRaText(info.center_ra.toFixed(6));
     setCenterDecText(info.center_dec.toFixed(6));
@@ -200,6 +216,9 @@ function PlateSolvePanel({
     setCenterRaText("");
     setCenterDecText("");
     setSearchRadiusText("");
+    setScaleLowText(DEFAULT_SCALE_LOW_TEXT);
+    setScaleHighText(DEFAULT_SCALE_HIGH_TEXT);
+    setScaleUnits("arcsecperpix");
     if (!filePath) return;
     let cancelled = false;
     getWcsInfo(filePath)
@@ -346,8 +365,12 @@ function PlateSolvePanel({
     if (onDetect) onDetect(sigma);
   }, [onDetect, sigma]);
 
+  const scaleRange = parseScaleRange(scaleLowText, scaleHighText);
+
   const handleSolve = useCallback(async () => {
     if (!filePath) return;
+    const scale = parseScaleRange(scaleLowText, scaleHighText);
+    if (scale.error !== null) return;
     const seq = ++solveSeqRef.current;
     const centerRa = parseAngle(centerRaText, 360);
     const centerDec = parseAngle(centerDecText, 90);
@@ -363,8 +386,8 @@ function PlateSolvePanel({
       setTimeoutSecs(limitSecs);
       const result = await withDeadline(
         plateSolve(filePath, {
-          scaleLower: scaleLow,
-          scaleUpper: scaleHigh,
+          scaleLower: scale.low,
+          scaleUpper: scale.high,
           scaleUnits,
           downsampleFactor: downsample > 1 ? downsample : undefined,
           centerRa: positionHint ? centerRa : undefined,
@@ -386,7 +409,7 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [filePath, scaleLow, scaleHigh, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
+  }, [filePath, scaleLowText, scaleHighText, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -476,9 +499,16 @@ function PlateSolvePanel({
           {stars.length > 0 && (
             <div className="space-y-1.5">
               <div className="grid grid-cols-3 gap-1 text-[10px]">
-                <div className="bg-zinc-900/80 rounded px-2 py-1">
+                <div
+                  className="bg-zinc-900/80 rounded px-2 py-1"
+                  title={
+                    detectedTotal != null && detectedTotal > stars.length
+                      ? `Detection keeps the ${stars.length} brightest of ${detectedTotal} sources; FWHM is their median`
+                      : undefined
+                  }
+                >
                   <div className="text-zinc-500">Stars</div>
-                  <div className="text-cyan-300 font-mono">{stars.length}</div>
+                  <div className="text-cyan-300 font-mono break-words">{starCountLabel(stars.length, detectedTotal)}</div>
                 </div>
                 <div className="bg-zinc-900/80 rounded px-2 py-1">
                   <div className="text-zinc-500">FWHM</div>
@@ -502,8 +532,8 @@ function PlateSolvePanel({
                   <thead>
                   <tr className="text-zinc-500 border-b border-zinc-800/50">
                     <th className="text-left px-1 py-0.5">#</th>
-                    <th className="text-right px-1">X</th>
-                    <th className="text-right px-1">Y</th>
+                    <th className="text-right px-1" title={ZERO_BASED_PIXEL_TITLE}>X (0-based)</th>
+                    <th className="text-right px-1" title={ZERO_BASED_PIXEL_TITLE}>Y (0-based)</th>
                     <th className="text-right px-1">Flux</th>
                     <th className="text-right px-1">FWHM</th>
                     <th className="text-right px-1">SNR</th>
@@ -573,12 +603,11 @@ function PlateSolvePanel({
               </label>
               <input
                 id={scaleLowId}
-                type="number"
-                min={0.01}
-                max={100}
-                step={0.1}
-                value={scaleLow}
-                onChange={(e) => setScaleLow(parseFloat(e.target.value) || 0.1)}
+                type="text"
+                inputMode="decimal"
+                value={scaleLowText}
+                aria-invalid={scaleRange.error !== null}
+                onChange={(e) => setScaleLowText(e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -588,16 +617,21 @@ function PlateSolvePanel({
               </label>
               <input
                 id={scaleHighId}
-                type="number"
-                min={0.01}
-                max={100}
-                step={0.1}
-                value={scaleHigh}
-                onChange={(e) => setScaleHigh(parseFloat(e.target.value) || 10.0)}
+                type="text"
+                inputMode="decimal"
+                value={scaleHighText}
+                aria-invalid={scaleRange.error !== null}
+                onChange={(e) => setScaleHighText(e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
           </div>
+
+          {scaleRange.error !== null && (
+            <div role="alert" className="text-[10px] text-red-400">
+              {scaleRange.error}
+            </div>
+          )}
 
           <div className="flex gap-2">
             <div className="flex-1 flex flex-col gap-0.5">
@@ -704,7 +738,7 @@ function PlateSolvePanel({
 
           <button
             onClick={handleSolve}
-            disabled={solveLoading || !filePath}
+            disabled={solveLoading || !filePath || scaleRange.error !== null}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
           >
             {solveLoading ? (

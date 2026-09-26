@@ -2,14 +2,20 @@ import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import { toUint8Array, parseFftBuffer } from "../infrastructure/tauri/parsers";
 import type { HistogramData, FftData, TimeSeriesResult, TimeSeriesTarget, PixelTableResult } from "../shared/types/analysis";
 import type { StarDetectionResult } from "../shared/types/processing";
+import { parseFftGrid } from "../utils/fftHeader";
 
-export function computeHistogram(path: string, excludeDq = false): Promise<HistogramData> {
-  return typedInvoke<HistogramData>("compute_histogram", { path, excludeDq });
+export function computeHistogram(
+  path: string,
+  excludeDq = false,
+  range: { lo: number; hi: number } | null = null,
+): Promise<HistogramData> {
+  return typedInvoke<HistogramData>("compute_histogram", { path, excludeDq, lo: range?.lo ?? null, hi: range?.hi ?? null });
 }
 
 export async function computeFftSpectrum(path: string): Promise<FftData> {
   const raw = await typedInvoke<ArrayBuffer>("compute_fft_spectrum", { path });
-  return parseFftBuffer(toUint8Array(raw));
+  const bytes = toUint8Array(raw);
+  return { ...parseFftBuffer(bytes), ...parseFftGrid(bytes) };
 }
 
 export function detectStars(path: string, sigma = 5.0, maxStars = 200): Promise<StarDetectionResult> {
@@ -191,7 +197,7 @@ export async function measurePhotometry(
     apertureRadius: options.apertureRadius ?? null,
     annulusInner: options.annulusInner ?? null,
     annulusOuter: options.annulusOuter ?? null,
-    gaiaMatch: options.gaiaMatch ?? true,
+    gaiaMatch: options.gaiaMatch ?? false,
     excludeDq: options.excludeDq ?? false,
     gain: options.gain ?? null,
   });

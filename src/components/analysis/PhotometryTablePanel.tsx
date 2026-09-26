@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ClipboardCopy, Download, Loader2, Shapes, Aperture } from "lucide-react";
+import { ClipboardCopy, Download, Loader2, Shapes, Aperture, X } from "lucide-react";
 import { measurePhotometryBatch } from "../../services/analysis";
 import type { BatchPhotometryResult } from "../../services/analysis";
 import { useDqContext } from "../../context/PreviewContext";
@@ -28,8 +28,10 @@ import {
   type PhotometryTableRow,
   type SortDirection,
 } from "../../utils/photometryTable";
+import { detectedStarsLabel } from "../../utils/photometryPanel";
+import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { APERTURE_LAYER_ID, APERTURE_LAYER_KIND, createAperturePainter, type ApertureMarker } from "../viewer/painters/aperturePainter";
-import { ErrorAlert, RunButton, WarningList } from "../ui";
+import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import type { Star } from "./PlateSolvePanel";
 
@@ -39,6 +41,7 @@ interface PhotometryTablePanelProps {
   stars: Star[];
   starsElsewhere?: boolean;
   measureKey?: string | null;
+  detectedTotal?: number | null;
 }
 
 type PositionSource = "stars" | "regions" | "pasted";
@@ -52,6 +55,7 @@ interface TableColumn {
   key: PhotometryColumnKey;
   header: string;
   digits: number;
+  note?: string;
 }
 
 const DEFAULT_APERTURE_RADIUS_PX = "5";
@@ -60,6 +64,11 @@ const DUPLICATE_TOLERANCE_PX = 1;
 const SAVED_NOTICE_MS = 6000;
 const PASTE_ROWS = 4;
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
+const APERTURE_DEFAULTS_CAPTION = "blank: r_ap = 1.5 × FWHM, sky 2–3 × r_ap";
+const APERTURE_TITLE = "Aperture radius in pixels; blank uses 1.5 × FWHM of each star";
+const SKY_IN_TITLE = "Inner sky radius in pixels; blank uses 2 × r_ap";
+const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
+const ZERO_BASED_CAPTION = "x, y: 0-based pixel centres; DS9 and .reg files are 1-based";
 const NO_STARS: Star[] = [];
 
 const INPUT_CLASS =
@@ -70,8 +79,8 @@ const SMALL_BUTTON_CLASS =
 
 const TABLE_COLUMNS: TableColumn[] = [
   { key: "label", header: "label", digits: 0 },
-  { key: "x", header: "x", digits: 1 },
-  { key: "y", header: "y", digits: 1 },
+  { key: "x", header: "x", digits: 1, note: ZERO_BASED_PIXEL_TITLE },
+  { key: "y", header: "y", digits: 1, note: ZERO_BASED_PIXEL_TITLE },
   { key: "net_flux", header: "flux", digits: 1 },
   { key: "snr", header: "SNR", digits: 1 },
   { key: "mag_ab", header: "AB", digits: 2 },
@@ -130,7 +139,14 @@ function rowFlags(row: PhotometryTableRow, duplicate: boolean): string {
   return flags.join(", ");
 }
 
-function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, starsElsewhere = false, measureKey = null }: PhotometryTablePanelProps) {
+function PhotometryTablePanel({
+  filePath,
+  overlayKey,
+  stars: detectedStars,
+  starsElsewhere = false,
+  measureKey = null,
+  detectedTotal = null,
+}: PhotometryTablePanelProps) {
   const sourceId = useId();
   const apertureId = useId();
   const skyInId = useId();
@@ -150,6 +166,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
   const [sortKey, setSortKey] = useState<PhotometryColumnKey>("index");
   const [sortDir, setSortDir] = useState<SortDirection>("asc");
   const [highlightIndex, setHighlightIndex] = useState<number | null>(null);
+  const [showApertures, setShowApertures] = useState(true);
   const { excludeDq } = useDqContext();
   const provenance = useMeasurementProvenance();
   const regionDoc = useRegionDoc(overlayKey);
@@ -236,7 +253,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
   const median = useMemo(() => medianSnr(rows), [rows]);
 
   useEffect(() => {
-    if (!overlayKey || rows.length === 0) return;
+    if (!overlayKey || rows.length === 0 || !showApertures) return;
     const apertures: ApertureMarker[] = [];
     const indices: number[] = [];
     for (const row of rows) {
@@ -253,7 +270,16 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
       paint: createAperturePainter({ apertures, highlightIndex: highlight >= 0 ? highlight : null }),
     });
     return () => overlayStore.remove(overlayKey, APERTURE_LAYER_ID);
-  }, [overlayKey, rows, highlightIndex]);
+  }, [overlayKey, rows, highlightIndex, showApertures]);
+
+  const clearTable = useCallback(() => {
+    requestSeqRef.current++;
+    setRun(null);
+    setError(null);
+    setRunning(false);
+    setHighlightIndex(null);
+    setSavedPath(null);
+  }, []);
 
   const toggleSort = useCallback(
     (key: PhotometryColumnKey) => {
@@ -329,7 +355,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
             Positions
           </label>
           <select id={sourceId} value={source} onChange={(e) => setSource(e.target.value as PositionSource)} className={SELECT_CLASS}>
-            <option value="stars">Detected stars ({stars.length})</option>
+            <option value="stars">{detectedStarsLabel(stars.length, starsElsewhere ? null : detectedTotal)}</option>
             <option value="regions">Point regions ({pointRegions.length})</option>
             <option value="pasted">Pasted positions</option>
           </select>
@@ -373,7 +399,8 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
               max={MAX_APERTURE_RADIUS_PX}
               step={0.5}
               value={apertureText}
-              placeholder="auto 1.5 x FWHM"
+              placeholder="auto"
+              title={APERTURE_TITLE}
               onChange={(e) => setApertureText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -388,7 +415,8 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
               min={1}
               step={0.5}
               value={skyInText}
-              placeholder="2 x r_ap"
+              placeholder="2×r"
+              title={SKY_IN_TITLE}
               onChange={(e) => setSkyInText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -404,7 +432,8 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
               max={MAX_SKY_OUTER_RADIUS_PX}
               step={0.5}
               value={skyOutText}
-              placeholder="3 x r_ap"
+              placeholder="3×r"
+              title={SKY_OUT_TITLE}
               onChange={(e) => setSkyOutText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -425,6 +454,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
             />
           </div>
         </div>
+        <div className="text-[9px] text-zinc-600">{APERTURE_DEFAULTS_CAPTION}</div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
         {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 
@@ -476,7 +506,7 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
                       key={column.key}
                       onClick={() => toggleSort(column.key)}
                       className={`${column.key === "label" ? "text-left" : "text-right"} px-1.5 py-0.5 cursor-pointer select-none hover:text-zinc-300`}
-                      title={`Sort by ${column.header}`}
+                      title={column.note ? `Sort by ${column.header}\n${column.note}` : `Sort by ${column.header}`}
                     >
                       {column.header}
                       {sortKey === column.key ? (sortDir === "asc" ? " ^" : " v") : ""}
@@ -518,7 +548,14 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
                 showing {TABLE_ROW_LIMIT} of {rows.length}; the CSV holds every row
               </div>
             )}
+            <div className="text-[9px] text-zinc-600 px-1.5 py-0.5" title={ZERO_BASED_PIXEL_TITLE}>
+              {ZERO_BASED_CAPTION}
+            </div>
           </div>
+        )}
+
+        {rows.length > 0 && (
+          <Toggle label="Show apertures" checked={showApertures} disabled={!overlayKey} accent="amber" onChange={setShowApertures} />
         )}
 
         {rows.length > 0 && (
@@ -540,6 +577,15 @@ function PhotometryTablePanel({ filePath, overlayKey, stars: detectedStars, star
             >
               <Shapes size={10} />
               Add as Point regions
+            </button>
+            <button
+              type="button"
+              onClick={clearTable}
+              className={SMALL_BUTTON_CLASS}
+              title="Discard this table and remove its apertures and labels from the image; point regions already added stay"
+            >
+              <X size={10} />
+              Clear
             </button>
           </div>
         )}

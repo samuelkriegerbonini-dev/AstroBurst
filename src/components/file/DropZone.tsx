@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Upload, AlertTriangle, X } from "lucide-react";
-import { isValidFitsFile, isCalibRefAsdf, SUPPORTED_EXTENSIONS_LABEL } from "../../utils/validation";
+import { astroFileFromPath, partitionIncoming, rejectionReport, SUPPORTED_EXTENSIONS_LABEL, type IngestReport } from "../../utils/validation";
 import { isTauri } from "../../infrastructure/tauri";
 import type { AstroFile } from "../../shared/types";
 
 interface DropZoneProps {
   onFilesAdded: (files: AstroFile[]) => void;
+  report?: IngestReport | null;
   children: React.ReactNode;
 }
 
-export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
+export default function DropZone({ onFilesAdded, report = null, children }: DropZoneProps) {
   const [isDragOver, setIsDragOver] = useState(false);
-  const [rejected, setRejected] = useState<{ skipped: number; calib: number } | null>(null);
+  const [rejected, setRejected] = useState<IngestReport | null>(null);
   const callbackRef = useRef(onFilesAdded);
   const dragCounterRef = useRef(0);
   const rejectedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -20,14 +21,18 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
     callbackRef.current = onFilesAdded;
   }, [onFilesAdded]);
 
-  const reportRejected = useCallback((skipped: number, calib: number) => {
-    if (skipped === 0 && calib === 0) return;
-    setRejected({ skipped, calib });
+  const reportRejected = useCallback((next: IngestReport | null) => {
+    if (!next) return;
+    setRejected(next);
     if (rejectedTimerRef.current) clearTimeout(rejectedTimerRef.current);
-    rejectedTimerRef.current = setTimeout(() => setRejected(null), 6000);
+    rejectedTimerRef.current = setTimeout(() => setRejected(null), next.message ? 10000 : 6000);
   }, []);
   const reportRejectedRef = useRef(reportRejected);
   reportRejectedRef.current = reportRejected;
+
+  useEffect(() => {
+    reportRejected(report);
+  }, [report, reportRejected]);
 
   useEffect(() => {
     return () => {
@@ -54,18 +59,10 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
             setIsDragOver(true);
           } else if (t === "drop") {
             setIsDragOver(false);
-            const paths: string[] = event.payload.paths || [];
-            const fitsFiles: AstroFile[] = paths
-              .filter((p: string) => isValidFitsFile(p))
-              .map((p: string) => ({
-                name: p.split(/[/\\]/).pop() || "file",
-                path: p,
-                size: 0,
-              }));
-            const validFiles = fitsFiles.filter((f: AstroFile) => !isCalibRefAsdf(f.name));
-            reportRejectedRef.current(paths.length - fitsFiles.length, fitsFiles.length - validFiles.length);
-            if (validFiles.length > 0) {
-              callbackRef.current(validFiles);
+            const partition = partitionIncoming(event.payload.paths || []);
+            reportRejectedRef.current(rejectionReport(partition));
+            if (partition.accepted.length > 0) {
+              callbackRef.current(partition.accepted.map(astroFileFromPath));
             }
           } else if (t === "leave" || t === "cancel") {
             setIsDragOver(false);
@@ -117,18 +114,10 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
     dragCounterRef.current = 0;
     setIsDragOver(false);
 
-    const droppedFiles = Array.from(e.dataTransfer?.files || []);
-    const fitsFiles = droppedFiles.filter((f) => isValidFitsFile(f.name));
-    const accepted = fitsFiles.filter((f) => !isCalibRefAsdf(f.name));
-    const validFiles: AstroFile[] = accepted.map((f) => ({
-      name: f.name,
-      path: f.name,
-      size: f.size,
-    }));
-
-    reportRejected(droppedFiles.length - fitsFiles.length, fitsFiles.length - accepted.length);
-    if (validFiles.length > 0) {
-      callbackRef.current(validFiles);
+    const partition = partitionIncoming(Array.from(e.dataTransfer?.files || []), (f) => f.name);
+    reportRejected(rejectionReport(partition));
+    if (partition.accepted.length > 0) {
+      callbackRef.current(partition.accepted.map((f) => ({ name: f.name, path: f.name, size: f.size })));
     }
   }, [reportRejected]);
 
@@ -168,14 +157,16 @@ export default function DropZone({ onFilesAdded, children }: DropZoneProps) {
 
       {rejected && (
           <div
-            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-2 px-3 py-2 rounded-lg text-xs shadow-lg animate-fade-in"
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-2 px-3 py-2 rounded-lg text-xs shadow-lg animate-fade-in max-w-[90vw]"
             style={{ background: "rgba(24,17,4,0.96)", border: "1px solid rgba(245,158,11,0.3)", color: "#fbbf24" }}
           >
             <AlertTriangle size={13} className="shrink-0" />
-            <span>
-              {rejected.skipped > 0 && `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: ${SUPPORTED_EXTENSIONS_LABEL}`}
-              {rejected.skipped > 0 && rejected.calib > 0 && " · "}
-              {rejected.calib > 0 && `${rejected.calib} JWST calibration reference .asdf skipped (not a loadable image)`}
+            <span style={{ overflowWrap: "anywhere" }}>
+              {[
+                rejected.message,
+                rejected.skipped > 0 ? `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: ${SUPPORTED_EXTENSIONS_LABEL}` : null,
+                rejected.calib > 0 ? `${rejected.calib} JWST calibration reference .asdf skipped (not a loadable image)` : null,
+              ].filter(Boolean).join(" · ")}
             </span>
             <button
               onClick={() => setRejected(null)}

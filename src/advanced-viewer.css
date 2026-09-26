@@ -26,8 +26,10 @@
 
 .ab-viewer-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+  row-gap: 2px;
   padding: 4px 8px;
   background: rgba(12, 12, 28, 0.85);
   border-bottom: 1px solid var(--ab-border);
@@ -75,6 +77,45 @@
 .ab-viewer-btn-active:hover {
   background: rgba(20, 184, 166, 0.18);
   color: var(--ab-teal);
+}
+
+.ab-viewer-btn:disabled,
+.ab-viewer-btn:disabled:hover {
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--ab-text-3);
+}
+
+.ab-viewer-btn-text {
+  font-size: 10px;
+  font-family: var(--ab-font-mono);
+}
+
+.ab-viewer-btn-wide {
+  width: auto;
+  gap: 4px;
+  padding: 0 7px;
+  font-size: 10px;
+  user-select: none;
+  touch-action: none;
+}
+
+.ab-viewer-zoom-readout {
+  margin-right: 4px;
+}
+
+.ab-viewer-preview-badge {
+  margin-right: 4px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-family: var(--ab-font-mono);
+  color: var(--ab-amber);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 3px;
+  white-space: nowrap;
+  cursor: help;
 }
 
 .ab-viewer-zoom-preset {

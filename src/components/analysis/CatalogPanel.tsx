@@ -253,7 +253,8 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
               max={300}
               step={0.5}
               value={radiusText}
-              placeholder="auto (half diagonal)"
+              placeholder="auto"
+              title="Cone radius in arcmin; blank uses half the image diagonal"
               onChange={(e) => setRadiusText(e.target.value)}
               className={INPUT_CLASS}
             />
@@ -275,6 +276,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
             />
           </div>
         </div>
+        <div className="text-[9px] text-zinc-600">blank radius: half the image diagonal</div>
 
         <RunButton
           label="Search Gaia DR3"

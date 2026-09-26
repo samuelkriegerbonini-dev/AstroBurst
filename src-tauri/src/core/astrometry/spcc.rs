@@ -127,16 +127,20 @@ pub fn spcc_calibrate_rgb(
     let center = wcs.pixel_to_world(cx, cy);
     let search_radius = (fov_w.max(fov_h) / 60.0) * 0.75;
 
-    let (catalog_stars, is_synthetic) = match config.catalog {
-        SpccCatalog::BuiltinBpRp => {
-            (generate_synthetic_catalog(&world_coords, &good_stars), true)
-        }
-        SpccCatalog::GaiaDr3Tap => {
-            match query_gaia_vizier(center.ra, center.dec, search_radius, 3) {
-                Ok(stars) => (stars, false),
-                Err(_) => (generate_synthetic_catalog(&world_coords, &good_stars), true),
-            }
-        }
+    let (catalog_stars, is_synthetic, label) = match config.catalog {
+        SpccCatalog::BuiltinBpRp => (
+            generate_synthetic_catalog(&world_coords, &good_stars),
+            true,
+            catalog_name(&config.catalog, None),
+        ),
+        SpccCatalog::GaiaDr3Tap => match query_gaia_vizier(center.ra, center.dec, search_radius, 3) {
+            Ok(stars) => (stars, false, catalog_name(&config.catalog, None)),
+            Err(reason) => (
+                generate_synthetic_catalog(&world_coords, &good_stars),
+                true,
+                catalog_name(&config.catalog, Some(&reason)),
+            ),
+        },
     };
 
     let matched = cross_match_stars(
@@ -167,11 +171,6 @@ pub fn spcc_calibrate_rgb(
         WhiteReference::Photopic => "Photopic (Human Eye)".into(),
     };
 
-    let catalog_name = match &config.catalog {
-        SpccCatalog::BuiltinBpRp => "Built-in Bp-Rp".into(),
-        SpccCatalog::GaiaDr3Tap => "Gaia DR3 (VizieR)".into(),
-    };
-
     Ok(SpccResult {
         r_factor,
         g_factor,
@@ -180,9 +179,19 @@ pub fn spcc_calibrate_rgb(
         stars_total: good_stars.len(),
         avg_color_index: avg_ci,
         white_ref_name,
-        catalog_name,
+        catalog_name: label,
         is_synthetic_catalog: is_synthetic,
     })
+}
+
+fn catalog_name(catalog: &SpccCatalog, fallback_reason: Option<&str>) -> String {
+    match (catalog, fallback_reason) {
+        (SpccCatalog::BuiltinBpRp, _) => "Built-in Bp-Rp".into(),
+        (SpccCatalog::GaiaDr3Tap, None) => "Gaia DR3 (VizieR)".into(),
+        (SpccCatalog::GaiaDr3Tap, Some(reason)) => {
+            format!("Built-in Bp-Rp (fallback, Gaia DR3 via VizieR unavailable: {reason})")
+        }
+    }
 }
 
 const SPCC_EDGE_MARGIN_PX: usize = 10;
@@ -758,5 +767,15 @@ mod tests {
         let err = spcc_calibrate_rgb(&r, &r, &b_small, &header, &config)
             .expect_err("mismatched B channel must be rejected");
         assert!(err.contains("size mismatch"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn the_catalog_name_says_when_the_synthetic_fallback_replaced_gaia() {
+        assert_eq!(catalog_name(&SpccCatalog::BuiltinBpRp, None), "Built-in Bp-Rp");
+        assert_eq!(catalog_name(&SpccCatalog::GaiaDr3Tap, None), "Gaia DR3 (VizieR)");
+        assert_eq!(
+            catalog_name(&SpccCatalog::GaiaDr3Tap, Some("VizieR returned HTTP 503")),
+            "Built-in Bp-Rp (fallback, Gaia DR3 via VizieR unavailable: VizieR returned HTTP 503)"
+        );
     }
 }

@@ -8,6 +8,7 @@ use crate::cmd::common::{blocking_cmd, cached_header, extract_image_resolved, im
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
+use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats};
 use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig, ImageStats, StfParams};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
@@ -18,7 +19,7 @@ use crate::infra::fits::writer::{
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
 use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
 use crate::types::header::HduHeader;
 
 const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
@@ -101,6 +102,27 @@ fn channels_export(paths: [Option<&str>; 3]) -> anyhow::Result<RgbExport> {
     })
 }
 
+fn header_dims(header: &HduHeader) -> Option<(usize, usize)> {
+    let rows = usize::try_from(header.get_i64("NAXIS2")?).ok()?;
+    let cols = usize::try_from(header.get_i64("NAXIS1")?).ok()?;
+    Some((rows, cols))
+}
+
+fn channel_header_for_grid(path: &str, grid: (usize, usize)) -> Option<HduHeader> {
+    let (mut header, dims) = if image_ref(path).is_synthetic() {
+        let entry = GLOBAL_IMAGE_CACHE.get(path)?;
+        (entry.header().cloned()?, Some(entry.arr().dim()))
+    } else {
+        let header = cached_header(path).ok()?;
+        let dims = header_dims(&header);
+        (header, dims)
+    };
+    if let Some(dims) = dims {
+        rescale_header_to_grid(&mut header, dims, grid);
+    }
+    Some(header)
+}
+
 fn composite_export(r_path: Option<&str>) -> Option<RgbExport> {
     let (cr, cg, cb) = match (
         GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R),
@@ -111,10 +133,18 @@ fn composite_export(r_path: Option<&str>) -> Option<RgbExport> {
         _ => return None,
     };
     let header = r_path
-        .filter(|p| !image_ref(p).is_synthetic())
-        .and_then(|p| cached_header(p).ok())
+        .and_then(|p| channel_header_for_grid(p, cr.arr().dim()))
         .or_else(|| cr.header().cloned());
     Some(RgbExport { r: cr.data_arc(), g: cg.data_arc(), b: cb.data_arc(), header })
+}
+
+fn writes_celestial_wcs(header: Option<&HduHeader>, dims: (usize, usize)) -> bool {
+    header.is_some_and(|written| {
+        let mut probe = written.clone();
+        probe.set("NAXIS1", dims.1.to_string());
+        probe.set("NAXIS2", dims.0.to_string());
+        WcsTransform::from_header(&probe).is_ok()
+    })
 }
 
 fn validated_stf_value(name: &str, value: Option<f64>) -> anyhow::Result<Option<f64>> {
@@ -338,12 +368,14 @@ pub async fn export_fits_rgb(
             .unwrap_or(0);
 
         let (rows, cols) = r_arr.dim();
+        let wcs_written = writes_celestial_wcs(filtered.as_ref(), (rows, cols));
 
         Ok(json!({
             RES_OUTPUT_PATH: output_path,
             RES_BITPIX: target_bitpix,
             COPY_WCS: do_wcs,
             RES_COPY_METADATA: do_meta,
+            RES_WCS_WRITTEN: wcs_written,
             RES_FILE_SIZE_BYTES: file_size,
             RES_DIMENSIONS: [cols, rows],
             RES_COMPRESS: if use_rice { "rice" } else { "none" },
@@ -1013,7 +1045,7 @@ mod tests {
             GLOBAL_IMAGE_CACHE.remove(key);
         }
         result.unwrap();
-        bare.unwrap();
+        assert_eq!(bare.unwrap()[RES_WCS_WRITTEN], json!(false), "an export without any header claimed a WCS");
 
         let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
         assert_eq!([&written.r, &written.g, &written.b], [&planes[0], &planes[1], &planes[2]]);
@@ -1024,5 +1056,50 @@ mod tests {
             .await
             .unwrap_err();
         assert!(gone.contains("no longer in memory"), "{gone}");
+    }
+
+    #[tokio::test]
+    async fn a_background_corrected_wizard_channel_keeps_its_wcs_in_the_composite_export() {
+        let _composite = helpers::composite_test_lock().await;
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::types::constants::wizard_bg_key("export_wcs_r");
+        let solved = header_with(&[
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+            ("CRVAL1", "83.8"),
+            ("CRVAL2", "-5.4"),
+            ("CRPIX1", "4.5"),
+            ("CRPIX2", "3.5"),
+            ("CDELT1", "-1.0E-4"),
+            ("CDELT2", "1.0E-4"),
+        ]);
+        let channel = ramp(1.0);
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&key, Arc::new(channel.clone()), compute_image_stats(&channel), Some(solved));
+        let composite = Array2::from_shape_fn((12, 16), |(y, x)| (y * 16 + x) as f32);
+        let stats = compute_image_stats(&composite);
+        helpers::clear_composite();
+        helpers::insert_composite_and_orig(
+            composite.clone(), composite.clone(), composite.clone(),
+            stats.clone(), stats.clone(), stats,
+        );
+
+        let out = tmp_path(&dir, "composite_bg.fits");
+        let result = export_fits_rgb(Some(key.clone()), None, None, out.clone(), None, None, None, None, None, None, None).await;
+        helpers::clear_composite();
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        assert_eq!(result.unwrap()[RES_WCS_WRITTEN], json!(true), "the export did not report the WCS it wrote");
+
+        let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!(written.r.dim(), (12, 16));
+        assert_eq!(written.header.get("CRVAL1").map(str::trim), Some("83.8"), "the WCS of the background-corrected channel was dropped");
+        let close = |key: &str, expected: f64| {
+            let actual = written.header.get_f64(key);
+            assert!(actual.is_some_and(|v| (v - expected).abs() <= expected.abs() * 1e-9), "{key}: {actual:?}, expected {expected}");
+        };
+        close("CRPIX1", 8.5);
+        close("CRPIX2", 6.5);
+        close("CDELT1", -5.0e-5);
+        close("CDELT2", 5.0e-5);
     }
 }

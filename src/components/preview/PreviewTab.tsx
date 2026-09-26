@@ -10,12 +10,13 @@ import {
   useDisplayedImage,
 } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
+import { useWizardCompositeDims } from "../../context/ComposeWizardContext";
 import type { HistogramData, RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
 import { emitPixelClick, pixelFromRect, setMousePixel } from "../../hooks/useMousePixelStore";
 
 import ZoomPanView from "../ui/ZoomPanView";
-import GpuViewport from "../render/GpuViewport";
+import GpuViewport, { type ViewportOriginal } from "../render/GpuViewport";
 import DisplayControls from "./DisplayControls";
 import { useRegionKey } from "../../hooks/useRegionKey";
 
@@ -27,6 +28,7 @@ interface PreviewTabProps {
   rawPixels: RawPixelData | null;
   rgbRawPixels?: RawRgbPixelData | null;
   onImageClick: (e: React.MouseEvent<HTMLElement>) => void;
+  onCubePixelClick: (x: number, y: number) => void;
   onBackToFile: () => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
   dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
@@ -35,7 +37,8 @@ interface PreviewTabProps {
 const MAX_RETRIES = 2;
 const RETRY_DELAYS = [300, 800] as const;
 const IDENTITY_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
-const PNG_ONLY_TITLE = "PNG-only result; reset to use display controls";
+const PNG_ONLY_TITLE = "PNG-only result; use Revert to original in the preview header to get the display controls back";
+const NEEDS_GPU_TITLE = "needs GPU rendering";
 
 function sameStf(a: StfParams, b: StfParams): boolean {
   return a.shadow === b.shadow && a.midtone === b.midtone && a.highlight === b.highlight;
@@ -81,7 +84,7 @@ const ProcessedBadge = memo(function ProcessedBadge({ label, pngOnly }: { label:
   return (
     <div
       className="absolute bottom-2 left-2 z-10 pointer-events-none text-[10px] px-2 py-0.5 rounded bg-black/60 text-emerald-300/90"
-      title={pngOnly ? PNG_ONLY_TITLE : "Showing a processed result; use Reset in the preview header to return to the original"}
+      title={pngOnly ? PNG_ONLY_TITLE : "Showing a processed result; use Revert to original in the preview header to return to the original"}
     >
       {pngOnly ? `${label} · PNG` : label}
     </div>
@@ -173,7 +176,7 @@ const ImagePreview = memo(function ImagePreview({
   );
 });
 
-function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
+function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onCubePixelClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams, histData } = useHistContext();
   const { isCube } = useCubeContext();
@@ -195,6 +198,8 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBack
   const showComposite = !!compositePreviewUrl && !(isFileRgbView && processed !== null);
 
   const fileDims = file?.result?.dimensions ?? null;
+  const wizardCompositeDims = useWizardCompositeDims();
+  const compositeDims = isFileRgbView ? fileDims : wizardCompositeDims;
   const displayedDims = displayed.dimensions;
   const regionsOnDisplayed = !!displayedDims && regionKey !== null;
   const regionsOnRgbFile = isFileRgbView && !!fileDims && regionKey !== null;
@@ -298,6 +303,19 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBack
     setMousePixel({ x, y });
   }, []);
 
+  const originalPreviewUrl = file?.result?.previewUrl ?? null;
+  const isProcessed = displayed.isProcessed;
+  const heldOriginal = useMemo<ViewportOriginal | null>(() => {
+    if (!isProcessed || !originalPreviewUrl) return null;
+    const sameGrid = !!fileDims && !!displayedDims && fileDims[0] === displayedDims[0] && fileDims[1] === displayedDims[1];
+    return {
+      url: originalPreviewUrl,
+      disabledReason: sameGrid
+        ? null
+        : `The original is ${fileDims ? `${fileDims[0]}×${fileDims[1]}` : "of unknown size"} and the result ${displayedDims ? `${displayedDims[0]}×${displayedDims[1]}` : "of unknown size"} px; hold-to-compare needs the same pixel grid`,
+    };
+  }, [isProcessed, originalPreviewUrl, fileDims, displayedDims]);
+
   if (showComposite) {
     const rgbOnGpu = useGpu && !!rgbRawPixels;
     const displayReferred = !!rgbRawPixels?.displayReferred;
@@ -390,8 +408,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBack
               <GpuViewport
                 renderW={rgbRawPixels.width}
                 renderH={rgbRawPixels.height}
-                fitsW={regionsOnRgbFile && fileDims ? fileDims[0] : undefined}
-                fitsH={regionsOnRgbFile && fileDims ? fileDims[1] : undefined}
+                fitsW={compositeDims?.[0]}
+                fitsH={compositeDims?.[1]}
+                deepZoomOffered={isFileRgbView}
                 regionsEnabled={regionsOnRgbFile}
                 crosshairEnabled={isFileRgbView}
                 onMousePixel={isFileRgbView ? handleViewerMousePixel : undefined}
@@ -447,8 +466,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBack
               onMouseLeave={clearMousePixel}
               overlayCanvasRef={starOverlayRef}
               dqCanvasRef={dqCanvasRef}
-              onCanvasClick={isCube ? onImageClick : undefined}
+              onCanvasPixelClick={isCube ? onCubePixelClick : undefined}
               regionsEnabled={regionsOnDisplayed}
+              original={heldOriginal}
             >
               <GpuRenderer
                 rawData={rawPixels.data}
@@ -470,12 +490,10 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onBack
     );
   }
 
-  const controls = previewOnly ? (
-    <div title={PNG_ONLY_TITLE}>
+  const controls = (
+    <div title={previewOnly ? PNG_ONLY_TITLE : NEEDS_GPU_TITLE}>
       <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
     </div>
-  ) : (
-    <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} disabled />
   );
 
   if (previewUrl && !previewError) {

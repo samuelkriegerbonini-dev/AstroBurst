@@ -87,8 +87,7 @@ pub async fn reset_wb_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let (orig_r, orig_g, orig_b) = helpers::load_composite_orig_rgb()
-            .map_err(|_| anyhow::anyhow!("No original composite. Run Blend first."))?;
+        let (orig_r, orig_g, orig_b) = helpers::load_composite_orig_rgb()?;
 
         let stats_r = orig_r.stats().clone();
         let stats_g = orig_g.stats().clone();
@@ -142,8 +141,7 @@ pub async fn calibrate_and_scnr_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let (orig_r, orig_g, orig_b) = helpers::load_composite_orig_rgb()
-            .map_err(|_| anyhow::anyhow!("No original composite. Run Blend first."))?;
+        let (orig_r, orig_g, orig_b) = helpers::load_composite_orig_rgb()?;
 
         let (rf, gf, bf) = validated_wb_factors(r_factor, g_factor, b_factor)?;
 
@@ -370,6 +368,21 @@ mod tests {
         assert!(err.contains("Re-run Blend"), "{err}");
         assert!(err.contains("24x20") && err.contains("16x16"), "{err}");
         assert_close(&slot(COMPOSITE_KEY_R), &new_r, "a refused channel still replaced the composite");
+    }
+
+    #[tokio::test]
+    async fn reset_and_calibrate_on_a_cleared_composite_say_to_run_blend_again() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        helpers::clear_composite();
+        let expected = "The colour composite is no longer in memory; run Blend again.";
+        let reset = reset_wb_cmd(out.clone()).await.expect_err("reset on a cleared composite must fail");
+        assert_eq!(reset, expected);
+        let calibrate = calibrate_and_scnr_cmd(out, 1.0, 1.0, 1.0, None, None, None, None)
+            .await
+            .expect_err("calibrate on a cleared composite must fail");
+        assert_eq!(calibrate, expected);
     }
 
     #[test]

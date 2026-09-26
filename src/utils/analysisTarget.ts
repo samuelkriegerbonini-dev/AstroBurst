@@ -94,7 +94,7 @@ export function describeMeasurementSource(input: MeasurementSourceInput): Measur
 }
 
 export const STF_LOCK_STRETCH = "STF applies only to the mtf stretch";
-export const STF_LOCK_PNG = "PNG-only result; reset to use display controls";
+export const STF_LOCK_PNG = "PNG-only result; use Revert to original in the preview header to get the display controls back";
 export const STF_LOCK_RGB = "RGB view on screen: this mono histogram does not drive it; use the RGB channel STF";
 
 export interface StfLockInput {

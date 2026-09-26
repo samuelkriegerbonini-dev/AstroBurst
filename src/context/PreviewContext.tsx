@@ -60,6 +60,7 @@ interface DoneFilesContextValue {
 
 interface HistContextValue {
   histData: HistogramData | null;
+  histDataPath: string | null;
   stfParams: StfParams;
   setStfParams: (p: StfParams) => void;
 }
@@ -315,6 +316,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const composite = useCompositeActions();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
+  const [histDataPath, setHistDataPath] = useState<string | null>(null);
   const [stfParams, setStfParams] = useState<StfParams>(DEFAULT_STF);
   const [isCube, setIsCube] = useState(false);
   const [isSpectralCube, setIsSpectralCube] = useState(false);
@@ -679,6 +681,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     prevFileIdRef.current = fileKey;
 
     setHistData(null);
+    setHistDataPath(null);
     setFlagTable(null);
     setOverlayRaw(DEFAULT_DQ_OVERLAY);
     setDqMask(null);
@@ -751,15 +754,18 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (!fileKey || !filePath) return;
     const seq = ++histSeqRef.current;
     const precomputed = processedPath || excludeDq ? null : precomputedHist;
+    const histPath = processedPath ?? filePath;
     if (precomputed?.bins) {
       setHistData(precomputed);
+      setHistDataPath(histPath);
       if (precomputed.auto_stf) setStfParams(precomputed.auto_stf);
       return;
     }
-    computeHistogram(processedPath ?? filePath, excludeDq)
+    computeHistogram(histPath, excludeDq)
       .then((data) => {
         if (histSeqRef.current !== seq) return;
         setHistData(data);
+        setHistDataPath(histPath);
         if (data.auto_stf) setStfParams(data.auto_stf);
       })
       .catch((err) => {
@@ -826,8 +832,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const histValue = useMemo<HistContextValue>(
-    () => ({ histData, stfParams, setStfParams }),
-    [histData, stfParams],
+    () => ({ histData, histDataPath, stfParams, setStfParams }),
+    [histData, histDataPath, stfParams],
   );
 
   const cubeValue = useMemo<CubeContextValue>(

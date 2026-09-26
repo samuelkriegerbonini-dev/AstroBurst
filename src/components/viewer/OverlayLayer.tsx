@@ -6,6 +6,7 @@ import { getWcsInfo, gridLines, isWcsGridError } from "../../services/astrometry
 import type { GridFrame } from "../../shared/types/display";
 import { horizontalPixelScaleArcsec, overlayWcsPath } from "../../utils/compass";
 import { overlayStore, type OverlayPaintContext } from "../../utils/overlayStore";
+import { wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
 import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMapping";
 import { isRegionMappingUsable, regionPointToScreen, resolveRegionHost, type RegionMapping } from "../../utils/regionCoords";
 import type { Pt } from "../../utils/regionGeometry";
@@ -20,6 +21,10 @@ interface OverlayLayerProps {
   fitsW: number;
   fitsH: number;
   enabled: boolean;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function useWcsGridLayer(
@@ -37,8 +42,10 @@ function useWcsGridLayer(
         if (cancelled) return;
         if (isWcsGridError(result)) {
           console.warn("[AstroBurst] WCS grid unavailable:", result.error);
+          wcsOverlayStatus.set("grid", result.error);
           return;
         }
+        wcsOverlayStatus.set("grid", null);
         overlayStore.add(fileKey, {
           id: GRID_LAYER_ID,
           kind: GRID_LAYER_KIND,
@@ -47,10 +54,13 @@ function useWcsGridLayer(
         });
       })
       .catch((err: unknown) => {
-        if (!cancelled) console.error("[AstroBurst] WCS grid failed:", err);
+        if (cancelled) return;
+        console.error("[AstroBurst] WCS grid failed:", err);
+        wcsOverlayStatus.set("grid", errorText(err));
       });
     return () => {
       cancelled = true;
+      wcsOverlayStatus.set("grid", null);
       overlayStore.remove(fileKey, GRID_LAYER_ID);
     };
   }, [fileKey, wcsPath, grid, frame, density]);
@@ -66,8 +76,10 @@ function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass
         const scaleX = horizontalPixelScaleArcsec(info);
         if (!info.north_vec || !info.east_vec || !Number.isFinite(scaleX)) {
           console.warn("[AstroBurst] compass unavailable: the WCS has no usable orientation");
+          wcsOverlayStatus.set("compass", "the WCS has no usable orientation");
           return;
         }
+        wcsOverlayStatus.set("compass", null);
         overlayStore.add(fileKey, {
           id: COMPASS_LAYER_ID,
           kind: COMPASS_LAYER_KIND,
@@ -81,10 +93,13 @@ function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass
         });
       })
       .catch((err: unknown) => {
-        if (!cancelled) console.warn("[AstroBurst] compass unavailable:", err);
+        if (cancelled) return;
+        console.warn("[AstroBurst] compass unavailable:", err);
+        wcsOverlayStatus.set("compass", errorText(err));
       });
     return () => {
       cancelled = true;
+      wcsOverlayStatus.set("compass", null);
       overlayStore.remove(fileKey, COMPASS_LAYER_ID);
     };
   }, [fileKey, wcsPath, compass]);

@@ -42,7 +42,9 @@ const BIN_TO_SLOT: Record<string, "L" | "R" | "G" | "B"> = {
   l: "L", r: "R", g: "G", b: "B", ha: "R", oiii: "G", sii: "B",
 };
 
-const FILTER_HEADER_KEYS = ["FILTER", "FILTER1", "FILTER2", "PUPIL"];
+const FILTER_HEADER_KEYS = ["FILTER", "FILTER1", "FILTER2", "FILTNAM1", "FILTNAM2", "PUPIL"];
+
+const WHEEL_POSITION = /^\d{1,2}$/;
 
 const CLEAR_TOKEN = /(?:^|[_\-.\s])CLEAR(?=[_\-.\s]|$)/i;
 
@@ -70,7 +72,7 @@ export function headerFilterValues(file: ChannelSource): string[] {
     const raw = header[key];
     if (raw == null) continue;
     const value = String(raw).trim();
-    if (value) values.push(value);
+    if (value && !WHEEL_POSITION.test(value)) values.push(value);
   }
   return values;
 }

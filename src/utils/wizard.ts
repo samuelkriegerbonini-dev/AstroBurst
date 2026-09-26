@@ -1,3 +1,5 @@
+import { detectChannel, resolveFileFilter, shortName, type ChannelSource } from "./channelMapping";
+
 export interface FrequencyBin {
   id: string;
   label: string;
@@ -202,6 +204,7 @@ export interface StepDef {
   shortLabel: string;
   color: string;
   enabled: (state: WizardState) => boolean;
+  blockedReason: (state: WizardState) => string | null;
   badge?: (state: WizardState) => string | null;
 }
 
@@ -211,6 +214,17 @@ function filledCount(s: WizardState): number {
 
 function totalFilesCount(s: WizardState): number {
   return s.bins.reduce((acc, b) => acc + b.files.length, 0);
+}
+
+const NEEDS_FRAMES = "assign frames in step 1";
+const NEEDS_TWO_CHANNELS = "assign at least 2 channels";
+
+function gate(blockedReason: (s: WizardState) => string | null): Pick<StepDef, "enabled" | "blockedReason"> {
+  return { enabled: (s) => blockedReason(s) === null, blockedReason };
+}
+
+export function wizardHasProgress(state: WizardState): boolean {
+  return totalFilesCount(state) > 0 || Object.values(state.completedSteps).some(Boolean);
 }
 
 const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
@@ -251,7 +265,7 @@ export const STEPS: StepDef[] = [
     label: "Channel Assignment",
     shortLabel: "Channels",
     color: "violet",
-    enabled: () => true,
+    ...gate(() => null),
     badge: (s) => {
       const n = totalFilesCount(s);
       return n > 0 ? `${n}` : null;
@@ -262,7 +276,10 @@ export const STEPS: StepDef[] = [
     label: "Stacking",
     shortLabel: "Stack",
     color: "blue",
-    enabled: (s) => s.bins.some((b) => b.files.length > 1),
+    ...gate((s) => {
+      if (totalFilesCount(s) === 0) return NEEDS_FRAMES;
+      return s.bins.some((b) => b.files.length > 1) ? null : "needs a channel with 2+ frames";
+    }),
     badge: (s) => {
       const n = Object.keys(s.stackedPaths).length;
       return n > 0 ? `${n}` : null;
@@ -273,14 +290,17 @@ export const STEPS: StepDef[] = [
     label: "Channel Alignment",
     shortLabel: "Align",
     color: "sky",
-    enabled: (s) => filledCount(s) >= 2,
+    ...gate((s) => (filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
   },
   {
     id: "crop",
     label: "Crop",
     shortLabel: "Crop",
     color: "cyan",
-    enabled: (s) => Object.keys(s.alignedPaths).length > 0,
+    ...gate((s) => {
+      if (Object.keys(s.alignedPaths).length > 0) return null;
+      return filledCount(s) >= 2 ? "run Align first" : NEEDS_TWO_CHANNELS;
+    }),
     badge: (s) => {
       const n = Object.keys(s.croppedPaths).length;
       return n > 0 ? `${n}` : null;
@@ -291,10 +311,12 @@ export const STEPS: StepDef[] = [
     label: "Background Extraction",
     shortLabel: "BG",
     color: "emerald",
-    enabled: (s) =>
+    ...gate((s) =>
       Object.keys(s.alignedPaths).length > 0 ||
       Object.keys(s.croppedPaths).length > 0 ||
-      totalFilesCount(s) > 0,
+      totalFilesCount(s) > 0
+        ? null
+        : NEEDS_FRAMES),
     badge: (s) => {
       const n = Object.keys(s.backgroundPaths).length;
       return n > 0 ? `${n}` : null;
@@ -305,7 +327,7 @@ export const STEPS: StepDef[] = [
     label: "Channel Blending",
     shortLabel: "Blend",
     color: "amber",
-    enabled: (s) => filledCount(s) >= 2,
+    ...gate((s) => (filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
     badge: (s) => s.compositeReady ? "✓" : null,
   },
   {
@@ -313,28 +335,31 @@ export const STEPS: StepDef[] = [
     label: "Color Balance",
     shortLabel: "Color",
     color: "cyan",
-    enabled: (s) => s.compositeReady || filledCount(s) >= 2,
+    ...gate((s) => (s.compositeReady || filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
   },
   {
     id: "stretch",
     label: "Stretch",
     shortLabel: "Stretch",
     color: "amber",
-    enabled: (s) => s.compositeReady || totalFilesCount(s) > 0,
+    ...gate((s) => (s.compositeReady || totalFilesCount(s) > 0 ? null : NEEDS_FRAMES)),
   },
   {
     id: "adjust",
     label: "Adjust",
     shortLabel: "Adjust",
     color: "purple",
-    enabled: (s) => s.compositeReady,
+    ...gate((s) => {
+      if (s.compositeReady) return null;
+      return filledCount(s) >= 2 ? "run Blend first" : `${NEEDS_TWO_CHANNELS}, then run Blend`;
+    }),
   },
   {
     id: "export",
     label: "Export",
     shortLabel: "Export",
     color: "teal",
-    enabled: () => true,
+    ...gate((s) => (s.compositeReady || totalFilesCount(s) > 0 ? null : NEEDS_FRAMES)),
   },
 ];
 
@@ -531,6 +556,186 @@ export function wizardZipChannels(state: WizardState): { name: string; path: str
     ? [{ name: `channel_${channels.monoBinId}`, path: channels.r }]
     : (["r", "g", "b"] as const).map((key) => ({ name: `channel_${key}`, path: channels[key] }));
   return entries.filter((e): e is { name: string; path: string } => e.path !== null);
+}
+
+export function exportBlockedReason(state: WizardState): string | null {
+  if (state.compositeReady) return null;
+  const { r, g, b } = resolveExportRgbPaths(state);
+  return r || g || b ? null : "Assign at least one channel in step 1";
+}
+
+export const WCS_MISSING_WARNING =
+  "This FITS was written without a celestial WCS (no CTYPE, CRVAL or CD cards), so viewers cannot place it on the sky.";
+
+export function exportWcsWarning(result: object, headerWarning: string | null): string | null {
+  if (headerWarning) return headerWarning;
+  return "wcs_written" in result && result.wcs_written === false ? WCS_MISSING_WARNING : null;
+}
+
+export function autoStfBlockedReason(state: WizardState): string | null {
+  if (state.compositeReady) return null;
+  return filledCount(state) >= 2
+    ? "Auto STF needs a blended composite: run Blend first."
+    : "Auto STF needs a blended composite, and Blend needs at least 2 channels.";
+}
+
+type RgbKey = "r" | "g" | "b";
+
+const RGB_KEYS: readonly RgbKey[] = ["r", "g", "b"];
+
+const SPCC_SOURCES: Record<RgbKey, readonly string[]> = {
+  r: ["r", "ha"],
+  g: ["g", "oiii"],
+  b: ["b", "sii"],
+};
+
+export interface SpccInput {
+  binId: string;
+  path: string;
+}
+
+export function spccInputs(state: WizardState): Record<RgbKey, SpccInput | null> {
+  const pick = (ids: readonly string[]): SpccInput | null => {
+    for (const binId of ids) {
+      const path = resolveChannelPath(state, binId);
+      if (path) return { binId, path };
+    }
+    return null;
+  };
+  return { r: pick(SPCC_SOURCES.r), g: pick(SPCC_SOURCES.g), b: pick(SPCC_SOURCES.b) };
+}
+
+const SPCC_BROADBAND_ONLY = "SPCC models broadband R/G/B filters only";
+
+const NARROWBAND_FILTER_CODE = /^F\d{3,4}N$/;
+
+const NARROWBAND_LINE_CODES = new Set(["HA", "HALPHA", "H_ALPHA", "OIII", "O3", "SII", "S2", "NII", "HB", "HBETA"]);
+
+const NARROWBAND_BIN_LABELS: Record<string, string> = { ha: "Hα", oiii: "OIII", sii: "SII", nii: "NII", hb: "Hβ" };
+
+export function narrowbandFilterLabel(
+  file: ChannelSource | undefined,
+  detection: FilterDetectionRef | undefined,
+): string | null {
+  if (detection?.filter && NB_FILTERS.has(detection.filter)) return detection.filter;
+  if (!file) return null;
+  const code = resolveFileFilter(file)?.code;
+  if (code && (NARROWBAND_FILTER_CODE.test(code) || NARROWBAND_LINE_CODES.has(code))) return code;
+  const bin = detectChannel(file);
+  return bin ? NARROWBAND_BIN_LABELS[bin] ?? null : null;
+}
+
+function binShortLabel(state: WizardState, binId: string): string {
+  return state.bins.find((b) => b.id === binId)?.shortLabel ?? binId;
+}
+
+export function spccBlockReason(
+  state: WizardState,
+  files: readonly (ChannelSource & { path: string })[],
+  detections: readonly FilterDetectionRef[] = [],
+): string | null {
+  const inputs = spccInputs(state);
+  const fallbacks = RGB_KEYS.flatMap((key) => {
+    const input = inputs[key];
+    return input && input.binId !== key ? [{ key, binId: input.binId }] : [];
+  });
+  if (fallbacks.length > 0) {
+    const names = fallbacks.map((f) => binShortLabel(state, f.binId)).join(", ");
+    const letters = fallbacks.map((f) => f.key.toUpperCase()).join(", ");
+    return `${SPCC_BROADBAND_ONLY}; ${names} would be measured as ${letters}.`;
+  }
+  for (const key of RGB_KEYS) {
+    const bin = state.bins.find((b) => b.id === key);
+    for (const path of bin?.files ?? []) {
+      const label = narrowbandFilterLabel(
+        files.find((f) => f.path === path),
+        detections.find((d) => d.path === path),
+      );
+      if (label) return `${SPCC_BROADBAND_ONLY}; ${shortName(path)} in ${binShortLabel(state, key)} is a narrowband frame (${label}).`;
+    }
+  }
+  return null;
+}
+
+const ALIGN_METHOD_LABELS: Record<string, string> = {
+  phase_correlation: "phase correlation",
+  affine: "affine",
+  rigid: "rigid",
+};
+
+const IDENTITY_ALIGN_METHODS = new Set(["identity", "phase_correlation_identity"]);
+
+export interface AlignChannelOutcome {
+  unregistered: string | null;
+  usedMethod: string | null;
+}
+
+export function alignChannelOutcome(
+  channel: { registered?: boolean; method_used?: string } | undefined,
+  requestedMethod: string,
+  isReference: boolean,
+): AlignChannelOutcome {
+  if (!channel || isReference) return { unregistered: null, usedMethod: null };
+  const used = channel.method_used;
+  const registered = channel.registered ?? !(used && IDENTITY_ALIGN_METHODS.has(used));
+  if (!registered) {
+    const other = requestedMethod === "affine" ? "Phase Correlation" : "Star-based Affine";
+    return { unregistered: `not registered — low-confidence match, channel left unshifted; try ${other}`, usedMethod: null };
+  }
+  const usedMethod = used && used !== requestedMethod ? ALIGN_METHOD_LABELS[used] ?? used : null;
+  return { unregistered: null, usedMethod };
+}
+
+export const BIN_MENU_WIDTH = 200;
+
+export const BIN_MENU_MAX_HEIGHT = 180;
+
+const MENU_GAP = 4;
+
+const VIEWPORT_MARGIN = 8;
+
+export interface MenuAnchor {
+  left: number;
+  top: number;
+  bottom: number;
+}
+
+export interface MenuPlacement {
+  left: number;
+  top: number | null;
+  bottom: number | null;
+}
+
+export function binMenuPlacement(anchor: MenuAnchor, viewport: { width: number; height: number }): MenuPlacement {
+  const left = Math.max(VIEWPORT_MARGIN, Math.min(anchor.left, viewport.width - BIN_MENU_WIDTH - VIEWPORT_MARGIN));
+  const spaceBelow = viewport.height - anchor.bottom - MENU_GAP - VIEWPORT_MARGIN;
+  const spaceAbove = anchor.top - MENU_GAP - VIEWPORT_MARGIN;
+  if (spaceBelow >= BIN_MENU_MAX_HEIGHT || spaceBelow >= spaceAbove) {
+    return { left, top: anchor.bottom + MENU_GAP, bottom: null };
+  }
+  return { left, top: null, bottom: viewport.height - anchor.top + MENU_GAP };
+}
+
+export type MenuKeyAction =
+  | { type: "close"; preventDefault: boolean }
+  | { type: "focus"; index: number };
+
+export function binMenuKeyAction(key: string, current: number, count: number): MenuKeyAction | null {
+  if (key === "Escape") return { type: "close", preventDefault: true };
+  if (key === "Tab") return { type: "close", preventDefault: false };
+  if (count <= 0) return null;
+  switch (key) {
+    case "ArrowDown":
+      return { type: "focus", index: current < 0 ? 0 : (current + 1) % count };
+    case "ArrowUp":
+      return { type: "focus", index: current < 0 ? count - 1 : (current - 1 + count) % count };
+    case "Home":
+      return { type: "focus", index: 0 };
+    case "End":
+      return { type: "focus", index: count - 1 };
+    default:
+      return null;
+  }
 }
 
 export function withChannelStage(

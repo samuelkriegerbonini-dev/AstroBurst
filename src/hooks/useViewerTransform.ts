@@ -1,4 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  clampViewerScale,
+  fitScale,
+  fitsPerRenderPx,
+  isZoomPresetActive,
+  renderScaleForFits,
+  wheelZoomFactor,
+  zoomPercentLabel,
+} from "../utils/viewerZoom";
 
 export interface Transform {
   scale: number;
@@ -6,21 +15,16 @@ export interface Transform {
   y: number;
 }
 
-const ZOOM_MIN = 0.1;
-const ZOOM_MAX = 32;
 const ZOOM_STEP = 1.15;
-
-function clamp(t: Transform): Transform {
-  return { scale: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, t.scale)), x: t.x, y: t.y };
-}
 
 export interface UseViewerTransformOptions {
   containerRef: React.RefObject<HTMLDivElement | null>;
   renderW: number;
   renderH: number;
+  fitsW?: number;
 }
 
-export function useViewerTransform({ containerRef, renderW, renderH }: UseViewerTransformOptions) {
+export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: UseViewerTransformOptions) {
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [transform, setTransformState] = useState<Transform>({ scale: 1, x: 0, y: 0 });
   const transformRef = useRef(transform);
@@ -28,6 +32,9 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   const userInteractedRef = useRef(false);
 
   const hasRenderDims = renderW > 0 && renderH > 0;
+  const fitsPerRender = fitsPerRenderPx(fitsW, renderW);
+  const fitsPerRenderRef = useRef(fitsPerRender);
+  fitsPerRenderRef.current = fitsPerRender;
 
   const attachContainer = useCallback(
     (el: HTMLDivElement | null) => {
@@ -48,14 +55,14 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
     const cw = container.clientWidth;
     const ch = container.clientHeight;
     if (cw === 0 || ch === 0) return;
-    const scale = Math.min(cw / renderW, ch / renderH, 1);
+    const scale = fitScale(cw, ch, renderW, renderH, fitsPerRender);
     userInteractedRef.current = false;
     setTransformState({
       scale,
       x: (cw - renderW * scale) / 2,
       y: (ch - renderH * scale) / 2,
     });
-  }, [containerRef, renderW, renderH, hasRenderDims]);
+  }, [containerRef, renderW, renderH, hasRenderDims, fitsPerRender]);
 
   const fitToWindowRef = useRef(fitToWindow);
   fitToWindowRef.current = fitToWindow;
@@ -63,7 +70,7 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   const zoomTo = useCallback((newScale: number, centerX?: number, centerY?: number) => {
     userInteractedRef.current = true;
     setTransformState((prev) => {
-      const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newScale));
+      const clamped = clampViewerScale(newScale, fitsPerRenderRef.current);
       const container = containerRef.current;
       if (!container) return { ...prev, scale: clamped };
       const rect = container.getBoundingClientRect();
@@ -80,17 +87,22 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
 
   const zoomIn = useCallback(() => zoomTo(transformRef.current.scale * ZOOM_STEP), [zoomTo]);
   const zoomOut = useCallback(() => zoomTo(transformRef.current.scale / ZOOM_STEP), [zoomTo]);
+  const zoomToFits = useCallback(
+    (fitsScale: number) => zoomTo(renderScaleForFits(fitsScale, fitsPerRenderRef.current)),
+    [zoomTo],
+  );
 
   const setOneToOne = useCallback(() => {
     const container = containerRef.current;
     if (!container || !hasRenderDims) return;
     userInteractedRef.current = true;
+    const scale = clampViewerScale(renderScaleForFits(1, fitsPerRender), fitsPerRender);
     setTransformState({
-      scale: 1,
-      x: (container.clientWidth - renderW) / 2,
-      y: (container.clientHeight - renderH) / 2,
+      scale,
+      x: (container.clientWidth - renderW * scale) / 2,
+      y: (container.clientHeight - renderH * scale) / 2,
     });
-  }, [containerRef, renderW, renderH, hasRenderDims]);
+  }, [containerRef, renderW, renderH, hasRenderDims, fitsPerRender]);
 
   const wheelRafRef = useRef<number | null>(null);
   const pendingWheelRef = useRef<{ factor: number; clientX: number; clientY: number } | null>(null);
@@ -98,7 +110,7 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
   const handleWheelNative = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      const factor = wheelZoomFactor(e.deltaY, e.deltaMode);
       const prev = pendingWheelRef.current;
       pendingWheelRef.current = {
         factor: (prev?.factor ?? 1) * factor,
@@ -116,13 +128,13 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
         const cy = pending.clientY - rect.top;
         userInteractedRef.current = true;
         setTransformState((t) => {
-          const newScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, t.scale * pending.factor));
+          const newScale = clampViewerScale(t.scale * pending.factor, fitsPerRenderRef.current);
           const ratio = newScale / t.scale;
-          return clamp({
+          return {
             scale: newScale,
             x: cx - (cx - t.x) * ratio,
             y: cy - (cy - t.y) * ratio,
-          });
+          };
         });
       });
     },
@@ -173,11 +185,14 @@ export function useViewerTransform({ containerRef, renderW, renderH }: UseViewer
     setTransform,
     fitToWindow,
     zoomTo,
+    zoomToFits,
     zoomIn,
     zoomOut,
     setOneToOne,
     hasRenderDims,
-    zoomPct: `${Math.round(transform.scale * 100)}%`,
+    fitsPerRender,
+    isPresetActive: (preset: number) => isZoomPresetActive(transform.scale, preset, fitsPerRender),
+    zoomPct: zoomPercentLabel(transform.scale, fitsPerRender),
     ZOOM_STEP,
   };
 }

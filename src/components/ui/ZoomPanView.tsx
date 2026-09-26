@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, memo } from "react";
 import { ZoomIn, ZoomOut, Home } from "lucide-react";
+import { FIT_SCALE_CAP, imageRenderingFor, wheelZoomFactor } from "../../utils/viewerZoom";
 
 interface ZoomPanViewProps {
   src: string;
@@ -9,7 +10,7 @@ interface ZoomPanViewProps {
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 16;
-const ZOOM_STEP = 1.15;
+const DOUBLE_CLICK_ZOOM = 3;
 
 function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -21,6 +22,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
   });
   const naturalRef = useRef<{ w: number; h: number } | null>(null);
   const userInteractedRef = useRef(false);
+  const fitScaleRef = useRef(1);
 
   const applyFit = useCallback(() => {
     const container = containerRef.current;
@@ -29,7 +31,8 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     const cw = container.clientWidth;
     const ch = container.clientHeight;
     if (cw === 0 || ch === 0) return;
-    const fit = Math.min(cw / nat.w, ch / nat.h, 1);
+    const fit = Math.min(cw / nat.w, ch / nat.h, FIT_SCALE_CAP);
+    fitScaleRef.current = fit;
     setScale(fit);
     setTranslate({ x: (cw - nat.w * fit) / 2, y: (ch - nat.h * fit) / 2 });
   }, []);
@@ -67,7 +70,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
   const handleWheelNative = useCallback((e: WheelEvent) => {
     e.preventDefault();
     userInteractedRef.current = true;
-    const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+    const factor = wheelZoomFactor(e.deltaY, e.deltaMode);
     const prev = pendingWheelRef.current;
     pendingWheelRef.current = {
       factor: (prev?.factor ?? 1) * factor,
@@ -145,11 +148,12 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
-    if (scale > 1.05) {
+    const fit = fitScaleRef.current;
+    if (scale > Math.max(1, fit) * 1.05) {
       resetView();
     } else {
       userInteractedRef.current = true;
-      const next = 3;
+      const next = Math.min(ZOOM_MAX, Math.max(DOUBLE_CLICK_ZOOM, fit * DOUBLE_CLICK_ZOOM));
       const ratio = next / scale;
       setTranslate((t) => ({
         x: mx - ratio * (mx - t.x),
@@ -204,7 +208,7 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
           className="block max-w-none"
           draggable={false}
           onLoad={handleImgLoad}
-          style={{ imageRendering: scale >= 2 ? "pixelated" : "auto" }}
+          style={{ imageRendering: imageRenderingFor(scale) }}
         />
       </div>
 

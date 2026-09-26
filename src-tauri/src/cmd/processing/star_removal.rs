@@ -219,6 +219,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn starless_and_stars_outputs_of_a_wizard_channel_held_in_memory_keep_its_header() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let key = crate::types::constants::wizard_bg_key("star_removal_test_r");
+        let source = header_with(&[
+            ("CTYPE1", "'RA---TAN'"),
+            ("CRVAL1", "83.8"),
+            ("OBJECT", "'M42'"),
+        ]);
+        let field = starry(1000.0);
+        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(
+            &key,
+            Arc::new(field.clone()),
+            crate::core::imaging::stats::compute_image_stats(&field),
+            Some(source),
+        );
+
+        let value = remove_stars_cmd(key.clone(), out, None, None, None, None, None).await;
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        let value = value.unwrap();
+        for key in [RES_FITS_PATH, RES_STARS_FITS_PATH] {
+            let header = crate::cmd::common::cached_header(value[key].as_str().unwrap()).unwrap();
+            assert_eq!(header.get_f64("CRVAL1"), Some(83.8), "{key} lost its WCS");
+            assert_eq!(unquoted(&header, "OBJECT").as_deref(), Some("M42"), "{key} lost its target");
+        }
+    }
+
+    #[tokio::test]
     async fn star_removal_on_a_stretched_image_stays_display_referred() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();

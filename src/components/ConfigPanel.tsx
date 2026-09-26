@@ -125,7 +125,7 @@ export default function ConfigPanel() {
       setCleanResult(
         res.cleaned_files > 0
           ? `${res.cleaned_files} files removed (${formatMb(res.cleaned_bytes)})`
-          : "Nothing removed — output is under the size cap",
+          : "Nothing removed — the outputs over the cap are still in use",
       );
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -182,6 +182,8 @@ export default function ConfigPanel() {
     if (!config || next === config.astrometry_api_url) return;
     commitField("astrometry_api_url", next);
   }, [apiUrlDraft, config, commitField]);
+
+  const underCap = storageInfo?.max_size != null && storageInfo.total_size <= storageInfo.max_size;
 
   if (loading) {
     return (
@@ -318,7 +320,8 @@ export default function ConfigPanel() {
           <button
             onClick={handleCleanup}
             onBlur={() => setCleanArmed(false)}
-            disabled={storageBusy}
+            disabled={storageBusy || underCap}
+            title={underCap ? "under the size cap, nothing to remove" : undefined}
             className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
             style={{
               background: cleanArmed ? "rgba(244,63,94,0.25)" : "rgba(244,63,94,0.1)",

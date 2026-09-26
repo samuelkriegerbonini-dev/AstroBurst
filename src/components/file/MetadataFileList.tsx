@@ -48,7 +48,7 @@ export interface MetadataFile {
   elapsed_ms?: number;
 }
 
-import type { FilterMode } from "../../hooks/useProductFilter";
+import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
 
 interface MetadataFileListProps {
   files: MetadataFile[];
@@ -295,14 +295,9 @@ function MetadataFileList({
   const doneCount = useMemo(() => files.filter((f) => f.status === "done").length, [files]);
 
   const filteredFiles = useMemo(() => {
-    if (!searchQuery.trim()) return files;
-    const q = searchQuery.toLowerCase();
-    return files.filter(
-      (f) =>
-        f.name.toLowerCase().includes(q)
-        || f.metadata?.filter?.toLowerCase().includes(q)
-        || f.metadata?.instrument?.toLowerCase().includes(q),
-    );
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return files;
+    return files.filter((f) => fileSearchText(metadataFilterable(f)).includes(q));
   }, [files, searchQuery]);
 
   useEffect(() => {

@@ -82,10 +82,12 @@ pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
 }
 
 
+const COMPOSITE_GONE: &str = "The colour composite is no longer in memory; run Blend again.";
+
 pub(crate) fn load_composite_channel(key: &str) -> anyhow::Result<ImageEntry> {
     GLOBAL_IMAGE_CACHE
         .get(key)
-        .ok_or_else(|| anyhow::anyhow!("Composite channel '{}' not found in cache", key))
+        .ok_or_else(|| anyhow::anyhow!(COMPOSITE_GONE))
 }
 
 pub(crate) fn load_composite_rgb() -> anyhow::Result<(ImageEntry, ImageEntry, ImageEntry)> {
@@ -105,13 +107,13 @@ pub(crate) fn load_composite_orig_rgb() -> anyhow::Result<(ImageEntry, ImageEntr
 pub(crate) fn load_orig_or_composite() -> anyhow::Result<(ImageEntry, ImageEntry, ImageEntry)> {
     let r = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_R)
         .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_R))
-        .ok_or_else(|| anyhow::anyhow!("Composite R not in cache"))?;
+        .ok_or_else(|| anyhow::anyhow!(COMPOSITE_GONE))?;
     let g = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_G)
         .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_G))
-        .ok_or_else(|| anyhow::anyhow!("Composite G not in cache"))?;
+        .ok_or_else(|| anyhow::anyhow!(COMPOSITE_GONE))?;
     let b = GLOBAL_IMAGE_CACHE.get(COMPOSITE_ORIG_B)
         .or_else(|| GLOBAL_IMAGE_CACHE.get(COMPOSITE_KEY_B))
-        .ok_or_else(|| anyhow::anyhow!("Composite B not in cache"))?;
+        .ok_or_else(|| anyhow::anyhow!(COMPOSITE_GONE))?;
     Ok((r, g, b))
 }
 
@@ -585,6 +587,19 @@ mod tests {
         assert!(input.is_some(), "precondition: the stretched composite was stored");
         assert!(held_after_run, "precondition: the run keeps its input for a re-run");
         assert!(!held_after_clear, "the input of the last composite LHE stayed in memory after the composite was cleared");
+    }
+
+    #[tokio::test]
+    async fn a_cleared_composite_says_to_run_blend_again() {
+        let _guard = composite_test_lock().await;
+        clear_composite();
+        let expected = "The colour composite is no longer in memory; run Blend again.";
+        let channel = load_composite_channel(COMPOSITE_KEY_R).err().expect("the R plane was cleared");
+        assert_eq!(channel.to_string(), expected);
+        let rgb = load_composite_rgb().err().expect("the planes were cleared");
+        assert_eq!(rgb.to_string(), expected);
+        let orig = load_orig_or_composite().err().expect("the original planes were cleared");
+        assert_eq!(orig.to_string(), expected);
     }
 }
 

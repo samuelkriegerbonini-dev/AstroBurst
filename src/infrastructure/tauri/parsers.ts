@@ -102,7 +102,7 @@ export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView) {
   };
 }
 
-const FFT_HEADER_SIZE = 32;
+const FFT_HEADER_SIZE = 40;
 
 export function parseFftBuffer(bytes: Uint8Array) {
   if (bytes.length < FFT_HEADER_SIZE) {
@@ -124,8 +124,9 @@ export function parseFftBuffer(bytes: Uint8Array) {
     dc_magnitude: view.getFloat32(8, true),
     max_magnitude: view.getFloat32(12, true),
     elapsed_ms: view.getUint32(16, true),
-    original_size: view.getUint32(20, true),
-    windowed: view.getUint32(24, true) !== 0,
+    windowed: (view.getUint32(28, true) & 1) !== 0,
+    image_width: view.getUint32(32, true),
+    image_height: view.getUint32(36, true),
     pixels: new Uint8Array(bytes.buffer, bytes.byteOffset + FFT_HEADER_SIZE, width * height),
   };
 }

@@ -25,6 +25,7 @@ import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { useRegionDoc, useRegionTool, useRegionDraft } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { generateId } from "../../utils/format";
+import { regionLayerSwallowsClick } from "../../utils/regionClick";
 
 interface RegionsLayerProps {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -70,6 +71,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const draft = useRegionDraft(fileKey);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState | null>(null);
+  const layerOwnsPressRef = useRef(false);
   const hoverRef = useRef<Pt | null>(null);
   const hoverRafRef = useRef<number | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -242,6 +244,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (e.button !== 0 || !fileKey || tool === "none") return;
+      layerOwnsPressRef.current = tool !== "select";
       const pt = toImage(e.clientX, e.clientY);
       const d = regionStore.getDoc(fileKey);
       if (tool === "select") {
@@ -263,6 +266,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
           }
           if (best) {
             e.stopPropagation();
+            layerOwnsPressRef.current = true;
             dragRef.current = { kind: "resize", id: selected.id, handleId: best.id, shapeStart: selected.shape };
             e.currentTarget.setPointerCapture(e.pointerId);
             return;
@@ -272,6 +276,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
           const r = d.regions[i];
           if (hitTest(r.shape, pt, tol)) {
             e.stopPropagation();
+            layerOwnsPressRef.current = true;
             regionStore.select(fileKey, r.id);
             dragRef.current = { kind: "move", id: r.id, start: pt, shapeStart: r.shape };
             e.currentTarget.setPointerCapture(e.pointerId);
@@ -425,7 +430,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       onPointerUp={handlePointerUp}
       onDoubleClick={handleDoubleClick}
       onClick={(e) => {
-        if (e.button === 0 && tool !== "none") e.stopPropagation();
+        if (e.button === 0 && regionLayerSwallowsClick(tool, layerOwnsPressRef.current)) e.stopPropagation();
       }}
       style={{
         position: "absolute",

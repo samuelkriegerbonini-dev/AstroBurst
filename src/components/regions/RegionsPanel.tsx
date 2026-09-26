@@ -7,13 +7,14 @@ import { useRegionDoc } from "../../hooks/useRegionStore";
 import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma, useRegionStats } from "../../hooks/useRegionStats";
 import { regionStore, shapeKindKey } from "../../utils/regionStore";
 import { normalizeProps } from "../../utils/regionPersistence";
-import { shapeSummary, isRegionShape } from "../../utils/regionGeometry";
+import { shapeSummary, shapeSummaryTitle, isRegionShape } from "../../utils/regionGeometry";
 import { regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../../utils/regionCsv";
 import { formatLat, formatLon } from "../../utils/coordFormat";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, regionLogReady, regionStatsEntries } from "../../utils/measurementLog";
 import { generateId } from "../../utils/format";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 
 interface RegionsPanelProps {
@@ -83,9 +84,9 @@ function fmt(v: number | null | undefined, digits = 3): string {
   return v.toFixed(digits);
 }
 
-function StatCell({ label, value }: { label: string; value: string }) {
+function StatCell({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <span className="whitespace-nowrap">
+    <span className="whitespace-nowrap" title={title}>
       <span className="text-zinc-600">{label} </span>
       <span className="text-zinc-300">{value}</span>
     </span>
@@ -135,7 +136,9 @@ function RegionRow({
           className="w-2.5 h-2.5 rounded-sm shrink-0 border border-black/40"
           style={{ background: region.props.color ?? DEFAULT_SWATCH }}
         />
-        <span className="font-mono text-zinc-300 truncate">{shapeSummary(region.shape)}</span>
+        <span className="font-mono text-zinc-300 truncate" title={shapeSummaryTitle(region.shape)}>
+          {shapeSummary(region.shape)}
+        </span>
         {region.props.text && <span className="text-zinc-500 truncate">{region.props.text}</span>}
         {!region.props.include && <span className="text-[9px] text-amber-400/80">excl</span>}
         <button
@@ -156,7 +159,7 @@ function RegionRow({
           <StatCell label="mean" value={fmt(s.mean)} />
           <StatCell label="med" value={fmt(s.median)} />
           <StatCell label="sum" value={s.sum_err != null ? `${fmt(s.sum)} ± ${fmt(s.sum_err)}` : fmt(s.sum)} />
-          <StatCell label="σ" value={fmt(s.sigma)} />
+          <StatCell label={SIGMA_MAD_LABEL} value={fmt(s.sigma)} title={SIGMA_MAD_TITLE} />
           {s.weighted_mean != null && <StatCell label="wmean" value={fmt(s.weighted_mean)} />}
           {s.net_sum !== null && <StatCell label="net" value={fmt(s.net_sum)} />}
           {s.net_snr !== null && <StatCell label="snr" value={fmt(s.net_snr, 1)} />}

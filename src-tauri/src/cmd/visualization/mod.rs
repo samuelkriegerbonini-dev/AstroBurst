@@ -365,8 +365,7 @@ fn tile_rgb_source(path: Option<&str>) -> anyhow::Result<(RgbPlanes, [ImageStats
             Ok(((r, g, b), [stats_r, stats_g, stats_b]))
         }
         None => {
-            let (r, g, b) = helpers::load_composite_rgb()
-                .map_err(|_| anyhow::anyhow!("RGB composite not available. Run Compose RGB first."))?;
+            let (r, g, b) = helpers::load_composite_rgb()?;
             let stats = [r.stats().clone(), g.stats().clone(), b.stats().clone()];
             Ok(((r.data_arc(), g.data_arc(), b.data_arc()), stats))
         }
@@ -462,6 +461,16 @@ mod tests {
             assert!(err.contains("tile_size"), "{err}");
         }
         assert_eq!(tile_params(256).unwrap().tile_size, 256);
+    }
+
+    #[tokio::test]
+    async fn deep_zoom_tiles_of_a_cleared_composite_say_to_run_blend_again() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        helpers::clear_composite();
+        let err = generate_tiles_rgb(out, 256, None).await.expect_err("the composite was cleared");
+        assert_eq!(err, "The colour composite is no longer in memory; run Blend again.");
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore, useId } from "react";
 import {
   Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X, Search,
   FileText, BarChart3, Sparkles, Layers2, FlaskConical, Download, Settings, PanelLeftClose,
@@ -19,8 +19,10 @@ import { useFileQueue } from "./hooks/useFileQueue";
 import { registerFileIngest } from "./hooks/useFileIngest";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
-import { isValidFitsFile, SUPPORTED_EXTENSIONS } from "./utils/validation";
-import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters } from "./hooks/useProductFilter";
+import { SUPPORTED_EXTENSIONS, astroFileFromPath, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
+import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters, metadataFilterable, processedFilterable } from "./hooks/useProductFilter";
+import { displayFilterValue } from "./utils/channelMapping";
+import { FOCUSABLE_SELECTOR, focusTrapTarget } from "./utils/focusTrap";
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { APP_VERSION, FILE_STATUS } from "./utils/constants";
@@ -45,6 +47,10 @@ const SIDEBAR_DEFAULT = 300;
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 480;
 
+const INFO_LEFT_IN_FILES = 42;
+const INFO_LEFT_OVER_VIEWER = 60;
+const INFO_WIDTH_OVER_VIEWER = 300;
+
 const LEFT_TABS: { id: "files"; label: string; icon: typeof FolderOpen }[] = [
   { id: "files", label: "Files", icon: FolderOpen },
 ];
@@ -57,6 +63,10 @@ const TOOL_ICONS: Record<RightToolId, typeof FileText> = {
   synth: FlaskConical,
   export: Download,
   config: Settings,
+};
+
+const TOOL_KEYWORDS: Partial<Record<RightToolId, string[]>> = {
+  config: ["Config"],
 };
 
 function toMetadataFiles(
@@ -79,7 +89,7 @@ function toMetadataFiles(
       error: f.error ?? undefined,
       metadata: header
         ? {
-          filter: header.FILTER ?? undefined,
+          filter: displayFilterValue(f) ?? undefined,
           exptime: header.EXPTIME != null ? Number(header.EXPTIME) : undefined,
           instrument: header.INSTRUME ?? undefined,
           detector: header.DETECTOR ?? undefined,
@@ -109,6 +119,7 @@ export default function App() {
   const sidebarStartW = useRef(0);
   const sidebarElRef = useRef<HTMLDivElement>(null);
   const sidebarInnerRef = useRef<HTMLDivElement>(null);
+  const infoPopoverRef = useRef<HTMLDivElement>(null);
   const [, forceSidebarRender] = useState(0);
 
   const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
@@ -135,11 +146,13 @@ export default function App() {
 
   const filteredDoneFiles = useMemo(() => {
     if (activeFilters.length === 0) return allDoneFiles;
-    return allDoneFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
+    return allDoneFiles.filter((f) => matchesActiveFilters(processedFilterable(f), activeFilters, filterMode));
   }, [allDoneFiles, activeFilters, filterMode]);
 
   useEffect(() => { const t = setTimeout(() => setLoading(false), 600); return () => clearTimeout(t); }, []);
   useEffect(() => { if (!loading) { const t = setTimeout(() => setShowBg(true), 100); return () => clearTimeout(t); } }, [loading]);
+
+  const [ingestReport, setIngestReport] = useState<IngestReport | null>(null);
 
   const handleFilesAdded = useCallback((newFiles: AstroFile[]) => {
     if (newFiles.length === 0) return;
@@ -182,8 +195,9 @@ export default function App() {
         const { open } = await import("@tauri-apps/plugin-dialog");
         const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: [...SUPPORTED_EXTENSIONS] }] });
         if (result) {
-          const paths = (Array.isArray(result) ? result : [result]).filter((p: string) => isValidFitsFile(p));
-          if (paths.length > 0) handleFilesAdded(paths.map((p: string) => ({ name: p.split(/[/\\]/).pop() || "Unknown", path: p, size: 0 })));
+          const partition = partitionIncoming(Array.isArray(result) ? result : [result]);
+          setIngestReport(rejectionReport(partition));
+          handleFilesAdded(partition.accepted.map(astroFileFromPath));
         }
       } catch (err) { console.error("[AstroBurst] File dialog error:", err); }
     } else {
@@ -192,14 +206,33 @@ export default function App() {
       input.onchange = (e: Event) => {
         const files = (e.target as HTMLInputElement).files;
         if (!files) return;
-        const list = Array.from(files).filter((f) => isValidFitsFile(f.name)).map((f) => ({ name: f.name, path: f.name, size: f.size }));
-        if (list.length > 0) handleFilesAdded(list);
+        const partition = partitionIncoming(Array.from(files), (f) => f.name);
+        setIngestReport(rejectionReport(partition));
+        handleFilesAdded(partition.accepted.map((f) => ({ name: f.name, path: f.name, size: f.size })));
       };
       input.click();
     }
   }, [handleFilesAdded]);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const shortcutsRef = useRef<HTMLDivElement>(null);
+  const shortcutsTitleId = useId();
+  useEffect(() => {
+    if (!shortcutsOpen) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    shortcutsRef.current?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [shortcutsOpen]);
+  const handleShortcutsKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Tab") return;
+    const focusables = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    const target = focusTrapTarget(focusables.length, focusables.indexOf(document.activeElement as HTMLElement), e.shiftKey);
+    if (target === null) return;
+    e.preventDefault();
+    focusables[target].focus();
+  }, []);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const lastShiftUp = useRef(0);
   useEffect(() => {
@@ -226,6 +259,7 @@ export default function App() {
       if (e.key === "Escape") {
         setShortcutsOpen(false);
         setPaletteOpen(false);
+        setInfoOpen(false);
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -248,23 +282,24 @@ export default function App() {
 
   const handleSelectFolder = useCallback(async () => {
     if (!isTauri()) { handleBrowseFiles(); return; }
+    let dir: string | null = null;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const { readDir } = await import("@tauri-apps/plugin-fs");
       const result = await open({ directory: true, multiple: false, title: "Select FITS Folder" });
-      const dir = typeof result === "string" ? result : null;
+      dir = typeof result === "string" ? result : null;
       if (!dir) return;
-      const entries = await readDir(dir);
-      const fitsFiles: AstroFile[] = [];
-      for (const entry of entries) {
-        const name = entry.name || "";
-        if (isValidFitsFile(name) && !entry.isDirectory) {
-          const sep = dir.includes("\\") ? "\\" : "/";
-          fitsFiles.push({ name, path: `${dir}${sep}${name}`, size: 0 });
-        }
-      }
-      if (fitsFiles.length > 0) handleFilesAdded(fitsFiles);
-    } catch (err) { console.error("[AstroBurst] Folder dialog error:", err); }
+      const base = dir;
+      const sep = base.includes("\\") ? "\\" : "/";
+      const entries = await readDir(base);
+      const paths = entries.filter((entry) => !entry.isDirectory && entry.name).map((entry) => `${base}${sep}${entry.name}`);
+      const partition = partitionIncoming(paths);
+      setIngestReport(folderReport(base, partition));
+      handleFilesAdded(partition.accepted.map(astroFileFromPath));
+    } catch (err) {
+      console.error("[AstroBurst] Folder dialog error:", err);
+      if (dir) setIngestReport(folderErrorReport(dir, err));
+    }
   }, [handleFilesAdded, handleBrowseFiles]);
 
   const handleNewBatch = useCallback(() => {
@@ -300,7 +335,7 @@ export default function App() {
     exportZip(
       activeFilters.length === 0
         ? all
-        : all.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode)),
+        : all.filter((f) => matchesActiveFilters(processedFilterable(f), activeFilters, filterMode)),
     );
   }, [exportZip, activeFilters, filterMode]);
 
@@ -319,7 +354,7 @@ export default function App() {
 
   const filteredMetadataFiles = useMemo(() => {
     if (activeFilters.length === 0) return metadataFiles;
-    return metadataFiles.filter((f) => matchesActiveFilters(f.name, activeFilters, filterMode));
+    return metadataFiles.filter((f) => matchesActiveFilters(metadataFilterable(f), activeFilters, filterMode));
   }, [metadataFiles, activeFilters, filterMode]);
 
   const filteredSelectedId = useMemo(() => {
@@ -362,6 +397,7 @@ export default function App() {
       sidebarWidthRef.current = next;
       if (el) el.style.width = `${next}px`;
       if (inner) inner.style.width = `${next}px`;
+      if (infoPopoverRef.current) infoPopoverRef.current.style.width = `${next}px`;
     };
     const onUp = () => {
       sidebarResizing.current = false;
@@ -399,21 +435,23 @@ export default function App() {
         { id: "toggle-sidebar", label: sidebarOpen ? "Hide Files Panel" : "Show Files Panel", icon: PanelLeftClose, run: () => setSidebarOpen((p) => !p) },
         { id: "toggle-compose", label: activeTool === "compose" ? "Hide Compose Panel" : "Show Compose Panel", icon: Layers, run: () => handleToggleTool("compose") },
       );
+      acts.push({ id: "toggle-info", label: infoOpen ? "Hide Info Panel" : "Show Info Panel", icon: InfoIcon, run: () => setInfoOpen((p) => !p) });
       for (const t of RIGHT_TOOLS) {
         acts.push({
           id: `tool-${t.id}`,
           label: rightTool === t.id ? `Hide ${t.label} Panel` : `Open ${t.label} Panel`,
           hint: "Tool",
+          keywords: TOOL_KEYWORDS[t.id],
           icon: TOOL_ICONS[t.id],
           run: () => rightToolStore.toggle(t.id),
         });
       }
       if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: handleExportZip });
-      if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", icon: RotateCcw, run: handleNewBatch });
+      if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", hint: "confirm in footer", icon: RotateCcw, run: handleNewBatchClick });
     }
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, sidebarOpen, activeTool, rightTool, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleToggleTool, handleExportZip, handleNewBatch]);
+  }, [view, sidebarOpen, activeTool, infoOpen, rightTool, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleToggleTool, handleExportZip, handleNewBatchClick]);
 
   const paletteFiles = useMemo<PaletteFile[]>(
     () => filteredMetadataFiles
@@ -440,12 +478,18 @@ export default function App() {
             onClick={() => setShortcutsOpen(false)}
           >
             <div
-              className="rounded-lg p-4 min-w-[300px] animate-fade-in"
+              ref={shortcutsRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={shortcutsTitleId}
+              tabIndex={-1}
+              onKeyDown={handleShortcutsKeyDown}
+              className="rounded-lg p-4 min-w-[300px] animate-fade-in focus:outline-none"
               style={{ background: "rgba(8,8,18,0.97)", border: "1px solid var(--ab-border-strong)", boxShadow: "0 8px 30px rgba(0,0,0,0.55)" }}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
+                <span id={shortcutsTitleId} className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
                 <button onClick={() => setShortcutsOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
                   <X size={12} />
                 </button>
@@ -493,7 +537,7 @@ export default function App() {
           </div>
         ) : (
           <div className="relative z-10 h-full animate-fade-in">
-            <DropZone onFilesAdded={handleFilesAdded}>
+            <DropZone onFilesAdded={handleFilesAdded} report={ingestReport}>
               {view === "empty" ? (
                 <div className="h-full flex items-center justify-center">
                   <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} />
@@ -666,11 +710,12 @@ export default function App() {
 
                         {infoOpen && (
                           <div
+                            ref={infoPopoverRef}
                             className="fixed z-50 rounded-lg overflow-hidden flex flex-col animate-fade-in"
                             style={{
-                              left: 60,
+                              left: sidebarOpen ? INFO_LEFT_IN_FILES : INFO_LEFT_OVER_VIEWER,
                               bottom: 88,
-                              width: 300,
+                              width: sidebarOpen ? sidebarWidthRef.current : INFO_WIDTH_OVER_VIEWER,
                               maxHeight: "50vh",
                               border: "1px solid var(--ab-border-strong)",
                               background: "rgba(8,8,18,0.97)",

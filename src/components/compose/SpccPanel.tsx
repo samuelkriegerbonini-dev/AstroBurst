@@ -176,7 +176,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
           )}
 
           <div className="text-[10px] text-cyan-400/80 bg-cyan-900/20 border border-cyan-800/20 rounded px-2.5 py-1.5">
-            Factors applied to Manual WB. Re-compose to see the result.
+            Factors loaded — click Apply Color Balance to apply them.
           </div>
         </div>
       )}

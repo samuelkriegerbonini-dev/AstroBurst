@@ -476,7 +476,7 @@ pub(crate) fn cached_header(path: &str) -> Result<HduHeader> {
 
 fn source_header_of(path: &str) -> Option<HduHeader> {
     if image_ref(path).is_synthetic() {
-        return None;
+        return GLOBAL_IMAGE_CACHE.get(path).and_then(|entry| entry.header().cloned());
     }
     cached_header(path).ok()
 }

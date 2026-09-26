@@ -106,6 +106,7 @@ export interface StarDetectionResult {
   image_width?: number;
   image_height?: number;
   elapsed_ms: number;
+  n_detected?: number;
 }
 
 export const BACKGROUND_PROGRESS_EVENT = "background-progress";

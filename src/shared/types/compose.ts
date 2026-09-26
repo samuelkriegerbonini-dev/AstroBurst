@@ -30,6 +30,7 @@ export interface AlignedChannel {
   matched_stars?: number;
   inliers?: number;
   residual_px?: number;
+  registered?: boolean;
 }
 
 export interface AlignResult {

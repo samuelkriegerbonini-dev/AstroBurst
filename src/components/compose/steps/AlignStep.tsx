@@ -1,6 +1,7 @@
 import { useState, useCallback, useId, useMemo } from "react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
+import { alignChannelOutcome } from "../../../utils/wizard";
 import { alignChannels } from "../../../services/compose";
 import type { AlignResult } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -87,30 +88,39 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
           const bin = activeBins.find((b) => b.id === c.binId);
           const ch = result?.channels?.[i];
           const offset = ch?.offset;
+          const outcome = alignChannelOutcome(ch, result?.align_method ?? method, i === 0);
           return (
-            <div key={c.binId} className="flex items-center justify-between py-1">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
-                <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
-                {i === 0 && <span className="text-[8px] text-sky-400/60 ml-1">REF</span>}
+            <div key={c.binId} className="flex flex-col py-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
+                  <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
+                  {i === 0 && <span className="text-[8px] text-sky-400/60 ml-1">REF</span>}
+                  {outcome.usedMethod && <span className="text-[8px] text-zinc-500">via {outcome.usedMethod}</span>}
+                </div>
+                <div className="flex items-center gap-2">
+                  {ch && (ch.matched_stars ?? 0) > 0 && (
+                    <span className="text-[8px] font-mono text-sky-400/50">
+                      {ch.inliers}/{ch.matched_stars} stars, {ch.residual_px?.toFixed(2)}px
+                    </span>
+                  )}
+                  {ch && (ch.confidence ?? 0) > 0 && ch.matched_stars === 0 && (
+                    <span className="text-[8px] font-mono text-sky-400/50">
+                      conf={ch.confidence?.toFixed(3)}
+                    </span>
+                  )}
+                  {offset && (
+                    <span className="text-[9px] font-mono text-zinc-600">
+                      [{offset[0]?.toFixed(1)}, {offset[1]?.toFixed(1)}]
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                {ch && (ch.matched_stars ?? 0) > 0 && (
-                  <span className="text-[8px] font-mono text-sky-400/50">
-                    {ch.inliers}/{ch.matched_stars} stars, {ch.residual_px?.toFixed(2)}px
-                  </span>
-                )}
-                {ch && (ch.confidence ?? 0) > 0 && ch.matched_stars === 0 && (
-                  <span className="text-[8px] font-mono text-sky-400/50">
-                    conf={ch.confidence?.toFixed(3)}
-                  </span>
-                )}
-                {offset && (
-                  <span className="text-[9px] font-mono text-zinc-600">
-                    [{offset[0]?.toFixed(1)}, {offset[1]?.toFixed(1)}]
-                  </span>
-                )}
-              </div>
+              {outcome.unregistered && (
+                <span className="text-[9px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded px-1.5 py-0.5 mt-0.5">
+                  {outcome.unregistered}
+                </span>
+              )}
             </div>
           );
         })}

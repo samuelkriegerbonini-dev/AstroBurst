@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   generateSynth,
   generateSynthStack,
@@ -8,6 +8,8 @@ import {
   type PsfType,
 } from "../../services/synth";
 import { synthOutputPaths } from "../../utils/synthPaths";
+import { formatCount } from "../../utils/formatCount";
+import { formatByteSize, synthStackEstimate } from "../../utils/synthBudget";
 import { Slider, RunButton, ErrorAlert, SectionHeader, Toggle } from "../ui";
 
 const ICON = (
@@ -38,7 +40,7 @@ function buildPsfType(choice: PsfChoice, fwhm: number, beta: number, lambdaD: nu
 }
 
 function formatFlux(value: number): string {
-  return `${Math.round(value).toLocaleString()} e⁻`;
+  return `${formatCount(value)} e⁻`;
 }
 
 export default function SynthPanel() {
@@ -102,6 +104,9 @@ export default function SynthPanel() {
     n_frames: stackMode ? nFrames : 1,
   }), [width, height, nStars, fluxMin, fluxMax, seed, fieldChoice, coreRadius, tidalRadius, scaleLength, inclination, psfChoice, fwhm, beta, lambdaD, gain, readNoise, skyBg, darkCurrent, expTime, biasLevel, vignette, vigStrength, stackMode, nFrames]);
 
+  const stackEstimate = synthStackEstimate(width, height, nFrames);
+  const stackOverBudget = stackMode ? stackEstimate.overBudgetReason : null;
+
   const handleGenerate = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -110,7 +115,8 @@ export default function SynthPanel() {
       const config = buildConfig();
 
       if (stackMode) {
-        const dir = await save({ title: "Choose output directory", defaultPath: "synth_stack" });
+        const picked = await open({ directory: true, multiple: false, title: "Choose output folder" });
+        const dir = typeof picked === "string" ? picked : null;
         if (!dir) { setLoading(false); return; }
         const res = await generateSynthStack(config, dir, "synth");
         setResult({ stars: res.star_count, path: res.output_path ?? dir });
@@ -199,7 +205,7 @@ export default function SynthPanel() {
           <Slider label="Beta" value={beta} min={1} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => v.toFixed(1)} onChange={setBeta} />
         )}
         {psfChoice === "airy" && (
-          <Slider label="\u03BB/D" value={lambdaD} min={0.5} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)}px`} onChange={setLambdaD} />
+          <Slider label="λ/D" value={lambdaD} min={0.5} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)}px`} onChange={setLambdaD} />
         )}
       </div>
 
@@ -223,11 +229,12 @@ export default function SynthPanel() {
         <Toggle label="Save ground truth" checked={saveGt} disabled={loading} onChange={setSaveGt} />
         <Toggle label="Stack mode (multi-frame)" checked={stackMode} disabled={loading} onChange={setStackMode} />
         {stackMode && (
-          <Slider label="Frames" value={nFrames} min={2} max={64} step={1} disabled={loading} accent="rose" onChange={setNFrames} />
+          <Slider label="Frames" value={nFrames} min={2} max={64} step={1} disabled={loading} accent="rose" hint={` ≈ ${formatByteSize(stackEstimate.bytes)} on disk`} onChange={setNFrames} />
         )}
       </div>
 
-      <RunButton label={stackMode ? `Generate ${nFrames} Frames` : "Generate FITS"} runningLabel="Generating..." running={loading} accent="rose" onClick={handleGenerate} />
+      <RunButton label={stackMode ? `Generate ${nFrames} Frames` : "Generate FITS"} runningLabel="Generating..." running={loading} disabled={!!stackOverBudget} accent="rose" onClick={handleGenerate} />
+      {stackOverBudget && <div className="text-[10px] text-amber-400/90 px-1">{stackOverBudget}</div>}
       <ErrorAlert message={error} />
 
       {result && (

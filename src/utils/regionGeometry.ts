@@ -452,6 +452,17 @@ export function shapeSummary(shape: RegionShape): string {
   }
 }
 
+export const ZERO_BASED_PIXEL_TITLE =
+  "Image pixel coordinates are 0-based at the pixel centre; DS9 and the exported .reg are 1-based (add 1).";
+
+export function zeroBasedPixelText(x: number, y: number): string {
+  return `px(${x},${y}) 0-based`;
+}
+
+export function shapeSummaryTitle(shape: RegionShape): string {
+  return `${shapeSummary(shape)} 0-based\n${ZERO_BASED_PIXEL_TITLE}`;
+}
+
 function fin(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }

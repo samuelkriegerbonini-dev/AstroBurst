@@ -5,8 +5,18 @@ import type { PhotometryMeasurement, StarPhotometry } from "../../services/analy
 import { getWcsInfo } from "../../services/astrometry";
 import { usePixelClick } from "../../hooks/useMousePixelStore";
 import { useDqContext } from "../../context/PreviewContext";
+import { useToolHost } from "../../context/ToolHostContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, photometryEntry } from "../../utils/measurementLog";
+import {
+  createClickLogGate,
+  gaiaFailureWarning,
+  loadGaiaMatchPreference,
+  replaceNewest,
+  saveGaiaMatchPreference,
+  withWarning,
+} from "../../utils/photometryPanel";
+import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { Toggle } from "../ui";
 import ProfilePlot from "../regions/ProfilePlot";
 import type { ProfileSeries } from "../regions/ProfilePlot";
@@ -31,6 +41,11 @@ const GROWTH_PLOT_HEIGHT = 140;
 const GROWTH_CURVE_COLOR = "#fbbf24";
 const GROWTH_CSV_NAME = "growth-curve";
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
+const APERTURE_DEFAULTS_CAPTION = "blank: r_ap = 1.5 × FWHM, sky 2–3 × r_ap";
+const APERTURE_TITLE = "Aperture radius in pixels; blank uses 1.5 × FWHM of the clicked star";
+const SKY_IN_TITLE = "Inner sky radius in pixels; blank uses 2 × r_ap";
+const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
+const GAIA_PENDING_TEXT = "Querying Gaia DR3 (VizieR)...";
 const NO_PLATEAU_TEXT =
   "no plateau: the curve of growth did not flatten before the sky annulus (crowded field, extended source or annulus too close), so the aperture correction, total flux and EE radii are not available";
 
@@ -100,7 +115,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const skyOutId = useId();
   const gainId = useId();
   const [armed, setArmed] = useState(false);
-  const [gaiaMatch, setGaiaMatch] = useState(true);
+  const [gaiaMatch, setGaiaMatch] = useState(() => loadGaiaMatchPreference());
+  const [gaiaPending, setGaiaPending] = useState(false);
   const [apertureText, setApertureText] = useState("");
   const [skyInText, setSkyInText] = useState("");
   const [skyOutText, setSkyOutText] = useState("");
@@ -113,23 +129,32 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const click = usePixelClick();
   const { excludeDq } = useDqContext();
+  const { active } = useToolHost();
   const provenance = useMeasurementProvenance();
   const lastSeqRef = useRef(0);
   const busyRef = useRef(false);
-  const requestSeqRef = useRef(0);
+  const [logGate] = useState(createClickLogGate);
   const clickRef = useRef(click);
   clickRef.current = click;
   const wcsSeqRef = useRef(0);
 
+  const changeGaiaMatch = useCallback((on: boolean) => {
+    setGaiaMatch(on);
+    saveGaiaMatchPreference(on);
+  }, []);
+
   useEffect(() => {
-    requestSeqRef.current++;
+    logGate.supersede();
     lastSeqRef.current = clickRef.current?.seq ?? lastSeqRef.current;
     setResult(null);
     setHistory([]);
     setError(null);
     setIsMeasuring(false);
+    setGaiaPending(false);
     busyRef.current = false;
-  }, [filePath]);
+  }, [filePath, logGate]);
+
+  useEffect(() => () => logGate.supersede(), [logGate]);
 
   useEffect(() => {
     const seq = ++wcsSeqRef.current;
@@ -156,38 +181,52 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const measure = useCallback(
     async (x: number, y: number) => {
       if (!filePath || busyRef.current || apertureOutOfRange) return;
-      const seq = ++requestSeqRef.current;
+      const seq = logGate.begin();
+      const options = { apertureRadius, annulusInner, annulusOuter, gain, excludeDq };
       busyRef.current = true;
       setIsMeasuring(true);
+      setGaiaPending(false);
       setError(null);
-      try {
-        const res = await measurePhotometry(filePath, x, y, {
-          apertureRadius,
-          annulusInner,
-          annulusOuter,
-          gain,
-          gaiaMatch,
-          excludeDq,
-        });
-        if (requestSeqRef.current !== seq) return;
-        setResult(res);
-        measurementLog.append(photometryEntry(provenance, res, { apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq }));
-        setHistory((prev) => [res, ...prev].slice(0, 4));
-      } catch (e: unknown) {
-        if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        busyRef.current = false;
-        if (requestSeqRef.current === seq) setIsMeasuring(false);
+      const local = await measurePhotometry(filePath, x, y, { ...options, gaiaMatch: false }).catch((e: unknown) => {
+        if (logGate.isCurrent(seq)) {
+          setError(e instanceof Error ? e.message : String(e));
+          setIsMeasuring(false);
+        }
+        return null;
+      });
+      busyRef.current = false;
+      if (!local || !logGate.isCurrent(seq)) return;
+      setResult(local);
+      setHistory((prev) => [local, ...prev].slice(0, 4));
+      setIsMeasuring(false);
+      const appendLocal = () => measurementLog.append(photometryEntry(provenance, local, { ...options, gaiaMatch: false }));
+      if (!gaiaMatch) {
+        logGate.commit(seq, appendLocal);
+        return;
       }
+      logGate.hold(seq, appendLocal);
+      setGaiaPending(true);
+      const matched = await measurePhotometry(filePath, x, y, { ...options, gaiaMatch: true }).catch((e: unknown) =>
+        withWarning(local, gaiaFailureWarning(e)),
+      );
+      if (!logGate.isCurrent(seq)) return;
+      setGaiaPending(false);
+      setResult(matched);
+      setHistory((prev) => replaceNewest(prev, local, matched));
+      logGate.commit(seq, () => measurementLog.append(photometryEntry(provenance, matched, { ...options, gaiaMatch: true })));
     },
-    [filePath, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq, provenance],
+    [filePath, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, gaiaMatch, excludeDq, provenance, logGate],
   );
 
   useEffect(() => {
+    if (!active) {
+      lastSeqRef.current = clickRef.current?.seq ?? lastSeqRef.current;
+      return;
+    }
     if (!armed || !click || click.seq === lastSeqRef.current) return;
     lastSeqRef.current = click.seq;
-    measure(click.x, click.y);
-  }, [armed, click, measure]);
+    void measure(click.x, click.y);
+  }, [active, armed, click, measure]);
 
   const phot = result?.photometry;
   const photcal = result?.photcal ?? null;
@@ -226,7 +265,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 max={MAX_APERTURE_RADIUS_PX}
                 step={0.5}
                 value={apertureText}
-                placeholder="auto 1.5 x FWHM"
+                placeholder="auto"
+                title={APERTURE_TITLE}
                 onChange={(e) => setApertureText(e.target.value)}
                 className={INPUT_CLASS}
               />
@@ -241,7 +281,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 min={1}
                 step={0.5}
                 value={skyInText}
-                placeholder="2 x r_ap"
+                placeholder="2×r"
+                title={SKY_IN_TITLE}
                 onChange={(e) => setSkyInText(e.target.value)}
                 className={INPUT_CLASS}
               />
@@ -257,7 +298,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 max={MAX_SKY_OUTER_RADIUS_PX}
                 step={0.5}
                 value={skyOutText}
-                placeholder="3 x r_ap"
+                placeholder="3×r"
+                title={SKY_OUT_TITLE}
                 onChange={(e) => setSkyOutText(e.target.value)}
                 className={INPUT_CLASS}
               />
@@ -278,16 +320,17 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
               />
             </div>
           </div>
+          <div className="text-[9px] text-zinc-600">{APERTURE_DEFAULTS_CAPTION}</div>
           {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
           {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
         </div>
 
-        <Toggle label="Match Gaia DR3 (online)" checked={gaiaMatch} accent="amber" onChange={setGaiaMatch} />
+        <Toggle label="Match Gaia DR3 (online)" checked={gaiaMatch} accent="amber" onChange={changeGaiaMatch} />
 
         {armed && (
           <div className="flex items-center gap-1.5 text-[10px] text-yellow-400/70">
             <Crosshair size={10} />
-            <span>Enable crosshair mode in the viewer toolbar, then click a star.</span>
+            <span>Select Crosshair in the viewer toolbar, then click a star.</span>
           </div>
         )}
 
@@ -318,8 +361,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 </span>
               )}
             </div>
-            <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-              <div className="text-zinc-500">Centroid</div>
+            <div className="bg-zinc-900/80 rounded px-2 py-1.5" title={ZERO_BASED_PIXEL_TITLE}>
+              <div className="text-zinc-500">Centroid (0-based)</div>
               <div className="text-yellow-300 font-mono">
                 {phot.x.toFixed(2)}, {phot.y.toFixed(2)}
               </div>
@@ -400,6 +443,12 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 <div className="text-zinc-300 font-mono">
                   {result.sky.ra.toFixed(5)}°, {result.sky.dec.toFixed(5)}°
                 </div>
+              </div>
+            )}
+            {gaiaPending && (
+              <div className="flex items-center gap-1.5 text-emerald-400/80 col-span-2">
+                <Loader2 size={10} className="animate-spin" />
+                <span>{GAIA_PENDING_TEXT}</span>
               </div>
             )}
             {result?.gaia && (

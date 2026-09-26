@@ -1,6 +1,9 @@
 import { useEffect, useRef, useCallback, useMemo, memo, useState } from "react";
 import { Wand2, RotateCcw, SlidersHorizontal, Check } from "lucide-react";
 import type { StfParams } from "../../shared/types";
+import { constrainStf, dragStfMarker, pickStfMarker, stfMarkerPositions } from "../../utils/histogramWindow";
+import type { HistogramRange } from "../../utils/histogramWindow";
+import { MEAN_LABEL, SIGMA_MAD_LABEL, SIGMA_MAD_TITLE, skyRangeLabel } from "../../utils/analysisLabels";
 
 const CANVAS_H = 110;
 const DRAG_THRESHOLD = 0.03;
@@ -28,9 +31,20 @@ interface HistogramPanelProps {
   disabled?: boolean;
   disabledHint?: string;
   badge?: React.ReactNode;
+  binsWindow?: HistogramRange | null;
+  skyZoom?: boolean;
+  skyAvailable?: boolean;
+  skyLoading?: boolean;
+  onSkyZoomChange?: (on: boolean) => void;
 }
 
 const DISABLED_HINT = "STF applies only to the mtf stretch";
+const SKY_TITLE = "Zoom on the sky: median − 5 σ(MAD) to median + 50 σ(MAD); markers outside it sit on the edge";
+
+function pinnedLabel(label: string, pos: { x: number; pinned: boolean }): string {
+  if (!pos.pinned) return label;
+  return pos.x === 0 ? `◂${label}` : `${label}▸`;
+}
 
 function HistogramPanel({
                           bins = [],
@@ -46,6 +60,11 @@ function HistogramPanel({
                           disabled = false,
                           disabledHint = DISABLED_HINT,
                           badge,
+                          binsWindow = null,
+                          skyZoom = false,
+                          skyAvailable = false,
+                          skyLoading = false,
+                          onSkyZoomChange,
                         }: HistogramPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -53,8 +72,9 @@ function HistogramPanel({
   const draggingRef = useRef<"shadow" | "midtone" | "highlight" | null>(null);
   const rafRef = useRef<number | null>(null);
   const overlayRafRef = useRef<number | null>(null);
-  const stateRef = useRef({ shadow, midtone, highlight });
-  stateRef.current = { shadow, midtone, highlight };
+  const frame = useMemo(() => ({ min: dataMin, max: dataMax }), [dataMin, dataMax]);
+  const stateRef = useRef({ shadow, midtone, highlight, frame, binsWindow });
+  stateRef.current = { shadow, midtone, highlight, frame, binsWindow };
 
   const [manualMode, setManualMode] = useState(false);
   const [draft, setDraft] = useState({ shadow: "", midtone: "", highlight: "" });
@@ -79,12 +99,14 @@ function HistogramPanel({
 
   const applyManual = useCallback(() => {
     if (!onChange) return;
-    const s = Math.max(0, Math.min(parseFloat(draft.shadow) || 0, 1));
-    const h = Math.max(0, Math.min(parseFloat(draft.highlight) || 1, 1));
-    const m = Math.max(0.001, Math.min(parseFloat(draft.midtone) || 0.5, 0.999));
-    onChange({ shadow: s, midtone: m, highlight: Math.max(s + 0.01, h) });
+    const typed = {
+      shadow: parseFloat(draft.shadow) || 0,
+      midtone: parseFloat(draft.midtone) || 0.5,
+      highlight: parseFloat(draft.highlight) || 1,
+    };
+    onChange(constrainStf(typed, frame, binsWindow));
     setManualMode(false);
-  }, [draft, onChange]);
+  }, [draft, onChange, frame, binsWindow]);
 
   const drawBars = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -134,10 +156,11 @@ function HistogramPanel({
       if (!ctx) return;
       ctx.clearRect(0, 0, W, H);
 
-      const { shadow: s, midtone: m, highlight: hi } = stateRef.current;
-      const shadowX = s * W;
-      const highlightX = hi * W;
-      const midX = shadowX + m * (highlightX - shadowX);
+      const { frame: f, binsWindow: win, ...stf } = stateRef.current;
+      const { shadow: shadowPos, midtone: midPos, highlight: highlightPos } = stfMarkerPositions(stf, f, win);
+      const shadowX = shadowPos.x * W;
+      const highlightX = highlightPos.x * W;
+      const midX = midPos.x * W;
 
       ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
       ctx.fillRect(0, 0, shadowX, H);
@@ -166,12 +189,19 @@ function HistogramPanel({
       ctx.setLineDash([]);
 
       ctx.font = "10px 'JetBrains Mono', monospace";
+      const drawLabel = (text: string, x: number, y: number, side: "left" | "right") => {
+        const width = ctx.measureText(text).width;
+        const left = x - 3 - width;
+        const right = x + 3;
+        const useLeft = side === "left" ? left >= 0 : right + width > W;
+        ctx.fillText(text, useLeft ? left : right, y);
+      };
       ctx.fillStyle = "#ef4444";
-      ctx.fillText("S", shadowX + 3, 11);
+      drawLabel(pinnedLabel("S", shadowPos), shadowX, 11, "right");
       ctx.fillStyle = "#eab308";
-      ctx.fillText("M", midX + 3, 11);
+      drawLabel(pinnedLabel("M", midPos), midX, midPos.pinned ? 23 : 11, "right");
       ctx.fillStyle = "#22c55e";
-      ctx.fillText("H", highlightX - 13, 11);
+      drawLabel(pinnedLabel("H", highlightPos), highlightX, 11, "left");
     });
   }, []);
 
@@ -187,7 +217,7 @@ function HistogramPanel({
     };
   }, [drawBars]);
 
-  useEffect(() => { drawOverlay(); }, [shadow, midtone, highlight, drawOverlay]);
+  useEffect(() => { drawOverlay(); }, [shadow, midtone, highlight, frame, binsWindow, drawOverlay]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -211,36 +241,19 @@ function HistogramPanel({
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (disabled) return;
-      const norm = getMouseNorm(e.nativeEvent);
-      const { shadow: s, midtone: m, highlight: hi } = stateRef.current;
-      const midX = s + m * (hi - s);
+      const { frame: f, binsWindow: win, ...stf } = stateRef.current;
+      const marker = pickStfMarker(getMouseNorm(e.nativeEvent), stf, f, win, DRAG_THRESHOLD);
+      if (!marker) return;
 
-      const distS = Math.abs(norm - s);
-      const distM = Math.abs(norm - midX);
-      const distH = Math.abs(norm - hi);
-      const minDist = Math.min(distS, distM, distH);
-
-      if (minDist > DRAG_THRESHOLD) return;
-
-      draggingRef.current =
-        minDist === distS ? "shadow" : minDist === distH ? "highlight" : "midtone";
+      draggingRef.current = marker;
       e.preventDefault();
 
       const onMove = (ev: MouseEvent) => {
-        if (!draggingRef.current || !onChange) return;
-        const n = getMouseNorm(ev);
-        const { shadow: cs, midtone: cm, highlight: ch } = stateRef.current;
-
-        if (draggingRef.current === "shadow") {
-          onChange({ shadow: Math.max(0, Math.min(n, ch - 0.01)), midtone: cm, highlight: ch });
-        } else if (draggingRef.current === "highlight") {
-          onChange({ shadow: cs, midtone: cm, highlight: Math.min(1, Math.max(n, cs + 0.01)) });
-        } else {
-          const range = ch - cs;
-          if (range > 0) {
-            onChange({ shadow: cs, midtone: Math.max(0.001, Math.min(0.999, (n - cs) / range)), highlight: ch });
-          }
-        }
+        const dragging = draggingRef.current;
+        if (!dragging || !onChange) return;
+        const { frame: cf, binsWindow: cw, ...current } = stateRef.current;
+        const next = dragStfMarker(dragging, getMouseNorm(ev), current, cf, cw);
+        if (next) onChange(next);
       };
 
       const onUp = () => {
@@ -280,6 +293,32 @@ function HistogramPanel({
           {badge}
         </div>
         <div className="flex items-center gap-0.5">
+          {onSkyZoomChange && (
+            <div className="flex items-center mr-1 rounded-md overflow-hidden" style={{ border: "1px solid rgba(63,63,70,0.4)" }}>
+              <button
+                type="button"
+                onClick={() => onSkyZoomChange(false)}
+                aria-pressed={!skyZoom}
+                title="Full range: bins over the whole data range"
+                className="text-[9px] px-1.5 py-0.5 transition-colors"
+                style={{ color: skyZoom ? "#71717a" : "var(--ab-blue)", background: skyZoom ? undefined : "rgba(59,130,246,0.1)" }}
+              >
+                Full
+              </button>
+              <button
+                type="button"
+                onClick={() => onSkyZoomChange(true)}
+                disabled={!skyAvailable}
+                aria-pressed={skyZoom}
+                title={skyAvailable ? SKY_TITLE : "No sky window: σ(MAD) is zero or the data range is empty"}
+                className="flex items-center gap-1 text-[9px] px-1.5 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ color: skyZoom ? "var(--ab-blue)" : "#71717a", background: skyZoom ? "rgba(59,130,246,0.1)" : undefined }}
+              >
+                Sky
+                {skyLoading && <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--ab-blue)" }} />}
+              </button>
+            </div>
+          )}
           <ToolbarBtn onClick={onAutoStf} title={disabled ? disabledHint : "Auto Stretch (STF)"} active={false} color="var(--ab-blue)" disabled={disabled}>
             <Wand2 size={11} />
             <span>Auto</span>
@@ -359,9 +398,14 @@ function HistogramPanel({
           className="flex items-center gap-4 px-3 py-1.5 text-[10px] font-mono text-zinc-500"
           style={{ borderTop: "1px solid rgba(63,63,70,0.12)" }}
         >
-          <span>\u03bc={stats.mean?.toFixed(1)}</span>
+          <span>{`${MEAN_LABEL}=${stats.mean?.toFixed(1)}`}</span>
           <span>med={stats.median?.toFixed(1)}</span>
-          <span>\u03c3={stats.sigma?.toFixed(1)}</span>
+          <span title={SIGMA_MAD_TITLE}>{`${SIGMA_MAD_LABEL}=${stats.sigma?.toFixed(1)}`}</span>
+          {binsWindow && (
+            <span className="ml-auto text-zinc-600" title={SKY_TITLE}>
+              {skyRangeLabel(binsWindow)}
+            </span>
+          )}
         </div>
       )}
     </div>

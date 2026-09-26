@@ -6,10 +6,12 @@ import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
   nextEnabledStep,
   STEPS,
+  wizardHasProgress,
   type ChannelStage,
   type CompositeOp,
 } from "../../utils/wizard";
 import type { StfParams } from "../../shared/types";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
@@ -54,7 +56,8 @@ function MiniInfoBar() {
       {histData && (
         <>
           <span className="text-zinc-600 shrink-0">
-            mean={histData.mean?.toFixed(2)} median={histData.median?.toFixed(2)} &sigma;={histData.sigma?.toFixed(2)}
+            mean={histData.mean?.toFixed(2)} median={histData.median?.toFixed(2)}{" "}
+            <span title={SIGMA_MAD_TITLE}>{SIGMA_MAD_LABEL}={histData.sigma?.toFixed(2)}</span>
           </span>
           <span style={{ color: "var(--ab-border-strong)" }}>|</span>
           <span className="shrink-0">
@@ -92,25 +95,37 @@ export default function ComposeWizard() {
   const { forgetOutputs } = useRenderActions();
   const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
 
-  const { state, dispatch, activeStep, setActiveStep, setOutputForgetter } = useComposeWizardContext();
+  const { state, dispatch, activeStep, setActiveStep, setOutputForgetter, setCompositeDims } = useComposeWizardContext();
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
   const totalFiles = useMemo(() => state.bins.reduce((a, b) => a + b.files.length, 0), [state.bins]);
 
-  const advanceToNext = useCallback((fromStepId: string) => {
-    const next = nextEnabledStep(fromStepId, state);
+  const completedStepRef = useRef<string | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const from = completedStepRef.current;
+    if (!from) return;
+    completedStepRef.current = null;
+    const next = nextEnabledStep(from, state);
     if (!next) return;
     if (suggestedTimerRef.current) clearTimeout(suggestedTimerRef.current);
     setSuggestedStep(next);
     suggestedTimerRef.current = setTimeout(() => setSuggestedStep(null), 4000);
   }, [state]);
 
+  useEffect(() => () => {
+    if (suggestedTimerRef.current) clearTimeout(suggestedTimerRef.current);
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+  }, []);
+
   const completeStep = useCallback((stepId: string) => {
+    completedStepRef.current = stepId;
     dispatch({ type: "COMPLETE_STEP", stepId });
-    advanceToNext(stepId);
-  }, [advanceToNext, dispatch]);
+  }, [dispatch]);
 
   const handleStepClick = useCallback((stepId: string) => {
     setActiveStep(stepId);
@@ -143,10 +158,23 @@ export default function ComposeWizard() {
     setOutputForgetter(forgetOutputs);
   }, [setOutputForgetter, forgetOutputs]);
 
+  const disarmReset = useCallback(() => {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = null;
+    setResetArmed(false);
+  }, []);
+
   const handleReset = useCallback(() => {
+    if (!resetArmed && wizardHasProgress(state)) {
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      setResetArmed(true);
+      resetTimerRef.current = setTimeout(() => setResetArmed(false), 4000);
+      return;
+    }
+    disarmReset();
     dispatch({ type: "RESET" });
     setActiveStep("channels");
-  }, [dispatch, setActiveStep]);
+  }, [resetArmed, state, disarmReset, dispatch, setActiveStep]);
 
   const handleCompositeOp = useCallback((op: CompositeOp) => {
     dispatch({ type: "RECORD_COMPOSITE_OP", op });
@@ -214,7 +242,8 @@ export default function ComposeWizard() {
           <BlendStep
             state={state}
             onWeightsChange={(weights, preset) => dispatch({ type: "SET_BLEND_WEIGHTS", weights, preset })}
-            onCompositeReady={(url, autoStf) => {
+            onCompositeReady={(url, autoStf, dimensions) => {
+              if (dimensions) setCompositeDims(dimensions);
               if (autoStf) {
                 handleCompositePreview(url, autoStf, autoStf, autoStf);
               } else {
@@ -228,6 +257,7 @@ export default function ComposeWizard() {
         return (
           <ColorBalanceStep
             state={state}
+            doneFiles={doneFiles}
             filterDetections={filterDetections}
             onWbChange={(mode, r, g, b) => dispatch({ type: "SET_WB", mode, r, g, b })}
             onScnrChange={(enabled, amount, method, preserveLuminance) =>
@@ -278,7 +308,7 @@ export default function ComposeWizard() {
       default:
         return null;
     }
-  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleCompositeOp, handleChannelOutput, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch]);
+  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleCompositeOp, handleChannelOutput, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch, setCompositeDims]);
 
   return (
     <div className="flex flex-col h-full">
@@ -288,7 +318,8 @@ export default function ComposeWizard() {
         <div className="flex flex-wrap items-center gap-0.5 flex-1 min-w-0">
           {STEPS.map((step, idx) => {
             const isActive = activeStep === step.id;
-            const isEnabled = step.enabled(state);
+            const blockedReason = step.blockedReason(state);
+            const isEnabled = blockedReason === null;
             const badge = step.badge?.(state);
             const isDone = !!state.completedSteps[step.id];
             const isSuggested = suggestedStep === step.id;
@@ -301,7 +332,7 @@ export default function ComposeWizard() {
                 className={`ab-step-pill ${
                   isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 } ${isSuggested ? "ab-step-suggested" : ""}`}
-                title={step.label}
+                title={blockedReason ? `${step.label} — ${blockedReason}` : step.label}
               >
                 <span className="text-[9px] text-zinc-600 font-mono">{idx + 1}</span>
                 {step.shortLabel}
@@ -325,10 +356,17 @@ export default function ComposeWizard() {
 
         <button
           onClick={handleReset}
-          className="shrink-0 px-1.5 py-1 rounded text-[9px] text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
-          title="Reset Wizard"
+          onBlur={() => { if (resetArmed) disarmReset(); }}
+          className={`shrink-0 flex items-center gap-1 px-1.5 py-1 rounded text-[9px] transition-all ${
+            resetArmed
+              ? "text-amber-300 bg-amber-500/15 ring-1 ring-amber-500/30"
+              : "text-zinc-600 hover:text-red-400 hover:bg-red-500/10"
+          }`}
+          title={resetArmed ? "Click again to clear every channel, step result and setting" : "Reset Wizard"}
+          aria-label={resetArmed ? "Confirm resetting all wizard steps" : "Reset Wizard"}
         >
           <RotateCcw size={10} />
+          {resetArmed && "Reset all steps?"}
         </button>
       </div>
 

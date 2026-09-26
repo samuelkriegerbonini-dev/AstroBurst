@@ -80,6 +80,13 @@ export interface MeasurementProvenance {
 
 export const EMPTY_LOG: readonly MeasurementLogEntry[] = Object.freeze([]) as readonly MeasurementLogEntry[];
 
+export const LOG_SESSION_NOTE = "Kept for this session only; Save CSV to keep it.";
+
+export function clearConfirmText(total: number, shown: number): string {
+  const rows = `${total} row${total === 1 ? "" : "s"}`;
+  return shown < total ? `Clear all ${rows}, not only the ${shown} shown?` : `Clear ${rows}?`;
+}
+
 type Listener = () => void;
 
 export class MeasurementLogCore {

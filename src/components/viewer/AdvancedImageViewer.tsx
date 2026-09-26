@@ -8,10 +8,8 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize,
-  Square,
   Columns2,
   Move,
-  RotateCcw,
   Crosshair,
   Eye,
   EyeOff,
@@ -22,6 +20,8 @@ import {
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
+import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
+import { previewTextureTitle } from "../../utils/previewShell";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "./OverlayLayer";
@@ -80,9 +80,10 @@ function AdvancedImageViewer({
   const {
     attachContainer,
     transform, transformRef, setTransform,
-    fitToWindow, zoomTo, zoomIn, zoomOut, setOneToOne,
-    hasRenderDims, zoomPct,
-  } = useViewerTransform({ containerRef, renderW, renderH });
+    fitToWindow, zoomToFits, zoomIn, zoomOut, setOneToOne,
+    hasRenderDims, zoomPct, isPresetActive,
+  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: activeImage?.width });
+  const textureBadge = previewTextureBadge(renderW, activeImage?.width);
 
   const mainRetry = useImageRetry(activeImage?.url);
   const origRetry = useImageRetry(original?.url);
@@ -121,7 +122,7 @@ function AdvancedImageViewer({
         setTransform((prev) => ({ ...prev, x: panStart.current.tx + dx, y: panStart.current.ty + dy }));
         return;
       }
-      if (cursorMode === "crosshair" && onMousePixel && hasRenderDims) {
+      if (onMousePixel && hasRenderDims) {
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
         const fitsW = activeImage?.width ?? renderW;
@@ -133,7 +134,7 @@ function AdvancedImageViewer({
         if (coord) onMousePixel(coord.x, coord.y);
       }
     },
-    [cursorMode, onMousePixel, activeImage, renderW, renderH, hasRenderDims, setTransform, transformRef],
+    [onMousePixel, activeImage, renderW, renderH, hasRenderDims, setTransform, transformRef],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -190,7 +191,7 @@ function AdvancedImageViewer({
   const imgStyle: React.CSSProperties = {
     transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
     transformOrigin: "0 0",
-    imageRendering: transform.scale >= 4 ? "pixelated" : "auto",
+    imageRendering: imageRenderingFor(transform.scale),
     willChange: "transform",
     position: "absolute",
     top: 0,
@@ -218,20 +219,33 @@ function AdvancedImageViewer({
           <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom In"><ZoomIn size={14} /></button>
           <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom Out"><ZoomOut size={14} /></button>
           <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window"><Maximize size={14} /></button>
-          <button onClick={setOneToOne} className="ab-viewer-btn" title="1:1 Pixel"><Square size={13} /></button>
-          <button onClick={fitToWindow} className="ab-viewer-btn" title="Reset View"><RotateCcw size={13} /></button>
+          <button onClick={setOneToOne} className="ab-viewer-btn ab-viewer-btn-text" title="1:1 Pixel (one FITS pixel per screen pixel)">1:1</button>
+        </div>
+
+        <div className="ab-viewer-toolbar-divider" />
+
+        <div className="ab-viewer-toolbar-group" role="group" aria-label="Pointer mode">
+          <button
+            onClick={() => setCursorMode("pan")}
+            className={`ab-viewer-btn ${cursorMode === "pan" ? "ab-viewer-btn-active" : ""}`}
+            title="Pan"
+            aria-pressed={cursorMode === "pan"}
+          >
+            <Move size={14} />
+          </button>
+          <button
+            onClick={() => setCursorMode("crosshair")}
+            className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
+            title="Crosshair"
+            aria-pressed={cursorMode === "crosshair"}
+          >
+            <Crosshair size={14} />
+          </button>
         </div>
 
         <div className="ab-viewer-toolbar-divider" />
 
         <div className="ab-viewer-toolbar-group">
-          <button
-            onClick={() => setCursorMode((m) => (m === "pan" ? "crosshair" : "pan"))}
-            className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
-            title={cursorMode === "crosshair" ? "Switch to Pan" : "Switch to Crosshair"}
-          >
-            {cursorMode === "crosshair" ? <Crosshair size={14} /> : <Move size={14} />}
-          </button>
           {hasComparison && (
             <button
               onClick={() => setCompareMode((v) => !v)}
@@ -253,11 +267,19 @@ function AdvancedImageViewer({
         {regionsEnabled && <RegionToolbar />}
 
         <div className="ab-viewer-toolbar-group ml-auto">
+          {textureBadge && (
+            <span
+              className="ab-viewer-preview-badge"
+              title={previewTextureTitle({ renderW, renderH, fitsW: activeImage.width ?? renderW, fitsH: activeImage.height ?? renderH, deepZoomOffered: true })}
+            >
+              {textureBadge}
+            </span>
+          )}
           {ZOOM_PRESETS.map((z) => (
             <button
               key={z}
-              onClick={() => zoomTo(z)}
-              className={`ab-viewer-zoom-preset ${Math.abs(transform.scale - z) < 0.01 ? "ab-viewer-zoom-preset-active" : ""}`}
+              onClick={() => zoomToFits(z)}
+              className={`ab-viewer-zoom-preset ${isPresetActive(z) ? "ab-viewer-zoom-preset-active" : ""}`}
             >
               {z >= 1 ? `${z}x` : `${Math.round(z * 100)}%`}
             </button>

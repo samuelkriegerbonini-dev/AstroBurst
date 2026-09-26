@@ -4,7 +4,9 @@ import { pixelTable } from "../../services/analysis";
 import type { PixelTableResult } from "../../shared/types/analysis";
 import { useMousePixel, usePixelClick } from "../../hooks/useMousePixelStore";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { useToolHost } from "../../context/ToolHostContext";
 import { measurementLog, pixelEntry } from "../../utils/measurementLog";
+import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { Toggle } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
@@ -69,6 +71,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const click = usePixelClick();
   const provenance = useMeasurementProvenance();
   const mouse = useMousePixel();
+  const { active } = useToolHost();
   const requestSeqRef = useRef(0);
   const busyRef = useRef(false);
   const pendingRef = useRef<{ x: number; y: number } | null>(null);
@@ -136,17 +139,21 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   fetchRef.current = fetchTable;
 
   useEffect(() => {
+    if (!active) {
+      lastSeqRef.current = clickRef.current?.seq ?? lastSeqRef.current;
+      return;
+    }
     if (!armed || !click || click.seq === lastSeqRef.current) return;
     lastSeqRef.current = click.seq;
     fetchTable(click.x, click.y);
-  }, [armed, click, fetchTable]);
+  }, [active, armed, click, fetchTable]);
 
   useEffect(() => {
-    if (!follow || !mouse) return;
+    if (!active || !follow || !mouse) return;
     const { x, y } = mouse;
     const timer = setTimeout(() => fetchTable(x, y), FOLLOW_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [follow, mouse, fetchTable]);
+  }, [active, follow, mouse, fetchTable]);
 
   useEffect(() => {
     const centre = centreRef.current;
@@ -203,7 +210,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
         {armed && (
           <div className="flex items-center gap-1.5 text-[10px] text-sky-400/70">
             <Crosshair size={10} />
-            <span>Enable crosshair mode in the viewer toolbar, then click a pixel.</span>
+            <span>Select Crosshair in the viewer toolbar, then click a pixel.</span>
           </div>
         )}
 
@@ -219,7 +226,9 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
               <table className="font-mono text-[9px] border-collapse">
                 <thead>
                   <tr>
-                    <th className={AXIS_CLASS}>y \ x</th>
+                    <th className={AXIS_CLASS} title={ZERO_BASED_PIXEL_TITLE}>
+                      y \ x (0-based)
+                    </th>
                     {cols.map((x) => (
                       <th key={x} className={x === result.x ? CENTRE_AXIS_CLASS : AXIS_CLASS}>
                         {x}

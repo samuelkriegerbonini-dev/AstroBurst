@@ -6,7 +6,7 @@ import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
 import { BACKGROUND_PROGRESS_EVENT } from "../../shared/types/processing";
-import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader, CompareView } from "../ui";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRenderContext } from "../../context/PreviewContext";
@@ -42,9 +42,18 @@ interface BackgroundRun {
   res: BackgroundResult;
   correctedUrl: string | undefined;
   modelUrl: string | undefined;
+  inputUrl: string | null;
   spline: boolean;
   sampleRadius: number;
 }
+
+type ResultView = "corrected" | "model" | "compare";
+
+const RESULT_VIEW_LABELS: Record<ResultView, string> = {
+  corrected: "Corrected",
+  model: "Model",
+  compare: "Compare",
+};
 
 interface BackgroundPanelProps {
   selectedFile: ProcessedFile | null;
@@ -85,7 +94,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<BackgroundRun>("background", fileKey ?? null);
   const { chain } = useRenderContext();
   const result = runResult && chainHoldsOutput(chain, "background", runResult.res.corrected_fits) ? runResult : null;
-  const [showModel, setShowModel] = useState(false);
+  const [view, setView] = useState<ResultView>("corrected");
   const [showSamples, setShowSamples] = useState(true);
 
   const modelId = useId();
@@ -130,6 +139,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
+    const inputUrl = selectedFile.result?.previewUrl ?? null;
     const spline = model === "spline";
     const sampleRadius = dbe.sampleRadius;
     resetProgress();
@@ -141,6 +151,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
         res,
         correctedUrl: bustPreviewUrl(res?.previewUrl, stamp),
         modelUrl: bustPreviewUrl(res?.modelUrl, stamp),
+        inputUrl,
         spline,
         sampleRadius,
       };
@@ -152,6 +163,10 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   const overlayDims = result?.res.dimensions;
   const overlayRadius = result?.sampleRadius ?? 0;
   const canOverlay = !!result?.spline && !!splineSamples && !!overlayDims && overlayDims[0] > 0 && overlayDims[1] > 0;
+  const canCompare = !!result?.inputUrl && !!result.correctedUrl;
+  const views: ResultView[] = canCompare ? ["corrected", "model", "compare"] : ["corrected", "model"];
+  const shownView: ResultView = view === "compare" && !canCompare ? "corrected" : view;
+  const showModel = shownView === "model";
   const resultItems = [
     { label: "Samples", value: result?.res.sample_count },
     ...(result?.res.rejected_count !== undefined ? [{ label: "Rejected", value: result.res.rejected_count }] : []),
@@ -259,41 +274,49 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
           {(result.correctedUrl || result.modelUrl) && (
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
-                <button onClick={() => setShowModel(false)} className={`text-xs px-2.5 py-1 rounded-md transition-all ${!showModel ? "bg-emerald-600/20 text-emerald-300 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:text-zinc-300"}`}>
-                  Corrected
-                </button>
-                <button onClick={() => setShowModel(true)} className={`text-xs px-2.5 py-1 rounded-md transition-all ${showModel ? "bg-emerald-600/20 text-emerald-300 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:text-zinc-300"}`}>
-                  Model
-                </button>
-                {canOverlay && (
+                {views.map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    title={v === "compare" ? "Wipe between the original image and the corrected result" : undefined}
+                    className={`text-xs px-2.5 py-1 rounded-md transition-all ${shownView === v ? "bg-emerald-600/20 text-emerald-300 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:text-zinc-300"}`}
+                  >
+                    {RESULT_VIEW_LABELS[v]}
+                  </button>
+                ))}
+                {canOverlay && shownView !== "compare" && (
                   <button onClick={() => setShowSamples((v) => !v)} className={`text-xs px-2.5 py-1 rounded-md transition-all ml-auto ${showSamples ? "bg-emerald-600/20 text-emerald-300 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:text-zinc-300"}`}>
                     Samples
                   </button>
                 )}
               </div>
-              <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-zinc-700/50">
-                <img src={showModel ? result.modelUrl : result.correctedUrl} alt={showModel ? "Background Model" : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
-                {canOverlay && showSamples && splineSamples && overlayDims && (
-                  <svg viewBox={`0 0 ${overlayDims[0]} ${overlayDims[1]}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 w-full h-full pointer-events-none">
-                    {splineSamples.map((s, i) => (
-                      <rect
-                        key={i}
-                        x={s.x - overlayRadius}
-                        y={s.y - overlayRadius}
-                        width={2 * overlayRadius + 1}
-                        height={2 * overlayRadius + 1}
-                        fill="none"
-                        stroke={sampleStroke(s)}
-                        strokeWidth={1}
-                        vectorEffect="non-scaling-stroke"
-                        opacity={s.rejected ? 0.9 : 0.7}
-                      />
-                    ))}
-                  </svg>
-                )}
-                <div className="ab-compare-label left-2">{showModel ? "Background Model" : "Background Removed"}</div>
-              </div>
-              {canOverlay && showSamples && (
+              {shownView === "compare" && result.inputUrl && result.correctedUrl ? (
+                <CompareView originalUrl={result.inputUrl} resultUrl={result.correctedUrl} originalLabel="Original" resultLabel="Background Removed" accent="emerald" />
+              ) : (
+                <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-zinc-700/50">
+                  <img src={showModel ? result.modelUrl : result.correctedUrl} alt={showModel ? "Background Model" : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+                  {canOverlay && showSamples && splineSamples && overlayDims && (
+                    <svg viewBox={`0 0 ${overlayDims[0]} ${overlayDims[1]}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 w-full h-full pointer-events-none">
+                      {splineSamples.map((s, i) => (
+                        <rect
+                          key={i}
+                          x={s.x - overlayRadius}
+                          y={s.y - overlayRadius}
+                          width={2 * overlayRadius + 1}
+                          height={2 * overlayRadius + 1}
+                          fill="none"
+                          stroke={sampleStroke(s)}
+                          strokeWidth={1}
+                          vectorEffect="non-scaling-stroke"
+                          opacity={s.rejected ? 0.9 : 0.7}
+                        />
+                      ))}
+                    </svg>
+                  )}
+                  <div className="ab-compare-label left-2">{showModel ? "Background Model" : "Background Removed"}</div>
+                </div>
+              )}
+              {canOverlay && showSamples && shownView !== "compare" && (
                 <div className="flex items-center gap-3 text-[10px] text-zinc-500 px-1">
                   <span><span className="inline-block w-2 h-2 rounded-sm mr-1 align-middle" style={{ background: SAMPLE_STROKE.accepted }} />used</span>
                   <span><span className="inline-block w-2 h-2 rounded-sm mr-1 align-middle" style={{ background: SAMPLE_STROKE.manual }} />point region</span>

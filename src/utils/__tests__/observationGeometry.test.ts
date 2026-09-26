@@ -169,8 +169,8 @@ describe("geometryRows", () => {
     expect(byKey.bjd_tdb.value).toBe("2461120.925123");
     expect(byKey.bjd_tdb.hint).toBe("computed");
     expect(byKey.hjd_utc.value).toBe("2461120.924321");
-    expect(byKey.lst.value).toBe("197.6932 (13:10:46.4)");
-    expect(byKey.lst.unit).toBe("deg");
+    expect(byKey.lst.value).toBe("197.6932 deg (13:10:46.4 h)");
+    expect(byKey.lst.unit).toBe("");
     expect(byKey.hour_angle.value).toBe("1.0000");
     expect(byKey.hour_angle.unit).toBe("h");
     expect(byKey.altitude.value).toBe("70.1812");
@@ -219,6 +219,7 @@ describe("geometryRows", () => {
     }
     expect(text).toContain("BJD_TDB: 2461120.925123 d");
     expect(text).toContain("Moon illumination: 67.9 %");
+    expect(text).toContain("Local sidereal time: 197.6932 deg (13:10:46.4 h)\n");
   });
 });
 

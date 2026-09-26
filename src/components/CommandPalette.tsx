@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, useId } from "react";
 import { Search, FileText } from "lucide-react";
 
 export interface PaletteAction {
   id: string;
   label: string;
   hint?: string;
+  keywords?: string[];
   icon?: React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
   run: () => void;
 }
@@ -51,14 +52,28 @@ export default function CommandPalette({ open, onClose, actions, files, selected
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const lastInputModeRef = useRef<"keyboard" | "mouse">("keyboard");
+  const baseId = useId();
+  const listId = `${baseId}-list`;
+  const optionId = (index: number) => `${baseId}-opt-${index}`;
 
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setSel(0);
-      lastInputModeRef.current = "keyboard";
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
+    if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setQuery("");
+    setSel(0);
+    lastInputModeRef.current = "keyboard";
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    const keepFocusInInput = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      e.preventDefault();
+      inputRef.current?.focus();
+    };
+    window.addEventListener("keydown", keepFocusInInput, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", keepFocusInInput, true);
+      if (previous?.isConnected) previous.focus();
+    };
   }, [open]);
 
   const entries = useMemo<Entry[]>(() => {
@@ -71,7 +86,7 @@ export default function CommandPalette({ open, onClose, actions, files, selected
         hint: a.hint,
         icon: a.icon,
         run: a.run,
-        score: matchScore(a.label, q),
+        score: Math.max(matchScore(a.label, q), ...(a.keywords ?? []).map((k) => matchScore(k, q))),
       }))
       .filter((e) => e.score > 0);
     const fs: (Entry & { score: number })[] = files
@@ -130,12 +145,17 @@ export default function CommandPalette({ open, onClose, actions, files, selected
 
   return (
     <div className="ab-cmdp-overlay" onMouseDown={onClose}>
-      <div className="ab-cmdp" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="ab-cmdp" role="dialog" aria-modal="true" aria-label="Search everywhere" onMouseDown={(e) => e.stopPropagation()}>
         <div className="ab-cmdp-input-row">
           <Search size={14} style={{ color: "var(--ab-text-4)", flexShrink: 0 }} />
           <input
             ref={inputRef}
             type="text"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={entries.length > 0 ? optionId(clampedSel) : undefined}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -146,16 +166,20 @@ export default function CommandPalette({ open, onClose, actions, files, selected
           />
           <kbd className="ab-cmdp-kbd">esc</kbd>
         </div>
-        <div ref={listRef} className="ab-cmdp-list">
+        <div ref={listRef} role="listbox" id={listId} aria-label="Results" className="ab-cmdp-list">
           {entries.length === 0 && <div className="ab-cmdp-empty">No matches for &ldquo;{query}&rdquo;</div>}
           {entries.map((entry, i) => {
             const Icon = entry.icon;
             const isFileHeader = i === firstFileIdx;
             return (
-              <div key={entry.key}>
-                {isFileHeader && <div className="ab-cmdp-section">Files</div>}
-                {i === 0 && entry.kind === "action" && <div className="ab-cmdp-section">Actions</div>}
+              <div key={entry.key} role="none">
+                {isFileHeader && <div className="ab-cmdp-section" aria-hidden="true">Files</div>}
+                {i === 0 && entry.kind === "action" && <div className="ab-cmdp-section" aria-hidden="true">Actions</div>}
                 <button
+                  id={optionId(i)}
+                  role="option"
+                  aria-selected={i === clampedSel}
+                  tabIndex={-1}
                   data-index={i}
                   data-active={i === clampedSel}
                   className="ab-cmdp-item"

@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type { ProcessedFile, HeaderData } from "../../shared/types";
 import { assignableChannel } from "../../utils/channelMapping";
+import { groupHeaderCards, headerCardLine, isCommentaryKey } from "../../utils/headerCards";
 
 interface CategoryMeta {
   label: string;
@@ -23,6 +24,9 @@ const CATEGORY_META: Record<string, CategoryMeta> = {
   processing: { label: "Processing", icon: Cpu, color: "var(--ab-violet)", glow: "rgba(139,92,246,0.08)" },
   other: { label: "Other", icon: MoreHorizontal, color: "var(--ab-sky)", glow: "rgba(14,165,233,0.06)" },
 };
+
+const CATEGORY_ORDER = Object.keys(CATEGORY_META);
+const COPY_ALL_KEY_WIDTH = 8;
 
 const CHANNEL_STYLES: Record<string, { bg: string; border: string; text: string; glow: string }> = {
   R: { bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.25)", text: "#fca5a5", glow: "rgba(239,68,68,0.12)" },
@@ -65,7 +69,7 @@ export default function HeaderExplorerPanel({
     processing: false,
     other: false,
   });
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const onLoadHeaderRef = useRef(onLoadHeader);
@@ -101,45 +105,29 @@ export default function HeaderExplorerPanel({
     });
   }, []);
 
-  const handleCopy = useCallback((key: string, value: string) => {
-    navigator.clipboard?.writeText(`${key} = ${value}`);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 1500);
+  const handleCopy = useCallback((index: number, key: string, value: string) => {
+    navigator.clipboard?.writeText(headerCardLine(key, value));
+    setCopiedIndex(index);
+    setTimeout(() => setCopiedIndex(null), 1500);
   }, []);
 
   const handleCopyAll = useCallback(() => {
     if (!headerData?.cards) return;
     const text = headerData.cards
-      .map((c) => `${c.key.padEnd(8)} = ${c.value}`)
+      .map((c) => headerCardLine(c.key, c.value, COPY_ALL_KEY_WIDTH))
       .join("\n");
     navigator.clipboard?.writeText(text);
     setCopiedAll(true);
     setTimeout(() => setCopiedAll(false), 2000);
   }, [headerData?.cards]);
 
-  const filteredCategories = useMemo(() => {
-    if (!headerData?.categories) return {} as Record<string, Record<string, string>>;
-    const q = search.toLowerCase().trim();
-    if (!q) return headerData.categories;
+  const groups = useMemo(
+    () => groupHeaderCards(headerData?.cards ?? [], headerData?.categories ?? {}, CATEGORY_ORDER, search),
+    [headerData?.cards, headerData?.categories, search],
+  );
 
-    const result: Record<string, Record<string, string>> = {};
-    for (const [cat, entries] of Object.entries(headerData.categories)) {
-      const filtered: Record<string, string> = {};
-      for (const [key, value] of Object.entries(entries)) {
-        if (key.toLowerCase().includes(q) || String(value).toLowerCase().includes(q)) {
-          filtered[key] = value;
-        }
-      }
-      if (Object.keys(filtered).length > 0) result[cat] = filtered;
-    }
-    return result;
-  }, [headerData?.categories, search]);
-
-  const totalVisible = useMemo(() => {
-    return Object.values(filteredCategories).reduce(
-      (sum, entries) => sum + Object.keys(entries).length, 0,
-    );
-  }, [filteredCategories]);
+  const totalVisible = useMemo(() => groups.reduce((sum, group) => sum + group.rows.length, 0), [groups]);
+  const searching = search.trim() !== "";
 
   const handleAssign = useCallback((channel: string) => {
     if (onAssignChannel && file?.path) onAssignChannel(channel, file.path);
@@ -169,9 +157,9 @@ export default function HeaderExplorerPanel({
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {headerData && (
+          {headerData && searching && (
             <span className="text-[10px] font-mono text-zinc-500">
-              {totalVisible}/{headerData.total_cards}
+              {totalVisible} of {headerData.total_cards}
             </span>
           )}
           {headerData?.cards && headerData.cards.length > 0 && (
@@ -288,12 +276,11 @@ export default function HeaderExplorerPanel({
           </div>
 
           <div className="flex-1 overflow-y-auto min-h-0">
-            {Object.entries(filteredCategories).map(([cat, entries]) => {
+            {groups.map(({ category: cat, rows }) => {
               const meta = CATEGORY_META[cat] || CATEGORY_META.other;
               const Icon = meta.icon;
               const isOpen = search ? true : expanded[cat];
-              const count = Object.keys(entries).length;
-              if (count === 0) return null;
+              const count = rows.length;
 
               return (
                 <div key={cat} style={{ borderBottom: "1px solid rgba(63,63,70,0.15)" }}>
@@ -319,13 +306,13 @@ export default function HeaderExplorerPanel({
 
                   {isOpen && (
                     <div className="pb-1">
-                      {Object.entries(entries).map(([key, value]) => {
+                      {rows.map(({ index, key, value }) => {
                         const isHighlight = IMPORTANT_KEYS.has(key.toUpperCase());
-                        const displayValue = String(value).replace(/^'|'$/g, "").trim();
+                        const displayValue = isCommentaryKey(key) ? value : value.replace(/^'|'$/g, "").trim();
 
                         return (
                           <div
-                            key={key}
+                            key={index}
                             className="group flex items-center gap-2 mx-1 px-2 py-[3px] rounded transition-colors"
                             style={{ background: isHighlight ? "rgba(245,158,11,0.04)" : undefined }}
                             onMouseOver={(e) => (e.currentTarget.style.background = "rgba(63,63,70,0.2)")}
@@ -349,11 +336,11 @@ export default function HeaderExplorerPanel({
                               {displayValue}
                             </span>
                             <button
-                              onClick={() => handleCopy(key, displayValue)}
+                              onClick={() => handleCopy(index, key, displayValue)}
                               className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
                               title={`Copy ${key}`}
                             >
-                              {copiedKey === key
+                              {copiedIndex === index
                                 ? <Check size={10} style={{ color: "var(--ab-emerald)" }} />
                                 : <Copy size={10} className="text-zinc-500" />}
                             </button>

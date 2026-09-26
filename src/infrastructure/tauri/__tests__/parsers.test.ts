@@ -126,8 +126,8 @@ describe("parseRawRgbPixelBuffer", () => {
 });
 
 describe("parseFftBuffer", () => {
-  function fftPayload(width: number, height: number, windowed: number, pixels: number[]): Uint8Array {
-    const buf = new ArrayBuffer(32 + pixels.length);
+  function fftPayload(width: number, height: number, flags: number, pixels: number[]): Uint8Array {
+    const buf = new ArrayBuffer(40 + pixels.length);
     const view = new DataView(buf);
     view.setUint32(0, width, true);
     view.setUint32(4, height, true);
@@ -135,8 +135,11 @@ describe("parseFftBuffer", () => {
     view.setFloat32(12, 2.5, true);
     view.setUint32(16, 42, true);
     view.setUint32(20, 1024, true);
-    view.setUint32(24, windowed, true);
-    new Uint8Array(buf, 32).set(pixels);
+    view.setUint32(24, 512, true);
+    view.setUint32(28, flags, true);
+    view.setUint32(32, 1000, true);
+    view.setUint32(36, 500, true);
+    new Uint8Array(buf, 40).set(pixels);
     return new Uint8Array(buf);
   }
 
@@ -147,19 +150,37 @@ describe("parseFftBuffer", () => {
     expect(parsed.dc_magnitude).toBe(1.5);
     expect(parsed.max_magnitude).toBe(2.5);
     expect(parsed.elapsed_ms).toBe(42);
-    expect(parsed.original_size).toBe(1024);
+    expect(parsed).not.toHaveProperty("original_size");
     expect(parsed.windowed).toBe(true);
     expect(Array.from(parsed.pixels)).toEqual([10, 20, 30, 40]);
-    expect(parsed.pixels.byteOffset).toBe(32);
+    expect(parsed.pixels.byteOffset).toBe(40);
   });
 
-  it("reports windowed=false for a zero flag", () => {
+  it("reads the size of the measured image from bytes 32 and 36, apart from the padded grid", () => {
+    const parsed = parseFftBuffer(fftPayload(2, 1, 3, [5, 6]));
+    expect(parsed.image_width).toBe(1000);
+    expect(parsed.image_height).toBe(500);
+    expect(Array.from(parsed.pixels)).toEqual([5, 6]);
+  });
+
+  it("honours the byte offset of a view into a larger buffer", () => {
+    const inner = fftPayload(1, 2, 1, [9, 8]);
+    const outer = new Uint8Array(inner.length + 3);
+    outer.set(inner, 3);
+    const parsed = parseFftBuffer(outer.subarray(3));
+    expect([parsed.image_width, parsed.image_height]).toEqual([1000, 500]);
+    expect(Array.from(parsed.pixels)).toEqual([9, 8]);
+  });
+
+  it("reads windowed from bit 0 of the flags word, not from the padded-rows word", () => {
     expect(parseFftBuffer(fftPayload(1, 1, 0, [7])).windowed).toBe(false);
+    expect(parseFftBuffer(fftPayload(1, 1, 2, [7])).windowed).toBe(false);
+    expect(parseFftBuffer(fftPayload(1, 1, 3, [7])).windowed).toBe(true);
   });
 
   it("throws on a short header and on a short pixel block", () => {
-    expect(() => parseFftBuffer(new Uint8Array(31))).toThrow(/too small \(31 bytes\)/);
-    expect(() => parseFftBuffer(fftPayload(2, 2, 0, [1, 2, 3]))).toThrow(/expected 36 bytes, got 35/);
+    expect(() => parseFftBuffer(new Uint8Array(39))).toThrow(/too small \(39 bytes\)/);
+    expect(() => parseFftBuffer(fftPayload(2, 2, 0, [1, 2, 3]))).toThrow(/expected 44 bytes, got 43/);
   });
 });
 

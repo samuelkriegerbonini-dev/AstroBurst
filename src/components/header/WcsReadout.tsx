@@ -3,6 +3,7 @@ import { Globe } from "lucide-react";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
 import type { WcsInfo, SkyFrame } from "../../shared/types/astrometry";
 import { formatLat, formatLon, frameAxisLabels, frameLonInHours, type CoordFormat } from "../../utils/coordFormat";
+import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -196,8 +197,8 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           </>
         ) : null}
         {mouseX !== null && mouseY !== null && (
-          <span className="text-zinc-600">
-            px({mouseX},{mouseY})
+          <span className="text-zinc-600" title={ZERO_BASED_PIXEL_TITLE}>
+            {zeroBasedPixelText(mouseX, mouseY)}
           </span>
         )}
       </div>

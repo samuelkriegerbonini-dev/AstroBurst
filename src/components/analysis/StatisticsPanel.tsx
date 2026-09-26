@@ -128,6 +128,10 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
   runRef.current = run;
 
   useEffect(() => {
+    if (!selectedShape) setUseRegion(false);
+  }, [selectedShape]);
+
+  useEffect(() => {
     requestSeqRef.current++;
     setResult(null);
     setError(null);
@@ -168,8 +172,16 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
     [result],
   );
 
+  const logReady = statisticsLogReady(result, {
+    composite: isShowingComposite,
+    noise,
+    excludeDq,
+    region: useRegion && !isShowingComposite ? selectedShape : null,
+  });
+  const stale = result !== null && !logReady;
+
   const handleCopy = useCallback(() => {
-    if (!result) return;
+    if (!result || stale) return;
     const columns = result.channels.map((c, i) => ({ label: c.label, stats: converted[i] }));
     const lines = [statisticsToCsv(columns, "raw")];
     if (result.channels.some((c) => c.body.noise)) {
@@ -180,14 +192,8 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
     navigator.clipboard?.writeText(lines.join("\n"));
     setCopied(true);
     window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-  }, [result, converted, noiseSigmas, unit]);
+  }, [result, stale, converted, noiseSigmas, unit]);
 
-  const logReady = statisticsLogReady(result, {
-    composite: isShowingComposite,
-    noise,
-    excludeDq,
-    region: useRegion && !isShowingComposite ? selectedShape : null,
-  });
   const handleLog = useCallback(() => {
     if (!logReady || !result) return;
     measurementLog.append(statisticsEntry(provenance, result));
@@ -264,8 +270,9 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
               <button
                 type="button"
                 onClick={handleCopy}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
-                title="Copy the table as CSV"
+                disabled={stale}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors disabled:opacity-40"
+                title={stale ? "The table no longer matches the settings; press Compute" : "Copy the table as CSV"}
               >
                 {copied ? <Check size={10} className="text-emerald-400" /> : <Copy size={10} />}
                 <span>{copied ? "Copied" : "CSV"}</span>
@@ -282,7 +289,16 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
               </button>
             </div>
 
-            <div className="overflow-x-auto rounded-lg border border-zinc-800/50">
+            {stale && !loading && (
+              <div role="status" className="text-[10px] text-amber-300/90">
+                Settings or region changed: press Compute
+              </div>
+            )}
+
+            <div
+              className="overflow-x-auto rounded-lg border border-zinc-800/50 transition-opacity"
+              style={stale ? { opacity: 0.4 } : undefined}
+            >
               <table className="w-full text-[9px]">
                 <thead>
                   <tr className="bg-zinc-900/50 text-zinc-500 uppercase tracking-wider">

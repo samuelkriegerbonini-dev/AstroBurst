@@ -6,6 +6,8 @@ import DeepZoomViewer from "../render/DeepZoomviewer";
 import MeasurementBadge from "./MeasurementBadge";
 import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import { FOCUSABLE_SELECTOR, focusTrapTarget } from "../../utils/focusTrap";
+import { useToolHost } from "../../context/ToolHostContext";
+import { deepZoomAvailable } from "../../utils/analysisSections";
 
 interface TileViewerPanelProps {
   filePath: string | null;
@@ -23,7 +25,7 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
   const overlayRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
-  const isLargeImage = (imageWidth || 0) > 4096 || (imageHeight || 0) > 4096;
+  const isLargeImage = deepZoomAvailable(imageWidth, imageHeight);
 
   const handleOpen = useCallback(() => {
     if (!filePath) return;
@@ -34,9 +36,15 @@ function TileViewerPanelInner({ filePath, composite, rgbPath, imageWidth, imageH
     setIsOpen(false);
   }, []);
 
+  const { active } = useToolHost();
+
   useEffect(() => {
     setIsOpen(false);
   }, [filePath]);
+
+  useEffect(() => {
+    if (!active) setIsOpen(false);
+  }, [active]);
 
   useEffect(() => {
     if (!isOpen) return;

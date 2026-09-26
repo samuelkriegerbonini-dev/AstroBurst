@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useId, useRef } from "react";
 import type { WizardState } from "../wizard";
 import {
+  autoStfBlockedReason,
   channelStretchInput,
   resolveChannelPath,
   singleChannelBinId,
@@ -65,6 +66,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const channelBinId = state.compositeReady ? null : singleChannelBinId(state);
   const channelLabel = state.bins.find((b) => b.id === channelBinId)?.shortLabel ?? "";
   const filledBinCount = state.bins.filter((b) => b.files.length > 0).length;
+  const autoStfBlocked = autoStfBlockedReason(state);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<StretchRunResult | null | undefined>(null);
   const [error, setError] = useState("");
@@ -364,7 +366,9 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           <option value="masked">Masked Stretch (star-protected)</option>
           <option value="arcsinh">Arcsinh Stretch</option>
           <option value="ghs">GHS (Generalized Hyperbolic)</option>
-          <option value="auto_stf">Auto STF</option>
+          <option value="auto_stf" disabled={autoStfBlocked !== null}>
+            {autoStfBlocked ? "Auto STF (needs a blended composite)" : "Auto STF"}
+          </option>
         </select>
       </div>
 
@@ -479,9 +483,9 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
         </>
       )}
 
-      {state.stretchMode === "auto_stf" && !state.compositeReady && (
-        <div className="text-[10px] text-zinc-500">
-          Auto STF will compute optimal shadow/midtone/highlight per channel based on image statistics.
+      {state.stretchMode === "auto_stf" && autoStfBlocked && (
+        <div className="text-[10px] text-amber-400/80">
+          {autoStfBlocked}
         </div>
       )}
 
@@ -491,6 +495,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
             label={runLabel}
             runningLabel="Stretching..."
             running={loading}
+            disabled={state.stretchMode === "auto_stf" && autoStfBlocked !== null}
             accent="amber"
             onClick={handleRun}
           />

@@ -120,6 +120,14 @@ interface ExportPanelProps {
 
 const ICON = <Save size={14} className="text-amber-400" />;
 
+type ExportSection = "fits" | "png" | "cutout" | "mef" | "aligned";
+
+const SAVED_ROW_MS = 8000;
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 async function revealInExplorer(path: string) {
   try {
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -164,7 +172,7 @@ export default function ExportPanel({
   const [mefRunning, setMefRunning] = useState(false);
   const [mefResult, setMefResult] = useState<CompressMefResult | null>(null);
   const [exportDone, setExportDone] = useState(false);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [saved, setSaved] = useState<{ section: ExportSection; path: string } | null>(null);
   const [alignedExporting, setAlignedExporting] = useState(false);
   const [alignedResult, setAlignedResult] = useState<AlignedExportState | null>(null);
   const [alignedMethod, setAlignedMethod] = useState(alignMethod ?? "phase_correlation");
@@ -172,7 +180,7 @@ export default function ExportPanel({
   const [pngApplyStf, setPngApplyStf] = useState(false);
   const [pngExporting, setPngExporting] = useState(false);
   const [pngExported, setPngExported] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ section: ExportSection; message: string } | null>(null);
   const [cutoutIncludeErr, setCutoutIncludeErr] = useState(true);
   const [cutoutIncludeDq, setCutoutIncludeDq] = useState(true);
   const [cutoutUnit, setCutoutUnit] = useState<CutoutSizeUnit>("px");
@@ -187,6 +195,15 @@ export default function ExportPanel({
   const regionKey = useRegionKey();
   const regionDoc = useRegionDoc(regionKey);
   const selectedBox = selectedBoxRegion(regionDoc.regions, regionDoc.selectedId);
+
+  const showSaved = useCallback((section: ExportSection, path: string, onExpire?: () => void) => {
+    const entry = { section, path };
+    setSaved(entry);
+    setTimeout(() => {
+      setSaved((current) => (current === entry ? null : current));
+      onExpire?.();
+    }, SAVED_ROW_MS);
+  }, []);
 
   useEffect(() => {
     if (alignMethod) setAlignedMethod(alignMethod);
@@ -242,16 +259,12 @@ export default function ExportPanel({
         quantizeLevel: effectiveQuantizeLevel,
       });
       setExportDone(true);
-      setSavedPath(outputPath);
-      setTimeout(() => {
-        setExportDone(false);
-        setSavedPath(null);
-      }, 8000);
+      showSaved("fits", outputPath, () => setExportDone(false));
     } catch (e) {
       console.error("Export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "fits", message: errorMessage(e) });
     }
-  }, [exportPath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport]);
+  }, [exportPath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport, showSaved]);
 
   const handleExportRgb = useCallback(async () => {
     if (rgbCubeUnavailableReason(rgbFilePath, rgbChannels ?? null)) return;
@@ -277,16 +290,12 @@ export default function ExportPanel({
           quantizeLevel: effectiveQuantizeLevel,
         });
       setExportDone(true);
-      setSavedPath(outputPath);
-      setTimeout(() => {
-        setExportDone(false);
-        setSavedPath(null);
-      }, 8000);
+      showSaved("fits", outputPath, () => setExportDone(false));
     } catch (e) {
       console.error("RGB FITS export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "fits", message: errorMessage(e) });
     }
-  }, [rgbFilePath, rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf]);
+  }, [rgbFilePath, rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf, showSaved]);
 
   const handleCompressMef = useCallback(async () => {
     if (!filePath) return;
@@ -305,15 +314,14 @@ export default function ExportPanel({
         rawExtnames: parseExtnameList(mefRawExtnames),
       });
       setMefResult(result);
-      setSavedPath(result.output_path);
-      setTimeout(() => setSavedPath(null), 8000);
+      showSaved("mef", result.output_path);
     } catch (e) {
       console.error("MEF compression failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "mef", message: errorMessage(e) });
     } finally {
       setMefRunning(false);
     }
-  }, [filePath, mefLossless, mefQuantizeLevel, mefDropExtnames, mefRawExtnames]);
+  }, [filePath, mefLossless, mefQuantizeLevel, mefDropExtnames, mefRawExtnames, showSaved]);
 
   const handleExportAligned = useCallback(async () => {
     if (!headerChannels) return;
@@ -328,17 +336,14 @@ export default function ExportPanel({
       );
       setAlignedResult(result);
       const firstPath = result?.channels?.[0]?.path;
-      if (firstPath) {
-        setSavedPath(firstPath.replace(/[/\\][^/\\]+$/, ""));
-        setTimeout(() => setSavedPath(null), 8000);
-      }
+      if (firstPath) showSaved("aligned", firstPath.replace(/[/\\][^/\\]+$/, ""));
     } catch (e) {
       console.error("Aligned export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "aligned", message: errorMessage(e) });
     } finally {
       setAlignedExporting(false);
     }
-  }, [headerChannels, alignedMethod, copyWcs, copyMetadata]);
+  }, [headerChannels, alignedMethod, copyWcs, copyMetadata, showSaved]);
 
   const handleExportPng = useCallback(async () => {
     if (!exportPath) return;
@@ -356,18 +361,14 @@ export default function ExportPanel({
         highlight: stfParams?.highlight,
       });
       setPngExported(true);
-      setSavedPath(outputPath);
-      setTimeout(() => {
-        setPngExported(false);
-        setSavedPath(null);
-      }, 8000);
+      showSaved("png", outputPath, () => setPngExported(false));
     } catch (e) {
       console.error("PNG export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "png", message: errorMessage(e) });
     } finally {
       setPngExporting(false);
     }
-  }, [exportPath, pngBitDepth, pngApplyStf, stfParams]);
+  }, [exportPath, pngBitDepth, pngApplyStf, stfParams, showSaved]);
 
   const handleExportRgbPng = useCallback(async () => {
     if (!rgbFilePath && !rgbChannels && !compositeStf) return;
@@ -385,11 +386,7 @@ export default function ExportPanel({
           ...fileStf,
         });
         setPngExported(true);
-        setSavedPath(filePngPath);
-        setTimeout(() => {
-          setPngExported(false);
-          setSavedPath(null);
-        }, 8000);
+        showSaved("png", filePngPath, () => setPngExported(false));
         return;
       }
       const stfArgs = compositeRgbPngStf(compositeStf ?? null, pngApplyStf, compositeStf?.linked ?? true);
@@ -404,18 +401,14 @@ export default function ExportPanel({
           ...stfArgs,
         });
       setPngExported(true);
-      setSavedPath(outputPath);
-      setTimeout(() => {
-        setPngExported(false);
-        setSavedPath(null);
-      }, 8000);
+      showSaved("png", outputPath, () => setPngExported(false));
     } catch (e) {
       console.error("RGB PNG export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ section: "png", message: errorMessage(e) });
     } finally {
       setPngExporting(false);
     }
-  }, [rgbFilePath, rgbChannels, pngBitDepth, pngApplyStf, compositeStf]);
+  }, [rgbFilePath, rgbChannels, pngBitDepth, pngApplyStf, compositeStf, showSaved]);
 
   const handleExportCutout = useCallback(async () => {
     if (!filePath) return;
@@ -428,11 +421,14 @@ export default function ExportPanel({
       pixelScaleArcsec: cutoutPixelScale,
     });
     if (!region) {
-      setError(
-        cutoutUnit === "arcsec" && cutoutPixelScale == null
-          ? "Arcsecond sizes need a WCS pixel scale; switch the unit to px or select a box region."
-          : "Select a box region or enter a centre and a positive size for the cutout.",
-      );
+      setCutoutResult(null);
+      setError({
+        section: "cutout",
+        message:
+          cutoutUnit === "arcsec" && cutoutPixelScale == null
+            ? "Arcsecond sizes need a WCS pixel scale; switch the unit to px or select a box region."
+            : "Select a box region or enter a centre and a positive size for the cutout.",
+      });
       return;
     }
     setError(null);
@@ -451,11 +447,11 @@ export default function ExportPanel({
         includeDq: cutoutIncludeDq,
       });
       setCutoutResult(result);
-      setSavedPath(result.output_path);
-      setTimeout(() => setSavedPath(null), 8000);
+      showSaved("cutout", result.output_path);
     } catch (e) {
       console.error("Cutout export failed:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setCutoutResult(null);
+      setError({ section: "cutout", message: errorMessage(e) });
     } finally {
       setCutoutExporting(false);
     }
@@ -470,7 +466,28 @@ export default function ExportPanel({
     cutoutPixelScale,
     cutoutIncludeErr,
     cutoutIncludeDq,
+    showSaved,
   ]);
+
+  const sectionFeedback = (section: ExportSection) => (
+    <>
+      <ErrorAlert message={error?.section === section ? error.message : null} />
+      {saved?.section === section && (
+        <button
+          onClick={() => revealInExplorer(saved.path)}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded bg-emerald-900/25 border border-emerald-600/20 text-left transition-colors hover:bg-emerald-900/40 group"
+        >
+          <FolderOpen size={12} className="text-emerald-400 shrink-0" />
+          <div className="flex flex-col min-w-0">
+            <span className="text-[10px] font-semibold text-emerald-300">Saved</span>
+            <span className="text-[9px] text-emerald-400/70 truncate group-hover:text-emerald-300/90">
+              {saved.path}
+            </span>
+          </div>
+        </button>
+      )}
+    </>
+  );
 
   const hasRgb = (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) || !!compositeStf || !!rgbFilePath;
   const rgbCubeBlocked = rgbCubeUnavailableReason(rgbFilePath, rgbChannels ?? null);
@@ -557,6 +574,22 @@ export default function ExportPanel({
         </button>
       )}
 
+      {sectionFeedback("fits")}
+
+      {lastResult && saved?.section !== "fits" && (
+        <ResultGrid columns={4} items={[
+          { label: "Output", value: lastResult.output_path?.split(/[/\\]/).pop() },
+          { label: "Size", value: lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--" },
+          {
+            label: lastResult.compress === "rice" ? "Compressed" : "Compression",
+            value: lastResult.compress === "rice"
+              ? `${lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--"} RICE q${lastResult.quantize_level ?? DEFAULT_QUANTIZE_LEVEL}`
+              : "none",
+          },
+          { label: "Time", value: lastResult.elapsed_ms != null ? `${lastResult.elapsed_ms} ms` : "--" },
+        ]} />
+      )}
+
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
         <SectionHeader icon={<ImageIcon size={14} className="text-sky-400" />} title="Export PNG" subtitle={sourceLabel} />
         <div className="flex items-center justify-between">
@@ -600,6 +633,7 @@ export default function ExportPanel({
             )}
           </>
         )}
+        {sectionFeedback("png")}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
@@ -658,6 +692,7 @@ export default function ExportPanel({
           icon={<Scissors size={12} />}
           onClick={handleExportCutout}
         />
+        {sectionFeedback("cutout")}
         {cutoutResult && (
           <div className="flex flex-col gap-0.5 px-1">
             <p className="text-[10px] text-violet-300 font-mono">{describeCutout(cutoutResult)}</p>
@@ -736,6 +771,7 @@ export default function ExportPanel({
           icon={<Archive size={12} />}
           onClick={handleCompressMef}
         />
+        {sectionFeedback("mef")}
         {mefResult && (
           <div className="flex flex-col gap-0.5 px-1">
             <p className="text-[10px] text-emerald-300 font-mono">
@@ -774,6 +810,7 @@ export default function ExportPanel({
             {alignedExporting ? <Loader2 size={12} className="animate-spin" /> : <Crosshair size={12} />}
             {alignedExporting ? "Aligning..." : "Export Aligned Channels (FITS)"}
           </button>
+          {sectionFeedback("aligned")}
         </div>
       )}
 
@@ -788,37 +825,6 @@ export default function ExportPanel({
           ))}
           <div className="text-[10px] text-zinc-600">{alignedResult.elapsed_ms} ms</div>
         </div>
-      )}
-
-      <ErrorAlert message={error} />
-
-      {savedPath && (
-        <button
-          onClick={() => revealInExplorer(savedPath)}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded bg-emerald-900/25 border border-emerald-600/20 text-left transition-colors hover:bg-emerald-900/40 group"
-        >
-          <FolderOpen size={12} className="text-emerald-400 shrink-0" />
-          <div className="flex flex-col min-w-0">
-            <span className="text-[10px] font-semibold text-emerald-300">Saved</span>
-            <span className="text-[9px] text-emerald-400/70 truncate group-hover:text-emerald-300/90">
-              {savedPath}
-            </span>
-          </div>
-        </button>
-      )}
-
-      {lastResult && !savedPath && (
-        <ResultGrid columns={4} items={[
-          { label: "Output", value: lastResult.output_path?.split(/[/\\]/).pop() },
-          { label: "Size", value: lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--" },
-          {
-            label: lastResult.compress === "rice" ? "Compressed" : "Compression",
-            value: lastResult.compress === "rice"
-              ? `${lastResult.file_size_bytes != null ? `${(lastResult.file_size_bytes / 1024).toFixed(0)} KB` : "--"} RICE q${lastResult.quantize_level ?? DEFAULT_QUANTIZE_LEVEL}`
-              : "none",
-          },
-          { label: "Time", value: lastResult.elapsed_ms != null ? `${lastResult.elapsed_ms} ms` : "--" },
-        ]} />
       )}
     </div>
   );

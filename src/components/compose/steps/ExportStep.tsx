@@ -4,6 +4,8 @@ import type { WizardState } from "../wizard";
 import {
   channelExportHistory,
   compositeHistoryLines,
+  exportBlockedReason,
+  exportWcsWarning,
   resolveExportRgbPaths,
   resolveRgbPaths,
   wizardHeaderSourcePath,
@@ -66,6 +68,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   const handleExport = useCallback(async () => {
     setLoading(true);
     setError("");
+    setResult(null);
     setHeaderWarning(null);
     setSavedPath(null);
 
@@ -92,7 +95,7 @@ export default function ExportStep({ state }: ExportStepProps) {
             { bitpix, history: buildHistory(state, []), headerPath: wizardHeaderSourcePath(state, []) },
           );
           setResult(exported.result);
-          setHeaderWarning(exported.headerWarning);
+          setHeaderWarning(exportWcsWarning(exported.result, exported.headerWarning));
           setSavedPath(outputPath);
         }
 
@@ -120,7 +123,7 @@ export default function ExportStep({ state }: ExportStepProps) {
           headerPath: wizardHeaderSourcePath(state, [r, g, b], monoBinId),
         });
         setResult(exported.result);
-        setHeaderWarning(exported.headerWarning);
+        setHeaderWarning(exportWcsWarning(exported.result, exported.headerWarning));
         setSavedPath(outputPath);
       }
     } catch (e) {
@@ -196,6 +199,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   }, [state, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
 
   const activeBins = state.bins.filter((b) => b.files.length > 0);
+  const blockedReason = exportBlockedReason(state);
   const monoBinId = state.compositeReady ? null : resolveExportRgbPaths(state).monoBinId;
   const monoLabel = monoBinId ? state.bins.find((b) => b.id === monoBinId)?.shortLabel ?? monoBinId : null;
 
@@ -262,10 +266,13 @@ export default function ExportStep({ state }: ExportStepProps) {
         label={`Export ${format.toUpperCase()}`}
         runningLabel="Exporting..."
         running={loading}
+        disabled={blockedReason !== null}
         accent="teal"
         onClick={handleExport}
         icon={<Download size={12} />}
       />
+
+      {blockedReason && <div className="text-[9px] text-zinc-500">{blockedReason}</div>}
 
       {result && (
         <div className="flex items-center gap-2 p-2 rounded-lg bg-teal-600/10 border border-teal-500/20">
@@ -297,7 +304,7 @@ export default function ExportStep({ state }: ExportStepProps) {
       <button
         onClick={handleZipExport}
         disabled={zipLoading || activeBins.length === 0}
-        className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs"
+        className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs disabled:opacity-40"
       >
         {zipLoading ? (
           <>

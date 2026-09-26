@@ -7,6 +7,7 @@ import { useAnalysisTarget, useMeasurementSource } from "../../hooks/useAnalysis
 import WcsReadout from "../header/WcsReadout";
 import PixelReadout from "../header/PixelReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 
 const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
@@ -62,7 +63,7 @@ export const InfoPanel = memo(function InfoPanel() {
           <div className="flex items-center gap-3 flex-wrap">
             <span>mean={histData.mean?.toFixed(2)}</span>
             <span>median={histData.median?.toFixed(2)}</span>
-            <span>&sigma;={histData.sigma?.toFixed(2)}</span>
+            <span title={SIGMA_MAD_TITLE}>{SIGMA_MAD_LABEL}={histData.sigma?.toFixed(2)}</span>
             {histData.masked && (
               <span className="text-zinc-600" title="Pixels flagged by the DQ exclusion mask were ignored">
                 (DQ-masked, {histData.dq_excluded ?? 0} excluded)

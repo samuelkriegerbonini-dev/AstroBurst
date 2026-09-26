@@ -12,7 +12,11 @@ pub struct FftResult {
     pub spectrum: Array2<f32>,
     pub display_width: usize,
     pub display_height: usize,
-    pub original_size: usize,
+    pub padded_rows: usize,
+    pub padded_cols: usize,
+    pub downsampled: bool,
+    pub image_rows: usize,
+    pub image_cols: usize,
 }
 
 pub fn compute_power_spectrum(data: &Array2<f32>) -> Result<FftResult> {
@@ -43,7 +47,8 @@ pub fn compute_power_spectrum(data: &Array2<f32>) -> Result<FftResult> {
         .collect();
     let spectrum = Array2::from_shape_vec((fft_rows, fft_cols), shifted_log).unwrap();
 
-    let display = if fft_rows > MAX_DISPLAY_SIZE || fft_cols > MAX_DISPLAY_SIZE {
+    let downsampled = fft_rows > MAX_DISPLAY_SIZE || fft_cols > MAX_DISPLAY_SIZE;
+    let display = if downsampled {
         let scale = MAX_DISPLAY_SIZE as f64 / fft_rows.max(fft_cols) as f64;
         let target_h = ((fft_rows as f64 * scale).round() as usize).max(1);
         let target_w = ((fft_cols as f64 * scale).round() as usize).max(1);
@@ -58,7 +63,11 @@ pub fn compute_power_spectrum(data: &Array2<f32>) -> Result<FftResult> {
         spectrum: display,
         display_width: dw,
         display_height: dh,
-        original_size: fft_rows.max(fft_cols),
+        padded_rows: fft_rows,
+        padded_cols: fft_cols,
+        downsampled,
+        image_rows: rows,
+        image_cols: cols,
     })
 }
 
@@ -89,4 +98,33 @@ fn downsample_area_average(src: &Array2<f32>, target_h: usize, target_w: usize) 
         .collect();
 
     Array2::from_shape_vec((target_h, target_w), result_data).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ramp(rows: usize, cols: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(y, x)| ((y * 7 + x * 3) % 11) as f32)
+    }
+
+    #[test]
+    fn a_tall_image_under_the_display_cap_is_padded_per_axis_and_not_downsampled() {
+        let result = compute_power_spectrum(&ramp(300, 20)).unwrap();
+        assert_eq!((result.padded_rows, result.padded_cols), (512, 32));
+        assert_eq!((result.display_height, result.display_width), (512, 32));
+        assert_eq!(result.spectrum.dim(), (512, 32));
+        assert!(!result.downsampled);
+        assert_eq!((result.image_rows, result.image_cols), (300, 20));
+    }
+
+    #[test]
+    fn an_image_over_the_display_cap_is_downsampled_and_keeps_its_padded_size_per_axis() {
+        let result = compute_power_spectrum(&ramp(1025, 20)).unwrap();
+        assert_eq!((result.padded_rows, result.padded_cols), (2048, 32));
+        assert_eq!((result.display_height, result.display_width), (1024, 16));
+        assert_eq!(result.spectrum.dim(), (1024, 16));
+        assert!(result.downsampled);
+        assert_eq!((result.image_rows, result.image_cols), (1025, 20));
+    }
 }

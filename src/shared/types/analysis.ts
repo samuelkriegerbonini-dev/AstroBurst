@@ -49,6 +49,12 @@ export interface FftData {
   dc_magnitude: number;
   max_magnitude: number;
   elapsed_ms: number;
+  grid_width?: number;
+  grid_height?: number;
+  windowed?: boolean;
+  downsampled?: boolean;
+  image_width?: number;
+  image_height?: number;
 }
 
 export interface PixelNeighborhood {
