@@ -7,6 +7,7 @@ import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
 import { useToolHost } from "../../context/ToolHostContext";
+import { useCompositePreview } from "../../context/CompositeContext";
 import { histogramSkyWindow } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { ANALYSIS_SECTION, analysisSections, deepZoomAvailable } from "../../utils/analysisSections";
@@ -19,6 +20,7 @@ import {
   detectedStarsOnMeasuredImage,
   histogramStfLock,
   rgbStfPanelMode,
+  starDetectionScope,
 } from "../../utils/analysisTarget";
 import type { StfParams } from "../../shared/types";
 import type { Star } from "./PlateSolvePanel";
@@ -84,6 +86,7 @@ function AnalysisTabInner({
   const { display } = useDisplayContext();
   const { excludeDq } = useDqContext();
   const { gpuDisplay } = useToolHost();
+  const { compositeVersion } = useCompositePreview();
 
   const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
   const [starLoading, setStarLoading] = useState(false);
@@ -106,13 +109,14 @@ function AnalysisTabInner({
     previewOnly: target.displayed.previewOnly,
   });
   const detectSeqRef = useRef(0);
+  const detectionScope = starDetectionScope({ path: effectivePath, composite: compositeOnScreen, rgbPath, compositeVersion });
 
   useEffect(() => {
     detectSeqRef.current++;
     setStarResult(null);
     setDetectError(null);
     setStarLoading(false);
-  }, [effectivePath, compositeOnScreen, rgbPath]);
+  }, [detectionScope]);
 
   const rafIdRef = useRef<number | null>(null);
   const pendingStfRef = useRef<{ params: StfParams; path: string } | null>(null);
@@ -389,6 +393,7 @@ function AnalysisTabInner({
             filePath={regionKey}
             sourceBadge={compositeMeasurementBadge}
             detectedTotal={starResult?.n_detected ?? null}
+            annotationsOnView={starsOnMeasuredImage}
           />
         </section>
 

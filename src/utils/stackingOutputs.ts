@@ -1,4 +1,5 @@
 import type { ProcessedResult } from "../shared/types/preview";
+import type { PipelineResult } from "../shared/types/stacking";
 import { samePath } from "./processingChain";
 
 function baseName(path: string): string {
@@ -18,14 +19,75 @@ function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");
 }
 
-export function stackOutputName(firstFramePath: string, frameCount: number, at: Date): string {
+function runTimestamp(at: Date): string {
   const date = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}`;
   const time = `${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}-${pad(at.getMilliseconds(), 3)}`;
-  return `${frameStem(firstFramePath)}_stack${frameCount}_${date}-${time}`;
+  return `${date}-${time}`;
+}
+
+export function stackOutputName(firstFramePath: string, frameCount: number, at: Date): string {
+  return `${frameStem(firstFramePath)}_stack${frameCount}_${runTimestamp(at)}`;
+}
+
+export function pipelineOutputName(firstFramePath: string, frameCount: number, at: Date): string {
+  return `${frameStem(firstFramePath)}_pipeline${frameCount}_${runTimestamp(at)}`;
 }
 
 export function framesLabel(prefix: string, frameCount: number): string {
   return `${prefix} · ${frameCount} frame${frameCount === 1 ? "" : "s"}`;
+}
+
+export const PIPELINE_RGB_CHOICE = "RGB";
+const PIPELINE_RGB_REFERENCE_CHANNEL = "R";
+
+export interface PipelineViewOutput {
+  output: Omit<ProcessedResult, "label">;
+  label: string;
+}
+
+function channelLights(result: PipelineResult, label: string): number {
+  return result.stats.channels.find((c) => c.label === label)?.lights_input ?? 0;
+}
+
+export function pipelineViewOutput(result: PipelineResult, choice: string): PipelineViewOutput | null {
+  const masters = result.masters ?? [];
+  if (choice === PIPELINE_RGB_CHOICE) {
+    const reference = masters.find((m) => m.label === PIPELINE_RGB_REFERENCE_CHANNEL) ?? masters[0];
+    if (!result.rgbPreviewUrl || !reference) return null;
+    const lights = result.stats.channels.reduce((sum, c) => sum + c.lights_input, 0);
+    return {
+      output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: null, kind: "stacking", inputPath: reference.input_path },
+      label: framesLabel("Pipeline RGB", lights),
+    };
+  }
+  const master = masters.find((m) => m.label === choice);
+  if (!master) return null;
+  return {
+    output: {
+      fitsPath: master.fits_path,
+      previewUrl: master.previewUrl ?? null,
+      dimensions: toDims(master.dimensions),
+      kind: "stacking",
+      inputPath: master.input_path,
+    },
+    label: framesLabel(`Pipeline ${choice}`, channelLights(result, choice)),
+  };
+}
+
+export function pipelineInitialChoice(result: PipelineResult): string | null {
+  if (result.rgb_preview) return PIPELINE_RGB_CHOICE;
+  return result.channel_previews[0]?.label ?? null;
+}
+
+export interface WizardParkInput {
+  targetKey: string;
+  currentKey: string | null;
+  wizardCompositeOnScreen: boolean;
+  wizardCompositeReady: boolean;
+}
+
+export function parksWizardComposite(input: WizardParkInput): boolean {
+  return input.targetKey === input.currentKey && input.wizardCompositeOnScreen && input.wizardCompositeReady;
 }
 
 export function sourceLabel(prefix: string, sourcePath: string, currentPath: string): string {

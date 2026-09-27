@@ -30,6 +30,7 @@ use crate::core::analysis::star_detection::{detect_stars as detect_stars_core, D
 use crate::core::astrometry::spcc::{query_gaia_vizier, CatalogStar};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
+use crate::core::imaging::luminance::rgb_to_luminance;
 use crate::core::imaging::stats::{
     build_histogram, compute_histogram_with_stats, compute_image_stats, downsample_histogram, is_valid_pixel,
 };
@@ -302,58 +303,26 @@ pub async fn detect_stars_composite(
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
-        let (er, eg, eb) = crate::cmd::io::rgb_source_planes(path.as_deref())?;
-
-        let r = er.as_ref();
-        let g = eg.as_ref();
-        let b = eb.as_ref();
-        let (rows, cols) = r.dim();
-
-        let r_s = r.as_slice().unwrap();
-        let g_s = g.as_slice().unwrap();
-        let b_s = b.as_slice().unwrap();
-
-        let n = rows * cols;
-        let lum_vec: Vec<f32> = if n > PAR_THRESHOLD {
-            (0..n).into_par_iter()
-                .map(|i| r_s[i] * 0.2126 + g_s[i] * 0.7152 + b_s[i] * 0.0722)
-                .collect()
-        } else {
-            (0..n)
-                .map(|i| r_s[i] * 0.2126 + g_s[i] * 0.7152 + b_s[i] * 0.0722)
-                .collect()
-        };
-
-        let mut lum_min = f32::INFINITY;
-        let mut lum_max = f32::NEG_INFINITY;
-        for &v in &lum_vec {
-            if v.is_finite() {
-                if v < lum_min { lum_min = v; }
-                if v > lum_max { lum_max = v; }
-            }
-        }
-
-        let range = lum_max - lum_min;
-        let normalized: Vec<f32> = if range > 1e-10 {
-            let inv = 1.0 / range;
-            if n > PAR_THRESHOLD {
-                lum_vec.par_iter()
-                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
-                    .collect()
-            } else {
-                lum_vec.iter()
-                    .map(|&v| if v.is_finite() { ((v - lum_min) * inv).clamp(0.0, 1.0) } else { 0.0 })
-                    .collect()
-            }
-        } else {
-            vec![0.0; n]
-        };
-
-        let lum = ndarray::Array2::from_shape_vec((rows, cols), normalized)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
+        let (r, g, b) = crate::cmd::io::rgb_source_planes(path.as_deref())?;
+        let lum = composite_detection_luminance(&r, &g, &b)?;
         capped_detection_json(detect_stars_core(&lum, sigma), max_stars, t0)
     })
+}
+
+fn composite_detection_luminance(
+    r: &ndarray::Array2<f32>,
+    g: &ndarray::Array2<f32>,
+    b: &ndarray::Array2<f32>,
+) -> anyhow::Result<ndarray::Array2<f32>> {
+    if r.dim() != g.dim() || r.dim() != b.dim() {
+        anyhow::bail!(
+            "Composite planes differ in size: R {:?}, G {:?}, B {:?}",
+            r.dim(),
+            g.dim(),
+            b.dim()
+        );
+    }
+    Ok(rgb_to_luminance(r, g, b))
 }
 
 pub const PHOTOMETRY_SATURATED_FLAG: &str = "SATURATED";
@@ -1110,6 +1079,79 @@ mod tests {
         let (x, y) = (stars[0]["x"].as_f64().unwrap(), stars[0]["y"].as_f64().unwrap());
         assert!((x - 32.0).abs() < 1.0 && (y - 32.0).abs() < 1.0, "brightest star at ({x}, {y})");
         assert!(of_slots.unwrap()["stars"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn composite_star_detection_measures_native_luminance_and_keeps_padding_at_exact_zero() {
+        let _guard = crate::cmd::helpers::composite_test_lock().await;
+        let size = 256;
+        let pad = 64;
+        let star = gaussian_pixels(size, 4000.0, 2.0, 0.0);
+        let mut state = 4242u32;
+        let mut noise = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 24) as f32 - 127.5) / 8.0
+        };
+        let mut plane = |gain: f32| {
+            ndarray::Array2::from_shape_fn((size, size), |(y, x)| {
+                if y < pad && x < pad {
+                    0.0
+                } else {
+                    gain * (10.0 + star[y * size + x] + noise())
+                }
+            })
+        };
+        let r = plane(11.4);
+        let mut g = plane(1.0);
+        let b = plane(12.1);
+        g[[200, 40]] = -60.0;
+
+        let lum = crate::core::imaging::luminance::rgb_to_luminance(&r, &g, &b);
+        assert!(lum.iter().cloned().fold(f32::INFINITY, f32::min) < 0.0, "the luminance needs a negative minimum");
+        assert_eq!(lum.iter().filter(|&&v| v == 0.0).count(), pad * pad, "padding must stay exactly zero");
+        let expected = detect_stars_core(&lum, 5.0);
+        assert!(expected.background_median > 1.0, "expected native units, got {}", expected.background_median);
+        assert!(!expected.stars.is_empty());
+
+        crate::cmd::helpers::insert_composite_and_orig(
+            r.clone(),
+            g.clone(),
+            b.clone(),
+            compute_image_stats(&r),
+            compute_image_stats(&g),
+            compute_image_stats(&b),
+        );
+        let of_slots = detect_stars_composite(5.0, 200, None).await;
+        crate::cmd::helpers::clear_composite();
+        let of_slots = of_slots.unwrap();
+
+        assert_eq!(of_slots["background_median"].as_f64(), Some(expected.background_median));
+        assert_eq!(of_slots["background_sigma"].as_f64(), Some(expected.background_sigma));
+        assert_eq!(of_slots[RES_N_DETECTED].as_u64(), Some(expected.stars.len() as u64));
+        assert_eq!(of_slots["image_width"].as_u64(), Some(size as u64));
+        let brightest = &of_slots["stars"][0];
+        assert_eq!(brightest["flux"].as_f64(), Some(expected.stars[0].flux));
+        assert!((brightest["x"].as_f64().unwrap() - 128.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn composite_star_detection_refuses_planes_of_different_sizes() {
+        let _guard = crate::cmd::helpers::composite_test_lock().await;
+        let r = ndarray::Array2::from_elem((16, 16), 3.0f32);
+        let g = ndarray::Array2::from_elem((16, 12), 3.0f32);
+        let b = ndarray::Array2::from_elem((16, 16), 3.0f32);
+        crate::cmd::helpers::insert_composite_and_orig(
+            r.clone(),
+            g.clone(),
+            b.clone(),
+            compute_image_stats(&r),
+            compute_image_stats(&g),
+            compute_image_stats(&b),
+        );
+        let result = detect_stars_composite(5.0, 200, None).await;
+        crate::cmd::helpers::clear_composite();
+        let err = result.unwrap_err();
+        assert!(err.contains("(16, 16)") && err.contains("(16, 12)"), "{err}");
     }
 
     fn gaussian_fits(dir: &std::path::Path, name: &str) -> String {

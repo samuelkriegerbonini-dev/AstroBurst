@@ -5,6 +5,7 @@ import { screenToImagePixel } from "../../utils/pixelMapping";
 import { viewportClickRoute } from "../../utils/regionClick";
 import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
 import { previewTextureTitle } from "../../utils/previewShell";
+import { viewScaleAttributes } from "../../utils/starOverlay";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "../viewer/OverlayLayer";
@@ -276,6 +277,7 @@ function GpuViewport({
             <canvas
               ref={overlayCanvasRef}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
+              {...viewScaleAttributes(transform.scale)}
             />
           )}
           {dqCanvasRef && (

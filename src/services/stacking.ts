@@ -1,4 +1,4 @@
-import { typedInvoke, withPreview } from "../infrastructure/tauri";
+import { getPreviewUrl, withPreview } from "../infrastructure/tauri";
 import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions, DrizzleRgbOptions, DrizzleRgbResult } from "../shared/types/stacking";
 import { evaluateNoiseBatch } from "./statistics";
 import { noiseWeightsFromSigmas, type NoiseWeightSummary } from "../utils/noiseWeights";
@@ -44,8 +44,16 @@ export function drizzleFrames(
   return withPreview<StackResult>("drizzle_stack", outputDir, { paths, name, ...rest });
 }
 
-export function runCalibrationPipeline(request: PipelineRequest): Promise<PipelineResult> {
-  return typedInvoke<PipelineResult>("run_pipeline_cmd", { request });
+export async function runCalibrationPipeline(
+  request: PipelineRequest,
+  outputDir?: string,
+  name?: string,
+): Promise<PipelineResult> {
+  const res = await withPreview<PipelineResult>("run_pipeline_cmd", outputDir, { request, name }, [["rgb_png_path", "rgbPreviewUrl"]]);
+  const masters = await Promise.all(
+    (res.masters ?? []).map(async (master) => ({ ...master, previewUrl: await getPreviewUrl(master.png_path) })),
+  );
+  return { ...res, masters };
 }
 
 export const MIN_DRIZZLE_FRAMES_PER_CHANNEL = 2;

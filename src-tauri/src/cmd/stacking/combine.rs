@@ -26,7 +26,7 @@ use crate::types::header::HduHeader;
 use crate::types::stacking::{DrizzleConfig, DrizzleResult, FrameAlignment, StackConfig, StackResult};
 
 const ABPROC_CALIBRATED: &str = "calibrated";
-const ABPROC_STACKED: &str = "stacked";
+pub(super) const ABPROC_STACKED: &str = "stacked";
 const ABPROC_DRIZZLED: &str = "drizzled";
 const ABPROC_REJECTION: &str = "rejection";
 
@@ -40,7 +40,7 @@ pub const RES_NORMALIZATION_APPLIED: &str = "normalization_applied";
 const RES_ALIGNMENT: &str = "alignment";
 const RES_INCLUDED: &str = "included";
 
-fn output_name(name: Option<&str>, default: &str) -> String {
+pub(super) fn output_name(name: Option<&str>, default: &str) -> String {
     let mut out = String::new();
     let mut replaced = false;
     for c in name.unwrap_or("").chars() {
@@ -75,7 +75,7 @@ fn alignment_json(paths: &[String], alignment: &[FrameAlignment]) -> Vec<serde_j
         .collect()
 }
 
-fn reference_header(paths: &[String]) -> Option<HduHeader> {
+pub(super) fn reference_header(paths: &[String]) -> Option<HduHeader> {
     paths.first().and_then(|p| cached_header(p).ok())
 }
 

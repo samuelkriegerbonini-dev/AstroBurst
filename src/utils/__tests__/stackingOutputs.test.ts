@@ -1,6 +1,21 @@
 import { describe, it, expect } from "vitest";
-import { displaysFileGrid, frameStem, framesLabel, otherGridHint, resultsForRecipients, showsOutput, sourceLabel, stackOutputName, toDims } from "../stackingOutputs";
+import {
+  displaysFileGrid,
+  frameStem,
+  framesLabel,
+  otherGridHint,
+  parksWizardComposite,
+  pipelineInitialChoice,
+  pipelineOutputName,
+  pipelineViewOutput,
+  resultsForRecipients,
+  showsOutput,
+  sourceLabel,
+  stackOutputName,
+  toDims,
+} from "../stackingOutputs";
 import type { ProcessedResult } from "../../shared/types/preview";
+import type { PipelineMasterOutput, PipelineResult } from "../../shared/types/stacking";
 
 function result(fitsPath: string | null, previewUrl: string | null): ProcessedResult {
   return { fitsPath, previewUrl, dimensions: null, label: "x", kind: "stacking", inputPath: "/in/a.fits" };
@@ -161,5 +176,126 @@ describe("showsOutput", () => {
   it("is false when nothing is shown", () => {
     expect(showsOutput(null, result("/out/x.fits", null))).toBe(false);
     expect(showsOutput(undefined, result("/out/x.fits", null))).toBe(false);
+  });
+});
+
+describe("pipelineOutputName", () => {
+  const t1 = new Date(2026, 8, 23, 14, 25, 30, 123);
+  const t2 = new Date(2026, 8, 23, 14, 25, 30, 456);
+
+  it("names the pipeline outputs after the first light, the light count and the run time", () => {
+    expect(pipelineOutputName("C:\\subs\\673nmos.fits", 3, t1)).toBe("673nmos_pipeline3_20260923-142530-123");
+  });
+
+  it("never reuses the name of a stack of the same frames or of an earlier pipeline run", () => {
+    const pipeline = pipelineOutputName("/subs/673nmos.fits", 3, t1);
+    const stack = stackOutputName("/subs/673nmos.fits", 3, t1);
+    const rerun = pipelineOutputName("/subs/673nmos.fits", 3, t2);
+    expect(new Set([pipeline, stack, rerun]).size).toBe(3);
+  });
+});
+
+function master(label: string, firstLight: string): PipelineMasterOutput {
+  return {
+    label,
+    png_path: `/out/run_${label}.png`,
+    fits_path: `/out/run_${label}.fits`,
+    dimensions: [1600, 1500],
+    input_path: firstLight,
+    previewUrl: `asset://out/run_${label}.png`,
+  };
+}
+
+function channelStats(label: string, lights: number) {
+  return { label, lights_input: lights, mean: 1, stddev: 1 };
+}
+
+function pipelineRun(overrides: Partial<PipelineResult> = {}): PipelineResult {
+  return {
+    stats: {
+      darks_combined: 0,
+      flats_combined: 0,
+      bias_combined: 0,
+      channels: [channelStats("G", 2), channelStats("R", 1), channelStats("B", 3)],
+    },
+    channel_previews: ["G", "R", "B"].map((label) => ({ label, pixels_b64: "", width: 800, height: 750 })),
+    rgb_preview: "AAAA",
+    masters: [master("G", "/subs/656nmos.fits"), master("R", "/subs/673nmos.fits"), master("B", "/subs/502nmos.fits")],
+    rgb_png_path: "/out/run_rgb.png",
+    rgb_dimensions: [800, 750],
+    rgbPreviewUrl: "asset://out/run_rgb.png",
+    ...overrides,
+  };
+}
+
+describe("pipelineViewOutput", () => {
+  it("shows the RGB as a PNG-only stacking result without a pixel grid, on the R channel's first light, counting every light", () => {
+    expect(pipelineViewOutput(pipelineRun(), "RGB")).toEqual({
+      output: {
+        fitsPath: null,
+        previewUrl: "asset://out/run_rgb.png",
+        dimensions: null,
+        kind: "stacking",
+        inputPath: "/subs/673nmos.fits",
+      },
+      label: "Pipeline RGB · 6 frames",
+    });
+  });
+
+  it("references the RGB to the first master's light when there is no R channel", () => {
+    const run = pipelineRun({ masters: [master("G", "/subs/656nmos.fits"), master("B", "/subs/502nmos.fits")] });
+    expect(pipelineViewOutput(run, "RGB")?.output.inputPath).toBe("/subs/656nmos.fits");
+  });
+
+  it("shows a channel as its master FITS, with the master's full size and the channel's first light", () => {
+    expect(pipelineViewOutput(pipelineRun(), "B")).toEqual({
+      output: {
+        fitsPath: "/out/run_B.fits",
+        previewUrl: "asset://out/run_B.png",
+        dimensions: [1600, 1500],
+        kind: "stacking",
+        inputPath: "/subs/502nmos.fits",
+      },
+      label: "Pipeline B · 3 frames",
+    });
+    expect(pipelineViewOutput(pipelineRun(), "R")?.label).toBe("Pipeline R · 1 frame");
+  });
+
+  it("has nothing to show for a channel the run did not build or an RGB it did not write", () => {
+    expect(pipelineViewOutput(pipelineRun(), "L")).toBeNull();
+    expect(pipelineViewOutput(pipelineRun({ rgb_png_path: null, rgbPreviewUrl: undefined }), "RGB")).toBeNull();
+    expect(pipelineViewOutput(pipelineRun({ masters: undefined }), "G")).toBeNull();
+  });
+});
+
+describe("pipelineInitialChoice", () => {
+  it("shows the RGB after a run that composed one", () => {
+    expect(pipelineInitialChoice(pipelineRun())).toBe("RGB");
+  });
+
+  it("shows the first channel when no RGB was composed, and nothing when no channel was built", () => {
+    expect(pipelineInitialChoice(pipelineRun({ rgb_preview: undefined, rgb_png_path: null, rgbPreviewUrl: undefined }))).toBe("G");
+    expect(pipelineInitialChoice(pipelineRun({ rgb_preview: undefined, channel_previews: [] }))).toBeNull();
+  });
+});
+
+describe("parksWizardComposite", () => {
+  const onScreen = { targetKey: "1|/d/673nmos.fits", currentKey: "1|/d/673nmos.fits", wizardCompositeOnScreen: true, wizardCompositeReady: true };
+
+  it("parks a finished wizard composite that would hide an output published to the file on screen", () => {
+    expect(parksWizardComposite(onScreen)).toBe(true);
+  });
+
+  it("leaves the composite on screen when the output goes to another file", () => {
+    expect(parksWizardComposite({ ...onScreen, currentKey: "2|/d/656nmos.fits" })).toBe(false);
+    expect(parksWizardComposite({ ...onScreen, currentKey: null })).toBe(false);
+  });
+
+  it("does nothing when no wizard composite is on screen", () => {
+    expect(parksWizardComposite({ ...onScreen, wizardCompositeOnScreen: false })).toBe(false);
+  });
+
+  it("does not park a composite the wizard has not finished building", () => {
+    expect(parksWizardComposite({ ...onScreen, wizardCompositeReady: false })).toBe(false);
   });
 });

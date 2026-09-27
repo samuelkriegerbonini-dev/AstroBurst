@@ -41,6 +41,19 @@ export function detectedStarsOnMeasuredImage(input: DetectedStarsInput): boolean
   return !input.compositeOnScreen || input.measuresFilePlanes;
 }
 
+export interface StarDetectionScopeInput {
+  path: string | null;
+  composite: boolean;
+  rgbPath: string | null;
+  compositeVersion: number;
+}
+
+export function starDetectionScope(input: StarDetectionScopeInput): string {
+  if (!input.composite) return `image:${input.path ?? ""}`;
+  if (input.rgbPath !== null) return `rgb-file:${input.rgbPath}`;
+  return `wizard-composite:${input.compositeVersion}:${input.path ?? ""}`;
+}
+
 export interface MeasureKeyInput {
   path: string | null;
   composite: boolean;
@@ -75,7 +88,8 @@ export function describeMeasurementSource(input: MeasurementSourceInput): Measur
     return {
       text: "composite",
       tone: "composite",
-      title: "Measured on the RGB composite on screen (the wizard Blend and the composite steps applied after it)",
+      title:
+        "Measured on the linear planes of the RGB composite (the wizard Blend and the linear steps applied after it), not on the stretch, curves or local contrast shown on screen",
     };
   }
   if (!input.processedLabel) return null;

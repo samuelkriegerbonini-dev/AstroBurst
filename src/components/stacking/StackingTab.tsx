@@ -1,12 +1,15 @@
-import { lazy, Suspense, memo, useState, useCallback, useEffect, useMemo } from "react";
+import { lazy, Suspense, memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Loader2 } from "lucide-react";
 import { fileKeyOf, getRenderRecord, useDoneFilesContext, useFileContext, useRenderActions } from "../../context/PreviewContext";
+import { useCompositeActions } from "../../context/CompositeContext";
+import { useComposeWizardContext } from "../../context/ComposeWizardContext";
+import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { fileStore } from "../../hooks/useFileStore";
 import { getOutputDir, getPreviewUrl } from "../../infrastructure/tauri";
 import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
-import { framesLabel, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
+import { framesLabel, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
 import type { CalibrateResult } from "../../shared/types";
-import type { DrizzleRgbResult, StackResult } from "../../shared/types/stacking";
+import type { DrizzleRgbResult, PipelineResult, StackResult } from "../../shared/types/stacking";
 import type { CosmeticBatchResult, CosmeticResult } from "../../shared/types/cosmetic";
 import type { ProcessedResult } from "../../shared/types/preview";
 import type { CalibrationMasters } from "./CalibrationPanel";
@@ -69,7 +72,12 @@ function filesShowing(output: Pick<ProcessedResult, "fitsPath" | "previewUrl">):
 
 function StackingTabInner() {
   const { doneFiles } = useDoneFilesContext();
-  const { publishProcessed } = useRenderActions();
+  const { publishProcessed, currentFileKey } = useRenderActions();
+  const { park } = useCompositeActions();
+  const wizardCompositeOnScreen = useCompositeMode();
+  const { state: wizardState } = useComposeWizardContext();
+  const wizardViewRef = useRef({ onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady });
+  wizardViewRef.current = { onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady };
   const { file } = useFileContext();
   const [active, setActive] = useState<StackSection>("calibrate");
   const [resolvedDir, setResolvedDir] = useState("./output");
@@ -109,14 +117,29 @@ function StackingTabInner() {
     [fileKey, filePath],
   );
 
+  const uncoverTarget = useCallback(
+    (target: RunTarget) => {
+      const wizardView = wizardViewRef.current;
+      const parks = parksWizardComposite({
+        targetKey: target.key,
+        currentKey: currentFileKey(),
+        wizardCompositeOnScreen: wizardView.onScreen,
+        wizardCompositeReady: wizardView.ready,
+      });
+      if (parks) park();
+    },
+    [currentFileKey, park],
+  );
+
   const publishOutput = useCallback(
     (target: RunTarget, output: Omit<ProcessedResult, "label">, labelFor: (recipientPath: string) => string) => {
       if (!output.fitsPath && !output.previewUrl) return;
+      uncoverTarget(target);
       for (const { key, result } of resultsForRecipients(target, filesShowing(output), output, labelFor)) {
         publishProcessed(key, result);
       }
     },
-    [publishProcessed],
+    [publishProcessed, uncoverTarget],
   );
 
   const handleCalibrationDone = useCallback(
@@ -215,6 +238,20 @@ function StackingTabInner() {
     [publishOutput],
   );
 
+  const handlePipelineShow = useCallback(
+    (result: PipelineResult, choice: string, target: RunTarget | null) => {
+      if (!target) return;
+      const view = pipelineViewOutput(result, choice);
+      if (!view) return;
+      if (showsOutput(getRenderRecord(target.key)?.processed, view.output)) {
+        uncoverTarget(target);
+        return;
+      }
+      publishOutput(target, view.output, () => view.label);
+    },
+    [publishOutput, uncoverTarget],
+  );
+
   const handleStackConfigChange = useCallback((config: Partial<StackConfig>) => {
     setStackConfig((prev) => ({ ...prev, ...config }));
   }, []);
@@ -287,6 +324,8 @@ function StackingTabInner() {
               files={doneFiles}
               calibration={calibration}
               stackConfig={stackConfig}
+              runTarget={runTarget}
+              onShow={handlePipelineShow}
             />
           </div>
           <div style={{ display: active === "drizzle_rgb" ? "block" : "none" }}>

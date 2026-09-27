@@ -115,12 +115,25 @@ export interface PipelineChannelPreview {
   height: number;
 }
 
+export interface PipelineMasterOutput {
+  label: string;
+  png_path: string;
+  fits_path: string;
+  dimensions: [number, number];
+  input_path: string;
+  previewUrl?: string;
+}
+
 export interface PipelineResult {
   stats: PipelineStats;
   channel_previews: PipelineChannelPreview[];
   rgb_preview?: string;
   elapsed_ms?: number;
   warnings?: string[];
+  masters?: PipelineMasterOutput[];
+  rgb_png_path?: string | null;
+  rgb_dimensions?: [number, number] | null;
+  rgbPreviewUrl?: string;
 }
 
 export interface CalibrateOptions {

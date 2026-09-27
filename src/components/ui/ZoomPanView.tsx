@@ -1,18 +1,20 @@
 import { useState, useCallback, useRef, useEffect, memo } from "react";
 import { ZoomIn, ZoomOut, Home } from "lucide-react";
 import { FIT_SCALE_CAP, imageRenderingFor, wheelZoomFactor } from "../../utils/viewerZoom";
+import { viewScaleAttributes } from "../../utils/starOverlay";
 
 interface ZoomPanViewProps {
   src: string;
   alt?: string;
   className?: string;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 16;
 const DOUBLE_CLICK_ZOOM = 3;
 
-function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
+function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPanViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [translate, setTranslate] = useState({ x: 0, y: 0 });
@@ -210,6 +212,14 @@ function ZoomPanView({ src, alt = "", className = "" }: ZoomPanViewProps) {
           onLoad={handleImgLoad}
           style={{ imageRendering: imageRenderingFor(scale) }}
         />
+        {overlayCanvasRef && (
+          <canvas
+            ref={overlayCanvasRef}
+            className="absolute inset-0 w-full h-full pointer-events-none"
+            style={{ display: "none" }}
+            {...viewScaleAttributes(scale)}
+          />
+        )}
       </div>
 
       <div className="absolute top-2 right-2 flex flex-col gap-1 z-10">

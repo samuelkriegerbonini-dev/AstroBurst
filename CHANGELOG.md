@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The Stack-tab Pipeline writes its stacked masters to the output folder (one FITS and one auto-STF PNG per channel, plus the RGB quick-look PNG) and returns their paths (`run_pipeline_cmd` now takes `outputDir` and `name`; the response adds `masters`, `rgb_png_path` and `rgb_dimensions` and keeps the base64 previews)
+
+### Changed
+- Publishing a Stack-tab result to the selected file while the Compose composite is on screen parks the composite, the same way "Back to file" does, so the result is visible; "Show composite" brings the composite back
+- Star rings, labels and plate-solve annotations keep a readable stroke and label size when the viewer is zoomed out, and redraw when the zoom changes
+- Star Detection shows BG, σ and flux with significant digits instead of fixed decimals, and its "composite" source title says detection uses the linear composite planes, not the display stretch or curves
+
+### Fixed
+- The Pipeline result never reached the central viewer: completing a run now shows "Pipeline RGB" (or the first master) on the file selected when the run started, and the R, G, B and RGB result pills show that output in the viewer, the channels as FITS with display controls; a failed re-run no longer leaves the previous run's pills active, and the in-panel RGB preview uses the RGB buffer's own size
+- Detect Stars on the colour composite (Compose composite or an RGB FITS view, GPU and CPU) drew no rings or labels because the composite view had no overlay layer
+- Star detection on the colour composite normalised the luminance by its min/max, which turned the exact-zero mosaic padding into fake sky, biased the background and σ low and roughly doubled the detections; the luminance now keeps the planes' native units, padding stays excluded, and mismatched channel sizes return an error instead of panicking
+- Composite star results were kept after Blend, Crop or a composite step replaced the composite, and plate-solve labels from the selected file's grid would have been drawn on a Compose composite with a different grid
+
 ## [0.6.4] - 2026-09-26
 
 ### Added

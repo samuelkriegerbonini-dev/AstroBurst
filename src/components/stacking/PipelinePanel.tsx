@@ -2,14 +2,16 @@ import { useState, useCallback, useId, useRef, useEffect, useMemo } from "react"
 import { open } from "@tauri-apps/plugin-dialog";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { runCalibrationPipeline } from "../../services/stacking";
+import { getOutputDir } from "../../infrastructure/tauri";
 import type { CombineMethod, PipelineResult, RejectionMethod } from "../../shared/types/stacking";
 import type { CosmeticConfig } from "../../shared/types/cosmetic";
 import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { detectChannel } from "../../utils/channelMapping";
 import { formatCount } from "../../utils/formatCount";
+import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, toDims } from "../../utils/stackingOutputs";
 import type { ProcessedFile } from "../../shared/types";
-import type { CalibrationState, StackConfig } from "./StackingTab";
+import type { CalibrationState, RunTarget, StackConfig } from "./StackingTab";
 
 interface FileGroup {
   label: string;
@@ -88,9 +90,11 @@ interface PipelinePanelProps {
   files?: ProcessedFile[];
   calibration?: CalibrationState;
   stackConfig?: StackConfig;
+  runTarget?: RunTarget | null;
+  onShow?: (result: PipelineResult, choice: string, target: RunTarget | null) => void;
 }
 
-export default function PipelinePanel({ files = [], calibration, stackConfig }: PipelinePanelProps) {
+export default function PipelinePanel({ files = [], calibration, stackConfig, runTarget = null, onShow }: PipelinePanelProps) {
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -217,8 +221,13 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
 
     if (channelInputs.length === 0 || defectErrors.length > 0) return;
 
+    const target = runTarget;
+    const lightCount = channelInputs.reduce((sum, c) => sum + c.paths.length, 0);
+    const name = pipelineOutputName(channelInputs[0].paths[0], lightCount, new Date());
     setLoading(true);
     setError(null);
+    setResult(null);
+    setActivePreview(null);
     setProgress("Building calibration masters...");
     try {
       const res = await runCalibrationPipeline({
@@ -234,10 +243,12 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
         combine,
         cosmetic: buildCosmetic(),
         dark_optimize: darkOptimize && darks.length > 0,
-      });
+      }, await getOutputDir(), name);
+      const choice = pipelineInitialChoice(res);
       setResult(res);
-      setActivePreview(res.rgb_preview ? "RGB" : res.channel_previews[0]?.label ?? null);
+      setActivePreview(choice);
       setProgress("");
+      if (choice) onShow?.(res, choice, target);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -251,20 +262,25 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
     decodedPreviewsRef.current.clear();
   }, [result]);
 
-  useEffect(() => {
-    if (activePreview !== "RGB") return;
-    if (!result?.rgb_preview || !rgbCanvasRef.current) return;
-    const firstCh = result.channel_previews[0];
-    if (!firstCh) return;
+  const showChoice = (choice: string) => {
+    setActivePreview(choice);
+    if (result) onShow?.(result, choice, runTarget);
+  };
 
-    const { width: w, height: h } = firstCh;
+  useEffect(() => {
+    if (activePreview !== PIPELINE_RGB_CHOICE) return;
+    if (!result?.rgb_preview || !rgbCanvasRef.current) return;
+    const rgbSize = toDims(result.rgb_dimensions);
+    if (!rgbSize) return;
+
+    const [w, h] = rgbSize;
     const canvas = rgbCanvasRef.current;
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    let imgData = decodedPreviewsRef.current.get("RGB");
+    let imgData = decodedPreviewsRef.current.get(PIPELINE_RGB_CHOICE);
     if (!imgData) {
       const raw = atob(result.rgb_preview);
       imgData = ctx.createImageData(w, h);
@@ -272,13 +288,13 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
       for (let i = 0, j = 0; i < w * h; i++, j += 3) {
         px[i] = (255 << 24) | (raw.charCodeAt(j + 2) << 16) | (raw.charCodeAt(j + 1) << 8) | raw.charCodeAt(j);
       }
-      decodedPreviewsRef.current.set("RGB", imgData);
+      decodedPreviewsRef.current.set(PIPELINE_RGB_CHOICE, imgData);
     }
     ctx.putImageData(imgData, 0, 0);
   }, [result, activePreview]);
 
   useEffect(() => {
-    if (!activePreview || activePreview === "RGB") return;
+    if (!activePreview || activePreview === PIPELINE_RGB_CHOICE) return;
     const ch = result?.channel_previews.find((c) => c.label === activePreview);
     const canvas = chCanvasRef.current;
     if (!ch || !canvas) return;
@@ -438,7 +454,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
             {result.channel_previews.map((ch) => (
               <button
                 key={ch.label}
-                onClick={() => setActivePreview(ch.label)}
+                onClick={() => showChoice(ch.label)}
                 className={`ab-pill ${activePreview === ch.label ? "data-active" : ""}`}
                 data-active={activePreview === ch.label || undefined}
               >
@@ -447,19 +463,19 @@ export default function PipelinePanel({ files = [], calibration, stackConfig }: 
             ))}
             {result.rgb_preview && (
               <button
-                onClick={() => setActivePreview("RGB")}
-                className={`ab-pill ${activePreview === "RGB" ? "data-active" : ""}`}
-                data-active={activePreview === "RGB" || undefined}
+                onClick={() => showChoice(PIPELINE_RGB_CHOICE)}
+                className={`ab-pill ${activePreview === PIPELINE_RGB_CHOICE ? "data-active" : ""}`}
+                data-active={activePreview === PIPELINE_RGB_CHOICE || undefined}
               >
-                RGB
+                {PIPELINE_RGB_CHOICE}
               </button>
             )}
           </div>
 
-          {activePreview === "RGB" && result.rgb_preview && (
+          {activePreview === PIPELINE_RGB_CHOICE && result.rgb_preview && (
             <canvas ref={rgbCanvasRef} className="w-full rounded border border-zinc-700" style={{ imageRendering: "auto" }} />
           )}
-          {activePreview && activePreview !== "RGB" && (
+          {activePreview && activePreview !== PIPELINE_RGB_CHOICE && (
             <canvas ref={chCanvasRef} className="w-full rounded border border-zinc-700" style={{ imageRendering: "auto" }} />
           )}
 

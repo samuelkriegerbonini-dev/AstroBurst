@@ -416,6 +416,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onCube
                 onMousePixel={isFileRgbView ? handleViewerMousePixel : undefined}
                 onPixelClick={isFileRgbView ? emitPixelClick : undefined}
                 onMouseLeave={clearMousePixel}
+                overlayCanvasRef={starOverlayRef}
               >
                 <GpuRgbRenderer
                   rgb={rgbRawPixels}
@@ -437,6 +438,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onImageClick, onCube
               src={compositePreviewUrl}
               alt="RGB composite"
               className="flex-1 min-h-0"
+              overlayCanvasRef={starOverlayRef}
             />
           </div>
         )}

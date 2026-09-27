@@ -3,7 +3,15 @@ import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag 
 import { plateSolve, getWcsInfo } from "../../services/astrometry";
 import type { WcsInfo } from "../../services/astrometry";
 import { getApiKey, getConfig } from "../../services/config";
-import { fitImageToCanvas, fitsPixelToCanvas, imagePointToCanvas } from "../../utils/starOverlay";
+import {
+  VIEW_SCALE_ATTRIBUTE,
+  fitImageToCanvas,
+  fitsPixelToCanvas,
+  imagePointToCanvas,
+  overlayLayers,
+  overlayStrokeScale,
+} from "../../utils/starOverlay";
+import { formatSignificant } from "../../utils/formatSignificant";
 import { withDeadline } from "../../utils/deadline";
 import {
   DEFAULT_SCALE_HIGH_TEXT,
@@ -59,6 +67,7 @@ interface SolveResult {
 }
 
 const EMPTY_ANNOTATIONS: FieldAnnotation[] = [];
+const ANNOTATIONS_OFF_VIEW_TITLE = "Object labels are in the solved file's pixel grid, so they are not drawn on the composite on screen";
 
 const SOLVE_TICK_MS = 250;
 const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
@@ -99,6 +108,7 @@ interface PlateSolvePanelProps {
   detectError?: string | null;
   sourceBadge?: React.ReactNode;
   detectedTotal?: number | null;
+  annotationsOnView?: boolean;
 }
 
 function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
@@ -118,6 +128,22 @@ function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefine
     return () => observer.disconnect();
   }, [ref]);
   return canvas;
+}
+
+function useViewScaleAttribute(canvas: HTMLCanvasElement | null): string | null {
+  const [value, setValue] = useState<string | null>(null);
+  useEffect(() => {
+    if (!canvas) {
+      setValue(null);
+      return;
+    }
+    const read = () => setValue(canvas.getAttribute(VIEW_SCALE_ATTRIBUTE));
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(canvas, { attributes: true, attributeFilter: [VIEW_SCALE_ATTRIBUTE] });
+    return () => observer.disconnect();
+  }, [canvas]);
+  return value;
 }
 
 function useElementSize(el: HTMLElement | null): string {
@@ -150,9 +176,11 @@ function PlateSolvePanel({
                                           detectError = null,
                                           sourceBadge,
                                           detectedTotal = null,
+                                          annotationsOnView = true,
                                         }: PlateSolvePanelProps) {
   const overlayCanvas = useLiveCanvas(overlayCanvasRef);
   const overlayHostSize = useElementSize(overlayCanvas?.parentElement ?? null);
+  const overlayViewScale = useViewScaleAttribute(overlayCanvas);
 
   const sigmaId = useId();
   const scaleLowId = useId();
@@ -244,6 +272,14 @@ function PlateSolvePanel({
   }, [solveLoading]);
 
   const annotations = solveResult?.annotations ?? EMPTY_ANNOTATIONS;
+  const { drawStars, drawAnnotations, unavailable: overlayUnavailable } = overlayLayers({
+    canvasMounted: overlayCanvas !== null,
+    showStars: showOverlay,
+    starCount: stars.length,
+    showAnnotations,
+    annotationCount: annotations.length,
+    annotationsOnView,
+  });
 
   useEffect(() => {
     const canvas = overlayCanvas;
@@ -254,9 +290,6 @@ function PlateSolvePanel({
       context?.clearRect(0, 0, canvas.width, canvas.height);
       canvas.style.display = "none";
     };
-
-    const drawStars = showOverlay && stars.length > 0;
-    const drawAnnotations = showAnnotations && annotations.length > 0;
 
     if (!drawStars && !drawAnnotations) {
       hide();
@@ -272,13 +305,14 @@ function PlateSolvePanel({
     const H = Math.min(parent.clientHeight, 8192);
     if (W === 0 || H === 0) return;
 
-    canvas.width = W;
-    canvas.height = H;
+    if (canvas.width !== W) canvas.width = W;
+    if (canvas.height !== H) canvas.height = H;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, W, H);
 
+    const k = overlayStrokeScale(canvas.getBoundingClientRect().width, W, canvas.hasAttribute(VIEW_SCALE_ATTRIBUTE));
     const fit = fitImageToCanvas(W, H, imageWidth || 1, imageHeight || 1);
     const scale = fit.scale;
 
@@ -287,7 +321,7 @@ function PlateSolvePanel({
 
       stars.forEach((star, i) => {
         const { x: sx, y: sy } = imagePointToCanvas(star.x, star.y, fit);
-        const radius = Math.max(3, (star.fwhm || 3) * scale * 1.5);
+        const radius = Math.max(3 * k, (star.fwhm || 3) * scale * 1.5);
         const brightness = Math.min(1, 0.3 + (star.flux / maxFlux) * 0.7);
 
         let color: string;
@@ -296,31 +330,31 @@ function PlateSolvePanel({
         else color = `rgba(255, 100, 0, ${brightness})`;
 
         ctx.strokeStyle = color;
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = 1.2 * k;
         ctx.beginPath();
         ctx.arc(sx, sy, radius, 0, Math.PI * 2);
         ctx.stroke();
 
         if (i < 20) {
           ctx.fillStyle = color;
-          ctx.font = "9px monospace";
-          ctx.fillText(`${i + 1}`, sx + radius + 2, sy - 2);
+          ctx.font = `${9 * k}px monospace`;
+          ctx.fillText(`${i + 1}`, sx + radius + 2 * k, sy - 2 * k);
         }
       });
 
       if (selectedStar !== null && selectedStar < stars.length) {
         const s = stars[selectedStar];
         const { x: sx, y: sy } = imagePointToCanvas(s.x, s.y, fit);
-        const radius = Math.max(6, (s.fwhm || 3) * scale * 2);
+        const radius = Math.max(6 * k, (s.fwhm || 3) * scale * 2);
 
         ctx.strokeStyle = "rgba(100, 200, 255, 1)";
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 * k;
         ctx.beginPath();
         ctx.arc(sx, sy, radius, 0, Math.PI * 2);
         ctx.stroke();
 
         ctx.strokeStyle = "rgba(100, 200, 255, 0.5)";
-        ctx.lineWidth = 0.5;
+        ctx.lineWidth = 0.5 * k;
         ctx.beginPath();
         ctx.moveTo(sx - radius * 2, sy);
         ctx.lineTo(sx + radius * 2, sy);
@@ -331,14 +365,15 @@ function PlateSolvePanel({
     }
 
     if (drawAnnotations) {
-      ctx.lineWidth = 1.2;
-      ctx.font = "10px monospace";
+      ctx.lineWidth = 1.2 * k;
+      ctx.font = `${10 * k}px monospace`;
+      const margin = 20 * k;
 
       for (const ann of annotations) {
         const { x: ax, y: ay } = fitsPixelToCanvas(ann.pixelx, ann.pixely, fit);
-        if (ax < -20 || ay < -20 || ax > W + 20 || ay > H + 20) continue;
+        if (ax < -margin || ay < -margin || ax > W + margin || ay > H + margin) continue;
 
-        const r = Math.max(10, (ann.radius ?? 12) * scale);
+        const r = Math.max(10 * k, (ann.radius ?? 12) * scale);
 
         ctx.strokeStyle = "rgba(167, 139, 250, 0.85)";
         ctx.beginPath();
@@ -349,17 +384,15 @@ function PlateSolvePanel({
         if (label) {
           ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
           const tw = ctx.measureText(label).width;
-          ctx.fillRect(ax + r + 2, ay - 8, tw + 6, 13);
+          ctx.fillRect(ax + r + 2 * k, ay - 8 * k, tw + 6 * k, 13 * k);
           ctx.fillStyle = "rgba(196, 181, 253, 1)";
-          ctx.fillText(label, ax + r + 5, ay + 2);
+          ctx.fillText(label, ax + r + 5 * k, ay + 2 * k);
         }
       }
     }
 
     return hide;
-  }, [stars, showOverlay, showAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvas, overlayHostSize, filePath]);
-
-  const overlayUnavailable = overlayCanvas === null && (stars.length > 0 || annotations.length > 0);
+  }, [stars, drawStars, drawAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvas, overlayHostSize, overlayViewScale, filePath]);
 
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
@@ -522,8 +555,8 @@ function PlateSolvePanel({
 
               {backgroundMedian != null && backgroundSigma != null && (
                 <div className="flex gap-2 text-[10px] text-zinc-500">
-                  <span>BG: {backgroundMedian.toFixed(1)}</span>
-                  <span>σ: {backgroundSigma.toFixed(2)}</span>
+                  <span>BG: {formatSignificant(backgroundMedian)}</span>
+                  <span>σ: {formatSignificant(backgroundSigma)}</span>
                 </div>
               )}
 
@@ -551,7 +584,7 @@ function PlateSolvePanel({
                       <td className="text-zinc-500 px-1 py-0.5">{i + 1}</td>
                       <td className="text-zinc-300 text-right px-1 font-mono">{s.x.toFixed(1)}</td>
                       <td className="text-zinc-300 text-right px-1 font-mono">{s.y.toFixed(1)}</td>
-                      <td className="text-zinc-300 text-right px-1 font-mono">{s.flux.toFixed(0)}</td>
+                      <td className="text-zinc-300 text-right px-1 font-mono">{formatSignificant(s.flux)}</td>
                       <td className="text-zinc-300 text-right px-1 font-mono">{s.fwhm.toFixed(1)}</td>
                       <td className="text-zinc-300 text-right px-1 font-mono">{s.snr.toFixed(0)}</td>
                     </tr>
@@ -576,8 +609,9 @@ function PlateSolvePanel({
             {annotations.length > 0 && (
               <button
                 onClick={() => setShowAnnotations(!showAnnotations)}
-                className={`transition-colors ${showAnnotations ? "text-violet-400" : "text-zinc-600 hover:text-zinc-400"}`}
-                title={showAnnotations ? "Hide object labels" : "Show object labels"}
+                disabled={!annotationsOnView}
+                className={`transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${showAnnotations ? "text-violet-400" : "text-zinc-600 hover:text-zinc-400"}`}
+                title={!annotationsOnView ? ANNOTATIONS_OFF_VIEW_TITLE : showAnnotations ? "Hide object labels" : "Show object labels"}
               >
                 <Tag size={12} />
               </button>

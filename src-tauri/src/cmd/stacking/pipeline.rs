@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use super::combine::{output_name, reference_header, ABPROC_STACKED};
+use crate::cmd::common::{derived_output_header, render_named_and_save, resolve_output_dir, OutputValues};
 use crate::core::imaging::calibration_pipeline::{
     lights_with_dq_planes, run_batch_pipeline, validate_cosmetic_config, BatchPipelineConfig,
     BatchPipelineResult, BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput,
@@ -12,8 +14,9 @@ use crate::core::stacking::calibration::{
     median_exposure_seconds, read_exposure_seconds,
 };
 use crate::types::constants::{
-    RES_LABEL, RES_PIXELS_B64, RES_WIDTH, RES_HEIGHT,
-    RES_STATS, RES_CHANNEL_PREVIEWS, RES_RGB_PREVIEW, RES_WARNINGS,
+    RES_CHANNEL_PREVIEWS, RES_DIMENSIONS, RES_FITS_PATH, RES_HEIGHT, RES_INPUT_PATH, RES_LABEL, RES_MASTERS,
+    RES_PIXELS_B64, RES_PNG_PATH, RES_RGB_DIMENSIONS, RES_RGB_PNG_PATH, RES_RGB_PREVIEW, RES_STATS, RES_WARNINGS,
+    RES_WIDTH,
 };
 
 const PIPELINE_PREVIEW_DIM: usize = 2048;
@@ -111,7 +114,7 @@ fn array2_to_b64_u16(arr: &ndarray::Array2<f32>) -> (String, usize, usize) {
     (base64::engine::general_purpose::STANDARD.encode(&buf), w, h)
 }
 
-fn rgb_to_b64_u8(rgb: &ndarray::Array3<f32>) -> String {
+fn rgb_preview_bytes(rgb: &ndarray::Array3<f32>) -> (Vec<u8>, usize, usize) {
     let (full_h, full_w, _) = rgb.dim();
     let step = preview_stride(full_h, full_w, PIPELINE_PREVIEW_DIM);
     let view = rgb.slice(ndarray::s![..;step, ..;step, ..]);
@@ -124,8 +127,77 @@ fn rgb_to_b64_u8(rgb: &ndarray::Array3<f32>) -> String {
             buf.push((view[[y, x, 2]].clamp(0.0, 1.0) * 255.0) as u8);
         }
     }
+    (buf, w, h)
+}
+
+struct MasterOutput {
+    label: String,
+    png_path: String,
+    fits_path: String,
+    width: usize,
+    height: usize,
+    input_path: String,
+}
+
+struct RgbOutput {
+    png_path: String,
+    preview_b64: String,
+    width: usize,
+    height: usize,
+}
+
+struct PipelineOutputs {
+    masters: Vec<MasterOutput>,
+    rgb: Option<RgbOutput>,
+}
+
+fn save_master(label: &str, arr: &ndarray::Array2<f32>, spec: &ChannelFilesInput, output_dir: &str, stem: &str) -> anyhow::Result<MasterOutput> {
+    let header = derived_output_header(reference_header(&spec.paths).as_ref(), ABPROC_STACKED, OutputValues::Linear);
+    let name = format!("{stem}_{}", output_name(Some(label), "channel"));
+    let (png_path, fits_path) = render_named_and_save(arr, output_dir, &name, true, Some(&header))?;
+    let fits_path = fits_path.ok_or_else(|| anyhow::anyhow!("Master '{label}' FITS was not written"))?;
+    let (rows, cols) = arr.dim();
+    Ok(MasterOutput {
+        label: label.to_string(),
+        png_path,
+        fits_path,
+        width: cols,
+        height: rows,
+        input_path: spec.paths.first().cloned().unwrap_or_default(),
+    })
+}
+
+fn save_rgb_preview(rgb: &ndarray::Array3<f32>, output_dir: &str, stem: &str) -> anyhow::Result<RgbOutput> {
+    let (bytes, width, height) = rgb_preview_bytes(rgb);
+    let png_path = format!("{output_dir}/{stem}_rgb.png");
+    image::save_buffer(&png_path, &bytes, width as u32, height as u32, image::ColorType::Rgb8)
+        .map_err(|e| anyhow::anyhow!("Failed to save RGB PNG: {e}"))?;
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(&buf)
+    let preview_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(RgbOutput { png_path, preview_b64, width, height })
+}
+
+fn save_pipeline_outputs(
+    result: &BatchPipelineResult,
+    specs: &[ChannelFilesInput],
+    output_dir: &str,
+    stem: &str,
+) -> anyhow::Result<PipelineOutputs> {
+    if result.master_channels.len() != specs.len() {
+        anyhow::bail!(
+            "Pipeline produced {} masters for {} channels",
+            result.master_channels.len(),
+            specs.len()
+        );
+    }
+    let masters = result
+        .master_channels
+        .iter()
+        .zip(specs)
+        .map(|((label, arr), spec)| save_master(label, arr, spec, output_dir, stem))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let rgb = result.rgb.as_ref().map(|rgb| save_rgb_preview(rgb, output_dir, stem)).transpose()?;
+    Ok(PipelineOutputs { masters, rgb })
 }
 
 fn compose_rgb_from_stacked_masters(
@@ -214,13 +286,19 @@ where
 #[tauri::command]
 pub async fn run_pipeline_cmd(
     request: PipelineRequest,
+    output_dir: String,
+    name: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || run_pipeline_request(request))
+    tokio::task::spawn_blocking(move || run_pipeline_request(request, &output_dir, name.as_deref()))
         .await
         .map_err(|e| format!("Task panic: {e}"))?
 }
 
-fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, String> {
+fn run_pipeline_request(
+    request: PipelineRequest,
+    output_dir: &str,
+    name: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
         .map_err(|e| format!("{:#}", e))?;
     let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
@@ -309,6 +387,11 @@ fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, S
     let counts = MasterFrameCounts::of(&request);
     let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, counts, &config)?;
 
+    let output_dir = resolve_output_dir(output_dir).map_err(|e| format!("{:#}", e))?;
+    let stem = output_name(name, "pipeline");
+    let outputs =
+        save_pipeline_outputs(&result, &request.channels, &output_dir, &stem).map_err(|e| format!("{:#}", e))?;
+
     let channel_previews: Vec<serde_json::Value> = result
         .master_channels
         .iter()
@@ -323,13 +406,29 @@ fn run_pipeline_request(request: PipelineRequest) -> Result<serde_json::Value, S
         })
         .collect();
 
-    let rgb_preview = result.rgb.as_ref().map(|rgb| rgb_to_b64_u8(rgb));
+    let masters_json: Vec<serde_json::Value> = outputs
+        .masters
+        .iter()
+        .map(|m| {
+            json!({
+                RES_LABEL: m.label,
+                RES_PNG_PATH: m.png_path,
+                RES_FITS_PATH: m.fits_path,
+                RES_DIMENSIONS: [m.width, m.height],
+                RES_INPUT_PATH: m.input_path,
+            })
+        })
+        .collect();
+    let rgb = outputs.rgb.as_ref();
 
     Ok(json!({
         RES_STATS: result.stats,
         RES_CHANNEL_PREVIEWS: channel_previews,
-        RES_RGB_PREVIEW: rgb_preview,
+        RES_RGB_PREVIEW: rgb.map(|o| &o.preview_b64),
         RES_WARNINGS: warnings,
+        RES_MASTERS: masters_json,
+        RES_RGB_PNG_PATH: rgb.map(|o| &o.png_path),
+        RES_RGB_DIMENSIONS: rgb.map(|o| [o.width, o.height]),
     }))
 }
 
@@ -417,10 +516,12 @@ mod tests {
             dark_optimize: false,
         };
 
-        let err = run_pipeline_request(request).unwrap_err();
+        let out = out_dir(&dir);
+        let err = run_pipeline_request(request, &out, Some("cosmetic")).unwrap_err();
         assert!(err.starts_with("Cosmetic correction"), "{err}");
         assert!(err.contains("Amount"), "{err}");
         assert!(!err.contains("missing_bias"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "the output dir was created before validation");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -533,15 +634,48 @@ mod tests {
         assert_eq!(err, "No channels provided");
     }
 
-    fn write_frames(dir: &tempfile::TempDir, prefix: &str, count: usize, level: f32) -> Vec<String> {
+    fn out_dir(dir: &tempfile::TempDir) -> String {
+        dir.path().join("out").to_str().unwrap().replace('\\', "/")
+    }
+
+    fn write_frames_sized(dir: &tempfile::TempDir, prefix: &str, count: usize, level: f32, size: usize) -> Vec<String> {
         (0..count)
             .map(|i| {
                 let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
-                let frame = Array2::from_shape_fn((12, 12), |(y, x)| level + ((x * 7 + y * 3 + i) % 5) as f32);
+                let frame = Array2::from_shape_fn((size, size), |(y, x)| level + ((x * 7 + y * 3 + i) % 5) as f32);
                 crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
                 path
             })
             .collect()
+    }
+
+    fn write_frames(dir: &tempfile::TempDir, prefix: &str, count: usize, level: f32) -> Vec<String> {
+        write_frames_sized(dir, prefix, count, level, 12)
+    }
+
+    fn rgb_request(dir: &tempfile::TempDir, sizes: [usize; 3]) -> PipelineRequest {
+        PipelineRequest {
+            channels: vec![
+                ChannelFilesInput { label: "R".into(), paths: write_frames_sized(dir, "r", 2, 500.0, sizes[0]) },
+                ChannelFilesInput { label: "G".into(), paths: write_frames_sized(dir, "g", 1, 300.0, sizes[1]) },
+                ChannelFilesInput { label: "B".into(), paths: write_frames_sized(dir, "b", 1, 200.0, sizes[2]) },
+            ],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: None,
+            align: Some(false),
+            rejection: None,
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        }
+    }
+
+    fn decode_b64(value: &serde_json::Value) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD.decode(value.as_str().expect("base64 string")).expect("valid base64")
     }
 
     #[test]
@@ -562,11 +696,98 @@ mod tests {
             dark_optimize: false,
         };
 
-        let response = run_pipeline_request(request).unwrap();
+        let response = run_pipeline_request(request, &out_dir(&dir), None).unwrap();
         let stats = &response[RES_STATS];
         assert_eq!(stats["darks_combined"], 3, "{stats}");
         assert_eq!(stats["flats_combined"], 2, "{stats}");
         assert_eq!(stats["bias_combined"], 0, "{stats}");
+    }
+
+    #[test]
+    fn pipeline_writes_fits_and_png_per_master_and_the_rgb_png_with_matching_dims() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let request = rgb_request(&dir, [12, 12, 12]);
+        let first_lights: Vec<String> = request.channels.iter().map(|ch| ch.paths[0].clone()).collect();
+        let stem = "M42_pipeline4_20260926-101010-123";
+
+        let response = run_pipeline_request(request, &out, Some(stem)).unwrap();
+
+        let masters = response[RES_MASTERS].as_array().unwrap();
+        let previews = response[RES_CHANNEL_PREVIEWS].as_array().unwrap();
+        assert_eq!(masters.len(), 3);
+        for (i, label) in ["R", "G", "B"].into_iter().enumerate() {
+            let master = &masters[i];
+            assert_eq!(master[RES_LABEL], label);
+            assert_eq!(previews[i][RES_LABEL], label);
+            let fits = master[RES_FITS_PATH].as_str().unwrap();
+            let png = master[RES_PNG_PATH].as_str().unwrap();
+            assert_eq!(fits, format!("{out}/{stem}_{label}.fits"));
+            assert_eq!(png, format!("{out}/{stem}_{label}.png"));
+            assert_eq!(crate::infra::fits::reader::load_fits_image(fits).unwrap().dim(), (12, 12));
+            assert_eq!(image::image_dimensions(png).unwrap(), (12, 12));
+            assert_eq!(master[RES_DIMENSIONS], json!([12, 12]));
+            assert_eq!(master[RES_INPUT_PATH], first_lights[i]);
+            let header = crate::infra::fits::reader::read_primary_header(fits).unwrap();
+            assert_eq!(header.get("ABPROC").map(str::trim), Some("stacked"));
+        }
+
+        let rgb_png = response[RES_RGB_PNG_PATH].as_str().unwrap();
+        assert_eq!(rgb_png, format!("{out}/{stem}_rgb.png"));
+        assert_eq!(response[RES_RGB_DIMENSIONS], json!([12, 12]));
+        let saved = image::open(rgb_png).unwrap().into_rgb8();
+        assert_eq!(saved.dimensions(), (12, 12));
+        assert_eq!(saved.into_raw(), decode_b64(&response[RES_RGB_PREVIEW]));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 7);
+    }
+
+    #[test]
+    fn pipeline_output_name_and_labels_cannot_escape_the_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let mut request = rgb_request(&dir, [12, 12, 12]);
+        request.channels[0].label = "../../R".into();
+        request.channels[1].label = "G / green".into();
+        request.channels[2].label = "..".into();
+
+        let response = run_pipeline_request(request, &out, Some("../evil")).unwrap();
+
+        let mut written = Vec::new();
+        for master in response[RES_MASTERS].as_array().unwrap() {
+            written.push(master[RES_FITS_PATH].as_str().unwrap().to_string());
+            written.push(master[RES_PNG_PATH].as_str().unwrap().to_string());
+        }
+        assert!(written[0].ends_with("/_evil__.._R.fits"), "{}", written[0]);
+        assert!(written[2].ends_with("/_evil_G_green.fits"), "{}", written[2]);
+        assert!(written[4].ends_with("/_evil_channel.fits"), "{}", written[4]);
+        let canonical_out = std::fs::canonicalize(&out).unwrap();
+        for path in &written {
+            let canonical = std::fs::canonicalize(path).unwrap();
+            assert_eq!(canonical.parent(), Some(canonical_out.as_path()), "{path}");
+        }
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), written.len());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().filter(|e| e.as_ref().unwrap().path().is_dir()).count(), 1);
+        assert!(response[RES_RGB_PNG_PATH].is_null());
+        assert!(response[RES_RGB_DIMENSIONS].is_null());
+        assert!(response[RES_RGB_PREVIEW].is_null());
+    }
+
+    #[test]
+    fn rgb_dimensions_follow_the_composed_buffer_when_channel_sizes_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+
+        let response = run_pipeline_request(rgb_request(&dir, [12, 10, 10]), &out, None).unwrap();
+
+        assert_eq!(response[RES_CHANNEL_PREVIEWS][0][RES_WIDTH], 12);
+        assert_eq!(response[RES_MASTERS][0][RES_DIMENSIONS], json!([12, 12]));
+        assert_eq!(response[RES_MASTERS][1][RES_DIMENSIONS], json!([10, 10]));
+        assert_eq!(response[RES_RGB_DIMENSIONS], json!([10, 10]));
+        assert_eq!(decode_b64(&response[RES_RGB_PREVIEW]).len(), 10 * 10 * 3);
+        let rgb_png = response[RES_RGB_PNG_PATH].as_str().unwrap();
+        assert_eq!(rgb_png, format!("{out}/pipeline_rgb.png"));
+        assert_eq!(image::image_dimensions(rgb_png).unwrap(), (10, 10));
+        assert!(std::path::Path::new(&format!("{out}/pipeline_R.fits")).is_file());
     }
 
     #[test]
@@ -636,9 +857,9 @@ mod tests {
         for x in 0..w {
             rgb[[0, x, 0]] = if x % 3 == 0 { 1.0 } else { 0.0 };
         }
-        let b64 = rgb_to_b64_u8(&rgb);
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).expect("valid base64");
+        let (bytes, rw, rh) = rgb_preview_bytes(&rgb);
         let (_, pw, ph) = array2_to_b64_u16(&Array2::<f32>::zeros((1, w)));
+        assert_eq!((rw, rh), (pw, ph));
         assert_eq!(bytes.len(), pw * ph * 3);
         assert!(bytes.iter().step_by(3).all(|&r| r == 255));
     }

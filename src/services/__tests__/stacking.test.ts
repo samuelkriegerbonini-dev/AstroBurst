@@ -6,17 +6,20 @@ import {
   type StackResult,
 } from "../../shared/types/stacking";
 
-const { withPreviewMock, typedInvokeMock } = vi.hoisted(() => ({
+const { withPreviewMock, typedInvokeMock, getPreviewUrlMock } = vi.hoisted(() => ({
   withPreviewMock: vi.fn(),
   typedInvokeMock: vi.fn(),
+  getPreviewUrlMock: vi.fn(),
 }));
 
 vi.mock("../../infrastructure/tauri", () => ({
   withPreview: withPreviewMock,
   typedInvoke: typedInvokeMock,
+  getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { channelOrNull, drizzleRgbStack } from "../stacking";
+import { channelOrNull, drizzleRgbStack, runCalibrationPipeline } from "../stacking";
+import type { PipelineRequest } from "../../shared/types/stacking";
 
 describe("channelOrNull", () => {
   it("passes a channel with enough frames through", () => {
@@ -68,6 +71,50 @@ describe("drizzleRgbStack", () => {
 
     const args = withPreviewMock.mock.calls[0][2] as { alignmentMethod: string | null };
     expect(args.alignmentMethod).toBe("affine");
+  });
+});
+
+describe("runCalibrationPipeline", () => {
+  const request: PipelineRequest = {
+    channels: [{ label: "R", paths: ["/subs/673nmos.fits"] }],
+    dark_paths: [],
+    flat_paths: [],
+    bias_paths: [],
+  };
+
+  beforeEach(() => {
+    withPreviewMock.mockReset();
+    getPreviewUrlMock.mockReset();
+    getPreviewUrlMock.mockImplementation(async (path: string) => `asset://localhost/${path}`);
+  });
+
+  it("asks the backend to write the outputs under the run name and resolves the RGB PNG to a viewer URL", async () => {
+    withPreviewMock.mockResolvedValue({ masters: [] });
+
+    await runCalibrationPipeline(request, "/out", "673nmos_pipeline3_20260923-142530-123");
+
+    expect(withPreviewMock).toHaveBeenCalledWith(
+      "run_pipeline_cmd",
+      "/out",
+      { request, name: "673nmos_pipeline3_20260923-142530-123" },
+      [["rgb_png_path", "rgbPreviewUrl"]],
+    );
+  });
+
+  it("gives every master a viewer URL for its own PNG and keeps the rest of the response", async () => {
+    withPreviewMock.mockResolvedValue({
+      rgbPreviewUrl: "asset://localhost//out/run_rgb.png",
+      masters: [
+        { label: "R", png_path: "/out/run_R.png", fits_path: "/out/run_R.fits", dimensions: [1600, 1600], input_path: "/subs/673nmos.fits" },
+        { label: "G", png_path: "/out/run_G.png", fits_path: "/out/run_G.fits", dimensions: [1600, 1600], input_path: "/subs/656nmos.fits" },
+      ],
+    });
+
+    const res = await runCalibrationPipeline(request);
+
+    expect(res.masters?.map((m) => m.previewUrl)).toEqual(["asset://localhost//out/run_R.png", "asset://localhost//out/run_G.png"]);
+    expect(res.masters?.[1].fits_path).toBe("/out/run_G.fits");
+    expect(res.rgbPreviewUrl).toBe("asset://localhost//out/run_rgb.png");
   });
 });
 

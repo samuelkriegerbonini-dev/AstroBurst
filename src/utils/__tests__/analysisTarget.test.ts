@@ -12,6 +12,7 @@ import {
   isFileRgbView,
   rgbMeasurePath,
   rgbStfPanelMode,
+  starDetectionScope,
 } from "../analysisTarget";
 
 describe("isFileRgbView", () => {
@@ -90,6 +91,14 @@ describe("describeMeasurementSource", () => {
     expect(source?.title).not.toContain("last RGB FITS loaded");
   });
 
+  it("says the composite measurement reads the linear planes, not the display stretch or curves", () => {
+    const source = describeMeasurementSource({ ...base, compositeOnScreen: true, measuresComposite: true });
+    expect(source?.title).toContain("linear planes");
+    expect(source?.title).toContain("wizard Blend");
+    expect(source?.title).toContain("not on the stretch, curves or local contrast");
+    expect(source?.title).not.toContain("on screen (the wizard Blend");
+  });
+
   it("says a per-file measurement ignores the RGB view on screen", () => {
     const source = describeMeasurementSource({ ...base, compositeOnScreen: true, processedLabel: "Background" });
     expect(source?.text).toBe("selected file");
@@ -119,6 +128,37 @@ describe("detectedStarsOnMeasuredImage", () => {
 
   it("keeps stars detected on the mono image the table measures", () => {
     expect(detectedStarsOnMeasuredImage({ compositeOnScreen: false, measuresFilePlanes: false })).toBe(true);
+  });
+});
+
+describe("starDetectionScope", () => {
+  const wizard = { path: "D:/l.fits", composite: true, rgbPath: null, compositeVersion: 3 };
+  const rgbFile = { path: "D:/m31_osc.fits", composite: true, rgbPath: "D:/m31_osc.fits", compositeVersion: 3 };
+  const mono = { path: "D:/l.fits", composite: false, rgbPath: null, compositeVersion: 3 };
+
+  it("changes when the wizard composite on screen is replaced", () => {
+    expect(starDetectionScope({ ...wizard, compositeVersion: 4 })).not.toBe(starDetectionScope(wizard));
+  });
+
+  it("ignores the composite version for the RGB-file view, which measures the file itself", () => {
+    expect(starDetectionScope({ ...rgbFile, compositeVersion: 4 })).toBe(starDetectionScope(rgbFile));
+  });
+
+  it("ignores the composite version for a mono view", () => {
+    expect(starDetectionScope({ ...mono, compositeVersion: 4 })).toBe(starDetectionScope(mono));
+  });
+
+  it("differs between the wizard composite and the mono view of the same file", () => {
+    expect(starDetectionScope(wizard)).not.toBe(starDetectionScope(mono));
+  });
+
+  it("differs between two RGB files and between two mono images", () => {
+    expect(starDetectionScope({ ...rgbFile, path: "D:/b.fits", rgbPath: "D:/b.fits" })).not.toBe(starDetectionScope(rgbFile));
+    expect(starDetectionScope({ ...mono, path: "D:/r.fits" })).not.toBe(starDetectionScope(mono));
+  });
+
+  it("differs between the RGB-file view and the wizard composite over the same file", () => {
+    expect(starDetectionScope({ ...wizard, path: rgbFile.path })).not.toBe(starDetectionScope(rgbFile));
   });
 });
 
