@@ -7,6 +7,8 @@ use crate::core::imaging::stats::is_padding;
 use crate::infra::progress::ProgressHandle;
 use crate::math::complex;
 use crate::math::fft::FftEngine2D;
+use crate::math::median::median_f32_mut;
+use crate::types::constants::{MAX_PROVIDED_PSF_SIZE, MIN_PROVIDED_PSF_SIZE};
 use crate::types::error::AppError;
 use crate::types::stacking::{RLConfig, RLResult};
 
@@ -171,6 +173,43 @@ fn validate_psf_kernel(psf: &Array2<f32>) -> Result<()> {
     Ok(())
 }
 
+pub fn provided_psf_kernel(rows: &[Vec<f32>]) -> Result<Array2<f32>> {
+    let size = rows.len();
+    if !(MIN_PROVIDED_PSF_SIZE..=MAX_PROVIDED_PSF_SIZE).contains(&size) || size % 2 == 0 {
+        bail!(
+            "The provided PSF kernel must be square with an odd size from {} to {}; it has {} rows",
+            MIN_PROVIDED_PSF_SIZE,
+            MAX_PROVIDED_PSF_SIZE,
+            size
+        );
+    }
+    if let Some((y, row)) = rows.iter().enumerate().find(|(_, row)| row.len() != size) {
+        bail!(
+            "The provided PSF kernel must be square; row {} has {} values but there are {} rows",
+            y,
+            row.len(),
+            size
+        );
+    }
+    let mut kernel = Array2::<f32>::zeros((size, size));
+    let mut sum = 0.0f64;
+    for (y, row) in rows.iter().enumerate() {
+        for (x, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                bail!("The provided PSF kernel has a non-finite value at row {}, column {}", y, x);
+            }
+            kernel[[y, x]] = v;
+            sum += v as f64;
+        }
+    }
+    if sum <= 0.0 {
+        bail!("The provided PSF kernel sums to {}; it needs a positive total to deconvolve", sum);
+    }
+    let sum = sum as f32;
+    kernel.mapv_inplace(|v| v / sum);
+    Ok(kernel)
+}
+
 fn valid_range(image: &Array2<f32>) -> Option<(f32, f32)> {
     image
         .iter()
@@ -189,6 +228,11 @@ fn non_negative_pedestal(image: &Array2<f32>) -> f32 {
     }
 }
 
+fn valid_median(image: &Array2<f32>) -> f32 {
+    let mut valid: Vec<f32> = image.iter().copied().filter(|v| !is_padding(*v)).collect();
+    median_f32_mut(&mut valid)
+}
+
 pub fn richardson_lucy(
     image: &Array2<f32>,
     psf: &Array2<f32>,
@@ -197,10 +241,12 @@ pub fn richardson_lucy(
 ) -> Result<RLResult> {
     validate_psf_kernel(psf)?;
     let pedestal = non_negative_pedestal(image);
-    if pedestal <= 0.0 {
+    let has_padding = image.iter().any(|v| is_padding(*v));
+    if pedestal <= 0.0 && !has_padding {
         return richardson_lucy_non_negative(image, psf, config, progress);
     }
-    let shifted = image.mapv(|v| if is_padding(v) { pedestal } else { v + pedestal });
+    let padding_fill = if pedestal > 0.0 { pedestal } else { valid_median(image) };
+    let shifted = image.mapv(|v| if is_padding(v) { padding_fill } else { v + pedestal });
     let mut result = richardson_lucy_non_negative(&shifted, psf, config, progress)?;
     Zip::from(&mut result.image).and(image).par_for_each(|out, &orig| {
         *out = if is_padding(orig) { 0.0 } else { *out - pedestal };
@@ -471,6 +517,49 @@ mod tests {
         assert_eq!(result.image[[40, 40]], 0.0);
     }
 
+    fn flat_sky_with_l_shaped_padding() -> Array2<f32> {
+        let mut image = Array2::from_elem((96, 96), 20.0f32);
+        image.slice_mut(ndarray::s![..48, ..24]).fill(0.0);
+        image.slice_mut(ndarray::s![..24, ..48]).fill(0.0);
+        image
+    }
+
+    fn away_from_the_array_border(y: usize, x: usize) -> bool {
+        (12..84).contains(&y) && (12..84).contains(&x)
+    }
+
+    fn touches_padding_within(image: &Array2<f32>, y: usize, x: usize, radius: usize) -> bool {
+        let (rows, cols) = image.dim();
+        let y1 = (y + radius + 1).min(rows);
+        let x1 = (x + radius + 1).min(cols);
+        image
+            .slice(ndarray::s![y.saturating_sub(radius)..y1, x.saturating_sub(radius)..x1])
+            .iter()
+            .any(|v| is_padding(*v))
+    }
+
+    #[test]
+    fn a_flat_sky_beside_l_shaped_padding_keeps_its_level_through_richardson_lucy() {
+        let image = flat_sky_with_l_shaped_padding();
+        let psf = generate_gaussian_psf(15, 2.0);
+        for deringing in [true, false] {
+            let result = richardson_lucy(&image, &psf, &rl_config(20, deringing), None).unwrap();
+            let mut checked = 0usize;
+            for ((y, x), &v) in result.image.indexed_iter() {
+                if is_padding(image[[y, x]]) {
+                    assert_eq!(v, 0.0, "deringing={deringing}: padding at ({y},{x}) became {v}");
+                } else if touches_padding_within(&image, y, x, 4) && away_from_the_array_border(y, x) {
+                    checked += 1;
+                    assert!(
+                        (v - 20.0).abs() <= 1.0,
+                        "deringing={deringing}: sky at ({y},{x}) next to padding moved to {v}"
+                    );
+                }
+            }
+            assert!(checked > 250, "only {checked} pixels lie within 4 px of the padding");
+        }
+    }
+
     #[test]
     fn a_positive_image_is_deconvolved_without_a_pedestal() {
         let image = Array2::from_shape_fn((32, 32), |(y, x)| ((y * 32 + x) as f32 / 1024.0) + 0.01);
@@ -478,6 +567,48 @@ mod tests {
         let psf = generate_gaussian_psf(5, 1.0);
         let result = richardson_lucy(&image, &psf, &rl_config(3, false), None).unwrap();
         assert!(result.image.iter().all(|v| v.is_finite() && *v >= 0.0));
+    }
+
+    fn square_kernel(size: usize, value: f32) -> Vec<Vec<f32>> {
+        vec![vec![value; size]; size]
+    }
+
+    #[test]
+    fn a_provided_kernel_is_normalised_to_unit_sum() {
+        let rows = vec![vec![1.0f32, 2.0, 1.0], vec![2.0, 4.0, 2.0], vec![1.0, 2.0, 1.0]];
+        let kernel = provided_psf_kernel(&rows).unwrap();
+        assert_eq!(kernel.dim(), (3, 3));
+        assert!((kernel.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!((kernel[[1, 1]] - 0.25).abs() < 1e-6);
+        assert!((kernel[[0, 0]] - 0.0625).abs() < 1e-6);
+        assert_eq!(provided_psf_kernel(&square_kernel(129, 1.0)).unwrap().dim(), (129, 129));
+    }
+
+    #[test]
+    fn a_malformed_provided_kernel_is_refused_with_the_reason() {
+        let even = provided_psf_kernel(&square_kernel(4, 1.0)).unwrap_err().to_string();
+        assert!(even.contains("odd size") && even.contains("4 rows"), "{even}");
+        let tiny = provided_psf_kernel(&square_kernel(1, 1.0)).unwrap_err().to_string();
+        assert!(tiny.contains("from 3 to 129"), "{tiny}");
+        let huge = provided_psf_kernel(&square_kernel(131, 1.0)).unwrap_err().to_string();
+        assert!(huge.contains("131 rows"), "{huge}");
+        let empty = provided_psf_kernel(&[]).unwrap_err().to_string();
+        assert!(empty.contains("0 rows"), "{empty}");
+
+        let mut ragged = square_kernel(3, 1.0);
+        ragged[1].pop();
+        let ragged = provided_psf_kernel(&ragged).unwrap_err().to_string();
+        assert!(ragged.contains("row 1 has 2 values"), "{ragged}");
+
+        let mut nan = square_kernel(3, 1.0);
+        nan[2][0] = f32::NAN;
+        let nan = provided_psf_kernel(&nan).unwrap_err().to_string();
+        assert!(nan.contains("non-finite value at row 2, column 0"), "{nan}");
+
+        let zero = provided_psf_kernel(&square_kernel(3, 0.0)).unwrap_err().to_string();
+        assert!(zero.contains("sums to 0"), "{zero}");
+        let negative = provided_psf_kernel(&square_kernel(5, -1.0)).unwrap_err().to_string();
+        assert!(negative.contains("positive total"), "{negative}");
     }
 
     #[test]

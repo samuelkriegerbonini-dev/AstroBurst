@@ -345,32 +345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replaced_channel_is_white_balanced_and_survives_a_reset() {
-        let _guard = helpers::composite_test_lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().to_str().unwrap().to_string();
-        let processed = dir.path().join("r_processed.fits").to_str().unwrap().to_string();
-        let new_r = plane(7.0);
-        write_fits_mono(&processed, &new_r, None).unwrap();
-
-        blend(plane(1.0), plane(2.0), plane(3.0));
-        apply_wb(&out, (2.0, 1.0, 1.0)).await;
-        super::super::update_composite_channel_cmd("r".to_string(), processed.clone()).await.unwrap();
-        assert_close(&slot(COMPOSITE_KEY_R), &new_r.mapv(|v| v * 2.0), "the synced channel lost its white balance");
-        assert_close(&slot(COMPOSITE_ORIG_R), &new_r, "the synced channel is missing from the unbalanced base");
-
-        reset_wb_cmd(out.clone()).await.unwrap();
-        assert_close(&slot(COMPOSITE_KEY_R), &new_r, "reset reverted the synced channel to the blend");
-
-        let bigger = dir.path().join("r_full_frame.fits").to_str().unwrap().to_string();
-        write_fits_mono(&bigger, &Array2::from_elem((20, 24), 5.0), None).unwrap();
-        let err = super::super::update_composite_channel_cmd("r".to_string(), bigger).await.unwrap_err();
-        assert!(err.contains("Re-run Blend"), "{err}");
-        assert!(err.contains("24x20") && err.contains("16x16"), "{err}");
-        assert_close(&slot(COMPOSITE_KEY_R), &new_r, "a refused channel still replaced the composite");
-    }
-
-    #[tokio::test]
     async fn reset_and_calibrate_on_a_cleared_composite_say_to_run_blend_again() {
         let _guard = helpers::composite_test_lock().await;
         let dir = tempfile::tempdir().unwrap();

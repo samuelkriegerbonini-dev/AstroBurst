@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Context;
@@ -119,17 +120,42 @@ pub(crate) fn load_orig_or_composite() -> anyhow::Result<(ImageEntry, ImageEntry
 
 const COMPOSITE_KEYS: [&str; 3] = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B];
 const COMPOSITE_ORIG_KEYS: [&str; 3] = [COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B];
+const COMPOSITE_STRETCHED_KEYS: [&str; 3] = [COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B];
+const COMPOSITE_TONED_KEYS: [&str; 3] = [COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B];
 const NEUTRAL_WB: [f32; 3] = [1.0; 3];
 
+pub(crate) const COMPOSITE_CHANGED: &str = "The composite changed while this step ran; run it again.";
+
 static COMPOSITE_WB: Mutex<[f32; 3]> = Mutex::new(NEUTRAL_WB);
+static COMPOSITE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn lock_composite_wb() -> MutexGuard<'static, [f32; 3]> {
     COMPOSITE_WB.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) fn composite_generation() -> u64 {
+    COMPOSITE_GENERATION.load(Ordering::SeqCst)
+}
+
+fn bump_composite_generation() -> u64 {
+    COMPOSITE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 #[cfg(test)]
 pub(crate) fn composite_wb_factors() -> [f32; 3] {
     *lock_composite_wb()
+}
+
+pub(crate) type CompositePlane = (Arc<Array2<f32>>, ImageStats);
+pub(crate) type CompositeTriplet = [CompositePlane; 3];
+
+#[derive(Clone)]
+pub(crate) struct CompositeSnapshot {
+    pub orig: CompositeTriplet,
+    pub key: CompositeTriplet,
+    pub wb: [f32; 3],
+    pub stretched: Option<CompositeTriplet>,
+    pub toned: Option<CompositeTriplet>,
 }
 
 fn scaled_stats(s: &ImageStats, k: f64) -> ImageStats {
@@ -160,7 +186,7 @@ pub(crate) fn insert_composite_and_orig(
     stats_b: ImageStats,
 ) {
     let mut wb = lock_composite_wb();
-    clear_composite_derived();
+    clear_derived_unlocked();
     let arc_r = Arc::new(r);
     let arc_g = Arc::new(g);
     let arc_b = Arc::new(b);
@@ -171,6 +197,7 @@ pub(crate) fn insert_composite_and_orig(
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_G, arc_g, stats_g);
     GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEY_B, arc_b, stats_b);
     *wb = NEUTRAL_WB;
+    bump_composite_generation();
 }
 
 pub(crate) fn insert_composite_white_balanced(
@@ -178,11 +205,12 @@ pub(crate) fn insert_composite_white_balanced(
     factors: [f32; 3],
 ) {
     let mut wb = lock_composite_wb();
-    clear_composite_derived();
+    clear_derived_unlocked();
     for (key, (arr, stats)) in COMPOSITE_KEYS.into_iter().zip(channels) {
         GLOBAL_IMAGE_CACHE.insert_synthetic(key, arr, stats);
     }
     *wb = factors;
+    bump_composite_generation();
 }
 
 pub(crate) fn insert_composite_content(
@@ -194,25 +222,14 @@ pub(crate) fn insert_composite_content(
     stats_b: ImageStats,
 ) {
     let wb = lock_composite_wb();
-    clear_composite_derived();
+    clear_derived_unlocked();
     let channels = [(Arc::new(r), stats_r), (Arc::new(g), stats_g), (Arc::new(b), stats_b)];
     for (i, (arr, stats)) in channels.into_iter().enumerate() {
         let (orig, orig_stats) = rescaled(&arr, &stats, 1.0 / wb[i]);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_ORIG_KEYS[i], orig, orig_stats);
         GLOBAL_IMAGE_CACHE.insert_synthetic(COMPOSITE_KEYS[i], arr, stats);
     }
-}
-
-pub(crate) fn replace_composite_channel(index: usize, arr: Arc<Array2<f32>>, stats: ImageStats) -> anyhow::Result<()> {
-    let (Some(key), Some(orig_key)) = (COMPOSITE_KEYS.get(index), COMPOSITE_ORIG_KEYS.get(index)) else {
-        anyhow::bail!("Invalid composite channel index {}", index);
-    };
-    let wb = lock_composite_wb();
-    clear_composite_derived();
-    let (balanced, balanced_stats) = rescaled(&arr, &stats, wb[index]);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(orig_key, arr, stats);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(key, balanced, balanced_stats);
-    Ok(())
+    bump_composite_generation();
 }
 
 pub(crate) fn clear_composite() {
@@ -220,8 +237,64 @@ pub(crate) fn clear_composite() {
     for key in COMPOSITE_KEYS.into_iter().chain(COMPOSITE_ORIG_KEYS) {
         GLOBAL_IMAGE_CACHE.remove(key);
     }
-    clear_composite_derived();
+    clear_derived_unlocked();
     *wb = NEUTRAL_WB;
+    bump_composite_generation();
+}
+
+fn load_planes(keys: [&str; 3]) -> Option<CompositeTriplet> {
+    let (r, g, b) = load_triplet(keys)?;
+    Some([r, g, b].map(|e| (e.data_arc(), e.stats().clone())))
+}
+
+fn store_planes(keys: [&str; 3], planes: &CompositeTriplet) {
+    for (key, (arr, stats)) in keys.into_iter().zip(planes) {
+        GLOBAL_IMAGE_CACHE.insert_synthetic(key, Arc::clone(arr), stats.clone());
+    }
+}
+
+fn store_optional_planes(keys: [&str; 3], planes: Option<&CompositeTriplet>) {
+    match planes {
+        Some(planes) => store_planes(keys, planes),
+        None => remove_triplet(keys),
+    }
+}
+
+pub(crate) fn unbalanced_planes(key: &CompositeTriplet, wb: [f32; 3]) -> CompositeTriplet {
+    [0, 1, 2].map(|i| rescaled(&key[i].0, &key[i].1, 1.0 / wb[i]))
+}
+
+pub(crate) fn composite_state_from_key(key: CompositeTriplet, wb: [f32; 3]) -> CompositeSnapshot {
+    let orig = unbalanced_planes(&key, wb);
+    CompositeSnapshot { orig, key, wb, stretched: None, toned: None }
+}
+
+pub(crate) fn snapshot_composite() -> anyhow::Result<(CompositeSnapshot, u64)> {
+    let wb = lock_composite_wb();
+    let key = load_planes(COMPOSITE_KEYS).ok_or_else(|| anyhow::anyhow!(COMPOSITE_GONE))?;
+    let orig = load_planes(COMPOSITE_ORIG_KEYS).unwrap_or_else(|| unbalanced_planes(&key, *wb));
+    let snapshot = CompositeSnapshot {
+        orig,
+        key,
+        wb: *wb,
+        stretched: load_planes(COMPOSITE_STRETCHED_KEYS),
+        toned: load_planes(COMPOSITE_TONED_KEYS),
+    };
+    Ok((snapshot, composite_generation()))
+}
+
+pub(crate) fn commit_composite(snapshot: &CompositeSnapshot, expected: Option<u64>) -> anyhow::Result<u64> {
+    let mut wb = lock_composite_wb();
+    if expected.is_some_and(|e| e != composite_generation()) {
+        anyhow::bail!(COMPOSITE_CHANGED);
+    }
+    store_planes(COMPOSITE_ORIG_KEYS, &snapshot.orig);
+    store_planes(COMPOSITE_KEYS, &snapshot.key);
+    *wb = snapshot.wb;
+    store_optional_planes(COMPOSITE_STRETCHED_KEYS, snapshot.stretched.as_ref());
+    store_optional_planes(COMPOSITE_TONED_KEYS, snapshot.toned.as_ref());
+    crate::cmd::processing::forget_composite_contrast();
+    Ok(bump_composite_generation())
 }
 
 #[cfg(test)]
@@ -250,39 +323,52 @@ fn load_triplet(keys: [&str; 3]) -> Option<(ImageEntry, ImageEntry, ImageEntry)>
     Some((r, g, b))
 }
 
-pub(crate) fn insert_composite_stretched(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
-    clear_composite_toned();
-    insert_triplet([COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B], r, g, b);
+fn remove_triplet(keys: [&str; 3]) {
+    for key in keys {
+        GLOBAL_IMAGE_CACHE.remove(key);
+    }
 }
 
-pub(crate) fn load_composite_stretched() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
-    load_triplet([COMPOSITE_STRETCHED_R, COMPOSITE_STRETCHED_G, COMPOSITE_STRETCHED_B])
+fn clear_stretched_unlocked() {
+    remove_triplet(COMPOSITE_STRETCHED_KEYS);
 }
 
-pub(crate) fn clear_composite_stretched() {
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_R);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_G);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_STRETCHED_B);
-}
-
-pub(crate) fn insert_composite_toned(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
-    insert_triplet([COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B], r, g, b);
-}
-
-pub(crate) fn load_composite_toned() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
-    load_triplet([COMPOSITE_TONED_R, COMPOSITE_TONED_G, COMPOSITE_TONED_B])
-}
-
-pub(crate) fn clear_composite_toned() {
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_R);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_G);
-    GLOBAL_IMAGE_CACHE.remove(COMPOSITE_TONED_B);
+fn clear_toned_unlocked() {
+    remove_triplet(COMPOSITE_TONED_KEYS);
     crate::cmd::processing::forget_composite_contrast();
 }
 
+fn clear_derived_unlocked() {
+    clear_stretched_unlocked();
+    clear_toned_unlocked();
+}
+
+pub(crate) fn insert_composite_stretched(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+    let _wb = lock_composite_wb();
+    clear_toned_unlocked();
+    insert_triplet(COMPOSITE_STRETCHED_KEYS, r, g, b);
+    bump_composite_generation();
+}
+
+pub(crate) fn load_composite_stretched() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
+    load_triplet(COMPOSITE_STRETCHED_KEYS)
+}
+
+pub(crate) fn insert_composite_toned(r: Array2<f32>, g: Array2<f32>, b: Array2<f32>) {
+    let _wb = lock_composite_wb();
+    insert_triplet(COMPOSITE_TONED_KEYS, r, g, b);
+    bump_composite_generation();
+}
+
+pub(crate) fn load_composite_toned() -> Option<(ImageEntry, ImageEntry, ImageEntry)> {
+    load_triplet(COMPOSITE_TONED_KEYS)
+}
+
+#[cfg(test)]
 pub(crate) fn clear_composite_derived() {
-    clear_composite_stretched();
-    clear_composite_toned();
+    let _wb = lock_composite_wb();
+    clear_derived_unlocked();
+    bump_composite_generation();
 }
 
 pub(crate) fn stats_json(stats: &ImageStats) -> serde_json::Value {
@@ -579,7 +665,7 @@ mod tests {
             kernel_radius: 3,
             ..crate::core::imaging::local_contrast::LheConfig::default()
         };
-        let run = crate::cmd::processing::lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), config).await;
+        let run = crate::cmd::processing::lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), config, None, None).await;
         let held_after_run = input.as_ref().is_some_and(|w| w.upgrade().is_some());
         clear_composite();
         let held_after_clear = input.as_ref().is_some_and(|w| w.upgrade().is_some());

@@ -7,6 +7,7 @@ import { listRenderRecords, useRenderActions } from "../context/PreviewContext";
 import { useCompositePreview } from "../context/CompositeContext";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { fileStore } from "../hooks/useFileStore";
+import { compositeChainStore } from "../utils/compositeChainStore";
 import { outputKeepList } from "../utils/outputKeep";
 
 function formatMb(bytes: number): string {
@@ -112,6 +113,7 @@ export default function ConfigPanel() {
         files: fileStore.getFiles(),
         records: listRenderRecords(),
         wizard: live.wizardState,
+        compositeChain: compositeChainStore.get(),
         previewUrls: [live.compositePreviewUrl],
       });
       const res = await cleanupOutput(dir, keep);

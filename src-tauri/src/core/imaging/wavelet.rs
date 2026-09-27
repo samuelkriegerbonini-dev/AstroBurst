@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ndarray::Array2;
+use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 
 use crate::core::imaging::stats::is_valid_pixel;
@@ -65,7 +65,9 @@ pub fn wavelet_denoise(
         p.set_total((num_scales * 2 + 1) as u64);
     }
 
-    let mut decomposition = atrous_decompose_with_progress(image, num_scales, progress)?;
+    let filled = padding_filled_with_the_valid_median(image);
+    let source = filled.as_ref().unwrap_or(image);
+    let mut decomposition = atrous_decompose_with_progress(source, num_scales, progress)?;
 
     let noise_sigma = mad_sigma_of_finite(detail_over_data(&decomposition.layers[0], image)) / noise_scaling_for_layer(0);
 
@@ -98,7 +100,14 @@ pub fn wavelet_denoise(
     }
 
     let bias = config.layer_bias.as_deref().unwrap_or(&[]);
-    let denoised = atrous_reconstruct_with_bias(&decomposition, bias);
+    let mut denoised = atrous_reconstruct_with_bias(&decomposition, bias);
+    if filled.is_some() {
+        Zip::from(&mut denoised).and(image).par_for_each(|out, &orig| {
+            if !is_valid_pixel(orig) {
+                *out = 0.0;
+            }
+        });
+    }
 
     if let Some(p) = progress {
         p.emit_complete();
@@ -110,6 +119,15 @@ pub fn wavelet_denoise(
         noise_estimate: noise_sigma,
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+fn padding_filled_with_the_valid_median(image: &Array2<f32>) -> Option<Array2<f32>> {
+    if image.iter().all(|v| is_valid_pixel(*v)) {
+        return None;
+    }
+    let mut valid: Vec<f32> = image.iter().copied().filter(|v| is_valid_pixel(*v)).collect();
+    let fill = median_f32_mut(&mut valid);
+    Some(image.mapv(|v| if is_valid_pixel(v) { v } else { fill }))
 }
 
 pub fn atrous_decompose(image: &Array2<f32>, num_scales: usize) -> AtrousLayers {
@@ -456,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruction_preserves_negative_and_nan() {
+    fn test_reconstruction_preserves_negative_and_restores_nan_as_zero_padding() {
         let mut image = Array2::from_elem((64, 64), -0.5f32);
         image[[0, 0]] = f32::NAN;
 
@@ -468,7 +486,7 @@ mod tests {
         };
 
         let result = wavelet_denoise(&image, &config, None).unwrap();
-        assert!(result.denoised[[0, 0]].is_nan());
+        assert_eq!(result.denoised[[0, 0]], 0.0);
         for y in 4..60 {
             for x in 4..60 {
                 assert!(
@@ -670,8 +688,8 @@ mod tests {
 
     #[test]
     fn test_layer_bias_doubles_finest_detail_of_impulse() {
-        let mut image = Array2::from_elem((32, 32), 0.0f32);
-        image[[16, 16]] = 1.0;
+        let mut image = Array2::from_elem((32, 32), 0.5f32);
+        image[[16, 16]] = 1.5;
         let base = WaveletConfig {
             num_scales: 3,
             thresholds: vec![0.0; 3],
@@ -700,8 +718,8 @@ mod tests {
 
     #[test]
     fn test_negative_layer_bias_softens_finest_detail() {
-        let mut image = Array2::from_elem((32, 32), 0.0f32);
-        image[[16, 16]] = 1.0;
+        let mut image = Array2::from_elem((32, 32), 0.5f32);
+        image[[16, 16]] = 1.5;
         let config = WaveletConfig {
             num_scales: 3,
             thresholds: vec![0.0; 3],
@@ -711,7 +729,7 @@ mod tests {
         let out = wavelet_denoise(&image, &config, None).unwrap().denoised;
         let decomposition = atrous_decompose(&image, 3);
         let expected = out[[16, 16]] + decomposition.layers[0][[16, 16]];
-        assert!((expected - 1.0).abs() < 1e-6, "softened center {} plus layer0 should restore the impulse", out[[16, 16]]);
+        assert!((expected - 1.5).abs() < 1e-6, "softened center {} plus layer0 should restore the impulse", out[[16, 16]]);
     }
 
     #[test]
@@ -740,6 +758,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn touches_padding_within(image: &Array2<f32>, y: usize, x: usize, radius: usize) -> bool {
+        let (rows, cols) = image.dim();
+        let y1 = (y + radius + 1).min(rows);
+        let x1 = (x + radius + 1).min(cols);
+        image
+            .slice(ndarray::s![y.saturating_sub(radius)..y1, x.saturating_sub(radius)..x1])
+            .iter()
+            .any(|v| !is_valid_pixel(*v))
+    }
+
+    #[test]
+    fn denoise_keeps_the_padding_exactly_zero_and_the_sky_beside_it_at_its_level() {
+        let mut image = gaussian_noise_image(96, 96, 5.0, 3).mapv(|v| v + 100.0);
+        image.slice_mut(ndarray::s![..48, ..24]).fill(0.0);
+        image.slice_mut(ndarray::s![..24, ..48]).fill(0.0);
+        let padding_before = image.iter().filter(|v| !is_valid_pixel(**v)).count();
+
+        let result = wavelet_denoise(&image, &WaveletConfig::default(), None).unwrap();
+
+        let padding_after = result.denoised.iter().filter(|v| !is_valid_pixel(**v)).count();
+        assert_eq!(padding_after, padding_before, "the padding count changed");
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        let mut far_sum = 0.0f64;
+        let mut far_count = 0usize;
+        for ((y, x), &v) in result.denoised.indexed_iter() {
+            if !is_valid_pixel(image[[y, x]]) {
+                assert_eq!(v, 0.0, "padding at ({y},{x}) came back as {v}");
+            } else if touches_padding_within(&image, y, x, 4) {
+                assert!((v - 100.0).abs() <= 10.0, "sky at ({y},{x}) next to padding moved to {v}");
+                sum += v as f64;
+                count += 1;
+            } else {
+                far_sum += v as f64;
+                far_count += 1;
+            }
+        }
+        assert!(count >= 400, "only {count} pixels lie within 4 px of the padding");
+        let mean = sum / count as f64;
+        let far_mean = far_sum / far_count as f64;
+        assert!((mean - 100.0).abs() <= 1.0, "the sky next to padding averages {mean}");
+        assert!((mean - far_mean).abs() <= 0.5, "the sky next to padding averages {mean} but {far_mean} elsewhere");
     }
 
     #[test]

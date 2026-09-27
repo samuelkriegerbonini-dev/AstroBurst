@@ -1,9 +1,14 @@
 import { useState, useCallback } from "react";
-import { applyArcsinhStretch } from "../../services/processing";
+import { applyArcsinhStretch, arcsinhStretchComposite } from "../../services/processing";
 import type { ArcsinhResult } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
+import { COMPOSITE_RESTARTED_NOTICE, compositeModeNotice } from "./compositeProps";
+import type { CompositePanelProps } from "./compositeProps";
 import { Slider, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 
 interface ArcsinhRun {
@@ -11,9 +16,10 @@ interface ArcsinhRun {
   resultUrl: string | undefined;
   baseUrl: string | null;
   baseLabel: string;
+  chainRestarted: boolean;
 }
 
-interface ArcsinhStretchPanelProps {
+interface ArcsinhStretchPanelProps extends CompositePanelProps {
   selectedFile: { path: string; result?: unknown } | null;
   outputDir?: string;
   onProcessingDone?: (result: ArcsinhResult) => void;
@@ -21,6 +27,8 @@ interface ArcsinhStretchPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const FACTOR_MIN = 1;
@@ -42,11 +50,17 @@ const ICON = (
   </svg>
 );
 
-export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: ArcsinhStretchPanelProps) {
+export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: ArcsinhStretchPanelProps) {
   const [factor, setFactor] = useState(50.0);
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<ArcsinhRun>("stretch", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<ArcsinhRun>("stretch", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "stretch", runResult.res.fits_path) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const holds = runResult !== null && (compositeMode
+    ? compositeChainHolds(compositeChain, "stretch", runResult.resultUrl)
+    : chainHoldsOutput(chain, "stretch", runResult.res.fits_path));
+  const result = holds ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
 
   const logMin = linearToLog(FACTOR_MIN);
   const logMax = linearToLog(FACTOR_MAX);
@@ -57,6 +71,23 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
   }, []);
 
   const handleRun = useCallback(() => {
+    if (compositeMode) {
+      if (!compositeInput) return;
+      const input = compositeInput;
+      const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+      void run(async () => {
+        const res = await arcsinhStretchComposite(factor, outputDir, { chainInput: input.input, displayStf });
+        onCompositeDone("stretch", "Stretch", res, displayStf);
+        return {
+          res,
+          resultUrl: bustPreviewUrl(res.previewUrl, Date.now()),
+          baseUrl: res.basePreviewUrl ?? input.previewUrl,
+          baseLabel: res.basePreviewUrl ? "Composite" : input.label,
+          chainRestarted: res.chain_restarted,
+        };
+      });
+      return;
+    }
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     const baseUrl = inputPreviewUrl ?? null;
@@ -65,17 +96,22 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
       const res = await applyArcsinhStretch(path, outputDir, factor);
       if (!ctx.inputUnchanged("stretch")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
+      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     });
-  }, [selectedFile?.path, factor, outputDir, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, factor, outputDir, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-3 p-4">
       <SectionHeader icon={ICON} title="Arcsinh Stretch" subtitle="arcsinh(I*S)/arcsinh(S)" />
       <ChainBanner chainedFrom={chainedFrom} accent="amber" />
 
-      {!selectedFile && (
+      {!selectedFile && !compositeMode && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to apply stretch.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-1">
@@ -113,13 +149,18 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
         ))}
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label={`Apply Stretch (S=${factor.toFixed(0)})`} runningLabel="Stretching..." running={isRunning} disabled={!selectedFile || blocked} accent="amber" onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label={`Apply Stretch (S=${factor.toFixed(0)})`} runningLabel="Stretching..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="amber" onClick={handleRun} />
       </div>
       <ErrorAlert message={error} />
 
       {result && (
         <div className="flex flex-col gap-2 animate-fade-in">
+          {result.chainRestarted && (
+            <div className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
           <ResultGrid items={[
             { label: "Factor", value: result.res.stretch_factor?.toFixed(1) },
             { label: "Time", value: result.res.elapsed_ms ? `${(result.res.elapsed_ms / 1000).toFixed(2)}s` : null },

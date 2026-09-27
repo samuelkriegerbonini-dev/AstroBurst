@@ -3,6 +3,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::compose::composite_chain::drop_chain_if_idle;
 use crate::cmd::helpers;
 use crate::core::compose::lrgb::lrgb_combine_normalized;
 use crate::core::imaging::resample::resample_image;
@@ -10,7 +11,7 @@ use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig, StfParams, apply_
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::ImageEntry;
-use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED, RES_CHANNEL, RES_UPDATED};
+use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED};
 
 const COMPOSITE_PNG_PREFIX: &str = "rgb_composite";
 const COMPOSITE_PNG_GRACE: Duration = Duration::from_secs(600);
@@ -187,46 +188,8 @@ pub async fn restretch_composite_cmd(
 #[tauri::command]
 pub async fn clear_composite_cache_cmd() -> Result<(), String> {
     helpers::clear_composite();
+    drop_chain_if_idle();
     Ok(())
-}
-
-fn composite_channel_index(channel: &str) -> anyhow::Result<usize> {
-    match channel.to_lowercase().as_str() {
-        "r" => Ok(0),
-        "g" => Ok(1),
-        "b" => Ok(2),
-        _ => anyhow::bail!("Invalid channel: {}. Must be r, g, or b.", channel),
-    }
-}
-
-#[tauri::command]
-pub async fn update_composite_channel_cmd(
-    channel: String,
-    path: String,
-) -> Result<serde_json::Value, String> {
-    blocking_cmd!({
-        let index = composite_channel_index(&channel)?;
-
-        let (er, _, _) = helpers::load_composite_rgb()?;
-        let target_dim = er.arr().dim();
-
-        let entry = load_from_cache_or_disk(&path)?;
-        let dim = entry.arr().dim();
-        if dim != target_dim {
-            anyhow::bail!(
-                "{} is {}x{} but the composite is {}x{}: the processed file is not aligned and cropped like the composite channels. Re-run Blend (with Align and Crop) to include it.",
-                path,
-                dim.1,
-                dim.0,
-                target_dim.1,
-                target_dim.0
-            );
-        }
-
-        helpers::replace_composite_channel(index, entry.data_arc(), entry.stats().clone())?;
-
-        Ok(json!({ RES_CHANNEL: channel, RES_UPDATED: true }))
-    })
 }
 
 #[cfg(test)]
@@ -291,16 +254,11 @@ mod tests {
         assert_eq!(lrgb, expected);
 
         let restretch = restretch_composite_cmd(
-            out.clone(), 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, None, None, None, None, None,
+            out, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, None, None, None, None, None,
         )
         .await
         .expect_err("restretch on a cleared composite must fail");
         assert_eq!(restretch, expected);
-
-        let update = update_composite_channel_cmd("r".to_string(), out)
-            .await
-            .expect_err("a channel update on a cleared composite must fail");
-        assert_eq!(update, expected);
     }
 
     #[test]

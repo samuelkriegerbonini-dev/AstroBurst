@@ -9,6 +9,17 @@ import type {
   MaskedStretchResult,
   SpccResult,
 } from "../shared/types/processing";
+import type {
+  CompositeChainCall,
+  CompositeMaskedStretchResult,
+  CompositeStretchResult,
+  PsfSource,
+} from "../shared/types/compositeChain";
+import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
+
+export interface DeconvolveRunResult extends DeconvolveResult {
+  psf_source: PsfSource;
+}
 
 export function deconvolveRL(
   path: string,
@@ -23,9 +34,10 @@ export function deconvolveRL(
     useEmpiricalPsf?: boolean;
     psfNumStars?: number;
     psfCutoutRadius?: number;
+    psfKernel?: number[][] | null;
   } = {},
-): Promise<DeconvolveResult> {
-  return withPreview<DeconvolveResult>("deconvolve_rl_cmd", outputDir, {
+): Promise<DeconvolveRunResult> {
+  return withPreview<DeconvolveRunResult>("deconvolve_rl_cmd", outputDir, {
     path,
     iterations: options.iterations ?? 20,
     psfSigma: options.psfSigma ?? 2.0,
@@ -36,6 +48,7 @@ export function deconvolveRL(
     useEmpiricalPsf: options.useEmpiricalPsf ?? false,
     psfNumStars: options.psfNumStars ?? 30,
     psfCutoutRadius: options.psfCutoutRadius ?? 15,
+    psfKernel: options.psfKernel ?? null,
   });
 }
 
@@ -263,10 +276,23 @@ export function maskedStretch(
   });
 }
 
+export function arcsinhStretchComposite(factor?: number, outputDir?: string): Promise<ArcsinhResult>;
+export function arcsinhStretchComposite(
+  factor: number,
+  outputDir: string | undefined,
+  chain: CompositeChainCall,
+): Promise<CompositeStretchResult>;
 export async function arcsinhStretchComposite(
   factor = 50.0,
   outputDir?: string,
-): Promise<ArcsinhResult> {
+  chain?: CompositeChainCall,
+): Promise<ArcsinhResult | CompositeStretchResult> {
+  if (chain) {
+    return withPreview<CompositeStretchResult>("arcsinh_stretch_composite_cmd", outputDir, {
+      factor,
+      ...chainArgs(chain),
+    }, CHAIN_PREVIEWS);
+  }
   const dir = outputDir ?? await getOutputDir();
   return typedInvoke<ArcsinhResult>("arcsinh_stretch_composite_cmd", {
     outputDir: dir,
@@ -274,23 +300,20 @@ export async function arcsinhStretchComposite(
   });
 }
 
-export async function maskedStretchComposite(
-  outputDir?: string,
-  options: {
-    iterations?: number;
-    targetBackground?: number;
-    maskGrowth?: number;
-    maskSoftness?: number;
-    protectionAmount?: number;
-    luminanceProtect?: boolean;
-    sharedMask?: boolean;
-    detectionSigma?: number;
-    maxEccentricity?: number;
-  } = {},
-): Promise<MaskedStretchResult> {
-  const dir = outputDir ?? await getOutputDir();
-  return typedInvoke<MaskedStretchResult>("masked_stretch_composite_cmd", {
-    outputDir: dir,
+export interface MaskedStretchCompositeOptions {
+  iterations?: number;
+  targetBackground?: number;
+  maskGrowth?: number;
+  maskSoftness?: number;
+  protectionAmount?: number;
+  luminanceProtect?: boolean;
+  sharedMask?: boolean;
+  detectionSigma?: number;
+  maxEccentricity?: number;
+}
+
+function maskedStretchCompositeArgs(options: MaskedStretchCompositeOptions) {
+  return {
     iterations: options.iterations ?? 10,
     targetBackground: options.targetBackground ?? 0.25,
     maskGrowth: options.maskGrowth ?? 2.5,
@@ -300,6 +323,30 @@ export async function maskedStretchComposite(
     sharedMask: options.sharedMask ?? true,
     detectionSigma: options.detectionSigma ?? 8.0,
     maxEccentricity: options.maxEccentricity ?? 0.85,
+  };
+}
+
+export function maskedStretchComposite(outputDir?: string, options?: MaskedStretchCompositeOptions): Promise<MaskedStretchResult>;
+export function maskedStretchComposite(
+  outputDir: string | undefined,
+  options: MaskedStretchCompositeOptions,
+  chain: CompositeChainCall,
+): Promise<CompositeMaskedStretchResult>;
+export async function maskedStretchComposite(
+  outputDir?: string,
+  options: MaskedStretchCompositeOptions = {},
+  chain?: CompositeChainCall,
+): Promise<MaskedStretchResult | CompositeMaskedStretchResult> {
+  if (chain) {
+    return withPreview<CompositeMaskedStretchResult>("masked_stretch_composite_cmd", outputDir, {
+      ...maskedStretchCompositeArgs(options),
+      ...chainArgs(chain),
+    }, CHAIN_PREVIEWS);
+  }
+  const dir = outputDir ?? await getOutputDir();
+  return typedInvoke<MaskedStretchResult>("masked_stretch_composite_cmd", {
+    outputDir: dir,
+    ...maskedStretchCompositeArgs(options),
   });
 }
 

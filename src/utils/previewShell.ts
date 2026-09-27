@@ -59,6 +59,28 @@ export function backToFileAction({ isRgbFile, hasProcessed, wizardCompositeReady
   return wizardCompositeReady ? "display-only" : "clear";
 }
 
+export type FileSwitchCompositeAction = "park" | "reset";
+
+export function fileSwitchCompositeAction({ livePreviewUrl, previousFileRgbUrl, wizardCompositeReady }: {
+  livePreviewUrl: string | null;
+  previousFileRgbUrl: string | null;
+  wizardCompositeReady: boolean;
+}): FileSwitchCompositeAction {
+  const wizardCompositeLive = livePreviewUrl !== null && livePreviewUrl !== previousFileRgbUrl;
+  return wizardCompositeLive && wizardCompositeReady ? "park" : "reset";
+}
+
+export function reseedsRgbFileView({ sameFile, isRgb, previousPreviewUrl, nextPreviewUrl, livePreviewUrl }: {
+  sameFile: boolean;
+  isRgb: boolean;
+  previousPreviewUrl: string | null;
+  nextPreviewUrl: string | null;
+  livePreviewUrl: string | null;
+}): boolean {
+  if (!sameFile || !isRgb || previousPreviewUrl === null || nextPreviewUrl === null) return false;
+  return nextPreviewUrl !== previousPreviewUrl && livePreviewUrl === previousPreviewUrl;
+}
+
 export function formatPixelValue(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
   const abs = Math.abs(v);

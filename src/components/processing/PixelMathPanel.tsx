@@ -2,11 +2,23 @@ import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react"
 import { Plus, Trash2 } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
 import { useDisplayedImage, useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { runPixelMath, validatePixelMath } from "../../services/pixelmath";
-import type { PixelMathResult, PixelMathSlot, PixelMathValidation } from "../../shared/types/pixelmath";
+import { compositePixelMath } from "../../services/compositeChain";
+import type { PixelMathResult, PixelMathSlot, PixelMathStats, PixelMathValidation } from "../../shared/types/pixelmath";
 import type { ProcessedFile } from "../../shared/types/fits.types";
+import {
+  COMPOSITE_RESTARTED_NOTICE,
+  channelTriple,
+  compositeModeNotice,
+  fileOnlyNotice,
+  type CompositePanelProps,
+  type CompositePixelMathResult,
+} from "./compositeProps";
 import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
@@ -20,7 +32,7 @@ import {
   slotErrors,
 } from "../../utils/pixelmathSlots";
 
-interface PixelMathPanelProps {
+interface PixelMathPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   chainedFrom?: string;
@@ -28,14 +40,34 @@ interface PixelMathPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
-interface PixelMathRun {
+interface PixelMathFileRun {
+  mode: "file";
   res: PixelMathResult;
   resultUrl: string | undefined;
   baseUrl: string | null;
   baseLabel: string;
 }
+
+interface PixelMathCompositeRun {
+  mode: "composite";
+  res: CompositePixelMathResult;
+  beforeUrl: string | null;
+  beforeLabel: string;
+  afterUrl: string | null;
+}
+
+type PixelMathRun = PixelMathFileRun | PixelMathCompositeRun;
+
+export type PixelMathTarget = "file" | "composite";
+
+const TARGET_OPTIONS: { value: PixelMathTarget; label: string }[] = [
+  { value: "file", label: "File" },
+  { value: "composite", label: "Composite (per channel)" },
+];
 
 const VALIDATION_DEBOUNCE_MS = 300;
 const ACCENT = "violet";
@@ -77,6 +109,8 @@ const TEXTAREA_CLASS =
   "w-full min-h-[72px] resize-y rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 font-mono text-xs text-zinc-200 focus:ring-1 focus:ring-violet-500/40";
 const INPUT_CLASS =
   "rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 font-mono text-xs text-zinc-200 focus:ring-1 focus:ring-violet-500/40";
+const AMBER_NOTICE_CLASS = "rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300";
+const COMPOSITE_NOTICE_CLASS = "rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-300";
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -89,6 +123,19 @@ function formatValue(v: number | undefined): string {
   return v.toFixed(4);
 }
 
+function compositeStatRows(res: CompositePixelMathResult): [string, string][] {
+  const channels = [res.stats.r, res.stats.g, res.stats.b];
+  const stat = (pick: (s: PixelMathStats) => number) =>
+    channelTriple(channels.map((s) => (s ? pick(s) : NaN)), formatValue);
+  return [
+    ["Min", stat((s) => s.min)],
+    ["Max", stat((s) => s.max)],
+    ["Mean", stat((s) => s.mean)],
+    ["Median", stat((s) => s.median)],
+    ["Non-finite", channelTriple(res.non_finite_count, String)],
+  ];
+}
+
 export default function PixelMathPanel({
   selectedFile,
   outputDir = "./output",
@@ -97,6 +144,12 @@ export default function PixelMathPanel({
   inputPreviewUrl,
   inputLabel,
   fileKey,
+  compositeMode,
+  compositeInput,
+  onCompositeDone,
+  fileName,
+  disabledReason,
+  disabledReasonId,
 }: PixelMathPanelProps) {
   const { doneFiles } = useDoneFilesContext();
   const displayed = useDisplayedImage();
@@ -112,12 +165,18 @@ export default function PixelMathPanel({
   const [rescale, setRescale] = useState(initial?.rescale ?? false);
   const [outputName, setOutputName] = useState(initial?.outputName ?? "");
   const [validation, setValidation] = useState<PixelMathValidation | null>(null);
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PixelMathRun>("pixelmath", retainKey);
+  const [target, setTarget] = useState<PixelMathTarget>("file");
+  const perChannel = compositeMode && target === "composite";
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PixelMathRun>("pixelmath", perChannel ? COMPOSITE_RUN_KEY : retainKey);
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "pixelMath", runResult.res.fits_path) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const fileResult = runResult?.mode === "file" && chainHoldsOutput(chain, "pixelMath", runResult.res.fits_path) ? runResult : null;
+  const compositeResult = runResult?.mode === "composite" && compositeChainHolds(compositeChain, "pixelMath", runResult.afterUrl) ? runResult : null;
   const validationSeq = useRef(0);
   const expressionId = useId();
   const outputNameId = useId();
+  const targetId = useId();
 
   const slotsTouchedRef = useRef(initial?.slotsTouched ?? false);
   const restoredForRef = useRef(retainKey);
@@ -258,19 +317,42 @@ export default function PixelMathPanel({
       });
       if (!ctx.displayedUnchanged()) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
+      return { mode: "file", res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
   }, [targetPath, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, outputName, run, onProcessingDone]);
+
+  const handleRunComposite = useCallback(() => {
+    if (!compositeInput) return;
+    const input = compositeInput;
+    const referenced = referencedSymbols(expression);
+    const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+    void run(async () => {
+      const res = await compositePixelMath(outputDir, { chainInput: input.input, displayStf }, expression, {
+        slots: slots.filter((s) => referenced.includes(s.name.trim())),
+        truncate,
+        rescale,
+      });
+      onCompositeDone("pixelMath", "PixelMath", res, displayStf);
+      return {
+        mode: "composite",
+        res,
+        beforeUrl: res.basePreviewUrl ?? input.previewUrl,
+        beforeLabel: res.basePreviewUrl ? "Composite" : input.label,
+        afterUrl: res.previewUrl ?? null,
+      };
+    });
+  }, [compositeInput, outputDir, expression, slots, truncate, rescale, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, run, onCompositeDone]);
 
   const validationError = validation && !validation.ok ? validation : null;
   const caret =
     validationError && validationError.position != null
       ? caretLines(expression, validationError.position, validationError.length ?? 1)
       : null;
-  const canRun = !!targetPath && expression.trim().length > 0 && !hasSlotErrors && !validationError;
+  const expressionReady = expression.trim().length > 0 && !hasSlotErrors && !validationError;
+  const canRun = perChannel ? compositeInput !== null && expressionReady : !!targetPath && expressionReady;
 
-  const originalUrl = result?.baseUrl ?? null;
-  const resultUrl = result?.resultUrl;
+  const originalUrl = fileResult?.baseUrl ?? null;
+  const resultUrl = fileResult?.resultUrl;
   const [targetPreviewBroken, setTargetPreviewBroken] = useState(false);
   useEffect(() => setTargetPreviewBroken(false), [originalUrl]);
 
@@ -278,16 +360,44 @@ export default function PixelMathPanel({
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <SectionHeader icon={ICON} title="PixelMath" subtitle="Per-pixel expressions over loaded images" />
 
-      {!targetPath && (
+      {compositeMode && (
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor={targetId} className="text-xs text-zinc-400">Target</label>
+          <select
+            id={targetId}
+            className="ab-select"
+            value={target}
+            disabled={isRunning}
+            onChange={(e) => setTarget(e.target.value as PixelMathTarget)}
+          >
+            {TARGET_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {compositeMode && !perChannel && (
+        <div className={AMBER_NOTICE_CLASS}>{fileOnlyNotice("Runs on", fileName)}</div>
+      )}
+      {perChannel && (
+        <div className={COMPOSITE_NOTICE_CLASS}>{compositeModeNotice(fileName)}</div>
+      )}
+
+      {perChannel && (
+        <div className="text-[10px] text-zinc-500">
+          {TARGET_SYMBOL} = <span className="text-zinc-300">{compositeInput?.label ?? "Composite"}</span>, one channel at a time
+        </div>
+      )}
+      {!perChannel && !targetPath && (
         <div className="px-1 text-xs italic text-zinc-500">Select a FITS file to use as {TARGET_SYMBOL}.</div>
       )}
-      {targetPath && (
+      {!perChannel && targetPath && (
         <div className="truncate text-[10px] text-zinc-500" title={targetPath}>
           {TARGET_SYMBOL} = <span className="text-zinc-300">{baseName(targetPath)}</span>
         </div>
       )}
-      {targetPath && chainedFrom && (
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+      {!perChannel && targetPath && chainedFrom && (
+        <div className={AMBER_NOTICE_CLASS}>
           {TARGET_SYMBOL} is the displayed image, not the latest processing output, so the
           <span className="font-medium"> {chainedFrom} </span>
           result is not part of this expression — bind it to a slot if you want it.
@@ -397,7 +507,7 @@ export default function PixelMathPanel({
               </button>
             </div>
             {nameErrors[i] && <div className="text-[10px] text-red-300">{nameErrors[i]}</div>}
-            {!nameErrors[i] && s.path === targetPath && (
+            {!nameErrors[i] && !perChannel && s.path === targetPath && (
               <div className="text-[10px] text-amber-300">
                 {s.name.trim() || `Slot ${i + 1}`} is the same image as {TARGET_SYMBOL}
               </div>
@@ -409,48 +519,58 @@ export default function PixelMathPanel({
       <div className="flex flex-col gap-2">
         <Toggle label="Truncate result to [0, 1]" checked={truncate} disabled={isRunning} accent={ACCENT} onChange={setTruncate} />
         <Toggle label="Rescale result to [0, 1]" checked={rescale} disabled={isRunning} accent={ACCENT} onChange={setRescale} />
-        <div className="flex items-center justify-between gap-2">
-          <label htmlFor={outputNameId} className="text-xs text-zinc-400">Output name</label>
-          <input
-            id={outputNameId}
-            className={`${INPUT_CLASS} w-40`}
-            value={outputName}
-            disabled={isRunning}
-            placeholder="pixelmath"
-            onChange={(e) => setOutputName(e.target.value)}
-          />
-        </div>
+        {!perChannel && (
+          <div className="flex items-center justify-between gap-2">
+            <label htmlFor={outputNameId} className="text-xs text-zinc-400">Output name</label>
+            <input
+              id={outputNameId}
+              className={`${INPUT_CLASS} w-40`}
+              value={outputName}
+              disabled={isRunning}
+              placeholder="pixelmath"
+              onChange={(e) => setOutputName(e.target.value)}
+            />
+          </div>
+        )}
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Run PixelMath" runningLabel="Evaluating..." running={isRunning} disabled={!canRun || blocked} accent={ACCENT} onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton
+          label="Run PixelMath"
+          runningLabel="Evaluating..."
+          running={isRunning}
+          disabled={!canRun || blocked || !!disabledReason}
+          describedBy={disabledReason ? disabledReasonId : undefined}
+          accent={ACCENT}
+          onClick={perChannel ? handleRunComposite : handleRun}
+        />
       </div>
       <ErrorAlert message={error} />
 
-      {result && (
+      {fileResult && (
         <div className="flex flex-col gap-3 animate-fade-in">
           <ResultGrid
             columns={4}
             items={[
-              { label: "Size", value: `${result.res.dimensions[0]}x${result.res.dimensions[1]}` },
-              { label: "Min", value: formatValue(result.res.stats?.min) },
-              { label: "Max", value: formatValue(result.res.stats?.max) },
-              { label: "Mean", value: formatValue(result.res.stats?.mean) },
-              { label: "Median", value: formatValue(result.res.stats?.median) },
-              { label: "Non-finite", value: result.res.non_finite_count },
-              { label: "Time", value: `${(result.res.elapsed_ms / 1000).toFixed(2)}s` },
-              { label: "Output", value: baseName(result.res.fits_path) },
+              { label: "Size", value: `${fileResult.res.dimensions[0]}x${fileResult.res.dimensions[1]}` },
+              { label: "Min", value: formatValue(fileResult.res.stats?.min) },
+              { label: "Max", value: formatValue(fileResult.res.stats?.max) },
+              { label: "Mean", value: formatValue(fileResult.res.stats?.mean) },
+              { label: "Median", value: formatValue(fileResult.res.stats?.median) },
+              { label: "Non-finite", value: fileResult.res.non_finite_count },
+              { label: "Time", value: `${(fileResult.res.elapsed_ms / 1000).toFixed(2)}s` },
+              { label: "Output", value: baseName(fileResult.res.fits_path) },
             ]}
           />
-          {result.res.warnings?.map((w) => (
-            <div key={w} className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          {fileResult.res.warnings?.map((w) => (
+            <div key={w} className={AMBER_NOTICE_CLASS}>
               {w}
             </div>
           ))}
           {originalUrl && resultUrl && !targetPreviewBroken && (
             <>
               <img src={originalUrl} alt="" className="hidden" onError={() => setTargetPreviewBroken(true)} />
-              <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel={result.baseLabel} resultLabel="PixelMath" accent={ACCENT} />
+              <CompareView originalUrl={originalUrl} resultUrl={resultUrl} originalLabel={fileResult.baseLabel} resultLabel="PixelMath" accent={ACCENT} />
             </>
           )}
           {originalUrl && resultUrl && targetPreviewBroken && (
@@ -458,6 +578,47 @@ export default function PixelMathPanel({
               The target preview is no longer on disk, so only the PixelMath result is shown. Reload the file to
               restore the comparison.
             </div>
+          )}
+        </div>
+      )}
+
+      {compositeResult && (
+        <div className="flex flex-col gap-3 animate-fade-in">
+          {compositeResult.res.chain_restarted && (
+            <div className={AMBER_NOTICE_CLASS}>{COMPOSITE_RESTARTED_NOTICE}</div>
+          )}
+          <ResultGrid
+            columns={2}
+            items={[
+              { label: "Size", value: `${compositeResult.res.dimensions[0]}x${compositeResult.res.dimensions[1]}` },
+              { label: "Time", value: `${(compositeResult.res.elapsed_ms / 1000).toFixed(2)}s` },
+            ]}
+          />
+          <div className="ab-metric-card flex flex-col gap-0.5">
+            <div className="flex items-center justify-between text-[10px] text-zinc-500">
+              <span>Per channel</span>
+              <span>R · G · B</span>
+            </div>
+            {compositeStatRows(compositeResult.res).map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-zinc-500">{label}</span>
+                <span className="font-mono text-zinc-200">{value}</span>
+              </div>
+            ))}
+          </div>
+          {compositeResult.res.warnings.map((w) => (
+            <div key={w} className={AMBER_NOTICE_CLASS}>
+              {w}
+            </div>
+          ))}
+          {compositeResult.beforeUrl && compositeResult.afterUrl && (
+            <CompareView
+              originalUrl={compositeResult.beforeUrl}
+              resultUrl={compositeResult.afterUrl}
+              originalLabel={compositeResult.beforeLabel}
+              resultLabel="PixelMath"
+              accent={ACCENT}
+            />
           )}
         </div>
       )}

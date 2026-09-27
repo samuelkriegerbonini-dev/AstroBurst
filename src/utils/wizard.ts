@@ -91,7 +91,6 @@ export interface WizardState {
   scnrAmount: number;
   scnrMethod: "average" | "maximum";
   scnrPreserveLuminance: boolean;
-  linkedStf: boolean;
   resultPng: string | null;
   resultFits: string | null;
   completedSteps: Record<string, boolean>;
@@ -190,7 +189,6 @@ export const INITIAL_STATE: WizardState = {
   scnrAmount: 0.5,
   scnrMethod: "average",
   scnrPreserveLuminance: false,
-  linkedStf: true,
   resultPng: null,
   resultFits: null,
   completedSteps: {},

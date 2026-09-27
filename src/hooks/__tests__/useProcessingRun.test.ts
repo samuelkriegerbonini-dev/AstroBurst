@@ -14,6 +14,7 @@ import {
   clearRunError,
   bustPreviewUrl,
   isCancelMessage,
+  isRunLocked,
   type RunState,
 } from "../useProcessingRun";
 import { EMPTY_CHAIN, withStep } from "../../utils/processingChain";
@@ -281,5 +282,15 @@ describe("isCancelMessage", () => {
   it("recognises a user cancel", () => {
     expect(isCancelMessage("Operation cancelled by user")).toBe(true);
     expect(isCancelMessage("File not found")).toBe(false);
+  });
+});
+
+describe("isRunLocked", () => {
+  it("reports a held key until that run settles, whichever panel holds it", () => {
+    let s = acquired(EMPTY_RUN_STATE, "background", A, 1);
+    expect(isRunLocked(s, A)).toBe(true);
+    expect(isRunLocked(s, B)).toBe(false);
+    s = settleRun(s, "background", A, 1, null, null);
+    expect(isRunLocked(s, A)).toBe(false);
   });
 });

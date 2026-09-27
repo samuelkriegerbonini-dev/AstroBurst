@@ -82,10 +82,6 @@ export function clearCompositeCache(): Promise<void> {
   return typedInvoke<void>("clear_composite_cache_cmd", {});
 }
 
-export function updateCompositeChannel(channel: string, path: string): Promise<void> {
-  return typedInvoke<void>("update_composite_channel_cmd", { channel, path });
-}
-
 export function blendChannels(
   channelPaths: string[],
   weights: { channelIdx: number; r: number; g: number; b: number }[],

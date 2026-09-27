@@ -1,18 +1,40 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { X } from "lucide-react";
 import { deconvolveRL } from "../../services/processing";
+import { compositeDeconvolveRL } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { DECONV_PROGRESS_EVENT } from "../../shared/types/processing";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import type { ChannelTriple, CompositeDeconvolveResult, CompositePanelProps } from "./compositeProps";
+import type { PsfSource } from "../../shared/types/compositeChain";
+import { empiricalPsfHint, psfSourceLabel, requestedPsfKernel } from "./deconvPsf";
+
+const RESULT_LABEL = "Deconvolved";
 
 function enforceOdd(value: number): number {
   const v = Math.round(value);
   return v % 2 === 0 ? v + 1 : v;
+}
+
+function formatCount(v: number): string {
+  return String(v);
+}
+
+function formatConvergence(v: number): string {
+  return v.toExponential(2);
+}
+
+function compositeEarlyStop(iterationsRun: ChannelTriple, requested: number): boolean {
+  return Math.min(...iterationsRun) < requested;
 }
 
 interface DeconvResult {
@@ -21,6 +43,7 @@ interface DeconvResult {
   iterations_run?: number;
   convergence?: number;
   elapsed_ms?: number;
+  psf_source?: PsfSource;
 }
 
 interface DeconvParams {
@@ -33,7 +56,8 @@ interface DeconvParams {
   useEmpiricalPsf: boolean;
 }
 
-interface DeconvRun {
+interface DeconvFileRun {
+  composite: false;
   res: DeconvResult;
   resultUrl: string | undefined;
   baseUrl: string | null;
@@ -41,7 +65,18 @@ interface DeconvRun {
   requestedIterations: number;
 }
 
-interface DeconvolutionPanelProps {
+interface DeconvCompositeRun {
+  composite: true;
+  res: CompositeDeconvolveResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+  requestedIterations: number;
+}
+
+type DeconvRun = DeconvFileRun | DeconvCompositeRun;
+
+interface DeconvolutionPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   onProcessingDone?: (result: DeconvResult) => void;
@@ -50,6 +85,8 @@ interface DeconvolutionPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ICON = (
@@ -59,7 +96,22 @@ const ICON = (
   </svg>
 );
 
-export default function DeconvolutionPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, psfKernel, inputPreviewUrl, inputLabel, fileKey }: DeconvolutionPanelProps) {
+export default function DeconvolutionPanel({
+  selectedFile,
+  outputDir = "./output",
+  onProcessingDone,
+  chainedFrom,
+  psfKernel,
+  inputPreviewUrl,
+  inputLabel,
+  fileKey,
+  compositeMode,
+  compositeInput,
+  onCompositeDone,
+  fileName,
+  disabledReason,
+  disabledReasonId,
+}: DeconvolutionPanelProps) {
   const progress = useProgress(DECONV_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [params, setParams] = useState<DeconvParams>({
@@ -71,15 +123,27 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
     deringThreshold: 0.1,
     useEmpiricalPsf: false,
   });
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<DeconvRun>("deconv", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<DeconvRun>("deconv", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "deconv", runResult.res.fits_path) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const displayStf = useMemo(
+    () => ({ r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked }),
+    [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked],
+  );
+  const held = runResult
+    ? runResult.composite
+      ? compositeChainHolds(compositeChain, "deconv", runResult.resultUrl)
+      : chainHoldsOutput(chain, "deconv", runResult.res.fits_path)
+    : false;
+  const result = held ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
 
   const update = useCallback(<K extends keyof DeconvParams>(key: K, value: DeconvParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const handleRun = useCallback(() => {
+  const handleFileRun = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     const baseUrl = inputPreviewUrl ?? null;
@@ -95,20 +159,64 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
         deringing: params.deringing,
         deringThreshold: params.deringThreshold,
         useEmpiricalPsf: params.useEmpiricalPsf,
+        psfKernel: requestedPsfKernel(params.useEmpiricalPsf, psfKernel),
       });
       if (!ctx.inputUnchanged("deconv")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
+      return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, outputDir, params, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [selectedFile, outputDir, params, psfKernel, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+
+  const handleCompositeRun = useCallback(() => {
+    if (!compositeInput) return;
+    const chainCall = { chainInput: compositeInput.input, displayStf };
+    const inputUrl = compositeInput.previewUrl;
+    const inputLabelAtRun = compositeInput.label;
+    const requestedIterations = params.iterations;
+    resetProgress();
+    void run(async () => {
+      const res = await compositeDeconvolveRL(outputDir, chainCall, {
+        iterations: params.iterations,
+        psfSigma: params.psfSigma,
+        psfSize: enforceOdd(params.psfSize),
+        regularization: params.regularization,
+        deringing: params.deringing,
+        deringThreshold: params.deringThreshold,
+        useEmpiricalPsf: params.useEmpiricalPsf,
+        psfKernel: requestedPsfKernel(params.useEmpiricalPsf, psfKernel),
+      });
+      onCompositeDone("deconv", RESULT_LABEL, res, chainCall.displayStf);
+      return {
+        composite: true as const,
+        res,
+        resultUrl: bustPreviewUrl(res.previewUrl, Date.now()),
+        baseUrl: res.basePreviewUrl ?? inputUrl,
+        baseLabel: res.chain_restarted ? "Composite" : inputLabelAtRun,
+        requestedIterations,
+      };
+    }, isCancelMessage).finally(resetProgress);
+  }, [compositeInput, displayStf, outputDir, params, psfKernel, resetProgress, run, onCompositeDone]);
+
+  const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
+
+  const earlyStop = result
+    ? result.composite
+      ? compositeEarlyStop(result.res.iterations_run, result.requestedIterations)
+      : result.res.iterations_run != null && result.res.iterations_run < result.requestedIterations
+    : false;
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
       <SectionHeader icon={ICON} title="Richardson-Lucy Deconvolution" subtitle="FFT-accelerated" />
       <ChainBanner chainedFrom={chainedFrom} accent="indigo" />
 
-      {!selectedFile && (
+      {!compositeMode && !selectedFile && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to enable deconvolution.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
@@ -129,18 +237,14 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
           <Slider label="Dering Threshold" value={params.deringThreshold} min={0} max={1} step={0.01} disabled={isRunning} accent="indigo" format={(v) => v.toFixed(2)} onChange={(v) => update("deringThreshold", v)} />
         )}
 
-        <Toggle label="Empirical PSF" checked={params.useEmpiricalPsf} disabled={isRunning} accent="violet" onChange={(v) => update("useEmpiricalPsf", v)} />
-
-        {params.useEmpiricalPsf && (
-          <div className="text-[10px] text-zinc-500 bg-zinc-900/50 rounded px-2.5 py-1.5">
-            The PSF is re-estimated from stars in the deconvolution input using default detection
-            parameters{psfKernel ? " — the kernel previewed in the PSF tab is not reused" : ""}.
-          </div>
-        )}
+        <div className="flex flex-col gap-1">
+          <Toggle label="Empirical PSF" checked={params.useEmpiricalPsf} disabled={isRunning} accent="violet" onChange={(v) => update("useEmpiricalPsf", v)} />
+          <div className="text-[10px] text-zinc-500 px-0.5">{empiricalPsfHint(psfKernel)}</div>
+        </div>
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!selectedFile || blocked} accent="indigo" onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="indigo" onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (
@@ -169,20 +273,27 @@ export default function DeconvolutionPanel({ selectedFile, outputDir = "./output
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
+          {result.composite && result.res.chain_restarted && (
+            <div className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
+
           <ResultGrid items={[
-            { label: "Iterations", value: result.res.iterations_run },
-            { label: "Convergence", value: result.res.convergence?.toExponential(2) },
+            { label: "Iterations", value: result.composite ? channelTriple(result.res.iterations_run, formatCount) : result.res.iterations_run },
+            { label: "Convergence", value: result.composite ? channelTriple(result.res.convergence, formatConvergence) : result.res.convergence?.toExponential(2) },
+            { label: "PSF", value: psfSourceLabel(result.res.psf_source) },
             { label: "Time", value: `${((result.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
           ]} />
 
-          {result.res.iterations_run != null && result.res.iterations_run < result.requestedIterations && (
+          {earlyStop && (
             <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-1.5">
-              Early stop: converged at iteration {result.res.iterations_run}/{result.requestedIterations}
+              Early stop: converged at iteration {result.composite ? channelTriple(result.res.iterations_run, formatCount) : result.res.iterations_run}/{result.requestedIterations}
             </div>
           )}
 
           {result.baseUrl && result.resultUrl && (
-            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Deconvolved" accent="indigo" />
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel={RESULT_LABEL} accent="indigo" />
           )}
         </div>
       )}

@@ -20,7 +20,7 @@ use crate::types::image_ref::sanitize_fragment;
 
 const ABPROC_BG_CORRECTED: &str = "bg_corrected";
 
-fn background_config(
+pub(crate) fn background_config(
     grid_size: usize,
     poly_degree: usize,
     sigma_clip: f64,

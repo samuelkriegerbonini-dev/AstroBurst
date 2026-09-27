@@ -125,6 +125,10 @@ export function runView(state: RunState, panel: string, key: string | null): Run
   };
 }
 
+export function isRunLocked(state: RunState, key: string): boolean {
+  return state.locks.has(key);
+}
+
 export function sameChainInput(before: ProcessingChain, after: ProcessingChain, step: ChainStep): boolean {
   const a = inputFor(before, step, "");
   const b = inputFor(after, step, "");
@@ -242,6 +246,10 @@ export function useProcessingRun<T>(panel: string, fileKey: string | null): Proc
     run,
     clearError,
   };
+}
+
+export function useRunLocked(key: string): boolean {
+  return useSyncExternalStore(subscribe, () => isRunLocked(runState, key), () => isRunLocked(runState, key));
 }
 
 export function beginCompositeCheck(

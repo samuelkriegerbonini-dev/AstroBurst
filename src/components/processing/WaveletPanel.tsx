@@ -1,14 +1,20 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { X } from "lucide-react";
 import { waveletDenoise } from "../../services/processing";
+import { compositeWaveletDenoise } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { WAVELET_PROGRESS_EVENT } from "../../shared/types/processing";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import type { CompositePanelProps, CompositeWaveletResult } from "./compositeProps";
 
 const DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
 const DEFAULT_BIAS = 0;
@@ -16,6 +22,7 @@ const BIAS_MIN = -1;
 const BIAS_MAX = 3;
 const BIAS_STEP = 0.05;
 const SCALE_LABELS = ["Fine detail", "Small structures", "Medium structures", "Large structures", "Very large"];
+const RESULT_LABEL = "Denoised";
 
 interface WaveletResult {
   previewUrl?: string;
@@ -25,14 +32,25 @@ interface WaveletResult {
   elapsed_ms?: number;
 }
 
-interface WaveletRun {
+interface WaveletFileRun {
+  composite: false;
   res: WaveletResult;
   resultUrl: string | undefined;
   baseUrl: string | null;
   baseLabel: string;
 }
 
-interface WaveletPanelProps {
+interface WaveletCompositeRun {
+  composite: true;
+  res: CompositeWaveletResult;
+  resultUrl: string | undefined;
+  baseUrl: string | null;
+  baseLabel: string;
+}
+
+type WaveletRun = WaveletFileRun | WaveletCompositeRun;
+
+interface WaveletPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   onProcessingDone?: (result: WaveletResult) => void;
@@ -40,6 +58,8 @@ interface WaveletPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ICON = (
@@ -66,16 +86,46 @@ function formatBias(v: number): string {
   return `${v > 0 ? "+" : ""}${v.toFixed(2)}`;
 }
 
-export default function WaveletPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: WaveletPanelProps) {
+function formatNoise(v: number): string {
+  return v.toExponential(2);
+}
+
+export default function WaveletPanel({
+  selectedFile,
+  outputDir = "./output",
+  onProcessingDone,
+  chainedFrom,
+  inputPreviewUrl,
+  inputLabel,
+  fileKey,
+  compositeMode,
+  compositeInput,
+  onCompositeDone,
+  fileName,
+  disabledReason,
+  disabledReasonId,
+}: WaveletPanelProps) {
   const progress = useProgress(WAVELET_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [numScales, setNumScales] = useState(5);
   const [thresholds, setThresholds] = useState<number[]>([...DEFAULT_THRESHOLDS]);
   const [layerBias, setLayerBias] = useState<number[]>(() => Array(5).fill(DEFAULT_BIAS));
   const [linear, setLinear] = useState(true);
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<WaveletRun>("denoise", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<WaveletRun>("denoise", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "denoise", runResult.res.fits_path) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const displayStf = useMemo(
+    () => ({ r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked }),
+    [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked],
+  );
+  const held = runResult
+    ? runResult.composite
+      ? compositeChainHolds(compositeChain, "denoise", runResult.resultUrl)
+      : chainHoldsOutput(chain, "denoise", runResult.res.fits_path)
+    : false;
+  const result = held ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
 
   const updateThreshold = useCallback((idx: number, value: number) => {
     setThresholds((prev) => {
@@ -104,7 +154,7 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
 
   const hasBias = layerBias.slice(0, numScales).some((b) => b !== DEFAULT_BIAS);
 
-  const handleRun = useCallback(() => {
+  const handleFileRun = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     const baseUrl = inputPreviewUrl ?? null;
@@ -119,17 +169,48 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
       });
       if (!ctx.inputUnchanged("denoise")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
+      return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
     }, isCancelMessage).finally(resetProgress);
   }, [selectedFile, outputDir, numScales, thresholds, linear, layerBias, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+
+  const handleCompositeRun = useCallback(() => {
+    if (!compositeInput) return;
+    const chainCall = { chainInput: compositeInput.input, displayStf };
+    const inputUrl = compositeInput.previewUrl;
+    const inputLabelAtRun = compositeInput.label;
+    resetProgress();
+    void run(async () => {
+      const res = await compositeWaveletDenoise(outputDir, chainCall, {
+        numScales,
+        thresholds: thresholds.slice(0, numScales),
+        linear,
+        layerBias: layerBias.slice(0, numScales),
+      });
+      onCompositeDone("denoise", RESULT_LABEL, res, chainCall.displayStf);
+      return {
+        composite: true as const,
+        res,
+        resultUrl: bustPreviewUrl(res.previewUrl, Date.now()),
+        baseUrl: res.basePreviewUrl ?? inputUrl,
+        baseLabel: res.chain_restarted ? "Composite" : inputLabelAtRun,
+      };
+    }, isCancelMessage).finally(resetProgress);
+  }, [compositeInput, displayStf, outputDir, numScales, thresholds, linear, layerBias, resetProgress, run, onCompositeDone]);
+
+  const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
       <SectionHeader icon={ICON} title="Wavelet Noise Reduction" />
       <ChainBanner chainedFrom={chainedFrom} accent="sky" />
 
-      {!selectedFile && (
+      {!compositeMode && !selectedFile && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to enable noise reduction.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
@@ -201,8 +282,8 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
         <Toggle label="Soft threshold (linear)" checked={linear} disabled={isRunning} accent="sky" onChange={setLinear} />
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Run Noise Reduction" runningLabel="Denoising..." running={isRunning} disabled={!selectedFile || blocked} accent="sky" onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label="Run Noise Reduction" runningLabel="Denoising..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="sky" onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (
@@ -231,14 +312,20 @@ export default function WaveletPanel({ selectedFile, outputDir = "./output", onP
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
+          {result.composite && result.res.chain_restarted && (
+            <div className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
+
           <ResultGrid items={[
             { label: "Scales", value: result.res.scales_processed },
-            { label: "Noise est.", value: result.res.noise_estimate?.toExponential(2) },
+            { label: "Noise est.", value: result.composite ? channelTriple(result.res.noise_estimate, formatNoise) : result.res.noise_estimate?.toExponential(2) },
             { label: "Time", value: `${((result.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
           ]} />
 
           {result.baseUrl && result.resultUrl && (
-            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Denoised" accent="sky" />
+            <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel={RESULT_LABEL} accent="sky" />
           )}
         </div>
       )}

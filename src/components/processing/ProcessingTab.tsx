@@ -1,16 +1,36 @@
-import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect, useId } from "react";
 import { Loader2, ArrowRight } from "lucide-react";
-import { fileKeyOf, useFileContext, useRenderActions, useRenderContext, useRgbContext } from "../../context/PreviewContext";
-import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
+import { fileKeyOf, useFileContext, useRenderActions, useRenderContext } from "../../context/PreviewContext";
+import { useCompositePreview, useCompositeActions } from "../../context/CompositeContext";
 import type { ChainEntry, ChainStep, ProcessedKind, ProcessingChain } from "../../shared/types/preview";
-import { CHAIN_ORDER, inputFor, lastStep, samePath, withStep, withVersionParam } from "../../utils/processingChain";
-import { compositeSyncStore, recordCompositeSync, wizardStepStaleAfterChannelSync, type CompositeChannel } from "../../utils/compositeSync";
+import type {
+  CompositeChain,
+  CompositeChainEntry,
+  CompositeDeconvolveResult,
+  CompositeStepResult,
+  DisplayStf,
+  PsfSource,
+} from "../../shared/types/compositeChain";
+import { CHAIN_ORDER, inputFor, lastStep, psfUseOf, samePath, showsPsfCrumb, withStep, withVersionParam, type PsfUse } from "../../utils/processingChain";
+import {
+  compositeChainHolds,
+  compositeInputFor,
+  compositeInputLabel,
+  compositeInputPreview,
+  compositeStepOutcome,
+  samePreview,
+  withCompositePsfKernel,
+  withCompositeStep,
+} from "../../utils/compositeChain";
+import { compositeChainStore } from "../../utils/compositeChainStore";
+import { wizardStepStaleAfterCompositeWrite } from "../../utils/compositeSync";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
-import { beginCompositeCheck } from "../../hooks/useProcessingRun";
+import { useCompositeMode } from "../../hooks/useCompositeMode";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { toDims } from "../../utils/stackingOutputs";
-import { updateCompositeChannel, restretchComposite } from "../../services/compose";
-import { getPreviewUrl } from "../../infrastructure/tauri";
 import { getOutputDir } from "../../infrastructure/tauri";
+import type { CompositeInputView } from "./compositeProps";
+import { rgbFitsDisabledReason } from "./rgbFitsNotice";
 
 const DeconvolutionPanel = lazy(() => import("./DeconvolutionPanel"));
 const BackgroundPanel = lazy(() => import("./BackgroundPanel"));
@@ -64,6 +84,13 @@ interface StepDoneResult {
   corrected_fits?: string;
   fits_path?: string;
   dimensions?: number[];
+  psf_source?: PsfSource;
+}
+
+type CompositePsfEntry = CompositeChainEntry & PsfUse;
+
+function psfSourceOf(result: CompositeStepResult | CompositeDeconvolveResult): PsfSource | undefined {
+  return "psf_source" in result ? result.psf_source : undefined;
 }
 
 interface PixelMathDoneResult {
@@ -118,20 +145,45 @@ function chainInput(chain: ProcessingChain, step: ChainStep, originalPath: strin
   return { path, from: null, entry: null };
 }
 
-function ChainIndicator({ chain, displayedFits, originalName }: { chain: ProcessingChain; displayedFits: string | null; originalName: string }) {
-  const steps: { label: string; current: boolean }[] = [{ label: originalName, current: false }];
-  for (const s of CHAIN_ORDER) {
-    if (s === "deconv" && chain.psfKernel) steps.push({ label: "PSF", current: false });
-    const entry = chain.steps[s];
-    if (!entry) continue;
-    steps.push({ label: INDICATOR_LABELS[s], current: displayedFits !== null && samePath(entry.fitsPath, displayedFits) });
-  }
+interface Crumb {
+  label: string;
+  current: boolean;
+}
 
-  if (steps.length <= 1) return null;
+function chainCrumbs(first: string, showPsf: boolean, currentOf: (step: ChainStep) => boolean | null): Crumb[] {
+  const crumbs: Crumb[] = [{ label: first, current: false }];
+  for (const s of CHAIN_ORDER) {
+    if (s === "deconv" && showPsf) crumbs.push({ label: "PSF", current: false });
+    const current = currentOf(s);
+    if (current === null) continue;
+    crumbs.push({ label: INDICATOR_LABELS[s], current });
+  }
+  return crumbs;
+}
+
+function fileCrumbs(chain: ProcessingChain, displayedFits: string | null, originalName: string): Crumb[] {
+  return chainCrumbs(originalName, showsPsfCrumb(chain.psfKernel, chain.steps.deconv), (s) => {
+    const entry = chain.steps[s];
+    if (!entry) return null;
+    return displayedFits !== null && samePath(entry.fitsPath, displayedFits);
+  });
+}
+
+function compositeCrumbs(chain: CompositeChain, compositePreviewUrl: string | null): Crumb[] {
+  const deconv: CompositePsfEntry | undefined = chain.steps.deconv;
+  return chainCrumbs("Composite", showsPsfCrumb(chain.psfKernel, deconv), (s) => {
+    const entry = chain.steps[s];
+    if (!entry) return null;
+    return compositePreviewUrl !== null && samePreview(entry.previewUrl, compositePreviewUrl);
+  });
+}
+
+function ChainIndicator({ crumbs }: { crumbs: Crumb[] }) {
+  if (crumbs.length <= 1) return null;
 
   return (
     <div className="flex items-center gap-1 px-4 py-1.5 text-[10px] font-mono text-zinc-600 border-b border-zinc-800/30">
-      {steps.map((s, i) => (
+      {crumbs.map((s, i) => (
         <span key={i} className="flex items-center gap-1">
           {i > 0 && <ArrowRight size={8} className="text-zinc-700" />}
           <span className={s.current ? "text-emerald-400/80" : "text-zinc-500"}>
@@ -154,69 +206,40 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
   teal: { active: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
 
+function compositeInputView(chain: CompositeChain, step: ChainStep, liveUrl: string | null): CompositeInputView {
+  const input = compositeInputFor(chain, step);
+  const entry = input === "base" ? undefined : chain.steps[input];
+  const previewUrl = compositeInputPreview(chain, input) ?? (input === "base" ? liveUrl : null);
+  return { input, previewUrl, label: entry?.label ?? compositeInputLabel(input) };
+}
+
+function compositeBannerOf(view: CompositeInputView): string | undefined {
+  return view.input === "base" ? undefined : BANNER_LABELS[view.input];
+}
+
 function ProcessingTabInner() {
   const { file } = useFileContext();
   const { chain, processed } = useRenderContext();
-  const { publishProcessed, setChain, currentFileKey } = useRenderActions();
+  const { publishProcessed, setChain } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
-  const { setCompositePreviewUrl } = useCompositeActions();
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
-  const { rgbChannels } = useRgbContext();
+  const { setCompositePreviewUrl, setCompositeStf, setCompositeAutoStf, setCompositeStfLinked, replaceParked } = useCompositeActions();
   const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
   const wizardReadyRef = useRef(wizardState.compositeReady);
   wizardReadyRef.current = wizardState.compositeReady;
+  const compositeMode = useCompositeMode();
+  const compositeModeRef = useRef(compositeMode);
+  compositeModeRef.current = compositeMode;
+  const compositeChain = useCompositeChain();
   const [active, setActive] = useState<ProcessingSection>("background");
+  const disabledReason = rgbFitsDisabledReason({ fileIsRgb: !!file?.result?.is_rgb, compositeMode });
+  const disabledReasonId = useId();
 
-  const [compositeSyncError, setCompositeSyncError] = useState<string | null>(null);
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 
-  const compositeStfRef = useRef({ r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked });
-  useEffect(() => {
-    compositeStfRef.current = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
-  }, [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
-
-  const liveCompositeRef = useRef({ rgbChannels, compositePreviewUrl });
-  liveCompositeRef.current = { rgbChannels, compositePreviewUrl };
-
-  const findLiveChannel = useCallback((filePath: string): CompositeChannel | null => {
-    const { rgbChannels: channels, compositePreviewUrl: url } = liveCompositeRef.current;
-    if (!channels || !url) return null;
-    const norm = (p: string) => p.replace(/\\/g, "/");
-    const fp = norm(filePath);
-    if (channels.r && norm(channels.r) === fp) return "r";
-    if (channels.g && norm(channels.g) === fp) return "g";
-    if (channels.b && norm(channels.b) === fp) return "b";
-    return null;
-  }, []);
-
-  const syncComposite = useCallback(async (fileKey: string, fitsPath: string, channel: CompositeChannel) => {
-    const stillSameComposite = beginCompositeCheck(currentFileKey);
-    try {
-      await updateCompositeChannel(channel, fitsPath);
-      const staleStep = wizardStepStaleAfterChannelSync(wizardReadyRef.current);
-      if (staleStep) wizardDispatch({ type: "INVALIDATE_FROM", stepId: staleStep });
-      const stf = compositeStfRef.current;
-      const dir = await getOutputDir();
-      const result = await restretchComposite(dir, stf.r, stf.g, stf.b, undefined, undefined, stf.linked);
-      if (!stillSameComposite()) return;
-      if (result?.png_path) {
-        const url = compositeSyncStore.tagUrl(await getPreviewUrl(result.png_path));
-        if (!stillSameComposite()) return;
-        const liveUrl = liveCompositeRef.current.compositePreviewUrl;
-        compositeSyncStore.set(recordCompositeSync(compositeSyncStore.get(), liveUrl, url, channel, fileKey));
-        setCompositePreviewUrl(url);
-      }
-      setCompositeSyncError(null);
-    } catch (e) {
-      console.error("[AstroBurst] Composite channel sync failed:", e);
-      if (stillSameComposite()) setCompositeSyncError(e instanceof Error ? e.message : String(e));
-    }
-  }, [setCompositePreviewUrl, currentFileKey, wizardDispatch]);
-
   const runKey = fileKeyOf(file);
   const runPath = file?.path ?? null;
-  const compositeAtRun = compositePreviewUrl !== null;
+  const fileName = file?.name ?? "";
 
   const inputs = useMemo(() => {
     const original = runPath ?? "";
@@ -228,11 +251,23 @@ function ProcessingTabInner() {
     };
   }, [chain, runPath]);
 
+  const compositeInputs = useMemo(() => {
+    if (!compositeMode) return null;
+    const view = (step: ChainStep) => compositeInputView(compositeChain, step, compositePreviewUrl);
+    return {
+      background: view("background"),
+      denoise: view("denoise"),
+      deconv: view("deconv"),
+      stretch: view("stretch"),
+      localContrast: view("localContrast"),
+      pixelMath: view("pixelMath"),
+    };
+  }, [compositeMode, compositeChain, compositePreviewUrl]);
+
   const makeStepDone = useCallback(
-    (step: ChainStep, label: string, inputPath: string | null, actsOnComposite: boolean) =>
+    (step: ChainStep, label: string, inputPath: string | null) =>
       (result: StepDoneResult) => {
         if (!runKey || !runPath || !result) return;
-        if (actsOnComposite) return;
         const fits = (step === "background" ? result.corrected_fits : result.fits_path) ?? null;
         const previewUrl = result.previewUrl ?? null;
         const dimensions = toDims(result.dimensions);
@@ -246,42 +281,75 @@ function ProcessingTabInner() {
           fitsPath: fits,
           previewUrl: previewUrl ? withVersionParam(previewUrl, Date.now()) : null,
           dimensions,
+          ...psfUseOf(step, result.psf_source),
         };
         publishProcessed(runKey, { fitsPath: fits, previewUrl, dimensions, label, kind, inputPath: input }, (c) => withStep(c, step, entry));
-        if (currentFileKey() !== runKey) return;
-        const ch = findLiveChannel(runPath);
-        if (ch) syncComposite(runKey, fits, ch);
       },
-    [runKey, runPath, publishProcessed, currentFileKey, findLiveChannel, syncComposite],
+    [runKey, runPath, publishProcessed],
   );
 
   const handleBackgroundDone = useMemo(
-    () => makeStepDone("background", STEP_LABELS.background, runPath, false),
+    () => makeStepDone("background", STEP_LABELS.background, runPath),
     [makeStepDone, runPath],
   );
   const handleDenoiseDone = useMemo(
-    () => makeStepDone("denoise", STEP_LABELS.denoise, inputs.denoise.path, false),
+    () => makeStepDone("denoise", STEP_LABELS.denoise, inputs.denoise.path),
     [makeStepDone, inputs.denoise.path],
   );
   const handleDeconvDone = useMemo(
-    () => makeStepDone("deconv", STEP_LABELS.deconv, inputs.deconv.path, false),
+    () => makeStepDone("deconv", STEP_LABELS.deconv, inputs.deconv.path),
     [makeStepDone, inputs.deconv.path],
   );
   const handleStretchDone = useMemo(
-    () => makeStepDone("stretch", STEP_LABELS.stretch, inputs.stretch.path, false),
+    () => makeStepDone("stretch", STEP_LABELS.stretch, inputs.stretch.path),
     [makeStepDone, inputs.stretch.path],
   );
   const handleMaskedStretchDone = useMemo(
-    () => makeStepDone("maskedStretch", STEP_LABELS.maskedStretch, inputs.stretch.path, false),
+    () => makeStepDone("maskedStretch", STEP_LABELS.maskedStretch, inputs.stretch.path),
     [makeStepDone, inputs.stretch.path],
   );
   const handleLheDone = useMemo(
-    () => makeStepDone("localContrast", "LHE", inputs.localContrast.path, compositeAtRun),
-    [makeStepDone, inputs.localContrast.path, compositeAtRun],
+    () => makeStepDone("localContrast", "LHE", inputs.localContrast.path),
+    [makeStepDone, inputs.localContrast.path],
   );
   const handleHdrDone = useMemo(
-    () => makeStepDone("localContrast", "HDRMT", inputs.localContrast.path, compositeAtRun),
-    [makeStepDone, inputs.localContrast.path, compositeAtRun],
+    () => makeStepDone("localContrast", "HDRMT", inputs.localContrast.path),
+    [makeStepDone, inputs.localContrast.path],
+  );
+
+  const handleCompositeDone = useCallback(
+    (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf) => {
+      const previewUrl = result.previewUrl;
+      if (!previewUrl) return;
+      const entry: CompositePsfEntry = {
+        previewUrl,
+        label,
+        displayed: result.displayed,
+        modelPreviewUrl: result.modelPreviewUrl ?? null,
+        ...psfUseOf(step, psfSourceOf(result)),
+      };
+      compositeChainStore.update((c) => withCompositeStep(c, step, entry, result, callStf));
+      const outcome = compositeStepOutcome({
+        step,
+        displayed: result.displayed,
+        accepted: compositeChainHolds(compositeChainStore.get(), step, previewUrl),
+        compositeMode: compositeModeRef.current,
+      });
+      if (outcome.invalidatesWizard) {
+        const staleStep = wizardStepStaleAfterCompositeWrite(wizardReadyRef.current);
+        if (staleStep) wizardDispatch({ type: "INVALIDATE_FROM", stepId: staleStep });
+      }
+      if (outcome.target === "parked") replaceParked(previewUrl, result.stf);
+      if (outcome.target !== "screen") return;
+      const stf = result.stf;
+      if (stf) {
+        setCompositeAutoStf(stf.r, stf.g, stf.b);
+        setCompositeStf(stf.r, stf.g, stf.b);
+        setCompositeStfLinked(stf.linked);
+      }
+      setCompositePreviewUrl(previewUrl);
+    },
+    [setCompositeAutoStf, setCompositeStf, setCompositeStfLinked, setCompositePreviewUrl, replaceParked, wizardDispatch],
   );
 
   const displayedPath = processed?.fitsPath ?? runPath;
@@ -321,10 +389,16 @@ function ProcessingTabInner() {
     [runKey, setChain],
   );
 
+  const handleCompositePsfReady = useCallback((kernel: number[][], liveGeneration: number) => {
+    compositeChainStore.update((c) => withCompositePsfKernel(c, kernel, liveGeneration));
+  }, []);
+
   const originalPreviewUrl = file?.result?.previewUrl ?? null;
   const inputPreviewOf = (input: ChainInput): string | null => input.entry?.previewUrl ?? (input.from ? null : originalPreviewUrl);
   const inputLabelOf = (input: ChainInput): string => (input.from ? STEP_LABELS[input.from] : "Original");
   const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : undefined);
+  const bannerFor = (fileInput: ChainInput, compositeInput: CompositeInputView | undefined): string | undefined =>
+    compositeInput ? compositeBannerOf(compositeInput) : bannerOf(fileInput);
 
   const withPath = useCallback(
     (path: string) => (file ? (path === file.path ? file : { ...file, path }) : null),
@@ -343,6 +417,10 @@ function ProcessingTabInner() {
       : undefined;
 
   const displayedFits = processed?.fitsPath ?? null;
+  const originalName = file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original";
+  const crumbs = compositeMode ? compositeCrumbs(compositeChain, compositePreviewUrl) : fileCrumbs(chain, displayedFits, originalName);
+  const activeSteps: Partial<Record<ChainStep, unknown>> = compositeMode ? compositeChain.steps : chain.steps;
+  const activePsfKernel = compositeMode ? compositeChain.psfKernel : chain.psfKernel;
 
   return (
     <div className="flex flex-col h-full">
@@ -351,7 +429,7 @@ function ProcessingTabInner() {
           {SECTIONS.map((s) => {
             const isActive = active === s.id;
             const step = SECTION_STEP[s.id];
-            const hasResult = s.id === "psf" ? chain.psfKernel !== null : step ? chain.steps[step] !== undefined : false;
+            const hasResult = s.id === "psf" ? activePsfKernel !== null : step ? activeSteps[step] !== undefined : false;
             const colors = COLOR_MAP[s.color];
             return (
               <button
@@ -370,24 +448,11 @@ function ProcessingTabInner() {
         </div>
       </div>
 
-      <ChainIndicator
-        chain={chain}
-        displayedFits={displayedFits}
-        originalName={file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original"}
-      />
+      <ChainIndicator crumbs={crumbs} />
 
-      {compositeSyncError && (
-        <div className="flex items-center gap-2 mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
-          <span className="flex-1 truncate" title={compositeSyncError}>
-            Composite not updated: {compositeSyncError} — re-run Blend to sync
-          </span>
-          <button
-            onClick={() => setCompositeSyncError(null)}
-            className="shrink-0 text-amber-500/70 hover:text-amber-300 transition-colors"
-            title="Dismiss"
-          >
-            ×
-          </button>
+      {disabledReason && (
+        <div id={disabledReasonId} role="note" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
+          {disabledReason}
         </div>
       )}
 
@@ -405,6 +470,10 @@ function ProcessingTabInner() {
               outputDir={resolvedDir}
               onPreviewUpdate={handleDebayerPreview}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "background" ? "block" : "none" }}>
@@ -414,6 +483,12 @@ function ProcessingTabInner() {
               onProcessingDone={handleBackgroundDone}
               chainedFrom={undefined}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.background ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "denoise" ? "block" : "none" }}>
@@ -421,17 +496,29 @@ function ProcessingTabInner() {
               selectedFile={denoiseInput}
               outputDir={resolvedDir}
               onProcessingDone={handleDenoiseDone}
-              chainedFrom={bannerOf(inputs.denoise)}
+              chainedFrom={bannerFor(inputs.denoise, compositeInputs?.denoise)}
               inputPreviewUrl={inputPreviewOf(inputs.denoise)}
               inputLabel={inputLabelOf(inputs.denoise)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.denoise ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "psf" ? "block" : "none" }}>
             <PsfPanel
               selectedFile={deconvInput}
               onPsfReady={handlePsfReady}
+              onCompositePsfReady={handleCompositePsfReady}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.deconv ?? null}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "deconvolution" ? "block" : "none" }}>
@@ -439,11 +526,17 @@ function ProcessingTabInner() {
               selectedFile={deconvInput}
               outputDir={resolvedDir}
               onProcessingDone={handleDeconvDone}
-              chainedFrom={bannerOf(inputs.deconv)}
-              psfKernel={chain.psfKernel}
+              chainedFrom={bannerFor(inputs.deconv, compositeInputs?.deconv)}
+              psfKernel={activePsfKernel}
               inputPreviewUrl={inputPreviewOf(inputs.deconv)}
               inputLabel={inputLabelOf(inputs.deconv)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.deconv ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "stretch" ? "block" : "none" }}>
@@ -451,10 +544,16 @@ function ProcessingTabInner() {
               selectedFile={stretchInput}
               outputDir={resolvedDir}
               onProcessingDone={handleStretchDone}
-              chainedFrom={bannerOf(inputs.stretch)}
+              chainedFrom={bannerFor(inputs.stretch, compositeInputs?.stretch)}
               inputPreviewUrl={inputPreviewOf(inputs.stretch)}
               inputLabel={inputLabelOf(inputs.stretch)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.stretch ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "masked_stretch" ? "block" : "none" }}>
@@ -462,10 +561,16 @@ function ProcessingTabInner() {
               selectedFile={stretchInput}
               outputDir={resolvedDir}
               onProcessingDone={handleMaskedStretchDone}
-              chainedFrom={bannerOf(inputs.stretch)}
+              chainedFrom={bannerFor(inputs.stretch, compositeInputs?.stretch)}
               inputPreviewUrl={inputPreviewOf(inputs.stretch)}
               inputLabel={inputLabelOf(inputs.stretch)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.stretch ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "local_contrast" ? "block" : "none" }}>
@@ -473,10 +578,16 @@ function ProcessingTabInner() {
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
               onProcessingDone={handleLheDone}
-              chainedFrom={bannerOf(inputs.localContrast)}
+              chainedFrom={bannerFor(inputs.localContrast, compositeInputs?.localContrast)}
               inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
               inputLabel={inputLabelOf(inputs.localContrast)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.localContrast ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "hdr" ? "block" : "none" }}>
@@ -484,10 +595,16 @@ function ProcessingTabInner() {
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
               onProcessingDone={handleHdrDone}
-              chainedFrom={bannerOf(inputs.localContrast)}
+              chainedFrom={bannerFor(inputs.localContrast, compositeInputs?.localContrast)}
               inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
               inputLabel={inputLabelOf(inputs.localContrast)}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.localContrast ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
           <div style={{ display: active === "pixelmath" ? "block" : "none" }}>
@@ -499,6 +616,12 @@ function ProcessingTabInner() {
               inputPreviewUrl={processed?.previewUrl ?? originalPreviewUrl}
               inputLabel={processed?.label ?? "Original"}
               fileKey={runKey}
+              compositeMode={compositeMode}
+              compositeInput={compositeInputs?.pixelMath ?? null}
+              onCompositeDone={handleCompositeDone}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
             />
           </div>
         </div>

@@ -7,6 +7,7 @@ use crate::cmd::common::{
     blocking_cmd, derived_output_header, load_cached, load_cached_full, output_stem, render_and_save_as,
     resolve_output_dir, write_derived_fits, OutputValues, RenderOutput, HEADER_DISPLAY_REFERRED, MAX_PREVIEW_DIM,
 };
+use crate::cmd::compose::composite_chain::{contrast_planes, run_chain_step, toned_state, ChainCall, ChainStep, DisplayStf, StepOutput};
 use crate::cmd::helpers;
 use crate::core::imaging::local_contrast::{lhe_rgb, lhe_with_progress, LheConfig};
 use crate::infra::cache::ImageEntry;
@@ -255,12 +256,31 @@ pub async fn lhe_cmd(
     })
 }
 
+pub(crate) fn run_composite_contrast_chain(
+    output_dir: String,
+    chain_input: String,
+    display_stf: Option<DisplayStf>,
+    apply: impl FnOnce(&Array2<f32>, &Array2<f32>, &Array2<f32>) -> anyhow::Result<Triplet>,
+) -> anyhow::Result<serde_json::Value> {
+    let call = ChainCall { output_dir, chain_input, display_stf };
+    run_chain_step(ChainStep::LocalContrast, &call, |input, _| {
+        let [r, g, b] = contrast_planes(input)?;
+        let (r, g, b) = apply(r, g, b)?;
+        Ok(StepOutput { state: toned_state(input, [r, g, b]), extras: json!({}) })
+    })
+}
+
 #[tauri::command]
 pub async fn lhe_composite_cmd(
     output_dir: String,
     config: LheConfig,
+    chain_input: Option<String>,
+    display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        if let Some(chain_input) = chain_input {
+            return run_composite_contrast_chain(output_dir, chain_input, display_stf, |r, g, b| lhe_rgb(r, g, b, &config));
+        }
         let output_dir = resolve_output_dir(&output_dir)?;
         run_composite_contrast(SUFFIX_LHE, &output_dir, move |r, g, b| lhe_rgb(r, g, b, &config))
     })
@@ -351,7 +371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let planes = [composite_plane(4), composite_plane(5), composite_plane(6)];
         helpers::insert_composite_stretched(planes[0].clone(), planes[1].clone(), planes[2].clone());
-        let run = lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), LheConfig { kernel_radius: 3, ..LheConfig::default() }).await;
+        let run = lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), LheConfig { kernel_radius: 3, ..LheConfig::default() }, None, None).await;
         let held = lock_last_run().is_some();
         forget_composite_contrast();
         let released = lock_last_run().is_none();
@@ -387,12 +407,12 @@ mod tests {
         let second = LheConfig { kernel_radius: 5, amount: 0.5, ..LheConfig::default() };
         let hdr = HdrConfig { layers: 2, ..HdrConfig::default() };
 
-        let run_first = lhe_composite_cmd(out.clone(), first.clone()).await;
+        let run_first = lhe_composite_cmd(out.clone(), first.clone(), None, None).await;
         let after_first = load_tier(CompositeTier::Toned);
         let stretched_after = load_tier(CompositeTier::Stretched);
-        let run_second = lhe_composite_cmd(out.clone(), second.clone()).await;
+        let run_second = lhe_composite_cmd(out.clone(), second.clone(), None, None).await;
         let after_second = load_tier(CompositeTier::Toned);
-        let run_hdr = hdrmt_composite_cmd(out, hdr.clone()).await;
+        let run_hdr = hdrmt_composite_cmd(out, hdr.clone(), None, None).await;
         let after_hdr = toned_tier();
         helpers::clear_composite_derived();
         run_first.unwrap();

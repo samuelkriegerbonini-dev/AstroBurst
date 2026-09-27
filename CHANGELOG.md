@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-26
+
+### Added
+- Processing-tab composite mode: while the colour composite built in Compose is on screen, Background (polynomial and spline), Denoise, PSF, Deconvolution, Stretch, Masked Stretch, LHE and HDRMT process its three channels instead of the selected mono file, update the view, and show colour before/after previews (per-channel numbers as `R · G · B`); the composite has its own processing chain with the same rules as the file chain (re-running a step drops the later ones), a "Revert to original" that restores the composite exactly as it was before the first step, and a restart notice when Blend or a wizard step replaced the composite meanwhile (`cmd::compose::composite_chain`, `composite_{background,wavelet_denoise,deconvolve_rl,estimate_psf}_cmd`, `pixelmath_composite_cmd`, `composite_chain_{reset,state}_cmd`, optional `chainInput`/`displayStf` on the arcsinh, masked, LHE and HDRMT composite commands)
+- PixelMath target selector while the composite is on screen: "File" runs on the selected file and says the composite does not change, "Composite (per channel)" evaluates the expression on R, G and B with `$T` bound to each channel
+- "Show composite" button in the preview header: selecting another file or "Back to file" now parks the Compose composite with its STF, and the button brings it back (an `rgb_composite_*` preview older than the 600 s sweep is re-rendered)
+
+### Changed
+- Masked Stretch protection follows each pixel's brightness above the pass background inside the star mask and is applied over log-spaced steps towards the target background; Iterations sets the number of steps again (more steps protect stars more), the result reports the passes applied and whether the target was reached, and an input already at or above the target is left unchanged
+- Deconvolution with "Empirical PSF" uses the kernel estimated in the PSF tab when there is one, on files and on the composite (`psfKernel`, validated and normalised), results report `psf_source`, and the chain indicator shows "PSF" before Deconv only when the kernel was used
+- The wizard Stretch "Link channels" toggle reads and writes the composite linked flag, so later renders from linear data and the STF panel follow the same choice
+- Removed the Headers "Assign" channel sync into the composite (`update_composite_channel_cmd`, `replace_composite_channel`), unreachable since composite mode; the Headers assignment still drives RGB export
+
+### Fixed
+- Processing panels showed grayscale previews of the selected file while the colour composite was on screen, and their steps never reached a composite built in Compose (the channel sync only ran for files assigned in Headers)
+- Masked Stretch turned every detected star and the sky around it into a dark disc, because protected pixels kept 85% of their linear value; the discs reached the FITS output, PixelMath and later steps, on files, the composite and the wizard
+- Richardson-Lucy on data without negative pixels treated mosaic padding as zero flux and left rims along the padding, and wavelet Denoise leaked values into the padding; both now fill the padding with the median of the valid pixels and restore it to exactly 0
+- Selecting another file reset the composite STF to identity while the Compose composite stayed ready, so later composite renders came out nearly black
+- Processing panels stayed enabled on an RGB FITS and always failed with a 3D-cube error; they are disabled with the reason, and LHE/HDRMT no longer process a leftover Compose composite from an RGB file's view
+- An RGB FITS reloaded in place was shown as the Compose composite
+
 ## [0.6.3] - 2026-09-25
 
 ### Added

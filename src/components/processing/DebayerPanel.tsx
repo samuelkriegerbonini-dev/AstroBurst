@@ -5,12 +5,15 @@ import { debayerFits, debayerBatch } from "../../services/processing";
 import type { DebayerResult, DebayerBatchResult } from "../../services/processing";
 import { useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
 import { useProcessingRun } from "../../hooks/useProcessingRun";
+import { fileOnlyNotice, type CompositeNoticeProps } from "./compositeProps";
 
-interface DebayerPanelProps {
+interface DebayerPanelProps extends CompositeNoticeProps {
   selectedFile: { path: string; name?: string } | null;
   outputDir: string;
   onPreviewUpdate?: (url: string | null | undefined) => void;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const PATTERNS = [
@@ -28,7 +31,7 @@ const METHODS = [
 
 const ICON = <Grid3X3 size={14} className="text-orange-400" />;
 
-export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate, fileKey }: DebayerPanelProps) {
+export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate, fileKey, compositeMode, fileName, disabledReason, disabledReasonId }: DebayerPanelProps) {
   const { doneFiles } = useDoneFilesContext();
   const [pattern, setPattern] = useState("");
   const [method, setMethod] = useState<"bilinear" | "superpixel">("bilinear");
@@ -76,7 +79,7 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
     }
   }, [doneFiles, outputDir, method, pattern, clearError]);
 
-  const fileName = selectedFile?.name || selectedFile?.path?.split(/[/\\]/).pop();
+  const inputName = selectedFile?.name || selectedFile?.path?.split(/[/\\]/).pop();
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -86,13 +89,19 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
         subtitle="Reconstruct R/G/B from a Bayer color camera frame"
       />
 
+      {compositeMode && fileName && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          {fileOnlyNotice("Debayer acts on", fileName)}
+        </div>
+      )}
+
       {!selectedFile && (
         <div className="text-[10px] text-zinc-500 italic">Load a CFA FITS (one-shot color camera) first.</div>
       )}
 
-      {fileName && (
+      {inputName && (
         <div className="text-[10px] text-zinc-500 truncate" title={selectedFile?.path}>
-          Input: <span className="text-zinc-300">{fileName}</span>
+          Input: <span className="text-zinc-300">{inputName}</span>
         </div>
       )}
 
@@ -126,12 +135,13 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
         </select>
       </div>
 
-      <div title={busyTitle}>
+      <div title={disabledReason ?? busyTitle}>
         <RunButton
           label="Debayer Current File"
           runningLabel="Debayering..."
           running={isRunning}
-          disabled={!selectedFile?.path || isBatchRunning || blocked}
+          disabled={!selectedFile?.path || isBatchRunning || blocked || !!disabledReason}
+          describedBy={disabledReason ? disabledReasonId : undefined}
           accent="amber"
           onClick={handleRun}
         />

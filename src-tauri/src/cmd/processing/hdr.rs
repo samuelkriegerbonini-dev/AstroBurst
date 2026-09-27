@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir};
-use crate::cmd::processing::local_contrast::{run_composite_contrast, save_contrast_output, source_header};
+use crate::cmd::compose::composite_chain::DisplayStf;
+use crate::cmd::processing::local_contrast::{run_composite_contrast, run_composite_contrast_chain, save_contrast_output, source_header};
 use crate::core::imaging::hdr::{hdrmt_rgb, hdrmt_with_progress, HdrConfig};
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH};
@@ -46,8 +47,13 @@ pub async fn hdrmt_cmd(
 pub async fn hdrmt_composite_cmd(
     output_dir: String,
     config: HdrConfig,
+    chain_input: Option<String>,
+    display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        if let Some(chain_input) = chain_input {
+            return run_composite_contrast_chain(output_dir, chain_input, display_stf, |r, g, b| hdrmt_rgb(r, g, b, &config));
+        }
         let output_dir = resolve_output_dir(&output_dir)?;
         run_composite_contrast(SUFFIX_HDR, &output_dir, move |r, g, b| hdrmt_rgb(r, g, b, &config))
     })

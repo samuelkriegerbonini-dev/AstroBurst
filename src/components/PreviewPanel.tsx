@@ -1,12 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import {
   Image, Cpu, Zap, Sparkles, Loader2, SkipBack,
-  Layers2, FlaskConical, Settings, Download, FileText, BarChart3,
+  Layers2, FlaskConical, Settings, Download, FileText, BarChart3, Palette,
 } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
-import { restretchComposite, updateCompositeChannel } from "../services/compose";
-import { getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import {
   fileKeyOf,
@@ -18,14 +16,19 @@ import {
   useRenderContext,
   useStarOverlayContext,
 } from "../context/PreviewContext";
-import { useCompositePreview, useCompositeActions, useCompositeStf } from "../context/CompositeContext";
+import { useCompositePreview, useCompositeActions } from "../context/CompositeContext";
 import { useMousePixelActions, setMousePixel, emitPixelClick, usePixelClick } from "../hooks/useMousePixelStore";
 import { useSpectrum, beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum } from "../hooks/useSpectrumStore";
+import { useCompositeChain, useCompositeChainSync } from "../hooks/useCompositeChain";
+import { useCompositeMode } from "../hooks/useCompositeMode";
+import { beginCompositeCheck, useRunLocked } from "../hooks/useProcessingRun";
+import { compositeChainReset } from "../services/compositeChain";
+import { compositeChainStore } from "../utils/compositeChainStore";
+import { COMPOSITE_RUN_KEY, compositeResultTarget, hasCompositeReset, lastCompositeStep } from "../utils/compositeChain";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadLayout, saveLayout } from "../utils/layout";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
 import { monoPixelsAction } from "../utils/gpuMonoPixels";
-import { advanceCompositeSync, compositeSyncStore, forgetCompositeSync, syncedChannelFor, wizardStepStaleAfterChannelSync } from "../utils/compositeSync";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
 import { useRightTool, rightToolStore } from "../hooks/useRightTool";
@@ -121,14 +124,17 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
-  const { resetProcessed } = useRenderActions();
+  const { resetProcessed, currentFileKey } = useRenderActions();
   const displayed = useDisplayedImage();
   const processedSourcePath = processed?.fitsPath ?? null;
   const processedSourceVersion = processedSourcePath ? processedVersion : 0;
-  const { compositePreviewUrl, compositeVersion } = useCompositePreview();
-  const { initRgb, setCompositePreviewUrl, clearComposite, resetComposite } = useCompositeActions();
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
-  const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
+  const { compositePreviewUrl, compositeVersion, canShowParked } = useCompositePreview();
+  const { initRgb, setCompositePreviewUrl, clearComposite, resetComposite, setCompositeStf, setCompositeAutoStf, setCompositeStfLinked, park, replaceParked, showParkedComposite } = useCompositeActions();
+  const compositeMode = useCompositeMode();
+  const compositeChain = useCompositeChain();
+  useCompositeChainSync();
+  const compositeRunning = useRunLocked(COMPOSITE_RUN_KEY);
+  const { state: wizardState } = useComposeWizardContext();
   const wizardReadyRef = useRef(wizardState.compositeReady);
   wizardReadyRef.current = wizardState.compositeReady;
   const { starOverlayRef } = useStarOverlayContext();
@@ -372,42 +378,47 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const handleBackToFile = useCallback(() => {
     const action = backToFileAction({ isRgbFile, hasProcessed: processed !== null, wizardCompositeReady: wizardReadyRef.current });
     if (action === "rgb-file") {
+      park();
       showRgbFileView();
       return;
     }
     if (action === "display-only") {
-      setCompositePreviewUrl(null);
+      park();
       return;
     }
     void clearComposite();
-  }, [isRgbFile, processed, showRgbFileView, setCompositePreviewUrl, clearComposite]);
+  }, [isRgbFile, processed, showRgbFileView, park, clearComposite]);
 
-  const liveCompositeUrlRef = useRef(compositePreviewUrl);
-  liveCompositeUrlRef.current = compositePreviewUrl;
+  const showParked = !!file && canShowParked && wizardState.compositeReady;
+  const handleShowComposite = useCallback(() => {
+    void showParkedComposite();
+  }, [showParkedComposite]);
+
   const canReset = processed !== null || chain.psfKernel !== null;
-  const handleResetProcessed = useCallback(() => {
-    const path = file?.path ?? null;
-    const channel = path && fileKey ? syncedChannelFor(compositeSyncStore.get(), compositePreviewUrl, fileKey) : null;
-    resetProcessed();
-    if (!path || !channel) return;
-    compositeSyncStore.set(forgetCompositeSync(compositeSyncStore.get(), channel));
-    const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+
+  const compositeLastStep = lastCompositeStep(compositeChain);
+  const compositeLastLabel = compositeLastStep ? compositeChain.steps[compositeLastStep]?.label ?? null : null;
+  const canCompositeReset = compositeMode && hasCompositeReset(compositeChain);
+  const handleCompositeReset = useCallback(() => {
+    const base = compositeChainStore.get().base;
+    compositeChainStore.reset();
+    if (!base) return;
+    const stillSameComposite = beginCompositeCheck(currentFileKey);
     (async () => {
       try {
-        await updateCompositeChannel(channel, path);
-        const staleStep = wizardStepStaleAfterChannelSync(wizardReadyRef.current);
-        if (staleStep) wizardDispatch({ type: "INVALIDATE_FROM", stepId: staleStep });
-        const dir = await getOutputDir();
-        const result = await restretchComposite(dir, stf.r, stf.g, stf.b, undefined, undefined, stf.linked);
-        if (!result?.png_path) return;
-        const url = compositeSyncStore.tagUrl(await getPreviewUrl(result.png_path));
-        compositeSyncStore.set(advanceCompositeSync(compositeSyncStore.get(), liveCompositeUrlRef.current, url));
-        setCompositePreviewUrl(url);
+        const res = await compositeChainReset();
+        const target = compositeResultTarget(res.restored, stillSameComposite());
+        if (target === "parked") replaceParked(base.previewUrl, base.stf);
+        if (target !== "screen") return;
+        setCompositeAutoStf(base.stf.r, base.stf.g, base.stf.b);
+        setCompositeStf(base.stf.r, base.stf.g, base.stf.b);
+        setCompositeStfLinked(base.stf.linked);
+        setCompositePreviewUrl(base.previewUrl);
       } catch (e) {
-        console.error("[AstroBurst] Composite channel restore failed:", e);
+        console.error("[AstroBurst] Composite chain reset failed:", e);
       }
     })();
-  }, [file?.path, fileKey, compositePreviewUrl, resetProcessed, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositePreviewUrl, wizardDispatch]);
+  }, [currentFileKey, setCompositeAutoStf, setCompositeStf, setCompositeStfLinked, setCompositePreviewUrl, replaceParked]);
 
   const handleToggleGpu = useCallback(() => {
     if (useGpu) {
@@ -634,9 +645,32 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
           <div className="flex items-center gap-2 shrink-0">
             {file && <DqControls />}
             {file && <DqOverlayCanvas canvasRef={dqCanvasRef} />}
-            {file && canReset && (
+            {canCompositeReset && (
               <button
-                onClick={handleResetProcessed}
+                onClick={handleCompositeReset}
+                disabled={compositeRunning}
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                style={{ border: "1px solid var(--ab-border)" }}
+                title={compositeRunning ? "A step is running on the composite; revert once it finishes" : compositeLastLabel ? `Showing ${compositeLastLabel} on the composite. Revert the composite to before processing.` : "Clear the PSF kernel estimated on the composite"}
+              >
+                <SkipBack size={10} />
+                Revert to original
+              </button>
+            )}
+            {showParked && (
+              <button
+                onClick={handleShowComposite}
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-violet-300/90 hover:text-violet-200 transition-colors"
+                style={{ border: "1px solid rgba(168,85,247,0.3)" }}
+                title="Show the colour composite built in Compose"
+              >
+                <Palette size={10} />
+                Show composite
+              </button>
+            )}
+            {file && !compositeMode && canReset && (
+              <button
+                onClick={resetProcessed}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
                 style={{ border: "1px solid var(--ab-border)" }}
                 title={processed ? `Showing ${processed.label}. Revert to the original image; step outputs stay on disk` : "Clear the processing chain of this file"}

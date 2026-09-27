@@ -8,6 +8,7 @@ interface RunButtonProps {
   accent?: string;
   icon?: React.ReactNode;
   small?: boolean;
+  describedBy?: string;
   onClick: () => void;
 }
 
@@ -19,12 +20,14 @@ function RunButton({
   accent = "teal",
   icon,
   small = false,
+  describedBy,
   onClick,
 }: RunButtonProps) {
   return (
     <button
       onClick={onClick}
       disabled={running || disabled}
+      aria-describedby={describedBy}
       className={`ab-run-btn ${small ? "ab-run-btn-sm" : ""}`}
       data-accent={accent}
       data-running={running}

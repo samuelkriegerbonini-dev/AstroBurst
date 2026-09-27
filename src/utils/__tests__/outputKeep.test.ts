@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { outputKeepList, urlToLocalPath, type KeepFile, type KeepWizard } from "../outputKeep";
 import { EMPTY_CHAIN, withStep } from "../processingChain";
+import type { CompositeChain } from "../../shared/types/compositeChain";
 import type { FileRenderState } from "../../shared/types/preview";
 
 const OUT = "C:/Users/u/AppData/astroburst/output";
@@ -87,6 +88,32 @@ describe("outputKeepList", () => {
     const keep = outputKeepList({ files: [], records: [], wizard });
     expect(keep).toEqual(expect.arrayContaining([`${OUT}/stack_r.fits`, `${OUT}/r_bg.fits`, `${OUT}/r_starless.fits`]));
     expect(keep.some((p) => p.startsWith("__"))).toBe(false);
+  });
+
+  it("keeps the composite chain's base, step and background model PNGs", () => {
+    const stf = { shadow: 0, midtone: 0.5, highlight: 1 };
+    const compositeChain: CompositeChain = {
+      generation: 3,
+      base: { previewUrl: asset(`${OUT}/composite_chain_base_1.png`), stf: { r: stf, g: stf, b: stf, linked: true } },
+      steps: {
+        background: {
+          previewUrl: `${asset(`${OUT}/composite_chain_background_2.png`)}?v=2`,
+          label: "Background",
+          displayed: "linear",
+          modelPreviewUrl: asset(`${OUT}/composite_chain_bgmodel_2.png`),
+        },
+        stretch: { previewUrl: asset(`${OUT}/composite_chain_stretch_3.png`), label: "Stretch", displayed: "stretched" },
+      },
+      psfKernel: null,
+    };
+    const keep = outputKeepList({ files: [], records: [], compositeChain });
+    expect(keep).toEqual(expect.arrayContaining([
+      `${OUT}/composite_chain_base_1.png`,
+      `${OUT}/composite_chain_background_2.png`,
+      `${OUT}/composite_chain_bgmodel_2.png`,
+      `${OUT}/composite_chain_stretch_3.png`,
+    ]));
+    expect(outputKeepList({ files: [], records: [], compositeChain: null })).toEqual([]);
   });
 
   it("strips plane fragments and collapses duplicates that differ only by case or slashes", () => {

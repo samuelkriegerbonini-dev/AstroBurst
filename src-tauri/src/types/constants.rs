@@ -155,6 +155,12 @@ pub const WB_MODE_NONE: &str = "none";
 pub const SCNR_METHOD_MAXIMUM: &str = "maximum";
 
 pub const SUFFIX_DECONV: &str = "deconv";
+pub const RES_PSF_SOURCE: &str = "psf_source";
+pub const PSF_SOURCE_GAUSSIAN: &str = "gaussian";
+pub const PSF_SOURCE_ESTIMATED: &str = "estimated";
+pub const PSF_SOURCE_PROVIDED: &str = "provided";
+pub const MIN_PROVIDED_PSF_SIZE: usize = 3;
+pub const MAX_PROVIDED_PSF_SIZE: usize = 129;
 
 pub const DEFAULT_DRIZZLE_SCALE: f64 = 2.0;
 pub const DEFAULT_DRIZZLE_PIXFRAC: f64 = 0.7;
@@ -489,3 +495,30 @@ pub const RES_OFFSET_UNIT: &str = "offset_unit";
 pub const RES_WCS_WRITTEN: &str = "wcs_written";
 
 pub const RES_N_DETECTED: &str = "n_detected";
+
+pub const RES_BASE_PNG_PATH: &str = "base_png_path";
+pub const RES_MODEL_PNG_PATH: &str = "model_png_path";
+pub const RES_CHAIN_GENERATION: &str = "chain_generation";
+pub const RES_CHAIN_RESTARTED: &str = "chain_restarted";
+pub const RES_CHAIN_INPUT: &str = "chain_input";
+pub const RES_DISPLAYED: &str = "displayed";
+pub const RES_LINKED: &str = "linked";
+pub const RES_LIVE_GENERATION: &str = "live_generation";
+pub const RES_RESTORED: &str = "restored";
+pub const RES_STEPS: &str = "steps";
+
+pub const CHAIN_INPUT_BASE: &str = "base";
+pub const CHAIN_STEP_BACKGROUND: &str = "background";
+pub const CHAIN_STEP_DENOISE: &str = "denoise";
+pub const CHAIN_STEP_DECONV: &str = "deconv";
+pub const CHAIN_STEP_STRETCH: &str = "stretch";
+pub const CHAIN_STEP_MASKED_STRETCH: &str = "maskedStretch";
+pub const CHAIN_STEP_LOCAL_CONTRAST: &str = "localContrast";
+pub const CHAIN_STEP_PIXEL_MATH: &str = "pixelMath";
+
+pub const DISPLAYED_LINEAR: &str = "linear";
+pub const DISPLAYED_STRETCHED: &str = "stretched";
+pub const DISPLAYED_TONED: &str = "toned";
+
+pub const BACKGROUND_MODEL_POLYNOMIAL: &str = "polynomial";
+pub const BACKGROUND_MODEL_SPLINE: &str = "spline";

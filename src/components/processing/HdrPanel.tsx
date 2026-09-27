@@ -3,17 +3,14 @@ import { X } from "lucide-react";
 import { applyHdrmt, applyHdrmtComposite } from "../../services/localContrast";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
-import {
-  COMPOSITE_CHANGED_MESSAGE,
-  INPUT_CHANGED_MESSAGE,
-  bustPreviewUrl,
-  isCancelMessage,
-  useCompositeRunGuard,
-  useProcessingRun,
-} from "../../hooks/useProcessingRun";
-import { useCompositeActions, useCompositePreview } from "../../context/CompositeContext";
+import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
+import { useCompositeStf } from "../../context/CompositeContext";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
+import { COMPOSITE_RESTARTED_NOTICE, unchangedFileClause } from "./compositeProps";
+import type { CompositePanelProps } from "./compositeProps";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import { DEFAULT_HDR_CONFIG, HDR_LIMITS, HDR_PROGRESS_EVENT } from "../../shared/types/localContrast";
@@ -24,12 +21,12 @@ interface HdrRun {
   resultUrl: string | undefined;
   baseUrl: string | null;
   baseLabel: string;
-  composite: boolean;
+  chainRestarted: boolean;
   layers: number;
   iterations: number;
 }
 
-interface HdrPanelProps {
+interface HdrPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   onProcessingDone?: (result: LocalContrastResult) => void;
@@ -37,6 +34,8 @@ interface HdrPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ACCENT = "violet";
@@ -54,52 +53,59 @@ function isLinearInputError(message: string | null): boolean {
   return !!message && message.includes(LINEAR_INPUT_MARKER);
 }
 
-export default function HdrPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: HdrPanelProps) {
-  const { isShowingComposite } = useCompositePreview();
-  const { setCompositePreviewUrl } = useCompositeActions();
-  const beginCompositeRun = useCompositeRunGuard();
+export default function HdrPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: HdrPanelProps) {
   const progress = useProgress(HDR_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [config, setConfig] = useState<HdrConfig>(DEFAULT_HDR_CONFIG);
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<HdrRun>("hdr", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<HdrRun>("hdr", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
-  const result = runResult && (runResult.composite || chainHoldsOutput(chain, "localContrast", runResult.res.fits_path)) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const holds = runResult !== null && (compositeMode
+    ? compositeChainHolds(compositeChain, "localContrast", runResult.resultUrl)
+    : chainHoldsOutput(chain, "localContrast", runResult.res.fits_path));
+  const result = holds ? runResult : null;
 
   const update = useCallback(<K extends keyof HdrConfig>(key: K, value: HdrConfig[K]) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const canRun = isShowingComposite || !!selectedFile?.path;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
 
   const handleRun = useCallback(() => {
-    if (!canRun) return;
-    const composite = isShowingComposite;
-    const path = selectedFile?.path ?? null;
-    if (!composite && !path) return;
     const runConfig = config;
-    const snapshot = {
-      baseUrl: inputPreviewUrl ?? null,
-      baseLabel: inputLabel ?? "Original",
-      composite,
-      layers: runConfig.layers,
-      iterations: runConfig.iterations,
-    };
-    const compositeStillCurrent = beginCompositeRun();
+    const snapshot = { layers: runConfig.layers, iterations: runConfig.iterations };
+    if (compositeMode) {
+      if (!compositeInput) return;
+      const input = compositeInput;
+      const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+      resetProgress();
+      void run(async () => {
+        const res = await applyHdrmtComposite(outputDir, runConfig, { chainInput: input.input, displayStf });
+        onCompositeDone("localContrast", "HDRMT", res, displayStf);
+        return {
+          ...snapshot,
+          res,
+          resultUrl: bustPreviewUrl(res.previewUrl, Date.now()),
+          baseUrl: res.basePreviewUrl ?? input.previewUrl,
+          baseLabel: res.basePreviewUrl ? "Composite" : input.label,
+          chainRestarted: res.chain_restarted,
+        };
+      }, isCancelMessage).finally(resetProgress);
+      return;
+    }
+    const path = selectedFile?.path;
+    if (!path) return;
+    const baseUrl = inputPreviewUrl ?? null;
+    const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      if (composite) {
-        const res = await applyHdrmtComposite(outputDir, runConfig);
-        if (!compositeStillCurrent()) throw new Error(COMPOSITE_CHANGED_MESSAGE);
-        if (res.previewUrl) setCompositePreviewUrl(res.previewUrl);
-        return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()) };
-      }
-      if (!path) return null;
       const res = await applyHdrmt(path, outputDir, runConfig);
       if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()) };
+      return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     }, isCancelMessage).finally(resetProgress);
-  }, [canRun, isShowingComposite, selectedFile?.path, outputDir, config, inputPreviewUrl, inputLabel, beginCompositeRun, resetProgress, run, setCompositePreviewUrl, onProcessingDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -109,9 +115,9 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
       {!canRun && (
         <div className="text-xs text-zinc-500 italic px-1">Select a stretched FITS file or show a stretched composite.</div>
       )}
-      {isShowingComposite && (
-        <div className="text-[10px] text-violet-300 bg-violet-900/20 border border-violet-800/30 rounded-lg px-3 py-1.5">
-          Composite mode: compresses the stretched RGB composite{config.toLightness ? " on its luminance, preserving hue." : " channel by channel."}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          Composite mode: compresses the stretched RGB composite{config.toLightness ? " on its luminance, preserving hue" : " channel by channel"}{unchangedFileClause(fileName)}
         </div>
       )}
 
@@ -121,7 +127,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
         <Slider label="Overdrive" value={config.overdrive} min={HDR_LIMITS.overdrive.min} max={HDR_LIMITS.overdrive.max} step={HDR_LIMITS.overdrive.step} disabled={isRunning} accent={ACCENT} format={(v) => `${(v * 100).toFixed(0)}%`} onChange={(v) => update("overdrive", v)} />
 
         <Toggle label="Invert (compress dark structures)" checked={config.inverted} disabled={isRunning} accent={ACCENT} onChange={(v) => update("inverted", v)} />
-        {isShowingComposite && (
+        {compositeMode && (
           <Toggle label="Apply to Lightness" checked={config.toLightness} disabled={isRunning} accent={ACCENT} onChange={(v) => update("toLightness", v)} />
         )}
         <Toggle label="Deringing (protect star cores)" checked={config.deringing} disabled={isRunning} accent={ACCENT} onChange={(v) => update("deringing", v)} />
@@ -130,11 +136,11 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
         )}
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Run HDRMT" runningLabel="Compressing..." running={isRunning} disabled={!canRun || blocked} accent={ACCENT} onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label="Run HDRMT" runningLabel="Compressing..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent={ACCENT} onClick={handleRun} />
       </div>
 
-      {isRunning && !isShowingComposite && progress.active && (
+      {isRunning && progress.active && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
           <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
             <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-violet), #c4b5fd)" }} />
@@ -165,6 +171,11 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
+          {result.chainRestarted && (
+            <div className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
           <ResultGrid items={[
             { label: "Layers", value: result.layers },
             { label: "Iterations", value: result.iterations },
@@ -172,7 +183,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
             { label: "Size", value: result.res.dimensions ? `${result.res.dimensions[0]}x${result.res.dimensions[1]}` : null },
           ]} columns={4} />
 
-          {!result.composite && result.baseUrl && result.resultUrl && (
+          {result.baseUrl && result.resultUrl && (
             <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="HDRMT" accent={ACCENT} />
           )}
         </div>

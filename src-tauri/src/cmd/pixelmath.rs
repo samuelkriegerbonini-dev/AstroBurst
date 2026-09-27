@@ -224,6 +224,112 @@ pub(crate) fn slot_names_with_target(names: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn entry_warnings(label: &str, entry: &ImageEntry) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(planes) = plane_count(entry) {
+        warnings.push(format!(
+            "{} is plane 1 of {}; the other planes were not read",
+            label, planes
+        ));
+    }
+    if entry.plane_info().is_some_and(|info| info.is_dq) {
+        warnings.push(format!(
+            "{} is a data-quality plane read as 32-bit float; flag values above 16777216 lose their low bits, so only zero/non-zero tests are exact",
+            label
+        ));
+    }
+    warnings
+}
+
+fn padding_warning(label: &str, arr: &Array2<f32>, reduced: bool) -> Option<String> {
+    if !reduced {
+        return None;
+    }
+    let zeros = exact_zero_fraction(arr);
+    if zeros < ZERO_FRACTION_WARNING {
+        return None;
+    }
+    Some(format!(
+        "{} is {:.0}% exact zeros, the value mosaics use as padding; med, mean, sdev, mdev, adev, min and max of {} include those pixels",
+        label,
+        zeros * 100.0,
+        label
+    ))
+}
+
+pub(crate) struct ChannelPixelMath {
+    pub results: [Array2<f32>; 3],
+    pub stats: [Option<ImageStats>; 3],
+    pub non_finite: [usize; 3],
+    pub warnings: Vec<String>,
+}
+
+const CHANNEL_LABELS: [&str; 3] = ["R", "G", "B"];
+
+pub(crate) fn evaluate_per_channel(
+    expression: &str,
+    slots: &[PixelMathSlot],
+    opts: &OutputOptions,
+    channels: [&Array2<f32>; 3],
+) -> anyhow::Result<ChannelPixelMath> {
+    let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
+    let slot_names = slot_names_with_target(&user_names);
+    let program = compile(expression, &slot_names).map_err(pixelmath_error)?;
+    let referenced = program.referenced_slots();
+    let reduced = program.reduced_slots();
+    let (rows, cols) = channels[0].dim();
+
+    let mut entries: Vec<Option<ImageEntry>> = Vec::with_capacity(slots.len());
+    let mut warnings: Vec<String> = Vec::new();
+    for (i, slot) in slots.iter().enumerate() {
+        if !referenced[i + 1] {
+            entries.push(None);
+            continue;
+        }
+        let entry = load_cached_full(&slot.path)
+            .with_context(|| format!("slot {} = {}", slot.name, slot.path))?;
+        let (slot_rows, slot_cols) = entry.arr().dim();
+        if (slot_rows, slot_cols) != (rows, cols) {
+            bail!(
+                "pixelmath: slot {} is {}x{} but the composite is {}x{} (width x height)",
+                slot.name,
+                slot_cols,
+                slot_rows,
+                cols,
+                rows
+            );
+        }
+        warnings.extend(entry_warnings(&slot.name, &entry));
+        warnings.extend(padding_warning(&slot.name, entry.arr(), reduced[i + 1]));
+        entries.push(Some(entry));
+    }
+
+    let mut results = Vec::with_capacity(3);
+    let mut stats = Vec::with_capacity(3);
+    let mut non_finite = Vec::with_capacity(3);
+    for (channel, label) in channels.into_iter().zip(CHANNEL_LABELS) {
+        warnings.extend(padding_warning(&format!("{} ({})", TARGET_SYMBOL, label), channel, reduced[0]));
+        let arrays: Vec<&Array2<f32>> = std::iter::once(channel)
+            .chain(entries.iter().map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(channel)))
+            .collect();
+        let result = evaluate(&program, &arrays, opts).map_err(pixelmath_error)?;
+        let (channel_stats, channel_non_finite) = finite_output_stats(&result);
+        results.push(result);
+        stats.push(channel_stats);
+        non_finite.push(channel_non_finite);
+    }
+
+    let [r, g, b] = <[Array2<f32>; 3]>::try_from(results).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
+    let [sr, sg, sb] = <[Option<ImageStats>; 3]>::try_from(stats).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
+    let [nr, ng, nb] = <[usize; 3]>::try_from(non_finite).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
+    Ok(ChannelPixelMath {
+        results: [r, g, b],
+        stats: [sr, sg, sb],
+        non_finite: [nr, ng, nb],
+        warnings,
+    })
+}
+
 fn ensure_outputs_are_not_inputs(outputs: &[&str], inputs: &[(&str, &str)]) -> anyhow::Result<()> {
     for output in outputs {
         let output_key = path_key(output);
@@ -282,29 +388,8 @@ pub(crate) fn run_pixelmath(
     let mut warnings: Vec<String> = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let Some(entry) = entry else { continue };
-        if let Some(planes) = plane_count(entry) {
-            warnings.push(format!(
-                "{} is plane 1 of {}; the other planes were not read",
-                slot_names[i], planes
-            ));
-        }
-        if entry.plane_info().is_some_and(|info| info.is_dq) {
-            warnings.push(format!(
-                "{} is a data-quality plane read as 32-bit float; flag values above 16777216 lose their low bits, so only zero/non-zero tests are exact",
-                slot_names[i]
-            ));
-        }
-        if reduced.get(i).copied().unwrap_or(false) {
-            let zeros = exact_zero_fraction(entry.arr());
-            if zeros >= ZERO_FRACTION_WARNING {
-                warnings.push(format!(
-                    "{} is {:.0}% exact zeros, the value mosaics use as padding; med, mean, sdev, mdev, adev, min and max of {} include those pixels",
-                    slot_names[i],
-                    zeros * 100.0,
-                    slot_names[i]
-                ));
-            }
-        }
+        warnings.extend(entry_warnings(&slot_names[i], entry));
+        warnings.extend(padding_warning(&slot_names[i], entry.arr(), reduced.get(i).copied().unwrap_or(false)));
     }
 
     let target_arr = target.arr();

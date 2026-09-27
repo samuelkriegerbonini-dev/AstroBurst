@@ -17,7 +17,7 @@ import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStre
 import type { StarRemovalResult } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { useCompositeStf } from "../../../context/CompositeContext";
+import { useCompositeActions, useCompositeStf } from "../../../context/CompositeContext";
 import { useRenderActions } from "../../../context/PreviewContext";
 import StfHistogram from "../StfHistogram";
 
@@ -62,6 +62,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
     compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
   } = useCompositeStf();
+  const { setCompositeStf, setCompositeStfLinked } = useCompositeActions();
+  const linked = compositeStfLinked;
   const { currentFileKey, publishProcessed } = useRenderActions();
   const channelBinId = state.compositeReady ? null : singleChannelBinId(state);
   const channelLabel = state.bins.find((b) => b.id === channelBinId)?.shortLabel ?? "";
@@ -70,7 +72,6 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<StretchRunResult | null | undefined>(null);
   const [error, setError] = useState("");
-  const [linked, setLinked] = useState(state.linkedStf);
   const [sharedMask, setSharedMask] = useState(true);
   const stretchModeId = useId();
   const [detectionSigma, setDetectionSigma] = useState(8.0);
@@ -86,10 +87,10 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [ghsSp, setGhsSp] = useState(0.01);
   const [ghsLp, setGhsLp] = useState(0.0);
   const [ghsHp, setGhsHp] = useState(1.0);
-  const [stfR, setStfR] = useState<ChannelStf>({ ...DEFAULT_STF });
-  const [stfG, setStfG] = useState<ChannelStf>({ ...DEFAULT_STF });
-  const [stfB, setStfB] = useState<ChannelStf>({ ...DEFAULT_STF });
-  const prevAutoStf = useRef<ChannelStf | null>(null);
+  const [stfR, setStfR] = useState<ChannelStf>(() => ({ ...(compositeAutoStfR ?? DEFAULT_STF) }));
+  const [stfG, setStfG] = useState<ChannelStf>(() => ({ ...(compositeAutoStfG ?? compositeAutoStfR ?? DEFAULT_STF) }));
+  const [stfB, setStfB] = useState<ChannelStf>(() => ({ ...(compositeAutoStfB ?? compositeAutoStfR ?? DEFAULT_STF) }));
+  const prevAutoStf = useRef<ChannelStf | null>(compositeAutoStfR);
 
   useEffect(() => {
     if (!compositeAutoStfR) return;
@@ -104,12 +105,13 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB]);
 
   const handleLinkedChange = useCallback((v: boolean) => {
-    setLinked(v);
+    setCompositeStfLinked(v);
     if (v) {
+      setCompositeStf(compositeStfR, compositeStfR, compositeStfR);
       setStfG({ ...stfR });
       setStfB({ ...stfR });
     }
-  }, [stfR]);
+  }, [stfR, compositeStfR, setCompositeStf, setCompositeStfLinked]);
 
   const updateChannel = useCallback((ch: "r" | "g" | "b", param: keyof ChannelStf, val: number) => {
     const update = (prev: ChannelStf) => ({ ...prev, [param]: val });
@@ -168,7 +170,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     try {
       let res: StretchRunResult | undefined;
       const dir = await getOutputDir();
-      const stfBundle = { r: stfR, g: stfG, b: stfB };
+      const stfBundle = linked ? { r: stfR, g: stfR, b: stfR } : { r: stfR, g: stfG, b: stfB };
       if (state.stretchMode === "auto_stf" && !state.compositeReady) {
         throw new Error("Run Blend first — Auto STF re-stretch operates on the blended composite");
       }
@@ -225,7 +227,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           res = await applyGhsStretch(input, dir, ghsOptions);
         }
       } else {
-        res = await restretchComposite(dir, stfR, stfG, stfB, undefined, true, linked);
+        res = await restretchComposite(dir, stfBundle.r, stfBundle.g, stfBundle.b, undefined, true, linked);
       }
 
       if (state.compositeReady) {

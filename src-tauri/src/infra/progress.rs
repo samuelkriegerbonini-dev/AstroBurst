@@ -27,6 +27,8 @@ pub struct ProgressHandle {
     app_handle: tauri::AppHandle,
     event_name: String,
     last_emit: Arc<Mutex<Instant>>,
+    part_index: u64,
+    part_count: u64,
 }
 
 #[cfg(not(feature = "tauri"))]
@@ -74,7 +76,30 @@ impl ProgressHandle {
             app_handle: app.clone(),
             event_name: event.to_string(),
             last_emit: Arc::new(Mutex::new(Instant::now())),
+            part_index: 0,
+            part_count: 1,
         }
+    }
+
+    pub fn part(&self, index: u64, count: u64) -> Self {
+        Self {
+            current: Arc::new(AtomicU64::new(0)),
+            total: Arc::new(AtomicU64::new(self.total.load(Ordering::Relaxed))),
+            cancelled: Arc::clone(&self.cancelled),
+            app_handle: self.app_handle.clone(),
+            event_name: self.event_name.clone(),
+            last_emit: Arc::clone(&self.last_emit),
+            part_index: index,
+            part_count: count.max(1),
+        }
+    }
+
+    fn percent(&self, cur: u64, tot: u64) -> u32 {
+        if tot == 0 {
+            return 0;
+        }
+        let done = (self.part_index * tot + cur) as f64;
+        (done / (self.part_count * tot) as f64 * 100.0) as u32
     }
 
     pub fn tick_with_stage(&self, stage: &str) {
@@ -91,11 +116,7 @@ impl ProgressHandle {
             *last = now;
         }
 
-        let percent = if tot > 0 {
-            (cur as f64 / tot as f64 * 100.0) as u32
-        } else {
-            0
-        };
+        let percent = self.percent(cur, tot);
         let _ = self.app_handle.emit(
             &self.event_name,
             ProgressPayload {
@@ -116,6 +137,9 @@ impl ProgressHandle {
     }
 
     pub fn emit_complete(&self) {
+        if self.part_index + 1 < self.part_count {
+            return;
+        }
         let tot = self.total.load(Ordering::Relaxed);
         let _ = self.app_handle.emit(
             &self.event_name,
@@ -131,6 +155,9 @@ impl ProgressHandle {
 
 #[cfg(not(feature = "tauri"))]
 impl ProgressHandle {
+    pub fn part(&self, _index: u64, _count: u64) -> Self {
+        ProgressHandle
+    }
     pub fn is_cancelled(&self) -> bool {
         false
     }

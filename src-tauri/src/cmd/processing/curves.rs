@@ -259,13 +259,13 @@ mod tests {
         let hdr_again = HdrConfig { layers: 3, ..HdrConfig::default() };
 
         let first = adjust(&out, &c1).await;
-        let lhe_run = lhe_composite_cmd(out.clone(), lhe.clone()).await;
+        let lhe_run = lhe_composite_cmd(out.clone(), lhe.clone(), None, None).await;
         let second = adjust(&out, &c2).await;
         let after_second = helpers::load_composite_toned().map(|_| toned_tier());
-        let hdr_run = hdrmt_composite_cmd(out.clone(), hdr.clone()).await;
+        let hdr_run = hdrmt_composite_cmd(out.clone(), hdr.clone(), None, None).await;
         let third = adjust(&out, &c1).await;
         let after_third = helpers::load_composite_toned().map(|_| toned_tier());
-        let hdr_rerun = hdrmt_composite_cmd(out, hdr_again.clone()).await;
+        let hdr_rerun = hdrmt_composite_cmd(out, hdr_again.clone(), None, None).await;
         let after_rerun = helpers::load_composite_toned().map(|_| toned_tier());
         helpers::clear_composite_derived();
         lhe_run.unwrap();

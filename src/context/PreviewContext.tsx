@@ -14,9 +14,12 @@ import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandDetection, NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
-import { useCompositeActions } from "./CompositeContext";
+import { useCompositeActions, useCompositePreview } from "./CompositeContext";
+import { useComposeWizardContext } from "./ComposeWizardContext";
+import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
 import type {
   ProcessedFile,
+  ProcessResult,
   StfParams,
   HistogramData,
   RawPixelData,
@@ -312,8 +315,40 @@ export function fileKeyOf(file: ProcessedFile | null): string | null {
   return file ? `${file.id}|${file.path}` : null;
 }
 
+type CompositeActions = ReturnType<typeof useCompositeActions>;
+
+interface SeenFile {
+  key: string | null;
+  isRgb: boolean;
+  previewUrl: string | null;
+}
+
+const NO_SEEN_FILE: SeenFile = { key: null, isRgb: false, previewUrl: null };
+
+function copyStf(s: StfParams): StfParams {
+  return { shadow: s.shadow, midtone: s.midtone, highlight: s.highlight };
+}
+
+function seedRgbFileView(composite: CompositeActions, result: ProcessResult): void {
+  if (result.stf_r && result.stf_g && result.stf_b) {
+    composite.initRgb(result.previewUrl ?? null, copyStf(result.stf_r), copyStf(result.stf_g), copyStf(result.stf_b));
+  } else if (result.previewUrl) {
+    composite.setCompositePreviewUrl(result.previewUrl);
+  }
+}
+
+function useOptionalWizardCompositeReady(): boolean {
+  try {
+    return useComposeWizardContext().state.compositeReady;
+  } catch {
+    return false;
+  }
+}
+
 export function PreviewProvider({ file, doneFiles, children }: Props) {
   const composite = useCompositeActions();
+  const { compositePreviewUrl } = useCompositePreview();
+  const wizardCompositeReady = useOptionalWizardCompositeReady();
 
   const [histData, setHistData] = useState<HistogramData | null>(null);
   const [histDataPath, setHistDataPath] = useState<string | null>(null);
@@ -394,6 +429,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   viewRef.current = current;
   const processedRef = useRef<ProcessedResult | null>(processed);
   processedRef.current = processed;
+  const liveCompositeUrlRef = useRef(compositePreviewUrl);
+  liveCompositeUrlRef.current = compositePreviewUrl;
+  const wizardReadyRef = useRef(wizardCompositeReady);
+  wizardReadyRef.current = wizardCompositeReady;
+  const seenFileRef = useRef<SeenFile>(NO_SEEN_FILE);
 
   const currentFileKey = useCallback(() => fileKeyRef.current, []);
 
@@ -706,26 +746,22 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     rawPixelsAbortRef.current++;
     rgbRawPixelsAbortRef.current++;
 
-    composite.resetComposite();
+    const isRgbFits = file.result?.is_rgb === true;
+    const previous = seenFileRef.current;
+    seenFileRef.current = { key: fileKey, isRgb: isRgbFits, previewUrl: file.result?.previewUrl ?? null };
+
+    const compositeAction = fileSwitchCompositeAction({
+      livePreviewUrl: liveCompositeUrlRef.current,
+      previousFileRgbUrl: previous.isRgb ? previous.previewUrl : null,
+      wizardCompositeReady: wizardReadyRef.current,
+    });
+    if (compositeAction === "park") composite.park();
+    else composite.resetComposite();
 
     const seq = ++seqRef.current;
     const stale = () => seqRef.current !== seq;
 
-    const isRgbFits = file.result?.is_rgb === true;
-
-    if (isRgbFits) {
-      const toStf = (s: StfParams): StfParams => ({ shadow: s.shadow, midtone: s.midtone, highlight: s.highlight });
-      if (file.result?.stf_r && file.result?.stf_g && file.result?.stf_b) {
-        composite.initRgb(
-          file.result.previewUrl ?? null,
-          toStf(file.result.stf_r),
-          toStf(file.result.stf_g),
-          toStf(file.result.stf_b),
-        );
-      } else if (file.result?.previewUrl) {
-        composite.setCompositePreviewUrl(file.result.previewUrl);
-      }
-    }
+    if (isRgbFits && file.result) seedRgbFileView(composite, file.result);
 
     const precomputedAutoStf = file.result?.histogram?.auto_stf;
     if (excludeDqRef.current && !processedPath && precomputedAutoStf) setStfParams(precomputedAutoStf);
@@ -747,6 +783,24 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
+
+  const fileResult = file?.result ?? null;
+
+  useEffect(() => {
+    const seen = seenFileRef.current;
+    const sameFile = seen.key === fileKey;
+    const isRgb = fileResult?.is_rgb === true;
+    const nextPreviewUrl = fileResult?.previewUrl ?? null;
+    const reseed = reseedsRgbFileView({
+      sameFile,
+      isRgb,
+      previousPreviewUrl: seen.previewUrl,
+      nextPreviewUrl,
+      livePreviewUrl: liveCompositeUrlRef.current,
+    });
+    if (sameFile) seenFileRef.current = { key: fileKey, isRgb, previewUrl: nextPreviewUrl };
+    if (reseed && fileResult) seedRgbFileView(composite, fileResult);
+  }, [fileKey, fileResult, composite]);
 
   const precomputedHist = file?.result?.histogram ?? null;
 

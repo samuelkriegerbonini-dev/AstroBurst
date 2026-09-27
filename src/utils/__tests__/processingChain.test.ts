@@ -11,6 +11,8 @@ import {
   withVersionParam,
   putCapped,
   pruneRecord,
+  psfUseOf,
+  showsPsfCrumb,
 } from "../processingChain";
 import type { ChainEntry, ChainStep, FileRenderState, ProcessingChain } from "../../shared/types/preview";
 
@@ -197,5 +199,43 @@ describe("putCapped", () => {
     putCapped(map, "a", 10, 3);
     putCapped(map, "d", 4, 3);
     expect([...map.keys()]).toEqual(["c", "a", "d"]);
+  });
+});
+
+describe("PSF crumb before Deconv", () => {
+  const KERNEL = [[0, 1, 0], [1, 4, 1], [0, 1, 0]];
+
+  it("records whether Deconv used the PSF-tab kernel, and only on the Deconv entry", () => {
+    expect(psfUseOf("deconv", "provided")).toEqual({ psfUsed: true });
+    expect(psfUseOf("deconv", "estimated")).toEqual({ psfUsed: false });
+    expect(psfUseOf("deconv", "gaussian")).toEqual({ psfUsed: false });
+    expect(psfUseOf("deconv", undefined)).toEqual({ psfUsed: false });
+    expect(psfUseOf("denoise", "provided")).toEqual({});
+  });
+
+  it("shows the crumb while a kernel exists and Deconv has not run yet", () => {
+    expect(showsPsfCrumb(KERNEL, undefined)).toBe(true);
+  });
+
+  it("shows the crumb when Deconv ran with the PSF-tab kernel", () => {
+    expect(showsPsfCrumb(KERNEL, { ...entry("/out/deconv.fits"), ...psfUseOf("deconv", "provided") })).toBe(true);
+  });
+
+  it("hides the crumb when Deconv ran with a Gaussian or re-estimated PSF", () => {
+    expect(showsPsfCrumb(KERNEL, { ...entry("/out/deconv.fits"), ...psfUseOf("deconv", "gaussian") })).toBe(false);
+    expect(showsPsfCrumb(KERNEL, { ...entry("/out/deconv.fits"), ...psfUseOf("deconv", "estimated") })).toBe(false);
+    expect(showsPsfCrumb(KERNEL, entry("/out/deconv.fits"))).toBe(false);
+  });
+
+  it("never shows the crumb without a kernel", () => {
+    expect(showsPsfCrumb(null, undefined)).toBe(false);
+    expect(showsPsfCrumb(null, { ...entry("/out/deconv.fits"), psfUsed: true })).toBe(false);
+  });
+
+  it("keeps the flag when a later step is added to the chain", () => {
+    const deconv = { ...entry("/out/deconv.fits"), ...psfUseOf("deconv", "provided") };
+    const chain = withStep(withStep({ ...EMPTY_CHAIN, psfKernel: KERNEL }, "deconv", deconv), "stretch", entry("/out/stretch.fits"));
+    expect(chain.steps.deconv?.psfUsed).toBe(true);
+    expect(showsPsfCrumb(chain.psfKernel, chain.steps.deconv)).toBe(true);
   });
 });

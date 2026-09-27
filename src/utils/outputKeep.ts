@@ -1,4 +1,5 @@
 import type { ProcessResult } from "../shared/types";
+import type { CompositeChain } from "../shared/types/compositeChain";
 import type { FileRenderState } from "../shared/types/preview";
 import type { WizardState } from "./wizard";
 import { assetUrlToPath } from "./exportSources";
@@ -29,6 +30,7 @@ export interface KeepInput {
   files: readonly KeepFile[];
   records: readonly FileRenderState[];
   wizard?: KeepWizard | null;
+  compositeChain?: CompositeChain | null;
   previewUrls?: readonly (string | null | undefined)[];
 }
 
@@ -82,6 +84,17 @@ export function outputKeepList(input: KeepInput): string[] {
     add(w.segmPath);
     add(w.resultFits);
     addUrl(w.resultPng);
+  }
+
+  const composite = input.compositeChain;
+  if (composite) {
+    addUrl(composite.base?.previewUrl);
+    for (const step of CHAIN_ORDER) {
+      const entry = composite.steps[step];
+      if (!entry) continue;
+      addUrl(entry.previewUrl);
+      addUrl(entry.modelPreviewUrl);
+    }
   }
 
   for (const url of input.previewUrls ?? []) addUrl(url);

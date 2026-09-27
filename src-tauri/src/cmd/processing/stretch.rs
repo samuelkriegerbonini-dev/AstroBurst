@@ -1,6 +1,9 @@
 use serde_json::json;
 
+use ndarray::Array2;
+
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save_as, resolve_output_dir, OutputValues, MAX_PREVIEW_DIM};
+use crate::cmd::compose::composite_chain::{key_planes, run_chain_step, stretched_state, ChainCall, ChainStep, DisplayStf, StepOutput};
 use crate::cmd::helpers;
 use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb, GhsParams};
 use crate::core::imaging::masked_stretch::{masked_stretch, masked_stretch_rgb_shared, MaskedStretchConfig};
@@ -212,12 +215,27 @@ pub async fn masked_stretch_cmd(
 pub async fn arcsinh_stretch_composite_cmd(
     output_dir: String,
     factor: f64,
+    chain_input: Option<String>,
+    display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let clamped_factor = (factor as f32).clamp(1.0, 500.0);
+
+        if let Some(chain_input) = chain_input {
+            let call = ChainCall { output_dir, chain_input, display_stf };
+            return run_chain_step(ChainStep::Stretch, &call, |input, _| {
+                let [r, g, b] = key_planes(input);
+                let (r, g, b) = arcsinh_stretch_rgb(r, g, b, clamped_factor);
+                Ok(StepOutput {
+                    state: stretched_state(input, [r, g, b]),
+                    extras: json!({ RES_STRETCH_FACTOR: clamped_factor }),
+                })
+            });
+        }
+
         let output_dir = resolve_output_dir(&output_dir)?;
 
         let (er, eg, eb) = helpers::load_composite_rgb()?;
-        let clamped_factor = (factor as f32).clamp(1.0, 500.0);
 
         let t0 = std::time::Instant::now();
         let (r, g, b) = arcsinh_stretch_rgb(er.arr(), eg.arr(), eb.arr(), clamped_factor);
@@ -250,6 +268,68 @@ fn channel_stats_json(r: &crate::core::imaging::masked_stretch::MaskedStretchRes
     })
 }
 
+struct MaskedStretchRgb {
+    r: Array2<f32>,
+    g: Array2<f32>,
+    b: Array2<f32>,
+    per_channel: serde_json::Value,
+    stars: usize,
+    coverage: f64,
+    mask_mode: &'static str,
+}
+
+fn masked_stretch_rgb(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    config: &MaskedStretchConfig,
+    use_shared: bool,
+) -> anyhow::Result<MaskedStretchRgb> {
+    if use_shared {
+        let result = masked_stretch_rgb_shared(r, g, b, config).map_err(|e| anyhow::anyhow!(e))?;
+        let pc = json!({
+            RES_R: channel_stats_json(&result.r),
+            RES_G: channel_stats_json(&result.g),
+            RES_B: channel_stats_json(&result.b),
+        });
+        return Ok(MaskedStretchRgb {
+            r: result.r.image,
+            g: result.g.image,
+            b: result.b.image,
+            per_channel: pc,
+            stars: result.shared_stars_masked,
+            coverage: result.shared_mask_coverage,
+            mask_mode: MASK_MODE_SHARED,
+        });
+    }
+    let (res_r, (res_g, res_b)) = rayon::join(
+        || masked_stretch(r, config),
+        || rayon::join(
+            || masked_stretch(g, config),
+            || masked_stretch(b, config),
+        ),
+    );
+    let r = res_r.map_err(|e| anyhow::anyhow!(e))?;
+    let g = res_g.map_err(|e| anyhow::anyhow!(e))?;
+    let b = res_b.map_err(|e| anyhow::anyhow!(e))?;
+    let pc = json!({
+        RES_R: channel_stats_json(&r),
+        RES_G: channel_stats_json(&g),
+        RES_B: channel_stats_json(&b),
+    });
+    let total_stars = r.stars_masked + g.stars_masked + b.stars_masked;
+    let avg_coverage = (r.mask_coverage + g.mask_coverage + b.mask_coverage) / 3.0;
+    Ok(MaskedStretchRgb {
+        r: r.image,
+        g: g.image,
+        b: b.image,
+        per_channel: pc,
+        stars: total_stars,
+        coverage: avg_coverage,
+        mask_mode: MASK_MODE_PER_CHANNEL,
+    })
+}
+
 #[tauri::command]
 pub async fn masked_stretch_composite_cmd(
     output_dir: String,
@@ -262,12 +342,10 @@ pub async fn masked_stretch_composite_cmd(
     shared_mask: Option<bool>,
     detection_sigma: Option<f64>,
     max_eccentricity: Option<f64>,
+    chain_input: Option<String>,
+    display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let output_dir = resolve_output_dir(&output_dir)?;
-
-        let (er, eg, eb) = helpers::load_composite_rgb()?;
-
         let config = MaskedStretchConfig {
             iterations: iterations.unwrap_or(10),
             target_background: target_background.unwrap_or(0.25),
@@ -279,47 +357,32 @@ pub async fn masked_stretch_composite_cmd(
             max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
             ..MaskedStretchConfig::default()
         };
-
-        let t0 = std::time::Instant::now();
         let use_shared = shared_mask.unwrap_or(true);
 
-        let (r_img, g_img, b_img, per_channel, stars, coverage, mask_mode) = if use_shared {
-            let result = masked_stretch_rgb_shared(er.arr(), eg.arr(), eb.arr(), &config)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let pc = json!({
-                RES_R: channel_stats_json(&result.r),
-                RES_G: channel_stats_json(&result.g),
-                RES_B: channel_stats_json(&result.b),
+        if let Some(chain_input) = chain_input {
+            let call = ChainCall { output_dir, chain_input, display_stf };
+            return run_chain_step(ChainStep::MaskedStretch, &call, |input, _| {
+                let [r, g, b] = key_planes(input);
+                let out = masked_stretch_rgb(r, g, b, &config, use_shared)?;
+                Ok(StepOutput {
+                    state: stretched_state(input, [out.r, out.g, out.b]),
+                    extras: json!({
+                        RES_STARS_MASKED: out.stars,
+                        RES_MASK_COVERAGE: out.coverage,
+                        CHANNELS: out.per_channel,
+                        RES_MASK_MODE: out.mask_mode,
+                    }),
+                })
             });
-            (
-                result.r.image, result.g.image, result.b.image,
-                pc, result.shared_stars_masked, result.shared_mask_coverage,
-                MASK_MODE_SHARED,
-            )
-        } else {
-            let (res_r, (res_g, res_b)) = rayon::join(
-                || masked_stretch(er.arr(), &config),
-                || rayon::join(
-                    || masked_stretch(eg.arr(), &config),
-                    || masked_stretch(eb.arr(), &config),
-                ),
-            );
-            let r = res_r.map_err(|e| anyhow::anyhow!(e))?;
-            let g = res_g.map_err(|e| anyhow::anyhow!(e))?;
-            let b = res_b.map_err(|e| anyhow::anyhow!(e))?;
-            let pc = json!({
-                RES_R: channel_stats_json(&r),
-                RES_G: channel_stats_json(&g),
-                RES_B: channel_stats_json(&b),
-            });
-            let total_stars = r.stars_masked + g.stars_masked + b.stars_masked;
-            let avg_coverage = (r.mask_coverage + g.mask_coverage + b.mask_coverage) / 3.0;
-            (
-                r.image, g.image, b.image,
-                pc, total_stars, avg_coverage,
-                MASK_MODE_PER_CHANNEL,
-            )
-        };
+        }
+
+        let output_dir = resolve_output_dir(&output_dir)?;
+
+        let (er, eg, eb) = helpers::load_composite_rgb()?;
+
+        let t0 = std::time::Instant::now();
+        let out = masked_stretch_rgb(er.arr(), eg.arr(), eb.arr(), &config, use_shared)?;
+        let MaskedStretchRgb { r: r_img, g: g_img, b: b_img, per_channel, stars, coverage, mask_mode } = out;
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
         let (rows, cols) = r_img.dim();

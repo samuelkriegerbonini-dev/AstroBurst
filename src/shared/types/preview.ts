@@ -6,6 +6,7 @@ export interface ChainEntry {
   fitsPath: string;
   previewUrl: string | null;
   dimensions: [number, number] | null;
+  psfUsed?: boolean;
 }
 
 export interface ProcessingChain {

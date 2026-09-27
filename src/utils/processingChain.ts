@@ -1,4 +1,7 @@
 import type { ChainEntry, ChainStep, FileRenderState, ProcessingChain } from "../shared/types/preview";
+import type { PsfSource } from "../shared/types/compositeChain";
+
+export type PsfUse = Pick<ChainEntry, "psfUsed">;
 
 export const CHAIN_ORDER: readonly ChainStep[] = [
   "background",
@@ -58,6 +61,14 @@ export function lastStep(chain: ProcessingChain): ChainStep | null {
     if (chain.steps[s]) return s;
   }
   return null;
+}
+
+export function psfUseOf(step: ChainStep, psfSource: PsfSource | undefined): PsfUse {
+  return step === "deconv" ? { psfUsed: psfSource === "provided" } : {};
+}
+
+export function showsPsfCrumb(psfKernel: number[][] | null, deconv: PsfUse | undefined): boolean {
+  return psfKernel !== null && (deconv === undefined || deconv.psfUsed === true);
 }
 
 export function chainHoldsOutput(chain: ProcessingChain, step: ChainStep, fitsPath: string | null | undefined): boolean {

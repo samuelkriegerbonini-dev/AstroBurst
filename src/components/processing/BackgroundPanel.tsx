@@ -2,20 +2,30 @@ import { useState, useCallback, useId, useMemo } from "react";
 import { X } from "lucide-react";
 import { extractBackground } from "../../services/processing";
 import { extractBackgroundDbe } from "../../services/dbe";
+import { compositeBackground } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { BACKGROUND_PROGRESS_EVENT } from "../../shared/types/processing";
 import { Slider, Toggle, RunButton, ResultGrid, ChainBanner, ErrorAlert, SectionHeader, CompareView } from "../ui";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { DEFAULT_DBE_CONFIG, pointSamplesFromDoc, validateDbeParams } from "../../utils/dbeSamples";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import type { CompositeBackgroundResult, CompositePanelProps } from "./compositeProps";
 import type { ProcessedFile } from "../../shared/types";
 import type { DbeConfig, DbeMode, DbeSample } from "../../shared/types/dbe";
 
 type BackgroundModel = "polynomial" | "spline";
+
+const RESULT_LABEL = "Background Removed";
+const MODEL_LABEL = "Background Model";
+const POINT_REGIONS_COMPOSITE_TITLE = "Point regions belong to the file's pixel grid, not the composite";
 
 interface BackgroundResult {
   previewUrl?: string;
@@ -38,14 +48,29 @@ interface BackgroundParams {
   mode: string;
 }
 
-interface BackgroundRun {
+interface BackgroundFileRun {
+  composite: false;
   res: BackgroundResult;
   correctedUrl: string | undefined;
   modelUrl: string | undefined;
   inputUrl: string | null;
+  inputLabel: string;
   spline: boolean;
   sampleRadius: number;
 }
+
+interface BackgroundCompositeRun {
+  composite: true;
+  res: CompositeBackgroundResult;
+  correctedUrl: string | undefined;
+  modelUrl: string | undefined;
+  inputUrl: string | null;
+  inputLabel: string;
+  spline: boolean;
+  sampleRadius: number;
+}
+
+type BackgroundRun = BackgroundFileRun | BackgroundCompositeRun;
 
 type ResultView = "corrected" | "model" | "compare";
 
@@ -55,12 +80,14 @@ const RESULT_VIEW_LABELS: Record<ResultView, string> = {
   compare: "Compare",
 };
 
-interface BackgroundPanelProps {
+interface BackgroundPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   onProcessingDone?: (result: BackgroundResult) => void;
   chainedFrom?: string | null;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ICON = (
@@ -78,7 +105,27 @@ function sampleStroke(sample: DbeSample): string {
   return sample.manual ? SAMPLE_STROKE.manual : SAMPLE_STROKE.accepted;
 }
 
-export default function BackgroundPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, fileKey }: BackgroundPanelProps) {
+function formatCount(v: number): string {
+  return String(v);
+}
+
+function formatRms(v: number): string {
+  return v.toExponential(2);
+}
+
+export default function BackgroundPanel({
+  selectedFile,
+  outputDir = "./output",
+  onProcessingDone,
+  chainedFrom,
+  fileKey,
+  compositeMode,
+  compositeInput,
+  onCompositeDone,
+  fileName,
+  disabledReason,
+  disabledReasonId,
+}: BackgroundPanelProps) {
   const progress = useProgress(BACKGROUND_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const [model, setModel] = useState<BackgroundModel>("polynomial");
@@ -91,9 +138,21 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   });
   const [dbe, setDbe] = useState<DbeConfig>(DEFAULT_DBE_CONFIG);
   const [usePointRegions, setUsePointRegions] = useState(true);
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<BackgroundRun>("background", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<BackgroundRun>("background", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "background", runResult.res.corrected_fits) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const displayStf = useMemo(
+    () => ({ r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked }),
+    [compositeStfR, compositeStfG, compositeStfB, compositeStfLinked],
+  );
+  const held = runResult
+    ? runResult.composite
+      ? compositeChainHolds(compositeChain, "background", runResult.correctedUrl)
+      : chainHoldsOutput(chain, "background", runResult.res.corrected_fits)
+    : false;
+  const result = held ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
   const [view, setView] = useState<ResultView>("corrected");
   const [showSamples, setShowSamples] = useState(true);
 
@@ -136,7 +195,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
     return extractBackgroundDbe(path, outputDir, config);
   }, [dbe, usePointRegions, pointSamples, selectedFile, outputDir]);
 
-  const handleRun = useCallback(() => {
+  const handleFileRun = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     const inputUrl = selectedFile.result?.previewUrl ?? null;
@@ -148,18 +207,60 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
       onProcessingDone?.(res);
       const stamp = Date.now();
       return {
+        composite: false as const,
         res,
         correctedUrl: bustPreviewUrl(res?.previewUrl, stamp),
         modelUrl: bustPreviewUrl(res?.modelUrl, stamp),
         inputUrl,
+        inputLabel: "Original",
         spline,
         sampleRadius,
       };
     }, isCancelMessage).finally(resetProgress);
   }, [selectedFile, model, dbe.sampleRadius, runSpline, runPolynomial, resetProgress, run, onProcessingDone]);
 
+  const handleCompositeRun = useCallback(() => {
+    if (!compositeInput) return;
+    const chainCall = { chainInput: compositeInput.input, displayStf };
+    const inputUrl = compositeInput.previewUrl;
+    const inputLabelAtRun = compositeInput.label;
+    const spline = model === "spline";
+    const splineConfig: DbeConfig = { ...dbe, manualSamples: [] };
+    const sampleRadius = dbe.sampleRadius;
+    resetProgress();
+    void run(async () => {
+      if (spline) {
+        const validation = validateDbeParams(splineConfig, null);
+        if (!validation.ok) throw new Error(validation.errors.join("; "));
+      }
+      const res = await compositeBackground(outputDir, chainCall, {
+        model,
+        gridSize: params.gridSize,
+        polyDegree: params.polyDegree,
+        sigmaClip: params.sigmaClip,
+        iterations: params.iterations,
+        mode: params.mode,
+        dbe: spline ? splineConfig : null,
+      });
+      onCompositeDone("background", RESULT_LABEL, res, chainCall.displayStf);
+      const stamp = Date.now();
+      return {
+        composite: true as const,
+        res,
+        correctedUrl: bustPreviewUrl(res.previewUrl, stamp),
+        modelUrl: bustPreviewUrl(res.modelPreviewUrl, stamp),
+        inputUrl: res.basePreviewUrl ?? inputUrl,
+        inputLabel: res.chain_restarted ? "Composite" : inputLabelAtRun,
+        spline,
+        sampleRadius,
+      };
+    }, isCancelMessage).finally(resetProgress);
+  }, [compositeInput, displayStf, model, dbe, params, outputDir, resetProgress, run, onCompositeDone]);
+
+  const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
+
   const isSpline = model === "spline";
-  const splineSamples = result?.res.samples;
+  const splineSamples = result && !result.composite ? result.res.samples : undefined;
   const overlayDims = result?.res.dimensions;
   const overlayRadius = result?.sampleRadius ?? 0;
   const canOverlay = !!result?.spline && !!splineSamples && !!overlayDims && overlayDims[0] > 0 && overlayDims[1] > 0;
@@ -167,20 +268,32 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
   const views: ResultView[] = canCompare ? ["corrected", "model", "compare"] : ["corrected", "model"];
   const shownView: ResultView = view === "compare" && !canCompare ? "corrected" : view;
   const showModel = shownView === "model";
-  const resultItems = [
-    { label: "Samples", value: result?.res.sample_count },
-    ...(result?.res.rejected_count !== undefined ? [{ label: "Rejected", value: result.res.rejected_count }] : []),
-    { label: "RMS", value: result?.res.rms_residual?.toExponential(2) },
-    { label: "Time", value: `${((result?.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
-  ];
+  const resultItems = result?.composite
+    ? [
+        { label: "Samples", value: channelTriple(result.res.sample_count, formatCount) },
+        ...(result.res.rejected_count ? [{ label: "Rejected", value: channelTriple(result.res.rejected_count, formatCount) }] : []),
+        { label: "RMS", value: channelTriple(result.res.rms_residual, formatRms) },
+        { label: "Time", value: `${(result.res.elapsed_ms / 1000).toFixed(1)}s` },
+      ]
+    : [
+        { label: "Samples", value: result?.res.sample_count },
+        ...(result?.res.rejected_count !== undefined ? [{ label: "Rejected", value: result.res.rejected_count }] : []),
+        { label: "RMS", value: result?.res.rms_residual?.toExponential(2) },
+        { label: "Time", value: `${((result?.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
+      ];
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
       <SectionHeader icon={ICON} title="Background Extraction" />
       <ChainBanner chainedFrom={chainedFrom} accent="emerald" />
 
-      {!selectedFile && (
+      {!compositeMode && !selectedFile && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to enable background extraction.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
@@ -217,14 +330,16 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
               format={(v) => (v === 0 ? "Off" : `${v}`)}
               onChange={(v) => updateDbe("autoGrid", v === 0 ? null : Math.round(v))}
             />
-            <Toggle
-              label="Use point regions as samples"
-              checked={usePointRegions}
-              disabled={isRunning}
-              accent="emerald"
-              badge={pointSamples.length > 0 ? `${pointSamples.length} pts` : null}
-              onChange={setUsePointRegions}
-            />
+            <div title={compositeMode ? POINT_REGIONS_COMPOSITE_TITLE : undefined}>
+              <Toggle
+                label="Use point regions as samples"
+                checked={compositeMode ? false : usePointRegions}
+                disabled={isRunning || compositeMode}
+                accent="emerald"
+                badge={!compositeMode && pointSamples.length > 0 ? `${pointSamples.length} pts` : null}
+                onChange={setUsePointRegions}
+              />
+            </div>
             <Toggle label="Reject stars" checked={dbe.rejectStars} disabled={isRunning} accent="emerald" onChange={(v) => updateDbe("rejectStars", v)} />
             <Toggle label="Keep image median" checked={dbe.normalize} disabled={isRunning} accent="emerald" onChange={(v) => updateDbe("normalize", v)} />
           </>
@@ -239,8 +354,8 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
         </div>
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label={isSpline ? "Extract Background (Spline)" : "Extract Background"} runningLabel="Extracting..." running={isRunning} disabled={!selectedFile || blocked} accent="emerald" onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label={isSpline ? "Extract Background (Spline)" : "Extract Background"} runningLabel="Extracting..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="emerald" onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (
@@ -269,7 +384,13 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
-          <ResultGrid items={resultItems} columns={resultItems.length === 4 ? 4 : 3} />
+          {result.composite && result.res.chain_restarted && (
+            <div className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
+
+          <ResultGrid items={resultItems} columns={result.composite ? 2 : resultItems.length === 4 ? 4 : 3} />
 
           {(result.correctedUrl || result.modelUrl) && (
             <div className="flex flex-col gap-2">
@@ -291,10 +412,10 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
                 )}
               </div>
               {shownView === "compare" && result.inputUrl && result.correctedUrl ? (
-                <CompareView originalUrl={result.inputUrl} resultUrl={result.correctedUrl} originalLabel="Original" resultLabel="Background Removed" accent="emerald" />
+                <CompareView originalUrl={result.inputUrl} resultUrl={result.correctedUrl} originalLabel={result.inputLabel} resultLabel={RESULT_LABEL} accent="emerald" />
               ) : (
                 <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-zinc-900 border border-zinc-700/50">
-                  <img src={showModel ? result.modelUrl : result.correctedUrl} alt={showModel ? "Background Model" : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+                  <img src={showModel ? result.modelUrl : result.correctedUrl} alt={showModel ? MODEL_LABEL : "Corrected"} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
                   {canOverlay && showSamples && splineSamples && overlayDims && (
                     <svg viewBox={`0 0 ${overlayDims[0]} ${overlayDims[1]}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 w-full h-full pointer-events-none">
                       {splineSamples.map((s, i) => (
@@ -313,7 +434,7 @@ export default function BackgroundPanel({ selectedFile, outputDir = "./output", 
                       ))}
                     </svg>
                   )}
-                  <div className="ab-compare-label left-2">{showModel ? "Background Model" : "Background Removed"}</div>
+                  <div className="ab-compare-label left-2">{showModel ? MODEL_LABEL : RESULT_LABEL}</div>
                 </div>
               )}
               {canOverlay && showSamples && shownView !== "compare" && (

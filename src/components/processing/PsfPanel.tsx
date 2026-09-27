@@ -1,7 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { estimatePsf } from "../../services/processing";
+import { compositeChainState, compositeEstimatePsf } from "../../services/compositeChain";
 import { useProcessingRun } from "../../hooks/useProcessingRun";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
+import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
 import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import { compositeModeNotice } from "./compositeProps";
+import type { CompositePanelProps } from "./compositeProps";
 
 interface PsfResult {
   kernel: number[][];
@@ -13,10 +18,13 @@ interface PsfResult {
   spread_pixels: number;
 }
 
-interface PsfPanelProps {
+interface PsfPanelProps extends Omit<CompositePanelProps, "onCompositeDone"> {
   selectedFile: { path: string; result?: unknown } | null;
   onPsfReady?: (kernel: number[][]) => void;
+  onCompositePsfReady?: (kernel: number[][], liveGeneration: number) => void;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ICON = (
@@ -27,8 +35,11 @@ const ICON = (
   </svg>
 );
 
-export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanelProps) {
-  const { running: loading, blocked, busyTitle, result, error, run } = useProcessingRun<PsfResult>("psf", fileKey ?? null);
+export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady, fileKey, compositeMode, compositeInput, fileName, disabledReason, disabledReasonId }: PsfPanelProps) {
+  const { running: loading, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PsfResult>("psf", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
+  const compositeChain = useCompositeChain();
+  const result = runResult && (!compositeMode || compositeChain.psfKernel === runResult.kernel) ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [numStars, setNumStars] = useState(30);
@@ -36,7 +47,7 @@ export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanel
   const [maxEllipticity, setMaxEllipticity] = useState(0.3);
   const [satThreshold, setSatThreshold] = useState(0.95);
 
-  const handleEstimate = useCallback(() => {
+  const handleFileEstimate = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     void run(async () => {
@@ -52,6 +63,25 @@ export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanel
       return res ?? null;
     });
   }, [selectedFile, numStars, cutoutRadius, maxEllipticity, satThreshold, onPsfReady, run]);
+
+  const handleCompositeEstimate = useCallback(() => {
+    if (!compositeInput) return;
+    const chainInput = compositeInput.input;
+    void run(async () => {
+      const { live_generation } = await compositeChainState();
+      const res = await compositeEstimatePsf(chainInput, {
+        numStars,
+        cutoutRadius,
+        maxEllipticity,
+        saturationThreshold: satThreshold,
+      });
+      if (!res.kernel) throw new Error("PSF estimation returned no kernel");
+      onCompositePsfReady?.(res.kernel, live_generation);
+      return { ...res, kernel: res.kernel };
+    });
+  }, [compositeInput, numStars, cutoutRadius, maxEllipticity, satThreshold, onCompositePsfReady, run]);
+
+  const handleEstimate = compositeMode ? handleCompositeEstimate : handleFileEstimate;
 
   useEffect(() => {
     if (!result || !canvasRef.current) return;
@@ -85,8 +115,13 @@ export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanel
     <div className="flex flex-col gap-3 p-4">
       <SectionHeader icon={ICON} title="PSF Estimation" subtitle="Empirical" />
 
-      {!selectedFile && (
+      {!compositeMode && !selectedFile && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to estimate PSF.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
@@ -96,8 +131,8 @@ export default function PsfPanel({ selectedFile, onPsfReady, fileKey }: PsfPanel
         <Slider label="Saturation threshold" value={satThreshold} min={0.5} max={1} step={0.05} disabled={loading} accent="violet" format={(v) => v.toFixed(2)} onChange={setSatThreshold} />
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Estimate PSF" runningLabel="Estimating..." running={loading} disabled={!selectedFile || blocked} accent="violet" onClick={handleEstimate} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label="Estimate PSF" runningLabel="Estimating..." running={loading} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="violet" onClick={handleEstimate} />
       </div>
       <ErrorAlert message={error} />
 

@@ -1,10 +1,23 @@
 import { useState, useCallback } from "react";
-import { maskedStretch } from "../../services/processing";
+import { maskedStretch, maskedStretchComposite } from "../../services/processing";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
+import type { MaskedStretchChannelStats } from "../../shared/types/processing";
 import { useRenderContext } from "../../context/PreviewContext";
+import { useCompositeStf } from "../../context/CompositeContext";
+import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import type { CompositePanelProps } from "./compositeProps";
+import { ITERATIONS_HINT, ITERATIONS_LABEL, stretchPassesSummary } from "./stretchPasses";
+
+interface MaskedStretchChannels {
+  r: MaskedStretchChannelStats;
+  g: MaskedStretchChannelStats;
+  b: MaskedStretchChannelStats;
+}
 
 interface MaskedStretchResult {
   previewUrl?: string;
@@ -14,6 +27,7 @@ interface MaskedStretchResult {
   stars_masked?: number;
   mask_coverage?: number;
   converged?: boolean;
+  channels?: MaskedStretchChannels;
   elapsed_ms?: number;
   dimensions?: number[];
 }
@@ -32,10 +46,10 @@ interface MaskedStretchRun {
   resultUrl: string | undefined;
   baseUrl: string | null;
   baseLabel: string;
-  requestedIterations: number;
+  chainRestarted: boolean;
 }
 
-interface MaskedStretchPanelProps {
+interface MaskedStretchPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   onProcessingDone?: (result: MaskedStretchResult) => void;
@@ -43,6 +57,8 @@ interface MaskedStretchPanelProps {
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
+  disabledReason?: string | null;
+  disabledReasonId?: string;
 }
 
 const ICON = (
@@ -60,7 +76,15 @@ const BG_PRESETS = [
   { label: "Bright", value: 0.35 },
 ];
 
-export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey }: MaskedStretchPanelProps) {
+function channelValues<T>(channels: MaskedStretchChannels, pick: (c: MaskedStretchChannelStats) => T): [T, T, T] {
+  return [pick(channels.r), pick(channels.g), pick(channels.b)];
+}
+
+function percent(v: number): string {
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: MaskedStretchPanelProps) {
   const [params, setParams] = useState<MaskedStretchParams>({
     iterations: 10,
     targetBackground: 0.25,
@@ -69,46 +93,80 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
     protectionAmount: 0.85,
     luminanceProtect: true,
   });
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<MaskedStretchRun>("maskedStretch", fileKey ?? null);
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<MaskedStretchRun>("maskedStretch", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
-  const result = runResult && chainHoldsOutput(chain, "maskedStretch", runResult.res.fits_path) ? runResult : null;
+  const compositeChain = useCompositeChain();
+  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const holds = runResult !== null && (compositeMode
+    ? compositeChainHolds(compositeChain, "maskedStretch", runResult.resultUrl)
+    : chainHoldsOutput(chain, "maskedStretch", runResult.res.fits_path));
+  const result = holds ? runResult : null;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
 
   const update = useCallback(<K extends keyof MaskedStretchParams>(key: K, value: MaskedStretchParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   const handleRun = useCallback(() => {
+    const options = {
+      iterations: params.iterations,
+      targetBackground: params.targetBackground,
+      maskGrowth: params.maskGrowth,
+      maskSoftness: params.maskSoftness,
+      protectionAmount: params.protectionAmount,
+      luminanceProtect: params.luminanceProtect,
+    };
+    if (compositeMode) {
+      if (!compositeInput) return;
+      const input = compositeInput;
+      const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+      void run(async () => {
+        const res = await maskedStretchComposite(outputDir, { ...options, sharedMask: true }, { chainInput: input.input, displayStf });
+        onCompositeDone("maskedStretch", "Masked stretch", res, displayStf);
+        return {
+          res,
+          resultUrl: bustPreviewUrl(res.previewUrl, Date.now()),
+          baseUrl: res.basePreviewUrl ?? input.previewUrl,
+          baseLabel: res.basePreviewUrl ? "Composite" : input.label,
+          chainRestarted: res.chain_restarted,
+        };
+      });
+      return;
+    }
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
-    const requestedIterations = params.iterations;
     void run(async (ctx) => {
-      const res = await maskedStretch(path, outputDir, {
-        iterations: params.iterations,
-        targetBackground: params.targetBackground,
-        maskGrowth: params.maskGrowth,
-        maskSoftness: params.maskSoftness,
-        protectionAmount: params.protectionAmount,
-        luminanceProtect: params.luminanceProtect,
-      });
+      const res = await maskedStretch(path, outputDir, options);
       if (!ctx.inputUnchanged("maskedStretch")) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
-      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
+      return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     });
-  }, [selectedFile, outputDir, params, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile, outputDir, params, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
+
+  const channels = result?.res.channels;
+  const passes = result ? stretchPassesSummary(result.res) : null;
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
       <SectionHeader icon={ICON} title="Masked Stretch" subtitle="Star-protected MTF" />
       <ChainBanner chainedFrom={chainedFrom} accent="rose" />
 
-      {!selectedFile && (
+      {!selectedFile && !compositeMode && (
         <div className="text-xs text-zinc-500 italic px-1">Select a FITS file to apply masked stretch.</div>
+      )}
+      {compositeMode && (
+        <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
+          {compositeModeNotice(fileName)}
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
-        <Slider label="Iterations" value={params.iterations} min={1} max={50} step={1} disabled={isRunning} accent="rose" onChange={(v) => update("iterations", v)} />
+        <div className="flex flex-col gap-1">
+          <Slider label={ITERATIONS_LABEL} value={params.iterations} min={1} max={50} step={1} disabled={isRunning} accent="rose" onChange={(v) => update("iterations", v)} />
+          <div className="text-[10px] text-zinc-500 px-0.5">{ITERATIONS_HINT}</div>
+        </div>
 
         <div className="flex flex-col gap-1">
           <Slider label="Target Background" value={params.targetBackground} min={0.05} max={0.50} step={0.01} disabled={isRunning} accent="rose" format={(v) => `${(v * 100).toFixed(0)}%`} onChange={(v) => update("targetBackground", v)} />
@@ -139,25 +197,28 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
         <Toggle label="Luminance Protection" checked={params.luminanceProtect} disabled={isRunning} accent="rose" onChange={(v) => update("luminanceProtect", v)} />
       </div>
 
-      <div title={busyTitle}>
-        <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!selectedFile || blocked} accent="rose" onClick={handleRun} />
+      <div title={disabledReason ?? busyTitle}>
+        <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="rose" onClick={handleRun} />
       </div>
       <ErrorAlert message={error} />
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">
-          <ResultGrid items={[
-            { label: "Iterations", value: result.res.iterations_run },
-            { label: "Background", value: result.res.final_background != null ? `${(result.res.final_background * 100).toFixed(1)}%` : null },
+          {result.chainRestarted && (
+            <div className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+              {COMPOSITE_RESTARTED_NOTICE}
+            </div>
+          )}
+          <ResultGrid columns={2} items={[
+            { label: "Background", value: channels ? channelTriple(channelValues(channels, (c) => c.final_background), percent) : result.res.final_background != null ? percent(result.res.final_background) : null },
             { label: "Stars Masked", value: result.res.stars_masked },
-            { label: "Mask Coverage", value: result.res.mask_coverage != null ? `${(result.res.mask_coverage * 100).toFixed(1)}%` : null },
-            { label: "Converged", value: result.res.converged ? "Yes" : "No" },
+            { label: "Mask Coverage", value: result.res.mask_coverage != null ? percent(result.res.mask_coverage) : null },
             { label: "Time", value: result.res.elapsed_ms ? `${(result.res.elapsed_ms / 1000).toFixed(1)}s` : null },
           ]} />
 
-          {result.res.converged && (
-            <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-1.5">
-              Converged at iteration {result.res.iterations_run}/{result.requestedIterations}
+          {passes && (
+            <div className={`text-[10px] rounded-lg px-3 py-1.5 border ${passes.converged ? "text-emerald-400 bg-emerald-900/20 border-emerald-800/30" : "text-amber-300 bg-amber-900/20 border-amber-800/30"}`}>
+              {passes.text}
             </div>
           )}
 

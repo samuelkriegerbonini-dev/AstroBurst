@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   backToFileAction,
+  fileSwitchCompositeAction,
   formatPixelValue,
   gpuAfterProbe,
   gpuDisplayOnScreen,
   keptToolFileKey,
   previewTextureTitle,
+  reseedsRgbFileView,
   rightToolSlots,
   statusStripIdleText,
   statusStripParts,
@@ -195,6 +197,48 @@ describe("backToFileAction", () => {
 
   it("clears the composite cache when no wizard composite depends on it", () => {
     expect(backToFileAction({ isRgbFile: false, hasProcessed: false, wizardCompositeReady: false })).toBe("clear");
+  });
+});
+
+describe("fileSwitchCompositeAction", () => {
+  const WIZARD = "asset://rgb_composite_1.png";
+  const PREVIOUS_RGB = "asset://drizzle_rgb.png";
+
+  it("parks the wizard composite that is on screen when the wizard composite is ready", () => {
+    expect(fileSwitchCompositeAction({ livePreviewUrl: WIZARD, previousFileRgbUrl: null, wizardCompositeReady: true })).toBe("park");
+    expect(fileSwitchCompositeAction({ livePreviewUrl: WIZARD, previousFileRgbUrl: PREVIOUS_RGB, wizardCompositeReady: true })).toBe("park");
+  });
+
+  it("resets when the screen shows the previous file's own RGB view", () => {
+    expect(fileSwitchCompositeAction({ livePreviewUrl: PREVIOUS_RGB, previousFileRgbUrl: PREVIOUS_RGB, wizardCompositeReady: true })).toBe("reset");
+  });
+
+  it("resets when no composite is on screen, or when the wizard has no ready composite", () => {
+    expect(fileSwitchCompositeAction({ livePreviewUrl: null, previousFileRgbUrl: null, wizardCompositeReady: true })).toBe("reset");
+    expect(fileSwitchCompositeAction({ livePreviewUrl: WIZARD, previousFileRgbUrl: null, wizardCompositeReady: false })).toBe("reset");
+  });
+});
+
+describe("reseedsRgbFileView", () => {
+  const OLD = "asset://drizzle_rgb.png";
+  const NEW = "asset://drizzle_rgb.png?v=3";
+  const base = { sameFile: true, isRgb: true, previousPreviewUrl: OLD, nextPreviewUrl: NEW, livePreviewUrl: OLD };
+
+  it("re-seeds an RGB file reloaded in place while its own view is on screen", () => {
+    expect(reseedsRgbFileView(base)).toBe(true);
+  });
+
+  it("leaves a wizard composite shown over the reloaded RGB file alone", () => {
+    expect(reseedsRgbFileView({ ...base, livePreviewUrl: "asset://rgb_composite_1.png" })).toBe(false);
+    expect(reseedsRgbFileView({ ...base, livePreviewUrl: null })).toBe(false);
+  });
+
+  it("ignores file switches, mono files and results whose preview did not change", () => {
+    expect(reseedsRgbFileView({ ...base, sameFile: false })).toBe(false);
+    expect(reseedsRgbFileView({ ...base, isRgb: false })).toBe(false);
+    expect(reseedsRgbFileView({ ...base, nextPreviewUrl: OLD })).toBe(false);
+    expect(reseedsRgbFileView({ ...base, nextPreviewUrl: null })).toBe(false);
+    expect(reseedsRgbFileView({ ...base, previousPreviewUrl: null, livePreviewUrl: null })).toBe(false);
   });
 });
 
