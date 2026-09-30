@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Detect Stars on the colour composite (Compose composite or an RGB FITS view, GPU and CPU) drew no rings or labels because the composite view had no overlay layer
 - Star detection on the colour composite normalised the luminance by its min/max, which turned the exact-zero mosaic padding into fake sky, biased the background and σ low and roughly doubled the detections; the luminance now keeps the planes' native units, padding stays excluded, and mismatched channel sizes return an error instead of panicking
 - Composite star results were kept after Blend, Crop or a composite step replaced the composite, and plate-solve labels from the selected file's grid would have been drawn on a Compose composite with a different grid
+- The Linux AppImage failed the AppImage catalog test: Tauri CLI 2.10.1 wrote `.DirIcon` as an absolute symlink into the build machine's AppDir, which dangles once the AppImage is mounted, and saved `AppRun.wrapped` as mode 0770, so the app could not start for any user other than the one who mounted it (firejail, root-mounted extractions); `@tauri-apps/cli` is now 2.12.0, which writes a relative `.DirIcon` and a world-executable `AppRun.wrapped` (the `.deb` contents are unchanged)
 
 ## [0.6.4] - 2026-09-26
 
