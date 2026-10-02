@@ -203,6 +203,15 @@ curl -fsSL https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/
 curl -fsSL https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/main/scripts/install-linux.sh | bash
 ```
 
+Flatpak (community-maintained, via [FlatPark](https://github.com/flatpark/flatpark)):
+
+```bash
+flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+flatpak install flatpark io.github.samuelkriegerbonini_dev.AstroBurst
+```
+
+This package is maintained by [jing2uo](https://github.com/jing2uo), not by the AstroBurst project. It downloads the official `.deb` from the GitHub releases unmodified at install time and follows new releases automatically. Permissions and details are on the [FlatPark app page](https://flatpark.org/apps/io.github.samuelkriegerbonini_dev.AstroBurst), and packaging issues go to the [FlatPark tracker](https://github.com/flatpark/flatpark/issues).
+
 Build from source:
 
 ```bash
