@@ -684,6 +684,276 @@ export function alignChannelOutcome(
   return { unregistered: null, usedMethod };
 }
 
+export const ALIGN_OFFSET_TITLE = "Offset of this channel relative to the reference, in array pixels (y down)";
+
+function signedPixels(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  const rounded = Math.round(value * 10) / 10;
+  if (rounded === 0) return "0.0 px";
+  return `${rounded > 0 ? "+" : "−"}${Math.abs(rounded).toFixed(1)} px`;
+}
+
+export function formatAlignOffset(offset: readonly [number, number]): string {
+  const [dy, dx] = offset;
+  return `Δx ${signedPixels(dx)}  Δy ${signedPixels(dy)}`;
+}
+
+export function alignMatchSummary(
+  channel: { confidence?: number; matched_stars?: number; inliers?: number; residual_px?: number } | undefined,
+): string | null {
+  if (!channel) return null;
+  const matched = channel.matched_stars ?? 0;
+  if (matched > 0) {
+    const stars = `${channel.inliers ?? 0}/${matched} stars`;
+    return channel.residual_px != null && Number.isFinite(channel.residual_px)
+      ? `${stars}, ${channel.residual_px.toFixed(2)} px`
+      : stars;
+  }
+  const snr = channel.confidence ?? 0;
+  return Number.isFinite(snr) && snr > 0 ? `SNR ${snr.toFixed(1)}` : null;
+}
+
+export const MAX_OVERLAY_CHANNELS = 3;
+
+export function alignOverlayBinIds(binIds: readonly string[], chosen: readonly string[] = []): string[] {
+  if (binIds.length <= MAX_OVERLAY_CHANNELS) return [...binIds];
+  const [reference, ...others] = binIds;
+  const picked: string[] = [];
+  const slots = MAX_OVERLAY_CHANNELS - 1;
+  for (const id of [...chosen, ...others]) {
+    if (picked.length === slots) break;
+    if (others.includes(id) && !picked.includes(id)) picked.push(id);
+  }
+  return [reference, ...picked];
+}
+
+export interface AlignedRun {
+  binIds: string[];
+  aligned: Record<string, string>;
+  inputs: Record<string, string>;
+}
+
+export function alignedRunFromChannels(
+  channels: readonly { binId: string; path: string }[],
+  alignedPaths: Readonly<Record<string, string>>,
+): AlignedRun | null {
+  if (channels.length < 2) return null;
+  const aligned: Record<string, string> = {};
+  const inputs: Record<string, string> = {};
+  for (const { binId, path } of channels) {
+    const key = alignedPaths[binId];
+    if (!key) return null;
+    aligned[binId] = key;
+    inputs[binId] = path;
+  }
+  return { binIds: channels.map((c) => c.binId), aligned, inputs };
+}
+
+export interface AlignOverlayRequest {
+  binIds: string[];
+  afterKeys: string[];
+  beforePaths: string[];
+}
+
+export function alignOverlayRequest(run: AlignedRun, chosen: readonly string[] = []): AlignOverlayRequest | null {
+  const binIds = alignOverlayBinIds(run.binIds, chosen);
+  const afterKeys = binIds.map((id) => run.aligned[id]);
+  const beforePaths = binIds.map((id) => run.inputs[id]);
+  if (binIds.length < 2 || afterKeys.some((k) => !k) || beforePaths.some((p) => !p)) return null;
+  return { binIds, afterKeys, beforePaths };
+}
+
+export type AlignPreviewView = "after" | "before" | "blink";
+
+const NO_DATA = "checkerboard = no data";
+
+export function alignOverlayColours(labels: readonly string[]): string {
+  const [reference, ...others] = labels;
+  const ref = `${reference} (ref)`;
+  if (others.length === 0) return `grey = ${ref}`;
+  if (others.length === 1) return `R = ${ref} · G+B = ${others[0]}`;
+  return `R = ${ref} · G = ${others[0]} · B = ${others[1]}`;
+}
+
+export function alignPreviewLegend(labels: readonly string[], view: AlignPreviewView, blinkIndex = 1): string {
+  if (labels.length < 2) return `${alignOverlayColours(labels)} · ${NO_DATA}`;
+  if (view === "blink") {
+    const other = labels[Math.min(Math.max(blinkIndex, 1), labels.length - 1)];
+    return `blinking ${labels[0]} (ref) and ${other} after Align · stars that jump = residual offset · ${NO_DATA}`;
+  }
+  const meaning = view === "before"
+    ? "inputs before Align: coloured fringes = original offset"
+    : "white = aligned, coloured fringes = residual offset";
+  return `${alignOverlayColours(labels)} · ${meaning}, ${NO_DATA}`;
+}
+
+export function sameAlignedRun(a: AlignedRun | null, b: AlignedRun | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.binIds.length !== b.binIds.length) return false;
+  return a.binIds.every(
+    (id, i) => id === b.binIds[i] && a.aligned[id] === b.aligned[id] && a.inputs[id] === b.inputs[id],
+  );
+}
+
+export interface AlignedRunState {
+  source: Readonly<Record<string, string>>;
+  loading: boolean;
+  run: AlignedRun | null;
+}
+
+export function nextAlignedRunState(
+  previous: AlignedRunState | null,
+  channels: readonly { binId: string; path: string }[],
+  alignedPaths: Readonly<Record<string, string>>,
+  loading: boolean,
+): AlignedRunState {
+  const run = loading ? null : alignedRunFromChannels(channels, alignedPaths);
+  if (
+    previous &&
+    previous.source === alignedPaths &&
+    previous.loading === loading &&
+    sameAlignedRun(previous.run, run)
+  ) {
+    return previous;
+  }
+  return { source: alignedPaths, loading, run };
+}
+
+export interface AlignOverlayShown {
+  previewUrl: string;
+  frameUrls: readonly string[];
+  binIds: readonly string[];
+}
+
+export interface AlignBlinkFrame {
+  src: string;
+  binId: string;
+  index: number;
+}
+
+export function alignBlinkPairs(frameUrls: readonly string[], binIds: readonly string[]): number {
+  return Math.min(frameUrls.length, binIds.length);
+}
+
+export function alignBlinkIndex(index: number, pairs: number): number {
+  return Math.min(Math.max(index, 1), Math.max(pairs - 1, 1));
+}
+
+export function alignBlinkFrame(
+  frameUrls: readonly string[],
+  binIds: readonly string[],
+  index: number,
+  showOther: boolean,
+): AlignBlinkFrame | null {
+  const pairs = alignBlinkPairs(frameUrls, binIds);
+  if (pairs < 2) return null;
+  const shownIndex = showOther ? alignBlinkIndex(index, pairs) : 0;
+  return { src: frameUrls[shownIndex], binId: binIds[shownIndex], index: shownIndex };
+}
+
+export interface AlignPreviewFrame {
+  view: AlignPreviewView;
+  src: string;
+  label: string;
+  labels: readonly string[];
+  blinkIndex: number;
+  canBlink: boolean;
+}
+
+export function alignPreviewFrame(
+  view: "after" | "before",
+  blink: { on: boolean; showOther: boolean; index: number },
+  after: AlignOverlayShown | null,
+  before: AlignOverlayShown | null,
+  binLabels: Readonly<Record<string, string>>,
+): AlignPreviewFrame {
+  const labelOf = (binId: string) => binLabels[binId] ?? binId;
+  const frames = after?.frameUrls ?? [];
+  const frameBins = after?.binIds ?? [];
+  const pairs = alignBlinkPairs(frames, frameBins);
+  const canBlink = pairs >= 2;
+  const blinkIndex = alignBlinkIndex(blink.index, pairs);
+  const blinkFrame = blink.on ? alignBlinkFrame(frames, frameBins, blink.index, blink.showOther) : null;
+  if (blinkFrame) {
+    const name = labelOf(blinkFrame.binId);
+    return {
+      view: "blink",
+      src: blinkFrame.src,
+      label: blinkFrame.index === 0 ? `${name} (ref)` : name,
+      labels: frameBins.slice(0, pairs).map(labelOf),
+      blinkIndex,
+      canBlink,
+    };
+  }
+  const shown = view === "before" ? before : after;
+  return {
+    view,
+    src: shown?.previewUrl ?? "",
+    label: view === "before" ? "Before Align" : "After Align",
+    labels: (shown?.binIds ?? []).map(labelOf),
+    blinkIndex,
+    canBlink,
+  };
+}
+
+export const ALIGN_IMAGE_LOAD_ERROR = "the overlay image could not be loaded; run Align again";
+
+export interface AlignViewerStatus {
+  hasRequest: boolean;
+  loading: boolean;
+  error: string;
+  brokenSrc: string;
+}
+
+export interface AlignViewerState {
+  src: string;
+  pending: boolean;
+  shown: AlignPreviewFrame | null;
+  error: string;
+}
+
+export function alignViewerState(
+  target: AlignPreviewFrame,
+  displayed: AlignPreviewFrame | null,
+  status: AlignViewerStatus,
+): AlignViewerState {
+  if (!status.hasRequest) return { src: "", pending: false, shown: null, error: "" };
+  const broken = target.src !== "" && target.src === status.brokenSrc;
+  if (target.src && !broken) {
+    const shown = displayed && displayed.src !== target.src ? displayed : target;
+    return { src: target.src, pending: status.loading, shown, error: "" };
+  }
+  const error = broken ? ALIGN_IMAGE_LOAD_ERROR : status.error;
+  if (error || !displayed) return { src: "", pending: false, shown: null, error };
+  return { src: displayed.src, pending: true, shown: displayed, error: "" };
+}
+
+export function alignDisplayedOnLoad(
+  loadedSrc: string,
+  target: AlignPreviewFrame,
+  displayed: AlignPreviewFrame | null,
+): AlignPreviewFrame | null {
+  return loadedSrc !== "" && loadedSrc === target.src ? target : displayed;
+}
+
+export interface AlignRunRecord<Result> {
+  running: boolean;
+  inputs: readonly string[];
+  result: Result | null;
+  error: string;
+}
+
+export function alignRunOutcome<Result>(
+  record: AlignRunRecord<Result> | null,
+  inputs: readonly string[],
+  keysStored: boolean,
+): { result: Result | null; error: string } {
+  if (!record || record.running) return { result: null, error: "" };
+  const sameInputs = record.inputs.length === inputs.length && record.inputs.every((p, i) => p === inputs[i]);
+  if (!sameInputs) return { result: null, error: "" };
+  return { result: keysStored ? record.result : null, error: record.error };
+}
+
 export const BIN_MENU_WIDTH = 200;
 
 export const BIN_MENU_MAX_HEIGHT = 180;

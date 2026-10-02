@@ -8,6 +8,8 @@ import type {
   CalibrateAndScnrResult,
   ResetWbResult,
   ScnrOptions,
+  ChannelOverlayPreview,
+  CropBounds,
 } from "../shared/types/compose";
 
 export interface CropResult {
@@ -18,6 +20,7 @@ export interface CropResult {
   crop_bottom: number;
   crop_left: number;
   crop_right: number;
+  auto_detected?: boolean;
   elapsed_ms: number;
 }
 
@@ -133,6 +136,32 @@ export async function cropChannels(
     binIds: binIds ?? null,
     persistToDisk: false,
   });
+}
+
+export async function channelOverlayPreview(
+  keys: string[],
+  options: { maskKeys?: string[]; withChannelFrames?: boolean; maxDim?: number; outputDir?: string } = {},
+): Promise<ChannelOverlayPreview> {
+  const outputDir = options.outputDir ?? await getOutputDir();
+  const res = await typedInvoke<Omit<ChannelOverlayPreview, "previewUrl" | "channelPreviewUrls">>(
+    "channel_overlay_preview_cmd",
+    {
+      keys,
+      maskKeys: options.maskKeys ?? null,
+      withChannelFrames: options.withChannelFrames ?? false,
+      outputDir,
+      maxDim: options.maxDim ?? null,
+    },
+  );
+  const [previewUrl, channelPreviewUrls] = await Promise.all([
+    getPreviewUrl(res.png_path),
+    Promise.all(res.channel_previews.map((path) => getPreviewUrl(path))),
+  ]);
+  return { ...res, previewUrl, channelPreviewUrls };
+}
+
+export function detectCropBounds(paths: string[]): Promise<CropBounds> {
+  return typedInvoke<CropBounds>("detect_crop_bounds_cmd", { paths });
 }
 
 export function calibrateAndScnr(

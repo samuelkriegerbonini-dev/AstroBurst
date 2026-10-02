@@ -40,6 +40,25 @@ export interface AlignResult {
   elapsed_ms: number;
 }
 
+export interface ChannelOverlayPreview {
+  png_path: string;
+  previewUrl: string;
+  channel_previews: string[];
+  channelPreviewUrls: string[];
+  dimensions: [number, number];
+  preview_dimensions: [number, number];
+  elapsed_ms: number;
+}
+
+export interface CropBounds {
+  dimensions: [number, number];
+  crop_top: number;
+  crop_bottom: number;
+  crop_left: number;
+  crop_right: number;
+  auto_detected: boolean;
+}
+
 export interface RestretchResult {
   png_path: string;
   previewUrl?: string;

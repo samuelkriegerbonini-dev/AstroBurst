@@ -61,3 +61,50 @@ export function previewTextureBadge(renderW: number, fitsW: number | undefined):
   if (fitsW === undefined || !Number.isFinite(fitsW) || renderW <= 0 || fitsW <= renderW) return null;
   return `preview ${renderW} px (${(fitsW / renderW).toFixed(1)}:1)`;
 }
+
+export const ZOOM_PAN_MIN = 0.25;
+
+export const ZOOM_PAN_MAX = 16;
+
+export const ACTUAL_SIZE_SCALE = 1;
+
+export function clampZoomPanScale(scale: number, fitScale: number): number {
+  const floor = fitScale > 0 ? Math.min(ZOOM_PAN_MIN, fitScale) : ZOOM_PAN_MIN;
+  return Math.max(floor, Math.min(ZOOM_PAN_MAX, scale));
+}
+
+export type WheelZoomMode = "always" | "modifier";
+
+export function wheelGestureZooms(
+  mode: WheelZoomMode,
+  modifiers: { ctrlKey: boolean; metaKey: boolean },
+): boolean {
+  return mode === "always" || modifiers.ctrlKey || modifiers.metaKey;
+}
+
+export interface PanOffset {
+  x: number;
+  y: number;
+}
+
+export function panForZoom(
+  scale: number,
+  pan: PanOffset,
+  nextScale: number,
+  anchorX: number,
+  anchorY: number,
+): PanOffset {
+  const ratio = nextScale / scale;
+  return { x: anchorX - ratio * (anchorX - pan.x), y: anchorY - ratio * (anchorY - pan.y) };
+}
+
+export function actualSizeView(
+  scale: number,
+  pan: PanOffset,
+  fitScale: number,
+  containerW: number,
+  containerH: number,
+): { scale: number; pan: PanOffset } {
+  const next = clampZoomPanScale(ACTUAL_SIZE_SCALE, fitScale);
+  return { scale: next, pan: panForZoom(scale, pan, next, containerW / 2, containerH / 2) };
+}

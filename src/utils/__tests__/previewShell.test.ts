@@ -1,18 +1,37 @@
 import { describe, it, expect } from "vitest";
 import {
+  CANVAS_HINT_CLASS,
+  CUBE_SPECTRUM_HINT,
+  GPU_LOAD_FAILED_TITLE,
+  GPU_PNG_ONLY_TOGGLE_TITLE,
+  GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE,
+  GPU_PROBING_TOGGLE_TITLE,
+  GPU_WAITING_TITLE,
+  GPU_WAITING_TOGGLE_TITLE,
+  NEEDS_GPU_TITLE,
+  PNG_ONLY_TITLE,
   backToFileAction,
+  compareDividerGrabbed,
+  cpuViewerDisplayTitle,
   fileSwitchCompositeAction,
   formatPixelValue,
   gpuAfterProbe,
   gpuDisplayOnScreen,
+  gpuToggleView,
+  histogramOnPath,
   keptToolFileKey,
   previewTextureTitle,
+  previewViewer,
   reseedsRgbFileView,
   rightToolSlots,
   statusStripIdleText,
   statusStripParts,
+  viewerClickRoute,
   viewerPublishesPixel,
+  type CompareDividerInput,
+  type GpuToggleInput,
   type RightToolSlotInput,
+  type ViewerClickInput,
 } from "../previewShell";
 
 function slots(patch: Partial<RightToolSlotInput>) {
@@ -169,6 +188,194 @@ describe("gpuDisplayOnScreen", () => {
   });
 });
 
+describe("previewViewer", () => {
+  const gpuFits = { hasFile: true, rgbView: false, useGpu: true, hasRawPixels: true, previewOnly: false };
+
+  it("shows the CPU viewer for a PNG-only result while the GPU is on", () => {
+    expect(previewViewer({ ...gpuFits, previewOnly: true })).toBe("cpu");
+    expect(previewViewer({ ...gpuFits, previewOnly: true, hasRawPixels: false })).toBe("cpu");
+  });
+
+  it("shows the CPU viewer for a FITS result whose GPU pixels are not loaded yet or failed to load", () => {
+    expect(previewViewer({ ...gpuFits, hasRawPixels: false })).toBe("cpu");
+  });
+
+  it("shows the preview tab once the GPU pixels of a FITS result are loaded", () => {
+    expect(previewViewer(gpuFits)).toBe("preview-tab");
+  });
+
+  it("keeps the preview tab for a colour view, with or without GPU pixels", () => {
+    expect(previewViewer({ ...gpuFits, rgbView: true, hasRawPixels: false })).toBe("preview-tab");
+    expect(previewViewer({ ...gpuFits, rgbView: true, useGpu: false })).toBe("preview-tab");
+  });
+
+  it("shows the CPU viewer whenever the GPU is off", () => {
+    expect(previewViewer({ ...gpuFits, useGpu: false })).toBe("cpu");
+  });
+
+  it("is empty without a file", () => {
+    expect(previewViewer({ ...gpuFits, hasFile: false })).toBe("empty");
+    expect(previewViewer({ ...gpuFits, hasFile: false, rgbView: true })).toBe("empty");
+  });
+
+  it("uses the preview tab exactly when the GPU display is on screen, outside colour views", () => {
+    for (const useGpu of [true, false]) {
+      for (const hasRawPixels of [true, false]) {
+        for (const previewOnly of [true, false]) {
+          const input = { hasFile: true, rgbView: false, useGpu, hasRawPixels, previewOnly };
+          expect(previewViewer(input) === "preview-tab").toBe(gpuDisplayOnScreen(input));
+        }
+      }
+    }
+  });
+});
+
+describe("cpuViewerDisplayTitle", () => {
+  it("keeps the needs-GPU reason while the GPU is off, PNG-only or not", () => {
+    expect(cpuViewerDisplayTitle({ useGpu: false, previewOnly: false, loadFailed: false })).toBe(NEEDS_GPU_TITLE);
+    expect(cpuViewerDisplayTitle({ useGpu: false, previewOnly: true, loadFailed: false })).toBe(NEEDS_GPU_TITLE);
+    expect(NEEDS_GPU_TITLE).toBe("needs GPU rendering");
+  });
+
+  it("names the PNG-only result while the GPU is on", () => {
+    expect(cpuViewerDisplayTitle({ useGpu: true, previewOnly: true, loadFailed: false })).toBe(PNG_ONLY_TITLE);
+    expect(PNG_ONLY_TITLE).toContain("PNG-only result");
+  });
+
+  it("says it waits for the GPU image while the pixels load", () => {
+    expect(cpuViewerDisplayTitle({ useGpu: true, previewOnly: false, loadFailed: false })).toBe(GPU_WAITING_TITLE);
+    expect(GPU_WAITING_TITLE).toBe("waiting for the GPU image");
+  });
+
+  it("says the GPU image load failed", () => {
+    expect(cpuViewerDisplayTitle({ useGpu: true, previewOnly: false, loadFailed: true })).toBe(GPU_LOAD_FAILED_TITLE);
+    expect(GPU_LOAD_FAILED_TITLE).toBe("GPU image load failed");
+  });
+});
+
+describe("gpuToggleView", () => {
+  const onGpu: GpuToggleInput = {
+    probing: false,
+    loading: false,
+    available: true,
+    supported: true,
+    useGpu: true,
+    loadError: null,
+    reason: null,
+    pngOnlyMono: false,
+    cpuViewerShown: false,
+  };
+
+  it("shows GPU in the GPU colour while the GPU display is on screen", () => {
+    expect(gpuToggleView(onGpu)).toEqual({ state: "gpu", label: "GPU", title: "Rendering on GPU (WebGPU)", tone: "gpu" });
+  });
+
+  it("keeps the GPU label but mutes it and says the CPU viewer shows a PNG-only result", () => {
+    expect(gpuToggleView({ ...onGpu, pngOnlyMono: true, cpuViewerShown: true })).toEqual({
+      state: "png-only",
+      label: "GPU",
+      title: GPU_PNG_ONLY_TOGGLE_TITLE,
+      tone: "muted",
+    });
+    expect(GPU_PNG_ONLY_TOGGLE_TITLE).toContain("CPU viewer");
+  });
+
+  it("says the CPU viewer is shown after a GPU image load failure", () => {
+    const view = gpuToggleView({ ...onGpu, loadError: "boom" });
+    expect(view).toEqual({
+      state: "failed",
+      label: "GPU failed",
+      title: "GPU image load failed: boom — showing the CPU viewer; click to switch to CPU",
+      tone: "failed",
+    });
+    expect(gpuToggleView({ ...onGpu, loadError: "boom", pngOnlyMono: true }).tone).toBe("failed");
+  });
+
+  it("shows a busy label while probing or loading, whatever the record", () => {
+    expect(gpuToggleView({ ...onGpu, probing: true, available: null })).toMatchObject({ state: "probing", label: "...", tone: "gpu" });
+    expect(gpuToggleView({ ...onGpu, loading: true })).toMatchObject({ state: "loading", label: "...", title: "Rendering on GPU (WebGPU)" });
+    expect(gpuToggleView({ ...onGpu, loading: true, pngOnlyMono: true }).tone).toBe("gpu");
+  });
+
+  it("says the CPU viewer shows the image while the GPU image is loaded", () => {
+    const shown = { ...onGpu, cpuViewerShown: true };
+    expect(gpuToggleView({ ...shown, loading: true })).toEqual({
+      state: "loading",
+      label: "...",
+      title: GPU_WAITING_TOGGLE_TITLE,
+      tone: "gpu",
+    });
+    expect(gpuToggleView(shown).title).toBe(GPU_WAITING_TOGGLE_TITLE);
+    expect(GPU_WAITING_TOGGLE_TITLE).toContain("CPU viewer");
+    expect(GPU_WAITING_TOGGLE_TITLE).not.toContain("Rendering on GPU");
+  });
+
+  it("keeps the other titles when the CPU viewer is shown", () => {
+    const shown = { ...onGpu, cpuViewerShown: true };
+    expect(gpuToggleView({ ...shown, pngOnlyMono: true }).title).toBe(GPU_PNG_ONLY_TOGGLE_TITLE);
+    expect(gpuToggleView({ ...shown, useGpu: false }).title).toBe("Rendering on CPU — click to use GPU");
+    expect(gpuToggleView({ ...shown, loadError: "boom" }).title).toBe(
+      "GPU image load failed: boom — showing the CPU viewer; click to switch to CPU",
+    );
+  });
+
+  it("says a GPU check is running while probing, whatever the saved choice, and that the CPU viewer shows the image", () => {
+    const probing = { ...onGpu, probing: true, available: null, cpuViewerShown: true };
+    expect(gpuToggleView(probing)).toEqual({
+      state: "probing",
+      label: "...",
+      title: GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE,
+      tone: "gpu",
+    });
+    expect(gpuToggleView({ ...probing, useGpu: false })).toEqual({
+      state: "probing",
+      label: "...",
+      title: GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE,
+      tone: "off",
+    });
+    expect(gpuToggleView({ ...probing, cpuViewerShown: false }).title).toBe(GPU_PROBING_TOGGLE_TITLE);
+    expect(GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE).toContain("CPU viewer");
+  });
+
+  it("never invites a click on the disabled toggle while a retry probe runs", () => {
+    const retrying = {
+      ...onGpu,
+      probing: true,
+      useGpu: false,
+      available: false,
+      reason: "GPU device lost — using CPU",
+      cpuViewerShown: true,
+    };
+    expect(gpuToggleView(retrying).title).toBe(GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE);
+    expect(gpuToggleView({ ...retrying, probing: false }).title).toBe("GPU device lost — using CPU — click to retry");
+    for (const input of [retrying, { ...retrying, available: null }, { ...retrying, useGpu: true, available: null }]) {
+      expect(gpuToggleView(input).title).not.toContain("click");
+    }
+  });
+
+  it("shows CPU with an invitation to switch while the GPU is off", () => {
+    expect(gpuToggleView({ ...onGpu, useGpu: false })).toEqual({
+      state: "cpu",
+      label: "CPU",
+      title: "Rendering on CPU — click to use GPU",
+      tone: "off",
+    });
+    expect(gpuToggleView({ ...onGpu, useGpu: false, pngOnlyMono: true }).state).toBe("cpu");
+  });
+
+  it("offers a retry with the reason when the GPU is unavailable", () => {
+    expect(gpuToggleView({ ...onGpu, useGpu: false, available: false, reason: "GPU device lost — using CPU" })).toEqual({
+      state: "unavailable",
+      label: "CPU",
+      title: "GPU device lost — using CPU — click to retry",
+      tone: "off",
+    });
+    expect(gpuToggleView({ ...onGpu, useGpu: false, available: false, supported: false, reason: "WebGPU not supported by this browser" }).title).toBe(
+      "WebGPU not supported by this browser",
+    );
+  });
+});
+
 describe("gpuAfterProbe", () => {
   it("falls back to the CPU viewer when the probe fails, whatever was saved", () => {
     expect(gpuAfterProbe(false, true, true)).toBe(false);
@@ -182,6 +389,112 @@ describe("gpuAfterProbe", () => {
   it("keeps the saved choice after a successful probe", () => {
     expect(gpuAfterProbe(true, false, false)).toBe(false);
     expect(gpuAfterProbe(true, true, true)).toBe(true);
+  });
+});
+
+describe("CANVAS_HINT_CLASS", () => {
+  it("keeps the shared cube hint on one line, out of the pointer's way and above the regions layer (z-index 5)", () => {
+    const classes = CANVAS_HINT_CLASS.split(" ");
+    expect(classes).toContain("whitespace-nowrap");
+    expect(classes).toContain("pointer-events-none");
+    expect(classes).toContain("z-[6]");
+    expect(CUBE_SPECTRUM_HINT).toBe("Click to extract spectrum");
+  });
+});
+
+describe("histogramOnPath", () => {
+  const cubeHist = { data_min: 0, data_max: 9 };
+
+  it("uses the histogram only when it was computed for the displayed path", () => {
+    expect(histogramOnPath(cubeHist, "/data/cube_s3d.fits", "/data/cube_s3d.fits")).toBe(cubeHist);
+  });
+
+  it("drops the cube histogram once a channel FITS is displayed and its own histogram has not landed", () => {
+    expect(histogramOnPath(cubeHist, "/data/cube_s3d.fits", "/out/cube_frame_ab12_13.fits")).toBeNull();
+  });
+
+  it("is empty while no histogram path is known", () => {
+    expect(histogramOnPath(cubeHist, null, "/data/cube_s3d.fits")).toBeNull();
+    expect(histogramOnPath(cubeHist, null, null)).toBeNull();
+    expect(histogramOnPath(null, "/data/cube_s3d.fits", "/data/cube_s3d.fits")).toBeNull();
+  });
+});
+
+describe("compareDividerGrabbed", () => {
+  const divider: CompareDividerInput = {
+    compareMode: true,
+    hasComparison: true,
+    viewerError: false,
+    offsetX: 400,
+    width: 800,
+    comparePos: 50,
+  };
+
+  it("grabs the drawn divider within 12 px of it", () => {
+    expect(compareDividerGrabbed(divider)).toBe(true);
+    expect(compareDividerGrabbed({ ...divider, offsetX: 411.5 })).toBe(true);
+    expect(compareDividerGrabbed({ ...divider, offsetX: 388.5 })).toBe(true);
+    expect(compareDividerGrabbed({ ...divider, offsetX: 200, comparePos: 25 })).toBe(true);
+  });
+
+  it("leaves presses 12 px or more away from the divider to the image", () => {
+    expect(compareDividerGrabbed({ ...divider, offsetX: 412 })).toBe(false);
+    expect(compareDividerGrabbed({ ...divider, offsetX: 388 })).toBe(false);
+  });
+
+  it("never grabs a divider that is not drawn", () => {
+    expect(compareDividerGrabbed({ ...divider, compareMode: false })).toBe(false);
+    expect(compareDividerGrabbed({ ...divider, hasComparison: false })).toBe(false);
+    expect(compareDividerGrabbed({ ...divider, viewerError: true })).toBe(false);
+  });
+});
+
+describe("viewerClickRoute", () => {
+  const click: ViewerClickInput = {
+    press: { x: 100, y: 100 },
+    release: { x: 100, y: 100 },
+    cursorMode: "crosshair",
+    onImage: true,
+    hasPixelHandler: true,
+    hasCanvasHandler: true,
+  };
+
+  it("routes a crosshair click to the pixel handler and a pan click to the canvas handler", () => {
+    expect(viewerClickRoute(click)).toBe("pixel");
+    expect(viewerClickRoute({ ...click, cursorMode: "pan" })).toBe("canvas");
+    expect(viewerClickRoute({ ...click, hasPixelHandler: false })).toBe("canvas");
+  });
+
+  it("drops a pan click without a canvas handler and any click off the image", () => {
+    expect(viewerClickRoute({ ...click, cursorMode: "pan", hasCanvasHandler: false })).toBe("none");
+    expect(viewerClickRoute({ ...click, onImage: false })).toBe("none");
+  });
+
+  it("counts a release up to 4 px from the press as a click and anything further as a drag", () => {
+    expect(viewerClickRoute({ ...click, release: { x: 104, y: 100 } })).toBe("pixel");
+    expect(viewerClickRoute({ ...click, release: { x: 103, y: 104 } })).toBe("none");
+    expect(viewerClickRoute({ ...click, cursorMode: "pan", release: { x: 140, y: 100 } })).toBe("none");
+  });
+
+  it("drops a release whose press grabbed the compare divider", () => {
+    expect(viewerClickRoute({ ...click, press: null })).toBe("none");
+    expect(viewerClickRoute({ ...click, press: null, cursorMode: "pan" })).toBe("none");
+  });
+
+  it("still clicks the image centre when compare mode was left on after the comparison went away", () => {
+    const centre = { x: 400, y: 300 };
+    const grabbed = compareDividerGrabbed({
+      compareMode: true,
+      hasComparison: false,
+      viewerError: false,
+      offsetX: centre.x,
+      width: 800,
+      comparePos: 50,
+    });
+    const press = grabbed ? null : centre;
+    expect(grabbed).toBe(false);
+    expect(viewerClickRoute({ ...click, press, release: centre })).toBe("pixel");
+    expect(viewerClickRoute({ ...click, press, release: centre, cursorMode: "pan" })).toBe("canvas");
   });
 });
 

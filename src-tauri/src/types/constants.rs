@@ -36,6 +36,7 @@ pub const RES_NAXIS: &str = "naxis";
 pub const RES_OUTPUT_DIMS: &str = "output_dims";
 pub const RES_INPUT_DIMS: &str = "input_dims";
 pub const RES_ORIGINAL_DIMENSIONS: &str = "original_dimensions";
+pub const RES_PREVIEW_DIMENSIONS: &str = "preview_dimensions";
 
 pub const RES_PNG_PATH: &str = "png_path";
 pub const RES_FITS_PATH: &str = "fits_path";

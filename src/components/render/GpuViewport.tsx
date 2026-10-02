@@ -2,9 +2,8 @@ import { useCallback, useRef, useState, memo } from "react";
 import { ZoomIn, ZoomOut, Maximize, Move, Crosshair, Eye } from "lucide-react";
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { screenToImagePixel } from "../../utils/pixelMapping";
-import { viewportClickRoute } from "../../utils/regionClick";
 import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
-import { previewTextureTitle } from "../../utils/previewShell";
+import { previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
@@ -136,13 +135,18 @@ function GpuViewport({
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLElement>) => {
-      const start = clickStart.current;
-      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
       const rect = hasRenderDims ? containerRef.current?.getBoundingClientRect() : undefined;
       const coord = rect
         ? screenToImagePixel(e.clientX, e.clientY, rect, transformRef.current, renderW, renderH, effFitsW, effFitsH)
         : null;
-      const route = viewportClickRoute(cursorMode, coord !== null, !!onPixelClick, !!onCanvasPixelClick);
+      const route = viewerClickRoute({
+        press: clickStart.current,
+        release: { x: e.clientX, y: e.clientY },
+        cursorMode,
+        onImage: coord !== null,
+        hasPixelHandler: !!onPixelClick,
+        hasCanvasHandler: !!onCanvasPixelClick,
+      });
       if (!coord || route === "none") return;
       if (route === "pixel") onPixelClick?.(coord.x, coord.y);
       else onCanvasPixelClick?.(coord.x, coord.y);

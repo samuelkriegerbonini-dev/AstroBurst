@@ -8,10 +8,11 @@ use crate::cmd::common::{
     blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir,
     write_derived_fits, OutputValues,
 };
+use crate::cmd::compose::overlay_preview::load_channel_entry;
 use crate::cmd::processing::source_header;
 use crate::core::imaging::cutout::{shift_header, CutoutRect};
 use crate::core::imaging::stats::compute_image_stats;
-use crate::infra::cache::GLOBAL_IMAGE_CACHE;
+use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::header::HduHeader;
 use crate::types::constants::{
     RES_PATHS, RES_CACHE_KEYS, RES_DIMENSIONS, RES_CROP_TOP, RES_CROP_BOTTOM,
@@ -20,6 +21,8 @@ use crate::types::constants::{
 
 const AUTO_THRESHOLD: f32 = 1e-6;
 const ABPROC_CROPPED: &str = "cropped";
+const NO_OVERLAP: &str = "Auto-crop found no valid overlapping region";
+const DIFFERENT_SIZES: &str = "Channels have different sizes; run Align first";
 
 fn cropped_header(source: Option<&HduHeader>, top: usize, left: usize, dims: (usize, usize)) -> HduHeader {
     let rect = CutoutRect { x0: left as i64, y0: top as i64, width: dims.1, height: dims.0 };
@@ -75,6 +78,27 @@ fn detect_valid_region(arr: &Array2<f32>, threshold: f32) -> (usize, usize, usiz
     }
 
     (top, bottom, left, right)
+}
+
+fn auto_crop_bounds(entries: &[ImageEntry]) -> Option<(usize, usize, usize, usize)> {
+    let mut max_top = 0usize;
+    let mut min_bottom = usize::MAX;
+    let mut max_left = 0usize;
+    let mut min_right = usize::MAX;
+
+    for entry in entries {
+        let (t, b, l, r) = detect_valid_region(entry.arr(), AUTO_THRESHOLD);
+        max_top = max_top.max(t);
+        min_bottom = min_bottom.min(b);
+        max_left = max_left.max(l);
+        min_right = min_right.min(r);
+    }
+
+    if min_bottom <= max_top || min_right <= max_left {
+        None
+    } else {
+        Some((max_top, min_bottom, max_left, min_right))
+    }
 }
 
 fn crop_array(arr: &Array2<f32>, top: usize, bottom: usize, left: usize, right: usize) -> Array2<f32> {
@@ -136,25 +160,10 @@ pub async fn crop_channels_cmd(
         let auto = auto_detect.unwrap_or(true);
 
         let (crop_top, crop_bottom, crop_left, crop_right) = if auto {
-            let mut max_top = 0usize;
-            let mut min_bottom = usize::MAX;
-            let mut max_left = 0usize;
-            let mut min_right = usize::MAX;
-
-            for entry in &entries {
-                let arr = entry.arr();
-                let (t, b, l, r) = detect_valid_region(arr, AUTO_THRESHOLD);
-                max_top = max_top.max(t);
-                min_bottom = min_bottom.min(b);
-                max_left = max_left.max(l);
-                min_right = min_right.min(r);
+            match auto_crop_bounds(&entries) {
+                Some(bounds) => bounds,
+                None => anyhow::bail!(NO_OVERLAP),
             }
-
-            if min_bottom <= max_top || min_right <= max_left {
-                anyhow::bail!("Auto-crop found no valid overlapping region");
-            }
-
-            (max_top, min_bottom, max_left, min_right)
         } else {
             let (rows, cols) = entries[0].arr().dim();
             match manual_crop_bounds(rows, cols, top, bottom, left, right) {
@@ -229,12 +238,161 @@ pub async fn crop_channels_cmd(
     })
 }
 
+#[tauri::command]
+pub async fn detect_crop_bounds_cmd(paths: Vec<String>) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        if paths.is_empty() {
+            anyhow::bail!("No paths provided for crop detection");
+        }
+
+        let entries: Vec<_> = paths
+            .iter()
+            .map(|p| load_channel_entry(p))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let (rows, cols) = entries[0].arr().dim();
+        if entries.iter().any(|e| e.arr().dim() != (rows, cols)) {
+            anyhow::bail!(DIFFERENT_SIZES);
+        }
+
+        let (margins, auto_detected) = match auto_crop_bounds(&entries) {
+            Some((top, bottom, left, right)) => ((top, rows - bottom, left, cols - right), true),
+            None => ((0, 0, 0, 0), false),
+        };
+
+        Ok(json!({
+            RES_DIMENSIONS: [cols, rows],
+            RES_CROP_TOP: margins.0,
+            RES_CROP_BOTTOM: margins.1,
+            RES_CROP_LEFT: margins.2,
+            RES_CROP_RIGHT: margins.3,
+            RES_AUTO_DETECTED: auto_detected,
+        }))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cmd::common::{load_cached_full, HEADER_ABPROC};
+    use crate::cmd::compose::overlay_preview::ALIGNED_GONE;
     use crate::core::astrometry::wcs::WcsTransform;
     use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::constants::{wizard_aligned_key, wizard_cropped_key, WIZARD_CACHE_PREFIX};
+
+    fn nan_bordered(rows: usize, cols: usize, top: usize, bottom: usize, left: usize, right: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, cols), |(r, c)| {
+            if r < top || r >= rows - bottom || c < left || c >= cols - right {
+                f32::NAN
+            } else {
+                5.0 + (r * cols + c) as f32 * 1e-3
+            }
+        })
+    }
+
+    fn seed_wizard_entry(bin: &str, arr: &Array2<f32>) -> String {
+        let key = wizard_aligned_key(bin);
+        GLOBAL_IMAGE_CACHE.insert_synthetic(&key, Arc::new(arr.clone()), compute_image_stats(arr));
+        key
+    }
+
+    fn margins(res: &serde_json::Value) -> [u64; 4] {
+        [RES_CROP_TOP, RES_CROP_BOTTOM, RES_CROP_LEFT, RES_CROP_RIGHT].map(|k| res[k].as_u64().unwrap())
+    }
+
+    #[tokio::test]
+    async fn detect_crop_bounds_agrees_with_auto_crop_and_crops_nothing() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let r_key = seed_wizard_entry("det_r", &nan_bordered(40, 50, 2, 4, 3, 5));
+        let g_key = seed_wizard_entry("det_g", &nan_bordered(40, 50, 6, 1, 0, 9));
+        let seeded_r = GLOBAL_IMAGE_CACHE.get(&r_key).unwrap().data_arc();
+        let seeded_g = GLOBAL_IMAGE_CACHE.get(&g_key).unwrap().data_arc();
+        let test_prefix = format!("{WIZARD_CACHE_PREFIX}det_");
+
+        let detected = detect_crop_bounds_cmd(vec![r_key.clone(), g_key.clone()]).await.unwrap();
+        let detect_added_entries = GLOBAL_IMAGE_CACHE.any_key(|k| k.starts_with(&test_prefix) && k != r_key && k != g_key);
+        let inputs_untouched = Arc::ptr_eq(&seeded_r, &GLOBAL_IMAGE_CACHE.get(&r_key).unwrap().data_arc())
+            && Arc::ptr_eq(&seeded_g, &GLOBAL_IMAGE_CACHE.get(&g_key).unwrap().data_arc());
+
+        let cropped = crop_channels_cmd(
+            vec![r_key.clone(), g_key.clone()],
+            dir.path().join("out").to_str().unwrap().to_string(),
+            0,
+            0,
+            0,
+            0,
+            Some(true),
+            Some(vec!["det_r".to_string(), "det_g".to_string()]),
+            None,
+        )
+        .await
+        .unwrap();
+        for key in [&r_key, &g_key, &wizard_cropped_key("det_r"), &wizard_cropped_key("det_g")] {
+            GLOBAL_IMAGE_CACHE.remove(key);
+        }
+
+        assert!(!detect_added_entries, "detection must not add cache entries");
+        assert!(inputs_untouched, "detection must not replace the entries it reads");
+        assert!(!dir.path().join("out").exists(), "detection must not write to the disk");
+        assert_eq!(detected[RES_AUTO_DETECTED], true, "{detected}");
+        assert_eq!(detected[RES_DIMENSIONS], json!([50, 40]));
+        assert_eq!(margins(&detected), [6, 4, 3, 9]);
+        assert_eq!(margins(&detected), margins(&cropped), "detect {detected} vs crop {cropped}");
+        assert_eq!(cropped[RES_DIMENSIONS], json!([50 - 3 - 9, 40 - 6 - 4]));
+    }
+
+    #[tokio::test]
+    async fn detect_crop_bounds_without_overlap_still_reports_the_grid() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let upper = seed_wizard_entry("det_upper", &nan_bordered(40, 50, 0, 30, 0, 0));
+        let lower = seed_wizard_entry("det_lower", &nan_bordered(40, 50, 30, 0, 0, 0));
+
+        let res = detect_crop_bounds_cmd(vec![upper.clone(), lower.clone()]).await;
+        let crop = crop_channels_cmd(
+            vec![upper.clone(), lower.clone()],
+            "unused".to_string(),
+            0,
+            0,
+            0,
+            0,
+            Some(true),
+            Some(vec!["det_upper".to_string(), "det_lower".to_string()]),
+            None,
+        )
+        .await;
+        GLOBAL_IMAGE_CACHE.remove(&upper);
+        GLOBAL_IMAGE_CACHE.remove(&lower);
+
+        let res = res.expect("no overlap is not an error for detection");
+        assert_eq!(res[RES_AUTO_DETECTED], false, "{res}");
+        assert_eq!(res[RES_DIMENSIONS], json!([50, 40]));
+        assert_eq!(margins(&res), [0, 0, 0, 0]);
+        assert_eq!(crop.expect_err("auto crop without overlap must still fail"), NO_OVERLAP);
+    }
+
+    #[tokio::test]
+    async fn detect_crop_bounds_rejects_channels_of_different_sizes() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let wide = seed_wizard_entry("det_wide", &nan_bordered(40, 50, 0, 0, 0, 0));
+        let narrow = seed_wizard_entry("det_narrow", &nan_bordered(40, 30, 0, 0, 0, 0));
+
+        let res = detect_crop_bounds_cmd(vec![wide.clone(), narrow.clone()]).await;
+        GLOBAL_IMAGE_CACHE.remove(&wide);
+        GLOBAL_IMAGE_CACHE.remove(&narrow);
+
+        assert_eq!(res.expect_err("mixed sizes must be rejected"), DIFFERENT_SIZES);
+        assert!(detect_crop_bounds_cmd(vec![]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn detect_crop_bounds_on_a_missing_wizard_key_says_to_run_align_again() {
+        let gone = detect_crop_bounds_cmd(vec![wizard_aligned_key("det_missing_probe")]).await;
+        assert_eq!(gone.expect_err("a missing wizard key must fail"), ALIGNED_GONE);
+
+        let missing_file = detect_crop_bounds_cmd(vec!["C:/astrokit-missing/det_probe.fits".to_string()]).await;
+        assert_ne!(missing_file.expect_err("a missing file must fail"), ALIGNED_GONE);
+    }
 
     fn card(header: &HduHeader, key: &str) -> Option<String> {
         header.get(key).map(|v| v.trim().trim_matches('\'').trim().to_string())

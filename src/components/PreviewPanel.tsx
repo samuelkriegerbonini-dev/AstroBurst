@@ -37,10 +37,22 @@ import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
 import ViewerStatusStrip from "./preview/ViewerStatusStrip";
 import DisplayControls from "./preview/DisplayControls";
+import PreviewTab from "./preview/PreviewTab";
 import { ToolHostContext } from "../context/ToolHostContext";
-import { KEPT_RIGHT_TOOL, backToFileAction, gpuAfterProbe, gpuDisplayOnScreen, keptToolFileKey, rightToolSlots } from "../utils/previewShell";
+import {
+  CUBE_SPECTRUM_HINT,
+  KEPT_RIGHT_TOOL,
+  backToFileAction,
+  cpuViewerDisplayTitle,
+  gpuAfterProbe,
+  gpuDisplayOnScreen,
+  gpuToggleView,
+  keptToolFileKey,
+  previewViewer,
+  rightToolSlots,
+  type GpuToggleTone,
+} from "../utils/previewShell";
 
-const PreviewTab = lazy(() => import("./preview/PreviewTab"));
 const ProcessingTab = lazy(() => import("./processing/ProcessingTab"));
 const ComposeWizard = lazy(() => import("./compose/ComposeWizard"));
 const StackingTab = lazy(() => import("./stacking/StackingTab"));
@@ -85,6 +97,13 @@ const MIN_PREVIEW_W = 320;
 const MIN_PREVIEW_H = 200;
 
 const gpuSupported = typeof navigator !== "undefined" && !!navigator.gpu;
+
+const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
+  failed: { background: "rgba(245,158,11,0.15)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)" },
+  gpu: { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" },
+  muted: { background: "transparent", color: "rgba(192,132,252,0.55)", border: "1px dashed rgba(168,85,247,0.35)" },
+  off: { color: "#71717a", border: "1px solid transparent" },
+};
 
 function TabSpinner() {
   return <div className="flex items-center justify-center py-8"><Loader2 size={16} className="animate-spin" style={{ color: "var(--ab-teal)" }} /></div>;
@@ -187,7 +206,9 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
   const nextKeptFileKey = keptToolFileKey(rightTool, fileKey, keptFileKey);
   if (nextKeptFileKey !== keptFileKey) setKeptFileKey(nextKeptFileKey);
   const slots = rightToolSlots({ rightTool, displayTool, columnMounted: rightTool !== null || rightMounted, fileKey, keptFileKey: nextKeptFileKey });
-  const gpuDisplay = gpuDisplayOnScreen({ hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly });
+  const gpuDisplayInput = { hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly };
+  const gpuDisplay = gpuDisplayOnScreen(gpuDisplayInput);
+  const viewer = previewViewer(gpuDisplayInput);
   const keptActive = slots.kept?.active ?? false;
   const transientActive = slots.transient?.active ?? false;
   const keptHost = useMemo(() => ({ active: keptActive, gpuDisplay }), [keptActive, gpuDisplay]);
@@ -463,19 +484,6 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     }
   }, [file?.path]);
 
-  const handleImageClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    if (!isCube || !file?.path) return;
-    const target = e.currentTarget;
-    if (!(target instanceof HTMLImageElement)) return;
-    const rect = target.getBoundingClientRect();
-    const dims = file.result?.dimensions;
-    if (!dims || rect.width <= 0 || rect.height <= 0) return;
-    const pixelX = Math.floor(((e.clientX - rect.left) / rect.width) * dims[0]);
-    const pixelY = Math.floor(((e.clientY - rect.top) / rect.height) * dims[1]);
-    if (pixelX < 0 || pixelX >= dims[0] || pixelY < 0 || pixelY >= dims[1]) return;
-    extractSpectrum(pixelX, pixelY);
-  }, [isCube, file?.path, file?.result?.dimensions, extractSpectrum]);
-
   const handleCubePixelClick = useCallback((x: number, y: number) => {
     const dims = file?.result?.dimensions;
     if (!isCube || !dims || x < 0 || x >= dims[0] || y < 0 || y >= dims[1]) return;
@@ -610,7 +618,19 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
     return { url: processedPreviewUrl, label, width: displayedW, height: displayedH };
   }, [stfPreviewUrl, processedPreviewUrl, displayedLabel, displayedPreviewOnly, displayedW, displayedH]);
 
-  const useAdvancedViewer = !isRgbView && !useGpu;
+  const cpuDisplayTitle = cpuViewerDisplayTitle({ useGpu, previewOnly: displayedPreviewOnly, loadFailed: gpuLoadError !== null });
+  const gpuToggle = gpuToggleView({
+    probing: gpuProbing,
+    loading: toggleLoading,
+    available: gpuAvailable,
+    supported: gpuSupported,
+    useGpu,
+    loadError: gpuLoadError,
+    reason: gpuReason,
+    pngOnlyMono: !isRgbView && displayedPreviewOnly,
+    cpuViewerShown: viewer === "cpu",
+  });
+  const gpuToggleBusy = gpuToggle.state === "probing" || gpuToggle.state === "loading";
 
   const planeBadge = file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
 
@@ -681,48 +701,47 @@ export default function PreviewPanel({ activeTool }: PreviewPanelProps) {
             )}
             {file && (
               <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu && !gpuSupported)}
-                      title={gpuLoadError ? `GPU image load failed: ${gpuLoadError} — showing the PNG preview; click to switch to CPU` : gpuAvailable === false && gpuSupported ? `${gpuReason ?? "GPU unavailable"} — click to retry` : gpuReason ?? (useGpu ? "Rendering on GPU (WebGPU)" : "Rendering on CPU — click to use GPU")}
+                      title={gpuToggle.title}
                       className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-                      style={gpuLoadError ? { background: "rgba(245,158,11,0.15)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)" } : useGpu ? { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" } : { color: "#71717a", border: "1px solid transparent" }}>
-                {gpuProbing ? <Loader2 size={10} className="animate-spin" /> : toggleLoading ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
-                {gpuProbing ? "..." : toggleLoading ? "..." : gpuAvailable === false ? "CPU" : gpuLoadError ? "GPU failed" : useGpu ? "GPU" : "CPU"}
+                      style={GPU_TOGGLE_STYLES[gpuToggle.tone]}>
+                {gpuToggleBusy ? <Loader2 size={10} className="animate-spin" /> : useGpu ? <Zap size={10} /> : <Cpu size={10} />}
+                {gpuToggle.label}
               </button>
             )}
           </div>
         </div>
 
         <div ref={viewportRef} className="flex-1 overflow-hidden min-h-0">
-          {!file ? (
+          {viewer === "empty" ? (
             <AdvancedImageViewer original={null} processed={null} />
-          ) : useAdvancedViewer ? (
+          ) : viewer === "cpu" ? (
             <div className="flex flex-col h-full">
-              <DisplayControls vmin={Number.NaN} vmax={Number.NaN} renderOnlyDisabled />
+              <DisplayControls vmin={Number.NaN} vmax={Number.NaN} renderOnlyDisabled renderOnlyTitle={cpuDisplayTitle} />
               <div className="flex-1 min-h-0">
                 <AdvancedImageViewer
                   original={originalImage}
                   processed={processedImage}
                   onMousePixel={handleViewerMousePixel}
                   onPixelClick={emitPixelClick}
+                  onCanvasPixelClick={isCube ? handleCubePixelClick : undefined}
                   onMouseLeave={handleLeave}
                   overlayCanvasRef={starOverlayRef}
                   dqCanvasRef={dqCanvasRef}
+                  canvasHint={isCube ? CUBE_SPECTRUM_HINT : undefined}
                 />
               </div>
             </div>
           ) : (
             <div className="h-full" onMouseLeave={handleLeave}>
-              <Suspense fallback={<TabSpinner />}>
-                <PreviewTab
-                  useGpu={useGpu}
-                  rawPixels={rawPixels}
-                  rgbRawPixels={rgbRawPixels}
-                  onImageClick={handleImageClick}
-                  onCubePixelClick={handleCubePixelClick}
-                  onBackToFile={handleBackToFile}
-                  starOverlayRef={starOverlayRef}
-                  dqCanvasRef={dqCanvasRef}
-                />
-              </Suspense>
+              <PreviewTab
+                useGpu={useGpu}
+                rawPixels={rawPixels}
+                rgbRawPixels={rgbRawPixels}
+                onCubePixelClick={handleCubePixelClick}
+                onBackToFile={handleBackToFile}
+                starOverlayRef={starOverlayRef}
+                dqCanvasRef={dqCanvasRef}
+              />
             </div>
           )}
         </div>

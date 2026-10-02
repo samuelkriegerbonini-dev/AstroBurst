@@ -18,7 +18,7 @@ vi.mock("../../../context/PreviewContext", () => ({
 
 import DisplayControls from "../DisplayControls";
 
-function render(props: { renderOnlyDisabled?: boolean; disabled?: boolean }, display: Partial<DisplaySettings> = {}): string {
+function render(props: { renderOnlyDisabled?: boolean; renderOnlyTitle?: string }, display: Partial<DisplaySettings> = {}): string {
   displayState.display = { ...DEFAULT_DISPLAY_SETTINGS, ...display };
   return renderToStaticMarkup(createElement(DisplayControls, { vmin: 0, vmax: 1, ...props }));
 }
@@ -48,6 +48,18 @@ describe("DisplayControls without GPU rendering", () => {
     expect(insideDisabledFieldset(html, ">grid<")).toBe(false);
     expect(insideDisabledFieldset(html, ">compass<")).toBe(false);
     expect(html).not.toContain("resolved display limits");
+  });
+
+  it("gives the disabled controls the reason it is passed instead of the default", () => {
+    const html = render({ renderOnlyDisabled: true, renderOnlyTitle: "waiting for the GPU image" });
+    expect(html.match(/title="waiting for the GPU image"/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(html).not.toContain("needs GPU rendering");
+    expect(insideDisabledFieldset(html, ">stretch<")).toBe(true);
+    expect(insideDisabledFieldset(html, ">grid<")).toBe(false);
+  });
+
+  it("ignores the reason while the controls are enabled", () => {
+    expect(render({ renderOnlyTitle: "waiting for the GPU image" })).not.toContain("waiting for the GPU image");
   });
 
   it("leaves every control enabled on the GPU display", () => {

@@ -12,6 +12,13 @@ import {
   renderScaleForFits,
   wheelZoomFactor,
   zoomPercentLabel,
+  ACTUAL_SIZE_SCALE,
+  actualSizeView,
+  clampZoomPanScale,
+  panForZoom,
+  wheelGestureZooms,
+  ZOOM_PAN_MAX,
+  ZOOM_PAN_MIN,
 } from "../viewerZoom";
 
 describe("fitsPerRenderPx", () => {
@@ -137,5 +144,75 @@ describe("previewTextureBadge", () => {
     expect(previewTextureBadge(512, 512)).toBeNull();
     expect(previewTextureBadge(512, undefined)).toBeNull();
     expect(previewTextureBadge(0, 5000)).toBeNull();
+  });
+});
+
+describe("ZoomPanView scale limits", () => {
+  const fit = Math.min(640 / 2048, 126 / 1365);
+
+  it("lets zoom-out stop at the fit scale when the fit is below the fixed minimum", () => {
+    expect(fit).toBeLessThan(ZOOM_PAN_MIN);
+    expect(clampZoomPanScale(fit * 0.87, fit)).toBe(fit);
+    expect(clampZoomPanScale(fit / 1.5, fit)).toBe(fit);
+    expect(clampZoomPanScale(fit * 1.15, fit)).toBeCloseTo(fit * 1.15, 12);
+  });
+
+  it("keeps the fixed minimum when the fit is above it", () => {
+    expect(clampZoomPanScale(0.1, 0.6)).toBe(ZOOM_PAN_MIN);
+    expect(clampZoomPanScale(0.1, 1)).toBe(ZOOM_PAN_MIN);
+    expect(clampZoomPanScale(0.5, 1)).toBe(0.5);
+  });
+
+  it("caps zoom-in and ignores an unknown fit", () => {
+    expect(clampZoomPanScale(40, 0.5)).toBe(ZOOM_PAN_MAX);
+    expect(clampZoomPanScale(0.1, 0)).toBe(ZOOM_PAN_MIN);
+    expect(clampZoomPanScale(0.1, Number.NaN)).toBe(ZOOM_PAN_MIN);
+  });
+
+  it("zooms on every wheel gesture by default and only with Ctrl or Cmd in modifier mode", () => {
+    const plain = { ctrlKey: false, metaKey: false };
+    expect(wheelGestureZooms("always", plain)).toBe(true);
+    expect(wheelGestureZooms("modifier", plain)).toBe(false);
+    expect(wheelGestureZooms("modifier", { ctrlKey: true, metaKey: false })).toBe(true);
+    expect(wheelGestureZooms("modifier", { ctrlKey: false, metaKey: true })).toBe(true);
+  });
+});
+
+describe("ZoomPanView actual size", () => {
+  const imageW = 2048;
+  const imageH = 1365;
+  const containerW = 640;
+  const containerH = 180;
+  const fit = Math.min(containerW / imageW, containerH / imageH);
+  const fitPan = { x: (containerW - imageW * fit) / 2, y: (containerH - imageH * fit) / 2 };
+
+  it("keeps the image point under the anchor fixed", () => {
+    const pan = panForZoom(0.5, { x: 10, y: 20 }, 2, 100, 50);
+    const imageXBefore = (100 - 10) / 0.5;
+    const imageXAfter = (100 - pan.x) / 2;
+    expect(imageXAfter).toBeCloseTo(imageXBefore, 12);
+    expect((50 - pan.y) / 2).toBeCloseTo((50 - 20) / 0.5, 12);
+  });
+
+  it("shows one preview pixel per screen pixel, centred on the image when coming from the fit", () => {
+    const view = actualSizeView(fit, fitPan, fit, containerW, containerH);
+    expect(view.scale).toBe(ACTUAL_SIZE_SCALE);
+    expect(view.pan.x + (imageW / 2) * view.scale).toBeCloseTo(containerW / 2, 9);
+    expect(view.pan.y + (imageH / 2) * view.scale).toBeCloseTo(containerH / 2, 9);
+  });
+
+  it("keeps the point at the centre of the view when the user had panned", () => {
+    const pan = { x: -900, y: -300 };
+    const scale = 3;
+    const centreBefore = { x: (containerW / 2 - pan.x) / scale, y: (containerH / 2 - pan.y) / scale };
+    const view = actualSizeView(scale, pan, fit, containerW, containerH);
+    expect((containerW / 2 - view.pan.x) / view.scale).toBeCloseTo(centreBefore.x, 9);
+    expect((containerH / 2 - view.pan.y) / view.scale).toBeCloseTo(centreBefore.y, 9);
+  });
+
+  it("makes a 14 px offset on a 6000 px frame span several screen pixels instead of under one at the fit", () => {
+    const previewPerFrame = 2048 / 6000;
+    expect(14 * previewPerFrame * fit).toBeLessThan(1);
+    expect(14 * previewPerFrame * actualSizeView(fit, fitPan, fit, containerW, containerH).scale).toBeGreaterThan(4);
   });
 });

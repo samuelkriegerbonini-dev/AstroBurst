@@ -4,6 +4,7 @@ import { useDisplayContext } from "../../context/PreviewContext";
 import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLimits";
 import { centreDraftFor, parseCentreDraft, symmetricStretchNote } from "../../utils/displayTransfer";
 import { wcsOverlayNote, wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
+import { NEEDS_GPU_TITLE } from "../../utils/previewShell";
 import {
   COLORMAP_LABELS,
   COLORMAP_NAMES,
@@ -21,11 +22,9 @@ import {
 interface DisplayControlsProps {
   vmin: number;
   vmax: number;
-  disabled?: boolean;
   renderOnlyDisabled?: boolean;
+  renderOnlyTitle?: string;
 }
-
-const RENDER_ONLY_TITLE = "needs GPU rendering";
 
 const SELECT_CLASS =
   "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] text-zinc-200 focus:border-zinc-500";
@@ -47,15 +46,15 @@ function parseNullable(text: string): number | null | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function DisplayControlsInner({ vmin, vmax, disabled = false, renderOnlyDisabled = false }: DisplayControlsProps) {
+function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOnlyTitle = NEEDS_GPU_TITLE }: DisplayControlsProps) {
   const { display, setDisplay, limits, limitsLoading, limitsError } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
   const stretchNote = symmetricStretchNote(display);
   const wcsErrors = useSyncExternalStore(wcsOverlayStatus.subscribe, wcsOverlayStatus.get, wcsOverlayStatus.get);
   const wcsNote = wcsOverlayNote({ grid: display.grid, compass: display.compass }, wcsErrors);
-  const renderTitle = (title: string) => (renderOnlyDisabled ? RENDER_ONLY_TITLE : title);
+  const renderTitle = (title: string) => (renderOnlyDisabled ? renderOnlyTitle : title);
   const renderGroupClass = `${GROUP_CLASS} ${renderOnlyDisabled ? "opacity-50" : ""}`;
-  const renderGroupTitle = renderOnlyDisabled ? RENDER_ONLY_TITLE : undefined;
+  const renderGroupTitle = renderOnlyDisabled ? renderOnlyTitle : undefined;
 
   const [centreDraft, setCentreDraft] = useState(() => String(display.centre));
   useEffect(() => {
@@ -104,8 +103,7 @@ function DisplayControlsInner({ vmin, vmax, disabled = false, renderOnlyDisabled
 
   return (
     <fieldset
-      disabled={disabled}
-      className={`flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap ${disabled ? "opacity-50" : ""}`}
+      className="flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap"
       style={{ background: "rgba(24,24,27,0.6)", minInlineSize: 0 }}
     >
       <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>

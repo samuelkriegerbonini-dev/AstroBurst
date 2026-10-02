@@ -21,7 +21,7 @@ import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform
 import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
 import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
-import { previewTextureTitle } from "../../utils/previewShell";
+import { CANVAS_HINT_CLASS, compareDividerGrabbed, previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
@@ -41,9 +41,11 @@ interface AdvancedImageViewerProps {
   pixelValue?: { x: number; y: number; value: number } | null;
   onMousePixel?: (x: number, y: number) => void;
   onPixelClick?: (x: number, y: number) => void;
+  onCanvasPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  canvasHint?: string;
   className?: string;
 }
 
@@ -53,9 +55,11 @@ function AdvancedImageViewer({
   pixelValue,
   onMousePixel,
   onPixelClick,
+  onCanvasPixelClick,
   onMouseLeave,
   overlayCanvasRef,
   dqCanvasRef,
+  canvasHint,
   className = "",
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,16 +93,28 @@ function AdvancedImageViewer({
   const mainRetry = useImageRetry(activeImage?.url);
   const origRetry = useImageRetry(original?.url);
   const procRetry = useImageRetry(processed?.url);
+  const compareActive = compareMode && hasComparison;
+  const viewerError = compareActive ? (procRetry.error || origRetry.error) : mainRetry.error;
+  const viewerLoading = compareActive ? (procRetry.loading || origRetry.loading) : mainRetry.loading;
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      clickStart.current = { x: e.clientX, y: e.clientY };
       const rect = containerRef.current?.getBoundingClientRect();
-      if (compareMode && rect && Math.abs((e.clientX - rect.left) - rect.width * comparePos / 100) < 12) {
+      const onDivider = !!rect && compareDividerGrabbed({
+        compareMode,
+        hasComparison,
+        viewerError: !!viewerError,
+        offsetX: e.clientX - rect.left,
+        width: rect.width,
+        comparePos,
+      });
+      if (onDivider) {
+        clickStart.current = null;
         compareDragging.current = true;
         e.currentTarget.setPointerCapture(e.pointerId);
         return;
       }
+      clickStart.current = { x: e.clientX, y: e.clientY };
       if (e.button === 1 || (e.button === 0 && cursorMode === "pan")) {
         setIsPanning(true);
         isPanningRef.current = true;
@@ -107,7 +123,7 @@ function AdvancedImageViewer({
         e.currentTarget.setPointerCapture(e.pointerId);
       }
     },
-    [compareMode, comparePos, cursorMode, transformRef],
+    [compareMode, hasComparison, viewerError, comparePos, cursorMode, transformRef],
   );
 
   const handlePointerMove = useCallback(
@@ -146,20 +162,25 @@ function AdvancedImageViewer({
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (cursorMode !== "crosshair" || !onPixelClick || !hasRenderDims) return;
-      const start = clickStart.current;
-      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      const rect = hasRenderDims ? containerRef.current?.getBoundingClientRect() : undefined;
       const fitsW = activeImage?.width ?? renderW;
       const fitsH = activeImage?.height ?? renderH;
-      const coord = screenToImagePixel(
-        e.clientX, e.clientY, rect, transformRef.current,
-        renderW, renderH, fitsW, fitsH,
-      );
-      if (coord) onPixelClick(coord.x, coord.y);
+      const coord = rect
+        ? screenToImagePixel(e.clientX, e.clientY, rect, transformRef.current, renderW, renderH, fitsW, fitsH)
+        : null;
+      const route = viewerClickRoute({
+        press: clickStart.current,
+        release: { x: e.clientX, y: e.clientY },
+        cursorMode,
+        onImage: coord !== null,
+        hasPixelHandler: !!onPixelClick,
+        hasCanvasHandler: !!onCanvasPixelClick,
+      });
+      if (!coord || route === "none") return;
+      if (route === "pixel") onPixelClick?.(coord.x, coord.y);
+      else onCanvasPixelClick?.(coord.x, coord.y);
     },
-    [cursorMode, onPixelClick, hasRenderDims, activeImage, renderW, renderH, transformRef],
+    [cursorMode, onPixelClick, onCanvasPixelClick, hasRenderDims, activeImage, renderW, renderH, transformRef],
   );
 
   const handleNaturalSize = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -177,17 +198,14 @@ function AdvancedImageViewer({
 
   const regionsEnabled =
     !!activeImage?.width && !!activeImage?.height && renderW > 0 && renderH > 0 && regionKey !== null;
-  const compareActive = compareMode && hasComparison;
-  const viewerError = compareActive ? (procRetry.error || origRetry.error) : mainRetry.error;
-  const viewerLoading = compareActive ? (procRetry.loading || origRetry.loading) : mainRetry.loading;
   const handleRetry = useCallback(() => {
-    if (compareMode) {
+    if (compareActive) {
       if (procRetry.error) procRetry.retry();
       if (origRetry.error) origRetry.retry();
       return;
     }
     mainRetry.retry();
-  }, [compareMode, procRetry, origRetry, mainRetry]);
+  }, [compareActive, procRetry, origRetry, mainRetry]);
 
   const imgStyle: React.CSSProperties = {
     transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
@@ -374,6 +392,7 @@ function AdvancedImageViewer({
           fitsH={activeImage.height ?? renderH}
           enabled={regionsEnabled}
         />
+        {canvasHint && !viewerError && <div className={CANVAS_HINT_CLASS}>{canvasHint}</div>}
       </div>
 
       {showOverlay && (

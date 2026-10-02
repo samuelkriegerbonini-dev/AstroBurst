@@ -84,7 +84,7 @@ fn valid_sigma(slice: &[f32]) -> f64 {
     (sum_sq / n as f64 - mean * mean).max(0.0).sqrt()
 }
 
-fn reduce_for_preview(arr: &Array2<f32>, max_dim: usize) -> Option<Array2<f32>> {
+pub(crate) fn reduce_for_preview(arr: &Array2<f32>, max_dim: usize) -> Option<Array2<f32>> {
     let (rows, cols) = arr.dim();
     if rows <= max_dim && cols <= max_dim {
         return None;

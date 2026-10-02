@@ -20,7 +20,8 @@ import {
   WizardState,
   withChannelStage,
 } from "../utils/wizard";
-import type { ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
+import type { AlignRunRecord, ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
+import type { AlignResult } from "../shared/types/compose";
 import { useCompositeActions } from "./CompositeContext";
 
 export type WizardAction =
@@ -149,6 +150,8 @@ export interface WizardStackRun {
   batch: { current: number; total: number; label: string } | null;
 }
 
+export type WizardAlignRun = AlignRunRecord<AlignResult>;
+
 interface ComposeWizardContextValue {
   state: WizardState;
   dispatch: Dispatch<WizardAction>;
@@ -158,6 +161,8 @@ interface ComposeWizardContextValue {
   setCompositeDims: (dims: [number, number]) => void;
   stackRun: WizardStackRun | null;
   setStackRun: (run: WizardStackRun | null) => void;
+  alignRun: WizardAlignRun | null;
+  setAlignRun: (run: WizardAlignRun | null) => void;
 }
 
 const ComposeWizardCtx = createContext<ComposeWizardContextValue | null>(null);
@@ -182,6 +187,7 @@ export function ComposeWizardProvider({ children }: Props) {
   const [activeStep, setActiveStepRaw] = useState("channels");
   const [compositeDims, setCompositeDims] = useState<[number, number] | null>(null);
   const [stackRun, setStackRun] = useState<WizardStackRun | null>(null);
+  const [alignRun, setAlignRun] = useState<WizardAlignRun | null>(null);
   const { clearComposite } = useCompositeActions();
   const wasReadyRef = useRef(state.compositeReady);
 
@@ -216,7 +222,9 @@ export function ComposeWizardProvider({ children }: Props) {
     setCompositeDims,
     stackRun,
     setStackRun,
-  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter, stackRun]);
+    alignRun,
+    setAlignRun,
+  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter, stackRun, alignRun]);
 
   return (
     <ComposeWizardCtx.Provider value={value}>

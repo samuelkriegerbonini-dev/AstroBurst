@@ -1,6 +1,15 @@
 import { useState, useCallback, useRef, useEffect, memo } from "react";
 import { ZoomIn, ZoomOut, Home } from "lucide-react";
-import { FIT_SCALE_CAP, imageRenderingFor, wheelZoomFactor } from "../../utils/viewerZoom";
+import {
+  actualSizeView,
+  clampZoomPanScale,
+  FIT_SCALE_CAP,
+  imageRenderingFor,
+  wheelGestureZooms,
+  wheelZoomFactor,
+  ZOOM_PAN_MAX,
+  type WheelZoomMode,
+} from "../../utils/viewerZoom";
 import { viewScaleAttributes } from "../../utils/starOverlay";
 
 interface ZoomPanViewProps {
@@ -8,13 +17,31 @@ interface ZoomPanViewProps {
   alt?: string;
   className?: string;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
+  preserveView?: boolean;
+  wheelZoom?: WheelZoomMode;
+  actualSizeButton?: boolean;
+  onImageLoad?: (src: string) => void;
+  onImageError?: (src: string) => void;
 }
 
-const ZOOM_MIN = 0.25;
-const ZOOM_MAX = 16;
 const DOUBLE_CLICK_ZOOM = 3;
 
-function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPanViewProps) {
+const CONTROL_BUTTON_CLASS = `w-7 h-7 flex items-center justify-center rounded-md
+  bg-zinc-900/80 backdrop-blur-sm border border-zinc-700/50
+  text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/90
+  transition-all duration-150 active:scale-95`;
+
+function ZoomPanView({
+  src,
+  alt = "",
+  className = "",
+  overlayCanvasRef,
+  preserveView = false,
+  wheelZoom = "always",
+  actualSizeButton = false,
+  onImageLoad,
+  onImageError,
+}: ZoomPanViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [translate, setTranslate] = useState({ x: 0, y: 0 });
@@ -45,8 +72,8 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
   }, [applyFit]);
 
   useEffect(() => {
-    userInteractedRef.current = false;
-  }, [src]);
+    if (!preserveView) userInteractedRef.current = false;
+  }, [src, preserveView]);
 
   const handleImgLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
@@ -54,7 +81,12 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
       naturalRef.current = { w: img.naturalWidth, h: img.naturalHeight };
       if (!userInteractedRef.current) applyFit();
     }
-  }, [applyFit]);
+    onImageLoad?.(img.getAttribute("src") ?? "");
+  }, [applyFit, onImageLoad]);
+
+  const handleImgError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    onImageError?.(e.currentTarget.getAttribute("src") ?? "");
+  }, [onImageError]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -70,6 +102,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
   const pendingWheelRef = useRef<{ factor: number; clientX: number; clientY: number } | null>(null);
 
   const handleWheelNative = useCallback((e: WheelEvent) => {
+    if (!wheelGestureZooms(wheelZoom, e)) return;
     e.preventDefault();
     userInteractedRef.current = true;
     const factor = wheelZoomFactor(e.deltaY, e.deltaMode);
@@ -89,7 +122,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
       const mx = pending.clientX - rect.left;
       const my = pending.clientY - rect.top;
       setScale((prevScale) => {
-        const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevScale * pending.factor));
+        const next = clampZoomPanScale(prevScale * pending.factor, fitScaleRef.current);
         const ratio = next / prevScale;
         setTranslate((t) => ({
           x: mx - ratio * (mx - t.x),
@@ -98,7 +131,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
         return next;
       });
     });
-  }, []);
+  }, [wheelZoom]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -155,7 +188,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
       resetView();
     } else {
       userInteractedRef.current = true;
-      const next = Math.min(ZOOM_MAX, Math.max(DOUBLE_CLICK_ZOOM, fit * DOUBLE_CLICK_ZOOM));
+      const next = Math.min(ZOOM_PAN_MAX, Math.max(DOUBLE_CLICK_ZOOM, fit * DOUBLE_CLICK_ZOOM));
       const ratio = next / scale;
       setTranslate((t) => ({
         x: mx - ratio * (mx - t.x),
@@ -172,7 +205,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
     const cx = container.clientWidth / 2;
     const cy = container.clientHeight / 2;
     setScale((prev) => {
-      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev * factor));
+      const next = clampZoomPanScale(prev * factor, fitScaleRef.current);
       const ratio = next / prev;
       setTranslate((t) => ({
         x: cx - ratio * (cx - t.x),
@@ -185,12 +218,27 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
   const zoomIn = useCallback(() => zoomAt(1.5), [zoomAt]);
   const zoomOut = useCallback(() => zoomAt(1 / 1.5), [zoomAt]);
 
+  const showActualSize = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    userInteractedRef.current = true;
+    const next = actualSizeView(
+      scale,
+      translate,
+      fitScaleRef.current,
+      container.clientWidth,
+      container.clientHeight,
+    );
+    setScale(next.scale);
+    setTranslate(next.pan);
+  }, [scale, translate]);
+
   const zoomPct = `${Math.round(scale * 100)}%`;
 
   return (
     <div
       ref={containerRef}
-      className={`relative overflow-hidden ${className}`}
+      className={`relative overflow-hidden select-none ${className}`}
       style={{ cursor: isPanning ? "grabbing" : "grab" }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -210,6 +258,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
           className="block max-w-none"
           draggable={false}
           onLoad={handleImgLoad}
+          onError={handleImgError}
           style={{ imageRendering: imageRenderingFor(scale) }}
         />
         {overlayCanvasRef && (
@@ -222,7 +271,7 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
         )}
       </div>
 
-      <div className="absolute top-2 right-2 flex flex-col gap-1 z-10">
+      <div className="absolute top-2 right-2 flex flex-col gap-1 z-10" onDoubleClick={(e) => e.stopPropagation()}>
         {[
           { icon: ZoomIn, action: zoomIn, title: "Zoom in" },
           { icon: ZoomOut, action: zoomOut, title: "Zoom out" },
@@ -232,14 +281,22 @@ function ZoomPanView({ src, alt = "", className = "", overlayCanvasRef }: ZoomPa
             key={title}
             onClick={(e) => { e.stopPropagation(); action(); }}
             title={title}
-            className="w-7 h-7 flex items-center justify-center rounded-md
-              bg-zinc-900/80 backdrop-blur-sm border border-zinc-700/50
-              text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/90
-              transition-all duration-150 active:scale-95"
+            className={CONTROL_BUTTON_CLASS}
           >
             <Icon size={13} strokeWidth={1.8} />
           </button>
         ))}
+        {actualSizeButton && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); showActualSize(); }}
+            title="Actual size (100%): one image pixel per screen pixel"
+            aria-label="Actual size, 1:1"
+            className={`${CONTROL_BUTTON_CLASS} text-[9px] font-mono font-semibold`}
+          >
+            1:1
+          </button>
+        )}
       </div>
 
       <div className="absolute bottom-2 left-2 z-10

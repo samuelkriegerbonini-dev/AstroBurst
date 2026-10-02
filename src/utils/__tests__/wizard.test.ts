@@ -1,7 +1,23 @@
 import { describe, it, expect } from "vitest";
 import {
   alignChannelOutcome,
+  alignedRunFromChannels,
+  alignMatchSummary,
+  alignOverlayBinIds,
+  alignOverlayColours,
+  alignOverlayRequest,
+  alignPreviewFrame,
+  alignPreviewLegend,
+  alignBlinkFrame,
+  alignBlinkIndex,
+  alignDisplayedOnLoad,
+  alignRunOutcome,
+  alignViewerState,
+  ALIGN_IMAGE_LOAD_ERROR,
   applyCompositeOp,
+  nextAlignedRunState,
+  sameAlignedRun,
+  formatAlignOffset,
   autoStfBlockedReason,
   binMenuKeyAction,
   binMenuPlacement,
@@ -416,6 +432,343 @@ describe("alignChannelOutcome", () => {
   it("never tags the reference channel", () => {
     expect(alignChannelOutcome({}, "phase_correlation", true)).toEqual({ unregistered: null, usedMethod: null });
     expect(alignChannelOutcome(undefined, "phase_correlation", false)).toEqual({ unregistered: null, usedMethod: null });
+  });
+});
+
+describe("formatAlignOffset", () => {
+  it("reads the backend offset as [dy, dx] and labels both axes with sign and unit", () => {
+    expect(formatAlignOffset([-9, 14])).toBe("Δx +14.0 px  Δy −9.0 px");
+    expect(formatAlignOffset([2.26, -0.34])).toBe("Δx −0.3 px  Δy +2.3 px");
+  });
+
+  it("prints no sign for an offset that rounds to zero, including negative zero", () => {
+    expect(formatAlignOffset([0, 0])).toBe("Δx 0.0 px  Δy 0.0 px");
+    expect(formatAlignOffset([-0.04, 0.04])).toBe("Δx 0.0 px  Δy 0.0 px");
+    expect(formatAlignOffset([-0, -0])).toBe("Δx 0.0 px  Δy 0.0 px");
+  });
+
+  it("says n/a for a non-finite component instead of printing NaN", () => {
+    expect(formatAlignOffset([Number.NaN, 3])).toBe("Δx +3.0 px  Δy n/a");
+  });
+});
+
+describe("alignMatchSummary", () => {
+  it("shows the phase-correlation confidence as a peak SNR", () => {
+    expect(alignMatchSummary({ confidence: 12.345, matched_stars: 0 })).toBe("SNR 12.3");
+    expect(alignMatchSummary({ confidence: 3.2 })).toBe("SNR 3.2");
+  });
+
+  it("shows star matches for the affine method and never a constant confidence", () => {
+    expect(alignMatchSummary({ confidence: 1, matched_stars: 40, inliers: 35, residual_px: 0.412 })).toBe("35/40 stars, 0.41 px");
+    expect(alignMatchSummary({ confidence: 1, matched_stars: 8, inliers: 6 })).toBe("6/8 stars");
+  });
+
+  it("shows nothing for the reference or an identity fallback without confidence", () => {
+    expect(alignMatchSummary(undefined)).toBeNull();
+    expect(alignMatchSummary({})).toBeNull();
+    expect(alignMatchSummary({ confidence: 0, matched_stars: 0 })).toBeNull();
+    expect(alignMatchSummary({ confidence: Number.NaN, matched_stars: 0 })).toBeNull();
+  });
+});
+
+describe("Align overlay channels", () => {
+  it("overlays every channel when there are at most three", () => {
+    expect(alignOverlayBinIds(["ha", "oiii"])).toEqual(["ha", "oiii"]);
+    expect(alignOverlayBinIds(["ha", "oiii", "sii"], ["sii"])).toEqual(["ha", "oiii", "sii"]);
+  });
+
+  it("keeps the reference and takes the next two channels in bin order by default", () => {
+    expect(alignOverlayBinIds(["r", "g", "b", "l"])).toEqual(["r", "g", "b"]);
+    expect(alignOverlayBinIds(["ha", "oiii", "sii", "r", "g"])).toEqual(["ha", "oiii", "sii"]);
+  });
+
+  it("uses the chosen channels in the order given, ignoring the reference, duplicates and unknown ids", () => {
+    expect(alignOverlayBinIds(["r", "g", "b", "l"], ["l", "g"])).toEqual(["r", "l", "g"]);
+    expect(alignOverlayBinIds(["r", "g", "b", "l"], ["r", "l", "l", "x"])).toEqual(["r", "l", "g"]);
+  });
+
+  it("builds a run only when every channel Align used has an aligned key", () => {
+    const channels = [{ binId: "ha", path: "/s/ha.fits" }, { binId: "oiii", path: "/raw/o_1.fits" }];
+    const aligned = { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" };
+    expect(alignedRunFromChannels(channels, aligned)).toEqual({
+      binIds: ["ha", "oiii"],
+      aligned,
+      inputs: { ha: "/s/ha.fits", oiii: "/raw/o_1.fits" },
+    });
+    expect(alignedRunFromChannels(channels, { ha: aligned.ha })).toBeNull();
+    expect(alignedRunFromChannels(channels.slice(0, 1), aligned)).toBeNull();
+  });
+
+  it("compares the aligned keys with the exact inputs Align used, channel for channel", () => {
+    const binIds = ["r", "g", "b", "l"];
+    const run = {
+      binIds,
+      aligned: Object.fromEntries(binIds.map((id) => [id, `__wizard_ch_${id}_aligned`])),
+      inputs: Object.fromEntries(binIds.map((id) => [id, `/in/${id}.fits`])),
+    };
+    expect(alignOverlayRequest(run)).toEqual({
+      binIds: ["r", "g", "b"],
+      afterKeys: ["__wizard_ch_r_aligned", "__wizard_ch_g_aligned", "__wizard_ch_b_aligned"],
+      beforePaths: ["/in/r.fits", "/in/g.fits", "/in/b.fits"],
+    });
+    expect(alignOverlayRequest(run, ["l", "b"])?.beforePaths).toEqual(["/in/r.fits", "/in/l.fits", "/in/b.fits"]);
+    expect(alignOverlayRequest({ ...run, inputs: { r: "/in/r.fits" } })).toBeNull();
+  });
+});
+
+describe("Align overlay legend", () => {
+  it("names the colour of each channel as the overlay renders it", () => {
+    expect(alignOverlayColours(["Hα"])).toBe("grey = Hα (ref)");
+    expect(alignOverlayColours(["Hα", "OIII"])).toBe("R = Hα (ref) · G+B = OIII");
+    expect(alignOverlayColours(["Hα", "OIII", "SII"])).toBe("R = Hα (ref) · G = OIII · B = SII");
+  });
+
+  it("explains what white, colour fringes and the checkerboard mean after Align", () => {
+    expect(alignPreviewLegend(["Hα", "OIII"], "after")).toBe(
+      "R = Hα (ref) · G+B = OIII · white = aligned, coloured fringes = residual offset, checkerboard = no data",
+    );
+  });
+
+  it("calls the fringes of the inputs the original offset", () => {
+    expect(alignPreviewLegend(["R", "G", "B"], "before")).toBe(
+      "R = R (ref) · G = G · B = B · inputs before Align: coloured fringes = original offset, checkerboard = no data",
+    );
+  });
+
+  it("names the two blinked frames, clamping the chosen channel to the overlay", () => {
+    expect(alignPreviewLegend(["Hα", "OIII", "SII"], "blink", 2)).toBe(
+      "blinking Hα (ref) and SII after Align · stars that jump = residual offset · checkerboard = no data",
+    );
+    expect(alignPreviewLegend(["Hα", "OIII"], "blink", 5)).toContain("blinking Hα (ref) and OIII");
+    expect(alignPreviewLegend(["Hα", "OIII"], "blink", 0)).toContain("and OIII");
+  });
+});
+
+describe("Aligned run follows the wizard state", () => {
+  const channels = [{ binId: "ha", path: "/s/ha.fits" }, { binId: "oiii", path: "/raw/o_1.fits" }];
+  const aligned = { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" };
+
+  it("keeps the same run object while neither the aligned keys nor the inputs change", () => {
+    const first = nextAlignedRunState(null, channels, aligned, false);
+    expect(first.run?.binIds).toEqual(["ha", "oiii"]);
+    expect(nextAlignedRunState(first, channels.map((c) => ({ ...c })), aligned, false)).toBe(first);
+  });
+
+  it("starts a new run when Align stores its keys again under the same names", () => {
+    const first = nextAlignedRunState(null, channels, aligned, false);
+    const again = nextAlignedRunState(first, channels, { ...aligned }, false);
+    expect(again).not.toBe(first);
+    expect(again.run).not.toBe(first.run);
+    expect(again.run).toEqual(first.run);
+  });
+
+  it("hides the run while Align is running and shows the stored keys once it settles", () => {
+    const first = nextAlignedRunState(null, channels, aligned, false);
+    const running = nextAlignedRunState(first, channels, aligned, true);
+    expect(running.run).toBeNull();
+    const settled = nextAlignedRunState(running, channels, { ...aligned }, false);
+    expect(settled.run?.aligned).toEqual(aligned);
+  });
+
+  it("drops the run when a new stack clears the aligned keys and follows a changed input", () => {
+    const first = nextAlignedRunState(null, channels, aligned, false);
+    expect(nextAlignedRunState(first, channels, {}, false).run).toBeNull();
+    const restacked = [{ binId: "ha", path: "/s/ha_2.fits" }, channels[1]];
+    expect(nextAlignedRunState(first, restacked, aligned, false).run?.inputs.ha).toBe("/s/ha_2.fits");
+  });
+
+  it("compares runs by bins, keys and inputs", () => {
+    const run = { binIds: ["ha", "oiii"], aligned, inputs: { ha: "/a", oiii: "/b" } };
+    expect(sameAlignedRun(run, { ...run, aligned: { ...aligned } })).toBe(true);
+    expect(sameAlignedRun(run, { ...run, inputs: { ha: "/a", oiii: "/c" } })).toBe(false);
+    expect(sameAlignedRun(run, { ...run, binIds: ["oiii", "ha"] })).toBe(false);
+    expect(sameAlignedRun(null, null)).toBe(true);
+    expect(sameAlignedRun(run, null)).toBe(false);
+  });
+});
+
+describe("Align preview frame", () => {
+  const names = { ha: "Hα", oiii: "OIII", sii: "SII" };
+  const after = { previewUrl: "after.png", frameUrls: ["f0.png", "f1.png", "f2.png"], binIds: ["ha", "oiii", "sii"] };
+  const before = { previewUrl: "before.png", frameUrls: [], binIds: ["ha", "sii"] };
+  const still = { on: false, showOther: false, index: 1 };
+
+  it("shows the overlay of the chosen view with the labels of the request that produced it", () => {
+    expect(alignPreviewFrame("after", still, after, before, names)).toMatchObject({
+      view: "after", src: "after.png", label: "After Align", labels: ["Hα", "OIII", "SII"],
+    });
+    expect(alignPreviewFrame("before", still, after, before, names)).toMatchObject({
+      view: "before", src: "before.png", label: "Before Align", labels: ["Hα", "SII"],
+    });
+  });
+
+  it("pairs blink frame i with bin i and alternates it with the reference", () => {
+    expect(alignPreviewFrame("after", { on: true, showOther: true, index: 2 }, after, before, names)).toMatchObject({
+      view: "blink", src: "f2.png", label: "SII", blinkIndex: 2,
+    });
+    expect(alignPreviewFrame("before", { on: true, showOther: false, index: 2 }, after, before, names)).toMatchObject({
+      view: "blink", src: "f0.png", label: "Hα (ref)",
+    });
+  });
+
+  it("clamps the blinked channel to the frames that have a bin", () => {
+    const twoBins = { ...after, binIds: ["ha", "oiii"] };
+    expect(alignPreviewFrame("after", { on: true, showOther: true, index: 5 }, twoBins, null, names)).toMatchObject({
+      src: "f1.png", label: "OIII", blinkIndex: 1,
+    });
+    expect(alignPreviewFrame("after", { on: true, showOther: true, index: 0 }, after, null, names).blinkIndex).toBe(1);
+  });
+
+  it("does not blink without two frames with a bin and shows nothing before a render arrives", () => {
+    const single = { ...after, frameUrls: ["f0.png"] };
+    expect(alignPreviewFrame("after", { on: true, showOther: true, index: 1 }, single, null, names)).toMatchObject({
+      view: "after", src: "after.png", canBlink: false,
+    });
+    expect(alignPreviewFrame("before", still, after, null, names)).toMatchObject({ src: "", labels: [] });
+  });
+
+  it("names a bin without a label by its id", () => {
+    expect(alignPreviewFrame("after", { on: true, showOther: true, index: 1 }, after, null, { ha: "Hα" }).label).toBe("oiii");
+  });
+});
+
+describe("Align blink frames", () => {
+  const frames = ["f0.png", "f1.png", "f2.png"];
+
+  it("pairs frame i with the bin id at index i of the request that produced the frames", () => {
+    expect(alignBlinkFrame(frames, ["ha", "oiii", "sii"], 1, true)).toEqual({ src: "f1.png", binId: "oiii", index: 1 });
+    expect(alignBlinkFrame(frames, ["ha", "oiii", "sii"], 2, true)).toEqual({ src: "f2.png", binId: "sii", index: 2 });
+    expect(alignBlinkFrame(frames, ["r", "l", "b"], 2, true)).toEqual({ src: "f2.png", binId: "b", index: 2 });
+  });
+
+  it("shows the reference frame between the blinks whatever channel is chosen", () => {
+    expect(alignBlinkFrame(frames, ["ha", "oiii", "sii"], 2, false)).toEqual({ src: "f0.png", binId: "ha", index: 0 });
+  });
+
+  it("only pairs the frames that have a bin and clamps the choice to them", () => {
+    expect(alignBlinkFrame(frames, ["ha", "oiii"], 2, true)).toEqual({ src: "f1.png", binId: "oiii", index: 1 });
+    expect(alignBlinkFrame(["f0.png", "f1.png"], ["ha", "oiii", "sii"], 2, true)).toEqual({ src: "f1.png", binId: "oiii", index: 1 });
+    expect(alignBlinkIndex(0, 3)).toBe(1);
+    expect(alignBlinkIndex(7, 3)).toBe(2);
+  });
+
+  it("has nothing to blink with fewer than two pairs", () => {
+    expect(alignBlinkFrame(["f0.png"], ["ha", "oiii"], 1, true)).toBeNull();
+    expect(alignBlinkFrame(frames, ["ha"], 1, true)).toBeNull();
+    expect(alignBlinkFrame([], [], 1, false)).toBeNull();
+  });
+});
+
+describe("Align viewer keeps the last image", () => {
+  const names = { ha: "Hα", oiii: "OIII" };
+  const afterShown = { previewUrl: "after.png", frameUrls: ["f0.png", "f1.png"], binIds: ["ha", "oiii"] };
+  const beforeShown = { previewUrl: "before.png", frameUrls: [], binIds: ["ha", "oiii"] };
+  const still = { on: false, showOther: false, index: 1 };
+  const ready = { hasRequest: true, loading: false, error: "", brokenSrc: "" };
+  const afterFrame = alignPreviewFrame("after", still, afterShown, beforeShown, names);
+
+  it("shows the requested image and describes it once it has loaded", () => {
+    const viewer = alignViewerState(afterFrame, null, ready);
+    expect(viewer).toMatchObject({ src: "after.png", pending: false, error: "" });
+    expect(viewer.shown?.label).toBe("After Align");
+    expect(alignDisplayedOnLoad("after.png", afterFrame, null)).toBe(afterFrame);
+  });
+
+  it("keeps the shown image mounted under a spinner while the requested view has not rendered yet", () => {
+    const beforePending = alignPreviewFrame("before", still, afterShown, null, names);
+    const viewer = alignViewerState(beforePending, afterFrame, { ...ready, loading: true });
+    expect(viewer).toMatchObject({ src: "after.png", pending: true, error: "" });
+    expect(viewer.shown?.label).toBe("After Align");
+  });
+
+  it("names the image on screen, not the requested one, until the requested image has loaded", () => {
+    const beforeFrame = alignPreviewFrame("before", still, afterShown, beforeShown, names);
+    const switching = alignViewerState(beforeFrame, afterFrame, ready);
+    expect(switching.src).toBe("before.png");
+    expect(switching.shown?.label).toBe("After Align");
+    const loaded = alignDisplayedOnLoad("before.png", beforeFrame, afterFrame);
+    expect(alignViewerState(beforeFrame, loaded, ready).shown?.label).toBe("Before Align");
+  });
+
+  it("ignores a load event of an image that is no longer requested", () => {
+    const beforeFrame = alignPreviewFrame("before", still, afterShown, beforeShown, names);
+    expect(alignDisplayedOnLoad("after.png", beforeFrame, afterFrame)).toBe(afterFrame);
+    expect(alignDisplayedOnLoad("", beforeFrame, null)).toBeNull();
+  });
+
+  it("follows a blink frame with the label and legend of the same frame", () => {
+    const blinkOther = alignPreviewFrame("after", { on: true, showOther: true, index: 1 }, afterShown, null, names);
+    const shownRef = alignPreviewFrame("after", { on: true, showOther: false, index: 1 }, afterShown, null, names);
+    const viewer = alignViewerState(blinkOther, shownRef, ready);
+    expect(viewer.src).toBe("f1.png");
+    expect(viewer.shown?.label).toBe("Hα (ref)");
+    const loaded = alignDisplayedOnLoad("f1.png", blinkOther, shownRef);
+    expect(alignViewerState(blinkOther, loaded, ready).shown).toMatchObject({ label: "OIII", view: "blink", blinkIndex: 1 });
+  });
+
+  it("keeps the old image of the same view under a spinner while a new render is pending", () => {
+    expect(alignViewerState(afterFrame, afterFrame, { ...ready, loading: true })).toMatchObject({
+      src: "after.png", pending: true,
+    });
+  });
+
+  it("shows the error of the requested view instead of an older image", () => {
+    const beforeFailed = alignPreviewFrame("before", still, afterShown, null, names);
+    expect(alignViewerState(beforeFailed, afterFrame, { ...ready, error: "boom" })).toEqual({
+      src: "", pending: false, shown: null, error: "boom",
+    });
+  });
+
+  it("reports an image that failed to load instead of naming it", () => {
+    expect(alignViewerState(afterFrame, null, { ...ready, brokenSrc: "after.png" })).toEqual({
+      src: "", pending: false, shown: null, error: ALIGN_IMAGE_LOAD_ERROR,
+    });
+  });
+
+  it("clears the viewer when there is nothing to render, before the first image or while Align runs", () => {
+    const empty = alignPreviewFrame("after", still, null, null, names);
+    expect(alignViewerState(empty, null, { ...ready, loading: true })).toEqual({
+      src: "", pending: false, shown: null, error: "",
+    });
+    expect(alignViewerState(afterFrame, afterFrame, { ...ready, hasRequest: false })).toEqual({
+      src: "", pending: false, shown: null, error: "",
+    });
+  });
+});
+
+describe("Align run across remounts of the step", () => {
+  const channels = [{ binId: "ha", path: "/s/ha.fits" }, { binId: "oiii", path: "/s/oiii.fits" }];
+  const inputs = channels.map((c) => c.path);
+  const aligned = { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" };
+  const result = { offsets: [[0, 0], [3, -2]] };
+
+  it("hides the stored keys from a step mounted while Align is still running", () => {
+    const remounted = nextAlignedRunState(null, channels, aligned, true);
+    expect(remounted.run).toBeNull();
+    const settled = nextAlignedRunState(remounted, channels, { ...aligned }, false);
+    expect(settled.run?.aligned).toEqual(aligned);
+  });
+
+  it("shows no outcome while the run is in flight", () => {
+    expect(alignRunOutcome({ running: true, inputs, result: null, error: "" }, inputs, true)).toEqual({
+      result: null, error: "",
+    });
+    expect(alignRunOutcome(null, inputs, true)).toEqual({ result: null, error: "" });
+  });
+
+  it("gives a remounted step the outcome of the run that finished meanwhile", () => {
+    expect(alignRunOutcome({ running: false, inputs, result, error: "" }, inputs, true)).toEqual({ result, error: "" });
+    expect(alignRunOutcome({ running: false, inputs, result: null, error: "boom" }, [...inputs], false)).toEqual({
+      result: null, error: "boom",
+    });
+  });
+
+  it("drops the outcome once the inputs change or the aligned keys are cleared", () => {
+    expect(alignRunOutcome({ running: false, inputs, result, error: "" }, ["/s/ha_2.fits", inputs[1]], true)).toEqual({
+      result: null, error: "",
+    });
+    expect(alignRunOutcome({ running: false, inputs, result, error: "" }, inputs.slice(0, 1), true).result).toBeNull();
+    expect(alignRunOutcome({ running: false, inputs, result, error: "" }, inputs, false).result).toBeNull();
   });
 });
 

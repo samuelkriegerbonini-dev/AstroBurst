@@ -14,12 +14,12 @@ use crate::infra::cache::ImageEntry;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_PNG_PATH, LRGB_APPLIED};
 
 const COMPOSITE_PNG_PREFIX: &str = "rgb_composite";
-const COMPOSITE_PNG_GRACE: Duration = Duration::from_secs(600);
+pub(super) const STALE_PNG_GRACE: Duration = Duration::from_secs(600);
 
-fn is_stale_composite_png(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
+fn is_stale_png(entry: &std::fs::DirEntry, prefix: &str, now: SystemTime) -> bool {
     let name = entry.file_name();
     let name = name.to_string_lossy();
-    if !name.starts_with(COMPOSITE_PNG_PREFIX) || !name.ends_with(".png") {
+    if !name.starts_with(prefix) || !name.ends_with(".png") {
         return false;
     }
     entry
@@ -27,18 +27,22 @@ fn is_stale_composite_png(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
         .and_then(|m| m.modified())
         .ok()
         .and_then(|modified| now.duration_since(modified).ok())
-        .is_some_and(|age| age > COMPOSITE_PNG_GRACE)
+        .is_some_and(|age| age > STALE_PNG_GRACE)
 }
 
-pub(super) fn composite_png_path(output_dir: &str) -> String {
-    let now = SystemTime::now();
+pub(super) fn remove_stale_pngs(output_dir: &str, prefix: &str, now: SystemTime) {
     if let Ok(entries) = std::fs::read_dir(output_dir) {
         for entry in entries.flatten() {
-            if is_stale_composite_png(&entry, now) {
+            if is_stale_png(&entry, prefix, now) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
+}
+
+pub(super) fn composite_png_path(output_dir: &str) -> String {
+    let now = SystemTime::now();
+    remove_stale_pngs(output_dir, COMPOSITE_PNG_PREFIX, now);
     let ts = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -271,7 +275,7 @@ mod tests {
         for p in [&fresh, &stale, &other] {
             std::fs::write(p, b"png").unwrap();
         }
-        let old = SystemTime::now() - COMPOSITE_PNG_GRACE - Duration::from_secs(60);
+        let old = SystemTime::now() - STALE_PNG_GRACE - Duration::from_secs(60);
         std::fs::OpenOptions::new().write(true).open(&stale).unwrap().set_modified(old).unwrap();
 
         let next = composite_png_path(out);
