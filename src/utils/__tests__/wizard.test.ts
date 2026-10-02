@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { createElement } from "react";
+import { prerender } from "react-dom/static";
+import { CompositeProvider } from "../../context/CompositeContext";
+import { ComposeWizardProvider, useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
   alignChannelOutcome,
   alignedRunFromChannels,
@@ -15,8 +19,23 @@ import {
   alignViewerState,
   ALIGN_IMAGE_LOAD_ERROR,
   applyCompositeOp,
+  ALIGN_INPUTS_CHANGED,
+  alignInputs,
+  alignRunFinish,
+  BACKGROUND_UNALIGNED_NOTICE,
+  backgroundAlignNotice,
+  discardsNotice,
+  effectiveBinFiles,
+  fullyExcludedBins,
+  nextAlignRun,
   nextAlignedRunState,
+  rerunDiscards,
+  resolveChannelPath,
+  sameAlignInputs,
   sameAlignedRun,
+  unalignedBins,
+  unstackedBins,
+  withExcludedFiles,
   formatAlignOffset,
   autoStfBlockedReason,
   binMenuKeyAction,
@@ -299,6 +318,15 @@ describe("wizard step gates", () => {
   const twoChannels = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] });
   const aligned = { ...twoChannels, alignedPaths: { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" } };
   const blended = { ...aligned, compositeReady: true };
+  const twoUnstacked = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o1.fits", "/o2.fits"] });
+  const halfStacked = { ...twoUnstacked, stackedPaths: { ha: "/out/stacked_ha_1.fits" } };
+  const keptOne = { ...twoUnstacked, excludedFiles: { ha: ["/h1.fits"], oiii: ["/o2.fits"] } };
+  const allExcluded = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] }, { excludedFiles: { ha: ["/h1.fits", "/h2.fits"] } });
+  const allExcludedOfThree = { ...allExcluded, bins: stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"], sii: ["/s.fits"] }).bins };
+  const R1_STEPS = ["align", "background", "blend", "colorbalance", "stretch", "export"];
+  const FIXTURES = [
+    empty, oneFrame, oneChannelStack, twoChannels, aligned, blended, twoUnstacked, halfStacked, keptOne, allExcluded, allExcludedOfThree,
+  ];
 
   it("keeps Export locked until a channel is assigned or a composite exists", () => {
     expect(stepById("export").enabled(empty)).toBe(false);
@@ -307,7 +335,7 @@ describe("wizard step gates", () => {
   });
 
   it("gives a reason exactly when a step is locked", () => {
-    for (const s of [empty, oneFrame, oneChannelStack, twoChannels, aligned, blended]) {
+    for (const s of FIXTURES) {
       for (const step of STEPS) {
         expect(step.blockedReason(s) === null, `${step.id}`).toBe(step.enabled(s));
       }
@@ -329,10 +357,375 @@ describe("wizard step gates", () => {
     expect(stepById("export").blockedReason(empty)).toBe("assign frames in step 1");
   });
 
+  it("asks to stack a single channel with 2+ frames before BG, Stretch and Export", () => {
+    const reason = "stack Hα first (2+ frames), or keep one file per channel";
+    expect(stepById("background").blockedReason(oneChannelStack)).toBe(reason);
+    expect(stepById("stretch").blockedReason(oneChannelStack)).toBe(reason);
+    expect(stepById("export").blockedReason(oneChannelStack)).toBe(reason);
+    expect(stepById("align").blockedReason(oneChannelStack)).toBe("assign at least 2 channels");
+    expect(stepById("blend").blockedReason(oneChannelStack)).toBe("assign at least 2 channels");
+  });
+
+  it("names every unstacked channel in the gates of Align, BG, Blend, Color, Stretch and Export", () => {
+    const reason = "stack Hα and OIII first (2+ frames each), or keep one file per channel";
+    for (const id of R1_STEPS) {
+      expect(stepById(id).blockedReason(twoUnstacked), id).toBe(reason);
+    }
+    const three = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o1.fits", "/o2.fits"], sii: ["/s1.fits", "/s2.fits"] });
+    expect(stepById("align").blockedReason(three)).toBe(
+      "stack Hα, OIII and SII first (2+ frames each), or keep one file per channel",
+    );
+    expect(stepById("align").blockedReason(halfStacked)).toBe("stack OIII first (2+ frames), or keep one file per channel");
+  });
+
+  it("opens the later steps once every channel is stacked or keeps a single effective file", () => {
+    const stacked = { ...twoUnstacked, stackedPaths: { ha: "/out/stacked_ha_1.fits", oiii: "/out/stacked_oiii_1.fits" } };
+    for (const s of [stacked, keptOne]) {
+      for (const id of R1_STEPS) {
+        expect(stepById(id).blockedReason(s), id).toBeNull();
+      }
+    }
+  });
+
+  it("names a channel whose frames are all excluded in the gates of Align, BG, Blend, Color, Stretch and Export", () => {
+    for (const s of [allExcluded, allExcludedOfThree]) {
+      for (const id of R1_STEPS) {
+        expect(stepById(id).blockedReason(s), id).toBe("all Hα frames are excluded; re-include one in Stack");
+      }
+    }
+    const two = { ...allExcludedOfThree, excludedFiles: { ha: ["/h1.fits", "/h2.fits"], sii: ["/s.fits"] } };
+    expect(stepById("align").blockedReason(two)).toBe("all Hα and SII frames are excluded; re-include one per channel in Stack");
+    const alsoUnstacked = stateWith(
+      { ha: ["/h1.fits", "/h2.fits"], oiii: ["/o1.fits", "/o2.fits"] },
+      { excludedFiles: { ha: ["/h1.fits", "/h2.fits"] } },
+    );
+    expect(stepById("align").blockedReason(alsoUnstacked)).toBe("all Hα frames are excluded; re-include one in Stack");
+    const lone = stateWith({ ha: ["/h1.fits", "/h2.fits"] }, { excludedFiles: { ha: ["/h1.fits", "/h2.fits"] } });
+    for (const id of ["background", "stretch", "export"]) {
+      expect(stepById(id).blockedReason(lone), id).toBe("all Hα frames are excluded; re-include one in Stack");
+    }
+  });
+
+  it("keeps a stacked channel usable when its frames are excluded afterwards", () => {
+    const stacked = { ...allExcluded, stackedPaths: { ha: "/out/stacked_ha_1.fits" } };
+    expect(fullyExcludedBins(stacked)).toEqual([]);
+    expect(fullyExcludedBins(allExcluded).map((b) => b.id)).toEqual(["ha"]);
+    for (const id of R1_STEPS) {
+      expect(stepById(id).blockedReason(stacked), id).toBeNull();
+    }
+  });
+
+  it("opens Align, BG and Blend only when every filled channel has an input", () => {
+    for (const s of FIXTURES) {
+      const filled = s.bins.filter((b) => b.files.length > 0).length;
+      for (const id of ["align", "background", "blend"]) {
+        if (stepById(id).enabled(s)) expect(alignInputs(s), id).toHaveLength(filled);
+      }
+    }
+  });
+
+  it("leaves the composite steps open once Blend has built the composite", () => {
+    const composite = { ...twoUnstacked, compositeReady: true };
+    for (const id of ["colorbalance", "stretch", "export"]) {
+      expect(stepById(id).blockedReason(composite), id).toBeNull();
+    }
+    expect(stepById("blend").blockedReason(composite)).not.toBeNull();
+  });
+
+  it("suggests only Stack while a channel with 2+ frames is unstacked", () => {
+    expect(nextEnabledStep("channels", twoUnstacked)).toBe("stack");
+    expect(nextEnabledStep("stack", twoUnstacked)).toBeNull();
+    expect(nextEnabledStep("stack", halfStacked)).toBeNull();
+  });
+
   it("suggests Crop after the first Align when the suggestion reads the state that holds the aligned paths", () => {
     expect(nextEnabledStep("align", twoChannels)).toBe("background");
     expect(nextEnabledStep("align", aligned)).toBe("crop");
     expect(nextEnabledStep("blend", blended)).toBe("colorbalance");
+  });
+});
+
+describe("unstacked channels and excluded files", () => {
+  it("counts the files left after exclusions and ignores stacked bins", () => {
+    const s = stateWith(
+      { ha: ["/h1.fits", "/h2.fits", "/h3.fits"], oiii: ["/o1.fits", "/o2.fits"], sii: ["/s1.fits", "/s2.fits"], r: ["/r.fits"] },
+      { excludedFiles: { ha: ["/h1.fits", "/h3.fits"] }, stackedPaths: { sii: "/out/stacked_sii_1.fits" } },
+    );
+    expect(effectiveBinFiles(s, s.bins.find((b) => b.id === "ha")!)).toEqual(["/h2.fits"]);
+    expect(unstackedBins(s).map((b) => b.id)).toEqual(["oiii"]);
+  });
+
+  it("never resolves a channel to an excluded file", () => {
+    const s = stateWith({ ha: ["/h1.fits", "/h2.fits"] }, { excludedFiles: { ha: ["/h1.fits"] } });
+    expect(resolveChannelPath(s, "ha")).toBe("/h2.fits");
+    expect(resolveChannelPath({ ...s, excludedFiles: { ha: ["/h1.fits", "/h2.fits"] } }, "ha")).toBeNull();
+    expect(resolveChannelPath({ ...s, stackedPaths: { ha: "/out/stacked_ha_1.fits" } }, "ha")).toBe("/out/stacked_ha_1.fits");
+  });
+
+  it("reads the header of the file the channel uses, not an excluded one", () => {
+    const s = stateWith(
+      { ha: ["/raw/ha_1.fits", "/raw/ha_2.fits"], oiii: ["/raw/o_1.fits"] },
+      { excludedFiles: { ha: ["/raw/ha_1.fits"] }, alignedPaths: { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" } },
+    );
+    expect(wizardHeaderSourcePath(s, [])).toBe("/raw/ha_2.fits");
+  });
+
+  it("drops the results built on a channel whose input an exclusion changes, and keeps them otherwise", () => {
+    const base = stateWith(
+      { ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] },
+      {
+        excludedFiles: { ha: ["/h1.fits"] },
+        alignedPaths: { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" },
+        backgroundPaths: { ha: "__wizard_ch_ha_bg" },
+        compositeReady: true,
+        completedSteps: { channels: true, stack: true, align: true, background: true, blend: true },
+      },
+    );
+    const switched = withExcludedFiles(base, "ha", ["/h2.fits"]);
+    expect(switched.excludedFiles.ha).toEqual(["/h2.fits"]);
+    expect(switched.alignedPaths).toEqual({});
+    expect(switched.backgroundPaths).toEqual({});
+    expect(switched.compositeReady).toBe(false);
+    expect(switched.completedSteps).toEqual({ channels: true, stack: true });
+    const same = withExcludedFiles(base, "ha", ["/h1.fits"]);
+    expect(same.alignedPaths).toBe(base.alignedPaths);
+    expect(same.compositeReady).toBe(true);
+    const stacked = { ...base, stackedPaths: { ha: "/out/stacked_ha_1.fits" } };
+    expect(withExcludedFiles(stacked, "ha", ["/h2.fits"]).alignedPaths).toBe(base.alignedPaths);
+    expect(withExcludedFiles(stacked, "ha", []).alignedPaths).toBe(base.alignedPaths);
+  });
+
+  it("drops the composite when re-including a frame makes the channel need a stack, although its input file is the same", () => {
+    const base = stateWith(
+      { ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] },
+      {
+        excludedFiles: { ha: ["/h2.fits"] },
+        alignedPaths: { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" },
+        compositeReady: true,
+        completedSteps: { channels: true, align: true, blend: true },
+      },
+    );
+    const reincluded = withExcludedFiles(base, "ha", []);
+    expect(resolveChannelPath(reincluded, "ha", "stacked")).toBe(resolveChannelPath(base, "ha", "stacked"));
+    expect(reincluded.compositeReady).toBe(false);
+    expect(reincluded.alignedPaths).toEqual({});
+    expect(reincluded.completedSteps).toEqual({ channels: true });
+    for (const id of ["align", "background", "blend", "colorbalance", "stretch", "export"]) {
+      expect(STEPS.find((s) => s.id === id)!.blockedReason(reincluded), id).toBe(
+        "stack Hα first (2+ frames), or keep one file per channel",
+      );
+    }
+  });
+
+  it("drops the results built on a channel when every one of its frames is excluded", () => {
+    const base = stateWith(
+      { ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] },
+      {
+        excludedFiles: { ha: ["/h2.fits"] },
+        alignedPaths: { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" },
+        compositeReady: true,
+      },
+    );
+    const none = withExcludedFiles(base, "ha", ["/h1.fits", "/h2.fits"]);
+    expect(resolveChannelPath(none, "ha")).toBeNull();
+    expect(none.alignedPaths).toEqual({});
+    expect(none.compositeReady).toBe(false);
+  });
+});
+
+describe("dependency warnings between Align, Crop, BG and Blend", () => {
+  const two = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] });
+  const alignedKeys = { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" };
+
+  it("flags every filled channel without an aligned key once 2+ channels are filled, whatever its later stage", () => {
+    expect(unalignedBins(stateWith({ ha: ["/h.fits"] }))).toEqual([]);
+    expect(unalignedBins(two).map((b) => b.id)).toEqual(["ha", "oiii"]);
+    const afterBg = { ...two, backgroundPaths: { ha: "__wizard_ch_ha_bg", oiii: "__wizard_ch_oiii_bg" } };
+    expect(unalignedBins(afterBg).map((b) => b.id)).toEqual(["ha", "oiii"]);
+    expect(unalignedBins({ ...afterBg, alignedPaths: alignedKeys })).toEqual([]);
+    expect(unalignedBins({ ...two, alignedPaths: { ha: alignedKeys.ha } }).map((b) => b.id)).toEqual(["oiii"]);
+  });
+
+  it("warns in BG only when 2+ channels are filled and Align was skipped", () => {
+    expect(backgroundAlignNotice(stateWith({ ha: ["/h.fits"] }))).toBeNull();
+    expect(backgroundAlignNotice(two)).toBe(BACKGROUND_UNALIGNED_NOTICE);
+    expect(backgroundAlignNotice({ ...two, alignedPaths: alignedKeys })).toBeNull();
+  });
+
+  it("lists the later results a new Align or Crop would clear, in step order", () => {
+    const full = {
+      ...two,
+      alignedPaths: alignedKeys,
+      croppedPaths: { ha: "__wizard_ch_ha_cropped", oiii: "__wizard_ch_oiii_cropped" },
+      backgroundPaths: { ha: "__wizard_ch_ha_bg" },
+      compositeReady: true,
+      channelResults: withChannelStage({}, "ha", "starless", starless),
+      completedSteps: { channels: true, align: true, crop: true, background: true, blend: true, colorbalance: true, adjust: true },
+    };
+    expect(rerunDiscards(full, "align")).toEqual(["Crop", "BG", "Blend", "Color", "Stretch", "Adjust"]);
+    expect(rerunDiscards(full, "crop")).toEqual(["BG", "Blend", "Color", "Stretch", "Adjust"]);
+    expect(rerunDiscards({ ...two, backgroundPaths: { ha: "__wizard_ch_ha_bg" } }, "align")).toEqual(["BG"]);
+    expect(rerunDiscards(two, "align")).toEqual([]);
+    expect(rerunDiscards(full, "unknown")).toEqual([]);
+  });
+
+  it("names only what invalidateDownstream actually clears", () => {
+    const s = { ...two, backgroundPaths: { ha: "__wizard_ch_ha_bg" }, compositeReady: true };
+    const after = { ...s, ...invalidateDownstream(s, "background") };
+    expect(rerunDiscards(s, "background")).toEqual(["Blend"]);
+    expect(after.backgroundPaths).toEqual(s.backgroundPaths);
+    expect(after.compositeReady).toBe(false);
+  });
+
+  it("writes one short line, or nothing when there is nothing to discard", () => {
+    expect(discardsNotice("Running Align", ["BG", "Blend"])).toBe("Running Align discards: BG, Blend");
+    expect(discardsNotice("Apply or Skip", [])).toBeNull();
+  });
+});
+
+describe("Align result that lands after its inputs changed", () => {
+  const base = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] }, { stackedPaths: { ha: "/out/stacked_ha_1.fits" } });
+  const result = { channels: [] };
+
+  it("takes the stacked or single-file input of every filled bin, with its bin id", () => {
+    expect(alignInputs(base)).toEqual([
+      { binId: "ha", path: "/out/stacked_ha_1.fits" },
+      { binId: "oiii", path: "/o.fits" },
+    ]);
+    const bg = { ...base, backgroundPaths: { ha: "__wizard_ch_ha_bg" }, alignedPaths: { ha: "__wizard_ch_ha_aligned" } };
+    expect(alignInputs(bg)).toEqual(alignInputs(base));
+  });
+
+  it("compares bin ids and paths in order", () => {
+    const a = alignInputs(base);
+    expect(sameAlignInputs(a, a.map((x) => ({ ...x })))).toBe(true);
+    expect(sameAlignInputs(a, [{ ...a[0], binId: "r" }, a[1]])).toBe(false);
+    expect(sameAlignInputs(a, [a[1], a[0]])).toBe(false);
+    expect(sameAlignInputs(a, a.slice(0, 1))).toBe(false);
+  });
+
+  it("stores the keys of a run whose inputs did not change", () => {
+    const started = alignInputs(base);
+    expect(alignRunFinish(started, alignInputs({ ...base }), result, "")).toEqual({
+      record: { running: false, inputs: ["/out/stacked_ha_1.fits", "/o.fits"], result, error: "" },
+      store: true,
+    });
+    expect(alignRunFinish(started, alignInputs(base), null, "boom")).toEqual({
+      record: { running: false, inputs: ["/out/stacked_ha_1.fits", "/o.fits"], result: null, error: "boom" },
+      store: false,
+    });
+  });
+
+  it("discards a run when a new stack or new bins changed its inputs mid-run, and says why", () => {
+    const started = alignInputs(base);
+    const restacked = { ...base, ...invalidateDownstream(base, "stack"), stackedPaths: { ha: "/out/stacked_ha_2.fits" } };
+    const outcome = alignRunFinish(started, alignInputs(restacked), result, "");
+    expect(outcome.store).toBe(false);
+    expect(outcome.record).toEqual({
+      running: false, inputs: ["/out/stacked_ha_2.fits", "/o.fits"], result: null, error: ALIGN_INPUTS_CHANGED,
+    });
+    const shown = alignRunOutcome(outcome.record, alignInputs(restacked).map((c) => c.path), false);
+    expect(shown).toEqual({ result: null, error: "Inputs changed while aligning; run Align again" });
+    const rebinned = stateWith({ ha: ["/h1.fits", "/h2.fits"], sii: ["/o.fits"] }, { stackedPaths: base.stackedPaths });
+    expect(alignRunFinish(started, alignInputs(rebinned), result, "").store).toBe(false);
+    expect(alignRunFinish(started, alignInputs(stateWith({})), result, "boom").record.error).toBe(ALIGN_INPUTS_CHANGED);
+  });
+
+  it("discards a run when an exclusion changes the file a channel uses", () => {
+    const single = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] }, { excludedFiles: { ha: ["/h1.fits"] } });
+    const started = alignInputs(single);
+    const switched = withExcludedFiles(single, "ha", ["/h2.fits"]);
+    expect(alignRunFinish(started, alignInputs(switched), result, "").store).toBe(false);
+  });
+});
+
+describe("Align run record across a reset", () => {
+  const running = { running: true, inputs: ["/a", "/b"], result: null, error: "" };
+  const finished = { running: false, inputs: ["/a", "/b"], result: { ok: 1 }, error: "" };
+
+  it("records the finished run when it is still the current one", () => {
+    const started = nextAlignRun(null, { type: "start", run: running });
+    expect(nextAlignRun(started, { type: "finish", started: running, run: finished })).toBe(finished);
+  });
+
+  it("clears the record on reset, also while a run is in flight, and ignores that run's late finish", () => {
+    const started = nextAlignRun(null, { type: "start", run: running });
+    const reset = nextAlignRun(started, { type: "reset" });
+    expect(reset).toBeNull();
+    expect(nextAlignRun(reset, { type: "finish", started: running, run: finished })).toBeNull();
+  });
+
+  it("keeps a newer run when an older one finishes", () => {
+    const newer = { running: true, inputs: ["/c", "/d"], result: null, error: "" };
+    const afterReset = nextAlignRun(nextAlignRun(null, { type: "start", run: running }), { type: "reset" });
+    const current = nextAlignRun(afterReset, { type: "start", run: newer });
+    expect(nextAlignRun(current, { type: "finish", started: running, run: finished })).toBe(newer);
+  });
+});
+
+type WizardContextValue = ReturnType<typeof useComposeWizardContext>;
+
+async function mountWizard(): Promise<WizardContextValue> {
+  const seen: WizardContextValue[] = [];
+  function Capture(): null {
+    seen.push(useComposeWizardContext());
+    return null;
+  }
+  const tree = createElement(CompositeProvider, {
+    children: createElement(ComposeWizardProvider, { children: createElement(Capture) }),
+  });
+  await prerender(tree);
+  return seen[0];
+}
+
+describe("wizard provider", () => {
+  const binsOf = (files: Record<string, string[]>) => stateWith(files).bins;
+  const analysis = { subframes: [], total: 2, accepted: 0, rejected: 2, elapsed_ms: 1 };
+  const running = { running: true, inputs: ["/a", "/b"], result: null, error: "" };
+  const finished = { ...running, running: false };
+
+  it("reads actions dispatched before the next render through getState", async () => {
+    const ctx = await mountWizard();
+    ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h.fits"], oiii: ["/o.fits"] }) });
+    ctx.dispatch({ type: "SET_STACKED", channelId: "ha", path: "/out/stacked_ha_1.fits" });
+    expect(alignInputs(ctx.getState())).toEqual([
+      { binId: "ha", path: "/out/stacked_ha_1.fits" },
+      { binId: "oiii", path: "/o.fits" },
+    ]);
+  });
+
+  it("forgets the exclusions and the analysis of a channel whose frames change, and keeps the others", async () => {
+    const ctx = await mountWizard();
+    ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o1.fits", "/o2.fits"] }) });
+    ctx.dispatch({ type: "SET_SUBFRAME_RESULT", binId: "ha", result: analysis });
+    ctx.dispatch({ type: "SET_SUBFRAME_RESULT", binId: "oiii", result: analysis });
+    ctx.dispatch({ type: "SET_EXCLUDED_FILES", binId: "ha", files: ["/h1.fits"] });
+    ctx.dispatch({ type: "SET_EXCLUDED_FILES", binId: "oiii", files: ["/o2.fits"] });
+    ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h1.fits"], oiii: ["/o1.fits", "/o2.fits"] }) });
+    const s = ctx.getState();
+    expect(s.excludedFiles).toEqual({ oiii: ["/o2.fits"] });
+    expect(Object.keys(s.subframeResults)).toEqual(["oiii"]);
+    expect(resolveChannelPath(s, "ha")).toBe("/h1.fits");
+    expect(STEPS.find((step) => step.id === "align")!.blockedReason(s)).toBeNull();
+  });
+
+  it("keeps the exclusions when the channels are set again with the same frames", async () => {
+    const ctx = await mountWizard();
+    const bins = binsOf({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] });
+    ctx.dispatch({ type: "SET_BINS", bins });
+    ctx.dispatch({ type: "SET_EXCLUDED_FILES", binId: "ha", files: ["/h1.fits"] });
+    ctx.dispatch({ type: "SET_BINS", bins: bins.map((b) => ({ ...b })) });
+    expect(ctx.getState().excludedFiles).toEqual({ ha: ["/h1.fits"] });
+  });
+
+  it("drops the Align run on RESET, so the late finish of a run in flight is ignored", async () => {
+    const live = await mountWizard();
+    live.startAlignRun(running);
+    expect(live.finishAlignRun(running, finished)).toBe(true);
+    const reset = await mountWizard();
+    reset.startAlignRun(running);
+    reset.dispatch({ type: "RESET" });
+    expect(reset.finishAlignRun(running, finished)).toBe(false);
   });
 });
 

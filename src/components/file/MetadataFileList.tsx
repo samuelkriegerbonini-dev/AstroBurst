@@ -508,6 +508,7 @@ function MetadataFileList({
       <div
         ref={scrollRef}
         className="ab-mfl-scroll"
+        style={{ minHeight: ITEM_HEIGHT }}
         onScroll={handleScroll}
         tabIndex={0}
         role="listbox"

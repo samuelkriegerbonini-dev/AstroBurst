@@ -19,119 +19,17 @@ import {
   gpuDisplayOnScreen,
   gpuToggleView,
   histogramOnPath,
-  keptToolFileKey,
   previewTextureTitle,
   previewViewer,
   reseedsRgbFileView,
-  rightToolSlots,
   statusStripIdleText,
   statusStripParts,
   viewerClickRoute,
   viewerPublishesPixel,
   type CompareDividerInput,
   type GpuToggleInput,
-  type RightToolSlotInput,
   type ViewerClickInput,
 } from "../previewShell";
-
-function slots(patch: Partial<RightToolSlotInput>) {
-  return rightToolSlots({
-    rightTool: null,
-    displayTool: null,
-    columnMounted: false,
-    fileKey: "a",
-    keptFileKey: null,
-    ...patch,
-  });
-}
-
-describe("rightToolSlots", () => {
-  it("mounts nothing before any tool is opened", () => {
-    expect(slots({})).toEqual({ kept: null, transient: null });
-  });
-
-  it("shows analysis as the active kept slot while it is the open tool", () => {
-    expect(slots({ rightTool: "analysis", displayTool: "analysis", columnMounted: true, keptFileKey: "a" })).toEqual({
-      kept: { visible: true, active: true },
-      transient: null,
-    });
-  });
-
-  it("mounts analysis on the render that opens it, before the kept file key catches up", () => {
-    expect(slots({ rightTool: "analysis", displayTool: "analysis", columnMounted: true, keptFileKey: null }).kept).toEqual({
-      visible: true,
-      active: true,
-    });
-  });
-
-  it("keeps analysis mounted but hidden and inactive while another tool is shown", () => {
-    expect(slots({ rightTool: "headers", displayTool: "headers", columnMounted: true, keptFileKey: "a" })).toEqual({
-      kept: { visible: false, active: false },
-      transient: { id: "headers", active: true },
-    });
-  });
-
-  it("keeps analysis visible but inactive during the close animation", () => {
-    expect(slots({ rightTool: null, displayTool: "analysis", columnMounted: true, keptFileKey: "a" })).toEqual({
-      kept: { visible: true, active: false },
-      transient: null,
-    });
-  });
-
-  it("keeps analysis mounted, hidden and inactive after the column has closed", () => {
-    expect(slots({ rightTool: null, displayTool: "analysis", columnMounted: false, keptFileKey: "a" })).toEqual({
-      kept: { visible: false, active: false },
-      transient: null,
-    });
-  });
-
-  it("drops the hidden analysis when another file is loaded", () => {
-    expect(slots({ rightTool: "headers", displayTool: "headers", columnMounted: true, fileKey: "b", keptFileKey: "a" }).kept).toBeNull();
-    expect(slots({ rightTool: null, displayTool: "analysis", columnMounted: false, fileKey: "b", keptFileKey: "a" }).kept).toBeNull();
-  });
-
-  it("keeps the open analysis mounted across a file change", () => {
-    expect(slots({ rightTool: "analysis", displayTool: "analysis", columnMounted: true, fileKey: "b", keptFileKey: "a" }).kept).toEqual({
-      visible: true,
-      active: true,
-    });
-  });
-
-  it("marks another tool inactive while the column closes and unmounts it once closed", () => {
-    expect(slots({ rightTool: null, displayTool: "headers", columnMounted: true }).transient).toEqual({ id: "headers", active: false });
-    expect(slots({ rightTool: null, displayTool: "headers", columnMounted: false }).transient).toBeNull();
-  });
-
-  it("never keeps analysis without a file", () => {
-    expect(slots({ fileKey: null, keptFileKey: null, rightTool: "headers", displayTool: "headers", columnMounted: true }).kept).toBeNull();
-  });
-});
-
-describe("keptToolFileKey", () => {
-  it("records the file the analysis tool was opened on and keeps it while another tool is shown", () => {
-    expect(keptToolFileKey("analysis", "a", null)).toBe("a");
-    expect(keptToolFileKey("analysis", "b", "a")).toBe("b");
-    expect(keptToolFileKey("headers", "a", "a")).toBe("a");
-    expect(keptToolFileKey(null, "a", "a")).toBe("a");
-  });
-
-  it("forgets the file as soon as another file is loaded", () => {
-    expect(keptToolFileKey("headers", "b", "a")).toBeNull();
-    expect(keptToolFileKey(null, "b", "a")).toBeNull();
-    expect(keptToolFileKey(null, null, "a")).toBeNull();
-  });
-
-  it("does not mount a hidden analysis on returning to a file after A -> B -> A", () => {
-    for (const other of ["headers", null] as const) {
-      let kept = keptToolFileKey("analysis", "a", null);
-      kept = keptToolFileKey(other, "a", kept);
-      kept = keptToolFileKey(other, "b", kept);
-      kept = keptToolFileKey(other, "a", kept);
-      expect(kept).toBeNull();
-      expect(slots({ rightTool: other, displayTool: other, columnMounted: other !== null, fileKey: "a", keptFileKey: kept }).kept).toBeNull();
-    }
-  });
-});
 
 describe("viewerPublishesPixel", () => {
   it("is false for the colour composite, whose viewer publishes no mouse pixel", () => {

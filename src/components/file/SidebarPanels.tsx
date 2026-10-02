@@ -1,24 +1,11 @@
-import { lazy, Suspense, memo } from "react";
-import { Loader2 } from "lucide-react";
-import { useFileContext, useHistContext, useStarOverlayContext } from "../../context/PreviewContext";
+import { memo } from "react";
+import { useFileContext, useHistContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
-import { useSpectrum } from "../../hooks/useSpectrumStore";
 import { useAnalysisTarget, useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import WcsReadout from "../header/WcsReadout";
 import PixelReadout from "../header/PixelReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
-
-const AnalysisTab = lazy(() => import("../analysis/AnalysisTab"));
-const HeadersTab = lazy(() => import("../header/HeadersTab"));
-
-function Spinner() {
-  return (
-    <div className="flex items-center justify-center py-12">
-      <Loader2 size={18} className="animate-spin" style={{ color: "var(--ab-teal)" }} />
-    </div>
-  );
-}
 
 export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
@@ -90,37 +77,3 @@ export const InfoPanel = memo(function InfoPanel() {
     </div>
   );
 });
-
-function AnalysisWrapper() {
-  const { starOverlayRef } = useStarOverlayContext();
-  const spec = useSpectrum();
-  return (
-    <AnalysisTab
-      spectrum={spec.spectrum}
-      specWavelengths={spec.wavelengths}
-      specCoord={spec.coord}
-      specLoading={spec.loading}
-      specElapsed={spec.elapsed}
-      specError={spec.error}
-      starOverlayRef={starOverlayRef}
-    />
-  );
-}
-
-export type LeftTabId = "files" | "info" | "analysis" | "headers";
-
-interface SidebarPanelsProps {
-  activeTab: LeftTabId;
-}
-
-export default function SidebarPanels({ activeTab }: SidebarPanelsProps) {
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <Suspense fallback={<Spinner />}>
-        {activeTab === "info" && <InfoPanel />}
-        {activeTab === "analysis" && <AnalysisWrapper />}
-        {activeTab === "headers" && <HeadersTab />}
-      </Suspense>
-    </div>
-  );
-}

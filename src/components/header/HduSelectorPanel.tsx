@@ -251,7 +251,7 @@ export default function HduSelectorPanel({
                   </span>
                 )}
                 {dims && (
-                  <span className="text-[10px] font-mono shrink-0" style={{ color: "#52525b" }}>
+                  <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "#52525b" }} title={dims}>
                     {dims}
                   </span>
                 )}

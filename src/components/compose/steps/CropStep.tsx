@@ -9,9 +9,10 @@ import {
 } from "../../../services/compose";
 import type { ChannelOverlayPreview, CropBounds } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
+import { useComposeWizardContext } from "../../../context/ComposeWizardContext";
 import { RunButton } from "../../ui";
 import CropEditor from "../CropEditor";
-import { alignOverlayColours, MAX_OVERLAY_CHANNELS } from "../../../utils/wizard";
+import { alignOverlayColours, discardsNotice, MAX_OVERLAY_CHANNELS, rerunDiscards } from "../../../utils/wizard";
 import {
   applyWaitsForDetection,
   cropOverlayKeys,
@@ -70,6 +71,8 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
   const [skipped, setSkipped] = useState(false);
   const [stepHeight, setStepHeight] = useState(0);
   const loadSeqRef = useRef(0);
+  const { alignRun } = useComposeWizardContext();
+  const aligning = alignRun?.running ?? false;
 
   const observeStep = useCallback((element: HTMLDivElement | null) => {
     if (!element) return;
@@ -107,9 +110,10 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     setError("");
     setSkipped(false);
     setDraft((prev) => replaceDraft(prev, ZERO_MARGINS, "auto"));
-    setDetecting(alignedKeys.length > 0);
-    setPreviewing(alignedKeys.length > 0);
-    if (alignedKeys.length === 0) return;
+    const load = !aligning && alignedKeys.length > 0;
+    setDetecting(load);
+    setPreviewing(load);
+    if (!load) return;
 
     detectCropBounds(alignedKeys)
       .then((res) => {
@@ -139,7 +143,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     return () => {
       loadSeqRef.current += 1;
     };
-  }, [alignedKeys]);
+  }, [alignedKeys, aligning]);
 
   const grid = useMemo(
     () => gridSize(bounds?.dimensions) ?? gridSize(overlay?.dimensions),
@@ -168,7 +172,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
   }, [bounds]);
 
   const handleCrop = useCallback(async () => {
-    if (alignedEntries.length === 0) return;
+    if (alignedEntries.length === 0 || aligning) return;
     setLoading(true);
     setError("");
     setSkipped(false);
@@ -209,16 +213,25 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [alignedEntries, margins, onCropped]);
+  }, [alignedEntries, aligning, margins, onCropped]);
 
   const handleSkip = useCallback(() => {
+    if (aligning) return;
     setSkipped(true);
     const passthrough: Record<string, string> = {};
     for (const [binId, path] of alignedEntries) {
       passthrough[binId] = path;
     }
     onCropped(passthrough);
-  }, [alignedEntries, onCropped]);
+  }, [alignedEntries, aligning, onCropped]);
+
+  if (aligning) {
+    return (
+      <div className="flex items-center justify-center py-12 text-zinc-500 text-xs">
+        Align is running… Crop reloads when it finishes.
+      </div>
+    );
+  }
 
   if (alignedEntries.length === 0) {
     return (
@@ -238,6 +251,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
         : "";
   const sourceText = draft.source === "manual" ? "Manual margins" : autoAvailable ? "Auto-detected margins" : "";
   const applyWaiting = applyWaitsForDetection(draft, detecting);
+  const discards = discardsNotice("Apply or Skip", rerunDiscards(state, "crop"));
 
   return (
     <div ref={observeStep} className="flex h-full flex-wrap items-start gap-3 p-3">
@@ -263,7 +277,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
           <span className="text-[9px] text-zinc-500">{alignedEntries.length} ready</span>
         </div>
 
-        <div className="grid grid-cols-[auto_auto] justify-start gap-x-4 gap-y-1.5">
+        <div className="grid max-w-[280px] grid-cols-[repeat(auto-fit,minmax(132px,max-content))] justify-start gap-x-4 gap-y-1.5">
           {MARGIN_EDGES.map((edge) => (
             <div key={edge} className="flex items-center gap-2">
               <label htmlFor={`${marginId}-${edge}`} className="w-11 text-[10px] text-zinc-400">
@@ -322,6 +336,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
             Skip
           </button>
         </div>
+        {discards && !loading && <div className="text-[9px] text-amber-400/80">{discards}</div>}
 
         {skipped && (
           <div className="text-[9px] text-zinc-500">

@@ -215,7 +215,7 @@ export default function ConfigPanel() {
             onKeyDown={(e) => { if (e.key === "Enter") handleSaveApiKey(); }}
             placeholder={apiKeyMasked ? "Enter new key to replace..." : "Paste your API key..."}
             aria-label="Astrometry.net API key"
-            className="flex-1 bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 focus:border-teal-500/50 placeholder:text-zinc-600"
+            className="flex-1 min-w-0 bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-2 text-xs text-zinc-200 focus:border-teal-500/50 placeholder:text-zinc-600"
           />
           <button
             onClick={handleSaveApiKey}

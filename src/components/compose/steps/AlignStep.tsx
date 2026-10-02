@@ -1,17 +1,21 @@
 import { useState, useCallback, useId, useMemo } from "react";
 import type { WizardState } from "../wizard";
-import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import {
   ALIGN_OFFSET_TITLE,
   alignChannelOutcome,
+  alignInputs,
   alignMatchSummary,
+  alignRunFinish,
   alignRunOutcome,
+  discardsNotice,
   formatAlignOffset,
   nextAlignedRunState,
+  rerunDiscards,
 } from "../../../utils/wizard";
 import { alignChannels } from "../../../services/compose";
+import type { AlignResult } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { useComposeWizardContext } from "../../../context/ComposeWizardContext";
+import { useComposeWizardContext, type WizardAlignRun } from "../../../context/ComposeWizardContext";
 import { RunButton } from "../../ui";
 import AlignPreview from "../AlignPreview";
 
@@ -20,14 +24,10 @@ interface AlignStepProps {
   onAligned: (paths: Record<string, string>) => void;
 }
 
-function resolveChannelPath(state: WizardState, binId: string): string | null {
-  return resolveWizardPath(state, binId, "stacked");
-}
-
 export default function AlignStep({ state, onAligned }: AlignStepProps) {
   const methodId = useId();
   const [method, setMethod] = useState("phase_correlation");
-  const { alignRun, setAlignRun } = useComposeWizardContext();
+  const { alignRun, startAlignRun, finishAlignRun, getState } = useComposeWizardContext();
   const loading = alignRun?.running ?? false;
 
   const activeBins = useMemo(
@@ -35,14 +35,8 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
     [state.bins],
   );
 
-  const channelPaths = useMemo(() => {
-    const entries: { binId: string; path: string }[] = [];
-    for (const bin of activeBins) {
-      const p = resolveChannelPath(state, bin.id);
-      if (p) entries.push({ binId: bin.id, path: p });
-    }
-    return entries;
-  }, [activeBins, state]);
+  const channelPaths = useMemo(() => alignInputs(state), [state]);
+  const discards = discardsNotice("Running Align", rerunDiscards(state, "align"));
 
   const [runState, setRunState] = useState(
     () => nextAlignedRunState(null, channelPaths, state.alignedPaths, loading),
@@ -61,23 +55,28 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
 
   const handleAlign = useCallback(async () => {
     if (channelPaths.length < 2 || loading) return;
-    const paths = channelPaths.map((c) => c.path);
-    const binIds = channelPaths.map((c) => c.binId);
-    setAlignRun({ running: true, inputs: paths, result: null, error: "" });
+    const started = channelPaths;
+    const paths = started.map((c) => c.path);
+    const binIds = started.map((c) => c.binId);
+    const startRecord: WizardAlignRun = { running: true, inputs: paths, result: null, error: "" };
+    startAlignRun(startRecord);
+    let res: AlignResult | null = null;
+    let error = "";
     try {
       const dir = await getOutputDir();
-      const res = await alignChannels(paths, dir, method, binIds);
-      const aligned: Record<string, string> = {};
-      res.channels?.forEach((ch, i) => {
-        const key = ch.cache_key || ch.path;
-        if (channelPaths[i] && key) aligned[channelPaths[i].binId] = key;
-      });
-      setAlignRun({ running: false, inputs: paths, result: res, error: "" });
-      if (res.channels) onAligned(aligned);
+      res = await alignChannels(paths, dir, method, binIds);
     } catch (e) {
-      setAlignRun({ running: false, inputs: paths, result: null, error: e instanceof Error ? e.message : String(e) });
+      error = e instanceof Error ? e.message : String(e);
     }
-  }, [channelPaths, loading, method, onAligned, setAlignRun]);
+    const outcome = alignRunFinish(started, alignInputs(getState()), res, error);
+    if (!finishAlignRun(startRecord, outcome.record) || !outcome.store || !res?.channels) return;
+    const aligned: Record<string, string> = {};
+    res.channels.forEach((ch, i) => {
+      const key = ch.cache_key || ch.path;
+      if (started[i] && key) aligned[started[i].binId] = key;
+    });
+    onAligned(aligned);
+  }, [channelPaths, loading, method, onAligned, startAlignRun, finishAlignRun, getState]);
 
   if (channelPaths.length < 2) {
     return (
@@ -150,6 +149,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
           accent="sky"
           onClick={handleAlign}
         />
+        {discards && !loading && <div className="text-[9px] text-amber-400/80">{discards}</div>}
 
         {result && (
           <div className="text-[9px] text-zinc-500">
@@ -159,7 +159,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
         {error && <div className="text-[9px] text-red-400">{error}</div>}
       </div>
 
-      <div className="flex flex-col flex-[2] basis-[300px] min-w-[260px]">
+      <div className="flex flex-col flex-[2] basis-[300px] min-w-[240px]">
         <AlignPreview run={alignedRun} labels={binLabels} aligning={loading} />
       </div>
     </div>

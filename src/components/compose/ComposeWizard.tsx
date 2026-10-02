@@ -390,7 +390,7 @@ export default function ComposeWizard() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-[96px] overflow-y-auto">
         <Suspense fallback={<div className="flex items-center justify-center py-12"><Loader2 size={20} className="animate-spin text-zinc-500" /></div>}>
           {stepContent}
         </Suspense>

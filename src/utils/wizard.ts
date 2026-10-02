@@ -217,6 +217,44 @@ function totalFilesCount(s: WizardState): number {
 const NEEDS_FRAMES = "assign frames in step 1";
 const NEEDS_TWO_CHANNELS = "assign at least 2 channels";
 
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+export function effectiveBinFiles(state: WizardState, bin: FrequencyBin): string[] {
+  const excluded = state.excludedFiles[bin.id];
+  if (!excluded || excluded.length === 0) return bin.files;
+  const skip = new Set(excluded);
+  return bin.files.filter((f) => !skip.has(f));
+}
+
+export function unstackedBins(state: WizardState): FrequencyBin[] {
+  return state.bins.filter((b) => effectiveBinFiles(state, b).length >= 2 && !state.stackedPaths[b.id]);
+}
+
+export function unstackedReason(state: WizardState): string | null {
+  const bins = unstackedBins(state);
+  if (bins.length === 0) return null;
+  const frames = bins.length === 1 ? "2+ frames" : "2+ frames each";
+  return `stack ${joinNames(bins.map((b) => b.shortLabel))} first (${frames}), or keep one file per channel`;
+}
+
+export function fullyExcludedBins(state: WizardState): FrequencyBin[] {
+  return state.bins.filter((b) => b.files.length > 0 && resolveChannelPath(state, b.id, "stacked") === null);
+}
+
+export function fullyExcludedReason(state: WizardState): string | null {
+  const bins = fullyExcludedBins(state);
+  if (bins.length === 0) return null;
+  const each = bins.length === 1 ? "one" : "one per channel";
+  return `all ${joinNames(bins.map((b) => b.shortLabel))} frames are excluded; re-include ${each} in Stack`;
+}
+
+function channelInputsReason(state: WizardState): string | null {
+  return fullyExcludedReason(state) ?? unstackedReason(state);
+}
+
 function gate(blockedReason: (s: WizardState) => string | null): Pick<StepDef, "enabled" | "blockedReason"> {
   return { enabled: (s) => blockedReason(s) === null, blockedReason };
 }
@@ -288,7 +326,7 @@ export const STEPS: StepDef[] = [
     label: "Channel Alignment",
     shortLabel: "Align",
     color: "sky",
-    ...gate((s) => (filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
+    ...gate((s) => (filledCount(s) >= 2 ? channelInputsReason(s) : NEEDS_TWO_CHANNELS)),
   },
   {
     id: "crop",
@@ -313,7 +351,7 @@ export const STEPS: StepDef[] = [
       Object.keys(s.alignedPaths).length > 0 ||
       Object.keys(s.croppedPaths).length > 0 ||
       totalFilesCount(s) > 0
-        ? null
+        ? channelInputsReason(s)
         : NEEDS_FRAMES),
     badge: (s) => {
       const n = Object.keys(s.backgroundPaths).length;
@@ -325,7 +363,7 @@ export const STEPS: StepDef[] = [
     label: "Channel Blending",
     shortLabel: "Blend",
     color: "amber",
-    ...gate((s) => (filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
+    ...gate((s) => (filledCount(s) >= 2 ? channelInputsReason(s) : NEEDS_TWO_CHANNELS)),
     badge: (s) => s.compositeReady ? "✓" : null,
   },
   {
@@ -333,14 +371,20 @@ export const STEPS: StepDef[] = [
     label: "Color Balance",
     shortLabel: "Color",
     color: "cyan",
-    ...gate((s) => (s.compositeReady || filledCount(s) >= 2 ? null : NEEDS_TWO_CHANNELS)),
+    ...gate((s) => {
+      if (s.compositeReady) return null;
+      return filledCount(s) >= 2 ? channelInputsReason(s) : NEEDS_TWO_CHANNELS;
+    }),
   },
   {
     id: "stretch",
     label: "Stretch",
     shortLabel: "Stretch",
     color: "amber",
-    ...gate((s) => (s.compositeReady || totalFilesCount(s) > 0 ? null : NEEDS_FRAMES)),
+    ...gate((s) => {
+      if (s.compositeReady) return null;
+      return totalFilesCount(s) > 0 ? channelInputsReason(s) : NEEDS_FRAMES;
+    }),
   },
   {
     id: "adjust",
@@ -357,7 +401,10 @@ export const STEPS: StepDef[] = [
     label: "Export",
     shortLabel: "Export",
     color: "teal",
-    ...gate((s) => (s.compositeReady || totalFilesCount(s) > 0 ? null : NEEDS_FRAMES)),
+    ...gate((s) => {
+      if (s.compositeReady) return null;
+      return totalFilesCount(s) > 0 ? channelInputsReason(s) : NEEDS_FRAMES;
+    }),
   },
 ];
 
@@ -400,6 +447,45 @@ export function invalidateDownstream(
   return partial;
 }
 
+const STEP_RESULTS: Partial<Record<string, (s: WizardState) => boolean>> = {
+  align: (s) => Object.keys(s.alignedPaths).length > 0,
+  crop: (s) => Object.keys(s.croppedPaths).length > 0,
+  background: (s) => Object.keys(s.backgroundPaths).length > 0,
+  blend: (s) => s.compositeReady,
+  stretch: (s) => Object.keys(s.channelResults).length > 0,
+};
+
+export function rerunDiscards(state: WizardState, fromStepId: string): string[] {
+  const from = STEP_ORDER.indexOf(fromStepId);
+  if (from === -1) return [];
+  const after: WizardState = { ...state, ...invalidateDownstream(state, fromStepId) };
+  return STEPS.filter((step, i) => {
+    if (i <= from) return false;
+    const has = STEP_RESULTS[step.id];
+    const lostResult = has ? has(state) && !has(after) : false;
+    const lostDone = !!state.completedSteps[step.id] && !after.completedSteps[step.id];
+    return lostResult || lostDone;
+  }).map((step) => step.shortLabel);
+}
+
+export function discardsNotice(action: string, labels: readonly string[]): string | null {
+  return labels.length > 0 ? `${action} discards: ${labels.join(", ")}` : null;
+}
+
+export function unalignedBins(state: WizardState): FrequencyBin[] {
+  const filled = state.bins.filter((b) => b.files.length > 0);
+  if (filled.length < 2) return [];
+  return filled.filter((b) => !state.alignedPaths[b.id]);
+}
+
+export const BACKGROUND_UNALIGNED_NOTICE =
+  "The channels are not aligned. Running Align later discards these BG results; align first unless the channels are already registered.";
+
+export function backgroundAlignNotice(state: WizardState): string | null {
+  if (filledCount(state) < 2 || Object.keys(state.alignedPaths).length > 0) return null;
+  return BACKGROUND_UNALIGNED_NOTICE;
+}
+
 export function nextEnabledStep(
   currentId: string,
   state: WizardState,
@@ -435,8 +521,15 @@ export function resolveChannelPath(
     if (p) return p;
   }
   const bin = state.bins.find((b) => b.id === binId);
-  if (bin && bin.files.length > 0) return bin.files[0];
-  return null;
+  return bin ? effectiveBinFiles(state, bin)[0] ?? null : null;
+}
+
+export function withExcludedFiles(state: WizardState, binId: string, files: string[]): WizardState {
+  const next: WizardState = { ...state, excludedFiles: { ...state.excludedFiles, [binId]: files } };
+  const needsStack = (s: WizardState) => unstackedBins(s).some((b) => b.id === binId);
+  const sameInput = resolveChannelPath(next, binId, "stacked") === resolveChannelPath(state, binId, "stacked");
+  if (sameInput && needsStack(next) === needsStack(state)) return next;
+  return { ...next, ...invalidateDownstream(state, "align"), alignedPaths: {} };
 }
 
 export function resolveAnyChannelPath(
@@ -545,7 +638,7 @@ export function wizardHeaderSourcePath(
         ? active[0]
         : undefined;
   if (!bin) return null;
-  return state.stackedPaths[bin.id] ?? bin.files[0] ?? null;
+  return state.stackedPaths[bin.id] ?? effectiveBinFiles(state, bin)[0] ?? null;
 }
 
 export function wizardZipChannels(state: WizardState): { name: string; path: string }[] {
@@ -952,6 +1045,62 @@ export function alignRunOutcome<Result>(
   const sameInputs = record.inputs.length === inputs.length && record.inputs.every((p, i) => p === inputs[i]);
   if (!sameInputs) return { result: null, error: "" };
   return { result: keysStored ? record.result : null, error: record.error };
+}
+
+export interface AlignInput {
+  binId: string;
+  path: string;
+}
+
+export function alignInputs(state: WizardState): AlignInput[] {
+  return state.bins.flatMap((bin) => {
+    if (bin.files.length === 0) return [];
+    const path = resolveChannelPath(state, bin.id, "stacked");
+    return path ? [{ binId: bin.id, path }] : [];
+  });
+}
+
+export function sameAlignInputs(a: readonly AlignInput[], b: readonly AlignInput[]): boolean {
+  return a.length === b.length && a.every((input, i) => input.binId === b[i].binId && input.path === b[i].path);
+}
+
+export const ALIGN_INPUTS_CHANGED = "Inputs changed while aligning; run Align again";
+
+export function alignRunFinish<Result>(
+  started: readonly AlignInput[],
+  current: readonly AlignInput[],
+  result: Result | null,
+  error: string,
+): { record: AlignRunRecord<Result>; store: boolean } {
+  if (!sameAlignInputs(started, current)) {
+    return {
+      record: { running: false, inputs: current.map((c) => c.path), result: null, error: ALIGN_INPUTS_CHANGED },
+      store: false,
+    };
+  }
+  return {
+    record: { running: false, inputs: started.map((c) => c.path), result, error },
+    store: result !== null && error === "",
+  };
+}
+
+export type AlignRunEvent<Result> =
+  | { type: "start"; run: AlignRunRecord<Result> }
+  | { type: "finish"; started: AlignRunRecord<Result>; run: AlignRunRecord<Result> }
+  | { type: "reset" };
+
+export function nextAlignRun<Result>(
+  current: AlignRunRecord<Result> | null,
+  event: AlignRunEvent<Result>,
+): AlignRunRecord<Result> | null {
+  switch (event.type) {
+    case "start":
+      return event.run;
+    case "finish":
+      return current === event.started ? event.run : current;
+    case "reset":
+      return null;
+  }
 }
 
 export const BIN_MENU_WIDTH = 200;

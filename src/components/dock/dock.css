@@ -1,0 +1,86 @@
+.ab-dock-drop-preview {
+  position: fixed;
+  z-index: 80;
+  background: rgba(59, 130, 246, 0.22);
+  border: 1px solid var(--ab-blue);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.ab-dock-drop-slot {
+  position: fixed;
+  z-index: 80;
+  border: 1px dashed var(--ab-blue);
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.08);
+  pointer-events: none;
+}
+
+.ab-dock-insert-marker {
+  position: fixed;
+  z-index: 81;
+  background: var(--ab-blue);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.ab-dock-drag-follow {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 81;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.ab-dock-drag-ghost {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--ab-border-strong);
+  border-radius: 4px;
+  background: rgba(20, 20, 32, 0.95);
+  color: #d4d4d8;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.ab-dock-drag-label {
+  padding: 4px 8px;
+  border: 1px solid var(--ab-border-strong);
+  border-radius: 999px;
+  background: rgba(8, 8, 18, 0.97);
+  color: #e4e4e7;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ab-dock-group-target {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+[data-dock-strip] [data-tool-id] {
+  touch-action: none;
+}
+
+[data-dock-strip] [data-tool-id][data-dragging] {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.ab-dock-menu {
+  position: fixed;
+  z-index: 85;
+}
+
+.ab-dock-menu [role^="menuitem"]:focus-visible {
+  outline-offset: -2px;
+}

@@ -723,6 +723,30 @@ describe("cropHitLayout", () => {
     expect(overlaps(hits.strips.w, hits.body)).toBe(false);
   });
 
+  it("puts each strip of a collapsed box against its own side of the body, spanning the body", () => {
+    const rect = { x0: 2000, y0: 1500, x1: 2001, y1: 1501 };
+    const { body, strips } = cropHitLayout(rect, unit, sizes);
+    const bodyRight = body.x + body.width;
+    const bodyBottom = body.y + body.height;
+    expect(strips.n.y + strips.n.height).toBeCloseTo(body.y, 6);
+    expect(strips.s.y).toBeCloseTo(bodyBottom, 6);
+    expect(strips.w.x + strips.w.width).toBeCloseTo(body.x, 6);
+    expect(strips.e.x).toBeCloseTo(bodyRight, 6);
+    for (const strip of [strips.n, strips.s]) {
+      expect(strip.x).toBeCloseTo(body.x, 6);
+      expect(strip.width).toBeCloseTo(body.width, 6);
+      expect(toScreen(strip).height).toBeCloseTo(8, 10);
+    }
+    for (const strip of [strips.w, strips.e]) {
+      expect(strip.y).toBeCloseTo(body.y, 6);
+      expect(strip.height).toBeCloseTo(body.height, 6);
+      expect(toScreen(strip).width).toBeCloseTo(8, 10);
+    }
+    for (const strip of [strips.n, strips.s, strips.w, strips.e]) {
+      expect(overlaps(strip, body)).toBe(false);
+    }
+  });
+
   it("gives a collapsed body at least the minimum on-screen size, centred on the box", () => {
     const rect = { x0: 2000, y0: 1500, x1: 2001, y1: 1501 };
     const body = toScreen(cropHitLayout(rect, unit, sizes).body);

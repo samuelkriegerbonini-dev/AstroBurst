@@ -16,11 +16,13 @@ import {
   FrequencyBin,
   INITIAL_STATE,
   invalidateDownstream,
+  nextAlignRun,
   STEP_ORDER,
   WizardState,
   withChannelStage,
+  withExcludedFiles,
 } from "../utils/wizard";
-import type { AlignRunRecord, ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
+import type { AlignRunEvent, AlignRunRecord, ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
 import type { AlignResult } from "../shared/types/compose";
 import { useCompositeActions } from "./CompositeContext";
 
@@ -71,9 +73,23 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         return { ...state, bins: action.bins, completedSteps: unchangedCompleted };
       }
       const stackedPaths = { ...state.stackedPaths };
-      for (const id of changedIds) delete stackedPaths[id];
+      const excludedFiles = { ...state.excludedFiles };
+      const subframeResults = { ...state.subframeResults };
+      for (const id of changedIds) {
+        delete stackedPaths[id];
+        delete excludedFiles[id];
+        delete subframeResults[id];
+      }
       const downstream = invalidateDownstream(state, "channels");
-      return { ...state, ...downstream, bins: action.bins, stackedPaths, completedSteps: completed };
+      return {
+        ...state,
+        ...downstream,
+        bins: action.bins,
+        stackedPaths,
+        excludedFiles,
+        subframeResults,
+        completedSteps: completed,
+      };
     }
     case "SET_BLEND_WEIGHTS":
       return { ...state, blendWeights: action.weights, blendPreset: action.preset };
@@ -118,7 +134,7 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_SUBFRAME_RESULT":
       return { ...state, subframeResults: { ...state.subframeResults, [action.binId]: action.result } };
     case "SET_EXCLUDED_FILES":
-      return { ...state, excludedFiles: { ...state.excludedFiles, [action.binId]: action.files } };
+      return withExcludedFiles(state, action.binId, action.files);
     case "SET_CHANNEL_STAGE":
       return { ...state, channelResults: withChannelStage(state.channelResults, action.binId, action.stage, action.value) };
     case "RECORD_COMPOSITE_OP":
@@ -155,6 +171,7 @@ export type WizardAlignRun = AlignRunRecord<AlignResult>;
 interface ComposeWizardContextValue {
   state: WizardState;
   dispatch: Dispatch<WizardAction>;
+  getState: () => WizardState;
   activeStep: string;
   setActiveStep: (step: string) => void;
   setOutputForgetter: (forget: (paths: string[]) => void) => void;
@@ -162,7 +179,8 @@ interface ComposeWizardContextValue {
   stackRun: WizardStackRun | null;
   setStackRun: (run: WizardStackRun | null) => void;
   alignRun: WizardAlignRun | null;
-  setAlignRun: (run: WizardAlignRun | null) => void;
+  startAlignRun: (run: WizardAlignRun) => void;
+  finishAlignRun: (started: WizardAlignRun, run: WizardAlignRun) => boolean;
 }
 
 const ComposeWizardCtx = createContext<ComposeWizardContextValue | null>(null);
@@ -183,12 +201,38 @@ interface Props {
 }
 
 export function ComposeWizardProvider({ children }: Props) {
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  const [state, reactDispatch] = useReducer(reducer, INITIAL_STATE);
   const [activeStep, setActiveStepRaw] = useState("channels");
   const [compositeDims, setCompositeDims] = useState<[number, number] | null>(null);
   const [stackRun, setStackRun] = useState<WizardStackRun | null>(null);
-  const [alignRun, setAlignRun] = useState<WizardAlignRun | null>(null);
+  const [alignRun, setAlignRunState] = useState<WizardAlignRun | null>(null);
+  const alignRunRef = useRef<WizardAlignRun | null>(null);
+  const latestStateRef = useRef(INITIAL_STATE);
   const { clearComposite } = useCompositeActions();
+
+  const updateAlignRun = useCallback((event: AlignRunEvent<AlignResult>) => {
+    const next = nextAlignRun(alignRunRef.current, event);
+    alignRunRef.current = next;
+    setAlignRunState(next);
+    return next;
+  }, []);
+
+  const startAlignRun = useCallback((run: WizardAlignRun) => {
+    updateAlignRun({ type: "start", run });
+  }, [updateAlignRun]);
+
+  const finishAlignRun = useCallback(
+    (started: WizardAlignRun, run: WizardAlignRun) => updateAlignRun({ type: "finish", started, run }) === run,
+    [updateAlignRun],
+  );
+
+  const dispatch = useCallback((action: WizardAction) => {
+    latestStateRef.current = reducer(latestStateRef.current, action);
+    if (action.type === "RESET") updateAlignRun({ type: "reset" });
+    reactDispatch(action);
+  }, [updateAlignRun]);
+
+  const getState = useCallback(() => latestStateRef.current, []);
   const wasReadyRef = useRef(state.compositeReady);
 
   useEffect(() => {
@@ -216,6 +260,7 @@ export function ComposeWizardProvider({ children }: Props) {
   const value = useMemo<ComposeWizardContextValue>(() => ({
     state,
     dispatch,
+    getState,
     activeStep,
     setActiveStep,
     setOutputForgetter,
@@ -223,8 +268,9 @@ export function ComposeWizardProvider({ children }: Props) {
     stackRun,
     setStackRun,
     alignRun,
-    setAlignRun,
-  }), [state, dispatch, activeStep, setActiveStep, setOutputForgetter, stackRun, alignRun]);
+    startAlignRun,
+    finishAlignRun,
+  }), [state, dispatch, getState, activeStep, setActiveStep, setOutputForgetter, stackRun, alignRun, startAlignRun, finishAlignRun]);
 
   return (
     <ComposeWizardCtx.Provider value={value}>

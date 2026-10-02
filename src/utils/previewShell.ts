@@ -1,36 +1,6 @@
-import type { RightToolId } from "../hooks/useRightTool";
 import { formatLat, formatLon } from "./coordFormat";
 import { deepZoomAvailable } from "./analysisSections";
 import { viewportClickRoute, type ViewportClickRoute } from "./regionClick";
-
-export const KEPT_RIGHT_TOOL: RightToolId = "analysis";
-
-export interface RightToolSlotInput {
-  rightTool: RightToolId | null;
-  displayTool: RightToolId | null;
-  columnMounted: boolean;
-  fileKey: string | null;
-  keptFileKey: string | null;
-}
-
-export interface RightToolSlots {
-  kept: { visible: boolean; active: boolean } | null;
-  transient: { id: RightToolId; active: boolean } | null;
-}
-
-export function keptToolFileKey(rightTool: RightToolId | null, fileKey: string | null, keptFileKey: string | null): string | null {
-  if (rightTool === KEPT_RIGHT_TOOL) return fileKey;
-  return keptFileKey === fileKey ? keptFileKey : null;
-}
-
-export function rightToolSlots({ rightTool, displayTool, columnMounted, fileKey, keptFileKey }: RightToolSlotInput): RightToolSlots {
-  const showing = columnMounted ? displayTool : null;
-  const keptMounted = rightTool === KEPT_RIGHT_TOOL || (fileKey !== null && keptFileKey === fileKey);
-  return {
-    kept: keptMounted ? { visible: showing === KEPT_RIGHT_TOOL, active: rightTool === KEPT_RIGHT_TOOL } : null,
-    transient: showing !== null && showing !== KEPT_RIGHT_TOOL ? { id: showing, active: rightTool === showing } : null,
-  };
-}
 
 export interface GpuDisplayInput {
   hasFile: boolean;

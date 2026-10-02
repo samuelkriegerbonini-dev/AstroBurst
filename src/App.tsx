@@ -1,15 +1,13 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore, useId } from "react";
-import {
-  Plus, RotateCcw, FolderOpen, Layers, Info as InfoIcon, X, Search,
-  FileText, BarChart3, Sparkles, Layers2, FlaskConical, Download, Settings, PanelLeftClose,
-} from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Search, Download, Columns2 } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
-import PreviewPanel, { type ToolId } from "./components/PreviewPanel";
-import { InfoPanel } from "./components/file/SidebarPanels";
+import PreviewPanel from "./components/PreviewPanel";
+import DockShell from "./components/dock/DockShell";
+import { DOCK_TOOLS } from "./components/dock/toolRegistry";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -30,10 +28,10 @@ import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider } from "./context/PreviewContext";
 
-import { loadLayout, saveLayout } from "./utils/layout";
 import { terminateStfWorker } from "./utils/stfworker";
 import CommandPalette, { type PaletteAction, type PaletteFile } from "./components/CommandPalette";
-import { useRightTool, rightToolStore, RIGHT_TOOLS, type RightToolId } from "./hooks/useRightTool";
+import { DOCK_TOOL_IDS, DOCK_TOOL_META, isToolOpen } from "./utils/dockLayout";
+import { dockStore, useDockLayout } from "./hooks/useDockLayout";
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
@@ -42,32 +40,6 @@ import { isTauri } from "./infrastructure/tauri";
 type ViewState = "empty" | "processing" | "complete";
 
 const MemoizedPreviewPanel = memo(PreviewPanel);
-
-const SIDEBAR_DEFAULT = 300;
-const SIDEBAR_MIN = 180;
-const SIDEBAR_MAX = 480;
-
-const INFO_LEFT_IN_FILES = 42;
-const INFO_LEFT_OVER_VIEWER = 60;
-const INFO_WIDTH_OVER_VIEWER = 300;
-
-const LEFT_TABS: { id: "files"; label: string; icon: typeof FolderOpen }[] = [
-  { id: "files", label: "Files", icon: FolderOpen },
-];
-
-const TOOL_ICONS: Record<RightToolId, typeof FileText> = {
-  headers: FileText,
-  analysis: BarChart3,
-  processing: Sparkles,
-  stacking: Layers2,
-  synth: FlaskConical,
-  export: Download,
-  config: Settings,
-};
-
-const TOOL_KEYWORDS: Partial<Record<RightToolId, string[]>> = {
-  config: ["Config"],
-};
 
 function toMetadataFiles(
   fileIds: string[],
@@ -111,22 +83,7 @@ export default function App() {
   const [view, setView] = useState<ViewState>("empty");
   const [showConfetti, setShowConfetti] = useState(false);
   const prevCompleteRef = useRef(false);
-
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const sidebarWidthRef = useRef(loadLayout("sidebarW", SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX));
-  const sidebarResizing = useRef(false);
-  const sidebarStartX = useRef(0);
-  const sidebarStartW = useRef(0);
-  const sidebarElRef = useRef<HTMLDivElement>(null);
-  const sidebarInnerRef = useRef<HTMLDivElement>(null);
-  const infoPopoverRef = useRef<HTMLDivElement>(null);
-  const [, forceSidebarRender] = useState(0);
-
-  const [activeTool, setActiveTool] = useState<ToolId | null>("compose");
-  const handleToggleTool = useCallback((toolId: ToolId) => {
-    setActiveTool((prev) => (prev === toolId ? null : toolId));
-  }, []);
-  const [infoOpen, setInfoOpen] = useState(false);
+  const dockLayout = useDockLayout();
 
   const { addFiles, startProcessing, scheduleProcessing, reset, isResampling, resampleProgress } = useFileQueue();
   const { stats, isProcessing, isComplete, progress } = useFileStats();
@@ -259,7 +216,6 @@ export default function App() {
       if (e.key === "Escape") {
         setShortcutsOpen(false);
         setPaletteOpen(false);
-        setInfoOpen(false);
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -307,8 +263,6 @@ export default function App() {
     resetProductFilter();
     setView("empty");
     setShowConfetti(false);
-    setActiveTool("compose");
-    setInfoOpen(false);
   }, [reset, resetProductFilter]);
 
   const [confirmNewBatch, setConfirmNewBatch] = useState(false);
@@ -324,7 +278,7 @@ export default function App() {
     confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
   }, [stats.done, confirmNewBatch, handleNewBatch]);
 
-  const handleSidebarToggle = useCallback(() => setSidebarOpen((p) => !p), []);
+  const handleHideFiles = useCallback(() => dockStore.dispatch({ type: "hide", tool: "files" }), []);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -378,80 +332,35 @@ export default function App() {
     return filteredMetadataFiles.some((f) => f.id === selectedFile.id) ? selectedFile : null;
   }, [selectedFile, activeFilters, filteredMetadataFiles]);
 
-  const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
-    if (!sidebarOpen) return;
-    e.preventDefault();
-    sidebarResizing.current = true;
-    sidebarStartX.current = e.clientX;
-    sidebarStartW.current = sidebarWidthRef.current;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const handle = e.currentTarget as HTMLElement;
-    handle.dataset.dragging = "true";
-    const el = sidebarElRef.current;
-    const inner = sidebarInnerRef.current;
-    if (el) el.style.transition = "none";
-    const onMove = (ev: MouseEvent) => {
-      if (!sidebarResizing.current) return;
-      const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, sidebarStartW.current + (ev.clientX - sidebarStartX.current)));
-      sidebarWidthRef.current = next;
-      if (el) el.style.width = `${next}px`;
-      if (inner) inner.style.width = `${next}px`;
-      if (infoPopoverRef.current) infoPopoverRef.current.style.width = `${next}px`;
-    };
-    const onUp = () => {
-      sidebarResizing.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      delete handle.dataset.dragging;
-      if (el) el.style.transition = "";
-      saveLayout("sidebarW", sidebarWidthRef.current);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      forceSidebarRender((c) => c + 1);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [sidebarOpen]);
-
-  const handleSidebarResizeReset = useCallback(() => {
-    sidebarWidthRef.current = SIDEBAR_DEFAULT;
-    saveLayout("sidebarW", SIDEBAR_DEFAULT);
-    const el = sidebarElRef.current;
-    if (el) el.style.width = `${SIDEBAR_DEFAULT}px`;
-    const inner = sidebarInnerRef.current;
-    if (inner) inner.style.width = `${SIDEBAR_DEFAULT}px`;
-    forceSidebarRender((c) => c + 1);
-  }, []);
-
-  const rightTool = useRightTool();
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const acts: PaletteAction[] = [
       { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
     if (view !== "empty") {
-      acts.push(
-        { id: "toggle-sidebar", label: sidebarOpen ? "Hide Files Panel" : "Show Files Panel", icon: PanelLeftClose, run: () => setSidebarOpen((p) => !p) },
-        { id: "toggle-compose", label: activeTool === "compose" ? "Hide Compose Panel" : "Show Compose Panel", icon: Layers, run: () => handleToggleTool("compose") },
-      );
-      acts.push({ id: "toggle-info", label: infoOpen ? "Hide Info Panel" : "Show Info Panel", icon: InfoIcon, run: () => setInfoOpen((p) => !p) });
-      for (const t of RIGHT_TOOLS) {
+      for (const id of DOCK_TOOL_IDS) {
+        const meta = DOCK_TOOL_META[id];
         acts.push({
-          id: `tool-${t.id}`,
-          label: rightTool === t.id ? `Hide ${t.label} Panel` : `Open ${t.label} Panel`,
+          id: `tool-${id}`,
+          label: `${isToolOpen(dockLayout, id) ? "Hide" : "Open"} ${meta.label} Panel`,
           hint: "Tool",
-          keywords: TOOL_KEYWORDS[t.id],
-          icon: TOOL_ICONS[t.id],
-          run: () => rightToolStore.toggle(t.id),
+          keywords: meta.keywords,
+          icon: DOCK_TOOLS[id].icon,
+          run: () => dockStore.dispatch({ type: "toggle", tool: id }),
         });
       }
+      acts.push({
+        id: "reset-layout",
+        label: "Reset Layout (default panels, order and sizes; closes the right panels)",
+        icon: Columns2,
+        run: () => dockStore.resetAll(),
+      });
       if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: handleExportZip });
       if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", hint: "confirm in footer", icon: RotateCcw, run: handleNewBatchClick });
     }
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, sidebarOpen, activeTool, infoOpen, rightTool, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleToggleTool, handleExportZip, handleNewBatchClick]);
+  }, [view, dockLayout, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick]);
 
   const paletteFiles = useMemo<PaletteFile[]>(
     () => filteredMetadataFiles
@@ -564,95 +473,36 @@ export default function App() {
                           )}
                         </div>
 
-                        <div className="flex-1 flex overflow-hidden min-h-0">
-                          <div className="ab-left-strip shrink-0">
-                            {LEFT_TABS.map((tab) => {
-                              const Icon = tab.icon;
-                              return (
-                                <button
-                                  key={tab.id}
-                                  onClick={() => setSidebarOpen((p) => !p)}
-                                  className={`ab-left-strip-btn ${sidebarOpen ? "ab-left-strip-btn-active" : ""}`}
-                                  title={tab.label}
-                                >
-                                  <Icon size={14} />
-                                  <span>{tab.label}</span>
-                                </button>
-                              );
-                            })}
-                            <div className="my-1 mx-2 h-px" style={{ background: "var(--ab-border)" }} />
-                            <button
-                              onClick={() => handleToggleTool("compose")}
-                              className={`ab-left-strip-btn ${activeTool === "compose" ? "ab-left-strip-btn-active" : ""}`}
-                              title="Compose"
-                            >
-                              <Layers size={14} />
-                              <span>Comp</span>
-                            </button>
-                            <button
-                              onClick={() => setInfoOpen((p) => !p)}
-                              className={`ab-left-strip-btn ${infoOpen ? "ab-left-strip-btn-active" : ""}`}
-                              title="Info"
-                            >
-                              <InfoIcon size={14} />
-                              <span>Info</span>
-                            </button>
-                          </div>
-
-                          <div
-                            ref={sidebarElRef}
-                            className="shrink-0 relative overflow-hidden ab-panel-anim-w"
-                            style={{ width: sidebarOpen ? sidebarWidthRef.current : 0 }}
-                            aria-hidden={!sidebarOpen}
-                          >
-                            <div
-                              ref={sidebarInnerRef}
-                              inert={!sidebarOpen}
-                              className="absolute inset-y-0 right-0 flex flex-col overflow-hidden"
-                              style={{
-                                width: sidebarWidthRef.current,
-                                borderRight: "1px solid var(--ab-border)",
-                                background: "rgba(5,5,16,0.55)",
-                              }}
-                            >
-                              <MetadataFileList
-                                files={filteredMetadataFiles}
-                                totalFiles={metadataFiles.length}
-                                selectedId={selectedId}
-                                onSelect={handleSelectFile}
-                                onExportZip={handleExportZip}
-                                collapsed={false}
-                                onToggle={handleSidebarToggle}
-                                isExporting={isExporting}
-                                zipProgress={zipProgress}
-                                downloaded={downloaded}
-                                exportError={zipError}
-                                productTypes={productTypes}
-                                customChips={filterState.customChips}
-                                activeFilters={activeFilters}
-                                filterMode={filterMode}
-                                onToggleFilter={toggleFilter}
-                                onToggleMode={toggleMode}
-                                onClearFilters={clearAll}
-                                onAddCustomChip={addCustomChip}
-                                onRemoveCustomChip={removeCustomChip}
-                              />
-                            </div>
-                          </div>
-
-                          {sidebarOpen && (
-                            <div
-                              className="ab-resize-handle"
-                              onMouseDown={handleSidebarResizeStart}
-                              onDoubleClick={handleSidebarResizeReset}
-                              title="Drag to resize — double-click to reset"
-                            />
-                          )}
-
-                          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-                            <MemoizedPreviewPanel activeTool={activeTool} />
-                          </div>
-                        </div>
+                        <DockShell
+                          tools={{
+                            files: (
+                                <MetadataFileList
+                                  files={filteredMetadataFiles}
+                                  totalFiles={metadataFiles.length}
+                                  selectedId={selectedId}
+                                  onSelect={handleSelectFile}
+                                  onExportZip={handleExportZip}
+                                  collapsed={false}
+                                  onToggle={handleHideFiles}
+                                  isExporting={isExporting}
+                                  zipProgress={zipProgress}
+                                  downloaded={downloaded}
+                                  exportError={zipError}
+                                  productTypes={productTypes}
+                                  customChips={filterState.customChips}
+                                  activeFilters={activeFilters}
+                                  filterMode={filterMode}
+                                  onToggleFilter={toggleFilter}
+                                  onToggleMode={toggleMode}
+                                  onClearFilters={clearAll}
+                                  onAddCustomChip={addCustomChip}
+                                  onRemoveCustomChip={removeCustomChip}
+                                />
+                            ),
+                          }}
+                        >
+                          <MemoizedPreviewPanel />
+                        </DockShell>
 
                         <div
                           className="px-4 py-1.5 flex items-center justify-between shrink-0"
@@ -707,35 +557,6 @@ export default function App() {
                             </button>
                           </div>
                         </div>
-
-                        {infoOpen && (
-                          <div
-                            ref={infoPopoverRef}
-                            className="fixed z-50 rounded-lg overflow-hidden flex flex-col animate-fade-in"
-                            style={{
-                              left: sidebarOpen ? INFO_LEFT_IN_FILES : INFO_LEFT_OVER_VIEWER,
-                              bottom: 88,
-                              width: sidebarOpen ? sidebarWidthRef.current : INFO_WIDTH_OVER_VIEWER,
-                              maxHeight: "50vh",
-                              border: "1px solid var(--ab-border-strong)",
-                              background: "rgba(8,8,18,0.97)",
-                              boxShadow: "0 8px 30px rgba(0,0,0,0.55)",
-                              backdropFilter: "blur(8px)",
-                            }}
-                          >
-                            <div className="flex items-center justify-between px-3 py-1.5 shrink-0" style={{ borderBottom: "1px solid var(--ab-border)" }}>
-                              <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
-                                <InfoIcon size={12} style={{ color: "var(--ab-teal)" }} /> Info
-                              </span>
-                              <button onClick={() => setInfoOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
-                                <X size={12} />
-                              </button>
-                            </div>
-                            <div className="overflow-y-auto min-h-0">
-                              <InfoPanel />
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </PreviewProvider>
                   </ComposeWizardProvider>

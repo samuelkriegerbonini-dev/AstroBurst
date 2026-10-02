@@ -1,8 +1,8 @@
 import { useState, useCallback, useId, useMemo } from "react";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
-import { backgroundRunSummary, type BackgroundRunSummaryInput } from "../../../utils/wizard";
+import { backgroundAlignNotice, backgroundRunSummary, type BackgroundRunSummaryInput } from "../../../utils/wizard";
 import { extractBackground, extractBackgroundBatch } from "../../../services/processing";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider } from "../../ui";
@@ -140,8 +140,16 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     );
   }
 
+  const alignNotice = backgroundAlignNotice(state);
+
   return (
     <div className="flex flex-col gap-3 p-3">
+      {alignNotice && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span>{alignNotice}</span>
+        </div>
+      )}
       <div className="flex flex-col gap-2">
         <Slider label="Grid Size" value={gridSize} min={3} max={32} step={1} accent="emerald"
                 format={(v) => `${v}`} onChange={setGridSize} />

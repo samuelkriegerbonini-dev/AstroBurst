@@ -5,8 +5,8 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir,
-    write_derived_fits, OutputValues,
+    blocking_cmd, derived_output_header, output_stem, resolve_output_dir, write_derived_fits,
+    OutputValues,
 };
 use crate::cmd::compose::overlay_preview::load_channel_entry;
 use crate::cmd::processing::source_header;
@@ -154,7 +154,7 @@ pub async fn crop_channels_cmd(
 
         let entries: Vec<_> = paths
             .iter()
-            .map(|p| load_from_cache_or_disk(p))
+            .map(|p| load_channel_entry(p))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let auto = auto_detect.unwrap_or(true);
@@ -332,9 +332,12 @@ mod tests {
             GLOBAL_IMAGE_CACHE.remove(key);
         }
 
-        assert!(!detect_added_entries, "detection must not add cache entries");
-        assert!(inputs_untouched, "detection must not replace the entries it reads");
-        assert!(!dir.path().join("out").exists(), "detection must not write to the disk");
+        assert!(!detect_added_entries, "detection must not add entries under {test_prefix} besides its two inputs");
+        assert!(inputs_untouched, "detection must not replace the data of the entries it reads");
+        assert!(
+            !dir.path().join("out").exists(),
+            "a wizard crop without persist_to_disk must not create the output dir (detection takes none)"
+        );
         assert_eq!(detected[RES_AUTO_DETECTED], true, "{detected}");
         assert_eq!(detected[RES_DIMENSIONS], json!([50, 40]));
         assert_eq!(margins(&detected), [6, 4, 3, 9]);
@@ -392,6 +395,61 @@ mod tests {
 
         let missing_file = detect_crop_bounds_cmd(vec!["C:/astrokit-missing/det_probe.fits".to_string()]).await;
         assert_ne!(missing_file.expect_err("a missing file must fail"), ALIGNED_GONE);
+    }
+
+    #[tokio::test]
+    async fn crop_channels_on_a_missing_wizard_key_says_to_run_align_again() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out").to_str().unwrap().to_string();
+        let present = seed_wizard_entry("crop_present", &nan_bordered(40, 50, 2, 4, 3, 5));
+        let missing = wizard_aligned_key("crop_missing_probe");
+        let cropped_keys = [wizard_cropped_key("crop_present"), wizard_cropped_key("crop_missing_probe")];
+
+        let auto = crop_channels_cmd(
+            vec![present.clone(), missing.clone()],
+            out.clone(),
+            0,
+            0,
+            0,
+            0,
+            Some(true),
+            Some(vec!["crop_present".to_string(), "crop_missing_probe".to_string()]),
+            None,
+        )
+        .await;
+        let manual = crop_channels_cmd(
+            vec![missing.clone()],
+            out.clone(),
+            2,
+            4,
+            3,
+            5,
+            Some(false),
+            Some(vec!["crop_missing_probe".to_string()]),
+            None,
+        )
+        .await;
+        let missing_file = crop_channels_cmd(
+            vec!["C:/astrokit-missing/crop_probe.fits".to_string()],
+            out.clone(),
+            2,
+            4,
+            3,
+            5,
+            Some(false),
+            None,
+            None,
+        )
+        .await;
+        let left_cropped_entries = GLOBAL_IMAGE_CACHE.any_key(|k| cropped_keys.iter().any(|c| c.as_str() == k));
+        GLOBAL_IMAGE_CACHE.remove(&present);
+
+        assert_eq!(auto.expect_err("a missing wizard key must fail in auto mode"), ALIGNED_GONE);
+        assert_eq!(manual.expect_err("a missing wizard key must fail in manual mode"), ALIGNED_GONE);
+        assert_ne!(missing_file.expect_err("a missing file must fail"), ALIGNED_GONE);
+        assert!(!left_cropped_entries, "a crop that fails to load must not leave cropped entries behind");
+        assert!(!dir.path().join("out").exists(), "a crop that fails to load must not create the output dir");
     }
 
     fn card(header: &HduHeader, key: &str) -> Option<String> {

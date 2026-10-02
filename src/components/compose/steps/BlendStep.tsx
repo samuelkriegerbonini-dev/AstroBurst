@@ -5,7 +5,15 @@ import { blendChannels, lrgbCombineComposite, renderLinearCompositePreview } fro
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton, Slider } from "../../ui";
-import {BLEND_PRESETS, BlendWeight, WizardState, resolveChannelPath, type CompositeOp} from "../../../utils/wizard";
+import {
+  BLEND_PRESETS,
+  BlendWeight,
+  WizardState,
+  effectiveBinFiles,
+  resolveChannelPath,
+  unalignedBins as findUnalignedBins,
+  type CompositeOp,
+} from "../../../utils/wizard";
 import {
   blendMatrixError,
   blendWeightsCoverAllColumns,
@@ -130,10 +138,8 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
     return stages;
   }, [filledBins, state.backgroundPaths, state.croppedPaths, state.alignedPaths, state.stackedPaths]);
 
-  const unalignedBins = useMemo(
-    () => filledBins.filter((b) => channelStages[b.id] === "stacked" || channelStages[b.id] === "raw"),
-    [filledBins, channelStages],
-  );
+  const unalignedBins = useMemo(() => findUnalignedBins(state), [state]);
+  const unalignedIds = useMemo(() => new Set(unalignedBins.map((b) => b.id)), [unalignedBins]);
 
   const resolvedPaths = useMemo(() => {
     if (filledBins.length < 2) return [];
@@ -296,16 +302,18 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
                 <span className="text-[10px] text-zinc-300">{bin.shortLabel}</span>
                 {(() => {
                   const stage = channelStages[bin.id];
-                  const risky = stage === "stacked" || stage === "raw";
-                  const label = stage === "raw" && bin.files.length > 1 ? `raw 1/${bin.files.length}` : stage;
+                  const risky = unalignedIds.has(bin.id);
+                  const frames = effectiveBinFiles(state, bin).length;
+                  const partial = stage === "raw" && frames > 1;
+                  const title = partial
+                    ? `Using 1 of ${frames} files — run Stack to combine them first`
+                    : `Source: ${stage} output`;
                   return (
                     <span
                       className={`text-[8px] px-1 py-px rounded truncate ${risky ? "text-amber-400/90 bg-amber-900/25" : "text-zinc-500 bg-zinc-800/40"}`}
-                      title={stage === "raw" && bin.files.length > 1
-                        ? `Using 1 of ${bin.files.length} files — run Stack to combine them first`
-                        : `Source: ${stage} output`}
+                      title={risky ? `${title}; not aligned` : title}
                     >
-                      {label}
+                      {partial ? `raw 1/${frames}` : stage}
                     </span>
                   );
                 })()}

@@ -290,7 +290,7 @@ function ZoomPanView({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); showActualSize(); }}
-            title="Actual size (100%): one image pixel per screen pixel"
+            title="One preview pixel per screen pixel"
             aria-label="Actual size, 1:1"
             className={`${CONTROL_BUTTON_CLASS} text-[9px] font-mono font-semibold`}
           >
