@@ -16,6 +16,8 @@ pub struct SolveResult {
     pub field_h_arcmin: f64,
     #[serde(default)]
     pub annotations: Vec<FieldAnnotation>,
+    #[serde(default)]
+    pub wcs_cards: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

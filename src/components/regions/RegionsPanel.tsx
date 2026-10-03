@@ -15,6 +15,13 @@ import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, regionLogReady, regionStatsEntries } from "../../utils/measurementLog";
 import { generateId } from "../../utils/format";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
+import {
+  EXCLUDED_CELL_TITLE,
+  EXCLUDE_TITLE,
+  backgroundCandidates,
+  excludedCellLabel,
+  toggledInclude,
+} from "../../utils/regionExclude";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 
 interface RegionsPanelProps {
@@ -37,6 +44,9 @@ const HEADER_BUTTON_CLASS =
   "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 disabled:opacity-40";
 const DANGER_BUTTON_CLASS = "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-400 hover:text-red-300";
 const DELETE_POINTS_CONFIRM_MS = 5000;
+const INCLUDE_TOGGLE_CLASS = "text-[9px] px-1 rounded border shrink-0";
+const INCLUDE_ON_CLASS = "text-zinc-500 border-zinc-700/60 hover:text-zinc-300";
+const INCLUDE_OFF_CLASS = "text-amber-400/90 border-amber-700/60 bg-amber-900/20 hover:text-amber-300";
 
 function formatJansky(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";
@@ -100,6 +110,7 @@ function RegionRow({
   annuli,
   onSelect,
   onBackground,
+  onToggleInclude,
   onDelete,
 }: {
   region: Region;
@@ -108,9 +119,11 @@ function RegionRow({
   annuli: Region[];
   onSelect: (id: string) => void;
   onBackground: (id: string, bg: string | null) => void;
+  onToggleInclude: (region: Region) => void;
   onDelete: (id: string) => void;
 }) {
   const s = entry?.stats ?? null;
+  const excludedLabel = s ? excludedCellLabel(s) : null;
   const sky = regionSkyOf(s);
   const area = formatArea(sky?.area_arcsec2);
   const skyText = skyLine(sky);
@@ -140,7 +153,22 @@ function RegionRow({
           {shapeSummary(region.shape)}
         </span>
         {region.props.text && <span className="text-zinc-500 truncate">{region.props.text}</span>}
-        {!region.props.include && <span className="text-[9px] text-amber-400/80">excl</span>}
+        {canBackground ? (
+          <button
+            type="button"
+            aria-pressed={!region.props.include}
+            title={EXCLUDE_TITLE}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleInclude(region);
+            }}
+            className={`${INCLUDE_TOGGLE_CLASS} ${region.props.include ? INCLUDE_ON_CLASS : INCLUDE_OFF_CLASS}`}
+          >
+            {region.props.include ? "incl" : "excl"}
+          </button>
+        ) : (
+          !region.props.include && <span className="text-[9px] text-amber-400/80">excl</span>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -155,7 +183,7 @@ function RegionRow({
       {entry?.error && <div className="mt-1 text-[9px] text-red-400 break-words">{entry.error}</div>}
       {s && (
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-mono">
-          <StatCell label="n" value={`${s.count}${s.n_excluded > 0 ? ` (−${s.n_excluded} dq)` : ""}`} />
+          <StatCell label="n" value={`${s.count}${excludedLabel ? ` ${excludedLabel}` : ""}`} title={excludedLabel ? EXCLUDED_CELL_TITLE : undefined} />
           <StatCell label="mean" value={fmt(s.mean)} />
           <StatCell label="med" value={fmt(s.median)} />
           <StatCell label="sum" value={s.sum_err != null ? `${fmt(s.sum)} ± ${fmt(s.sum_err)}` : fmt(s.sum)} />
@@ -222,7 +250,6 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [armedPointsKey, setArmedPointsKey] = useState<string | null>(null);
 
-  const annuli = doc.regions.filter((r) => r.shape.shape === "annulus");
   const pointCount = doc.regions.filter((r) => r.shape.shape === "point").length;
   const pointsKey = useMemo(() => shapeKindKey(doc.regions, "point"), [doc.regions]);
   const confirmingDeletePoints = armedPointsKey !== null && armedPointsKey === pointsKey;
@@ -244,6 +271,12 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
   const handleDelete = useCallback(
     (id: string) => {
       if (filePath) regionStore.remove(filePath, id);
+    },
+    [filePath],
+  );
+  const handleToggleInclude = useCallback(
+    (region: Region) => {
+      if (filePath) regionStore.update(filePath, region.id, toggledInclude(region));
     },
     [filePath],
   );
@@ -386,6 +419,14 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
           <span className="text-[9px] text-zinc-600 font-mono">{doc.regions.length}</span>
           {doc.regions.length > 0 && <MeasurementBadge />}
           {excludeDq && <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">DQ masked</span>}
+          {(statsMeasured?.regionExcluded ?? 0) > 0 && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30"
+              title={`${statsMeasured?.regionExcluded} pixels inside exclude regions are left out of the other regions`}
+            >
+              regions excluded
+            </span>
+          )}
           {calibrationBadge}
         </div>
         <div className="flex flex-wrap items-center gap-1">
@@ -511,9 +552,10 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
                 region={r}
                 selected={r.id === doc.selectedId}
                 entry={stats.get(r.id)}
-                annuli={annuli.filter((a) => a.id !== r.id)}
+                annuli={backgroundCandidates(doc.regions, r)}
                 onSelect={handleSelect}
                 onBackground={handleBackground}
+                onToggleInclude={handleToggleInclude}
                 onDelete={handleDelete}
               />
             ))}

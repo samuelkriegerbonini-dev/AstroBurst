@@ -74,6 +74,8 @@ pub enum RegionError {
     Empty { shape: &'static str },
     #[error("{shape} region contains only padding (exact 0) and non-finite pixels")]
     OnlyPadding { shape: &'static str },
+    #[error("{shape} region has no pixels left after exclusion (DQ or exclude regions)")]
+    AllExcluded { shape: &'static str },
     #[error("sky region requires a WCS on the image, but none is present")]
     WcsRequired,
     #[error("region does not project onto the image")]
@@ -587,6 +589,48 @@ impl RegionShape {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExclusionPaint {
+    pub painted: u64,
+    pub skipped: usize,
+}
+
+pub fn paint_exclusions(mask: &mut Array2<u8>, shapes: &[RegionShape]) -> ExclusionPaint {
+    let (rows, cols) = mask.dim();
+    let mut painted = 0u64;
+    let mut skipped = 0usize;
+    for shape in shapes {
+        if shape.validate().is_err() {
+            skipped += 1;
+            continue;
+        }
+        if matches!(shape, RegionShape::Line { .. } | RegionShape::Point { .. }) {
+            continue;
+        }
+        let b = shape.bounds();
+        let x0 = b.x0.max(0);
+        let y0 = b.y0.max(0);
+        let x1 = b.x1.min(cols as i64 - 1);
+        let y1 = b.y1.min(rows as i64 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        for py in y0..=y1 {
+            for px in x0..=x1 {
+                if !shape.contains(px as f64, py as f64) {
+                    continue;
+                }
+                let cell = &mut mask[[py as usize, px as usize]];
+                if *cell == 0 {
+                    *cell = 1;
+                    painted += 1;
+                }
+            }
+        }
+    }
+    ExclusionPaint { painted, skipped }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SigmaClip {
     pub sigma: f32,
@@ -673,7 +717,9 @@ pub fn region_data_stats(
     let sample = |s: &RegionShape, e: Option<&Array2<f32>>| s.masked_values_with_err(arr, e, excluded).without_padding();
     let mv = sample(shape, err);
     if mv.values.is_empty() {
-        return Err(if mv.n_padding > 0 {
+        return Err(if mv.n_excluded > 0 {
+            RegionError::AllExcluded { shape: shape.kind() }
+        } else if mv.n_padding > 0 {
             RegionError::OnlyPadding { shape: shape.kind() }
         } else {
             RegionError::Empty { shape: shape.kind() }
@@ -1623,6 +1669,56 @@ mod tests {
     }
 
     #[test]
+    fn paint_exclusions_marks_the_lattice_inside_each_shape_once_and_skips_lines_and_points() {
+        let disc = circle(20.0, 20.0, 5.0);
+        let expected = disc.masked_values(&zeros(64, 64), None).n_inside;
+        let painted = |mask: &Array2<u8>| mask.iter().filter(|&&v| v != 0).count() as u64;
+
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        assert_eq!(paint_exclusions(&mut mask, std::slice::from_ref(&disc)), ExclusionPaint { painted: expected, skipped: 0 });
+        assert_eq!(painted(&mask), expected);
+        assert!(pixel_set(&disc, 64, 64).iter().all(|&(x, y)| mask[[y, x]] == 1));
+        assert_eq!(paint_exclusions(&mut mask, std::slice::from_ref(&disc)).painted, 0);
+        assert_eq!(paint_exclusions(&mut mask, &[circle(500.0, 500.0, 3.0)]).painted, 0);
+        let line = RegionShape::Line { x1: 0.0, y1: 0.0, x2: 40.0, y2: 40.0 };
+        let point = RegionShape::Point { x: 40.0, y: 40.0 };
+        assert_eq!(paint_exclusions(&mut mask, &[line, point]), ExclusionPaint { painted: 0, skipped: 0 });
+        assert_eq!(painted(&mask), expected);
+
+        let edge = circle(0.0, 0.0, 3.0);
+        let mut corner = Array2::<u8>::zeros((64, 64));
+        let clamped = edge.masked_values(&zeros(64, 64), None).n_inside;
+        assert_eq!(paint_exclusions(&mut corner, &[edge, disc]).painted, clamped + expected);
+    }
+
+    #[test]
+    fn paint_exclusions_skips_invalid_shapes_counts_them_and_still_paints_the_valid_ones() {
+        let disc = circle(20.0, 20.0, 5.0);
+        let expected = disc.masked_values(&zeros(64, 64), None).n_inside;
+        let invalid = [
+            circle(10.0, 10.0, 0.0),
+            RegionShape::Annulus { x: 10.0, y: 10.0, r_inner: 6.0, r_outer: 6.0 },
+            RegionShape::Polygon { points: vec![[1.0, 1.0], [5.0, 5.0]] },
+            RegionShape::Box { x: 10.0, y: 10.0, width: 0.0, height: 4.0, angle: 0.0 },
+            circle(f64::NAN, 1.0, 2.0),
+        ];
+        for shape in &invalid {
+            assert!(shape.validate().is_err(), "{shape:?}");
+        }
+
+        let mut untouched = Array2::<u8>::zeros((64, 64));
+        assert_eq!(paint_exclusions(&mut untouched, &invalid), ExclusionPaint { painted: 0, skipped: invalid.len() });
+        assert!(untouched.iter().all(|&v| v == 0));
+
+        let mut mixed = Array2::<u8>::zeros((64, 64));
+        let mut shapes = invalid[..2].to_vec();
+        shapes.push(disc.clone());
+        shapes.push(invalid[2].clone());
+        assert_eq!(paint_exclusions(&mut mixed, &shapes), ExclusionPaint { painted: expected, skipped: 3 });
+        assert_eq!(mixed.iter().filter(|&&v| v != 0).count() as u64, expected);
+    }
+
+    #[test]
     fn ds9_circle_counts_at_integer_centre() {
         let arr = zeros(32, 32);
         let mv = circle(10.0, 10.0, 5.0).masked_values(&arr, None);
@@ -1864,6 +1960,36 @@ mod tests {
         assert_eq!(s.n_excluded, 2);
         assert_eq!(s.max, 15.0);
         assert_eq!(s.sum, 135.0 - 16.0 - 11.0);
+    }
+
+    #[test]
+    fn region_stats_name_the_exclusion_when_every_pixel_is_masked() {
+        let arr = known_4x4();
+        let mut ex = Array2::<u8>::zeros((6, 6));
+        for y in 1..5 {
+            for x in 1..5 {
+                ex[[y, x]] = 1;
+            }
+        }
+        assert_eq!(
+            region_data_stats(&arr, &whole(), None, Some(&ex), None, SigmaClip::default()),
+            Err(RegionError::AllExcluded { shape: "box" })
+        );
+        let mut padded = arr.clone();
+        padded[[2, 2]] = 0.0;
+        assert_eq!(
+            region_data_stats(&padded, &whole(), None, Some(&ex), None, SigmaClip::default()),
+            Err(RegionError::AllExcluded { shape: "box" })
+        );
+        let nan = Array2::from_elem((6, 6), f32::NAN);
+        assert_eq!(
+            region_data_stats(&nan, &whole(), None, None, None, SigmaClip::default()),
+            Err(RegionError::Empty { shape: "box" })
+        );
+        assert_eq!(
+            RegionError::AllExcluded { shape: "circle" }.to_string(),
+            "circle region has no pixels left after exclusion (DQ or exclude regions)"
+        );
     }
 
     #[test]

@@ -66,6 +66,11 @@ export interface PixelNeighborhood {
   n_nan: number;
 }
 
+export interface WavelengthProbe {
+  value: number;
+  unit: string | null;
+}
+
 export interface PixelProbeResult {
   x: number;
   y: number;
@@ -75,6 +80,7 @@ export interface PixelProbeResult {
   neighborhood: PixelNeighborhood;
   dq: DqProbe | null;
   err: ErrProbe | null;
+  wavelength: WavelengthProbe | null;
 }
 
 export const TIME_SERIES_PROGRESS_EVENT = "time-series-progress";
@@ -147,5 +153,8 @@ export interface PixelTableResult {
   unit: string | null;
   stats: PixelTableStats;
   err_stats: PixelTableStats | null;
+  wavelength: (number | null)[][] | null;
+  wavelength_stats: PixelTableStats | null;
+  wavelength_unit: string | null;
   elapsed_ms: number;
 }

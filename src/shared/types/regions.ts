@@ -126,6 +126,7 @@ export interface RegionStatsResult {
   regions: RegionStatsEntry[];
   masked: boolean;
   dq_excluded: number | null;
+  region_excluded: number;
   elapsed_ms: number;
   photcal?: PhotCal | null;
   calibration_warnings?: string[];
@@ -148,6 +149,8 @@ export interface RadialProfile {
   background: BackgroundEstimate | null;
   bins: RadialBin[];
   masked: boolean;
+  dq_excluded: number | null;
+  region_excluded: number;
   elapsed_ms: number;
 }
 
@@ -163,6 +166,8 @@ export interface LineCut {
   ys: number[];
   values: (number | null)[];
   masked: boolean;
+  dq_excluded: number | null;
+  region_excluded: number;
   elapsed_ms: number;
 }
 
@@ -214,5 +219,7 @@ export interface SbProfile {
   total_mag_ab: number | null;
   notes: string[];
   masked: boolean;
+  dq_excluded: number | null;
+  region_excluded: number;
   elapsed_ms: number;
 }

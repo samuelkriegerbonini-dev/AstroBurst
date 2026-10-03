@@ -49,6 +49,9 @@ export interface MetadataFile {
 }
 
 import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
+import { tableOnlyFileHint } from "../../utils/x1dCompare";
+
+const OPEN_TABLE_TITLE = "Select its cube, open Analysis and compare this x1d with the cube spectrum in Spectroscopy";
 
 interface MetadataFileListProps {
   files: MetadataFile[];
@@ -72,6 +75,8 @@ interface MetadataFileListProps {
   onClearFilters?: () => void;
   onAddCustomChip?: (text: string) => void;
   onRemoveCustomChip?: (text: string) => void;
+  onOpenTable?: (id: string) => void;
+  tableBlockers?: ReadonlyMap<string, string | null>;
 }
 
 const STATUS_CONFIG = {
@@ -114,9 +119,11 @@ interface MetadataFileItemProps {
   file: MetadataFile;
   isSelected: boolean;
   onSelect: (id: string) => void;
+  onOpenTable?: (id: string) => void;
+  tableBlocker: string | null;
 }
 
-function MetadataFileItem({ file, isSelected, onSelect }: MetadataFileItemProps) {
+function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
   const [thumbError, setThumbError] = useState(false);
   const [thumbLoaded, setThumbLoaded] = useState(false);
 
@@ -125,6 +132,7 @@ function MetadataFileItem({ file, isSelected, onSelect }: MetadataFileItemProps)
   const Icon = config.icon;
   const isClickable = status === "done";
   const meta = file.metadata;
+  const tableHint = status === "error" ? tableOnlyFileHint(file.error) : null;
 
   useEffect(() => {
     setThumbError(false);
@@ -244,8 +252,27 @@ function MetadataFileItem({ file, isSelected, onSelect }: MetadataFileItemProps)
           {status === "queued" && (
             <span className="ab-mfl-queued-text">Queued</span>
           )}
-          {status === "error" && (
+          {status === "error" && tableHint === null && (
             <span className="ab-mfl-error-text" title={file.error}>{file.error}</span>
+          )}
+          {tableHint !== null && (
+            <>
+              <span className="ab-mfl-error-text" title={file.error}>{tableHint}</span>
+              {onOpenTable && (
+                <button
+                  type="button"
+                  className="ab-mfl-chip ab-mfl-chip-neutral disabled:opacity-40"
+                  disabled={tableBlocker !== null}
+                  title={tableBlocker ?? OPEN_TABLE_TITLE}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenTable(file.id);
+                  }}
+                >
+                  Open in Spectroscopy
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -261,7 +288,10 @@ const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   prev.file.id === next.file.id
   && prev.isSelected === next.isSelected
   && prev.file.status === next.file.status
-  && prev.file.previewUrl === next.file.previewUrl,
+  && prev.file.previewUrl === next.file.previewUrl
+  && prev.file.error === next.file.error
+  && prev.onOpenTable === next.onOpenTable
+  && prev.tableBlocker === next.tableBlocker,
 );
 
 function MetadataFileList({
@@ -285,6 +315,8 @@ function MetadataFileList({
                             onClearFilters,
                             onAddCustomChip,
                             onRemoveCustomChip,
+                            onOpenTable,
+                            tableBlockers,
                           }: MetadataFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -544,6 +576,8 @@ function MetadataFileList({
                   file={file}
                   isSelected={file.id === selectedId}
                   onSelect={onSelect}
+                  onOpenTable={onOpenTable}
+                  tableBlocker={tableBlockers?.get(file.id) ?? null}
                 />
               ))}
             </div>

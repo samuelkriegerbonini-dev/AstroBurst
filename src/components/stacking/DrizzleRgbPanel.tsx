@@ -9,6 +9,7 @@ import type { DrizzleAlignmentMethod, DrizzleRgbResult, RejectionMethod } from "
 import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
 import { formatCount } from "../../utils/formatCount";
+import { cullDrizzleChannels, subframeExclusionNotice } from "../../utils/subframeCull";
 import type { RunTarget } from "./StackingTab";
 
 type Channel = "r" | "g" | "b";
@@ -17,7 +18,11 @@ interface DrizzleRgbPanelProps {
   files: ProcessedFile[];
   runTarget?: RunTarget | null;
   onResult?: (result: DrizzleRgbResult, inputs: string[], target: RunTarget | null) => void;
+  rejectedPaths?: readonly string[];
+  onUseAllFrames?: () => void;
 }
+
+const NO_PATHS: readonly string[] = [];
 
 const ICON = <Grid3X3 size={14} className="text-rose-400" />;
 
@@ -47,7 +52,7 @@ const KERNELS = [
   { value: "lanczos3", label: "Lanczos3" },
 ] as const;
 
-export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult }: DrizzleRgbPanelProps) {
+export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult, rejectedPaths = NO_PATHS, onUseAllFrames }: DrizzleRgbPanelProps) {
   const [assignments, setAssignments] = useState<Record<string, Channel>>({});
   const [scale, setScale] = useState(2.0);
   const [pixfrac, setPixfrac] = useState(0.7);
@@ -86,8 +91,13 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
     return out;
   }, [files, assignments]);
 
-  const readyChannels = (["r", "g", "b"] as Channel[]).filter((ch) => channelPaths[ch].length >= 2);
-  const shortChannels = (["r", "g", "b"] as Channel[]).filter((ch) => channelPaths[ch].length === 1);
+  const culled = useMemo(() => cullDrizzleChannels(channelPaths, rejectedPaths), [channelPaths, rejectedPaths]);
+  const culledPaths = culled.channels;
+  const rejectedSet = useMemo(() => new Set(rejectedPaths), [rejectedPaths]);
+  const exclusionNotice = subframeExclusionNotice(culled.excluded);
+
+  const readyChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length >= 2);
+  const shortChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length === 1);
   const canRun = readyChannels.length >= 2;
 
   const toggleAssignment = useCallback((path: string, ch: Channel) => {
@@ -119,16 +129,16 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const handleRun = useCallback(async () => {
     if (!canRun) return;
     const target = runTarget;
-    const inputs = [...channelPaths.r, ...channelPaths.g, ...channelPaths.b];
+    const inputs = [...culledPaths.r, ...culledPaths.g, ...culledPaths.b];
     setIsRunning(true);
     setError(null);
     setResult(null);
     resetProgress();
     try {
       const res = await drizzleRgbStack(
-        channelPaths.r,
-        channelPaths.g,
-        channelPaths.b,
+        culledPaths.r,
+        culledPaths.g,
+        culledPaths.b,
         await getOutputDir(),
         {
           scale,
@@ -157,7 +167,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
       setIsRunning(false);
       resetProgress();
     }
-  }, [canRun, channelPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
+  }, [canRun, culledPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -193,6 +203,9 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
               }`}
             >
               <span className="truncate flex-1">{f.name}</span>
+              {rejectedSet.has(f.path) && (
+                <span className="shrink-0 text-[9px] text-amber-400/80" title="Rejected in the Subframe Selector; left out of the drizzle">culled</span>
+              )}
               <div className="flex gap-1 shrink-0">
                 {(["r", "g", "b"] as Channel[]).map((ch) => (
                   <button
@@ -217,8 +230,8 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
             <span className={`text-[9px] uppercase ${ch === "r" ? "text-red-400/70" : ch === "g" ? "text-green-400/70" : "text-blue-400/70"}`}>
               {ch} frames
             </span>
-            <span className={`text-sm font-mono ${channelPaths[ch].length >= 2 ? "text-zinc-200" : "text-zinc-600"}`}>
-              {channelPaths[ch].length}
+            <span className={`text-sm font-mono ${culledPaths[ch].length >= 2 ? "text-zinc-200" : "text-zinc-600"}`}>
+              {culledPaths[ch].length}
             </span>
           </div>
         ))}
@@ -345,6 +358,17 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
         )}
         <Toggle label="Save FITS alongside PNG" checked={saveFits} accent="rose" onChange={setSaveFits} />
       </div>
+
+      {exclusionNotice && (
+        <div className="flex items-start justify-between gap-2 text-[10px] text-amber-400/90 bg-amber-900/20 border border-amber-800/30 rounded px-2.5 py-1.5">
+          <span data-subframe-notice className="break-words">{exclusionNotice}</span>
+          <button
+            type="button"
+            onClick={() => onUseAllFrames?.()}
+            className="shrink-0 text-[10px] text-amber-300 hover:text-amber-200 bg-zinc-800 px-2 py-0.5 rounded"
+          >Use all frames</button>
+        </div>
+      )}
 
       <RunButton
         label={`Drizzle ${readyChannels.map((c) => c.toUpperCase()).join("+") || "RGB"}`}

@@ -1,10 +1,28 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
 const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock }));
 
-import { exportFitsRgb, exportFitsRgbWithHeader } from "../export";
+import { exportFitsRgb, exportFitsRgbWithHeader, exportValuesCell, type ExportResult } from "../export";
+
+describe("export_fits display-referred flag", () => {
+  it("is an optional boolean on the export result", () => {
+    expectTypeOf<ExportResult["display_referred"]>().toEqualTypeOf<boolean | undefined>();
+  });
+
+  it("names display-referred values with the header marker", () => {
+    expect(exportValuesCell({ display_referred: true })).toEqual({ label: "Values", value: "display-referred (ABDISP=T)" });
+  });
+
+  it("names unstretched values linear", () => {
+    expect(exportValuesCell({ display_referred: false })).toEqual({ label: "Values", value: "linear" });
+  });
+
+  it("adds no cell when the export command does not report the flag", () => {
+    expect(exportValuesCell({})).toBeNull();
+  });
+});
 
 const OK = { output_path: "/x/out.fits", elapsed_ms: 1 };
 

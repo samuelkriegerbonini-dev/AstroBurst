@@ -1,4 +1,4 @@
-import { detectChannel, resolveFileFilter, shortName, type ChannelSource } from "./channelMapping";
+import { detectChannel, headerFilterValues, resolveFileFilter, resolveFilterFromName, shortName, type ChannelSource } from "./channelMapping";
 
 export interface FrequencyBin {
   id: string;
@@ -50,16 +50,22 @@ export interface ChannelResult {
   stretched: ChannelStage | null;
 }
 
+export interface LevelMatchEntry {
+  channel: string;
+  scale: number;
+}
+
 export interface CompositeHistory {
   blend: string | null;
+  levels: string[];
   colorBalance: string[];
   after: string[];
 }
 
-export const EMPTY_COMPOSITE_HISTORY: CompositeHistory = { blend: null, colorBalance: [], after: [] };
+export const EMPTY_COMPOSITE_HISTORY: CompositeHistory = { blend: null, levels: [], colorBalance: [], after: [] };
 
 export type CompositeOp =
-  | { kind: "blend"; preset: string }
+  | { kind: "blend"; preset: string; levels?: readonly LevelMatchEntry[] | null }
   | { kind: "colorBalance"; mode: string; r: number; g: number; b: number; scnr: { method: string; amount: number } | null }
   | { kind: "resetColorBalance" }
   | { kind: "lrgb"; lightness: number; chrominance: number }
@@ -96,6 +102,9 @@ export interface WizardState {
   completedSteps: Record<string, boolean>;
   subframeResults: Record<string, SubframeAnalysisResult>;
   excludedFiles: Record<string, string[]>;
+  levelMatch: boolean | null;
+  blendLevelScales: Record<string, number> | null;
+  spccFactors: { r: number; g: number; b: number } | null;
 }
 
 export const DEFAULT_BINS: FrequencyBin[] = [
@@ -194,6 +203,9 @@ export const INITIAL_STATE: WizardState = {
   completedSteps: {},
   subframeResults: {},
   excludedFiles: {},
+  levelMatch: null,
+  blendLevelScales: null,
+  spccFactors: null,
 };
 
 export interface StepDef {
@@ -263,7 +275,7 @@ export function wizardHasProgress(state: WizardState): boolean {
   return totalFilesCount(state) > 0 || Object.values(state.completedSteps).some(Boolean);
 }
 
-const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
+export const NARROWBAND_IDS = new Set(["ha", "sii", "nii", "oiii", "hb"]);
 
 const NB_PRESETS = new Set(["sho", "hoo", "dynamic_hoo", "foraxx", "hubble_legacy"]);
 
@@ -441,6 +453,7 @@ export function invalidateDownstream(
   if (clear("blend")) {
     partial.compositeReady = false;
     partial.compositeHistory = EMPTY_COMPOSITE_HISTORY;
+    partial.blendLevelScales = null;
   }
   if (clear("stretch")) partial.channelResults = {};
 
@@ -641,6 +654,11 @@ export function wizardHeaderSourcePath(
   return state.stackedPaths[bin.id] ?? effectiveBinFiles(state, bin)[0] ?? null;
 }
 
+export function wizardChannelExport(state: WizardState): { r: string; g: string; b: string; monoBinId: string | null } | null {
+  const { r, g, b, monoBinId } = resolveExportRgbPaths(state);
+  return r && g && b ? { r, g, b, monoBinId } : null;
+}
+
 export function wizardZipChannels(state: WizardState): { name: string; path: string }[] {
   const channels = state.compositeReady ? { ...resolveRgbPaths(state), monoBinId: null } : resolveExportRgbPaths(state);
   const entries = channels.monoBinId
@@ -700,6 +718,8 @@ const SPCC_BROADBAND_ONLY = "SPCC models broadband R/G/B filters only";
 
 const NARROWBAND_FILTER_CODE = /^F\d{3,4}N$/;
 
+const MEDIUM_BAND_FILTER_CODE = /^F\d{3,4}M$/;
+
 const NARROWBAND_LINE_CODES = new Set(["HA", "HALPHA", "H_ALPHA", "OIII", "O3", "SII", "S2", "NII", "HB", "HBETA"]);
 
 const NARROWBAND_BIN_LABELS: Record<string, string> = { ha: "Hα", oiii: "OIII", sii: "SII", nii: "NII", hb: "Hβ" };
@@ -714,6 +734,39 @@ export function narrowbandFilterLabel(
   if (code && (NARROWBAND_FILTER_CODE.test(code) || NARROWBAND_LINE_CODES.has(code))) return code;
   const bin = detectChannel(file);
   return bin ? NARROWBAND_BIN_LABELS[bin] ?? null : null;
+}
+
+export const SPCC_MIN_NM = 380;
+
+export const SPCC_MAX_NM = 830;
+
+export const AUTO_WB_SPCC_HINT = "Use SPCC or manual factors.";
+
+export const AUTO_WB_MANUAL_HINT = "Use manual factors; SPCC does not model these filters.";
+
+export function fileFilterBand(file: ChannelSource | undefined, path: string): { code: string; nm: number } | null {
+  return (file ? resolveFileFilter(file) : null) ?? resolveFilterFromName(file?.name || shortName(path));
+}
+
+export function filterCodeTokens(file: ChannelSource | undefined, path: string): string[] {
+  const sources = [...(file ? headerFilterValues(file) : []), shortName(file?.name || path)];
+  return sources.flatMap((value) => value.toUpperCase().split(/[^A-Z0-9]+/)).filter((token) => token !== "");
+}
+
+export function narrowbandFileLabel(
+  file: ChannelSource | undefined,
+  detection: FilterDetectionRef | undefined,
+  path: string,
+): string | null {
+  return narrowbandFilterLabel(file, detection) ?? filterCodeTokens(file, path).find((t) => NARROWBAND_FILTER_CODE.test(t)) ?? null;
+}
+
+export function scnrAutoEnable(narrowband: boolean, spccBlocked: string | null): boolean {
+  return !narrowband && spccBlocked === null;
+}
+
+export function autoWbErrorText(message: string, spccAllowed: boolean): string {
+  return spccAllowed ? message : message.replace(AUTO_WB_SPCC_HINT, AUTO_WB_MANUAL_HINT);
 }
 
 function binShortLabel(state: WizardState, binId: string): string {
@@ -735,14 +788,25 @@ export function spccBlockReason(
     const letters = fallbacks.map((f) => f.key.toUpperCase()).join(", ");
     return `${SPCC_BROADBAND_ONLY}; ${names} would be measured as ${letters}.`;
   }
-  for (const key of RGB_KEYS) {
-    const bin = state.bins.find((b) => b.id === key);
-    for (const path of bin?.files ?? []) {
-      const label = narrowbandFilterLabel(
-        files.find((f) => f.path === path),
-        detections.find((d) => d.path === path),
-      );
-      if (label) return `${SPCC_BROADBAND_ONLY}; ${shortName(path)} in ${binShortLabel(state, key)} is a narrowband frame (${label}).`;
+  const inputFiles = RGB_KEYS.flatMap((key) =>
+    (state.bins.find((b) => b.id === key)?.files ?? []).map((path) => ({
+      path,
+      file: files.find((f) => f.path === path),
+      where: `${shortName(path)} in ${binShortLabel(state, key)}`,
+    })),
+  );
+  for (const { path, file, where } of inputFiles) {
+    const label = narrowbandFileLabel(file, detections.find((d) => d.path === path), path);
+    if (label) return `${SPCC_BROADBAND_ONLY}; ${where} is a narrowband frame (${label}).`;
+  }
+  for (const { path, file, where } of inputFiles) {
+    const medium = filterCodeTokens(file, path).find((t) => MEDIUM_BAND_FILTER_CODE.test(t));
+    if (medium) return `${SPCC_BROADBAND_ONLY}; ${where} is a medium-band frame (${medium}).`;
+  }
+  for (const { path, file, where } of inputFiles) {
+    const band = fileFilterBand(file, path);
+    if (band && (band.nm < SPCC_MIN_NM || band.nm > SPCC_MAX_NM)) {
+      return `SPCC models visible light (${SPCC_MIN_NM}-${SPCC_MAX_NM} nm) only; ${where} is ${band.code} at ${band.nm} nm.`;
     }
   }
   return null;
@@ -1206,7 +1270,7 @@ const percent = (v: number) => `${Math.round(v * 100)}%`;
 export function applyCompositeOp(history: CompositeHistory, op: CompositeOp): CompositeHistory {
   switch (op.kind) {
     case "blend":
-      return { blend: `Blend: ${op.preset}`, colorBalance: [], after: [] };
+      return { blend: `Blend: ${op.preset}`, levels: (op.levels ?? []).map(levelMatchLine), colorBalance: [], after: [] };
     case "colorBalance": {
       const lines: string[] = [];
       if (op.r !== 1 || op.g !== 1 || op.b !== 1) {
@@ -1225,7 +1289,11 @@ export function applyCompositeOp(history: CompositeHistory, op: CompositeOp): Co
 }
 
 export function compositeHistoryLines(history: CompositeHistory): string[] {
-  return [...(history.blend ? [history.blend] : []), ...history.colorBalance, ...history.after];
+  return [...(history.blend ? [history.blend] : []), ...history.levels, ...history.colorBalance, ...history.after];
+}
+
+export function levelMatchLine(entry: LevelMatchEntry): string {
+  return `Level match ${entry.channel}: x${entry.scale.toPrecision(4)}`;
 }
 
 export function wizardStackName(binId: string, drizzle: boolean, runId: number): string {

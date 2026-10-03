@@ -12,6 +12,7 @@ import { checkReference, hasCompleteTimeAxis, lightCurve, referenceTimeSource, s
 import { generateId } from "./format";
 import { exportStem, parseImageRef } from "./imageRef";
 import { regionSkyOf } from "./regionCsv";
+import { isExcludeRegion } from "./regionExclude";
 import { firstSurfaceBrightness } from "./sbProfile";
 import type { ComparisonCsvInput } from "./spectrumCompare";
 import { spectrumExportSummary, type SpectrumExportInput } from "./spectrumExport";
@@ -45,6 +46,7 @@ const NOTE_SEPARATOR = " | ";
 const NULL_TEXT = "--";
 const SUMMARY_DIGITS = 6;
 const NO_STATISTICS_NOTE = "no statistics";
+export const EXCLUDE_ROW_NOTE = "exclude region: measured on its own pixels, without the exclude mask";
 const LOADED_CUBE_IMAGE = "loaded cube";
 const LOADED_FILE_IMAGE = "loaded file";
 const ORIGINAL_IMAGE = "original";
@@ -161,6 +163,10 @@ export function dqHandlingOf(requested: boolean, masked: boolean | null): DqHand
   return masked === true ? "excluded" : "requested";
 }
 
+export function profileDqHandling(excludeDq: boolean, data: { dq_excluded: number | null }): DqHandling {
+  return dqHandlingOf(excludeDq, data.dq_excluded !== null);
+}
+
 export function imageLabelOf(source: MeasurementSource | null): string {
   return source?.text ?? ORIGINAL_IMAGE;
 }
@@ -205,12 +211,14 @@ export interface RadialLogRequest {
   y: number;
   maxRadius: number;
   background: [number, number] | null;
+  exclude: readonly RegionShape[];
 }
 
 export interface SbLogRequest {
   shape: RegionShape;
   background: RegionShape | null;
   binWidth: number;
+  exclude: readonly RegionShape[];
 }
 
 export function filterEntries(
@@ -278,6 +286,7 @@ export interface RegionStatsMeasured {
   maxiters: number | null;
   masked: boolean;
   dqExcluded: number | null;
+  regionExcluded: number;
   elapsedMs: number;
 }
 
@@ -489,17 +498,21 @@ export function regionStatsEntries(
   photcal: PhotCal | null,
 ): MeasurementLogDraft[] {
   const byId = new Map(measured.regions.map((r) => [r.id, r]));
-  const dq = dqHandlingOf(measured.excludeDq, measured.masked);
+  const dq = dqHandlingOf(measured.excludeDq, measured.dqExcluded !== null);
   const params: LogRecord = {
     sigma: measured.sigma ?? DEFAULT_CLIP_SIGMA,
     maxiters: measured.maxiters ?? DEFAULT_CLIP_ITERS,
     dq_excluded_px: measured.dqExcluded,
+    region_excluded_px: measured.regionExcluded,
     photcal: photcal?.label ?? null,
   };
+  const ownParams: LogRecord = { ...params, region_excluded_px: 0 };
   return measured.regions.map((region) => {
     const entry = stats.get(region.id);
     const s = entry?.stats ?? null;
     const background = region.backgroundId ? (byId.get(region.backgroundId)?.shape ?? null) : null;
+    const own = isExcludeRegion(region);
+    const notes = s ? [] : [entry?.error ?? NO_STATISTICS_NOTE];
     return {
       kind: "region_stats",
       file: prov.file,
@@ -507,9 +520,9 @@ export function regionStatsEntries(
       dq,
       unit: photcal?.bunit ?? null,
       source: regionSource(region.props.text, region.shape, background),
-      params,
+      params: own ? ownParams : params,
       values: s ? regionStatsValues(s) : {},
-      notes: s ? [] : [entry?.error ?? NO_STATISTICS_NOTE],
+      notes: own ? [...notes, EXCLUDE_ROW_NOTE] : notes,
     };
   });
 }
@@ -526,7 +539,7 @@ export function radialProfileEntry(
     kind: "radial_profile",
     file: prov.file,
     image: prov.image,
-    dq: dqHandlingOf(excludeDq, data.masked),
+    dq: profileDqHandling(excludeDq, data),
     unit: null,
     source: regionSource(region.props.text, region.shape, null),
     params: {
@@ -535,6 +548,8 @@ export function radialProfileEntry(
       max_radius_px: finiteOrNull(data.max_radius),
       background_inner_px: req.background ? finiteOrNull(req.background[0]) : null,
       background_outer_px: req.background ? finiteOrNull(req.background[1]) : null,
+      region_excluded_px: data.region_excluded,
+      exclude_regions: req.exclude.length,
     },
     values: {
       n_bins: data.bins.length,
@@ -558,7 +573,7 @@ export function sbProfileEntry(
     kind: "sb_profile",
     file: prov.file,
     image: prov.image,
-    dq: dqHandlingOf(excludeDq, sb.masked),
+    dq: profileDqHandling(excludeDq, sb),
     unit: sb.photcal?.bunit ?? null,
     source: regionSource(region.props.text, region.shape, req.background),
     params: {
@@ -569,6 +584,8 @@ export function sbProfileEntry(
       angle_deg: finiteOrNull(sb.angle_deg),
       bin_width_px: finiteOrNull(sb.bin_width),
       photcal: sb.photcal?.label ?? null,
+      region_excluded_px: sb.region_excluded,
+      exclude_regions: req.exclude.length,
     },
     values: {
       r50_px: finiteOrNull(sb.r50_px),
@@ -588,16 +605,29 @@ export function sbProfileEntry(
   };
 }
 
-export function lineCutEntry(prov: MeasurementProvenance, cut: LineCut, excludeDq: boolean, region: Region): MeasurementLogDraft {
+export function lineCutEntry(
+  prov: MeasurementProvenance,
+  cut: LineCut,
+  excludeDq: boolean,
+  region: Region,
+  exclude: readonly RegionShape[],
+): MeasurementLogDraft {
   const finite = cut.values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   return {
     kind: "line_cut",
     file: prov.file,
     image: prov.image,
-    dq: dqHandlingOf(excludeDq, cut.masked),
+    dq: profileDqHandling(excludeDq, cut),
     unit: null,
     source: regionSource(region.props.text, region.shape, null),
-    params: { x1: finiteOrNull(cut.x1), y1: finiteOrNull(cut.y1), x2: finiteOrNull(cut.x2), y2: finiteOrNull(cut.y2) },
+    params: {
+      x1: finiteOrNull(cut.x1),
+      y1: finiteOrNull(cut.y1),
+      x2: finiteOrNull(cut.x2),
+      y2: finiteOrNull(cut.y2),
+      region_excluded_px: cut.region_excluded,
+      exclude_regions: exclude.length,
+    },
     values: {
       length_px: finiteOrNull(cut.length),
       n_samples: cut.n_samples,
@@ -783,6 +813,8 @@ export function pixelEntry(prov: MeasurementProvenance, result: PixelTableResult
       err: finiteOrNull(result.err?.[half]?.[half]),
       dq_value: finiteOrNull(result.dq?.[half]?.[half]),
       dq_names: result.dq_names?.[half]?.[half] ?? null,
+      wavelength: finiteOrNull(result.wavelength?.[half]?.[half]),
+      wavelength_unit: result.wavelength_unit ?? null,
       window_min: finiteOrNull(result.stats.min),
       window_max: finiteOrNull(result.stats.max),
       window_mean: finiteOrNull(result.stats.mean),
@@ -902,6 +934,9 @@ export function spectrumCompareEntry(filePath: string, csvInput: ComparisonCsvIn
       offset_step: csvInput.mode === "offset" ? finiteOrNull(csvInput.result.step) : null,
       view: csvInput.view,
       saved_path: savedPath,
+      x1d_path: csvInput.table?.path ?? null,
+      x1d_hdu: csvInput.table?.hdu ?? null,
+      x1d_dq_rows_dropped: csvInput.table?.resampled.droppedDq ?? null,
     },
     values: { n_series: csvInput.result.plotted.length },
     notes: csvInput.result.omitted.map((o) => `${o.label}: ${o.reason}`),

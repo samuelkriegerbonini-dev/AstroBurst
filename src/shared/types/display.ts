@@ -73,6 +73,7 @@ export interface DisplaySettings {
   gridFrame: GridFrame;
   gridDensity: number;
   compass: boolean;
+  colorbar: boolean;
   symmetric: boolean;
   centre: number;
 }
@@ -93,6 +94,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   gridFrame: "icrs",
   gridDensity: GRID_DENSITY_DEFAULT,
   compass: false,
+  colorbar: true,
   symmetric: false,
   centre: 0,
 };

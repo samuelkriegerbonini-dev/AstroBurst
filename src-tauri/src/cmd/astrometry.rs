@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, image_ref, source_path};
+use crate::cmd::common::{
+    blocking_cmd, cached_header, derived_output_header, image_ref, load_cached_full, output_stem,
+    render_named_and_save, resolve_output_dir, source_path, OutputValues,
+};
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::wcs::{
@@ -8,22 +11,26 @@ use crate::core::astrometry::wcs::{
 };
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::writer::{filter_header, is_wcs_card};
 use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
-    RES_CENTER_RA, RES_EAST_VEC, RES_FLIPPED, RES_FOV_ARCMIN, RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN,
-    RES_FRAME, RES_NAXIS1, RES_NAXIS2, RES_NORTH_VEC, RES_ON_IMAGE, RES_PARITY,
-    RES_PIXEL_LENGTH, RES_PIXEL_SCALE_ARCSEC, RES_PIXEL_SCALE_X_ARCSEC, RES_PIXEL_SCALE_Y_ARCSEC,
-    RES_POINTS, RES_POSITION_ANGLE_DEG, RES_PROJECTION, RES_ROTATION_DEG, RES_SEPARATION_ARCMIN,
+    RES_CENTER_RA, RES_DIMENSIONS, RES_EAST_VEC, RES_ELAPSED_MS, RES_FITS_PATH, RES_FLIPPED,
+    RES_FOV_ARCMIN, RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
+    RES_NORTH_VEC, RES_ON_IMAGE, RES_PARITY, RES_PIXEL_LENGTH, RES_PIXEL_SCALE_ARCSEC,
+    RES_PIXEL_SCALE_X_ARCSEC, RES_PIXEL_SCALE_Y_ARCSEC, RES_PNG_PATH, RES_POINTS,
+    RES_POSITION_ANGLE_DEG, RES_PROJECTION, RES_ROTATION_DEG, RES_SEPARATION_ARCMIN,
     RES_SEPARATION_ARCSEC, RES_SEPARATION_DEG, RES_SIP_PRESENT,
 };
 use crate::types::config::AppConfig;
+use crate::types::header::HduHeader;
 
 const MAX_UPLOAD_DIM: usize = 2048;
 const MAX_SKY_POINTS: usize = 20_000;
 const MAX_LATITUDE_DEG: f64 = 90.0;
 const PARITY_NORMAL: &str = "normal";
 const PARITY_FLIPPED: &str = "flipped";
+const ABPROC_PLATE_SOLVED: &str = "platesolved";
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let header = load_plane_header(&image_ref(path))?;
@@ -254,6 +261,8 @@ pub async fn plate_solve_cmd(
 
         if let Some((fx, fy)) = ds_factor {
             rescale_solve_to_original(&mut solve_result, fx, fy, original_dims.0, original_dims.1);
+            solve_result.wcs_cards =
+                rescale_wcs_cards_to_original(&solve_result.wcs_cards, upload_dims, original_dims);
         }
 
         drop((_tmp, _tmp_ds));
@@ -289,6 +298,90 @@ fn rescale_solve_to_original(
             *r *= f_mean;
         }
     }
+}
+
+#[cfg(feature = "astrometry-net")]
+fn rescale_wcs_cards_to_original(
+    cards: &[(String, String)],
+    upload_dims: (usize, usize),
+    original_dims: (usize, usize),
+) -> Vec<(String, String)> {
+    let mut header = HduHeader::empty();
+    for (key, value) in cards {
+        header.set(key.trim(), value.clone());
+    }
+    let updates = crate::core::imaging::resample::compute_wcs_updates(
+        &header,
+        (upload_dims.1, upload_dims.0),
+        (original_dims.1, original_dims.0),
+    );
+    for (key, value) in updates {
+        if key.starts_with("NAXIS") {
+            continue;
+        }
+        header.set_f64(&key, value);
+    }
+    header.cards
+}
+
+pub(crate) fn write_solved_wcs(
+    path: &str,
+    wcs_cards: &[(String, String)],
+    output_dir: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let started = std::time::Instant::now();
+    let name = output_stem(path);
+    let source_header = cached_header(path)?;
+    let planes = source_header.get_i64("NAXIS3").unwrap_or(1);
+    if source_header.get_i64("NAXIS").unwrap_or(0) > 2 && planes > 1 {
+        anyhow::bail!("{name} has {planes} planes; writing a solved WCS supports single-plane images only");
+    }
+
+    let entry = load_cached_full(path)?;
+    let source = entry.header().cloned().unwrap_or_else(HduHeader::empty);
+    let mut merged = filter_header(&source, false, true).unwrap_or_else(HduHeader::empty);
+    for (key, value) in wcs_cards {
+        let key = key.trim();
+        if is_wcs_card(key) {
+            merged.set(key, value.clone());
+        }
+    }
+    let header = derived_output_header(Some(&merged), ABPROC_PLATE_SOLVED, OutputValues::Linear);
+
+    let (rows, cols) = entry.arr().dim();
+    let mut probe = header.clone();
+    probe.set(HEADER_NAXIS1, cols.to_string());
+    probe.set(HEADER_NAXIS2, rows.to_string());
+    let wcs = WcsTransform::from_header(&probe).map_err(|e| {
+        anyhow::anyhow!("The solved WCS is not a usable celestial WCS ({e:#}); nothing was written.")
+    })?;
+
+    let output_dir = resolve_output_dir(output_dir)?;
+    let (png_path, fits_path) =
+        render_named_and_save(entry.arr(), &output_dir, &format!("{name}_wcs"), true, Some(&header))?;
+    let fits_path = fits_path.ok_or_else(|| anyhow::anyhow!("the solved WCS FITS was not written"))?;
+
+    let (cx, cy) = pixel_center(cols, rows);
+    let centre = wcs.pixel_to_world(cx, cy);
+    Ok(json!({
+        RES_FITS_PATH: fits_path,
+        RES_PNG_PATH: png_path,
+        RES_DIMENSIONS: [cols, rows],
+        RES_CENTER_RA: centre.ra,
+        RES_CENTER_DEC: centre.dec,
+        RES_PIXEL_SCALE_ARCSEC: wcs.pixel_scale_arcsec(),
+        RES_SIP_PRESENT: wcs.orientation(cols, rows).sip_present,
+        RES_ELAPSED_MS: started.elapsed().as_millis() as u64,
+    }))
+}
+
+#[tauri::command]
+pub async fn write_solved_wcs_cmd(
+    path: String,
+    wcs_cards: Vec<(String, String)>,
+    output_dir: String,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(write_solved_wcs(&path, &wcs_cards, &output_dir))
 }
 
 fn image_dims(header: &crate::types::header::HduHeader) -> (usize, usize) {
@@ -663,6 +756,7 @@ mod tests {
     use crate::core::astrometry::frames::SkyFrame;
     use crate::core::astrometry::grid::{DEFAULT_DENSITY, MAX_DENSITY};
     use crate::core::imaging::region::test_support::{make_header, north_up_cd, wcs_cards};
+    use crate::infra::astrometry::plate_solve::test_support::nova_wcs_cards;
 
     fn write_north_up_fits(path: &str, size: usize) {
         let cards = wcs_cards(north_up_cd());
@@ -732,6 +826,7 @@ mod tests {
                 pixely: 512.5,
                 radius: Some(10.0),
             }],
+            wcs_cards: Vec::new(),
         };
         super::rescale_solve_to_original(&mut result, 2.0, 2.0, 4096, 2048);
         assert!((result.pixel_scale - 1.0).abs() < 1e-12);
@@ -741,6 +836,241 @@ mod tests {
         assert!((ann.pixelx - 2048.5).abs() < 1e-12 && (ann.pixely - 1024.5).abs() < 1e-12);
         assert_eq!(ann.radius, Some(20.0));
         assert_eq!((result.ra_center, result.dec_center, result.orientation), (10.0, 20.0, 30.0));
+    }
+
+    #[cfg(feature = "astrometry-net")]
+    #[test]
+    fn rescaled_wcs_cards_reproduce_the_upload_solution_at_the_original_corners() {
+        use crate::core::astrometry::wcs::{angular_separation, pixel_center, pixel_edge_corners, WcsTransform};
+
+        let wcs_of = |cards: &[(String, String)], (cols, rows): (usize, usize)| {
+            let mut h = crate::types::header::HduHeader::empty();
+            for (k, v) in cards {
+                h.set(k, v.clone());
+            }
+            h.set("NAXIS1", cols.to_string());
+            h.set("NAXIS2", rows.to_string());
+            WcsTransform::from_header(&h).unwrap()
+        };
+        let centred = |(cols, rows): (usize, usize)| -> Vec<(String, String)> {
+            nova_wcs_cards()
+                .into_iter()
+                .map(|(k, v)| match k.as_str() {
+                    "CRPIX1" => (k, format!("{}", cols as f64 / 2.0 + 0.5)),
+                    "CRPIX2" => (k, format!("{}", rows as f64 / 2.0 + 0.5)),
+                    _ => (k, v),
+                })
+                .collect()
+        };
+        let cases = [
+            ((1024usize, 683usize), (2048usize, 1366usize), nova_wcs_cards()),
+            ((2048, 1365), (6000, 4000), centred((2048, 1365))),
+        ];
+        for (upload, original, cards) in cases {
+            let rescaled = super::rescale_wcs_cards_to_original(&cards, upload, original);
+            let upload_wcs = wcs_of(&cards, upload);
+            let orig_wcs = wcs_of(&rescaled, original);
+            let fx = original.0 as f64 / upload.0 as f64;
+            let fy = original.1 as f64 / upload.1 as f64;
+            let scale = orig_wcs.pixel_scale_arcsec();
+            let mut points: Vec<(f64, f64)> = pixel_edge_corners(original.0, original.1).to_vec();
+            points.push(pixel_center(original.0, original.1));
+            for (x, y) in points {
+                let xu = (x + 0.5) / fx - 0.5;
+                let yu = (y + 0.5) / fy - 0.5;
+                let up = upload_wcs.pixel_to_world(xu, yu);
+                let orig = orig_wcs.pixel_to_world(x, y);
+                let sep_px = angular_separation(up.ra, up.dec, orig.ra, orig.dec) * 3600.0 / scale;
+                assert!(sep_px < 0.05, "{upload:?} -> {original:?} at ({x}, {y}): {sep_px} px apart");
+                let (pu, pv) = upload_wcs.world_to_pixel(up.ra, up.dec);
+                let (px, py) = orig_wcs.world_to_pixel(up.ra, up.dec);
+                let (ex, ey) = (fx * (pu + 0.5) - 0.5, fy * (pv + 0.5) - 0.5);
+                assert!(
+                    (px - ex).abs() < 0.05 && (py - ey).abs() < 0.05,
+                    "{upload:?} -> {original:?} at ({x}, {y}): ({px}, {py}) vs ({ex}, {ey})"
+                );
+            }
+        }
+    }
+
+    fn source_with_cards(
+        dir: &tempfile::TempDir,
+        name: &str,
+        extra: &[(String, String)],
+    ) -> (String, ndarray::Array2<f32>) {
+        let mut pairs = wcs_cards(north_up_cd());
+        pairs.extend(extra.iter().cloned());
+        pairs.push(("BUNIT".to_string(), "MJy/sr".to_string()));
+        pairs.push(("EXPTIME".to_string(), "300".to_string()));
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let arr = ndarray::Array2::from_shape_fn((48, 64), |(y, x)| (y * 64 + x) as f32 * 0.5 + 10.0);
+        let path = dir.path().join(name).to_string_lossy().to_string();
+        crate::infra::fits::writer::write_fits_mono(&path, &arr, Some(&make_header(&refs))).unwrap();
+        (path, arr)
+    }
+
+    fn source_with_old_wcs(dir: &tempfile::TempDir, name: &str) -> (String, ndarray::Array2<f32>) {
+        source_with_cards(dir, name, &[])
+    }
+
+    fn stale_wcs_cards() -> Vec<(String, String)> {
+        [
+            ("CDELT1", "-2.777777777778E-04"),
+            ("CDELT2", "2.777777777778E-04"),
+            ("PC1_1", "1.0"),
+            ("PC1_2", "0.0"),
+            ("PC2_1", "0.0"),
+            ("PC2_2", "1.0"),
+            ("CROTA2", "12.5"),
+            ("A_ORDER", "3"),
+            ("A_0_3", "4.0E-11"),
+            ("A_3_0", "-7.0E-11"),
+            ("B_ORDER", "3"),
+            ("B_0_3", "6.0E-11"),
+            ("B_3_0", "-2.0E-11"),
+            ("PV1_1", "0.0"),
+            ("PV1_2", "90.0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn write_solved_wcs_drops_the_stale_wcs_cards_nova_does_not_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = source_with_cards(&dir, "stale_src.fits", &stale_wcs_cards());
+        let out = dir.path().join("out").to_string_lossy().to_string();
+        let source = crate::infra::image_source::load_plane_header(&crate::cmd::common::image_ref(&path)).unwrap();
+        for (key, _) in stale_wcs_cards() {
+            assert!(source.get(&key).is_some(), "{key} is missing from the fixture");
+        }
+
+        let result = super::write_solved_wcs(&path, &nova_wcs_cards(), &out).unwrap();
+
+        let fits_path = result["fits_path"].as_str().unwrap().to_string();
+        let header = crate::infra::image_source::load_plane_header(&crate::cmd::common::image_ref(&fits_path)).unwrap();
+        for key in [
+            "CDELT1", "CDELT2", "PC1_1", "PC1_2", "PC2_1", "PC2_2", "CROTA2", "A_0_3", "A_3_0", "B_0_3", "B_3_0",
+            "PV1_1", "PV1_2",
+        ] {
+            assert!(header.get(key).is_none(), "stale {key} survived as {:?}", header.get(key));
+        }
+        assert_eq!(header.get_i64("A_ORDER"), Some(2));
+        assert_eq!(header.get_i64("B_ORDER"), Some(2));
+
+        let mut written: Vec<String> = header
+            .cards
+            .iter()
+            .map(|(k, _)| k.trim().to_string())
+            .filter(|k| crate::infra::fits::writer::is_wcs_card(k))
+            .collect();
+        written.sort();
+        written.dedup();
+        let mut expected: Vec<String> = nova_wcs_cards().into_iter().map(|(k, _)| k).collect();
+        expected.sort();
+        assert_eq!(written, expected);
+
+        let mut nova_only = crate::types::header::HduHeader::empty();
+        for (k, v) in nova_wcs_cards() {
+            nova_only.set(&k, v);
+        }
+        nova_only.set("NAXIS1", "64".to_string());
+        nova_only.set("NAXIS2", "48".to_string());
+        let expected_wcs = crate::core::astrometry::wcs::WcsTransform::from_header(&nova_only).unwrap();
+        let written_wcs = crate::core::astrometry::wcs::WcsTransform::from_header(&header).unwrap();
+        for (x, y) in [(0.0, 0.0), (63.0, 0.0), (0.0, 47.0), (63.0, 47.0), (31.5, 23.5)] {
+            let ours = written_wcs.pixel_to_world(x, y);
+            let theirs = expected_wcs.pixel_to_world(x, y);
+            assert!(
+                (ours.ra - theirs.ra).abs() < 1e-9 && (ours.dec - theirs.dec).abs() < 1e-9,
+                "({x}, {y}): ({}, {}) vs ({}, {})",
+                ours.ra,
+                ours.dec,
+                theirs.ra,
+                theirs.dec
+            );
+        }
+        assert_eq!(result["sip_present"], true);
+    }
+
+    #[tokio::test]
+    async fn write_solved_wcs_replaces_the_old_wcs_and_keeps_pixels_and_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, arr) = source_with_old_wcs(&dir, "solved_src.fits");
+        let out = dir.path().join("out").to_string_lossy().to_string();
+
+        let result = super::write_solved_wcs(&path, &nova_wcs_cards(), &out).unwrap();
+
+        let fits_path = result["fits_path"].as_str().unwrap().to_string();
+        assert!(fits_path.ends_with("solved_src_wcs.fits"), "{fits_path}");
+        assert!(std::path::Path::new(&fits_path).exists(), "{fits_path} missing");
+        assert!(std::path::Path::new(result["png_path"].as_str().unwrap()).exists(), "{}", result["png_path"]);
+        assert_eq!(result["dimensions"], serde_json::json!([64, 48]));
+
+        let header = crate::infra::image_source::load_plane_header(&crate::cmd::common::image_ref(&fits_path)).unwrap();
+        assert_eq!(header.get("CTYPE1").map(str::trim), Some("RA---TAN-SIP"));
+        assert_eq!(header.get("CTYPE2").map(str::trim), Some("DEC--TAN-SIP"));
+        assert_eq!(header.get_f64("CRVAL1"), Some(83.822));
+        assert_eq!(header.get_f64("CRVAL2"), Some(-5.391));
+        assert_eq!(header.get_f64("CD1_1"), Some(-5.55e-4));
+        assert_eq!(header.get_f64("A_2_0"), Some(1.2e-7));
+        assert_eq!(header.get("BUNIT").map(str::trim), Some("MJy/sr"));
+        assert_eq!(header.get_f64("EXPTIME"), Some(300.0));
+        assert_eq!(header.get("ABPROC").map(str::trim), Some("platesolved"));
+        assert!(header.get("ABDISP").is_none());
+
+        let written = crate::infra::fits::reader::load_fits_image(&fits_path).unwrap();
+        assert_eq!(written, arr);
+
+        let info = super::get_wcs_info(fits_path.clone()).await.unwrap();
+        for key in ["center_ra", "center_dec", "pixel_scale_arcsec"] {
+            let ours = result[key].as_f64().unwrap();
+            let theirs = info[key].as_f64().unwrap();
+            assert!((ours - theirs).abs() < 1e-9, "{key}: {ours} vs {theirs}");
+        }
+        let mut expected = crate::types::header::HduHeader::empty();
+        for (k, v) in nova_wcs_cards() {
+            expected.set(&k, v);
+        }
+        expected.set("NAXIS1", "64".to_string());
+        expected.set("NAXIS2", "48".to_string());
+        let centre = crate::core::astrometry::wcs::WcsTransform::from_header(&expected).unwrap().pixel_to_world(31.5, 23.5);
+        assert!((result["center_ra"].as_f64().unwrap() - centre.ra).abs() < 1e-9, "{} vs {}", result["center_ra"], centre.ra);
+        assert!((result["center_dec"].as_f64().unwrap() - centre.dec).abs() < 1e-9, "{} vs {}", result["center_dec"], centre.dec);
+        assert_eq!(result["sip_present"], true);
+        assert_eq!(info["sip_present"], true);
+        assert!(result["elapsed_ms"].is_u64(), "{}", result["elapsed_ms"]);
+    }
+
+    #[test]
+    fn write_solved_wcs_refuses_cards_without_a_celestial_wcs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = source_with_old_wcs(&dir, "nocrval.fits");
+        let cards: Vec<(String, String)> = nova_wcs_cards().into_iter().filter(|(k, _)| k != "CRVAL1").collect();
+        let out = dir.path().join("out");
+
+        let err = format!("{:#}", super::write_solved_wcs(&path, &cards, out.to_str().unwrap()).unwrap_err());
+
+        assert!(err.starts_with("The solved WCS is not a usable celestial WCS"), "{err}");
+        assert!(err.contains("CRVAL1"), "{err}");
+        assert!(!out.join("nocrval_wcs.fits").exists(), "a FITS was written despite the refusal");
+        assert!(!out.exists(), "the output dir was created despite the refusal");
+    }
+
+    #[test]
+    fn write_solved_wcs_refuses_a_multi_plane_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rgb_src.fits").to_string_lossy().to_string();
+        let plane = ndarray::Array2::<f32>::from_elem((16, 24), 1.0);
+        crate::infra::fits::writer::write_fits_rgb_bitpix(&path, &plane, &plane, &plane, None, -32).unwrap();
+        let out = dir.path().join("out");
+
+        let err = format!("{:#}", super::write_solved_wcs(&path, &nova_wcs_cards(), out.to_str().unwrap()).unwrap_err());
+
+        assert!(err.contains("rgb_src has 3 planes"), "{err}");
+        assert!(err.contains("single-plane images only"), "{err}");
+        assert!(!out.exists(), "the output dir was created despite the refusal");
     }
 
     #[test]

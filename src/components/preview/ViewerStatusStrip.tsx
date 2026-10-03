@@ -40,10 +40,10 @@ function ViewerStatusStrip() {
     const timer = setTimeout(() => {
       probePixel(path, x, y, PROBE_BOX)
         .then((res) => {
-          if (!cancelled) setValueAt({ path, x, y, value: res.value, unit: res.unit });
+          if (!cancelled) setValueAt({ path, x, y, value: res.value, unit: res.unit, wavelength: res.wavelength ?? null });
         })
         .catch(() => {
-          if (!cancelled) setValueAt({ path, x, y, value: null, unit: null });
+          if (!cancelled) setValueAt({ path, x, y, value: null, unit: null, wavelength: null });
         });
     }, HOVER_DEBOUNCE_MS);
     return () => {
@@ -84,6 +84,11 @@ function ViewerStatusStrip() {
         <>
           <span className="text-zinc-400" title={ZERO_BASED_PIXEL_TITLE}>{parts.position}</span>
           <span style={{ color: "rgba(251,191,36,0.8)" }} title="Pixel value of the image being measured">{parts.value}</span>
+          {parts.wavelength && (
+            <span style={{ color: "rgba(167,139,250,0.85)" }} title="Wavelength at this pixel from the WAVELENGTH extension">
+              {parts.wavelength}
+            </span>
+          )}
           {parts.sky && <span style={{ color: "rgba(52,211,153,0.7)" }}>{parts.sky}</span>}
         </>
       ) : (

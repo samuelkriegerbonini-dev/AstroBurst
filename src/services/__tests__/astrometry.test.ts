@@ -1,10 +1,10 @@
 import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
-const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
+const { typedInvokeMock, withPreviewMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn(), withPreviewMock: vi.fn() }));
 
-vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: vi.fn() }));
+vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: withPreviewMock }));
 
-import { skySeparation, worldToPixel, type PlateSolveResult } from "../astrometry";
+import { skySeparation, worldToPixel, writeSolvedWcs, type PlateSolveResult } from "../astrometry";
 
 describe("PlateSolveResult", () => {
   it("declares only the SolveResult fields plate_solve_cmd still serializes", () => {
@@ -15,7 +15,30 @@ describe("PlateSolveResult", () => {
       | "pixel_scale_arcsec"
       | "field_of_view_w_arcmin"
       | "field_of_view_h_arcmin"
+      | "wcs_cards"
     >();
+    expectTypeOf<PlateSolveResult["wcs_cards"]>().toEqualTypeOf<[string, string][]>();
+  });
+});
+
+describe("writeSolvedWcs", () => {
+  beforeEach(() => withPreviewMock.mockReset());
+
+  it("writeSolvedWcs pins write_solved_wcs_cmd", async () => {
+    const result = { fits_path: "C:/out/light_wcs.fits", png_path: "C:/out/light_wcs.png" };
+    withPreviewMock.mockResolvedValue(result);
+    const res = await writeSolvedWcs("C:/d/light.fits", [["CTYPE1", "RA---TAN"]]);
+    expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", undefined, {
+      path: "C:/d/light.fits",
+      wcsCards: [["CTYPE1", "RA---TAN"]],
+    });
+    expect(res).toBe(result);
+  });
+
+  it("passes an explicit output folder through", async () => {
+    withPreviewMock.mockResolvedValue({});
+    await writeSolvedWcs("C:/d/light.fits", [], "D:/keep");
+    expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", "D:/keep", { path: "C:/d/light.fits", wcsCards: [] });
   });
 });
 

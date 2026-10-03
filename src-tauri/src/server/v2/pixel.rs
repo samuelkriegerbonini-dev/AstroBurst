@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::imaging::pixel_probe::{
-    data_unit, probe_companions, probe_json_with_companions, probe_pixel, CompanionProbe,
-    ProbeError,
+    data_unit, probe_companions, probe_json_with_companions, probe_pixel, wavelength_unit,
+    CompanionProbe, ProbeError,
 };
 use astroburst_lib::infra::cache::ImageEntry;
 use astroburst_lib::infra::image_source::{load_companions_into, LoadedCompanions};
@@ -101,7 +101,7 @@ pub async fn pixel(
         })
         .unwrap_or(Value::Null);
 
-    let (companions, err_unit) = if entry.companions().is_some() {
+    let (companions, err_unit, wave_unit) = if entry.companions().is_some() {
         let sess = session.clone();
         let active = entry.clone();
         let (px, py) = (probe.x, probe.y);
@@ -112,16 +112,29 @@ pub async fn pixel(
                 .as_ref()
                 .and_then(|(e, table)| e.int_plane().map(|p| (p, *table)));
             let err_unit = comps.err.as_ref().and_then(|e| e.header().and_then(data_unit));
-            let probe = probe_companions(dq, comps.err.as_ref().map(|e| e.arr()), px, py);
-            (probe, err_unit)
+            let wave_unit = comps.wavelength.as_ref().map(|e| wavelength_unit(e.header()));
+            let probe = probe_companions(
+                dq,
+                comps.err.as_ref().map(|e| e.arr()),
+                comps.wavelength.as_ref().map(|e| e.arr()),
+                px,
+                py,
+            );
+            (probe, err_unit, wave_unit)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
     } else {
-        (CompanionProbe { dq: None, err: None }, None)
+        (CompanionProbe { dq: None, err: None, wavelength: None }, None, None)
     };
 
-    let mut body = probe_json_with_companions(&probe, unit.as_deref(), err_unit.as_deref(), &companions);
+    let mut body = probe_json_with_companions(
+        &probe,
+        unit.as_deref(),
+        err_unit.as_deref(),
+        wave_unit.as_deref(),
+        &companions,
+    );
     body["ref"] = json!(target);
     body["sky"] = sky;
     Ok(Json(body))

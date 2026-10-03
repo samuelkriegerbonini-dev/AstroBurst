@@ -7,6 +7,7 @@ import { overlayStore } from "../../utils/overlayStore";
 import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { generateId } from "../../utils/format";
+import { targetProjectionPath } from "../../utils/skyList";
 import { catalogCsvFileName, catalogRowsCsv, matchesCsv, sourcesCsv } from "../../utils/catalogCsv";
 import { crossMatchEntry, measurementLog } from "../../utils/measurementLog";
 import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../viewer/painters/catalogPainter";
@@ -15,6 +16,7 @@ import CrossMatchPlots from "./CrossMatchPlots";
 
 interface CatalogPanelProps {
   filePath: string | null;
+  measurePath?: string | null;
 }
 
 const DEFAULT_MAG_LIMIT = 18;
@@ -50,7 +52,8 @@ function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
   return ga - gb;
 }
 
-function CatalogPanel({ filePath }: CatalogPanelProps) {
+function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
+  const wcsPath = targetProjectionPath(filePath, measurePath);
   const radiusId = useId();
   const magLimitId = useId();
   const bandId = useId();
@@ -81,7 +84,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
     setHoverId(null);
     setSearching(false);
     setMatching(false);
-  }, [filePath]);
+  }, [filePath, wcsPath]);
 
   const matchedIds = useMemo(() => new Set((cross?.matches ?? []).map((m) => m.row.id)), [cross]);
   const separations = useMemo(() => {
@@ -111,12 +114,12 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
   }, [filePath, overlay, cone, matchedIds, labels, hoverId]);
 
   const runSearch = useCallback(async (): Promise<ConeSearchResult | null> => {
-    if (!filePath) return null;
+    if (!wcsPath) return null;
     const seq = ++requestSeqRef.current;
     setSearching(true);
     setError(null);
     try {
-      const result = await catalogConeSearch(filePath, {
+      const result = await catalogConeSearch(wcsPath, {
         radiusArcmin: parseOptionalNumber(radiusText),
         magLimit: parseNumberOr(magLimitText, DEFAULT_MAG_LIMIT),
         maxRows: DEFAULT_MAX_ROWS,
@@ -130,16 +133,16 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
     } finally {
       if (requestSeqRef.current === seq) setSearching(false);
     }
-  }, [filePath, radiusText, magLimitText]);
+  }, [wcsPath, radiusText, magLimitText]);
 
   const runCrossMatch = useCallback(async () => {
-    if (!filePath) return;
+    if (!wcsPath) return;
     const seq = ++requestSeqRef.current;
     setMatching(true);
     setError(null);
     let matched = false;
     try {
-      const result = await catalogCrossMatch(filePath, {
+      const result = await catalogCrossMatch(wcsPath, {
         sigma: DEFAULT_DETECTION_SIGMA,
         maxStars: DEFAULT_MAX_STARS,
         radiusArcsec: parseNumberOr(matchRadiusText, DEFAULT_MATCH_RADIUS_ARCSEC),
@@ -149,14 +152,14 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
       if (requestSeqRef.current !== seq) return;
       matched = true;
       setCross(result);
-      measurementLog.append(crossMatchEntry(filePath, result, { sigma: DEFAULT_DETECTION_SIGMA, maxStars: DEFAULT_MAX_STARS, colourTerm }));
+      measurementLog.append(crossMatchEntry(filePath ?? wcsPath, result, { sigma: DEFAULT_DETECTION_SIGMA, maxStars: DEFAULT_MAX_STARS, colourTerm }));
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (requestSeqRef.current === seq) setMatching(false);
     }
     if (matched && !cone) await runSearch();
-  }, [filePath, matchRadiusText, band, colourTerm, cone, runSearch]);
+  }, [filePath, wcsPath, matchRadiusText, band, colourTerm, cone, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -170,18 +173,18 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
   const exportCsv = useCallback(
     async (kind: CatalogCsvKind) => {
       const items = exportItems(kind);
-      if (!filePath || !items || exporting) return;
+      if (!wcsPath || !items || exporting) return;
       setExporting(true);
       setError(null);
       try {
         const { save } = await import("@tauri-apps/plugin-dialog");
         const target = await save({
-          defaultPath: catalogCsvFileName(filePath, kind),
+          defaultPath: catalogCsvFileName(wcsPath, kind),
           filters: [{ name: "CSV", extensions: ["csv"] }],
           title: `Export ${kind} CSV`,
         });
         if (!target) return;
-        const result = await catalogExportCsv(filePath, target, items);
+        const result = await catalogExportCsv(wcsPath, target, items);
         setSavedPath(result.output_path);
         setTimeout(() => setSavedPath(null), SAVED_NOTICE_MS);
       } catch (e: unknown) {
@@ -190,7 +193,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
         setExporting(false);
       }
     },
-    [filePath, exportItems, exporting],
+    [wcsPath, exportItems, exporting],
   );
 
   const copyCsv = useCallback(
@@ -282,7 +285,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
           label="Search Gaia DR3"
           runningLabel="Querying VizieR..."
           running={searching}
-          disabled={!filePath || busy}
+          disabled={!wcsPath || busy}
           accent="cyan"
           icon={<Database size={12} />}
           onClick={() => void runSearch()}
@@ -324,7 +327,7 @@ function CatalogPanel({ filePath }: CatalogPanelProps) {
           label="Cross-match detected stars"
           runningLabel="Detecting and matching..."
           running={matching}
-          disabled={!filePath || busy}
+          disabled={!wcsPath || busy}
           accent="amber"
           icon={<Crosshair size={12} />}
           onClick={() => void runCrossMatch()}

@@ -1,4 +1,5 @@
 pub mod calibration;
+pub mod cfa_guard;
 pub mod combine;
 pub mod drizzle;
 

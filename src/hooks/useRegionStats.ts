@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { Region, RegionStatsEntry, RegionStatsResult } from "../shared/types/regions";
+import type { Region, RegionShape, RegionStatsEntry, RegionStatsResult } from "../shared/types/regions";
 import type { PhotCal } from "../services/analysis";
 import { regionStats, type RegionStatsRequest } from "../services/regions";
 import type { RegionStatsMeasured } from "../utils/measurementLog";
+import { excludeShapes, isExcludeRegion } from "../utils/regionExclude";
 
 export const STATS_DEBOUNCE_MS = 250;
 export const MAX_REGIONS_PER_STATS_CALL = 512;
@@ -62,10 +63,18 @@ export function calibrationOf(res: RegionStatsResult): RegionCalibrationState {
   };
 }
 
-export function measuredOfChunks(responses: readonly RegionStatsResult[]): { masked: boolean; dqExcluded: number | null; elapsedMs: number } {
+export interface ChunksMeasured {
+  masked: boolean;
+  dqExcluded: number | null;
+  regionExcluded: number;
+  elapsedMs: number;
+}
+
+export function measuredOfChunks(responses: readonly RegionStatsResult[]): ChunksMeasured {
   return {
     masked: responses.some((r) => r.masked),
     dqExcluded: responses.find((r) => typeof r.dq_excluded === "number")?.dq_excluded ?? null,
+    regionExcluded: responses.find((r) => r.region_excluded > 0)?.region_excluded ?? 0,
     elapsedMs: responses.reduce((sum, r) => sum + r.elapsed_ms, 0),
   };
 }
@@ -77,6 +86,23 @@ export function buildStatsRequests(regions: Region[]): RegionStatsRequest[] {
     shape: r.shape,
     background: r.backgroundId ? (byId.get(r.backgroundId)?.shape ?? null) : null,
   }));
+}
+
+export interface StatsCall {
+  requests: RegionStatsRequest[];
+  exclude: RegionShape[];
+}
+
+export function statsCalls(regions: Region[]): StatsCall[] {
+  const exclude = excludeShapes(regions);
+  const excludeIds = new Set(regions.filter(isExcludeRegion).map((r) => r.id));
+  const requests = buildStatsRequests(regions);
+  const masked = requests.filter((r) => !excludeIds.has(r.id));
+  const own = requests.filter((r) => excludeIds.has(r.id));
+  return [
+    ...chunkStatsRequests(masked).map((chunk) => ({ requests: chunk, exclude })),
+    ...chunkStatsRequests(own).map((chunk) => ({ requests: chunk, exclude: [] })),
+  ];
 }
 
 export function useRegionStats(
@@ -117,11 +143,12 @@ export function useRegionStats(
         const merged = new Map<string, RegionStatsEntry>();
         let last: RegionCalibrationState = NO_CALIBRATION;
         const responses: RegionStatsResult[] = [];
-        for (const chunk of chunkStatsRequests(buildStatsRequests(regions))) {
-          const res = await regionStats(filePath, chunk, {
+        for (const call of statsCalls(regions)) {
+          const res = await regionStats(filePath, call.requests, {
             excludeDq,
             sigma: sigma ?? undefined,
             maxiters: maxiters ?? undefined,
+            exclude: call.exclude,
           });
           if (seqRef.current !== seq) return;
           responses.push(res);

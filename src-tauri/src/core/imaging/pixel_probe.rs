@@ -4,9 +4,9 @@ use serde_json::{json, Value};
 use crate::core::imaging::dq_flags::DqTable;
 use crate::math::exact_median_f64;
 use crate::types::constants::{
-    HEADER_BUNIT, RES_BITS, RES_BOX, RES_DQ, RES_ERR, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN,
-    RES_NAMES, RES_NEIGHBORHOOD, RES_N_FINITE, RES_N_NAN, RES_N_PIXELS, RES_TABLE, RES_TEXT,
-    RES_UNIT, RES_VALUE, RES_X, RES_Y,
+    DEFAULT_WAVELENGTH_UNIT, HEADER_BUNIT, RES_BITS, RES_BOX, RES_DQ, RES_ERR, RES_MAX, RES_MEAN,
+    RES_MEDIAN, RES_MIN, RES_NAMES, RES_NEIGHBORHOOD, RES_N_FINITE, RES_N_NAN, RES_N_PIXELS,
+    RES_TABLE, RES_TEXT, RES_UNIT, RES_VALUE, RES_WAVELENGTH, RES_X, RES_Y,
 };
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
@@ -24,6 +24,7 @@ pub struct DqProbe {
 pub struct CompanionProbe {
     pub dq: Option<DqProbe>,
     pub err: Option<f64>,
+    pub wavelength: Option<f64>,
 }
 
 fn in_bounds(rows: usize, cols: usize, x: i64, y: i64) -> Option<(usize, usize)> {
@@ -33,9 +34,17 @@ fn in_bounds(rows: usize, cols: usize, x: i64, y: i64) -> Option<(usize, usize)>
     Some((y as usize, x as usize))
 }
 
+fn finite_at(arr: &Array2<f32>, x: i64, y: i64) -> Option<f64> {
+    let (rows, cols) = arr.dim();
+    let (yy, xx) = in_bounds(rows, cols, x, y)?;
+    let v = arr[[yy, xx]] as f64;
+    v.is_finite().then_some(v)
+}
+
 pub fn probe_companions(
     dq: Option<(&IntPlane, DqTable)>,
     err: Option<&Array2<f32>>,
+    wavelength: Option<&Array2<f32>>,
     x: i64,
     y: i64,
 ) -> CompanionProbe {
@@ -51,19 +60,22 @@ pub fn probe_companions(
             text: table.format(bits),
         })
     });
-    let err = err.and_then(|arr| {
-        let (rows, cols) = arr.dim();
-        let (yy, xx) = in_bounds(rows, cols, x, y)?;
-        let v = arr[[yy, xx]] as f64;
-        v.is_finite().then_some(v)
-    });
-    CompanionProbe { dq, err }
+    let err = err.and_then(|arr| finite_at(arr, x, y));
+    let wavelength = wavelength.and_then(|arr| finite_at(arr, x, y));
+    CompanionProbe { dq, err, wavelength }
+}
+
+pub fn wavelength_unit(header: Option<&HduHeader>) -> String {
+    header
+        .and_then(data_unit)
+        .unwrap_or_else(|| DEFAULT_WAVELENGTH_UNIT.to_string())
 }
 
 pub fn probe_json_with_companions(
     probe: &PixelProbe,
     unit: Option<&str>,
     err_unit: Option<&str>,
+    wavelength_unit: Option<&str>,
     comp: &CompanionProbe,
 ) -> Value {
     let mut out = probe_json(probe, unit);
@@ -81,9 +93,14 @@ pub fn probe_json_with_companions(
         Some(v) => json!({ RES_VALUE: v, RES_UNIT: err_unit }),
         None => Value::Null,
     };
+    let wavelength = match comp.wavelength {
+        Some(v) => json!({ RES_VALUE: v, RES_UNIT: wavelength_unit }),
+        None => Value::Null,
+    };
     if let Some(obj) = out.as_object_mut() {
         obj.insert(RES_DQ.to_string(), dq);
         obj.insert(RES_ERR.to_string(), err);
+        obj.insert(RES_WAVELENGTH.to_string(), wavelength);
     }
     out
 }
@@ -567,7 +584,7 @@ mod tests {
         let plane = dq_plane(false);
         let mut err = Array2::from_elem((3, 3), 0.5f32);
         err[[0, 0]] = f32::NAN;
-        let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), 1, 1);
+        let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), None, 1, 1);
         let dq = c.dq.unwrap();
         assert_eq!(dq.bits, 3);
         assert_eq!(dq.value, 3);
@@ -576,27 +593,81 @@ mod tests {
         assert_eq!(dq.text, "3: DO_NOT_USE | SATURATED");
         assert_eq!(c.err, Some(0.5));
 
-        let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), 0, 0);
+        let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), None, 0, 0);
         assert_eq!(c.dq.unwrap().text, "0: GOOD");
         assert_eq!(c.err, None);
 
         for (x, y) in [(-1, 0), (0, -1), (3, 0), (0, 3)] {
-            let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), x, y);
+            let c = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), None, x, y);
             assert!(c.dq.is_none() && c.err.is_none(), "({x},{y})");
         }
-        let c = probe_companions(None, None, 1, 1);
-        assert_eq!(c, CompanionProbe { dq: None, err: None });
+        let c = probe_companions(None, None, None, 1, 1);
+        assert_eq!(c, CompanionProbe { dq: None, err: None, wavelength: None });
+    }
+
+    #[test]
+    fn probe_companions_reports_the_wavelength_and_none_where_it_is_nan_or_off_image() {
+        let mut wave = Array2::from_elem((3, 3), 2.1f32);
+        wave[[0, 0]] = f32::NAN;
+        let c = probe_companions(None, None, Some(&wave), 1, 1);
+        assert_eq!(c.wavelength, Some(2.1f32 as f64));
+        assert!(c.dq.is_none() && c.err.is_none());
+        assert_eq!(probe_companions(None, None, Some(&wave), 0, 0).wavelength, None);
+        for (x, y) in [(-1, 0), (0, -1), (3, 0), (0, 3)] {
+            assert_eq!(probe_companions(None, None, Some(&wave), x, y).wavelength, None, "({x},{y})");
+        }
+
+        let plane = dq_plane(false);
+        let err = Array2::from_elem((3, 3), 0.5f32);
+        let all = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), Some(&wave), 1, 1);
+        assert_eq!(all.err, Some(0.5));
+        assert_eq!(all.wavelength, Some(2.1f32 as f64));
+        assert_eq!(all.dq.unwrap().bits, 3);
+        assert_eq!(
+            probe_companions(None, None, None, 1, 1),
+            CompanionProbe { dq: None, err: None, wavelength: None }
+        );
     }
 
     #[test]
     fn probe_companions_dq_value_signed_vs_unsigned() {
-        let unsigned = probe_companions(Some((&dq_plane(false), DqTable::Unknown)), None, 2, 2).dq.unwrap();
+        let unsigned = probe_companions(Some((&dq_plane(false), DqTable::Unknown)), None, None, 2, 2).dq.unwrap();
         assert_eq!(unsigned.bits, 0xFFFF_FFFF);
         assert_eq!(unsigned.value, 4294967295);
         assert_eq!(unsigned.names.len(), 32);
-        let signed = probe_companions(Some((&dq_plane(true), DqTable::Unknown)), None, 2, 2).dq.unwrap();
+        let signed = probe_companions(Some((&dq_plane(true), DqTable::Unknown)), None, None, 2, 2).dq.unwrap();
         assert_eq!(signed.bits, 0xFFFF_FFFF);
         assert_eq!(signed.value, -1);
+    }
+
+    #[test]
+    fn probe_json_with_companions_writes_the_wavelength_block_with_its_unit() {
+        let arr = ramp_7x7();
+        let p = probe_pixel(&arr, 1.0, 1.0, 3).unwrap();
+        let comp = CompanionProbe { dq: None, err: None, wavelength: Some(2.1) };
+        let j = probe_json_with_companions(&p, None, None, Some("um"), &comp);
+        assert_eq!(j[RES_WAVELENGTH], json!({ RES_VALUE: 2.1, RES_UNIT: "um" }));
+        assert!(j[RES_DQ].is_null());
+        assert!(j[RES_ERR].is_null());
+
+        let absent = probe_json_with_companions(
+            &p,
+            None,
+            None,
+            Some("um"),
+            &CompanionProbe { dq: None, err: None, wavelength: None },
+        );
+        assert!(absent.as_object().unwrap().contains_key(RES_WAVELENGTH));
+        assert!(absent[RES_WAVELENGTH].is_null());
+
+        let unitless = probe_json_with_companions(&p, None, None, None, &comp);
+        assert_eq!(unitless[RES_WAVELENGTH][RES_VALUE], 2.1);
+        assert!(unitless[RES_WAVELENGTH][RES_UNIT].is_null());
+
+        assert_eq!(wavelength_unit(None), "um");
+        assert_eq!(wavelength_unit(Some(&HduHeader::empty())), "um");
+        assert_eq!(wavelength_unit(Some(&header_with("BUNIT", "'nm'"))), "nm");
+        assert_eq!(wavelength_unit(Some(&header_with("BUNIT", "''"))), "um");
     }
 
     #[test]
@@ -605,8 +676,8 @@ mod tests {
         let p = probe_pixel(&arr, 1.0, 1.0, 3).unwrap();
         let plane = IntPlane { bits: Array2::from_elem((7, 7), 3u32), signed: false };
         let err = Array2::from_elem((7, 7), 0.25f32);
-        let comp = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), 1, 1);
-        let j = probe_json_with_companions(&p, Some("MJy/sr"), Some("MJy/sr"), &comp);
+        let comp = probe_companions(Some((&plane, DqTable::Jwst)), Some(&err), None, 1, 1);
+        let j = probe_json_with_companions(&p, Some("MJy/sr"), Some("MJy/sr"), None, &comp);
         assert_eq!(j[RES_VALUE], 8.0);
         assert_eq!(j[RES_DQ][RES_BITS], 3);
         assert_eq!(j[RES_DQ][RES_VALUE], 3);
@@ -616,12 +687,24 @@ mod tests {
         assert_eq!(j[RES_ERR][RES_VALUE], 0.25);
         assert_eq!(j[RES_ERR][RES_UNIT], "MJy/sr");
 
-        let empty = probe_json_with_companions(&p, None, None, &CompanionProbe { dq: None, err: None });
+        let empty = probe_json_with_companions(
+            &p,
+            None,
+            None,
+            None,
+            &CompanionProbe { dq: None, err: None, wavelength: None },
+        );
         assert!(empty[RES_DQ].is_null());
         assert!(empty[RES_ERR].is_null());
         assert_eq!(empty[RES_NEIGHBORHOOD][RES_N_PIXELS], 9);
 
-        let err_only = probe_json_with_companions(&p, None, None, &CompanionProbe { dq: None, err: Some(1.5) });
+        let err_only = probe_json_with_companions(
+            &p,
+            None,
+            None,
+            None,
+            &CompanionProbe { dq: None, err: Some(1.5), wavelength: None },
+        );
         assert!(err_only[RES_DQ].is_null());
         assert_eq!(err_only[RES_ERR][RES_VALUE], 1.5);
         assert!(err_only[RES_ERR][RES_UNIT].is_null());

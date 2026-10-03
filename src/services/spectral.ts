@@ -8,10 +8,15 @@ import type {
   SpectralAxisInfo,
   SpectrumSource,
   VelocityConvention,
+  X1dSpectrum,
 } from "../shared/types/spectral";
 
 export function getSpectralAxis(path: string): Promise<SpectralAxisInfo> {
   return typedInvoke<SpectralAxisInfo>("spectral_axis_cmd", { path });
+}
+
+export function readX1dSpectrum(path: string, hdu: number | null = null): Promise<X1dSpectrum> {
+  return typedInvoke<X1dSpectrum>("read_x1d_spectrum_cmd", { path, hdu });
 }
 
 export function getRadialVelocityCorrection(

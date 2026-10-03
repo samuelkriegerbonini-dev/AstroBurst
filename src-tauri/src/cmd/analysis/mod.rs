@@ -31,6 +31,7 @@ use crate::core::astrometry::spcc::{query_gaia_vizier, CatalogStar};
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
 use crate::core::imaging::luminance::rgb_to_luminance;
+use crate::core::imaging::region::{paint_exclusions, RegionShape};
 use crate::core::imaging::stats::{
     build_histogram, compute_histogram_with_stats, compute_image_stats, downsample_histogram, is_valid_pixel,
 };
@@ -78,6 +79,44 @@ pub(crate) fn resolve_dq_mask(path: &str, exclude_dq: bool, dims: (usize, usize)
     };
     let excluded = map.iter().filter(|&&v| v != 0).count() as u64;
     Some(DqMask { map, excluded })
+}
+
+pub(crate) struct PixelMask {
+    pub map: ndarray::Array2<u8>,
+    pub dq_excluded: Option<u64>,
+    pub region_excluded: u64,
+    pub exclude_skipped: usize,
+}
+
+impl PixelMask {
+    pub fn masked(&self) -> bool {
+        self.dq_excluded.is_some() || self.region_excluded > 0
+    }
+
+    pub fn notes(&self) -> Vec<String> {
+        exclude_skipped_note(self.exclude_skipped).into_iter().collect()
+    }
+}
+
+fn exclude_skipped_note(skipped: usize) -> Option<String> {
+    let plural = if skipped == 1 { "" } else { "s" };
+    (skipped > 0).then(|| format!("{skipped} exclude region{plural} skipped: invalid shape"))
+}
+
+pub(crate) fn resolve_pixel_mask(
+    path: &str,
+    exclude_dq: bool,
+    exclude: &[RegionShape],
+    dims: (usize, usize),
+) -> Option<PixelMask> {
+    let dq = resolve_dq_mask(path, exclude_dq, dims);
+    if dq.is_none() && exclude.is_empty() {
+        return None;
+    }
+    let dq_excluded = dq.as_ref().map(|m| m.excluded);
+    let mut map = dq.map_or_else(|| ndarray::Array2::zeros(dims), |m| m.map);
+    let paint = paint_exclusions(&mut map, exclude);
+    Some(PixelMask { map, dq_excluded, region_excluded: paint.painted, exclude_skipped: paint.skipped })
 }
 
 fn display_frame(measured: &ImageStats, full: &ImageStats) -> ImageStats {

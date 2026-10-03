@@ -13,7 +13,7 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { channelOverlayPreview, detectCropBounds } from "../compose";
+import { channelOverlayPreview, detectCropBounds, measureChannelLevel } from "../compose";
 
 const overlayResponse = {
   png_path: "C:/out/channel_overlay_1_0_overlay.png",
@@ -103,5 +103,29 @@ describe("detectCropBounds", () => {
 
     await expect(detectCropBounds(["k1", "k2"])).resolves.toEqual(bounds);
     expect(typedInvokeMock).toHaveBeenCalledWith("detect_crop_bounds_cmd", { paths: ["k1", "k2"] });
+  });
+});
+
+describe("measureChannelLevel", () => {
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+  });
+
+  it("measureChannelLevel pins compute_scale_limits_cmd", async () => {
+    const limits = { vmin: 0.1, vmax: 2.6, algorithm: "percentile", symmetric: false, centre: null, notes: [] };
+    typedInvokeMock.mockResolvedValue(limits);
+
+    await expect(measureChannelLevel("__wizard_ch_g_aligned")).resolves.toEqual(limits);
+    expect(typedInvokeMock).toHaveBeenCalledTimes(1);
+    expect(typedInvokeMock).toHaveBeenCalledWith("compute_scale_limits_cmd", {
+      path: "__wizard_ch_g_aligned",
+      algorithm: "percentile",
+      vmin: null,
+      vmax: null,
+      percentile: [50, 99.5],
+      zscaleContrast: null,
+      symmetric: false,
+      centre: null,
+    });
   });
 });

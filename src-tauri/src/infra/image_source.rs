@@ -18,7 +18,7 @@ use crate::infra::fits::reader::{
     extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions, HduInfo,
     MmapImageResult,
 };
-use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR};
+use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_WAVELENGTH};
 use crate::types::image::IntPlane;
 use crate::types::image_ref::{ImageRef, PlaneSelector};
 use crate::types::HduHeader;
@@ -61,6 +61,7 @@ pub struct PlaneInfo {
 pub struct Companions {
     pub dq: Option<ImageRef>,
     pub err: Option<ImageRef>,
+    pub wavelength: Option<ImageRef>,
 }
 
 pub struct LoadedPlane {
@@ -90,6 +91,7 @@ impl LoadedPlane {
 pub struct LoadedCompanions {
     pub dq: Option<(ImageEntry, DqTable)>,
     pub err: Option<ImageEntry>,
+    pub wavelength: Option<ImageEntry>,
 }
 
 fn last_segment(name: &str) -> &str {
@@ -106,6 +108,12 @@ pub fn is_dq_name(name: &str) -> bool {
 pub fn is_err_name(name: &str) -> bool {
     let trimmed = name.trim();
     trimmed.eq_ignore_ascii_case(EXTNAME_ERR) || last_segment(trimmed).eq_ignore_ascii_case("err")
+}
+
+pub fn is_wavelength_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case(EXTNAME_WAVELENGTH)
+        || last_segment(trimmed).eq_ignore_ascii_case("wavelength")
 }
 
 fn plane_info_for(kind: PlaneSelector, ext: Option<&HduInfo>) -> PlaneInfo {
@@ -163,7 +171,12 @@ fn fits_companions(ref_path: &str, exts: &[HduInfo], idx: usize) -> Result<Compa
     } else {
         pick_companion(exts, active, EXTNAME_ERR).map(|i| ImageRef::hdu(ref_path, i))
     };
-    Ok(Companions { dq, err })
+    let wavelength = if is_wavelength_name(name) {
+        None
+    } else {
+        pick_companion(exts, active, EXTNAME_WAVELENGTH).map(|i| ImageRef::hdu(ref_path, i))
+    };
+    Ok(Companions { dq, err, wavelength })
 }
 
 fn asdf_companions(ref_path: &str, asdf: &AsdfFile, data_key: &str) -> Companions {
@@ -174,7 +187,7 @@ fn asdf_companions(ref_path: &str, asdf: &AsdfFile, data_key: &str) -> Companion
     let active = ImageRef::array(ref_path, data_key);
     let dq = if is_dq_name(data_key) { Some(active.clone()) } else { find("dq") };
     let err = if is_err_name(data_key) { Some(active) } else { find("err") };
-    Companions { dq, err }
+    Companions { dq, err, wavelength: None }
 }
 
 fn fits_plane(file: &File, index: usize, want_int: bool) -> Result<(MmapImageResult, PlaneInfo, Option<IntPlane>)> {
@@ -318,7 +331,8 @@ pub fn load_companions_into(
         (e, table)
     });
     let err = comps.err.as_ref().and_then(fetch);
-    LoadedCompanions { dq, err }
+    let wavelength = comps.wavelength.as_ref().and_then(fetch);
+    LoadedCompanions { dq, err, wavelength }
 }
 
 pub fn resolve_plane_info(r: &ImageRef) -> Result<PlaneInfo> {
@@ -377,8 +391,8 @@ pub fn plane_ref(path: &str, info: &HduInfo, is_asdf: bool) -> ImageRef {
 mod tests {
     use super::*;
     use crate::infra::fits::reader::test_fixtures::{
-        cube_hdu, empty_primary_cards, plane_hdu, ramp_f32, sci_err_dq_mef, write_raw_hdus,
-        write_test_mef, HduData, TestHdu,
+        cube_hdu, empty_primary_cards, plane_hdu, ramp_f32, sci_err_dq_mef, sci_err_dq_wave_mef,
+        write_raw_hdus, write_test_mef, HduData, TestHdu,
     };
 
     fn mef_path(dir: &tempfile::TempDir) -> String {
@@ -482,6 +496,49 @@ mod tests {
             Some(ImageRef::hdu(&sp, 2)),
             "a rank-3 extension of a single plane is still a usable companion"
         );
+    }
+
+    #[test]
+    fn load_plane_resolves_the_wavelength_companion_and_skips_it_when_absent_or_cubic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_wave.fits");
+        sci_err_dq_wave_mef(&path, 4, 4, vec![-2147483648i32; 16], vec![1.5f32; 16]);
+        let p = path.to_str().unwrap().to_string();
+
+        let c = companions_of(&ImageRef::hdu(&p, 1));
+        assert_eq!(c.wavelength, Some(ImageRef::hdu(&p, 5)));
+        assert_eq!(c.dq, Some(ImageRef::hdu(&p, 3)));
+        assert_eq!(c.err, Some(ImageRef::hdu(&p, 2)));
+        assert_eq!(companions_of(&ImageRef::hdu(&p, 5)).wavelength, None);
+        assert_eq!(companions_of(&ImageRef::hdu(&p, 4)).wavelength, None);
+
+        let cache = ImageCache::new(8, usize::MAX);
+        let key = format!("{}#hdu=1", p);
+        let active = cache.get_or_load_plane(&key, || plane_load(&ImageRef::hdu(&p, 1))).unwrap();
+        let loaded = load_companions_into(&cache, &active, plane_load);
+        assert_eq!(loaded.wavelength.expect("wavelength companion").arr()[[0, 0]], 1.5);
+        assert!(cache.contains(&format!("{}#hdu=5", p)));
+
+        let plain = mef_path(&dir);
+        assert_eq!(companions_of(&ImageRef::hdu(&plain, 1)).wavelength, None);
+
+        let cubic = dir.path().join("wave_cube.fits");
+        write_raw_hdus(
+            &cubic,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                sci_2d_hdu(4, 3),
+                cube_hdu("WAVELENGTH", 4, 3, 5, &[]),
+            ],
+        );
+        let cp = cubic.to_str().unwrap().to_string();
+        assert_eq!(companions_of(&ImageRef::hdu(&cp, 1)).wavelength, None);
+
+        assert!(is_wavelength_name("WAVELENGTH"));
+        assert!(is_wavelength_name(" wavelength "));
+        assert!(is_wavelength_name("roman.wavelength"));
+        assert!(!is_wavelength_name("WAVELENGTHS"));
+        assert!(!is_wavelength_name("SCI"));
     }
 
     #[test]

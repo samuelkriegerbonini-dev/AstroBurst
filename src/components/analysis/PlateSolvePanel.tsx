@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
-import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag } from "lucide-react";
-import { plateSolve, getWcsInfo } from "../../services/astrometry";
-import type { WcsInfo } from "../../services/astrometry";
+import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save } from "lucide-react";
+import { plateSolve, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
+import type { WcsInfo, WriteSolvedWcsResult } from "../../services/astrometry";
+import { solvedWcsSummary, wcsWriteBlocker } from "../../utils/solvedWcs";
 import { getApiKey, getConfig } from "../../services/config";
 import {
   VIEW_SCALE_ATTRIBUTE,
@@ -64,6 +65,7 @@ interface SolveResult {
   fov_arcmin?: [number, number];
   orientation?: number;
   annotations?: FieldAnnotation[];
+  wcs_cards?: [string, string][];
 }
 
 const EMPTY_ANNOTATIONS: FieldAnnotation[] = [];
@@ -109,6 +111,7 @@ interface PlateSolvePanelProps {
   sourceBadge?: React.ReactNode;
   detectedTotal?: number | null;
   annotationsOnView?: boolean;
+  onWcsWritten?: (result: WriteSolvedWcsResult) => void;
 }
 
 function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
@@ -177,6 +180,7 @@ function PlateSolvePanel({
                                           sourceBadge,
                                           detectedTotal = null,
                                           annotationsOnView = true,
+                                          onWcsWritten,
                                         }: PlateSolvePanelProps) {
   const overlayCanvas = useLiveCanvas(overlayCanvasRef);
   const overlayHostSize = useElementSize(overlayCanvas?.parentElement ?? null);
@@ -210,6 +214,10 @@ function PlateSolvePanel({
   const [solveElapsedMs, setSolveElapsedMs] = useState(0);
   const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_SOLVE_TIMEOUT_SECS);
   const solveSeqRef = useRef(0);
+  const [wcsWriting, setWcsWriting] = useState(false);
+  const [wcsWriteError, setWcsWriteError] = useState<string | null>(null);
+  const [wcsWritten, setWcsWritten] = useState<WriteSolvedWcsResult | null>(null);
+  const wcsSeqRef = useRef(0);
 
   useEffect(() => {
     getApiKey("astrometry")
@@ -236,10 +244,14 @@ function PlateSolvePanel({
 
   useEffect(() => {
     solveSeqRef.current++;
+    wcsSeqRef.current++;
     setWcsInfo(null);
     setSolveResult(null);
     setSolveError(null);
     setSolveLoading(false);
+    setWcsWriting(false);
+    setWcsWriteError(null);
+    setWcsWritten(null);
     setSelectedStar(null);
     setCenterRaText("");
     setCenterDecText("");
@@ -412,6 +424,8 @@ function PlateSolvePanel({
     setSolveLoading(true);
     setSolveError(null);
     setSolveResult(null);
+    setWcsWriteError(null);
+    setWcsWritten(null);
     try {
       const cfg = await getConfig().catch(() => null);
       const limitSecs = cfg?.plate_solve_timeout_secs || DEFAULT_SOLVE_TIMEOUT_SECS;
@@ -443,6 +457,27 @@ function PlateSolvePanel({
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
   }, [filePath, scaleLowText, scaleHighText, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
+
+  const wcsBlocker = wcsWriteBlocker(solveResult);
+
+  const handleWriteWcs = useCallback(async () => {
+    if (!filePath || wcsWriteBlocker(solveResult) !== null) return;
+    const cards = solveResult?.wcs_cards ?? [];
+    const seq = ++wcsSeqRef.current;
+    setWcsWriting(true);
+    setWcsWriteError(null);
+    setWcsWritten(null);
+    try {
+      const res = await writeSolvedWcs(filePath, cards);
+      if (wcsSeqRef.current !== seq) return;
+      onWcsWritten?.(res);
+      setWcsWritten(res);
+    } catch (e: unknown) {
+      if (wcsSeqRef.current === seq) setWcsWriteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (wcsSeqRef.current === seq) setWcsWriting(false);
+    }
+  }, [filePath, solveResult, onWcsWritten]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -838,6 +873,32 @@ function PlateSolvePanel({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleWriteWcs}
+            disabled={wcsBlocker !== null || wcsWriting || !filePath}
+            title={wcsBlocker ?? undefined}
+            className="w-full flex items-center justify-center gap-2 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {wcsWriting ? (
+              <><Loader2 size={12} className="animate-spin" /> Writing WCS...</>
+            ) : (
+              <><Save size={12} /> Write WCS to image</>
+            )}
+          </button>
+
+          {wcsWriteError && (
+            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
+              {wcsWriteError}
+            </div>
+          )}
+
+          {wcsWritten && (
+            <div data-wcs-summary className="text-[10px] text-emerald-300 break-words">
+              {solvedWcsSummary(wcsWritten)}
             </div>
           )}
 

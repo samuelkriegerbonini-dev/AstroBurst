@@ -18,9 +18,11 @@ import { registerFileIngest } from "./hooks/useFileIngest";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
 import { SUPPORTED_EXTENSIONS, astroFileFromPath, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
-import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, matchesActiveFilters, metadataFilterable, processedFilterable } from "./hooks/useProductFilter";
+import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "./hooks/useProductFilter";
 import { displayFilterValue } from "./utils/channelMapping";
 import { FOCUSABLE_SELECTOR, focusTrapTarget } from "./utils/focusTrap";
+import { findSiblingCube, tableBlockers } from "./utils/x1dCompare";
+import { spectrumComparisonStore } from "./hooks/useSpectrumComparisonStore";
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { APP_VERSION, FILE_STATUS } from "./utils/constants";
@@ -284,6 +286,20 @@ export default function App() {
     fileStore.selectFile(id);
   }, []);
 
+  const handleOpenTable = useCallback((id: string) => {
+    const x1d = fileStore.getFile(id);
+    if (!x1d) return;
+    const cube = findSiblingCube(fileStore.getFiles(), x1d.path);
+    if (!cube) return;
+    const listed = metaCacheRef.current.get(cube);
+    const active = productFilterStore.getActiveFilters();
+    const revealed = filtersRevealing(listed ? metadataFilterable(listed) : processedFilterable(cube), active, productFilterStore.getMode());
+    if (revealed !== active) productFilterStore.setActiveFilters(revealed);
+    fileStore.selectFile(cube.id);
+    spectrumComparisonStore.requestTable(cube.path, x1d.path);
+    dockStore.dispatch({ type: "open", tool: "analysis" });
+  }, []);
+
   const handleExportZip = useCallback(() => {
     const all = fileStore.getFiles();
     exportZip(
@@ -300,6 +316,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [fileIds, storeVersion],
   );
+
+  const metadataTableBlockers = useMemo(() => tableBlockers(metadataFiles), [metadataFiles]);
 
   const productTypes = useMemo(
     () => detectProductTypes(fileIds.map((id) => fileStore.getFile(id)?.name ?? "")),
@@ -497,6 +515,8 @@ export default function App() {
                                   onClearFilters={clearAll}
                                   onAddCustomChip={addCustomChip}
                                   onRemoveCustomChip={removeCustomChip}
+                                  onOpenTable={handleOpenTable}
+                                  tableBlockers={metadataTableBlockers}
                                 />
                             ),
                           }}

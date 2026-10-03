@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::core::stacking::combine::{
     reject_and_combine_with, stack_images_cancellable, validate_frame_weights, validate_minmax_counts,
     KernelScratch, Sample,
@@ -447,6 +448,9 @@ pub fn stack_from_paths(
     }
     validate_frame_weights(config.weights.as_deref(), paths.len())?;
     validate_minmax_counts(config.rejection, config.minmax_low, config.minmax_high, paths.len())?;
+    if config.align {
+        refuse_cfa_frames(paths, CfaStep::Align)?;
+    }
 
     let images = load_frames_with_progress(paths, progress)?;
 
@@ -462,6 +466,7 @@ pub fn drizzle_from_paths(
     if paths.is_empty() {
         bail!("No image paths provided");
     }
+    refuse_cfa_frames(paths, CfaStep::Drizzle)?;
 
     let images = load_frames_with_progress(paths, progress)?;
 

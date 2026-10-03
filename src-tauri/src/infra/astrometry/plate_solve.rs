@@ -74,6 +74,63 @@ mod astrometry_net_impl {
         submission["jobs"].as_array()?.iter().filter_map(|j| j.as_u64()).find(|&id| id > 0)
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(super) struct Calibration {
+        pub ra: f64,
+        pub dec: f64,
+        pub orientation: f64,
+        pub pixscale: f64,
+    }
+
+    pub(super) fn parse_calibration(cal: &serde_json::Value, jid: u64) -> Result<Calibration> {
+        let finite = |key: &str| cal[key].as_f64().filter(|v| v.is_finite());
+        let unusable = |key: &str| {
+            anyhow::anyhow!("astrometry.net calibration for job {jid} has no usable {key}; the solve cannot be used")
+        };
+        let ra = finite("ra").ok_or_else(|| unusable("ra"))?;
+        let dec = finite("dec").ok_or_else(|| unusable("dec"))?;
+        let pixscale = finite("pixscale").filter(|v| *v > 0.0).ok_or_else(|| unusable("pixscale"))?;
+        Ok(Calibration {
+            ra,
+            dec,
+            orientation: cal["orientation"].as_f64().unwrap_or(0.0),
+            pixscale,
+        })
+    }
+
+    pub(super) fn wcs_cards_from_wcs_file(bytes: &[u8]) -> Result<Vec<(String, String)>> {
+        let header = crate::infra::fits::reader::parse_header_at(bytes, 0)
+            .context("astrometry.net wcs_file is not a FITS header")?
+            .header;
+        let cards: Vec<(String, String)> = header
+            .cards
+            .iter()
+            .filter(|(key, _)| crate::infra::fits::writer::is_wcs_card(key.trim()))
+            .map(|(key, value)| (key.trim().to_string(), value.clone()))
+            .collect();
+        for key in ["CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"] {
+            if !cards.iter().any(|(k, _)| k == key) {
+                bail!("astrometry.net wcs_file has no {key}");
+            }
+        }
+        Ok(cards)
+    }
+
+    async fn fetch_wcs_cards(client: &reqwest::Client, base_url: &str, jid: u64) -> Result<Vec<(String, String)>> {
+        let resp = client
+            .get(format!("{}/wcs_file/{}", base_url, jid))
+            .header("Referer", REFERER)
+            .send()
+            .await
+            .context("wcs_file request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("wcs_file: HTTP {}", status);
+        }
+        let bytes = resp.bytes().await.context("wcs_file: failed to read response body")?;
+        wcs_cards_from_wcs_file(&bytes)
+    }
+
     pub async fn solve_astrometry_net(
         fits_path: &str,
         image_width: usize,
@@ -235,10 +292,8 @@ mod astrometry_net_impl {
             .await?;
         let cal = parse_json_response(cal_resp, "Calibration").await?;
 
-        let ra_center = cal["ra"].as_f64().unwrap_or(0.0);
-        let dec_center = cal["dec"].as_f64().unwrap_or(0.0);
-        let orientation = cal["orientation"].as_f64().unwrap_or(0.0);
-        let pixel_scale = cal["pixscale"].as_f64().unwrap_or(0.0);
+        let Calibration { ra: ra_center, dec: dec_center, orientation, pixscale: pixel_scale } =
+            parse_calibration(&cal, jid)?;
         let field_w = pixel_scale * image_width as f64 / 60.0;
         let field_h = pixel_scale * image_height as f64 / 60.0;
 
@@ -268,6 +323,11 @@ mod astrometry_net_impl {
             }
         };
 
+        let wcs_cards = fetch_wcs_cards(&client, base_url, jid).await.unwrap_or_else(|e| {
+            log::warn!("WCS file for job {} unavailable: {:#}", jid, e);
+            Vec::new()
+        });
+
         Ok(SolveResult {
             ra_center,
             dec_center,
@@ -276,7 +336,88 @@ mod astrometry_net_impl {
             field_w_arcmin: field_w,
             field_h_arcmin: field_h,
             annotations,
+            wcs_cards,
         })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    const STRING_KEYS: &[&str] = &["CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2", "DATE"];
+
+    pub(crate) fn nova_wcs_cards() -> Vec<(String, String)> {
+        [
+            ("WCSAXES", "2"),
+            ("CTYPE1", "RA---TAN-SIP"),
+            ("CTYPE2", "DEC--TAN-SIP"),
+            ("EQUINOX", "2000.0"),
+            ("LONPOLE", "180.0"),
+            ("LATPOLE", "0.0"),
+            ("CRVAL1", "83.822"),
+            ("CRVAL2", "-5.391"),
+            ("CRPIX1", "512.5"),
+            ("CRPIX2", "341.5"),
+            ("CUNIT1", "deg"),
+            ("CUNIT2", "deg"),
+            ("CD1_1", "-5.55E-04"),
+            ("CD1_2", "1.23E-05"),
+            ("CD2_1", "1.21E-05"),
+            ("CD2_2", "5.56E-04"),
+            ("A_ORDER", "2"),
+            ("A_0_2", "-3.0E-08"),
+            ("A_1_1", "5.0E-08"),
+            ("A_2_0", "1.2E-07"),
+            ("B_ORDER", "2"),
+            ("B_0_2", "1.1E-07"),
+            ("B_1_1", "-4.0E-08"),
+            ("B_2_0", "2.0E-08"),
+            ("AP_ORDER", "2"),
+            ("AP_0_2", "3.0E-08"),
+            ("AP_1_1", "-5.0E-08"),
+            ("AP_2_0", "-1.2E-07"),
+            ("BP_ORDER", "2"),
+            ("BP_0_2", "-1.1E-07"),
+            ("BP_1_1", "4.0E-08"),
+            ("BP_2_0", "-2.0E-08"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    fn card(key: &str, value: &str) -> String {
+        let text = if STRING_KEYS.contains(&key) {
+            format!("{:<8}= '{}'", key, value)
+        } else {
+            format!("{:<8}= {:>20}", key, value)
+        };
+        format!("{:<80}", text)
+    }
+
+    pub(crate) fn nova_wcs_file_from(wcs_cards: &[(String, String)]) -> Vec<u8> {
+        let mut text = String::new();
+        for (k, v) in [("SIMPLE", "T"), ("BITPIX", "8"), ("NAXIS", "0"), ("EXTEND", "T")] {
+            text.push_str(&card(k, v));
+        }
+        for (k, v) in wcs_cards {
+            text.push_str(&card(k, v));
+            if k == "CD2_2" {
+                text.push_str(&card("IMAGEW", "1024"));
+                text.push_str(&card("IMAGEH", "683"));
+            }
+        }
+        text.push_str(&card("DATE", "2026-10-02T12:00:00"));
+        text.push_str(&format!("{:<80}", "COMMENT Solved by the offline test fixture"));
+        text.push_str(&format!("{:<80}", "HISTORY Created by the Astrometry.net suite."));
+        text.push_str(&format!("{:<80}", "END"));
+        while text.len() % 2880 != 0 {
+            text.push(' ');
+        }
+        text.into_bytes()
+    }
+
+    pub(crate) fn nova_wcs_file() -> Vec<u8> {
+        nova_wcs_file_from(&nova_wcs_cards())
     }
 }
 
@@ -285,8 +426,144 @@ mod tests {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
-    use super::astrometry_net_impl::{char_prefix, first_job_id, parse_json_body};
+    use serde_json::json;
+
+    use super::astrometry_net_impl::{
+        char_prefix, first_job_id, parse_calibration, parse_json_body, wcs_cards_from_wcs_file,
+    };
+    use super::test_support::{nova_wcs_cards, nova_wcs_file, nova_wcs_file_from};
     use super::{solve_astrometry_net, SolveConfig};
+
+    const FULL_CALIBRATION: &str =
+        r#"{"ra":83.822,"dec":-5.391,"orientation":91.2,"pixscale":2.0,"parity":1.0,"radius":0.4}"#;
+
+    fn solve_config(api_url: String) -> SolveConfig {
+        SolveConfig {
+            api_url,
+            api_key: "key".into(),
+            ra_hint: None,
+            dec_hint: None,
+            radius_hint: None,
+            scale_low: None,
+            scale_high: None,
+            scale_units: None,
+            timeout_secs: 30,
+        }
+    }
+
+    fn respond(stream: &mut std::net::TcpStream, status: &str, content_type: &str, body: &[u8]) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body);
+    }
+
+    fn serve_a_solved_job(calibration: &'static str, wcs_file: Option<Vec<u8>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let line = read_request_line(&mut stream);
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let json = "application/json";
+                match path.as_str() {
+                    "/api/login" => respond(&mut stream, "200 OK", json, br#"{"status":"success","session":"test-session"}"#),
+                    "/api/upload" => respond(&mut stream, "200 OK", json, br#"{"status":"success","subid":7}"#),
+                    "/api/submissions/7" => respond(&mut stream, "200 OK", json, br#"{"jobs":[42]}"#),
+                    "/api/jobs/42" => respond(&mut stream, "200 OK", json, br#"{"status":"success"}"#),
+                    "/api/jobs/42/calibration" => respond(&mut stream, "200 OK", json, calibration.as_bytes()),
+                    "/api/jobs/42/annotations" => respond(&mut stream, "200 OK", json, br#"{"annotations":[]}"#),
+                    "/wcs_file/42" => match &wcs_file {
+                        Some(bytes) => respond(&mut stream, "200 OK", "application/fits", bytes),
+                        None => respond(&mut stream, "404 Not Found", "text/plain", b"no wcs file"),
+                    },
+                    _ => respond(&mut stream, "404 Not Found", "text/plain", b"unknown route"),
+                }
+            }
+        });
+        url
+    }
+
+    fn upload_fixture(dir: &tempfile::TempDir) -> String {
+        let fits = dir.path().join("upload.fits");
+        std::fs::write(&fits, vec![b' '; 2880]).unwrap();
+        fits.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn calibration_without_ra_dec_or_pixscale_is_refused() {
+        let err = parse_calibration(&json!({"dec": -5.391, "pixscale": 2.0}), 42).unwrap_err().to_string();
+        assert!(err.contains("job 42") && err.contains("no usable ra;"), "{err}");
+        let err = parse_calibration(&json!({"ra": 83.822, "pixscale": 2.0}), 7).unwrap_err().to_string();
+        assert!(err.contains("job 7") && err.contains("no usable dec;"), "{err}");
+        let err = parse_calibration(&json!({"ra": 83.822, "dec": -5.391, "pixscale": 0}), 42).unwrap_err().to_string();
+        assert!(err.contains("no usable pixscale;"), "{err}");
+        let err = parse_calibration(&json!({"ra": 83.822, "dec": -5.391}), 42).unwrap_err().to_string();
+        assert!(err.contains("no usable pixscale;"), "{err}");
+
+        let cal = parse_calibration(&serde_json::from_str(FULL_CALIBRATION).unwrap(), 42).unwrap();
+        assert_eq!((cal.ra, cal.dec, cal.orientation, cal.pixscale), (83.822, -5.391, 91.2, 2.0));
+        let no_orientation = parse_calibration(&json!({"ra": 1.0, "dec": 2.0, "pixscale": 3.0}), 1).unwrap();
+        assert_eq!(no_orientation.orientation, 0.0);
+    }
+
+    #[test]
+    fn wcs_file_keeps_only_the_wcs_cards() {
+        let cards = wcs_cards_from_wcs_file(&nova_wcs_file()).unwrap();
+        let value = |key: &str| cards.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(value("CTYPE1"), Some("RA---TAN-SIP"));
+        assert_eq!(value("A_ORDER"), Some("2"));
+        assert_eq!(value("AP_2_0"), Some("-1.2E-07"));
+        assert_eq!(value("CRPIX1"), Some("512.5"));
+        for key in ["IMAGEW", "IMAGEH", "DATE", "COMMENT", "HISTORY", "SIMPLE", "NAXIS", "BITPIX", "EXTEND"] {
+            assert_eq!(value(key), None, "{key} leaked into the WCS cards");
+        }
+        assert_eq!(cards, nova_wcs_cards());
+
+        let without_crval: Vec<(String, String)> =
+            nova_wcs_cards().into_iter().filter(|(k, _)| k != "CRVAL2").collect();
+        let err = wcs_cards_from_wcs_file(&nova_wcs_file_from(&without_crval)).unwrap_err().to_string();
+        assert!(err.contains("has no CRVAL2"), "{err}");
+        assert!(wcs_cards_from_wcs_file(b"not a fits header").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_successful_solve_returns_the_wcs_cards_of_the_job() {
+        let api_url = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
+        let dir = tempfile::tempdir().unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await.unwrap();
+        assert_eq!(result.ra_center, 83.822);
+        assert_eq!(result.dec_center, -5.391);
+        assert_eq!(result.pixel_scale, 2.0);
+        assert_eq!(result.orientation, 91.2);
+        assert!((result.field_w_arcmin - 2.0 * 1024.0 / 60.0).abs() < 1e-9);
+        assert!(!result.wcs_cards.is_empty(), "the solve carries no WCS cards");
+        assert_eq!(result.wcs_cards, nova_wcs_cards());
+    }
+
+    #[tokio::test]
+    async fn a_missing_wcs_file_keeps_the_solve_with_no_cards() {
+        let api_url = serve_a_solved_job(FULL_CALIBRATION, None);
+        let dir = tempfile::tempdir().unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await.unwrap();
+        assert_eq!(result.ra_center, 83.822);
+        assert!(result.wcs_cards.is_empty(), "{:?}", result.wcs_cards);
+    }
+
+    #[tokio::test]
+    async fn a_calibration_without_ra_fails_the_solve() {
+        let api_url =
+            serve_a_solved_job(r#"{"dec":-5.391,"orientation":91.2,"pixscale":2.0}"#, Some(nova_wcs_file()));
+        let dir = tempfile::tempdir().unwrap();
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("job 42") && err.contains("no usable ra;"), "{err}");
+    }
 
     fn read_request_line(stream: &mut std::net::TcpStream) -> String {
         let mut data: Vec<u8> = Vec::new();

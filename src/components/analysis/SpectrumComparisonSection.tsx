@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "
 import { Layers } from "lucide-react";
 import ProfilePlot from "../regions/ProfilePlot";
 import { getCubeSpectrum, getCubeSpectrumRegion } from "../../services/cube";
+import { readX1dSpectrum } from "../../services/spectral";
 import { spectrumComparisonStore, useSpectrumComparison } from "../../hooks/useSpectrumComparisonStore";
 import { measurementLog, spectrumCompareEntry } from "../../utils/measurementLog";
 import type { ContinuumWindows } from "../../shared/types/cube";
@@ -21,8 +22,10 @@ import {
   comparisonSeries,
   entriesFrom,
   limitCandidates,
+  plottedTable,
   pruneEntries,
   type ComparisonCsvInput,
+  type ComparisonEntry,
   type NormaliseMode,
 } from "../../utils/spectrumCompare";
 import {
@@ -35,6 +38,7 @@ import {
   type SpectrumView,
 } from "../../utils/spectrumExport";
 import { windowsAreValid } from "../../utils/spectrumRange";
+import { APERTURE_NOTE, siblingX1dPath, withTable } from "../../utils/x1dCompare";
 
 interface SpectrumComparisonSectionProps {
   filePath: string;
@@ -64,6 +68,18 @@ const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 focus:border-violet-500/50 w-16 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const SMALL_BUTTON_CLASS = "px-2 py-0.5 rounded border transition-colors text-zinc-500 hover:text-zinc-300 disabled:opacity-40";
+const FITS_FILTER = { name: "FITS", extensions: ["fits", "fit", "fts"] };
+const PICK_TITLE = "Pick a pipeline x1d table";
+const CANCEL_TABLE_TITLE = "Stop loading the x1d";
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function tableOverlapTitle(entry: ComparisonEntry): string | undefined {
+  const overlap = entry.table?.resampled.overlap;
+  return overlap ? `overlap with the cube: ${overlap[0].toFixed(4)}-${overlap[1].toFixed(4)} µm (vacuum)` : undefined;
+}
 
 function SpectrumComparisonSection({
   filePath,
@@ -103,7 +119,10 @@ function SpectrumComparisonSection({
     [axisCol, channelCount],
   );
   const vacuum = useMemo(() => vacuumUmAxis(axis, restUm, convention, channelCount), [axis, restUm, convention, channelCount]);
-  const entries = useMemo(() => pruneEntries(doc.entries, regions, channelCount), [doc.entries, regions, channelCount]);
+  const entries = useMemo(
+    () => withTable(pruneEntries(doc.entries, regions, channelCount), doc.table, vacuum, channelCount),
+    [doc.entries, regions, channelCount, doc.table, vacuum],
+  );
   const hidden = useMemo(() => new Set(doc.hidden), [doc.hidden]);
   const windowsValid = windowsAreValid(windows, channelCount);
   const usableWindows = windowsValid ? windows : null;
@@ -111,7 +130,8 @@ function SpectrumComparisonSection({
     () => comparisonSeries(entries, hidden, axisValues, view, doc.normalise, usableWindows, doc.offsetStep, bunit, limited.omitted),
     [entries, hidden, axisValues, view, doc.normalise, usableWindows, doc.offsetStep, bunit, limited.omitted],
   );
-  const stale = doc.loading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
+  const tablePlotted = useMemo(() => plottedTable(entries, result), [entries, result]);
+  const stale = doc.loading || doc.tableLoading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
 
   const showNotice = useCallback((text: string, error: boolean) => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
@@ -165,6 +185,36 @@ function SpectrumComparisonSection({
     return () => spectrumComparisonStore.invalidate(filePath);
   }, [filePath]);
 
+  useEffect(() => {
+    if (!doc.enabled || doc.tablePath === null || doc.table !== null || doc.tableError !== null || doc.tableLoading) return;
+    const request = spectrumComparisonStore.beginTable(filePath);
+    if (!request) return;
+    void readX1dSpectrum(request.path, request.hdu).then(
+      (x1d) => spectrumComparisonStore.commitTable(filePath, request, x1d),
+      (e: unknown) => spectrumComparisonStore.failTable(filePath, request, errorMessage(e)),
+    );
+  }, [filePath, doc.enabled, doc.tablePath, doc.table, doc.tableError, doc.tableLoading]);
+
+  const requestSiblingTable = useCallback(() => {
+    spectrumComparisonStore.requestTable(filePath, siblingX1dPath(filePath) ?? filePath);
+  }, [filePath]);
+
+  const pickTable = useCallback(async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ multiple: false, directory: false, filters: [FITS_FILTER], title: PICK_TITLE });
+      if (typeof picked === "string") spectrumComparisonStore.requestTable(filePath, picked);
+    } catch (e) {
+      showNotice(`pick failed: ${errorMessage(e)}`, true);
+    }
+  }, [filePath, showNotice]);
+
+  const tableHduOptions = useMemo(() => {
+    const table = doc.table;
+    if (!table || table.other_tables.length === 0) return [];
+    return [{ hdu: table.hdu, extver: table.extver }, ...table.other_tables].sort((a, b) => a.hdu - b.hdu);
+  }, [doc.table]);
+
   const toggleHidden = useCallback(
     (id: string) => {
       const next = doc.hidden.includes(id) ? doc.hidden.filter((h) => h !== id) : [...doc.hidden, id];
@@ -193,6 +243,7 @@ function SpectrumComparisonSection({
         correction,
         correctionResult,
         exportedAtUtc: new Date().toISOString(),
+        table: tablePlotted,
       };
       const csv = comparisonCsv(csvInput);
       const path = await saveCsvDialog(csv, comparisonCsvFileName(filePath), "Save comparison CSV");
@@ -203,7 +254,7 @@ function SpectrumComparisonSection({
     } finally {
       setSaveBusy(false);
     }
-  }, [saveBusy, filePath, view, doc.normalise, usableWindows, axisCol, axis, vacuum, channelCount, entries, result, mode, correction, correctionResult, showNotice]);
+  }, [saveBusy, filePath, view, doc.normalise, usableWindows, axisCol, axis, vacuum, channelCount, entries, result, mode, correction, correctionResult, tablePlotted, showNotice]);
 
   const candidateCount = candidates.length;
   const skippedCount = limited.omitted.length;
@@ -246,32 +297,93 @@ function SpectrumComparisonSection({
             >
               Close
             </button>
-            {doc.loading && (
+            <button onClick={requestSiblingTable} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+              Compare with pipeline x1d
+            </button>
+            <button onClick={() => void pickTable()} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+              Pick x1d…
+            </button>
+            {(doc.loading || doc.tableLoading) && (
               <div className="w-3 h-3 rounded-full animate-spin" style={{ border: "1.5px solid transparent", borderTopColor: ACCENT }} />
             )}
-            {stale && <span className="text-zinc-600">refreshing…</span>}
+            {doc.tableLoading && (
+              <>
+                <span className="text-zinc-600">loading x1d…</span>
+                <button
+                  type="button"
+                  onClick={() => spectrumComparisonStore.clearTable(filePath)}
+                  title={CANCEL_TABLE_TITLE}
+                  aria-label={CANCEL_TABLE_TITLE}
+                  className="px-1 text-zinc-500 hover:text-zinc-300"
+                >
+                  ×
+                </button>
+              </>
+            )}
+            {stale && !doc.tableLoading && <span className="text-zinc-600">refreshing…</span>}
           </>
         )}
       </div>
 
       {doc.enabled && (
         <>
+          {doc.tableError !== null && (
+            <span className="text-[10px] font-mono text-red-400/80 break-words" role="alert">
+              x1d: {doc.tableError}
+            </span>
+          )}
+
           {nothingToCompare && entries.length === 0 && <span className="text-[10px] font-mono text-zinc-600">{NOTHING_HINT}</span>}
 
           {entries.length > 0 && (
             <div className="flex flex-col gap-0.5 text-[10px] font-mono">
               {entries.map((entry) => (
-                <label key={entry.id} className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="checkbox" checked={!hidden.has(entry.id)} onChange={() => toggleHidden(entry.id)} />
-                  <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: entry.color }} />
-                  <span className="text-zinc-300 truncate">{entry.label}</span>
-                  {entry.region && (
-                    <span className="text-zinc-600">
-                      {entry.region.npix.toFixed(1)} px{entry.region.bg_subtracted ? ` · bg ${entry.region.n_bg} px` : ""}
-                    </span>
+                <div key={entry.id} className="flex items-center gap-1.5 min-w-0">
+                  <label className="flex items-center gap-1.5 cursor-pointer min-w-0">
+                    <input type="checkbox" checked={!hidden.has(entry.id)} onChange={() => toggleHidden(entry.id)} />
+                    <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: entry.color }} />
+                    <span className="text-zinc-300 truncate">{entry.label}</span>
+                    {entry.region && (
+                      <span className="text-zinc-600">
+                        {entry.region.npix.toFixed(1)} px{entry.region.bg_subtracted ? ` · bg ${entry.region.n_bg} px` : ""}
+                      </span>
+                    )}
+                    {entry.table && (
+                      <span className="text-zinc-600" title={tableOverlapTitle(entry)}>
+                        {entry.table.nRows} rows · {entry.table.resampled.droppedDq} DQ rows dropped
+                      </span>
+                    )}
+                    {entry.error !== null && <span className="text-red-400/80 truncate">{entry.error}</span>}
+                  </label>
+                  {entry.kind === "table" && tableHduOptions.length > 0 && doc.table && (
+                    <select
+                      aria-label="x1d EXTRACT1D HDU"
+                      value={doc.table.hdu}
+                      onChange={(e) => {
+                        const table = doc.table;
+                        if (table) spectrumComparisonStore.requestTable(filePath, table.path, Number(e.target.value));
+                      }}
+                      className={SELECT_CLASS}
+                    >
+                      {tableHduOptions.map((option) => (
+                        <option key={option.hdu} value={option.hdu}>
+                          EXTVER {option.extver ?? "?"} (HDU {option.hdu})
+                        </option>
+                      ))}
+                    </select>
                   )}
-                  {entry.error !== null && <span className="text-red-400/80 truncate">{entry.error}</span>}
-                </label>
+                  {entry.kind === "table" && (
+                    <button
+                      type="button"
+                      onClick={() => spectrumComparisonStore.clearTable(filePath)}
+                      title="Remove the x1d from the comparison"
+                      aria-label="Remove the x1d from the comparison"
+                      className="px-1 text-zinc-500 hover:text-zinc-300"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -335,6 +447,17 @@ function SpectrumComparisonSection({
               logToggle
               csvName="spectra"
             />
+          )}
+
+          {tablePlotted && (
+            <div className="flex flex-col gap-0.5 text-[10px] font-mono text-zinc-600">
+              <span className="break-words">{APERTURE_NOTE}</span>
+              {doc.table?.notes.map((note) => (
+                <span key={note} className="break-words">
+                  x1d: {note}
+                </span>
+              ))}
+            </div>
           )}
 
           {result.omitted.length > 0 && (

@@ -1,13 +1,14 @@
 import { useState, useCallback, useId, useMemo, useEffect, useRef, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { isNarrowbandWorkflow, spccBlockReason, spccInputs, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
+import { autoWbErrorText, isNarrowbandWorkflow, scnrAutoEnable, spccBlockReason, spccInputs, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
 import type { ProcessedFile } from "../../../shared/types";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { calibrateAndScnr, computeAutoWb, resetWb } from "../../../services/compose";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { wbSliderBounds, wbFactorsOutOfRange, WB_APPLY_MIN, WB_APPLY_MAX } from "../../../utils/whiteBalanceRange";
+import { spccLevelNote } from "../../../utils/levelMatch";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -16,14 +17,16 @@ interface ColorBalanceStepProps {
   doneFiles: ProcessedFile[];
   filterDetections?: FilterDetectionRef[];
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
+  onSpccFactors: (factors: { r: number; g: number; b: number }) => void;
   onScnrChange: (enabled: boolean, amount?: number, method?: string, preserveLuminance?: boolean) => void;
   onResult: (png: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
   onCompositeOp: (op: CompositeOp) => void;
 }
 
-export default function ColorBalanceStep({ state, doneFiles, filterDetections, onWbChange, onScnrChange, onResult, onCompositeOp }: ColorBalanceStepProps) {
+export default function ColorBalanceStep({ state, doneFiles, filterDetections, onWbChange, onSpccFactors, onScnrChange, onResult, onCompositeOp }: ColorBalanceStepProps) {
   const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset, filterDetections), [state.bins, state.blendPreset, filterDetections]);
   const spccBlocked = useMemo(() => spccBlockReason(state, doneFiles, filterDetections), [state, doneFiles, filterDetections]);
+  const levelNote = useMemo(() => spccLevelNote(state), [state]);
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -51,13 +54,15 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   useEffect(() => {
     if (defaultsSet.current || !state.compositeReady) return;
     defaultsSet.current = true;
-    if (!narrowband && !state.scnrEnabled) {
+    if (scnrAutoEnable(narrowband, spccBlocked) && !state.scnrEnabled) {
       onScnrChange(true, 0.8, "average", false);
     }
-  }, [state.compositeReady, narrowband, state.scnrEnabled, onScnrChange]);
+  }, [state.compositeReady, narrowband, spccBlocked, state.scnrEnabled, onScnrChange]);
 
   const onWbChangeRef = useRef(onWbChange);
   onWbChangeRef.current = onWbChange;
+  const spccBlockedRef = useRef(spccBlocked);
+  spccBlockedRef.current = spccBlocked;
 
   useEffect(() => {
     if (state.wbMode !== "auto" || !state.compositeReady) return;
@@ -81,7 +86,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
         if (cancelled) return;
         setEmptyChannels([]);
         setRefChannel(null);
-        setError(`Auto WB failed: ${e instanceof Error ? e.message : String(e)}`);
+        setError(`Auto WB failed: ${autoWbErrorText(e instanceof Error ? e.message : String(e), spccBlockedRef.current === null)}`);
       })
       .finally(() => { if (!cancelled) setAutoLoading(false); });
     return () => { cancelled = true; };
@@ -114,11 +119,15 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   }, [localR, localG, localB, onWbChange]);
 
   const handleSpccFactors = useCallback((r: number, g: number, b: number) => {
-    setLocalR(r);
-    setLocalG(g);
-    setLocalB(b);
-    onWbChange("spcc", r, g, b);
-  }, [onWbChange]);
+    onSpccFactors({ r, g, b });
+  }, [onSpccFactors]);
+
+  useEffect(() => {
+    if (state.wbMode !== "spcc" || state.spccFactors === null) return;
+    setLocalR(state.wbR);
+    setLocalG(state.wbG);
+    setLocalB(state.wbB);
+  }, [state.wbMode, state.spccFactors, state.wbR, state.wbG, state.wbB]);
 
   const handleToggleScnr = useCallback((val: boolean) => {
     onScnrChange(val, state.scnrAmount, scnrMethod, preserveLum);
@@ -291,6 +300,8 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
           />
         </Suspense>
       )}
+
+      {levelNote && <div className="text-[9px] text-zinc-500">{levelNote}</div>}
 
       {state.wbMode === "spcc" && !spccBlocked && (!rPath || !gPath || !bPath) && (
         <div className="text-[10px] text-amber-400/80 py-2">

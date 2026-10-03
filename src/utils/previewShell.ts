@@ -1,6 +1,7 @@
 import { formatLat, formatLon } from "./coordFormat";
 import { deepZoomAvailable } from "./analysisSections";
 import { viewportClickRoute, type ViewportClickRoute } from "./regionClick";
+import type { WavelengthProbe } from "../shared/types/analysis";
 
 export interface GpuDisplayInput {
   hasFile: boolean;
@@ -197,6 +198,7 @@ export interface PixelValueAt {
   y: number;
   value: number | null;
   unit: string | null;
+  wavelength: WavelengthProbe | null;
 }
 
 export interface SkyAt {
@@ -209,6 +211,11 @@ export interface StatusStripParts {
   position: string;
   value: string;
   sky: string | null;
+  wavelength: string | null;
+}
+
+export function formatWavelength(w: WavelengthProbe): string {
+  return `λ ${w.value.toFixed(w.value < 10 ? 4 : 3)}${w.unit ? ` ${w.unit}` : ""}`;
 }
 
 export function statusStripParts(
@@ -225,6 +232,7 @@ export function statusStripParts(
     sky: skyHere
       ? `RA ${formatLon(skyHere.radec[0], { hours: true, format: "sexagesimal" })}  Dec ${formatLat(skyHere.radec[1], { format: "sexagesimal" })} ICRS`
       : null,
+    wavelength: valueHere?.wavelength ? formatWavelength(valueHere.wavelength) : null,
   };
 }
 

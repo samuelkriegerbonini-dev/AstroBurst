@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached_full};
+use crate::core::analysis::x1d::{read_x1d_spectrum, resolve_x1d_path};
 use crate::core::astrometry::spectral::{
     header_target_coordinates, is_non_linear_spectral_ctype, radial_velocity_correction, spectral_axis_on,
     RadialVelocityCorrection, SpectralAxis,
@@ -109,6 +110,15 @@ pub async fn radial_velocity_correction_cmd(
     })
 }
 
+#[tauri::command]
+pub async fn read_x1d_spectrum_cmd(path: String, hdu: Option<usize>) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let resolved = resolve_x1d_path(&path).map_err(anyhow::Error::msg)?;
+        let spectrum = read_x1d_spectrum(resolved.to_string_lossy().as_ref(), hdu)?;
+        Ok(serde_json::to_value(&spectrum)?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -116,6 +126,7 @@ mod tests {
     use ndarray::Array2;
 
     use super::*;
+    use crate::core::analysis::x1d::test_fixtures::write_x1d_fixture;
     use crate::core::astrometry::spectral::{velocity_axis, AxisKind, SPEED_OF_LIGHT_KMS, VelocityConvention};
     use crate::core::imaging::region::test_support::make_header;
     use crate::infra::fits::writer::write_fits_mono;
@@ -248,6 +259,56 @@ mod tests {
         let jwst = correction_json(&make_header(&[("TELESCOP", "JWST")]), Some(1.0), Some(2.0));
         assert!(jwst[KEY_ERROR].as_str().unwrap().contains("JWST"), "{jwst}");
         assert!(jwst["barycentric_kms"].is_null());
+    }
+
+    #[tokio::test]
+    async fn read_x1d_spectrum_cmd_returns_the_json_contract_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write_x1d_fixture(dir.path(), "jw_nrs1_x1d.fits", 6, &[1], "um");
+        let s3d = format!("{}#hdu=1", dir.path().join("jw_nrs1_s3d.fits").to_str().unwrap());
+        let value = read_x1d_spectrum_cmd(s3d, None).await.unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "path",
+            "hdu",
+            "extver",
+            "n_rows",
+            "wavelength_um",
+            "wavelength_unit",
+            "flux",
+            "flux_error",
+            "flux_unit",
+            "surf_bright",
+            "surf_bright_unit",
+            "background",
+            "npixels",
+            "dq",
+            "dq_table",
+            "dq_flagged_rows",
+            "srctype",
+            "grating",
+            "filter",
+            "detector",
+            "instrument",
+            "target",
+            "other_tables",
+            "notes",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert_eq!(value["dq_table"], "jwst");
+        assert_eq!(value["hdu"], 1);
+        assert_eq!(value["extver"], 1);
+        assert_eq!(value["n_rows"], 6);
+        assert_eq!(value["dq_flagged_rows"], 1);
+        assert!(value["path"].as_str().unwrap().ends_with("jw_nrs1_x1d.fits"), "{}", value["path"]);
+        assert_eq!(value["wavelength_um"].as_array().unwrap().len(), 6);
+        assert_eq!(value["other_tables"], json!([]));
+
+        let missing = dir.path().join("lonely_cal.fits").to_str().unwrap().to_string();
+        let err = read_x1d_spectrum_cmd(missing, None).await.unwrap_err();
+        assert!(err.starts_with("no pipeline x1d next to lonely_cal.fits: expected lonely_x1d.fits"), "{err}");
     }
 
     #[test]

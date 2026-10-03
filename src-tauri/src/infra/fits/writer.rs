@@ -25,7 +25,7 @@ const WCS_PREFIXES: &[&str] = &[
     "WCSAXES", "WCSNAME",
 ];
 
-fn is_wcs_card(key: &str) -> bool {
+pub(crate) fn is_wcs_card(key: &str) -> bool {
     WCS_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 

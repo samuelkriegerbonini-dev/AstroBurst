@@ -1327,6 +1327,37 @@ pub mod test_fixtures {
             ],
         );
     }
+
+    pub fn sci_err_dq_wave_mef(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        dq_bits: Vec<i32>,
+        wavelengths: Vec<f32>,
+    ) {
+        sci_err_dq_wave_mef_with_wave_cards(path, cols, rows, dq_bits, wavelengths, vec![("BUNIT", "'um'".into())]);
+    }
+
+    pub fn sci_err_dq_wave_mef_with_wave_cards(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        dq_bits: Vec<i32>,
+        wavelengths: Vec<f32>,
+        wave_cards: Vec<(&'static str, String)>,
+    ) {
+        write_test_mef(
+            path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(ramp_f32(cols, rows)), extra_cards: vec![("BUNIT", "'MJy/sr'".into())] },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols, rows, data: HduData::F32(ramp_f32(cols, rows).iter().map(|v| v * 0.5).collect()), extra_cards: vec![("BUNIT", "'MJy/sr'".into())] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols, rows, data: HduData::I32(dq_bits), extra_cards: vec![("BZERO", "2147483648".into()), ("BSCALE", "1".into())] },
+                TestHdu { extname: Some("SCI"), extver: Some(2), cols, rows, data: HduData::F32(ramp_f32(cols, rows)), extra_cards: vec![] },
+                TestHdu { extname: Some("WAVELENGTH"), extver: Some(1), cols, rows, data: HduData::F32(wavelengths), extra_cards: wave_cards },
+            ],
+        );
+    }
 }
 
 #[cfg(test)]

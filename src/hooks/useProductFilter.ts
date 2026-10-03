@@ -51,6 +51,16 @@ export function matchesActiveFilters(file: FilterableFile, filters: string[], mo
     : filters.every((f) => singleMatch(file, f));
 }
 
+export function filtersRevealing(file: FilterableFile, filters: string[], mode: FilterMode): string[] {
+  if (matchesActiveFilters(file, filters, mode)) return filters;
+  const productType = extractProductType(file.name);
+  if (mode === "or" && productType) {
+    const widened = [...filters, productType];
+    if (matchesActiveFilters(file, widened, mode)) return widened;
+  }
+  return [];
+}
+
 export interface FilterState {
   activeFilters: string[];
   customChips: string[];
@@ -98,6 +108,13 @@ class ProductFilterStore {
 
   toggleMode() {
     this.state.mode = this.state.mode === "or" ? "and" : "or";
+    this.notify();
+  }
+
+  setActiveFilters(filters: string[]) {
+    const current = this.state.activeFilters;
+    if (filters.length === current.length && filters.every((f, i) => f === current[i])) return;
+    this.state.activeFilters = [...filters];
     this.notify();
   }
 

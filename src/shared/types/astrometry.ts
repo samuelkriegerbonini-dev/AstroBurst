@@ -85,6 +85,20 @@ export interface PlateSolveOptions {
   radius?: number;
 }
 
+export type WcsCard = [string, string];
+
+export interface WriteSolvedWcsResult {
+  fits_path: string;
+  png_path: string;
+  previewUrl?: string;
+  dimensions: [number, number];
+  center_ra: number;
+  center_dec: number;
+  pixel_scale_arcsec: number;
+  sip_present: boolean;
+  elapsed_ms: number;
+}
+
 export type WcsParity = "normal" | "flipped";
 
 export interface WcsOrientationInfo {

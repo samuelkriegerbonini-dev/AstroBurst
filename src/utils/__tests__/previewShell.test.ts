@@ -15,6 +15,7 @@ import {
   cpuViewerDisplayTitle,
   fileSwitchCompositeAction,
   formatPixelValue,
+  formatWavelength,
   gpuAfterProbe,
   gpuDisplayOnScreen,
   gpuToggleView,
@@ -479,21 +480,51 @@ describe("statusStripParts", () => {
 
   it("shows the 0-based position, the value with its unit and the ICRS position", () => {
     expect(
-      statusStripParts({ x: 12, y: 34 }, { x: 12, y: 34, value: 1.5, unit: "MJy/sr" }, { x: 12, y: 34, radec: [150, -2.5] }),
-    ).toEqual({ position: "x 12  y 34", value: "1.5000 MJy/sr", sky: "RA 10h00m00.00s  Dec -02°30'00.0\" ICRS" });
+      statusStripParts(
+        { x: 12, y: 34 },
+        { x: 12, y: 34, value: 1.5, unit: "MJy/sr", wavelength: null },
+        { x: 12, y: 34, radec: [150, -2.5] },
+      ),
+    ).toEqual({ position: "x 12  y 34", value: "1.5000 MJy/sr", sky: "RA 10h00m00.00s  Dec -02°30'00.0\" ICRS", wavelength: null });
   });
 
   it("omits the unit when the file has none", () => {
-    expect(statusStripParts({ x: 1, y: 2 }, { x: 1, y: 2, value: 7, unit: null }, null)).toEqual({
+    expect(statusStripParts({ x: 1, y: 2 }, { x: 1, y: 2, value: 7, unit: null, wavelength: null }, null)).toEqual({
       position: "x 1  y 2",
       value: "7",
       sky: null,
+      wavelength: null,
     });
   });
 
   it("does not show a value or a sky position measured at another pixel", () => {
     expect(
-      statusStripParts({ x: 5, y: 5 }, { x: 4, y: 5, value: 3, unit: "e-" }, { x: 5, y: 4, radec: [10, 10] }),
-    ).toEqual({ position: "x 5  y 5", value: "…", sky: null });
+      statusStripParts({ x: 5, y: 5 }, { x: 4, y: 5, value: 3, unit: "e-", wavelength: null }, { x: 5, y: 4, radec: [10, 10] }),
+    ).toEqual({ position: "x 5  y 5", value: "…", sky: null, wavelength: null });
+  });
+
+  it("adds the wavelength of the WAVELENGTH companion at this pixel", () => {
+    const parts = statusStripParts({ x: 3, y: 4 }, { x: 3, y: 4, value: 2, unit: "MJy/sr", wavelength: { value: 2.12341, unit: "um" } }, null);
+    expect(parts?.wavelength).toBe("λ 2.1234 um");
+  });
+
+  it("has no wavelength part without the plane or for a probe made at another pixel", () => {
+    expect(statusStripParts({ x: 3, y: 4 }, { x: 3, y: 4, value: 2, unit: null, wavelength: null }, null)?.wavelength).toBeNull();
+    expect(
+      statusStripParts({ x: 3, y: 5 }, { x: 3, y: 4, value: 2, unit: null, wavelength: { value: 2.1, unit: "um" } }, null)?.wavelength,
+    ).toBeNull();
+  });
+});
+
+describe("formatWavelength", () => {
+  it("prints four decimals below 10 and three from 10 up, with the unit", () => {
+    expect(formatWavelength({ value: 2.12341, unit: "um" })).toBe("λ 2.1234 um");
+    expect(formatWavelength({ value: 1.654, unit: "um" })).toBe("λ 1.6540 um");
+    expect(formatWavelength({ value: 12.34567, unit: "um" })).toBe("λ 12.346 um");
+    expect(formatWavelength({ value: 6563.2, unit: "Angstrom" })).toBe("λ 6563.200 Angstrom");
+  });
+
+  it("omits the unit when the plane has none", () => {
+    expect(formatWavelength({ value: 2.5, unit: null })).toBe("λ 2.5000");
   });
 });

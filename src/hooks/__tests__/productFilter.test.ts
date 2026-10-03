@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fileSearchText, matchesActiveFilters, metadataFilterable, processedFilterable } from "../useProductFilter";
+import { fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
 import { displayFilterValue } from "../../utils/channelMapping";
 
 const WFPC2 = [
@@ -70,5 +70,43 @@ describe("matchesActiveFilters", () => {
     const processed = { name: "light_0001.fits", result: { header: { FILTER: "656.3" } } };
     expect(processedFilterable(processed).filter).toBe("656.3");
     expect(matchesActiveFilters(processedFilterable(processed), ["656"], "or")).toBe(true);
+  });
+});
+
+describe("filtersRevealing", () => {
+  const cube = { name: "jw01266005001_02103_00001_nrs1_s3d.fits", filter: "F170LP", instrument: "NIRSPEC" };
+
+  it("keeps the same filter list when the file already matches", () => {
+    const filters = ["s3d"];
+    expect(filtersRevealing(cube, filters, "or")).toBe(filters);
+  });
+
+  it("adds the file's product chip in OR mode so the hidden cube appears beside the x1d files", () => {
+    const next = filtersRevealing(cube, ["x1d"], "or");
+    expect(next).toEqual(["x1d", "s3d"]);
+    expect(matchesActiveFilters(cube, next, "or")).toBe(true);
+  });
+
+  it("clears the filters in AND mode, where another chip cannot reveal the file", () => {
+    expect(filtersRevealing(cube, ["x1d", "nirspec"], "and")).toEqual([]);
+  });
+
+  it("clears the filters when the file has no product chip to add", () => {
+    expect(filtersRevealing({ name: "cube.fits", instrument: "NIRSPEC" }, ["x1d"], "or")).toEqual([]);
+  });
+});
+
+describe("productFilterStore.setActiveFilters", () => {
+  it("replaces the active filters and notifies, keeping the custom chips", () => {
+    productFilterStore.reset();
+    productFilterStore.addCustomChip("m42");
+    let calls = 0;
+    const off = productFilterStore.subscribe(() => { calls += 1; });
+    productFilterStore.setActiveFilters(["x1d", "s3d"]);
+    off();
+    expect(productFilterStore.getActiveFilters()).toEqual(["x1d", "s3d"]);
+    expect(productFilterStore.getSnapshot().customChips).toEqual(["m42"]);
+    expect(calls).toBe(1);
+    productFilterStore.reset();
   });
 });

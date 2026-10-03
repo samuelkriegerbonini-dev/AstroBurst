@@ -1,4 +1,4 @@
-import { typedInvoke } from "../infrastructure/tauri";
+import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import type {
   WcsInfo,
   PlateSolveOptions,
@@ -6,9 +6,11 @@ import type {
   PointingOverlapResult,
   SkyFrame,
   SkySeparationResult,
+  WcsCard,
   WcsGridError,
   WcsGridResult,
   WorldToPixelResult,
+  WriteSolvedWcsResult,
 } from "../shared/types/astrometry";
 
 export type {
@@ -20,8 +22,10 @@ export type {
   SkySeparationResult,
   WcsGrid,
   WcsGridError,
+  WcsCard,
   WcsGridResult,
   WorldToPixelResult,
+  WriteSolvedWcsResult,
 } from "../shared/types/astrometry";
 
 export const DEFAULT_GRID_DENSITY = 3;
@@ -45,6 +49,7 @@ export interface PlateSolveResult {
   pixel_scale_arcsec: number;
   field_of_view_w_arcmin: number;
   field_of_view_h_arcmin: number;
+  wcs_cards: WcsCard[];
 }
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {
@@ -59,6 +64,10 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
     centerDec: opts.centerDec ?? null,
     radius: opts.radius ?? null,
   });
+}
+
+export function writeSolvedWcs(path: string, wcsCards: readonly WcsCard[], outputDir?: string): Promise<WriteSolvedWcsResult> {
+  return withPreview<WriteSolvedWcsResult>("write_solved_wcs_cmd", outputDir, { path, wcsCards });
 }
 
 export function getWcsInfo(path: string): Promise<WcsInfo> {

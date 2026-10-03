@@ -11,12 +11,11 @@
 //! HCOMPRESS_1, NULL_PIXEL_MASK (per-pixel null bitmap), per-tile ZBLANK
 //! column (only a scalar header BLANK/ZBLANK is honored).
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
+use crate::infra::fits::table::{build_bintable_layout, read_fixed_f64, read_var_descriptor, BintableLayout, ColumnSpan};
 use crate::types::HduHeader;
 
 use super::gzip::gzip_decode;
@@ -51,171 +50,6 @@ pub fn read_compressed_shape(header: &HduHeader) -> CompressedImageShape {
         znaxis2: header.get_i64("ZNAXIS2").unwrap_or(0),
         znaxis3: header.get_i64("ZNAXIS3").unwrap_or(0),
         zbitpix: header.get_i64("ZBITPIX").unwrap_or(0),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ColumnSpan {
-    Fixed {
-        offset: usize,
-        type_code: char,
-    },
-    VarArray {
-        offset: usize,
-        elem_bytes: usize,
-        wide: bool,
-    },
-}
-
-struct BintableLayout {
-    row_width: usize,
-    n_rows: usize,
-    heap_base: usize, // absolute mmap offset where the variable-length heap begins
-    columns: HashMap<String, ColumnSpan>,
-}
-
-fn tform_elem_bytes(type_code: char) -> Result<usize> {
-    Ok(match type_code {
-        'L' | 'B' | 'A' => 1,
-        'I' => 2,
-        'J' | 'E' => 4,
-        'K' | 'D' | 'C' => 8,
-        'M' => 16,
-        other => bail!("Unsupported BINTABLE column type code '{other}'"),
-    })
-}
-
-enum TformKind {
-    Fixed { repeat: usize, type_code: char },
-    VarArray { elem_type: char, wide: bool },
-}
-
-fn parse_tform(tform: &str) -> Result<TformKind> {
-    let tform = tform.trim();
-    let digit_end = tform
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(tform.len());
-    let repeat: usize = if digit_end == 0 {
-        1
-    } else {
-        tform[..digit_end].parse().unwrap_or(1)
-    };
-    let mut chars = tform[digit_end..].chars();
-    let type_code = chars.next().context("empty TFORM type code")?;
-    if type_code == 'P' || type_code == 'Q' {
-        let elem_type = chars
-            .next()
-            .context("variable-length TFORM missing element type code")?;
-        Ok(TformKind::VarArray {
-            elem_type,
-            wide: type_code == 'Q',
-        })
-    } else {
-        Ok(TformKind::Fixed { repeat, type_code })
-    }
-}
-
-fn build_bintable_layout(header: &HduHeader, data_start: usize) -> Result<BintableLayout> {
-    let naxis1 = header.get_i64("NAXIS1").context("Missing NAXIS1")? as usize;
-    let naxis2 = header.get_i64("NAXIS2").context("Missing NAXIS2")? as usize;
-    let tfields = header.get_i64("TFIELDS").unwrap_or(0) as usize;
-
-    let mut offset = 0usize;
-    let mut columns = HashMap::new();
-
-    for i in 1..=tfields {
-        let tform = header
-            .get(&format!("TFORM{i}"))
-            .with_context(|| format!("Missing TFORM{i}"))?;
-        let ttype = header
-            .get(&format!("TTYPE{i}"))
-            .map(|s| s.trim().to_uppercase());
-
-        let (span, width) = match parse_tform(tform)? {
-            TformKind::VarArray { elem_type, wide } => {
-                let elem_bytes = tform_elem_bytes(elem_type)?;
-                let width = if wide { 16 } else { 8 };
-                (
-                    ColumnSpan::VarArray {
-                        offset,
-                        elem_bytes,
-                        wide,
-                    },
-                    width,
-                )
-            }
-            TformKind::Fixed { repeat, type_code } => {
-                let width = if type_code == 'X' {
-                    repeat.div_ceil(8)
-                } else {
-                    repeat * tform_elem_bytes(type_code)?
-                };
-                (ColumnSpan::Fixed { offset, type_code }, width)
-            }
-        };
-
-        if let Some(name) = ttype {
-            columns.insert(name, span);
-        }
-        offset += width;
-    }
-
-    if offset != naxis1 {
-        bail!(
-            "BINTABLE row width mismatch: TFORM columns sum to {} bytes, NAXIS1={}",
-            offset,
-            naxis1
-        );
-    }
-
-    let theap = header.get_i64("THEAP").unwrap_or((naxis1 * naxis2) as i64) as usize;
-    let heap_base = data_start + theap;
-
-    Ok(BintableLayout {
-        row_width: naxis1,
-        n_rows: naxis2,
-        heap_base,
-        columns,
-    })
-}
-
-fn read_var_descriptor(row: &[u8], span: &ColumnSpan) -> Result<(usize, usize)> {
-    match *span {
-        ColumnSpan::VarArray {
-            offset,
-            elem_bytes,
-            wide,
-        } => {
-            let (nelem, rel) = if wide {
-                let nelem = i64::from_be_bytes(row[offset..offset + 8].try_into().unwrap());
-                let rel = i64::from_be_bytes(row[offset + 8..offset + 16].try_into().unwrap());
-                (nelem as usize, rel as usize)
-            } else {
-                let nelem = i32::from_be_bytes(row[offset..offset + 4].try_into().unwrap());
-                let rel = i32::from_be_bytes(row[offset + 4..offset + 8].try_into().unwrap());
-                (nelem as usize, rel as usize)
-            };
-            Ok((nelem * elem_bytes, rel * elem_bytes))
-        }
-        _ => bail!("column is not a variable-length array"),
-    }
-}
-
-fn read_fixed_f64(row: &[u8], span: &ColumnSpan) -> Result<f64> {
-    match *span {
-        ColumnSpan::Fixed {
-            offset,
-            type_code: 'D',
-            ..
-        } => Ok(f64::from_be_bytes(
-            row[offset..offset + 8].try_into().unwrap(),
-        )),
-        ColumnSpan::Fixed {
-            offset,
-            type_code: 'E',
-            ..
-        } => Ok(f32::from_be_bytes(row[offset..offset + 4].try_into().unwrap()) as f64),
-        _ => bail!("column is not a fixed D/E scalar"),
     }
 }
 

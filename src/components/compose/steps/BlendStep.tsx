@@ -1,10 +1,11 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 
-import { blendChannels, lrgbCombineComposite, renderLinearCompositePreview } from "../../../services/compose";
+import { blendChannels, lrgbCombineComposite, measureChannelLevel, renderLinearCompositePreview } from "../../../services/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
-import { RunButton, Slider } from "../../ui";
+import { RunButton, Slider, Toggle } from "../../ui";
+import type { ProcessedFile } from "../../../shared/types";
 import {
   BLEND_PRESETS,
   BlendWeight,
@@ -13,7 +14,21 @@ import {
   resolveChannelPath,
   unalignedBins as findUnalignedBins,
   type CompositeOp,
+  type FilterDetectionRef,
 } from "../../../utils/wizard";
+import {
+  blendRequest,
+  channelLevel,
+  channelLevels,
+  levelMatchChannelLabel,
+  levelMatchEnabled,
+  levelMatchEntries,
+  levelMatchSummary,
+  levelMeasureError,
+  levelScales,
+  levelTargets,
+  scaleBlendWeights,
+} from "../../../utils/levelMatch";
 import {
   blendMatrixError,
   blendWeightsCoverAllColumns,
@@ -26,6 +41,10 @@ import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 
 interface BlendStepProps {
   state: WizardState;
+  files: readonly ProcessedFile[];
+  filterDetections?: FilterDetectionRef[];
+  onLevelMatchChange: (enabled: boolean) => void;
+  onLevelScales: (scales: Record<string, number> | null) => void;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
   onCompositeReady: (
     previewUrl: string | null,
@@ -41,9 +60,20 @@ interface BlendRunResult {
   elapsed_ms?: number;
 }
 
-export default function BlendStep({ state, onWeightsChange, onCompositeReady, onCompositeOp }: BlendStepProps) {
+export default function BlendStep({
+  state,
+  files,
+  filterDetections,
+  onLevelMatchChange,
+  onLevelScales,
+  onWeightsChange,
+  onCompositeReady,
+  onCompositeOp,
+}: BlendStepProps) {
   const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const [loading, setLoading] = useState(false);
+  const [levelProgress, setLevelProgress] = useState<string | null>(null);
+  const matchOn = useMemo(() => levelMatchEnabled(state, files, filterDetections), [state, files, filterDetections]);
   const [result, setResult] = useState<BlendRunResult | null>(null);
   const [error, setError] = useState("");
   const [lrgbLightness, setLrgbLightness] = useState(1.0);
@@ -154,39 +184,41 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
     setLoading(true);
     setError("");
     try {
-      const channelOrder: string[] = [];
-      const paths: string[] = [];
-      for (const bin of filledBins) {
-        const p = resolveChannelPath(state, bin.id);
-        if (p) {
-          channelOrder.push(bin.id);
-          paths.push(p);
-        }
-      }
+      const request = blendRequest(state, filledBins, activeWeights);
 
-      if (paths.length < 2) {
+      if (request.paths.length < 2) {
         throw new Error("Need at least 2 channel paths to blend");
       }
 
-      const backendWeights = activeWeights
-        .filter((w) => w.r > 0 || w.g > 0 || w.b > 0)
-        .map((w) => {
-          const idx = channelOrder.indexOf(w.channelId);
-          if (idx === -1) return null;
-          return { channelIdx: idx, r: w.r, g: w.g, b: w.b };
-        })
-        .filter(Boolean) as { channelIdx: number; r: number; g: number; b: number }[];
-
-      const sentLabels = channelOrder.map(
+      const sentLabels = request.channelOrder.map(
         (id) => state.bins.find((b) => b.id === id)?.shortLabel ?? id,
       );
-      const matrixProblem = blendMatrixError(backendWeights, sentLabels);
+      const matrixProblem = blendMatrixError(request.weights, sentLabels);
       if (matrixProblem) {
         throw new Error(matrixProblem);
       }
 
+      let scales: Record<string, number> | null = null;
+      if (matchOn) {
+        const labelOf = (binId: string) => levelMatchChannelLabel(state, binId, files);
+        const targets = levelTargets(request);
+        const levelsByPath: Record<string, number> = {};
+        for (const [i, target] of targets.entries()) {
+          setLevelProgress(`Measuring levels ${i + 1}/${targets.length}`);
+          try {
+            levelsByPath[target.path] = channelLevel(await measureChannelLevel(target.path));
+          } catch (e) {
+            throw new Error(levelMeasureError(labelOf(target.binId), target.path, e instanceof Error ? e.message : String(e)));
+          }
+        }
+        const outcome = levelScales(channelLevels(request, levelsByPath, labelOf));
+        if ("error" in outcome) throw new Error(outcome.error);
+        scales = outcome.scales;
+      }
+      setLevelProgress(null);
+
       const dir = await getOutputDir();
-      const res = await blendChannels(paths, backendWeights, dir, {
+      const res = await blendChannels(request.paths, scaleBlendWeights(request.weights, request.channelOrder, scales), dir, {
         preset: state.blendPreset,
       });
 
@@ -194,14 +226,20 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       const autoStf = res.auto_stf ?? undefined;
-      onCompositeOp({ kind: "blend", preset: state.blendPreset });
+      onLevelScales(scales);
+      onCompositeOp({
+        kind: "blend",
+        preset: state.blendPreset,
+        levels: scales ? levelMatchEntries(state, files, scales) : null,
+      });
       onCompositeReady(previewUrl, autoStf, res.dimensions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setLevelProgress(null);
       setLoading(false);
     }
-  }, [filledBins, state, activeWeights, onCompositeReady, onCompositeOp]);
+  }, [filledBins, state, activeWeights, matchOn, files, onLevelScales, onCompositeReady, onCompositeOp]);
 
   const lPath = useMemo(() => resolveChannelPath(state, "l"), [state]);
 
@@ -343,6 +381,13 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
         })}
       </div>
 
+      <div className="flex flex-col gap-0.5">
+        <Toggle label="Match levels" checked={matchOn} accent="amber" onChange={onLevelMatchChange} />
+        <div className="text-[9px] text-zinc-500">
+          Scales each channel by its signal (p99.5 minus median) before blending, so a bright narrowband filter does not swamp the others. On by default when a narrowband filter is loaded.
+        </div>
+      </div>
+
       <div className="text-[9px] text-zinc-600 bg-zinc-900/50 rounded px-2 py-1.5">
         Blend produces a linear composite. Preview uses auto-STF for visualization.
       </div>
@@ -377,7 +422,7 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
 
       <RunButton
         label="Run Blend"
-        runningLabel="Blending..."
+        runningLabel={levelProgress ?? "Blending..."}
         running={loading}
         accent="amber"
         onClick={handleRunBlend}
@@ -405,6 +450,11 @@ export default function BlendStep({ state, onWeightsChange, onCompositeReady, on
       {result && (
         <div className="text-[9px] text-zinc-500">
           {result.channel_count} channels, {result.dimensions?.[0]}x{result.dimensions?.[1]}, {result.elapsed_ms}ms
+        </div>
+      )}
+      {state.compositeReady && state.blendLevelScales && (
+        <div className="text-[9px] text-zinc-500">
+          {levelMatchSummary(levelMatchEntries(state, files, state.blendLevelScales))}
         </div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

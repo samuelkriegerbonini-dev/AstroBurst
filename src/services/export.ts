@@ -71,7 +71,13 @@ export interface ExportResult {
   compress?: string;
   quantize_level?: number;
   wcs_written?: boolean;
+  display_referred?: boolean;
   channels?: Array<{ path: string; channel: string }>;
+}
+
+export function exportValuesCell(result: Pick<ExportResult, "display_referred">): { label: string; value: string } | null {
+  if (result.display_referred === undefined) return null;
+  return { label: "Values", value: result.display_referred ? "display-referred (ABDISP=T)" : "linear" };
 }
 
 export interface CompressMefOptions {

@@ -20,6 +20,8 @@ import GpuViewport, { type ViewportOriginal } from "../render/GpuViewport";
 import GpuRenderer from "../render/GpuRenderer";
 import GpuRgbRenderer from "../render/GpuRgbRenderer";
 import DisplayControls from "./DisplayControls";
+import Colorbar from "./Colorbar";
+import { colorbarCentre, colorbarUnit } from "../../utils/colorbar";
 import { useRegionKey } from "../../hooks/useRegionKey";
 
 interface PreviewTabProps {
@@ -66,7 +68,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
   } = useCompositeStf();
   const [stfOpen, setStfOpen] = useState(false);
-  const { display, limits, lut } = useDisplayContext();
+  const { display, limits, lut, limitsLoading } = useDisplayContext();
   const regionKey = useRegionKey();
 
   const isFileRgbView =
@@ -308,6 +310,15 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
         {badge}
         {isCube && <div className={CANVAS_HINT_CLASS}>{CUBE_SPECTRUM_HINT}</div>}
       </div>
+      {display.colorbar && (
+        <Colorbar
+          transfer={transfer}
+          lut={lutBytes}
+          unit={colorbarUnit(file?.result?.header?.BUNIT, displayed.isProcessed)}
+          pending={limitsLoading && display.stretch !== "mtf"}
+          centre={colorbarCentre(display.symmetric, limits)}
+        />
+      )}
     </div>
   );
 }

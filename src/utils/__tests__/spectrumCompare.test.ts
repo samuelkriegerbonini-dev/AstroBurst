@@ -3,7 +3,9 @@ import {
   COMPARISON_PALETTE,
   MAX_COMPARISON_REGIONS,
   NORMALISE_MODES,
+  NO_SURF_BRIGHT_REASON,
   PIXEL_SERIES_COLOR,
+  X1D_NO_WINDOW_DATA_REASON,
   comparisonCsv,
   comparisonCsvFileName,
   comparisonSeries,
@@ -13,11 +15,13 @@ import {
   limitCandidates,
   normaliseFactor,
   offsetStepAuto,
+  plottedTable,
   pruneEntries,
   type ComparisonCsvInput,
   type ComparisonEntry,
 } from "../spectrumCompare";
 import { comparisonAxis, comparisonCandidates, vacuumUmAxis } from "../spectrumExport";
+import { APERTURE_NOTE, type TableEntryData } from "../x1dCompare";
 import type { CubeSpectrum, RegionSpectrum } from "../../shared/types/cube";
 import type { Region, RegionShape } from "../../shared/types/regions";
 import type { SpectralAxisInfo, SpectralAxisKind } from "../../shared/types/spectral";
@@ -83,6 +87,7 @@ function regionEntry(id: string, sum: number[], extra: Partial<ComparisonEntry> 
     backgroundId: null,
     region: regionSpectrum(sum, spectrum),
     pixel: null,
+    table: null,
     error: null,
     ...extra,
   };
@@ -99,6 +104,7 @@ function pixelEntry(values: number[], fluxJy: number[] | null = null, extra: Par
     backgroundId: null,
     region: null,
     pixel: pixelSpectrum(values, fluxJy),
+    table: null,
     error: null,
     ...extra,
   };
@@ -411,5 +417,164 @@ describe("comparisonCsv", () => {
     expect(comparisonCsvFileName("C:/data/cube_s3d.fits#hdu=1")).toBe("cube_s3d_spectra.csv");
     expect(comparisonCsvFileName("C:\\data\\cube.fits")).toBe("cube_spectra.csv");
     expect(comparisonCsvFileName(null)).toBe("spectra.csv");
+  });
+});
+
+describe("table entries", () => {
+  const X1D_PATH = "C:/d/jw01_nrs1_x1d.fits";
+  const TABLE_LABEL = "x1d (nrs1, G235H/F170LP)";
+
+  function tableData(flux: number[], surfBright: number[] | null): TableEntryData {
+    return {
+      path: X1D_PATH,
+      hdu: 1,
+      nRows: 5,
+      fluxUnit: "Jy",
+      sbUnit: "MJy/sr",
+      resampled: {
+        flux,
+        fluxErr: flux.map((v) => (Number.isFinite(v) ? v / 10 : null)),
+        surfBright,
+        rowsUsed: 4,
+        droppedDq: 1,
+        overlap: [1, 1.002],
+      },
+    };
+  }
+
+  function tableEntryOf(flux: number[], surfBright: number[] | null = null, extra: Partial<ComparisonEntry> = {}): ComparisonEntry {
+    return {
+      id: "x1d",
+      kind: "table",
+      label: TABLE_LABEL,
+      color: "#f0abfc",
+      source: { kind: "table", path: X1D_PATH, hdu: 1 },
+      regionText: null,
+      backgroundId: null,
+      region: null,
+      pixel: null,
+      table: tableData(flux, surfBright),
+      error: null,
+      ...extra,
+    };
+  }
+
+  it("entryValues gives the resampled flux in the sum and Jy views and the surface brightness in the mean view", () => {
+    const entry = tableEntryOf([10, NaN, 30], [1, 2, 3]);
+    expect(entryValues(entry, "sum")).toEqual([10, NaN, 30]);
+    expect(entryValues(entry, "jy")).toEqual([10, NaN, 30]);
+    expect(entryValues(entry, "mean")).toEqual([1, 2, 3]);
+    expect(entryValues(tableEntryOf([10, 20, 30]), "mean")).toBeNull();
+    expect(entryValues(tableEntryOf([10, 20, 30], null, { table: null, error: "no vacuum axis" }), "jy")).toBeNull();
+  });
+
+  it("comparisonSeries labels a region sum next to an x1d as mixed units and a Jy pair as Jy", () => {
+    const region = regionEntry("r1", [1, 2, 3], {}, { flux_jy: [0.1, 0.2, 0.3] });
+    const table = tableEntryOf([10, NaN, 30], [1, 2, 3]);
+    const sum = comparisonSeries([region, table], new Set(), axis3, "sum", "none", null, null, "MJy/sr");
+    expect(sum.yLabel).toBe("flux (mixed units)");
+    expect(sum.plotted.map((p) => p.unit)).toEqual(["MJy/sr x pix", "Jy"]);
+    expect(sum.series[1].y).toEqual([10, null, 30]);
+    const jy = comparisonSeries([region, table], new Set(), axis3, "jy", "none", null, null, "MJy/sr");
+    expect(jy.yLabel).toBe("Jy");
+    expect(jy.series.map((s) => s.label)).toEqual(["r1", TABLE_LABEL]);
+    const mean = comparisonSeries([region, table], new Set(), axis3, "mean", "none", null, null, "MJy/sr");
+    expect(mean.yLabel).toBe("MJy/sr");
+  });
+
+  it("comparisonSeries omits an x1d without SURF_BRIGHT in the mean view with its own reason", () => {
+    const result = comparisonSeries([tableEntryOf([10, 20, 30])], new Set(), axis3, "mean", "none", null, null, "MJy/sr");
+    expect(result.series).toEqual([]);
+    expect(result.omitted).toEqual([{ id: "x1d", label: TABLE_LABEL, reason: NO_SURF_BRIGHT_REASON }]);
+    expect(NO_SURF_BRIGHT_REASON).toBe("x1d has no SURF_BRIGHT column");
+    const regionless = comparisonSeries([regionEntry("r1", [], { region: null })], new Set(), axis3, "mean", "none", null, null, "MJy/sr");
+    expect(regionless.omitted[0].reason).toBe("no result for this entry");
+  });
+
+  it("comparisonSeries says the x1d has no data in the continuum windows instead of a non-positive median", () => {
+    const outside = comparisonSeries([tableEntryOf([NaN, NaN, 30])], new Set(), axis3, "sum", "window", [[0, 0], [1, 1]], null, "MJy/sr");
+    expect(outside.series).toEqual([]);
+    expect(outside.omitted).toEqual([{ id: "x1d", label: TABLE_LABEL, reason: X1D_NO_WINDOW_DATA_REASON }]);
+    expect(X1D_NO_WINDOW_DATA_REASON).toBe("x1d has no data in the continuum windows");
+    const negative = comparisonSeries([tableEntryOf([-1, -2, 30])], new Set(), axis3, "sum", "window", [[0, 0], [1, 1]], null, "MJy/sr");
+    expect(negative.omitted[0].reason).toBe("continuum median is not positive");
+    const inside = comparisonSeries([tableEntryOf([NaN, NaN, 30])], new Set(), axis3, "sum", "window", [[0, 0], [2, 2]], null, "MJy/sr");
+    expect(inside.plotted.map((p) => p.factor)).toEqual([30]);
+    const region = comparisonSeries([regionEntry("r1", [NaN, NaN, 3])], new Set(), axis3, "sum", "window", [[0, 0], [1, 1]], null, "MJy/sr");
+    expect(region.omitted[0].reason).toBe("continuum median is not positive");
+  });
+
+  it("pruneEntries keeps a table entry on the cube channel grid and one still waiting for an axis", () => {
+    const regions = [regionOf("r1", circle)];
+    const kept = pruneEntries([regionEntry("r1", [1, 2, 3]), tableEntryOf([1, 2, 3])], regions, 3);
+    expect(kept.map((e) => e.kind)).toEqual(["region", "table"]);
+    expect(pruneEntries([tableEntryOf([1, 2])], regions, 3)).toEqual([]);
+    const waiting = tableEntryOf([], null, { table: null, error: "no spectral axis" });
+    expect(pruneEntries([waiting], regions, 3)).toEqual([waiting]);
+  });
+
+  function tableCsvInput(hidden: ReadonlySet<string>, mode: ComparisonCsvInput["mode"] = "none"): ComparisonCsvInput {
+    const axis = axisOf("wave", [1.0, 1.001, 1.002]);
+    const entries = [regionEntry("r1", [1, 2, 3], { label: "R1" }), tableEntryOf([10, NaN, 30], [1, 2, 3])];
+    const axisColumn = comparisonAxis(axis, "wavelength_vac", null, "optical", "none", null, 3);
+    const result = comparisonSeries(entries, hidden, axisColumn.values ?? axis3, "sum", mode, null, null, "MJy/sr");
+    return {
+      fileName: "cube_s3d.fits",
+      view: "sum",
+      mode,
+      windows: null,
+      axis: axisColumn,
+      axisKnown: true,
+      vacuum: vacuumUmAxis(axis, null, "optical", 3),
+      channelCount: 3,
+      entries,
+      result,
+      specsys: null,
+      axisMode: "wavelength_vac",
+      correction: "none",
+      correctionResult: null,
+      exportedAtUtc: "2026-10-02T12:00:00.000Z",
+    };
+  }
+
+  it("plottedTable returns the table data only while the table entry is plotted", () => {
+    const shown = tableCsvInput(new Set());
+    expect(plottedTable(shown.entries, shown.result)?.path).toBe(X1D_PATH);
+    const hidden = tableCsvInput(new Set(["x1d"]));
+    expect(plottedTable(hidden.entries, hidden.result)).toBeNull();
+  });
+
+  it("comparisonCsv adds the x1d provenance line and unnormalised x1d flux and error columns", () => {
+    const csv = comparisonCsv(tableCsvInput(new Set(), "peak"));
+    const lines = csv.split("\r\n");
+    expect(lines).toContain(
+      `# x1d: ${X1D_PATH}; hdu: 1; rows: 5; dq_rows_dropped: 1; resampling: linear onto the cube vacuum axis, never across a dropped row; x1d_flux_err_jy: FLUX_ERROR combined in quadrature between the bracketing rows; ${APERTURE_NOTE}`,
+    );
+    expect(lines).toContain(
+      `# series: ${TABLE_LABEL}; table; x1d jw01_nrs1_x1d.fits HDU 1; background: pipeline; npix: -; n_bg: -; bg_subtracted: -; unit: norm; factor: 30; offset: 0`,
+    );
+    const header = lines.find((line) => !line.startsWith("#")) ?? "";
+    expect(header).toBe(`channel,wavelength_vacuum_um,vacuum_wavelength_um,R1 [norm],"${TABLE_LABEL} [norm]",x1d_flux_jy,x1d_flux_err_jy`);
+    const rows = lines.filter((line) => line !== "" && !line.startsWith("#")).slice(1);
+    expect(rows[0]).toBe(`0,1,1,${1 / 3},${1 / 3},10,1`);
+    expect(rows[1]).toBe(`1,1.001,1.001,${2 / 3},,,`);
+    expect(rows[2]).toBe("2,1.002,1.002,1,1,30,3");
+  });
+
+  it("comparisonCsv leaves the x1d columns out while the table entry is hidden", () => {
+    const csv = comparisonCsv(tableCsvInput(new Set(["x1d"])));
+    expect(csv).not.toContain("x1d_flux_jy");
+    expect(csv.split("\r\n").some((line) => line.startsWith("# x1d:"))).toBe(false);
+  });
+
+  it("comparisonCsv writes the table it is given, the same one the measurement log reads", () => {
+    const given = { ...tableData([7, 8, 9], null), path: "C:/d/other_x1d.fits", hdu: 4 };
+    const lines = comparisonCsv({ ...tableCsvInput(new Set()), table: given }).split("\r\n");
+    expect(lines.some((line) => line.startsWith("# x1d: C:/d/other_x1d.fits; hdu: 4;"))).toBe(true);
+    const rows = lines.filter((line) => line !== "" && !line.startsWith("#")).slice(1);
+    expect(rows.map((row) => row.split(",").slice(-2).join(","))).toEqual(["7,0.7", "8,0.8", "9,0.9"]);
+    const none = comparisonCsv({ ...tableCsvInput(new Set()), table: null });
+    expect(none).not.toContain("x1d_flux_jy");
+    expect(none.split("\r\n").some((line) => line.startsWith("# x1d:"))).toBe(false);
   });
 });

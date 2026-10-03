@@ -16,6 +16,7 @@ use astroburst_lib::core::stacking::calibration::{
     create_master_bias_cancellable, create_master_dark_cancellable, create_master_flat_cancellable,
     median_exposure_seconds, read_exposure_seconds,
 };
+use astroburst_lib::core::stacking::cfa_guard::CfaStep;
 use astroburst_lib::core::stacking::CancelCheck;
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::load_fits_image;
@@ -24,7 +25,7 @@ use astroburst_lib::types::stacking::{CombineMethod, RejectionMethod};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::handlers::stacking::{require_positive, stop_if_cancelled};
+use crate::handlers::stacking::{refuse_cfa_lights, require_positive, stop_if_cancelled};
 use crate::job::{new_job, spawn_job, Job};
 use crate::state::AppState;
 
@@ -232,6 +233,10 @@ pub async fn run(
     };
     require_positive("sigma_low", config.stack.sigma_low as f64)?;
     require_positive("sigma_high", config.stack.sigma_high as f64)?;
+    if config.align {
+        let lights: Vec<String> = params.channels.iter().flat_map(|ch| ch.paths.iter().cloned()).collect();
+        refuse_cfa_lights(lights, CfaStep::Align).await?;
+    }
 
     let permit = state
         .job_semaphore

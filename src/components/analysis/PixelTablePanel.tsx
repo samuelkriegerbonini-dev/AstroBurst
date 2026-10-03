@@ -11,14 +11,18 @@ import { Toggle } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
   DEFAULT_PIXEL_TABLE_SIZE,
+  PIXEL_TABLE_PLANES,
   PIXEL_TABLE_SIZES,
   cellTone,
   columnIndices,
   displayedPlane,
-  formatCell,
+  formatPlaneCell,
+  pixelCellTitle,
   pixelTableCsv,
+  planeAvailable,
   rowIndices,
   type CellTone,
+  type PixelTablePlane,
 } from "../../utils/pixelTable";
 
 interface PixelTablePanelProps {
@@ -28,7 +32,6 @@ interface PixelTablePanelProps {
 
 const FOLLOW_DEBOUNCE_MS = 80;
 const NOTICE_MS = 1500;
-const CELL_DIGITS = 3;
 const SUMMARY_DIGITS = 4;
 const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 font-mono focus:border-sky-500/50";
@@ -51,18 +54,11 @@ function parseSize(text: string): number {
   return (PIXEL_TABLE_SIZES as readonly number[]).includes(n) ? n : DEFAULT_PIXEL_TABLE_SIZE;
 }
 
-function cellTitle(x: number, y: number, value: number | null, err: number | null | undefined, dqNames: string | null, unit: string | null): string {
-  const parts = [`(${x}, ${y}): ${formatCell(value, SUMMARY_DIGITS)}${unit && value !== null ? ` ${unit}` : ""}`];
-  if (err !== undefined) parts.push(`ERR ${formatCell(err, SUMMARY_DIGITS)}`);
-  if (dqNames) parts.push(`DQ ${dqNames}`);
-  return parts.join("\n");
-}
-
 function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const sizeId = useId();
   const [armed, setArmed] = useState(false);
   const [follow, setFollow] = useState(false);
-  const [showErr, setShowErr] = useState(false);
+  const [planeChoice, setPlaneChoice] = useState<PixelTablePlane>("SCI");
   const [sizeText, setSizeText] = useState(String(DEFAULT_PIXEL_TABLE_SIZE));
   const [result, setResult] = useState<PixelTableResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -160,13 +156,14 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
     if (centre) fetchRef.current(centre.x, centre.y);
   }, [size]);
 
-  const shown = useMemo(() => (result ? displayedPlane(result, showErr) : null), [result, showErr]);
+  const shown = useMemo(() => (result ? displayedPlane(result, planeChoice) : null), [result, planeChoice]);
+  if (shown && shown.plane !== planeChoice) setPlaneChoice(shown.plane);
 
   const copyCsv = useCallback(async () => {
     if (!result || !shown) return;
     try {
       await navigator.clipboard.writeText(pixelTableCsv(result, shown.grid));
-      showNotice(`${shown.plane === "ERR" ? "ERR" : "Pixel"} table copied to the clipboard as CSV`);
+      showNotice(`${shown.plane === "SCI" ? "Pixel" : shown.plane} table copied to the clipboard as CSV`);
     } catch (e: unknown) {
       setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -177,7 +174,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const half = result ? Math.floor(result.size / 2) : 0;
   const grid = shown?.grid ?? [];
   const stats = shown?.stats;
-  const plane = shown?.plane;
+  const plane = shown?.plane ?? "SCI";
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -248,10 +245,21 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
                         return (
                           <td
                             key={x}
-                            title={cellTitle(x, y, result.values[r]?.[c] ?? null, result.err ? result.err[r]?.[c] ?? null : undefined, dqNames, result.unit)}
+                            title={pixelCellTitle(
+                              x,
+                              y,
+                              {
+                                value: result.values[r]?.[c] ?? null,
+                                err: result.err ? (result.err[r]?.[c] ?? null) : undefined,
+                                wavelength: result.wavelength ? (result.wavelength[r]?.[c] ?? null) : undefined,
+                                dqNames,
+                              },
+                              result,
+                              SUMMARY_DIGITS,
+                            )}
                             className={`${CELL_BASE} ${CELL_TONE_CLASS[tone]}${centre ? ` ${CENTRE_CLASS}` : ""}`}
                           >
-                            {formatCell(v, CELL_DIGITS)}
+                            {formatPlaneCell(v, plane)}
                           </td>
                         );
                       })}
@@ -262,12 +270,14 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
             </div>
 
             <div className="text-[9px] text-zinc-500 font-mono flex flex-wrap gap-x-2">
-              {result.err != null && <span>{plane}</span>}
-              {result.unit && <span>unit {result.unit}</span>}
-              <span>min {formatCell(stats.min, SUMMARY_DIGITS)}</span>
-              <span>max {formatCell(stats.max, SUMMARY_DIGITS)}</span>
-              <span>mean {formatCell(stats.mean, SUMMARY_DIGITS)}</span>
-              <span>median {formatCell(stats.median, SUMMARY_DIGITS)}</span>
+              {(result.err != null || result.wavelength != null) && <span>{plane}</span>}
+              {plane === "WAVELENGTH"
+                ? result.wavelength_unit && <span>λ unit {result.wavelength_unit}</span>
+                : result.unit && <span>unit {result.unit}</span>}
+              <span>min {formatPlaneCell(stats.min, plane, SUMMARY_DIGITS)}</span>
+              <span>max {formatPlaneCell(stats.max, plane, SUMMARY_DIGITS)}</span>
+              <span>mean {formatPlaneCell(stats.mean, plane, SUMMARY_DIGITS)}</span>
+              <span>median {formatPlaneCell(stats.median, plane, SUMMARY_DIGITS)}</span>
               <span>
                 {stats.n_finite} finite{stats.n_nan > 0 ? `, ${stats.n_nan} NaN` : ""}
               </span>
@@ -276,7 +286,19 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
             </div>
 
             <div className="flex items-center justify-between gap-2">
-              <Toggle label="Show ERR" checked={showErr} disabled={result.err == null} accent="sky" onChange={setShowErr} />
+              <select
+                aria-label="Pixel table plane"
+                title="Plane shown in the table and copied as CSV: science values, ERR or the per-pixel wavelength"
+                value={plane}
+                onChange={(e) => setPlaneChoice(e.target.value as PixelTablePlane)}
+                className={SELECT_CLASS}
+              >
+                {PIXEL_TABLE_PLANES.map((p) => (
+                  <option key={p} value={p} disabled={!planeAvailable(result, p)}>
+                    {p}
+                  </option>
+                ))}
+              </select>
               <button type="button" onClick={copyCsv} className={BUTTON_CLASS}>
                 Copy CSV
               </button>
@@ -287,7 +309,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
                 }}
                 disabled={!result}
                 className={`${BUTTON_CLASS} inline-flex items-center gap-1`}
-                title="Log the centre pixel with its ERR value and DQ flag names"
+                title="Log the centre pixel with its ERR value, DQ flag names and wavelength"
               >
                 <Plus size={11} /> Log
               </button>

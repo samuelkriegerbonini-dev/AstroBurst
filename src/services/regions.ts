@@ -22,6 +22,7 @@ export interface RegionStatsOptions {
   excludeDq?: boolean;
   sigma?: number;
   maxiters?: number;
+  exclude?: RegionShape[];
 }
 
 export function regionStats(
@@ -35,6 +36,7 @@ export function regionStats(
     excludeDq: opts.excludeDq ?? false,
     sigma: opts.sigma ?? null,
     maxiters: opts.maxiters ?? null,
+    exclude: opts.exclude ?? [],
   });
 }
 
@@ -43,7 +45,7 @@ export function radialProfile(
   x: number,
   y: number,
   maxRadius: number,
-  opts: { background?: [number, number] | null; excludeDq?: boolean } = {},
+  opts: { background?: [number, number] | null; excludeDq?: boolean; exclude?: RegionShape[] } = {},
 ): Promise<RadialProfile> {
   return typedInvoke<RadialProfile>("radial_profile_cmd", {
     path,
@@ -52,6 +54,7 @@ export function radialProfile(
     maxRadius,
     background: opts.background ?? null,
     excludeDq: opts.excludeDq ?? false,
+    exclude: opts.exclude ?? [],
   });
 }
 
@@ -62,14 +65,16 @@ export function lineCut(
   x2: number,
   y2: number,
   excludeDq = false,
+  exclude: RegionShape[] = [],
 ): Promise<LineCut> {
-  return typedInvoke<LineCut>("line_cut_cmd", { path, x1, y1, x2, y2, excludeDq });
+  return typedInvoke<LineCut>("line_cut_cmd", { path, x1, y1, x2, y2, excludeDq, exclude });
 }
 
 export interface SbProfileOptions {
   binWidth?: number | null;
   background?: RegionShape | null;
   excludeDq?: boolean;
+  exclude?: RegionShape[];
 }
 
 export function sbProfile(path: string, shape: RegionShape, opts: SbProfileOptions = {}): Promise<SbProfile> {
@@ -79,6 +84,7 @@ export function sbProfile(path: string, shape: RegionShape, opts: SbProfileOptio
     binWidth: opts.binWidth ?? null,
     background: opts.background ?? null,
     excludeDq: opts.excludeDq ?? false,
+    exclude: opts.exclude ?? [],
   });
 }
 

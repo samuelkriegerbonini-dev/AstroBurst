@@ -311,6 +311,19 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           />
           <span className={LABEL_CLASS}>invert</span>
         </label>
+
+        <label
+          className="flex items-center gap-1 cursor-pointer"
+          title={renderTitle("value scale under the image: ticks follow stretch, limits and colormap")}
+        >
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            checked={display.colorbar}
+            onChange={(e) => setDisplay({ colorbar: e.target.checked })}
+          />
+          <span className={LABEL_CLASS}>colorbar</span>
+        </label>
       </fieldset>
 
       <div className={GROUP_CLASS}>
@@ -383,7 +396,7 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
       <button
         onClick={() => setDisplay(DEFAULT_DISPLAY_SETTINGS)}
         className={`flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors ${renderOnlyDisabled ? "ml-auto" : ""}`}
-        title="Reset display settings (stretch, limits, colormap, grid and compass)"
+        title="Reset display settings (stretch, limits, colormap, colorbar, grid and compass)"
       >
         <RotateCcw size={9} />
         Reset display

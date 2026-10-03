@@ -19,6 +19,8 @@ import {
   alignViewerState,
   ALIGN_IMAGE_LOAD_ERROR,
   applyCompositeOp,
+  AUTO_WB_MANUAL_HINT,
+  autoWbErrorText,
   ALIGN_INPUTS_CHANGED,
   alignInputs,
   alignRunFinish,
@@ -31,6 +33,7 @@ import {
   nextAlignedRunState,
   rerunDiscards,
   resolveChannelPath,
+  scnrAutoEnable,
   sameAlignInputs,
   sameAlignedRun,
   unalignedBins,
@@ -50,6 +53,7 @@ import {
   exportWcsWarning,
   INITIAL_STATE,
   invalidateDownstream,
+  levelMatchLine,
   nextEnabledStep,
   spccBlockReason,
   spccInputs,
@@ -62,6 +66,7 @@ import {
   singleChannelBinId,
   starRemovalNote,
   withChannelStage,
+  wizardChannelExport,
   wizardHeaderSourcePath,
   wizardStackName,
   wizardZipChannels,
@@ -250,6 +255,59 @@ describe("composite HISTORY", () => {
   it("starts over on a new blend", () => {
     const h = applyCompositeOp(blended, { kind: "lrgb", lightness: 1, chrominance: 1 });
     expect(compositeHistoryLines(applyCompositeOp(h, { kind: "blend", preset: "hoo" }))).toEqual(["Blend: hoo"]);
+  });
+
+  it("carries one level-match line per channel", () => {
+    const h = applyCompositeOp(EMPTY_COMPOSITE_HISTORY, {
+      kind: "blend",
+      preset: "auto_wavelength",
+      levels: [{ channel: "b F090W", scale: 4.7123 }, { channel: "g F187N", scale: 1 }],
+    });
+    const lines = ["Blend: auto_wavelength", "Level match b F090W: x4.712", "Level match g F187N: x1.000"];
+    expect(compositeHistoryLines(h)).toEqual(lines);
+    const balanced = applyCompositeOp(h, { kind: "colorBalance", mode: "manual", r: 1.2, g: 1, b: 1, scnr: null });
+    expect(compositeHistoryLines(balanced)).toEqual([...lines, "White balance: manual R=1.200 G=1.000 B=1.000"]);
+    const later = applyCompositeOp(applyCompositeOp(balanced, { kind: "lrgb", lightness: 1, chrominance: 1 }), { kind: "resetColorBalance" });
+    expect(compositeHistoryLines(later)).toEqual([...lines, "LRGB: lightness 100%, chrominance 100%"]);
+    const longest = levelMatchLine({ channel: "oiii F1000W", scale: 12345.678 });
+    for (const line of [...compositeHistoryLines(balanced), longest]) {
+      expect(line.length).toBeLessThanOrEqual(70);
+      expect(line).toMatch(/^[\x20-\x7e]*$/);
+    }
+  });
+
+  it("writes today's history for a blend without levels", () => {
+    expect(compositeHistoryLines(applyCompositeOp(EMPTY_COMPOSITE_HISTORY, { kind: "blend", preset: "sho", levels: null }))).toEqual(["Blend: sho"]);
+    expect(compositeHistoryLines(applyCompositeOp(EMPTY_COMPOSITE_HISTORY, { kind: "blend", preset: "sho", levels: [] }))).toEqual(["Blend: sho"]);
+  });
+
+  it("drops the level scales when a step before Blend is invalidated", () => {
+    const s = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { blendLevelScales: { r: 2 } });
+    expect(invalidateDownstream(s, "align").blendLevelScales).toBeNull();
+    expect(invalidateDownstream(s, "channels").blendLevelScales).toBeNull();
+    expect(invalidateDownstream(s, "blend").blendLevelScales).toBeUndefined();
+  });
+});
+
+describe("wizardChannelExport", () => {
+  it("sends three non-null slots", () => {
+    const cases = [
+      stateWith({ ha: ["/h.fits"] }),
+      stateWith({ ha: ["/h.fits"] }, { channelResults: withChannelStage({}, "ha", "stretched", stretched) }),
+      stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }),
+      stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"], sii: ["/s.fits"] }),
+      stateWith({ ha: ["/h.fits"], r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] }, {
+        channelResults: withChannelStage({}, "ha", "stretched", stretched),
+      }),
+    ];
+    for (const s of cases) {
+      const out = wizardChannelExport(s);
+      expect(out).not.toBeNull();
+      expect([out?.r, out?.g, out?.b].every((p) => typeof p === "string" && p.length > 0)).toBe(true);
+      expect(out).toEqual(resolveExportRgbPaths(s));
+    }
+    expect(wizardChannelExport(cases[4])?.monoBinId).toBe("ha");
+    expect(wizardChannelExport(stateWith({}))).toBeNull();
   });
 });
 
@@ -718,6 +776,43 @@ describe("wizard provider", () => {
     expect(ctx.getState().excludedFiles).toEqual({ ha: ["/h1.fits"] });
   });
 
+  it("gives a new channel set the Match levels default again", async () => {
+    const ctx = await mountWizard();
+    const bins = binsOf({ ha: ["/h.fits"], oiii: ["/o.fits"] });
+    ctx.dispatch({ type: "SET_BINS", bins });
+    ctx.dispatch({ type: "UPDATE", partial: { levelMatch: false, blendLevelScales: { ha: 1, oiii: 3 } } });
+    ctx.dispatch({ type: "SET_BINS", bins: bins.map((b) => ({ ...b })) });
+    expect(ctx.getState().levelMatch).toBe(false);
+    expect(ctx.getState().blendLevelScales).toEqual({ ha: 1, oiii: 3 });
+    ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h.fits"], sii: ["/s.fits"] }) });
+    expect(ctx.getState().levelMatch).toBeNull();
+    expect(ctx.getState().blendLevelScales).toBeNull();
+  });
+
+  it("re-derives the SPCC factors when a later Blend changes the level-match scales", async () => {
+    const ctx = await mountWizard();
+    const wb = () => {
+      const s = ctx.getState();
+      return [s.wbR, s.wbG, s.wbB];
+    };
+    ctx.dispatch({ type: "SET_BINS", bins: binsOf({ r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] }) });
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: null } });
+    ctx.dispatch({ type: "UPDATE", partial: { wbMode: "spcc", spccFactors: { r: 1.1, g: 1, b: 0.9 } } });
+    expect(wb()).toEqual([1.1, 1, 0.9]);
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: 1, g: 1.4, b: 2.1 } } });
+    expect(wb()[0]).toBe(1.1);
+    expect(wb()[1]).toBeCloseTo(1 / 1.4, 12);
+    expect(wb()[2]).toBeCloseTo(0.9 / 2.1, 12);
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: null } });
+    expect(wb()).toEqual([1.1, 1, 0.9]);
+    ctx.dispatch({ type: "SET_WB", mode: "manual", r: 1.3, g: 1, b: 0.8 });
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: 2, g: 1, b: 1 } } });
+    expect(wb()).toEqual([1.3, 1, 0.8]);
+    ctx.dispatch({ type: "SET_WB", mode: "spcc", r: 1.3, g: 1, b: 0.8 });
+    expect(wb()[0]).toBeCloseTo(0.55, 12);
+    expect(wb().slice(1)).toEqual([1, 0.9]);
+  });
+
   it("drops the Align run on RESET, so the late finish of a run in flight is ignored", async () => {
     const live = await mountWizard();
     live.startAlignRun(running);
@@ -796,6 +891,95 @@ describe("SPCC gate", () => {
 
   it("says nothing while an input is missing, which the step reports on its own", () => {
     expect(spccBlockReason(stateWith({ r: ["/r.fits"] }), [frame("/r.fits", "Red")])).toBeNull();
+  });
+
+  it("blocks a medium-band frame by its code", () => {
+    const s = stateWith({ r: ["/n/f410m.fits"], g: ["/n/f200w.fits"], b: ["/n/f090w.fits"] });
+    const files = [frame("/n/f410m.fits", "F410M"), frame("/n/f200w.fits", "F200W"), frame("/n/f090w.fits", "F090W")];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models broadband R/G/B filters only; f410m in R is a medium-band frame (F410M).",
+    );
+  });
+
+  it("blocks an unmapped medium band by the pattern", () => {
+    const s = stateWith({ r: ["/h/f547m.fits"], g: ["/h/f606w.fits"], b: ["/h/f435w.fits"] });
+    const files = [frame("/h/f547m.fits", "F547M"), frame("/h/f606w.fits", "F606W"), frame("/h/f435w.fits", "F435W")];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models broadband R/G/B filters only; f547m in R is a medium-band frame (F547M).",
+    );
+  });
+
+  it("blocks an infrared broadband by wavelength and names it", () => {
+    const s = stateWith({ r: ["/h/f814w.fits"], g: ["/h/f606w.fits"], b: ["/n/f090w.fits"] });
+    const files = [frame("/h/f814w.fits", "F814W"), frame("/h/f606w.fits", "F606W"), frame("/n/f090w.fits", "F090W")];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models visible light (380-830 nm) only; f090w in B is F090W at 900 nm.",
+    );
+  });
+
+  it("names the first infrared channel of a NIRCam set", () => {
+    const s = stateWith({ r: ["/n/f444w.fits"], g: ["/n/f200w.fits"], b: ["/n/f090w.fits"] });
+    const files = [frame("/n/f444w.fits", "F444W"), frame("/n/f200w.fits", "F200W"), frame("/n/f090w.fits", "F090W")];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models visible light (380-830 nm) only; f444w in R is F444W at 4440 nm.",
+    );
+  });
+
+  it("reads a narrowband PUPIL", () => {
+    const pupil = "/n/jw_f444w-f470n_i2d.fits";
+    const s = stateWith({ r: [pupil], g: ["/n/f200w.fits"], b: ["/n/f090w.fits"] });
+    const files = [
+      { path: pupil, name: "jw_f444w-f470n_i2d.fits", result: { header: { FILTER: "F444W", PUPIL: "F470N" } } },
+      frame("/n/f200w.fits", "F200W"),
+      frame("/n/f090w.fits", "F090W"),
+    ];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models broadband R/G/B filters only; jw_f444w-f470n_i2d in R is a narrowband frame (F470N).",
+    );
+  });
+
+  it("reports a narrowband frame before an infrared one, as today", () => {
+    const s = stateWith({ r: ["/n/r4_f200w.fits"], g: ["/n/r4_f187n.fits"], b: ["/n/r4_f090w.fits"] });
+    const files = [frame("/n/r4_f200w.fits", "F200W"), frame("/n/r4_f187n.fits", "F187N"), frame("/n/r4_f090w.fits", "F090W")];
+    expect(spccBlockReason(s, files)).toBe(
+      "SPCC models broadband R/G/B filters only; r4_f187n in G is a narrowband frame (F187N).",
+    );
+    const mixed = stateWith({ r: ["/n/f444w.fits"], g: ["/n/f410m.fits"], b: ["/n/f090w.fits"] });
+    expect(spccBlockReason(mixed, [frame("/n/f444w.fits", "F444W"), frame("/n/f410m.fits", "F410M"), frame("/n/f090w.fits", "F090W")])).toBe(
+      "SPCC models broadband R/G/B filters only; f410m in G is a medium-band frame (F410M).",
+    );
+  });
+
+  it("keeps visible broadband and unmapped codes allowed", () => {
+    const hst = stateWith({ r: ["/h/f814w.fits"], g: ["/h/f606w.fits"], b: ["/h/f435w.fits"] });
+    expect(spccBlockReason(hst, [frame("/h/f814w.fits", "F814W"), frame("/h/f606w.fits", "F606W"), frame("/h/f435w.fits", "F435W")])).toBeNull();
+    const wide = stateWith({ r: ["/h/f814w.fits"], g: ["/h/f606w.fits"], b: ["/n/f070w.fits"] });
+    expect(spccBlockReason(wide, [frame("/h/f814w.fits", "F814W"), frame("/h/f606w.fits", "F606W"), frame("/n/f070w.fits", "F070W")])).toBeNull();
+  });
+});
+
+describe("scnrAutoEnable", () => {
+  it("switches SCNR on only for broadband data that SPCC can model", () => {
+    expect(scnrAutoEnable(false, null)).toBe(true);
+    expect(scnrAutoEnable(false, "x")).toBe(false);
+    expect(scnrAutoEnable(true, null)).toBe(false);
+  });
+});
+
+describe("autoWbErrorText", () => {
+  const rust =
+    "Auto white balance needs a sky level clearly above zero, but the median of channel G is within 3 sigma of zero (the sky was probably subtracted). Use SPCC or manual factors.";
+
+  it("suggests manual factors instead of SPCC when SPCC cannot run", () => {
+    const text = autoWbErrorText(rust, false);
+    expect(text.endsWith(AUTO_WB_MANUAL_HINT)).toBe(true);
+    expect(text.endsWith("Use manual factors; SPCC does not model these filters.")).toBe(true);
+    expect(text).not.toContain("SPCC or");
+  });
+
+  it("keeps the backend text when SPCC is allowed or the hint is absent", () => {
+    expect(autoWbErrorText(rust, true)).toBe(rust);
+    expect(autoWbErrorText("Auto WB: composite cache is empty", false)).toBe("Auto WB: composite cache is empty");
   });
 });
 

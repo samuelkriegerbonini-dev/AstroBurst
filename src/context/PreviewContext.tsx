@@ -186,6 +186,7 @@ function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
     gridFrame,
     gridDensity: clampGridDensity(finiteOr(r.gridDensity, d.gridDensity)),
     compass: r.compass === true,
+    colorbar: r.colorbar !== false,
     symmetric: r.symmetric === true,
     centre: finiteOr(r.centre, d.centre),
   };

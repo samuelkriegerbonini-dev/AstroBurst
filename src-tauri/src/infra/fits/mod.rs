@@ -3,4 +3,5 @@ pub mod dispatcher;
 pub mod file_bytes;
 pub mod mef_writer;
 pub mod reader;
+pub mod table;
 pub mod writer;

@@ -9,7 +9,7 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: vi.fn(),
 }));
 
-import { getSpectralAxis, measureSpectralLine } from "../spectral";
+import { getSpectralAxis, measureSpectralLine, readX1dSpectrum } from "../spectral";
 import type { SpectrumSource } from "../../shared/types/spectral";
 
 describe("measureSpectralLine", () => {
@@ -81,5 +81,25 @@ describe("getSpectralAxis", () => {
     typedInvokeMock.mockResolvedValue({ kind: "wave" });
     await getSpectralAxis("cube.fits");
     expect(typedInvokeMock).toHaveBeenCalledWith("spectral_axis_cmd", { path: "cube.fits" });
+  });
+});
+
+describe("readX1dSpectrum", () => {
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+  });
+
+  it("sends the cube path with its plane fragment and a null HDU by default", async () => {
+    typedInvokeMock.mockResolvedValue({ n_rows: 3 });
+    const result = await readX1dSpectrum("a_s3d.fits#hdu=1");
+    expect(result).toEqual({ n_rows: 3 });
+    expect(typedInvokeMock).toHaveBeenCalledTimes(1);
+    expect(typedInvokeMock).toHaveBeenCalledWith("read_x1d_spectrum_cmd", { path: "a_s3d.fits#hdu=1", hdu: null });
+  });
+
+  it("passes an explicit EXTRACT1D HDU through", async () => {
+    typedInvokeMock.mockResolvedValue({ n_rows: 3 });
+    await readX1dSpectrum("C:/d/b_x1d.fits", 3);
+    expect(typedInvokeMock).toHaveBeenCalledWith("read_x1d_spectrum_cmd", { path: "C:/d/b_x1d.fits", hdu: 3 });
   });
 });

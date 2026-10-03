@@ -5,6 +5,7 @@ import {
   selectCubePlaneHdu,
   isCubePlaneResult,
 } from "../fitsErrors";
+import { TABLE_ONLY_HINT, tableOnlyFileHint } from "../x1dCompare";
 
 const CUBE_REJECTION =
   "Failed to load C:/data/jw01234_s3d.fits: HDU 1 (SCI): 3D cube of 1400 planes, not a single 2D image; " +
@@ -124,6 +125,21 @@ describe("isCubePlaneResult", () => {
     expect(isCubePlaneResult(null, undefined)).toBe(false);
     expect(isCubePlaneResult({ NAXIS: "3", NAXIS3: "3" }, true)).toBe(false);
     expect(isCubePlaneResult({ NAXIS3: "not-a-number" }, undefined)).toBe(false);
+  });
+});
+
+describe("tableOnlyFileHint", () => {
+  it("turns the x1d rejection into the Spectroscopy hint", () => {
+    expect(tableOnlyFileHint(X1D_REJECTION)).toBe(TABLE_ONLY_HINT);
+    expect(TABLE_ONLY_HINT).toBe("1D spectrum table (EXTRACT1D): open it from the Spectroscopy panel of its cube");
+  });
+
+  it("leaves the cube rejection, other tables and missing errors alone", () => {
+    expect(tableOnlyFileHint(CUBE_REJECTION)).toBeNull();
+    expect(tableOnlyFileHint("HDU 1 (ASDF): BINTABLE extension, holds no image pixels")).toBeNull();
+    expect(tableOnlyFileHint("EXTRACT1D mentioned without the table rejection")).toBeNull();
+    expect(tableOnlyFileHint(null)).toBeNull();
+    expect(tableOnlyFileHint(undefined)).toBeNull();
   });
 });
 

@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_PIXEL_TABLE_SIZE,
+  PIXEL_TABLE_PLANES,
   PIXEL_TABLE_SIZES,
   cellTone,
   columnIndices,
   displayedPlane,
   formatCell,
+  formatPlaneCell,
+  pixelCellTitle,
   pixelTableCsv,
+  planeAvailable,
   rowIndices,
 } from "../pixelTable";
 import { CSV_LINE_END } from "../catalogCsv";
@@ -33,6 +37,9 @@ function result(overrides: Partial<PixelTableResult> = {}): PixelTableResult {
     unit: null,
     stats: STATS,
     err_stats: null,
+    wavelength: null,
+    wavelength_stats: null,
+    wavelength_unit: null,
     elapsed_ms: 1,
     ...overrides,
   };
@@ -93,16 +100,72 @@ describe("displayedPlane", () => {
     [null, 4, 4.5],
   ];
 
+  const WAVE_STATS: PixelTableStats = { min: 1.654, max: 1.66, mean: 1.657, median: 1.657, n_finite: 6, n_nan: 0 };
+  const WAVE = [
+    [null, 1.654, 1.655],
+    [null, 1.656, 1.657],
+    [null, 1.659, 1.66],
+  ];
+
   it("shows the ERR grid with the ERR plane's own stats when ERR is requested and present", () => {
     const r = result({ err: ERR, err_stats: ERR_STATS });
-    expect(displayedPlane(r, true)).toEqual({ plane: "ERR", grid: ERR, stats: ERR_STATS });
+    expect(displayedPlane(r, "ERR")).toEqual({ plane: "ERR", grid: ERR, stats: ERR_STATS });
   });
 
-  it("shows the science grid and science stats when ERR is off or the image has no ERR plane", () => {
+  it("shows the science grid and science stats when SCI is requested or the image has no ERR plane", () => {
     const r = result({ err: ERR, err_stats: ERR_STATS });
-    expect(displayedPlane(r, false)).toEqual({ plane: "SCI", grid: r.values, stats: STATS });
+    expect(displayedPlane(r, "SCI")).toEqual({ plane: "SCI", grid: r.values, stats: STATS });
     const plain = result();
-    expect(displayedPlane(plain, true)).toEqual({ plane: "SCI", grid: plain.values, stats: STATS });
+    expect(displayedPlane(plain, "ERR")).toEqual({ plane: "SCI", grid: plain.values, stats: STATS });
+  });
+
+  it("shows the WAVELENGTH grid with its own stats when requested and present", () => {
+    const r = result({ err: ERR, err_stats: ERR_STATS, wavelength: WAVE, wavelength_stats: WAVE_STATS, wavelength_unit: "um" });
+    expect(displayedPlane(r, "WAVELENGTH")).toEqual({ plane: "WAVELENGTH", grid: WAVE, stats: WAVE_STATS });
+  });
+
+  it("falls back to the science grid when the WAVELENGTH plane is missing", () => {
+    const plain = result({ err: ERR, err_stats: ERR_STATS });
+    expect(displayedPlane(plain, "WAVELENGTH")).toEqual({ plane: "SCI", grid: plain.values, stats: STATS });
+  });
+});
+
+describe("planeAvailable", () => {
+  it("offers SCI always, ERR and WAVELENGTH only when their grid and stats came back", () => {
+    const plain = result();
+    expect(planeAvailable(plain, "SCI")).toBe(true);
+    expect(planeAvailable(plain, "ERR")).toBe(false);
+    expect(planeAvailable(plain, "WAVELENGTH")).toBe(false);
+    const full = result({
+      err: [[1]],
+      err_stats: STATS,
+      wavelength: [[2]],
+      wavelength_stats: STATS,
+      wavelength_unit: "um",
+    });
+    expect(PIXEL_TABLE_PLANES.map((p) => planeAvailable(full, p))).toEqual([true, true, true]);
+    expect(planeAvailable(result({ wavelength: [[2]], wavelength_stats: null }), "WAVELENGTH")).toBe(false);
+  });
+
+  it("lists the planes in the order of the plane selector", () => {
+    expect([...PIXEL_TABLE_PLANES]).toEqual(["SCI", "ERR", "WAVELENGTH"]);
+  });
+});
+
+describe("pixelCellTitle", () => {
+  const units = { unit: "MJy/sr", wavelength_unit: "um" };
+
+  it("adds a λ line with the wavelength unit when the WAVELENGTH plane came back", () => {
+    expect(pixelCellTitle(3, 4, { value: 2.5, err: 0.1, wavelength: 1.65432, dqNames: "SATURATED" }, units, 4)).toBe(
+      "(3, 4): 2.5000 MJy/sr\nERR 0.1000\nλ 1.65432 um\nDQ SATURATED",
+    );
+  });
+
+  it("writes λ -- on a NaN wavelength pixel and leaves the line out without the plane", () => {
+    expect(pixelCellTitle(0, 0, { value: 1, err: undefined, wavelength: null, dqNames: null }, units, 4)).toBe("(0, 0): 1.0000 MJy/sr\nλ --");
+    expect(pixelCellTitle(0, 0, { value: 1, err: undefined, wavelength: undefined, dqNames: null }, { unit: null, wavelength_unit: null }, 4)).toBe(
+      "(0, 0): 1.0000",
+    );
   });
 });
 
@@ -133,6 +196,33 @@ describe("formatCell", () => {
     expect(formatCell(null, 2)).toBe("--");
     expect(formatCell(Number.NaN, 2)).toBe("--");
     expect(formatCell(Number.POSITIVE_INFINITY, 2)).toBe("--");
+  });
+});
+
+describe("formatPlaneCell", () => {
+  it("prints WAVELENGTH cells with six significant digits so adjacent pixels differ in every NIRSpec grating", () => {
+    const g140h = [0.97012, 0.97035, 0.97058].map((v) => formatPlaneCell(v, "WAVELENGTH"));
+    expect(g140h).toEqual(["0.970120", "0.970350", "0.970580"]);
+    const g235h = [1.654, 1.65438, 1.65476, 1.65514].map((v) => formatPlaneCell(v, "WAVELENGTH"));
+    expect(g235h).toEqual(["1.65400", "1.65438", "1.65476", "1.65514"]);
+    const fine = [1.654, 1.65405, 1.6541].map((v) => formatPlaneCell(v, "WAVELENGTH"));
+    expect(new Set(fine).size).toBe(3);
+    expect(formatPlaneCell(12.34567, "WAVELENGTH")).toBe("12.3457");
+    expect(formatPlaneCell(null, "WAVELENGTH")).toBe("--");
+    expect(formatPlaneCell(Number.NaN, "WAVELENGTH")).toBe("--");
+  });
+
+  it("keeps the per-pixel step readable whatever unit the WAVELENGTH plane is in", () => {
+    expect([1654.38, 1654.76].map((v) => formatPlaneCell(v, "WAVELENGTH"))).toEqual(["1654.38", "1654.76"]);
+    expect([16543.8, 16547.6].map((v) => formatPlaneCell(v, "WAVELENGTH"))).toEqual(["16543.8", "16547.6"]);
+    expect([1.65438e-6, 1.65476e-6].map((v) => formatPlaneCell(v, "WAVELENGTH"))).toEqual(["1.65438e-6", "1.65476e-6"]);
+  });
+
+  it("keeps three decimals for SCI and ERR cells and takes the summary digits only for those planes", () => {
+    expect(formatPlaneCell(1.65438, "SCI")).toBe("1.654");
+    expect(formatPlaneCell(1.65438, "ERR")).toBe("1.654");
+    expect(formatPlaneCell(1.65438, "SCI", 4)).toBe("1.6544");
+    expect(formatPlaneCell(1.65438, "WAVELENGTH", 4)).toBe("1.65438");
   });
 });
 

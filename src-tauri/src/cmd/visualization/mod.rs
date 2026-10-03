@@ -16,7 +16,7 @@ use crate::core::imaging::colormap::Colormap;
 use crate::core::imaging::dq_flags::{mask_preview_or, DqTable};
 use crate::core::imaging::pixel_probe::{
     data_unit, grid_origin, grid_stats, grid_stats_json, int_grid, int_value_grid, pixel_grid,
-    probe_companions, probe_json_with_companions, probe_pixel,
+    probe_companions, probe_json_with_companions, probe_pixel, wavelength_unit,
 };
 use crate::core::imaging::scale::{
     resolve_limits, symmetric_about, validate_symmetric_centre, LimitMode, DEFAULT_SYMMETRIC_CENTRE,
@@ -31,8 +31,8 @@ use crate::types::constants::{
     RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
     RES_ERR_REF, RES_ERR_STATS, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL,
     RES_MIDTONE, RES_NAME, RES_NODATA, RES_NOTES, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE,
-    RES_STATS, RES_SYMMETRIC, RES_TABLE, RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_X, RES_X0,
-    RES_Y, RES_Y0,
+    RES_STATS, RES_SYMMETRIC, RES_TABLE, RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_WAVELENGTH,
+    RES_WAVELENGTH_STATS, RES_WAVELENGTH_UNIT, RES_X, RES_X0, RES_Y, RES_Y0,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
@@ -230,8 +230,21 @@ pub async fn probe_pixel_cmd(
             .as_ref()
             .and_then(|(e, table)| e.int_plane().map(|p| (p, *table)));
         let err_unit = comps.err.as_ref().and_then(|e| e.header().and_then(data_unit));
-        let companions = probe_companions(dq, comps.err.as_ref().map(|e| e.arr()), probe.x, probe.y);
-        Ok(probe_json_with_companions(&probe, unit.as_deref(), err_unit.as_deref(), &companions))
+        let wave_unit = wavelength_unit(comps.wavelength.as_ref().and_then(|e| e.header()));
+        let companions = probe_companions(
+            dq,
+            comps.err.as_ref().map(|e| e.arr()),
+            comps.wavelength.as_ref().map(|e| e.arr()),
+            probe.x,
+            probe.y,
+        );
+        Ok(probe_json_with_companions(
+            &probe,
+            unit.as_deref(),
+            err_unit.as_deref(),
+            Some(&wave_unit),
+            &companions,
+        ))
     })
 }
 
@@ -259,6 +272,12 @@ pub async fn pixel_table_cmd(
             .err
             .as_ref()
             .map(|e| grid_stats_json(&grid_stats(e.arr(), x, y, size)));
+        let wavelength = comps.wavelength.as_ref().map(|e| pixel_grid(e.arr(), x, y, size));
+        let wavelength_stats = comps
+            .wavelength
+            .as_ref()
+            .map(|e| grid_stats_json(&grid_stats(e.arr(), x, y, size)));
+        let wave_unit = comps.wavelength.as_ref().map(|e| wavelength_unit(e.header()));
         let dq = comps
             .dq
             .as_ref()
@@ -285,6 +304,9 @@ pub async fn pixel_table_cmd(
             RES_UNIT: unit,
             RES_STATS: grid_stats_json(&stats),
             RES_ERR_STATS: err_stats,
+            RES_WAVELENGTH: wavelength,
+            RES_WAVELENGTH_STATS: wavelength_stats,
+            RES_WAVELENGTH_UNIT: wave_unit,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
@@ -399,7 +421,10 @@ pub async fn generate_tiles_rgb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::fits::reader::test_fixtures::{sci_err_dq_mef, sci_err_dq_mef_with_dq_cards};
+    use crate::infra::fits::reader::test_fixtures::{
+        sci_err_dq_mef, sci_err_dq_mef_with_dq_cards, sci_err_dq_wave_mef, sci_err_dq_wave_mef_with_wave_cards,
+    };
+    use crate::types::constants::RES_VALUE;
 
     #[test]
     fn overlay_mask_defaults_per_table() {
@@ -692,6 +717,97 @@ mod tests {
         assert!(p[RES_DQ_NAMES].is_null());
         assert!(p[RES_DQ_TABLE].is_null());
         assert!(p[RES_UNIT].is_null());
+    }
+
+    #[tokio::test]
+    async fn probe_pixel_reports_the_wavelength_companion_with_its_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wave_probe.fits");
+        let mut wave = vec![2.0f32; 16];
+        wave[5] = 1.654;
+        wave[15] = f32::NAN;
+        sci_err_dq_wave_mef(&path, 4, 4, vec![-2147483648i32; 16], wave);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let j = probe_pixel_cmd(key.clone(), 1.0, 1.0, Some(1)).await.unwrap();
+        assert!((j[RES_WAVELENGTH][RES_VALUE].as_f64().unwrap() - 1.654).abs() < 1e-6, "{j}");
+        assert_eq!(j[RES_WAVELENGTH][RES_UNIT], "um");
+        assert_eq!(j[RES_ERR][RES_VALUE], 2.5);
+        assert_eq!(j[RES_VALUE], 5.0);
+
+        let nan = probe_pixel_cmd(key, 3.0, 3.0, Some(1)).await.unwrap();
+        assert!(nan.as_object().unwrap().contains_key(RES_WAVELENGTH), "{nan}");
+        assert!(nan[RES_WAVELENGTH].is_null(), "{nan}");
+        assert_eq!(nan[RES_VALUE], 15.0);
+
+        let plain = dir.path().join("plain_probe.fits").to_str().unwrap().to_string();
+        let data = ndarray::Array2::from_shape_fn((5, 5), |(y, x)| (y * 5 + x) as f32);
+        crate::infra::fits::writer::write_fits_mono(&plain, &data, None).unwrap();
+        let p = probe_pixel_cmd(plain, 2.0, 2.0, Some(1)).await.unwrap();
+        assert_eq!(p[RES_VALUE], 12.0);
+        assert!(p.as_object().unwrap().contains_key(RES_WAVELENGTH), "{p}");
+        assert!(p[RES_WAVELENGTH].is_null(), "{p}");
+    }
+
+    #[tokio::test]
+    async fn pixel_table_includes_the_wavelength_grid_stats_and_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wave_table.fits");
+        let wave: Vec<f32> = (0..16).map(|i| 1.0 + 0.25 * i as f32).collect();
+        sci_err_dq_wave_mef(&path, 4, 4, vec![-2147483648i32; 16], wave);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let t = pixel_table_cmd(key, 0, 1, Some(3)).await.unwrap();
+        assert_eq!(t[RES_WAVELENGTH], json!([[null, 1.0, 1.25], [null, 2.0, 2.25], [null, 3.0, 3.25]]));
+        assert_eq!(
+            t[RES_WAVELENGTH_STATS],
+            json!({ "min": 1.0, "max": 3.25, "mean": 2.125, "median": 2.125, "n_finite": 6, "n_nan": 0 })
+        );
+        assert_eq!(t[RES_WAVELENGTH_UNIT], "um");
+        assert_eq!(t[RES_VALUES][1][1], 4.0);
+        assert_eq!(t[RES_ERR][1][2], 2.5);
+
+        let plain = dir.path().join("plain_table.fits").to_str().unwrap().to_string();
+        let data = ndarray::Array2::from_shape_fn((5, 5), |(y, x)| (y * 5 + x) as f32);
+        crate::infra::fits::writer::write_fits_mono(&plain, &data, None).unwrap();
+        let p = pixel_table_cmd(plain, 2, 2, Some(3)).await.unwrap();
+        for key in [RES_WAVELENGTH, RES_WAVELENGTH_STATS, RES_WAVELENGTH_UNIT] {
+            assert!(p.as_object().unwrap().contains_key(key), "{key}: {p}");
+            assert!(p[key].is_null(), "{key}: {p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_pixel_reads_the_wavelength_unit_from_bunit_and_falls_back_to_um_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave: Vec<f32> = (0..16).map(|i| 1.6 + 0.01 * i as f32).collect();
+        let bare = dir.path().join("wave_nobunit.fits");
+        sci_err_dq_wave_mef_with_wave_cards(&bare, 4, 4, vec![-2147483648i32; 16], wave.clone(), vec![]);
+        let j = probe_pixel_cmd(format!("{}#hdu=1", bare.to_str().unwrap()), 2.0, 1.0, Some(1)).await.unwrap();
+        assert!((j[RES_WAVELENGTH][RES_VALUE].as_f64().unwrap() - wave[6] as f64).abs() < 1e-6, "{j}");
+        assert_eq!(j[RES_WAVELENGTH][RES_UNIT], "um", "{j}");
+
+        let nm = dir.path().join("wave_nm.fits");
+        sci_err_dq_wave_mef_with_wave_cards(&nm, 4, 4, vec![-2147483648i32; 16], wave, vec![("BUNIT", "'nm'".into())]);
+        let j = probe_pixel_cmd(format!("{}#hdu=1", nm.to_str().unwrap()), 2.0, 1.0, Some(1)).await.unwrap();
+        assert_eq!(j[RES_WAVELENGTH][RES_UNIT], "nm", "{j}");
+    }
+
+    #[tokio::test]
+    async fn pixel_table_reads_the_wavelength_unit_from_bunit_and_falls_back_to_um_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave: Vec<f32> = (0..16).map(|i| 1.6 + 0.01 * i as f32).collect();
+        let bare = dir.path().join("table_nobunit.fits");
+        sci_err_dq_wave_mef_with_wave_cards(&bare, 4, 4, vec![-2147483648i32; 16], wave.clone(), vec![]);
+        let t = pixel_table_cmd(format!("{}#hdu=1", bare.to_str().unwrap()), 1, 1, Some(3)).await.unwrap();
+        assert_eq!(t[RES_WAVELENGTH_UNIT], "um", "{t}");
+        assert!((t[RES_WAVELENGTH][1][1].as_f64().unwrap() - wave[5] as f64).abs() < 1e-6, "{t}");
+        assert_eq!(t[RES_WAVELENGTH_STATS]["n_finite"], 9, "{t}");
+
+        let nm = dir.path().join("table_nm.fits");
+        sci_err_dq_wave_mef_with_wave_cards(&nm, 4, 4, vec![-2147483648i32; 16], wave, vec![("BUNIT", "'nm'".into())]);
+        let t = pixel_table_cmd(format!("{}#hdu=1", nm.to_str().unwrap()), 1, 1, Some(3)).await.unwrap();
+        assert_eq!(t[RES_WAVELENGTH_UNIT], "nm", "{t}");
     }
 
     #[tokio::test]

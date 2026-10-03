@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::imaging::stats::compute_image_stats;
+use astroburst_lib::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use astroburst_lib::core::stacking::combine::{stack_images_cancellable, validate_frame_weights};
 use astroburst_lib::core::stacking::drizzle::drizzle_stack_cancellable;
 use astroburst_lib::core::stacking::CancelCheck;
@@ -80,6 +81,13 @@ pub(crate) fn stop_if_cancelled(cancelled: CancelCheck) -> anyhow::Result<()> {
         return Err(CoreError::Cancelled.into());
     }
     Ok(())
+}
+
+pub(crate) async fn refuse_cfa_lights(paths: Vec<String>, step: CfaStep) -> Result<()> {
+    tokio::task::spawn_blocking(move || refuse_cfa_frames(&paths, step))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("cfa guard panicked: {e}")))?
+        .map_err(|e| AppError::BadRequest(format!("{e:#}")))
 }
 
 fn load_frames(job: &Job, paths: &[String], cancelled: CancelCheck) -> anyhow::Result<Vec<Array2<f32>>> {
@@ -205,6 +213,10 @@ pub async fn stack(
         rejection_maps: params.rejection_maps.unwrap_or(false),
     };
     validate_stack_config(&config, params.paths.len())?;
+    let paths = params.paths;
+    if config.align {
+        refuse_cfa_lights(paths.clone(), CfaStep::Align).await?;
+    }
 
     let permit = state
         .job_semaphore
@@ -213,7 +225,6 @@ pub async fn stack(
         .map_err(|_| AppError::TooManyRequests(state.config.jobs_max))?;
 
     let result_slot = params.result_slot.unwrap_or_else(|| "stacked".into());
-    let paths = params.paths;
 
     let job = new_job("stack");
     let job_id = job.id.clone();
@@ -258,6 +269,8 @@ pub async fn drizzle(
         ..DrizzleConfig::default()
     };
     validate_drizzle_config(&config)?;
+    let paths = params.paths;
+    refuse_cfa_lights(paths.clone(), CfaStep::Drizzle).await?;
 
     let permit = state
         .job_semaphore
@@ -266,7 +279,6 @@ pub async fn drizzle(
         .map_err(|_| AppError::TooManyRequests(state.config.jobs_max))?;
 
     let result_slot = params.result_slot.unwrap_or_else(|| "drizzled".into());
-    let paths = params.paths;
 
     let job = new_job("drizzle");
     let job_id = job.id.clone();

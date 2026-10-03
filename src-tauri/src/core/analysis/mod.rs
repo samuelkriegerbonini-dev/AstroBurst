@@ -6,3 +6,4 @@ pub mod line_measure;
 pub mod photometry;
 pub mod star_detection;
 pub mod subframe;
+pub mod x1d;

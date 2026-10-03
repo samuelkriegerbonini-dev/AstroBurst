@@ -52,6 +52,45 @@ export type SpectrumSource =
   | { kind: "pixel"; x: number; y: number }
   | { kind: "region"; shape: RegionShape; background: RegionShape | null };
 
+export interface TableSource {
+  kind: "table";
+  path: string;
+  hdu: number;
+}
+
+export interface X1dTableRef {
+  hdu: number;
+  extver: number | null;
+  n_rows: number;
+}
+
+export interface X1dSpectrum {
+  path: string;
+  hdu: number;
+  extver: number | null;
+  n_rows: number;
+  wavelength_um: number[];
+  wavelength_unit: string;
+  flux: number[];
+  flux_error: number[] | null;
+  flux_unit: string;
+  surf_bright: number[] | null;
+  surf_bright_unit: string | null;
+  background: number[] | null;
+  npixels: number[] | null;
+  dq: number[] | null;
+  dq_table: "jwst" | "roman" | "hst" | "unknown";
+  dq_flagged_rows: number;
+  srctype: string | null;
+  grating: string | null;
+  filter: string | null;
+  detector: string | null;
+  instrument: string | null;
+  target: string | null;
+  other_tables: X1dTableRef[];
+  notes: string[];
+}
+
 export interface LineVelocity {
   centroid_kms: number | null;
   sigma_kms: number | null;

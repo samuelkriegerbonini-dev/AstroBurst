@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   EMPTY_LOG,
+  EXCLUDE_ROW_NOTE,
   MAX_LOG_ENTRIES,
   MeasurementLogCore,
   batchPhotometryEntry,
@@ -19,6 +20,7 @@ import {
   medianOf,
   photometryEntry,
   pixelEntry,
+  profileDqHandling,
   profileLogReady,
   pvEntry,
   radialProfileEntry,
@@ -57,6 +59,7 @@ import type {
 import type { PvDiagramResult, PvRun } from "../../shared/types/pv";
 import type { SpectrumExportInput } from "../spectrumExport";
 import type { ComparisonCsvInput, ComparisonEntry } from "../spectrumCompare";
+import type { TableEntryData } from "../x1dCompare";
 
 const CLOCK = "2026-09-25T12:00:00.000Z";
 const PROV: MeasurementProvenance = { file: "x.fits", image: "original" };
@@ -312,6 +315,9 @@ function pixelResult(extra: Partial<PixelTableResult> = {}): PixelTableResult {
     unit: "MJy/sr",
     stats: { min: 1, max: 9, mean: 5.06, median: 5.5, n_finite: 9, n_nan: 0 },
     err_stats: null,
+    wavelength: null,
+    wavelength_stats: null,
+    wavelength_unit: null,
     elapsed_ms: 1,
     ...extra,
   };
@@ -421,7 +427,18 @@ function exportInput(): SpectrumExportInput {
 }
 
 function comparisonEntry(id: string, label: string): ComparisonEntry {
-  return { id, kind: "region", label, color: "#fff", source: { kind: "region", shape: CIRCLE, background: null }, regionText: null, backgroundId: null, region: null, pixel: null, error: null };
+  return { id, kind: "region", label, color: "#fff", source: { kind: "region", shape: CIRCLE, background: null }, regionText: null, backgroundId: null, region: null, pixel: null, table: null, error: null };
+}
+
+function x1dTable(): TableEntryData {
+  return {
+    path: "C:/d/jw01266005001_02103_00001_nrs1_x1d.fits",
+    hdu: 1,
+    nRows: 3814,
+    fluxUnit: "Jy",
+    sbUnit: "MJy/sr",
+    resampled: { flux: [1, 2], fluxErr: [0.1, 0.2], surfBright: null, rowsUsed: 3802, droppedDq: 12, overlap: [1.0, 1.001] },
+  };
 }
 
 function comparisonInput(): ComparisonCsvInput {
@@ -658,7 +675,7 @@ describe("helpers", () => {
 
   it("regionLogReady requires the same regions array reference and identical clip and DQ settings", () => {
     const regions = [region("r1")];
-    const measured: RegionStatsMeasured = { regions, excludeDq: true, sigma: 3, maxiters: 5, masked: true, dqExcluded: 4, elapsedMs: 2 };
+    const measured: RegionStatsMeasured = { regions, excludeDq: true, sigma: 3, maxiters: 5, masked: true, dqExcluded: 4, regionExcluded: 0, elapsedMs: 2 };
     expect(regionLogReady(measured, { regions, excludeDq: true, sigma: 3, maxiters: 5 })).toBe(true);
     expect(regionLogReady(measured, { regions: [...regions], excludeDq: true, sigma: 3, maxiters: 5 })).toBe(false);
     expect(regionLogReady(measured, { regions, excludeDq: true, sigma: 2.5, maxiters: 5 })).toBe(false);
@@ -773,7 +790,7 @@ describe("builders", () => {
     const r1 = region("r1", { backgroundId: "bg", props: { color: null, width: null, text: "core", dash: null, include: true } });
     const r3 = region("r3", { shape: { shape: "box", x: 1, y: 2, width: 3, height: 4, angle: 0 } });
     const r4 = region("r4");
-    const measured: RegionStatsMeasured = { regions: [r1, bg, r3, r4], excludeDq: true, sigma: null, maxiters: null, masked: false, dqExcluded: 9, elapsedMs: 3 };
+    const measured: RegionStatsMeasured = { regions: [r1, bg, r3, r4], excludeDq: true, sigma: null, maxiters: null, masked: false, dqExcluded: null, regionExcluded: 0, elapsedMs: 3 };
     const table = new Map<string, RegionStatsEntry>([
       ["r1", { id: "r1", stats: stats({ calibrated: calibrated(), sky: { ra: 150.5, dec: 2.25, pa_sky_deg: 12.5, area_arcsec2: 0.126, geometric_area_arcsec2: 0.126 } }), error: null }],
       ["bg", { id: "bg", stats: stats({ count: 200, sum: 800 }), error: null }],
@@ -783,7 +800,7 @@ describe("builders", () => {
     expect(rows).toHaveLength(4);
     expect(rows.every((r) => r.kind === "region_stats" && r.dq === "requested" && r.unit === "MJy/sr")).toBe(true);
     expect(rows[0].source).toBe(JSON.stringify({ kind: "region", label: "core", shape: CIRCLE, background: ANNULUS }));
-    expect(rows[0].params).toEqual({ sigma: 3, maxiters: 5, dq_excluded_px: 9, photcal: "JWST MJy/sr" });
+    expect(rows[0].params).toEqual({ sigma: 3, maxiters: 5, dq_excluded_px: null, region_excluded_px: 0, photcal: "JWST MJy/sr" });
     expect(rows[0].values.count).toBe(49);
     expect(rows[0].values.n_excluded).toBe(2);
     expect(rows[0].values.area_px).toBe(50.27);
@@ -801,11 +818,19 @@ describe("builders", () => {
     expect(rows[2].notes).toEqual(["no statistics"]);
     expect(rows[3].values).toEqual({});
     expect(rows[3].notes).toEqual(["off image"]);
-    const clipped = regionStatsEntries(PROV, { ...measured, sigma: 2.5, maxiters: 10, masked: true }, table, null);
+    const clipped = regionStatsEntries(PROV, { ...measured, sigma: 2.5, maxiters: 10, masked: true, dqExcluded: 9 }, table, null);
+    expect(clipped[0].params.dq_excluded_px).toBe(9);
     expect(clipped[0].params.sigma).toBe(2.5);
     expect(clipped[0].params.maxiters).toBe(10);
     expect(clipped[0].dq).toBe("excluded");
     expect(clipped[0].unit).toBeNull();
+    const excluded = regionStatsEntries(PROV, { ...measured, masked: true, regionExcluded: 81 }, table, null);
+    expect(excluded.every((r) => r.params.region_excluded_px === 81)).toBe(true);
+    expect(excluded[0].dq).toBe("requested");
+    const both = regionStatsEntries(PROV, { ...measured, masked: true, dqExcluded: 4, regionExcluded: 81 }, table, null);
+    expect(both[0].dq).toBe("excluded");
+    expect(both[0].params.dq_excluded_px).toBe(4);
+    expect(both[0].params.region_excluded_px).toBe(81);
   });
 
   it("lineEntry copies the echoed z range, rest wavelength and velocities, has no DQ and states the unit of every value", () => {
@@ -902,9 +927,11 @@ describe("builders", () => {
         { r: 1, count: 12, mean: 5, median: 5, std: 1, cumulative_sum: 100 },
       ],
       masked: true,
+      dq_excluded: 12,
+      region_excluded: 0,
       elapsed_ms: 2,
     };
-    const radial = radialProfileEntry(PROV, data, true, { x: 10, y: 20, maxRadius: 30, background: [40, 60] }, reg);
+    const radial = radialProfileEntry(PROV, data, true, { x: 10, y: 20, maxRadius: 30, background: [40, 60], exclude: [] }, reg);
     expect(radial.kind).toBe("radial_profile");
     expect(radial.dq).toBe("excluded");
     expect(radial.unit).toBeNull();
@@ -912,12 +939,13 @@ describe("builders", () => {
     expect(radial.params.max_radius_px).toBe(30);
     expect(radial.params.background_inner_px).toBe(40);
     expect(radial.params.background_outer_px).toBe(60);
+    expect(radial.params.region_excluded_px).toBe(0);
     expect(radial.values.n_bins).toBe(2);
     expect(radial.values.background_median).toBe(1.5);
     expect(radial.values.background_count).toBe(400);
     expect(radial.values.cumulative_sum_last).toBe(100);
     expect(JSON.parse(radial.source)).toEqual({ kind: "region", label: "r1", shape: CIRCLE, background: null });
-    const noBg = radialProfileEntry(PROV, { ...data, background: null, bins: [] }, false, { x: 10, y: 20, maxRadius: 30, background: null }, reg);
+    const noBg = radialProfileEntry(PROV, { ...data, background: null, bins: [] }, false, { x: 10, y: 20, maxRadius: 30, background: null, exclude: [] }, reg);
     expect(noBg.params.background_inner_px).toBeNull();
     expect(noBg.params.background_outer_px).toBeNull();
     expect(noBg.values.background_median).toBeNull();
@@ -945,14 +973,16 @@ describe("builders", () => {
       total_mag_ab: 14.5,
       notes: ["sb note"],
       masked: false,
+      dq_excluded: null,
+      region_excluded: 0,
       elapsed_ms: 3,
     };
-    const sbEntry = sbProfileEntry(PROV, sb, false, { shape: CIRCLE, background: ANNULUS, binWidth: 2 }, reg);
+    const sbEntry = sbProfileEntry(PROV, sb, false, { shape: CIRCLE, background: ANNULUS, binWidth: 2, exclude: [] }, reg);
     expect(sbEntry.kind).toBe("sb_profile");
     expect(sbEntry.dq).toBe("off");
     expect(sbEntry.unit).toBe("MJy/sr");
     expect(JSON.parse(sbEntry.source)).toEqual({ kind: "region", label: "r1", shape: CIRCLE, background: ANNULUS });
-    expect(sbEntry.params).toEqual({ x: 50, y: 50, sma_max_px: 3, ellipticity: 0.4, angle_deg: 30, bin_width_px: 2, photcal: "JWST MJy/sr" });
+    expect(sbEntry.params).toEqual({ x: 50, y: 50, sma_max_px: 3, ellipticity: 0.4, angle_deg: 30, bin_width_px: 2, photcal: "JWST MJy/sr", region_excluded_px: 0, exclude_regions: 0 });
     expect(sbEntry.values.r50_px).toBe(0.5);
     expect(sbEntry.values.petrosian_radius_px).toBe(2.4);
     expect(sbEntry.values.total_mag_ab).toBe(14.5);
@@ -961,22 +991,153 @@ describe("builders", () => {
     expect(sbEntry.values.n_bins).toBe(1);
     expect(sbEntry.values.background_median).toBe(0.7);
     expect(sbEntry.notes).toEqual(["sb note", "cw"]);
-    const sbNoBg = sbProfileEntry(PROV, { ...sb, background: null, photcal: null }, true, { shape: CIRCLE, background: null, binWidth: 2 }, reg);
+    const sbNoBg = sbProfileEntry(PROV, { ...sb, background: null, photcal: null }, true, { shape: CIRCLE, background: null, binWidth: 2, exclude: [] }, reg);
     expect(JSON.parse(sbNoBg.source).background).toBeNull();
     expect(sbNoBg.values.background_sigma).toBeNull();
     expect(sbNoBg.unit).toBeNull();
     expect(sbNoBg.dq).toBe("requested");
 
-    const cut: LineCut = { x1: 1, y1: 2, x2: 4, y2: 6, length: 5, n_samples: 6, distance: [0, 1, 2, 3, 4, 5], xs: [], ys: [], values: [null, 2, NaN, 9, 4, null], masked: false, elapsed_ms: 1 };
-    const cutEntry = lineCutEntry(PROV, cut, true, region("l", { shape: LINE }));
+    const cut: LineCut = { x1: 1, y1: 2, x2: 4, y2: 6, length: 5, n_samples: 6, distance: [0, 1, 2, 3, 4, 5], xs: [], ys: [], values: [null, 2, NaN, 9, 4, null], masked: false, dq_excluded: null, region_excluded: 0, elapsed_ms: 1 };
+    const cutEntry = lineCutEntry(PROV, cut, true, region("l", { shape: LINE }), []);
     expect(cutEntry.kind).toBe("line_cut");
     expect(cutEntry.dq).toBe("requested");
-    expect(cutEntry.params).toEqual({ x1: 1, y1: 2, x2: 4, y2: 6 });
+    expect(cutEntry.params).toEqual({ x1: 1, y1: 2, x2: 4, y2: 6, region_excluded_px: 0, exclude_regions: 0 });
     expect(cutEntry.values).toEqual({ length_px: 5, n_samples: 6, value_min: 2, value_max: 9 });
     expect(cutEntry.unit).toBeNull();
-    const emptyCut = lineCutEntry(PROV, { ...cut, values: [null, null] }, false, region("l", { shape: LINE }));
+    const emptyCut = lineCutEntry(PROV, { ...cut, values: [null, null] }, false, region("l", { shape: LINE }), []);
     expect(emptyCut.values.value_min).toBeNull();
     expect(emptyCut.values.value_max).toBeNull();
+  });
+
+  it("profile rows take dq from dq_excluded, not masked, so exclude regions alone never read as DQ excluded, and they log the excluded pixel count", () => {
+    const reg = region("outer");
+    const regionsOnly = { masked: true, dq_excluded: null, region_excluded: 81 };
+    const withDq = { masked: true, dq_excluded: 4, region_excluded: 81 };
+    const radialData: RadialProfile = { x: 10, y: 20, max_radius: 15, background: null, bins: [], elapsed_ms: 1, ...regionsOnly };
+    const radialReq = { x: 10, y: 20, maxRadius: 15, background: null, exclude: [CIRCLE] };
+    const radial = radialProfileEntry(PROV, radialData, true, radialReq, reg);
+    expect(radial.dq).toBe("requested");
+    expect(radial.params.region_excluded_px).toBe(81);
+    expect(radialProfileEntry(PROV, { ...radialData, ...withDq }, true, radialReq, reg).dq).toBe("excluded");
+
+    const sbData: SbProfile = {
+      x: 10,
+      y: 20,
+      sma_max: 15,
+      ellipticity: 0,
+      angle_deg: 0,
+      bin_width: 1,
+      background: null,
+      bins: [],
+      r50_px: null,
+      r80_px: null,
+      r90_px: null,
+      petrosian_radius_px: null,
+      pixel_scale_arcsec: null,
+      pixel_area_arcsec2: null,
+      sky_pa_deg: null,
+      photcal: null,
+      calibration_warnings: [],
+      total_mag_ab: null,
+      notes: [],
+      elapsed_ms: 1,
+      ...regionsOnly,
+    };
+    const sbReq = { shape: CIRCLE, background: null, binWidth: 1, exclude: [CIRCLE] };
+    const sb = sbProfileEntry(PROV, sbData, true, sbReq, reg);
+    expect(sb.dq).toBe("requested");
+    expect(sb.params.region_excluded_px).toBe(81);
+    expect(sbProfileEntry(PROV, { ...sbData, ...withDq }, true, sbReq, reg).dq).toBe("excluded");
+
+    const cutData: LineCut = { x1: 0, y1: 20, x2: 30, y2: 20, length: 30, n_samples: 31, distance: [], xs: [], ys: [], values: [1, null, 3], elapsed_ms: 1, ...regionsOnly };
+    const cut = lineCutEntry(PROV, cutData, true, region("l", { shape: LINE }), [CIRCLE]);
+    expect(cut.dq).toBe("requested");
+    expect(cut.params.region_excluded_px).toBe(81);
+    expect(lineCutEntry(PROV, { ...cutData, ...withDq }, true, region("l", { shape: LINE }), [CIRCLE]).dq).toBe("excluded");
+  });
+
+  it("profile rows record how many exclude regions were applied, so rows with and without exclusions differ even when no pixel was removed", () => {
+    const reg = region("outer");
+    const none = { masked: false, dq_excluded: null, region_excluded: 0 };
+    const radialData: RadialProfile = { x: 10, y: 20, max_radius: 15, background: null, bins: [], elapsed_ms: 1, ...none };
+    const radialReq = { x: 10, y: 20, maxRadius: 15, background: null };
+    const radialPlain = radialProfileEntry(PROV, radialData, false, { ...radialReq, exclude: [] }, reg);
+    const radialMasked = radialProfileEntry(PROV, radialData, false, { ...radialReq, exclude: [CIRCLE] }, reg);
+    expect(radialPlain.params.exclude_regions).toBe(0);
+    expect(radialMasked.params.exclude_regions).toBe(1);
+    expect(radialMasked.params.region_excluded_px).toBe(0);
+    expect(radialMasked.params).not.toEqual(radialPlain.params);
+    const radialTwo = radialProfileEntry(PROV, { ...radialData, masked: true, region_excluded: 81 }, false, { ...radialReq, exclude: [CIRCLE, ANNULUS] }, reg);
+    expect(radialTwo.params.exclude_regions).toBe(2);
+    expect(radialTwo.params.region_excluded_px).toBe(81);
+
+    const sbData: SbProfile = {
+      x: 10,
+      y: 20,
+      sma_max: 15,
+      ellipticity: 0,
+      angle_deg: 0,
+      bin_width: 1,
+      background: null,
+      bins: [],
+      r50_px: null,
+      r80_px: null,
+      r90_px: null,
+      petrosian_radius_px: null,
+      pixel_scale_arcsec: null,
+      pixel_area_arcsec2: null,
+      sky_pa_deg: null,
+      photcal: null,
+      calibration_warnings: [],
+      total_mag_ab: null,
+      notes: [],
+      elapsed_ms: 1,
+      ...none,
+    };
+    const sbReq = { shape: CIRCLE, background: null, binWidth: 1 };
+    const sbPlain = sbProfileEntry(PROV, sbData, false, { ...sbReq, exclude: [] }, reg);
+    const sbMasked = sbProfileEntry(PROV, sbData, false, { ...sbReq, exclude: [ANNULUS] }, reg);
+    expect(sbPlain.params.exclude_regions).toBe(0);
+    expect(sbMasked.params.exclude_regions).toBe(1);
+    expect(sbMasked.params).not.toEqual(sbPlain.params);
+
+    const cutData: LineCut = { x1: 0, y1: 20, x2: 30, y2: 20, length: 30, n_samples: 31, distance: [], xs: [], ys: [], values: [1, 2], elapsed_ms: 1, ...none };
+    const line = region("l", { shape: LINE });
+    const cutPlain = lineCutEntry(PROV, cutData, false, line, []);
+    const cutMasked = lineCutEntry(PROV, cutData, false, line, [CIRCLE, CIRCLE, ANNULUS]);
+    expect(cutPlain.params.exclude_regions).toBe(0);
+    expect(cutMasked.params.exclude_regions).toBe(3);
+    expect(cutMasked.params).not.toEqual(cutPlain.params);
+
+    const csv = measurementLogCsv([radialPlain, radialMasked].map((d, i) => ({ ...d, id: `e${i}`, timestamp_utc: "2026-10-02T00:00:00.000Z" })));
+    const [header, plainLine, maskedLine] = csv.split(/\r?\n/);
+    expect(header.split(",")).toContain("p_exclude_regions");
+    expect(plainLine).not.toBe(maskedLine);
+  });
+
+  it("profileDqHandling reads the DQ mask from dq_excluded for the profile header badge", () => {
+    expect(profileDqHandling(true, { dq_excluded: null })).toBe("requested");
+    expect(profileDqHandling(true, { dq_excluded: 0 })).toBe("excluded");
+    expect(profileDqHandling(true, { dq_excluded: 4 })).toBe("excluded");
+    expect(profileDqHandling(false, { dq_excluded: 4 })).toBe("off");
+  });
+
+  it("regionStatsEntries marks the exclude region's own row, which is measured without the exclude mask", () => {
+    const outer = region("outer", { shape: { shape: "circle", x: 10, y: 20, r: 12 } });
+    const hole = region("hole", { props: { color: null, width: null, text: "star", dash: null, include: false } });
+    const measured: RegionStatsMeasured = { regions: [outer, hole], excludeDq: false, sigma: null, maxiters: null, masked: true, dqExcluded: null, regionExcluded: 49, elapsedMs: 2 };
+    const table = new Map<string, RegionStatsEntry>([
+      ["outer", { id: "outer", stats: stats({ count: 400, n_excluded: 49 }), error: null }],
+      ["hole", { id: "hole", stats: stats({ n_excluded: 0 }), error: null }],
+    ]);
+    const [outerRow, holeRow] = regionStatsEntries(PROV, measured, table, null);
+    expect(outerRow.params.region_excluded_px).toBe(49);
+    expect(outerRow.notes).toEqual([]);
+    expect(holeRow.params.region_excluded_px).toBe(0);
+    expect(holeRow.params.sigma).toBe(3);
+    expect(holeRow.notes).toEqual([EXCLUDE_ROW_NOTE]);
+    const failed = regionStatsEntries(PROV, measured, new Map(), null);
+    expect(failed[1].notes).toEqual(["no statistics", EXCLUDE_ROW_NOTE]);
   });
 
   it("skySeparationEntry logs arcsec with the position angle east of north", () => {
@@ -997,13 +1158,43 @@ describe("builders", () => {
     expect(entry.unit).toBe("MJy/sr");
     expect(entry.source).toBe('{"kind":"pixel","x":12,"y":34}');
     expect(entry.params).toEqual({ size: 3, dq_table: "JWST" });
-    expect(entry.values).toEqual({ x: 12, y: 34, value: 5.5, err: 0.25, dq_value: 4, dq_names: "SATURATED", window_min: 1, window_max: 9, window_mean: 5.06, window_median: 5.5, n_finite: 9, n_nan: 0 });
+    expect(entry.values).toEqual({
+      x: 12,
+      y: 34,
+      value: 5.5,
+      err: 0.25,
+      dq_value: 4,
+      dq_names: "SATURATED",
+      wavelength: null,
+      wavelength_unit: null,
+      window_min: 1,
+      window_max: 9,
+      window_mean: 5.06,
+      window_median: 5.5,
+      n_finite: 9,
+      n_nan: 0,
+    });
     const bare = pixelEntry(PROV, pixelResult({ err: null, dq: null, dq_names: null, dq_table: null, unit: null }));
     expect(bare.values.err).toBeNull();
     expect(bare.values.dq_value).toBeNull();
     expect(bare.values.dq_names).toBeNull();
     expect(bare.params.dq_table).toBeNull();
     expect(bare.unit).toBeNull();
+  });
+
+  it("pixelEntry logs the wavelength of the centre pixel with its unit from the WAVELENGTH plane", () => {
+    const wavelength = [
+      [1.65, 1.651, 1.652],
+      [1.653, 1.6543, 1.655],
+      [1.656, 1.657, 1.658],
+    ];
+    const stats = { min: 1.65, max: 1.658, mean: 1.654, median: 1.6543, n_finite: 9, n_nan: 0 };
+    const entry = pixelEntry(PROV, pixelResult({ wavelength, wavelength_stats: stats, wavelength_unit: "um" }));
+    expect(entry.values.wavelength).toBe(1.6543);
+    expect(entry.values.wavelength_unit).toBe("um");
+    const offTrace = pixelEntry(PROV, pixelResult({ wavelength: [[1, 1, 1], [1, null, 1], [1, 1, 1]], wavelength_stats: stats, wavelength_unit: "um" }));
+    expect(offTrace.values.wavelength).toBeNull();
+    expect(offTrace.values.wavelength_unit).toBe("um");
   });
 
   it("statisticsEntry prefixes channel keys only for composite results and marks composite as not_applied", () => {
@@ -1092,11 +1283,24 @@ describe("builders", () => {
     expect(compared.file).toBe("x.fits");
     expect(compared.dq).toBe("not_applied");
     expect(compared.source).toBe('{"kind":"file"}');
-    expect(compared.params).toEqual({ normalisation: "offset", offset_step: 2.5, view: "mean", saved_path: "C:/out/cmp.csv" });
+    expect(compared.params).toEqual({
+      normalisation: "offset",
+      offset_step: 2.5,
+      view: "mean",
+      saved_path: "C:/out/cmp.csv",
+      x1d_path: null,
+      x1d_hdu: null,
+      x1d_dq_rows_dropped: null,
+    });
     expect(compared.values).toEqual({ n_series: 2 });
     expect(compared.unit).toBeNull();
     const peak = spectrumCompareEntry("/a/y.fits", { ...comparisonInput(), mode: "peak" }, "/out/c.csv");
     expect(peak.params.offset_step).toBeNull();
+    const withX1d = spectrumCompareEntry("/a/y.fits", { ...comparisonInput(), table: x1dTable() }, "/out/c.csv");
+    expect(withX1d.params.x1d_path).toBe("C:/d/jw01266005001_02103_00001_nrs1_x1d.fits");
+    expect(withX1d.params.x1d_hdu).toBe(1);
+    expect(withX1d.params.x1d_dq_rows_dropped).toBe(12);
+    expect(spectrumCompareEntry("/a/y.fits", { ...comparisonInput(), table: null }, null).params.x1d_hdu).toBeNull();
 
     const pv = pvEntry(pvRun());
     expect(pv.kind).toBe("pv");

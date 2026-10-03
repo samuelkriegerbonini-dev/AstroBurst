@@ -13,6 +13,7 @@ use crate::core::stacking::calibration::{
     create_master_bias, create_master_dark, create_master_flat, load_fits_image,
     median_exposure_seconds, read_exposure_seconds,
 };
+use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::types::constants::{
     RES_CHANNEL_PREVIEWS, RES_DIMENSIONS, RES_FITS_PATH, RES_HEIGHT, RES_INPUT_PATH, RES_LABEL, RES_MASTERS,
     RES_PIXELS_B64, RES_PNG_PATH, RES_RGB_DIMENSIONS, RES_RGB_PNG_PATH, RES_RGB_PREVIEW, RES_STATS, RES_WARNINGS,
@@ -305,6 +306,10 @@ fn run_pipeline_request(
         .map_err(|e| format!("{:#}", e))?;
     if let Some(cosmetic) = &request.cosmetic {
         validate_cosmetic_config(cosmetic)?;
+    }
+    if request.align.unwrap_or(true) {
+        let lights: Vec<String> = request.channels.iter().flat_map(|ch| ch.paths.iter().cloned()).collect();
+        refuse_cfa_frames(&lights, CfaStep::Align).map_err(|e| format!("{:#}", e))?;
     }
 
     let master_bias = if request.bias_paths.is_empty() {
@@ -676,6 +681,57 @@ mod tests {
 
     fn decode_b64(value: &serde_json::Value) -> Vec<u8> {
         base64::engine::general_purpose::STANDARD.decode(value.as_str().expect("base64 string")).expect("valid base64")
+    }
+
+    fn write_cfa_frames(dir: &tempfile::TempDir, prefix: &str, count: usize) -> Vec<String> {
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("BAYERPAT", "RGGB".to_string());
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                let frame = Array2::from_shape_fn((12, 12), |(y, x)| 500.0 + ((x * 7 + y * 3 + i) % 5) as f32);
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, Some(&header)).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn cfa_request(dir: &tempfile::TempDir, align: bool, bias_paths: Vec<String>) -> PipelineRequest {
+        PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "R".into(), paths: write_cfa_frames(dir, "cfa", 2) }],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths,
+            sigma_low: None,
+            sigma_high: None,
+            normalize: None,
+            align: Some(align),
+            rejection: None,
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        }
+    }
+
+    #[test]
+    fn pipeline_refuses_cfa_lights_before_building_masters() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_bias = dir.path().join("missing_bias.fits").to_str().unwrap().to_string();
+        let request = cfa_request(&dir, true, vec![missing_bias]);
+        let out = out_dir(&dir);
+        let err = run_pipeline_request(request, &out, Some("cfa")).unwrap_err();
+        assert!(err.contains("2 of 2 lights"), "{err}");
+        assert!(err.contains("BAYERPAT=RGGB"), "{err}");
+        assert!(!err.contains("missing_bias"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "the output dir was created before the guard ran");
+    }
+
+    #[test]
+    fn pipeline_without_alignment_accepts_cfa_lights() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = cfa_request(&dir, false, vec![]);
+        let response = run_pipeline_request(request, &out_dir(&dir), Some("cfa")).unwrap();
+        assert_eq!(response[RES_MASTERS].as_array().map(|m| m.len()), Some(1));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { useCallback, useSyncExternalStore } from "react";
+import type { X1dSpectrum } from "../shared/types/spectral";
 import type { ComparisonEntry, NormaliseMode } from "../utils/spectrumCompare";
 
 export interface ComparisonDoc {
@@ -14,6 +15,16 @@ export interface ComparisonDoc {
   includePixel: boolean;
   hidden: string[];
   seq: number;
+  tablePath: string | null;
+  tableHdu: number | null;
+  table: X1dSpectrum | null;
+  tableError: string | null;
+  tableLoading: boolean;
+}
+
+export interface TableRequest {
+  path: string;
+  hdu: number | null;
 }
 
 export const EMPTY_COMPARISON_DOC: ComparisonDoc = Object.freeze({
@@ -29,6 +40,11 @@ export const EMPTY_COMPARISON_DOC: ComparisonDoc = Object.freeze({
   includePixel: true,
   hidden: [],
   seq: 0,
+  tablePath: null,
+  tableHdu: null,
+  table: null,
+  tableError: null,
+  tableLoading: false,
 }) as ComparisonDoc;
 
 export const MAX_COMPARISON_DOCS = 8;
@@ -36,7 +52,19 @@ export const MAX_COMPARISON_DOCS = 8;
 type Listener = () => void;
 
 export type ComparisonPatch = Partial<
-  Omit<ComparisonDoc, "seq" | "loading" | "entries" | "regionVersion" | "pixelKey" | "pendingRegionVersion" | "pendingPixelKey">
+  Omit<
+    ComparisonDoc,
+    | "seq"
+    | "loading"
+    | "entries"
+    | "regionVersion"
+    | "pixelKey"
+    | "pendingRegionVersion"
+    | "pendingPixelKey"
+    | "table"
+    | "tableError"
+    | "tableLoading"
+  >
 >;
 
 export class SpectrumComparisonStore {
@@ -103,6 +131,56 @@ export class SpectrumComparisonStore {
 
   forget(filePath: string): void {
     if (this.docs.delete(filePath)) this.notify();
+  }
+
+  requestTable(filePath: string, tablePath: string, hdu: number | null = null): void {
+    this.write(filePath, {
+      ...this.getDoc(filePath),
+      enabled: true,
+      tablePath,
+      tableHdu: hdu,
+      table: null,
+      tableError: null,
+      tableLoading: false,
+    });
+  }
+
+  beginTable(filePath: string): TableRequest | null {
+    const doc = this.getDoc(filePath);
+    if (doc.tablePath === null) return null;
+    this.write(filePath, { ...doc, table: null, tableError: null, tableLoading: true });
+    return { path: doc.tablePath, hdu: doc.tableHdu };
+  }
+
+  private awaiting(filePath: string, request: TableRequest): ComparisonDoc | null {
+    const doc = this.docs.get(filePath);
+    if (!doc || !doc.tableLoading || doc.tablePath !== request.path || doc.tableHdu !== request.hdu) return null;
+    return doc;
+  }
+
+  commitTable(filePath: string, request: TableRequest, x1d: X1dSpectrum): boolean {
+    const doc = this.awaiting(filePath, request);
+    if (!doc) return false;
+    this.write(filePath, { ...doc, table: x1d, tableError: null, tableLoading: false });
+    return true;
+  }
+
+  failTable(filePath: string, request: TableRequest, error: string): boolean {
+    const doc = this.awaiting(filePath, request);
+    if (!doc) return false;
+    this.write(filePath, { ...doc, table: null, tableError: error, tableLoading: false });
+    return true;
+  }
+
+  clearTable(filePath: string): void {
+    this.write(filePath, {
+      ...this.getDoc(filePath),
+      tablePath: null,
+      tableHdu: null,
+      table: null,
+      tableError: null,
+      tableLoading: false,
+    });
   }
 }
 

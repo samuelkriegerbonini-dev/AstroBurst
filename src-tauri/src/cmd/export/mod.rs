@@ -4,7 +4,11 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, cached_header, extract_image_resolved, image_ref, invalidate_written, try_extract_rgb_resolved};
+use crate::cmd::catalog::uncalibrated_reason;
+use crate::cmd::common::{
+    blocking_cmd, cached_header, derived_output_header, extract_image_resolved, image_ref, invalidate_written,
+    try_extract_rgb_resolved, OutputValues,
+};
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
@@ -19,10 +23,25 @@ use crate::infra::fits::writer::{
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
 use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DISPLAY_REFERRED, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
 use crate::types::header::HduHeader;
 
 const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
+const ABPROC_STF_EXPORT: &str = "stf_export";
+const STF_EXPORT_VALUES_NOTE: &str = "pixel values are display-referred in [0,1]";
+
+fn stf_export_header(source: Option<&HduHeader>, stf: &StfParams) -> HduHeader {
+    let mut header = derived_output_header(source, ABPROC_STF_EXPORT, OutputValues::DisplayReferred);
+    header.cards.push((
+        "HISTORY".to_string(),
+        format!(
+            "STF stretch applied (shadow={:.4} midtone={:.4} highlight={:.4})",
+            stf.shadow, stf.midtone, stf.highlight
+        ),
+    ));
+    header.cards.push(("HISTORY".to_string(), STF_EXPORT_VALUES_NOTE.to_string()));
+    header
+}
 
 struct ExportChannel {
     arr: Arc<Array2<f32>>,
@@ -259,21 +278,26 @@ pub async fn export_fits(
         refuse_source_as_target(&output_path, &path)?;
 
         let resolved = extract_image_resolved(&path)?;
-        let filtered = filter_header(&resolved.header, do_wcs, do_meta);
+        let stf = do_stf.then(|| StfParams {
+            shadow: shadow.unwrap_or(0.0),
+            midtone: midtone.unwrap_or(0.5),
+            highlight: highlight.unwrap_or(1.0),
+        });
+        let base = filter_header(&resolved.header, do_wcs, do_meta);
+        let filtered = match &stf {
+            Some(params) => Some(stf_export_header(base.as_ref(), params)),
+            None => base,
+        };
         let source_ref = &resolved.arr;
 
         let stretched;
-        let write_ref = if do_stf {
-            let stf = StfParams {
-                shadow: shadow.unwrap_or(0.0),
-                midtone: midtone.unwrap_or(0.5),
-                highlight: highlight.unwrap_or(1.0),
-            };
-            let stats = compute_image_stats(source_ref);
-            stretched = apply_stf_f32(source_ref, &stf, &stats);
-            &stretched
-        } else {
-            source_ref
+        let write_ref = match &stf {
+            Some(params) => {
+                let stats = compute_image_stats(source_ref);
+                stretched = apply_stf_f32(source_ref, params, &stats);
+                &stretched
+            }
+            None => source_ref,
         };
 
         crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
@@ -292,6 +316,7 @@ pub async fn export_fits(
             RES_OUTPUT_PATH: output_path,
             RES_BITPIX: target_bitpix,
             RES_APPLY_STF: do_stf,
+            RES_DISPLAY_REFERRED: filtered.as_ref().is_some_and(|h| uncalibrated_reason(h).is_some()),
             COPY_WCS: do_wcs,
             RES_COPY_METADATA: do_meta,
             RES_FILE_SIZE_BYTES: file_size,
@@ -636,13 +661,181 @@ pub async fn export_rgb_png(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::common::load_cached;
-    use crate::infra::fits::reader::parse_header_at;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use std::fs::File;
+    use crate::cmd::common::{load_cached, load_cached_full};
+    use crate::infra::fits::reader::{extract_image_mmap, parse_header_at};
+    use crate::infra::fits::reader::test_fixtures::{ramp_f32, sci_err_dq_mef, write_test_mef, HduData, TestHdu};
     use crate::types::constants::{
         BLOCK_SIZE, RES_DROPPED, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES,
         RES_SOURCE_SIZE_BYTES,
     };
+
+    fn calibrated_source(dir: &tempfile::TempDir) -> String {
+        let src = dir.path().join("calibrated_sci.fits");
+        let cards = [
+            ("BUNIT", "'MJy/sr'"),
+            ("PHOTMJSR", "1.5"),
+            ("PIXAR_SR", "2.0E-13"),
+            ("CTYPE1", "'RA---TAN'"),
+            ("CTYPE2", "'DEC--TAN'"),
+            ("CRVAL1", "10.0"),
+            ("CRVAL2", "20.0"),
+            ("CRPIX1", "4.0"),
+            ("CRPIX2", "4.0"),
+            ("CD1_1", "-1.0E-5"),
+            ("CD2_2", "1.0E-5"),
+        ];
+        write_test_mef(
+            &src,
+            &[],
+            &[TestHdu {
+                extname: Some("SCI"),
+                extver: Some(1),
+                cols: 8,
+                rows: 8,
+                data: HduData::F32(ramp_f32(8, 8)),
+                extra_cards: cards.iter().map(|(k, v)| (*k, (*v).to_string())).collect(),
+            }],
+        );
+        format!("{}#hdu=1", src.to_str().unwrap())
+    }
+
+    fn reopen(path: &str) -> (HduHeader, Array2<f32>) {
+        let result = extract_image_mmap(&File::open(path).unwrap()).unwrap();
+        (result.header, result.image)
+    }
+
+    fn card_text(header: &HduHeader, key: &str) -> Option<String> {
+        header.get(key).map(|v| v.trim().trim_matches('\'').trim().to_string())
+    }
+
+    fn history_mentions(header: &HduHeader, needle: &str) -> bool {
+        header.cards.iter().any(|(k, v)| k.trim() == "HISTORY" && v.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn export_fits_with_stf_marks_the_output_display_referred_and_drops_the_calibration_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = calibrated_source(&dir);
+        let out = tmp_path(&dir, "stf_export.fits");
+        let value = export_fits(key, out.clone(), Some(true), None, None, None, Some(true), Some(true), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(value[RES_DISPLAY_REFERRED], json!(true), "{value}");
+
+        let (header, image) = reopen(&out);
+        assert_eq!(card_text(&header, "ABDISP").as_deref(), Some("T"));
+        assert_eq!(card_text(&header, "ABPROC").as_deref(), Some("stf_export"));
+        for dropped in ["BUNIT", "PHOTMJSR", "PIXAR_SR"] {
+            assert!(header.get(dropped).is_none(), "{dropped} survived the STF export");
+        }
+        for kept in ["CRVAL1", "CD1_1", "CTYPE1"] {
+            assert!(header.get(kept).is_some(), "{kept} was dropped from the STF export");
+        }
+        assert!(history_mentions(&header, "display-referred"), "{:?}", header.cards);
+        assert!(uncalibrated_reason(&header).is_some());
+        assert!(image.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[tokio::test]
+    async fn export_fits_without_stf_keeps_the_calibration_cards_and_stays_calibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = calibrated_source(&dir);
+        let out = tmp_path(&dir, "linear_export.fits");
+        let value = export_fits(key, out.clone(), None, None, None, None, None, None, None, None, None).await.unwrap();
+        assert_eq!(value[RES_DISPLAY_REFERRED], json!(false), "{value}");
+
+        let (header, _) = reopen(&out);
+        assert_eq!(card_text(&header, "BUNIT").as_deref(), Some("MJy/sr"));
+        assert!(header.get("ABDISP").is_none());
+        assert_eq!(uncalibrated_reason(&header), None);
+    }
+
+    #[tokio::test]
+    async fn export_fits_reports_display_referred_from_the_written_header_not_the_stf_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = calibrated_source(&dir);
+        let stretched = tmp_path(&dir, "stretched.fits");
+        export_fits(key, stretched.clone(), Some(true), None, None, None, Some(true), Some(true), None, None, None)
+            .await
+            .unwrap();
+
+        let copied = tmp_path(&dir, "stretched_copy.fits");
+        let value = export_fits(
+            stretched.clone(),
+            copied.clone(),
+            Some(false),
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value[RES_APPLY_STF], json!(false), "{value}");
+        assert_eq!(value[RES_DISPLAY_REFERRED], json!(true), "{value}");
+        let (header, _) = reopen(&copied);
+        assert_eq!(card_text(&header, "ABDISP").as_deref(), Some("T"));
+        assert!(uncalibrated_reason(&header).is_some());
+
+        let bare = tmp_path(&dir, "stretched_bare.fits");
+        let value = export_fits(stretched, bare.clone(), Some(false), None, None, None, Some(false), Some(false), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(value[RES_DISPLAY_REFERRED], json!(false), "{value}");
+        let (header, _) = reopen(&bare);
+        assert!(header.get("ABDISP").is_none());
+    }
+
+    #[tokio::test]
+    async fn export_fits_with_stf_keeps_the_marker_through_rice_and_bitpix_16() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = calibrated_source(&dir);
+        let cases = [("stf_rice.fits", None, Some("rice".to_string())), ("stf_i16.fits", Some(16), None)];
+        for (name, bitpix, compress) in cases {
+            let out = tmp_path(&dir, name);
+            let value = export_fits(
+                key.clone(),
+                out.clone(),
+                Some(true),
+                None,
+                None,
+                None,
+                Some(true),
+                Some(true),
+                bitpix,
+                compress,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(value[RES_DISPLAY_REFERRED], json!(true), "{name}: {value}");
+            let entry = load_cached_full(&out).unwrap();
+            let header = entry.header().unwrap();
+            assert_eq!(card_text(header, "ABDISP").as_deref(), Some("T"), "{name}");
+            assert_eq!(card_text(header, "ABPROC").as_deref(), Some("stf_export"), "{name}");
+            assert!(header.get("BUNIT").is_none(), "{name}: BUNIT survived the STF export");
+            assert!(uncalibrated_reason(header).is_some(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_fits_with_stf_and_no_copied_metadata_still_writes_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = calibrated_source(&dir);
+        let out = tmp_path(&dir, "stf_bare.fits");
+        export_fits(key, out.clone(), Some(true), None, None, None, Some(false), Some(false), None, None, None)
+            .await
+            .unwrap();
+
+        let (header, _) = reopen(&out);
+        assert_eq!(card_text(&header, "ABDISP").as_deref(), Some("T"));
+        assert!(header.get("CRVAL1").is_none());
+    }
 
     #[tokio::test]
     async fn compress_mef_cmd_compresses_sci_drops_dq_and_keeps_err_raw() {

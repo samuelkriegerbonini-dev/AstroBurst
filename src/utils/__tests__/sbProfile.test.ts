@@ -58,6 +58,8 @@ function profile(overrides: Partial<SbProfile> = {}): SbProfile {
     total_mag_ab: 14.5,
     notes: [],
     masked: false,
+    dq_excluded: null,
+    region_excluded: 0,
     elapsed_ms: 1,
     ...overrides,
   };

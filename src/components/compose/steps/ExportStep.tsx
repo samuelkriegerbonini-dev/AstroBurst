@@ -8,12 +8,12 @@ import {
   exportWcsWarning,
   resolveExportRgbPaths,
   resolveRgbPaths,
+  wizardChannelExport,
   wizardHeaderSourcePath,
   wizardZipChannels,
 } from "../../../utils/wizard";
 import { exportRgbPng, exportFitsRgbWithHeader } from "../../../services/export";
 import { compositeRgbPngStf } from "../../../utils/exportSources";
-import { clearCompositeCache } from "../../../services/compose";
 import { getExportDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton } from "../../ui";
@@ -102,13 +102,9 @@ export default function ExportStep({ state }: ExportStepProps) {
         return;
       }
 
-      const { r, g, b, monoBinId } = resolveExportRgbPaths(state);
-
-      if (!r && !g && !b) {
-        throw new Error("No channel paths resolved for export");
-      }
-
-      await clearCompositeCache().catch(() => {});
+      const channels = wizardChannelExport(state);
+      if (!channels) throw new Error("No channel paths resolved for export");
+      const { r, g, b, monoBinId } = channels;
 
       if (format === "png") {
         const outputPath = `${dir}/astroburst_rgb_${ts}.png`;

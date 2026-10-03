@@ -152,6 +152,12 @@ fn parse_unit(raw: &str) -> Option<ParsedUnit> {
     Some(ParsedUnit { family, to_canonical })
 }
 
+pub fn wavelength_unit_to_um(raw: &str) -> Option<f64> {
+    parse_unit(raw)
+        .filter(|unit| unit.family == UnitFamily::Wavelength)
+        .map(|unit| unit.to_canonical)
+}
+
 fn card_string(header: &HduHeader, key: &str) -> Option<String> {
     header
         .get(key)
@@ -1040,6 +1046,16 @@ mod tests {
 
     fn axis_header(pairs: &[(&str, &str)]) -> HduHeader {
         make_header(pairs)
+    }
+
+    #[test]
+    fn wavelength_unit_to_um_scales_wavelength_units_only() {
+        assert_eq!(wavelength_unit_to_um("um"), Some(1.0));
+        assert_eq!(wavelength_unit_to_um("'Angstrom'"), Some(1e-4));
+        assert_eq!(wavelength_unit_to_um("nm"), Some(1e-3));
+        assert_eq!(wavelength_unit_to_um("GHz"), None);
+        assert_eq!(wavelength_unit_to_um("km/s"), None);
+        assert_eq!(wavelength_unit_to_um("furlong"), None);
     }
 
     #[test]

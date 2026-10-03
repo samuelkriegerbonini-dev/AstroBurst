@@ -597,6 +597,59 @@ pub(crate) mod v2_fixtures {
         buf.extend_from_slice(&data_block_i32(&dq_pixels));
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
+
+    pub const WAVE_NAN_PIXEL: (usize, usize) = (3, 2);
+
+    pub fn wavelength_at(x: usize, y: usize, w: usize) -> f32 {
+        1.6 + 0.01 * (y * w + x) as f32
+    }
+
+    pub fn write_mef_with_wavelength(path: &std::path::Path, w: usize, h: usize, bunit: Option<&str>) {
+        let mut primary: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "0".into()),
+            ("EXTEND", "T".into()),
+        ];
+        primary.extend(wcs_cards());
+
+        let sci = image_ext("SCI", "-32", w, h, &[("BUNIT", "'MJy/sr'".into())]);
+        let err = image_ext("ERR", "-32", w, h, &[("BUNIT", "'MJy/sr'".into())]);
+        let dq = image_ext("DQ", "32", w, h, &[("BZERO", "2147483648".into()), ("BSCALE", "1".into())]);
+        let wave_cards: Vec<(&'static str, String)> =
+            bunit.map(|u| vec![("BUNIT", format!("'{u}'"))]).unwrap_or_default();
+        let wave = image_ext("WAVELENGTH", "-32", w, h, &wave_cards);
+
+        let mut wave_pixels: Vec<f32> = (0..w * h).map(|i| wavelength_at(i % w, i / w, w)).collect();
+        wave_pixels[WAVE_NAN_PIXEL.1 * w + WAVE_NAN_PIXEL.0] = f32::NAN;
+
+        let mut buf = header_block(&primary);
+        buf.extend_from_slice(&header_block(&sci));
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        buf.extend_from_slice(&header_block(&err));
+        buf.extend_from_slice(&data_block(&ramp(w, h).iter().map(|v| v * 0.5).collect::<Vec<f32>>()));
+        buf.extend_from_slice(&header_block(&dq));
+        buf.extend_from_slice(&data_block_i32(&vec![-2147483648i32; w * h]));
+        buf.extend_from_slice(&header_block(&wave));
+        buf.extend_from_slice(&data_block(&wave_pixels));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
+    pub fn write_cfa_fits(path: &std::path::Path, w: usize, h: usize, pixels: &[f32], pattern: &str) {
+        assert_eq!(pixels.len(), w * h, "pixel count must equal w*h");
+        let cards: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+            ("BAYERPAT", format!("'{pattern}'")),
+            ("EXPTIME", "60.0".into()),
+        ];
+        let mut buf = header_block(&cards);
+        buf.extend_from_slice(&data_block(pixels));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
 }
 
 async fn post_json(
@@ -875,6 +928,68 @@ async fn v2_pixel_on_dq_ref_reports_high_bits() {
     assert_eq!(json["dq"]["value"], 2147483649u64);
     assert_eq!(json["dq"]["text"], "2147483649: DO_NOT_USE | REFERENCE_PIXEL");
     assert!((json["value"].as_f64().unwrap() - 2147483649.0).abs() < 300.0);
+}
+
+#[tokio::test]
+async fn v2_pixel_reports_wavelength_null_without_the_plane() {
+    let (state, _dir, _path) = open_dq_mef("s-wave", 1).await;
+    let resp = post_json(build_router(state), "/v2/sessions/s-wave/pixel", r#"{"x":0,"y":0,"box":1}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json.as_object().unwrap().contains_key("wavelength"), "{json}");
+    assert!(json["wavelength"].is_null(), "{json}");
+    assert_eq!(json["err"]["value"], 0.0);
+    assert_eq!(json["unit"], "MJy/sr");
+}
+
+async fn open_wavelength_mef(id: &str, name: &str, bunit: Option<&str>) -> (AppState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join(name);
+    v2_fixtures::write_mef_with_wavelength(&fits, 4, 4, bunit);
+    let path = fits.to_str().unwrap().to_string();
+
+    let state = AppState::new(cfg());
+    seed_session(&state, id);
+    let resp = post_json(
+        build_router(state.clone()),
+        &format!("/v2/sessions/{id}/open"),
+        &format!(r#"{{"path":{},"hdu":1}}"#, serde_json::to_string(&path).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    (state, dir)
+}
+
+#[tokio::test]
+async fn v2_pixel_reports_the_wavelength_companion_value_and_unit() {
+    let (state, _dir) = open_wavelength_mef("s-wave-um", "wave_nobunit.fits", None).await;
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-wave-um/pixel", r#"{"x":2,"y":1,"box":1}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let expected = v2_fixtures::wavelength_at(2, 1, 4) as f64;
+    assert!((json["wavelength"]["value"].as_f64().unwrap() - expected).abs() < 1e-6, "{json}");
+    assert_eq!(json["wavelength"]["unit"], "um", "{json}");
+    assert_eq!(json["value"], 6.0);
+    assert!((json["err"]["value"].as_f64().unwrap() - 3.0).abs() < 1e-6, "{json}");
+
+    let (x, y) = v2_fixtures::WAVE_NAN_PIXEL;
+    let resp = post_json(
+        build_router(state),
+        "/v2/sessions/s-wave-um/pixel",
+        &format!(r#"{{"x":{x},"y":{y},"box":1}}"#),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json.as_object().unwrap().contains_key("wavelength"), "{json}");
+    assert!(json["wavelength"].is_null(), "{json}");
+
+    let (state, _dir) = open_wavelength_mef("s-wave-nm", "wave_nm.fits", Some("nm")).await;
+    let resp = post_json(build_router(state), "/v2/sessions/s-wave-nm/pixel", r#"{"x":2,"y":1,"box":1}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!((json["wavelength"]["value"].as_f64().unwrap() - expected).abs() < 1e-6, "{json}");
+    assert_eq!(json["wavelength"]["unit"], "nm", "{json}");
 }
 
 #[tokio::test]
@@ -3013,6 +3128,111 @@ async fn drizzle_rejects_a_cosmic_ray_and_validates_the_rejection_name() {
     let bad = serde_json::json!({ "paths": paths, "rejection": "bogus" }).to_string();
     let resp = post_json(build_router(state), "/sessions/s-drz-rej/stacking/drizzle", &bad).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+fn write_lights(dir: &tempfile::TempDir, prefix: &str, count: usize, pattern: Option<&str>) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let p = dir.path().join(format!("{prefix}{i}.fits"));
+            let pixels: Vec<f32> = (0..64).map(|k| 100.0 + ((k * 7 + i) % 5) as f32).collect();
+            match pattern {
+                Some(pattern) => v2_fixtures::write_cfa_fits(&p, 8, 8, &pixels, pattern),
+                None => v2_fixtures::write_pixels_fits(&p, 8, 8, &pixels),
+            }
+            p.to_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+async fn refused(state: &AppState, uri: &str, body: &serde_json::Value) -> String {
+    let resp = post_json(build_router(state.clone()), uri, &body.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri} {body}");
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request", "{json}");
+    json["error"]["message"].as_str().unwrap().to_string()
+}
+
+async fn accepted(state: &AppState, sid: &str, uri: &str, body: &serde_json::Value) -> serde_json::Value {
+    let resp = post_json(build_router(state.clone()), uri, &body.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "{uri} {body}");
+    let json = body_json(resp).await;
+    let jid = json["job_id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for_job(state, sid, &jid).await, "done");
+    json
+}
+
+#[tokio::test]
+async fn stack_refuses_cfa_lights_when_aligning_and_accepts_them_unaligned() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_lights(&dir, "cfa", 3, Some("RGGB"));
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-stack-cfa");
+    let uri = "/sessions/s-stack-cfa/stacking/stack";
+
+    let message = refused(&state, uri, &serde_json::json!({ "paths": paths, "align": true, "result_slot": "cfa" })).await;
+    assert!(message.contains("3 of 3 lights are one-shot-colour frames (BAYERPAT=RGGB)"), "{message}");
+    assert!(message.contains("aligning them before debayering"), "{message}");
+    assert!(message.contains("turn alignment off"), "{message}");
+    let message = refused(&state, uri, &serde_json::json!({ "paths": paths, "result_slot": "cfa" })).await;
+    assert!(message.contains("3 of 3 lights"), "{message}");
+    assert!(state.sessions.get("s-stack-cfa").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+
+    accepted(&state, "s-stack-cfa", uri, &serde_json::json!({ "paths": paths, "align": false, "result_slot": "cfa" })).await;
+    let session = state.sessions.get("s-stack-cfa").unwrap();
+    assert_eq!(session.cache.get("cfa").expect("stacked slot").arr().dim(), (8, 8));
+}
+
+#[tokio::test]
+async fn drizzle_refuses_cfa_lights_even_with_alignment_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = write_lights(&dir, "cfa", 2, Some("GBRG"));
+    paths.extend(write_lights(&dir, "plain", 1, None));
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-drz-cfa");
+    let uri = "/sessions/s-drz-cfa/stacking/drizzle";
+
+    let body = serde_json::json!({ "paths": paths, "align": false, "scale": 1.0, "pixfrac": 1.0, "result_slot": "drz" });
+    let message = refused(&state, uri, &body).await;
+    assert!(message.contains("2 of 3 lights are one-shot-colour frames (BAYERPAT=GBRG)"), "{message}");
+    assert!(message.contains("drizzle resamples across the colour sites"), "{message}");
+    assert!(!message.contains("turn alignment off"), "{message}");
+    assert!(state.sessions.get("s-drz-cfa").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+
+    let mono = write_lights(&dir, "mono", 3, None);
+    let body = serde_json::json!({ "paths": mono, "align": false, "scale": 1.0, "pixfrac": 1.0, "result_slot": "drz" });
+    accepted(&state, "s-drz-cfa", uri, &body).await;
+    let session = state.sessions.get("s-drz-cfa").unwrap();
+    assert_eq!(session.cache.get("drz").expect("drizzled slot").arr().dim(), (8, 8));
+}
+
+#[tokio::test]
+async fn pipeline_refuses_cfa_lights_when_aligning_and_accepts_them_unaligned() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = write_lights(&dir, "r", 2, Some("RGGB"));
+    let mut g = write_lights(&dir, "g_plain", 1, None);
+    g.extend(write_lights(&dir, "g_cfa", 1, Some("RGGB")));
+    let channels = serde_json::json!([{ "label": "R", "paths": r }, { "label": "G", "paths": g }]);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-pipe-cfa");
+    let uri = "/sessions/s-pipe-cfa/pipeline/run";
+
+    let message = refused(&state, uri, &serde_json::json!({ "channels": channels, "result_prefix": "cfa_" })).await;
+    assert!(message.contains("3 of 4 lights are one-shot-colour frames (BAYERPAT=RGGB)"), "{message}");
+    assert!(message.contains("aligning them before debayering"), "{message}");
+    assert!(state.sessions.get("s-pipe-cfa").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+
+    let body = serde_json::json!({
+        "channels": channels,
+        "align": false,
+        "normalize": false,
+        "rejection": "none",
+        "result_prefix": "cfa_"
+    });
+    let json = accepted(&state, "s-pipe-cfa", uri, &body).await;
+    assert_eq!(json["slots"], serde_json::json!(["cfa_R", "cfa_G"]));
+    let session = state.sessions.get("s-pipe-cfa").unwrap();
+    assert_eq!(session.cache.get("cfa_R").expect("R slot").arr().dim(), (8, 8));
+    assert_eq!(session.cache.get("cfa_G").expect("G slot").arr().dim(), (8, 8));
 }
 
 #[tokio::test]

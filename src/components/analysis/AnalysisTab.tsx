@@ -22,7 +22,9 @@ import {
   rgbStfPanelMode,
   starDetectionScope,
 } from "../../utils/analysisTarget";
+import { SOLVED_WCS_LABEL } from "../../utils/solvedWcs";
 import type { StfParams } from "../../shared/types";
+import type { WriteSolvedWcsResult } from "../../shared/types/astrometry";
 import type { Star } from "./PlateSolvePanel";
 import type { CubeResult } from "./SpectroscopyPanel";
 import type { StarDetectionResult, HistogramData } from "../../shared/types";
@@ -234,6 +236,21 @@ function AnalysisTabInner({
     [publishProcessed, fileKey, filePath],
   );
 
+  const handleWcsWritten = useCallback(
+    (res: WriteSolvedWcsResult) => {
+      if (!fileKey || !filePath) return;
+      publishProcessed(fileKey, {
+        fitsPath: res.fits_path,
+        previewUrl: res.previewUrl ?? null,
+        dimensions: res.dimensions,
+        label: SOLVED_WCS_LABEL,
+        kind: "processing",
+        inputPath: filePath,
+      });
+    },
+    [publishProcessed, fileKey, filePath],
+  );
+
   const frameSeqRef = useRef(0);
   const handleFramePreview = useCallback(
     async (outputPath: string, frameIndex: number, fitsPath?: string) => {
@@ -394,6 +411,7 @@ function AnalysisTabInner({
             sourceBadge={compositeMeasurementBadge}
             detectedTotal={starResult?.n_detected ?? null}
             annotationsOnView={starsOnMeasuredImage}
+            onWcsWritten={handleWcsWritten}
           />
         </section>
 
@@ -421,7 +439,7 @@ function AnalysisTabInner({
         </section>
 
         <section id={ANALYSIS_SECTION.catalog.id}>
-          <CatalogPanel filePath={regionKey} />
+          <CatalogPanel filePath={regionKey} measurePath={effectivePath} />
         </section>
 
         <section id={ANALYSIS_SECTION.targets.id}>

@@ -1,5 +1,7 @@
 import { withPreview, typedInvoke, getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
 import type { StfParams } from "../shared/types";
+import type { ScaleLimits } from "../shared/types/display";
+import { LEVEL_PERCENTILES } from "../utils/levelMatch";
 import type {
   BlendResult,
   AlignResult,
@@ -95,6 +97,19 @@ export function blendChannels(
     channelPaths,
     weights,
     preset: options.preset ?? "",
+  });
+}
+
+export function measureChannelLevel(path: string): Promise<ScaleLimits> {
+  return typedInvoke<ScaleLimits>("compute_scale_limits_cmd", {
+    path,
+    algorithm: "percentile",
+    vmin: null,
+    vmax: null,
+    percentile: [LEVEL_PERCENTILES[0], LEVEL_PERCENTILES[1]],
+    zscaleContrast: null,
+    symmetric: false,
+    centre: null,
   });
 }
 

@@ -1,6 +1,41 @@
-import { describe, it, expect } from "vitest";
-import { EMPTY_COMPARISON_DOC, MAX_COMPARISON_DOCS, SpectrumComparisonStore } from "../useSpectrumComparisonStore";
+import { describe, it, expect, expectTypeOf } from "vitest";
+import {
+  EMPTY_COMPARISON_DOC,
+  MAX_COMPARISON_DOCS,
+  SpectrumComparisonStore,
+  type ComparisonPatch,
+} from "../useSpectrumComparisonStore";
 import type { ComparisonEntry } from "../../utils/spectrumCompare";
+import type { X1dSpectrum } from "../../shared/types/spectral";
+
+function x1dAt(path: string, hdu = 1): X1dSpectrum {
+  return {
+    path,
+    hdu,
+    extver: 1,
+    n_rows: 2,
+    wavelength_um: [1, 2],
+    wavelength_unit: "um",
+    flux: [1, 2],
+    flux_error: null,
+    flux_unit: "Jy",
+    surf_bright: null,
+    surf_bright_unit: null,
+    background: null,
+    npixels: null,
+    dq: null,
+    dq_table: "jwst",
+    dq_flagged_rows: 0,
+    srctype: null,
+    grating: null,
+    filter: null,
+    detector: null,
+    instrument: null,
+    target: null,
+    other_tables: [],
+    notes: [],
+  };
+}
 
 const entry: ComparisonEntry = {
   id: "r1",
@@ -23,6 +58,7 @@ const entry: ComparisonEntry = {
     elapsed_ms: 1,
   },
   pixel: null,
+  table: null,
   error: null,
 };
 
@@ -71,6 +107,11 @@ describe("SpectrumComparisonStore", () => {
       includePixel: true,
       hidden: [],
       seq: 0,
+      tablePath: null,
+      tableHdu: null,
+      table: null,
+      tableError: null,
+      tableLoading: false,
     });
     const before = store.getDoc(path);
     store.patch(path, { enabled: true, normalise: "peak" });
@@ -138,5 +179,105 @@ describe("SpectrumComparisonStore", () => {
     store.patch("C:/d/late.fits", { enabled: true });
     expect(store.getDoc(paths[2])).toBe(EMPTY_COMPARISON_DOC);
     expect(store.getDoc(paths[1]).normalise).toBe("median");
+  });
+
+  it("requestTable enables the comparison and records the request, and begin/commit/fail/clear move the table state", () => {
+    const store = new SpectrumComparisonStore();
+    let notified = 0;
+    store.subscribe(() => notified++);
+    store.patch(path, { normalise: "peak" });
+    store.requestTable(path, "C:/d/cube_x1d.fits");
+    let doc = store.getDoc(path);
+    expect(doc.enabled).toBe(true);
+    expect(doc.normalise).toBe("peak");
+    expect(doc.tablePath).toBe("C:/d/cube_x1d.fits");
+    expect(doc.tableHdu).toBeNull();
+    expect(doc.table).toBeNull();
+    expect(doc.tableError).toBeNull();
+    expect(doc.tableLoading).toBe(false);
+
+    const request = store.beginTable(path);
+    expect(request).toEqual({ path: "C:/d/cube_x1d.fits", hdu: null });
+    expect(store.getDoc(path).tableLoading).toBe(true);
+    const x1d = x1dAt("C:/d/cube_x1d.fits");
+    expect(store.commitTable(path, request!, x1d)).toBe(true);
+    doc = store.getDoc(path);
+    expect(doc.table).toBe(x1d);
+    expect(doc.tableLoading).toBe(false);
+    expect(doc.tableError).toBeNull();
+
+    store.requestTable(path, x1d.path, 3);
+    doc = store.getDoc(path);
+    expect(doc.table).toBeNull();
+    expect(doc.tableHdu).toBe(3);
+    const second = store.beginTable(path);
+    expect(second).toEqual({ path: x1d.path, hdu: 3 });
+    expect(store.failTable(path, second!, "HDU 3 (ASDF) is not an EXTRACT1D table")).toBe(true);
+    doc = store.getDoc(path);
+    expect(doc.tableError).toBe("HDU 3 (ASDF) is not an EXTRACT1D table");
+    expect(doc.tableLoading).toBe(false);
+    expect(doc.table).toBeNull();
+
+    store.requestTable(path, x1d.path);
+    expect(store.getDoc(path).tableError).toBeNull();
+    store.clearTable(path);
+    doc = store.getDoc(path);
+    expect(doc.tablePath).toBeNull();
+    expect(doc.tableHdu).toBeNull();
+    expect(doc.table).toBeNull();
+    expect(doc.tableError).toBeNull();
+    expect(doc.tableLoading).toBe(false);
+    expect(doc.enabled).toBe(true);
+    expect(store.beginTable(path)).toBeNull();
+    expect(notified).toBe(9);
+  });
+
+  it("a table reply for a superseded or cleared request is dropped", () => {
+    const store = new SpectrumComparisonStore();
+    store.requestTable(path, "C:/d/a_x1d.fits");
+    const stale = store.beginTable(path)!;
+    store.requestTable(path, "C:/d/b_x1d.fits");
+    expect(store.getDoc(path).tableLoading).toBe(false);
+    const fresh = store.beginTable(path)!;
+    expect(store.commitTable(path, stale, x1dAt("C:/d/a_x1d.fits"))).toBe(false);
+    expect(store.failTable(path, stale, "late")).toBe(false);
+    expect(store.getDoc(path).table).toBeNull();
+    expect(store.getDoc(path).tableError).toBeNull();
+    expect(store.getDoc(path).tableLoading).toBe(true);
+    const b = x1dAt("C:/d/b_x1d.fits");
+    expect(store.commitTable(path, fresh, b)).toBe(true);
+    expect(store.getDoc(path).table).toBe(b);
+    expect(store.commitTable(path, fresh, x1dAt("C:/d/b_x1d.fits"))).toBe(false);
+    store.clearTable(path);
+    expect(store.commitTable(path, fresh, b)).toBe(false);
+    expect(store.getDoc(path).table).toBeNull();
+    expect(store.commitTable("C:/d/never.fits", fresh, b)).toBe(false);
+    expect(store.getDoc("C:/d/never.fits")).toBe(EMPTY_COMPARISON_DOC);
+  });
+
+  it("a table load that never settles can be cancelled with clearTable or restarted with requestTable", () => {
+    const store = new SpectrumComparisonStore();
+    store.requestTable(path, "C:/d/a_x1d.fits");
+    const stuck = store.beginTable(path)!;
+    expect(store.getDoc(path).tableLoading).toBe(true);
+    store.clearTable(path);
+    expect(store.getDoc(path).tableLoading).toBe(false);
+    expect(store.failTable(path, stuck, "late")).toBe(false);
+    expect(store.getDoc(path).tableError).toBeNull();
+    store.requestTable(path, "C:/d/a_x1d.fits");
+    const first = store.beginTable(path)!;
+    store.requestTable(path, "C:/d/a_x1d.fits");
+    expect(store.getDoc(path).tableLoading).toBe(false);
+    const retry = store.beginTable(path)!;
+    expect(retry).toEqual(first);
+    expect(store.getDoc(path).tableLoading).toBe(true);
+  });
+
+  it("patch cannot set the table state owned by the loader", () => {
+    expectTypeOf<ComparisonPatch>().not.toHaveProperty("table");
+    expectTypeOf<ComparisonPatch>().not.toHaveProperty("tableError");
+    expectTypeOf<ComparisonPatch>().not.toHaveProperty("tableLoading");
+    expectTypeOf<ComparisonPatch>().toHaveProperty("tablePath");
+    expectTypeOf<ComparisonPatch>().toHaveProperty("tableHdu");
   });
 });

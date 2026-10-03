@@ -239,6 +239,7 @@ use image::RgbImage;
 use rayon::prelude::*;
 
 use crate::core::stacking::calibration::drizzle_from_paths;
+use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::infra::fits::writer as fits_writer;
 use crate::types::stacking::{DrizzleConfig, DrizzleResult};
 
@@ -273,6 +274,13 @@ pub fn drizzle_rgb(
             }
         }
     }
+
+    let lights: Vec<String> = [r_paths, g_paths, b_paths]
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p.iter().cloned())
+        .collect();
+    refuse_cfa_frames(&lights, CfaStep::Drizzle)?;
 
     let (r_result, (g_result, b_result)) = rayon::join(
         || {

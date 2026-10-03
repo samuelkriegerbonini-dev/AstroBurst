@@ -70,6 +70,28 @@ describe("DisplayControls without GPU rendering", () => {
   });
 });
 
+function colorbarCheckbox(markup: string): string {
+  const at = markup.indexOf(">colorbar<");
+  expect(at).toBeGreaterThan(-1);
+  return markup.slice(markup.lastIndexOf("<label", at), at);
+}
+
+describe("DisplayControls colorbar toggle", () => {
+  it("is on by default", () => {
+    expect(DEFAULT_DISPLAY_SETTINGS.colorbar).toBe(true);
+    expect(colorbarCheckbox(render({}))).toContain('checked=""');
+  });
+
+  it("reflects a colorbar switched off", () => {
+    expect(colorbarCheckbox(render({}, { colorbar: false }))).not.toContain('checked=""');
+  });
+
+  it("sits with the render-only controls, disabled without GPU rendering", () => {
+    expect(insideDisabledFieldset(render({ renderOnlyDisabled: true }), ">colorbar<")).toBe(true);
+    expect(insideDisabledFieldset(render({}), ">colorbar<")).toBe(false);
+  });
+});
+
 describe("DisplayControls labels and notes", () => {
   afterEach(() => {
     wcsOverlayStatus.set("grid", null);

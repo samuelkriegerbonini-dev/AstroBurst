@@ -10,6 +10,7 @@ import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { detectChannel } from "../../utils/channelMapping";
 import { formatCount } from "../../utils/formatCount";
 import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, toDims } from "../../utils/stackingOutputs";
+import { cullChannelGroups, pipelineChannelInputs, subframeExclusionNotice } from "../../utils/subframeCull";
 import type { ProcessedFile } from "../../shared/types";
 import type { CalibrationState, RunTarget, StackConfig } from "./StackingTab";
 
@@ -18,11 +19,7 @@ interface FileGroup {
   paths: string[];
 }
 
-interface ChannelFilesInput {
-  label: string;
-  paths: string[];
-}
-
+const NO_PATHS: readonly string[] = [];
 const CHANNEL_LABELS = ["R", "G", "B"];
 const CHANNEL_COLORS: Record<string, string> = { R: "#ef4444", G: "#22c55e", B: "#3b82f6" };
 const MAX_DEFECT_ERRORS = 3;
@@ -92,9 +89,11 @@ interface PipelinePanelProps {
   stackConfig?: StackConfig;
   runTarget?: RunTarget | null;
   onShow?: (result: PipelineResult, choice: string, target: RunTarget | null) => void;
+  rejectedPaths?: readonly string[];
+  onUseAllFrames?: () => void;
 }
 
-export default function PipelinePanel({ files = [], calibration, stackConfig, runTarget = null, onShow }: PipelinePanelProps) {
+export default function PipelinePanel({ files = [], calibration, stackConfig, runTarget = null, onShow, rejectedPaths = NO_PATHS, onUseAllFrames }: PipelinePanelProps) {
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +125,8 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   const rejectionId = useId();
   const combineId = useId();
 
+  const culled = useMemo(() => cullChannelGroups(channels, rejectedPaths), [channels, rejectedPaths]);
+  const exclusionNotice = subframeExclusionNotice(culled.excluded);
   const parsedDefects = useMemo(() => parseDefectList(defectText), [defectText]);
   const defectErrors = cosmeticEnabled ? parsedDefects.errors : [];
 
@@ -215,9 +216,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   );
 
   const handleRun = async () => {
-    const channelInputs: ChannelFilesInput[] = channels
-      .filter((c) => c.paths.length > 0)
-      .map((c) => ({ label: c.label, paths: c.paths }));
+    const { inputs: channelInputs } = pipelineChannelInputs(channels, rejectedPaths);
 
     if (channelInputs.length === 0 || defectErrors.length > 0) return;
 
@@ -319,8 +318,8 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
     ctx.putImageData(imgData, 0, 0);
   }, [result, activePreview]);
 
-  const totalLights = channels.reduce((s, c) => s + c.paths.length, 0);
-  const smallestChannel = channels
+  const totalLights = culled.groups.reduce((s, c) => s + c.paths.length, 0);
+  const smallestChannel = culled.groups
     .filter((c) => c.paths.length > 0)
     .reduce((min, c) => Math.min(min, c.paths.length), Number.POSITIVE_INFINITY);
   const hint = rejectionFrameHint(rejection, Number.isFinite(smallestChannel) ? smallestChannel : 0);
@@ -330,24 +329,28 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
       <SectionHeader icon={ICON} title="Calibration Pipeline" />
 
       <div className="flex flex-col gap-2">
-        {channels.map((ch, i) => (
-          <div key={ch.label} className="flex items-center justify-between rounded border border-zinc-800/50 px-2 py-1.5">
-            <div className="flex items-center gap-2">
-              <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: CHANNEL_COLORS[ch.label] }} />
-              <span className="text-xs text-zinc-300">{ch.label}</span>
-              <span className="text-[10px] text-zinc-500">{ch.paths.length} files</span>
+        {channels.map((ch, i) => {
+          const kept = culled.groups[i].paths.length;
+          const lost = ch.paths.length - kept;
+          return (
+            <div key={ch.label} className="flex items-center justify-between rounded border border-zinc-800/50 px-2 py-1.5">
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: CHANNEL_COLORS[ch.label] }} />
+                <span className="text-xs text-zinc-300">{ch.label}</span>
+                <span className="text-[10px] text-zinc-500">{kept} files{lost > 0 && ` (${lost} excluded)`}</span>
+              </div>
+              <div className="flex gap-1">
+                <button onClick={() => addToChannel(i)} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
+                {ch.paths.length > 0 && (
+                  <button
+                    onClick={() => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; })}
+                    className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded"
+                  >Clear</button>
+                )}
+              </div>
             </div>
-            <div className="flex gap-1">
-              <button onClick={() => addToChannel(i)} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
-              {ch.paths.length > 0 && (
-                <button
-                  onClick={() => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; })}
-                  className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded"
-                >Clear</button>
-              )}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
@@ -434,6 +437,17 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
         <Toggle label="Normalize before stack" checked={normalize} accent="sky" onChange={setNormalize} />
         <Toggle label="Align frames before stack" checked={align} accent="sky" onChange={setAlign} />
       </div>
+
+      {exclusionNotice && (
+        <div className="flex items-start justify-between gap-2 text-[10px] text-amber-400/90 bg-amber-900/20 border border-amber-800/30 rounded px-2.5 py-1.5">
+          <span data-subframe-notice className="break-words">{exclusionNotice}</span>
+          <button
+            type="button"
+            onClick={() => onUseAllFrames?.()}
+            className="shrink-0 text-[10px] text-amber-300 hover:text-amber-200 bg-zinc-800 px-2 py-0.5 rounded"
+          >Use all frames</button>
+        </div>
+      )}
 
       <RunButton
         label={`Run Pipeline (${totalLights} lights)`}

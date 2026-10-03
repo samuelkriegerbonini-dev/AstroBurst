@@ -7,6 +7,7 @@ import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { fileStore } from "../../hooks/useFileStore";
 import { getOutputDir, getPreviewUrl } from "../../infrastructure/tauri";
 import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
+import { fileSetKey, liveSubframeSelection, panelRejectedPaths, withAllFramesIn, type SubframeSelection } from "../../utils/subframeCull";
 import { framesLabel, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
 import type { CalibrateResult } from "../../shared/types";
 import type { DrizzleRgbResult, PipelineResult, StackResult } from "../../shared/types/stacking";
@@ -60,6 +61,7 @@ export interface RunTarget {
 }
 
 const COSMETIC_LABEL = "Cosmetic";
+const NO_PATHS: string[] = [];
 
 function filesShowing(output: Pick<ProcessedResult, "fitsPath" | "previewUrl">): RunTarget[] {
   const shown: RunTarget[] = [];
@@ -96,19 +98,21 @@ function StackingTabInner() {
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_SETTINGS);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
-  const [rejectedPaths, setRejectedPaths] = useState<string[]>([]);
-  const [acceptedPaths, setAcceptedPaths] = useState<string[] | undefined>(undefined);
-  const [subframeWeights, setSubframeWeights] = useState<Record<string, number> | undefined>(undefined);
+  const [selection, setSelection] = useState<SubframeSelection | null>(null);
+  const filePaths = useMemo(() => doneFiles.map((f) => f.path), [doneFiles]);
 
   const handleSubframeSelection = useCallback(
     (accepted: string[], rejected: string[], weights?: Record<string, number>) => {
-      setAcceptedPaths(accepted);
-      setRejectedPaths(rejected);
-      setSubframeWeights(weights);
+      setSelection({ accepted, rejected, weights, fileKey: fileSetKey(filePaths) });
       setActive("stack");
     },
-    [],
+    [filePaths],
   );
+
+  const live = useMemo(() => liveSubframeSelection(selection, filePaths), [selection, filePaths]);
+  if (live !== selection) setSelection(live);
+  const allFramesInPipeline = useCallback(() => setSelection((prev) => withAllFramesIn(prev, "pipeline")), []);
+  const allFramesInDrizzle = useCallback(() => setSelection((prev) => withAllFramesIn(prev, "drizzle")), []);
 
   const filePath = file?.path ?? null;
   const fileKey = fileKeyOf(file);
@@ -304,7 +308,7 @@ function StackingTabInner() {
             />
           </div>
           <div style={{ display: active === "subframe" ? "block" : "none" }}>
-            <SubframeSelectorPanel files={doneFiles.map(f => f.path)} onSelectionChange={handleSubframeSelection} />
+            <SubframeSelectorPanel files={filePaths} onSelectionChange={handleSubframeSelection} />
           </div>
           <div style={{ display: active === "stack" ? "block" : "none" }}>
             <StackingPanel
@@ -312,11 +316,11 @@ function StackingTabInner() {
               runTarget={runTarget}
               onResult={handleStackResult}
               injectedPaths={injectedPaths}
-              acceptedPaths={acceptedPaths}
+              acceptedPaths={live?.accepted}
               stackConfig={stackConfig}
               onStackConfigChange={handleStackConfigChange}
-              rejectedPaths={rejectedPaths}
-              subframeWeights={subframeWeights}
+              rejectedPaths={live?.rejected ?? NO_PATHS}
+              subframeWeights={live?.weights}
             />
           </div>
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>
@@ -326,10 +330,18 @@ function StackingTabInner() {
               stackConfig={stackConfig}
               runTarget={runTarget}
               onShow={handlePipelineShow}
+              rejectedPaths={panelRejectedPaths(live, "pipeline")}
+              onUseAllFrames={allFramesInPipeline}
             />
           </div>
           <div style={{ display: active === "drizzle_rgb" ? "block" : "none" }}>
-            <DrizzleRgbPanel files={doneFiles} runTarget={runTarget} onResult={handleDrizzleResult} />
+            <DrizzleRgbPanel
+              files={doneFiles}
+              runTarget={runTarget}
+              onResult={handleDrizzleResult}
+              rejectedPaths={panelRejectedPaths(live, "drizzle")}
+              onUseAllFrames={allFramesInDrizzle}
+            />
           </div>
         </div>
       </Suspense>

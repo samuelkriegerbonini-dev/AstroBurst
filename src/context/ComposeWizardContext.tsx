@@ -25,6 +25,7 @@ import {
 import type { AlignRunEvent, AlignRunRecord, ChannelStage, CompositeOp, SubframeAnalysisResult } from "../utils/wizard";
 import type { AlignResult } from "../shared/types/compose";
 import { useCompositeActions } from "./CompositeContext";
+import { withSpccWb } from "../utils/levelMatch";
 
 export type WizardAction =
   | { type: "SET_BINS"; bins: FrequencyBin[] }
@@ -51,6 +52,10 @@ export type WizardAction =
   | { type: "RESET" };
 
 function reducer(state: WizardState, action: WizardAction): WizardState {
+  return withSpccWb(applyAction(state, action));
+}
+
+function applyAction(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
     case "SET_BINS": {
       const hasFiles = action.bins.some((b) => b.files.length > 0);
@@ -89,6 +94,7 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         excludedFiles,
         subframeResults,
         completedSteps: completed,
+        levelMatch: null,
       };
     }
     case "SET_BLEND_WEIGHTS":

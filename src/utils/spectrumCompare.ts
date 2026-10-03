@@ -6,12 +6,13 @@ import type {
   RadialVelocityCorrectionResult,
   SpectralAxisMode,
   SpectrumSource,
+  TableSource,
 } from "../shared/types/spectral";
 import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
 import { shapeSummary } from "./regionGeometry";
 import {
   NO_JY_REASON,
-  fluxUnitLabel,
+  fileBaseName,
   frameLines,
   linkedAnnulus,
   numericSeries,
@@ -22,6 +23,7 @@ import {
   type VacuumAxis,
 } from "./spectrumExport";
 import { windowsAreValid } from "./spectrumRange";
+import { APERTURE_NOTE, entryFluxUnit, type TableEntryData } from "./x1dCompare";
 
 export type NormaliseMode = "none" | "peak" | "median" | "window" | "offset";
 
@@ -57,18 +59,26 @@ const PEAK_REASON = "peak is not positive";
 const MEDIAN_REASON = "median is not positive";
 const CONTINUUM_MEDIAN_REASON = "continuum median is not positive";
 const NO_RESULT_REASON = "no result for this entry";
+export const NO_SURF_BRIGHT_REASON = "x1d has no SURF_BRIGHT column";
+export const X1D_NO_WINDOW_DATA_REASON = "x1d has no data in the continuum windows";
 const TOO_MANY_REGIONS_REASON = `more than ${MAX_COMPARISON_REGIONS} regions: not compared`;
+const TABLE_BACKGROUND = "pipeline";
+const TABLE_RESAMPLING = "linear onto the cube vacuum axis, never across a dropped row";
+const X1D_FLUX_HEADER = "x1d_flux_jy";
+const X1D_FLUX_ERR_HEADER = "x1d_flux_err_jy";
+const TABLE_ERROR_NOTE = `${X1D_FLUX_ERR_HEADER}: FLUX_ERROR combined in quadrature between the bracketing rows`;
 
 export interface ComparisonEntry {
   id: string;
-  kind: "region" | "pixel";
+  kind: "region" | "pixel" | "table";
   label: string;
   color: string;
-  source: SpectrumSource;
+  source: SpectrumSource | TableSource;
   regionText: string | null;
   backgroundId: string | null;
   region: RegionSpectrum | null;
   pixel: CubeSpectrum | null;
+  table: TableEntryData | null;
   error: string | null;
 }
 
@@ -134,6 +144,7 @@ export function entriesFrom(
       backgroundId: background ? region.backgroundId : null,
       region: result?.status === "fulfilled" ? result.value : null,
       pixel: null,
+      table: null,
       error: result === undefined ? NO_RESULT_REASON : result.status === "rejected" ? errorText(result.reason) : null,
     };
   });
@@ -148,6 +159,7 @@ export function entriesFrom(
       backgroundId: null,
       region: null,
       pixel: pixel.result.status === "fulfilled" ? pixel.result.value : null,
+      table: null,
       error: pixel.result.status === "rejected" ? errorText(pixel.result.reason) : null,
     });
   }
@@ -156,6 +168,7 @@ export function entriesFrom(
 
 function entryLength(entry: ComparisonEntry): number | null {
   if (entry.kind === "region") return entry.region ? entry.region.sum.length : null;
+  if (entry.kind === "table") return entry.table?.resampled.flux.length ?? null;
   return entry.pixel ? entry.pixel.values.length : null;
 }
 
@@ -174,6 +187,11 @@ export function entryValues(entry: ComparisonEntry, view: SpectrumView): number[
     if (!region) return null;
     const array = view === "sum" ? region.sum : view === "mean" ? region.mean : region.flux_jy;
     return array ? numericSeries(array) : null;
+  }
+  if (entry.kind === "table") {
+    const resampled = entry.table?.resampled;
+    if (!resampled) return null;
+    return view === "mean" ? resampled.surfBright : resampled.flux;
   }
   const pixel = entry.pixel;
   if (!pixel) return null;
@@ -263,6 +281,16 @@ function yLabelFor(mode: NormaliseMode, fluxUnits: string[], step: number | null
   }
 }
 
+function normaliseReason(entry: ComparisonEntry, values: number[], windows: ContinuumWindows | null, reason: string): string {
+  if (entry.kind !== "table" || reason !== CONTINUUM_MEDIAN_REASON || windows === null) return reason;
+  return windowIndices(windows).some((i) => Number.isFinite(values[i])) ? reason : X1D_NO_WINDOW_DATA_REASON;
+}
+
+function missingValuesReason(entry: ComparisonEntry, view: SpectrumView): string {
+  if (entry.kind === "table") return entry.table && view === "mean" ? NO_SURF_BRIGHT_REASON : NO_RESULT_REASON;
+  return view === "jy" ? NO_JY_REASON : NO_RESULT_REASON;
+}
+
 export function comparisonSeries(
   entries: ComparisonEntry[],
   hidden: ReadonlySet<string>,
@@ -285,7 +313,7 @@ export function comparisonSeries(
     }
     const values = entryValues(entry, view);
     if (values === null) {
-      omit(view === "jy" ? NO_JY_REASON : NO_RESULT_REASON);
+      omit(missingValuesReason(entry, view));
       continue;
     }
     if (values.length !== axisValues.length) {
@@ -294,10 +322,10 @@ export function comparisonSeries(
     }
     const norm = normaliseFactor(values, mode, windows);
     if ("reason" in norm) {
-      omit(norm.reason);
+      omit(normaliseReason(entry, values, windows, norm.reason));
       continue;
     }
-    prepared.push({ entry, values, factor: norm.factor, fluxUnit: fluxUnitLabel(bunit, view, entry.kind) });
+    prepared.push({ entry, values, factor: norm.factor, fluxUnit: entryFluxUnit(entry, bunit, view) });
   }
   const step =
     mode === "offset"
@@ -336,6 +364,17 @@ export interface ComparisonCsvInput {
   correction: CorrectionFrame;
   correctionResult: RadialVelocityCorrectionResult | null;
   exportedAtUtc: string;
+  table?: TableEntryData | null;
+}
+
+export function plottedTable(entries: ComparisonEntry[], result: ComparisonSeriesResult): TableEntryData | null {
+  const plottedIds = new Set(result.plotted.map((p) => p.id));
+  const entry = entries.find((e) => e.kind === "table" && e.table !== null && plottedIds.has(e.id));
+  return entry?.table ?? null;
+}
+
+function tableLine(table: TableEntryData): string {
+  return `x1d: ${table.path}; hdu: ${table.hdu}; rows: ${table.nRows}; dq_rows_dropped: ${table.resampled.droppedDq}; resampling: ${TABLE_RESAMPLING}; ${TABLE_ERROR_NOTE}; ${APERTURE_NOTE}`;
 }
 
 function normaliseLine(input: ComparisonCsvInput): string {
@@ -349,9 +388,18 @@ function normaliseLine(input: ComparisonCsvInput): string {
 
 function seriesLine(entry: ComparisonEntry, plotted: ComparisonPlotted): string {
   const source = entry.source;
-  const where = source.kind === "pixel" ? `pixel (${source.x}, ${source.y})` : shapeSummary(source.shape);
+  const where =
+    source.kind === "pixel"
+      ? `pixel (${source.x}, ${source.y})`
+      : source.kind === "table"
+        ? `x1d ${fileBaseName(source.path)} HDU ${source.hdu}`
+        : shapeSummary(source.shape);
   const background =
-    source.kind === "region" && source.background ? `annulus ${entry.backgroundId ?? EMPTY_FIELD}` : "none";
+    source.kind === "table"
+      ? TABLE_BACKGROUND
+      : source.kind === "region" && source.background
+        ? `annulus ${entry.backgroundId ?? EMPTY_FIELD}`
+        : "none";
   const region = entry.region;
   const npix = region ? String(region.npix) : EMPTY_FIELD;
   const nBg = region ? String(region.n_bg) : EMPTY_FIELD;
@@ -375,6 +423,8 @@ export function comparisonCsv(input: ComparisonCsvInput): string {
     if (entry) lines.push(seriesLine(entry, plotted));
   });
   for (const omission of input.result.omitted) lines.push(`omitted: ${omission.label}; ${omission.reason}`);
+  const table = input.table === undefined ? plottedTable(input.entries, input.result) : input.table;
+  if (table !== null) lines.push(tableLine(table));
 
   const columns: CsvColumn<number>[] = [{ header: CHANNEL_HEADER, value: (i) => i }];
   const vacuumValues = input.vacuum.values;
@@ -387,6 +437,11 @@ export function comparisonCsv(input: ComparisonCsvInput): string {
     const y = input.result.series[k]?.y ?? [];
     columns.push({ header: `${plotted.label} [${plotted.unit}]`, value: (i) => y[i] ?? null });
   });
+  if (table !== null) {
+    const { flux, fluxErr } = table.resampled;
+    columns.push({ header: X1D_FLUX_HEADER, value: (i) => flux[i] ?? null });
+    columns.push({ header: X1D_FLUX_ERR_HEADER, value: (i) => fluxErr[i] ?? null });
+  }
   const rows = Array.from({ length: input.channelCount }, (_, i) => i);
   return lines.map((line) => `# ${line}`).join(CSV_LINE_END) + CSV_LINE_END + buildCsv(columns, rows);
 }

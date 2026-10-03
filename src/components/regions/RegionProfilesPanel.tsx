@@ -6,8 +6,16 @@ import { radialProfile, lineCut, sbProfile } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
-import { lineCutEntry, measurementLog, profileLogReady, radialProfileEntry, sbProfileEntry } from "../../utils/measurementLog";
+import {
+  lineCutEntry,
+  measurementLog,
+  profileDqHandling,
+  profileLogReady,
+  radialProfileEntry,
+  sbProfileEntry,
+} from "../../utils/measurementLog";
 import { shapeSummary } from "../../utils/regionGeometry";
+import { exclusionsFor } from "../../utils/regionExclude";
 import {
   SB_X_UNITS,
   SB_Y_MODES,
@@ -59,10 +67,11 @@ const PROFILE_MODES: readonly ProfileMode[] = ["radial", "sb"];
 const PROFILE_MODE_LABEL: Record<ProfileMode, string> = { radial: "radial", sb: "SB" };
 const Y_MODE_LABEL: Record<SbYMode, string> = { mean: "mean", mu: "mu", ee: "EE" };
 
-type ProfileRequest =
+type ProfileRequest = { exclude: RegionShape[] } & (
   | { kind: "radial"; x: number; y: number; maxRadius: number; background: [number, number] | null }
   | { kind: "sb"; shape: RegionShape; background: RegionShape | null; binWidth: number }
-  | { kind: "cut"; x1: number; y1: number; x2: number; y2: number };
+  | { kind: "cut"; x1: number; y1: number; x2: number; y2: number }
+);
 
 type ProfileResult = { requestKey: string; excludeDq: boolean } & (
   | { kind: "radial"; data: RadialProfile }
@@ -82,18 +91,19 @@ function requestFor(
   background: RegionShape | undefined,
   mode: ProfileMode,
   binWidth: number,
+  exclude: RegionShape[],
 ): ProfileRequest | null {
   if (!shape) return null;
   if (shape.shape === "ellipse" || (shape.shape === "circle" && mode === "sb")) {
-    return { kind: "sb", shape, background: background ?? null, binWidth };
+    return { kind: "sb", shape, background: background ?? null, binWidth, exclude };
   }
   const bg: [number, number] | null =
     background && background.shape === "annulus" ? [background.r_inner, background.r_outer] : null;
-  if (shape.shape === "circle") return { kind: "radial", x: shape.x, y: shape.y, maxRadius: shape.r, background: bg };
+  if (shape.shape === "circle") return { kind: "radial", x: shape.x, y: shape.y, maxRadius: shape.r, background: bg, exclude };
   if (shape.shape === "annulus") {
-    return { kind: "radial", x: shape.x, y: shape.y, maxRadius: shape.r_outer, background: bg };
+    return { kind: "radial", x: shape.x, y: shape.y, maxRadius: shape.r_outer, background: bg, exclude };
   }
-  if (shape.shape === "line") return { kind: "cut", x1: shape.x1, y1: shape.y1, x2: shape.x2, y2: shape.y2 };
+  if (shape.shape === "line") return { kind: "cut", x1: shape.x1, y1: shape.y1, x2: shape.x2, y2: shape.y2, exclude };
   return null;
 }
 
@@ -159,9 +169,10 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
   const selected = doc.regions.find((r) => r.id === doc.selectedId);
   const background = selected?.backgroundId ? doc.regions.find((r) => r.id === selected.backgroundId) : undefined;
   const binWidth = parseBinWidth(binWidthText);
+  const exclude = useMemo(() => exclusionsFor(selected, doc.regions), [selected, doc.regions]);
   const request = useMemo(
-    () => requestFor(selected?.shape, background?.shape, mode, binWidth ?? DEFAULT_BIN_WIDTH),
-    [selected?.shape, background?.shape, mode, binWidth],
+    () => requestFor(selected?.shape, background?.shape, mode, binWidth ?? DEFAULT_BIN_WIDTH, exclude),
+    [selected?.shape, background?.shape, mode, binWidth, exclude],
   );
   const requestKey = request ? JSON.stringify(request) : null;
 
@@ -188,17 +199,17 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
             kind: "radial",
             requestKey,
             excludeDq,
-            data: await radialProfile(measurePath, req.x, req.y, req.maxRadius, { background: req.background, excludeDq }),
+            data: await radialProfile(measurePath, req.x, req.y, req.maxRadius, { background: req.background, excludeDq, exclude: req.exclude }),
           };
         } else if (req.kind === "sb") {
           res = {
             kind: "sb",
             requestKey,
             excludeDq,
-            data: await sbProfile(measurePath, req.shape, { binWidth: req.binWidth, background: req.background, excludeDq }),
+            data: await sbProfile(measurePath, req.shape, { binWidth: req.binWidth, background: req.background, excludeDq, exclude: req.exclude }),
           };
         } else {
-          res = { kind: "cut", requestKey, excludeDq, data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq) };
+          res = { kind: "cut", requestKey, excludeDq, data: await lineCut(measurePath, req.x1, req.y1, req.x2, req.y2, excludeDq, req.exclude) };
         }
         if (seqRef.current !== seq) return;
         dispatch({ type: "success", result: res });
@@ -251,7 +262,7 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
     } else if (result.kind === "sb" && req.kind === "sb") {
       measurementLog.append(sbProfileEntry(provenance, result.data, result.excludeDq, req, selected));
     } else if (result.kind === "cut") {
-      measurementLog.append(lineCutEntry(provenance, result.data, result.excludeDq, selected));
+      measurementLog.append(lineCutEntry(provenance, result.data, result.excludeDq, selected, req.exclude));
     }
   }, [logReady, result, selected, provenance]);
 
@@ -277,8 +288,16 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
           <MeasurementBadge />
         </div>
         <div className="flex items-center gap-2">
-          {result?.data.masked && (
+          {result && profileDqHandling(result.excludeDq, result.data) === "excluded" && (
             <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">DQ masked</span>
+          )}
+          {result && result.data.region_excluded > 0 && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30"
+              title={`${result.data.region_excluded} pixels inside exclude regions are left out of this profile`}
+            >
+              regions excluded
+            </span>
           )}
           {loading && <Loader2 size={12} className="animate-spin text-sky-400/70" />}
         </div>

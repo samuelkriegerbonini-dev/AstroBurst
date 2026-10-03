@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use ndarray::Array2;
 
-use crate::cmd::analysis::{resolve_dq_mask, DqMask, HEADER_PROCESSING_PROVENANCE, RES_PHOTCAL};
+use crate::cmd::analysis::{resolve_pixel_mask, PixelMask, HEADER_PROCESSING_PROVENANCE, RES_PHOTCAL};
 use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::{position_angle_deg, WcsTransform};
@@ -22,8 +22,8 @@ use crate::types::constants::{
     RES_BINS, RES_CALIBRATED, RES_CALIBRATION_WARNINGS, RES_DEC, RES_DQ_EXCLUDED, RES_ELAPSED_MS, RES_ERROR,
     RES_HAS_WCS, RES_ID, RES_LABEL, RES_MAG_AB_CUMULATIVE, RES_MASKED, RES_MU_AB, RES_MU_ERR, RES_NOTES,
     RES_PETROSIAN_RADIUS_PX, RES_PIXEL_AREA_ARCSEC2, RES_PIXEL_SCALE_ARCSEC, RES_R50_PX, RES_R80_PX, RES_R90_PX,
-    RES_RA, RES_REGIONS, RES_REG_TEXT, RES_SKY, RES_SKY_PA_DEG, RES_SMA_ARCSEC, RES_STATS, RES_SYSTEM,
-    RES_TOTAL_MAG_AB, RES_WARNINGS,
+    RES_RA, RES_REGIONS, RES_REGION_EXCLUDED, RES_REG_TEXT, RES_SKY, RES_SKY_PA_DEG, RES_SMA_ARCSEC, RES_STATS,
+    RES_SYSTEM, RES_TOTAL_MAG_AB, RES_WARNINGS,
 };
 use crate::types::header::HduHeader;
 
@@ -142,20 +142,18 @@ pub(crate) fn entry_calibration(entry: &ImageEntry) -> EntryCalibration {
     let wcs = entry_wcs(entry);
     let header = entry.header();
     let mut warnings = Vec::new();
-    let photcal = header.and_then(|h| {
-        let cal = PhotCal::from_header(h, wcs.as_ref())?;
-        match uncalibrated_reason(h) {
-            Some(reason) => {
-                warnings.push(reason);
-                None
-            }
-            None => {
-                warnings.extend(cal.jansky_unavailable_reason());
-                warnings.extend(cal.warnings.iter().cloned());
-                cal.converts_to_jansky().then_some(cal)
-            }
+    let photcal = match header.and_then(uncalibrated_reason) {
+        Some(reason) => {
+            warnings.push(reason);
+            None
         }
-    });
+        None => header.and_then(|h| {
+            let cal = PhotCal::from_header(h, wcs.as_ref())?;
+            warnings.extend(cal.jansky_unavailable_reason());
+            warnings.extend(cal.warnings.iter().cloned());
+            cal.converts_to_jansky().then_some(cal)
+        }),
+    };
     if photcal.is_none() && warnings.is_empty() {
         warnings.push(missing_calibration_reason(header));
     }
@@ -268,10 +266,28 @@ fn photcal_json(cal: &PhotCal) -> anyhow::Result<Value> {
     Ok(val)
 }
 
-fn with_timing(mut body: Value, masked: bool, t0: Instant) -> Value {
+fn exclude_shapes(exclude: Option<Vec<RegionShape>>) -> anyhow::Result<Vec<RegionShape>> {
+    let shapes = exclude.unwrap_or_default();
+    if shapes.len() > MAX_REGIONS_PER_CALL {
+        bail!("too many exclude regions in one call ({}); the limit is {}", shapes.len(), MAX_REGIONS_PER_CALL);
+    }
+    Ok(shapes)
+}
+
+fn mask_notes(mask: Option<&PixelMask>) -> Vec<String> {
+    mask.map_or_else(Vec::new, PixelMask::notes)
+}
+
+fn with_mask(mut body: Value, mask: Option<&PixelMask>, t0: Instant) -> Value {
     if let Some(obj) = body.as_object_mut() {
-        obj.insert(RES_MASKED.to_string(), json!(masked));
+        obj.insert(RES_MASKED.to_string(), json!(mask.is_some_and(PixelMask::masked)));
+        obj.insert(RES_DQ_EXCLUDED.to_string(), json!(mask.and_then(|m| m.dq_excluded)));
+        obj.insert(RES_REGION_EXCLUDED.to_string(), json!(mask.map_or(0, |m| m.region_excluded)));
         obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
+        let notes = obj.entry(RES_NOTES).or_insert_with(|| json!([]));
+        if let Some(list) = notes.as_array_mut() {
+            list.extend(mask_notes(mask).into_iter().map(Value::String));
+        }
     }
     body
 }
@@ -279,12 +295,11 @@ fn with_timing(mut body: Value, masked: bool, t0: Instant) -> Value {
 pub(crate) fn stats_for_entry(
     entry: &ImageEntry,
     regions: &[RegionStatsRequest],
-    mask: Option<&DqMask>,
+    excluded: Option<&Array2<u8>>,
     err: Option<&Array2<f32>>,
     clip: SigmaClip,
     cal: &EntryCalibration,
 ) -> Vec<Value> {
-    let excluded = mask.map(|m| &m.map);
     regions
         .iter()
         .map(|req| {
@@ -333,27 +348,37 @@ pub async fn region_stats_cmd(
     exclude_dq: Option<bool>,
     sigma: Option<f32>,
     maxiters: Option<usize>,
+    exclude: Option<Vec<RegionShape>>,
 ) -> Result<Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         if regions.len() > MAX_REGIONS_PER_CALL {
             bail!("too many regions in one call ({}); the limit is {}", regions.len(), MAX_REGIONS_PER_CALL);
         }
+        let exclude = exclude_shapes(exclude)?;
         let clip = sigma_clip_params(sigma, maxiters)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
+        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
         let err_entry = companion_err(&path, entry.arr().dim());
         let cal = entry_calibration(&entry);
-        let entries =
-            stats_for_entry(&entry, &regions, mask.as_ref(), err_entry.as_ref().map(|e| e.arr()), clip, &cal);
+        let entries = stats_for_entry(
+            &entry,
+            &regions,
+            mask.as_ref().map(|m| &m.map),
+            err_entry.as_ref().map(|e| e.arr()),
+            clip,
+            &cal,
+        );
         let photcal = match &cal.photcal {
             Some(photcal) => photcal_json(photcal)?,
             None => Value::Null,
         };
         Ok(json!({
             RES_REGIONS: entries,
-            RES_MASKED: mask.is_some(),
-            RES_DQ_EXCLUDED: mask.as_ref().map(|m| m.excluded),
+            RES_MASKED: mask.as_ref().is_some_and(PixelMask::masked),
+            RES_DQ_EXCLUDED: mask.as_ref().and_then(|m| m.dq_excluded),
+            RES_REGION_EXCLUDED: mask.as_ref().map_or(0, |m| m.region_excluded),
+            RES_NOTES: mask_notes(mask.as_ref()),
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
             RES_PHOTCAL: photcal,
             RES_CALIBRATION_WARNINGS: cal.warnings,
@@ -370,11 +395,13 @@ pub async fn radial_profile_cmd(
     max_radius: f64,
     background: Option<[f64; 2]>,
     exclude_dq: Option<bool>,
+    exclude: Option<Vec<RegionShape>>,
 ) -> Result<Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
+        let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
+        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
         let profile = radial_profile(
             entry.arr(),
             x,
@@ -383,7 +410,7 @@ pub async fn radial_profile_cmd(
             background.map(|b| (b[0], b[1])),
             mask.as_ref().map(|m| &m.map),
         )?;
-        Ok(with_timing(serde_json::to_value(profile)?, mask.is_some(), t0))
+        Ok(with_mask(serde_json::to_value(profile)?, mask.as_ref(), t0))
     })
 }
 
@@ -395,13 +422,15 @@ pub async fn line_cut_cmd(
     x2: f64,
     y2: f64,
     exclude_dq: Option<bool>,
+    exclude: Option<Vec<RegionShape>>,
 ) -> Result<Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
+        let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
+        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
         let cut = line_cut(entry.arr(), x1, y1, x2, y2, mask.as_ref().map(|m| &m.map))?;
-        Ok(with_timing(serde_json::to_value(cut)?, mask.is_some(), t0))
+        Ok(with_mask(serde_json::to_value(cut)?, mask.as_ref(), t0))
     })
 }
 
@@ -444,7 +473,7 @@ pub(crate) fn sb_profile_json(
     shape: &RegionShape,
     background: Option<&RegionShape>,
     cal: &EntryCalibration,
-    masked: bool,
+    mask: Option<&PixelMask>,
     t0: Instant,
 ) -> anyhow::Result<Value> {
     let pixel_scale = cal.wcs.as_ref().map(|w| w.pixel_scale_arcsec()).and_then(positive_finite);
@@ -472,7 +501,7 @@ pub(crate) fn sb_profile_json(
     obj.insert(RES_CALIBRATION_WARNINGS.to_string(), json!(cal.warnings));
     obj.insert(RES_TOTAL_MAG_AB.to_string(), json!(total_mag_ab));
     obj.insert(RES_NOTES.to_string(), json!(sb_profile_notes(shape, background)));
-    Ok(with_timing(body, masked, t0))
+    Ok(with_mask(body, mask, t0))
 }
 
 #[tauri::command]
@@ -482,6 +511,7 @@ pub async fn sb_profile_cmd(
     bin_width: Option<f64>,
     background: Option<RegionShape>,
     exclude_dq: Option<bool>,
+    exclude: Option<Vec<RegionShape>>,
 ) -> Result<Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -493,8 +523,9 @@ pub async fn sb_profile_cmd(
         if let Some(bg) = &background {
             bg.validate()?;
         }
+        let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_dq_mask(&path, exclude_dq.unwrap_or(false), entry.arr().dim());
+        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
         let profile = elliptical_profile(
             entry.arr(),
             x,
@@ -507,7 +538,7 @@ pub async fn sb_profile_cmd(
             mask.as_ref().map(|m| &m.map),
         )?;
         let cal = entry_calibration(&entry);
-        sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.is_some(), t0)
+        sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.as_ref(), t0)
     })
 }
 
@@ -540,14 +571,381 @@ pub async fn regions_export_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::analysis::resolve_dq_mask;
     use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
     use crate::core::imaging::region_file::RegionProperties;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
     use crate::infra::fits::writer::write_fits_mono;
     use ndarray::Array2;
 
+    const STAR_X: usize = 30;
+    const STAR_Y: usize = 30;
+
     fn req(id: &str, shape: RegionShape) -> RegionStatsRequest {
         RegionStatsRequest { id: id.into(), shape, background: None }
+    }
+
+    fn write_star_field(dir: &std::path::Path) -> String {
+        let mut arr = Array2::<f32>::from_elem((64, 64), 1.0);
+        arr[[STAR_Y, STAR_X]] = 100.0;
+        let path = dir.join("star_field.fits");
+        write_fits_mono(path.to_str().unwrap(), &arr, None).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn lattice(shape: &RegionShape) -> u64 {
+        shape.masked_values(&Array2::<f32>::zeros((64, 64)), None).n_inside
+    }
+
+    fn star_exclusion() -> RegionShape {
+        RegionShape::Circle { x: STAR_X as f64, y: STAR_Y as f64, r: 5.0 }
+    }
+
+    #[tokio::test]
+    async fn region_stats_leave_out_pixels_inside_exclude_regions_and_report_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let outer = RegionShape::Circle { x: 32.0, y: 32.0, r: 20.0 };
+        let inner = lattice(&star_exclusion());
+        assert!(inner > 0 && inner < lattice(&outer));
+
+        let out = region_stats_cmd(key.clone(), vec![req("outer", outer.clone())], None, None, None, Some(vec![star_exclusion()]))
+            .await
+            .unwrap();
+        assert!(out[RES_REGIONS][0][RES_ERROR].is_null(), "{out}");
+        let stats = &out[RES_REGIONS][0][RES_STATS];
+        assert_eq!(stats["count"], lattice(&outer) - inner, "{stats}");
+        assert_eq!(stats["mean"], 1.0, "{stats}");
+        assert_eq!(stats["n_excluded"], inner, "{stats}");
+        assert_eq!(out[RES_REGION_EXCLUDED], inner, "{out}");
+        assert_eq!(out[RES_MASKED], true, "{out}");
+        assert!(out[RES_DQ_EXCLUDED].is_null(), "{out}");
+
+        let plain = region_stats_cmd(key, vec![req("outer", outer)], None, None, None, None).await.unwrap();
+        let stats = &plain[RES_REGIONS][0][RES_STATS];
+        assert!(stats["mean"].as_f64().unwrap() > 1.0, "{stats}");
+        assert_eq!(stats["n_excluded"], 0, "{stats}");
+        assert_eq!(plain[RES_REGION_EXCLUDED], 0, "{plain}");
+        assert_eq!(plain[RES_MASKED], false, "{plain}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_combine_dq_and_exclude_regions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq_and_exclude.fits");
+        let mut dq = vec![-2147483648i32; 16];
+        dq[1] = -2147483647;
+        dq[6] = -2147483645;
+        dq[9] = -2147483646;
+        sci_err_dq_mef(&path, 4, 4, dq);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+        let whole = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
+        let overlapping_dq_pixel_6 = RegionShape::Box { x: 2.5, y: 1.5, width: 2.0, height: 2.0, angle: 0.0 };
+
+        let out = region_stats_cmd(key, vec![req("all", whole)], Some(true), None, None, Some(vec![overlapping_dq_pixel_6]))
+            .await
+            .unwrap();
+        assert_eq!(out[RES_DQ_EXCLUDED], 2, "{out}");
+        assert_eq!(out[RES_REGION_EXCLUDED], 3, "{out}");
+        assert_eq!(out[RES_MASKED], true, "{out}");
+        let stats = &out[RES_REGIONS][0][RES_STATS];
+        assert_eq!(stats["n_excluded"], 5, "{stats}");
+        assert_eq!(stats["n_padding"], 1, "{stats}");
+        assert_eq!(stats["count"], 10, "{stats}");
+        assert_eq!(stats["sum"], 85.0, "{stats}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_and_radial_profile_apply_exclude_regions_to_the_background_annulus() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let inner = lattice(&star_exclusion());
+        let annulus = RegionShape::Annulus { x: 20.0, y: 20.0, r_inner: 5.0, r_outer: 22.0 };
+        let sky = lattice(&annulus);
+        assert!(annulus.contains(STAR_X as f64, STAR_Y as f64));
+        let target = || RegionStatsRequest {
+            id: "net".into(),
+            shape: RegionShape::Circle { x: 20.0, y: 20.0, r: 3.0 },
+            background: Some(annulus.clone()),
+        };
+
+        let open = region_stats_cmd(key.clone(), vec![target()], None, None, None, None).await.unwrap();
+        assert_eq!(open[RES_REGIONS][0][RES_STATS]["background"]["count"], sky, "{open}");
+
+        let masked = region_stats_cmd(key.clone(), vec![target()], None, None, None, Some(vec![star_exclusion()])).await.unwrap();
+        let stats = &masked[RES_REGIONS][0][RES_STATS];
+        assert_eq!(stats["background"]["count"], sky - inner, "{stats}");
+        assert_eq!(stats["n_excluded"], 0, "{stats}");
+        assert_eq!(masked[RES_REGION_EXCLUDED], inner, "{masked}");
+
+        let radial_open = radial_profile_cmd(key.clone(), 20.0, 20.0, 4.0, Some([5.0, 22.0]), None, None).await.unwrap();
+        assert_eq!(radial_open["background"]["count"], sky, "{radial_open}");
+        let radial = radial_profile_cmd(key, 20.0, 20.0, 4.0, Some([5.0, 22.0]), None, Some(vec![star_exclusion()]))
+            .await
+            .unwrap();
+        assert_eq!(radial["background"]["count"], sky - inner, "{radial}");
+        assert_eq!(radial[RES_REGION_EXCLUDED], inner, "{radial}");
+    }
+
+    #[tokio::test]
+    async fn a_region_inside_an_exclude_region_reports_the_exclusion_not_missing_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let core = RegionShape::Circle { x: STAR_X as f64, y: STAR_Y as f64, r: 2.0 };
+        let out = region_stats_cmd(key, vec![req("core", core)], None, None, None, Some(vec![star_exclusion()])).await.unwrap();
+        let row = &out[RES_REGIONS][0];
+        assert!(row[RES_STATS].is_null(), "{row}");
+        let err = row[RES_ERROR].as_str().unwrap();
+        assert!(err.contains("no pixels left after exclusion"), "{err}");
+        assert_eq!(out[RES_REGION_EXCLUDED], lattice(&star_exclusion()), "{out}");
+    }
+
+    #[tokio::test]
+    async fn profiles_and_line_cut_honour_exclude_regions() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let inner = lattice(&star_exclusion());
+        let exclude = Some(vec![star_exclusion()]);
+        let (cx, cy) = (STAR_X as f64, STAR_Y as f64);
+
+        let radial = radial_profile_cmd(key.clone(), cx, cy, 15.0, None, None, exclude.clone()).await.unwrap();
+        let bins = radial[RES_BINS].as_array().unwrap();
+        for bin in &bins[..5] {
+            assert_eq!(bin["count"], 0, "{bin}");
+        }
+        assert!(bins[5]["count"].as_u64().unwrap() > 0, "{}", bins[5]);
+        assert_eq!(radial[RES_REGION_EXCLUDED], inner, "{radial}");
+        assert_eq!(radial[RES_MASKED], true, "{radial}");
+        assert!(radial[RES_DQ_EXCLUDED].is_null(), "{radial}");
+
+        let cut = line_cut_cmd(key.clone(), 10.0, cy, 50.0, cy, None, exclude.clone()).await.unwrap();
+        let xs = cut["xs"].as_array().unwrap();
+        let values = cut["values"].as_array().unwrap();
+        let at = |x: f64| xs.iter().position(|v| (v.as_f64().unwrap() - x).abs() < 1e-9).unwrap();
+        assert_eq!(values[at(10.0)], 1.0, "{cut}");
+        assert!(values[at(30.0)].is_null(), "{cut}");
+        assert!(values[at(26.0)].is_null(), "{cut}");
+        assert_eq!(values[at(50.0)], 1.0, "{cut}");
+        assert_eq!(cut[RES_REGION_EXCLUDED], inner, "{cut}");
+        assert_eq!(cut[RES_MASKED], true, "{cut}");
+
+        let disc = RegionShape::Circle { x: cx, y: cy, r: 15.0 };
+        let sb = sb_profile_cmd(key.clone(), disc, Some(1.0), None, None, exclude).await.unwrap();
+        let bins = sb[RES_BINS].as_array().unwrap();
+        assert_eq!(bins[0]["count"], 0, "{}", bins[0]);
+        assert_eq!(bins[4]["count"], 0, "{}", bins[4]);
+        assert!(bins[6]["count"].as_u64().unwrap() > 0, "{}", bins[6]);
+        assert_eq!(sb[RES_REGION_EXCLUDED], inner, "{sb}");
+        assert_eq!(sb[RES_MASKED], true, "{sb}");
+
+        let open = radial_profile_cmd(key, cx, cy, 15.0, None, None, None).await.unwrap();
+        assert!(open[RES_BINS][0]["count"].as_u64().unwrap() > 0, "{open}");
+        assert_eq!(open[RES_REGION_EXCLUDED], 0, "{open}");
+        assert_eq!(open[RES_MASKED], false, "{open}");
+    }
+
+    fn invalid_exclusions() -> Vec<RegionShape> {
+        vec![
+            RegionShape::Circle { x: 10.0, y: 10.0, r: 0.0 },
+            RegionShape::Annulus { x: 10.0, y: 10.0, r_inner: 6.0, r_outer: 6.0 },
+            RegionShape::Polygon { points: vec![[1.0, 1.0], [5.0, 5.0]] },
+            RegionShape::Box { x: 10.0, y: 10.0, width: 0.0, height: 4.0, angle: 0.0 },
+        ]
+    }
+
+    fn mixed_exclusions() -> Vec<RegionShape> {
+        let mut shapes = invalid_exclusions();
+        shapes.insert(2, star_exclusion());
+        shapes
+    }
+
+    const FOUR_SKIPPED: &str = "4 exclude regions skipped: invalid shape";
+
+    #[tokio::test]
+    async fn region_stats_skip_invalid_exclude_shapes_and_say_so_in_the_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let outer = RegionShape::Circle { x: 32.0, y: 32.0, r: 20.0 };
+        let inner = lattice(&star_exclusion());
+
+        let out = region_stats_cmd(key.clone(), vec![req("outer", outer.clone())], None, None, None, Some(mixed_exclusions()))
+            .await
+            .unwrap();
+        assert!(out[RES_REGIONS][0][RES_ERROR].is_null(), "{out}");
+        assert_eq!(out[RES_REGIONS][0][RES_STATS]["n_excluded"], inner, "{out}");
+        assert_eq!(out[RES_REGION_EXCLUDED], inner, "{out}");
+        assert_eq!(out[RES_MASKED], true, "{out}");
+        assert_eq!(out[RES_NOTES], json!([FOUR_SKIPPED]), "{out}");
+
+        let one = region_stats_cmd(key.clone(), vec![req("outer", outer.clone())], None, None, None, Some(invalid_exclusions()[..1].to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(one[RES_NOTES], json!(["1 exclude region skipped: invalid shape"]), "{one}");
+        assert_eq!(one[RES_REGION_EXCLUDED], 0, "{one}");
+        assert_eq!(one[RES_MASKED], false, "{one}");
+        assert_eq!(one[RES_REGIONS][0][RES_STATS]["n_excluded"], 0, "{one}");
+
+        let plain = region_stats_cmd(key, vec![req("outer", outer)], None, None, None, None).await.unwrap();
+        assert_eq!(plain[RES_NOTES], json!([]), "{plain}");
+    }
+
+    #[tokio::test]
+    async fn radial_profile_skips_invalid_exclude_shapes_and_says_so_in_the_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let (cx, cy) = (STAR_X as f64, STAR_Y as f64);
+        let radial = radial_profile_cmd(key.clone(), cx, cy, 15.0, None, None, Some(mixed_exclusions())).await.unwrap();
+        assert_eq!(radial[RES_BINS][0]["count"], 0, "{radial}");
+        assert_eq!(radial[RES_REGION_EXCLUDED], lattice(&star_exclusion()), "{radial}");
+        assert_eq!(radial[RES_NOTES], json!([FOUR_SKIPPED]), "{radial}");
+        let open = radial_profile_cmd(key, cx, cy, 15.0, None, None, None).await.unwrap();
+        assert_eq!(open[RES_NOTES], json!([]), "{open}");
+    }
+
+    #[tokio::test]
+    async fn line_cut_skips_invalid_exclude_shapes_and_says_so_in_the_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let cy = STAR_Y as f64;
+        let cut = line_cut_cmd(key.clone(), 10.0, cy, 50.0, cy, None, Some(mixed_exclusions())).await.unwrap();
+        let xs = cut["xs"].as_array().unwrap();
+        let values = cut["values"].as_array().unwrap();
+        let at = |x: f64| xs.iter().position(|v| (v.as_f64().unwrap() - x).abs() < 1e-9).unwrap();
+        assert!(values[at(30.0)].is_null(), "{cut}");
+        assert_eq!(values[at(10.0)], 1.0, "{cut}");
+        assert_eq!(cut[RES_REGION_EXCLUDED], lattice(&star_exclusion()), "{cut}");
+        assert_eq!(cut[RES_NOTES], json!([FOUR_SKIPPED]), "{cut}");
+        let open = line_cut_cmd(key, 10.0, cy, 50.0, cy, None, None).await.unwrap();
+        assert_eq!(open[RES_NOTES], json!([]), "{open}");
+    }
+
+    #[tokio::test]
+    async fn sb_profile_skips_invalid_exclude_shapes_and_appends_the_note_to_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let disc = RegionShape::Circle { x: STAR_X as f64, y: STAR_Y as f64, r: 15.0 };
+        let sb = sb_profile_cmd(key.clone(), disc.clone(), Some(1.0), None, None, Some(mixed_exclusions())).await.unwrap();
+        assert_eq!(sb[RES_BINS][0]["count"], 0, "{sb}");
+        assert_eq!(sb[RES_REGION_EXCLUDED], lattice(&star_exclusion()), "{sb}");
+        let notes = sb[RES_NOTES].as_array().unwrap();
+        assert_eq!(notes[0], SB_COARSE_BIN_NOTE, "{sb}");
+        assert_eq!(notes[1], SB_NO_BACKGROUND_NOTE, "{sb}");
+        assert_eq!(notes.last().unwrap(), FOUR_SKIPPED, "{sb}");
+        let open = sb_profile_cmd(key, disc, Some(1.0), None, None, None).await.unwrap();
+        assert_eq!(open[RES_NOTES], json!([SB_COARSE_BIN_NOTE, SB_NO_BACKGROUND_NOTE]), "{open}");
+    }
+
+    fn write_half_plane(dir: &std::path::Path) -> String {
+        let arr = Array2::<f32>::from_shape_fn((64, 64), |(_, x)| if x > 20 { 100.0 } else { 1.0 });
+        let path = dir.join("half_plane.fits");
+        write_fits_mono(path.to_str().unwrap(), &arr, None).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn an_exclude_disc_inside_the_background_annulus_moves_the_background_median() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_half_plane(dir.path());
+        let annulus = RegionShape::Annulus { x: 20.0, y: 20.0, r_inner: 5.0, r_outer: 22.0 };
+        let dark_side = RegionShape::Circle { x: 11.0, y: 20.0, r: 8.0 };
+        let count = |pred: &dyn Fn(i64, i64) -> bool| {
+            (0..64i64).flat_map(|y| (0..64i64).map(move |x| (x, y))).filter(|&(x, y)| pred(x, y)).count() as u64
+        };
+        let in_annulus = |x: i64, y: i64| annulus.contains(x as f64, y as f64);
+        let ones = count(&|x, y| in_annulus(x, y) && x <= 20);
+        let hundreds = count(&|x, y| in_annulus(x, y) && x > 20);
+        let removed = count(&|x, y| in_annulus(x, y) && dark_side.contains(x as f64, y as f64));
+        assert!(ones > hundreds && ones - removed < hundreds, "{ones} {hundreds} {removed}");
+        assert_eq!(count(&|x, y| in_annulus(x, y) && x > 20 && dark_side.contains(x as f64, y as f64)), 0);
+        let target = || RegionStatsRequest {
+            id: "net".into(),
+            shape: RegionShape::Circle { x: 20.0, y: 20.0, r: 3.0 },
+            background: Some(annulus.clone()),
+        };
+
+        let open = region_stats_cmd(key.clone(), vec![target()], None, None, None, None).await.unwrap();
+        let bg = &open[RES_REGIONS][0][RES_STATS]["background"];
+        assert_eq!(bg["median"], 1.0, "{bg}");
+        assert_eq!(bg["count"], ones + hundreds, "{bg}");
+
+        let masked = region_stats_cmd(key.clone(), vec![target()], None, None, None, Some(vec![dark_side.clone()])).await.unwrap();
+        let bg = &masked[RES_REGIONS][0][RES_STATS]["background"];
+        assert_eq!(bg["median"], 100.0, "{bg}");
+        assert_eq!(bg["count"], ones + hundreds - removed, "{bg}");
+        assert_eq!(masked[RES_REGION_EXCLUDED], lattice(&dark_side), "{masked}");
+
+        let radial_open = radial_profile_cmd(key.clone(), 20.0, 20.0, 4.0, Some([5.0, 22.0]), None, None).await.unwrap();
+        assert_eq!(radial_open["background"]["median"], 1.0, "{radial_open}");
+        let radial = radial_profile_cmd(key, 20.0, 20.0, 4.0, Some([5.0, 22.0]), None, Some(vec![dark_side])).await.unwrap();
+        assert_eq!(radial["background"]["median"], 100.0, "{radial}");
+        assert_eq!(radial["background"]["count"], ones + hundreds - removed, "{radial}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_cmd_refuses_more_exclude_shapes_than_the_limit() {
+        let too_many: Vec<RegionShape> =
+            (0..=MAX_REGIONS_PER_CALL).map(|i| RegionShape::Circle { x: i as f64, y: 1.0, r: 1.0 }).collect();
+        let shape = RegionShape::Circle { x: 4.0, y: 4.0, r: 2.0 };
+        let err = region_stats_cmd("nowhere.fits".into(), vec![req("r", shape)], None, None, None, Some(too_many))
+            .await
+            .unwrap_err();
+        assert!(err.contains("too many exclude regions in one call (513); the limit is 512"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn profile_commands_refuse_more_exclude_shapes_than_the_limit() {
+        let too_many: Vec<RegionShape> =
+            (0..=MAX_REGIONS_PER_CALL).map(|i| RegionShape::Circle { x: i as f64, y: 1.0, r: 1.0 }).collect();
+        let expected = "too many exclude regions in one call (513); the limit is 512";
+        let radial = radial_profile_cmd("nowhere.fits".into(), 4.0, 4.0, 2.0, None, None, Some(too_many.clone()))
+            .await
+            .unwrap_err();
+        assert!(radial.contains(expected), "{radial}");
+        let cut = line_cut_cmd("nowhere.fits".into(), 0.0, 4.0, 8.0, 4.0, None, Some(too_many.clone())).await.unwrap_err();
+        assert!(cut.contains(expected), "{cut}");
+        let shape = RegionShape::Circle { x: 4.0, y: 4.0, r: 2.0 };
+        let sb = sb_profile_cmd("nowhere.fits".into(), shape, Some(1.0), None, None, Some(too_many)).await.unwrap_err();
+        assert!(sb.contains(expected), "{sb}");
+    }
+
+    #[tokio::test]
+    async fn region_stats_on_an_stf_export_report_the_display_referred_reason_and_no_photcal() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_jwst_disc(dir.path(), "calibrated_source.fits", &[]);
+        let out = dir.path().join("calibrated_source_stf.fits").to_str().unwrap().to_string();
+        let reply = crate::cmd::export::export_fits(
+            source.clone(),
+            out.clone(),
+            Some(true),
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply[crate::types::constants::RES_DISPLAY_REFERRED], true, "{reply}");
+
+        let stats = region_stats_cmd(out.clone(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
+        assert!(stats[RES_PHOTCAL].is_null(), "{stats}");
+        let warnings: Vec<&str> =
+            stats[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert!(warnings[0].contains("display-referred (ABDISP=T)"), "{warnings:?}");
+        assert!(!warnings.iter().any(|w| w.contains("no photometric calibration in the header")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| *w == "photometry on processed data (stf_export)"), "{warnings:?}");
+        assert!(stats[RES_REGIONS][0][RES_STATS][RES_CALIBRATED].is_null(), "{stats}");
+
+        let sb = sb_profile_cmd(out, circle(4.0), Some(1.0), None, None, None).await.unwrap();
+        assert!(sb[RES_PHOTCAL].is_null(), "{sb}");
+        assert!(sb[RES_CALIBRATION_WARNINGS][0].as_str().unwrap().contains("display-referred (ABDISP=T)"), "{sb}");
+
+        let linear = region_stats_cmd(source, vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
+        assert!(linear[RES_PHOTCAL].is_object(), "{linear}");
+        assert!(linear[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{linear}");
     }
 
     #[test]
@@ -569,7 +967,7 @@ mod tests {
             req("all", whole.clone()),
             req("empty", RegionShape::Circle { x: 100.0, y: 100.0, r: 2.0 }),
         ];
-        let out = stats_for_entry(&entry, &regions, Some(&mask), None, SigmaClip::default(), &EntryCalibration::none());
+        let out = stats_for_entry(&entry, &regions, Some(&mask.map), None, SigmaClip::default(), &EntryCalibration::none());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0][RES_ID], "all");
         assert!(out[0][RES_ERROR].is_null());
@@ -619,7 +1017,7 @@ mod tests {
         assert!(out[0][RES_STATS]["weighted_mean"].as_f64().unwrap().is_finite());
 
         let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
-        let masked = stats_for_entry(&entry, &regions, Some(&mask), Some(err.arr()), SigmaClip::default(), &EntryCalibration::none());
+        let masked = stats_for_entry(&entry, &regions, Some(&mask.map), Some(err.arr()), SigmaClip::default(), &EntryCalibration::none());
         let expected_masked: f64 = (0..16)
             .filter(|i| *i != 1 && *i != 6)
             .map(|i| (0.5 * i as f64).powi(2))
@@ -759,14 +1157,14 @@ mod tests {
         let regions = || vec![req("all", RegionShape::Box { x: 3.5, y: 3.5, width: 8.0, height: 8.0, angle: 0.0 })];
 
         for sigma in [-1.0f32, 0.0, f32::NAN, f32::INFINITY] {
-            let err = region_stats_cmd(key.clone(), regions(), None, Some(sigma), None).await.unwrap_err();
+            let err = region_stats_cmd(key.clone(), regions(), None, Some(sigma), None, None).await.unwrap_err();
             assert!(err.contains("sigma must be a finite number greater than 0"), "{err}");
         }
         for maxiters in [0usize, MAX_SIGMA_CLIP_ITERS + 1] {
-            let err = region_stats_cmd(key.clone(), regions(), None, None, Some(maxiters)).await.unwrap_err();
+            let err = region_stats_cmd(key.clone(), regions(), None, None, Some(maxiters), None).await.unwrap_err();
             assert!(err.contains("maxiters must be between 1 and 100"), "{err}");
         }
-        let ok = region_stats_cmd(key, regions(), None, Some(2.5), Some(MAX_SIGMA_CLIP_ITERS)).await.unwrap();
+        let ok = region_stats_cmd(key, regions(), None, Some(2.5), Some(MAX_SIGMA_CLIP_ITERS), None).await.unwrap();
         assert!(ok[RES_REGIONS][0][RES_ERROR].is_null(), "{ok}");
         assert_eq!(ok[RES_REGIONS][0][RES_STATS]["count"], 64);
     }
@@ -829,7 +1227,7 @@ mod tests {
             req("ellipse", ellipse.clone()),
             req("polygon", RegionShape::Polygon { points: vec![[45.0, 45.0], [55.0, 45.0], [50.0, 55.0]] }),
         ];
-        let out = region_stats_cmd(key.clone(), regions, None, None, None).await.unwrap();
+        let out = region_stats_cmd(key.clone(), regions, None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"), "{out}");
         assert_eq!(out[RES_PHOTCAL]["convention"]["kind"], "jwst_mjy_sr");
         assert!(out[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{out}");
@@ -902,7 +1300,7 @@ mod tests {
     async fn region_stats_refuse_calibration_on_display_referred_or_processed_data() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_jwst_disc(dir.path(), "stretched.fits", &[("ABDISP", "T"), ("ABPROC", "arcsinh_stretch")]);
-        let out = region_stats_cmd(key, vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        let out = region_stats_cmd(key, vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL].is_null(), "{out}");
         let warnings: Vec<&str> = out[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
         assert!(warnings[0].contains("display-referred"), "{warnings:?}");
@@ -923,7 +1321,7 @@ mod tests {
         let path = dir.path().join("plain_disc.fits");
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), None).unwrap();
         let key = path.to_str().unwrap().to_string();
-        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL].is_null());
         assert!(out[RES_PIXEL_AREA_ARCSEC2].is_null());
         let warnings = out[RES_CALIBRATION_WARNINGS].as_array().unwrap();
@@ -1014,7 +1412,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = write_flat_sb_disc(dir.path());
         let shape = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 24.0, ry: 12.0, angle: 30.0 };
-        let out = sb_profile_cmd(key.clone(), shape, None, None, None).await.unwrap();
+        let out = sb_profile_cmd(key.clone(), shape, None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL][RES_LABEL].as_str().unwrap().contains("JWST MJy/sr"), "{out}");
         assert!(out[RES_CALIBRATION_WARNINGS].as_array().unwrap().is_empty(), "{out}");
         assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - SB_PIXEL_SCALE_ARCSEC.powi(2)).abs() < 1e-15);
@@ -1063,7 +1461,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = write_flat_sb_disc(dir.path());
         let wide = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 16.0, ry: 8.0, angle: 30.0 };
-        let out = sb_profile_cmd(key.clone(), wide.clone(), Some(2.0), None, None).await.unwrap();
+        let out = sb_profile_cmd(key.clone(), wide.clone(), Some(2.0), None, None, None).await.unwrap();
         let pa = out[RES_SKY_PA_DEG].as_f64().unwrap();
         assert!((pa - 120.0).abs() < 1e-6, "major axis 30 deg from the x axis on a north-up frame has PA 120, got {pa}");
 
@@ -1074,7 +1472,7 @@ mod tests {
         assert!((pa - region_pa).abs() < 1e-9, "profile {pa} vs region block {region_pa}");
 
         let tall = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 8.0, ry: 16.0, angle: -60.0 };
-        let swapped = sb_profile_cmd(key.clone(), tall, Some(2.0), None, None).await.unwrap();
+        let swapped = sb_profile_cmd(key.clone(), tall, Some(2.0), None, None, None).await.unwrap();
         assert!((swapped[RES_SKY_PA_DEG].as_f64().unwrap() - 120.0).abs() < 1e-6, "{swapped}");
         assert_eq!(swapped["angle_deg"], 30.0);
         assert_eq!(swapped[RES_BINS], out[RES_BINS]);
@@ -1082,7 +1480,7 @@ mod tests {
         assert_eq!(notes.last().unwrap(), SB_AXES_SWAPPED_NOTE);
 
         let annulus = RegionShape::Annulus { x: DISC_CENTRE, y: DISC_CENTRE, r_inner: 20.0, r_outer: 30.0 };
-        let with_bg = sb_profile_cmd(key, circle(12.0), Some(1.0), Some(annulus), None).await.unwrap();
+        let with_bg = sb_profile_cmd(key, circle(12.0), Some(1.0), Some(annulus), None, None).await.unwrap();
         assert!((with_bg["background"]["median"].as_f64().unwrap() - SB_DISC_FLOOR as f64).abs() < 1e-9, "{with_bg}");
         assert!(with_bg[RES_SKY_PA_DEG].is_null(), "a circle has no major axis: {with_bg}");
         assert_eq!(with_bg[RES_NOTES][1], "background from annulus region");
@@ -1095,7 +1493,7 @@ mod tests {
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header_with_cd(jwst_north_up_cd()))).unwrap();
         let key = path.to_str().unwrap().to_string();
         let ellipse = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 6.0, ry: 3.0, angle: 0.0 };
-        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0)), req("e", ellipse)], None, None, None)
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0)), req("e", ellipse)], None, None, None, None)
             .await
             .unwrap();
         assert!(out[RES_PHOTCAL].is_null(), "{out}");
@@ -1137,7 +1535,7 @@ mod tests {
         for (tall, expected) in tall_ellipses {
             let pa = region_pa(&tall);
             assert!(axis_angle_gap_deg(pa, expected) < 1e-6, "{tall:?}: major-axis PA {expected}, got {pa}");
-            let profile = sb_profile_cmd(key.clone(), tall.clone(), Some(2.0), None, None).await.unwrap();
+            let profile = sb_profile_cmd(key.clone(), tall.clone(), Some(2.0), None, None, None).await.unwrap();
             assert_eq!(profile[RES_SKY_PA_DEG].as_f64().unwrap(), pa, "{tall:?}");
         }
         let boxed = |width: f64, height: f64, angle: f64| RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width, height, angle };
@@ -1174,7 +1572,7 @@ mod tests {
             let expected = (native_north + 90.0).rem_euclid(POSITION_ANGLE_PERIOD_DEG);
             assert!((expected - approximate).abs() < 0.01, "{ctype1}: native equator at the reference point has PA {expected}");
 
-            let out = region_stats_cmd(key.clone(), vec![req("e", along_x.clone())], None, None, None).await.unwrap();
+            let out = region_stats_cmd(key.clone(), vec![req("e", along_x.clone())], None, None, None, None).await.unwrap();
             let stats = &out[RES_REGIONS][0][RES_STATS];
             let pa = stats[RES_CALIBRATED][RES_PA_SKY_DEG].as_f64().unwrap();
             assert!(axis_angle_gap_deg(pa, expected) < 1e-6, "{ctype1}: the pixel x axis has equatorial PA {expected}, got {pa}");
@@ -1184,7 +1582,7 @@ mod tests {
             let line_pa = position_angle_deg(centre.ra, centre.dec, far.ra, far.dec);
             assert!(axis_angle_gap_deg(pa, line_pa) < 1e-6, "{ctype1}: region {pa} vs a line along the same axis {line_pa}");
 
-            let sb = sb_profile_cmd(key, along_x.clone(), None, None, None).await.unwrap();
+            let sb = sb_profile_cmd(key, along_x.clone(), None, None, None, None).await.unwrap();
             assert_eq!(sb[RES_SKY_PA_DEG].as_f64().unwrap(), pa, "{ctype1}");
         }
     }
@@ -1196,11 +1594,11 @@ mod tests {
         let round = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 10.0, ry: 10.0, angle: 37.0 };
         let square = RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width: 8.0, height: 8.0, angle: 20.0 };
         for shape in [circle(10.0), round.clone()] {
-            let out = sb_profile_cmd(key.clone(), shape.clone(), Some(2.0), None, None).await.unwrap();
+            let out = sb_profile_cmd(key.clone(), shape.clone(), Some(2.0), None, None, None).await.unwrap();
             assert!(out[RES_SKY_PA_DEG].is_null(), "{shape:?}: {}", out[RES_SKY_PA_DEG]);
         }
         let regions = vec![req("circle", circle(10.0)), req("round", round), req("square", square)];
-        let out = region_stats_cmd(key, regions, None, None, None).await.unwrap();
+        let out = region_stats_cmd(key, regions, None, None, None, None).await.unwrap();
         for entry in out[RES_REGIONS].as_array().unwrap() {
             assert!(entry[RES_STATS][RES_CALIBRATED].is_object(), "{entry}");
             assert!(entry[RES_STATS][RES_CALIBRATED][RES_PA_SKY_DEG].is_null(), "{entry}");
@@ -1219,20 +1617,20 @@ mod tests {
         let path = dir.path().join("hst_counts_no_exptime.fits");
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
         let key = path.to_str().unwrap().to_string();
-        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL].is_null(), "a PhotCal that cannot reach Jy must not be reported as calibration: {out}");
         assert!(out[RES_REGIONS][0][RES_STATS][RES_CALIBRATED].is_null(), "{out}");
         let first = out[RES_CALIBRATION_WARNINGS][0].as_str().unwrap();
         assert!(first.starts_with("EXPTIME missing"), "{first}");
         assert!((out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - 1.0).abs() < 1e-9, "{out}");
-        let sb = sb_profile_cmd(key, circle(8.0), None, None, None).await.unwrap();
+        let sb = sb_profile_cmd(key, circle(8.0), None, None, None, None).await.unwrap();
         assert!(sb[RES_PHOTCAL].is_null(), "{sb}");
         assert!(sb[RES_CALIBRATION_WARNINGS][0].as_str().unwrap().starts_with("EXPTIME missing"), "{sb}");
 
         header.set_f64("EXPTIME", 500.0);
         let path = dir.path().join("hst_counts_with_exptime.fits");
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
-        let out = region_stats_cmd(path.to_str().unwrap().into(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+        let out = region_stats_cmd(path.to_str().unwrap().into(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
         assert!(out[RES_PHOTCAL].is_object(), "{out}");
         assert!(out[RES_REGIONS][0][RES_STATS][RES_CALIBRATED]["flux_jy"].as_f64().is_some(), "{out}");
     }
@@ -1247,13 +1645,13 @@ mod tests {
             let path = dir.path().join(format!("{name}.fits"));
             write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
             let key = path.to_str().unwrap().to_string();
-            let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None).await.unwrap();
+            let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
             assert!(out[RES_PHOTCAL].is_null(), "{name}: {out}");
             let warnings: Vec<&str> =
                 out[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
             assert!(warnings[0].contains("no finite positive conversion to Jy"), "{name}: {warnings:?}");
             assert!(warnings.iter().any(|w| w.contains("pixel area derived from the WCS")), "{name}: {warnings:?}");
-            let sb = sb_profile_cmd(key, circle(8.0), None, None, None).await.unwrap();
+            let sb = sb_profile_cmd(key, circle(8.0), None, None, None, None).await.unwrap();
             assert!(sb[RES_PHOTCAL].is_null(), "{name}: {sb}");
             let first = sb[RES_CALIBRATION_WARNINGS][0].as_str().unwrap();
             assert!(first.contains("no finite positive conversion to Jy"), "{name}: {first}");
@@ -1264,7 +1662,7 @@ mod tests {
     async fn sb_profile_single_pixel_bin_keeps_its_surface_brightness_but_has_no_error() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_flat_sb_disc(dir.path());
-        let out = sb_profile_cmd(key, circle(8.0), Some(1.0), None, None).await.unwrap();
+        let out = sb_profile_cmd(key, circle(8.0), Some(1.0), None, None, None).await.unwrap();
         let first = &out[RES_BINS][0];
         assert_eq!(first["count"], 1, "{first}");
         assert!(first["std"].is_null(), "{first}");
@@ -1279,16 +1677,16 @@ mod tests {
     #[tokio::test]
     async fn sb_profile_cmd_rejects_too_elongated_or_too_large_regions_before_loading() {
         let thin = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 100.0, ry: 4.0, angle: 0.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), thin, None, None, None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), thin, None, None, None, None).await.unwrap_err();
         assert!(err.contains("rx = 100, ry = 4") && err.contains("too elongated"), "{err}");
         let tall = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 4.0, ry: 100.0, angle: 0.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), tall, None, None, None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), tall, None, None, None, None).await.unwrap_err();
         assert!(err.contains("rx = 4, ry = 100") && err.contains("too elongated"), "{err}");
         let huge = RegionShape::Circle { x: 5.0, y: 5.0, r: 5000.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), huge, None, None, None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), huge, None, None, None, None).await.unwrap_err();
         assert!(err.contains("circle radius r must be at most 4096 px") && err.contains("got 5000 px"), "{err}");
         let wide = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 3000.0, ry: 5000.0, angle: 0.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), wide, None, None, None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), wide, None, None, None, None).await.unwrap_err();
         assert!(err.contains("semi-major axis") && err.contains("got 5000 px"), "{err}");
         let at_limit = RegionShape::Ellipse { x: 5.0, y: 5.0, rx: 100.0, ry: 5.0, angle: 0.0 };
         assert_eq!(ellipse_geometry(&at_limit).unwrap().3, 0.95);
@@ -1297,14 +1695,14 @@ mod tests {
     #[tokio::test]
     async fn sb_profile_cmd_rejects_bad_bin_widths_and_non_elliptical_shapes_before_loading() {
         let boxed = RegionShape::Box { x: 5.0, y: 5.0, width: 4.0, height: 2.0, angle: 0.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), boxed, None, None, None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), boxed, None, None, None, None).await.unwrap_err();
         assert!(err.contains("needs a circle or ellipse region, got box"), "{err}");
         for bin_width in [0.25, 100.0, f64::NAN] {
-            let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), Some(bin_width), None, None).await.unwrap_err();
+            let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), Some(bin_width), None, None, None).await.unwrap_err();
             assert!(err.contains("bin_width must be between 0.5 and 64 px"), "{err}");
         }
         let bad_bg = RegionShape::Circle { x: 1.0, y: 1.0, r: -2.0 };
-        let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), None, Some(bad_bg), None).await.unwrap_err();
+        let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), None, Some(bad_bg), None, None).await.unwrap_err();
         assert!(err.contains("invalid region"), "{err}");
     }
 }

@@ -702,6 +702,7 @@ mod tests {
         Companions {
             dq: Some(ImageRef::hdu("a.fits", 3)),
             err: Some(ImageRef::hdu("a.fits", 2)),
+            wavelength: None,
         }
     }
 

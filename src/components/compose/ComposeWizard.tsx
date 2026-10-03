@@ -241,6 +241,10 @@ export default function ComposeWizard() {
         return (
           <BlendStep
             state={state}
+            files={doneFiles}
+            filterDetections={filterDetections}
+            onLevelMatchChange={(enabled) => dispatch({ type: "UPDATE", partial: { levelMatch: enabled } })}
+            onLevelScales={(scales) => dispatch({ type: "UPDATE", partial: { blendLevelScales: scales } })}
             onWeightsChange={(weights, preset) => dispatch({ type: "SET_BLEND_WEIGHTS", weights, preset })}
             onCompositeReady={(url, autoStf, dimensions) => {
               if (dimensions) setCompositeDims(dimensions);
@@ -260,6 +264,7 @@ export default function ComposeWizard() {
             doneFiles={doneFiles}
             filterDetections={filterDetections}
             onWbChange={(mode, r, g, b) => dispatch({ type: "SET_WB", mode, r, g, b })}
+            onSpccFactors={(factors) => dispatch({ type: "UPDATE", partial: { wbMode: "spcc", spccFactors: factors } })}
             onScnrChange={(enabled, amount, method, preserveLuminance) =>
               dispatch({ type: "SET_SCNR", enabled, amount, method, preserveLuminance })
             }

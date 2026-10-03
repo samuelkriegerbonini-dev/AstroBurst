@@ -7,6 +7,7 @@ import {
   exportAlignedChannels,
   exportPng,
   exportRgbPng,
+  exportValuesCell,
   parseExtnameList,
   riceSupportsBitpix,
   DEFAULT_QUANTIZE_LEVEL,
@@ -87,6 +88,7 @@ interface ExportResult {
   elapsed_ms?: number;
   compress?: string;
   quantize_level?: number;
+  display_referred?: boolean;
 }
 
 interface RgbChannels {
@@ -497,6 +499,7 @@ export default function ExportPanel({
   const hasHeaderChannels = !!headerChannels && !!(headerChannels.r || headerChannels.g || headerChannels.b);
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
+  const valuesCell = lastResult ? exportValuesCell(lastResult) : null;
   const cutoutInputClass =
     "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-violet-500/50 w-full";
 
@@ -587,6 +590,7 @@ export default function ExportPanel({
               : "none",
           },
           { label: "Time", value: lastResult.elapsed_ms != null ? `${lastResult.elapsed_ms} ms` : "--" },
+          ...(valuesCell ? [valuesCell] : []),
         ]} />
       )}
 
