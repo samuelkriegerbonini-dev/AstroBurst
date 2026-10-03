@@ -15,6 +15,7 @@ import {
   type DockToolId,
 } from "../../utils/dockLayout";
 import { announce, moveAnnouncement } from "./useDockDrag";
+import { focusStripButton } from "./dockGeometry";
 import "./dock.css";
 
 export interface DockMenuRequest {
@@ -169,7 +170,7 @@ function returnFocus(tool: DockToolId, trigger: HTMLButtonElement): void {
   const active = document.activeElement;
   if (active !== null && active !== document.body && active.isConnected) return;
   const target = trigger.isConnected ? trigger : document.querySelector<HTMLElement>(`[data-dock-root] [data-tool-id="${tool}"]`);
-  target?.focus({ preventScroll: true });
+  focusStripButton(target);
 }
 
 function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose(): void }): React.ReactNode {

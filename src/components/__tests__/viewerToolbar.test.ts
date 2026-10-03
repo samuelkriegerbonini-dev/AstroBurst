@@ -51,7 +51,7 @@ describe("GPU viewer toolbar", () => {
   });
 
   it("points the preview badge to Deep Zoom only when the image has a side above the Deep Zoom threshold", () => {
-    expect(renderViewport(null, 5000, 2812)).toMatch(/class="ab-viewer-preview-badge" title="[^"]*open Analysis &gt; Deep Zoom\."/);
+    expect(renderViewport(null, 5000, 2812)).toMatch(/class="ab-viewer-preview-badge" title="[^"]*open Image &gt; Deep Zoom\."/);
     const belowThreshold = renderViewport(null, 3000, 1688);
     expect(belowThreshold).toMatch(/class="ab-viewer-preview-badge" title="The viewer shows a downsampled preview texture \(1920×1080 of 3000×1688 FITS pixels\)\."/);
     expect(belowThreshold).not.toContain("Deep Zoom");

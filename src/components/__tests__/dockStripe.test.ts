@@ -3,9 +3,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Stripe from "../dock/Stripe";
 import type { StripButtonDragProps } from "../dock/useDockDrag";
-import { nextShown, settleBottom, settleSide, startResizeDrag, type AnchorTools } from "../dock/dockGeometry";
+import { focusStripButton, nextShown, settleBottom, settleSide, startResizeDrag, type AnchorTools } from "../dock/dockGeometry";
 import type { ResizeSession } from "../dock/ResizeHandle";
 import { dockStore } from "../../hooks/useDockLayout";
+import { measurementLog } from "../../utils/measurementLog";
 import {
   DEFAULT_DOCK_LAYOUT,
   DOCK_TOOL_META,
@@ -77,10 +78,10 @@ describe("Stripe", () => {
   });
 
   it("follows a moved and reordered layout", () => {
-    let layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "analysis", anchor: "left-bottom", index: 0 });
+    let layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom", index: 0 });
     layout = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 0, to: 2 });
-    expect(order(render("left", layout), "left-bottom")).toEqual(["analysis", "compose"]);
-    expect(order(render("right", layout), "right-top")).toEqual(["processing", "stacking", "headers"]);
+    expect(order(render("left", layout), "left-bottom")).toEqual(["image", "compose"]);
+    expect(order(render("right", layout), "right-top")).toEqual(["astrometry", "photometry", "headers", "cube", "processing", "stacking"]);
   });
 
   it("presses exactly the active tool of each group and nothing in a closed group", () => {
@@ -124,6 +125,7 @@ describe("Stripe", () => {
           expect(b["data-anchor"]).toBe(anchor);
           expect(b["aria-haspopup"]).toBe("menu");
           expect(b.title).toBe(meta.label);
+          expect(b["aria-label"]).toBe(meta.label);
         }
       }
     }
@@ -137,6 +139,93 @@ describe("Stripe", () => {
     expect(order(html, "left-bottom")).toEqual([]);
     expect(order(html, "left-top")).toEqual(["files", "info", "compose"]);
     expect(pressed(html, "left-top")).toEqual(["compose"]);
+  });
+
+  it("shows the five analysis tools on the right strip in the default order", () => {
+    const html = render("right");
+    expect(order(html, "right-top")).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(order(html, "right-bottom")).toEqual(["synth", "export", "config", "log"]);
+    for (const id of ["image", "astrometry", "photometry", "cube", "log"]) expect(html).toContain(`data-tool-id="${id}"`);
+    expect(html).not.toContain('data-tool-id="analysis"');
+  });
+
+  it("labels each analysis button with its full name, not the strip abbreviation", () => {
+    const buttons = [...group(render("right"), "right-top"), ...group(render("right"), "right-bottom")];
+    const byId = Object.fromEntries(buttons.map((b) => [b["data-tool-id"], b["aria-label"]]));
+    expect(byId.astrometry).toBe("Astrometry");
+    expect(byId.photometry).toBe("Photometry");
+    expect(byId.image).toBe("Image");
+    expect(byId.cube).toBe("Cube");
+  });
+
+  it("keeps Log enabled without a file while the other analysis tools are disabled", () => {
+    const html = render("right", DEFAULT_DOCK_LAYOUT, false);
+    const byId = Object.fromEntries([...group(html, "right-top"), ...group(html, "right-bottom")].map((b) => [b["data-tool-id"], b]));
+    expect(byId.log["aria-disabled"]).toBeUndefined();
+    for (const id of ["image", "astrometry", "photometry", "cube"]) expect(byId[id]["aria-disabled"]).toBe("true");
+  });
+});
+
+function addEntry(i: number) {
+  measurementLog.append({ kind: "pixel", file: "a.fits", image: "original", dq: "off", unit: null, source: "test", params: {}, values: { i }, notes: [] });
+}
+
+describe("Log strip count", () => {
+  afterEach(() => {
+    measurementLog.clear();
+  });
+
+  function logButton(html: string): { attrs: Record<string, string>; inner: string } {
+    const match = /(<button[^>]*data-tool-id="log"[^>]*>)(.*?)<\/button>/.exec(html);
+    if (!match) throw new Error("log button not rendered");
+    return { attrs: attrs(match[1]), inner: match[2] };
+  }
+
+  it("shows no badge and the plain label while the log is empty", () => {
+    measurementLog.clear();
+    const { attrs: a, inner } = logButton(render("right"));
+    expect(a.title).toBe("Log");
+    expect(a["aria-label"]).toBe("Log");
+    expect(inner).not.toMatch(/data-log-count/);
+  });
+
+  it("names the entry count in the title and label and shows it as a hidden badge", () => {
+    measurementLog.clear();
+    for (let i = 0; i < 3; i++) addEntry(i);
+    const { attrs: a, inner } = logButton(render("right"));
+    expect(a.title).toBe("Log (3 entries)");
+    expect(a["aria-label"]).toBe("Log (3 entries)");
+    expect(inner).toMatch(/<span[^>]*data-log-count=""[^>]*aria-hidden="true"[^>]*>3<\/span>|<span[^>]*aria-hidden="true"[^>]*data-log-count=""[^>]*>3<\/span>/);
+    expect(inner).toContain(">Log</span>");
+  });
+
+  it("uses the singular for one entry", () => {
+    measurementLog.clear();
+    addEntry(0);
+    const { attrs: a } = logButton(render("right"));
+    expect(a.title).toBe("Log (1 entry)");
+    expect(a["aria-label"]).toBe("Log (1 entry)");
+  });
+
+  it("caps the badge at 99+", () => {
+    measurementLog.clear();
+    for (let i = 0; i < 120; i++) addEntry(i);
+    const { attrs: a, inner } = logButton(render("right"));
+    expect(a["aria-label"]).toBe("Log (120 entries)");
+    expect(inner).toMatch(/>99\+<\/span>/);
+  });
+
+  it("leaves every other tool's button untouched", () => {
+    measurementLog.clear();
+    for (let i = 0; i < 3; i++) addEntry(i);
+    const html = render("right");
+    for (const b of [...group(html, "right-top"), ...group(html, "right-bottom")]) {
+      if (b["data-tool-id"] === "log") continue;
+      const meta = DOCK_TOOL_META[b["data-tool-id"] as DockToolId];
+      expect(b.title).toBe(meta.label);
+      expect(b["aria-label"]).toBe(meta.label);
+    }
+    expect(html.match(/data-log-count/g)).toHaveLength(1);
   });
 });
 
@@ -191,8 +280,8 @@ describe("dock shown state (close animation)", () => {
   });
 
   it("keeps a side anchor until its own width transition ends", () => {
-    const shown = nextShown(tools({ "left-top": "files", "right-top": "analysis" }), tools({ "left-top": "files" }));
-    expect(shown).toEqual(tools({ "left-top": "files", "right-top": "analysis" }));
+    const shown = nextShown(tools({ "left-top": "files", "right-top": "image" }), tools({ "left-top": "files" }));
+    expect(shown).toEqual(tools({ "left-top": "files", "right-top": "image" }));
     const open = tools({ "left-top": "files" });
     expect(settleSide(shown, open, "left-top")).toBe(shown);
     expect(settleBottom(shown, open)).toBe(shown);
@@ -200,18 +289,18 @@ describe("dock shown state (close animation)", () => {
   });
 
   it("follows a reopen before the close settles and ignores the late settle", () => {
-    const closing = nextShown(tools({ "right-top": "analysis" }), NONE);
-    const reopened = nextShown(closing, tools({ "right-top": "analysis" }));
+    const closing = nextShown(tools({ "right-top": "image" }), NONE);
+    const reopened = nextShown(closing, tools({ "right-top": "image" }));
     expect(reopened).toBe(closing);
-    expect(settleSide(reopened, tools({ "right-top": "analysis" }), "right-top")).toBe(reopened);
+    expect(settleSide(reopened, tools({ "right-top": "image" }), "right-top")).toBe(reopened);
     expect(nextShown(closing, tools({ "right-top": "headers" }))).toEqual(tools({ "right-top": "headers" }));
   });
 
   it("shows a tool moved away from a closing anchor at its new anchor at once and clears the old one on its own settle", () => {
-    const closing = nextShown(tools({ "right-top": "analysis" }), NONE);
-    const open = tools({ "left-bottom": "analysis" });
+    const closing = nextShown(tools({ "right-top": "image" }), NONE);
+    const open = tools({ "left-bottom": "image" });
     const moved = nextShown(closing, open);
-    expect(moved).toEqual(tools({ "right-top": "analysis", "left-bottom": "analysis" }));
+    expect(moved).toEqual(tools({ "right-top": "image", "left-bottom": "image" }));
     expect(settleBottom(moved, open)).toBe(moved);
     expect(settleSide(moved, open, "right-top")).toEqual(open);
   });
@@ -359,5 +448,46 @@ describe("resize handle drag", () => {
     win.fire("mouseup", 140);
     expect(split.session.apply).toHaveBeenCalledWith(440);
     expect(dispatch).toHaveBeenLastCalledWith({ type: "resize", key: "bottomSplit", value: 0.55 });
+  });
+});
+
+describe("focusStripButton", () => {
+  function fakeButton(inStrip: boolean) {
+    const calls: string[] = [];
+    const selectors: string[] = [];
+    return {
+      calls,
+      selectors,
+      button: {
+        focus(options?: FocusOptions) {
+          calls.push(`focus preventScroll=${options?.preventScroll}`);
+        },
+        closest(selector: string) {
+          selectors.push(selector);
+          return inStrip ? {} : null;
+        },
+        scrollIntoView(options?: ScrollIntoViewOptions) {
+          calls.push(`scroll block=${options?.block}`);
+        },
+      },
+    };
+  }
+
+  it("focuses without scrolling, then brings a strip button into view", () => {
+    const fake = fakeButton(true);
+    focusStripButton(fake.button);
+    expect(fake.calls).toEqual(["focus preventScroll=true", "scroll block=nearest"]);
+    expect(fake.selectors).toEqual([".ab-dock-strip"]);
+  });
+
+  it("only focuses a button outside the strip", () => {
+    const fake = fakeButton(false);
+    focusStripButton(fake.button);
+    expect(fake.calls).toEqual(["focus preventScroll=true"]);
+  });
+
+  it("ignores a missing button", () => {
+    expect(() => focusStripButton(null)).not.toThrow();
+    expect(() => focusStripButton(undefined)).not.toThrow();
   });
 });

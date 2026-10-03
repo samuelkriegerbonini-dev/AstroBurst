@@ -1,4 +1,4 @@
-export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "analysis", "processing", "stacking", "synth", "export", "config"] as const;
+export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "synth", "export", "config", "log"] as const;
 export type DockToolId = (typeof DOCK_TOOL_IDS)[number];
 export const DOCK_ANCHORS = ["left-top", "left-bottom", "right-top", "right-bottom"] as const;
 export type DockAnchor = (typeof DOCK_ANCHORS)[number];
@@ -45,6 +45,7 @@ export interface DockToolMeta {
   needsFile: boolean;
   mount: DockMountPolicy;
   minWidth: number;
+  keepGroup?: "analysis";
 }
 
 export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
@@ -52,12 +53,65 @@ export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
   info: { id: "info", label: "Info", shortLabel: "Info", accent: "var(--ab-teal)", needsFile: false, mount: "whileOpen", minWidth: 180 },
   compose: { id: "compose", label: "Compose", shortLabel: "Comp", accent: "var(--ab-teal)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   headers: { id: "headers", label: "Headers", shortLabel: "Headers", accent: "var(--ab-teal)", needsFile: true, mount: "whileOpen", minWidth: 280 },
-  analysis: { id: "analysis", label: "Analysis", shortLabel: "Analysis", accent: "var(--ab-blue)", needsFile: true, mount: "perFile", minWidth: 280 },
+  image: {
+    id: "image",
+    label: "Image",
+    shortLabel: "Image",
+    accent: "var(--ab-blue)",
+    keywords: ["Analysis", "Histogram", "STF", "Statistics", "Pixels", "Regions", "Profiles", "Contours", "FFT", "Deep Zoom"],
+    needsFile: true,
+    mount: "perFile",
+    minWidth: 280,
+    keepGroup: "analysis",
+  },
+  astrometry: {
+    id: "astrometry",
+    label: "Astrometry",
+    shortLabel: "Astro",
+    accent: "var(--ab-violet)",
+    keywords: ["Analysis", "Stars", "Star detection", "Plate solve", "WCS", "Catalog", "Targets", "Geometry"],
+    needsFile: true,
+    mount: "perFile",
+    minWidth: 280,
+    keepGroup: "analysis",
+  },
+  photometry: {
+    id: "photometry",
+    label: "Photometry",
+    shortLabel: "Phot",
+    accent: "var(--ab-amber)",
+    keywords: ["Analysis", "Aperture", "Photometry table", "Time series", "Light curve"],
+    needsFile: true,
+    mount: "perFile",
+    minWidth: 280,
+    keepGroup: "analysis",
+  },
+  cube: {
+    id: "cube",
+    label: "Cube",
+    shortLabel: "Cube",
+    accent: "var(--ab-cyan)",
+    keywords: ["Analysis", "Spectrum", "Spectroscopy", "Ramp", "PV", "Line fit", "Moments"],
+    needsFile: true,
+    mount: "perFile",
+    minWidth: 280,
+    keepGroup: "analysis",
+  },
   processing: { id: "processing", label: "Processing", shortLabel: "Proc", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   stacking: { id: "stacking", label: "Stacking", shortLabel: "Stack", accent: "var(--ab-blue)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   synth: { id: "synth", label: "Synth", shortLabel: "Synth", accent: "var(--ab-rose)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   export: { id: "export", label: "Export", shortLabel: "Export", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   config: { id: "config", label: "Settings", shortLabel: "Config", accent: "#a1a1aa", keywords: ["Config"], needsFile: true, mount: "whileOpen", minWidth: 280 },
+  log: {
+    id: "log",
+    label: "Log",
+    shortLabel: "Log",
+    accent: "#a1a1aa",
+    keywords: ["Analysis", "Measurement log", "Measurements", "CSV"],
+    needsFile: false,
+    mount: "whileOpen",
+    minWidth: 280,
+  },
 };
 
 export interface DockSizes {
@@ -105,8 +159,8 @@ export const DEFAULT_DOCK_LAYOUT: DockLayout = freezeLayout({
   anchors: {
     "left-top": ["files", "info"],
     "left-bottom": ["compose"],
-    "right-top": ["headers", "analysis", "processing", "stacking"],
-    "right-bottom": ["synth", "export", "config"],
+    "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"],
+    "right-bottom": ["synth", "export", "config", "log"],
   },
   active: { "left-top": "files", "left-bottom": "compose", "right-top": null, "right-bottom": null },
   sizes: { leftW: 300, rightW: 380, bottomH: 280, bottomSplit: 0.5 },
@@ -288,8 +342,16 @@ export function toolMountState({ tool, activeTool, shownTool, anchorMounted, has
   return { mounted, visible, active };
 }
 
-export function keptToolFileKey(toolActive: boolean, fileKey: string | null, keptFileKey: string | null): string | null {
+export function groupActive(open: Record<DockAnchor, DockToolId | null>, group: string): boolean {
+  return DOCK_ANCHORS.some((anchor) => {
+    const tool = open[anchor];
+    return tool !== null && DOCK_TOOL_META[tool].keepGroup === group;
+  });
+}
+
+export function keptToolFileKey(toolActive: boolean, fileKey: string | null, keptFileKey: string | null, groupActive = false): string | null {
   if (toolActive) return fileKey;
+  if (groupActive && keptFileKey !== null) return fileKey;
   return keptFileKey === fileKey ? keptFileKey : null;
 }
 

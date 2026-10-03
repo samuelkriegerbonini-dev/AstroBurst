@@ -22,7 +22,7 @@ import {
   type Point,
   type Rect,
 } from "../../utils/dockDrag";
-import { measureDockGeometry, stripShowsFile } from "./dockGeometry";
+import { focusStripButton, measureDockGeometry, stripShowsFile } from "./dockGeometry";
 
 export interface DockDragState {
   tool: DockToolId;
@@ -149,7 +149,7 @@ function dragFrame(session: DragSession, geometry: DockGeometry, layout: DockLay
 
 function focusToolButton(root: HTMLElement | null, tool: DockToolId): void {
   requestAnimationFrame(() => {
-    root?.querySelector<HTMLElement>(`[data-tool-id="${tool}"]`)?.focus({ preventScroll: true });
+    focusStripButton(root?.querySelector<HTMLElement>(`[data-tool-id="${tool}"]`));
   });
 }
 

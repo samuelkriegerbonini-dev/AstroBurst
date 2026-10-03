@@ -19,7 +19,7 @@ interface MenuProps {
 
 function menuProps(over: Partial<MenuProps> = {}): MenuProps {
   return {
-    tool: "analysis",
+    tool: "image",
     anchor: "right-top",
     index: 1,
     count: 4,
@@ -107,7 +107,7 @@ describe("DockMenuList markup", () => {
   it("is a menu labelled after the tool and carries the data hook", () => {
     const html = render(menuProps());
     expect(html).toMatch(/role="menu"/);
-    expect(html).toMatch(/aria-label="Analysis options"/);
+    expect(html).toMatch(/aria-label="Image options"/);
     expect(html).toMatch(/data-dock-menu=""/);
     expect(render(menuProps({ tool: "config" }))).toMatch(/aria-label="Settings options"/);
   });
@@ -298,23 +298,23 @@ describe("DockMenuList native menu and focus", () => {
 
 describe("moveAnnouncement", () => {
   it("names the target anchor with the owner's labels after a cross-anchor move", () => {
-    const after = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "analysis", anchor: "right-bottom" });
-    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, after, "analysis")).toBe("Analysis moved to Bottom Right");
+    const after = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "right-bottom" });
+    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, after, "image")).toBe("Image moved to Bottom Right");
     const left = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "config", anchor: "left-bottom" });
     expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, left, "config")).toBe("Settings moved to Bottom Left");
   });
 
   it("says up or down for a reorder inside the anchor", () => {
-    const up = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 2, to: 0 });
+    const up = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 5, to: 0 });
     expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, up, "processing")).toBe("Processing moved up");
     const down = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 0, to: 3 });
     expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, down, "headers")).toBe("Headers moved down");
   });
 
   it("stays silent when the tool did not move", () => {
-    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, DEFAULT_DOCK_LAYOUT, "analysis")).toBeNull();
+    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, DEFAULT_DOCK_LAYOUT, "image")).toBeNull();
     const other = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-bottom", from: 0, to: 2 });
-    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, other, "analysis")).toBeNull();
+    expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, other, "image")).toBeNull();
   });
 });
 
@@ -327,11 +327,11 @@ describe("LiveRegion", () => {
   });
 
   it("shows the latest announcement", () => {
-    announce("Analysis moved to Bottom Right");
-    expect(renderToStaticMarkup(createElement(LiveRegion))).toContain("Analysis moved to Bottom Right");
+    announce("Image moved to Bottom Right");
+    expect(renderToStaticMarkup(createElement(LiveRegion))).toContain("Image moved to Bottom Right");
     announce("Layout reset");
     const html = renderToStaticMarkup(createElement(LiveRegion));
     expect(html).toContain("Layout reset");
-    expect(html).not.toContain("Analysis moved");
+    expect(html).not.toContain("Image moved");
   });
 });

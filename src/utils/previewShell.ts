@@ -255,6 +255,6 @@ export interface PreviewTextureInput {
 export function previewTextureTitle({ renderW, renderH, fitsW, fitsH, deepZoomOffered }: PreviewTextureInput): string {
   const texture = `The viewer shows a downsampled preview texture (${renderW}×${renderH} of ${fitsW}×${fitsH} FITS pixels).`;
   return deepZoomOffered && deepZoomAvailable(fitsW, fitsH)
-    ? `${texture} For full-resolution pixels open Analysis > Deep Zoom.`
+    ? `${texture} For full-resolution pixels open Image > Deep Zoom.`
     : texture;
 }

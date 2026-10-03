@@ -49,13 +49,13 @@ function withSizes(sizes: Partial<DockSizes>, base: DockLayout = DEFAULT_DOCK_LA
   return { ...base, sizes: { ...base.sizes, ...sizes } };
 }
 
-const RIGHT_BOTTOM_EMPTY = (["synth", "export", "config"] as const).reduce<DockLayout>(
+const RIGHT_BOTTOM_EMPTY = (["synth", "export", "config", "log"] as const).reduce<DockLayout>(
   (layout, tool) => dockReducer(layout, { type: "move", tool, anchor: "left-top" }),
   DEFAULT_DOCK_LAYOUT,
 );
 
 const G = geometryFor(DEFAULT_DOCK_LAYOUT);
-const ANALYSIS: DragSource = { tool: "analysis", from: "right-top", fromIndex: 1 };
+const IMAGE: DragSource = { tool: "image", from: "right-top", fromIndex: 1 };
 const HEADERS: DragSource = { tool: "headers", from: "right-top", fromIndex: 0 };
 const FILES: DragSource = { tool: "files", from: "left-top", fromIndex: 0 };
 const INFO: DragSource = { tool: "info", from: "left-top", fromIndex: 1 };
@@ -101,38 +101,38 @@ describe("insertionIndex", () => {
 
 describe("dropTargetAt", () => {
   it("targets the left top group over its second item", () => {
-    expect(dropTargetAt({ x: 20, y: 90 }, G, ANALYSIS)).toEqual({ anchor: "left-top", index: 1 });
-    expect(dropTargetAt({ x: 20, y: 110 }, G, ANALYSIS)).toEqual({ anchor: "left-top", index: 2 });
+    expect(dropTargetAt({ x: 20, y: 90 }, G, IMAGE)).toEqual({ anchor: "left-top", index: 1 });
+    expect(dropTargetAt({ x: 20, y: 110 }, G, IMAGE)).toEqual({ anchor: "left-top", index: 2 });
   });
 
   it("targets the nearer group from the spacer", () => {
-    expect(dropTargetAt({ x: 20, y: 600 }, G, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
-    expect(dropTargetAt({ x: 20, y: 200 }, G, ANALYSIS)).toEqual({ anchor: "left-top", index: 2 });
-    expect(dropTargetAt({ x: 20, y: 735 }, G, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 1 });
+    expect(dropTargetAt({ x: 20, y: 600 }, G, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 200 }, G, IMAGE)).toEqual({ anchor: "left-top", index: 2 });
+    expect(dropTargetAt({ x: 20, y: 735 }, G, IMAGE)).toEqual({ anchor: "left-bottom", index: 1 });
   });
 
   it("targets an empty bottom group through its slot", () => {
     const g = geometryFor(RIGHT_BOTTOM_EMPTY);
-    expect(dropTargetAt({ x: 1260, y: 720 }, g, ANALYSIS)).toEqual({ anchor: "right-bottom", index: 0 });
-    expect(dropTargetAt({ x: 1260, y: 700 }, g, ANALYSIS)).toEqual({ anchor: "right-bottom", index: 0 });
-    expect(dropTargetAt({ x: 1260, y: 300 }, g, ANALYSIS)).toEqual({ anchor: "right-top", index: 3 });
+    expect(dropTargetAt({ x: 1260, y: 720 }, g, IMAGE)).toEqual({ anchor: "right-bottom", index: 0 });
+    expect(dropTargetAt({ x: 1260, y: 700 }, g, IMAGE)).toEqual({ anchor: "right-bottom", index: 0 });
+    expect(dropTargetAt({ x: 1260, y: 300 }, g, IMAGE)).toEqual({ anchor: "right-top", index: 6 });
   });
 
   it("accepts points inside the slop next to a strip", () => {
-    expect(dropTargetAt({ x: 52, y: 70 }, G, ANALYSIS)).toEqual({ anchor: "left-top", index: 1 });
-    expect(dropTargetAt({ x: 57, y: 70 }, G, ANALYSIS)).toEqual({ anchor: "left-top", index: 1 });
-    expect(dropTargetAt({ x: 1228, y: 50 }, G, ANALYSIS)).toEqual({ anchor: "right-top", index: 0 });
-    expect(dropTargetAt({ x: 1222, y: 50 }, G, ANALYSIS)).toEqual({ anchor: "right-top", index: 0 });
+    expect(dropTargetAt({ x: 52, y: 70 }, G, IMAGE)).toEqual({ anchor: "left-top", index: 1 });
+    expect(dropTargetAt({ x: 57, y: 70 }, G, IMAGE)).toEqual({ anchor: "left-top", index: 1 });
+    expect(dropTargetAt({ x: 1228, y: 50 }, G, IMAGE)).toEqual({ anchor: "right-top", index: 0 });
+    expect(dropTargetAt({ x: 1222, y: 50 }, G, IMAGE)).toEqual({ anchor: "right-top", index: 0 });
   });
 
   it("returns null over the viewer and outside the dock", () => {
-    expect(dropTargetAt({ x: 59, y: 70 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: 1221, y: 50 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: 640, y: 300 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: 20, y: 760 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: 20, y: 20 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: -5, y: 100 }, G, ANALYSIS)).toBeNull();
-    expect(dropTargetAt({ x: 1290, y: 100 }, G, ANALYSIS)).toBeNull();
+    expect(dropTargetAt({ x: 59, y: 70 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: 1221, y: 50 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: 640, y: 300 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: 20, y: 760 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: 20, y: 20 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: -5, y: 100 }, G, IMAGE)).toBeNull();
+    expect(dropTargetAt({ x: 1290, y: 100 }, G, IMAGE)).toBeNull();
   });
 
   it("picks the group under the pointer when the bottom group starts within the slop of the top group", () => {
@@ -150,12 +150,12 @@ describe("dropTargetAt", () => {
         { anchor: "left-bottom", rect: { x: 0, y: 130, w: 42, h: 38 }, items: [{ tool: "compose", rect: { x: 2, y: 130, w: 38, h: 38 } }] },
       ],
     };
-    expect(dropTargetAt({ x: 20, y: 130 }, crowded, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
-    expect(dropTargetAt({ x: 20, y: 133 }, crowded, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
-    expect(dropTargetAt({ x: 20, y: 136 }, crowded, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
-    expect(dropTargetAt({ x: 20, y: 118 }, crowded, ANALYSIS)).toEqual({ anchor: "left-top", index: 2 });
-    expect(dropTargetAt({ x: 20, y: 124 }, crowded, ANALYSIS)).toEqual({ anchor: "left-top", index: 2 });
-    expect(dropTargetAt({ x: 20, y: 126 }, crowded, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 130 }, crowded, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 133 }, crowded, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 136 }, crowded, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 118 }, crowded, IMAGE)).toEqual({ anchor: "left-top", index: 2 });
+    expect(dropTargetAt({ x: 20, y: 124 }, crowded, IMAGE)).toEqual({ anchor: "left-top", index: 2 });
+    expect(dropTargetAt({ x: 20, y: 126 }, crowded, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
     const adjacent: DockGeometry = {
       ...crowded,
       groups: [
@@ -163,14 +163,14 @@ describe("dropTargetAt", () => {
         { anchor: "left-bottom", rect: { x: 0, y: 120, w: 42, h: 38 }, items: [{ tool: "compose", rect: { x: 2, y: 120, w: 38, h: 38 } }] },
       ],
     };
-    expect(dropTargetAt({ x: 20, y: 122 }, adjacent, ANALYSIS)).toEqual({ anchor: "left-bottom", index: 0 });
-    expect(dropTargetAt({ x: 20, y: 118 }, adjacent, ANALYSIS)).toEqual({ anchor: "left-top", index: 2 });
+    expect(dropTargetAt({ x: 20, y: 122 }, adjacent, IMAGE)).toEqual({ anchor: "left-bottom", index: 0 });
+    expect(dropTargetAt({ x: 20, y: 118 }, adjacent, IMAGE)).toEqual({ anchor: "left-top", index: 2 });
   });
 
   it("returns the index after removal inside the dragged item's own group", () => {
-    expect(dropTargetAt({ x: 1260, y: 190 }, G, ANALYSIS)).toEqual({ anchor: "right-top", index: 3 });
-    expect(dropTargetAt({ x: 1260, y: 90 }, G, ANALYSIS)).toEqual({ anchor: "right-top", index: 1 });
-    expect(dropTargetAt({ x: 1260, y: 50 }, G, ANALYSIS)).toEqual({ anchor: "right-top", index: 0 });
+    expect(dropTargetAt({ x: 1260, y: 190 }, G, IMAGE)).toEqual({ anchor: "right-top", index: 3 });
+    expect(dropTargetAt({ x: 1260, y: 90 }, G, IMAGE)).toEqual({ anchor: "right-top", index: 1 });
+    expect(dropTargetAt({ x: 1260, y: 50 }, G, IMAGE)).toEqual({ anchor: "right-top", index: 0 });
   });
 });
 
@@ -194,48 +194,48 @@ describe("emptyGroupSlotRect", () => {
 
 describe("insertionMarkerRect", () => {
   it("draws a 30 x 2 line centred in the strip at the insertion gap", () => {
-    expect(insertionMarkerRect({ anchor: "left-top", index: 0 }, G, ANALYSIS)).toEqual({ x: 6, y: 43, w: 30, h: 2 });
-    expect(insertionMarkerRect({ anchor: "left-top", index: 1 }, G, ANALYSIS)).toEqual({ x: 6, y: 81, w: 30, h: 2 });
-    expect(insertionMarkerRect({ anchor: "left-top", index: 2 }, G, ANALYSIS)).toEqual({ x: 6, y: 119, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "left-top", index: 0 }, G, IMAGE)).toEqual({ x: 6, y: 43, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "left-top", index: 1 }, G, IMAGE)).toEqual({ x: 6, y: 81, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "left-top", index: 2 }, G, IMAGE)).toEqual({ x: 6, y: 119, w: 30, h: 2 });
   });
 
   it("skips the dragged item inside its own group", () => {
-    expect(insertionMarkerRect({ anchor: "right-top", index: 1 }, G, ANALYSIS)).toEqual({ x: 1244, y: 100, w: 30, h: 2 });
-    expect(insertionMarkerRect({ anchor: "right-top", index: 2 }, G, ANALYSIS)).toEqual({ x: 1244, y: 157, w: 30, h: 2 });
-    expect(insertionMarkerRect({ anchor: "right-top", index: 3 }, G, ANALYSIS)).toEqual({ x: 1244, y: 195, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "right-top", index: 1 }, G, IMAGE)).toEqual({ x: 1244, y: 100, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "right-top", index: 2 }, G, IMAGE)).toEqual({ x: 1244, y: 157, w: 30, h: 2 });
+    expect(insertionMarkerRect({ anchor: "right-top", index: 3 }, G, IMAGE)).toEqual({ x: 1244, y: 195, w: 30, h: 2 });
   });
 
   it("centres the line in the slot of an empty group", () => {
-    expect(insertionMarkerRect({ anchor: "right-bottom", index: 0 }, geometryFor(RIGHT_BOTTOM_EMPTY), ANALYSIS))
+    expect(insertionMarkerRect({ anchor: "right-bottom", index: 0 }, geometryFor(RIGHT_BOTTOM_EMPTY), IMAGE))
       .toEqual({ x: 1244, y: 723, w: 30, h: 2 });
   });
 });
 
 describe("dropPreviewRect", () => {
   it("is null for a reorder inside the source anchor", () => {
-    expect(dropPreviewRect({ anchor: "right-top", index: 3 }, G, DEFAULT_DOCK_LAYOUT, ANALYSIS)).toBeNull();
+    expect(dropPreviewRect({ anchor: "right-top", index: 3 }, G, DEFAULT_DOCK_LAYOUT, IMAGE)).toBeNull();
   });
 
   it("covers the side column the tool will open in", () => {
-    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, ANALYSIS)).toEqual({ x: 42, y: 40, w: 300, h: 700 });
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, IMAGE)).toEqual({ x: 42, y: 40, w: 300, h: 700 });
     expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, FILES)).toEqual({ x: 858, y: 40, w: 380, h: 700 });
   });
 
   it("widens to the moved tool's minimum", () => {
-    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, withSizes({ leftW: 180 }), ANALYSIS)).toEqual({ x: 42, y: 40, w: 280, h: 700 });
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, withSizes({ leftW: 180 }), IMAGE)).toEqual({ x: 42, y: 40, w: 280, h: 700 });
   });
 
   it("switches the cap from 60vw to 40vw when both side columns will be open", () => {
     const wide = withSizes({ leftW: 640 });
-    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, wide, ANALYSIS)).toEqual({ x: 42, y: 40, w: 640, h: 700 });
-    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, withActive({ "right-top": "processing" }, wide), ANALYSIS))
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, wide, IMAGE)).toEqual({ x: 42, y: 40, w: 640, h: 700 });
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, withActive({ "right-top": "processing" }, wide), IMAGE))
       .toEqual({ x: 42, y: 40, w: 512, h: 700 });
   });
 
   it("covers the full centre width when the moved tool closes its source column", () => {
-    expect(dropPreviewRect({ anchor: "left-bottom", index: 1 }, G, withActive({ "right-top": "analysis" }), ANALYSIS))
+    expect(dropPreviewRect({ anchor: "left-bottom", index: 1 }, G, withActive({ "right-top": "image" }), IMAGE))
       .toEqual({ x: 342, y: 460, w: 896, h: 280 });
-    expect(dropPreviewRect({ anchor: "left-bottom", index: 1 }, G, withActive({ "right-top": "processing" }), ANALYSIS))
+    expect(dropPreviewRect({ anchor: "left-bottom", index: 1 }, G, withActive({ "right-top": "processing" }), IMAGE))
       .toEqual({ x: 342, y: 460, w: 516, h: 280 });
   });
 
@@ -253,17 +253,17 @@ describe("dropPreviewRect", () => {
   });
 
   it("leaves out the panels that stay closed without a file", () => {
-    const stored = withActive({ "right-top": "analysis" });
+    const stored = withActive({ "right-top": "image" });
     expect(dropPreviewRect({ anchor: "right-bottom", index: 0 }, G, stored, INFO, false)).toEqual({ x: 342, y: 460, w: 896, h: 280 });
     expect(dropPreviewRect({ anchor: "right-bottom", index: 0 }, G, stored, INFO, true)).toEqual({ x: 622, y: 460, w: 236, h: 280 });
     expect(dropPreviewRect({ anchor: "right-bottom", index: 0 }, G, stored, INFO)).toEqual({ x: 622, y: 460, w: 236, h: 280 });
-    const analysisLeft = withSizes({ rightW: 640 }, dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "analysis", anchor: "left-top" }));
-    expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, analysisLeft, INFO, false)).toEqual({ x: 598, y: 40, w: 640, h: 700 });
-    expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, analysisLeft, INFO, true)).toEqual({ x: 726, y: 40, w: 512, h: 700 });
+    const imageLeft = withSizes({ rightW: 640 }, dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-top" }));
+    expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, imageLeft, INFO, false)).toEqual({ x: 598, y: 40, w: 640, h: 700 });
+    expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, imageLeft, INFO, true)).toEqual({ x: 726, y: 40, w: 512, h: 700 });
   });
 
   it("shows no preview for a tool that needs a file while there is none", () => {
-    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, ANALYSIS, false)).toBeNull();
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, IMAGE, false)).toBeNull();
     expect(dropPreviewRect({ anchor: "right-bottom", index: 0 }, G, DEFAULT_DOCK_LAYOUT, HEADERS, false)).toBeNull();
     expect(dropPreviewRect({ anchor: "right-top", index: 0 }, G, DEFAULT_DOCK_LAYOUT, FILES, false)).toEqual({ x: 858, y: 40, w: 380, h: 700 });
   });

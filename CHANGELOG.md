@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Analysis is now five dock tools with their own strip icons instead of one tool with Image / Sources / Cube tabs: Image (histogram and STF, statistics, pixels, regions, profiles, contours, FFT, deep zoom), Astrometry (star detection, plate solve, catalog, targets, observation geometry), Photometry (aperture photometry, photometry table, time series), Cube (ramp, spectrum with moments and Fit lines, PV) and Log (the measurement log, with the entry count as a badge on its icon and in its label, "Log (3 entries)"); each docks, moves and opens side by side like every other tool, detected stars are shared through a store so the Photometry table sees the stars found in Astrometry even when the two sit in different anchors, the four per-file tools keep their inputs across file switches as long as one of them is open (as the single Analysis tool did), and when the selected file changes an open Image or Cube switches to the one that fits the file (Cube for cubes and ramps) and remembers the one picked per file; saved layouts that contain the old `analysis` tool are migrated in place (the four tools take its position, Log goes to Bottom Right, an open Analysis reopens as Image); "Open in Spectroscopy" on an x1d row opens the Cube tool; the strip scrolls when the tools do not fit and a moved button is scrolled into view
+
 ## [0.6.6] - 2026-10-03
 
 ### Added

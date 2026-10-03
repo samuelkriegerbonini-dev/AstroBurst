@@ -1,20 +1,23 @@
 import { lazy } from "react";
 import {
-  BarChart3,
+  Aperture,
+  Box,
   Download,
   FileText,
   FlaskConical,
   FolderOpen,
+  ImageIcon,
   Info,
   Layers,
   Layers2,
+  ScrollText,
   Settings,
   Sparkles,
+  Telescope,
   type LucideIcon,
 } from "lucide-react";
 import type { DockToolId } from "../../utils/dockLayout";
 import { InfoPanel } from "../file/SidebarPanels";
-import AnalysisTool from "./tools/AnalysisTool";
 
 const ComposeWizard = lazy(() => import("../compose/ComposeWizard"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
@@ -23,6 +26,11 @@ const StackingTab = lazy(() => import("../stacking/StackingTab"));
 const SynthPanel = lazy(() => import("../synth/SynthPanel"));
 const ExportTab = lazy(() => import("../export/ExportTab"));
 const ConfigTab = lazy(() => import("../preview/ConfigTab"));
+const ImageTool = lazy(() => import("../analysis/ImageTool"));
+const AstrometryTool = lazy(() => import("../analysis/AstrometryTool"));
+const PhotometryTool = lazy(() => import("../analysis/PhotometryTool"));
+const CubeTool = lazy(() => import("../analysis/CubeTool"));
+const LogTool = lazy(() => import("../analysis/LogTool"));
 
 export interface DockToolDef {
   id: DockToolId;
@@ -35,10 +43,14 @@ export const DOCK_TOOLS: Record<DockToolId, DockToolDef> = {
   info: { id: "info", icon: Info, render: () => <InfoPanel /> },
   compose: { id: "compose", icon: Layers, render: () => <ComposeWizard /> },
   headers: { id: "headers", icon: FileText, render: () => <HeadersTab /> },
-  analysis: { id: "analysis", icon: BarChart3, render: () => <AnalysisTool /> },
+  image: { id: "image", icon: ImageIcon, render: () => <ImageTool /> },
+  astrometry: { id: "astrometry", icon: Telescope, render: () => <AstrometryTool /> },
+  photometry: { id: "photometry", icon: Aperture, render: () => <PhotometryTool /> },
+  cube: { id: "cube", icon: Box, render: () => <CubeTool /> },
   processing: { id: "processing", icon: Sparkles, render: () => <ProcessingTab /> },
   stacking: { id: "stacking", icon: Layers2, render: () => <StackingTab /> },
   synth: { id: "synth", icon: FlaskConical, render: () => <SynthPanel /> },
   export: { id: "export", icon: Download, render: () => <ExportTab /> },
   config: { id: "config", icon: Settings, render: () => <ConfigTab /> },
+  log: { id: "log", icon: ScrollText, render: () => <LogTool /> },
 };

@@ -22,6 +22,7 @@ export interface ToolMountProps {
   anchorMounted: boolean;
   hasFile: boolean;
   fileKey: string | null;
+  groupActive: boolean;
 }
 
 type ScrollOffsets = [Element, number, number][];
@@ -66,12 +67,12 @@ function TabSpinner() {
   );
 }
 
-const ToolMount = memo(function ToolMount({ tool, content, containers, anchor, activeTool, shownTool, anchorMounted, hasFile, fileKey }: ToolMountProps) {
+const ToolMount = memo(function ToolMount({ tool, content, containers, anchor, activeTool, shownTool, anchorMounted, hasFile, fileKey, groupActive }: ToolMountProps) {
   const meta = DOCK_TOOL_META[tool];
   const [host] = useState(() => createHost(tool));
   const [ready, setReady] = useState(false);
   const [keptFileKey, setKeptFileKey] = useState<string | null>(null);
-  const nextKeptFileKey = keptToolFileKey(activeTool === tool, fileKey, keptFileKey);
+  const nextKeptFileKey = keptToolFileKey(activeTool === tool, fileKey, keptFileKey, groupActive);
   if (nextKeptFileKey !== keptFileKey) setKeptFileKey(nextKeptFileKey);
   const state = toolMountState({
     tool,

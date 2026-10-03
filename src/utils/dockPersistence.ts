@@ -22,6 +22,20 @@ export interface PersistedDockLayout {
   sizes: Partial<Record<keyof DockSizes, number>>;
 }
 
+export const LEGACY_TOOL_ALIASES: Readonly<Record<string, readonly DockToolId[]>> = {
+  analysis: ["image", "astrometry", "photometry", "cube"],
+};
+
+export const LEGACY_ACTIVE_ALIASES: Readonly<Record<string, DockToolId>> = { analysis: "image" };
+
+function legacyToolAlias(id: unknown): readonly DockToolId[] | null {
+  return typeof id === "string" && Object.hasOwn(LEGACY_TOOL_ALIASES, id) ? LEGACY_TOOL_ALIASES[id] : null;
+}
+
+function legacyActiveAlias(id: unknown): DockToolId | null {
+  return typeof id === "string" && Object.hasOwn(LEGACY_ACTIVE_ALIASES, id) ? LEGACY_ACTIVE_ALIASES[id] : null;
+}
+
 const LEGACY_SIZE_TARGETS: Record<(typeof LEGACY_SIZE_KEYS)[number], keyof DockSizes> = {
   "ab.layout.sidebarW": "leftW",
   "ab.layout.rightW": "rightW",
@@ -35,18 +49,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function parseDockLayout(raw: unknown, fallback: DockLayout = DEFAULT_DOCK_LAYOUT): DockLayout {
   if (!isRecord(raw) || raw.version !== DOCK_LAYOUT_VERSION || !isRecord(raw.anchors)) return fallback;
   const rawAnchors = raw.anchors;
+  const rawLists = DOCK_ANCHORS.map((anchor) => {
+    const list = rawAnchors[anchor];
+    return Array.isArray(list) ? (list as unknown[]) : [];
+  });
+  const rawKnown = new Set(rawLists.flat().filter(isDockToolId));
   const seen = new Set<DockToolId>();
   const anchors = {} as Record<DockAnchor, DockToolId[]>;
-  for (const anchor of DOCK_ANCHORS) {
-    const list = rawAnchors[anchor];
+  DOCK_ANCHORS.forEach((anchor, i) => {
     anchors[anchor] = [];
-    if (!Array.isArray(list)) continue;
-    for (const id of list) {
-      if (!isDockToolId(id) || seen.has(id)) continue;
-      seen.add(id);
-      anchors[anchor].push(id);
+    for (const id of rawLists[i]) {
+      const expanded = isDockToolId(id) ? [id] : (legacyToolAlias(id) ?? []).filter((alias) => !rawKnown.has(alias));
+      for (const tool of expanded) {
+        if (seen.has(tool)) continue;
+        seen.add(tool);
+        anchors[anchor].push(tool);
+      }
     }
-  }
+  });
   for (const anchor of DOCK_ANCHORS) {
     for (const id of DEFAULT_DOCK_LAYOUT.anchors[anchor]) {
       if (!seen.has(id)) anchors[anchor].push(id);
@@ -56,7 +76,8 @@ export function parseDockLayout(raw: unknown, fallback: DockLayout = DEFAULT_DOC
   const active = {} as Record<DockAnchor, DockToolId | null>;
   for (const anchor of DOCK_ANCHORS) {
     const id = rawActive[anchor];
-    active[anchor] = isDockToolId(id) && anchors[anchor].includes(id) ? id : null;
+    const wanted = isDockToolId(id) ? id : legacyActiveAlias(id);
+    active[anchor] = wanted !== null && anchors[anchor].includes(wanted) ? wanted : null;
   }
   const rawSizes = isRecord(raw.sizes) ? raw.sizes : {};
   const sizes = {} as DockSizes;

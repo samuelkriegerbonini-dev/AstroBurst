@@ -83,6 +83,7 @@ declare module "lucide-react" {
   export const Repeat: Icon;
   export const RotateCcw: Icon;
   export const Save: Icon;
+  export const ScrollText: Icon;
   export const Search: Icon;
   export const Settings: Icon;
   export const SkipBack: Icon;

@@ -56,7 +56,7 @@ describe("previewTextureTitle", () => {
 
   it("points to Deep Zoom when the image has a side above the Deep Zoom threshold", () => {
     expect(previewTextureTitle({ ...texture, fitsW: 8000, fitsH: 4500, deepZoomOffered: true })).toBe(
-      "The viewer shows a downsampled preview texture (2048×1152 of 8000×4500 FITS pixels). For full-resolution pixels open Analysis > Deep Zoom.",
+      "The viewer shows a downsampled preview texture (2048×1152 of 8000×4500 FITS pixels). For full-resolution pixels open Image > Deep Zoom.",
     );
   });
 

@@ -297,7 +297,7 @@ export default function App() {
     if (revealed !== active) productFilterStore.setActiveFilters(revealed);
     fileStore.selectFile(cube.id);
     spectrumComparisonStore.requestTable(cube.path, x1d.path);
-    dockStore.dispatch({ type: "open", tool: "analysis" });
+    dockStore.dispatch({ type: "open", tool: "cube" });
   }, []);
 
   const handleExportZip = useCallback(() => {

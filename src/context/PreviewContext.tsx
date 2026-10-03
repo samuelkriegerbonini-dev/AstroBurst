@@ -80,6 +80,7 @@ interface CubeContextValue {
   cubeDims: CubeDims | null;
   ramp: RampInfo | null;
   rampSource: RampSource | null;
+  cubeFileKey: string | null;
 }
 
 interface RgbContextValue {
@@ -367,6 +368,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [cubeDims, setCubeDims] = useState<CubeDims | null>(null);
   const [ramp, setRamp] = useState<RampInfo | null>(null);
   const [rampSource, setRampSource] = useState<RampSource | null>(null);
+  const [cubeFileKey, setCubeFileKey] = useState<string | null>(null);
   const [rgbChannels, setRgbChannels] = useState<RgbChannelMap | null>(null);
   const [view, setView] = useState<RenderView>(EMPTY_VIEW);
   const [stfPreview, setStfPreview] = useState<StfPreviewState>(NO_STF_PREVIEW);
@@ -755,6 +757,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setCubeDims(null);
     setRamp(null);
     setRampSource(null);
+    setCubeFileKey(fileKey);
     resetRampIntegration();
     setRawPixels(null);
     setRawPixelsLoading(false);
@@ -928,8 +931,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const cubeValue = useMemo<CubeContextValue>(
-    () => ({ isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource }),
-    [isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource],
+    () => ({ isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey }),
+    [isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey],
   );
 
   const rgbValue = useMemo<RgbContextValue>(

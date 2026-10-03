@@ -776,6 +776,14 @@ img,
   flex-direction: column;
   align-items: center;
   padding: 4px 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.ab-dock-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .ab-dock-strip[data-side="left"] {
@@ -815,6 +823,10 @@ img,
   width: 38px;
   line-height: 1;
   letter-spacing: 0.02em;
+}
+
+.ab-dock-strip-btn:focus-visible {
+  outline-offset: -2px;
 }
 
 .ab-dock-strip-btn:hover {

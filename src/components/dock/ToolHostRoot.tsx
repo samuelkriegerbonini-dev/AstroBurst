@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DOCK_TOOL_IDS, anchorOf, type DockAnchor, type DockLayout, type DockToolId } from "../../utils/dockLayout";
+import { DOCK_TOOL_IDS, DOCK_TOOL_META, anchorOf, groupActive, type DockAnchor, type DockLayout, type DockToolId } from "../../utils/dockLayout";
 import { DOCK_TOOLS } from "./toolRegistry";
 import ToolMount from "./ToolMount";
 
@@ -25,6 +25,7 @@ export default function ToolHostRoot({ tools, containers, layout, open, shown, h
     <>
       {DOCK_TOOL_IDS.map((tool) => {
         const anchor = anchorOf(layout, tool);
+        const keepGroup = DOCK_TOOL_META[tool].keepGroup;
         return (
           <ToolMount
             key={tool}
@@ -37,6 +38,7 @@ export default function ToolHostRoot({ tools, containers, layout, open, shown, h
             anchorMounted={shown[anchor] !== null}
             hasFile={hasFile}
             fileKey={fileKey}
+            groupActive={keepGroup !== undefined && groupActive(open, keepGroup)}
           />
         );
       })}

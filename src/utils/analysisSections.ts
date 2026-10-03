@@ -1,28 +1,23 @@
+import { DOCK_ANCHORS, type DockAnchor, type DockLayout, type DockToolId } from "./dockLayout";
+
 export const DEEP_ZOOM_MIN_SIDE = 4096;
 
 export function deepZoomAvailable(width: number | undefined, height: number | undefined): boolean {
   return (width ?? 0) > DEEP_ZOOM_MIN_SIDE || (height ?? 0) > DEEP_ZOOM_MIN_SIDE;
 }
 
-export type AnalysisTabId = "image" | "sources" | "cube";
+export type AnalysisToolId = Extract<DockToolId, "image" | "astrometry" | "photometry" | "cube" | "log">;
 
-export interface AnalysisTab {
-  id: AnalysisTabId;
-  label: string;
-}
+export const ANALYSIS_TOOL_IDS: readonly AnalysisToolId[] = ["image", "astrometry", "photometry", "cube", "log"];
 
-export const ANALYSIS_TABS: readonly AnalysisTab[] = [
-  { id: "image", label: "Image" },
-  { id: "sources", label: "Sources" },
-  { id: "cube", label: "Cube" },
-];
+export const CUBE_TOOL_EMPTY_TITLE = "Open a data cube or a ramp";
 
-export const CUBE_TAB_UNAVAILABLE_TITLE = "Open a data cube or a ramp";
+export const MIN_CHIP_SECTIONS = 4;
 
 export interface AnalysisSection {
   id: string;
   label: string;
-  tab: AnalysisTabId | null;
+  tool: AnalysisToolId;
 }
 
 export interface AnalysisSectionsInput {
@@ -34,118 +29,105 @@ export interface AnalysisSectionsInput {
 }
 
 export const ANALYSIS_SECTION = {
-  histogram: { id: "analysis-histogram", label: "Histogram", tab: "image" },
-  stars: { id: "analysis-stars", label: "Stars", tab: "sources" },
-  photometry: { id: "analysis-photometry", label: "Photometry", tab: "sources" },
-  table: { id: "analysis-table", label: "Table", tab: "sources" },
-  series: { id: "analysis-series", label: "Series", tab: "sources" },
-  geometry: { id: "analysis-geometry", label: "Geometry", tab: "sources" },
-  catalog: { id: "analysis-catalog", label: "Catalog", tab: "sources" },
-  targets: { id: "analysis-targets", label: "Targets", tab: "sources" },
-  statistics: { id: "analysis-statistics", label: "Stats", tab: "image" },
-  pixels: { id: "analysis-pixels", label: "Pixels", tab: "image" },
-  regions: { id: "analysis-regions", label: "Regions", tab: "image" },
-  profiles: { id: "analysis-profiles", label: "Profiles", tab: "image" },
-  contours: { id: "analysis-contours", label: "Contours", tab: "image" },
-  fft: { id: "analysis-fft", label: "FFT", tab: "image" },
-  ramp: { id: "analysis-ramp", label: "Ramp", tab: "cube" },
-  spectrum: { id: "analysis-spectrum", label: "Spectrum", tab: "cube" },
-  pv: { id: "analysis-pv", label: "PV", tab: "cube" },
-  deepZoom: { id: "analysis-deep-zoom", label: "Deep Zoom", tab: "image" },
-  log: { id: "analysis-log", label: "Log", tab: null },
+  histogram: { id: "analysis-histogram", label: "Histogram", tool: "image" },
+  stars: { id: "analysis-stars", label: "Stars", tool: "astrometry" },
+  photometry: { id: "analysis-photometry", label: "Photometry", tool: "photometry" },
+  table: { id: "analysis-table", label: "Table", tool: "photometry" },
+  series: { id: "analysis-series", label: "Series", tool: "photometry" },
+  geometry: { id: "analysis-geometry", label: "Geometry", tool: "astrometry" },
+  catalog: { id: "analysis-catalog", label: "Catalog", tool: "astrometry" },
+  targets: { id: "analysis-targets", label: "Targets", tool: "astrometry" },
+  statistics: { id: "analysis-statistics", label: "Stats", tool: "image" },
+  pixels: { id: "analysis-pixels", label: "Pixels", tool: "image" },
+  regions: { id: "analysis-regions", label: "Regions", tool: "image" },
+  profiles: { id: "analysis-profiles", label: "Profiles", tool: "image" },
+  contours: { id: "analysis-contours", label: "Contours", tool: "image" },
+  fft: { id: "analysis-fft", label: "FFT", tool: "image" },
+  ramp: { id: "analysis-ramp", label: "Ramp", tool: "cube" },
+  spectrum: { id: "analysis-spectrum", label: "Spectrum", tool: "cube" },
+  pv: { id: "analysis-pv", label: "PV", tool: "cube" },
+  deepZoom: { id: "analysis-deep-zoom", label: "Deep Zoom", tool: "image" },
+  log: { id: "analysis-log", label: "Log", tool: "log" },
 } as const satisfies Record<string, AnalysisSection>;
 
-export function analysisSections(input: AnalysisSectionsInput): AnalysisSection[] {
+export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput): AnalysisSection[] {
   const s = ANALYSIS_SECTION;
-  return [
-    ...(input.hasHistogram ? [s.histogram] : []),
-    s.stars,
-    s.photometry,
-    s.table,
-    s.series,
-    s.geometry,
-    s.catalog,
-    s.targets,
-    s.statistics,
-    s.pixels,
-    s.regions,
-    s.profiles,
-    s.contours,
-    ...(input.showFft ? [s.fft] : []),
-    ...(input.isRamp ? [s.ramp] : []),
-    ...(input.isCube ? [s.spectrum, s.pv] : []),
-    ...(input.showDeepZoom ? [s.deepZoom] : []),
-    s.log,
-  ];
+  switch (tool) {
+    case "image":
+      return [
+        ...(input.hasHistogram ? [s.histogram] : []),
+        s.statistics,
+        s.pixels,
+        s.regions,
+        s.profiles,
+        s.contours,
+        ...(input.showFft ? [s.fft] : []),
+        ...(input.showDeepZoom ? [s.deepZoom] : []),
+      ];
+    case "astrometry":
+      return [s.stars, s.geometry, s.catalog, s.targets];
+    case "photometry":
+      return [s.photometry, s.table, s.series];
+    case "cube":
+      return [...(input.isRamp ? [s.ramp] : []), ...(input.isCube ? [s.spectrum, s.pv] : [])];
+    case "log":
+      return [s.log];
+  }
 }
 
-export function analysisTabSections(input: AnalysisSectionsInput, tab: AnalysisTabId): AnalysisSection[] {
-  return analysisSections(input).filter((s) => s.tab === tab);
+export function showSectionChips(sections: readonly AnalysisSection[]): boolean {
+  return sections.length >= MIN_CHIP_SECTIONS;
 }
 
-export function defaultAnalysisTab(input: { isCube: boolean; isRamp?: boolean }): AnalysisTabId {
+export type AnalysisRouteTool = "image" | "cube";
+
+export function analysisToolForFile(input: { isCube: boolean; isRamp?: boolean }): AnalysisRouteTool {
   return input.isCube || input.isRamp ? "cube" : "image";
 }
 
-export type AnalysisTabAvailability = Record<AnalysisTabId, boolean>;
-
-export function tabAvailability(input: AnalysisSectionsInput): AnalysisTabAvailability {
-  const sections = analysisSections(input);
-  const has = (tab: AnalysisTabId) => sections.some((s) => s.tab === tab);
-  return { image: has("image"), sources: has("sources"), cube: has("cube") };
+export interface AnalysisRouteInput {
+  layout: Pick<DockLayout, "anchors" | "active">;
+  fileKey: string | null;
+  isCube: boolean;
+  isRamp: boolean;
+  memory: ReadonlyMap<string, AnalysisRouteTool>;
 }
 
-export function resolveAnalysisTab(remembered: AnalysisTabId | undefined, input: AnalysisSectionsInput): AnalysisTabId {
-  if (remembered !== undefined && tabAvailability(input)[remembered]) return remembered;
-  return defaultAnalysisTab(input);
+export interface AnalysisRouteStep {
+  anchor: DockAnchor;
+  tool: AnalysisRouteTool;
 }
 
-export interface AnalysisTabMemory {
-  resolve(fileKey: string | null, input: AnalysisSectionsInput): AnalysisTabId;
-  remember(fileKey: string | null, tab: AnalysisTabId): void;
+function isRouteTool(tool: DockToolId | null): tool is AnalysisRouteTool {
+  return tool === "image" || tool === "cube";
 }
 
-export function createAnalysisTabMemory(): AnalysisTabMemory {
-  const chosen = new Map<string, AnalysisTabId>();
-  return {
-    resolve: (fileKey, input) => resolveAnalysisTab(chosen.get(fileKey ?? ""), input),
-    remember: (fileKey, tab) => {
-      chosen.set(fileKey ?? "", tab);
-    },
-  };
+function openRouteTools(open: DockLayout["active"]): AnalysisRouteTool[] {
+  return DOCK_ANCHORS.map((anchor) => open[anchor]).filter(isRouteTool);
 }
 
-export type TabNavKey = "ArrowLeft" | "ArrowRight" | "Home" | "End";
-
-export function isTabNavKey(key: string): key is TabNavKey {
-  return key === "ArrowLeft" || key === "ArrowRight" || key === "Home" || key === "End";
+export function nextAnalysisRoute({ layout, fileKey, isCube, isRamp, memory }: AnalysisRouteInput): AnalysisRouteStep[] {
+  if (fileKey === null) return [];
+  const open = openRouteTools(layout.active);
+  if (open.length === 0) return [];
+  const wanted = memory.get(fileKey) ?? analysisToolForFile({ isCube, isRamp });
+  const tool = wanted === "cube" && !isCube && !isRamp ? "image" : wanted;
+  if (open.includes(tool)) return [];
+  const anchor = DOCK_ANCHORS.find((a) => layout.anchors[a].includes(tool));
+  return anchor === undefined ? [] : [{ anchor, tool }];
 }
 
-export function nextAnalysisTab(current: AnalysisTabId, key: TabNavKey, available: AnalysisTabAvailability): AnalysisTabId {
-  const enabled = ANALYSIS_TABS.map((t) => t.id).filter((id) => available[id]);
-  if (enabled.length === 0) return current;
-  if (key === "Home") return enabled[0];
-  if (key === "End") return enabled[enabled.length - 1];
-  const at = enabled.indexOf(current);
-  const step = key === "ArrowRight" ? 1 : -1;
-  if (at < 0) return step > 0 ? enabled[0] : enabled[enabled.length - 1];
-  return enabled[(at + step + enabled.length) % enabled.length];
+export function rememberAnalysisChoice(memory: Map<string, AnalysisRouteTool>, fileKey: string | null, before: DockLayout["active"], after: DockLayout["active"]): void {
+  if (fileKey === null || before === after) return;
+  const wasOpen = openRouteTools(before);
+  const opened = openRouteTools(after).find((tool) => !wasOpen.includes(tool));
+  if (opened !== undefined) memory.set(fileKey, opened);
 }
 
-export interface AnalysisPanelAttributes {
-  role: "tabpanel";
-  id: string;
-  "aria-labelledby": string;
-  "data-analysis-panel": AnalysisTabId;
-  hidden: boolean;
+export function analysisRouteDue({ fileKey, flagsKey, routedKey }: { fileKey: string | null; flagsKey: string | null; routedKey: string | null }): boolean {
+  return fileKey !== null && fileKey !== routedKey && flagsKey === fileKey;
 }
 
-export function analysisPanelAttributes(tab: AnalysisTabId, activeTab: AnalysisTabId): AnalysisPanelAttributes {
-  return {
-    role: "tabpanel",
-    id: `analysis-panel-${tab}`,
-    "aria-labelledby": `analysis-tab-${tab}`,
-    "data-analysis-panel": tab,
-    hidden: tab !== activeTab,
-  };
+export function analysisSections(input: AnalysisSectionsInput): AnalysisSection[] {
+  return ANALYSIS_TOOL_IDS.flatMap((tool) => toolSections(tool, input));
 }

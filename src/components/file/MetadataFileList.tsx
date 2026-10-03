@@ -51,7 +51,7 @@ export interface MetadataFile {
 import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
 import { tableOnlyFileHint } from "../../utils/x1dCompare";
 
-const OPEN_TABLE_TITLE = "Select its cube, open Analysis and compare this x1d with the cube spectrum in Spectroscopy";
+const OPEN_TABLE_TITLE = "Select its cube, open Cube and compare this x1d with the cube spectrum in Spectroscopy";
 
 interface MetadataFileListProps {
   files: MetadataFile[];

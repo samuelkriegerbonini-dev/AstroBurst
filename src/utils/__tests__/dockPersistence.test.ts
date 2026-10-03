@@ -47,9 +47,9 @@ describe("parseDockLayout", () => {
         "right-bottom": ["synth", "export", "config", "files"],
       },
     }));
-    expect(layout.anchors["left-top"]).toEqual(["files", "analysis", "info"]);
+    expect(layout.anchors["left-top"]).toEqual(["files", "image", "astrometry", "photometry", "cube", "info"]);
     expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking"]);
-    expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config"]);
+    expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config", "log"]);
   });
 
   it("appends missing tools to their default anchor in default order", () => {
@@ -57,14 +57,14 @@ describe("parseDockLayout", () => {
     expect(layout.anchors).toEqual({
       "left-top": ["info", "files"],
       "left-bottom": ["compose"],
-      "right-top": ["stacking", "headers", "analysis", "processing"],
-      "right-bottom": ["synth", "export", "config"],
+      "right-top": ["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing"],
+      "right-bottom": ["synth", "export", "config", "log"],
     });
     expect(dockLayoutErrors(layout)).toEqual([]);
   });
 
   it("keeps a tool docked in a non-default anchor and lets other anchors be empty", () => {
-    const all = ["files", "info", "compose", "headers", "analysis", "processing", "stacking", "synth", "export", "config"];
+    const all = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "synth", "export", "config", "log"];
     const layout = parseDockLayout(persisted({ anchors: { "right-bottom": all }, active: { "right-bottom": "export" } }));
     expect(layout.anchors).toEqual({ "left-top": [], "left-bottom": [], "right-top": [], "right-bottom": all });
     expect(layout.active).toEqual({ "left-top": null, "left-bottom": null, "right-top": null, "right-bottom": "export" });
@@ -88,7 +88,7 @@ describe("parseDockLayout", () => {
 
   it("round-trips through serializeDockLayout", () => {
     let layout = DEFAULT_DOCK_LAYOUT;
-    layout = dockReducer(layout, { type: "move", tool: "analysis", anchor: "left-bottom", index: 0 });
+    layout = dockReducer(layout, { type: "move", tool: "image", anchor: "left-bottom", index: 0 });
     layout = dockReducer(layout, { type: "move", tool: "info", anchor: "right-top" });
     layout = dockReducer(layout, { type: "toggle", tool: "export" });
     layout = dockReducer(layout, { type: "resize", key: "bottomSplit", value: 0.375 });
@@ -96,6 +96,84 @@ describe("parseDockLayout", () => {
     const text = serializeDockLayout(layout);
     expect(JSON.parse(text)).toEqual({ version: DOCK_LAYOUT_VERSION, anchors: layout.anchors, active: layout.active, sizes: layout.sizes });
     expect(parseDockLayout(JSON.parse(text))).toEqual(layout);
+  });
+});
+
+const OLD_ANCHORS = {
+  "left-top": ["files", "info"],
+  "left-bottom": ["compose"],
+  "right-top": ["headers", "analysis", "processing", "stacking"],
+  "right-bottom": ["synth", "export", "config"],
+};
+
+const OLD_ACTIVE = { "left-top": "files", "left-bottom": "compose", "right-top": null, "right-bottom": null };
+
+function oldBlob(anchors: Record<string, unknown> = {}, active: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    anchors: { ...OLD_ANCHORS, ...anchors },
+    active: { ...OLD_ACTIVE, ...active },
+    sizes: { leftW: 320, rightW: 420, bottomH: 260, bottomSplit: 0.4 },
+  };
+}
+
+describe("legacy analysis tool", () => {
+  it("replaces Analysis by the four analysis tools at its slot, opens Image in its place and docks Log bottom right", () => {
+    const layout = parseDockLayout(oldBlob({}, { "right-top": "analysis" }));
+    expect(layout.anchors["right-top"]).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(layout.active["right-top"]).toBe("image");
+    expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config", "log"]);
+    expect(layout.anchors["left-top"]).toEqual(["files", "info"]);
+    expect(layout.anchors["left-bottom"]).toEqual(["compose"]);
+    expect(layout.sizes).toEqual({ leftW: 320, rightW: 420, bottomH: 260, bottomSplit: 0.4 });
+    expect(dockLayoutErrors(layout)).toEqual([]);
+  });
+
+  it("expands Analysis where the user had moved it", () => {
+    const layout = parseDockLayout(oldBlob({ "left-bottom": ["analysis", "compose"], "right-top": ["headers", "processing", "stacking"] }));
+    expect(layout.anchors["left-bottom"]).toEqual(["image", "astrometry", "photometry", "cube", "compose"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking"]);
+    expect(layout.active["right-top"]).toBeNull();
+  });
+
+  it("keeps an analysis tool already docked elsewhere and expands only the others", () => {
+    const layout = parseDockLayout(oldBlob({ "left-top": ["files", "info", "image"] }));
+    expect(layout.anchors["left-top"]).toEqual(["files", "info", "image"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(dockLayoutErrors(layout)).toEqual([]);
+  });
+
+  it("closes an anchor whose open Analysis was docked in another anchor", () => {
+    const layout = parseDockLayout(oldBlob({ "left-bottom": ["analysis", "compose"], "right-top": ["headers", "processing", "stacking"] }, { "right-top": "analysis" }));
+    expect(layout.active["right-top"]).toBeNull();
+    expect(layout.active["left-bottom"]).toBe("compose");
+  });
+
+  it("migrates the layout of the validation checklist", () => {
+    const layout = parseDockLayout(oldBlob(
+      { "left-bottom": ["analysis", "compose"], "right-top": ["headers", "processing", "stacking"] },
+      { "left-bottom": "analysis" },
+    ));
+    expect(layout.anchors["left-bottom"]).toEqual(["image", "astrometry", "photometry", "cube", "compose"]);
+    expect(layout.active["left-bottom"]).toBe("image");
+    expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config", "log"]);
+    expect(serializeDockLayout(layout)).not.toContain("analysis");
+  });
+
+  it("is idempotent through a save and a reload", () => {
+    for (const raw of [
+      oldBlob({}, { "right-top": "analysis" }),
+      oldBlob({ "left-bottom": ["analysis", "compose"], "right-top": ["headers", "processing", "stacking"] }, { "left-bottom": "analysis" }),
+      oldBlob({ "left-top": ["files", "info", "image"] }, { "right-top": "analysis" }),
+    ]) {
+      const once = parseDockLayout(raw);
+      expect(parseDockLayout(JSON.parse(serializeDockLayout(once)))).toEqual(once);
+    }
+  });
+
+  it("leaves a layout without Analysis alone", () => {
+    const layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "cube", anchor: "left-top", index: 0 });
+    expect(parseDockLayout(JSON.parse(serializeDockLayout(layout)))).toEqual(layout);
   });
 });
 
@@ -151,7 +229,7 @@ describe("dockStore", () => {
   });
 
   it("loads the stored layout", async () => {
-    const layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "analysis", anchor: "left-bottom" });
+    const layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom" });
     const { dockStore } = await freshStore(memoryStorage({ [DOCK_LAYOUT_STORAGE_KEY]: serializeDockLayout(layout) }));
     expect(dockStore.get()).toEqual(layout);
   });
@@ -177,11 +255,11 @@ describe("dockStore", () => {
     dockStore.dispatch({ type: "open", tool: "files" });
     expect(listener).not.toHaveBeenCalled();
     expect(storage.map.has(DOCK_LAYOUT_STORAGE_KEY)).toBe(false);
-    dockStore.dispatch({ type: "toggle", tool: "analysis" });
+    dockStore.dispatch({ type: "toggle", tool: "image" });
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(storedLayout(storage).active["right-top"]).toBe("analysis");
+    expect(storedLayout(storage).active["right-top"]).toBe("image");
     unsubscribe();
-    dockStore.dispatch({ type: "toggle", tool: "analysis" });
+    dockStore.dispatch({ type: "toggle", tool: "image" });
     expect(listener).toHaveBeenCalledTimes(1);
     expect(storedLayout(storage).active["right-top"]).toBeNull();
   });
@@ -282,13 +360,13 @@ describe("useDockLayout and useGpuDisplay", () => {
   it("render on the server from the current store values", async () => {
     const { dockStore, useDockLayout } = await freshStore(memoryStorage());
     const { gpuDisplayStore, useGpuDisplay } = await import("../../hooks/useGpuDisplay");
-    dockStore.dispatch({ type: "toggle", tool: "analysis" });
+    dockStore.dispatch({ type: "toggle", tool: "image" });
     gpuDisplayStore.set(true);
     function Probe() {
       const layout = useDockLayout();
       const gpu = useGpuDisplay();
       return createElement("span", null, `${layout.active["right-top"]}|${String(gpu)}`);
     }
-    expect(renderToStaticMarkup(createElement(Probe))).toBe("<span>analysis|true</span>");
+    expect(renderToStaticMarkup(createElement(Probe))).toBe("<span>image|true</span>");
   });
 });

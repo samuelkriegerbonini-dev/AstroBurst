@@ -50,6 +50,18 @@ export function stripShowsFile(root: HTMLElement): boolean {
   return root.querySelector('[data-tool-id][aria-disabled="true"]') === null;
 }
 
+interface StripButton {
+  focus(options?: FocusOptions): void;
+  closest(selector: string): unknown;
+  scrollIntoView(options?: ScrollIntoViewOptions): void;
+}
+
+export function focusStripButton(button: StripButton | null | undefined): void {
+  if (!button) return;
+  button.focus({ preventScroll: true });
+  if (button.closest(".ab-dock-strip")) button.scrollIntoView({ block: "nearest" });
+}
+
 export type AnchorTools = Record<DockAnchor, DockToolId | null>;
 
 function isBottom(anchor: DockAnchor): anchor is BottomAnchor {

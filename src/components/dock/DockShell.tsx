@@ -25,6 +25,7 @@ import DragOverlay from "./DragOverlay";
 import DockContextMenu, { type DockMenuRequest } from "./DockContextMenu";
 import LiveRegion from "./LiveRegion";
 import { useDockDrag } from "./useDockDrag";
+import { useAnalysisRouting } from "./useAnalysisRouting";
 import { nextShown, settleBottom, settleSide, type AnchorTools } from "./dockGeometry";
 
 export interface DockShellProps {
@@ -69,6 +70,7 @@ export default function DockShell({ tools, children }: DockShellProps) {
   const { file } = useFileContext();
   const hasFile = file !== null;
   const fileKey = fileKeyOf(file);
+  useAnalysisRouting(layout.active, fileKey);
 
   const open = useMemo(() => {
     const result = {} as AnchorTools;

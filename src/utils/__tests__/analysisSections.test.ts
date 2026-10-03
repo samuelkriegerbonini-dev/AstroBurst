@@ -1,19 +1,21 @@
 import { describe, it, expect } from "vitest";
 import {
   ANALYSIS_SECTION,
-  ANALYSIS_TABS,
-  CUBE_TAB_UNAVAILABLE_TITLE,
-  analysisPanelAttributes,
+  ANALYSIS_TOOL_IDS,
+  CUBE_TOOL_EMPTY_TITLE,
+  MIN_CHIP_SECTIONS,
+  analysisRouteDue,
   analysisSections,
-  analysisTabSections,
-  createAnalysisTabMemory,
+  analysisToolForFile,
   deepZoomAvailable,
-  defaultAnalysisTab,
-  isTabNavKey,
-  nextAnalysisTab,
-  resolveAnalysisTab,
-  tabAvailability,
+  nextAnalysisRoute,
+  rememberAnalysisChoice,
+  showSectionChips,
+  toolSections,
+  type AnalysisRouteTool,
+  type AnalysisSectionsInput,
 } from "../analysisSections";
+import { DEFAULT_DOCK_LAYOUT, DOCK_TOOL_IDS, dockReducer, type DockAction, type DockLayout } from "../dockLayout";
 
 describe("deepZoomAvailable", () => {
   it("offers Deep Zoom only above 4096 pixels on either side", () => {
@@ -24,230 +26,256 @@ describe("deepZoomAvailable", () => {
   });
 });
 
-const base = { hasHistogram: true, isCube: false, isRamp: false, showFft: true, showDeepZoom: true };
+const everything: AnalysisSectionsInput = { hasHistogram: true, isCube: true, isRamp: true, showFft: true, showDeepZoom: true };
+const nothing: AnalysisSectionsInput = { hasHistogram: false, isCube: false, isRamp: false, showFft: false, showDeepZoom: false };
+const largeMono: AnalysisSectionsInput = { hasHistogram: true, isCube: false, isRamp: false, showFft: true, showDeepZoom: true };
 
-describe("analysisSections", () => {
-  it("lists every panel of a large mono frame in column order", () => {
-    expect(analysisSections(base).map((s) => s.label)).toEqual([
-      "Histogram",
-      "Stars",
-      "Photometry",
-      "Table",
-      "Series",
-      "Geometry",
-      "Catalog",
-      "Targets",
-      "Stats",
-      "Pixels",
-      "Regions",
-      "Profiles",
-      "Contours",
-      "FFT",
-      "Deep Zoom",
-      "Log",
-    ]);
-  });
+const labels = (tool: Parameters<typeof toolSections>[0], input: AnalysisSectionsInput) => toolSections(tool, input).map((s) => s.label);
 
-  it("gives every section a distinct element id", () => {
-    const ids = analysisSections({ ...base, isCube: true }).map((s) => s.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const id of ids) expect(id).toMatch(/^analysis-[a-z-]+$/);
-  });
-
-  it("drops the panels that are not rendered", () => {
-    const labels = analysisSections({ hasHistogram: false, isCube: false, isRamp: false, showFft: false, showDeepZoom: false }).map(
-      (s) => s.label,
-    );
-    expect(labels).not.toContain("Histogram");
-    expect(labels).not.toContain("FFT");
-    expect(labels).not.toContain("Deep Zoom");
-    expect(labels).not.toContain("Spectrum");
-    expect(labels[0]).toBe("Stars");
-    expect(labels[labels.length - 1]).toBe("Log");
-  });
-
-  it("adds the cube panels after Contours for a cube", () => {
-    const labels = analysisSections({ ...base, isCube: true, showFft: false }).map((s) => s.label);
-    const contours = labels.indexOf("Contours");
-    expect(labels.slice(contours + 1, contours + 3)).toEqual(["Spectrum", "PV"]);
-    expect(labels).not.toContain("Ramp");
-  });
-
-  it("puts the Ramp section right before Spectrum only for a ramp", () => {
-    const labels = analysisSections({ ...base, isCube: true, isRamp: true, showFft: false }).map((s) => s.label);
-    const spectrum = labels.indexOf("Spectrum");
-    expect(labels.slice(spectrum - 1, spectrum + 2)).toEqual(["Ramp", "Spectrum", "PV"]);
-    expect(labels.filter((l) => l === "Ramp")).toHaveLength(1);
-    const ids = analysisSections({ ...base, isCube: true, isRamp: true }).map((s) => s.id);
-    expect(ids).toContain("analysis-ramp");
-    expect(new Set(ids).size).toBe(ids.length);
+describe("analysis tools", () => {
+  it("are the five dock tools that host analysis sections, in strip order", () => {
+    expect(ANALYSIS_TOOL_IDS).toEqual(["image", "astrometry", "photometry", "cube", "log"]);
+    for (const tool of ANALYSIS_TOOL_IDS) expect(DOCK_TOOL_IDS).toContain(tool);
   });
 });
 
-const everything = { hasHistogram: true, isCube: true, isRamp: true, showFft: true, showDeepZoom: true };
-const plain = { hasHistogram: true, isCube: false, isRamp: false, showFft: true, showDeepZoom: false };
-const cube = { ...plain, isCube: true, showFft: false };
-const rampOnly = { ...plain, isRamp: true };
-
-describe("analysis tabs", () => {
-  it("names the three tabs Image, Sources and Cube in that order", () => {
-    expect(ANALYSIS_TABS.map((t) => [t.id, t.label])).toEqual([
-      ["image", "Image"],
-      ["sources", "Sources"],
-      ["cube", "Cube"],
-    ]);
-    expect(CUBE_TAB_UNAVAILABLE_TITLE).toBe("Open a data cube or a ramp");
+describe("toolSections", () => {
+  it("lists the Image sections of a large mono frame in render order", () => {
+    expect(labels("image", largeMono)).toEqual(["Histogram", "Stats", "Pixels", "Regions", "Profiles", "Contours", "FFT", "Deep Zoom"]);
   });
 
-  it("assigns every section to its tab and keeps the log out of the tabs", () => {
-    const tabOf = Object.fromEntries(Object.entries(ANALYSIS_SECTION).map(([key, s]) => [key, s.tab]));
-    expect(tabOf).toEqual({
-      histogram: "image",
-      statistics: "image",
-      pixels: "image",
-      regions: "image",
-      profiles: "image",
-      contours: "image",
-      fft: "image",
-      deepZoom: "image",
-      stars: "sources",
-      photometry: "sources",
-      table: "sources",
-      series: "sources",
-      geometry: "sources",
-      catalog: "sources",
-      targets: "sources",
-      ramp: "cube",
-      spectrum: "cube",
-      pv: "cube",
-      log: null,
-    });
-    expect(ANALYSIS_SECTION.log.id).toBe("analysis-log");
+  it("drops the Image sections that are not rendered", () => {
+    expect(labels("image", nothing)).toEqual(["Stats", "Pixels", "Regions", "Profiles", "Contours"]);
+    expect(labels("image", { ...largeMono, showFft: false })).not.toContain("FFT");
+    expect(labels("image", { ...largeMono, showDeepZoom: false })).not.toContain("Deep Zoom");
+    expect(labels("image", { ...largeMono, hasHistogram: false })[0]).toBe("Stats");
   });
 
-  it("lists each tab's sections in the column order", () => {
-    const labels = (tab: "image" | "sources" | "cube") => analysisTabSections(everything, tab).map((s) => s.label);
-    expect(labels("image")).toEqual(["Histogram", "Stats", "Pixels", "Regions", "Profiles", "Contours", "FFT", "Deep Zoom"]);
-    expect(labels("sources")).toEqual(["Stars", "Photometry", "Table", "Series", "Geometry", "Catalog", "Targets"]);
-    expect(labels("cube")).toEqual(["Ramp", "Spectrum", "PV"]);
-  });
-
-  it("covers every rendered section except the log exactly once across the tabs, in column order", () => {
-    const all = analysisSections(everything).map((s) => s.id);
-    const tabbed = ANALYSIS_TABS.flatMap((t) => analysisTabSections(everything, t.id).map((s) => s.id));
-    expect(tabbed).toHaveLength(all.length - 1);
-    expect(new Set(tabbed)).toEqual(new Set(all.filter((id) => id !== ANALYSIS_SECTION.log.id)));
-    for (const t of ANALYSIS_TABS) {
-      const idx = analysisTabSections(everything, t.id).map((s) => all.indexOf(s.id));
-      expect(idx).toEqual([...idx].sort((a, b) => a - b));
+  it("lists the Astrometry sections whatever the file", () => {
+    for (const input of [everything, nothing, largeMono]) {
+      expect(labels("astrometry", input)).toEqual(["Stars", "Geometry", "Catalog", "Targets"]);
     }
   });
 
-  it("keeps optional sections out of their tab when they are not rendered", () => {
-    const bare = { hasHistogram: false, isCube: false, isRamp: false, showFft: false, showDeepZoom: false };
-    expect(analysisTabSections(bare, "image").map((s) => s.label)).toEqual(["Stats", "Pixels", "Regions", "Profiles", "Contours"]);
-    expect(analysisTabSections(bare, "cube")).toEqual([]);
-    expect(analysisTabSections(cube, "cube").map((s) => s.label)).toEqual(["Spectrum", "PV"]);
-    expect(analysisTabSections(rampOnly, "cube").map((s) => s.label)).toEqual(["Ramp"]);
+  it("lists the Photometry sections whatever the file", () => {
+    for (const input of [everything, nothing, largeMono]) {
+      expect(labels("photometry", input)).toEqual(["Photometry", "Table", "Series"]);
+    }
   });
 
-  it("opens cubes and ramps on the Cube tab and everything else on Image", () => {
-    expect(defaultAnalysisTab({ isCube: false, isRamp: false })).toBe("image");
-    expect(defaultAnalysisTab({ isCube: false })).toBe("image");
-    expect(defaultAnalysisTab({ isCube: true, isRamp: false })).toBe("cube");
-    expect(defaultAnalysisTab({ isCube: false, isRamp: true })).toBe("cube");
-    expect(defaultAnalysisTab({ isCube: true, isRamp: true })).toBe("cube");
+  it("gates the Cube sections on a ramp and on a cube", () => {
+    expect(labels("cube", nothing)).toEqual([]);
+    expect(labels("cube", { ...nothing, isCube: true })).toEqual(["Spectrum", "PV"]);
+    expect(labels("cube", { ...nothing, isRamp: true })).toEqual(["Ramp"]);
+    expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum", "PV"]);
   });
 
-  it("enables the Cube tab only for a cube or a ramp", () => {
-    expect(tabAvailability(plain)).toEqual({ image: true, sources: true, cube: false });
-    expect(tabAvailability({ ...plain, hasHistogram: false, showFft: false })).toEqual({ image: true, sources: true, cube: false });
-    expect(tabAvailability(cube)).toEqual({ image: true, sources: true, cube: true });
-    expect(tabAvailability(rampOnly)).toEqual({ image: true, sources: true, cube: true });
-  });
-});
-
-describe("remembered analysis tab", () => {
-  it("uses the default when nothing is remembered and falls back when the remembered tab is unavailable", () => {
-    expect(resolveAnalysisTab(undefined, plain)).toBe("image");
-    expect(resolveAnalysisTab(undefined, cube)).toBe("cube");
-    expect(resolveAnalysisTab("sources", cube)).toBe("sources");
-    expect(resolveAnalysisTab("cube", plain)).toBe("image");
-    expect(resolveAnalysisTab("cube", rampOnly)).toBe("cube");
+  it("gives the Log tool only the log section", () => {
+    for (const input of [everything, nothing]) expect(toolSections("log", input)).toEqual([ANALYSIS_SECTION.log]);
   });
 
-  it("remembers the chosen tab per file key", () => {
-    const memory = createAnalysisTabMemory();
-    expect(memory.resolve("1|a.fits", plain)).toBe("image");
-    expect(memory.resolve("2|cube.fits", cube)).toBe("cube");
-    memory.remember("1|a.fits", "sources");
-    memory.remember("2|cube.fits", "image");
-    expect(memory.resolve("1|a.fits", plain)).toBe("sources");
-    expect(memory.resolve("2|cube.fits", cube)).toBe("image");
-    expect(memory.resolve("3|b.fits", plain)).toBe("image");
-  });
-
-  it("falls back to the default without forgetting a tab that becomes available again", () => {
-    const memory = createAnalysisTabMemory();
-    memory.remember("k", "cube");
-    expect(memory.resolve("k", plain)).toBe("image");
-    expect(memory.resolve("k", cube)).toBe("cube");
-  });
-
-  it("follows the default until the user picks a tab, so a late cube detection still lands on Cube", () => {
-    const memory = createAnalysisTabMemory();
-    expect(memory.resolve("k", plain)).toBe("image");
-    expect(memory.resolve("k", cube)).toBe("cube");
-  });
-
-  it("keeps separate memories independent and treats a missing file key as one slot", () => {
-    const a = createAnalysisTabMemory();
-    const b = createAnalysisTabMemory();
-    a.remember(null, "sources");
-    expect(a.resolve(null, plain)).toBe("sources");
-    expect(b.resolve(null, plain)).toBe("image");
+  it("tags every listed section with the tool that renders it", () => {
+    for (const tool of ANALYSIS_TOOL_IDS) {
+      for (const section of toolSections(tool, everything)) expect(section.tool).toBe(tool);
+    }
   });
 });
 
-describe("tab keyboard navigation", () => {
-  const all = { image: true, sources: true, cube: true };
-  const noCube = { image: true, sources: true, cube: false };
-
-  it("recognises only the roving-tabindex keys", () => {
-    expect(["ArrowLeft", "ArrowRight", "Home", "End"].every(isTabNavKey)).toBe(true);
-    expect(isTabNavKey("ArrowUp")).toBe(false);
-    expect(isTabNavKey("Enter")).toBe(false);
-  });
-
-  it("wraps with the arrows and jumps with Home and End", () => {
-    expect(nextAnalysisTab("image", "ArrowRight", all)).toBe("sources");
-    expect(nextAnalysisTab("cube", "ArrowRight", all)).toBe("image");
-    expect(nextAnalysisTab("image", "ArrowLeft", all)).toBe("cube");
-    expect(nextAnalysisTab("sources", "Home", all)).toBe("image");
-    expect(nextAnalysisTab("image", "End", all)).toBe("cube");
-  });
-
-  it("skips the disabled Cube tab", () => {
-    expect(nextAnalysisTab("sources", "ArrowRight", noCube)).toBe("image");
-    expect(nextAnalysisTab("image", "ArrowLeft", noCube)).toBe("sources");
-    expect(nextAnalysisTab("image", "End", noCube)).toBe("sources");
-  });
-
-  it("moves from a focused disabled tab to its enabled neighbours", () => {
-    expect(nextAnalysisTab("cube", "ArrowLeft", noCube)).toBe("sources");
-    expect(nextAnalysisTab("cube", "ArrowRight", noCube)).toBe("image");
-  });
-});
-
-describe("analysis tab panel attributes", () => {
-  it("links each panel to its tab and hides only the inactive ones", () => {
-    expect(analysisPanelAttributes("cube", "sources")).toEqual({
-      role: "tabpanel",
-      id: "analysis-panel-cube",
-      "aria-labelledby": "analysis-tab-cube",
-      "data-analysis-panel": "cube",
-      hidden: true,
+describe("ANALYSIS_SECTION", () => {
+  it("keeps today's element ids and labels", () => {
+    expect(Object.fromEntries(Object.entries(ANALYSIS_SECTION).map(([key, s]) => [key, [s.id, s.label]]))).toEqual({
+      histogram: ["analysis-histogram", "Histogram"],
+      stars: ["analysis-stars", "Stars"],
+      photometry: ["analysis-photometry", "Photometry"],
+      table: ["analysis-table", "Table"],
+      series: ["analysis-series", "Series"],
+      geometry: ["analysis-geometry", "Geometry"],
+      catalog: ["analysis-catalog", "Catalog"],
+      targets: ["analysis-targets", "Targets"],
+      statistics: ["analysis-statistics", "Stats"],
+      pixels: ["analysis-pixels", "Pixels"],
+      regions: ["analysis-regions", "Regions"],
+      profiles: ["analysis-profiles", "Profiles"],
+      contours: ["analysis-contours", "Contours"],
+      fft: ["analysis-fft", "FFT"],
+      ramp: ["analysis-ramp", "Ramp"],
+      spectrum: ["analysis-spectrum", "Spectrum"],
+      pv: ["analysis-pv", "PV"],
+      deepZoom: ["analysis-deep-zoom", "Deep Zoom"],
+      log: ["analysis-log", "Log"],
     });
-    expect(analysisPanelAttributes("sources", "sources").hidden).toBe(false);
+  });
+
+  it("puts every section in exactly one tool", () => {
+    const all = analysisSections(everything);
+    for (const section of Object.values(ANALYSIS_SECTION)) {
+      const owners = ANALYSIS_TOOL_IDS.filter((tool) => toolSections(tool, everything).includes(section));
+      expect(owners, section.id).toEqual([section.tool]);
+      expect(all.filter((s) => s === section), section.id).toHaveLength(1);
+    }
+    expect(all).toHaveLength(Object.keys(ANALYSIS_SECTION).length);
+  });
+
+  it("gives every section a distinct element id across all tools", () => {
+    const ids = analysisSections(everything).map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^analysis-[a-z-]+$/);
+  });
+});
+
+describe("analysisSections", () => {
+  it("concatenates the tools' sections in tool order", () => {
+    expect(analysisSections(largeMono)).toEqual(ANALYSIS_TOOL_IDS.flatMap((tool) => toolSections(tool, largeMono)));
+    expect(analysisSections(nothing).map((s) => s.label)).toEqual([
+      "Stats", "Pixels", "Regions", "Profiles", "Contours",
+      "Stars", "Geometry", "Catalog", "Targets",
+      "Photometry", "Table", "Series",
+      "Log",
+    ]);
+  });
+});
+
+describe("showSectionChips", () => {
+  it("shows the chip nav from four sections up", () => {
+    expect(MIN_CHIP_SECTIONS).toBe(4);
+    const s = Object.values(ANALYSIS_SECTION);
+    expect(showSectionChips([])).toBe(false);
+    expect(showSectionChips(s.slice(0, 3))).toBe(false);
+    expect(showSectionChips(s.slice(0, 4))).toBe(true);
+    expect(showSectionChips(s.slice(0, 8))).toBe(true);
+  });
+
+  it("gives chips to Image and Astrometry and never to Photometry, Cube or Log", () => {
+    expect(showSectionChips(toolSections("image", nothing))).toBe(true);
+    expect(showSectionChips(toolSections("astrometry", nothing))).toBe(true);
+    for (const tool of ["photometry", "cube", "log"] as const) expect(showSectionChips(toolSections(tool, everything))).toBe(false);
+  });
+});
+
+describe("analysisToolForFile", () => {
+  it("opens Cube for a cube or a ramp and Image for anything else", () => {
+    expect(analysisToolForFile({ isCube: true })).toBe("cube");
+    expect(analysisToolForFile({ isCube: false, isRamp: true })).toBe("cube");
+    expect(analysisToolForFile({ isCube: true, isRamp: true })).toBe("cube");
+    expect(analysisToolForFile({ isCube: false, isRamp: false })).toBe("image");
+    expect(analysisToolForFile({ isCube: false })).toBe("image");
+  });
+});
+
+describe("CUBE_TOOL_EMPTY_TITLE", () => {
+  it("tells what the Cube tool needs", () => {
+    expect(CUBE_TOOL_EMPTY_TITLE).toBe("Open a data cube or a ramp");
+  });
+});
+
+const after = (...actions: DockAction[]): DockLayout => actions.reduce(dockReducer, DEFAULT_DOCK_LAYOUT);
+const memoryOf = (entries: [string, AnalysisRouteTool][] = []) => new Map<string, AnalysisRouteTool>(entries);
+const plain = { isCube: false, isRamp: false };
+const cube = { isCube: true, isRamp: false };
+const rampOnly = { isCube: false, isRamp: true };
+
+describe("nextAnalysisRoute", () => {
+  it("swaps Image for Cube in the shared anchor when a cube is selected", () => {
+    const layout = after({ type: "open", tool: "image" });
+    expect(nextAnalysisRoute({ layout, fileKey: "c", ...cube, memory: memoryOf() })).toEqual([{ anchor: "right-top", tool: "cube" }]);
+  });
+
+  it("routes a ramp to Cube like a cube", () => {
+    const layout = after({ type: "open", tool: "image" });
+    expect(nextAnalysisRoute({ layout, fileKey: "r", ...rampOnly, memory: memoryOf() })).toEqual([{ anchor: "right-top", tool: "cube" }]);
+  });
+
+  it("swaps Cube for Image when a plain image is selected", () => {
+    const layout = after({ type: "open", tool: "cube" });
+    expect(nextAnalysisRoute({ layout, fileKey: "p", ...plain, memory: memoryOf() })).toEqual([{ anchor: "right-top", tool: "image" }]);
+  });
+
+  it("does nothing when the desired tool is already open", () => {
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "image" }), fileKey: "p", ...plain, memory: memoryOf() })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "cube" }), fileKey: "c", ...cube, memory: memoryOf() })).toEqual([]);
+  });
+
+  it("never opens a tool when neither Image nor Cube is open", () => {
+    expect(nextAnalysisRoute({ layout: DEFAULT_DOCK_LAYOUT, fileKey: "c", ...cube, memory: memoryOf() })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "photometry" }), fileKey: "c", ...cube, memory: memoryOf() })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "astrometry" }), fileKey: "p", ...plain, memory: memoryOf([["p", "cube"]]) })).toEqual([]);
+  });
+
+  it("does nothing without a selected file", () => {
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "image" }), fileKey: null, ...cube, memory: memoryOf() })).toEqual([]);
+  });
+
+  it("prefers the last explicit choice for the file over the default", () => {
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "image" }), fileKey: "c", ...cube, memory: memoryOf([["c", "image"]]) })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "cube" }), fileKey: "c", ...cube, memory: memoryOf([["c", "image"]]) })).toEqual([
+      { anchor: "right-top", tool: "image" },
+    ]);
+  });
+
+  it("keys the remembered choice by file", () => {
+    const layout = after({ type: "open", tool: "image" });
+    expect(nextAnalysisRoute({ layout, fileKey: "d", ...cube, memory: memoryOf([["c", "image"]]) })).toEqual([{ anchor: "right-top", tool: "cube" }]);
+  });
+
+  it("falls back to Image when Cube is remembered but the file is neither a cube nor a ramp", () => {
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "image" }), fileKey: "p", ...plain, memory: memoryOf([["p", "cube"]]) })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "cube" }), fileKey: "p", ...plain, memory: memoryOf([["p", "cube"]]) })).toEqual([
+      { anchor: "right-top", tool: "image" },
+    ]);
+  });
+
+  it("opens the desired tool in its own anchor and leaves the other anchor alone", () => {
+    const split = after({ type: "move", tool: "cube", anchor: "left-bottom" }, { type: "open", tool: "compose" }, { type: "open", tool: "image" });
+    expect(nextAnalysisRoute({ layout: split, fileKey: "c", ...cube, memory: memoryOf() })).toEqual([{ anchor: "left-bottom", tool: "cube" }]);
+    const both = dockReducer(split, { type: "open", tool: "cube" });
+    expect(nextAnalysisRoute({ layout: both, fileKey: "c", ...cube, memory: memoryOf() })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: both, fileKey: "p", ...plain, memory: memoryOf() })).toEqual([]);
+  });
+
+  it("routes from an open Cube in another anchor to Image in its own anchor", () => {
+    const layout = after({ type: "move", tool: "cube", anchor: "left-bottom" });
+    expect(layout.active["right-top"]).toBe(null);
+    expect(nextAnalysisRoute({ layout, fileKey: "p", ...plain, memory: memoryOf() })).toEqual([{ anchor: "right-top", tool: "image" }]);
+  });
+});
+
+describe("rememberAnalysisChoice", () => {
+  it("remembers Image or Cube when the user opens it for the selected file", () => {
+    const memory = memoryOf();
+    const closed = DEFAULT_DOCK_LAYOUT;
+    const image = dockReducer(closed, { type: "open", tool: "image" });
+    rememberAnalysisChoice(memory, "a", closed.active, image.active);
+    expect(memory.get("a")).toBe("image");
+    const cubeOpen = dockReducer(image, { type: "toggle", tool: "cube" });
+    rememberAnalysisChoice(memory, "a", image.active, cubeOpen.active);
+    expect(memory.get("a")).toBe("cube");
+    expect(memory.size).toBe(1);
+  });
+
+  it("ignores closing, moving an already open tool and opening other tools", () => {
+    const memory = memoryOf([["a", "cube"]]);
+    const image = after({ type: "open", tool: "image" });
+    rememberAnalysisChoice(memory, "a", image.active, dockReducer(image, { type: "hide", tool: "image" }).active);
+    rememberAnalysisChoice(memory, "a", image.active, dockReducer(image, { type: "move", tool: "image", anchor: "left-bottom" }).active);
+    rememberAnalysisChoice(memory, "a", image.active, dockReducer(image, { type: "open", tool: "photometry" }).active);
+    rememberAnalysisChoice(memory, "a", image.active, image.active);
+    expect(memory.get("a")).toBe("cube");
+  });
+
+  it("remembers nothing without a selected file", () => {
+    const memory = memoryOf();
+    rememberAnalysisChoice(memory, null, DEFAULT_DOCK_LAYOUT.active, after({ type: "open", tool: "image" }).active);
+    expect(memory.size).toBe(0);
+  });
+});
+
+describe("analysisRouteDue", () => {
+  it("decides once per file, only after the cube flags describe that file", () => {
+    expect(analysisRouteDue({ fileKey: "b", flagsKey: "a", routedKey: "a" })).toBe(false);
+    expect(analysisRouteDue({ fileKey: "b", flagsKey: "b", routedKey: "a" })).toBe(true);
+    expect(analysisRouteDue({ fileKey: "b", flagsKey: "b", routedKey: "b" })).toBe(false);
+    expect(analysisRouteDue({ fileKey: "b", flagsKey: "b", routedKey: null })).toBe(true);
+    expect(analysisRouteDue({ fileKey: null, flagsKey: "a", routedKey: "a" })).toBe(false);
+    expect(analysisRouteDue({ fileKey: null, flagsKey: null, routedKey: null })).toBe(false);
   });
 });
