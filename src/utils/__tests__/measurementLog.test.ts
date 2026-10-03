@@ -3,6 +3,7 @@ import {
   EMPTY_LOG,
   EXCLUDE_ROW_NOTE,
   MAX_LOG_ENTRIES,
+  MEASUREMENT_KINDS,
   MeasurementLogCore,
   batchPhotometryEntry,
   crossMatchEntry,
@@ -14,6 +15,7 @@ import {
   imageLabelOf,
   lineCutEntry,
   lineEntry,
+  lineFitEntry,
   lineUnitNote,
   measurementLogCsv,
   measurementLogCsvFileName,
@@ -57,6 +59,7 @@ import type {
   SbProfile,
 } from "../../shared/types/regions";
 import type { PvDiagramResult, PvRun } from "../../shared/types/pv";
+import type { LineFitRun } from "../lineFit";
 import type { SpectrumExportInput } from "../spectrumExport";
 import type { ComparisonCsvInput, ComparisonEntry } from "../spectrumCompare";
 import type { TableEntryData } from "../x1dCompare";
@@ -1326,6 +1329,108 @@ describe("builders", () => {
     const flat = pvEntry(pvRun({ ridge: [null, null] }));
     expect(flat.values.ridge_min).toBeNull();
     expect(flat.values.ridge_max).toBeNull();
+  });
+
+  it("lineFitEntry logs a line_fit row with the run config, the resolved windows, the counts and the DQ handling", () => {
+    const run = (useDq: boolean, dqHdu: number | null, overrides: Partial<LineFitRun["result"]> = {}): LineFitRun => ({
+      key: "k",
+      filePath: "C:\\d\\g395h_s3d.fits#hdu=1",
+      lineLabel: "Brα",
+      config: {
+        z0: 1769,
+        z1: 1786,
+        rest_um: 4.052262,
+        convention: "optical",
+        continuum: null,
+        snr_threshold: 3,
+        emission_only: true,
+        use_err: true,
+        use_dq: useDq,
+        resolving_power: null,
+        components: "auto",
+      },
+      result: {
+        planes: {
+          flux: { png_path: "C:/o/f.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_flux_1769-1786.fits" },
+          velocity: { png_path: "C:/o/v.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_velocity_1769-1786.fits" },
+        },
+        plane_order: ["flux", "velocity"],
+        units: { flux: "MJy/sr km/s", velocity: "km/s", sigma: "km/s" },
+        sigma_label: "observed (instrumental width not removed)",
+        weighting: "err",
+        err_hdu: 2,
+        dq_hdu: dqHdu,
+        z0: 1769,
+        z1: 1786,
+        n_channels: 18,
+        rest_um: 4.052262,
+        convention: "optical",
+        components: "auto",
+        continuum_windows: [
+          [1750, 1762],
+          [1789, 1800],
+        ],
+        resolving_power: null,
+        snr_threshold: 3,
+        n_fit: 690,
+        n_masked: 40,
+        n_const_continuum: 65,
+        n_two_components: 351,
+        median_chi2_red: 225.5,
+        notes: ["weights note", "caveat"],
+        dimensions: [53, 55],
+        elapsed_ms: 2400,
+        ...overrides,
+      },
+    });
+    expect(MEASUREMENT_KINDS).toContain("line_fit");
+    const entry = lineFitEntry(run(true, 3));
+    expect(entry.kind).toBe("line_fit");
+    expect(entry.file).toBe("g395h_s3d.fits");
+    expect(entry.image).toBe("loaded cube");
+    expect(entry.unit).toBe("MJy/sr km/s");
+    expect(entry.source).toBe('{"kind":"cube","z0":1769,"z1":1786}');
+    expect(entry.dq).toBe(dqHandlingOf(true, true));
+    expect(entry.dq).toBe("excluded");
+    expect(lineFitEntry(run(true, null)).dq).toBe(dqHandlingOf(true, false));
+    expect(lineFitEntry(run(true, null)).dq).toBe("requested");
+    expect(lineFitEntry(run(false, null)).dq).toBe(dqHandlingOf(false, false));
+    expect(lineFitEntry(run(false, null)).dq).toBe("off");
+    expect(entry.params).toEqual({
+      z0: 1769,
+      z1: 1786,
+      n_channels: 18,
+      rest_um: 4.052262,
+      convention: "optical",
+      continuum_windows: "[[1750,1762],[1789,1800]]",
+      weighting: "err",
+      err_hdu: 2,
+      dq_hdu: 3,
+      use_err: true,
+      use_dq: true,
+      emission_only: true,
+      snr_threshold: 3,
+      resolving_power: null,
+      components: "auto",
+      line: "Brα",
+      sigma_label: "observed (instrumental width not removed)",
+      fits_velocity: "C:/o/g395h_s3d_hdu1_linefit_velocity_1769-1786.fits",
+      fits_flux: "C:/o/g395h_s3d_hdu1_linefit_flux_1769-1786.fits",
+    });
+    expect(entry.values).toEqual({
+      n_fit: 690,
+      n_masked: 40,
+      n_const_continuum: 65,
+      n_two_components: 351,
+      median_chi2_red: 225.5,
+      elapsed_ms: 2400,
+    });
+    expect(entry.notes).toEqual(["weights note", "caveat"]);
+    const sparse = lineFitEntry(run(true, 3, { median_chi2_red: null, rest_um: null, err_hdu: null, weighting: "continuum" }));
+    expect(sparse.values.median_chi2_red).toBeNull();
+    expect(sparse.params.rest_um).toBeNull();
+    expect(sparse.params.err_hdu).toBeNull();
+    expect(sparse.params.weighting).toBe("continuum");
   });
 
   it("formatLogValue and entrySummary render numbers, strings, booleans and null", () => {

@@ -23,6 +23,7 @@ export type { TauriCommandError } from "./errors";
 export type { WcsInfo, PlateSolveOptions, SkyFrame, PixelToWorldResult } from "./astrometry";
 export type { AppConfig, ApiKeyResult } from "./config";
 export type { CubeDims, CubeSpectrum } from "./cube";
+export type { RampInfo, QuickSlopeParams, QuickSlopeResult, RateComparison, CubeInfoWithRamp } from "./ramp";
 export type {
   ChannelStats,
   BlendResult,

@@ -29,6 +29,13 @@ function publishAllowed(gate: FramePublishGate | undefined): boolean {
   return gate?.isCurrent() ?? true;
 }
 
+export type FrameLoader = (
+  path: string,
+  frameIndex: number,
+  outputPath: string,
+  outputFits?: string,
+) => Promise<{ output_path: string; fits_path?: string | null }>;
+
 interface CubeFrameNavProps {
   filePath: string;
   totalFrames: number;
@@ -36,6 +43,8 @@ interface CubeFrameNavProps {
   requestSeq: number;
   onFrameRequest: (idx: number) => void;
   frameLabel?: string | null;
+  labelFor?: (idx: number) => string;
+  frameLoader?: FrameLoader;
   loop?: boolean;
   onLoopChange?: (loop: boolean) => void;
   onFrameChange?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
@@ -49,6 +58,8 @@ function CubeFrameNavInner({
   requestSeq,
   onFrameRequest,
   frameLabel = null,
+  labelFor,
+  frameLoader,
   loop,
   onLoopChange,
   onFrameChange,
@@ -75,6 +86,8 @@ function CubeFrameNavInner({
   onFrameRequestRef.current = onFrameRequest;
   const publishGateRef = useRef(publishGate);
   publishGateRef.current = publishGate;
+  const frameLoaderRef = useRef<FrameLoader>(frameLoader ?? getCubeFrame);
+  frameLoaderRef.current = frameLoader ?? getCubeFrame;
 
   const playingRef = useRef(false);
   const seqRef = useRef(0);
@@ -147,7 +160,7 @@ function CubeFrameNavInner({
       const seq = ++seqRef.current;
       try {
         const paths = cubeFrameOutputPaths(filePath, idx);
-        const result = await getCubeFrame(filePath, idx, paths.png, withFits ? paths.fits : undefined);
+        const result = await frameLoaderRef.current(filePath, idx, paths.png, withFits ? paths.fits : undefined);
         if (seqRef.current !== seq) return;
         pngCacheRef.current.set(idx, result.output_path);
         if (result.fits_path) fitsCacheRef.current.set(idx, result.fits_path);
@@ -309,7 +322,8 @@ function CubeFrameNavInner({
   if (totalFrames <= 1) return null;
 
   const shown = dragValue ?? frame;
-  const headerText = dragValue === null && frameLabel ? frameLabel : formatFrameLabel(shown, totalFrames, null, "");
+  const headerText =
+    dragValue === null && frameLabel ? frameLabel : labelFor ? labelFor(shown) : formatFrameLabel(shown, totalFrames, null, "");
 
   return (
     <div className="bg-zinc-950/50 rounded-lg border border-purple-500/20 p-3">
@@ -333,6 +347,7 @@ function CubeFrameNavInner({
         onPointerUp={handleSliderRelease}
         onKeyUp={handleSliderRelease}
         aria-label="Cube frame"
+        aria-valuetext={headerText}
         className="w-full accent-purple-500 mb-2"
       />
 

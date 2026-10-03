@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
+import { extractProductType, fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
 import { displayFilterValue } from "../../utils/channelMapping";
 
 const WFPC2 = [
@@ -10,6 +10,14 @@ const WFPC2 = [
 
 const NIRCAM = { name: "jw02739-o001_t001_nircam_clear-f200w_i2d.fits", filter: "F200W", instrument: "NIRCAM" };
 const NIRCAM_BARE = { name: "jw02739-o001_t001_nrcb1_i2d.fits", filter: "F200W", instrument: "NIRCAM" };
+
+describe("extractProductType", () => {
+  it("gives the quick-slope product its own chip next to uncal and rate", () => {
+    expect(extractProductType("jw_nrs1_qslope.fits")).toBe("qslope");
+    expect(extractProductType("jw_nrs1_uncal.fits")).toBe("uncal");
+    expect(extractProductType("jw_nrs1_rate.fits")).toBe("rate");
+  });
+});
 
 describe("fileSearchText", () => {
   it("joins the name, the filter and the instrument in lower case", () => {

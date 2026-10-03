@@ -10,7 +10,7 @@ use crate::cmd::common::{
 };
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
-use crate::core::cube::eager::{build_wavelength_axis, classify_spectral_cube};
+use crate::core::cube::eager::{build_wavelength_axis, classify_spectral_cube, ramp_classification};
 use crate::core::cube::lazy::{CollapseMode, LazyCube};
 use crate::core::cube::moments::{moment_maps, MomentConfig};
 use crate::core::imaging::region::RegionShape;
@@ -21,7 +21,7 @@ use crate::types::constants::{
     RES_BITPIX, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT,
     RES_OUTPUT_PATH, RES_SPECTRUM, RES_WIDTH, RES_UNIT,
     RES_SPECTRAL_CLASSIFICATION, RES_IS_SPECTRAL, RES_SPECTRAL_REASON,
-    RES_AXIS_TYPE, RES_AXIS_UNIT, RES_CHANNEL_COUNT, RES_WAVELENGTHS,
+    RES_AXIS_TYPE, RES_AXIS_UNIT, RES_CHANNEL_COUNT, RES_WAVELENGTHS, RES_RAMP,
 };
 use crate::types::header::HduHeader;
 
@@ -34,6 +34,8 @@ const CARD_CHANNEL: &str = "CHANNEL";
 const CARD_SPECTRAL_TYPE: &str = "SPECTYPE";
 const CARD_SPECTRAL_VALUE: &str = "SPECVAL";
 const CARD_SPECTRAL_UNIT: &str = "SPECUNIT";
+pub(crate) const CARD_GROUP: &str = "ABGROUP";
+pub(crate) const CARD_INTEGRATION: &str = "ABINTEG";
 const ABPROC_CUBE_FRAME: &str = "cube-frame";
 const SUMMED_UNIT_SUFFIX: &str = " x channels";
 
@@ -100,6 +102,10 @@ fn moment_header(cube: &LazyCube, order: u8, unit: &str) -> HduHeader {
 pub(crate) fn frame_header(cube: &LazyCube, z: usize) -> HduHeader {
     let mut header = plane_header(cube, ABPROC_CUBE_FRAME, OutputValues::Linear);
     header.set(CARD_CHANNEL, z.to_string());
+    if let Some(ramp) = cube.ramp() {
+        header.set(CARD_GROUP, (z % ramp.ngroups).to_string());
+        header.set(CARD_INTEGRATION, (z / ramp.ngroups).to_string());
+    }
     if let Ok(axis) = cube.spectral_axis() {
         if let Some(value) = axis.header_values().get(z).copied().filter(|v| v.is_finite()) {
             header.set_f64(CARD_SPECTRAL_VALUE, value);
@@ -272,12 +278,17 @@ pub(crate) fn moment_map_files(
 fn cube_info_json(path: &str) -> anyhow::Result<serde_json::Value> {
     let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
     let geo = &cube.geometry;
-    let classification = classify_spectral_cube(&cube.header, geo.naxis3);
+    let ramp = cube.ramp();
+    let classification = match &ramp {
+        Some(r) => ramp_classification(r, geo.naxis3),
+        None => classify_spectral_cube(&cube.header, geo.naxis3),
+    };
     Ok(json!({
         RES_WIDTH: geo.naxis1,
         RES_HEIGHT: geo.naxis2,
-        RES_FRAMES: geo.naxis3,
+        RES_FRAMES: geo.depth,
         RES_BITPIX: geo.bitpix,
+        RES_RAMP: ramp,
         RES_SPECTRAL_CLASSIFICATION: {
             RES_IS_SPECTRAL: classification.is_spectral,
             RES_SPECTRAL_REASON: classification.reason,
@@ -291,7 +302,7 @@ fn cube_info_json(path: &str) -> anyhow::Result<serde_json::Value> {
     }))
 }
 
-fn cube_frame_json(
+pub(crate) fn cube_frame_json(
     path: &str,
     frame_index: usize,
     output_path: &str,
@@ -770,6 +781,82 @@ mod tests {
         assert!((got - pinned).abs() <= 1e-12 * pinned, "channel 20: got={} expected={}", got, pinned);
         GLOBAL_CUBE_CACHE.invalidate(&key);
         GLOBAL_CUBE_CACHE.invalidate(mjy_key);
+    }
+
+    fn write_ramp_fixture(dir: &tempfile::TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        let primary = [
+            ("TELESCOP", "'JWST'"),
+            ("NGROUPS", "3"),
+            ("NINTS", "2"),
+            ("TGROUP", "10.0"),
+            ("READPATT", "'NRSIRS2RAPID'"),
+            ("DATAMODL", "'Level1bModel'"),
+        ];
+        write_u16_ramp_mef(&path, 4, 3, 3, 2, &primary, &[("BUNIT", "'DN'")], |i, g, y, x| (30000 + i * 1000 + g * 100 + y * 10 + x) as u16);
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn cube_info_json_carries_the_ramp_block_and_the_flattened_frame_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_ramp_fixture(&dir, "ramp_info.fits");
+        let info = get_cube_info(key.clone()).await.unwrap();
+        assert_eq!(info[RES_FRAMES], 6);
+        assert_eq!(info[RES_WIDTH], 4);
+        assert_eq!(info[RES_HEIGHT], 3);
+        assert_eq!(info[RES_RAMP]["ngroups"], 3);
+        assert_eq!(info[RES_RAMP]["nints"], 2);
+        assert_eq!(info[RES_RAMP]["tgroup_s"], 10.0);
+        assert_eq!(info[RES_RAMP]["kind"], "jwst_groups");
+        assert_eq!(info[RES_RAMP]["group_times_s"], serde_json::json!([0.0, 10.0, 20.0]));
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_IS_SPECTRAL], false);
+        let reason = info[RES_SPECTRAL_CLASSIFICATION][RES_SPECTRAL_REASON].as_str().unwrap();
+        assert!(reason.starts_with("ramp:"), "{}", reason);
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_CHANNEL_COUNT], 3);
+        assert!(info[RES_WAVELENGTHS].is_null());
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+
+        let plain = dir.path().join("plain.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_key = plain.to_str().unwrap().to_string();
+        let info = get_cube_info(plain_key.clone()).await.unwrap();
+        assert!(info[RES_RAMP].is_null(), "{}", info[RES_RAMP]);
+        assert_eq!(info[RES_FRAMES], LINE_CUBE_DEPTH);
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_IS_SPECTRAL], true);
+        GLOBAL_CUBE_CACHE.invalidate(&plain_key);
+    }
+
+    #[test]
+    fn a_ramp_frame_header_names_group_and_integration() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_ramp_fixture(&dir, "ramp_frame.fits");
+        let cube = LazyCube::open(&key).unwrap();
+        let header = frame_header(&cube, 4);
+        assert_eq!(header.get_i64("ABGROUP"), Some(1));
+        assert_eq!(header.get_i64("ABINTEG"), Some(1));
+        assert_eq!(header.get_i64(CARD_CHANNEL), Some(4));
+        assert_eq!(header.get("TELESCOP"), None, "the primary header must not leak into a derived frame");
+        assert_eq!(header.get("BUNIT"), Some("DN"));
+        assert_eq!(header.get(HEADER_ABPROC), Some(ABPROC_CUBE_FRAME));
+        assert!(header.get("NAXIS4").is_none() && header.get("NAXIS3").is_none(), "{:?}", header.cards);
+        let first = frame_header(&cube, 0);
+        assert_eq!((first.get_i64("ABGROUP"), first.get_i64("ABINTEG")), (Some(0), Some(0)));
+
+        let png = dir.path().join("ramp_frame.png");
+        let fits = dir.path().join("ramp_frame_4.fits");
+        cube_frame_json(&key, 4, png.to_str().unwrap(), Some(fits.to_str().unwrap())).unwrap();
+        let reopened = reopen(fits.to_str().unwrap());
+        assert_eq!(reopened.header.get_i64("ABGROUP"), Some(1));
+        assert_eq!(reopened.header.get_i64("ABINTEG"), Some(1));
+        assert_eq!(reopened.image[[1, 2]], 31112.0);
+
+        let plain = dir.path().join("plain_frame.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_cube = LazyCube::open(plain.to_str().unwrap()).unwrap();
+        let header = frame_header(&plain_cube, 3);
+        assert!(header.get("ABGROUP").is_none() && header.get("ABINTEG").is_none());
+        GLOBAL_CUBE_CACHE.invalidate(&key);
     }
 
     #[test]

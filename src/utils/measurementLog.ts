@@ -11,6 +11,7 @@ import { buildCsv, type CsvColumn } from "./catalogCsv";
 import { checkReference, hasCompleteTimeAxis, lightCurve, referenceTimeSource, seriesRms } from "./differentialPhotometry";
 import { generateId } from "./format";
 import { exportStem, parseImageRef } from "./imageRef";
+import type { LineFitRun } from "./lineFit";
 import { regionSkyOf } from "./regionCsv";
 import { isExcludeRegion } from "./regionExclude";
 import { firstSurfaceBrightness } from "./sbProfile";
@@ -34,6 +35,7 @@ export const MEASUREMENT_KINDS = [
   "spectrum_export",
   "spectrum_compare",
   "pv",
+  "line_fit",
 ] as const;
 
 const DEFAULT_CLIP_SIGMA = 3;
@@ -973,6 +975,48 @@ export function pvEntry(run: PvRun): MeasurementLogDraft {
       n_channels: result.summary.n_channels,
       ridge_min: ridge.length > 0 ? Math.min(...ridge) : null,
       ridge_max: ridge.length > 0 ? Math.max(...ridge) : null,
+    },
+    notes: [...result.notes],
+  };
+}
+
+export function lineFitEntry(run: LineFitRun): MeasurementLogDraft {
+  const { config, result } = run;
+  return {
+    kind: "line_fit",
+    file: fileNameOf(run.filePath),
+    image: LOADED_CUBE_IMAGE,
+    dq: dqHandlingOf(config.use_dq, result.dq_hdu !== null),
+    unit: result.units.flux,
+    source: JSON.stringify({ kind: "cube", z0: result.z0, z1: result.z1 }),
+    params: {
+      z0: result.z0,
+      z1: result.z1,
+      n_channels: result.n_channels,
+      rest_um: finiteOrNull(result.rest_um),
+      convention: result.convention,
+      continuum_windows: JSON.stringify(result.continuum_windows),
+      weighting: result.weighting,
+      err_hdu: finiteOrNull(result.err_hdu),
+      dq_hdu: finiteOrNull(result.dq_hdu),
+      use_err: config.use_err,
+      use_dq: config.use_dq,
+      emission_only: config.emission_only,
+      snr_threshold: finiteOrNull(result.snr_threshold),
+      resolving_power: finiteOrNull(result.resolving_power),
+      components: result.components,
+      line: run.lineLabel,
+      sigma_label: result.sigma_label,
+      fits_velocity: result.planes.velocity?.fits_path ?? null,
+      fits_flux: result.planes.flux?.fits_path ?? null,
+    },
+    values: {
+      n_fit: result.n_fit,
+      n_masked: result.n_masked,
+      n_const_continuum: result.n_const_continuum,
+      n_two_components: result.n_two_components,
+      median_chi2_red: finiteOrNull(result.median_chi2_red),
+      elapsed_ms: result.elapsed_ms,
     },
     notes: [...result.notes],
   };

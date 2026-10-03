@@ -35,7 +35,8 @@ fn validate_output_paths(args: &GenerateSynthArgs) -> anyhow::Result<()> {
 pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, String> {
     validate_output_paths(&args).map_err(|e| format!("{:#}", e))?;
     let config = args.config;
-    let header = pipeline::frame_header(&config.noise, 0, config.cadence_seconds);
+    let header = pipeline::synth_header(&config, 0, None);
+    let truth_header = pipeline::ground_truth_header(&config);
     let noise = config.noise.clone();
 
     let (noisy, ground_truth, stars) =
@@ -49,7 +50,7 @@ pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, 
 
     if args.save_ground_truth {
         if let Some(gt_path) = &args.ground_truth_path {
-            write_derived_fits(gt_path, &ground_truth, Some(&header))
+            write_derived_fits(gt_path, &ground_truth, Some(&truth_header))
                 .map_err(|e| format!("Failed to save ground truth: {}", e))?;
         }
     }
@@ -66,6 +67,7 @@ pub async fn generate_synth_cmd(args: GenerateSynthArgs) -> Result<SynthResult, 
         height: noisy.dim().0 as u32,
         star_count: stars.len(),
         output_path: Some(args.output_path),
+        frames_manifest_path: None,
     })
 }
 
@@ -74,6 +76,10 @@ pub struct GenerateStackArgs {
     pub config: SynthConfig,
     pub output_dir: String,
     pub prefix: String,
+    #[serde(default)]
+    pub save_catalog: bool,
+    #[serde(default)]
+    pub save_ground_truth: bool,
 }
 
 fn is_frame_file_name(name: &str, prefix: &str) -> bool {
@@ -113,6 +119,38 @@ fn validate_output_dir(output_dir: &str, prefix: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct StackOutputs {
+    star_count: usize,
+    manifest_path: String,
+}
+
+fn write_stack(config: &SynthConfig, output_dir: &str, prefix: &str, save_catalog: bool, save_ground_truth: bool) -> anyhow::Result<StackOutputs> {
+    let plan = pipeline::prepare_stack(config)?;
+    let dir = std::path::Path::new(output_dir);
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("Could not create the output folder {output_dir}: {e}"))?;
+    for i in 0..plan.n_frames() {
+        let path = dir.join(format!("{prefix}_{i:04}.fits"));
+        let frame = plan.frame(i);
+        write_derived_fits(&path.to_string_lossy(), &frame, Some(&plan.header(i)))
+            .map_err(|e| anyhow::anyhow!("Failed to save frame {i} to {}: {e}", path.display()))?;
+    }
+    let manifest = dir.join(format!("{prefix}_frames.csv"));
+    std::fs::write(&manifest, plan.manifest_csv())
+        .map_err(|e| anyhow::anyhow!("Failed to save the frame manifest {}: {e}", manifest.display()))?;
+    if save_catalog {
+        let path = dir.join(format!("{prefix}_catalog.csv"));
+        pipeline::save_catalog(&plan.stars, &config.noise, &path.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!("Failed to save catalog {}: {e}", path.display()))?;
+    }
+    if save_ground_truth {
+        let path = dir.join(format!("{prefix}_groundtruth.fits"));
+        write_derived_fits(&path.to_string_lossy(), &plan.ground_truth_in_frame_units(), Some(&plan.ground_truth_header()))
+            .map_err(|e| anyhow::anyhow!("Failed to save ground truth {}: {e}", path.display()))?;
+    }
+    Ok(StackOutputs { star_count: plan.stars.len(), manifest_path: manifest.to_string_lossy().into_owned() })
+}
+
 #[command]
 pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthResult, String> {
     validate_output_dir(&args.output_dir, &args.prefix).map_err(|e| format!("{:#}", e))?;
@@ -120,29 +158,19 @@ pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthRe
     let (width, height) = (config.field.width, config.field.height);
     let output_dir = args.output_dir.clone();
     let prefix = args.prefix;
+    let (save_catalog, save_ground_truth) = (args.save_catalog, args.save_ground_truth);
 
-    let star_count = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        let plan = pipeline::prepare_stack(&config)?;
-        let dir = std::path::Path::new(&output_dir);
-        std::fs::create_dir_all(dir)
-            .map_err(|e| anyhow::anyhow!("Could not create the output folder {output_dir}: {e}"))?;
-        for i in 0..plan.n_frames() {
-            let path = dir.join(format!("{prefix}_{i:04}.fits"));
-            let frame = plan.frame(i);
-            write_derived_fits(&path.to_string_lossy(), &frame, Some(&plan.header(i)))
-                .map_err(|e| anyhow::anyhow!("Failed to save frame {i} to {}: {e}", path.display()))?;
-        }
-        Ok(plan.stars.len())
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
-    .map_err(|e| format!("{:#}", e))?;
+    let outputs = tokio::task::spawn_blocking(move || write_stack(&config, &output_dir, &prefix, save_catalog, save_ground_truth))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("{:#}", e))?;
 
     Ok(SynthResult {
         width,
         height,
-        star_count,
+        star_count: outputs.star_count,
         output_path: Some(args.output_dir),
+        frames_manifest_path: Some(outputs.manifest_path),
     })
 }
 
@@ -150,7 +178,8 @@ pub async fn generate_synth_stack_cmd(args: GenerateStackArgs) -> Result<SynthRe
 mod tests {
     use super::*;
     use crate::cmd::common::load_cached_full;
-    use crate::core::synth::pipeline::FieldType;
+    use crate::core::synth::pipeline::{FieldType, FrameVariation, GROUND_TRUTH_NOTE, OFFSET_CONVENTION};
+    use crate::types::header::HduHeader;
 
     fn small_config() -> SynthConfig {
         let mut config = SynthConfig::default();
@@ -160,18 +189,40 @@ mod tests {
         config
     }
 
+    fn stack_args(config: SynthConfig, output_dir: &std::path::Path) -> GenerateStackArgs {
+        GenerateStackArgs {
+            config,
+            output_dir: output_dir.to_str().unwrap().to_string(),
+            prefix: "synth".to_string(),
+            save_catalog: false,
+            save_ground_truth: false,
+        }
+    }
+
+    fn file_names(dir: &std::path::Path) -> Vec<String> {
+        let mut written: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        written.sort();
+        written
+    }
+
+    fn header_of(path: &std::path::Path) -> HduHeader {
+        load_cached_full(path.to_str().unwrap()).unwrap().header().expect("header").clone()
+    }
+
+    fn text_card(header: &HduHeader, key: &str) -> Option<String> {
+        header.get(key).map(|v| v.trim().trim_matches('\'').trim().to_string())
+    }
+
     #[tokio::test]
     async fn a_stack_of_zero_frames_is_an_error_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stack");
         let mut config = small_config();
         config.n_frames = 0;
-        let args = GenerateStackArgs {
-            config,
-            output_dir: out.to_str().unwrap().to_string(),
-            prefix: "synth".to_string(),
-        };
-        let err = generate_synth_stack_cmd(args).await.expect_err("zero frames must be refused");
+        let err = generate_synth_stack_cmd(stack_args(config, &out)).await.expect_err("zero frames must be refused");
         assert!(err.contains("Frame count 0"), "{err}");
         assert!(!out.exists(), "an empty output directory was left behind");
     }
@@ -181,12 +232,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stack");
         std::fs::write(&out, b"not a folder").unwrap();
-        let args = GenerateStackArgs {
-            config: small_config(),
-            output_dir: out.to_str().unwrap().to_string(),
-            prefix: "synth".to_string(),
-        };
-        let err = generate_synth_stack_cmd(args).await.expect_err("a file path must be refused");
+        let err = generate_synth_stack_cmd(stack_args(small_config(), &out)).await.expect_err("a file path must be refused");
         assert!(err.contains("is an existing file"), "{err}");
         assert!(err.contains("stack"), "{err}");
         assert!(out.is_file(), "the existing file must be left untouched");
@@ -197,12 +243,7 @@ mod tests {
     async fn an_output_folder_with_a_missing_parent_is_refused_before_generating() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("missing").join("stack");
-        let args = GenerateStackArgs {
-            config: small_config(),
-            output_dir: out.to_str().unwrap().to_string(),
-            prefix: "synth".to_string(),
-        };
-        let err = generate_synth_stack_cmd(args).await.expect_err("a missing parent must be refused");
+        let err = generate_synth_stack_cmd(stack_args(small_config(), &out)).await.expect_err("a missing parent must be refused");
         assert!(err.contains("parent folder"), "{err}");
         assert!(err.contains("stack"), "{err}");
         assert!(!dir.path().join("missing").exists(), "nothing may be created");
@@ -216,12 +257,7 @@ mod tests {
         config.field.width = 16384;
         config.field.height = 16384;
         config.n_frames = 1024;
-        let args = GenerateStackArgs {
-            config,
-            output_dir: out.to_str().unwrap().to_string(),
-            prefix: "synth".to_string(),
-        };
-        let err = generate_synth_stack_cmd(args).await.expect_err("an over-budget stack must be refused");
+        let err = generate_synth_stack_cmd(stack_args(config, &out)).await.expect_err("an over-budget stack must be refused");
         assert!(err.contains("the limit is"), "{err}");
         assert!(!out.exists(), "an empty output directory was left behind");
     }
@@ -231,24 +267,72 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = small_config();
         config.n_frames = 3;
-        let args = GenerateStackArgs {
-            config,
-            output_dir: dir.path().to_str().unwrap().to_string(),
-            prefix: "synth".to_string(),
-        };
-        let res = generate_synth_stack_cmd(args).await.unwrap();
+        let res = generate_synth_stack_cmd(stack_args(config, dir.path())).await.unwrap();
         assert_eq!(res.star_count, 5);
         assert_eq!((res.width, res.height), (32, 32));
-        let mut written: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        written.sort();
-        assert_eq!(written, ["synth_0000.fits", "synth_0001.fits", "synth_0002.fits"]);
+        let manifest = dir.path().join("synth_frames.csv");
+        assert_eq!(res.frames_manifest_path.as_deref(), manifest.to_str());
+        assert_eq!(file_names(dir.path()), ["synth_0000.fits", "synth_0001.fits", "synth_0002.fits", "synth_frames.csv"]);
+        let rows: Vec<String> = std::fs::read_to_string(&manifest).unwrap().lines().map(str::to_string).collect();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], "frame,dx,dy,fwhm_factor,sky_factor,transparency,n_cosmic_rays,date_obs");
         let first = load_cached_full(dir.path().join("synth_0000.fits").to_str().unwrap()).unwrap();
         let last = load_cached_full(dir.path().join("synth_0002.fits").to_str().unwrap()).unwrap();
         let mjd = |e: &crate::infra::cache::ImageEntry| e.header().unwrap().get_f64("MJD-OBS").unwrap();
-        assert!(mjd(&last) > mjd(&first));
+        let step = (mjd(&last) - mjd(&first)) / 2.0 * 86400.0;
+        assert!((step - 310.0).abs() < 1e-3, "cadence step {step} s");
+    }
+
+    #[tokio::test]
+    async fn stack_mode_writes_the_catalog_ground_truth_and_manifest_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = small_config();
+        config.n_frames = 2;
+        config.frame_variation = FrameVariation::default();
+        let mut args = stack_args(config, dir.path());
+        args.save_catalog = true;
+        args.save_ground_truth = true;
+        let res = generate_synth_stack_cmd(args).await.unwrap();
+        assert_eq!(res.star_count, 5);
+        assert_eq!(
+            file_names(dir.path()),
+            ["synth_0000.fits", "synth_0001.fits", "synth_catalog.csv", "synth_frames.csv", "synth_groundtruth.fits"]
+        );
+        let catalog = std::fs::read_to_string(dir.path().join("synth_catalog.csv")).unwrap();
+        assert_eq!(catalog.lines().count(), 6);
+        assert!(catalog.starts_with("id,x,y,z,flux_e,flux_adu,temperature\n"));
+        let truth = header_of(&dir.path().join("synth_groundtruth.fits"));
+        assert_eq!(text_card(&truth, "SYNTHGT").as_deref(), Some(GROUND_TRUTH_NOTE));
+        assert_eq!(truth.get("SYNFRAME"), None);
+        assert_eq!(text_card(&truth, "SYNFIELD").as_deref(), Some("uniform"));
+        let manifest = std::fs::read_to_string(dir.path().join("synth_frames.csv")).unwrap();
+        let second: Vec<&str> = manifest.lines().nth(2).unwrap().split(',').collect();
+        assert_eq!(second[0], "1");
+        assert_ne!(second[1], "0.0000");
+        let frame1 = header_of(&dir.path().join("synth_0001.fits"));
+        assert!((frame1.get_f64("SYNDX").unwrap() - second[1].parse::<f64>().unwrap()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stack_args_without_save_flags_still_deserialize() {
+        let json = serde_json::json!({
+            "config": {
+                "field": {"width": 16, "height": 16, "n_stars": 1, "flux_min": 2000.0, "flux_max": 500000.0, "seed": 1},
+                "field_type": "Uniform",
+                "psf_type": {"Gaussian": {"fwhm": 3.0}},
+                "noise": {"gain": 1.5, "readout_noise": 8.0, "sky_background": 200.0, "dark_current": 0.05, "exposure_time": 300.0, "bias_level": 1000.0, "seed": 1001},
+                "apply_vignette": false,
+                "vignette_strength": 0.3,
+                "n_frames": 2
+            },
+            "output_dir": "C:/tmp/stack",
+            "prefix": "synth"
+        });
+        let args: GenerateStackArgs = serde_json::from_value(json).unwrap();
+        assert!(!args.save_catalog && !args.save_ground_truth);
+        assert_eq!(args.config.cadence_seconds, 310.0);
+        assert_eq!(args.config.noise.seed, Some(1001));
+        assert!(args.config.frame_variation.enabled);
     }
 
     #[test]
@@ -289,26 +373,20 @@ mod tests {
         let output_dir = dir.path().to_str().unwrap().to_string();
         let mut first = small_config();
         first.n_frames = 3;
-        let first_args = GenerateStackArgs { config: first, output_dir: output_dir.clone(), prefix: "synth".to_string() };
-        generate_synth_stack_cmd(first_args).await.unwrap();
+        generate_synth_stack_cmd(stack_args(first, dir.path())).await.unwrap();
         let before = std::fs::read(dir.path().join("synth_0000.fits")).unwrap();
         let mut second = small_config();
         second.n_frames = 1;
         second.field.n_stars = 2;
-        second.noise.seed = second.noise.seed.wrapping_add(1);
-        let second_args = GenerateStackArgs { config: second, output_dir: output_dir.clone(), prefix: "synth".to_string() };
-        let err = generate_synth_stack_cmd(second_args).await.expect_err("a folder holding frames from an earlier run must be refused");
+        second.field.seed += 1;
+        let err = generate_synth_stack_cmd(stack_args(second, dir.path())).await.expect_err("a folder holding frames from an earlier run must be refused");
         assert!(err.contains("already holds frames from an earlier run"), "{err}");
         assert!(err.contains("synth_0000.fits"), "{err}");
         assert!(err.contains(&output_dir), "{err}");
-        let mut written: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        written.sort();
-        assert_eq!(written, ["synth_0000.fits", "synth_0001.fits", "synth_0002.fits"]);
+        assert_eq!(file_names(dir.path()), ["synth_0000.fits", "synth_0001.fits", "synth_0002.fits", "synth_frames.csv"]);
         assert_eq!(std::fs::read(dir.path().join("synth_0000.fits")).unwrap(), before, "the first run was overwritten");
-        let other_prefix = GenerateStackArgs { config: small_config(), output_dir: output_dir.clone(), prefix: "field".to_string() };
+        let mut other_prefix = stack_args(small_config(), dir.path());
+        other_prefix.prefix = "field".to_string();
         generate_synth_stack_cmd(other_prefix).await.unwrap();
         assert!(dir.path().join("field_0000.fits").is_file());
     }
@@ -331,25 +409,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn written_frames_carry_the_exposure_gain_and_unit() {
+    async fn written_frames_carry_the_exposure_gain_unit_and_provenance_cards() {
         let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("frame.fits").to_str().unwrap().to_string();
-        let gt = dir.path().join("truth.fits").to_str().unwrap().to_string();
+        let out = dir.path().join("frame.fits");
+        let gt = dir.path().join("truth.fits");
+        let mut config = small_config();
+        config.field.seed = 4242;
+        config.psf_type = crate::core::synth::pipeline::PsfType::Moffat { fwhm: 2.5, beta: 4.0 };
         let args = GenerateSynthArgs {
-            config: small_config(),
-            output_path: out.clone(),
+            config,
+            output_path: out.to_str().unwrap().to_string(),
             save_catalog: false,
             catalog_path: None,
             save_ground_truth: true,
-            ground_truth_path: Some(gt.clone()),
+            ground_truth_path: Some(gt.to_str().unwrap().to_string()),
         };
-        generate_synth_cmd(args).await.unwrap();
+        let res = generate_synth_cmd(args).await.unwrap();
+        assert_eq!(res.frames_manifest_path, None);
         for path in [&out, &gt] {
-            let entry = load_cached_full(path).unwrap();
-            let header = entry.header().expect("header");
+            let header = header_of(path);
             assert_eq!(header.get_f64("EXPTIME"), Some(300.0));
             assert_eq!(header.get_f64("GAIN"), Some(1.5));
-            assert_eq!(header.get("BUNIT").map(|v| v.trim().trim_matches('\'').trim()), Some("ADU"));
+            assert_eq!(header.get_f64("RDNOISE"), Some(8.0));
+            assert_eq!(text_card(&header, "BUNIT").as_deref(), Some("ADU"));
+            assert_eq!(header.get_i64("SYNSEED"), Some(4242));
+            assert_eq!(text_card(&header, "SYNFIELD").as_deref(), Some("uniform"));
+            assert_eq!(text_card(&header, "SYNPSF").as_deref(), Some("moffat"));
+            assert_eq!(header.get_f64("SYNFWHM"), Some(2.5));
+            assert_eq!(header.get("SYNFRAME"), None);
+            assert_eq!(header.get("SYNDX"), None);
+        }
+        assert_eq!(header_of(&out).get("SYNTHGT"), None);
+        assert_eq!(text_card(&header_of(&gt), "SYNTHGT").as_deref(), Some(GROUND_TRUTH_NOTE));
+
+        let stack_dir = dir.path().join("stack");
+        let mut config = small_config();
+        config.n_frames = 2;
+        config.frame_variation = FrameVariation::default();
+        generate_synth_stack_cmd(stack_args(config, &stack_dir)).await.unwrap();
+        for i in 0..2i64 {
+            let header = header_of(&stack_dir.join(format!("synth_{i:04}.fits")));
+            assert_eq!(header.get_i64("SYNFRAME"), Some(i));
+            assert_eq!(header.get_i64("SYNSEED"), Some(42));
+            assert!(header.get_f64("SYNDX").is_some() && header.get_f64("SYNDY").is_some());
+            assert_eq!(text_card(&header, "SYNOFFS").as_deref(), Some(OFFSET_CONVENTION));
+            assert_eq!(header.get_f64("RDNOISE"), Some(8.0));
+            assert_eq!(text_card(&header, "SYNPSF").as_deref(), Some("gaussian"));
+            if i == 0 {
+                assert_eq!(header.get_f64("SYNDX"), Some(0.0));
+                assert_eq!(header.get_f64("SYNDY"), Some(0.0));
+            } else {
+                assert_ne!(header.get_f64("SYNDX"), Some(0.0));
+            }
         }
     }
 

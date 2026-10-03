@@ -2,6 +2,9 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } fr
 import { Image, Cpu, Zap, Loader2, SkipBack, Palette } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
+import { getRampPixelSeries, rampSpectrumFromSeries } from "../services/ramp";
+import { useRampIntegration } from "../hooks/useRampStore";
+import { rampPixelTarget } from "../utils/rampLabels";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import {
   fileKeyOf,
@@ -55,7 +58,8 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
 
 export default function PreviewPanel() {
   const { file } = useFileContext();
-  const { isCube } = useCubeContext();
+  const { isCube, ramp } = useCubeContext();
+  const rampIntegration = useRampIntegration();
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
@@ -86,6 +90,8 @@ export default function PreviewPanel() {
   const gpuLoadKeyRef = useRef<string | null>(null);
   const dqCanvasRef = useRef<HTMLCanvasElement>(null);
   const specAbortRef = useRef(0);
+  const rampPixelRef = useRef<{ path: string; x: number; y: number } | null>(null);
+  const lastRampIntegrationRef = useRef(rampIntegration);
 
   const fileKey = fileKeyOf(file);
   const isRgbFile = !!file?.result?.is_rgb;
@@ -268,21 +274,48 @@ export default function PreviewPanel() {
     enableGpu();
   }, [useGpu, gpuAvailable, enableGpu, clearRawPixels, clearRgbRawPixels]);
 
-  const extractSpectrum = useCallback(async (x: number, y: number) => {
-    const path = file?.path;
-    if (!path) return;
+  const loadSpectrum = useCallback(async (path: string, x: number, y: number, integration: number | null) => {
     const seq = ++specAbortRef.current;
     beginSpectrum({ x, y });
     const t0 = performance.now();
     try {
-      const result = await getCubeSpectrum(path, x, y);
+      const result = integration !== null
+        ? rampSpectrumFromSeries(await getRampPixelSeries(path, x, y, integration))
+        : await getCubeSpectrum(path, x, y);
       if (specAbortRef.current !== seq) return;
       commitSpectrum(result, Math.round(performance.now() - t0));
     } catch (err) {
       if (specAbortRef.current !== seq) return;
       failSpectrum(err instanceof Error ? err.message : String(err));
     }
-  }, [file?.path]);
+  }, []);
+
+  const displayedDims = displayed.dimensions;
+  const extractSpectrum = useCallback((x: number, y: number) => {
+    const path = file?.path;
+    if (!path) return;
+    if (!ramp) {
+      rampPixelRef.current = null;
+      void loadSpectrum(path, x, y, null);
+      return;
+    }
+    const target = rampPixelTarget(x, y, ramp, displayedDims);
+    if (!target.ok) {
+      specAbortRef.current++;
+      failSpectrum(target.reason);
+      return;
+    }
+    rampPixelRef.current = { path, x: target.x, y: target.y };
+    void loadSpectrum(path, target.x, target.y, rampIntegration);
+  }, [file?.path, ramp, displayedDims, rampIntegration, loadSpectrum]);
+
+  useEffect(() => {
+    if (lastRampIntegrationRef.current === rampIntegration) return;
+    lastRampIntegrationRef.current = rampIntegration;
+    const pixel = rampPixelRef.current;
+    if (!ramp || !pixel || pixel.path !== file?.path) return;
+    void loadSpectrum(pixel.path, pixel.x, pixel.y, rampIntegration);
+  }, [rampIntegration, ramp, file?.path, loadSpectrum]);
 
   const handleCubePixelClick = useCallback((x: number, y: number) => {
     const dims = file?.result?.dimensions;

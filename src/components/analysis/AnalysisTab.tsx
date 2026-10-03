@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo, lazy, Suspense, memo } from "react";
 import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
 import MeasurementBadge from "./MeasurementBadge";
@@ -6,12 +6,24 @@ import { detectStars, detectStarsComposite, computeFftSpectrum, applyStfRender, 
 import { getOutputDir } from "../../infrastructure/tauri";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { fileKeyOf, useFileContext, useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
-import { useToolHost } from "../../context/ToolHostContext";
+import { ToolHostContext, useToolHost } from "../../context/ToolHostContext";
 import { useCompositePreview } from "../../context/CompositeContext";
 import { histogramSkyWindow } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
-import { ANALYSIS_SECTION, analysisSections, deepZoomAvailable } from "../../utils/analysisSections";
+import {
+  ANALYSIS_SECTION,
+  analysisPanelAttributes,
+  analysisTabSections,
+  createAnalysisTabMemory,
+  deepZoomAvailable,
+  tabAvailability,
+  type AnalysisSectionsInput,
+  type AnalysisTabId,
+} from "../../utils/analysisSections";
+import AnalysisTabBar from "./AnalysisTabBar";
+import AnalysisLogFooter from "./AnalysisLogFooter";
 import { frameRecordLabel } from "../../utils/cubeNavigation";
+import { cubePanelGates, formatRampFrameLabel } from "../../utils/rampLabels";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import {
@@ -46,8 +58,10 @@ const TargetsPanel = lazy(() => import("./TargetsPanel"));
 const MeasurementLogPanel = lazy(() => import("./MeasurementLogPanel"));
 const ObservationGeometryPanel = lazy(() => import("./ObservationGeometryPanel"));
 const PvPanel = lazy(() => import("./PvPanel"));
+const RampPanel = lazy(() => import("./RampPanel"));
 
 const EMPTY_STARS: Star[] = [];
+const tabMemory = createAnalysisTabMemory();
 
 function TabSpinner() {
   return (
@@ -81,13 +95,13 @@ function AnalysisTabInner({
                           }: AnalysisTabProps) {
   const { file } = useFileContext();
   const { histData, histDataPath, stfParams, setStfParams } = useHistContext();
-  const { isCube, cubeDims } = useCubeContext();
+  const { isCube, cubeDims, ramp, rampSource } = useCubeContext();
   const { publishProcessed, setStfPreviewUrl } = useRenderActions();
   const { processed, processedVersion } = useRenderContext();
   const { rawPixels, rawPixelsLoading, rgbRawPixels, rgbRawPixelsLoading } = useRawPixelsContext();
   const { display } = useDisplayContext();
   const { excludeDq } = useDqContext();
-  const { gpuDisplay } = useToolHost();
+  const { active: hostActive, gpuDisplay } = useToolHost();
   const { compositeVersion } = useCompositePreview();
 
   const [starResult, setStarResult] = useState<StarDetectionResult | null>(null);
@@ -220,6 +234,7 @@ function AnalysisTabInner({
 
   const filePath = file?.path;
   const fileKey = fileKeyOf(file);
+  const [cubeGates] = useState(cubePanelGates);
   const publishCube = useCallback(
     (result: CubeResult) => {
       if (!fileKey || !filePath) return;
@@ -231,6 +246,7 @@ function AnalysisTabInner({
         kind: "cube",
         inputPath: filePath,
         frameIndex: result.frameIndex,
+        displayHint: result.displayHint,
       });
     },
     [publishProcessed, fileKey, filePath],
@@ -258,14 +274,16 @@ function AnalysisTabInner({
       try {
         const url = await getPreviewUrl(outputPath);
         if (frameSeqRef.current !== seq) return;
-        const label = frameRecordLabel(frameIndex, cubeDims?.frames ?? 0, cubeDims?.spectral_axis ?? null);
+        const label = ramp
+          ? formatRampFrameLabel(frameIndex, ramp)
+          : frameRecordLabel(frameIndex, cubeDims?.frames ?? 0, cubeDims?.spectral_axis ?? null);
         const dimensions: [number, number] | null = fitsPath && cubeDims ? [cubeDims.width, cubeDims.height] : null;
         publishCube({ label, previewUrl: url, fitsPath: fitsPath ?? null, dimensions, frameIndex });
       } catch (e) {
         console.error("Frame preview failed:", e);
       }
     },
-    [publishCube, cubeDims],
+    [publishCube, cubeDims, ramp],
   );
 
   const histPath = processed?.fitsPath ?? filePath ?? null;
@@ -325,195 +343,263 @@ function AnalysisTabInner({
 
   const showFft = Boolean(effectivePath) && !isCube && (targetWidth ?? 0) >= 64;
   const showDeepZoom = Boolean(effectivePath) && deepZoomAvailable(targetWidth, targetHeight);
-  const sections = analysisSections({
+  const sectionsInput: AnalysisSectionsInput = {
     hasHistogram: histData !== null && histData.bins.length > 0,
     isCube,
+    isRamp: ramp !== null,
     showFft,
     showDeepZoom,
+  };
+  const [, setTabPick] = useState(0);
+  const activeTab = tabMemory.resolve(fileKey, sectionsInput);
+  const available = tabAvailability(sectionsInput);
+  const sections = analysisTabSections(sectionsInput, activeTab);
+  const tabHosts = useMemo(
+    () => ({
+      image: { active: hostActive && activeTab === "image", gpuDisplay },
+      sources: { active: hostActive && activeTab === "sources", gpuDisplay },
+      cube: { active: hostActive && activeTab === "cube", gpuDisplay },
+    }),
+    [hostActive, activeTab, gpuDisplay],
+  );
+  const pendingTabScroll = useRef(false);
+  const selectTab = useCallback(
+    (tab: AnalysisTabId) => {
+      tabMemory.remember(fileKey, tab);
+      pendingTabScroll.current = true;
+      setTabPick((n) => n + 1);
+    },
+    [fileKey],
+  );
+  const panelProps = (tab: AnalysisTabId) => ({
+    ...analysisPanelAttributes(tab, activeTab),
+    className: tab === activeTab ? "flex flex-col gap-3" : undefined,
   });
-  const navRef = useRef<HTMLElement>(null);
+  const navRef = useRef<HTMLDivElement>(null);
   const jumpTo = useCallback((id: string) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.style.scrollMarginTop = `${(navRef.current?.offsetHeight ?? 0) + 8}px`;
     el.scrollIntoView({ block: "start", behavior: "smooth" });
   }, []);
+  useLayoutEffect(() => {
+    if (!pendingTabScroll.current) return;
+    pendingTabScroll.current = false;
+    const panel = document.getElementById(`analysis-panel-${activeTab}`);
+    const nav = navRef.current;
+    if (!panel || !nav) return;
+    if (panel.getBoundingClientRect().top >= nav.getBoundingClientRect().bottom) return;
+    panel.style.scrollMarginTop = `${nav.offsetHeight + 12}px`;
+    panel.scrollIntoView({ block: "start" });
+  });
 
   return (
     <Suspense fallback={<TabSpinner />}>
       <div className="flex flex-col gap-3 p-3">
-        <nav
+        <div
           ref={navRef}
-          aria-label="Analysis panels"
-          className="sticky top-0 z-20 -mx-3 -mt-3 px-3 py-1.5 flex flex-wrap gap-1"
-          style={{ background: "rgba(5,5,16,0.94)", borderBottom: "1px solid var(--ab-border)" }}
+          className="sticky top-0 z-20 -mx-3 -mt-3 px-3 py-1.5 flex flex-col gap-1.5"
+          style={{ background: "rgb(5,5,16)", borderBottom: "1px solid var(--ab-border)" }}
         >
-          {sections.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => jumpTo(s.id)}
-              className="text-[9px] px-1.5 py-0.5 rounded-full text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors"
-              style={{ border: "1px solid rgba(63,63,70,0.5)" }}
-            >
-              {s.label}
-            </button>
-          ))}
-        </nav>
+          <AnalysisTabBar active={activeTab} available={available} onSelect={selectTab} />
+          <nav aria-label="Analysis panels" className="flex flex-wrap gap-1">
+            {sections.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => jumpTo(s.id)}
+                className="text-[9px] px-1.5 py-0.5 rounded-full text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors"
+                style={{ border: "1px solid rgba(63,63,70,0.5)" }}
+              >
+                {s.label}
+              </button>
+            ))}
+          </nav>
+        </div>
 
-        {histData && histStats && histData.bins.length > 0 && (
-          <section id={ANALYSIS_SECTION.histogram.id}>
-            <HistogramPanel
-              bins={skyShown ? skyShown.bins : histData.bins}
-              binsWindow={skyShown ? skyShown.window : null}
-              dataMin={histData.data_min}
-              dataMax={histData.data_max}
-              autoStf={histData.auto_stf}
-              shadow={stfParams.shadow}
-              midtone={stfParams.midtone}
-              highlight={stfParams.highlight}
-              onChange={handleStfChange}
-              onAutoStf={handleAutoStf}
-              onReset={handleResetStf}
-              stats={histStats}
-              disabled={stfLock !== null}
-              disabledHint={stfLock ?? undefined}
-              badge={measurementBadge}
-              skyZoom={skyZoom && skyWindow !== null}
-              skyAvailable={skyWindow !== null}
-              skyLoading={skyZoom && skyWindow !== null && skyShown === null}
-              onSkyZoomChange={setSkyZoom}
-            />
+        <div {...panelProps("image")}>
+          <ToolHostContext.Provider value={tabHosts.image}>
+            {histData && histStats && histData.bins.length > 0 && (
+              <section id={ANALYSIS_SECTION.histogram.id}>
+                <HistogramPanel
+                  bins={skyShown ? skyShown.bins : histData.bins}
+                  binsWindow={skyShown ? skyShown.window : null}
+                  dataMin={histData.data_min}
+                  dataMax={histData.data_max}
+                  autoStf={histData.auto_stf}
+                  shadow={stfParams.shadow}
+                  midtone={stfParams.midtone}
+                  highlight={stfParams.highlight}
+                  onChange={handleStfChange}
+                  onAutoStf={handleAutoStf}
+                  onReset={handleResetStf}
+                  stats={histStats}
+                  disabled={stfLock !== null}
+                  disabledHint={stfLock ?? undefined}
+                  badge={measurementBadge}
+                  skyZoom={skyZoom && skyWindow !== null}
+                  skyAvailable={skyWindow !== null}
+                  skyLoading={skyZoom && skyWindow !== null && skyShown === null}
+                  onSkyZoomChange={setSkyZoom}
+                />
+              </section>
+            )}
+
+            {rgbStfMode === "live" && <RgbStfPanel showSlotHistogram={!target.fileRgbView} />}
+            {rgbStfMode === "baked" && (
+              <div className="px-3 py-2 rounded-lg border border-violet-600/20 bg-violet-900/10 text-[10px] text-violet-300/80">
+                RGB Channel STF is baked in: the composite on screen is display-referred (stretch or curves applied), so
+                channel sliders would not change it.
+              </div>
+            )}
+
+            <section id={ANALYSIS_SECTION.statistics.id}>
+              <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={target.rgbPath} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.pixels.id}>
+              <PixelTablePanel filePath={effectivePath} measureKey={measureKey} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.regions.id}>
+              <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.profiles.id}>
+              <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.contours.id}>
+              <ContourPanel
+                filePath={effectivePath}
+                overlayKey={regionKey}
+                imageWidth={targetWidth}
+                imageHeight={targetHeight}
+                measureKey={measureKey}
+              />
+            </section>
+
+            {showFft && effectivePath && (
+              <section id={ANALYSIS_SECTION.fft.id}>
+                <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />
+              </section>
+            )}
+
+            {showDeepZoom && (
+              <section id={ANALYSIS_SECTION.deepZoom.id}>
+                <TileViewerPanel
+                  filePath={effectivePath}
+                  composite={compositeOnScreen}
+                  rgbPath={rgbPath}
+                  imageWidth={targetWidth}
+                  imageHeight={targetHeight}
+                />
+              </section>
+            )}
+          </ToolHostContext.Provider>
+        </div>
+
+        <div {...panelProps("sources")}>
+          <ToolHostContext.Provider value={tabHosts.sources}>
+            <section id={ANALYSIS_SECTION.stars.id}>
+              <PlateSolvePanel
+                stars={stars}
+                isLoading={starLoading}
+                onDetect={handleDetectStars}
+                detectError={detectError}
+                backgroundMedian={starResult?.background_median}
+                backgroundSigma={starResult?.background_sigma}
+                imageWidth={starResult?.image_width || targetWidth}
+                imageHeight={starResult?.image_height || targetHeight}
+                elapsed={starResult?.elapsed_ms || 0}
+                overlayCanvasRef={starOverlayRef}
+                filePath={regionKey}
+                sourceBadge={compositeMeasurementBadge}
+                detectedTotal={starResult?.n_detected ?? null}
+                annotationsOnView={starsOnMeasuredImage}
+                onWcsWritten={handleWcsWritten}
+              />
+            </section>
+
+            <section id={ANALYSIS_SECTION.photometry.id}>
+              <PhotometryPanel filePath={effectivePath} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.table.id}>
+              <PhotometryTablePanel
+                filePath={effectivePath}
+                overlayKey={regionKey}
+                stars={tableStars}
+                starsElsewhere={!starsOnMeasuredImage && stars.length > 0}
+                measureKey={measureKey}
+                detectedTotal={starsOnMeasuredImage ? starResult?.n_detected ?? null : null}
+              />
+            </section>
+
+            <section id={ANALYSIS_SECTION.series.id}>
+              <TimeSeriesPanel filePath={regionKey} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.geometry.id}>
+              <ObservationGeometryPanel filePath={regionKey} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.catalog.id}>
+              <CatalogPanel filePath={regionKey} measurePath={effectivePath} />
+            </section>
+
+            <section id={ANALYSIS_SECTION.targets.id}>
+              <TargetsPanel filePath={regionKey} measurePath={effectivePath} />
+            </section>
+          </ToolHostContext.Provider>
+        </div>
+
+        <div {...panelProps("cube")}>
+          <ToolHostContext.Provider value={tabHosts.cube}>
+            {ramp && (
+              <section id={ANALYSIS_SECTION.ramp.id}>
+                <RampPanel
+                  key={filePath ?? ""}
+                  filePath={filePath}
+                  ramp={ramp}
+                  rampSource={rampSource}
+                  cubeDims={cubeDims}
+                  onCubeResult={publishCube}
+                  publishGate={cubeGates.ramp}
+                />
+              </section>
+            )}
+
+            {isCube && (
+              <section id={ANALYSIS_SECTION.spectrum.id}>
+                <SpectroscopyPanel
+                  spectrum={spectrum}
+                  wavelengths={specWavelengths}
+                  pixelCoord={specCoord}
+                  isLoading={specLoading}
+                  cubeDims={cubeDims}
+                  elapsed={specElapsed}
+                  error={specError}
+                  filePath={filePath}
+                  onCubeResult={publishCube}
+                  onFramePreview={handleFramePreview}
+                  publishGate={cubeGates.spectrum}
+                />
+              </section>
+            )}
+            {isCube && (
+              <section id={ANALYSIS_SECTION.pv.id}>
+                <PvPanel filePath={filePath} fileKey={fileKey} cubeDims={cubeDims} />
+              </section>
+            )}
+          </ToolHostContext.Provider>
+        </div>
+
+        <AnalysisLogFooter>
+          <section id={ANALYSIS_SECTION.log.id}>
+            <MeasurementLogPanel />
           </section>
-        )}
-
-        {rgbStfMode === "live" && <RgbStfPanel showSlotHistogram={!target.fileRgbView} />}
-        {rgbStfMode === "baked" && (
-          <div className="px-3 py-2 rounded-lg border border-violet-600/20 bg-violet-900/10 text-[10px] text-violet-300/80">
-            RGB Channel STF is baked in: the composite on screen is display-referred (stretch or curves applied), so
-            channel sliders would not change it.
-          </div>
-        )}
-
-        <section id={ANALYSIS_SECTION.stars.id}>
-          <PlateSolvePanel
-            stars={stars}
-            isLoading={starLoading}
-            onDetect={handleDetectStars}
-            detectError={detectError}
-            backgroundMedian={starResult?.background_median}
-            backgroundSigma={starResult?.background_sigma}
-            imageWidth={starResult?.image_width || targetWidth}
-            imageHeight={starResult?.image_height || targetHeight}
-            elapsed={starResult?.elapsed_ms || 0}
-            overlayCanvasRef={starOverlayRef}
-            filePath={regionKey}
-            sourceBadge={compositeMeasurementBadge}
-            detectedTotal={starResult?.n_detected ?? null}
-            annotationsOnView={starsOnMeasuredImage}
-            onWcsWritten={handleWcsWritten}
-          />
-        </section>
-
-        <section id={ANALYSIS_SECTION.photometry.id}>
-          <PhotometryPanel filePath={effectivePath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.table.id}>
-          <PhotometryTablePanel
-            filePath={effectivePath}
-            overlayKey={regionKey}
-            stars={tableStars}
-            starsElsewhere={!starsOnMeasuredImage && stars.length > 0}
-            measureKey={measureKey}
-            detectedTotal={starsOnMeasuredImage ? starResult?.n_detected ?? null : null}
-          />
-        </section>
-
-        <section id={ANALYSIS_SECTION.series.id}>
-          <TimeSeriesPanel filePath={regionKey} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.geometry.id}>
-          <ObservationGeometryPanel filePath={regionKey} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.catalog.id}>
-          <CatalogPanel filePath={regionKey} measurePath={effectivePath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.targets.id}>
-          <TargetsPanel filePath={regionKey} measurePath={effectivePath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.statistics.id}>
-          <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={target.rgbPath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.pixels.id}>
-          <PixelTablePanel filePath={effectivePath} measureKey={measureKey} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.regions.id}>
-          <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.profiles.id}>
-          <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
-        </section>
-
-        <section id={ANALYSIS_SECTION.contours.id}>
-          <ContourPanel
-            filePath={effectivePath}
-            overlayKey={regionKey}
-            imageWidth={targetWidth}
-            imageHeight={targetHeight}
-            measureKey={measureKey}
-          />
-        </section>
-
-        {showFft && effectivePath && (
-          <section id={ANALYSIS_SECTION.fft.id}>
-            <FFTPanel filePath={effectivePath} computeFftSpectrum={computeFftSpectrum} />
-          </section>
-        )}
-
-        {isCube && (
-          <section id={ANALYSIS_SECTION.spectrum.id}>
-            <SpectroscopyPanel
-              spectrum={spectrum}
-              wavelengths={specWavelengths}
-              pixelCoord={specCoord}
-              isLoading={specLoading}
-              cubeDims={cubeDims}
-              elapsed={specElapsed}
-              error={specError}
-              filePath={filePath}
-              onCubeResult={publishCube}
-              onFramePreview={handleFramePreview}
-            />
-          </section>
-        )}
-        {isCube && (
-          <section id={ANALYSIS_SECTION.pv.id}>
-            <PvPanel filePath={filePath} fileKey={fileKey} cubeDims={cubeDims} />
-          </section>
-        )}
-
-        {showDeepZoom && (
-          <section id={ANALYSIS_SECTION.deepZoom.id}>
-            <TileViewerPanel
-              filePath={effectivePath}
-              composite={compositeOnScreen}
-              rgbPath={rgbPath}
-              imageWidth={targetWidth}
-              imageHeight={targetHeight}
-            />
-          </section>
-        )}
-        <section id={ANALYSIS_SECTION.log.id}>
-          <MeasurementLogPanel />
-        </section>
+        </AnalysisLogFooter>
       </div>
     </Suspense>
   );

@@ -8,3 +8,4 @@ pub mod cube;
 pub mod metadata;
 pub mod synth;
 pub mod pixelmath;
+pub mod ramp;

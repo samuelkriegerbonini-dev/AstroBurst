@@ -13,6 +13,7 @@ use crate::core::astrometry::spectral::SpectralAxis;
 use crate::core::cube::eager::DISPLAY_ASINH_ALPHA;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::stats::is_valid_pixel;
+use crate::core::ramp::info::{ramp_info, RampInfo};
 use crate::infra::fits::compress::is_compressed_image_hdu;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::file_bytes::{io_mode, prefer_mmap, IoMode};
@@ -28,6 +29,8 @@ pub struct CubeGeometry {
     pub naxis1: usize,
     pub naxis2: usize,
     pub naxis3: usize,
+    pub naxis4: usize,
+    pub depth: usize,
     pub bitpix: i64,
     pub bytes_per_pixel: usize,
     pub bzero: f64,
@@ -338,7 +341,25 @@ fn compressed_axes(header: &HduHeader) -> Option<i64> {
     is_compressed_image_hdu(header).then(|| header.get_i64("ZNAXIS").unwrap_or(0))
 }
 
-fn cube_depth(header: &HduHeader) -> std::result::Result<usize, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CubeShape {
+    pub naxis3: usize,
+    pub naxis4: usize,
+}
+
+fn unsupported_axis(axis: i64, len: i64) -> String {
+    format!(
+        "has NAXIS{}={}: only cubes whose axes beyond the third have length 1 are supported",
+        axis, len
+    )
+}
+
+fn fourth_axis_is_a_ramp(header: &HduHeader, primary: Option<&HduHeader>, naxis3: i64, naxis4: i64) -> bool {
+    let merged = primary.map_or_else(|| header.clone(), |p| p.merge_with(header));
+    ramp_info(&merged).is_some_and(|r| r.ngroups as i64 == naxis3 && r.nints as i64 == naxis4)
+}
+
+fn cube_depth(header: &HduHeader, primary: Option<&HduHeader>) -> std::result::Result<CubeShape, String> {
     if let Some(znaxis) = compressed_axes(header) {
         return Err(if znaxis >= 3 {
             format!(
@@ -354,19 +375,23 @@ fn cube_depth(header: &HduHeader) -> std::result::Result<usize, String> {
         return Err(format!("has NAXIS={}, not a data cube", naxis));
     }
     let naxis3 = header.get_i64("NAXIS3").unwrap_or(0);
-    if naxis3 <= 1 {
+    let naxis4 = if naxis >= 4 { header.get_i64("NAXIS4").unwrap_or(1) } else { 1 };
+    let integrations_are_a_ramp = naxis4 > 1 && fourth_axis_is_a_ramp(header, primary, naxis3, naxis4);
+    if naxis3 <= 1 && !(naxis3 == 1 && integrations_are_a_ramp) {
         return Err(format!("has NAXIS3={}: a cube needs at least two planes", naxis3));
     }
-    for axis in 4..=naxis {
+    if naxis4 != 1 && !integrations_are_a_ramp {
+        return Err(unsupported_axis(4, naxis4));
+    }
+    for axis in 5..=naxis {
         let len = header.get_i64(&format!("NAXIS{}", axis)).unwrap_or(1);
         if len != 1 {
-            return Err(format!(
-                "has NAXIS{}={}: only cubes whose axes beyond the third have length 1 are supported",
-                axis, len
-            ));
+            return Err(unsupported_axis(axis, len));
         }
     }
-    usize::try_from(naxis3).map_err(|_| format!("has NAXIS3={}, too large for this platform", naxis3))
+    let naxis3 = usize::try_from(naxis3).map_err(|_| format!("has NAXIS3={}, too large for this platform", naxis3))?;
+    let naxis4 = usize::try_from(naxis4).map_err(|_| format!("has NAXIS4={}, too large for this platform", naxis4))?;
+    Ok(CubeShape { naxis3, naxis4 })
 }
 
 fn positive_axis(header: &HduHeader, key: &str) -> Result<usize> {
@@ -380,24 +405,26 @@ fn positive_axis(header: &HduHeader, key: &str) -> Result<usize> {
 struct FoundCube {
     index: usize,
     parsed: ParsedHdu,
-    depth: usize,
+    shape: CubeShape,
+    primary: Option<HduHeader>,
 }
 
 fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
     let mut offset = 0usize;
     let mut index = 0usize;
     let mut compressed_cube: Option<String> = None;
+    let mut primary: Option<HduHeader> = None;
     while offset < data.len() {
         let parsed = data
             .header_at(offset)
             .with_context(|| format!("Header parse failed in lazy cube at HDU {}", index))?;
         match plane {
             PlaneSelector::Hdu(n) if *n == index => {
-                let depth = cube_depth(&parsed.header).map_err(|reason| anyhow!("HDU {} {}", index, reason))?;
-                return Ok(FoundCube { index, parsed, depth });
+                let shape = cube_depth(&parsed.header, primary.as_ref()).map_err(|reason| anyhow!("HDU {} {}", index, reason))?;
+                return Ok(FoundCube { index, parsed, shape, primary });
             }
-            PlaneSelector::Auto => match cube_depth(&parsed.header) {
-                Ok(depth) => return Ok(FoundCube { index, parsed, depth }),
+            PlaneSelector::Auto => match cube_depth(&parsed.header, primary.as_ref()) {
+                Ok(shape) => return Ok(FoundCube { index, parsed, shape, primary }),
                 Err(reason) => {
                     if compressed_cube.is_none() && compressed_axes(&parsed.header).is_some_and(|n| n >= 3) {
                         compressed_cube = Some(format!("HDU {} {}", index, reason));
@@ -408,6 +435,9 @@ fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
         }
         if parsed.next_hdu_offset <= offset {
             bail!("HDU {} has an invalid data size", index);
+        }
+        if index == 0 {
+            primary = Some(parsed.header);
         }
         offset = parsed.next_hdu_offset;
         index += 1;
@@ -423,6 +453,7 @@ pub struct LazyCube {
     data: CubeData,
     _tmp: Option<tempfile::TempDir>,
     pub header: HduHeader,
+    pub primary_header: Option<HduHeader>,
     pub geometry: CubeGeometry,
     pub hdu_index: usize,
     cache: Mutex<LruFrameCache>,
@@ -463,14 +494,15 @@ impl LazyCube {
         let header = found.parsed.header;
         let naxis1 = positive_axis(&header, "NAXIS1")?;
         let naxis2 = positive_axis(&header, "NAXIS2")?;
-        let naxis3 = found.depth;
+        let CubeShape { naxis3, naxis4 } = found.shape;
+        let depth = naxis3.checked_mul(naxis4).context("Cube depth overflow")?;
 
         let bitpix = header.get_i64("BITPIX").context("Missing BITPIX")?;
         if !SUPPORTED_BITPIX.contains(&bitpix) {
             bail!("Unsupported BITPIX={}", bitpix);
         }
         let bytes_per_pixel = (bitpix.unsigned_abs() / 8) as usize;
-        let (frame_bytes, total_bytes) = checked_cube_bytes(naxis1, naxis2, naxis3, bytes_per_pixel)?;
+        let (frame_bytes, total_bytes) = checked_cube_bytes(naxis1, naxis2, depth, bytes_per_pixel)?;
         let data_offset = found.parsed.data_start;
         let data_end = data_offset
             .checked_add(total_bytes)
@@ -483,6 +515,8 @@ impl LazyCube {
             naxis1,
             naxis2,
             naxis3,
+            naxis4,
+            depth,
             bitpix,
             bytes_per_pixel,
             bzero: header.get_f64("BZERO").unwrap_or(0.0),
@@ -496,6 +530,7 @@ impl LazyCube {
             data,
             _tmp: tmp,
             header,
+            primary_header: found.primary,
             geometry,
             hdu_index: found.index,
             cache: Mutex::new(LruFrameCache::new(DEFAULT_CACHE_BYTES)),
@@ -518,10 +553,24 @@ impl LazyCube {
     }
 
     fn check_frame(&self, z: usize) -> Result<()> {
-        if z >= self.geometry.naxis3 {
-            bail!("Frame index {} out of range (depth={})", z, self.geometry.naxis3);
+        if z >= self.geometry.depth {
+            bail!("Frame index {} out of range (depth={})", z, self.geometry.depth);
         }
         Ok(())
+    }
+
+    fn sample_at(&self, z: usize, pixel_offset_in_frame: usize) -> Result<f32> {
+        let g = &self.geometry;
+        let raw = self.data.bytes(g.data_offset + z * g.frame_bytes + pixel_offset_in_frame, g.bytes_per_pixel)?;
+        Ok(self.decode(&raw).first().copied().unwrap_or(f32::NAN))
+    }
+
+    fn pixel_offset_in_frame(&self, y: usize, x: usize) -> Result<usize> {
+        let g = &self.geometry;
+        if y >= g.naxis2 || x >= g.naxis1 {
+            bail!("Pixel ({}, {}) out of bounds", y, x);
+        }
+        Ok((y * g.naxis1 + x) * g.bytes_per_pixel)
     }
 
     pub fn get_frame(&self, z: usize) -> Result<Arc<Array2<f32>>> {
@@ -542,28 +591,38 @@ impl LazyCube {
     }
 
     pub fn extract_spectrum_at(&self, y: usize, x: usize) -> Result<Vec<f32>> {
+        let pixel_offset_in_frame = self.pixel_offset_in_frame(y, x)?;
+        (0..self.geometry.depth).map(|z| self.sample_at(z, pixel_offset_in_frame)).collect()
+    }
+
+    pub fn merged_header(&self) -> HduHeader {
+        match &self.primary_header {
+            Some(primary) => primary.merge_with(&self.header),
+            None => self.header.clone(),
+        }
+    }
+
+    pub fn ramp(&self) -> Option<RampInfo> {
         let g = &self.geometry;
-        if y >= g.naxis2 || x >= g.naxis1 {
-            bail!("Pixel ({}, {}) out of bounds", y, x);
+        ramp_info(&self.merged_header()).filter(|r| r.ngroups == g.naxis3 && r.nints == g.naxis4)
+    }
+
+    pub fn extract_group_series(&self, y: usize, x: usize, integration: usize) -> Result<Vec<f32>> {
+        let g = &self.geometry;
+        if integration >= g.naxis4 {
+            bail!("Integration {} out of range (nints={})", integration, g.naxis4);
         }
-
-        let pixel_offset_in_frame = (y * g.naxis1 + x) * g.bytes_per_pixel;
-        let mut spectrum = Vec::with_capacity(g.naxis3);
-
-        for z in 0..g.naxis3 {
-            let raw = self.data.bytes(g.data_offset + z * g.frame_bytes + pixel_offset_in_frame, g.bytes_per_pixel)?;
-            spectrum.push(self.decode(&raw).first().copied().unwrap_or(f32::NAN));
-        }
-
-        Ok(spectrum)
+        let pixel_offset_in_frame = self.pixel_offset_in_frame(y, x)?;
+        let z0 = integration * g.naxis3;
+        (z0..z0 + g.naxis3).map(|z| self.sample_at(z, pixel_offset_in_frame)).collect()
     }
 
     pub fn check_channel_range(&self, z0: usize, z1: usize) -> Result<()> {
         if z0 > z1 {
             bail!("channel range start {} is after its end {}", z0, z1);
         }
-        if z1 >= self.geometry.naxis3 {
-            bail!("channel {} is out of range (depth={})", z1, self.geometry.naxis3);
+        if z1 >= self.geometry.depth {
+            bail!("channel {} is out of range (depth={})", z1, self.geometry.depth);
         }
         Ok(())
     }
@@ -608,7 +667,7 @@ impl LazyCube {
         subsamples: u8,
     ) -> Result<ApertureSpectrum> {
         let g = &self.geometry;
-        let (rows, cols, depth) = (g.naxis2, g.naxis1, g.naxis3);
+        let (rows, cols, depth) = (g.naxis2, g.naxis1, g.depth);
         let pixels = region_pixels(shape, rows, cols, subsamples)?;
         let Some((mut y0, mut y1)) = row_span(&pixels) else {
             bail!("{} region covers no image pixels", shape.kind());
@@ -759,9 +818,9 @@ impl LazyCube {
     pub fn compute_global_stats_streaming(&self) -> Result<GlobalCubeStats> {
         let g = &self.geometry;
 
-        let (step, stride) = stats_sample_plan(g.naxis3, g.naxis1 * g.naxis2);
+        let (step, stride) = stats_sample_plan(g.depth, g.naxis1 * g.naxis2);
 
-        let indices: Vec<usize> = (0..g.naxis3).step_by(step).collect();
+        let indices: Vec<usize> = (0..g.depth).step_by(step).collect();
         let frame_samples: Vec<Vec<f32>> = indices
             .par_iter()
             .map(|&z| {
@@ -935,6 +994,39 @@ pub(crate) mod test_support {
             }
         }
         write_bytes(path, &image_hdu("SIMPLE", &[cols, rows, depth], 16, cards, data));
+    }
+
+    pub const RAMP_U16_BZERO: i64 = 32768;
+
+    pub fn write_u16_ramp_mef(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        ngroups: usize,
+        nints: usize,
+        primary_cards: &[(&str, &str)],
+        sci_cards: &[(&str, &str)],
+        value: impl Fn(usize, usize, usize, usize) -> u16,
+    ) {
+        let mut primary: Vec<(&str, &str)> = vec![("EXTEND", "T")];
+        primary.extend_from_slice(primary_cards);
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &primary, Vec::new());
+        let bzero = RAMP_U16_BZERO.to_string();
+        let mut sci: Vec<(&str, &str)> = vec![("BZERO", bzero.as_str()), ("BSCALE", "1"), ("EXTNAME", "'SCI'")];
+        sci.extend_from_slice(sci_cards);
+        let mut data = Vec::with_capacity(cols * rows * ngroups * nints * 2);
+        for i in 0..nints {
+            for g in 0..ngroups {
+                for y in 0..rows {
+                    for x in 0..cols {
+                        let stored = (value(i, g, y, x) as i64 - RAMP_U16_BZERO) as i16;
+                        data.extend_from_slice(&stored.to_be_bytes());
+                    }
+                }
+            }
+        }
+        bytes.extend(image_hdu("XTENSION", &[cols, rows, ngroups, nints], 16, &sci, data));
+        write_bytes(path, &bytes);
     }
 
     pub fn write_mef_cube(path: &std::path::Path, cols: usize, rows: usize, depth: usize, extensions: &[(&str, f32)]) {
@@ -1364,6 +1456,14 @@ mod tests {
         assert_eq!(cube.get_frame(4).unwrap()[[1, 2]], 412.0);
         assert_eq!(cube.extract_spectrum_at(1, 2).unwrap(), vec![12.0, 112.0, 212.0, 312.0, 412.0]);
 
+        assert_eq!((cube.geometry.naxis4, cube.geometry.depth), (1, 5));
+        assert!(cube.primary_header.is_none());
+        assert!(cube.ramp().is_none());
+    }
+
+    #[test]
+    fn a_fourth_axis_above_one_without_ramp_cards_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
         let polarised = dir.path().join("polarised.fits");
         let data = f32_samples(3, 2, 10, |z, _, _| z as f32);
         write_bytes(&polarised, &image_hdu("SIMPLE", &[3, 2, 5, 2], -32, &[], data));
@@ -1371,6 +1471,140 @@ mod tests {
         assert!(err.contains("No 3D data block"), "{}", err);
         let err = format!("{:#}", LazyCube::open(&format!("{}#hdu=0", polarised.to_str().unwrap())).err().unwrap());
         assert!(err.contains("NAXIS4=2"), "{}", err);
+
+        let inconsistent = dir.path().join("inconsistent.fits");
+        write_u16_ramp_mef(&inconsistent, 3, 2, 5, 2, &[("NGROUPS", "4"), ("NINTS", "2")], &[], |_, _, _, _| 1);
+        let err = format!("{:#}", LazyCube::open(inconsistent.to_str().unwrap()).err().expect("NGROUPS 4 on NAXIS3 5 is not a ramp"));
+        assert!(err.contains("No 3D data block"), "{}", err);
+    }
+
+    #[test]
+    fn a_fourth_axis_whose_product_matches_the_cards_but_whose_axes_disagree_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let swapped = dir.path().join("swapped.fits");
+        let primary = [("NGROUPS", "4"), ("NINTS", "3"), ("DATAMODL", "'Level1bModel'")];
+        write_u16_ramp_mef(&swapped, 3, 2, 6, 2, &primary, &[], |_, _, _, _| 1);
+        let err = format!("{:#}", LazyCube::open(swapped.to_str().unwrap()).err().expect("NGROUPS 4 x NINTS 3 on [6, 2] is not a ramp"));
+        assert!(err.contains("No 3D data block"), "{}", err);
+        let err = format!("{:#}", LazyCube::open(&format!("{}#hdu=1", swapped.to_str().unwrap())).err().unwrap());
+        assert!(err.contains("NAXIS4=2"), "{}", err);
+    }
+
+    #[test]
+    fn a_ramp_whose_cards_disagree_with_the_axes_of_a_degenerate_fourth_axis_opens_as_a_plain_cube() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flat_integrations.fits");
+        let primary = [("NGROUPS", "5"), ("NINTS", "2"), ("TGROUP", "10.0"), ("DATAMODL", "'Level1bModel'")];
+        write_u16_ramp_mef(&path, 3, 2, 10, 1, &primary, &[], |_, g, _, _| (30000 + g) as u16);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (10, 1, 10));
+        assert!(ramp_info(&cube.merged_header()).is_some(), "the product check alone accepts 5 x 2 on 10 x 1");
+        assert!(cube.ramp().is_none(), "the cube reports no ramp when the axes disagree with the cards");
+        assert_eq!(cube.extract_spectrum_at(0, 0).unwrap().len(), 10);
+        assert_eq!(cube.extract_group_series(0, 0, 0).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn a_ramp_with_a_single_group_and_several_integrations_opens_as_a_cube_of_integrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one_group.fits");
+        let primary = [("NGROUPS", "1"), ("NINTS", "5"), ("TGROUP", "10.0"), ("DATAMODL", "'Level1bModel'")];
+        write_u16_ramp_mef(&path, 3, 2, 1, 5, &primary, &[], |i, _, y, x| (30000 + i * 100 + y * 10 + x) as u16);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (1, 5, 5));
+        let ramp = cube.ramp().expect("NGROUPS 1 x NINTS 5 is a ramp");
+        assert_eq!((ramp.ngroups, ramp.nints), (1, 5));
+        assert_eq!(cube.extract_group_series(1, 2, 3).unwrap(), vec![30312.0]);
+        assert_eq!(cube.get_frame(4).unwrap()[[0, 0]], 30400.0);
+        assert_eq!(cube.extract_spectrum_at(0, 0).unwrap().len(), 5);
+
+        let flat = dir.path().join("flat.fits");
+        write_u16_ramp_mef(&flat, 3, 2, 1, 1, &[("NGROUPS", "1"), ("NINTS", "1")], &[], |_, _, _, _| 1);
+        let err = format!("{:#}", LazyCube::open(&format!("{}#hdu=1", flat.to_str().unwrap())).err().expect("a single plane is not a cube"));
+        assert!(err.contains("at least two planes"), "{}", err);
+    }
+
+    fn ramp_value(i: usize, g: usize, y: usize, x: usize) -> u16 {
+        (30000 + i * 1000 + g * 100 + y * 10 + x) as u16
+    }
+
+    #[test]
+    fn a_four_dimensional_ramp_with_several_integrations_opens_when_the_primary_header_names_ngroups_and_nints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_uncal.fits");
+        let primary = [("NGROUPS", "3"), ("NINTS", "2"), ("TGROUP", "10.0"), ("DATAMODL", "'Level1bModel'")];
+        write_u16_ramp_mef(&path, 4, 3, 3, 2, &primary, &[], ramp_value);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(cube.hdu_index, 1);
+        assert_eq!((cube.geometry.naxis1, cube.geometry.naxis2), (4, 3));
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (3, 2, 6));
+        assert_eq!(cube.get_frame(4).unwrap()[[1, 2]], 31112.0);
+        assert_eq!(cube.get_frame(5).unwrap()[[2, 3]], 31223.0);
+        assert_eq!(cube.extract_group_series(1, 2, 1).unwrap(), vec![31012.0, 31112.0, 31212.0]);
+        assert_eq!(cube.extract_group_series(0, 0, 0).unwrap(), vec![30000.0, 30100.0, 30200.0]);
+        assert_eq!(cube.extract_spectrum_at(1, 2).unwrap().len(), 6);
+        assert_eq!(cube.extract_spectrum_at(1, 2).unwrap()[4], 31112.0);
+        assert!(cube.extract_group_series(1, 2, 2).unwrap_err().to_string().contains("out of range"));
+        assert!(cube.get_frame(6).is_err());
+        assert_eq!(cube.decode_frames(0, 6).unwrap().len(), 6);
+        assert_eq!(cube.collapse_range(0, 5, CollapseMode::Mean).unwrap().dim(), (3, 4));
+
+        let ramp = cube.ramp().expect("the merged header carries NGROUPS and NINTS");
+        assert_eq!((ramp.ngroups, ramp.nints), (3, 2));
+        assert_eq!(ramp.tgroup_s, Some(10.0));
+        assert_eq!(ramp.datamodl.as_deref(), Some("Level1bModel"));
+        assert!(cube.primary_header.as_ref().is_some_and(|p| p.get("NGROUPS") == Some("3")));
+        assert_eq!(cube.header.get("NGROUPS"), None);
+
+        let explicit = LazyCube::open(&format!("{}#hdu=1", path.to_str().unwrap())).unwrap();
+        assert_eq!(explicit.geometry.depth, 6);
+        assert!(explicit.ramp().is_some());
+    }
+
+    #[test]
+    fn the_merged_header_prefers_extension_cards_and_geometry_ignores_a_primary_bzero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("merged.fits");
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T"), ("TELESCOP", "'JWST'"), ("BUNIT", "'wrong'"), ("BZERO", "1000")], Vec::new());
+        let data = f32_samples(3, 2, 4, |z, y, x| (z * 100 + y * 10 + x) as f32);
+        bytes.extend(image_hdu("XTENSION", &[3, 2, 4], -32, &[("EXTNAME", "'SCI'"), ("BUNIT", "'DN'")], data));
+        write_bytes(&path, &bytes);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(cube.header.get("TELESCOP"), None);
+        let merged = cube.merged_header();
+        assert_eq!(merged.get("TELESCOP"), Some("JWST"));
+        assert_eq!(merged.get("BUNIT"), Some("DN"));
+        assert_eq!(merged.get("EXTNAME"), Some("SCI"));
+        assert_eq!(merged.get_i64("NAXIS"), Some(3));
+        assert_eq!(cube.geometry.bzero, 0.0);
+        assert_eq!(cube.get_frame(0).unwrap()[[1, 2]], 12.0);
+        assert_eq!(cube.get_frame(3).unwrap()[[0, 0]], 300.0);
+        assert!(cube.ramp().is_none());
+    }
+
+    #[test]
+    fn a_ramp_with_one_integration_still_opens_and_reports_a_ramp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner_like_uncal.fits");
+        let primary = [
+            ("NGROUPS", "10"),
+            ("NINTS", "1"),
+            ("TGROUP", "14.589"),
+            ("DATAMODL", "'Level1bModel'"),
+            ("DETECTOR", "'NRS1'"),
+            ("NRS_NORM", "16"),
+            ("NRS_REF", "4"),
+        ];
+        write_u16_ramp_mef(&path, 8, 20, 10, 1, &primary, &[("BUNIT", "'DN'")], |_, g, y, x| (1000 + g * 50 + y + x) as u16);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (10, 1, 10));
+        let ramp = cube.ramp().expect("NINTS 1 is still a ramp");
+        assert_eq!((ramp.ngroups, ramp.nints), (10, 1));
+        assert_eq!(ramp.detector.as_deref(), Some("NRS1"));
+        assert_eq!(ramp.irs2.as_ref().map(|i| (i.nrs_norm, i.nrs_ref, i.noutputs)), Some((16, 4, 5)));
+        assert_eq!((ramp.frame_width, ramp.frame_height), (8, 20));
+        assert_eq!(cube.extract_group_series(3, 2, 0).unwrap()[4], 1205.0);
+        assert_eq!(cube.get_frame(9).unwrap()[[19, 7]], 1476.0);
     }
 
     #[test]

@@ -84,9 +84,9 @@ function optical(id: string): number {
 }
 
 describe("rest-frame line table", () => {
-  it("the table holds the 23 lines of the brief once each with the family of their storage unit", () => {
-    expect(REST_LINES).toHaveLength(23);
-    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(23);
+  it("the table holds the 27 lines of the brief once each with the family of their storage unit", () => {
+    expect(REST_LINES).toHaveLength(27);
+    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(27);
     expect(LINE_FAMILIES).toEqual(["optical", "nir", "radio"]);
     const count: Record<LineFamily, number> = { optical: 0, nir: 0, radio: 0 };
     for (const line of REST_LINES) {
@@ -95,7 +95,7 @@ describe("rest-frame line table", () => {
       if (line.family === "radio") expect(line.restGhz).toBeGreaterThan(0);
       else expect(line.restGhz).toBeNull();
     }
-    expect(count).toEqual({ optical: 10, nir: 6, radio: 7 });
+    expect(count).toEqual({ optical: 10, nir: 10, radio: 7 });
   });
 
   it("optical lines match NIST ASD vacuum wavelengths", () => {
@@ -126,12 +126,39 @@ describe("rest-frame line table", () => {
       hei_1083: 1.083331,
       h2_2122: 2.121834,
       feii_1644: 1.644,
+      br_alpha: 4.052262,
+      br_beta: 2.625872,
+      pf_beta: 4.653778,
+      hei_2058: 2.05869,
     };
     for (const [id, um] of Object.entries(values)) {
       const line = lineById(id);
       expect(line?.family).toBe("nir");
       expectNear(line?.vacuumUm ?? null, um, 1e-5);
     }
+  });
+
+  it("Brα, Brβ and Pfβ follow the Rydberg values of Storey & Hummer (1995) / NIST ASD and He I 2.058 the NIST ASD value (Drake 2006), in vacuum", () => {
+    const expected: Record<string, [string, number]> = {
+      br_alpha: ["Brα", 4.052262],
+      br_beta: ["Brβ", 2.625872],
+      pf_beta: ["Pfβ", 4.653778],
+      hei_2058: ["He I 2.058", 2.05869],
+    };
+    for (const [id, [label, um]] of Object.entries(expected)) {
+      const line = lineById(id);
+      expect(line?.vacuumUm).toBe(um);
+      expect(line?.label).toBe(label);
+      expect(line?.family).toBe("nir");
+      expect(line?.restGhz).toBeNull();
+    }
+    const families = REST_LINES.map((l) => l.family);
+    const firstIndex = (f: LineFamily) => families.indexOf(f);
+    const lastIndex = (f: LineFamily) => families.lastIndexOf(f);
+    expect(lastIndex("optical")).toBeLessThan(firstIndex("nir"));
+    expect(lastIndex("nir")).toBeLessThan(firstIndex("radio"));
+    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(REST_LINES.length);
+    expect(new Set(REST_LINES.map((l) => l.label)).size).toBe(REST_LINES.length);
   });
 
   it("radio lines match Splatalogue rest frequencies", () => {

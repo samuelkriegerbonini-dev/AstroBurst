@@ -468,6 +468,7 @@ pub struct HduInfo {
     pub naxis1: i64,
     pub naxis2: i64,
     pub naxis3: i64,
+    pub naxis4: i64,
     pub bitpix: i64,
     pub has_data: bool,
     #[serde(skip)]
@@ -506,18 +507,20 @@ fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
     let is_compressed = compress::is_compressed_image_hdu(h);
 
     // A compressed-image BINTABLE describes its decompressed image in ZNAXIS/ZNAXISn/ZBITPIX; NAXIS/NAXISn/BITPIX describe the table storage.
-    let (naxis, naxis1, naxis2, naxis3, bitpix, plane_count) = if is_compressed {
+    let (naxis, naxis1, naxis2, naxis3, naxis4, bitpix, plane_count) = if is_compressed {
         let shape = compress::read_compressed_shape(h);
         let planes = declared_plane_count_with_prefix(h, shape.znaxis, "Z");
         let naxis3 = if shape.znaxis == 3 { shape.znaxis3 } else { 0 };
-        (shape.znaxis, shape.znaxis1, shape.znaxis2, naxis3, shape.zbitpix, planes)
+        let naxis4 = if shape.znaxis >= 4 { h.get_i64("ZNAXIS4").unwrap_or(0) } else { 0 };
+        (shape.znaxis, shape.znaxis1, shape.znaxis2, naxis3, naxis4, shape.zbitpix, planes)
     } else {
         let naxis = h.get_i64("NAXIS").unwrap_or(0);
         let naxis1 = h.get_i64("NAXIS1").unwrap_or(0);
         let naxis2 = h.get_i64("NAXIS2").unwrap_or(0);
         let naxis3 = h.get_i64("NAXIS3").unwrap_or(0);
+        let naxis4 = h.get_i64("NAXIS4").unwrap_or(0);
         let bitpix = h.get_i64("BITPIX").unwrap_or(0);
-        (naxis, naxis1, naxis2, naxis3, bitpix, declared_plane_count(h, naxis))
+        (naxis, naxis1, naxis2, naxis3, naxis4, bitpix, declared_plane_count(h, naxis))
     };
 
     let decodable = if is_compressed { naxis <= 3 } else { is_image_hdu };
@@ -533,6 +536,7 @@ fn build_scanned_hdu(parsed: ParsedHdu, idx: usize) -> ScannedHdu {
             naxis1,
             naxis2,
             naxis3,
+            naxis4,
             bitpix,
             has_data,
             header_start: parsed.header_start,
@@ -1946,6 +1950,7 @@ mod tests {
             naxis1: 100,
             naxis2: 100,
             naxis3: 0,
+            naxis4: 0,
             bitpix: -32,
             has_data: true,
             header_start: 0,
@@ -1953,7 +1958,43 @@ mod tests {
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["extname"], "SCI");
+        assert_eq!(json["naxis4"], 0);
         assert!(json.get("header_start").is_none());
+    }
+
+    #[test]
+    fn hdu_info_reports_the_fourth_axis_length_and_zero_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ramp_mef.fits");
+        let ramp_cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "16".into()),
+            ("NAXIS", "4".into()),
+            ("NAXIS1", "4".into()),
+            ("NAXIS2", "3".into()),
+            ("NAXIS3", "5".into()),
+            ("NAXIS4", "2".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("EXTNAME", "'SCI'".into()),
+        ];
+        let ramp_bytes = vec![0u8; 4 * 3 * 5 * 2 * 2];
+        test_fixtures::write_raw_hdus(
+            &path,
+            &[
+                (test_fixtures::empty_primary_cards(), Vec::new()),
+                (ramp_cards, ramp_bytes),
+                test_fixtures::cube_hdu("CUBE", 4, 3, 5, &[]),
+                test_fixtures::plane_hdu("FLAT", 4, 3),
+            ],
+        );
+        let hdus = list_extensions(&File::open(&path).unwrap()).unwrap();
+        assert_eq!(hdus.len(), 4);
+        assert_eq!((hdus[0].naxis, hdus[0].naxis3, hdus[0].naxis4), (0, 0, 0));
+        assert_eq!((hdus[1].naxis, hdus[1].naxis3, hdus[1].naxis4), (4, 5, 2));
+        assert_eq!((hdus[2].naxis, hdus[2].naxis3, hdus[2].naxis4), (3, 5, 0));
+        assert_eq!((hdus[3].naxis, hdus[3].naxis3, hdus[3].naxis4), (2, 0, 0));
+        assert_eq!(serde_json::to_value(&hdus[1]).unwrap()["naxis4"], 2);
     }
 
     fn compressed_fixtures_dir() -> Option<std::path::PathBuf> {

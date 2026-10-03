@@ -4,6 +4,9 @@ import type {
   CollapseRangeResult,
   CubeDims,
   CubeSpectrum,
+  LineFitConfig,
+  LineFitResult,
+  LineFitSpaxel,
   MomentConfig,
   MomentMapsResult,
   RegionSpectrum,
@@ -99,4 +102,21 @@ export async function computeMomentMaps(
     m1: { ...result.m1, previewUrl: m1 },
     m2: { ...result.m2, previewUrl: m2 },
   };
+}
+
+export async function fitCubeLines(
+  path: string,
+  outputDir: string | undefined,
+  config: LineFitConfig,
+): Promise<LineFitResult> {
+  const dir = outputDir && outputDir !== "./output" ? outputDir : await getOutputDir();
+  const result = await typedInvoke<LineFitResult>("cube_line_fit_cmd", { path, outputDir: dir, config });
+  const entries = Object.entries(result.planes);
+  const urls = await Promise.all(entries.map(([, files]) => getPreviewUrl(files.png_path)));
+  const planes = Object.fromEntries(entries.map(([plane, files], i) => [plane, { ...files, previewUrl: urls[i] }]));
+  return { ...result, planes };
+}
+
+export function inspectLineFitSpaxel(path: string, config: LineFitConfig, x: number, y: number): Promise<LineFitSpaxel> {
+  return typedInvoke<LineFitSpaxel>("cube_line_fit_spaxel_cmd", { path, config, x, y });
 }

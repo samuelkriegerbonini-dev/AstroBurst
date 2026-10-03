@@ -17,6 +17,7 @@ export interface FitsExtension {
   naxis1: number;
   naxis2: number;
   naxis3: number;
+  naxis4?: number;
   bitpix: number;
   has_data: boolean;
   extver: number | null;

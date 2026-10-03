@@ -2,19 +2,42 @@ import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "
 import { Activity, BarChart3, CircleDot, Crosshair, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
+import LineFitSection from "./LineFitSection";
 import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
 import SpectrumComparisonSection from "./SpectrumComparisonSection";
 import {
   collapseCubeRange,
   computeMomentMaps,
+  fitCubeLines,
   getCubeSpectrum,
   getCubeSpectrumRegion,
+  inspectLineFitSpaxel,
 } from "../../services/cube";
 import { getSpectralAxis, measureSpectralLine } from "../../services/spectral";
-import { lineEntry, measurementLog, spectrumExportEntry } from "../../utils/measurementLog";
+import { lineEntry, lineFitEntry, measurementLog, spectrumExportEntry } from "../../utils/measurementLog";
+import {
+  COMPONENT_COLORS,
+  DEFAULT_LINE_FIT_SNR,
+  displayedLineFitPlane,
+  inspectKey,
+  lineFitConfig,
+  lineFitCubeResult,
+  lineFitFrameNote,
+  lineFitOverlayPolylines,
+  type LineFitRun,
+} from "../../utils/lineFit";
 import { getOutputDir } from "../../infrastructure/tauri";
-import { useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { useCubeContext, useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { setIntegration, useRampIntegration } from "../../hooks/useRampStore";
+import {
+  formatRampFrameLabel,
+  frameForIntegration,
+  frameToPosition,
+  rampFrameFromPlotChannel,
+  rampFrameMarker,
+  rampKeyHint,
+} from "../../utils/rampLabels";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import {
@@ -28,10 +51,14 @@ import type {
   CollapseRangeMode,
   ContinuumWindows,
   CubeDims,
+  LineFitComponents,
+  LineFitPlane,
+  LineFitSpaxel,
   MomentKind,
   MomentMapsResult,
 } from "../../shared/types/cube";
 import { COLLAPSE_RANGE_MODES, MOMENT_KINDS } from "../../shared/types/cube";
+import type { DisplayHint } from "../../shared/types/preview";
 import type { Region, RegionShape } from "../../shared/types/regions";
 import type {
   CorrectionFrame,
@@ -83,12 +110,12 @@ import {
   channelFromPlotPixel,
   channelRequestNeeded,
   clampFrame,
-  createFramePublishGate,
   displayedChannel,
   formatFrameDelta,
   formatFrameLabel,
   frameAxisValue,
   frameFromKey,
+  type FramePublishGate,
 } from "../../utils/cubeNavigation";
 import { formatAxisTick } from "../../utils/plotScale";
 import {
@@ -114,6 +141,7 @@ export interface CubeResult {
   fitsPath: string | null;
   dimensions: [number, number] | null;
   frameIndex?: number;
+  displayHint?: DisplayHint;
 }
 
 interface SpectroscopyPanelProps {
@@ -127,6 +155,7 @@ interface SpectroscopyPanelProps {
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
   onCubeResult?: (result: CubeResult) => void;
+  publishGate: FramePublishGate;
 }
 
 type BrushTarget = "range" | "left" | "right";
@@ -208,6 +237,7 @@ const LINE_CONTINUUM_COLOR = "rgba(245,158,11,0.9)";
 const LINE_MODEL_COLOR = "rgba(250,250,250,0.9)";
 const LINE_CONTINUUM_DASH = [5, 3];
 const LINE_MODEL_DASH = [2, 2];
+const LINE_FIT_READY_HINT = "brush a line range and set a rest wavelength";
 const FRAME_MARKER_COLOR = "rgba(167,139,250,0.95)";
 const FRAME_MARKER_HALO = "rgba(9,9,11,0.8)";
 const FRAME_MARKER_LABEL_PAD = 3;
@@ -240,6 +270,7 @@ function SpectroscopyPanel({
   filePath,
   onFramePreview,
   onCubeResult,
+  publishGate: framePublishGate,
 }: SpectroscopyPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -254,11 +285,17 @@ function SpectroscopyPanel({
   const rangeSeqRef = useRef(0);
   const momentSeqRef = useRef(0);
   const lineSeqRef = useRef(0);
+  const lineFitSeqRef = useRef(0);
+  const inspectSeqRef = useRef(0);
+  const inspectKeyRef = useRef<string | null>(null);
   const previousFileRef = useRef<string | undefined>(filePath);
 
   const { region, regionSource, regionLoading, regionError } = useSpectrum();
   const { processed } = useRenderContext();
   const { file } = useFileContext();
+  const { ramp } = useCubeContext();
+  const rampIntegration = useRampIntegration();
+  const lastRampIntegrationRef = useRef(rampIntegration);
   const bunit = file?.result?.header?.BUNIT ?? null;
   const shownFrame = displayedChannel(processed, filePath);
   const regionKey = useRegionKey();
@@ -304,11 +341,22 @@ function SpectroscopyPanel({
   const [lineResult, setLineResult] = useState<LineRun | null>(null);
   const [lineLoading, setLineLoading] = useState(false);
   const [lineError, setLineError] = useState<string | null>(null);
+  const [useErr, setUseErr] = useState(true);
+  const [useDq, setUseDq] = useState(true);
+  const [emissionOnly, setEmissionOnly] = useState(true);
+  const [lineFitSnrText, setLineFitSnrText] = useState(String(DEFAULT_LINE_FIT_SNR));
+  const [resolvingPowerText, setResolvingPowerText] = useState("");
+  const [lineFitComponents, setLineFitComponents] = useState<LineFitComponents>("one");
+  const [lineFitLoading, setLineFitLoading] = useState(false);
+  const [lineFitError, setLineFitError] = useState<string | null>(null);
+  const [lineFitRun, setLineFitRun] = useState<LineFitRun | null>(null);
+  const [inspect, setInspect] = useState<LineFitSpaxel | null>(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [inspectError, setInspectError] = useState<string | null>(null);
   const [frame, setFrame] = useState(() => shownFrame ?? 0);
   const [frameFile, setFrameFile] = useState(filePath);
   const [seenRecord, setSeenRecord] = useState(processed);
   const [requestSeq, setRequestSeq] = useState(0);
-  const [framePublishGate] = useState(createFramePublishGate);
   const [loopPlayback, setLoopPlayback] = useState(false);
   if (frameFile !== filePath) {
     setFrameFile(filePath);
@@ -329,6 +377,9 @@ function SpectroscopyPanel({
     rangeSeqRef.current++;
     momentSeqRef.current++;
     lineSeqRef.current++;
+    lineFitSeqRef.current++;
+    inspectSeqRef.current++;
+    inspectKeyRef.current = null;
     setRange(null);
     setWindows(null);
     setMomentResult(null);
@@ -342,6 +393,12 @@ function SpectroscopyPanel({
     setLineResult(null);
     setLineError(null);
     setLineLoading(false);
+    setLineFitRun(null);
+    setLineFitError(null);
+    setLineFitLoading(false);
+    setInspect(null);
+    setInspectLoading(false);
+    setInspectError(null);
     if (previousFileRef.current !== filePath) {
       previousFileRef.current = filePath;
       setRegionView("sum");
@@ -397,10 +454,12 @@ function SpectroscopyPanel({
     return { values: null, label: "Channel", unit: "ch" };
   }, [formatted, n, mode, correction, correctionResult, wavelengths, cubeDims]);
 
-  const frameLabel = useMemo(
-    () => (frameLinked ? formatFrameLabel(frame, totalFrames, frameAxisValue(frame, axisX.values), axisX.unit) : null),
-    [frameLinked, frame, totalFrames, axisX],
-  );
+  const frameLabel = useMemo(() => {
+    if (!frameLinked) return null;
+    if (ramp) return formatRampFrameLabel(frame, ramp);
+    return formatFrameLabel(frame, totalFrames, frameAxisValue(frame, axisX.values), axisX.unit);
+  }, [frameLinked, frame, totalFrames, axisX, ramp]);
+  const rampLabelFor = useMemo(() => (ramp ? (idx: number) => formatRampFrameLabel(idx, ramp) : undefined), [ramp]);
 
   const shownPngOnly = processed !== null && processed.fitsPath === null;
   const requestFrame = useCallback(
@@ -412,6 +471,19 @@ function SpectroscopyPanel({
     },
     [totalFrames, frame, shownFrame, shownPngOnly],
   );
+
+  useEffect(() => {
+    if (!ramp || ramp.nints <= 1 || lastRampIntegrationRef.current === rampIntegration) return;
+    lastRampIntegrationRef.current = rampIntegration;
+    requestFrame(frameForIntegration(frame, rampIntegration, ramp.ngroups));
+  }, [ramp, rampIntegration, frame, requestFrame]);
+
+  useEffect(() => {
+    if (!ramp || ramp.nints <= 1) return;
+    const shownIntegration = frameToPosition(frame, ramp.ngroups).integration;
+    lastRampIntegrationRef.current = shownIntegration;
+    setIntegration(shownIntegration);
+  }, [ramp, frame]);
 
   const publishCubeResult = useCallback(
     (result: CubeResult) => {
@@ -582,6 +654,21 @@ function SpectroscopyPanel({
       strokeDashed(ctx, curves.continuum, LINE_CONTINUUM_COLOR, LINE_CONTINUUM_DASH);
       strokeDashed(ctx, curves.model, LINE_MODEL_COLOR, LINE_MODEL_DASH);
     }
+    if (
+      inspect &&
+      lineFitRun &&
+      pixelCoord &&
+      !region &&
+      inspect.x === pixelCoord.x &&
+      inspect.y === pixelCoord.y &&
+      displayedLineFitPlane(processed, lineFitRun.result) !== null
+    ) {
+      const frame = { top: plotTop, height: plotBottom - plotTop, yMin: plotParams.yMin, yMax: plotParams.yMax };
+      const curves = lineFitOverlayPolylines(inspect, m, frame);
+      strokeDashed(ctx, curves.continuum, LINE_CONTINUUM_COLOR, LINE_CONTINUUM_DASH);
+      strokeDashed(ctx, curves.model, LINE_MODEL_COLOR, []);
+      if (inspect.ncomp === 2) curves.components.forEach((c, i) => strokeDashed(ctx, c, COMPONENT_COLORS[i], LINE_MODEL_DASH));
+    }
     for (const mark of placeLineMarks(lineMarksShown, m)) {
       if (mark.px < PAD.left || mark.px > W - PAD.right) continue;
       const pickedMark = mark.id === pickedMarkId;
@@ -601,8 +688,10 @@ function SpectroscopyPanel({
       ctx.fillStyle = color;
       ctx.fillText(mark.label, mark.labelX, plotBottom - 3);
     }
-    if (frameLinked && shownFrame !== null && shownFrame < n) {
-      const fx = axisValueToPixel(channelAxisValue(shownFrame, m), m);
+    const frameMarker = frameLinked ? rampFrameMarker(shownFrame, n, ramp) : null;
+    const markerChannel = ramp ? frameMarker?.channel ?? null : shownFrame;
+    if (frameMarker) {
+      const fx = axisValueToPixel(channelAxisValue(frameMarker.channel, m), m);
       if (Number.isFinite(fx) && fx >= PAD.left && fx <= W - PAD.right) {
         ctx.strokeStyle = FRAME_MARKER_COLOR;
         ctx.lineWidth = 1.5;
@@ -612,7 +701,7 @@ function SpectroscopyPanel({
         ctx.lineTo(fx, plotBottom);
         ctx.stroke();
         ctx.font = "9px 'JetBrains Mono', monospace";
-        const markerText = `ch ${shownFrame}`;
+        const markerText = frameMarker.text;
         const mw = ctx.measureText(markerText).width;
         const mx = Math.min(Math.max(fx - mw / 2, PAD.left), W - PAD.right - mw);
         ctx.fillStyle = FRAME_MARKER_HALO;
@@ -651,7 +740,7 @@ function SpectroscopyPanel({
     ctx.fill();
 
     ctx.font = "10px 'JetBrains Mono', monospace";
-    const delta = frameLinked && shownFrame !== null ? `, ${formatFrameDelta(hoveredIdx, shownFrame)}` : "";
+    const delta = frameLinked && markerChannel !== null ? `, ${formatFrameDelta(hoveredIdx, markerChannel)}` : "";
     const label = axisX.values
       ? `ch ${hoveredIdx}${delta} · ${formatAxisValue(x, axisX.unit)} ${axisX.unit} → ${y.toFixed(3)}`
       : `ch ${hoveredIdx}${delta} → ${y.toFixed(3)}`;
@@ -662,7 +751,7 @@ function SpectroscopyPanel({
     ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
     ctx.fillStyle = "#fafafa";
     ctx.fillText(label, tx, ty);
-  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, shownFrame, lineMarksShown, pickedMarkId]);
+  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, shownFrame, ramp, lineMarksShown, pickedMarkId, inspect, processed, lineFitRun, pixelCoord, region]);
 
   useEffect(() => {
     drawPlot();
@@ -721,9 +810,9 @@ function SpectroscopyPanel({
       if (!canvas || px === null || n === 0 || !frameLinked) return;
       if (performance.now() - lastLinePickRef.current < LINE_PICK_DOUBLE_CLICK_GUARD_MS) return;
       const channel = channelFromPlotPixel(px, mappingFor(canvas.width), totalFrames);
-      if (channel !== null) requestFrame(channel);
+      if (channel !== null) requestFrame(rampFrameFromPlotChannel(channel, n, ramp, rampIntegration));
     },
-    [canvasX, n, frameLinked, mappingFor, totalFrames, requestFrame],
+    [canvasX, n, frameLinked, mappingFor, totalFrames, requestFrame, ramp, rampIntegration],
   );
 
   const handleKeyDown = useCallback(
@@ -1012,6 +1101,103 @@ function SpectroscopyPanel({
     }
   }, [filePath, range, currentSource, windows, channelCount, axis, lineShiftKms, restUm, convention, lineModel]);
 
+  const showLineFitPlane = useCallback(
+    (run: LineFitRun, plane: LineFitPlane) => {
+      const result = lineFitCubeResult(run, plane);
+      if (result) publishCubeResult(result);
+    },
+    [publishCubeResult],
+  );
+
+  const handleFitLines = useCallback(async () => {
+    if (!filePath || !range) return;
+    const config = lineFitConfig({
+      range,
+      windows,
+      channelCount,
+      restUm,
+      convention,
+      snrText: lineFitSnrText,
+      emissionOnly,
+      useErr,
+      useDq,
+      resolvingPowerText,
+      components: lineFitComponents,
+    });
+    if ("error" in config) {
+      setLineFitError(config.error);
+      return;
+    }
+    const seq = ++lineFitSeqRef.current;
+    setLineFitLoading(true);
+    setLineFitError(null);
+    try {
+      const result = await fitCubeLines(filePath, await getOutputDir(), config);
+      if (lineFitSeqRef.current !== seq) return;
+      const run: LineFitRun = { key: `${filePath}#run${seq}`, filePath, config, result, lineLabel: pickedShown?.label ?? null };
+      setLineFitRun(run);
+      measurementLog.append(lineFitEntry(run));
+      showLineFitPlane(run, "velocity");
+    } catch (e) {
+      if (lineFitSeqRef.current === seq) setLineFitError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (lineFitSeqRef.current === seq) setLineFitLoading(false);
+    }
+  }, [
+    filePath,
+    range,
+    windows,
+    channelCount,
+    restUm,
+    convention,
+    lineFitSnrText,
+    emissionOnly,
+    useErr,
+    useDq,
+    resolvingPowerText,
+    lineFitComponents,
+    pickedShown,
+    showLineFitPlane,
+  ]);
+
+  const handleShowLineFitPlane = useCallback(
+    (plane: LineFitPlane) => {
+      if (lineFitRun) showLineFitPlane(lineFitRun, plane);
+    },
+    [lineFitRun, showLineFitPlane],
+  );
+
+  useEffect(() => {
+    const shownPlane = lineFitRun ? displayedLineFitPlane(processed, lineFitRun.result) : null;
+    if (!lineFitRun || !pixelCoord || region || shownPlane === null) {
+      inspectSeqRef.current++;
+      inspectKeyRef.current = null;
+      setInspect(null);
+      setInspectLoading(false);
+      setInspectError(null);
+      return;
+    }
+    const key = inspectKey(lineFitRun.filePath, pixelCoord.x, pixelCoord.y, lineFitRun);
+    if (inspectKeyRef.current === key) return;
+    inspectKeyRef.current = key;
+    const seq = ++inspectSeqRef.current;
+    setInspect(null);
+    setInspectError(null);
+    setInspectLoading(true);
+    inspectLineFitSpaxel(lineFitRun.filePath, lineFitRun.config, pixelCoord.x, pixelCoord.y)
+      .then((spaxel) => {
+        if (inspectSeqRef.current === seq) setInspect(spaxel);
+      })
+      .catch((e: unknown) => {
+        if (inspectSeqRef.current !== seq) return;
+        inspectKeyRef.current = null;
+        setInspectError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (inspectSeqRef.current === seq) setInspectLoading(false);
+      });
+  }, [pixelCoord, processed, lineFitRun, region]);
+
   const updateRangeEdge = useCallback(
     (edge: "z0" | "z1", text: string) => {
       const value = parseChannelInput(text, channelCount);
@@ -1192,7 +1378,7 @@ function SpectroscopyPanel({
         ref={containerRef}
         tabIndex={0}
         onKeyDown={handleKeyDown}
-        title={frameLinked ? FRAME_KEY_HINT : undefined}
+        title={frameLinked ? (ramp ? rampKeyHint(ramp) : FRAME_KEY_HINT) : undefined}
         className="p-2 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-violet-500/50"
       >
         {isLoading ? (
@@ -1500,6 +1686,37 @@ function SpectroscopyPanel({
       )}
 
       {filePath && cubeDims && totalFrames > 1 && (
+        <LineFitSection
+          ready={momentsReady && !!range}
+          readyHint={LINE_FIT_READY_HINT}
+          loading={lineFitLoading}
+          error={lineFitError}
+          errAvailable={lineFitRun && lineFitRun.config.use_err ? lineFitRun.result.err_hdu !== null : null}
+          dqAvailable={lineFitRun && lineFitRun.config.use_dq ? lineFitRun.result.dq_hdu !== null : null}
+          useErr={useErr}
+          onUseErr={setUseErr}
+          useDq={useDq}
+          onUseDq={setUseDq}
+          emissionOnly={emissionOnly}
+          onEmissionOnly={setEmissionOnly}
+          snrText={lineFitSnrText}
+          onSnrText={setLineFitSnrText}
+          resolvingPowerText={resolvingPowerText}
+          onResolvingPowerText={setResolvingPowerText}
+          components={lineFitComponents}
+          onComponents={setLineFitComponents}
+          onFit={handleFitLines}
+          run={lineFitRun}
+          shownPlane={lineFitRun ? (displayedLineFitPlane(processed, lineFitRun.result) ?? null) : null}
+          onShowPlane={handleShowLineFitPlane}
+          inspect={inspect}
+          inspectLoading={inspectLoading}
+          inspectError={inspectError}
+          frameNote={lineFitFrameNote(axis?.specsys ?? null)}
+        />
+      )}
+
+      {filePath && cubeDims && totalFrames > 1 && (
         <LineMeasurementSection
           result={visibleLineResult}
           loading={lineLoading}
@@ -1539,6 +1756,7 @@ function SpectroscopyPanel({
             requestSeq={requestSeq}
             onFrameRequest={requestFrame}
             frameLabel={frameLabel}
+            labelFor={rampLabelFor}
             loop={loopPlayback}
             onLoopChange={setLoopPlayback}
             onFrameChange={onFramePreview}

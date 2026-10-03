@@ -4,7 +4,7 @@ import { displayFilterValue, type ChannelSource } from "../utils/channelMapping"
 type Listener = () => void;
 export type FilterMode = "or" | "and";
 
-const JWST_PRODUCT_RE = /[_-](i2d|segm|cal|rate|rateints|x1d|s2d|s3d|uncal|crf|bsub|srctype|outlier|tweakreg|skymatch|whtlt)(?:\.fits|\.fit|\.fts|\.asdf)$/i;
+const JWST_PRODUCT_RE = /[_-](i2d|segm|cal|rate|rateints|x1d|s2d|s3d|uncal|qslope|crf|bsub|srctype|outlier|tweakreg|skymatch|whtlt)(?:\.fits|\.fit|\.fts|\.asdf)$/i;
 
 export function extractProductType(filename: string): string | null {
   const match = filename.match(JWST_PRODUCT_RE);

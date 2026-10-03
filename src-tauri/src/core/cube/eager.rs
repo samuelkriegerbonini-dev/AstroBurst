@@ -1,6 +1,7 @@
 use ndarray::Array2;
 
 use crate::core::astrometry::spectral::spectral_axis;
+use crate::core::ramp::info::{ramp_info, RampInfo};
 use crate::types::header::HduHeader;
 
 const SPECTRAL_CTYPES: [&str; 9] = ["WAVE", "FREQ", "VELO", "AWAV", "VRAD", "VOPT", "ZOPT", "BETA", "ENER"];
@@ -47,20 +48,41 @@ fn card_upper(header: &HduHeader, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+pub(crate) fn ctype_is_spectral(header: &HduHeader) -> bool {
+    card_upper(header, "CTYPE3")
+        .as_deref()
+        .is_some_and(|ct| SPECTRAL_CTYPES.iter().any(|&s| ct.contains(s)))
+}
+
+pub fn ramp_classification(r: &RampInfo, naxis3: usize) -> SpectralClassification {
+    SpectralClassification {
+        is_spectral: false,
+        reason: format!(
+            "ramp: {} groups x {} integrations ({})",
+            r.ngroups,
+            r.nints,
+            r.readpatt.as_deref().unwrap_or("unknown read pattern")
+        ),
+        axis_type: None,
+        axis_unit: None,
+        axis_unit_assumed: false,
+        channel_count: naxis3,
+    }
+}
+
 fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> SpectralClassification {
     let ctype3 = card_upper(header, "CTYPE3");
     let cunit3 = card_upper(header, "CUNIT3");
     let has_cdelt3 = header.get_f64("CDELT3").is_some();
     let has_crval3 = header.get_f64("CRVAL3").is_some();
 
-    let ctype_is_spectral = ctype3
-        .as_deref()
-        .is_some_and(|ct| SPECTRAL_CTYPES.iter().any(|&s| ct.contains(s)));
     let cunit_is_spectral = cunit3.as_deref().is_some_and(|cu| SPECTRAL_UNITS.contains(&cu));
     let integration_stack = INTEGRATION_CARDS.iter().any(|&key| header.get(key).is_some());
 
-    let (is_spectral, reason) = if ctype_is_spectral {
+    let (is_spectral, reason) = if ctype_is_spectral(header) {
         (true, format!("CTYPE3 indicates spectral axis: {}", ctype3.as_deref().unwrap_or("")))
+    } else if let Some(ramp) = ramp_info(header) {
+        return ramp_classification(&ramp, naxis3);
     } else if integration_stack {
         (false, format!("NAXIS3={} counts integrations (NINTS/INTSTART present), not spectral channels", naxis3))
     } else if cunit_is_spectral && has_cdelt3 {
@@ -239,5 +261,42 @@ mod tests {
         assert!(classify_spectral_cube(&freq, 3).is_spectral);
         let ramp = make_header(&[("CRVAL3", "1.0"), ("CDELT3", "1.0")]);
         assert!(classify_spectral_cube(&ramp, 30).is_spectral);
+    }
+
+    #[test]
+    fn a_ramp_is_classified_before_the_integration_stack_branch_but_after_a_spectral_ctype3() {
+        let uncal = make_header(&[
+            ("NINTS", "1"),
+            ("NGROUPS", "10"),
+            ("NAXIS", "4"),
+            ("NAXIS1", "2048"),
+            ("NAXIS2", "3200"),
+            ("NAXIS3", "10"),
+            ("NAXIS4", "1"),
+            ("READPATT", "NRSIRS2RAPID"),
+        ]);
+        let c = classify_spectral_cube(&uncal, 10);
+        assert!(!c.is_spectral, "{}", c.reason);
+        assert!(c.reason.starts_with("ramp: 10 groups x 1 integrations"), "{}", c.reason);
+        assert!(c.reason.contains("NRSIRS2RAPID"), "{}", c.reason);
+        assert_eq!(c.channel_count, 10);
+        assert!(c.axis_type.is_none() && c.axis_unit.is_none() && !c.axis_unit_assumed);
+
+        let s3d = make_header(&[
+            ("NINTS", "1"),
+            ("NGROUPS", "10"),
+            ("NAXIS", "4"),
+            ("NAXIS1", "2048"),
+            ("NAXIS2", "3200"),
+            ("NAXIS3", "10"),
+            ("NAXIS4", "1"),
+            ("CTYPE3", "WAVE"),
+        ]);
+        let c = classify_spectral_cube(&s3d, 10);
+        assert!(c.is_spectral, "{}", c.reason);
+        assert!(c.reason.starts_with("CTYPE3"), "{}", c.reason);
+
+        let unknown = ramp_info(&make_header(&[("NAXIS", "4"), ("NAXIS3", "4"), ("NAXIS4", "2"), ("NGROUPS", "4"), ("NINTS", "2")])).unwrap();
+        assert_eq!(ramp_classification(&unknown, 4).reason, "ramp: 4 groups x 2 integrations (unknown read pattern)");
     }
 }

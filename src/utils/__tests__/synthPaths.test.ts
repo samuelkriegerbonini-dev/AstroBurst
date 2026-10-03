@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { synthOutputPaths } from "../synthPaths";
+import { synthOutputPaths, synthStackOutputPaths } from "../synthPaths";
 import { isValidFitsFile } from "../validation";
 
 describe("synthOutputPaths", () => {
@@ -54,5 +54,23 @@ describe("synthOutputPaths", () => {
       expect(isValidFitsFile(out.fits), out.fits).toBe(true);
       expect(isValidFitsFile(out.groundTruth), out.groundTruth).toBe(true);
     }
+  });
+});
+
+describe("synthStackOutputPaths", () => {
+  it("names the stack catalog and ground truth after the prefix inside the folder", () => {
+    expect(synthStackOutputPaths("C:\\Users\\u\\run", "synth")).toEqual({
+      catalog: "C:\\Users\\u\\run\\synth_catalog.csv",
+      groundTruth: "C:\\Users\\u\\run\\synth_groundtruth.fits",
+    });
+    expect(synthStackOutputPaths("/home/u/run", "f")).toEqual({
+      catalog: "/home/u/run/f_catalog.csv",
+      groundTruth: "/home/u/run/f_groundtruth.fits",
+    });
+  });
+
+  it("does not double a trailing separator", () => {
+    expect(synthStackOutputPaths("/home/u/run/", "synth").catalog).toBe("/home/u/run/synth_catalog.csv");
+    expect(synthStackOutputPaths("C:\\run\\", "synth").groundTruth).toBe("C:\\run\\synth_groundtruth.fits");
   });
 });

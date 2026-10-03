@@ -1,3 +1,7 @@
+import type { DisplaySettings } from "./display";
+
+export type DisplayHint = Partial<Pick<DisplaySettings, "colormap" | "invert" | "symmetric" | "centre" | "stretch" | "limits">>;
+
 export type ProcessedKind = "processing" | "pixelmath" | "debayer" | "stacking" | "cube" | "wizard";
 
 export type ChainStep = "background" | "denoise" | "deconv" | "stretch" | "maskedStretch" | "localContrast" | "pixelMath";
@@ -22,6 +26,7 @@ export interface ProcessedResult {
   kind: ProcessedKind;
   inputPath: string;
   frameIndex?: number;
+  displayHint?: DisplayHint;
 }
 
 export interface FileRenderState {

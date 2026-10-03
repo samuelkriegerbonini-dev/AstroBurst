@@ -157,6 +157,7 @@ fn array_info_to_hdu(i: usize, a: &AsdfArrayInfo) -> HduInfo {
         naxis1: geometry.width as i64,
         naxis2: geometry.height as i64,
         naxis3: if rank >= 3 { geometry.plane_count as i64 } else { 0 },
+        naxis4: if rank >= 4 { a.shape[rank - 4] as i64 } else { 0 },
         bitpix: a.bitpix,
         has_data: rank >= 2,
         extver: None,
@@ -165,14 +166,25 @@ fn array_info_to_hdu(i: usize, a: &AsdfArrayInfo) -> HduInfo {
     }
 }
 
+fn is_resultant_ramp_shape(shape: &[usize]) -> bool {
+    shape.len() == 3 && shape[0] >= 2 && !is_interleaved_layout(shape)
+}
+
 fn multi_plane_refusal(key: &str, shape: &[usize], planes: usize) -> anyhow::Error {
-    anyhow::anyhow!(
+    let mut message = format!(
         "ASDF array '{}' cannot be loaded as a 2D image: {}D array [{}] of {} planes, not a single 2D image",
         key,
         shape.len(),
         shape_label(shape),
         planes
-    )
+    );
+    if is_resultant_ramp_shape(shape) {
+        message.push_str(&format!(
+            "; a [n, h, w] array is a ramp of {} resultants: open it with #array={} to view resultant 1 and use the Ramp panel to step",
+            shape[0], key
+        ));
+    }
+    anyhow::anyhow!(message)
 }
 
 pub fn list_asdf_arrays(path: &Path) -> Result<Vec<HduInfo>> {
@@ -546,6 +558,29 @@ mod tests {
             &[0, 1, 0, 0],
             "the mask plane must line up with the image plane it accompanies"
         );
+    }
+
+    #[test]
+    fn the_asdf_multi_plane_refusal_now_points_at_the_ramp_vocabulary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, CUBE_TREE);
+        let msg = format!("{:#}", extract_plane_from_asdf(&path, None).err().unwrap());
+        assert!(msg.contains("not a single 2D image"), "{msg}");
+        assert!(msg.contains("a [n, h, w] array is a ramp of 3 resultants"), "{msg}");
+        assert!(msg.contains("#array=roman.data"), "{msg}");
+        assert!(msg.contains("Ramp panel"), "{msg}");
+        let listed = list_asdf_arrays(&path).unwrap();
+        let cube = listed.iter().find(|e| e.extname.as_deref() == Some("roman.data")).unwrap();
+        assert_eq!((cube.naxis3, cube.naxis4), (3, 0));
+
+        let interleaved = write_asdf(&dir, &interleaved_tree());
+        let msg = format!("{:#}", extract_plane_from_asdf(&interleaved, None).err().unwrap());
+        assert!(msg.contains("not a single 2D image"), "{msg}");
+        assert!(!msg.contains("resultants"), "an interleaved colour array is not a ramp: {msg}");
+
+        let four = "stack: !core/ndarray-1.0.0\n  data: [[[[1, 2], [3, 4]], [[5, 6], [7, 8]]], [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]]\n  datatype: float32\n";
+        let listed = list_asdf_arrays(&write_asdf(&dir, four)).unwrap();
+        assert_eq!((listed[0].naxis, listed[0].naxis4), (4, 2));
     }
 
     #[test]

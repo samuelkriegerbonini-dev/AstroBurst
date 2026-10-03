@@ -1,15 +1,25 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import {
-  generateSynth,
-  generateSynthStack,
-  type SynthConfig,
-  type FieldType,
-  type PsfType,
-} from "../../services/synth";
-import { synthOutputPaths } from "../../utils/synthPaths";
+import { generateSynth, generateSynthStack } from "../../services/synth";
+import { synthOutputPaths, synthStackOutputPaths } from "../../utils/synthPaths";
 import { formatCount } from "../../utils/formatCount";
 import { formatByteSize, synthStackEstimate } from "../../utils/synthBudget";
+import {
+  SYNTH_PANEL_DEFAULTS as D,
+  SYNTH_SEED_MAX,
+  buildSynthConfig,
+  nextRandomSeed,
+  synthResultCard,
+  synthSettingsSignature,
+  type SynthFieldChoice,
+  type SynthPanelState,
+  type SynthPsfChoice,
+  type SynthResultCard,
+} from "../../utils/synthConfig";
+import { ingestFiles } from "../../hooks/useFileIngest";
+import { fileStore } from "../../hooks/useFileStore";
+import { overwrittenFileIds } from "../../utils/overwrittenFiles";
+import { astroFileFromPath } from "../../utils/validation";
 import { Slider, RunButton, ErrorAlert, SectionHeader, Toggle } from "../ui";
 
 const ICON = (
@@ -20,67 +30,90 @@ const ICON = (
   </svg>
 );
 
-type FieldChoice = "uniform" | "king" | "disk";
-type PsfChoice = "gaussian" | "moffat" | "airy";
+const DICE_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+    <circle cx="8" cy="8" r="1.2" fill="currentColor" />
+    <circle cx="16" cy="8" r="1.2" fill="currentColor" />
+    <circle cx="12" cy="12" r="1.2" fill="currentColor" />
+    <circle cx="8" cy="16" r="1.2" fill="currentColor" />
+    <circle cx="16" cy="16" r="1.2" fill="currentColor" />
+  </svg>
+);
 
-function buildFieldType(choice: FieldChoice, coreR: number, tidalR: number, scaleLen: number, incl: number): FieldType {
-  switch (choice) {
-    case "king": return { KingCluster: { core_radius: coreR, tidal_radius: tidalR } };
-    case "disk": return { ExponentialDisk: { scale_length: scaleLen, inclination_deg: incl } };
-    default: return "Uniform";
-  }
-}
+const STACK_PREFIX = "synth";
 
-function buildPsfType(choice: PsfChoice, fwhm: number, beta: number, lambdaD: number): PsfType {
-  switch (choice) {
-    case "moffat": return { Moffat: { fwhm, beta } };
-    case "airy": return { Airy: { lambda_over_d: lambdaD } };
-    default: return { Gaussian: { fwhm } };
-  }
-}
+const FIELD_OPTS: { value: SynthFieldChoice; label: string }[] = [
+  { value: "uniform", label: "Uniform" },
+  { value: "king", label: "King Cluster" },
+  { value: "disk", label: "Exp. Disk" },
+];
+
+const PSF_OPTS: { value: SynthPsfChoice; label: string }[] = [
+  { value: "gaussian", label: "Gaussian" },
+  { value: "moffat", label: "Moffat" },
+  { value: "airy", label: "Airy" },
+];
 
 function formatFlux(value: number): string {
   return `${formatCount(value)} e⁻`;
 }
 
+function fileName(path: string): string {
+  return path.split(/[/\\]/).pop() ?? path;
+}
+
+function OutputRow({ label, path }: { label: string; path: string }) {
+  return (
+    <>
+      <div className="text-zinc-500">{label}</div>
+      <div className="text-zinc-200 font-mono text-[10px] truncate" title={path}>{fileName(path)}</div>
+    </>
+  );
+}
+
 export default function SynthPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ stars: number; path: string } | null>(null);
+  const [result, setResult] = useState<SynthResultCard | null>(null);
 
-  const [width, setWidth] = useState(2048);
-  const [height, setHeight] = useState(2048);
-  const [nStars, setNStars] = useState(500);
-  const [fluxMin, setFluxMin] = useState(100);
-  const [fluxMax, setFluxMax] = useState(50000);
-  const [seed, setSeed] = useState(42);
+  const [width, setWidth] = useState(D.width);
+  const [height, setHeight] = useState(D.height);
+  const [nStars, setNStars] = useState(D.nStars);
+  const [fluxMin, setFluxMin] = useState(D.fluxMin);
+  const [fluxMax, setFluxMax] = useState(D.fluxMax);
+  const [seed, setSeed] = useState(D.seed);
 
-  const [fieldChoice, setFieldChoice] = useState<FieldChoice>("uniform");
-  const [coreRadius, setCoreRadius] = useState(50.0);
-  const [tidalRadius, setTidalRadius] = useState(400.0);
-  const [scaleLength, setScaleLength] = useState(200.0);
-  const [inclination, setInclination] = useState(30.0);
+  const [fieldChoice, setFieldChoice] = useState<SynthFieldChoice>(D.fieldChoice);
+  const [coreRadius, setCoreRadius] = useState(D.coreRadius);
+  const [tidalRadius, setTidalRadius] = useState(D.tidalRadius);
+  const [scaleLength, setScaleLength] = useState(D.scaleLength);
+  const [inclination, setInclination] = useState(D.inclination);
 
-  const [psfChoice, setPsfChoice] = useState<PsfChoice>("gaussian");
-  const [fwhm, setFwhm] = useState(3.0);
-  const [beta, setBeta] = useState(4.0);
-  const [lambdaD, setLambdaD] = useState(2.5);
+  const [psfChoice, setPsfChoice] = useState<SynthPsfChoice>(D.psfChoice);
+  const [fwhm, setFwhm] = useState(D.fwhm);
+  const [beta, setBeta] = useState(D.beta);
+  const [lambdaD, setLambdaD] = useState(D.lambdaD);
 
-  const [gain, setGain] = useState(1.5);
-  const [readNoise, setReadNoise] = useState(8.0);
-  const [skyBg, setSkyBg] = useState(200.0);
-  const [darkCurrent, setDarkCurrent] = useState(0.05);
-  const [expTime, setExpTime] = useState(300.0);
-  const [biasLevel, setBiasLevel] = useState(1000.0);
+  const [gain, setGain] = useState(D.gain);
+  const [readNoise, setReadNoise] = useState(D.readNoise);
+  const [skyBg, setSkyBg] = useState(D.skyBg);
+  const [darkCurrent, setDarkCurrent] = useState(D.darkCurrent);
+  const [expTime, setExpTime] = useState(D.expTime);
+  const [biasLevel, setBiasLevel] = useState(D.biasLevel);
 
-  const [vignette, setVignette] = useState(false);
-  const [vigStrength, setVigStrength] = useState(0.3);
+  const [vignette, setVignette] = useState(D.vignette);
+  const [vigStrength, setVigStrength] = useState(D.vigStrength);
 
   const [saveCatalog, setSaveCatalog] = useState(true);
   const [saveGt, setSaveGt] = useState(false);
 
-  const [stackMode, setStackMode] = useState(false);
-  const [nFrames, setNFrames] = useState(8);
+  const [stackMode, setStackMode] = useState(D.stackMode);
+  const [nFrames, setNFrames] = useState(D.nFrames);
+  const [varyFrames, setVaryFrames] = useState(D.varyFrames);
+  const [ditherPx, setDitherPx] = useState(D.ditherPx);
+  const [seeingJitterPct, setSeeingJitterPct] = useState(D.seeingJitterPct);
+  const [cosmicRays, setCosmicRays] = useState(D.cosmicRays);
 
   const handleFluxMin = useCallback((value: number) => {
     const rounded = Math.round(value);
@@ -94,15 +127,25 @@ export default function SynthPanel() {
     setFluxMin((prev) => (prev >= rounded ? Math.max(1, rounded - 1) : prev));
   }, []);
 
-  const buildConfig = useCallback((): SynthConfig => ({
-    field: { width, height, n_stars: nStars, flux_min: fluxMin, flux_max: fluxMax, seed },
-    field_type: buildFieldType(fieldChoice, coreRadius, tidalRadius, scaleLength, inclination),
-    psf_type: buildPsfType(psfChoice, fwhm, beta, lambdaD),
-    noise: { gain, readout_noise: readNoise, sky_background: skyBg, dark_current: darkCurrent, exposure_time: expTime, bias_level: biasLevel, seed: seed + 1000 },
-    apply_vignette: vignette,
-    vignette_strength: vigStrength,
-    n_frames: stackMode ? nFrames : 1,
-  }), [width, height, nStars, fluxMin, fluxMax, seed, fieldChoice, coreRadius, tidalRadius, scaleLength, inclination, psfChoice, fwhm, beta, lambdaD, gain, readNoise, skyBg, darkCurrent, expTime, biasLevel, vignette, vigStrength, stackMode, nFrames]);
+  const handleRandomSeed = useCallback(() => {
+    setSeed((prev) => nextRandomSeed(prev));
+  }, []);
+
+  const panelState = useMemo((): SynthPanelState => ({
+    width, height, nStars, fluxMin, fluxMax, seed,
+    fieldChoice, coreRadius, tidalRadius, scaleLength, inclination,
+    psfChoice, fwhm, beta, lambdaD,
+    gain, readNoise, skyBg, darkCurrent, expTime, biasLevel,
+    vignette, vigStrength,
+    stackMode, nFrames, varyFrames, ditherPx, seeingJitterPct, cosmicRays,
+  }), [width, height, nStars, fluxMin, fluxMax, seed, fieldChoice, coreRadius, tidalRadius, scaleLength, inclination, psfChoice, fwhm, beta, lambdaD, gain, readNoise, skyBg, darkCurrent, expTime, biasLevel, vignette, vigStrength, stackMode, nFrames, varyFrames, ditherPx, seeingJitterPct, cosmicRays]);
+
+  const config = useMemo(() => buildSynthConfig(panelState), [panelState]);
+  const signature = useMemo(
+    () => synthSettingsSignature(config, { stackMode, saveCatalog, saveGroundTruth: saveGt }),
+    [config, stackMode, saveCatalog, saveGt],
+  );
+  const stale = result !== null && result.signature !== signature;
 
   const stackEstimate = synthStackEstimate(width, height, nFrames);
   const stackOverBudget = stackMode ? stackEstimate.overBudgetReason : null;
@@ -110,41 +153,47 @@ export default function SynthPanel() {
   const handleGenerate = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setResult(null);
     try {
-      const config = buildConfig();
-
       if (stackMode) {
         const picked = await open({ directory: true, multiple: false, title: "Choose output folder" });
         const dir = typeof picked === "string" ? picked : null;
-        if (!dir) { setLoading(false); return; }
-        const res = await generateSynthStack(config, dir, "synth");
-        setResult({ stars: res.star_count, path: res.output_path ?? dir });
+        if (!dir) return;
+        setResult(null);
+        const res = await generateSynthStack(config, dir, STACK_PREFIX, saveCatalog, saveGt);
+        const sidecars = synthStackOutputPaths(res.output_path || dir, STACK_PREFIX);
+        setResult(synthResultCard(res, {
+          kind: "stack",
+          fallbackPath: dir,
+          signature,
+          catalogPath: saveCatalog ? sidecars.catalog : null,
+          groundTruthPath: saveGt ? sidecars.groundTruth : null,
+        }));
       } else {
         const path = await save({ title: "Save synthetic FITS", defaultPath: "synthetic.fits", filters: [{ name: "FITS", extensions: ["fits", "fit"] }] });
-        if (!path) { setLoading(false); return; }
+        if (!path) return;
+        setResult(null);
         const out = synthOutputPaths(path);
-        const res = await generateSynth(config, out.fits, saveCatalog, saveCatalog ? out.catalog : undefined, saveGt, saveGt ? out.groundTruth : undefined);
-        setResult({ stars: res.star_count, path: res.output_path ?? out.fits });
+        const catalogPath = saveCatalog ? out.catalog : undefined;
+        const groundTruthPath = saveGt ? out.groundTruth : undefined;
+        const res = await generateSynth(config, out.fits, saveCatalog, catalogPath, saveGt, groundTruthPath);
+        setResult(synthResultCard(res, { kind: "single", fallbackPath: out.fits, signature, catalogPath, groundTruthPath }));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [buildConfig, stackMode, saveCatalog, saveGt]);
+  }, [config, signature, stackMode, saveCatalog, saveGt]);
 
-  const FIELD_OPTS: { value: FieldChoice; label: string }[] = [
-    { value: "uniform", label: "Uniform" },
-    { value: "king", label: "King Cluster" },
-    { value: "disk", label: "Exp. Disk" },
-  ];
-
-  const PSF_OPTS: { value: PsfChoice; label: string }[] = [
-    { value: "gaussian", label: "Gaussian" },
-    { value: "moffat", label: "Moffat" },
-    { value: "airy", label: "Airy" },
-  ];
+  const handleOpenInViewer = useCallback(() => {
+    if (!result?.openPath) return;
+    const [openId] = overwrittenFileIds(fileStore.getFiles(), [result.openPath]);
+    if (openId) {
+      fileStore.selectFile(openId);
+      return;
+    }
+    if (!ingestFiles([astroFileFromPath(result.openPath)])) setError("The viewer is not ready to open files yet.");
+  }, [result]);
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -161,15 +210,29 @@ export default function SynthPanel() {
         <Slider label="Stars" value={nStars} min={10} max={5000} step={10} disabled={loading} accent="rose" onChange={setNStars} />
         <Slider label="Flux min" value={fluxMin} min={1} max={100000} step={1} scale="log" disabled={loading} accent="rose" format={formatFlux} onChange={handleFluxMin} />
         <Slider label="Flux max" value={fluxMax} min={1} max={1000000} step={1} scale="log" disabled={loading} accent="rose" format={formatFlux} onChange={handleFluxMax} />
-        <Slider label="Seed" value={seed} min={0} max={9999} step={1} disabled={loading} accent="rose" onChange={setSeed} />
+        <div className="flex items-end gap-1.5">
+          <div className="flex-1 min-w-0">
+            <Slider label="Seed" value={seed} min={0} max={SYNTH_SEED_MAX} step={1} disabled={loading} accent="rose" onChange={setSeed} />
+          </div>
+          <button
+            type="button"
+            aria-label="New random seed"
+            title="New random seed"
+            disabled={loading}
+            onClick={handleRandomSeed}
+            className="mb-0.5 p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-zinc-800/50 disabled:opacity-40 disabled:pointer-events-none"
+          >
+            {DICE_ICON}
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-2">
         <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider px-1">Distribution</div>
         <div className="flex gap-1 px-1">
           {FIELD_OPTS.map((o) => (
-            <button key={o.value} onClick={() => setFieldChoice(o.value)}
-              className={`px-2.5 py-1 rounded text-[10px] font-medium transition-all ${fieldChoice === o.value ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}>
+            <button key={o.value} type="button" disabled={loading} aria-pressed={fieldChoice === o.value} onClick={() => setFieldChoice(o.value)}
+              className={`px-2.5 py-1 rounded text-[10px] font-medium transition-all disabled:opacity-40 disabled:pointer-events-none ${fieldChoice === o.value ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}>
               {o.label}
             </button>
           ))}
@@ -183,7 +246,7 @@ export default function SynthPanel() {
         {fieldChoice === "disk" && (
           <>
             <Slider label="Scale length" value={scaleLength} min={20} max={800} step={10} disabled={loading} accent="rose" format={(v) => `${v}px`} onChange={setScaleLength} />
-            <Slider label="Inclination" value={inclination} min={0} max={85} step={1} disabled={loading} accent="rose" format={(v) => `${v}\u00B0`} onChange={setInclination} />
+            <Slider label="Inclination" value={inclination} min={0} max={85} step={1} disabled={loading} accent="rose" format={(v) => `${v}°`} onChange={setInclination} />
           </>
         )}
       </div>
@@ -192,8 +255,8 @@ export default function SynthPanel() {
         <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider px-1">PSF Model</div>
         <div className="flex gap-1 px-1">
           {PSF_OPTS.map((o) => (
-            <button key={o.value} onClick={() => setPsfChoice(o.value)}
-              className={`px-2.5 py-1 rounded text-[10px] font-medium transition-all ${psfChoice === o.value ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}>
+            <button key={o.value} type="button" disabled={loading} aria-pressed={psfChoice === o.value} onClick={() => setPsfChoice(o.value)}
+              className={`px-2.5 py-1 rounded text-[10px] font-medium transition-all disabled:opacity-40 disabled:pointer-events-none ${psfChoice === o.value ? "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}>
               {o.label}
             </button>
           ))}
@@ -211,11 +274,11 @@ export default function SynthPanel() {
 
       <div className="flex flex-col gap-2">
         <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider px-1">CCD Noise</div>
-        <Slider label="Gain" value={gain} min={0.1} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e\u207B/ADU`} onChange={setGain} />
-        <Slider label="Read noise" value={readNoise} min={0} max={50} step={0.5} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e\u207B`} onChange={setReadNoise} />
+        <Slider label="Gain" value={gain} min={0.1} max={10} step={0.1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e⁻/ADU`} onChange={setGain} />
+        <Slider label="Read noise" value={readNoise} min={0} max={50} step={0.5} disabled={loading} accent="rose" format={(v) => `${v.toFixed(1)} e⁻`} onChange={setReadNoise} />
         <Slider label="Sky background" value={skyBg} min={0} max={2000} step={10} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)} ADU`} onChange={setSkyBg} />
         <Slider label="Dark current" value={darkCurrent} min={0} max={5} step={0.01} disabled={loading} accent="rose" format={(v) => `${v.toFixed(2)} e⁻/s`} onChange={setDarkCurrent} />
-        <Slider label="Exposure" value={expTime} min={1} max={3600} step={1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)}s`} onChange={setExpTime} />
+        <Slider label="Exposure (s)" value={expTime} min={1} max={3600} step={1} disabled={loading} accent="rose" hint="sets EXPTIME and dark current; star flux and sky are per-frame totals" format={(v) => v.toFixed(0)} onChange={setExpTime} />
         <Slider label="Bias level" value={biasLevel} min={0} max={5000} step={10} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)} ADU`} onChange={setBiasLevel} />
       </div>
 
@@ -229,7 +292,17 @@ export default function SynthPanel() {
         <Toggle label="Save ground truth" checked={saveGt} disabled={loading} onChange={setSaveGt} />
         <Toggle label="Stack mode (multi-frame)" checked={stackMode} disabled={loading} onChange={setStackMode} />
         {stackMode && (
-          <Slider label="Frames" value={nFrames} min={2} max={64} step={1} disabled={loading} accent="rose" hint={` ≈ ${formatByteSize(stackEstimate.bytes)} on disk`} onChange={setNFrames} />
+          <>
+            <Slider label="Frames" value={nFrames} min={2} max={64} step={1} disabled={loading} accent="rose" hint={` ≈ ${formatByteSize(stackEstimate.bytes)} on disk`} onChange={setNFrames} />
+            <Toggle label="Vary frames" checked={varyFrames} disabled={loading} onChange={setVaryFrames} />
+            {varyFrames && (
+              <>
+                <Slider label="Dither (px)" value={ditherPx} min={0} max={20} step={0.5} disabled={loading} accent="rose" format={(v) => v.toFixed(1)} onChange={setDitherPx} />
+                <Slider label="Seeing jitter %" value={seeingJitterPct} min={0} max={50} step={1} disabled={loading} accent="rose" format={(v) => `${v.toFixed(0)}%`} onChange={setSeeingJitterPct} />
+                <Toggle label="Cosmic rays" checked={cosmicRays} disabled={loading} onChange={setCosmicRays} />
+              </>
+            )}
+          </>
         )}
       </div>
 
@@ -238,15 +311,27 @@ export default function SynthPanel() {
       <ErrorAlert message={error} />
 
       {result && (
-        <div className="animate-fade-in ab-metric-card p-3">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+        <div className="animate-fade-in ab-metric-card p-3 flex flex-col gap-2">
+          <div className={stale ? "text-[10px] text-amber-400/90" : "sr-only"} role="status">{stale ? "Settings changed since generation" : ""}</div>
+          <div className={`grid grid-cols-2 gap-x-4 gap-y-1 text-xs ${stale ? "opacity-60" : ""}`}>
             <div className="text-zinc-500">Stars</div>
             <div className="text-zinc-200 font-mono">{result.stars}</div>
             <div className="text-zinc-500">Size</div>
-            <div className="text-zinc-200 font-mono">{width} x {height}</div>
-            <div className="text-zinc-500">Output</div>
-            <div className="text-zinc-200 font-mono text-[10px] truncate" title={result.path}>{result.path.split(/[/\\]/).pop()}</div>
+            <div className="text-zinc-200 font-mono">{result.width} x {result.height}</div>
+            <OutputRow label={result.kind === "stack" ? "Folder" : "Output"} path={result.path} />
+            {result.manifestPath && <OutputRow label="Frames manifest" path={result.manifestPath} />}
+            {result.catalogPath && <OutputRow label="Catalog" path={result.catalogPath} />}
+            {result.groundTruthPath && <OutputRow label="Ground truth" path={result.groundTruthPath} />}
           </div>
+          {result.openPath && (
+            <button
+              type="button"
+              onClick={handleOpenInViewer}
+              className="self-start px-2.5 py-1 rounded text-[10px] font-medium text-rose-400 ring-1 ring-rose-500/30 hover:bg-rose-600/20"
+            >
+              Open in viewer
+            </button>
+          )}
         </div>
       )}
     </div>

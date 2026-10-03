@@ -297,6 +297,7 @@ pub async fn use_rgb_file_as_composite_cmd(path: String) -> Result<serde_json::V
 #[tauri::command]
 pub async fn release_cube_cmd(path: String) -> Result<(), String> {
     GLOBAL_CUBE_CACHE.invalidate(&path);
+    crate::cmd::ramp::inspect::release_asdf_ramp(&path);
     Ok(())
 }
 

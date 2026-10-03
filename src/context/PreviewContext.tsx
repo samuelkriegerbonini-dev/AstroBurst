@@ -10,10 +10,14 @@ import {
 } from "react";
 import { computeHistogram } from "../services/analysis";
 import { getCubeInfo } from "../services/cube";
+import { getRampInfo } from "../services/ramp";
 import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandDetection, NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
+import { resetRampIntegration } from "../hooks/useRampStore";
+import { rampOpenPlan } from "../utils/rampLabels";
+import type { CubeInfoWithRamp, RampInfo, RampSource } from "../shared/types/ramp";
 import { useCompositeActions, useCompositePreview } from "./CompositeContext";
 import { useComposeWizardContext } from "./ComposeWizardContext";
 import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
@@ -42,6 +46,7 @@ import {
 } from "../shared/types/display";
 import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
 import { GRAY_LUT_RGBA, reconcileDisplayPatch } from "../utils/displayTransfer";
+import { displayForRecordChange, initialHintedDisplay, patchHintedDisplay, persistableDisplay, type HintedDisplay } from "../utils/displayHint";
 import { clampGridDensity } from "../utils/gridSteps";
 import { EMPTY_CHAIN, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
 
@@ -73,6 +78,8 @@ interface CubeContextValue {
   isSpectralCube: boolean;
   spectralReason: string | null;
   cubeDims: CubeDims | null;
+  ramp: RampInfo | null;
+  rampSource: RampSource | null;
 }
 
 interface RgbContextValue {
@@ -358,6 +365,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [isSpectralCube, setIsSpectralCube] = useState(false);
   const [spectralReason, setSpectralReason] = useState<string | null>(null);
   const [cubeDims, setCubeDims] = useState<CubeDims | null>(null);
+  const [ramp, setRamp] = useState<RampInfo | null>(null);
+  const [rampSource, setRampSource] = useState<RampSource | null>(null);
   const [rgbChannels, setRgbChannels] = useState<RgbChannelMap | null>(null);
   const [view, setView] = useState<RenderView>(EMPTY_VIEW);
   const [stfPreview, setStfPreview] = useState<StfPreviewState>(NO_STF_PREVIEW);
@@ -369,7 +378,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
-  const [display, setDisplayRaw] = useState<DisplaySettings>(loadDisplaySettings);
+  const [displayState, setDisplayState] = useState<HintedDisplay>(() => initialHintedDisplay(loadDisplaySettings()));
+  const display = displayState.display;
   const [limits, setLimits] = useState<ScaleLimits | null>(null);
   const [limitsLoading, setLimitsLoading] = useState(false);
   const [limitsError, setLimitsError] = useState<string | null>(null);
@@ -389,6 +399,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }
   const current = view.key === fileKey ? view : EMPTY_VIEW;
   const processed = current.processed;
+  const [hintSource, setHintSource] = useState<ProcessedResult | null>(processed);
+  if (hintSource !== processed) {
+    setHintSource(processed);
+    setDisplayState((s) => displayForRecordChange(s, hintSource, processed));
+  }
   const processedVersion = current.version;
   const chain = current.chain;
   const processedPath = processed?.fitsPath ?? null;
@@ -525,9 +540,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, []);
 
   const setDisplay = useCallback((patch: Partial<DisplaySettings>) => {
-    setDisplayRaw((prev) => {
-      const next = reconcileDisplayPatch(prev, patch);
-      saveDisplaySettings(next);
+    setDisplayState((prev) => {
+      const next = patchHintedDisplay(prev, patch);
+      const persisted = persistableDisplay(next);
+      if (persisted) saveDisplaySettings(persisted);
       return next;
     });
   }, []);
@@ -737,6 +753,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setIsSpectralCube(false);
     setSpectralReason(null);
     setCubeDims(null);
+    setRamp(null);
+    setRampSource(null);
+    resetRampIntegration();
     setRawPixels(null);
     setRawPixelsLoading(false);
     setRawPixelsError(null);
@@ -769,7 +788,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
     const naxis3 = file.result?.header?.NAXIS3;
     const n3 = naxis3 ? parseInt(naxis3, 10) : 0;
-    if (n3 > 1 && !isRgbFits) {
+    const openPlan = rampOpenPlan(file.path, n3, isRgbFits);
+    const probeRamp = () =>
+      getRampInfo(file.path)
+        .then((info) => {
+          if (stale() || !info.ramp) return;
+          setRamp(info.ramp);
+          setRampSource(info.source);
+        })
+        .catch(() => {});
+    if (openPlan === "cube") {
       setIsCube(true);
       getCubeInfo(file.path)
         .then((info) => {
@@ -779,8 +807,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
             setIsSpectralCube(info.spectral_classification.is_spectral || false);
             setSpectralReason(info.spectral_classification.reason || null);
           }
+          const cubeRamp = (info as CubeInfoWithRamp).ramp ?? null;
+          setRamp(cubeRamp);
+          setRampSource(cubeRamp ? "fits" : null);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!stale()) probeRamp();
+        });
+    } else if (openPlan === "asdf_ramp") {
+      setIsCube(true);
+      probeRamp();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
@@ -892,8 +928,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const cubeValue = useMemo<CubeContextValue>(
-    () => ({ isCube, isSpectralCube, spectralReason, cubeDims }),
-    [isCube, isSpectralCube, spectralReason, cubeDims],
+    () => ({ isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource }),
+    [isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource],
   );
 
   const rgbValue = useMemo<RgbContextValue>(
