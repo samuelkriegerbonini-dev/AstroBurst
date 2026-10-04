@@ -5,7 +5,7 @@ import { CompositeProvider } from "../../context/CompositeContext";
 import { PreviewProvider } from "../../context/PreviewContext";
 import GpuViewport, { type ViewportOriginal } from "../render/GpuViewport";
 
-function renderViewport(original: ViewportOriginal | null, fitsW = 5000, fitsH = 2812): string {
+function renderViewport(original: ViewportOriginal | null, fitsW = 5000, fitsH = 2812, label: string | null = null): string {
   const viewport = createElement(GpuViewport, {
     renderW: 1920,
     renderH: 1080,
@@ -13,6 +13,7 @@ function renderViewport(original: ViewportOriginal | null, fitsW = 5000, fitsH =
     fitsH,
     crosshairEnabled: true,
     original,
+    label,
     children: null,
   });
   const preview = createElement(PreviewProvider, { file: null, doneFiles: [], children: viewport });
@@ -68,5 +69,49 @@ describe("GPU viewer toolbar", () => {
     const html = renderViewport({ url: "asset://original.png", disabledReason: "different grid" });
     expect(html).toMatch(/disabled="" title="different grid"/);
     expect(html).not.toContain('src="asset://original.png"');
+  });
+});
+
+function classesOfElementWithText(html: string, text: string): string[] {
+  const at = html.indexOf(`>${text}</div>`);
+  expect(at).toBeGreaterThan(-1);
+  const open = html.lastIndexOf("<div", at);
+  return (/class="([^"]*)"/.exec(html.slice(open, at))?.[1] ?? "").split(" ");
+}
+
+function divMarkupWithAttribute(html: string, attribute: string): string {
+  const at = html.indexOf(attribute);
+  expect(at).toBeGreaterThan(-1);
+  const start = html.lastIndexOf("<div", at);
+  const tag = /<div[\s>]|<\/div>/g;
+  tag.lastIndex = start;
+  let depth = 0;
+  for (let match = tag.exec(html); match; match = tag.exec(html)) {
+    depth += match[0] === "</div>" ? -1 : 1;
+    if (depth === 0) return html.slice(start, tag.lastIndex);
+  }
+  return html.slice(start);
+}
+
+describe("GPU viewer processed label", () => {
+  const label = "Moment m1 · 25 ch";
+
+  it("shows the processed label at the top right of the image area, away from the compass and scale bar painted bottom left", () => {
+    const html = renderViewport(null, 1920, 1080, label);
+    expect(divMarkupWithAttribute(html, 'class="ab-viewer-canvas"')).toContain(`>${label}</div>`);
+    const classes = classesOfElementWithText(html, label);
+    expect(classes).toEqual(expect.arrayContaining(["absolute", "top-2", "right-2", "pointer-events-none"]));
+    expect(classes.some((c) => c.startsWith("bottom-") || c.startsWith("left-"))).toBe(false);
+  });
+
+  it("keeps the processed label over the result while the Original button is not held", () => {
+    const html = renderViewport({ url: "asset://original.png", disabledReason: null }, 1920, 1080, label);
+    expect(html).toMatch(/title="Hold to show the original[^"]*" aria-pressed="false"/);
+    expect(divMarkupWithAttribute(html, 'class="ab-viewer-canvas"')).toContain(`>${label}</div>`);
+  });
+
+  it("shows no processed label when none is passed", () => {
+    expect(renderViewport(null, 1920, 1080)).not.toContain("Showing a processed result");
+    expect(renderViewport(null, 1920, 1080, "")).not.toContain("Showing a processed result");
   });
 });

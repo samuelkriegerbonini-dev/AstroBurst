@@ -17,11 +17,14 @@ import {
 import { shapeSummary } from "../../utils/regionGeometry";
 import { exclusionsFor } from "../../utils/regionExclude";
 import {
+  MAX_BIN_WIDTH,
+  MIN_BIN_WIDTH,
   SB_X_UNITS,
   SB_Y_MODES,
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
+  parseBinWidth,
   profileFetchReducer,
   sbProfileCsv,
   sbReferenceLines,
@@ -45,9 +48,7 @@ const MEDIAN_COLOR = "#fbbf24";
 const CUT_COLOR = "#a78bfa";
 const DEFAULT_BIN_WIDTH_TEXT = "1";
 const DEFAULT_BIN_WIDTH = 1;
-const MIN_BIN_WIDTH = 0.5;
-const MAX_BIN_WIDTH = 64;
-const BIN_WIDTH_HINT = `bin width must be between ${MIN_BIN_WIDTH} and ${MAX_BIN_WIDTH} px; using ${DEFAULT_BIN_WIDTH}`;
+const BIN_WIDTH_HINT = `bin width must be between ${MIN_BIN_WIDTH} and ${MAX_BIN_WIDTH} px, written with a dot; using ${DEFAULT_BIN_WIDTH}`;
 const COPIED_FEEDBACK_MS = 1500;
 const CSV_NAME: Record<ProfileRequest["kind"], string> = { radial: "radial-profile", sb: "sb-profile", cut: "line-cut" };
 const MAG_DIGITS = 2;
@@ -80,11 +81,6 @@ type ProfileResult = { requestKey: string; excludeDq: boolean } & (
 );
 
 const NO_PROFILE: ProfileFetchState<ProfileResult> = { result: null, error: null };
-
-function parseBinWidth(text: string): number | null {
-  const v = parseFloat(text);
-  return Number.isFinite(v) && v >= MIN_BIN_WIDTH && v <= MAX_BIN_WIDTH ? v : null;
-}
 
 function requestFor(
   shape: RegionShape | undefined,

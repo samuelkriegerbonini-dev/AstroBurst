@@ -12,7 +12,7 @@ import { useCompositePreview, useCompositeStf, useCompositeActions } from "../..
 import { useWizardCompositeDims } from "../../context/ComposeWizardContext";
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
-import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, histogramOnPath } from "../../utils/previewShell";
+import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
 import { emitPixelClick, pixelFromRect, setMousePixel } from "../../hooks/useMousePixelStore";
 
 import ZoomPanView from "../ui/ZoomPanView";
@@ -44,21 +44,10 @@ function clearMousePixel() {
   setMousePixel(null);
 }
 
-const ProcessedBadge = memo(function ProcessedBadge({ label }: { label: string }) {
-  return (
-    <div
-      className="absolute bottom-2 left-2 z-10 pointer-events-none text-[10px] px-2 py-0.5 rounded bg-black/60 text-emerald-300/90"
-      title="Showing a processed result; use Revert to original in the preview header to return to the original"
-    >
-      {label}
-    </div>
-  );
-});
-
 function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams, histData, histDataPath } = useHistContext();
-  const { isCube } = useCubeContext();
+  const { isCube, isSpectralCube } = useCubeContext();
   const { processed } = useRenderContext();
   const displayed = useDisplayedImage();
   const { compositePreviewUrl } = useCompositePreview();
@@ -139,10 +128,9 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
   const isProcessed = displayed.isProcessed;
   const heldOriginal = useMemo<ViewportOriginal | null>(() => {
     if (!isProcessed || !originalPreviewUrl) return null;
-    const sameGrid = !!fileDims && !!displayedDims && fileDims[0] === displayedDims[0] && fileDims[1] === displayedDims[1];
     return {
       url: originalPreviewUrl,
-      disabledReason: sameGrid
+      disabledReason: sameGrid(fileDims, displayedDims)
         ? null
         : `The original is ${fileDims ? `${fileDims[0]}×${fileDims[1]}` : "of unknown size"} and the result ${displayedDims ? `${displayedDims[0]}×${displayedDims[1]}` : "of unknown size"} px; hold-to-compare needs the same pixel grid`,
     };
@@ -278,8 +266,6 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
 
   if (!useGpu || !rawPixels || displayed.previewOnly) return null;
 
-  const badge = displayed.isProcessed && displayed.label ? <ProcessedBadge label={displayed.label} /> : null;
-
   return (
     <div className="flex flex-col h-full">
       <DisplayControls vmin={transfer.vmin} vmax={transfer.vmax} />
@@ -298,6 +284,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
           onCanvasPixelClick={isCube ? onCubePixelClick : undefined}
           regionsEnabled={regionsOnDisplayed}
           original={heldOriginal}
+          label={displayed.isProcessed ? displayed.label : null}
         >
           <GpuRenderer
             pixels={rawPixels}
@@ -307,8 +294,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
             lut={lutBytes}
           />
         </GpuViewport>
-        {badge}
-        {isCube && <div className={CANVAS_HINT_CLASS}>{CUBE_SPECTRUM_HINT}</div>}
+        {cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }) && <div className={CANVAS_HINT_CLASS}>{CUBE_SPECTRUM_HINT}</div>}
       </div>
       {display.colorbar && (
         <Colorbar

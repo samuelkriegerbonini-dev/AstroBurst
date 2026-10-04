@@ -51,6 +51,7 @@ export interface MetadataFile {
 
 import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
 import { tableOnlyFileHint } from "../../utils/x1dCompare";
+import { fileListNames } from "../../utils/fileListNames";
 
 const OPEN_TABLE_TITLE = "Select its cube, open Cube and compare this x1d with the cube spectrum in Spectroscopy";
 
@@ -105,27 +106,19 @@ function getFilterColor(filter?: string): string {
   return FILTER_COLORS[filter.toUpperCase().trim()] ?? "#71717a";
 }
 
-function shortName(fullName: string): string {
-  const parts = fullName.replace(/\.[^.]+$/, "").split(/[_-]/);
-  if (parts.length <= 3) return fullName;
-  const filterPart = parts.find((p) => /^f\d{3}[wmnWMN]/i.test(p));
-  const last = parts[parts.length - 1];
-  if (filterPart) return `...${filterPart}_${last}`;
-  return parts.slice(-3).join("_");
-}
-
 const ITEM_HEIGHT = 72;
 const OVERSCAN = 4;
 
 interface MetadataFileItemProps {
   file: MetadataFile;
+  displayName: string;
   isSelected: boolean;
   onSelect: (id: string) => void;
   onOpenTable?: (id: string) => void;
   tableBlocker: string | null;
 }
 
-function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
+function MetadataFileItem({ file, displayName, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
   const [thumbError, setThumbError] = useState(false);
   const [thumbLoaded, setThumbLoaded] = useState(false);
 
@@ -209,7 +202,7 @@ function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocke
       <div className="ab-mfl-content">
         <div className="ab-mfl-row-primary">
           <span className="ab-mfl-filename" title={file.name}>
-            {shortName(file.name)}
+            {displayName}
           </span>
           <div className="ab-mfl-status-dot" data-status={status} />
         </div>
@@ -289,6 +282,7 @@ function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocke
 
 const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   prev.file.id === next.file.id
+  && prev.displayName === next.displayName
   && prev.isSelected === next.isSelected
   && prev.file.status === next.file.status
   && prev.file.previewUrl === next.file.previewUrl
@@ -328,6 +322,11 @@ function MetadataFileList({
   const rafRef = useRef<number | null>(null);
 
   const doneCount = useMemo(() => files.filter((f) => f.status === "done").length, [files]);
+
+  const displayNames = useMemo(() => {
+    const names = fileListNames(files.map((f) => f.name));
+    return new Map(files.map((f, i) => [f.id, names[i]]));
+  }, [files]);
 
   const filteredFiles = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -577,6 +576,7 @@ function MetadataFileList({
                 <MemoFileItem
                   key={file.id}
                   file={file}
+                  displayName={displayNames.get(file.id) ?? file.name}
                   isSelected={file.id === selectedId}
                   onSelect={onSelect}
                   onOpenTable={onOpenTable}

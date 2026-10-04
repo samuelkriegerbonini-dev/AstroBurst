@@ -97,7 +97,7 @@ function CubeTool() {
             />
           </section>
         )}
-        {isCube && (
+        {isCube && !ramp && (
           <section id={ANALYSIS_SECTION.pv.id}>
             <PvPanel filePath={filePath} fileKey={fileKey} cubeDims={cubeDims} />
           </section>

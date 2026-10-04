@@ -120,6 +120,9 @@ pub async fn get_full_header(path: String, palette: Option<String>) -> Result<se
             "DATAMIN","DATAMAX","BLANK"];
         let proc_keys = ["SWCREATE","SOFTWARE","HISTORY","COMMENT","PROGRAM","CREATOR",
             "ORIGIN","PIPELINE"];
+        let instrument_keys = ["DETECTOR","MODULE","CHANNEL","BAND","GRATING","PUPIL","PILIN",
+            "FOCUSPOS","LAMP","OPMODE","FPE_SIDE","ICE_SIDE","CCCSTATE","FWPOSOFF","FWPOSTOL",
+            "PWPOSOFF","PWPOSTOL","EXP_TYPE","READPATT","SUBARRAY","APERNAME"];
 
         let mut categories: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
         for cat in [
@@ -140,7 +143,7 @@ pub async fn get_full_header(path: String, palette: Option<String>) -> Result<se
                 CATEGORY_IMAGE
             } else if proc_keys.iter().any(|&k| ku == k || ku.starts_with("HISTORY") || ku.starts_with("COMMENT")) {
                 CATEGORY_PROCESSING
-            } else if ku.starts_with("TELESCOP") || ku.starts_with("INSTRUME") || ku.starts_with("CAMERA") || ku.starts_with("CCD") || ku.starts_with("SENSOR") {
+            } else if instrument_keys.iter().any(|&k| ku == k) || ku.starts_with("GWA_") || ku.starts_with("TELESCOP") || ku.starts_with("INSTRUME") || ku.starts_with("CAMERA") || ku.starts_with("CCD") || ku.starts_with("SENSOR") {
                 CATEGORY_INSTRUMENT
             } else {
                 CATEGORY_OTHER
@@ -255,5 +258,30 @@ mod tests {
         assert_eq!(sho[1][RES_HUBBLE_CHANNEL], "R");
         let hos = detection_json(&detect_filter(&files[1].1).unwrap(), &palette_from(Some("hos")));
         assert_eq!(hos[RES_HUBBLE_CHANNEL], "B");
+    }
+
+    #[tokio::test]
+    async fn jwst_instrument_configuration_keys_group_under_instrument() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("jw01266005001_02103_00001_nrs1_cal.fits").to_str().unwrap().to_string();
+        let keys = [
+            ("TELESCOP", "JWST"), ("INSTRUME", "NIRSPEC"), ("DETECTOR", "NRS1"), ("FILTER", "F170LP"), ("GRATING", "G235H"),
+            ("FOCUSPOS", "3"), ("LAMP", "NONE"), ("OPMODE", "IFU"), ("GWA_XTIL", "0.351098329"), ("GWA_TILT", "36.1412"),
+            ("EXP_TYPE", "NRS_IFU"), ("READPATT", "NRSIRS2RAPID"), ("SUBARRAY", "FULL"), ("APERNAME", "NRS_FULL_IFU"),
+            ("MODULE", "MULTIPLE"), ("CHANNEL", "LONG"), ("PUPIL", "F470N"), ("PILIN", "F"),
+            ("BAND", "SHORT"), ("FPE_SIDE", "A"), ("ICE_SIDE", "A"), ("CCCSTATE", "OPEN"),
+            ("FWPOSOFF", "0"), ("FWPOSTOL", "0"), ("PWPOSOFF", "0"), ("PWPOSTOL", "0"),
+        ];
+        write_fits_mono(&p, &Array2::zeros((4, 4)), Some(&make_header(&keys))).unwrap();
+        let out = get_full_header(p, None).await.unwrap();
+        let categories = &out[RES_CATEGORIES];
+        let observation_keys = ["TELESCOP", "INSTRUME", "FILTER"];
+        for (key, _) in keys.iter().filter(|(k, _)| !observation_keys.contains(k)) {
+            assert!(categories[CATEGORY_INSTRUMENT].get(*key).is_some(), "{key} is not under Instrument: {}", categories);
+            assert!(categories[CATEGORY_OTHER].get(*key).is_none(), "{key} is still under Other");
+        }
+        assert_eq!(categories[CATEGORY_OBSERVATION]["TELESCOP"], "JWST");
+        assert_eq!(categories[CATEGORY_OBSERVATION]["INSTRUME"], "NIRSPEC");
+        assert_eq!(categories[CATEGORY_OBSERVATION]["FILTER"], "F170LP");
     }
 }

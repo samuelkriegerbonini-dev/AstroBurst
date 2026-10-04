@@ -69,7 +69,7 @@ export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput)
     case "photometry":
       return [s.photometry, s.table, s.series];
     case "cube":
-      return [...(input.isRamp ? [s.ramp] : []), ...(input.isCube ? [s.spectrum, s.pv] : [])];
+      return [...(input.isRamp ? [s.ramp] : []), ...(input.isCube ? [s.spectrum] : []), ...(input.isCube && !input.isRamp ? [s.pv] : [])];
     case "log":
       return [s.log];
   }

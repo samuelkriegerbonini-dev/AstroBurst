@@ -1,5 +1,5 @@
 import { memo, useCallback, useState, useRef, useEffect, useId } from "react";
-import { resolveTypedValue } from "./sliderValue";
+import { parseTypedText, resolveTypedValue, typedTextRejected } from "./sliderValue";
 
 interface SliderProps {
   label: string;
@@ -92,16 +92,21 @@ function Slider({
   const commitEdit = useCallback(() => {
     setEditing(false);
     if (editText === editStartText.current) return;
-    const parsed = parseFloat(editText);
-    if (!isNaN(parsed)) {
+    const parsed = parseTypedText(editText);
+    if (parsed !== null) {
       (onCommit ?? onChange)?.(resolveTypedValue(parsed, min, max, step, isLog));
     }
   }, [editText, min, max, step, isLog, onChange, onCommit]);
 
+  const editRejected = typedTextRejected(editText);
+
   const handleEditKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (!editRejected) commitEdit();
+    }
     if (e.key === "Escape") { setEditing(false); }
-  }, [commitEdit]);
+  }, [commitEdit, editRejected]);
 
   useEffect(() => {
     if (editing && inputRef.current) {
@@ -121,11 +126,12 @@ function Slider({
             ref={inputRef}
             type="text"
             aria-label={`${label} value`}
+            aria-invalid={editRejected}
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onBlur={commitEdit}
             onKeyDown={handleEditKeyDown}
-            className="ab-slider-value-edit"
+            className={editRejected ? "ab-slider-value-edit border-red-500!" : "ab-slider-value-edit"}
           />
         ) : (
           <button

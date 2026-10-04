@@ -1,4 +1,5 @@
 import type { CollapseRangeMode, ContinuumWindows } from "../shared/types/cube";
+import { formatTickLabels, niceTicks } from "./plotScale";
 
 export interface ChannelRange {
   z0: number;
@@ -25,6 +26,7 @@ export interface PlotMapping {
 export const DEFAULT_CONTINUUM_WIDTH = 5;
 
 const MIN_RANGE = 1e-10;
+const X_TICK_COUNT = 6;
 
 function plotWidth(m: PlotMapping): number {
   return Math.max(m.width - m.padLeft - m.padRight, 1);
@@ -45,6 +47,20 @@ export function axisValueToPixel(x: number, m: PlotMapping): number {
 
 export function pixelToAxisValue(px: number, m: PlotMapping): number {
   return m.xMin + ((px - m.padLeft) / plotWidth(m)) * xRange(m);
+}
+
+export interface SpectrumXTick {
+  px: number;
+  label: string;
+}
+
+export function spectrumXTicks(m: PlotMapping): SpectrumXTick[] {
+  const channelIndexAxis = !m.xValues || m.xValues.length !== m.n;
+  const ticks = niceTicks(m.xMin, m.xMax, X_TICK_COUNT).filter(
+    (t) => t >= m.xMin && t <= m.xMax && (!channelIndexAxis || Number.isInteger(t)),
+  );
+  const labels = formatTickLabels(ticks);
+  return ticks.map((t, i) => ({ px: axisValueToPixel(t, m), label: labels[i] }));
 }
 
 export function nearestChannel(xValue: number, m: PlotMapping): number | null {

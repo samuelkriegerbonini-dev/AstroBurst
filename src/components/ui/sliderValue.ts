@@ -33,3 +33,13 @@ export function resolveTypedValue(
 ): number {
   return isLog ? clampToRange(value, min, max) : snapToStep(value, min, max, step);
 }
+
+export function typedTextRejected(text: string): boolean {
+  return text.includes(",");
+}
+
+export function parseTypedText(text: string): number | null {
+  if (typedTextRejected(text)) return null;
+  const value = parseFloat(text);
+  return Number.isNaN(value) ? null : value;
+}

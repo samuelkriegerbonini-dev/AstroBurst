@@ -69,6 +69,7 @@ export const InfoPanel = memo(function InfoPanel() {
           {file.result.header.TELESCOP && <span>TELESCOP: {file.result.header.TELESCOP}</span>}
           {file.result.header.INSTRUME && <span>INSTRUME: {file.result.header.INSTRUME}</span>}
           {file.result.header.FILTER && <span>FILTER: {file.result.header.FILTER}</span>}
+          {file.result.header.PUPIL && <span>PUPIL: {file.result.header.PUPIL}</span>}
           {file.result.header.EXPTIME && <span>EXPTIME: {file.result.header.EXPTIME}s</span>}
           {file.result.header["DATE-OBS"] && <span>DATE: {file.result.header["DATE-OBS"]}</span>}
           {file.result.header.OBJECT && <span>OBJECT: {file.result.header.OBJECT}</span>}

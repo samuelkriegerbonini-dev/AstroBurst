@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { snapToStep, resolveTypedValue } from "../sliderValue";
+import { snapToStep, resolveTypedValue, parseTypedText, typedTextRejected } from "../sliderValue";
 
 describe("snapToStep", () => {
   it("snaps a fractional entry to an integer grid", () => {
@@ -57,5 +57,48 @@ describe("resolveTypedValue", () => {
   it("does not invent a value for non-numeric input on either scale", () => {
     expect(resolveTypedValue(NaN, 1, 10, 1, true)).toBeNaN();
     expect(resolveTypedValue(NaN, 1, 10, 1, false)).toBeNaN();
+  });
+});
+
+describe("parseTypedText", () => {
+  it("rejects a decimal comma instead of reading the digits before it", () => {
+    expect(parseTypedText("0,75")).toBeNull();
+    expect(parseTypedText("1,5")).toBeNull();
+    expect(parseTypedText("2,5px")).toBeNull();
+  });
+
+  it("keeps reading the unit-suffixed text the value button shows", () => {
+    expect(parseTypedText("4px")).toBe(4);
+    expect(parseTypedText("1.5x")).toBe(1.5);
+    expect(parseTypedText("2.5σ")).toBe(2.5);
+    expect(parseTypedText("50%")).toBe(50);
+    expect(parseTypedText(" 0.75 ")).toBe(0.75);
+    expect(parseTypedText("1e-3")).toBe(0.001);
+  });
+
+  it("gives no value for text without a number", () => {
+    expect(parseTypedText("")).toBeNull();
+    expect(parseTypedText("abc")).toBeNull();
+  });
+});
+
+describe("typedTextRejected", () => {
+  it("marks a decimal comma, so Enter keeps the box open instead of applying the digits before it", () => {
+    expect(typedTextRejected("0,75")).toBe(true);
+    expect(typedTextRejected("1,5px")).toBe(true);
+    expect(typedTextRejected(",")).toBe(true);
+  });
+
+  it("does not mark the valid prefix of a number while it is being typed", () => {
+    for (const prefix of ["-", "+", ".", "-.", "-0.", "1e"]) {
+      expect(typedTextRejected(prefix), `prefix "${prefix}"`).toBe(false);
+    }
+  });
+
+  it("does not mark text without a comma, which Enter still closes without applying as before", () => {
+    expect(typedTextRejected("abc")).toBe(false);
+    expect(typedTextRejected("")).toBe(false);
+    expect(typedTextRejected("4px")).toBe(false);
+    expect(parseTypedText("abc")).toBeNull();
   });
 });

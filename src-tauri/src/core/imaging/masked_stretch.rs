@@ -2,7 +2,8 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::core::imaging::star_mask::{generate_star_mask, StarMaskConfig, StarMaskResult};
-use crate::core::imaging::stats::{is_padding, is_valid_pixel};
+use crate::core::imaging::stats::{compute_image_stats, is_padding, is_valid_pixel};
+use crate::types::image::{AutoStfConfig, ImageStats};
 
 const MINMAX_CHUNK: usize = 1 << 16;
 const CORRECTION_PASSES: usize = 3;
@@ -66,7 +67,11 @@ pub fn masked_stretch(
 ) -> Result<MaskedStretchResult, String> {
     let normalized = normalize_to_01(image);
     let mask_result = generate_star_mask(&normalized, &star_mask_config(config))?;
-    stretch_normalized(normalized, &image.mapv(is_padding), &mask_result, config)
+    let working = match stretch_range(&[image]) {
+        Some((lo, hi)) => normalize_to_01_with(image, lo, hi),
+        None => normalized,
+    };
+    stretch_normalized(working, &image.mapv(is_padding), &mask_result, config)
 }
 
 struct PassOutcome {
@@ -223,7 +228,7 @@ pub fn masked_stretch_rgb_shared(
     let mask = &shared_mask.mask;
     let protection = config.protection_amount as f32;
 
-    let (mut wr, mut wg, mut wb) = match shared_min_max(&[r, g, b]) {
+    let (mut wr, mut wg, mut wb) = match stretch_range(&[r, g, b]) {
         Some((dmin, dmax)) => (
             normalize_to_01_with(r, dmin, dmax),
             normalize_to_01_with(g, dmin, dmax),
@@ -343,6 +348,40 @@ fn shared_min_max(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
         None
     } else {
         Some((dmin, dmax))
+    }
+}
+
+fn shadow_floor(stats: &ImageStats) -> f32 {
+    let shadow = stats.median + AutoStfConfig::default().shadow_k * stats.sigma;
+    let resolvable_offset = f32::EPSILON as f64 * (stats.max - stats.min);
+    if stats.median - shadow < resolvable_offset {
+        return stats.min as f32;
+    }
+    (shadow as f32).max(stats.min as f32)
+}
+
+fn channel_stats(channel: &Array2<f32>) -> ImageStats {
+    if channel.is_standard_layout() {
+        compute_image_stats(channel)
+    } else {
+        compute_image_stats(&channel.as_standard_layout().into_owned())
+    }
+}
+
+fn stretch_range(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
+    let (dmin, dmax) = shared_min_max(channels)?;
+    let lo = channels
+        .iter()
+        .map(|channel| channel_stats(channel))
+        .filter(|stats| stats.valid_count > 0)
+        .map(|stats| shadow_floor(&stats))
+        .fold(f32::INFINITY, f32::min)
+        .max(dmin);
+    let range = dmax - lo;
+    if !range.is_finite() || range < 1e-10 {
+        None
+    } else {
+        Some((lo, dmax))
     }
 }
 
@@ -476,6 +515,7 @@ fn clamp_inplace(data: &mut Array2<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::imaging::stf::{apply_stf_f32, auto_stf};
 
     struct Lcg(u64);
 
@@ -495,6 +535,7 @@ mod tests {
     }
 
     const FIELD: usize = 96;
+    const SKY_LEVEL: f32 = 10.0;
     const NOISE_SIGMA: f32 = 1.0;
     const STAR_PEAK: f32 = 500.0;
     const STAR_SIGMA: f32 = 1.5;
@@ -649,7 +690,7 @@ mod tests {
 
     fn faint_sky_with_stars() -> Array2<f32> {
         let mut rng = Lcg(0x2545_F491_4F6C_DD1D);
-        let mut img = Array2::from_shape_fn((FIELD, FIELD), |_| 10.0 + NOISE_SIGMA * rng.gaussian());
+        let mut img = Array2::from_shape_fn((FIELD, FIELD), |_| SKY_LEVEL + NOISE_SIGMA * rng.gaussian());
         add_stars(&mut img, &STAR_CENTRES, STAR_PEAK);
         mark_padding(&mut img);
         img
@@ -1109,8 +1150,8 @@ mod tests {
         assert_eq!(res.g.iterations_run, 1, "the weight can only be recovered from a single pass");
 
         let mask = shared_star_mask(&r, &g, &b, &config);
-        let (dmin, dmax) = shared_min_max(&[&r, &g, &b]).unwrap();
-        let inputs = [&r, &g, &b].map(|plane| normalize_to_01_with(plane, dmin, dmax));
+        let (lo, hi) = stretch_range(&[&r, &g, &b]).unwrap();
+        let inputs = [&r, &g, &b].map(|plane| normalize_to_01_with(plane, lo, hi));
         let luminance = compute_luminance(&inputs[0], &inputs[1], &inputs[2]).unwrap();
         let padding = ndarray::Zip::from(&r)
             .and(&g)
@@ -1162,5 +1203,206 @@ mod tests {
         }
         assert!(checked >= 50, "only {} star pixels could be checked", checked);
         assert!(strongest > 0.5, "the strongest protection weight checked was only {}", strongest);
+    }
+
+    const ARTIFACT: (usize, usize) = (90, 5);
+    const SKY_PROBES: [((usize, usize), f32); 2] =
+        [((10, 46), SKY_LEVEL - NOISE_SIGMA), ((10, 50), SKY_LEVEL + NOISE_SIGMA)];
+
+    fn plant_sky_probes(img: &mut Array2<f32>) {
+        for &((y, x), v) in &SKY_PROBES {
+            img[[y, x]] = v;
+        }
+    }
+
+    fn faint_sky_with_probes() -> Array2<f32> {
+        let mut img = faint_sky_with_stars();
+        plant_sky_probes(&mut img);
+        img
+    }
+
+    fn with_negative_artifact(img: &Array2<f32>) -> Array2<f32> {
+        let mut out = img.clone();
+        out[ARTIFACT] = -60.0;
+        out
+    }
+
+    fn probe_gap(out: &Array2<f32>) -> f32 {
+        out[SKY_PROBES[1].0] - out[SKY_PROBES[0].0]
+    }
+
+    fn auto_stf_probe_gap(img: &Array2<f32>) -> f32 {
+        let stats = compute_image_stats(img);
+        probe_gap(&apply_stf_f32(img, &auto_stf(&stats, &AutoStfConfig::default()), &stats))
+    }
+
+    #[test]
+    fn sky_far_above_a_negative_artifact_keeps_the_contrast_of_the_auto_stf() {
+        let img = with_negative_artifact(&faint_sky_with_probes());
+        let res = masked_stretch(&img, &MaskedStretchConfig::default()).unwrap();
+        let (gap, stf_gap) = (probe_gap(&res.image), auto_stf_probe_gap(&img));
+        assert!(
+            gap >= 0.8 * stf_gap,
+            "sky probes one sigma below and above the sky end up {} apart, the Auto STF puts them {} apart",
+            gap,
+            stf_gap
+        );
+    }
+
+    #[test]
+    fn shared_rgb_sky_far_above_one_channels_artifact_keeps_the_contrast_of_the_auto_stf() {
+        let r = faint_sky_with_probes();
+        let g = r.clone();
+        let b = with_negative_artifact(&r);
+        let res = masked_stretch_rgb_shared(&r, &g, &b, &MaskedStretchConfig::default()).unwrap();
+        let stf_gap = auto_stf_probe_gap(&r);
+        for (label, plane) in [("R", &res.r.image), ("G", &res.g.image), ("B", &res.b.image)] {
+            let gap = probe_gap(plane);
+            assert!(
+                gap >= 0.8 * stf_gap,
+                "{}: sky probes one sigma below and above the sky end up {} apart, the Auto STF puts them {} apart",
+                label,
+                gap,
+                stf_gap
+            );
+        }
+    }
+
+    const EXACT_SKY_PIXELS_PER_TEN: usize = 7;
+
+    fn zero_mad_sky_with_stars() -> Array2<f32> {
+        let mut rng = Lcg(0x3C6E_F372_FE94_F82B);
+        let mut img = Array2::from_shape_fn((FIELD, FIELD), |(y, x)| {
+            if (y * FIELD + x) % 10 < EXACT_SKY_PIXELS_PER_TEN {
+                SKY_LEVEL
+            } else {
+                SKY_LEVEL + NOISE_SIGMA * rng.gaussian()
+            }
+        });
+        add_stars(&mut img, &STAR_CENTRES, STAR_PEAK);
+        plant_sky_probes(&mut img);
+        mark_padding(&mut img);
+        img
+    }
+
+    fn exact_sky_pixels(img: &Array2<f32>) -> Vec<(usize, usize)> {
+        img.indexed_iter().filter(|(_, &v)| v == SKY_LEVEL).map(|(idx, _)| idx).collect()
+    }
+
+    fn assert_sky_reaches_the_target(
+        label: &str,
+        result: &MaskedStretchResult,
+        sky: &[(usize, usize)],
+        config: &MaskedStretchConfig,
+    ) {
+        let sky_level = median_of(sky.iter().map(|&(y, x)| result.image[[y, x]]).collect());
+        let target = config.target_background as f32;
+        assert!(
+            (sky_level - target).abs() <= 0.15 * target,
+            "{}: the zero-MAD sky lands at {} instead of about {}",
+            label,
+            sky_level,
+            target
+        );
+        assert!(result.converged, "{}: not converged, background {}", label, result.final_background);
+        let (below, above) = (result.image[SKY_PROBES[0].0], result.image[SKY_PROBES[1].0]);
+        assert!(
+            below > 0.05 && below < sky_level && sky_level < above && above < 0.6,
+            "{}: sky probes one sigma below and above the sky map to {} and {} around a sky at {}, the sky noise is crushed",
+            label,
+            below,
+            above,
+            sky_level
+        );
+    }
+
+    #[test]
+    fn sky_with_zero_mad_is_stretched_to_the_target_background() {
+        let img = zero_mad_sky_with_stars();
+        assert_eq!(compute_image_stats(&img).mad, 0.0, "the fixture needs a zero MAD");
+        let sky = exact_sky_pixels(&img);
+        assert!(sky.len() > FIELD * FIELD / 2, "only {} pixels sit exactly at the sky level", sky.len());
+        let config = MaskedStretchConfig::default();
+        let res = masked_stretch(&img, &config).unwrap();
+        assert_sky_reaches_the_target("mono", &res, &sky, &config);
+    }
+
+    #[test]
+    fn shared_rgb_sky_with_zero_mad_is_stretched_to_the_target_background() {
+        let img = zero_mad_sky_with_stars();
+        let sky = exact_sky_pixels(&img);
+        let config = MaskedStretchConfig::default();
+        let res = masked_stretch_rgb_shared(&img, &img, &img, &config).unwrap();
+        for (label, result) in [("R", &res.r), ("G", &res.g), ("B", &res.b)] {
+            assert_sky_reaches_the_target(label, result, &sky, &config);
+        }
+    }
+
+    const EXACT_STATS_PIXEL_LIMIT: usize = 4_000_000;
+    const LARGE_FIELD: usize = 2048;
+    const LARGE_FIELD_STAR_PIXELS: usize = 200;
+
+    fn large_zero_mad_sky_with_stars() -> Array2<f32> {
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+        let mut img = Array2::from_shape_fn((LARGE_FIELD, LARGE_FIELD), |(y, x)| {
+            if (y * LARGE_FIELD + x) % 10 < EXACT_SKY_PIXELS_PER_TEN {
+                SKY_LEVEL
+            } else {
+                SKY_LEVEL + NOISE_SIGMA * rng.gaussian()
+            }
+        });
+        for i in 0..LARGE_FIELD_STAR_PIXELS {
+            img[[(i * 97 + 11) % LARGE_FIELD, (i * 193 + 7) % LARGE_FIELD]] = SKY_LEVEL + STAR_PEAK;
+        }
+        plant_sky_probes(&mut img);
+        img[[0, 0]] = 0.0;
+        img[[0, 1]] = f32::NAN;
+        img[[LARGE_FIELD - 1, LARGE_FIELD - 1]] = f32::INFINITY;
+        img
+    }
+
+    #[test]
+    fn zero_mad_sky_above_the_exact_stats_limit_takes_the_channel_minimum_as_its_floor() {
+        let img = large_zero_mad_sky_with_stars();
+        assert!(img.len() > EXACT_STATS_PIXEL_LIMIT, "the fixture must exceed the exact-stats pixel limit");
+        let stats = compute_image_stats(&img);
+        let exact_sky = img.iter().filter(|&&v| v == SKY_LEVEL).count() as u64;
+        assert!(exact_sky > stats.valid_count / 2, "only {} of {} valid pixels sit exactly at the sky level", exact_sky, stats.valid_count);
+        let (lo, hi) = stretch_range(&[&img]).unwrap();
+        assert_eq!(hi, stats.max as f32);
+        assert_eq!(
+            lo,
+            stats.min as f32,
+            "the floor of a zero-MAD sky must be the channel minimum, the shadow point is {} below the sky with mad {}",
+            SKY_LEVEL - lo,
+            stats.mad
+        );
+    }
+
+    #[test]
+    fn zero_mad_sky_above_the_exact_stats_limit_keeps_its_noise_around_the_target_background() {
+        let img = large_zero_mad_sky_with_stars();
+        assert!(img.len() > EXACT_STATS_PIXEL_LIMIT, "the fixture must exceed the exact-stats pixel limit");
+        let sky = exact_sky_pixels(&img);
+        let config = MaskedStretchConfig::default();
+        let res = masked_stretch(&img, &config).unwrap();
+        assert_sky_reaches_the_target("large mono", &res, &sky, &config);
+    }
+
+    #[test]
+    fn a_channel_outside_standard_layout_gets_the_same_range_and_a_converging_stretch() {
+        let img = faint_sky_with_stars();
+        let transposed = img.clone().reversed_axes();
+        assert!(!transposed.is_standard_layout(), "the fixture must not be in standard layout");
+        assert_eq!(stretch_range(&[&transposed]), stretch_range(&[&img]));
+        let config = MaskedStretchConfig::default();
+        let res = masked_stretch(&transposed, &config).unwrap();
+        assert!(res.converged, "not converged, background {}", res.final_background);
+        assert!(
+            (res.final_background - config.target_background).abs() < config.convergence_threshold,
+            "background {} is not at the target {}",
+            res.final_background,
+            config.target_background
+        );
     }
 }

@@ -12,6 +12,7 @@ import {
 } from "../../utils/wizard";
 import type { StfParams } from "../../shared/types";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
+import { displayFilterValue } from "../../utils/channelMapping";
 
 
 const ChannelStep = lazy(() => import("./steps/ChannelStep"));
@@ -37,7 +38,7 @@ const COLOR_MAP: Record<string, { tab: string; dot: string }> = {
   teal: { tab: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
 
-function MiniInfoBar() {
+export function MiniInfoBar() {
   const { file } = useFileContext();
   const { histData, stfParams } = useHistContext();
 
@@ -76,7 +77,7 @@ function MiniInfoBar() {
             {[
               file.result.header.TELESCOP,
               file.result.header.INSTRUME,
-              file.result.header.FILTER,
+              displayFilterValue(file),
             ].filter(Boolean).join(" ")}
           </span>
         </>

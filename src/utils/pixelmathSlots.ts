@@ -1,3 +1,5 @@
+import { samePath } from "./processingChain";
+
 export const TARGET_SYMBOL = "$T";
 export const MAX_SLOTS = 26;
 
@@ -78,6 +80,32 @@ export function autoSlotsFromFiles(
   return added;
 }
 
+function withoutPixelMathOutput(files: readonly LoadedImageRef[], pixelMathOutput: string | null): readonly LoadedImageRef[] {
+  return pixelMathOutput ? files.filter((f) => !samePath(f.path, pixelMathOutput)) : files;
+}
+
+export function rebindUntouchedSlots(
+  slots: SlotBinding[],
+  files: readonly LoadedImageRef[],
+  targetPath: string | null,
+  touched: boolean,
+  pixelMathOutput: string | null,
+): SlotBinding[] {
+  if (touched || files.length === 0) return slots;
+  const kept = slots.filter((s) => s.path !== targetPath);
+  if (kept.length > 0) return kept.length === slots.length ? slots : kept;
+  return autoSlotsFromFiles(withoutPixelMathOutput(files, pixelMathOutput), targetPath, kept);
+}
+
+export function slotForAdd(
+  existing: readonly SlotBinding[],
+  files: readonly LoadedImageRef[],
+  targetPath: string | null,
+): SlotBinding {
+  const [free] = autoSlotsFromFiles(files, targetPath, existing);
+  return free ?? { name: nextSlotName(existing.map((s) => s.name.trim())), path: targetPath ?? "" };
+}
+
 const SYMBOL_RE = /(?<![A-Za-z0-9_$.])\$?[A-Za-z_][A-Za-z0-9_]*/g;
 
 export function referencedSymbols(expression: string): string[] {
@@ -102,11 +130,14 @@ export function bindMissingSlots(
   files: readonly LoadedImageRef[],
   targetPath: string | null,
   existing: readonly SlotBinding[],
+  pixelMathOutput: string | null,
 ): SlotBinding[] {
   const names = existing.map((s) => s.name.trim());
   const missing = missingSlots(expression, names);
   const boundPaths = new Set(existing.map((s) => s.path));
-  const candidates = files.map((f) => f.path).filter((p) => p && p !== targetPath && !boundPaths.has(p));
+  const candidates = withoutPixelMathOutput(files, pixelMathOutput)
+    .map((f) => f.path)
+    .filter((p) => p && p !== targetPath && !boundPaths.has(p));
   const added: SlotBinding[] = [];
   for (const name of missing) {
     if (names.length + added.length >= MAX_SLOTS) break;

@@ -67,7 +67,7 @@ describe("toolSections", () => {
     expect(labels("cube", nothing)).toEqual([]);
     expect(labels("cube", { ...nothing, isCube: true })).toEqual(["Spectrum", "PV"]);
     expect(labels("cube", { ...nothing, isRamp: true })).toEqual(["Ramp"]);
-    expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum", "PV"]);
+    expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum"]);
   });
 
   it("gives the Log tool only the log section", () => {
@@ -107,13 +107,13 @@ describe("ANALYSIS_SECTION", () => {
   });
 
   it("puts every section in exactly one tool", () => {
-    const all = analysisSections(everything);
+    const rampAndCube = [everything, { ...everything, isRamp: false }];
     for (const section of Object.values(ANALYSIS_SECTION)) {
-      const owners = ANALYSIS_TOOL_IDS.filter((tool) => toolSections(tool, everything).includes(section));
+      const owners = ANALYSIS_TOOL_IDS.filter((tool) => rampAndCube.some((input) => toolSections(tool, input).includes(section)));
       expect(owners, section.id).toEqual([section.tool]);
-      expect(all.filter((s) => s === section), section.id).toHaveLength(1);
+      for (const input of rampAndCube) expect(analysisSections(input).filter((s) => s === section).length, section.id).toBeLessThanOrEqual(1);
     }
-    expect(all).toHaveLength(Object.keys(ANALYSIS_SECTION).length);
+    expect(new Set(rampAndCube.flatMap((input) => analysisSections(input))).size).toBe(Object.keys(ANALYSIS_SECTION).length);
   });
 
   it("gives every section a distinct element id across all tools", () => {

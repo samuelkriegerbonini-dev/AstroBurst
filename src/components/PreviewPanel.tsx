@@ -40,6 +40,7 @@ import {
   CUBE_SPECTRUM_HINT,
   backToFileAction,
   cpuViewerDisplayTitle,
+  cubeSpectrumHintShown,
   gpuAfterProbe,
   gpuDisplayOnScreen,
   gpuToggleView,
@@ -58,7 +59,7 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
 
 export default function PreviewPanel() {
   const { file } = useFileContext();
-  const { isCube, ramp } = useCubeContext();
+  const { isCube, isSpectralCube, ramp } = useCubeContext();
   const rampIntegration = useRampIntegration();
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
@@ -462,7 +463,7 @@ export default function PreviewPanel() {
                 onMouseLeave={handleLeave}
                 overlayCanvasRef={starOverlayRef}
                 dqCanvasRef={dqCanvasRef}
-                canvasHint={isCube ? CUBE_SPECTRUM_HINT : undefined}
+                canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims: file?.result?.dimensions ?? null, displayedDims }) ? CUBE_SPECTRUM_HINT : undefined}
               />
             </div>
           </div>

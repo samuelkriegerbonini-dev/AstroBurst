@@ -44,6 +44,8 @@ const BIN_TO_SLOT: Record<string, "L" | "R" | "G" | "B"> = {
 
 const FILTER_HEADER_KEYS = ["FILTER", "FILTER1", "FILTER2", "FILTNAM1", "FILTNAM2", "PUPIL"];
 
+const PUPIL_FIRST_KEYS = ["PUPIL", ...FILTER_HEADER_KEYS.filter((key) => key !== "PUPIL")];
+
 const WHEEL_POSITION = /^\d{1,2}$/;
 
 const CLEAR_TOKEN = /(?:^|[_\-.\s])CLEAR(?=[_\-.\s]|$)/i;
@@ -68,7 +70,8 @@ export function headerFilterValues(file: ChannelSource): string[] {
   const header = file.result?.header;
   if (!header) return [];
   const values: string[] = [];
-  for (const key of FILTER_HEADER_KEYS) {
+  const keys = filterCodeAndWavelengthNm(header.PUPIL) !== null ? PUPIL_FIRST_KEYS : FILTER_HEADER_KEYS;
+  for (const key of keys) {
     const raw = header[key];
     if (raw == null) continue;
     const value = String(raw).trim();

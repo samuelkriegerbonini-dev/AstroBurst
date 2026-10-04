@@ -14,7 +14,8 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
-import { registerFileIngest } from "./hooks/useFileIngest";
+import { registerFileIngest, type IngestOptions } from "./hooks/useFileIngest";
+import { quietCompletion } from "./utils/quietCompletion";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
 import { SUPPORTED_EXTENSIONS, astroFileFromPath, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
@@ -85,6 +86,7 @@ export default function App() {
   const [view, setView] = useState<ViewState>("empty");
   const [showConfetti, setShowConfetti] = useState(false);
   const prevCompleteRef = useRef(false);
+  const quietCompletionRef = useRef(false);
   const dockLayout = useDockLayout();
 
   const { addFiles, startProcessing, scheduleProcessing, reset, isResampling, resampleProgress } = useFileQueue();
@@ -113,8 +115,9 @@ export default function App() {
 
   const [ingestReport, setIngestReport] = useState<IngestReport | null>(null);
 
-  const handleFilesAdded = useCallback((newFiles: AstroFile[]) => {
+  const handleFilesAdded = useCallback((newFiles: AstroFile[], options?: IngestOptions) => {
     if (newFiles.length === 0) return;
+    quietCompletionRef.current = quietCompletion(options?.quiet === true, prevCompleteRef.current, quietCompletionRef.current);
     addFiles(newFiles);
     setView((v) => (v === "empty" || v === "complete") ? "processing" : v);
     scheduleProcessing();
@@ -131,10 +134,11 @@ export default function App() {
   useEffect(() => {
     if (isComplete && !prevCompleteRef.current) {
       setView("complete");
-      if (stats.done > 0 && stats.failed === 0) {
+      if (stats.done > 0 && stats.failed === 0 && !quietCompletionRef.current) {
         setShowConfetti(true);
         setTimeout(() => setShowConfetti(false), 3000);
       }
+      quietCompletionRef.current = false;
     }
     prevCompleteRef.current = isComplete;
   }, [isComplete, stats.done, stats.failed]);

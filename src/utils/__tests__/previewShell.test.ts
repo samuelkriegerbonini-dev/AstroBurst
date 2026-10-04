@@ -13,6 +13,7 @@ import {
   backToFileAction,
   compareDividerGrabbed,
   cpuViewerDisplayTitle,
+  cubeSpectrumHintShown,
   fileSwitchCompositeAction,
   formatPixelValue,
   formatWavelength,
@@ -298,6 +299,26 @@ describe("CANVAS_HINT_CLASS", () => {
     expect(classes).toContain("pointer-events-none");
     expect(classes).toContain("z-[6]");
     expect(CUBE_SPECTRUM_HINT).toBe("Click to extract spectrum");
+  });
+});
+
+describe("cubeSpectrumHintShown", () => {
+  it("shows the hint on a spectral cube and on maps on its spatial grid", () => {
+    expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: [53, 55], displayedDims: [53, 55] })).toBe(true);
+  });
+
+  it("hides the hint on a PV diagram, whose pixels are offset x channel", () => {
+    expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: [53, 55], displayedDims: [44, 3814] })).toBe(false);
+  });
+
+  it("hides the hint on a ramp and its quick slope, where a click plots the pixel ramp", () => {
+    expect(cubeSpectrumHintShown({ isSpectralCube: false, fileDims: [2048, 3200], displayedDims: [2048, 3200] })).toBe(false);
+    expect(cubeSpectrumHintShown({ isSpectralCube: false, fileDims: [2048, 3200], displayedDims: [2048, 2048] })).toBe(false);
+  });
+
+  it("hides the hint while the file or the displayed image has no dimensions", () => {
+    expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: null, displayedDims: [53, 55] })).toBe(false);
+    expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: [53, 55], displayedDims: null })).toBe(false);
   });
 });
 

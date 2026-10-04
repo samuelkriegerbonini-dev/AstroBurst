@@ -4,9 +4,10 @@ import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader }
 import { useDisplayedImage, useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
-import { chainHoldsOutput } from "../../utils/processingChain";
+import { chainHoldsOutput, pixelMathTarget } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
+import { ingestUnlessLoaded } from "../../hooks/useFileIngest";
 import { runPixelMath, validatePixelMath } from "../../services/pixelmath";
 import { compositePixelMath } from "../../services/compositeChain";
 import type { PixelMathResult, PixelMathSlot, PixelMathStats, PixelMathValidation } from "../../shared/types/pixelmath";
@@ -19,17 +20,18 @@ import {
   type CompositePanelProps,
   type CompositePixelMathResult,
 } from "./compositeProps";
+import { markSlotsTouched, retain, retainedFor, slotsTouchedFor } from "./pixelMathPanelState";
 import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
   TARGET_SYMBOL,
-  autoSlotsFromFiles,
   bindMissingSlots,
   caretLines,
   missingSlots,
-  nextSlotName,
+  rebindUntouchedSlots,
   referencedSymbols,
   slotErrors,
+  slotForAdd,
 } from "../../utils/pixelmathSlots";
 
 interface PixelMathPanelProps extends CompositePanelProps {
@@ -71,33 +73,6 @@ const TARGET_OPTIONS: { value: PixelMathTarget; label: string }[] = [
 
 const VALIDATION_DEBOUNCE_MS = 300;
 const ACCENT = "violet";
-const MAX_RETAINED_PANELS = 32;
-
-interface RetainedPanelState {
-  expression: string;
-  slots: PixelMathSlot[];
-  truncate: boolean;
-  rescale: boolean;
-  outputName: string;
-  slotsTouched: boolean;
-}
-
-const retained = new Map<string, RetainedPanelState>();
-
-function retainedFor(key: string | null): RetainedPanelState | undefined {
-  return key ? retained.get(key) : undefined;
-}
-
-function retain(key: string | null, state: RetainedPanelState): void {
-  if (!key) return;
-  retained.delete(key);
-  retained.set(key, state);
-  while (retained.size > MAX_RETAINED_PANELS) {
-    const oldest = retained.keys().next().value;
-    if (oldest === undefined) break;
-    retained.delete(oldest);
-  }
-}
 const SLOT_NAME_SEPARATOR = "\u0000";
 const ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-400">
@@ -153,9 +128,15 @@ export default function PixelMathPanel({
 }: PixelMathPanelProps) {
   const { doneFiles } = useDoneFilesContext();
   const displayed = useDisplayedImage();
-  const targetPath = selectedFile ? displayed.path ?? selectedFile.path : null;
+  const { chain, processed } = useRenderContext();
+  const targetPath = selectedFile ? pixelMathTarget(processed, selectedFile.path) : null;
+  const pixelMathOutput = chain.steps.pixelMath?.fitsPath ?? null;
   const retainKey = fileKey ?? null;
-  const targetBaseUrl = displayed.previewOnly ? selectedFile?.result?.previewUrl ?? null : inputPreviewUrl ?? selectedFile?.result?.previewUrl ?? null;
+  const targetBaseUrl = displayed.previewOnly
+    ? selectedFile?.result?.previewUrl ?? null
+    : inputPreviewUrl !== undefined
+      ? inputPreviewUrl
+      : selectedFile?.result?.previewUrl ?? null;
   const targetBaseLabel = displayed.previewOnly ? "Original" : inputLabel ?? "Original";
 
   const initial = retainedFor(retainKey);
@@ -168,7 +149,6 @@ export default function PixelMathPanel({
   const [target, setTarget] = useState<PixelMathTarget>("file");
   const perChannel = compositeMode && target === "composite";
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PixelMathRun>("pixelmath", perChannel ? COMPOSITE_RUN_KEY : retainKey);
-  const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
   const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
   const fileResult = runResult?.mode === "file" && chainHoldsOutput(chain, "pixelMath", runResult.res.fits_path) ? runResult : null;
@@ -201,18 +181,14 @@ export default function PixelMathPanel({
       truncate,
       rescale,
       outputName,
-      slotsTouched: slotsTouchedRef.current,
+      slotsTouched: slotsTouchedRef.current || slotsTouchedFor(retainKey),
     });
   }, [retainKey, expression, slots, truncate, rescale, outputName]);
 
   useEffect(() => {
-    if (slotsTouchedRef.current || doneFiles.length === 0) return;
-    setSlots((prev) => {
-      const kept = prev.filter((s) => s.path !== targetPath);
-      if (kept.length > 0) return kept.length === prev.length ? prev : kept;
-      return autoSlotsFromFiles(doneFiles, targetPath, kept);
-    });
-  }, [doneFiles, targetPath]);
+    const touched = slotsTouchedRef.current || slotsTouchedFor(retainKey);
+    setSlots((prev) => rebindUntouchedSlots(prev, doneFiles, targetPath, touched, pixelMathOutput));
+  }, [doneFiles, targetPath, retainKey, pixelMathOutput]);
 
   const nameErrors = useMemo(() => slotErrors(slots), [slots]);
   const hasSlotErrors = nameErrors.some((e) => e !== null);
@@ -246,7 +222,7 @@ export default function PixelMathPanel({
     const options: { value: string; label: string }[] = [];
     if (targetPath && !seen.has(targetPath)) {
       seen.add(targetPath);
-      options.push({ value: targetPath, label: `${baseName(targetPath)} (current)` });
+      options.push({ value: targetPath, label: `${baseName(targetPath)} (${TARGET_SYMBOL})` });
     }
     for (const f of doneFiles) {
       if (seen.has(f.path)) continue;
@@ -266,8 +242,7 @@ export default function PixelMathPanel({
     slotsTouchedRef.current = true;
     setSlots((prev) => {
       if (prev.length >= MAX_SLOTS) return prev;
-      const defaultPath = doneFiles[0]?.path ?? targetPath ?? "";
-      return [...prev, { name: nextSlotName(prev.map((s) => s.name.trim())), path: defaultPath }];
+      return [...prev, slotForAdd(prev, doneFiles, targetPath)];
     });
   }, [doneFiles, targetPath]);
 
@@ -284,11 +259,11 @@ export default function PixelMathPanel({
   const bindUnbound = useCallback(
     (expr: string) => {
       setSlots((prev) => {
-        const added = bindMissingSlots(expr, doneFiles, targetPath, prev);
+        const added = bindMissingSlots(expr, doneFiles, targetPath, prev, pixelMathOutput);
         return added.length ? [...prev, ...added] : prev;
       });
     },
-    [doneFiles, targetPath],
+    [doneFiles, targetPath, pixelMathOutput],
   );
 
   const insertExample = useCallback(
@@ -317,6 +292,8 @@ export default function PixelMathPanel({
       });
       if (!ctx.displayedUnchanged()) throw new Error(INPUT_CHANGED_MESSAGE);
       onProcessingDone?.(res);
+      markSlotsTouched(ctx.key);
+      ingestUnlessLoaded(res.fits_path);
       return { mode: "file", res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
   }, [targetPath, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, outputName, run, onProcessingDone]);

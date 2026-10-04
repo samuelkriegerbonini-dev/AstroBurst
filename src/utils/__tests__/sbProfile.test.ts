@@ -4,6 +4,7 @@ import {
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
+  parseBinWidth,
   profileFetchReducer,
   sbProfileCsv,
   sbReferenceLines,
@@ -242,5 +243,23 @@ describe("profileFetchReducer", () => {
     const shown = profileFetchReducer(empty, { type: "success", result: profile() });
     expect(profileFetchReducer(shown, { type: "reset" })).toEqual(empty);
     expect(profileFetchReducer(empty, { type: "reset" })).toBe(empty);
+  });
+});
+
+describe("parseBinWidth", () => {
+  it("rejects a decimal comma instead of truncating it to whole pixels", () => {
+    expect(parseBinWidth("1,5")).toBeNull();
+    expect(parseBinWidth("2,5")).toBeNull();
+    expect(parseBinWidth("1.5px")).toBeNull();
+  });
+
+  it("reads dot decimals inside the allowed range", () => {
+    expect(parseBinWidth("1.5")).toBe(1.5);
+    expect(parseBinWidth(" 2 ")).toBe(2);
+    expect(parseBinWidth("0.5")).toBe(0.5);
+    expect(parseBinWidth("64")).toBe(64);
+    expect(parseBinWidth("0.4")).toBeNull();
+    expect(parseBinWidth("65")).toBeNull();
+    expect(parseBinWidth("")).toBeNull();
   });
 });

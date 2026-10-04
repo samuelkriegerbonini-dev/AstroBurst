@@ -23,6 +23,7 @@ pub const RES_NON_FINITE_COUNT: &str = "non_finite_count";
 pub const DEFAULT_PIXELMATH_SUFFIX: &str = "pixelmath";
 pub const TARGET_SYMBOL: &str = "$T";
 
+const PREVIEW_PNG_SUFFIX: &str = "preview";
 const USER_SUFFIX_PREFIX: &str = "pm_";
 const HEADER_PMEXPR: &str = "PMEXPR";
 const HEADER_PMSOURCE: &str = "PMSRC";
@@ -365,7 +366,7 @@ pub(crate) fn run_pixelmath(
     let suffix = output_suffix(name);
     let stem = output_stem(path);
     let fits_path = format!("{}/{}_{}.fits", output_dir, stem, suffix);
-    let png_path = format!("{}/{}_{}.png", output_dir, stem, suffix);
+    let png_path = format!("{}/{}_{}_{}.png", output_dir, stem, suffix, PREVIEW_PNG_SUFFIX);
     let inputs: Vec<(&str, &str)> = std::iter::once((TARGET_SYMBOL, path))
         .chain(slots.iter().map(|s| (s.name.as_str(), s.path.as_str())))
         .collect();
@@ -1047,6 +1048,21 @@ mod tests {
         let res = run_pixelmath(&src, &out, "$T * 2", &[], OutputOptions::default(), None).unwrap();
         let expected = gpu_view_with_auto_stf(&sky.mapv(|v| v * 2.0));
         assert_png_matches(res[RES_PNG_PATH].as_str().unwrap(), &expected);
+    }
+
+    #[test]
+    fn the_preview_is_not_the_png_the_files_list_renders_for_the_output_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("queued.fits").to_str().unwrap().to_string();
+        let out = dir.path().join("out").to_str().unwrap().to_string();
+        write_fits_mono(&src, &synthetic_sky(8, 8), None).unwrap();
+
+        let res = run_pixelmath(&src, &out, "$T * 2", &[], OutputOptions::default(), None).unwrap();
+        let fits_path = res[RES_FITS_PATH].as_str().unwrap();
+        let png_path = res[RES_PNG_PATH].as_str().unwrap();
+        let files_list_png = format!("{}/{}.png", out, output_stem(fits_path));
+        assert_ne!(png_path, files_list_png, "ingesting the output FITS overwrites the PixelMath preview");
+        assert!(std::path::Path::new(png_path).exists());
     }
 
     #[test]

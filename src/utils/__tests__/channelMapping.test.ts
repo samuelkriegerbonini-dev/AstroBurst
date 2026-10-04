@@ -438,3 +438,59 @@ describe("runAutoMap", () => {
     expect(result.sources).toEqual(["FITS Headers (Rust)"]);
   });
 });
+
+describe("NIRCam and NIRISS pupil wheel", () => {
+  const PILLARS = "jw02739-o001_t001_nircam_f444w-f470n_i2d.fits";
+  const crossed = (FILTER: string, PUPIL: string, INSTRUME = "NIRISS") =>
+    fileWithHeader("x.fits", { FILTER, PUPIL, INSTRUME });
+
+  it("reads the narrowband PUPIL filter instead of the wide FILTER it is crossed with", () => {
+    const file = fileWithHeader(PILLARS, { FILTER: "F444W", INSTRUME: "NIRCAM", PUPIL: "F470N" });
+    expect(displayFilterValue(file)).toBe("F470N");
+    expect(resolveFileFilter(file)).toEqual({ code: "F470N", nm: 4700 });
+    expect(headerFilterValues(file)).toEqual(["F470N", "F444W"]);
+  });
+
+  it("reads every NIRCam pupil-wheel filter crossed with its wide filter", () => {
+    for (const [FILTER, PUPIL] of [["F150W2", "F162M"], ["F150W2", "F164N"], ["F322W2", "F323N"], ["F444W", "F405N"], ["F444W", "F466N"]]) {
+      expect(displayFilterValue(crossed(FILTER, PUPIL, "NIRCAM"))).toBe(PUPIL);
+      expect(resolveFileFilter(crossed(FILTER, PUPIL, "NIRCAM"))?.code).toBe(PUPIL);
+    }
+  });
+
+  it("reads the NIRISS pupil filter crossed with CLEAR or a grism", () => {
+    expect(displayFilterValue(crossed("CLEAR", "F200W"))).toBe("F200W");
+    expect(displayFilterValue(crossed("GR150R", "F150W"))).toBe("F150W");
+  });
+
+  it("keeps the filter wheel when the pupil holds no filter", () => {
+    expect(displayFilterValue(crossed("F444W", "CLEAR", "NIRCAM"))).toBe("F444W");
+    expect(displayFilterValue(crossed("F444W", "GRISMR", "NIRCAM"))).toBe("F444W");
+    expect(displayFilterValue(crossed("F335M", "MASKRND", "NIRCAM"))).toBe("F335M");
+    expect(displayFilterValue(crossed("F380M", "CLEARP"))).toBe("F380M");
+    expect(displayFilterValue(crossed("F480M", "NRM"))).toBe("F480M");
+  });
+
+  it("keeps FILTER first when PUPIL is not a filter code, whatever the wavelength table holds", () => {
+    expect(headerFilterValues(crossed("F444W", "CLEAR", "NIRCAM"))).toEqual(["F444W", "CLEAR"]);
+    expect(headerFilterValues(crossed("F277W", "CLEARP"))).toEqual(["F277W", "CLEARP"]);
+    expect(headerFilterValues(crossed("F480M", "NRM"))).toEqual(["F480M", "NRM"]);
+    expect(detectChannelByHeader(fileWithHeader("M42_R.fits", { FILTER: "Red", PUPIL: "CLEAR" }))).toBe("r");
+  });
+
+  it("maps the long-wave Pillars set to three colours instead of stacking F470N with F444W", () => {
+    const longWave = [
+      ["clear-f335m", "F335M", "CLEAR"],
+      ["clear-f444w", "F444W", "CLEAR"],
+      ["f444w-f470n", "F444W", "F470N"],
+    ].map(([tag, FILTER, PUPIL]) => {
+      const name = `jw02739-o001_t001_nircam_${tag}_i2d.fits`;
+      return { name, path: `C:/heavy/${tag}`, result: { header: { FILTER, PUPIL, INSTRUME: "NIRCAM" } } };
+    });
+    const result = mapFilesByWavelength(DEFAULT_BINS.map((b) => ({ ...b, files: [] })), longWave, new Set());
+    const files = (id: string) => result.bins.find((b) => b.id === id)?.files ?? [];
+    expect(files("r")).toEqual(["C:/heavy/f444w-f470n"]);
+    expect(files("g")).toEqual(["C:/heavy/clear-f444w"]);
+    expect(files("b")).toEqual(["C:/heavy/clear-f335m"]);
+  });
+});

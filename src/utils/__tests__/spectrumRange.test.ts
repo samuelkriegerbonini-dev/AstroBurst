@@ -13,6 +13,7 @@ import {
   pixelToAxisValue,
   rangeBounds,
   rangePixelSpan,
+  spectrumXTicks,
   windowsAreValid,
   type PlotMapping,
 } from "../spectrumRange";
@@ -188,5 +189,63 @@ describe("fullCubeCollapse", () => {
   it("refuses a cube with no known channel count", () => {
     expect(fullCubeCollapse(0, "mean")).toBeNull();
     expect(fullCubeCollapse(Number.NaN, "mean")).toBeNull();
+  });
+});
+
+function linearAxis(crval: number, cdelt: number, n: number): number[] {
+  return Array.from({ length: n }, (_, i) => crval + i * cdelt);
+}
+
+function expectInsidePlotAscending(px: number[]): void {
+  for (const p of px) {
+    expect(p).toBeGreaterThanOrEqual(50);
+    expect(p).toBeLessThanOrEqual(388);
+  }
+  for (let i = 1; i < px.length; i++) expect(px[i]).toBeGreaterThan(px[i - 1]);
+}
+
+describe("spectrumXTicks", () => {
+  it("labels the MIRI ch3-short wavelength axis with ticks inside the plot", () => {
+    const m = mapping(linearAxis(11.551250190706924, 0.002499999944120645, 769), 769);
+    const ticks = spectrumXTicks(m);
+    expect(ticks.map((t) => t.label)).toEqual(["12.0", "12.5", "13.0"]);
+    expectInsidePlotAscending(ticks.map((t) => t.px));
+    expect(ticks[1].px).toBeCloseTo(axisValueToPixel(12.5, m), 9);
+  });
+
+  it("labels the NIRSpec G395H wavelength axis", () => {
+    const m = mapping(linearAxis(2.870332385558868, 0.000664999999571591, 3610), 3610);
+    const ticks = spectrumXTicks(m);
+    expect(ticks.map((t) => t.label)).toEqual(["3.0", "3.5", "4.0", "4.5", "5.0"]);
+    expectInsidePlotAscending(ticks.map((t) => t.px));
+  });
+
+  it("labels channel indices when the cube has no spectral axis", () => {
+    const ticks = spectrumXTicks(mapping(null, 769));
+    expect(ticks.map((t) => t.label)).toEqual(["0", "200", "400", "600"]);
+    expect(ticks[0].px).toBe(50);
+    expectInsidePlotAscending(ticks.map((t) => t.px));
+  });
+
+  it("labels only whole channels on a 3-channel axis without spectral values", () => {
+    const ticks = spectrumXTicks(mapping(null, 3));
+    expect(ticks.map((t) => t.label)).toEqual(["0", "1", "2"]);
+    expect(ticks.map((t) => t.px)).toEqual([50, 219, 388]);
+  });
+
+  it("labels only whole channels on 2- and 4-channel axes without spectral values", () => {
+    expect(spectrumXTicks(mapping(null, 2)).map((t) => t.label)).toEqual(["0", "1"]);
+    expect(spectrumXTicks(mapping(null, 4)).map((t) => t.label)).toEqual(["0", "1", "2", "3"]);
+  });
+
+  it("keeps fractional ticks on a short spectral axis", () => {
+    expect(spectrumXTicks(mapping([1.0, 1.5, 2.0], 3)).map((t) => t.label)).toEqual(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0"]);
+  });
+
+  it("keeps ticks that fall exactly on the ends of a velocity axis", () => {
+    const ticks = spectrumXTicks(mapping(linearAxis(-3000, 6000 / 768, 769), 769));
+    expect(ticks.map((t) => t.label)).toEqual(["-3000", "-2000", "-1000", "0", "1000", "2000", "3000"]);
+    expect(ticks[0].px).toBeCloseTo(50, 9);
+    expect(ticks[ticks.length - 1].px).toBeCloseTo(388, 9);
   });
 });

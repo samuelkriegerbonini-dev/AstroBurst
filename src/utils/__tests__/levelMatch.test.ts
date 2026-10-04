@@ -3,6 +3,7 @@ import {
   blendRequest,
   channelLevel,
   channelLevels,
+  levelMatchChannelLabel,
   levelMatchDefault,
   levelMatchEnabled,
   levelMatchEntries,
@@ -17,7 +18,16 @@ import {
   withSpccWb,
   type BackendBlendWeight,
 } from "../levelMatch";
-import { BLEND_PRESETS, INITIAL_STATE, spccInputs, type BlendWeight, type WizardState } from "../wizard";
+import {
+  applyCompositeOp,
+  BLEND_PRESETS,
+  compositeHistoryLines,
+  EMPTY_COMPOSITE_HISTORY,
+  INITIAL_STATE,
+  spccInputs,
+  type BlendWeight,
+  type WizardState,
+} from "../wizard";
 import { blendMatrixError } from "../blendWeights";
 import { WB_APPLY_MAX, WB_APPLY_MIN, wbFactorsOutOfRange } from "../whiteBalanceRange";
 import type { ChannelSource } from "../channelMapping";
@@ -255,6 +265,50 @@ describe("Match levels labels and messages", () => {
       "g F187N is no longer in memory; run Align again (or the Crop or BG step that produced it).",
     );
     expect(levelMeasureError("X", "/n/f187n.fits", "msg")).toBe("Measuring levels for X failed: msg");
+  });
+});
+
+describe("Match levels label for a NIRCam pupil filter", () => {
+  const pupil = "/n/jw02739-o001_t001_nircam_f444w-f470n_i2d.fits";
+  const s = stateWith({ r: [pupil], g: ["/n/f200w.fits"], b: ["/n/f090w.fits"] });
+  const files = [
+    frame(pupil, { FILTER: "F444W", PUPIL: "F470N", INSTRUME: "NIRCAM" }),
+    frame("/n/f200w.fits", { FILTER: "F200W", PUPIL: "CLEAR" }),
+    frame("/n/f090w.fits", { FILTER: "F090W", PUPIL: "CLEAR" }),
+  ];
+
+  it("names the PUPIL narrowband, not the wide FILTER", () => {
+    expect(levelMatchEntries(s, files, { r: 2, g: 1, b: 3 })).toEqual([
+      { channel: "r F470N", scale: 2 },
+      { channel: "g F200W", scale: 1 },
+      { channel: "b F090W", scale: 3 },
+    ]);
+    expect(levelMatchSummary(levelMatchEntries(s, files, { r: 2, g: 1, b: 3 }))).toBe(
+      "Level match: r F470N x2.000, g F200W x1.000, b F090W x3.000",
+    );
+  });
+
+  it("writes the PUPIL narrowband into the export HISTORY line", () => {
+    const history = applyCompositeOp(EMPTY_COMPOSITE_HISTORY, {
+      kind: "blend",
+      preset: "rgb",
+      levels: levelMatchEntries(s, files, { r: 2, g: 1, b: 3 }),
+    });
+    expect(compositeHistoryLines(history)).toEqual([
+      "Blend: rgb",
+      "Level match r F470N: x2.000",
+      "Level match g F200W: x1.000",
+      "Level match b F090W: x3.000",
+    ]);
+  });
+
+  it("names the PUPIL narrowband when Blend refuses a channel without signal", () => {
+    const request = blendRequest(s, filled(s), BLEND_PRESETS.rgb.weights);
+    const levels = channelLevels(request, { [pupil]: 0, "/n/f200w.fits": 4, "/n/f090w.fits": 2 }, (binId) =>
+      levelMatchChannelLabel(s, binId, files),
+    );
+    const outcome = levelScales(levels);
+    expect("error" in outcome ? outcome.error : "").toContain("r F470N has p99.5 - p50 = 0");
   });
 });
 

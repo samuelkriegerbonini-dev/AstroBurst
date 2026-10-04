@@ -59,7 +59,6 @@ export function lastCompositeStep(chain: CompositeChain): ChainStep | null {
 }
 
 export function compositeInputFor(chain: CompositeChain, step: ChainStep): CompositeChainInput {
-  if (step === "pixelMath") return lastCompositeStep(chain) ?? "base";
   const stage = STAGE[step];
   for (let i = CHAIN_ORDER.length - 1; i >= 0; i--) {
     const s = CHAIN_ORDER[i];

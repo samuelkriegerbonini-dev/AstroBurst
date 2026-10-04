@@ -13,8 +13,10 @@ import {
   pruneRecord,
   psfUseOf,
   showsPsfCrumb,
+  pixelMathTarget,
+  pixelMathCompareBase,
 } from "../processingChain";
-import type { ChainEntry, ChainStep, FileRenderState, ProcessingChain } from "../../shared/types/preview";
+import type { ChainEntry, ChainStep, FileRenderState, ProcessedResult, ProcessingChain } from "../../shared/types/preview";
 
 function entry(fitsPath: string): ChainEntry {
   return { fitsPath, previewUrl: null, dimensions: null };
@@ -237,5 +239,69 @@ describe("PSF crumb before Deconv", () => {
     const chain = withStep(withStep({ ...EMPTY_CHAIN, psfKernel: KERNEL }, "deconv", deconv), "stretch", entry("/out/stretch.fits"));
     expect(chain.steps.deconv?.psfUsed).toBe(true);
     expect(showsPsfCrumb(chain.psfKernel, chain.steps.deconv)).toBe(true);
+  });
+});
+
+describe("pixelMathTarget", () => {
+  const RAW = "C:/raw/f444w_i2d.fits";
+  const BG = "C:/out/f444w_i2d_bg.fits";
+  const PM = "C:/out/f444w_i2d_bg_pixelmath.fits";
+
+  function shown(kind: ProcessedResult["kind"], fitsPath: string | null, inputPath: string): Pick<ProcessedResult, "kind" | "fitsPath" | "inputPath"> {
+    return { kind, fitsPath, inputPath };
+  }
+
+  it("a PixelMath result on screen targets the image it was computed from, not itself", () => {
+    expect(pixelMathTarget(shown("pixelmath", PM, BG), RAW)).toBe(BG);
+    expect(pixelMathTarget(shown("pixelmath", "C:/out/f444w_i2d_pixelmath.fits", RAW), RAW)).toBe(RAW);
+  });
+
+  it("any other displayed image is the target, and the loaded file when nothing is displayed", () => {
+    expect(pixelMathTarget(shown("processing", BG, RAW), RAW)).toBe(BG);
+    expect(pixelMathTarget(shown("cube", "C:/out/f444w_moment0.fits", RAW), RAW)).toBe("C:/out/f444w_moment0.fits");
+    expect(pixelMathTarget(shown("debayer", null, RAW), RAW)).toBe(RAW);
+    expect(pixelMathTarget(null, RAW)).toBe(RAW);
+  });
+});
+
+describe("pixelMathCompareBase", () => {
+  const RAW = "C:/raw/f444w_i2d.fits";
+  const BG = "C:/out/f444w_i2d_bg.fits";
+  const PM = "C:/out/f444w_i2d_bg_pixelmath.fits";
+  const ORIGINAL = { path: RAW, previewUrl: "asset://raw.png" };
+  const LABELS: Record<ChainStep, string> = {
+    background: "Background",
+    denoise: "Denoise",
+    deconv: "Deconvolution",
+    stretch: "Stretch",
+    maskedStretch: "Masked stretch",
+    localContrast: "LHE / HDRMT",
+    pixelMath: "PixelMath",
+  };
+  const bgEntry: ChainEntry = { fitsPath: BG, previewUrl: "asset://bg.png?v=3", dimensions: null };
+  const pmEntry: ChainEntry = { fitsPath: PM, previewUrl: "asset://pm.png?v=4", dimensions: null };
+  const chain: ProcessingChain = { steps: { background: bgEntry, pixelMath: pmEntry }, psfKernel: null };
+
+  function pixelMathShown(inputPath: string) {
+    return { kind: "pixelmath" as const, previewUrl: "asset://pm.png?v=5", label: "PixelMath", inputPath };
+  }
+
+  it("compares a PixelMath result with the chain output it was computed from, never with itself", () => {
+    expect(pixelMathCompareBase(chain, pixelMathShown(BG), ORIGINAL, LABELS)).toEqual({ previewUrl: "asset://bg.png?v=3", label: "Background" });
+  });
+
+  it("compares a PixelMath result computed from the loaded file with the original", () => {
+    const onlyPm: ProcessingChain = { steps: { pixelMath: pmEntry }, psfKernel: null };
+    expect(pixelMathCompareBase(onlyPm, pixelMathShown("c:\\raw\\F444W_i2d.fits"), ORIGINAL, LABELS)).toEqual({ previewUrl: "asset://raw.png", label: "Original" });
+  });
+
+  it("has no base preview when the PixelMath input is no longer on screen anywhere", () => {
+    expect(pixelMathCompareBase(chain, pixelMathShown("C:/out/f444w_moment0.fits"), ORIGINAL, LABELS)).toEqual({ previewUrl: null, label: "f444w_moment0.fits" });
+  });
+
+  it("any other displayed image is its own base, and the original when nothing is displayed", () => {
+    const cube = { kind: "cube" as const, previewUrl: "asset://m0.png", label: "Moment 0", inputPath: RAW };
+    expect(pixelMathCompareBase(chain, cube, ORIGINAL, LABELS)).toEqual({ previewUrl: "asset://m0.png", label: "Moment 0" });
+    expect(pixelMathCompareBase(EMPTY_CHAIN, null, ORIGINAL, LABELS)).toEqual({ previewUrl: "asset://raw.png", label: "Original" });
   });
 });

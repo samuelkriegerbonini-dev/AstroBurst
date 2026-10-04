@@ -9,6 +9,7 @@ import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
 import type { ProcessedFile } from "../../shared/types";
+import { displayFilterValue } from "../../utils/channelMapping";
 import type { RunTarget } from "./StackingTab";
 
 export interface CalibrationMasters {
@@ -28,7 +29,7 @@ function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
     id: f.id ?? f.path,
     path: f.path ?? "",
     name: f.name ?? "Unknown",
-    filter: f.result?.header?.FILTER as string | undefined,
+    filter: displayFilterValue(f) ?? undefined,
     instrument: f.result?.header?.INSTRUME as string | undefined,
     exptime: f.result?.header?.EXPTIME as number | undefined,
     previewUrl: f.result?.previewUrl,

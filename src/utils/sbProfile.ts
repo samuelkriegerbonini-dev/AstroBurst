@@ -1,6 +1,7 @@
 import type { PlotReferenceLine, ProfileSeries } from "../components/regions/ProfilePlot";
 import type { SbBin, SbProfile } from "../shared/types/regions";
 import { buildCsv, type CsvColumn } from "./catalogCsv";
+import { parseDecimalText } from "./decimalText";
 
 export type SbYMode = "mean" | "mu" | "ee";
 export type SbXUnit = "px" | "arcsec";
@@ -185,4 +186,12 @@ export function profileFetchReducer<R>(state: ProfileFetchState<R>, event: Profi
   if (event.type === "success") return { result: event.result, error: null };
   if (event.type === "failure") return { result: null, error: event.message };
   return state.result === null && state.error === null ? state : { result: null, error: null };
+}
+
+export const MIN_BIN_WIDTH = 0.5;
+export const MAX_BIN_WIDTH = 64;
+
+export function parseBinWidth(text: string): number | null {
+  const v = parseDecimalText(text);
+  return v !== null && v >= MIN_BIN_WIDTH && v <= MAX_BIN_WIDTH ? v : null;
 }

@@ -116,7 +116,7 @@ describe("EXAMPLE_EXPRESSIONS", () => {
   });
 });
 
-import { autoSlotsFromFiles, bindMissingSlots, missingSlots, referencedSymbols } from "../pixelmathSlots";
+import { autoSlotsFromFiles, bindMissingSlots, missingSlots, referencedSymbols, slotForAdd } from "../pixelmathSlots";
 
 describe("automatic slot binding", () => {
   const files = [{ path: "C:/d/target.fits" }, { path: "C:/d/a.fits" }, { path: "C:/d/b.fits" }, { path: "C:/d/c.fits" }];
@@ -157,7 +157,7 @@ describe("automatic slot binding", () => {
   });
 
   it("binds missing symbols to unbound loaded files and falls back to the target", () => {
-    const added = bindMissingSlots("(A + B + C + D) / 4", files, "C:/d/target.fits", [{ name: "A", path: "C:/d/a.fits" }]);
+    const added = bindMissingSlots("(A + B + C + D) / 4", files, "C:/d/target.fits", [{ name: "A", path: "C:/d/a.fits" }], null);
     expect(added).toEqual([
       { name: "B", path: "C:/d/b.fits" },
       { name: "C", path: "C:/d/c.fits" },
@@ -166,10 +166,115 @@ describe("automatic slot binding", () => {
   });
 
   it("binds nothing when there is neither a free file nor a target", () => {
-    expect(bindMissingSlots("(A + B) / 2", [], null, [])).toEqual([]);
+    expect(bindMissingSlots("(A + B) / 2", [], null, [], null)).toEqual([]);
   });
 
   it("never binds a name that is not a valid slot identifier", () => {
-    expect(bindMissingSlots("$T + pi", files, null, [])).toEqual([]);
+    expect(bindMissingSlots("$T + pi", files, null, [], null)).toEqual([]);
+  });
+});
+
+describe("slotForAdd", () => {
+  const target = "C:/d/f444w.fits";
+  const a = "C:/d/f335m.fits";
+  const b = "C:/d/f470n.fits";
+  const loaded = [{ path: target }, { path: a }, { path: b }];
+
+  it("binds the next loaded file that neither $T nor another slot uses", () => {
+    expect(slotForAdd([{ name: "A", path: a }], loaded, target)).toEqual({ name: "B", path: b });
+  });
+
+  it("never repeats the first loaded file when it is already the target or bound", () => {
+    expect(slotForAdd([], loaded, target)).toEqual({ name: "A", path: a });
+    expect(slotForAdd([{ name: "A", path: b }], [{ path: a }, { path: b }], target)).toEqual({ name: "B", path: a });
+  });
+
+  it("falls back to $T only when every loaded file is already bound", () => {
+    expect(slotForAdd([{ name: "A", path: a }, { name: "B", path: b }], loaded, target)).toEqual({ name: "C", path: target });
+  });
+
+  it("repeated Add slot walks the free files before falling back to $T", () => {
+    let slots = [{ name: "A", path: a }];
+    slots = [...slots, slotForAdd(slots, loaded, target)];
+    slots = [...slots, slotForAdd(slots, loaded, target)];
+    expect(slots).toEqual([
+      { name: "A", path: a },
+      { name: "B", path: b },
+      { name: "C", path: target },
+    ]);
+  });
+
+  it("is an empty binding when nothing is loaded and there is no target", () => {
+    expect(slotForAdd([], [], null)).toEqual({ name: "A", path: "" });
+  });
+});
+
+import { rebindUntouchedSlots } from "../pixelmathSlots";
+
+describe("rebindUntouchedSlots", () => {
+  const x = "C:/d/673nmos.fits";
+  const y = "C:/d/502nmos.fits";
+  const z = "C:/d/656nmos.fits";
+
+  it("untouched slots release the image that became $T and keep the others", () => {
+    const slots = [{ name: "A", path: y }, { name: "B", path: z }];
+    expect(rebindUntouchedSlots(slots, [{ path: x }, { path: y }, { path: z }], y, false, null)).toEqual([{ name: "B", path: z }]);
+  });
+
+  it("untouched slots with nothing left bind the other loaded files", () => {
+    expect(rebindUntouchedSlots([{ name: "A", path: x }], [{ path: x }, { path: y }], x, false, null)).toEqual([{ name: "A", path: y }]);
+  });
+
+  it("touched slots stay exactly as they are", () => {
+    const slots = [{ name: "A", path: y }, { name: "B", path: z }, { name: "C", path: x }];
+    expect(rebindUntouchedSlots(slots, [{ path: x }, { path: y }, { path: z }, { path: "C:/out/673nmos_pixelmath.fits" }], x, true, null)).toBe(slots);
+  });
+
+  it("nothing loaded leaves the slots alone", () => {
+    const slots = [{ name: "A", path: x }];
+    expect(rebindUntouchedSlots(slots, [], x, false, null)).toBe(slots);
+  });
+});
+
+describe("automatic binding and the current file's PixelMath result", () => {
+  const x = "C:/data/673nmos.fits";
+  const y = "C:/data/502nmos.fits";
+  const z = "C:/data/656nmos.fits";
+  const result = "C:/out/673nmos_pixelmath.fits";
+  const otherResult = "C:/out/502nmos_pixelmath.fits";
+
+  it("an example never binds the previous result of the file on screen", () => {
+    expect(bindMissingSlots("(A + B + C) / 3", [{ path: x }, { path: y }, { path: z }, { path: result }], x, [], result)).toEqual([
+      { name: "A", path: y },
+      { name: "B", path: z },
+      { name: "C", path: x },
+    ]);
+    expect(bindMissingSlots("$T * (A / med(A))", [{ path: x }, { path: result }], x, [], result)).toEqual([{ name: "A", path: x }]);
+  });
+
+  it("untouched slots never bind the previous result of the file on screen", () => {
+    expect(rebindUntouchedSlots([], [{ path: x }, { path: y }, { path: result }], x, false, result)).toEqual([{ name: "A", path: y }]);
+    expect(rebindUntouchedSlots([], [{ path: x }, { path: result }], x, false, result)).toEqual([]);
+  });
+
+  it("recognises the result when the loaded row spells its path differently", () => {
+    const loadedSpelling = "c:\\OUT\\673nmos_pixelmath.fits";
+    expect(bindMissingSlots("A + B", [{ path: x }, { path: y }, { path: loadedSpelling }], x, [], result)).toEqual([
+      { name: "A", path: y },
+      { name: "B", path: x },
+    ]);
+    expect(rebindUntouchedSlots([], [{ path: x }, { path: loadedSpelling }], x, false, result)).toEqual([]);
+  });
+
+  it("still binds the PixelMath result of another loaded file", () => {
+    expect(bindMissingSlots("A + B", [{ path: x }, { path: y }, { path: otherResult }], x, [], result)).toEqual([
+      { name: "A", path: y },
+      { name: "B", path: otherResult },
+    ]);
+    expect(rebindUntouchedSlots([], [{ path: x }, { path: otherResult }], x, false, result)).toEqual([{ name: "A", path: otherResult }]);
+  });
+
+  it("Add slot is explicit and may still bind the previous result", () => {
+    expect(slotForAdd([], [{ path: x }, { path: result }], x)).toEqual({ name: "A", path: result });
   });
 });

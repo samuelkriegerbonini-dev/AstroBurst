@@ -86,9 +86,12 @@ describe("compositeInputFor", () => {
     expect(compositeInputFor(chainOf("background", "denoise"), "localContrast")).toBe("denoise");
   });
 
-  it("pixelMath compounds on the newest step of all, itself included", () => {
+  it("pixelMath reads the newest step before it and never its own previous result", () => {
     expect(compositeInputFor(chainOf("background", "localContrast"), "pixelMath")).toBe("localContrast");
-    expect(compositeInputFor(chainOf("background", "pixelMath"), "pixelMath")).toBe("pixelMath");
+    expect(compositeInputFor(chainOf("background", "pixelMath"), "pixelMath")).toBe("background");
+    expect(compositeInputFor(chainOf("background", "stretch", "localContrast", "pixelMath"), "pixelMath")).toBe("localContrast");
+    expect(compositeInputFor(chainOf("maskedStretch", "pixelMath"), "pixelMath")).toBe("maskedStretch");
+    expect(compositeInputFor(chainOf("pixelMath"), "pixelMath")).toBe("base");
   });
 });
 

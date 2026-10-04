@@ -129,6 +129,7 @@ import {
   parseChannelInput,
   pixelToAxisValue,
   rangePixelSpan,
+  spectrumXTicks,
   windowsAreValid,
   type ChannelRange,
   type FullCollapseMode,
@@ -230,6 +231,8 @@ function pickRegion(regions: Region[], selectedId: string | null): { target: Reg
 const CANVAS_H = 180;
 const PAD = { top: 10, bottom: 24, left: 50, right: 12 } as const;
 const N_GRID_Y = 4;
+const X_TICK_LENGTH = 3;
+const X_TICK_BASELINE = 10;
 const DEFAULT_SNR = 3;
 const LABEL_MAPPING_WIDTH = 400;
 const MEASURED_SERIES_VIEW: RegionView = "sum";
@@ -615,7 +618,20 @@ function SpectroscopyPanel({
       ctx.fillText(formatAxisTick(val, yRange), PAD.left - 4, y + 3);
     }
 
+    const xTicks = spectrumXTicks(m);
+    const plotBottom = H - PAD.bottom;
+    ctx.strokeStyle = "#52525b";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const tick of xTicks) {
+      const x = Math.round(tick.px) + 0.5;
+      ctx.moveTo(x, plotBottom);
+      ctx.lineTo(x, plotBottom + X_TICK_LENGTH);
+    }
+    ctx.stroke();
+
     ctx.textAlign = "center";
+    for (const tick of xTicks) ctx.fillText(tick.label, tick.px, plotBottom + X_TICK_BASELINE);
     ctx.fillStyle = "#52525b";
     ctx.fillText(axisX.label, W / 2, H - 4);
   }, [series, n, axisX, plotParams, mappingFor, region]);
@@ -1339,36 +1355,40 @@ function SpectroscopyPanel({
         </div>
       </div>
 
-      <SpectralAxisControls
-        filePath={filePath ?? null}
-        axis={axis}
-        mode={mode}
-        onModeChange={setMode}
-        restValue={restUm}
-        onRestChange={setRestUm}
-        convention={convention}
-        onConventionChange={setConvention}
-        correction={correction}
-        onCorrectionChange={setCorrection}
-        onCorrectionLoaded={setCorrectionResult}
-      />
+      {!ramp && (
+        <SpectralAxisControls
+          filePath={filePath ?? null}
+          axis={axis}
+          mode={mode}
+          onModeChange={setMode}
+          restValue={restUm}
+          onRestChange={setRestUm}
+          convention={convention}
+          onConventionChange={setConvention}
+          correction={correction}
+          onCorrectionChange={setCorrection}
+          onCorrectionLoaded={setCorrectionResult}
+        />
+      )}
 
-      <LineListControls
-        visible={lineListVisible}
-        onVisibleChange={setLineListVisible}
-        redshift={redshift}
-        onRedshiftChange={setRedshift}
-        convention={lineConvention}
-        families={lineFamilies}
-        onFamiliesChange={setLineFamilies}
-        frameLabel={lineFrameLabel}
-        availability={lineAvailability}
-        clickHint={lineClickHint(axis)}
-        pickedLabel={pickedShown ? pickedLineLabel(pickedShown) : null}
-        drawnCount={lineMarksShown.length}
-      />
+      {!ramp && (
+        <LineListControls
+          visible={lineListVisible}
+          onVisibleChange={setLineListVisible}
+          redshift={redshift}
+          onRedshiftChange={setRedshift}
+          convention={lineConvention}
+          families={lineFamilies}
+          onFamiliesChange={setLineFamilies}
+          frameLabel={lineFrameLabel}
+          availability={lineAvailability}
+          clickHint={lineClickHint(axis)}
+          pickedLabel={pickedShown ? pickedLineLabel(pickedShown) : null}
+          drawnCount={lineMarksShown.length}
+        />
+      )}
 
-      {!axis && axisError && (
+      {!ramp && !axis && axisError && (
         <p className="mx-3 mb-2 text-[10px] text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20">
           No spectral axis for this file: {axisError}
         </p>

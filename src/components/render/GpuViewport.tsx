@@ -23,6 +23,7 @@ interface GpuViewportProps {
   crosshairEnabled?: boolean;
   regionsEnabled?: boolean;
   original?: ViewportOriginal | null;
+  label?: string | null;
   onMousePixel?: (x: number, y: number) => void;
   onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
@@ -43,6 +44,7 @@ function GpuViewport({
   crosshairEnabled = false,
   regionsEnabled = false,
   original = null,
+  label = null,
   onMousePixel,
   onPixelClick,
   onMouseLeave,
@@ -311,6 +313,14 @@ function GpuViewport({
         />
         {showOriginal && (
           <div className="ab-viewer-compare-label-left" style={{ zIndex: 4 }}>Original</div>
+        )}
+        {label && !showOriginal && (
+          <div
+            className="absolute top-2 right-2 z-10 pointer-events-none text-[10px] px-2 py-0.5 rounded bg-black/60 text-emerald-300/90"
+            title="Showing a processed result; use Revert to original in the preview header to return to the original"
+          >
+            {label}
+          </div>
         )}
       </div>
     </div>

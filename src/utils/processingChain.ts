@@ -1,5 +1,6 @@
-import type { ChainEntry, ChainStep, FileRenderState, ProcessingChain } from "../shared/types/preview";
+import type { ChainEntry, ChainStep, FileRenderState, ProcessedResult, ProcessingChain } from "../shared/types/preview";
 import type { PsfSource } from "../shared/types/compositeChain";
+import { fileBaseName } from "./spectrumExport";
 
 export type PsfUse = Pick<ChainEntry, "psfUsed">;
 
@@ -53,6 +54,31 @@ export function inputFor(chain: ProcessingChain, step: ChainStep, originalPath: 
     if (existing) return existing.fitsPath;
   }
   return originalPath;
+}
+
+export function pixelMathTarget(processed: Pick<ProcessedResult, "kind" | "fitsPath" | "inputPath"> | null, filePath: string): string {
+  return processed?.kind === "pixelmath" ? processed.inputPath : processed?.fitsPath ?? filePath;
+}
+
+export interface CompareBase {
+  previewUrl: string | null;
+  label: string;
+}
+
+export function pixelMathCompareBase(
+  chain: ProcessingChain,
+  processed: Pick<ProcessedResult, "kind" | "previewUrl" | "label" | "inputPath"> | null,
+  original: { path: string; previewUrl: string | null },
+  stepLabels: Readonly<Record<ChainStep, string>>,
+): CompareBase {
+  if (processed?.kind !== "pixelmath") return { previewUrl: processed?.previewUrl ?? original.previewUrl, label: processed?.label ?? "Original" };
+  const input = processed.inputPath;
+  if (samePath(input, original.path)) return { previewUrl: original.previewUrl, label: "Original" };
+  for (const step of CHAIN_ORDER) {
+    const entry = chain.steps[step];
+    if (step !== "pixelMath" && entry && samePath(entry.fitsPath, input)) return { previewUrl: entry.previewUrl, label: stepLabels[step] };
+  }
+  return { previewUrl: null, label: fileBaseName(input) };
 }
 
 export function lastStep(chain: ProcessingChain): ChainStep | null {

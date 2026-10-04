@@ -11,7 +11,19 @@ import type {
   DisplayStf,
   PsfSource,
 } from "../../shared/types/compositeChain";
-import { CHAIN_ORDER, inputFor, lastStep, psfUseOf, samePath, showsPsfCrumb, withStep, withVersionParam, type PsfUse } from "../../utils/processingChain";
+import {
+  CHAIN_ORDER,
+  inputFor,
+  lastStep,
+  pixelMathCompareBase,
+  pixelMathTarget,
+  psfUseOf,
+  samePath,
+  showsPsfCrumb,
+  withStep,
+  withVersionParam,
+  type PsfUse,
+} from "../../utils/processingChain";
 import {
   compositeChainHolds,
   compositeInputFor,
@@ -352,7 +364,6 @@ function ProcessingTabInner() {
     [setCompositeAutoStf, setCompositeStf, setCompositeStfLinked, setCompositePreviewUrl, replaceParked, wizardDispatch],
   );
 
-  const displayedPath = processed?.fitsPath ?? runPath;
   const handlePixelMathDone = useCallback(
     (result: PixelMathDoneResult) => {
       if (!runKey || !runPath || !result?.fits_path) return;
@@ -366,11 +377,11 @@ function ProcessingTabInner() {
       };
       publishProcessed(
         runKey,
-        { fitsPath: fits, previewUrl, dimensions, label: STEP_LABELS.pixelMath, kind: "pixelmath", inputPath: displayedPath ?? runPath },
+        { fitsPath: fits, previewUrl, dimensions, label: STEP_LABELS.pixelMath, kind: "pixelmath", inputPath: pixelMathTarget(processed, runPath) },
         (c) => withStep(c, "pixelMath", entry),
       );
     },
-    [runKey, runPath, displayedPath, publishProcessed],
+    [runKey, runPath, processed, publishProcessed],
   );
 
   const handleDebayerPreview = useCallback(
@@ -399,6 +410,7 @@ function ProcessingTabInner() {
   const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : undefined);
   const bannerFor = (fileInput: ChainInput, compositeInput: CompositeInputView | undefined): string | undefined =>
     compositeInput ? compositeBannerOf(compositeInput) : bannerOf(fileInput);
+  const pixelMathBase = pixelMathCompareBase(chain, processed, { path: runPath ?? "", previewUrl: originalPreviewUrl }, STEP_LABELS);
 
   const withPath = useCallback(
     (path: string) => (file ? (path === file.path ? file : { ...file, path }) : null),
@@ -613,8 +625,8 @@ function ProcessingTabInner() {
               outputDir={resolvedDir}
               chainedFrom={pixelMathChainNotice}
               onProcessingDone={handlePixelMathDone}
-              inputPreviewUrl={processed?.previewUrl ?? originalPreviewUrl}
-              inputLabel={processed?.label ?? "Original"}
+              inputPreviewUrl={pixelMathBase.previewUrl}
+              inputLabel={pixelMathBase.label}
               fileKey={runKey}
               compositeMode={compositeMode}
               compositeInput={compositeInputs?.pixelMath ?? null}

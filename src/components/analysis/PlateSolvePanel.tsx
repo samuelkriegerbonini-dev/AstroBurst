@@ -17,7 +17,10 @@ import { withDeadline } from "../../utils/deadline";
 import {
   DEFAULT_SCALE_HIGH_TEXT,
   DEFAULT_SCALE_LOW_TEXT,
+  headerPositionHintTexts,
+  parsePositionHint,
   parseScaleRange,
+  positionHintStatus,
   scaleHintFromPixelScale,
 } from "../../utils/plateSolveScale";
 import { starCountLabel } from "../../utils/analysisLabels";
@@ -73,23 +76,6 @@ const ANNOTATIONS_OFF_VIEW_TITLE = "Object labels are in the solved file's pixel
 
 const SOLVE_TICK_MS = 250;
 const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
-
-function parseAngle(text: string, limit: number): number | null {
-  const value = parseFloat(text);
-  return Number.isFinite(value) && Math.abs(value) <= limit ? value : null;
-}
-
-function parseRadius(text: string): number | null {
-  const value = parseFloat(text);
-  return Number.isFinite(value) && value > 0 && value <= 180 ? value : null;
-}
-
-function hintRadiusDeg(info: WcsInfo): number | null {
-  const fov = info.fov_arcmin;
-  if (!fov || !Number.isFinite(fov[0]) || !Number.isFinite(fov[1])) return null;
-  const radius = Math.hypot(fov[0], fov[1]) / 2 / 60;
-  return radius > 0 ? radius : null;
-}
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -235,11 +221,11 @@ function PlateSolvePanel({
       setScaleHighText(scaleHint.high);
       setScaleUnits("arcsecperpix");
     }
-    if (!Number.isFinite(info.center_ra) || !Number.isFinite(info.center_dec)) return;
-    setCenterRaText(info.center_ra.toFixed(6));
-    setCenterDecText(info.center_dec.toFixed(6));
-    const radius = hintRadiusDeg(info);
-    if (radius !== null) setSearchRadiusText(radius.toFixed(4));
+    const positionTexts = headerPositionHintTexts(info);
+    if (!positionTexts) return;
+    setCenterRaText(positionTexts.ra);
+    setCenterDecText(positionTexts.dec);
+    if (positionTexts.radius !== null) setSearchRadiusText(positionTexts.radius);
   }, []);
 
   useEffect(() => {
@@ -416,11 +402,9 @@ function PlateSolvePanel({
     if (!filePath) return;
     const scale = parseScaleRange(scaleLowText, scaleHighText);
     if (scale.error !== null) return;
+    const hint = parsePositionHint(centerRaText, centerDecText, searchRadiusText);
+    if (hint.error !== null) return;
     const seq = ++solveSeqRef.current;
-    const centerRa = parseAngle(centerRaText, 360);
-    const centerDec = parseAngle(centerDecText, 90);
-    const radius = parseRadius(searchRadiusText);
-    const positionHint = centerRa !== null && centerDec !== null;
     setSolveLoading(true);
     setSolveError(null);
     setSolveResult(null);
@@ -437,9 +421,9 @@ function PlateSolvePanel({
           scaleUpper: scale.high,
           scaleUnits,
           downsampleFactor: downsample > 1 ? downsample : undefined,
-          centerRa: positionHint ? centerRa : undefined,
-          centerDec: positionHint ? centerDec : undefined,
-          radius: positionHint && radius !== null ? radius : undefined,
+          centerRa: hint.centerRa ?? undefined,
+          centerDec: hint.centerDec ?? undefined,
+          radius: hint.radius ?? undefined,
         }),
         limitSecs * 1000,
         `Plate solve gave up after ${formatDuration(limitSecs * 1000)} (Settings > Timeout). astrometry.net may still finish the job; try again later.`,
@@ -487,7 +471,7 @@ function PlateSolvePanel({
   }, [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
-  const solveHintReady = parseAngle(centerRaText, 360) !== null && parseAngle(centerDecText, 90) !== null;
+  const positionHint = parsePositionHint(centerRaText, centerDecText, searchRadiusText);
 
   return (
     <div className="flex flex-col gap-3">
@@ -742,11 +726,10 @@ function PlateSolvePanel({
               </label>
               <input
                 id={centerRaId}
-                type="number"
-                min={0}
-                max={360}
-                step={0.0001}
+                type="text"
+                inputMode="decimal"
                 value={centerRaText}
+                aria-invalid={positionHint.raInvalid}
                 placeholder="blind"
                 title="Right ascension of the field centre in degrees; speeds the solve up enormously"
                 onChange={(e) => setCenterRaText(e.target.value)}
@@ -759,11 +742,10 @@ function PlateSolvePanel({
               </label>
               <input
                 id={centerDecId}
-                type="number"
-                min={-90}
-                max={90}
-                step={0.0001}
+                type="text"
+                inputMode="decimal"
                 value={centerDecText}
+                aria-invalid={positionHint.decInvalid}
                 placeholder="blind"
                 title="Declination of the field centre in degrees; both centre fields are needed for a hinted solve"
                 onChange={(e) => setCenterDecText(e.target.value)}
@@ -776,11 +758,10 @@ function PlateSolvePanel({
               </label>
               <input
                 id={searchRadiusId}
-                type="number"
-                min={0.01}
-                max={180}
-                step={0.1}
+                type="text"
+                inputMode="decimal"
                 value={searchRadiusText}
+                aria-invalid={positionHint.radiusInvalid}
                 placeholder="10"
                 title="Search radius around the centre in degrees (default 10 when left empty)"
                 onChange={(e) => setSearchRadiusText(e.target.value)}
@@ -789,10 +770,14 @@ function PlateSolvePanel({
             </div>
           </div>
 
+          {positionHint.error !== null && (
+            <div role="alert" className="text-[10px] text-red-400">
+              {positionHint.error}
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-[9px] text-zinc-500">
-            <span>
-              {solveHintReady ? "Hinted solve around the field centre" : "Blind solve: fill both centre fields to hint it"}
-            </span>
+            <span>{positionHintStatus(positionHint)}</span>
             {wcsInfo && (
               <button
                 type="button"
@@ -807,7 +792,7 @@ function PlateSolvePanel({
 
           <button
             onClick={handleSolve}
-            disabled={solveLoading || !filePath || scaleRange.error !== null}
+            disabled={solveLoading || !filePath || scaleRange.error !== null || positionHint.error !== null}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
           >
             {solveLoading ? (

@@ -116,6 +116,18 @@ export const CUBE_SPECTRUM_HINT = "Click to extract spectrum";
 export const CANVAS_HINT_CLASS =
   "absolute bottom-2 right-2 z-[6] bg-black/60 text-[10px] text-purple-300 px-2 py-1 rounded pointer-events-none whitespace-nowrap";
 
+export function sameGrid(a: [number, number] | null, b: [number, number] | null): boolean {
+  return !!a && !!b && a[0] === b[0] && a[1] === b[1];
+}
+
+export function cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }: {
+  isSpectralCube: boolean;
+  fileDims: [number, number] | null;
+  displayedDims: [number, number] | null;
+}): boolean {
+  return isSpectralCube && sameGrid(fileDims, displayedDims);
+}
+
 export const CLICK_SLOP_PX = 4;
 export const COMPARE_DIVIDER_GRAB_PX = 12;
 
