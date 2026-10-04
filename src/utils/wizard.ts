@@ -841,6 +841,29 @@ export function alignChannelOutcome(
   return { unregistered: null, usedMethod };
 }
 
+function alignMethodLabel(method: string): string {
+  if (IDENTITY_ALIGN_METHODS.has(method)) return "identity";
+  return ALIGN_METHOD_LABELS[method] ?? method;
+}
+
+export function alignRunMethodLabel(result: {
+  align_method: string;
+  channels?: readonly { offset?: readonly [number, number]; registered?: boolean; method_used?: string }[];
+}): string {
+  const requested = alignMethodLabel(result.align_method);
+  const used = (result.channels ?? []).slice(1).map((ch) => ch.method_used).filter((m): m is string => !!m);
+  const fallbacks = used.filter((m) => m !== result.align_method);
+  if (fallbacks.length === 0) return requested;
+  const counts = new Map<string, number>();
+  for (const m of fallbacks) {
+    const label = alignMethodLabel(m);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  if (fallbacks.length === used.length && counts.size === 1 && !counts.has("identity")) return [...counts.keys()][0];
+  const detail = [...counts].map(([label, n]) => `${label} on ${n} of ${used.length}`).join(", ");
+  return `${requested} requested; ${detail}`;
+}
+
 export const ALIGN_OFFSET_TITLE = "Offset of this channel relative to the reference, in array pixels (y down)";
 
 function signedPixels(value: number): string {

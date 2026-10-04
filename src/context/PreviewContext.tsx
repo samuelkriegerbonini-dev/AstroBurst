@@ -21,6 +21,7 @@ import type { CubeInfoWithRamp, RampInfo, RampSource } from "../shared/types/ram
 import { useCompositeActions, useCompositePreview } from "./CompositeContext";
 import { useComposeWizardContext } from "./ComposeWizardContext";
 import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
+import { rawPixelsHolder } from "../utils/pixelHolder";
 import type {
   ProcessedFile,
   ProcessResult,
@@ -658,13 +659,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     getRawPixelsPreview(path, maxDim)
       .then((result) => {
         if (rawPixelsAbortRef.current !== seq) return;
-        setRawPixels({
-          data: result.pixels,
-          width: result.width,
-          height: result.height,
-          min: result.dataMin,
-          max: result.dataMax,
-        });
+        setRawPixels(rawPixelsHolder(result));
       })
       .catch((err) => {
         if (rawPixelsAbortRef.current !== seq) return;

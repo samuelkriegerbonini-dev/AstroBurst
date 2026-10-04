@@ -5,6 +5,7 @@ import { CompositeProvider } from "../../context/CompositeContext";
 import { ComposeWizardProvider, useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
   alignChannelOutcome,
+  alignRunMethodLabel,
   alignedRunFromChannels,
   alignMatchSummary,
   alignOverlayBinIds,
@@ -1009,6 +1010,50 @@ describe("alignChannelOutcome", () => {
   it("never tags the reference channel", () => {
     expect(alignChannelOutcome({}, "phase_correlation", true)).toEqual({ unregistered: null, usedMethod: null });
     expect(alignChannelOutcome(undefined, "phase_correlation", false)).toEqual({ unregistered: null, usedMethod: null });
+  });
+});
+
+describe("alignRunMethodLabel", () => {
+  const ref = { offset: [0, 0] as [number, number], registered: true };
+  const ch = (method_used: string, registered = true) => ({ offset: [1, 2] as [number, number], registered, method_used });
+
+  it("names the requested method when every channel used it", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, ch("affine"), ch("affine")] })).toBe("affine");
+    expect(alignRunMethodLabel({ align_method: "phase_correlation", channels: [ref, ch("phase_correlation")] })).toBe("phase correlation");
+  });
+
+  it("names the fallback method when every channel fell back to the same one", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, ch("phase_correlation"), ch("phase_correlation")] })).toBe(
+      "phase correlation",
+    );
+  });
+
+  it("reports the requested method and the fallback count when channels disagree", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, ch("phase_correlation"), ch("affine")] })).toBe(
+      "affine requested; phase correlation on 1 of 2",
+    );
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, ch("phase_correlation"), ch("rigid"), ch("affine")] })).toBe(
+      "affine requested; phase correlation on 1 of 3, rigid on 1 of 3",
+    );
+  });
+
+  it("counts identity outcomes as fallbacks named identity", () => {
+    expect(
+      alignRunMethodLabel({ align_method: "phase_correlation", channels: [ref, ch("phase_correlation_identity", false), ch("phase_correlation")] }),
+    ).toBe("phase correlation requested; identity on 1 of 2");
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, ch("identity", false)] })).toBe("affine requested; identity on 1 of 1");
+    expect(
+      alignRunMethodLabel({ align_method: "phase_correlation", channels: [ref, ch("phase_correlation_identity", false), ch("phase_correlation_identity", false)] }),
+    ).toBe("phase correlation requested; identity on 2 of 2");
+  });
+
+  it("ignores the reference channel's method_used", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [{ ...ref, method_used: "phase_correlation" }, ch("affine")] })).toBe("affine");
+  });
+
+  it("falls back to the requested method when channels carry no method_used", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, { offset: [1, 2] as [number, number], registered: true }] })).toBe("affine");
+    expect(alignRunMethodLabel({ align_method: "unknown_method", channels: [ref] })).toBe("unknown_method");
   });
 });
 

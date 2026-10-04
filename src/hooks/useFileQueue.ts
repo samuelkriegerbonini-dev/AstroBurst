@@ -9,9 +9,10 @@ import {
   selectCubePlaneHdu,
   isCubePlaneResult,
 } from "../utils/fitsErrors";
+import { tableOnlyFileHint } from "../utils/x1dCompare";
 import { fileStore } from "./useFileStore";
 import { refreshOverwrittenFiles } from "./refreshOverwrittenFiles";
-import { onCommandOutputs } from "../infrastructure/tauri/outputEvents";
+import { onCommandOutputs } from "../infrastructure/tauri";
 import type { ProcessedFile, AstroFile } from "../shared/types";
 
 const RESAMPLE_RATIO_THRESHOLD = 1.5;
@@ -84,6 +85,21 @@ async function loadFirstCubePlane(file: ProcessedFile, rejection: string): Promi
   }
 }
 
+export function ingestOutcome(msg: string): "table" | "cube-fallback" {
+  const verdictEnd = msg.indexOf(";");
+  const verdict = verdictEnd === -1 ? msg : msg.slice(0, verdictEnd);
+  return tableOnlyFileHint(verdict) !== null ? "table" : "cube-fallback";
+}
+
+export async function settleIngestFailure(file: ProcessedFile, msg: string): Promise<void> {
+  if (ingestOutcome(msg) === "table") {
+    fileStore.fileTable(file.id, msg);
+    return;
+  }
+  const loadedAsCube = await loadFirstCubePlane(file, msg);
+  if (!loadedAsCube) fileStore.fileError(file.id, msg);
+}
+
 export function useFileQueue() {
   const processingRef = useRef(false);
   const [isResamplingState, setIsResampling] = useState(false);
@@ -106,8 +122,7 @@ export function useFileQueue() {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!shouldRetryWithoutFullAnalysis(msg)) {
-          const loadedAsCube = await loadFirstCubePlane(file, msg);
-          if (!loadedAsCube) fileStore.fileError(file.id, msg);
+          await settleIngestFailure(file, msg);
           return;
         }
         try {

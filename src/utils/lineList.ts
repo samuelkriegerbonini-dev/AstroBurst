@@ -18,9 +18,9 @@ import {
 } from "./spectralAxis";
 import { axisValueToPixel, type PlotMapping } from "./spectrumRange";
 
-export type LineFamily = "optical" | "nir" | "radio";
+export type LineFamily = "optical" | "nir" | "mir" | "radio";
 
-export const LINE_FAMILIES: readonly LineFamily[] = ["optical", "nir", "radio"];
+export const LINE_FAMILIES: readonly LineFamily[] = ["optical", "nir", "mir", "radio"];
 
 export interface RestLine {
   id: string;
@@ -41,7 +41,7 @@ const SYSTEMIC_DECIMALS = 1;
 const MICRON = "μm";
 const UNSHIFTED_CORRECTION_METHOD_PREFIX = "already in";
 
-function wavelengthLine(id: string, label: string, family: "optical" | "nir", vacuumUm: number): RestLine {
+function wavelengthLine(id: string, label: string, family: "optical" | "nir" | "mir", vacuumUm: number): RestLine {
   return { id, label, family, vacuumUm, restGhz: null };
 }
 
@@ -70,6 +70,22 @@ export const REST_LINES: readonly RestLine[] = [
   wavelengthLine("hei_1083", "He I 1.083", "nir", 1.083331),
   wavelengthLine("h2_2122", "H2 1-0 S(1)", "nir", 2.121834),
   wavelengthLine("feii_1644", "[FeII] 1.644", "nir", 1.644),
+  wavelengthLine("arii_6985", "[ArII] 6.985", "mir", 6.985274),
+  wavelengthLine("ariii_8991", "[ArIII] 8.991", "mir", 8.99138),
+  wavelengthLine("h2_s3_9665", "H2 0-0 S(3)", "mir", 9.66492),
+  wavelengthLine("siv_10511", "[SIV] 10.511", "mir", 10.5105),
+  wavelengthLine("h2_s2_12279", "H2 0-0 S(2)", "mir", 12.27861),
+  wavelengthLine("neii_12814", "[NeII] 12.814", "mir", 12.81355),
+  wavelengthLine("nev_14322", "[NeV] 14.322", "mir", 14.3217),
+  wavelengthLine("neiii_15555", "[NeIII] 15.555", "mir", 15.5551),
+  wavelengthLine("h2_s1_17035", "H2 0-0 S(1)", "mir", 17.03484),
+  wavelengthLine("siii_18713", "[SIII] 18.713", "mir", 18.713),
+  wavelengthLine("nev_24318", "[NeV] 24.318", "mir", 24.3175),
+  wavelengthLine("oiv_25890", "[OIV] 25.890", "mir", 25.8903),
+  wavelengthLine("feii_25988", "[FeII] 25.988", "mir", 25.98829),
+  wavelengthLine("h2_s0_28219", "H2 0-0 S(0)", "mir", 28.21883),
+  wavelengthLine("siii_33481", "[SIII] 33.481", "mir", 33.481),
+  wavelengthLine("si_ii_34815", "[SiII] 34.815", "mir", 34.8152),
   radioLine("co_1_0", "CO 1-0", 115.2712018),
   radioLine("co_2_1", "CO 2-1", 230.538),
   radioLine("co_3_2", "CO 3-2", 345.7959899),
@@ -89,6 +105,8 @@ export function familyLabel(family: LineFamily): string {
       return "Optical";
     case "nir":
       return "NIR";
+    case "mir":
+      return "MIR";
     case "radio":
       return "Radio";
   }

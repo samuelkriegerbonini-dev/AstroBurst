@@ -8,6 +8,7 @@ import {
   type GpuResources as GpuSingleton,
 } from "../../infrastructure/gpu/GpuSingleton";
 import { LUT_BYTES, lutNodataRgb, type DisplayTransfer } from "../../utils/displayTransfer";
+import type { RawPixelData } from "../../shared/types";
 
 interface GpuResources {
   uniformBuffer: GPUBuffer;
@@ -17,7 +18,7 @@ interface GpuResources {
 }
 
 interface GpuRendererProps {
-  rawData: Float32Array | null;
+  pixels: RawPixelData | null;
   width: number;
   height: number;
   transfer: DisplayTransfer;
@@ -67,13 +68,14 @@ function fillUniforms(
 }
 
 export default function GpuRenderer({
-  rawData,
+  pixels,
   width,
   height,
   transfer,
   lut,
   className = "",
 }: GpuRendererProps) {
+  const rawData = pixels?.data ?? null;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fallbackRef = useRef(false);
   const resourcesRef = useRef<GpuResources | null>(null);

@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn box_shape_cutout_rect_matches_the_desktop_pixel_centre_rule() {
+    fn box_shape_cutout_rect_matches_the_desktop_half_open_pixel_extent_rule() {
         let half_integer: RegionSpec = serde_json::from_str(
             r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6}"#,
         )
@@ -317,7 +317,7 @@ mod tests {
         let integer_centre: RegionSpec =
             serde_json::from_str(r#"{"type":"shape","shape":"box","x":15,"y":10,"width":10,"height":6}"#).unwrap();
         let r = resolve_cutout_rect(&integer_centre, 40, 40, None, BUDGET).unwrap();
-        assert_eq!((r.x0, r.y0, r.width, r.height), (10, 7, 11, 7));
+        assert_eq!((r.x0, r.y0, r.width, r.height), (10, 7, 10, 6));
 
         let rotated: RegionSpec = serde_json::from_str(
             r#"{"type":"shape","shape":"box","x":15.5,"y":10.5,"width":10,"height":6,"angle":30}"#,

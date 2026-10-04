@@ -1,3 +1,5 @@
+import { makePixelHolder } from "../../utils/pixelHolder";
+
 export function parseRawPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   const bytes = toUint8Array(raw);
   if (bytes.length < 16) {
@@ -52,7 +54,7 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
       start % 4 === 0
         ? new Float32Array(bytes.buffer, start, npix)
         : new Float32Array(bytes.slice(32 + blockIndex * blockBytes, 32 + (blockIndex + 1) * blockBytes).buffer);
-    return { data, min, max };
+    return makePixelHolder({ min, max }, data);
   };
 
   return {

@@ -276,7 +276,7 @@ mod tests {
     }
 
     fn overhanging_box() -> RegionShape {
-        RegionShape::Box { x: 4.5, y: 1.5, width: 6.0, height: 5.0, angle: 0.0 }
+        RegionShape::Box { x: 4.5, y: 1.5, width: 6.0, height: 6.0, angle: 0.0 }
     }
 
     #[test]

@@ -6,5 +6,6 @@ export interface QueueStats {
   total: number;
   done: number;
   failed: number;
+  tables: number;
   totalBytes: number;
 }

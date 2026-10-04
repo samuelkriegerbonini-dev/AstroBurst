@@ -409,6 +409,14 @@ struct FoundCube {
     primary: Option<HduHeader>,
 }
 
+const CONTEXT_EXTNAMES: [&str; 2] = ["CON", "CTX"];
+
+fn is_resample_context_hdu(header: &HduHeader) -> bool {
+    header
+        .get("EXTNAME")
+        .is_some_and(|name| CONTEXT_EXTNAMES.iter().any(|known| name.trim().eq_ignore_ascii_case(known)))
+}
+
 fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
     let mut offset = 0usize;
     let mut index = 0usize;
@@ -423,6 +431,7 @@ fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
                 let shape = cube_depth(&parsed.header, primary.as_ref()).map_err(|reason| anyhow!("HDU {} {}", index, reason))?;
                 return Ok(FoundCube { index, parsed, shape, primary });
             }
+            PlaneSelector::Auto if is_resample_context_hdu(&parsed.header) => {}
             PlaneSelector::Auto => match cube_depth(&parsed.header, primary.as_ref()) {
                 Ok(shape) => return Ok(FoundCube { index, parsed, shape, primary }),
                 Err(reason) => {
@@ -1123,6 +1132,32 @@ pub(crate) mod test_support {
             LINE_CONTINUUM + line
         });
     }
+
+    pub fn context_hdu(cols: usize, rows: usize, planes: usize) -> Vec<u8> {
+        context_hdu_named("'CON     '", cols, rows, planes)
+    }
+
+    pub fn context_hdu_named(extname: &str, cols: usize, rows: usize, planes: usize) -> Vec<u8> {
+        let data: Vec<u8> = (0..cols * rows * planes).flat_map(|i| (i as i32 % 4).to_be_bytes()).collect();
+        image_hdu("XTENSION", &[cols, rows, planes], 32, &[("EXTNAME", extname)], data)
+    }
+
+    pub fn write_i2d_like_mef(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        primary_cards: &[(&str, &str)],
+        sci_cards: &[(&str, &str)],
+    ) {
+        let mut primary: Vec<(&str, &str)> = vec![("EXTEND", "T")];
+        primary.extend_from_slice(primary_cards);
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &primary, Vec::new());
+        let mut sci: Vec<(&str, &str)> = vec![("EXTNAME", "'SCI     '")];
+        sci.extend_from_slice(sci_cards);
+        bytes.extend(image_hdu("XTENSION", &[cols, rows], -32, &sci, f32_samples(cols, rows, 1, |_, y, x| (y * cols + x) as f32)));
+        bytes.extend(context_hdu(cols, rows, 2));
+        write_bytes(path, &bytes);
+    }
 }
 
 #[cfg(test)]
@@ -1634,6 +1669,64 @@ mod tests {
         assert!(missing.contains("out of range"), "{}", missing);
         let asdf = format!("{:#}", LazyCube::open(&format!("{}#array=data", source)).err().unwrap());
         assert!(asdf.contains("ASDF"), "{}", asdf);
+    }
+
+    #[test]
+    fn auto_detection_skips_a_jwst_con_context_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_i2d.fits");
+        write_i2d_like_mef(
+            &path,
+            6,
+            4,
+            &[("TELESCOP", "'JWST'")],
+            &[("CTYPE1", "'RA---TAN'"), ("CTYPE2", "'DEC--TAN'"), ("CRVAL1", "150.0"), ("CRVAL2", "2.0")],
+        );
+        let key = path.to_str().unwrap();
+
+        let auto = format!("{:#}", LazyCube::open(key).err().expect("an i2d with a CON context extension is not a cube"));
+        assert!(auto.contains("No 3D data block"), "{}", auto);
+
+        let explicit = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        assert_eq!(explicit.hdu_index, 2);
+        assert_eq!(explicit.header.get("EXTNAME"), Some("CON"));
+        assert_eq!(explicit.geometry.depth, 2);
+    }
+
+    #[test]
+    fn auto_detection_skips_an_hst_drizzle_ctx_context_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hst_drc.fits");
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T"), ("TELESCOP", "'HST'")], Vec::new());
+        bytes.extend(image_hdu("XTENSION", &[5, 3], -32, &[("EXTNAME", "'SCI     '")], f32_samples(5, 3, 1, |_, y, x| (y * 5 + x) as f32)));
+        bytes.extend(context_hdu_named("'CTX     '", 5, 3, 3));
+        write_bytes(&path, &bytes);
+        let key = path.to_str().unwrap();
+
+        let auto = format!("{:#}", LazyCube::open(key).err().expect("a drizzled product with a 3D CTX extension is not a cube"));
+        assert!(auto.contains("No 3D data block"), "{}", auto);
+
+        let explicit = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        assert_eq!(explicit.hdu_index, 2);
+        assert_eq!(explicit.header.get("EXTNAME"), Some("CTX"));
+        assert_eq!(explicit.geometry.depth, 3);
+    }
+
+    #[test]
+    fn auto_detection_still_finds_a_science_cube_behind_a_con_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("con_then_sci.fits");
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T")], Vec::new());
+        bytes.extend(context_hdu(3, 2, 2));
+        let data = f32_samples(3, 2, 4, |z, y, x| (z * 100 + y * 10 + x) as f32);
+        bytes.extend(image_hdu("XTENSION", &[3, 2, 4], -32, &[("EXTNAME", "'SCI'")], data));
+        write_bytes(&path, &bytes);
+
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(cube.hdu_index, 2);
+        assert_eq!(cube.header.get("EXTNAME"), Some("SCI"));
+        assert_eq!(cube.geometry.depth, 4);
+        assert_eq!(cube.get_frame(3).unwrap()[[1, 2]], 312.0);
     }
 
     #[test]

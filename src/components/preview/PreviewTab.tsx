@@ -300,7 +300,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
           original={heldOriginal}
         >
           <GpuRenderer
-            rawData={rawPixels.data}
+            pixels={rawPixels}
             width={rawPixels.width}
             height={rawPixels.height}
             transfer={transfer}

@@ -23,6 +23,7 @@ import {
   SlidersHorizontal,
   Pin,
   X,
+  Grid3X3,
 } from "lucide-react";
 
 export interface FileMetadata {
@@ -40,7 +41,7 @@ export interface MetadataFile {
   name: string;
   path: string;
   size: number;
-  status: "queued" | "processing" | "done" | "error";
+  status: "queued" | "processing" | "done" | "error" | "table";
   error?: string;
   metadata?: FileMetadata;
   previewUrl?: string;
@@ -84,6 +85,7 @@ const STATUS_CONFIG = {
   processing: { icon: Loader2, color: "", accentColor: "var(--ab-teal)" },
   done: { icon: CheckCircle2, color: "", accentColor: "var(--ab-green)" },
   error: { icon: XCircle, color: "text-red-400", accentColor: "" },
+  table: { icon: Grid3X3, color: "text-fuchsia-300", accentColor: "" },
 };
 
 const FILTER_COLORS: Record<string, string> = {
@@ -132,7 +134,8 @@ function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocke
   const Icon = config.icon;
   const isClickable = status === "done";
   const meta = file.metadata;
-  const tableHint = status === "error" ? tableOnlyFileHint(file.error) : null;
+  const tableHint = status === "table" || status === "error" ? tableOnlyFileHint(file.error) : null;
+  const noteClass = status === "table" ? "ab-mfl-table-text" : "ab-mfl-error-text";
 
   useEffect(() => {
     setThumbError(false);
@@ -252,12 +255,12 @@ function MetadataFileItem({ file, isSelected, onSelect, onOpenTable, tableBlocke
           {status === "queued" && (
             <span className="ab-mfl-queued-text">Queued</span>
           )}
-          {status === "error" && tableHint === null && (
-            <span className="ab-mfl-error-text" title={file.error}>{file.error}</span>
+          {(status === "error" || status === "table") && tableHint === null && (
+            <span className={noteClass} title={file.error}>{file.error}</span>
           )}
           {tableHint !== null && (
             <>
-              <span className="ab-mfl-error-text" title={file.error}>{tableHint}</span>
+              <span className={noteClass} title={file.error}>{tableHint}</span>
               {onOpenTable && (
                 <button
                   type="button"

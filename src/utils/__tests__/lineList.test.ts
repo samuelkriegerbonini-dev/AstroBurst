@@ -84,18 +84,18 @@ function optical(id: string): number {
 }
 
 describe("rest-frame line table", () => {
-  it("the table holds the 27 lines of the brief once each with the family of their storage unit", () => {
-    expect(REST_LINES).toHaveLength(27);
-    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(27);
-    expect(LINE_FAMILIES).toEqual(["optical", "nir", "radio"]);
-    const count: Record<LineFamily, number> = { optical: 0, nir: 0, radio: 0 };
+  it("the table holds the 43 lines of the brief once each with the family of their storage unit", () => {
+    expect(REST_LINES).toHaveLength(43);
+    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(43);
+    expect(LINE_FAMILIES).toEqual(["optical", "nir", "mir", "radio"]);
+    const count: Record<LineFamily, number> = { optical: 0, nir: 0, mir: 0, radio: 0 };
     for (const line of REST_LINES) {
       count[line.family]++;
       expect(line.vacuumUm).toBeGreaterThan(0);
       if (line.family === "radio") expect(line.restGhz).toBeGreaterThan(0);
       else expect(line.restGhz).toBeNull();
     }
-    expect(count).toEqual({ optical: 10, nir: 10, radio: 7 });
+    expect(count).toEqual({ optical: 10, nir: 10, mir: 16, radio: 7 });
   });
 
   it("optical lines match NIST ASD vacuum wavelengths", () => {
@@ -156,9 +156,44 @@ describe("rest-frame line table", () => {
     const firstIndex = (f: LineFamily) => families.indexOf(f);
     const lastIndex = (f: LineFamily) => families.lastIndexOf(f);
     expect(lastIndex("optical")).toBeLessThan(firstIndex("nir"));
-    expect(lastIndex("nir")).toBeLessThan(firstIndex("radio"));
+    expect(lastIndex("nir")).toBeLessThan(firstIndex("mir"));
+    expect(lastIndex("mir")).toBeLessThan(firstIndex("radio"));
     expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(REST_LINES.length);
     expect(new Set(REST_LINES.map((l) => l.label)).size).toBe(REST_LINES.length);
+  });
+
+  it("mid-infrared lines match the ISO (Lutz) fine-structure list and Black's H2 rotational list in vacuum", () => {
+    const iso: Record<string, [string, number]> = {
+      arii_6985: ["[ArII] 6.985", 6.985274],
+      ariii_8991: ["[ArIII] 8.991", 8.99138],
+      h2_s3_9665: ["H2 0-0 S(3)", 9.66492],
+      siv_10511: ["[SIV] 10.511", 10.5105],
+      h2_s2_12279: ["H2 0-0 S(2)", 12.27861],
+      neii_12814: ["[NeII] 12.814", 12.81355],
+      nev_14322: ["[NeV] 14.322", 14.3217],
+      neiii_15555: ["[NeIII] 15.555", 15.5551],
+      h2_s1_17035: ["H2 0-0 S(1)", 17.03484],
+      siii_18713: ["[SIII] 18.713", 18.713],
+      nev_24318: ["[NeV] 24.318", 24.3175],
+      oiv_25890: ["[OIV] 25.890", 25.8903],
+      feii_25988: ["[FeII] 25.988", 25.98829],
+      h2_s0_28219: ["H2 0-0 S(0)", 28.21883],
+      siii_33481: ["[SIII] 33.481", 33.481],
+      si_ii_34815: ["[SiII] 34.815", 34.8152],
+    };
+    for (const [id, [label, um]] of Object.entries(iso)) {
+      const line = lineById(id);
+      expect(line?.label).toBe(label);
+      expect(line?.family).toBe("mir");
+      expect(line?.restGhz).toBeNull();
+      expectNear(line?.vacuumUm ?? null, um, 1e-6);
+    }
+    const axis = axisOf("wave", linearAxis(5, 28, 231));
+    const base = { axis, mode: "wavelength_vac" as const, restUm: null, convention: "optical" as const, shiftKms: null, redshift: 0, xMin: 5, xMax: 28 };
+    const marks = lineMarks({ ...base, families: ["mir"] });
+    expect(marks.map((m) => m.id)).toContain("neii_12814");
+    expect(marks.every((m) => m.family === "mir")).toBe(true);
+    expect(lineMarks({ ...base, families: ["nir", "radio"] })).toEqual([]);
   });
 
   it("radio lines match Splatalogue rest frequencies", () => {
@@ -457,6 +492,7 @@ describe("click hit test and hints", () => {
     expect(lineById("nope")).toBeNull();
     expect(familyLabel("optical")).toBe("Optical");
     expect(familyLabel("nir")).toBe("NIR");
+    expect(familyLabel("mir")).toBe("MIR");
     expect(familyLabel("radio")).toBe("Radio");
   });
 

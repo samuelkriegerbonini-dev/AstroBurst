@@ -190,9 +190,9 @@ pub fn shift_header(parent: &HduHeader, rect: &CutoutRect) -> HduHeader {
 
 fn pixel_extent_rect(cx: f64, cy: f64, width: f64, height: f64) -> CutoutRect {
     let x0 = (cx - width / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64;
-    let x1 = (cx + width / 2.0 + PIXEL_EDGE_TOLERANCE).floor() as i64;
+    let x1 = (cx + width / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
     let y0 = (cy - height / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64;
-    let y1 = (cy + height / 2.0 + PIXEL_EDGE_TOLERANCE).floor() as i64;
+    let y1 = (cy + height / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
     CutoutRect { x0, y0, width: (x1 - x0 + 1).max(1) as usize, height: (y1 - y0 + 1).max(1) as usize }
 }
 
@@ -415,7 +415,7 @@ mod tests {
 
         let integer_centre = RegionShape::Box { x: 15.0, y: 10.0, width: 10.0, height: 6.0, angle: 0.0 };
         let out = rect_from_region(&integer_centre, RegionSystem::Image, None, (40, 40)).unwrap();
-        assert_eq!(out.rect, rect(10, 7, 11, 7));
+        assert_eq!(out.rect, rect(10, 7, 10, 6));
 
         let quarter = RegionShape::Box { x: 15.5, y: 10.5, width: 10.0, height: 6.0, angle: 90.0 };
         let out = rect_from_region(&quarter, RegionSystem::Image, None, (40, 40)).unwrap();
@@ -431,7 +431,7 @@ mod tests {
 
         let overhang = RegionShape::Box { x: 1.0, y: 1.0, width: 6.0, height: 6.0, angle: 0.0 };
         let out = rect_from_region(&overhang, RegionSystem::Image, None, (40, 40)).unwrap();
-        assert_eq!(out.rect, rect(-2, -2, 7, 7));
+        assert_eq!(out.rect, rect(-2, -2, 6, 6));
         assert!(fraction_on_image(&out.rect, 40, 40) < 1.0);
 
         let outside = RegionShape::Box { x: 100.0, y: 100.0, width: 4.0, height: 4.0, angle: 0.0 };
@@ -513,6 +513,20 @@ mod tests {
         let shifted = shift_header(&subarray, &r);
         assert_eq!(reported_ltv(Some(&shifted), &r), (-522.0, -12.0));
         assert_eq!(reported_ltv(Some(&shifted), &r), (shifted.get_f64("LTV1").unwrap(), shifted.get_f64("LTV2").unwrap()));
+    }
+
+    #[test]
+    fn integer_centre_with_even_size_yields_exactly_the_requested_size() {
+        let b = RegionShape::Box { x: 1232.0, y: 2381.0, width: 512.0, height: 512.0, angle: 0.0 };
+        assert_eq!(box_pixel_rect(&b).unwrap().rect, rect(976, 2125, 512, 512));
+        let half = RegionShape::Box { x: 1232.5, y: 2381.5, width: 512.0, height: 512.0, angle: 0.0 };
+        assert_eq!(box_pixel_rect(&half).unwrap().rect, rect(977, 2126, 512, 512));
+        let odd = RegionShape::Box { x: 10.5, y: 10.5, width: 5.0, height: 5.0, angle: 0.0 };
+        assert_eq!(box_pixel_rect(&odd).unwrap().rect, rect(8, 8, 5, 5));
+        let shifted = shift_header(&make_header(&[("CRPIX1", "1232"), ("CRPIX2", "2381")]), &rect(976, 2125, 512, 512));
+        assert_eq!((shifted.get_f64("CRPIX1"), shifted.get_f64("CRPIX2")), (Some(256.0), Some(256.0)));
+        assert_eq!((shifted.get_f64("LTV1"), shifted.get_f64("LTV2")), (Some(-976.0), Some(-2125.0)));
+        assert_eq!((shifted.get_i64("NAXIS1"), shifted.get_i64("NAXIS2")), (Some(512), Some(512)));
     }
 
     #[test]

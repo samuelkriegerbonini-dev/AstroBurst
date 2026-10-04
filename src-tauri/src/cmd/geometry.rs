@@ -184,6 +184,26 @@ mod tests {
     }
 
     #[test]
+    fn geometry_of_a_jwst_i2d_reads_the_sci_wcs_not_the_con_context_extension() {
+        use crate::core::cube::lazy::test_support::write_i2d_like_mef;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_i2d.fits");
+        let wcs: Vec<(String, String)> = wcs_cards(north_up_cd())
+            .into_iter()
+            .filter(|(k, _)| k != "NAXIS1" && k != "NAXIS2")
+            .map(|(k, v)| if k.starts_with("CTYPE") { (k, format!("'{v}'")) } else { (k, v) })
+            .collect();
+        let sci: Vec<(&str, &str)> = wcs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let primary = [("TELESCOP", "'JWST'"), ("EXPMID", "59810.34"), ("TARG_RA", "274.7299"), ("TARG_DEC", "-13.8517")];
+        write_i2d_like_mef(&path, 100, 100, &primary, &sci);
+        let j = observation_geometry_json(path.to_str().unwrap(), &GeometryOverrides::default()).unwrap();
+        assert!(j[RES_TARGET]["source"].as_str().unwrap().starts_with("WCS at image centre"), "{j}");
+        assert!((j[RES_TARGET]["ra_deg"].as_f64().unwrap() - 150.0).abs() < 1e-3, "{j}");
+        assert!((j[RES_TARGET]["dec_deg"].as_f64().unwrap() - 2.0).abs() < 1e-3, "{j}");
+        assert!(j[RES_GEOMETRY]["jd_utc"].as_f64().unwrap().is_finite(), "{j}");
+    }
+
+    #[test]
     fn geometry_overrides_are_validated_with_the_named_limits() {
         let base = GeometryOverrides::default();
         let check = |overrides: GeometryOverrides, fragment: &str| {

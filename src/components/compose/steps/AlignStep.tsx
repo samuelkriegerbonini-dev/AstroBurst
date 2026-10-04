@@ -6,6 +6,7 @@ import {
   alignInputs,
   alignMatchSummary,
   alignRunFinish,
+  alignRunMethodLabel,
   alignRunOutcome,
   discardsNotice,
   formatAlignOffset,
@@ -153,7 +154,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
 
         {result && (
           <div className="text-[9px] text-zinc-500">
-            {result.align_method}, {result.dimensions?.[0]}x{result.dimensions?.[1]}, {result.elapsed_ms}ms
+            {alignRunMethodLabel(result)}, {result.dimensions?.[0]}x{result.dimensions?.[1]}, {result.elapsed_ms}ms
           </div>
         )}
         {error && <div className="text-[9px] text-red-400">{error}</div>}
