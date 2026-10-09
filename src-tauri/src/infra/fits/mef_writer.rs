@@ -627,7 +627,10 @@ mod tests {
 
         let hdu1 = parse_header_at(&out_bytes, primary.next_hdu_offset).unwrap();
         assert_eq!(hdu1.header.get("ZCMPTYPE"), Some("GZIP_2"));
-        assert!(hdu1.header.get("ZQUANTIZ").is_none(), "lossless float must not be quantized");
+        assert!(
+            matches!(hdu1.header.get("ZQUANTIZ").map(str::trim), None | Some("NONE")),
+            "lossless float must not be quantized"
+        );
         assert_eq!(hdu1.header.get_i64("ZBITPIX"), Some(-32));
         let sci_decoded = decode_compressed_image(&out_bytes, &hdu1.header, hdu1.data_start).unwrap();
         let sci_original: Vec<f32> =

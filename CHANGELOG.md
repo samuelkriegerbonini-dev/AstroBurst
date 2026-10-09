@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tile-compressed FITS is read, and RICE_1 / GZIP_2 written, through [fitsio-pure](https://crates.io/crates/fitsio-pure) with its `parallel` feature, a pure-Rust port of cfitsio's codecs, in place of the Rice, GZIP and quantization code in `infra/fits/compress` (net 1,388 lines removed).
+  - Reads are bit-identical to the previous reader on the bundled fixtures, the HST sample data, astropy-written 26 MP RICE_1 / GZIP_1 / GZIP_2 files and Solar Orbiter EUI L2 frames. 26 MP compressed reads are 3.4 to 5.6x faster on 64 threads and 1.1 to 1.4x faster on one.
+  - RICE_1 exports are 1.2 to 2.2x faster. Float exports quantize as cfitsio does: the same ZSCALE / ZZERO and error bound, with some pixels one step apart from before.
+  - Lossless GZIP_2 floats carry `ZQUANTIZ = 'NONE'`, as cfitsio writes them.
+  - The reader also opens HCOMPRESS_1, PLIO_1, any tile shape and SUBTRACTIVE_DITHER_2.
+
 ## [0.6.7.2] - 2026-10-11
 
 ### Added

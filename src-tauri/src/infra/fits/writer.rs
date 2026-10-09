@@ -1,16 +1,12 @@
 use anyhow::{bail, Context, Result};
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use fitsio_pure::compress::{compress_image_hdu, DitherSeed, Quantize, TileCompression};
 use ndarray::Array2;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
-use crate::infra::fits::compress::gzip::gzip2_encode;
-use crate::infra::fits::compress::quantize::{quantize_tile, QuantizeResult, NULL_VALUE};
-use crate::infra::fits::compress::rice::RiceParams;
-use crate::infra::fits::compress::rice_encode::rice_encode;
 use crate::types::header::HduHeader;
 
 const FITS_BLOCK_SIZE: usize = 2880;
@@ -578,8 +574,7 @@ pub fn write_fits_rgb_bitpix(
 
 
 
-const RICE_BLOCKSIZE: u32 = 32;
-const RICE_DITHER_SEED: i32 = 1;
+const RICE_DITHER_SEED: u16 = 1;
 
 pub(crate) fn write_primary_hdu_stub(
     writer: &mut BufWriter<File>,
@@ -604,148 +599,79 @@ pub(crate) fn write_primary_hdu_stub(
     Ok(())
 }
 
-struct EncodedRow {
-    compressed: Vec<u8>,
-    gzip: Vec<u8>,
-    zscale: f64,
-    zzero: f64,
+enum TilePixels<'a> {
+    U8(Vec<u8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    F32(Cow<'a, [f32]>),
+    F64(Vec<f64>),
 }
 
-fn encode_int16_row(row: &[f32], bzero: f64, bscale: f64) -> EncodedRow {
-    let ints: Vec<i64> = row
-        .iter()
+fn int16_pixels(data: &[f32], bzero: f64, bscale: f64) -> Vec<i16> {
+    data.par_iter()
         .map(|&val| {
             if val.is_finite() {
                 let physical = (val as f64 - bzero) / bscale;
-                physical.clamp(I16_BLANK as f64 + 1.0, i16::MAX as f64).round() as i64
+                physical
+                    .clamp(I16_BLANK as f64 + 1.0, i16::MAX as f64)
+                    .round() as i16
             } else {
-                I16_BLANK as i64
+                I16_BLANK
             }
         })
-        .collect();
-    let params = RiceParams { blocksize: RICE_BLOCKSIZE, bytepix: 2, signed: true };
-    EncodedRow { compressed: rice_encode(&ints, &params), gzip: Vec::new(), zscale: 0.0, zzero: 0.0 }
+        .collect()
 }
 
-fn gzip_raw_row(row: &[f32]) -> Vec<u8> {
-    let mut raw = Vec::with_capacity(row.len() * 4);
-    for &v in row {
-        raw.extend_from_slice(&v.to_be_bytes());
-    }
-    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(&raw).expect("gzip encode into a Vec<u8> sink cannot fail");
-    enc.finish().expect("gzip finish into a Vec<u8> sink cannot fail")
-}
-
-fn encode_lossless_int_row(raw: &[i64], bytepix: u32) -> EncodedRow {
-    let signed = bytepix != 1;
-    let params = RiceParams { blocksize: RICE_BLOCKSIZE, bytepix, signed };
-    EncodedRow { compressed: rice_encode(raw, &params), gzip: Vec::new(), zscale: 0.0, zzero: 0.0 }
-}
-
-fn encode_quantized_row(row: &[f32], quantize_level: f64, tile_index: usize) -> (EncodedRow, bool) {
-    match quantize_tile(row, quantize_level, RICE_DITHER_SEED, tile_index) {
-        QuantizeResult::Ints { values, quant, has_null } => {
-            let params = RiceParams { blocksize: RICE_BLOCKSIZE, bytepix: 4, signed: true };
-            (
-                EncodedRow {
-                    compressed: rice_encode(&values, &params),
-                    gzip: Vec::new(),
-                    zscale: quant.scale,
-                    zzero: quant.zero,
-                },
-                has_null,
-            )
-        }
-        QuantizeResult::Overflow => (
-            EncodedRow { compressed: Vec::new(), gzip: gzip_raw_row(row), zscale: 0.0, zzero: 0.0 },
-            false,
-        ),
-    }
+fn rice_quantized(quantize_level: f64) -> TileCompression {
+    TileCompression::rice().quantize(
+        Quantize::new()
+            .level(quantize_level as f32)
+            .seed(DitherSeed::Fixed(RICE_DITHER_SEED)),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_compressed_bintable(
+fn write_compressed_image(
     writer: &mut BufWriter<File>,
+    pixels: TilePixels,
     ncols: usize,
     nrows_per_plane: usize,
     nplanes: usize,
     colour_axis: bool,
-    zbitpix: i32,
-    quantized: bool,
-    has_null: bool,
+    compression: &TileCompression,
     blank: Option<i64>,
     bzero: f64,
     bscale: f64,
     header: Option<&HduHeader>,
-    zcmptype: &str,
-    rows: &[EncodedRow],
 ) -> Result<()> {
-    let tfields: usize = if quantized { 4 } else { 1 };
-    let row_width: usize = if quantized { 32 } else { 8 };
-    let n_bintable_rows = rows.len();
-    debug_assert_eq!(n_bintable_rows, nrows_per_plane * nplanes);
-
-    let heap_len: usize = rows.iter().map(|r| r.compressed.len() + r.gzip.len()).sum();
-
-    let mut buf: Vec<u8> = Vec::new();
-    push_header_card(&mut buf, "XTENSION", "BINTABLE");
-    push_header_card(&mut buf, "BITPIX", "8");
-    push_header_card(&mut buf, "NAXIS", "2");
-    push_header_card(&mut buf, "NAXIS1", &row_width.to_string());
-    push_header_card(&mut buf, "NAXIS2", &n_bintable_rows.to_string());
-    push_header_card(&mut buf, "PCOUNT", &heap_len.to_string());
-    push_header_card(&mut buf, "GCOUNT", "1");
-    push_header_card(&mut buf, "TFIELDS", &tfields.to_string());
-
-    push_header_card(&mut buf, "TTYPE1", "COMPRESSED_DATA");
-    push_header_card(&mut buf, "TFORM1", "1PB");
-    if quantized {
-        push_header_card(&mut buf, "TTYPE2", "GZIP_COMPRESSED_DATA");
-        push_header_card(&mut buf, "TFORM2", "1PB");
-        push_header_card(&mut buf, "TTYPE3", "ZSCALE");
-        push_header_card(&mut buf, "TFORM3", "1D");
-        push_header_card(&mut buf, "TTYPE4", "ZZERO");
-        push_header_card(&mut buf, "TFORM4", "1D");
-    }
-
-    push_header_card(&mut buf, "ZIMAGE", "T");
-    push_header_card(&mut buf, "ZCMPTYPE", zcmptype);
-    push_header_card(&mut buf, "ZBITPIX", &zbitpix.to_string());
-    push_header_card(&mut buf, "ZNAXIS", if nplanes > 1 { "3" } else { "2" });
-    push_header_card(&mut buf, "ZNAXIS1", &ncols.to_string());
-    push_header_card(&mut buf, "ZNAXIS2", &nrows_per_plane.to_string());
+    let mut naxes = vec![ncols, nrows_per_plane];
     if nplanes > 1 {
-        push_header_card(&mut buf, "ZNAXIS3", &nplanes.to_string());
+        naxes.push(nplanes);
     }
+    let hdu = match &pixels {
+        TilePixels::U8(p) => compress_image_hdu(&naxes, p, compression, &[]),
+        TilePixels::I16(p) => compress_image_hdu(&naxes, p, compression, &[]),
+        TilePixels::I32(p) => compress_image_hdu(&naxes, p, compression, &[]),
+        TilePixels::F32(p) => compress_image_hdu(&naxes, p, compression, &[]),
+        TilePixels::F64(p) => compress_image_hdu(&naxes, p, compression, &[]),
+    }
+    .map_err(|e| anyhow::anyhow!("tile compression failed: {e}"))?;
+
+    let end = hdu
+        .chunks(CARD_LEN)
+        .position(|card| card.starts_with(b"END     "))
+        .context("compressed HDU header has no END card")?;
+    let data_start = ((end + 1) * CARD_LEN).div_ceil(FITS_BLOCK_SIZE) * FITS_BLOCK_SIZE;
+
+    let mut buf = hdu[..end * CARD_LEN].to_vec();
     if colour_axis {
         push_header_card(&mut buf, "CTYPE3", RGB_AXIS_TYPE);
     }
-    push_header_card(&mut buf, "ZTILE1", &ncols.to_string());
-    push_header_card(&mut buf, "ZTILE2", "1");
-    if nplanes > 1 {
-        push_header_card(&mut buf, "ZTILE3", "1");
-    }
-    if zcmptype == "RICE_1" {
-        push_header_card(&mut buf, "ZNAME1", "BLOCKSIZE");
-        push_header_card(&mut buf, "ZVAL1", &RICE_BLOCKSIZE.to_string());
-        push_header_card(&mut buf, "ZNAME2", "BYTEPIX");
-        let bytepix = (zbitpix.unsigned_abs() / 8).max(1);
-        push_header_card(&mut buf, "ZVAL2", &bytepix.to_string());
-    }
-    if quantized {
-        push_header_card(&mut buf, "ZQUANTIZ", "SUBTRACTIVE_DITHER_1");
-        push_header_card(&mut buf, "ZDITHER0", &RICE_DITHER_SEED.to_string());
-        if has_null {
-            push_header_card(&mut buf, "ZBLANK", &NULL_VALUE.to_string());
-        }
-    } else if let Some(blank_value) = blank {
+    if let Some(blank_value) = blank {
         push_header_card(&mut buf, "BLANK", &blank_value.to_string());
     }
     push_header_card(&mut buf, "BZERO", &format!("{:.10E}", bzero));
     push_header_card(&mut buf, "BSCALE", &format!("{:.10E}", bscale));
-    push_header_card(&mut buf, "THEAP", &(row_width * n_bintable_rows).to_string());
-
     if let Some(hdr) = header {
         for card in &hdr.cards {
             let key = card.0.trim();
@@ -755,50 +681,11 @@ fn write_compressed_bintable(
             push_source_card(&mut buf, key, &card.1, hdr);
         }
     }
-
     push_provenance(&mut buf, header);
 
     writer.write_all(&buf)?;
     write_header_end(writer, buf.len())?;
-
-    let mut table_buf = Vec::with_capacity(row_width * n_bintable_rows);
-    let mut heap_buf = Vec::with_capacity(heap_len);
-    let mut offset: i64 = 0;
-    let push_desc = |table_buf: &mut Vec<u8>, len: usize, offset: i64| -> Result<i64> {
-        let len_i32 = i32::try_from(len)
-            .map_err(|_| anyhow::anyhow!("Compressed tile exceeds 2 GiB descriptor limit"))?;
-        let off_i32 = i32::try_from(offset)
-            .map_err(|_| anyhow::anyhow!("Compressed heap exceeds the 2 GiB FITS descriptor limit; export without compression"))?;
-        table_buf.extend_from_slice(&len_i32.to_be_bytes());
-        table_buf.extend_from_slice(&off_i32.to_be_bytes());
-        Ok(offset + len as i64)
-    };
-    for row in rows {
-        if !row.compressed.is_empty() {
-            offset = push_desc(&mut table_buf, row.compressed.len(), offset)?;
-            heap_buf.extend_from_slice(&row.compressed);
-        } else {
-            table_buf.extend_from_slice(&0i32.to_be_bytes());
-            table_buf.extend_from_slice(&0i32.to_be_bytes());
-        }
-        if quantized {
-            if !row.gzip.is_empty() {
-                offset = push_desc(&mut table_buf, row.gzip.len(), offset)?;
-                heap_buf.extend_from_slice(&row.gzip);
-            } else {
-                table_buf.extend_from_slice(&0i32.to_be_bytes());
-                table_buf.extend_from_slice(&0i32.to_be_bytes());
-            }
-            table_buf.extend_from_slice(&row.zscale.to_be_bytes());
-            table_buf.extend_from_slice(&row.zzero.to_be_bytes());
-        }
-    }
-
-    writer.write_all(&table_buf)?;
-    writer.write_all(&heap_buf)?;
-    let data_bytes = table_buf.len() + heap_buf.len();
-    pad_to_block(writer, data_bytes, 0u8)?;
-
+    writer.write_all(&hdu[data_start..])?;
     Ok(())
 }
 
@@ -821,26 +708,35 @@ pub fn write_fits_mono_rice(
 
     let (bzero, bscale) =
         if quantized { (0.0, 1.0) } else { compute_bzero_bscale_array(data) };
-
-    let mut encoded_rows = Vec::with_capacity(nrows);
-    let mut has_null = false;
-    for r in 0..nrows {
-        let row = &slice[r * ncols..(r + 1) * ncols];
-        if quantized {
-            let (enc, null) = encode_quantized_row(row, quantize_level, r);
-            has_null |= null;
-            encoded_rows.push(enc);
-        } else {
-            encoded_rows.push(encode_int16_row(row, bzero, bscale));
-        }
-    }
+    let (pixels, compression, blank) = if quantized {
+        (
+            TilePixels::F32(Cow::Borrowed(slice)),
+            rice_quantized(quantize_level),
+            None,
+        )
+    } else {
+        (
+            TilePixels::I16(int16_pixels(slice, bzero, bscale)),
+            TileCompression::rice(),
+            Some(I16_BLANK as i64),
+        )
+    };
 
     let file = File::create(path).context("Failed to create FITS file")?;
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     write_primary_hdu_stub(&mut writer, None)?;
-    write_compressed_bintable(
-        &mut writer, ncols, nrows, 1, false, bitpix, quantized, has_null, Some(I16_BLANK as i64),
-        bzero, bscale, header, "RICE_1", &encoded_rows,
+    write_compressed_image(
+        &mut writer,
+        pixels,
+        ncols,
+        nrows,
+        1,
+        false,
+        &compression,
+        blank,
+        bzero,
+        bscale,
+        header,
     )?;
     writer.flush()?;
     Ok(())
@@ -883,30 +779,39 @@ pub fn write_fits_rgb_rice(
         compute_bzero_bscale(&combined)
     };
 
-    let mut encoded_rows = Vec::with_capacity(nrows * 3);
-    let mut has_null = false;
-    let mut tile_index = 0usize;
+    let mut planes = Vec::with_capacity(nrows * ncols * 3);
     for channel in [r, g, b] {
-        let slice = channel.as_slice().context("Channel not contiguous")?;
-        for row_i in 0..nrows {
-            let row = &slice[row_i * ncols..(row_i + 1) * ncols];
-            if quantized {
-                let (enc, null) = encode_quantized_row(row, quantize_level, tile_index);
-                has_null |= null;
-                encoded_rows.push(enc);
-            } else {
-                encoded_rows.push(encode_int16_row(row, bzero, bscale));
-            }
-            tile_index += 1;
-        }
+        planes.extend_from_slice(channel.as_slice().context("Channel not contiguous")?);
     }
+    let (pixels, compression, blank) = if quantized {
+        (
+            TilePixels::F32(Cow::Owned(planes)),
+            rice_quantized(quantize_level),
+            None,
+        )
+    } else {
+        (
+            TilePixels::I16(int16_pixels(&planes, bzero, bscale)),
+            TileCompression::rice(),
+            Some(I16_BLANK as i64),
+        )
+    };
 
     let file = File::create(path).context("Failed to create FITS file")?;
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     write_primary_hdu_stub(&mut writer, None)?;
-    write_compressed_bintable(
-        &mut writer, ncols, nrows, 3, true, bitpix, quantized, has_null, Some(I16_BLANK as i64),
-        bzero, bscale, header, "RICE_1", &encoded_rows,
+    write_compressed_image(
+        &mut writer,
+        pixels,
+        ncols,
+        nrows,
+        3,
+        true,
+        &compression,
+        blank,
+        bzero,
+        bscale,
+        header,
     )?;
     writer.flush()?;
     Ok(())
@@ -926,26 +831,23 @@ pub(crate) fn write_planes_quantized(
         }
     }
 
-    let slices: Vec<&[f32]> = planes
-        .iter()
-        .map(|p| p.as_slice().context("plane not contiguous"))
-        .collect::<Result<_>>()?;
+    let mut pixels = Vec::with_capacity(nrows * ncols * planes.len());
+    for p in planes {
+        pixels.extend_from_slice(p.as_slice().context("plane not contiguous")?);
+    }
 
-    let encoded: Vec<(EncodedRow, bool)> = (0..slices.len() * nrows)
-        .into_par_iter()
-        .map(|tile_index| {
-            let slice = slices[tile_index / nrows];
-            let row_i = tile_index % nrows;
-            let row = &slice[row_i * ncols..(row_i + 1) * ncols];
-            encode_quantized_row(row, quantize_level, tile_index)
-        })
-        .collect();
-    let has_null = encoded.iter().any(|(_, null)| *null);
-    let encoded_rows: Vec<EncodedRow> = encoded.into_iter().map(|(enc, _)| enc).collect();
-
-    write_compressed_bintable(
-        writer, ncols, nrows, planes.len(), false, -32, true, has_null, None, 0.0, 1.0, header,
-        "RICE_1", &encoded_rows,
+    write_compressed_image(
+        writer,
+        TilePixels::F32(Cow::Owned(pixels)),
+        ncols,
+        nrows,
+        planes.len(),
+        false,
+        &rice_quantized(quantize_level),
+        None,
+        0.0,
+        1.0,
+        header,
     )
 }
 
@@ -961,13 +863,6 @@ pub(crate) fn write_planes_lossless_int(
     bscale: f64,
     header: Option<&HduHeader>,
 ) -> Result<()> {
-    let bytepix = match zbitpix {
-        8 => 1,
-        16 => 2,
-        32 => 4,
-        other => bail!("write_planes_lossless_int: unsupported ZBITPIX {other}"),
-    };
-
     for plane in raw_planes {
         if plane.len() != nrows * ncols {
             bail!(
@@ -976,20 +871,26 @@ pub(crate) fn write_planes_lossless_int(
             );
         }
     }
+    let values = raw_planes.iter().flatten();
+    let pixels = match zbitpix {
+        8 => TilePixels::U8(values.map(|&v| v as u8).collect()),
+        16 => TilePixels::I16(values.map(|&v| v as i16).collect()),
+        32 => TilePixels::I32(values.map(|&v| v as i32).collect()),
+        other => bail!("write_planes_lossless_int: unsupported ZBITPIX {other}"),
+    };
 
-    let encoded_rows: Vec<EncodedRow> = (0..raw_planes.len() * nrows)
-        .into_par_iter()
-        .map(|idx| {
-            let plane = &raw_planes[idx / nrows];
-            let row_i = idx % nrows;
-            let row = &plane[row_i * ncols..(row_i + 1) * ncols];
-            encode_lossless_int_row(row, bytepix)
-        })
-        .collect();
-
-    write_compressed_bintable(
-        writer, ncols, nrows, raw_planes.len(), false, zbitpix, false, false, blank, bzero, bscale,
-        header, "RICE_1", &encoded_rows,
+    write_compressed_image(
+        writer,
+        pixels,
+        ncols,
+        nrows,
+        raw_planes.len(),
+        false,
+        &TileCompression::rice(),
+        blank,
+        bzero,
+        bscale,
+        header,
     )
 }
 
@@ -1021,24 +922,35 @@ pub(crate) fn write_planes_gzip2_lossless(
         }
     }
 
-    let encoded_rows: Vec<EncodedRow> = (0..raw_plane_bytes.len() * nrows)
-        .into_par_iter()
-        .map(|idx| {
-            let plane = raw_plane_bytes[idx / nrows];
-            let row_i = idx % nrows;
-            let row = &plane[row_i * row_bytes..(row_i + 1) * row_bytes];
-            EncodedRow {
-                compressed: gzip2_encode(row, bytepix),
-                gzip: Vec::new(),
-                zscale: 0.0,
-                zzero: 0.0,
-            }
-        })
-        .collect();
+    let bytes = raw_plane_bytes
+        .iter()
+        .flat_map(|plane| plane.chunks_exact(bytepix));
+    let pixels = if bytepix == 4 {
+        TilePixels::F32(Cow::Owned(
+            bytes
+                .map(|b| f32::from_be_bytes(b.try_into().unwrap()))
+                .collect(),
+        ))
+    } else {
+        TilePixels::F64(
+            bytes
+                .map(|b| f64::from_be_bytes(b.try_into().unwrap()))
+                .collect(),
+        )
+    };
 
-    write_compressed_bintable(
-        writer, ncols, nrows, raw_plane_bytes.len(), false, zbitpix, false, false, None, bzero,
-        bscale, header, "GZIP_2", &encoded_rows,
+    write_compressed_image(
+        writer,
+        pixels,
+        ncols,
+        nrows,
+        raw_plane_bytes.len(),
+        false,
+        &TileCompression::gzip2().lossless().gzip_level(6),
+        None,
+        bzero,
+        bscale,
+        header,
     )
 }
 
@@ -1157,6 +1069,8 @@ pub fn write_mef_images(
 mod tests {
     use super::*;
     use crate::infra::fits::reader::parse_header_at;
+
+    const NULL_VALUE: i64 = -2_147_483_647;
 
     fn mk_header(pairs: &[(&str, &str)]) -> HduHeader {
         let mut header = HduHeader::empty();

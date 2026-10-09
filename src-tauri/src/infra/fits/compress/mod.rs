@@ -1,8 +1,4 @@
 // FITS tile-compression support (Rice/GZIP) — contributed by Jae-Joon Lee <https://github.com/leejjoon>
-pub mod gzip;
-pub mod quantize;
-pub mod rice;
-pub mod rice_encode;
 pub mod tiles;
 
 #[cfg(test)]
