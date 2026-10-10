@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7.1] - 2026-10-10
+
+### Changed
+- Compose Blend: when the preview stretch is unlinked and the blend weights give R, G and B unequal totals (Auto (λ) with two filters puts the longer one in R and splits the shorter one half to G and half to B), a note says so (`R, G and B get unequal total weights (R 1.00 · G 0.50 · B 0.50), so their backgrounds differ even after Match levels. Balanced (λ) gives each colour the same total weight.`) with a Use Balanced (λ) button; on the JWST F200W/F444W pair the composite medians go from R 7.48 · G 3.74 · B 3.74 to three equal values and the stretch stays linked
+- README updated for 0.6.7
+
+### Fixed
+- The Windows CI run failed an ASDF test because fixtures without binary blocks were checked out with CRLF line endings; `.asdf` and `.fits` files are now marked binary in `.gitattributes`
+
 ## [0.6.7.0] - 2026-10-10
 
 ### Added

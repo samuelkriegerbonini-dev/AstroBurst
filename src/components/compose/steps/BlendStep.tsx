@@ -39,6 +39,8 @@ import {
   blendMatrixError,
   blendWeightsCoverAllColumns,
   resolvePresetWeights,
+  type ColorAxes,
+  unequalColumnTotalsNote,
   wavelengthAutoWeights,
   wavelengthAutoWeightsBalanced,
   weightsForFilledBins,
@@ -65,6 +67,32 @@ interface BlendRunResult {
   dimensions?: [number, number];
   elapsed_ms?: number;
   stf_note?: string | null;
+  stf_linked?: boolean;
+  weights?: ColorAxes[];
+}
+
+interface BlendColumnNoteProps {
+  stfLinked: boolean | undefined;
+  weights: ColorAxes[];
+  balancedActive: boolean;
+  onUseBalanced: () => void;
+}
+
+export function BlendColumnNote({ stfLinked, weights, balancedActive, onUseBalanced }: BlendColumnNoteProps) {
+  const note = stfLinked === false ? unequalColumnTotalsNote(weights) : null;
+  if (!note) return null;
+  return (
+    <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+      <AlertTriangle size={12} className="shrink-0 mt-px" />
+      <div className="flex flex-col items-start gap-1">
+        <span data-testid="blend-column-note">{note}</span>
+        {!balancedActive && (
+          <button type="button" data-testid="blend-use-balanced" onClick={onUseBalanced}
+                  className="px-2 py-0.5 rounded text-[9px] font-medium bg-amber-500/15 text-amber-200 hover:bg-amber-500/25">Use Balanced (λ)</button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function BlendStep({
@@ -231,7 +259,7 @@ export default function BlendStep({
         preset: state.blendPreset,
       });
 
-      setResult(res);
+      setResult({ ...res, weights: request.weights });
 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
       onLevelScales(scales);
@@ -470,6 +498,14 @@ export default function BlendStep({
           <AlertTriangle size={12} className="shrink-0 mt-px" />
           <span data-testid="blend-stf-note">{result.stf_note}</span>
         </div>
+      )}
+      {result && (
+        <BlendColumnNote
+          stfLinked={result.stf_linked}
+          weights={result.weights ?? []}
+          balancedActive={state.blendPreset === "auto_wavelength_balanced"}
+          onUseBalanced={handleAutoWavelengthBalanced}
+        />
       )}
       {state.compositeReady && state.blendLevelScales && (
         <div className="text-[9px] text-zinc-500" data-testid="blend-level-summary">

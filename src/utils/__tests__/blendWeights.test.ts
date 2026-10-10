@@ -5,6 +5,7 @@ import {
   blendWeightsCoverAllColumns,
   emptyBlendColumns,
   resolvePresetWeights,
+  unequalColumnTotalsNote,
   wavelengthAutoWeights,
   wavelengthAutoWeightsBalanced,
   weightsForFilledBins,
@@ -130,5 +131,59 @@ describe("weight matrix validation", () => {
 
   it("rejects an empty matrix", () => {
     expect(blendMatrixError([], [])).toContain("No weights assigned");
+  });
+});
+
+describe("unequalColumnTotalsNote", () => {
+  const bicolorNote =
+    "R, G and B get unequal total weights (R 1.00 · G 0.50 · B 0.50), so their backgrounds differ even after Match levels. Balanced (λ) gives each colour the same total weight.";
+
+  it("names the R 1 / G 0.5 / B 0.5 totals of the two-filter Auto (λ) spread", () => {
+    const weights = wavelengthAutoWeights([bin("ha", 656), bin("oiii", 501)]);
+
+    expect(unequalColumnTotalsNote(weights)).toBe(bicolorNote);
+  });
+
+  it("stays silent for Balanced (λ) on the same two filters", () => {
+    expect(unequalColumnTotalsNote(wavelengthAutoWeightsBalanced([bin("ha", 656), bin("oiii", 501)]))).toBeNull();
+  });
+
+  it("stays silent for the three-filter Auto (λ) spread, whose totals are 1 / 1 / 1", () => {
+    expect(unequalColumnTotalsNote(wavelengthAutoWeights([bin("sii", 673), bin("ha", 656), bin("oiii", 501)]))).toBeNull();
+  });
+
+  it("stays silent for the four-filter Auto (λ) spread, whose rounded totals 1.33 / 1.34 / 1.33 sit within 5 %", () => {
+    const bins = [bin("a", 450), bin("b", 550), bin("c", 650), bin("d", 750)];
+
+    expect(unequalColumnTotalsNote(wavelengthAutoWeights(bins))).toBeNull();
+  });
+
+  it("flags the green-heavy five-filter Auto (λ) spread and clears it with Balanced (λ)", () => {
+    const bins = [bin("a", 450), bin("b", 500), bin("c", 550), bin("d", 600), bin("e", 650)];
+
+    expect(unequalColumnTotalsNote(wavelengthAutoWeights(bins))).toContain("(R 1.50 · G 2.00 · B 1.50)");
+    expect(unequalColumnTotalsNote(wavelengthAutoWeightsBalanced(bins))).toBeNull();
+  });
+
+  it("stays silent for a diagonal identity matrix", () => {
+    const identity = [{ r: 1, g: 0, b: 0 }, { r: 0, g: 1, b: 0 }, { r: 0, g: 0, b: 1 }];
+
+    expect(unequalColumnTotalsNote(identity)).toBeNull();
+  });
+
+  it("ignores an all-zero column, which blendMatrixError reports instead", () => {
+    expect(unequalColumnTotalsNote([{ r: 1, g: 1, b: 0 }])).toBeNull();
+    expect(unequalColumnTotalsNote([{ r: 0.6, g: 0, b: 0 }, { r: 0, g: 0, b: 0.6 }])).toBeNull();
+  });
+
+  it("treats totals within 5 % of the largest as equal and anything wider as unequal", () => {
+    expect(unequalColumnTotalsNote([{ r: 1, g: 0.95, b: 1 }])).toBeNull();
+    expect(unequalColumnTotalsNote([{ r: 1, g: 0.94, b: 1 }])).toContain("(R 1.00 · G 0.94 · B 1.00)");
+  });
+
+  it("stays silent when there is nothing to compare", () => {
+    expect(unequalColumnTotalsNote([])).toBeNull();
+    expect(unequalColumnTotalsNote([{ r: 0, g: 0, b: 0 }])).toBeNull();
+    expect(unequalColumnTotalsNote([{ r: 1, g: 0, b: 0 }])).toBeNull();
   });
 });

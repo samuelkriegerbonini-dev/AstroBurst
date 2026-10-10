@@ -51,6 +51,18 @@ export function blendMatrixError(rows: ColorAxes[], channelLabels: string[]): st
   return `Blend matrix leaves ${columns} empty: every ${columns} weight is zero, which renders a black plane instead of a composite. Assign a non-zero ${columns} weight to one of ${feeders}, or press Auto (λ).`;
 }
 
+const COLUMN_TOTAL_TOLERANCE = 0.05;
+
+export function unequalColumnTotalsNote(rows: ColorAxes[]): string | null {
+  const totals = blendColumnTotals(rows);
+  const fed = [totals.r, totals.g, totals.b].filter((total) => Math.abs(total) >= MIN_COLUMN_WEIGHT);
+  if (fed.length < 2) return null;
+  const largest = Math.max(...fed);
+  if (Math.min(...fed) >= largest * (1 - COLUMN_TOTAL_TOLERANCE)) return null;
+  const shown = `R ${totals.r.toFixed(2)} · G ${totals.g.toFixed(2)} · B ${totals.b.toFixed(2)}`;
+  return `R, G and B get unequal total weights (${shown}), so their backgrounds differ even after Match levels. Balanced (λ) gives each colour the same total weight.`;
+}
+
 export function weightsForFilledBins(weights: BlendWeight[], filledBins: FrequencyBin[]): BlendWeight[] {
   return weights.filter((w) => filledBins.some((b) => b.id === w.channelId));
 }
