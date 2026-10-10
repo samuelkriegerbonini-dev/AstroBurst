@@ -12,7 +12,14 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { useComposeWizardContext } from "../../../context/ComposeWizardContext";
 import { RunButton } from "../../ui";
 import CropEditor from "../CropEditor";
-import { alignOverlayColours, discardsNotice, MAX_OVERLAY_CHANNELS, rerunDiscards } from "../../../utils/wizard";
+import {
+  alignOverlayColours,
+  discardsNotice,
+  MAX_OVERLAY_CHANNELS,
+  rerunDiscards,
+  resolveChannelPath,
+  singleFilledBin,
+} from "../../../utils/wizard";
 import {
   applyWaitsForDetection,
   cropOverlayKeys,
@@ -88,9 +95,14 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     return () => observer.disconnect();
   }, []);
 
-  const alignedEntries = useMemo(() => {
-    return Object.entries(state.alignedPaths).filter(([, p]) => !!p);
-  }, [state.alignedPaths]);
+  const singleBin = singleFilledBin(state);
+  const singlePath = singleBin ? resolveChannelPath(state, singleBin, "stacked") : null;
+  const alignedEntries = useMemo<[string, string][]>(() => {
+    const aligned = Object.entries(state.alignedPaths).filter(([, p]) => !!p);
+    if (aligned.length > 0 || !singleBin || !singlePath) return aligned;
+    return [[singleBin, singlePath]];
+  }, [state.alignedPaths, singleBin, singlePath]);
+  const singleChannel = Object.keys(state.alignedPaths).length === 0 && alignedEntries.length === 1;
   const alignedKeys = useMemo(() => alignedEntries.map(([, path]) => path), [alignedEntries]);
   const overlayLegend = useMemo(() => {
     const labels = alignedEntries
@@ -189,6 +201,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
         margins.right,
         false,
         binIds,
+        state.alignRunToken,
       );
       setResult(res);
 
@@ -213,7 +226,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [alignedEntries, aligning, margins, onCropped]);
+  }, [alignedEntries, aligning, margins, onCropped, state.alignRunToken]);
 
   const handleSkip = useCallback(() => {
     if (aligning) return;
@@ -273,7 +286,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
       >
         <div className="flex items-baseline gap-1.5">
           <Scissors size={12} className="self-center text-cyan-400" />
-          <span className="text-xs text-zinc-300">Crop aligned channels</span>
+          <span className="text-xs text-zinc-300">{singleChannel ? "Crop channel" : "Crop aligned channels"}</span>
           <span className="text-[9px] text-zinc-500">{alignedEntries.length} ready</span>
         </div>
 
@@ -340,7 +353,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
 
         {skipped && (
           <div className="text-[9px] text-zinc-500">
-            Crop skipped. Aligned paths passed through directly.
+            {singleChannel ? "Crop skipped. The channel passes through uncropped." : "Crop skipped. Aligned paths passed through directly."}
           </div>
         )}
 
@@ -353,7 +366,8 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
 
         <div className="flex flex-col gap-1 text-[10px] text-zinc-500">
           <span>
-            Drag the box or its handles, or type the margins in pixels. Apply crops every aligned channel to the box.
+            Drag the box or its handles, or type the margins in pixels.{" "}
+            {singleChannel ? "Apply crops the channel to the box." : "Apply crops every aligned channel to the box."}
           </span>
           <span>Image: {overlayLegend}</span>
           <span>

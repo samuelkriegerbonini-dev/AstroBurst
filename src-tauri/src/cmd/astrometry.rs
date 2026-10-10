@@ -13,14 +13,17 @@ use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::writer::{filter_header, is_wcs_card};
 use crate::infra::image_source::{load_plane, load_plane_header};
+use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
     RES_CENTER_RA, RES_DIMENSIONS, RES_EAST_VEC, RES_ELAPSED_MS, RES_FITS_PATH, RES_FLIPPED,
-    RES_FOV_ARCMIN, RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_NAXIS1, RES_NAXIS2,
-    RES_NORTH_VEC, RES_ON_IMAGE, RES_PARITY, RES_PIXEL_LENGTH, RES_PIXEL_SCALE_ARCSEC,
+    RES_FOV_ARCMIN, RES_FOV_H_ARCMIN, RES_FOV_W_ARCMIN, RES_FRAME, RES_GWCS_FRAMES, RES_GWCS_REFUSAL,
+    RES_GWCS_SOURCE, RES_GWCS_STEPS, RES_GWCS_VS_SIP_MAX_MAS, RES_GWCS_VS_SIP_MAX_PX, RES_NAXIS1,
+    RES_NAXIS2, RES_NORTH_VEC, RES_ON_IMAGE, RES_PARITY, RES_PIXEL_LENGTH, RES_PIXEL_SCALE_ARCSEC,
     RES_PIXEL_SCALE_X_ARCSEC, RES_PIXEL_SCALE_Y_ARCSEC, RES_PNG_PATH, RES_POINTS,
     RES_POSITION_ANGLE_DEG, RES_PROJECTION, RES_ROTATION_DEG, RES_SEPARATION_ARCMIN,
-    RES_SEPARATION_ARCSEC, RES_SEPARATION_DEG, RES_SIP_PRESENT,
+    RES_SEPARATION_ARCSEC, RES_SEPARATION_DEG, RES_SIP_INV_ERR_PX, RES_SIP_MAX_ERR_PX,
+    RES_SIP_PRESENT, RES_WCS_KIND,
 };
 use crate::types::config::AppConfig;
 use crate::types::header::HduHeader;
@@ -34,7 +37,7 @@ const ABPROC_PLATE_SOLVED: &str = "platesolved";
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let header = load_plane_header(&image_ref(path))?;
-    let wcs = WcsTransform::from_header(&header)?;
+    let wcs = load_wcs(path, &header)?;
     Ok((header, wcs))
 }
 
@@ -80,7 +83,7 @@ fn load_wcs_with_dims_cached(path: &str) -> anyhow::Result<CachedWcs> {
     let header = load_plane_header(&image_ref(path))?;
     let (naxis1, naxis2) = image_dims(&header);
     let cached = CachedWcs {
-        wcs: std::sync::Arc::new(WcsTransform::from_header(&header)?),
+        wcs: std::sync::Arc::new(load_wcs(path, &header)?),
         naxis1,
         naxis2,
     };
@@ -363,6 +366,7 @@ pub(crate) fn write_solved_wcs(
 
     let (cx, cy) = pixel_center(cols, rows);
     let centre = wcs.pixel_to_world(cx, cy);
+    let orientation = wcs.orientation(cols, rows);
     Ok(json!({
         RES_FITS_PATH: fits_path,
         RES_PNG_PATH: png_path,
@@ -370,7 +374,9 @@ pub(crate) fn write_solved_wcs(
         RES_CENTER_RA: centre.ra,
         RES_CENTER_DEC: centre.dec,
         RES_PIXEL_SCALE_ARCSEC: wcs.pixel_scale_arcsec(),
-        RES_SIP_PRESENT: wcs.orientation(cols, rows).sip_present,
+        RES_SIP_PRESENT: orientation.sip_present,
+        RES_SIP_MAX_ERR_PX: orientation.sip_max_err_px,
+        RES_SIP_INV_ERR_PX: orientation.sip_inv_err_px,
         RES_ELAPSED_MS: started.elapsed().as_millis() as u64,
     }))
 }
@@ -413,6 +419,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
         let (cx, cy) = pixel_center(naxis1, naxis2);
         let center = wcs.pixel_to_world(cx, cy);
         let orientation = wcs.orientation(naxis1, naxis2);
+        let gwcs = orientation.gwcs.as_ref();
 
         Ok(json!({
             RES_CENTER_RA: center.ra,
@@ -430,8 +437,17 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_PIXEL_SCALE_Y_ARCSEC: orientation.pixel_scale_y_arcsec,
             RES_PROJECTION: orientation.projection,
             RES_SIP_PRESENT: orientation.sip_present,
+            RES_SIP_MAX_ERR_PX: orientation.sip_max_err_px,
+            RES_SIP_INV_ERR_PX: orientation.sip_inv_err_px,
             RES_NORTH_VEC: orientation.north_vec,
             RES_EAST_VEC: orientation.east_vec,
+            RES_WCS_KIND: orientation.wcs_kind,
+            RES_GWCS_STEPS: gwcs.map(|g| g.n_steps),
+            RES_GWCS_FRAMES: gwcs.map(|g| &g.frames),
+            RES_GWCS_SOURCE: gwcs.map(|g| &g.source),
+            RES_GWCS_VS_SIP_MAX_MAS: gwcs.and_then(|g| g.vs_header_sip_max_mas),
+            RES_GWCS_VS_SIP_MAX_PX: gwcs.and_then(|g| g.vs_header_sip_max_px),
+            RES_GWCS_REFUSAL: wcs.gwcs_refusal(),
         }))
     })
 }
@@ -446,7 +462,7 @@ pub async fn pixel_to_world_cmd(
         let frame = SkyFrame::from_name(frame.as_deref().unwrap_or("icrs"))
             .map_err(|e| anyhow::anyhow!(e))?;
         let wcs = load_wcs_cached(&path)?;
-        let coords = wcs.pixel_to_world_batch(&points);
+        let coords = wcs.pixel_to_world_bounded_batch(&points);
         let out: Vec<serde_json::Value> = coords
             .into_iter()
             .map(|c| {
@@ -1314,6 +1330,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_wcs_info_reports_the_sip_fit_residual() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sip_residual.fits").to_string_lossy().to_string();
+        let mut cards = wcs_cards(north_up_cd());
+        cards.push(("SIPMXERR".to_string(), "0.0123".to_string()));
+        let pairs: Vec<(&str, &str)> = cards.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        crate::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::<f32>::zeros((100, 100)), Some(&make_header(&pairs))).unwrap();
+
+        let info = super::get_wcs_info(path).await.unwrap();
+        assert_eq!(info["sip_max_err_px"].as_f64(), Some(0.0123), "{info}");
+        assert_eq!(info.get("sip_inv_err_px"), Some(&serde_json::Value::Null), "{info}");
+        assert_eq!(info["sip_present"], false);
+
+        let (source, _) = source_with_old_wcs(&dir, "solved_residual_src.fits");
+        let out = dir.path().join("out").to_string_lossy().to_string();
+        let mut solver_cards = nova_wcs_cards();
+        solver_cards.push(("SIPMXERR".to_string(), "0.0098".to_string()));
+        solver_cards.push(("SIPIVERR".to_string(), "0.012".to_string()));
+        let result = super::write_solved_wcs(&source, &solver_cards, &out).unwrap();
+        assert_eq!(result["sip_max_err_px"].as_f64(), Some(0.0098), "{result}");
+        assert_eq!(result["sip_inv_err_px"].as_f64(), Some(0.012), "{result}");
+        let fits_path = result["fits_path"].as_str().unwrap().to_string();
+        let written = crate::infra::image_source::load_plane_header(&crate::cmd::common::image_ref(&fits_path)).unwrap();
+        assert_eq!(written.get_f64("SIPMXERR"), Some(0.0098));
+        assert_eq!(written.get_f64("SIPIVERR"), Some(0.012));
+        let info = super::get_wcs_info(fits_path).await.unwrap();
+        assert_eq!(info["sip_max_err_px"].as_f64(), Some(0.0098), "{info}");
+        assert_eq!(info["sip_inv_err_px"].as_f64(), Some(0.012), "{info}");
+    }
+
+    #[tokio::test]
     async fn wcs_info_reports_the_orientation_of_a_north_up_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("info.fits").to_string_lossy().to_string();
@@ -1329,5 +1376,293 @@ mod tests {
         assert!(nx.abs() < 1e-6 && (ny - 1.0).abs() < 1e-6, "north ({nx}, {ny})");
         let (ex, ey) = sky_of(&info, "east_vec");
         assert!((ex + 1.0).abs() < 1e-6 && ey.abs() < 1e-6, "east ({ex}, {ey})");
+    }
+
+    mod gwcs {
+        use std::path::PathBuf;
+
+        use serde_json::Value;
+
+        use super::write_north_up_fits;
+        use crate::cmd::common::image_ref;
+        use crate::core::astrometry::gwcs::test_support::{
+            assert_close, assert_close_slice, documents_fits_dir, fixture_pipeline, heavy_test_dir, mast_dir, real_data_dir,
+            skip_if_absent,
+        };
+        use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
+        use crate::infra::asdf::converter::test_fixtures::nircam_gwcs_with_inline_data;
+        use crate::infra::image_source::load_plane_header;
+        use crate::infra::wcs_source::gwcs_for_path;
+
+        const GWCS_NULL_KEYS: [&str; 6] = [
+            "gwcs_steps",
+            "gwcs_frames",
+            "gwcs_source",
+            "gwcs_vs_header_sip_max_mas",
+            "gwcs_vs_header_sip_max_px",
+            "gwcs_refusal",
+        ];
+
+        fn gwcs_asdf(dir: &tempfile::TempDir) -> String {
+            let path = dir.path().join("nircam_gwcs.asdf");
+            std::fs::write(&path, nircam_gwcs_with_inline_data()).unwrap();
+            path.to_string_lossy().into_owned()
+        }
+
+        fn pair(v: &Value) -> [f64; 2] {
+            [v[0].as_f64().unwrap(), v[1].as_f64().unwrap()]
+        }
+
+        async fn points_of(path: &str, pixels: &[(f64, f64)]) -> Vec<Option<[f64; 2]>> {
+            let out = super::super::pixel_to_world_cmd(path.to_string(), pixels.to_vec(), None).await.unwrap();
+            out["points"].as_array().unwrap().iter().map(|p| (!p.is_null()).then(|| pair(p))).collect()
+        }
+
+        async fn pixels_of(path: &str, sky: &[(f64, f64)]) -> Vec<Option<[f64; 2]>> {
+            let out = super::super::world_to_pixel_cmd(path.to_string(), sky.to_vec(), None).await.unwrap();
+            out["points"].as_array().unwrap().iter().map(|p| (!p.is_null()).then(|| pair(p))).collect()
+        }
+
+        fn real_file(dir: PathBuf, name: &str) -> Option<String> {
+            let path = dir.join(name);
+            (!skip_if_absent(&path)).then(|| path.to_string_lossy().into_owned())
+        }
+
+        fn header_only_wcs(path: &str) -> WcsTransform {
+            WcsTransform::from_header(&load_plane_header(&image_ref(path)).unwrap()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn get_wcs_info_reports_the_gwcs_mode() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = gwcs_asdf(&dir);
+            let info = super::super::get_wcs_info(path.clone()).await.unwrap();
+            assert_eq!(info["wcs_kind"], "gwcs", "{info}");
+            assert_eq!(info["gwcs_steps"], 3, "{info}");
+            assert_eq!(info["gwcs_frames"], serde_json::json!(["detector", "v2v3", "v2v3vacorr", "world"]), "{info}");
+            assert_eq!(info["gwcs_source"], "wcs", "{info}");
+            assert_eq!(info["projection"], "gWCS", "{info}");
+            assert_eq!(info["sip_present"], false, "{info}");
+            assert_eq!(info["gwcs_refusal"], Value::Null, "{info}");
+            let pipeline = fixture_pipeline("wcs_jwst_nircam_cal300.asdf");
+            let centre = pipeline.forward(1.5, 1.5, false);
+            assert_close(info["center_ra"].as_f64().unwrap(), centre[0], 1e-9, "center_ra is the pipeline at the 4x4 image centre");
+            assert_close(info["center_dec"].as_f64().unwrap(), centre[1], 1e-9, "center_dec");
+            let px = info["gwcs_vs_header_sip_max_px"].as_f64().expect("the synthesised header carries the fitted SIP");
+            assert!(px < 0.001, "fitted header SIP vs gWCS: {px} px");
+            assert!(info["gwcs_vs_header_sip_max_mas"].as_f64().unwrap() < 0.05, "{info}");
+            assert!(info["sip_max_err_px"].as_f64().unwrap() < 1e-6, "SIPMXERR of the fitted header: {info}");
+
+            let plain = dir.path().join("plain_tan.fits").to_string_lossy().to_string();
+            write_north_up_fits(&plain, 50);
+            let info = super::super::get_wcs_info(plain).await.unwrap();
+            assert_eq!(info["wcs_kind"], "header", "{info}");
+            assert_eq!(info["projection"], "TAN");
+            for key in GWCS_NULL_KEYS {
+                assert_eq!(info.get(key), Some(&Value::Null), "{key}: {info}");
+            }
+        }
+
+        #[tokio::test]
+        async fn pixel_to_world_cmd_uses_the_gwcs() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = gwcs_asdf(&dir);
+            let pipeline = fixture_pipeline("wcs_jwst_nircam_cal300.asdf");
+            let corner = pipeline.forward(0.0, 0.0, false);
+            let got = points_of(&path, &[(0.0, 0.0), (-1.0, 0.0), (3.0, 3.0)]).await;
+            assert_close_slice(&got[0].expect("inside"), &corner, 1e-9, "(0, 0) equals pipeline.forward");
+            assert_close_slice(&got[0].unwrap(), &[274.7253135310639, -13.875903855344635], 1e-9, "(0, 0) equals the gwcs truth");
+            assert!(got[1].is_none(), "the readout applies the bounding box: {got:?}");
+            assert_close_slice(&got[2].expect("inside"), &pipeline.forward(3.0, 3.0, false), 1e-9, "(3, 3)");
+            let unbounded = super::super::load_wcs_cached(&path).unwrap().pixel_to_world(-1.0, 0.0);
+            assert!(unbounded.ra.is_finite() && unbounded.dec.is_finite(), "internal consumers extrapolate: {unbounded:?}");
+
+            let back = pixels_of(&path, &[(corner[0], corner[1])]).await;
+            let back = back[0].expect("finite");
+            assert_close_slice(&back, &[0.0, 0.0], 1e-6, "world_to_pixel_cmd is the exact gWCS inverse");
+            let (hx, hy) = header_only_wcs(&path).world_to_pixel(corner[0], corner[1]);
+            let header_err = hx.hypot(hy);
+            assert!(header_err > back[0].hypot(back[1]), "the fitted AP/BP inverse ({hx}, {hy}) is less exact than Newton {back:?}");
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_nrca1_cal_info_and_points() {
+            let Some(path) = real_file(real_data_dir(), "jw02739001001_02105_00001_nrca1_cal.fits") else { return };
+            let info = super::super::get_wcs_info(path.clone()).await.unwrap();
+            assert_eq!(info["wcs_kind"], "gwcs", "{info}");
+            assert_eq!(info["gwcs_source"], "ASDF HDU 8", "{info}");
+            assert_eq!(info["gwcs_steps"], 3, "{info}");
+            assert_eq!(info["gwcs_frames"], serde_json::json!(["detector", "v2v3", "v2v3vacorr", "world"]));
+            assert_eq!(info["sip_max_err_px"].as_f64(), Some(0.008736956112743353), "{info}");
+            assert_eq!(info["sip_inv_err_px"].as_f64(), Some(0.008801265065873224), "{info}");
+            assert_close(info["gwcs_vs_header_sip_max_mas"].as_f64().unwrap(), 0.2662, 0.005, "9x9 header SIP residual");
+            assert_eq!(info["gwcs_refusal"], Value::Null);
+            assert_eq!(info["projection"], "gWCS");
+            assert_close_slice(
+                &[info["center_ra"].as_f64().unwrap(), info["center_dec"].as_f64().unwrap()],
+                &[274.7348047011612, -13.867263013140171],
+                1e-9,
+                "centre (1023.5, 1023.5)",
+            );
+            let expected = [
+                [274.7253135310639, -13.875903855344635],
+                [274.73891366393576, -13.871908419682919],
+                [274.7348093260082, -13.867258830394992],
+                [274.7442624159364, -13.858765184824815],
+                [274.72589718810605, -13.858073848486038],
+            ];
+            let got = points_of(&path, &[(0.0, 0.0), (500.0, 1500.0), (1024.0, 1024.0), (2047.0, 2047.0), (2047.0, 0.0)]).await;
+            for (g, e) in got.iter().zip(expected) {
+                assert_close_slice(&g.expect("finite"), &e, 1e-9, "nrca1 CDP point");
+            }
+            println!("nrca1 cal: {} 9x9 max {} mas", info["gwcs_source"], info["gwcs_vs_header_sip_max_mas"]);
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_mirimage_cal_points_and_exact_inverse() {
+            let Some(path) = real_file(real_data_dir(), "jw02739002001_02101_00001_mirimage_cal.fits") else { return };
+            let got = points_of(&path, &[(0.0, 0.0), (515.0, 511.0)]).await;
+            assert_close_slice(&got[0].unwrap(), &[274.7271082813119, -13.841811218259549], 1e-9, "mirimage (0, 0)");
+            assert_close_slice(&got[1].unwrap(), &[274.74503682314577, -13.828111050526784], 1e-9, "mirimage (515, 511)");
+            let back = pixels_of(&path, &[(274.7271082813119, -13.841811218259549)]).await;
+            assert_close_slice(&back[0].unwrap(), &[0.0, 0.0], 1e-6, "exact inverse (header AP/BP: 0.014 px, analytic: 0.11 px)");
+            let (hx, hy) = header_only_wcs(&path).world_to_pixel(274.7271082813119, -13.841811218259549);
+            println!("mirimage (0,0) inverse: newton {:?}, header AP/BP ({hx}, {hy})", back[0]);
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_roman_cal_info_points_inverse_and_grid() {
+            let Some(path) = real_file(real_data_dir(), "r9999901001001001001_0001_wfi01_f129_cal.asdf") else { return };
+            let info = super::super::get_wcs_info(path.clone()).await.unwrap();
+            assert_eq!(info["wcs_kind"], "gwcs", "{info}");
+            assert_eq!(info["gwcs_source"], "roman.meta.wcs", "{info}");
+            assert_eq!(info["gwcs_steps"], 3);
+            assert_eq!(info["projection"], "gWCS");
+            assert_eq!(info["gwcs_refusal"], Value::Null);
+            assert_close(info["pixel_scale_arcsec"].as_f64().unwrap(), 0.1093, 0.0005, "mean of the anisotropic surrogate");
+            assert_close(info["pixel_scale_x_arcsec"].as_f64().unwrap(), 0.1103, 0.0005, "x scale");
+            assert_close(info["pixel_scale_y_arcsec"].as_f64().unwrap(), 0.1083, 0.0005, "y scale");
+            assert!(info["gwcs_vs_header_sip_max_px"].as_f64().unwrap() < 0.001, "fitted degree-5 header vs gWCS: {info}");
+            let expected = [
+                [72.49379934026463, -30.725719347990214],
+                [72.45811479570528, -30.665770933732336],
+                [72.42090111505738, -30.66436058048687],
+                [72.34786329185872, -30.602393450898834],
+                [72.34851066377523, -30.72522315122843],
+                [72.48302693211511, -30.608447954482045],
+            ];
+            let pixels = [(0.0, 0.0), (1000.0, 2000.0), (2044.0, 2044.0), (4087.0, 4087.0), (4087.0, 0.0), (300.0, 3900.0)];
+            let got = points_of(&path, &pixels).await;
+            for (g, e) in got.iter().zip(expected) {
+                assert_close_slice(&g.expect("finite"), &e, 1e-9, "roman CDP point");
+            }
+            let far = super::super::world_to_pixel_cmd(path.clone(), vec![(72.83404951829527, -31.252367086918532)], None).await.unwrap();
+            let margin = crate::core::astrometry::wcs::GWCS_NEWTON_SKIP_MARGIN_PX;
+            if let Some(p) = far["points"][0].as_array() {
+                let [x, y] = pair(&far["points"][0]);
+                assert!(x < -0.5 - margin || x > 4087.5 + margin || y < -0.5 - margin || y > 4087.5 + margin, "ghost at ({x}, {y}): {p:?}");
+                assert_eq!(far["on_image"][0], false);
+            }
+            let grid = super::super::grid_lines_cmd(path.clone(), Some("icrs".into()), None).await.unwrap();
+            assert!(grid.get("error").is_none(), "{grid}");
+            let lines = grid["lines"].as_array().unwrap();
+            let lon = lines.iter().filter(|l| l["kind"] == "lon").count();
+            let lat = lines.iter().filter(|l| l["kind"] == "lat").count();
+            assert!(lon >= 2 && lat >= 2, "lon {lon} lat {lat}");
+            println!("roman cal: {} lon + {} lat grid lines, scale {}", lon, lat, info["pixel_scale_arcsec"]);
+        }
+
+        fn i2d_files(dir: &PathBuf) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                eprintln!("skipped: {} absent", dir.display());
+                return Vec::new();
+            };
+            let mut files: Vec<String> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_i2d.fits")))
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            files
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_i2d_products_stay_in_header_mode() {
+            let heavy = i2d_files(&heavy_test_dir());
+            let mast = i2d_files(&mast_dir());
+            if !heavy.is_empty() {
+                assert_eq!(heavy.len(), 6, "{heavy:?}");
+            }
+            if !mast.is_empty() {
+                assert_eq!(mast.len(), 22, "{mast:?}");
+            }
+            let files: Vec<String> = heavy.into_iter().chain(mast).collect();
+            if files.is_empty() {
+                return;
+            }
+            for path in &files {
+                let lookup = gwcs_for_path(path);
+                assert!(matches!(lookup, Ok(None)), "{path}: {:?}", lookup.map(|s| s.map(|_| ())));
+                let info = super::super::get_wcs_info(path.clone()).await.unwrap();
+                assert_eq!(info["wcs_kind"], "header", "{path}: {info}");
+                for key in GWCS_NULL_KEYS {
+                    assert_eq!(info.get(key), Some(&Value::Null), "{path} {key}: {info}");
+                }
+                let header_only = header_only_wcs(path);
+                let (n1, n2) = (info["naxis1"].as_u64().unwrap() as f64, info["naxis2"].as_u64().unwrap() as f64);
+                let corners = [(0.0, 0.0), (n1 - 1.0, 0.0), (0.0, n2 - 1.0), (n1 - 1.0, n2 - 1.0)];
+                let got = points_of(path, &corners).await;
+                for (g, (x, y)) in got.iter().zip(corners) {
+                    let h = header_only.pixel_to_world(x, y);
+                    assert_close_slice(&g.expect("finite"), &[h.ra, h.dec], 1e-12, &format!("{path} corner ({x}, {y})"));
+                }
+            }
+            println!("{} i2d products in header mode", files.len());
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_rate_and_s3d_keep_their_header_result() {
+            if let Some(s3d) = real_file(documents_fits_dir(), "jw01266005001_02103_00001_nrs1_s3d.fits") {
+                assert!(matches!(gwcs_for_path(&s3d), Ok(None)));
+                let err = super::super::get_wcs_info(s3d.clone()).await.unwrap_err();
+                assert!(err.contains("3D cube"), "a cube is not a plane for get_wcs_info, before and after: {err}");
+                let file = std::fs::File::open(&s3d).unwrap();
+                let header = crate::infra::fits::reader::extract_header_by_index(&file, 1).unwrap();
+                let wcs = crate::infra::wcs_source::load_wcs(&s3d, &header).unwrap();
+                assert_eq!((wcs.kind(), wcs.gwcs_refusal()), (crate::core::astrometry::wcs::WcsKind::Header, None));
+                let (a, b) = (wcs.pixel_to_world(10.0, 12.0), WcsTransform::from_header(&header).unwrap().pixel_to_world(10.0, 12.0));
+                assert_close_slice(&[a.ra, a.dec], &[b.ra, b.dec], 1e-12, "s3d header TAN through load_wcs");
+            }
+            if let Some(rate) = real_file(documents_fits_dir(), "jw01266005001_02103_00001_nrs1_rate.fits") {
+                assert!(matches!(gwcs_for_path(&rate), Ok(None)));
+                let err = super::super::get_wcs_info(rate.clone()).await.unwrap_err();
+                let header = load_plane_header(&image_ref(&rate)).unwrap();
+                let before = WcsTransform::from_header(&header).unwrap_err().to_string();
+                assert!(err.ends_with(&before), "the rate SCI (no CRPIX, no celestial CTYPE) refuses as before: {err} vs {before}");
+            }
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn gwcs_real_crf_reference_exposure_uses_its_gwcs() {
+            let Some(path) = real_file(mast_dir(), "jw01475001001_02101_00001_nrca1_o001_crf.fits") else { return };
+            let info = super::super::get_wcs_info(path.clone()).await.unwrap();
+            assert_eq!(info["wcs_kind"], "gwcs", "{info}");
+            assert!(info["gwcs_source"].as_str().unwrap().starts_with("ASDF HDU "), "{info}");
+            assert_eq!(info["gwcs_steps"], 3);
+            let mas = info["gwcs_vs_header_sip_max_mas"].as_f64().unwrap();
+            assert!(mas < 0.01, "cal_ver 2.0.1 degree-5 header SIP vs gWCS: {mas} mas");
+            let header_only = header_only_wcs(&path);
+            let got = points_of(&path, &[(0.0, 0.0)]).await;
+            let h = header_only.pixel_to_world(0.0, 0.0);
+            let sep_mas = angular_separation(got[0].unwrap()[0], got[0].unwrap()[1], h.ra, h.dec) * 3.6e6;
+            assert!(sep_mas <= mas + 1e-9, "corner separation {sep_mas} mas within the 9x9 maximum {mas}");
+        }
     }
 }

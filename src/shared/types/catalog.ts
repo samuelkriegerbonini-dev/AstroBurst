@@ -25,6 +25,8 @@ export interface PlacedCatalogRow extends CatalogRow {
   on_image: boolean;
 }
 
+export type CatalogSource = "network" | "memory" | "disk";
+
 export interface ConeSearchResult {
   rows: PlacedCatalogRow[];
   epoch_year: number | null;
@@ -35,6 +37,7 @@ export interface ConeSearchResult {
   center_dec: number;
   elapsed_ms: number;
   warnings: string[];
+  catalog_source?: CatalogSource;
 }
 
 export interface ConeSearchOptions {
@@ -106,6 +109,7 @@ export interface CrossMatchResult {
   match_radius_arcsec: number;
   elapsed_ms: number;
   warnings: string[];
+  catalog_source?: CatalogSource;
 }
 
 export interface CrossMatchOptions {

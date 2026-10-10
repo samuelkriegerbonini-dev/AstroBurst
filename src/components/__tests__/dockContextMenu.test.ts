@@ -14,6 +14,7 @@ interface MenuProps {
   onMove: ReturnType<typeof vi.fn<(anchor: DockAnchor) => void>>;
   onReorder: ReturnType<typeof vi.fn<(delta: -1 | 1) => void>>;
   onReset: ReturnType<typeof vi.fn<() => void>>;
+  onShowTips: ReturnType<typeof vi.fn<() => void>>;
   onClose: ReturnType<typeof vi.fn<() => void>>;
 }
 
@@ -26,6 +27,7 @@ function menuProps(over: Partial<MenuProps> = {}): MenuProps {
     onMove: vi.fn<(anchor: DockAnchor) => void>(),
     onReorder: vi.fn<(delta: -1 | 1) => void>(),
     onReset: vi.fn<() => void>(),
+    onShowTips: vi.fn<() => void>(),
     onClose: vi.fn<() => void>(),
     ...over,
   };
@@ -154,16 +156,16 @@ describe("DockMenuList markup", () => {
     expect(byText(lone, "Move down").attrs).toContain('aria-disabled="true"');
   });
 
-  it("ends with Reset layout after separators", () => {
+  it("ends with Reset layout and Show layout tips after separators", () => {
     const html = render(menuProps());
-    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "Reset layout"]);
+    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "Reset layout", "Show layout tips"]);
     expect(html.match(/role="separator"/g)?.length).toBe(2);
   });
 
   it("keeps every item out of the tab order", () => {
     const html = render(menuProps());
     const items = [...buttons(html, "menuitemradio"), ...buttons(html, "menuitem")];
-    expect(items).toHaveLength(7);
+    expect(items).toHaveLength(8);
     for (const item of items) {
       expect(item.attrs).toContain('tabindex="-1"');
       expect(item.attrs).toContain('type="button"');
@@ -206,6 +208,14 @@ describe("DockMenuList activation", () => {
     const props = menuProps();
     activate(props, "menuitem", "Reset layout");
     expect(props.onReset).toHaveBeenCalledTimes(1);
+    expect(props.onShowTips).not.toHaveBeenCalled();
+  });
+
+  it("shows the layout tips", () => {
+    const props = menuProps();
+    activate(props, "menuitem", "Show layout tips");
+    expect(props.onShowTips).toHaveBeenCalledTimes(1);
+    expect(props.onReset).not.toHaveBeenCalled();
   });
 });
 

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore, useId } from "react";
-import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Search, Download, Columns2 } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Search, Download, Columns2, Sparkles } from "lucide-react";
 
 import DropZone from "./components/file/DropZone";
 import EmptyState from "./components/EmptyState";
@@ -8,6 +8,7 @@ import type { MetadataFile } from "./components/file/MetadataFileList";
 import PreviewPanel from "./components/PreviewPanel";
 import DockShell from "./components/dock/DockShell";
 import { DOCK_TOOLS } from "./components/dock/toolRegistry";
+import { dockOnboardingStore } from "./components/dock/dockOnboardingStore";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -377,6 +378,7 @@ export default function App() {
         icon: Columns2,
         run: () => dockStore.resetAll(),
       });
+      acts.push({ id: "dock-tips", label: "Show tool window tips", keywords: ["Layout", "Drag", "Dock", "Onboarding"], icon: Sparkles, run: () => dockOnboardingStore.show() });
       if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: handleExportZip });
       if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", hint: "confirm in footer", icon: RotateCcw, run: handleNewBatchClick });
     }

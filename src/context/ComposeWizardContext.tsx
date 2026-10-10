@@ -26,6 +26,9 @@ import type { AlignRunEvent, AlignRunRecord, ChannelStage, CompositeOp, Subframe
 import type { AlignResult } from "../shared/types/compose";
 import { useCompositeActions } from "./CompositeContext";
 import { withSpccWb } from "../utils/levelMatch";
+import { nextDiscardNotices, stackStateAfterReset, type StackRunOutcome } from "../utils/stackRun";
+import { cancelProgress } from "../services/progress";
+import { STACK_PROGRESS_EVENT } from "../shared/types/stacking";
 
 export type WizardAction =
   | { type: "SET_BINS"; bins: FrequencyBin[] }
@@ -51,7 +54,7 @@ export type WizardAction =
   | { type: "INVALIDATE_FROM"; stepId: string }
   | { type: "RESET" };
 
-function reducer(state: WizardState, action: WizardAction): WizardState {
+export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   return withSpccWb(applyAction(state, action));
 }
 
@@ -170,6 +173,8 @@ export interface WizardStackRun {
   binId: string;
   startedAt: number;
   batch: { current: number; total: number; label: string } | null;
+  token: number;
+  files: string[];
 }
 
 export type WizardAlignRun = AlignRunRecord<AlignResult>;
@@ -184,6 +189,11 @@ interface ComposeWizardContextValue {
   setCompositeDims: (dims: [number, number]) => void;
   stackRun: WizardStackRun | null;
   setStackRun: (run: WizardStackRun | null) => void;
+  finishStackRun: (token: number) => void;
+  stackGeneration: number;
+  getStackGeneration: () => number;
+  stackDiscarded: Record<string, string>;
+  recordStackOutcome: (binId: string, outcome: StackRunOutcome) => void;
   alignRun: WizardAlignRun | null;
   startAlignRun: (run: WizardAlignRun) => void;
   finishAlignRun: (started: WizardAlignRun, run: WizardAlignRun) => boolean;
@@ -207,10 +217,14 @@ interface Props {
 }
 
 export function ComposeWizardProvider({ children }: Props) {
-  const [state, reactDispatch] = useReducer(reducer, INITIAL_STATE);
+  const [state, reactDispatch] = useReducer(wizardReducer, INITIAL_STATE);
   const [activeStep, setActiveStepRaw] = useState("channels");
   const [compositeDims, setCompositeDims] = useState<[number, number] | null>(null);
-  const [stackRun, setStackRun] = useState<WizardStackRun | null>(null);
+  const [stackRun, setStackRunState] = useState<WizardStackRun | null>(null);
+  const stackRunRef = useRef<WizardStackRun | null>(null);
+  const [stackGeneration, setStackGeneration] = useState(0);
+  const stackGenerationRef = useRef(0);
+  const [stackDiscarded, setStackDiscarded] = useState<Record<string, string>>({});
   const [alignRun, setAlignRunState] = useState<WizardAlignRun | null>(null);
   const alignRunRef = useRef<WizardAlignRun | null>(null);
   const latestStateRef = useRef(INITIAL_STATE);
@@ -232,11 +246,35 @@ export function ComposeWizardProvider({ children }: Props) {
     [updateAlignRun],
   );
 
+  const setStackRun = useCallback((run: WizardStackRun | null) => {
+    stackRunRef.current = run;
+    setStackRunState(run);
+  }, []);
+
+  const finishStackRun = useCallback((token: number) => {
+    if (stackRunRef.current?.token !== token) return;
+    stackRunRef.current = null;
+    setStackRunState(null);
+  }, []);
+
+  const getStackGeneration = useCallback(() => stackGenerationRef.current, []);
+
+  const recordStackOutcome = useCallback((binId: string, outcome: StackRunOutcome) => {
+    setStackDiscarded((prev) => nextDiscardNotices(prev, binId, outcome));
+  }, []);
+
   const dispatch = useCallback((action: WizardAction) => {
-    latestStateRef.current = reducer(latestStateRef.current, action);
-    if (action.type === "RESET") updateAlignRun({ type: "reset" });
+    latestStateRef.current = wizardReducer(latestStateRef.current, action);
+    if (action.type === "RESET") {
+      updateAlignRun({ type: "reset" });
+      const next = stackStateAfterReset(stackGenerationRef.current, stackRunRef.current !== null);
+      stackGenerationRef.current = next.generation;
+      setStackGeneration(next.generation);
+      setStackRun(null);
+      if (next.cancel) cancelProgress(STACK_PROGRESS_EVENT).catch(() => {});
+    }
     reactDispatch(action);
-  }, [updateAlignRun]);
+  }, [updateAlignRun, setStackRun]);
 
   const getState = useCallback(() => latestStateRef.current, []);
   const wasReadyRef = useRef(state.compositeReady);
@@ -273,10 +311,15 @@ export function ComposeWizardProvider({ children }: Props) {
     setCompositeDims,
     stackRun,
     setStackRun,
+    finishStackRun,
+    stackGeneration,
+    getStackGeneration,
+    stackDiscarded,
+    recordStackOutcome,
     alignRun,
     startAlignRun,
     finishAlignRun,
-  }), [state, dispatch, getState, activeStep, setActiveStep, setOutputForgetter, stackRun, alignRun, startAlignRun, finishAlignRun]);
+  }), [state, dispatch, getState, activeStep, setActiveStep, setOutputForgetter, stackRun, setStackRun, finishStackRun, stackGeneration, getStackGeneration, stackDiscarded, recordStackOutcome, alignRun, startAlignRun, finishAlignRun]);
 
   return (
     <ComposeWizardCtx.Provider value={value}>

@@ -4,6 +4,7 @@ import type { PhotCal } from "../services/analysis";
 import { regionStats, type RegionStatsRequest } from "../services/regions";
 import type { RegionStatsMeasured } from "../utils/measurementLog";
 import { excludeShapes, isExcludeRegion } from "../utils/regionExclude";
+import { regionStatsRunKey } from "../utils/analysisTarget";
 
 export const STATS_DEBOUNCE_MS = 250;
 export const MAX_REGIONS_PER_STATS_CALL = 512;
@@ -110,6 +111,7 @@ export function useRegionStats(
   regions: Region[],
   excludeDq: boolean,
   clip?: RegionStatsClip,
+  measureKey?: string | null,
 ): RegionStatsState {
   const [stats, setStats] = useState<Map<string, RegionStatsEntry>>(EMPTY_STATS);
   const [calibration, setCalibration] = useState<RegionCalibrationState>(NO_CALIBRATION);
@@ -119,6 +121,7 @@ export function useRegionStats(
   const seqRef = useRef(0);
   const sigma = clip?.sigma ?? null;
   const maxiters = clip?.maxiters ?? null;
+  const runKey = regionStatsRunKey(filePath, measureKey ?? null);
 
   useEffect(() => {
     setStats(EMPTY_STATS);
@@ -167,7 +170,7 @@ export function useRegionStats(
       }
     }, STATS_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [filePath, regions, excludeDq, sigma, maxiters]);
+  }, [filePath, runKey, regions, excludeDq, sigma, maxiters]);
 
   return { stats, loading, error, measured, ...calibration };
 }

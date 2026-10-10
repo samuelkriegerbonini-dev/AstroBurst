@@ -54,6 +54,8 @@ const DebayerPanel = lazy(() => import("./DebayerPanel"));
 const PixelMathPanel = lazy(() => import("./PixelMathPanel"));
 const LocalContrastPanel = lazy(() => import("./LocalContrastPanel"));
 const HdrPanel = lazy(() => import("./HdrPanel"));
+const CurvesPanel = lazy(() => import("./CurvesPanel"));
+const GeometryPanel = lazy(() => import("./GeometryPanel"));
 
 type ProcessingSection =
   | "debayer"
@@ -65,7 +67,9 @@ type ProcessingSection =
   | "masked_stretch"
   | "local_contrast"
   | "hdr"
-  | "pixelmath";
+  | "curves"
+  | "pixelmath"
+  | "geometry";
 
 const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "debayer", label: "Debayer", color: "orange" },
@@ -77,7 +81,9 @@ const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
   { id: "masked_stretch", label: "Masked", color: "rose" },
   { id: "local_contrast", label: "LHE", color: "teal" },
   { id: "hdr", label: "HDRMT", color: "violet" },
+  { id: "curves", label: "Curves", color: "purple" },
   { id: "pixelmath", label: "PixelMath", color: "violet" },
+  { id: "geometry", label: "Geometry", color: "orange" },
 ];
 
 const SECTION_STEP: Partial<Record<ProcessingSection, ChainStep>> = {
@@ -88,6 +94,7 @@ const SECTION_STEP: Partial<Record<ProcessingSection, ChainStep>> = {
   masked_stretch: "maskedStretch",
   local_contrast: "localContrast",
   hdr: "localContrast",
+  curves: "tone",
   pixelmath: "pixelMath",
 };
 
@@ -118,6 +125,7 @@ const STEP_LABELS: Record<ChainStep, string> = {
   stretch: "Stretch",
   maskedStretch: "Masked stretch",
   localContrast: "LHE / HDRMT",
+  tone: "Curves",
   pixelMath: "PixelMath",
 };
 
@@ -128,6 +136,7 @@ const INDICATOR_LABELS: Record<ChainStep, string> = {
   stretch: "Stretch",
   maskedStretch: "Masked",
   localContrast: "LHE/HDRMT",
+  tone: "Curves",
   pixelMath: "PixelMath",
 };
 
@@ -138,6 +147,7 @@ const BANNER_LABELS: Record<ChainStep, string> = {
   stretch: "Arcsinh Stretch",
   maskedStretch: "Masked Stretch",
   localContrast: "LHE / HDRMT",
+  tone: "Curves",
   pixelMath: "PixelMath",
 };
 
@@ -216,6 +226,7 @@ const COLOR_MAP: Record<string, { active: string; dot: string }> = {
   amber: { active: "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30", dot: "bg-amber-400" },
   rose: { active: "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30", dot: "bg-rose-400" },
   teal: { active: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
+  purple: { active: "bg-purple-600/20 text-purple-400 ring-1 ring-purple-500/30", dot: "bg-purple-400" },
 };
 
 function compositeInputView(chain: CompositeChain, step: ChainStep, liveUrl: string | null): CompositeInputView {
@@ -260,6 +271,7 @@ function ProcessingTabInner() {
       deconv: chainInput(chain, "deconv", original),
       stretch: chainInput(chain, "stretch", original),
       localContrast: chainInput(chain, "localContrast", original),
+      tone: chainInput(chain, "tone", original),
     };
   }, [chain, runPath]);
 
@@ -327,6 +339,10 @@ function ProcessingTabInner() {
   const handleHdrDone = useMemo(
     () => makeStepDone("localContrast", "HDRMT", inputs.localContrast.path),
     [makeStepDone, inputs.localContrast.path],
+  );
+  const handleToneDone = useMemo(
+    () => makeStepDone("tone", STEP_LABELS.tone, inputs.tone.path),
+    [makeStepDone, inputs.tone.path],
   );
 
   const handleCompositeDone = useCallback(
@@ -420,6 +436,7 @@ function ProcessingTabInner() {
   const deconvInput = useMemo(() => withPath(inputs.deconv.path), [withPath, inputs.deconv.path]);
   const stretchInput = useMemo(() => withPath(inputs.stretch.path), [withPath, inputs.stretch.path]);
   const nonLinearInput = useMemo(() => withPath(inputs.localContrast.path), [withPath, inputs.localContrast.path]);
+  const toneInput = useMemo(() => withPath(inputs.tone.path), [withPath, inputs.tone.path]);
 
   const latest = lastStep(chain);
   const latestEntry = latest ? chain.steps[latest] : undefined;
@@ -462,7 +479,7 @@ function ProcessingTabInner() {
 
       <ChainIndicator crumbs={crumbs} />
 
-      {disabledReason && (
+      {disabledReason && active !== "curves" && active !== "geometry" && (
         <div id={disabledReasonId} role="note" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
           {disabledReason}
         </div>
@@ -619,6 +636,21 @@ function ProcessingTabInner() {
               disabledReasonId={disabledReasonId}
             />
           </div>
+          <div style={{ display: active === "curves" ? "block" : "none" }}>
+            <CurvesPanel
+              selectedFile={toneInput}
+              outputDir={resolvedDir}
+              onProcessingDone={handleToneDone}
+              chainedFrom={bannerOf(inputs.tone)}
+              inputPreviewUrl={inputPreviewOf(inputs.tone)}
+              inputLabel={inputLabelOf(inputs.tone)}
+              fileKey={runKey}
+              compositeMode={compositeMode}
+              fileName={fileName}
+              disabledReason={disabledReason}
+              disabledReasonId={disabledReasonId}
+            />
+          </div>
           <div style={{ display: active === "pixelmath" ? "block" : "none" }}>
             <PixelMathPanel
               selectedFile={file}
@@ -634,6 +666,15 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+            />
+          </div>
+          <div style={{ display: active === "geometry" ? "block" : "none" }}>
+            <GeometryPanel
+              selectedFile={file}
+              outputDir={resolvedDir}
+              fileKey={runKey}
+              compositeMode={compositeMode}
+              fileName={fileName}
             />
           </div>
         </div>

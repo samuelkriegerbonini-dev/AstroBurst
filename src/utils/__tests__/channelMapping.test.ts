@@ -116,12 +116,20 @@ describe("HST filter wheels", () => {
     expect(displayFilterValue(fileWithHeader("x.fits", { FILTER: "3" }))).toBeNull();
   });
 
-  it("keeps an unresolvable filter name when the wheel number is the only other value", () => {
+  it("keeps the WFPC2 filter name when the wheel number is the only other value", () => {
     expect(displayFilterValue(fileWithHeader("x.fits", { FILTNAM1: "F555W", FILTER1: "17" }))).toBe("F555W");
   });
 
   it("keeps the ACS filter from FILTER1 and ignores its clear slot", () => {
     expect(displayFilterValue(fileWithHeader("j_flt.fits", { FILTER1: "F658N", FILTER2: "CLEAR2L", INSTRUME: "ACS" }))).toBe("F658N");
+  });
+
+  it("reads the ACS broadband code from FILTER2 behind a CLEAR1L slot, as the Rust effective_filter does", () => {
+    expect(displayFilterValue({ result: { header: { FILTER1: "CLEAR1L", FILTER2: "F814W" } } })).toBe("F814W");
+  });
+
+  it("falls back to the first value when no filter code resolves, as the Rust effective_filter does", () => {
+    expect(displayFilterValue({ result: { header: { FILTER1: "CLEAR1L", FILTER2: "F850LP" } } })).toBe("CLEAR1L");
   });
 
   it("drops the three WFPC2 sample wheel numbers and keeps only the filter names", () => {
@@ -461,6 +469,12 @@ describe("NIRCam and NIRISS pupil wheel", () => {
   it("reads the NIRISS pupil filter crossed with CLEAR or a grism", () => {
     expect(displayFilterValue(crossed("CLEAR", "F200W"))).toBe("F200W");
     expect(displayFilterValue(crossed("GR150R", "F150W"))).toBe("F150W");
+  });
+
+  it("reads a NIRISS pupil filter (CLEAR + F158M)", () => {
+    const file = { result: { header: { FILTER: "CLEAR", PUPIL: "F158M", INSTRUME: "NIRISS" } } };
+    expect(resolveFileFilter(file)).toEqual({ code: "F158M", nm: 1580 });
+    expect(displayFilterValue(file)).toBe("F158M");
   });
 
   it("keeps the filter wheel when the pupil holds no filter", () => {

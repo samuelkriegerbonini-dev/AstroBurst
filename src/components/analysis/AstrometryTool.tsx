@@ -53,14 +53,15 @@ function AstrometryTool() {
         dimensions: res.dimensions,
         label: SOLVED_WCS_LABEL,
         kind: "processing",
-        inputPath: filePath,
+        inputPath: effectivePath ?? filePath,
       });
     },
-    [publishProcessed, fileKey, filePath],
+    [publishProcessed, fileKey, filePath, effectivePath],
   );
 
   const stars = starResult?.stars ?? EMPTY_STARS;
   const compositeMeasurementBadge = useMemo(() => <MeasurementBadge measuresComposite />, []);
+  const solveMeasurementBadge = useMemo(() => <MeasurementBadge />, []);
 
   return (
     <Suspense fallback={<TabSpinner />}>
@@ -80,7 +81,9 @@ function AstrometryTool() {
             elapsed={starResult?.elapsed_ms || 0}
             overlayCanvasRef={starOverlayRef}
             filePath={regionKey}
+            solvePath={effectivePath}
             sourceBadge={compositeMeasurementBadge}
+            solveBadge={solveMeasurementBadge}
             detectedTotal={starResult?.n_detected ?? null}
             annotationsOnView={starsOnMeasuredImage}
             onWcsWritten={handleWcsWritten}

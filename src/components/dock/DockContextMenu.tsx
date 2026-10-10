@@ -14,8 +14,9 @@ import {
   type DockSide,
   type DockToolId,
 } from "../../utils/dockLayout";
-import { announce, moveAnnouncement } from "./useDockDrag";
+import { announce, commitDockMove, moveAnnouncement } from "./useDockDrag";
 import { focusStripButton } from "./dockGeometry";
+import { dockOnboardingStore } from "./dockOnboardingStore";
 import "./dock.css";
 
 export interface DockMenuRequest {
@@ -36,6 +37,7 @@ interface DockMenuListProps {
   onMove(anchor: DockAnchor): void;
   onReorder(delta: -1 | 1): void;
   onReset(): void;
+  onShowTips(): void;
   onClose(): void;
   id?: string;
 }
@@ -64,7 +66,7 @@ function focusIndex(key: string, current: number, count: number): number | null 
   }
 }
 
-export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, onReset, onClose, id }: DockMenuListProps): React.JSX.Element {
+export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, onReset, onShowTips, onClose, id }: DockMenuListProps): React.JSX.Element {
   const upDisabled = index <= 0;
   const downDisabled = index >= count - 1;
 
@@ -149,6 +151,10 @@ export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, on
       <button type="button" role="menuitem" tabIndex={-1} onClick={onReset} className={ITEM_CLASS}>
         <span className="w-3" />
         Reset layout
+      </button>
+      <button type="button" role="menuitem" tabIndex={-1} onClick={onShowTips} className={ITEM_CLASS}>
+        <span className="w-3" />
+        Show layout tips
       </button>
     </div>
   );
@@ -245,9 +251,7 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
   };
 
   const onMove = (target: DockAnchor) => {
-    const before = dockStore.get();
-    dockStore.dispatch({ type: "move", tool, anchor: target });
-    reportMove(before);
+    commitDockMove(tool, target);
     close();
   };
 
@@ -264,6 +268,11 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
     close();
   };
 
+  const onShowTips = () => {
+    dockOnboardingStore.show();
+    close();
+  };
+
   return createPortal(
     <div ref={boxRef} className="ab-dock-menu" style={position ?? { left: 0, top: 0, visibility: "hidden" }}>
       <DockMenuList
@@ -275,6 +284,7 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
         onMove={onMove}
         onReorder={onReorder}
         onReset={onReset}
+        onShowTips={onShowTips}
         onClose={close}
       />
     </div>,

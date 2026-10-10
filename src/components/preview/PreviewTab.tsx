@@ -28,7 +28,7 @@ interface PreviewTabProps {
   useGpu: boolean;
   rawPixels: RawPixelData | null;
   rgbRawPixels?: RawRgbPixelData | null;
-  onCubePixelClick: (x: number, y: number) => void;
+  onCubePixelClick?: (x: number, y: number) => void;
   onBackToFile: () => void;
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
   dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
@@ -47,7 +47,7 @@ function clearMousePixel() {
 function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams, histData, histDataPath } = useHistContext();
-  const { isCube, isSpectralCube } = useCubeContext();
+  const { isSpectralCube } = useCubeContext();
   const { processed } = useRenderContext();
   const displayed = useDisplayedImage();
   const { compositePreviewUrl } = useCompositePreview();
@@ -281,7 +281,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
           onMouseLeave={clearMousePixel}
           overlayCanvasRef={starOverlayRef}
           dqCanvasRef={dqCanvasRef}
-          onCanvasPixelClick={isCube ? onCubePixelClick : undefined}
+          onCanvasPixelClick={onCubePixelClick}
           regionsEnabled={regionsOnDisplayed}
           original={heldOriginal}
           label={displayed.isProcessed ? displayed.label : null}

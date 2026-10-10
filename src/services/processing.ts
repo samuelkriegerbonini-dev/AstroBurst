@@ -97,6 +97,7 @@ export function extractBackgroundBatch(
     iterations?: number;
     mode?: string;
     referenceBin?: string | null;
+    runToken?: string | null;
   } = {},
 ): Promise<BackgroundBatchResult> {
   return typedInvoke<BackgroundBatchResult>("extract_background_batch_cmd", {
@@ -109,6 +110,7 @@ export function extractBackgroundBatch(
     iterations: options.iterations ?? 3,
     mode: options.mode ?? "subtract",
     referenceBin: options.referenceBin ?? null,
+    runToken: options.runToken ?? null,
   });
 }
 
@@ -417,6 +419,7 @@ export function spccCalibrate(
     minSnr?: number;
     maxStars?: number;
     catalog?: "gaia" | "builtin";
+    wavelengthsNm?: [number, number, number] | null;
   } = {},
 ): Promise<SpccResult> {
   return typedInvoke<SpccResult>("spcc_calibrate_cmd", {
@@ -428,5 +431,6 @@ export function spccCalibrate(
     minSnr: options.minSnr ?? 20.0,
     maxStars: options.maxStars ?? 200,
     catalog: options.catalog ?? "gaia",
+    wavelengthsNm: options.wavelengthsNm ?? null,
   });
 }

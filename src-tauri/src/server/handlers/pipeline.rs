@@ -8,15 +8,17 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::imaging::calibration_pipeline::{
     lights_with_dq_planes, run_batch_pipeline_cancellable, validate_cosmetic_config, BatchPipelineConfig,
-    BatchStackConfig, CalibrationMasters, ChannelInput, DQ_COSMETIC_WARNING,
+    BatchStackConfig, ChannelInput, DQ_COSMETIC_WARNING,
 };
 use astroburst_lib::core::imaging::cosmetic::CosmeticConfig;
 use astroburst_lib::core::imaging::stats::compute_image_stats;
-use astroburst_lib::core::stacking::calibration::{
-    create_master_bias_cancellable, create_master_dark_cancellable, create_master_flat_cancellable,
-    median_exposure_seconds, read_exposure_seconds,
-};
+use astroburst_lib::core::stacking::calibration::read_exposure_seconds;
 use astroburst_lib::core::stacking::cfa_guard::CfaStep;
+use astroburst_lib::core::stacking::frame_cards::{read_frame_cards, FrameCards};
+use astroburst_lib::core::stacking::masters::{
+    assign_dark_groups, build_calibration_masters, check_channel_lights, check_master_frames, dark_group_warnings,
+    read_master_frames, MasterRequest,
+};
 use astroburst_lib::core::stacking::CancelCheck;
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::load_fits_image;
@@ -63,6 +65,7 @@ pub struct PipelineParams {
     pub dark_paths: Option<Vec<String>>,
     pub flat_paths: Option<Vec<String>>,
     pub bias_paths: Option<Vec<String>>,
+    pub flat_dark_paths: Option<Vec<String>>,
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
@@ -82,6 +85,25 @@ fn cosmetic_warnings(light_paths: Vec<String>) -> Vec<String> {
     } else {
         vec![DQ_COSMETIC_WARNING.to_string()]
     }
+}
+
+fn pre_run_checks(
+    inputs: &PipelineInputs,
+    channels: &[(String, Vec<String>)],
+    cosmetic_enabled: bool,
+) -> std::result::Result<Vec<String>, String> {
+    let frames = read_master_frames(&inputs.master_request());
+    let mut warnings = check_master_frames(&frames).map_err(|e| format!("{:#}", e))?;
+    for (label, paths) in channels {
+        let cards = channel_cards(paths);
+        warnings.extend(check_channel_lights(&frames, label, &cards, cosmetic_enabled).map_err(|e| format!("{:#}", e))?);
+        warnings.extend(dark_group_warnings(&frames, &cards, label));
+    }
+    if cosmetic_enabled {
+        let light_paths: Vec<String> = channels.iter().flat_map(|(_, paths)| paths.iter().cloned()).collect();
+        warnings.extend(cosmetic_warnings(light_paths));
+    }
+    Ok(warnings)
 }
 
 fn dark_scales(light_paths: &[String], dark_exp: Option<f64>) -> Vec<f32> {
@@ -114,6 +136,22 @@ struct PipelineInputs {
     bias_paths: Vec<String>,
     dark_paths: Vec<String>,
     flat_paths: Vec<String>,
+    flat_dark_paths: Vec<String>,
+}
+
+impl PipelineInputs {
+    fn master_request(&self) -> MasterRequest<'_> {
+        MasterRequest {
+            bias: &self.bias_paths,
+            darks: &self.dark_paths,
+            flats: &self.flat_paths,
+            flat_darks: &self.flat_dark_paths,
+        }
+    }
+}
+
+fn channel_cards(paths: &[String]) -> Vec<FrameCards> {
+    paths.iter().map(|p| read_frame_cards(p)).collect()
 }
 
 fn checkpoint(cancelled: CancelCheck) -> std::result::Result<(), String> {
@@ -131,57 +169,35 @@ fn run_pipeline(
     config: &BatchPipelineConfig,
     cancelled: CancelCheck,
 ) -> std::result::Result<Vec<(String, Array2<f32>)>, String> {
-    let PipelineInputs { bias_paths, dark_paths, flat_paths } = inputs;
     job.progress(5, "building masters");
 
-    let master_bias = if bias_paths.is_empty() {
-        None
-    } else {
-        Some(create_master_bias_cancellable(bias_paths, cancelled).map_err(|e| format!("bias: {:#}", e))?)
-    };
+    let (masters, report) =
+        build_calibration_masters(&inputs.master_request(), cancelled).map_err(|e| format!("{:#}", e))?;
     checkpoint(cancelled)?;
-
-    let master_dark = if dark_paths.is_empty() {
-        None
-    } else {
-        Some(
-            create_master_dark_cancellable(dark_paths, master_bias.as_ref(), cancelled)
-                .map_err(|e| format!("dark: {:#}", e))?,
-        )
-    };
-    checkpoint(cancelled)?;
-
-    let master_flat = if flat_paths.is_empty() {
-        None
-    } else {
-        Some(
-            create_master_flat_cancellable(
-                flat_paths,
-                master_bias.as_ref(),
-                master_dark.as_ref(),
-                median_exposure_seconds(dark_paths),
-                cancelled,
-            )
-            .map_err(|e| format!("flat: {:#}", e))?,
-        )
-    };
-    checkpoint(cancelled)?;
-
-    let dark_exp = if dark_paths.is_empty() || master_bias.is_none() {
-        None
-    } else {
-        median_exposure_seconds(dark_paths)
-    };
-
-    let masters = CalibrationMasters { dark: master_dark, flat: master_flat, bias: master_bias };
+    for warning in &report.warnings {
+        log::warn!("pipeline: {warning}");
+    }
+    let dark_exp = report.dark_exposure_s.filter(|_| masters.bias.is_some());
 
     job.progress(15, "loading lights");
     let mut channel_inputs: Vec<ChannelInput> = Vec::with_capacity(channels_spec.len());
     for ch in channels_spec {
         checkpoint(cancelled)?;
+        let cards = channel_cards(&ch.paths);
         let lights = load_batch(&ch.paths, cancelled).map_err(|e| format!("channel '{}': {:#}", ch.label, e))?;
         let scales = dark_scales(&ch.paths, dark_exp);
-        channel_inputs.push(ChannelInput { lights, label: ch.label.clone(), dark_scales: scales });
+        let (dark_group, temp_warnings) = assign_dark_groups(&masters.dark_groups, &cards, &ch.label);
+        for warning in &temp_warnings {
+            log::warn!("pipeline: {warning}");
+        }
+        channel_inputs.push(ChannelInput {
+            lights,
+            label: ch.label.clone(),
+            dark_scales: scales,
+            cfa: cards.iter().any(|c| c.cfa),
+            dark_group,
+            light_temp_c: cards.iter().map(|c| c.temp_c).collect(),
+        });
     }
     checkpoint(cancelled)?;
 
@@ -203,6 +219,7 @@ pub async fn run(
     let bias_paths = params.bias_paths.unwrap_or_default();
     let dark_paths = params.dark_paths.unwrap_or_default();
     let flat_paths = params.flat_paths.unwrap_or_default();
+    let flat_dark_paths = params.flat_dark_paths.unwrap_or_default();
     let prefix = params.result_prefix.unwrap_or_default();
 
     let rejection = match params.rejection.as_deref() {
@@ -244,13 +261,21 @@ pub async fn run(
         .try_acquire_owned()
         .map_err(|_| AppError::TooManyRequests(state.config.jobs_max))?;
 
-    let warnings = if config.cosmetic.is_some() {
-        let light_paths: Vec<String> = params.channels.iter().flat_map(|ch| ch.paths.iter().cloned()).collect();
-        tokio::task::spawn_blocking(move || cosmetic_warnings(light_paths))
+    let inputs = PipelineInputs { bias_paths, dark_paths, flat_paths, flat_dark_paths };
+    let warnings = {
+        let inputs = PipelineInputs {
+            bias_paths: inputs.bias_paths.clone(),
+            dark_paths: inputs.dark_paths.clone(),
+            flat_paths: inputs.flat_paths.clone(),
+            flat_dark_paths: inputs.flat_dark_paths.clone(),
+        };
+        let channels: Vec<(String, Vec<String>)> =
+            params.channels.iter().map(|ch| (ch.label.clone(), ch.paths.clone())).collect();
+        let cosmetic_enabled = config.cosmetic.is_some();
+        tokio::task::spawn_blocking(move || pre_run_checks(&inputs, &channels, cosmetic_enabled))
             .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("dq inspection panicked: {e}")))?
-    } else {
-        Vec::new()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("frame inspection panicked: {e}")))?
+            .map_err(AppError::BadRequest)?
     };
 
     let slot_names: Vec<String> = params
@@ -269,7 +294,6 @@ pub async fn run(
 
     spawn_job(job, permit, move |job| {
         let cancelled = || job.cancel.is_cancelled();
-        let inputs = PipelineInputs { bias_paths, dark_paths, flat_paths };
         match run_pipeline(job, &inputs, &channels_spec, &config, &cancelled) {
             Ok(channels) => store_channels(job, &cache, channels, &slot_names),
             Err(message) => {
@@ -297,6 +321,7 @@ mod tests {
 
     use super::*;
     use crate::job::{cancel_after_stage_started, run_job, JobStatus, SseEvent};
+    use astroburst_lib::core::stacking::calibration::median_exposure_seconds;
 
     fn setup() -> (Arc<Job>, mpsc::Receiver<SseEvent>, ImageCache) {
         let job = new_job("pipeline");
@@ -417,7 +442,7 @@ mod tests {
         let mut bias_paths = write_frames(&dir, "bias", 1);
         let missing = dir.path().join("missing.fits").to_str().unwrap().to_string();
         bias_paths.push(missing.clone());
-        let inputs = PipelineInputs { bias_paths, dark_paths: vec![missing.clone()], flat_paths: Vec::new() };
+        let inputs = PipelineInputs { bias_paths, dark_paths: vec![missing.clone()], flat_paths: Vec::new(), flat_dark_paths: Vec::new() };
         let channels = [ChannelSpec { label: "R".into(), paths: vec![missing] }];
         let err = run_pipeline(&job, &inputs, &channels, &plain_config(), &|| job.cancel.is_cancelled()).unwrap_err();
         assert_eq!(err, format!("bias: {}", CoreError::Cancelled));
@@ -426,7 +451,7 @@ mod tests {
     #[test]
     fn a_cancel_raised_while_the_channels_are_stacked_stops_the_combine() {
         let dir = tempfile::tempdir().unwrap();
-        let inputs = PipelineInputs { bias_paths: Vec::new(), dark_paths: Vec::new(), flat_paths: Vec::new() };
+        let inputs = PipelineInputs { bias_paths: Vec::new(), dark_paths: Vec::new(), flat_paths: Vec::new(), flat_dark_paths: Vec::new() };
         let channels = [ChannelSpec { label: "R".into(), paths: write_frames(&dir, "light", 3) }];
         let (job, _rx, _cache) = setup();
         let err = run_pipeline(&job, &inputs, &channels, &plain_config(), &cancel_after_stage_started(&job, STACKING_PCT))

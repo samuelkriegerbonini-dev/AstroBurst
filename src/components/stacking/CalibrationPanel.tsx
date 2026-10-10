@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import { CheckCircle2 } from "lucide-react";
-import { Slider, ErrorAlert } from "../ui";
+import { ErrorAlert, WarningList } from "../ui";
 import { useProgress } from "../../hooks/useProgress";
 import { calibrate } from "../../services/stacking";
 import type { CalibrateResult } from "../../shared/types";
@@ -16,6 +16,7 @@ export interface CalibrationMasters {
   darkPaths: string[];
   flatPaths: string[];
   biasPaths: string[];
+  flatDarkPaths: string[];
 }
 
 interface CalibrationPanelProps {
@@ -36,12 +37,28 @@ function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
   }));
 }
 
+export function CalibrationResultLines({ result }: { result: CalibrateResult }) {
+  return (
+    <div className="text-[10px] font-mono text-zinc-400 space-y-0.5">
+      <div>{result.dimensions?.[0]}x{result.dimensions?.[1]}</div>
+      {result.has_bias && <div>Bias subtracted</div>}
+      {result.has_dark && <div>Dark subtracted</div>}
+      {result.has_dark && typeof result.dark_scale === "number" && (
+        <div data-testid="calibration-dark-scale">{`Dark scale ${result.dark_scale.toFixed(3)}`}</div>
+      )}
+      {result.has_flat && result.has_flat_dark && <div>Flat-dark subtracted from the flats</div>}
+      {result.has_flat && <div>Flat divided</div>}
+      {result.fits_path && (
+        <div className="text-emerald-400/70 mt-1">Output auto-injected into Stack tab</div>
+      )}
+    </div>
+  );
+}
+
 export default function CalibrationPanel({ files = [], runTarget = null, onCalibrationDone }: CalibrationPanelProps) {
-  const [darkExposureRatio, setDarkExposureRatio] = useState(1.0);
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [result, setResult] = useState<CalibrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastAssignment, setLastAssignment] = useState<CalibAssignment | null>(null);
   const progress = useProgress(CALIBRATE_PROGRESS_EVENT);
   const resetProgress = progress.reset;
 
@@ -51,7 +68,6 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
     if (!assignments.science) return;
     const target = runTarget;
     const sciencePath = assignments.science.path;
-    setLastAssignment(assignments);
     setIsCalibrating(true);
     setError(null);
     setResult(null);
@@ -60,13 +76,14 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
       darkPaths: assignments.dark.map((f) => f.path),
       flatPaths: assignments.flat.map((f) => f.path),
       biasPaths: assignments.bias.map((f) => f.path),
+      flatDarkPaths: assignments.flatdark.map((f) => f.path),
     };
     try {
       const res = await calibrate(sciencePath, await getOutputDir(), {
         biasPaths: masters.biasPaths.length > 0 ? masters.biasPaths : undefined,
         darkPaths: masters.darkPaths.length > 0 ? masters.darkPaths : undefined,
         flatPaths: masters.flatPaths.length > 0 ? masters.flatPaths : undefined,
-        darkExposureRatio,
+        flatDarkPaths: masters.flatDarkPaths,
       });
       setResult(res);
       onCalibrationDone?.(res, masters, sciencePath, target);
@@ -76,9 +93,7 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
       setIsCalibrating(false);
       resetProgress();
     }
-  }, [darkExposureRatio, resetProgress, runTarget, onCalibrationDone]);
-
-  const hasDarks = lastAssignment ? lastAssignment.dark.length > 0 : false;
+  }, [resetProgress, runTarget, onCalibrationDone]);
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
@@ -88,21 +103,6 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
         onCalibrate={handleCalibrate}
         isLoading={isCalibrating}
       />
-
-      {hasDarks && (
-        <div className="px-4">
-          <Slider
-            label="Dark Exposure Ratio"
-            value={darkExposureRatio}
-            min={0.1}
-            max={3.0}
-            step={0.1}
-            accent="sky"
-            format={(v) => `${v.toFixed(1)}x`}
-            onChange={setDarkExposureRatio}
-          />
-        </div>
-      )}
 
       {isCalibrating && progress.active && (
         <div className="px-4 flex flex-col gap-1.5 animate-fade-in">
@@ -126,14 +126,9 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
             <CheckCircle2 size={12} />
             Calibration Complete
           </div>
-          <div className="text-[10px] font-mono text-zinc-400 space-y-0.5">
-            <div>{result.dimensions?.[0]}x{result.dimensions?.[1]}</div>
-            {result.has_bias && <div>Bias subtracted</div>}
-            {result.has_dark && <div>Dark subtracted</div>}
-            {result.has_flat && <div>Flat divided</div>}
-            {result.fits_path && (
-              <div className="text-emerald-400/70 mt-1">Output auto-injected into Stack tab</div>
-            )}
+          <CalibrationResultLines result={result} />
+          <div data-testid="calibration-warnings" className="flex flex-col gap-1.5 empty:hidden">
+            <WarningList warnings={result.warnings} />
           </div>
         </div>
       )}

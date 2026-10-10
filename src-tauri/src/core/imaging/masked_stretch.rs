@@ -352,9 +352,10 @@ fn shared_min_max(channels: &[&Array2<f32>]) -> Option<(f32, f32)> {
 }
 
 fn shadow_floor(stats: &ImageStats) -> f32 {
-    let shadow = stats.median + AutoStfConfig::default().shadow_k * stats.sigma;
-    let resolvable_offset = f32::EPSILON as f64 * (stats.max - stats.min);
-    if stats.median - shadow < resolvable_offset {
+    let sigma = stats.sigma;
+    let shadow = stats.median + AutoStfConfig::default().shadow_k * sigma;
+    let resolvable_offset = f32::EPSILON as f64 * stats.median.abs();
+    if !(sigma > 0.0 && sigma.is_finite()) || stats.median - shadow < resolvable_offset {
         return stats.min as f32;
     }
     (shadow as f32).max(stats.min as f32)
@@ -1377,6 +1378,46 @@ mod tests {
             SKY_LEVEL - lo,
             stats.mad
         );
+    }
+
+    #[test]
+    fn one_extreme_outlier_does_not_drop_the_shadow_floor_to_the_minimum() {
+        let mut rng = Lcg(0x2545_F491_4F6C_DD1D);
+        let mut img = Array2::from_shape_fn((256, 256), |_| 1000.0 + 2.0 * rng.gaussian());
+        img[[0, 0]] = 1e30;
+        let stats = compute_image_stats(&img);
+        assert!(stats.max > 1e29, "the outlier must be counted as a valid pixel, max {}", stats.max);
+        assert!(stats.sigma > 1.5 && stats.sigma < 2.5, "sigma {}", stats.sigma);
+        let (lo, hi) = stretch_range(&[&img]).unwrap();
+        assert_eq!(hi, stats.max as f32);
+        let expected = (1000.0 - 2.8 * stats.sigma) as f32;
+        assert!(
+            (lo - expected).abs() < 0.5,
+            "the floor must sit at the shadow point {} (median - 2.8 sigma), got {} (channel minimum {})",
+            expected,
+            lo,
+            stats.min
+        );
+        assert!(lo > stats.min as f32 + 0.5, "the floor {} fell to the channel minimum {}", lo, stats.min);
+    }
+
+    #[test]
+    fn a_sky_in_tiny_physical_units_keeps_its_floor_at_the_shadow_point() {
+        let mut rng = Lcg(0x5851_F42D_4C95_7F2D);
+        let mut img = Array2::from_shape_fn((256, 256), |_| 1e-7 + 1e-8 * rng.gaussian());
+        img[[0, 0]] = 1e-6;
+        let stats = compute_image_stats(&img);
+        assert!((stats.median - 1e-7).abs() < 1e-9, "median {:e}", stats.median);
+        assert!(stats.sigma > 0.8e-8 && stats.sigma < 1.2e-8, "sigma {:e}", stats.sigma);
+        let (lo, hi) = stretch_range(&[&img]).unwrap();
+        assert_eq!(hi, stats.max as f32);
+        let expected = stats.median - 2.8 * stats.sigma;
+        assert!(
+            (lo as f64 - expected).abs() < 0.1 * stats.sigma,
+            "the floor must sit at the shadow point {expected:e} (median - 2.8 sigma), got {lo:e} (channel minimum {:e})",
+            stats.min
+        );
+        assert!(lo as f64 > stats.min, "the floor {lo:e} fell to the channel minimum {:e}", stats.min);
     }
 
     #[test]

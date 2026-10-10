@@ -92,6 +92,7 @@ export default function ComposeWizard() {
     setCompositePreviewUrl,
     setCompositeAutoStf,
     setCompositeStf,
+    setCompositeStfLinked,
   } = useCompositeActions();
   const { forgetOutputs } = useRenderActions();
   const { narrowbandPalette, narrowbandFilters: filterDetections } = useNarrowbandContext();
@@ -134,7 +135,7 @@ export default function ComposeWizard() {
     setSuggestedStep(null);
   }, [setActiveStep]);
 
-  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams) => {
+  const handleCompositePreview = useCallback((previewUrl: string | null, stfR?: StfParams, stfG?: StfParams, stfB?: StfParams, linked?: boolean) => {
     if (previewUrl) {
       setCompositePreviewUrl(previewUrl);
     }
@@ -142,9 +143,12 @@ export default function ComposeWizard() {
       setCompositeAutoStf(stfR, stfG, stfB);
       setCompositeStf(stfR, stfG, stfB);
     }
+    if (linked !== undefined) {
+      setCompositeStfLinked(linked);
+    }
     dispatch({ type: "SET_COMPOSITE_READY", ready: true });
     completeStep("blend");
-  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, completeStep, dispatch]);
+  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setCompositeStfLinked, completeStep, dispatch]);
 
   const handleRestretchPreview = useCallback((previewUrl: string | null, stf?: { r: StfParams; g: StfParams; b: StfParams }) => {
     if (previewUrl) {
@@ -247,10 +251,10 @@ export default function ComposeWizard() {
             onLevelMatchChange={(enabled) => dispatch({ type: "UPDATE", partial: { levelMatch: enabled } })}
             onLevelScales={(scales) => dispatch({ type: "UPDATE", partial: { blendLevelScales: scales } })}
             onWeightsChange={(weights, preset) => dispatch({ type: "SET_BLEND_WEIGHTS", weights, preset })}
-            onCompositeReady={(url, autoStf, dimensions) => {
+            onCompositeReady={(url, stf, dimensions) => {
               if (dimensions) setCompositeDims(dimensions);
-              if (autoStf) {
-                handleCompositePreview(url, autoStf, autoStf, autoStf);
+              if (stf) {
+                handleCompositePreview(url, stf.r, stf.g, stf.b, stf.linked);
               } else {
                 handleCompositePreview(url);
               }
@@ -292,9 +296,15 @@ export default function ComposeWizard() {
               handleRestretchPreview(url, stf);
               completeStep("stretch");
             }}
+            onPreview={handleRestretchPreview}
+            onStarRemoval={() => dispatch({ type: "INVALIDATE_FROM", stepId: "stretch" })}
             onChannelOutput={(binId, stage, value) => {
               handleChannelOutput(binId, stage, value);
-              completeStep("stretch");
+              if (stage === "stretched") {
+                completeStep("stretch");
+              } else {
+                dispatch({ type: "INVALIDATE_FROM", stepId: "stretch" });
+              }
             }}
             onCompositeOp={handleCompositeOp}
           />
@@ -335,6 +345,8 @@ export default function ComposeWizard() {
                 key={step.id}
                 onClick={() => isEnabled && handleStepClick(step.id)}
                 disabled={!isEnabled}
+                data-testid={`step-${step.id}`}
+                data-complete={isDone ? "true" : undefined}
                 className={`ab-step-pill ${
                   isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 } ${isSuggested ? "ab-step-suggested" : ""}`}

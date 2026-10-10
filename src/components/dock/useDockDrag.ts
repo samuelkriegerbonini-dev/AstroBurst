@@ -23,6 +23,7 @@ import {
   type Rect,
 } from "../../utils/dockDrag";
 import { focusStripButton, measureDockGeometry, stripShowsFile } from "./dockGeometry";
+import { dockOnboardingStore } from "./dockOnboardingStore";
 
 export interface DockDragState {
   tool: DockToolId;
@@ -110,6 +111,17 @@ export function moveAnnouncement(before: DockLayout, after: DockLayout, tool: Do
   if (delta < 0) return `${label} moved up`;
   if (delta > 0) return `${label} moved down`;
   return null;
+}
+
+export function commitDockMove(tool: DockToolId, anchor: DockAnchor, index?: number): boolean {
+  const before = dockStore.get();
+  dockStore.dispatch({ type: "move", tool, anchor, index });
+  const after = dockStore.get();
+  if (after === before) return false;
+  const message = moveAnnouncement(before, after, tool);
+  if (message) announce(message);
+  dockOnboardingStore.afterMove(before, after, tool);
+  return true;
 }
 
 interface DragConfig {
@@ -216,13 +228,7 @@ function createDockDragController(config: React.RefObject<DragConfig>): DockDrag
     end();
     if (target === null) return;
     const { tool } = s.source;
-    const before = dockStore.get();
-    dockStore.dispatch({ type: "move", tool, anchor: target.anchor, index: target.index });
-    const after = dockStore.get();
-    if (after === before) return;
-    const message = moveAnnouncement(before, after, tool);
-    if (message) announce(message);
-    focusToolButton(config.current.rootRef.current, tool);
+    if (commitDockMove(tool, target.anchor, target.index)) focusToolButton(config.current.rootRef.current, tool);
   };
 
   const clearDragHappened = () => {

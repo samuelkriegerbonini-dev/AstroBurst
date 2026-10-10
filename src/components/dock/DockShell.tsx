@@ -22,6 +22,7 @@ import BottomArea from "./BottomArea";
 import ResizeHandle, { type ResizeSession } from "./ResizeHandle";
 import ToolHostRoot from "./ToolHostRoot";
 import DragOverlay from "./DragOverlay";
+import DockOnboarding from "./DockOnboarding";
 import DockContextMenu, { type DockMenuRequest } from "./DockContextMenu";
 import LiveRegion from "./LiveRegion";
 import { useDockDrag } from "./useDockDrag";
@@ -312,6 +313,7 @@ export default function DockShell({ tools, children }: DockShellProps) {
       <Stripe side="right" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} />
       <ToolHostRoot tools={tools} containers={containers} layout={layout} open={open} shown={shown} hasFile={hasFile} fileKey={fileKey} />
       <DragOverlay />
+      <DockOnboarding rootRef={rootRef} />
       <DockContextMenu request={menu} onClose={closeMenu} />
       <LiveRegion />
     </div>

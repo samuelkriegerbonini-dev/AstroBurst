@@ -295,6 +295,39 @@ pub fn wizard_bg_key(bin_id: &str) -> String {
     wizard_cache_key(bin_id, "_bg")
 }
 
+pub fn wizard_cache_key_for(token: Option<&str>, bin_id: &str, stage: &str) -> String {
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => format!(
+            "{}t{}_{}{}",
+            WIZARD_CACHE_PREFIX,
+            crate::types::image_ref::sanitize_fragment(t),
+            bin_id,
+            stage
+        ),
+        None => wizard_cache_key(bin_id, stage),
+    }
+}
+
+pub fn wizard_aligned_key_for(token: Option<&str>, bin_id: &str) -> String {
+    wizard_cache_key_for(token, bin_id, "_aligned")
+}
+
+pub fn wizard_cropped_key_for(token: Option<&str>, bin_id: &str) -> String {
+    wizard_cache_key_for(token, bin_id, "_cropped")
+}
+
+pub fn wizard_bg_key_for(token: Option<&str>, bin_id: &str) -> String {
+    wizard_cache_key_for(token, bin_id, "_bg")
+}
+
+pub fn wizard_run_prefix(token: &str) -> String {
+    format!(
+        "{}t{}_",
+        WIZARD_CACHE_PREFIX,
+        crate::types::image_ref::sanitize_fragment(token)
+    )
+}
+
 pub const RES_CACHE_KEYS: &str = "cache_keys";
 
 pub const RES_STAB_R: &str = "stab_r";
@@ -448,6 +481,13 @@ pub const RES_PIXEL_SCALE_X_ARCSEC: &str = "pixel_scale_x_arcsec";
 pub const RES_PIXEL_SCALE_Y_ARCSEC: &str = "pixel_scale_y_arcsec";
 pub const RES_PROJECTION: &str = "projection";
 pub const RES_SIP_PRESENT: &str = "sip_present";
+pub const RES_WCS_KIND: &str = "wcs_kind";
+pub const RES_GWCS_STEPS: &str = "gwcs_steps";
+pub const RES_GWCS_FRAMES: &str = "gwcs_frames";
+pub const RES_GWCS_SOURCE: &str = "gwcs_source";
+pub const RES_GWCS_VS_SIP_MAX_MAS: &str = "gwcs_vs_header_sip_max_mas";
+pub const RES_GWCS_VS_SIP_MAX_PX: &str = "gwcs_vs_header_sip_max_px";
+pub const RES_GWCS_REFUSAL: &str = "gwcs_refusal";
 pub const RES_NORTH_VEC: &str = "north_vec";
 pub const RES_EAST_VEC: &str = "east_vec";
 pub const RES_ON_IMAGE: &str = "on_image";
@@ -536,3 +576,53 @@ pub const DISPLAYED_TONED: &str = "toned";
 
 pub const BACKGROUND_MODEL_POLYNOMIAL: &str = "polynomial";
 pub const BACKGROUND_MODEL_SPLINE: &str = "spline";
+
+pub const RES_SIP_MAX_ERR_PX: &str = "sip_max_err_px";
+pub const RES_SIP_INV_ERR_PX: &str = "sip_inv_err_px";
+pub const HEADER_NCOMBINE: &str = "NCOMBINE";
+pub const HEADER_TOTEXP: &str = "TOTEXP";
+pub const HEADER_COMBINE_METHOD: &str = "ABCOMB";
+pub const HEADER_DRIZZLE_SCALE: &str = "ABDRZSCL";
+pub const HEADER_REJECTION_METHOD: &str = "ABREJECT";
+pub const HEADER_NORMALIZATION_METHOD: &str = "ABNORM";
+pub const HEADER_DISPLAY_REFERRED_CARD: &str = "ABDISP";
+pub const HEADER_DEBAND: &str = "ABDEBAND";
+pub const RES_GAIN_USED: &str = "gain_used";
+pub const RES_DARK_SCALE: &str = "dark_scale";
+pub const RES_HAS_FLAT_DARK: &str = "has_flat_dark";
+pub const RES_CFA_APPLIED: &str = "cfa_applied";
+pub const RES_CFA_SOURCE: &str = "cfa_source";
+pub const RES_WEIGHTS_APPLIED: &str = "weights_applied";
+pub const RES_WAVELENGTHS_NM: &str = "wavelengths_nm";
+pub const RES_WAVELENGTH_SOURCE: &str = "wavelength_source";
+pub const RES_CATALOG_SOURCE: &str = "catalog_source";
+pub const RES_STF_LINKED: &str = "stf_linked";
+pub const RES_STF_NOTE: &str = "stf_note";
+pub const RES_CHANNEL_LEVELS: &str = "levels";
+pub const RES_VALID_COUNT: &str = "valid_count";
+pub const RES_REFERENCE_INDEX: &str = "reference_index";
+pub const RES_REFERENCE_RULE: &str = "reference_rule";
+pub const RES_RUN_TOKEN: &str = "run_token";
+pub const RES_REPROJECTED: &str = "reprojected";
+pub const RES_WCS_SCALE_RATIO: &str = "wcs_scale_ratio";
+pub const RES_WCS_ROTATION_DEG: &str = "wcs_rotation_deg";
+pub const RES_PREFILTER_K: &str = "prefilter_k";
+pub const RES_RESIDUAL_MEASURED: &str = "residual_measured";
+pub const RES_AXIS: &str = "axis";
+pub const RES_INPUT_NORMALIZED: &str = "input_normalized";
+pub const RES_OP: &str = "op";
+pub const RES_WCS_UPDATED: &str = "wcs_updated";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wizard_keys_with_a_run_token_use_the_t_prefix() {
+        assert_eq!(wizard_aligned_key_for(Some("ab1"), "r"), "__wizard_ch_tab1_r_aligned");
+        assert_eq!(wizard_aligned_key_for(None, "r"), wizard_aligned_key("r"));
+        assert_eq!(wizard_aligned_key_for(Some(""), "r"), "__wizard_ch_r_aligned");
+        assert_eq!(wizard_run_prefix("ab1"), "__wizard_ch_tab1_");
+        assert_eq!(wizard_bg_key_for(Some("a/b"), "ha"), "__wizard_ch_ta_b_ha_bg");
+    }
+}

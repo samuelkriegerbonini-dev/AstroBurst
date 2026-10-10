@@ -322,6 +322,8 @@ mod tests {
             None,
             Some(vec!["ovl_r".to_string(), "ovl_g".to_string()]),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();

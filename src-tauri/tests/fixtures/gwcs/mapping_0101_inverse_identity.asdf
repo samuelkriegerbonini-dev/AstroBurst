@@ -1,0 +1,28 @@
+#ASDF 1.0.0
+#ASDF_STANDARD 1.6.0
+%YAML 1.1
+%TAG ! tag:stsci.edu:asdf/
+--- !core/asdf-1.1.0
+asdf_library: !core/software-1.0.0 {author: The ASDF Developers, homepage: 'http://github.com/asdf-format/asdf',
+  name: asdf, version: 5.4.0}
+history:
+  extensions:
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/core/extensions/core-1.6.0
+    manifest_software: !core/software-1.0.0 {name: asdf_standard, version: 1.5.0}
+    software: !core/software-1.0.0 {name: asdf, version: 5.4.0}
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/transform/extensions/transform-1.7.0
+    manifest_software: !core/software-1.0.0 {name: asdf_transform_schemas, version: 0.6.0}
+    software: !core/software-1.0.0 {name: asdf-astropy, version: 0.11.0}
+transform: !transform/remap_axes-1.5.0
+  inputs: [x0, x1]
+  inverse: !transform/identity-1.4.0
+    inputs: [x0, x1]
+    n_dims: 2
+    outputs: [x0, x1]
+  mapping: [0, 1, 0, 1]
+  outputs: [x0, x1, x2, x3]
+...

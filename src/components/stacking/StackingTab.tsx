@@ -53,6 +53,7 @@ export interface CalibrationState {
   darkPaths: string[];
   flatPaths: string[];
   biasPaths: string[];
+  flatDarkPaths: string[];
 }
 
 export interface RunTarget {
@@ -94,6 +95,7 @@ function StackingTabInner() {
     darkPaths: [],
     flatPaths: [],
     biasPaths: [],
+    flatDarkPaths: [],
   });
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_SETTINGS);
@@ -168,6 +170,7 @@ function StackingTabInner() {
           darkPaths: masters.darkPaths,
           flatPaths: masters.flatPaths,
           biasPaths: masters.biasPaths,
+          flatDarkPaths: masters.flatDarkPaths,
         });
         setInjectedPaths((prev) => {
           if (prev.includes(fitsPath)) return prev;

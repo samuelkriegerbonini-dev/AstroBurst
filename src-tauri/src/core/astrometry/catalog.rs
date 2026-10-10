@@ -1,7 +1,10 @@
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::astrometry::catalog_disk;
 use crate::core::astrometry::spectral::mid_exposure_jd;
 use crate::core::astrometry::time::JD_J2000;
 use crate::core::astrometry::wcs::angular_separation;
@@ -20,6 +23,12 @@ pub const VIZIER_ASU_TSV_URL: &str = "https://vizier.cds.unistra.fr/viz-bin/asu-
 pub const VIZIER_TIMEOUT_SECS: u64 = 30;
 pub const MIN_CONE_RADIUS_DEG: f64 = 0.001;
 pub const MAX_CONE_RADIUS_DEG: f64 = 5.0;
+pub const ENV_VIZIER_URL: &str = "ASTROBURST_VIZIER_URL";
+pub const SPCC_GAIA_MAG_LIMIT: f64 = 17.0;
+pub const SPCC_GAIA_MAX_ROWS: usize = 500;
+pub const SPCC_MIN_CONE_RADIUS_DEG: f64 = 0.01;
+pub const GAIA_MATCH_MAG_LIMIT: f64 = 17.0;
+pub const GAIA_MATCH_FALLBACK_ROWS: usize = 500;
 
 const MIN_FIT_SAMPLES_WITH_COLOUR: usize = 3;
 const DAYS_PER_JULIAN_YEAR: f64 = 365.25;
@@ -64,6 +73,29 @@ impl ConeQuery {
             radius_deg,
             mag_limit: None,
             max_rows: DEFAULT_MAX_ROWS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogSource {
+    Network,
+    Memory,
+    Disk,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogHit {
+    pub rows: Arc<Vec<CatalogRow>>,
+    pub source: CatalogSource,
+}
+
+impl CatalogHit {
+    pub fn source_name(&self) -> &'static str {
+        match self.source {
+            CatalogSource::Network => "network",
+            CatalogSource::Memory => "memory",
+            CatalogSource::Disk => "disk",
         }
     }
 }
@@ -479,20 +511,66 @@ fn store_rows(key: CatalogCacheKey, rows: Vec<CatalogRow>) -> Arc<Vec<CatalogRow
     rows
 }
 
-pub fn query_gaia_cached_with<F>(q: &ConeQuery, fetch: F) -> Result<Arc<Vec<CatalogRow>>, String>
+pub fn query_gaia_cached_in<F>(dir: Option<&Path>, q: &ConeQuery, fetch: F) -> Result<CatalogHit, String>
 where
     F: FnOnce(&ConeQuery) -> Result<Vec<CatalogRow>, String>,
 {
     let key = catalog_cache_key(q);
     if let Some(rows) = cached_rows(&key) {
-        return Ok(rows);
+        return Ok(CatalogHit { rows, source: CatalogSource::Memory });
+    }
+    if let Some(entry) = dir.and_then(|d| catalog_disk::load(d, &key)) {
+        return Ok(CatalogHit { rows: store_rows(key, entry.rows), source: CatalogSource::Disk });
     }
     let rows = fetch(q)?;
-    Ok(store_rows(key, rows))
+    if let Some(d) = dir.filter(|_| !rows.is_empty()) {
+        let now_unix_s = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if let Err(e) = catalog_disk::store(d, &key, q, &rows, now_unix_s) {
+            log::warn!("catalog cache: could not store {} in {} ({})", catalog_disk::file_name(&key), d.display(), e);
+        }
+    }
+    Ok(CatalogHit { rows: store_rows(key, rows), source: CatalogSource::Network })
 }
 
-pub fn query_gaia_cached(q: &ConeQuery) -> Result<Arc<Vec<CatalogRow>>, String> {
-    query_gaia_cached_with(q, query_gaia)
+pub fn query_gaia_cached_with<F>(q: &ConeQuery, fetch: F) -> Result<CatalogHit, String>
+where
+    F: FnOnce(&ConeQuery) -> Result<Vec<CatalogRow>, String>,
+{
+    query_gaia_cached_in(None, q, fetch)
+}
+
+pub fn query_gaia_cached(q: &ConeQuery) -> Result<CatalogHit, String> {
+    query_gaia_cached_in(catalog_disk::cache_dir(), q, query_gaia)
+}
+
+pub fn spcc_cone_query(ra: f64, dec: f64, radius_deg: f64) -> ConeQuery {
+    ConeQuery {
+        ra,
+        dec,
+        radius_deg: radius_deg.clamp(SPCC_MIN_CONE_RADIUS_DEG, MAX_CONE_RADIUS_DEG),
+        mag_limit: Some(SPCC_GAIA_MAG_LIMIT),
+        max_rows: SPCC_GAIA_MAX_ROWS,
+    }
+}
+
+pub fn gaia_cone_stars_cached(ra: f64, dec: f64, radius_deg: f64) -> Result<CatalogHit, String> {
+    query_gaia_cached(&spcc_cone_query(ra, dec, radius_deg))
+}
+
+static VIZIER_URL: OnceLock<String> = OnceLock::new();
+
+pub fn init_vizier_url_from_env() {
+    VIZIER_URL.get_or_init(|| {
+        std::env::var(ENV_VIZIER_URL)
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| VIZIER_ASU_TSV_URL.to_string())
+    });
+}
+
+pub fn vizier_url() -> &'static str {
+    VIZIER_URL.get().map_or(VIZIER_ASU_TSV_URL, String::as_str)
 }
 
 pub fn vizier_query_params(q: &ConeQuery) -> Vec<(&'static str, String)> {
@@ -527,7 +605,7 @@ pub fn query_gaia(q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
 
     let params = vizier_query_params(q);
     let response = client
-        .get(VIZIER_ASU_TSV_URL)
+        .get(vizier_url())
         .query(&params)
         .send()
         .map_err(|e| format!("VizieR request failed: {}", e))?;
@@ -651,6 +729,28 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert_eq!(rows.len(), 1);
         assert!((rows[0].ra - 83.6).abs() < 1e-9);
         assert_eq!(rows[0].g, None);
+    }
+
+    #[test]
+    fn parse_gaia_tsv_reads_the_spcc_cone_layout_and_keeps_rows_without_a_colour() {
+        let body = "#INFO VizieR result\n#Column list\nRA_ICRS\tDE_ICRS\tBP-RP\tGmag\ndeg\tdeg\tmag\tmag\n---------\t---------\t------\t----\n83.633083\t22.014472\t0.650\t8.5\n83.700000\t22.100000\t\t9.0\n84.000000\t21.900000\t1.234\t10.2\n";
+        let rows = parse_gaia_tsv(body).unwrap();
+        assert_eq!(rows.len(), 3, "the units and rule lines are skipped, every data row is kept");
+        assert!((rows[0].ra - 83.633083).abs() < 1e-9);
+        assert!((rows[0].dec - 22.014472).abs() < 1e-9);
+        let colour = rows[0].bp_rp.expect("BP-RP read from the column");
+        assert!((colour - 0.650).abs() < 1e-9);
+        assert_eq!(rows[0].g, Some(8.5));
+        assert_eq!(rows[1].bp_rp, None, "a blank BP-RP without BPmag/RPmag columns stays uncoloured");
+        assert_eq!(rows[1].g, Some(9.0));
+        let colour = rows[2].bp_rp.expect("BP-RP read from the column");
+        assert!((colour - 1.234).abs() < 1e-9);
+        assert_eq!(rows[2].g, Some(10.2));
+
+        let no_colour = parse_gaia_tsv("RA_ICRS\tDE_ICRS\tGmag\ndeg\tdeg\tmag\n----\t----\t----\n83.6\t22.0\t8.5\n").unwrap();
+        assert_eq!(no_colour.len(), 1);
+        assert_eq!((no_colour[0].bp_rp, no_colour[0].bp, no_colour[0].rp), (None, None, None));
+        assert_eq!(no_colour[0].g, Some(8.5));
     }
 
     #[test]
@@ -853,16 +953,110 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         };
         let first = query_gaia_cached_with(&probe, fetch).unwrap();
         assert_eq!(fetches.get(), 1);
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.source, CatalogSource::Network);
         let second = query_gaia_cached_with(&probe, |_| Err("must not be called".to_string())).unwrap();
         assert_eq!(fetches.get(), 1);
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first.rows, &second.rows));
+        assert_eq!(second.source, CatalogSource::Memory);
 
         let failing = ConeQuery::new(359.5, -89.9, 0.0111);
         let err = query_gaia_cached_with(&failing, |_| Err("offline".to_string())).unwrap_err();
         assert_eq!(err, "offline");
         let retried = query_gaia_cached_with(&failing, |_| Ok(vec![])).unwrap();
-        assert!(retried.is_empty(), "a failed fetch is not cached");
+        assert!(retried.rows.is_empty(), "a failed fetch is not cached");
+    }
+
+    fn disk_query(ra: f64, dec: f64) -> ConeQuery {
+        ConeQuery {
+            ra,
+            dec,
+            radius_deg: 0.02,
+            mag_limit: Some(17.0),
+            max_rows: 500,
+        }
+    }
+
+    #[test]
+    fn a_disk_entry_skips_the_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = disk_query(200.0, -30.0);
+        let rows = vec![row("d1", 200.0, -30.0), row("d2", 200.001, -30.001)];
+        let first = query_gaia_cached_in(Some(dir.path()), &q, |_| Ok(rows.clone())).unwrap();
+        assert_eq!(first.source, CatalogSource::Network);
+        assert_eq!(first.source_name(), "network");
+        assert_eq!(*first.rows, rows);
+        let file = dir.path().join(catalog_disk::file_name(&catalog_cache_key(&q)));
+        assert!(file.is_file(), "a network fetch is written to {}", file.display());
+
+        let on_disk = disk_query(200.5, -30.0);
+        let on_disk_key = catalog_cache_key(&on_disk);
+        assert!(cached_rows(&on_disk_key).is_none(), "the second cone was never in memory");
+        catalog_disk::store(dir.path(), &on_disk_key, &on_disk, &rows, 1).unwrap();
+        let hit = query_gaia_cached_in(Some(dir.path()), &on_disk, |_| panic!("fetch must not run")).unwrap();
+        assert_eq!(hit.source, CatalogSource::Disk);
+        assert_eq!(hit.source_name(), "disk");
+        assert_eq!(*hit.rows, rows);
+
+        let again = query_gaia_cached_in(Some(dir.path()), &on_disk, |_| panic!("fetch must not run")).unwrap();
+        assert_eq!(again.source, CatalogSource::Memory);
+        assert_eq!(again.source_name(), "memory");
+        assert!(Arc::ptr_eq(&hit.rows, &again.rows), "a disk hit is loaded into the memory tier");
+    }
+
+    #[test]
+    fn empty_results_are_not_written_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = disk_query(201.0, -31.0);
+        let fetches = std::cell::Cell::new(0usize);
+        let first = query_gaia_cached_in(Some(dir.path()), &q, |_| {
+            fetches.set(fetches.get() + 1);
+            Ok(vec![])
+        })
+        .unwrap();
+        assert_eq!(first.source, CatalogSource::Network);
+        assert!(first.rows.is_empty());
+        let key = catalog_cache_key(&q);
+        assert!(catalog_disk::load(dir.path(), &key).is_none());
+        assert!(!dir.path().join(catalog_disk::file_name(&key)).exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let second = query_gaia_cached_in(Some(dir.path()), &q, |_| panic!("fetch must not run")).unwrap();
+        assert_eq!(second.source, CatalogSource::Memory);
+        assert!(second.rows.is_empty());
+        assert_eq!(fetches.get(), 1);
+    }
+
+    #[test]
+    fn a_network_failure_is_an_error_when_nothing_is_cached() {
+        let q = disk_query(202.0, -32.0);
+        let err = query_gaia_cached_in(None, &q, |_| Err("VizieR request failed: offline".to_string())).unwrap_err();
+        assert_eq!(err, "VizieR request failed: offline");
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = query_gaia_cached_in(Some(dir.path()), &q, |_| Err("VizieR request failed: offline".to_string()))
+            .unwrap_err();
+        assert_eq!(err, "VizieR request failed: offline");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "a failure leaves no file behind");
+    }
+
+    #[test]
+    fn the_vizier_url_falls_back_to_the_constant() {
+        assert_eq!(vizier_url(), VIZIER_ASU_TSV_URL);
+        assert_eq!(ENV_VIZIER_URL, "ASTROBURST_VIZIER_URL");
+    }
+
+    #[test]
+    fn the_spcc_cone_uses_the_g17_limit_and_a_one_hundredth_degree_floor() {
+        let q = spcc_cone_query(203.0, -33.0, 0.002);
+        assert_eq!(q.ra, 203.0);
+        assert_eq!(q.dec, -33.0);
+        assert_eq!(q.radius_deg, SPCC_MIN_CONE_RADIUS_DEG);
+        assert_eq!(q.mag_limit, Some(SPCC_GAIA_MAG_LIMIT));
+        assert_eq!(q.max_rows, SPCC_GAIA_MAX_ROWS);
+        assert_eq!(spcc_cone_query(203.0, -33.0, 0.25).radius_deg, 0.25);
+        assert_eq!(spcc_cone_query(203.0, -33.0, 9.0).radius_deg, MAX_CONE_RADIUS_DEG);
+        assert_eq!((SPCC_GAIA_MAG_LIMIT, SPCC_GAIA_MAX_ROWS), (GAIA_MATCH_MAG_LIMIT, GAIA_MATCH_FALLBACK_ROWS));
     }
 
     #[test]

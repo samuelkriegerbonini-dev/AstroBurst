@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::{bail, Context, Result};
 
+use crate::core::astrometry::spectral::{TabColumn, TabTables};
 use crate::infra::fits::reader::{list_extensions, read_header_blocks, ParsedHdu};
 use crate::types::HduHeader;
 
@@ -295,6 +296,27 @@ pub struct Column {
     pub unit: Option<String>,
     pub values: ColumnValues,
     pub null_rows: usize,
+    pub repeat: usize,
+    pub tdim: Option<Vec<usize>>,
+    pub tnull: Option<i64>,
+}
+
+pub fn parse_tdim(text: &str) -> Result<Vec<usize>> {
+    let trimmed = text.trim().trim_matches('\'').trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .with_context(|| format!("TDIM '{trimmed}' is not of the form '(a,b,...)'"))?;
+    inner
+        .split(',')
+        .map(|part| {
+            let part = part.trim();
+            part.parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .with_context(|| format!("TDIM '{trimmed}': '{part}' is not a positive integer"))
+        })
+        .collect()
 }
 
 fn read_raw_int(bytes: &[u8], type_code: char) -> i64 {
@@ -306,57 +328,82 @@ fn read_raw_int(bytes: &[u8], type_code: char) -> i64 {
     }
 }
 
-fn read_one_column(data: &[u8], layout: &BintableLayout, info: &ColumnInfo) -> Result<Column> {
+fn read_one_column(data: &[u8], layout: &BintableLayout, info: &ColumnInfo, tdim_card: Option<&str>) -> Result<Column> {
     let span = layout
         .columns
         .get(&info.name)
         .with_context(|| format!("column '{}' has no layout entry", info.name))?;
-    let (offset, type_code) = match *span {
-        ColumnSpan::Fixed { offset, type_code, repeat: 1 } => (offset, type_code),
-        _ => bail!(
-            "column '{}' is an array column (TFORM '{}'); only scalar columns are read",
+    let (offset, type_code, repeat) = match *span {
+        ColumnSpan::Fixed { offset, type_code, repeat } => (offset, type_code, repeat),
+        ColumnSpan::VarArray { .. } => bail!(
+            "column '{}' is a variable-length array column (TFORM '{}'); variable-length arrays are not read",
             info.name,
             info.tform
         ),
     };
-    let rows = (0..layout.n_rows).map(|i| &data[i * layout.row_width + offset..(i + 1) * layout.row_width]);
-    let (values, null_rows) = match type_code {
-        'D' => (ColumnValues::F64(rows.map(|r| f64::from_be_bytes(r[..8].try_into().unwrap())).collect()), 0),
-        'E' => (ColumnValues::F64(rows.map(|r| f32::from_be_bytes(r[..4].try_into().unwrap()) as f64).collect()), 0),
-        'B' | 'I' | 'J' | 'K' => {
-            let raws: Vec<i64> = rows.map(|r| read_raw_int(r, type_code)).collect();
+    if !matches!(type_code, 'D' | 'E' | 'B' | 'I' | 'J' | 'K') {
+        bail!("column '{}': unsupported scalar type '{}'", info.name, type_code);
+    }
+    let tdim = match tdim_card {
+        Some(text) => {
+            let shape = parse_tdim(text)?;
+            if shape.iter().product::<usize>() != repeat {
+                bail!(
+                    "TDIM{} '{}' does not match the TFORM{} repeat {}",
+                    info.index,
+                    text.trim().trim_matches('\'').trim(),
+                    info.index,
+                    repeat
+                );
+            }
+            Some(shape)
+        }
+        None => None,
+    };
+    let elem_bytes = tform_elem_bytes(type_code)?;
+    let elements = (0..layout.n_rows).flat_map(|row| {
+        let start = row * layout.row_width + offset;
+        (0..repeat).map(move |e| &data[start + e * elem_bytes..start + (e + 1) * elem_bytes])
+    });
+    let (values, null_rows, tnull) = match type_code {
+        'D' => (ColumnValues::F64(elements.map(|r| f64::from_be_bytes(r.try_into().unwrap())).collect()), 0, None),
+        'E' => (ColumnValues::F64(elements.map(|r| f32::from_be_bytes(r.try_into().unwrap()) as f64).collect()), 0, None),
+        _ => {
+            let raws: Vec<i64> = elements.map(|r| read_raw_int(r, type_code)).collect();
             let null_rows = info.tnull.map_or(0, |tnull| raws.iter().filter(|&&v| v == tnull).count());
             let tscal = info.tscal.unwrap_or(1.0);
             let tzero = info.tzero.unwrap_or(0.0);
             let promote = tscal != 1.0 || tzero.fract() != 0.0;
-            let values = if promote {
-                ColumnValues::F64(
+            let (values, tnull) = if promote {
+                let values = ColumnValues::F64(
                     raws.iter()
                         .map(|&raw| if info.tnull == Some(raw) { f64::NAN } else { raw as f64 * tscal + tzero })
                         .collect(),
-                )
+                );
+                (values, None)
             } else {
                 let shift = tzero as i128;
                 let shifted: Vec<i128> = raws.iter().map(|&raw| raw as i128 + shift).collect();
                 if shifted.iter().all(|&v| i64::try_from(v).is_ok()) {
-                    ColumnValues::I64(shifted.iter().map(|&v| v as i64).collect())
+                    let sentinel = info.tnull.and_then(|t| i64::try_from(t as i128 + shift).ok());
+                    (ColumnValues::I64(shifted.iter().map(|&v| v as i64).collect()), sentinel)
                 } else {
-                    ColumnValues::F64(
+                    let values = ColumnValues::F64(
                         raws.iter()
                             .zip(&shifted)
                             .map(|(&raw, &v)| if info.tnull == Some(raw) { f64::NAN } else { v as f64 })
                             .collect(),
-                    )
+                    );
+                    (values, None)
                 }
             };
-            (values, null_rows)
+            (values, null_rows, tnull)
         }
-        other => bail!("column '{}': unsupported scalar type '{}'", info.name, other),
     };
-    Ok(Column { name: info.name.clone(), unit: info.unit.clone(), values, null_rows })
+    Ok(Column { name: info.name.clone(), unit: info.unit.clone(), values, null_rows, repeat, tdim, tnull })
 }
 
-fn read_columns_in(data: &[u8], header: &HduHeader, names: &[&str], label: &str) -> Result<Vec<Column>> {
+fn read_columns_in(data: &[u8], header: &HduHeader, names: &[&str], label: &str, flatten_rows: bool) -> Result<Vec<Column>> {
     let infos = column_infos(header, label)?;
     let layout = build_bintable_layout(header, 0)?;
     let needed = layout
@@ -379,14 +426,27 @@ fn read_columns_in(data: &[u8], header: &HduHeader, names: &[&str], label: &str)
             let info = matches
                 .first()
                 .with_context(|| format!("column '{wanted}' not in {label}; columns: {available}"))?;
-            read_one_column(data, &layout, info)
+            if !flatten_rows && layout.n_rows > 1 {
+                if let Some(ColumnSpan::Fixed { repeat, .. }) = layout.columns.get(&info.name) {
+                    if *repeat > 1 {
+                        bail!(
+                            "column '{}' is an array column (TFORM '{}') in a {}-row table: each row holds its own array (a multi-spectrum or TSO layout, one spectrum per row), which cannot be read as a single column",
+                            info.name,
+                            info.tform,
+                            layout.n_rows
+                        );
+                    }
+                }
+            }
+            let tdim_card = card_text(header, &format!("TDIM{}", info.index));
+            read_one_column(data, &layout, info, tdim_card.as_deref())
         })
         .collect()
 }
 
 pub fn read_columns(data: &[u8], header: &HduHeader, names: &[&str]) -> Result<Vec<Column>> {
     let label = card_text(header, "EXTNAME").map_or_else(|| "this table".to_string(), |n| format!("table {n}"));
-    read_columns_in(data, header, names, &label)
+    read_columns_in(data, header, names, &label, false)
 }
 
 pub struct BintableData {
@@ -397,12 +457,21 @@ pub struct BintableData {
 
 impl BintableData {
     pub fn column(&self, name: &str) -> Result<Column> {
-        let mut columns = read_columns_in(&self.bytes, &self.header, &[name], &self.label)?;
+        let mut columns = self.columns(&[name])?;
         Ok(columns.remove(0))
     }
 
     pub fn columns(&self, names: &[&str]) -> Result<Vec<Column>> {
-        read_columns_in(&self.bytes, &self.header, names, &self.label)
+        read_columns_in(&self.bytes, &self.header, names, &self.label, false)
+    }
+
+    pub fn flattened_column(&self, name: &str) -> Result<Column> {
+        let mut columns = self.flattened_columns(&[name])?;
+        Ok(columns.remove(0))
+    }
+
+    pub fn flattened_columns(&self, names: &[&str]) -> Result<Vec<Column>> {
+        read_columns_in(&self.bytes, &self.header, names, &self.label, true)
     }
 }
 
@@ -438,7 +507,51 @@ pub fn load_bintable(path: &str, hdu: usize) -> Result<BintableData> {
 }
 
 pub fn read_bintable_columns(path: &str, hdu: usize, names: &[&str]) -> Result<Vec<Column>> {
-    load_bintable(path, hdu)?.columns(names)
+    load_bintable(path, hdu)?.flattened_columns(names)
+}
+
+pub fn find_bintable(path: &str, extname: &str, extver: i64) -> Result<usize> {
+    let file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let wanted = extname.trim();
+    for info in list_extensions(&file)? {
+        let parsed = read_header_blocks(&file, info.header_start)?;
+        if !is_bintable_hdu(&parsed.header) {
+            continue;
+        }
+        let name_matches = card_text(&parsed.header, "EXTNAME").map_or(false, |name| name.eq_ignore_ascii_case(wanted));
+        if name_matches && parsed.header.get_i64("EXTVER").unwrap_or(1) == extver {
+            return Ok(info.index);
+        }
+    }
+    bail!("no BINTABLE named '{extname}' (EXTVER {extver}) in {path}")
+}
+
+pub fn read_bintable_column_by_name(path: &str, extname: &str, extver: i64, column: &str) -> Result<Column> {
+    let hdu = find_bintable(path, extname, extver)?;
+    load_bintable(path, hdu)?.flattened_column(column)
+}
+
+pub struct FileTabTables<'a> {
+    pub path: &'a str,
+}
+
+impl TabTables for FileTabTables<'_> {
+    fn coordinate_column(&self, extname: &str, extver: i64, column: &str) -> std::result::Result<TabColumn, String> {
+        let hdu = find_bintable(self.path, extname, extver).map_err(|e| format!("{e:#}"))?;
+        let table = load_bintable(self.path, hdu).map_err(|e| format!("{e:#}"))?;
+        let Column { values, repeat, tdim, unit, tnull, .. } = table.flattened_column(column).map_err(|e| format!("{e:#}"))?;
+        let values = match values {
+            ColumnValues::F64(v) => v,
+            ColumnValues::I64(v) => v.into_iter().map(|x| if tnull == Some(x) { f64::NAN } else { x as f64 }).collect(),
+        };
+        let rows = values.len() / repeat.max(1);
+        if rows != 1 {
+            return Err(format!(
+                "{extname}[{extver}] column '{column}' has {rows} rows; a -TAB coordinate array is a single-row table"
+            ));
+        }
+        Ok(TabColumn { values, shape: tdim.unwrap_or_else(|| vec![repeat]), unit })
+    }
 }
 
 #[cfg(test)]
@@ -479,8 +592,10 @@ pub mod test_support {
             ("PCOUNT", "0".into()),
             ("GCOUNT", "1".into()),
             ("TFIELDS", columns.len().to_string()),
-            ("EXTNAME", "'EXTRACT1D'".into()),
         ];
+        if !extra.iter().any(|(k, _)| *k == "EXTNAME") {
+            cards.push(("EXTNAME", "'EXTRACT1D'".into()));
+        }
         for (i, (name, tform, unit)) in columns.iter().enumerate() {
             let n = i + 1;
             cards.push((leak(format!("TTYPE{n}")), format!("'{name:<8}'")));
@@ -512,9 +627,9 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::write_table;
+    use super::test_support::{bintable_cards, write_table};
     use super::*;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, sci_err_dq_mef, write_raw_hdus};
 
     fn make_header(pairs: &[(&str, &str)]) -> HduHeader {
         let mut header = HduHeader::empty();
@@ -596,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn read_columns_refuses_array_and_variable_length_columns() {
+    fn variable_length_columns_are_refused_with_a_clear_message() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_table(
             dir.path(),
@@ -607,13 +722,288 @@ mod tests {
             &[],
         );
         let key = path.to_str().unwrap();
-        let arr = format!("{:#}", read_bintable_columns(key, 1, &["ARR"]).unwrap_err());
-        assert!(arr.contains("column 'ARR' is an array column (TFORM '3D')"), "{arr}");
-        assert!(arr.contains("only scalar columns are read"), "{arr}");
         let var = format!("{:#}", read_bintable_columns(key, 1, &["VAR"]).unwrap_err());
-        assert!(var.contains("column 'VAR' is an array column (TFORM '1PD(10)')"), "{var}");
+        assert!(var.contains("column 'VAR' is a variable-length array column (TFORM '1PD(10)')"), "{var}");
+        assert!(var.contains("variable-length arrays are not read"), "{var}");
+        let arr = read_bintable_columns(key, 1, &["ARR"]).unwrap();
+        assert_eq!(f64s(&arr[0]), vec![0.0, 0.0, 0.0]);
         let ok = read_bintable_columns(key, 1, &["OK"]).unwrap();
         assert_eq!(f64s(&ok[0]), vec![0.0]);
+    }
+
+    fn f64_rows(rows: &[&[f64]]) -> Vec<u8> {
+        rows.iter().flat_map(|r| r.iter().flat_map(|v| v.to_be_bytes())).collect()
+    }
+
+    #[test]
+    fn fixed_repeat_array_columns_are_read_as_flattened_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_table(
+            dir.path(),
+            "arr3d.fits",
+            &[("ARR", "3D", None)],
+            2,
+            f64_rows(&[&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]]),
+            &[],
+        );
+        let column = &read_bintable_columns(path.to_str().unwrap(), 1, &["ARR"]).unwrap()[0];
+        assert_eq!(f64s(column), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(column.repeat, 3);
+        assert_eq!(column.tdim, None);
+        assert_eq!(column.null_rows, 0);
+    }
+
+    #[test]
+    fn tdim_shapes_the_array_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_table(
+            dir.path(),
+            "tdim.fits",
+            &[("ARR", "3D", None)],
+            1,
+            f64_rows(&[&[1.0, 1.5, 2.25]]),
+            &[("TDIM1", "'(1,3)'".into())],
+        );
+        let column = &read_bintable_columns(path.to_str().unwrap(), 1, &["ARR"]).unwrap()[0];
+        assert_eq!(column.tdim, Some(vec![1, 3]));
+        assert_eq!(column.repeat, 3);
+        assert_eq!(f64s(column), vec![1.0, 1.5, 2.25]);
+        assert_eq!(parse_tdim("(1,1400)").unwrap(), vec![1, 1400]);
+        assert_eq!(parse_tdim("'(1,1400)'").unwrap(), vec![1, 1400]);
+        assert_eq!(parse_tdim(" (2, 3,4) ").unwrap(), vec![2, 3, 4]);
+        assert!(parse_tdim("1,3").is_err());
+        assert!(parse_tdim("(1,x)").is_err());
+    }
+
+    #[test]
+    fn tdim_must_match_the_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_table(
+            dir.path(),
+            "tdim_bad.fits",
+            &[("ARR", "3D", None)],
+            1,
+            f64_rows(&[&[1.0, 2.0, 3.0]]),
+            &[("TDIM1", "'(2,2)'".into())],
+        );
+        let err = format!("{:#}", read_bintable_columns(path.to_str().unwrap(), 1, &["ARR"]).unwrap_err());
+        assert!(err.contains("TDIM1 '(2,2)' does not match the TFORM1 repeat 3"), "{err}");
+    }
+
+    #[test]
+    fn integer_array_columns_apply_tnull_tscal_per_element() {
+        let dir = tempfile::tempdir().unwrap();
+        let raws = [0i32, -1, 5];
+        let data = be_bytes(&raws.map(|v| v.to_be_bytes()));
+        let path = write_table(
+            dir.path(),
+            "arr3j.fits",
+            &[("ARR", "3J", None)],
+            1,
+            data,
+            &[("TNULL1", "-1".into()), ("TSCAL1", "0.5".into())],
+        );
+        let column = &read_bintable_columns(path.to_str().unwrap(), 1, &["ARR"]).unwrap()[0];
+        let values = f64s(column);
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], 0.0);
+        assert!(values[1].is_nan(), "{values:?}");
+        assert_eq!(values[2], 2.5);
+        assert_eq!(column.null_rows, 1);
+        assert_eq!(column.repeat, 3);
+    }
+
+    fn wcs_table_hdu(extver: i64, values: &[f32]) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let tform = format!("{}E", values.len());
+        let cards = super::test_support::bintable_cards(
+            &[("wavelength", &tform, Some("um"))],
+            1,
+            &[("EXTNAME", "'WCS-TABLE'".into()), ("EXTVER", extver.to_string())],
+        );
+        let data = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        (cards, data)
+    }
+
+    #[test]
+    fn find_bintable_locates_by_extname_and_extver() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two_tables.fits");
+        crate::infra::fits::reader::test_fixtures::write_raw_hdus(
+            &path,
+            &[
+                (crate::infra::fits::reader::test_fixtures::empty_primary_cards(), Vec::new()),
+                wcs_table_hdu(1, &[1.0, 1.5, 2.25]),
+                wcs_table_hdu(2, &[10.0, 20.0]),
+            ],
+        );
+        let key = path.to_str().unwrap();
+        assert_eq!(find_bintable(key, "WCS-TABLE", 1).unwrap(), 1);
+        assert_eq!(find_bintable(key, "wcs-table", 2).unwrap(), 2);
+        let err = format!("{:#}", find_bintable(key, "WCS-TABLE", 3).unwrap_err());
+        assert!(err.contains("no BINTABLE named 'WCS-TABLE' (EXTVER 3)"), "{err}");
+        let err = format!("{:#}", find_bintable(key, "NOPE", 1).unwrap_err());
+        assert!(err.contains("no BINTABLE named 'NOPE' (EXTVER 1)"), "{err}");
+        let second = read_bintable_column_by_name(key, "WCS-TABLE", 2, "wavelength").unwrap();
+        assert_eq!(f64s(&second), vec![10.0, 20.0]);
+        assert_eq!(second.repeat, 2);
+        assert_eq!(second.unit.as_deref(), Some("um"));
+    }
+
+    #[test]
+    fn find_bintable_ignores_a_sibling_table_that_describe_table_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_sibling.fits");
+        let broken = super::test_support::bintable_cards(
+            &[("WAVELENGTH", "1D", None), ("FLUX", "1D", None)],
+            1,
+            &[("TFIELDS", "1000".into())],
+        );
+        crate::infra::fits::reader::test_fixtures::write_raw_hdus(
+            &path,
+            &[
+                (crate::infra::fits::reader::test_fixtures::empty_primary_cards(), Vec::new()),
+                (broken, vec![0u8; 16]),
+                wcs_table_hdu(1, &[1.0, 1.5, 2.25]),
+            ],
+        );
+        let key = path.to_str().unwrap();
+        let listed = format!("{:#}", list_tables(&File::open(&path).unwrap()).err().unwrap());
+        assert!(listed.contains("TFIELDS=1000 exceeds the FITS limit of 999"), "{listed}");
+        assert_eq!(find_bintable(key, "WCS-TABLE", 1).unwrap(), 2);
+        let column = read_bintable_column_by_name(key, "WCS-TABLE", 1, "wavelength").unwrap();
+        assert_eq!(f64s(&column), vec![1.0, 1.5, 2.25]);
+    }
+
+    #[test]
+    fn file_tab_tables_serves_a_single_row_coordinate_array_with_its_shape_and_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tab.fits");
+        let mut shaped = wcs_table_hdu(1, &[1.0, 1.5, 2.25]);
+        shaped.0.push(("TDIM1", "'(1,3)'".into()));
+        crate::infra::fits::reader::test_fixtures::write_raw_hdus(
+            &path,
+            &[(crate::infra::fits::reader::test_fixtures::empty_primary_cards(), Vec::new()), shaped],
+        );
+        let key = path.to_str().unwrap();
+        let tables = FileTabTables { path: key };
+        let column = tables.coordinate_column("WCS-TABLE", 1, "wavelength").unwrap();
+        assert_eq!(column.values, vec![1.0, 1.5, 2.25]);
+        assert_eq!(column.shape, vec![1, 3]);
+        assert_eq!(column.unit.as_deref(), Some("um"));
+        let err = tables.coordinate_column("WCS-TABLE", 2, "wavelength").unwrap_err();
+        assert!(err.contains("no BINTABLE named 'WCS-TABLE' (EXTVER 2)"), "{err}");
+        let err = tables.coordinate_column("WCS-TABLE", 1, "flux").unwrap_err();
+        assert!(err.contains("column 'FLUX' not in"), "{err}");
+    }
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    #[test]
+    fn multi_row_array_columns_are_refused_unless_flattening_is_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_table(
+            dir.path(),
+            "tso_x1dints.fits",
+            &[("WAVELENGTH", "3D", Some("um")), ("FLUX", "3D", Some("Jy")), ("NPIXELS", "1D", None)],
+            2,
+            f64_rows(&[&[1.0, 1.1, 1.2, 10.0, 11.0, 12.0, 9.0], &[1.0, 1.1, 1.2, 20.0, 21.0, 22.0, 9.0]]),
+            &[],
+        );
+        let table = load_bintable(path.to_str().unwrap(), 1).unwrap();
+        let err = format!("{:#}", table.columns(&["WAVELENGTH", "FLUX"]).unwrap_err());
+        assert!(err.contains("column 'WAVELENGTH' is an array column (TFORM '3D') in a 2-row table"), "{err}");
+        assert!(err.contains("TSO"), "{err}");
+        let err = format!("{:#}", table.column("FLUX").unwrap_err());
+        assert!(err.contains("column 'FLUX' is an array column (TFORM '3D') in a 2-row table"), "{err}");
+        assert_eq!(f64s(&table.column("NPIXELS").unwrap()), vec![9.0, 9.0]);
+        let flattened = table.flattened_columns(&["WAVELENGTH", "FLUX"]).unwrap();
+        assert_eq!(f64s(&flattened[0]), vec![1.0, 1.1, 1.2, 1.0, 1.1, 1.2]);
+        assert_eq!(f64s(&flattened[1]), vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0]);
+        assert_eq!(flattened[0].repeat, 3);
+        assert_eq!(f64s(&table.flattened_column("FLUX").unwrap()), vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0]);
+
+        let single = write_table(
+            dir.path(),
+            "one_row.fits",
+            &[("WAVELENGTH", "3D", Some("um")), ("FLUX", "3D", Some("Jy"))],
+            1,
+            f64_rows(&[&[1.0, 1.1, 1.2, 10.0, 11.0, 12.0]]),
+            &[],
+        );
+        let columns = load_bintable(single.to_str().unwrap(), 1).unwrap().columns(&["WAVELENGTH", "FLUX"]).unwrap();
+        assert_eq!(f64s(&columns[0]), vec![1.0, 1.1, 1.2]);
+        assert_eq!(f64s(&columns[1]), vec![10.0, 11.0, 12.0]);
+    }
+
+    #[test]
+    fn file_tab_tables_refuses_a_multi_row_coordinate_table_with_its_own_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two_rows.fits");
+        let cards = bintable_cards(
+            &[("wavelength", "3E", Some("um"))],
+            2,
+            &[("EXTNAME", "'WCS-TABLE'".into()), ("EXTVER", "1".into())],
+        );
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (cards, f32_bytes(&[1.0, 1.5, 2.25, 3.0, 3.5, 4.25]))]);
+        let err = FileTabTables { path: path.to_str().unwrap() }.coordinate_column("WCS-TABLE", 1, "wavelength").unwrap_err();
+        assert_eq!(err, "WCS-TABLE[1] column 'wavelength' has 2 rows; a -TAB coordinate array is a single-row table");
+    }
+
+    #[test]
+    fn file_tab_tables_turns_tnull_entries_of_an_integer_column_into_nan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("int_index.fits");
+        let cards = bintable_cards(
+            &[("wavelength", "3E", Some("um")), ("idx", "3J", None), ("shifted", "3J", None)],
+            1,
+            &[
+                ("EXTNAME", "'WCS-TABLE'".into()),
+                ("EXTVER", "1".into()),
+                ("TNULL2", "-1".into()),
+                ("TNULL3", "-1".into()),
+                ("TZERO3", "10".into()),
+            ],
+        );
+        let mut data = f32_bytes(&[1.0, 1.5, 2.25]);
+        data.extend(be_bytes(&[10i32, -1, 30].map(|v| v.to_be_bytes())));
+        data.extend(be_bytes(&[5i32, -1, 7].map(|v| v.to_be_bytes())));
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (cards, data)]);
+        let key = path.to_str().unwrap();
+        let tables = FileTabTables { path: key };
+        let idx = tables.coordinate_column("WCS-TABLE", 1, "idx").unwrap();
+        assert_eq!(idx.values[0], 10.0);
+        assert!(idx.values[1].is_nan(), "{:?}", idx.values);
+        assert_eq!(idx.values[2], 30.0);
+        assert_eq!(idx.shape, vec![3]);
+        let shifted = tables.coordinate_column("WCS-TABLE", 1, "shifted").unwrap();
+        assert_eq!(shifted.values[0], 15.0);
+        assert!(shifted.values[1].is_nan(), "{:?}", shifted.values);
+        assert_eq!(shifted.values[2], 17.0);
+        let raw = read_bintable_column_by_name(key, "WCS-TABLE", 1, "idx").unwrap();
+        assert_eq!(i64s(&raw), vec![10, -1, 30]);
+        assert_eq!(raw.tnull, Some(-1));
+        assert_eq!(raw.null_rows, 1);
+        let raw = read_bintable_column_by_name(key, "WCS-TABLE", 1, "shifted").unwrap();
+        assert_eq!(i64s(&raw), vec![15, 9, 17]);
+        assert_eq!(raw.tnull, Some(9));
+        let floats = read_bintable_column_by_name(key, "WCS-TABLE", 1, "wavelength").unwrap();
+        assert_eq!(floats.tnull, None);
+    }
+
+    #[test]
+    fn find_bintable_treats_a_missing_extver_as_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_extver.fits");
+        let cards = bintable_cards(&[("wavelength", "3E", Some("um"))], 1, &[("EXTNAME", "'WCS-TABLE'".into())]);
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (cards, f32_bytes(&[1.0, 1.5, 2.25]))]);
+        let key = path.to_str().unwrap();
+        assert_eq!(find_bintable(key, "WCS-TABLE", 1).unwrap(), 1);
+        let err = format!("{:#}", find_bintable(key, "WCS-TABLE", 2).unwrap_err());
+        assert!(err.contains("no BINTABLE named 'WCS-TABLE' (EXTVER 2)"), "{err}");
+        let column = FileTabTables { path: key }.coordinate_column("WCS-TABLE", 1, "wavelength").unwrap();
+        assert_eq!(column.values, vec![1.0, 1.5, 2.25]);
     }
 
     #[test]

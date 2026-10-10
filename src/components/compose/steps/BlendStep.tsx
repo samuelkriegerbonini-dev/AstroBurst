@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 
-import { blendChannels, lrgbCombineComposite, measureChannelLevel, renderLinearCompositePreview } from "../../../services/compose";
+import { blendChannels, lrgbCombineComposite, renderLinearCompositePreview } from "../../../services/compose";
+import { measureChannelLevels } from "../../../services/channelLevels";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { RunButton, Slider, Toggle } from "../../ui";
@@ -17,9 +18,10 @@ import {
   type FilterDetectionRef,
 } from "../../../utils/wizard";
 import {
+  blendCompositeStf,
   blendRequest,
-  channelLevel,
   channelLevels,
+  LEVEL_MATCH_HELP,
   levelMatchChannelLabel,
   levelMatchEnabled,
   levelMatchEntries,
@@ -28,6 +30,10 @@ import {
   levelScales,
   levelTargets,
   scaleBlendWeights,
+  spccBackgroundNote,
+  type BlendCompositeStf,
+  type LevelScales,
+  type MeasuredLevel,
 } from "../../../utils/levelMatch";
 import {
   blendMatrixError,
@@ -44,11 +50,11 @@ interface BlendStepProps {
   files: readonly ProcessedFile[];
   filterDetections?: FilterDetectionRef[];
   onLevelMatchChange: (enabled: boolean) => void;
-  onLevelScales: (scales: Record<string, number> | null) => void;
+  onLevelScales: (scales: LevelScales | null) => void;
   onWeightsChange: (weights: BlendWeight[], preset: string) => void;
   onCompositeReady: (
     previewUrl: string | null,
-    autoStf?: { shadow: number; midtone: number; highlight: number },
+    stf?: BlendCompositeStf,
     dimensions?: [number, number],
   ) => void;
   onCompositeOp: (op: CompositeOp) => void;
@@ -58,6 +64,7 @@ interface BlendRunResult {
   channel_count?: number;
   dimensions?: [number, number];
   elapsed_ms?: number;
+  stf_note?: string | null;
 }
 
 export default function BlendStep({
@@ -74,6 +81,7 @@ export default function BlendStep({
   const [loading, setLoading] = useState(false);
   const [levelProgress, setLevelProgress] = useState<string | null>(null);
   const matchOn = useMemo(() => levelMatchEnabled(state, files, filterDetections), [state, files, filterDetections]);
+  const spccBgNote = spccBackgroundNote(state, matchOn);
   const [result, setResult] = useState<BlendRunResult | null>(null);
   const [error, setError] = useState("");
   const [lrgbLightness, setLrgbLightness] = useState(1.0);
@@ -198,15 +206,16 @@ export default function BlendStep({
         throw new Error(matrixProblem);
       }
 
-      let scales: Record<string, number> | null = null;
+      let scales: LevelScales | null = null;
       if (matchOn) {
         const labelOf = (binId: string) => levelMatchChannelLabel(state, binId, files);
         const targets = levelTargets(request);
-        const levelsByPath: Record<string, number> = {};
+        const levelsByPath: Record<string, MeasuredLevel> = {};
         for (const [i, target] of targets.entries()) {
           setLevelProgress(`Measuring levels ${i + 1}/${targets.length}`);
           try {
-            levelsByPath[target.path] = channelLevel(await measureChannelLevel(target.path));
+            const [measured] = await measureChannelLevels([target.path]);
+            if (measured) levelsByPath[target.path] = { median: measured.median, mad: measured.mad };
           } catch (e) {
             throw new Error(levelMeasureError(labelOf(target.binId), target.path, e instanceof Error ? e.message : String(e)));
           }
@@ -225,14 +234,13 @@ export default function BlendStep({
       setResult(res);
 
       const previewUrl = res.previewUrl ?? res.png_path ?? null;
-      const autoStf = res.auto_stf ?? undefined;
       onLevelScales(scales);
       onCompositeOp({
         kind: "blend",
         preset: state.blendPreset,
         levels: scales ? levelMatchEntries(state, files, scales) : null,
       });
-      onCompositeReady(previewUrl, autoStf, res.dimensions);
+      onCompositeReady(previewUrl, blendCompositeStf(res), res.dimensions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -383,9 +391,14 @@ export default function BlendStep({
 
       <div className="flex flex-col gap-0.5">
         <Toggle label="Match levels" checked={matchOn} accent="amber" onChange={onLevelMatchChange} />
-        <div className="text-[9px] text-zinc-500">
-          Scales each channel by its signal (p99.5 minus median) before blending, so a bright narrowband filter does not swamp the others. On by default when a narrowband filter is loaded.
+        <div className="text-[9px] text-zinc-500" data-testid="blend-level-match-help">
+          {LEVEL_MATCH_HELP}
         </div>
+        {spccBgNote && (
+          <div className="text-[9px] text-amber-300/90" data-testid="blend-spcc-bg-note">
+            {spccBgNote}
+          </div>
+        )}
       </div>
 
       <div className="text-[9px] text-zinc-600 bg-zinc-900/50 rounded px-2 py-1.5">
@@ -452,8 +465,14 @@ export default function BlendStep({
           {result.channel_count} channels, {result.dimensions?.[0]}x{result.dimensions?.[1]}, {result.elapsed_ms}ms
         </div>
       )}
+      {result?.stf_note && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          <AlertTriangle size={12} className="shrink-0 mt-px" />
+          <span data-testid="blend-stf-note">{result.stf_note}</span>
+        </div>
+      )}
       {state.compositeReady && state.blendLevelScales && (
-        <div className="text-[9px] text-zinc-500">
+        <div className="text-[9px] text-zinc-500" data-testid="blend-level-summary">
           {levelMatchSummary(levelMatchEntries(state, files, state.blendLevelScales))}
         </div>
       )}

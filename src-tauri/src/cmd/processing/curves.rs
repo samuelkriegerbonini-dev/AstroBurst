@@ -44,12 +44,12 @@ pub struct ToneCurveInput {
     pub points: Vec<[f64; 2]>,
 }
 
-fn build_spline(input: &ToneCurveInput) -> SplineLut {
+pub(crate) fn build_spline(input: &ToneCurveInput) -> SplineLut {
     let pts: Vec<(f64, f64)> = input.points.iter().map(|p| (p[0], p[1])).collect();
     SplineLut::from_points(&pts)
 }
 
-fn is_curve_identity(input: &ToneCurveInput) -> bool {
+pub(crate) fn is_curve_identity(input: &ToneCurveInput) -> bool {
     let pts: Vec<(f64, f64)> = input.points.iter().map(|p| (p[0], p[1])).collect();
     SplineLut::is_identity(&pts)
 }

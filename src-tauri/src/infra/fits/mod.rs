@@ -1,3 +1,4 @@
+pub mod asdf_hdu;
 pub mod compress;
 pub mod dispatcher;
 pub mod file_bytes;

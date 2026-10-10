@@ -108,7 +108,7 @@ pub(crate) fn untag(value: &Value) -> &Value {
     }
 }
 
-fn flatten_inline(node: &Value, out: &mut Vec<f64>, dims: &mut Vec<usize>, depth: usize) -> bool {
+pub(crate) fn flatten_inline(node: &Value, out: &mut Vec<f64>, dims: &mut Vec<usize>, depth: usize) -> bool {
     match untag(node) {
         Value::Sequence(seq) => {
             if dims.len() == depth {
@@ -342,7 +342,7 @@ struct GwcsChain<'a> {
     crval: Option<[f64; 2]>,
 }
 
-fn gwcs_param(leaf: &Value, keys: &[&str], units: &[(&str, f64)]) -> Result<Option<f64>, String> {
+pub(crate) fn gwcs_param(leaf: &Value, keys: &[&str], units: &[(&str, f64)]) -> Result<Option<f64>, String> {
     let Some((key, node)) = keys.iter().find_map(|k| leaf.get(*k).map(|v| (*k, v))) else {
         return Ok(None);
     };
@@ -699,7 +699,7 @@ impl WcsInfo {
         format!("{} {}", tag, field).to_lowercase()
     }
 
-    fn model_name(node: &Value) -> String {
+    pub(crate) fn model_name(node: &Value) -> String {
         let from_tag = match node {
             Value::Tagged(tagged) => {
                 let tag = tagged.tag.to_string();

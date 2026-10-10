@@ -29,6 +29,9 @@ export interface CalibrateResult {
   stats?: { min: number; max: number; mean: number; sigma: number };
   dimensions: [number, number];
   elapsed_ms: number;
+  dark_scale?: number;
+  warnings?: string[];
+  has_flat_dark?: boolean;
 }
 
 export interface StackNormalizationApplied {
@@ -67,6 +70,7 @@ export interface StackResult {
   normalization_applied?: StackNormalizationApplied[];
   rejection_low_fits?: string | null;
   rejection_high_fits?: string | null;
+  weights_applied?: (number | null)[];
 }
 
 export interface PipelineChannel {
@@ -79,6 +83,7 @@ export interface PipelineRequest {
   dark_paths: string[];
   flat_paths: string[];
   bias_paths: string[];
+  flat_dark_paths?: string[];
   sigma_low?: number;
   sigma_high?: number;
   normalize?: boolean;
@@ -99,12 +104,23 @@ export interface PipelineChannelStats {
   dark_scale_min?: number | null;
   dark_scale_max?: number | null;
   dark_scale_mean?: number | null;
+  dark_group_temp_c?: number | null;
+  dark_temp_delta_max_c?: number | null;
+  warnings?: string[];
+  excluded_frames?: number[];
+}
+
+export interface PipelineDarkGroup {
+  temp_c: number | null;
+  frames: number;
 }
 
 export interface PipelineStats {
   darks_combined: number;
   flats_combined: number;
   bias_combined: number;
+  flat_darks_combined?: number;
+  dark_groups?: PipelineDarkGroup[];
   channels: PipelineChannelStats[];
 }
 
@@ -140,6 +156,7 @@ export interface CalibrateOptions {
   darkPaths?: string[];
   flatPaths?: string[];
   biasPaths?: string[];
+  flatDarkPaths?: string[];
   darkExposureRatio?: number;
 }
 

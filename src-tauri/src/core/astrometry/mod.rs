@@ -6,4 +6,6 @@ pub mod spectral;
 pub mod time;
 pub mod wcs;
 pub mod catalog;
+pub mod catalog_disk;
+pub mod gwcs;
 pub mod geometry;

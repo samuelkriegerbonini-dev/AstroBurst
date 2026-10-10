@@ -5,12 +5,15 @@ use crate::cmd::processing::source_header;
 use crate::core::astrometry::spcc::{
     spcc_calibrate_rgb, SpccConfig, SpccCatalog, WhiteReference,
 };
-use crate::core::astrometry::wcs::WcsTransform;
 use crate::infra::cache::ImageEntry;
-use crate::types::constants::{RES_ELAPSED_MS, RES_R_FACTOR, RES_G_FACTOR, RES_B_FACTOR, RES_STARS_MATCHED, RES_STARS_TOTAL, RES_AVG_COLOR_INDEX, RES_WHITE_REF, RES_CATALOG_NAME, IS_SYNTHETIC_CATALOG};
+use crate::infra::wcs_source::load_wcs;
+use crate::types::constants::{
+    IS_SYNTHETIC_CATALOG, RES_AVG_COLOR_INDEX, RES_B_FACTOR, RES_CATALOG_NAME, RES_CATALOG_SOURCE, RES_ELAPSED_MS, RES_G_FACTOR,
+    RES_R_FACTOR, RES_STARS_MATCHED, RES_STARS_TOTAL, RES_WAVELENGTHS_NM, RES_WAVELENGTH_SOURCE, RES_WHITE_REF,
+};
 use crate::types::header::HduHeader;
 
-fn spcc_header(r_path: &str, r_entry: &ImageEntry, wcs_path: Option<&str>) -> anyhow::Result<HduHeader> {
+fn spcc_header(r_path: &str, r_entry: &ImageEntry, wcs_path: Option<&str>) -> anyhow::Result<(String, HduHeader)> {
     let (label, header) = match wcs_path {
         Some(path) => (format!("WCS source {}", path), cached_header(path).ok()),
         None => (format!("R channel {}", r_path), source_header(r_path, r_entry)),
@@ -18,10 +21,11 @@ fn spcc_header(r_path: &str, r_entry: &ImageEntry, wcs_path: Option<&str>) -> an
     let header = header.ok_or_else(|| {
         anyhow::anyhow!("{} carries no FITS header; SPCC needs a plate-solved image whose header holds a celestial WCS.", label)
     })?;
-    WcsTransform::from_header(&header).map_err(|e| {
+    let source_path = wcs_path.unwrap_or(r_path);
+    load_wcs(source_path, &header).map_err(|e| {
         anyhow::anyhow!("{} has no usable celestial WCS ({:#}); SPCC needs a plate-solved image.", label, e)
     })?;
-    Ok(header)
+    Ok((source_path.to_string(), header))
 }
 
 #[tauri::command]
@@ -34,13 +38,14 @@ pub async fn spcc_calibrate_cmd(
     min_snr: Option<f64>,
     max_stars: Option<usize>,
     catalog: Option<String>,
+    wavelengths_nm: Option<[f64; 3]>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let r_entry = load_from_cache_or_disk(&r_path)?;
         let g_entry = load_from_cache_or_disk(&g_path)?;
         let b_entry = load_from_cache_or_disk(&b_path)?;
 
-        let header = spcc_header(&r_path, &r_entry, wcs_path.as_deref())?;
+        let (wcs_source, header) = spcc_header(&r_path, &r_entry, wcs_path.as_deref())?;
 
         let wr = match white_reference.as_deref() {
             Some("g2v") | Some("G2V") => WhiteReference::G2V,
@@ -54,19 +59,23 @@ pub async fn spcc_calibrate_cmd(
             _ => SpccCatalog::GaiaDr3Tap,
         };
 
-        let config = SpccConfig {
+        let mut config = SpccConfig {
             min_snr: min_snr.unwrap_or(20.0),
             max_stars: max_stars.unwrap_or(200),
             catalog: cat,
             white_reference: wr,
             ..SpccConfig::default()
         };
+        if let Some(wl) = wavelengths_nm {
+            config.wavelengths_nm = wl;
+        }
 
         let t0 = std::time::Instant::now();
         let result = spcc_calibrate_rgb(
             r_entry.arr(),
             g_entry.arr(),
             b_entry.arr(),
+            &wcs_source,
             &header,
             &config,
         ).map_err(|e| anyhow::anyhow!(e))?;
@@ -82,6 +91,9 @@ pub async fn spcc_calibrate_cmd(
             RES_WHITE_REF: result.white_ref_name,
             RES_CATALOG_NAME: result.catalog_name,
             IS_SYNTHETIC_CATALOG: result.is_synthetic_catalog,
+            RES_WAVELENGTHS_NM: result.wavelengths_nm,
+            RES_WAVELENGTH_SOURCE: result.wavelength_source,
+            RES_CATALOG_SOURCE: result.catalog_source,
             RES_ELAPSED_MS: elapsed_ms,
         }))
     })
@@ -158,6 +170,7 @@ mod tests {
             Some(5.0),
             None,
             Some("builtin".to_string()),
+            None,
         )
         .await;
         let named = spcc_calibrate_cmd(
@@ -169,6 +182,7 @@ mod tests {
             Some(5.0),
             None,
             Some("builtin".to_string()),
+            None,
         )
         .await;
         for key in keys.iter().chain(std::iter::once(&bare)) {
@@ -204,7 +218,7 @@ mod tests {
         for r in [&bare, &unsolved] {
             errors.push((
                 r.clone(),
-                spcc_calibrate_cmd(r.clone(), g.clone(), b.clone(), None, None, Some(5.0), None, Some("builtin".to_string()))
+                spcc_calibrate_cmd(r.clone(), g.clone(), b.clone(), None, None, Some(5.0), None, Some("builtin".to_string()), None)
                     .await
                     .unwrap_err(),
             ));
@@ -217,5 +231,49 @@ mod tests {
             assert!(err.contains("plate-solved"), "{err}");
             assert!(!err.contains("Failed to open") && !err.contains("os error"), "a cache key was opened as a file: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn spcc_response_reports_wavelengths_and_catalog_source() {
+        let _wizard = lock_wizard_entries();
+        let keys = [wizard_bg_key("spcc_wl_r"), wizard_bg_key("spcc_wl_g"), wizard_bg_key("spcc_wl_b")];
+        insert(&keys[0], &star_field(1.0), Some(solved_header()));
+        insert(&keys[1], &star_field(0.8), None);
+        insert(&keys[2], &star_field(0.6), None);
+
+        let run = |wl: Option<[f64; 3]>| {
+            spcc_calibrate_cmd(
+                keys[0].clone(),
+                keys[1].clone(),
+                keys[2].clone(),
+                None,
+                None,
+                Some(5.0),
+                None,
+                Some("builtin".to_string()),
+                wl,
+            )
+        };
+        let default = run(None).await;
+        let filters = run(Some([814.0, 555.0, 435.0])).await;
+        let rejected = run(Some([200.0, 530.0, 460.0])).await;
+        for key in &keys {
+            GLOBAL_IMAGE_CACHE.remove(key);
+        }
+
+        let default = default.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(default[RES_WAVELENGTHS_NM], json!([640.0, 530.0, 460.0]), "{default}");
+        assert_eq!(default[RES_WAVELENGTH_SOURCE], "default", "{default}");
+        assert_eq!(default[RES_CATALOG_SOURCE], serde_json::Value::Null, "{default}");
+        assert_eq!(default[IS_SYNTHETIC_CATALOG], true, "{default}");
+
+        let filters = filters.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(filters[RES_WAVELENGTHS_NM], json!([814.0, 555.0, 435.0]), "{filters}");
+        assert_eq!(filters[RES_WAVELENGTH_SOURCE], "filters", "{filters}");
+        assert_eq!(filters[RES_CATALOG_SOURCE], serde_json::Value::Null, "{filters}");
+        assert_ne!(filters[RES_R_FACTOR], default[RES_R_FACTOR], "the wavelengths must change the Planck expectation");
+
+        let err = rejected.expect_err("200 nm is outside the SPCC range");
+        assert!(err.contains("SPCC wavelengths must be finite and between 300 and 1200 nm (got [200, 530, 460])."), "{err}");
     }
 }

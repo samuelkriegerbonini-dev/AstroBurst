@@ -84,11 +84,11 @@ fn first_card_f64<'a>(header: &HduHeader, keys: impl IntoIterator<Item = &'a str
     keys.into_iter().find_map(|key| card_f64(header, key).map(|v| (key, v)))
 }
 
-fn normalized_unit(bunit: &str) -> String {
+pub(crate) fn normalized_unit(bunit: &str) -> String {
     bunit.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase()
 }
 
-fn is_mjy_per_sr(unit: &str) -> bool {
+pub(crate) fn is_mjy_per_sr(unit: &str) -> bool {
     MJY_PER_SR_UNITS.contains(&unit)
 }
 

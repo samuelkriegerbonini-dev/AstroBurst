@@ -17,6 +17,83 @@ mod astrometry_net_impl {
     const SESSION_LOG_CHARS: usize = 8;
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
     const POLLS_PER_LOG: u64 = 10;
+    const GET_ATTEMPTS: u32 = 3;
+    const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+    const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+    fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+        let mut parts = vec![error.to_string()];
+        let mut source = error.source();
+        while let Some(cause) = source {
+            let text = cause.to_string();
+            if !parts.iter().any(|p| p.contains(&text)) {
+                parts.push(text);
+            }
+            source = cause.source();
+        }
+        parts.join(": ")
+    }
+
+    fn is_transient(error: &reqwest::Error) -> bool {
+        error.is_connect() || error.is_request() || error.is_timeout() || error.is_body()
+    }
+
+    async fn get_with_retry(
+        client: &reqwest::Client,
+        url: &str,
+        label: &str,
+        subject: &str,
+        referer: bool,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+        let mut last_error: Option<reqwest::Error> = None;
+        for attempt in 1..=GET_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(RETRY_BACKOFF * (attempt - 1)).await;
+            }
+            let mut request = client.get(url);
+            if referer {
+                request = request.header("Referer", REFERER);
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) if is_transient(&error) => {
+                    log::warn!("{label} ({subject}) attempt {attempt}/{GET_ATTEMPTS}: {}", error_chain(&error));
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => bail!("{label} request failed ({subject}): {}", error_chain(&error)),
+            };
+            let status = response.status();
+            if status.is_server_error() && attempt < GET_ATTEMPTS {
+                log::warn!("{label} ({subject}) attempt {attempt}/{GET_ATTEMPTS}: HTTP {status}");
+                continue;
+            }
+            match response.bytes().await {
+                Ok(body) => return Ok((status, body.to_vec())),
+                Err(error) if is_transient(&error) => {
+                    log::warn!("{label} ({subject}) body attempt {attempt}/{GET_ATTEMPTS}: {}", error_chain(&error));
+                    last_error = Some(error);
+                }
+                Err(error) => bail!("{label}: failed to read response body ({subject}): {}", error_chain(&error)),
+            }
+        }
+        match last_error {
+            Some(error) => bail!(
+                "{label} request failed after {GET_ATTEMPTS} attempts ({subject}): {}",
+                error_chain(&error)
+            ),
+            None => bail!("{label} request failed after {GET_ATTEMPTS} attempts ({subject})"),
+        }
+    }
+
+    async fn get_json(client: &reqwest::Client, url: &str, label: &str, subject: &str) -> Result<serde_json::Value> {
+        let (status, body) = get_with_retry(client, url, label, subject, false).await?;
+        let body = String::from_utf8_lossy(&body);
+        if !status.is_success() {
+            bail!("{}: HTTP {} -- {}", label, status, char_prefix(&body, ERROR_SNIPPET_CHARS));
+        }
+        parse_json_body(&body, label)
+    }
 
     pub(super) fn char_prefix(text: &str, max_chars: usize) -> &str {
         text.char_indices().nth(max_chars).map_or(text, |(end, _)| &text[..end])
@@ -117,17 +194,11 @@ mod astrometry_net_impl {
     }
 
     async fn fetch_wcs_cards(client: &reqwest::Client, base_url: &str, jid: u64) -> Result<Vec<(String, String)>> {
-        let resp = client
-            .get(format!("{}/wcs_file/{}", base_url, jid))
-            .header("Referer", REFERER)
-            .send()
-            .await
-            .context("wcs_file request failed")?;
-        let status = resp.status();
+        let url = format!("{}/wcs_file/{}", base_url, jid);
+        let (status, bytes) = get_with_retry(client, &url, "wcs_file", &format!("job {jid}"), true).await?;
         if !status.is_success() {
             bail!("wcs_file: HTTP {}", status);
         }
-        let bytes = resp.bytes().await.context("wcs_file: failed to read response body")?;
         wcs_cards_from_wcs_file(&bytes)
     }
 
@@ -162,6 +233,7 @@ mod astrometry_net_impl {
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .build()?;
         let base_url = &config.api_url;
 
@@ -253,11 +325,13 @@ mod astrometry_net_impl {
         let jid = loop {
             tokio::time::sleep(POLL_INTERVAL).await;
             polls += 1;
-            let resp = client
-                .get(format!("{}/api/submissions/{}", base_url, subid))
-                .send()
-                .await?;
-            let sub_status = parse_json_response(resp, "Submission status").await?;
+            let sub_status = get_json(
+                &client,
+                &format!("{}/api/submissions/{}", base_url, subid),
+                "Submission status",
+                &format!("submission {subid}"),
+            )
+            .await?;
             if let Some(id) = first_job_id(&sub_status) {
                 break id;
             }
@@ -268,12 +342,10 @@ mod astrometry_net_impl {
         log::info!("Job {} started, polling for solution...", jid);
 
         let mut polls: u64 = 0;
+        let job_subject = format!("job {jid}");
         loop {
-            let resp = client
-                .get(format!("{}/api/jobs/{}", base_url, jid))
-                .send()
-                .await?;
-            let job_data = parse_json_response(resp, "Job status").await?;
+            let job_data =
+                get_json(&client, &format!("{}/api/jobs/{}", base_url, jid), "Job status", &job_subject).await?;
             match job_data["status"].as_str().unwrap_or("") {
                 "success" => break,
                 "failure" => bail!("Plate solve failed on astrometry.net (job {})", jid),
@@ -286,11 +358,13 @@ mod astrometry_net_impl {
             }
         }
 
-        let cal_resp = client
-            .get(format!("{}/api/jobs/{}/calibration", base_url, jid))
-            .send()
-            .await?;
-        let cal = parse_json_response(cal_resp, "Calibration").await?;
+        let cal = get_json(
+            &client,
+            &format!("{}/api/jobs/{}/calibration", base_url, jid),
+            "Calibration",
+            &job_subject,
+        )
+        .await?;
 
         let Calibration { ra: ra_center, dec: dec_center, orientation, pixscale: pixel_scale } =
             parse_calibration(&cal, jid)?;
@@ -302,23 +376,23 @@ mod astrometry_net_impl {
             ra_center, dec_center, pixel_scale, orientation, field_w, field_h
         );
 
-        let annotations = match client
-            .get(format!("{}/api/jobs/{}/annotations", base_url, jid))
-            .header("Referer", REFERER)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                match parse_json_response(resp, "Annotations").await {
+        let annotations_url = format!("{}/api/jobs/{}/annotations", base_url, jid);
+        let annotations = match get_with_retry(&client, &annotations_url, "Annotations", &job_subject, true).await {
+            Ok((status, body)) if status.is_success() => {
+                match parse_json_body(&String::from_utf8_lossy(&body), "Annotations") {
                     Ok(json) => parse_annotations(&json),
                     Err(e) => {
-                        log::warn!("Failed to parse annotations: {}", e);
+                        log::warn!("Failed to parse annotations: {:#}", e);
                         Vec::new()
                     }
                 }
             }
+            Ok((status, _)) => {
+                log::warn!("Annotations request for job {}: HTTP {}", jid, status);
+                Vec::new()
+            }
             Err(e) => {
-                log::warn!("Annotations request failed: {}", e);
+                log::warn!("Annotations request failed: {:#}", e);
                 Vec::new()
             }
         };
@@ -647,6 +721,93 @@ mod tests {
         let seen = seen.lock().unwrap().clone();
         assert!(seen.iter().any(|l| l.starts_with("POST /api/login")), "{seen:?}");
         assert!(seen.iter().any(|l| l.starts_with("POST /api/upload")), "{seen:?}");
+    }
+
+    fn serve_a_flaky_solved_job(
+        seen: Arc<Mutex<Vec<String>>>,
+        dropped_calibrations: usize,
+        busy_job_polls: usize,
+    ) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut calibrations = 0usize;
+            let mut job_polls = 0usize;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let line = read_request_line(&mut stream);
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(path.clone());
+                let json = "application/json";
+                match path.as_str() {
+                    "/api/login" => respond(&mut stream, "200 OK", json, br#"{"status":"success","session":"test-session"}"#),
+                    "/api/upload" => respond(&mut stream, "200 OK", json, br#"{"status":"success","subid":7}"#),
+                    "/api/submissions/7" => respond(&mut stream, "200 OK", json, br#"{"jobs":[42]}"#),
+                    "/api/jobs/42" => {
+                        job_polls += 1;
+                        if job_polls <= busy_job_polls {
+                            respond(&mut stream, "503 Service Unavailable", "text/html", b"<html>overloaded</html>");
+                        } else {
+                            respond(&mut stream, "200 OK", json, br#"{"status":"success"}"#);
+                        }
+                    }
+                    "/api/jobs/42/calibration" => {
+                        calibrations += 1;
+                        if calibrations <= dropped_calibrations {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        } else {
+                            respond(&mut stream, "200 OK", json, FULL_CALIBRATION.as_bytes());
+                        }
+                    }
+                    "/api/jobs/42/annotations" => respond(&mut stream, "200 OK", json, br#"{"annotations":[]}"#),
+                    "/wcs_file/42" => respond(&mut stream, "200 OK", "application/fits", &nova_wcs_file()),
+                    _ => respond(&mut stream, "404 Not Found", "text/plain", b"unknown route"),
+                }
+            }
+        });
+        url
+    }
+
+    fn count(seen: &Arc<Mutex<Vec<String>>>, path: &str) -> usize {
+        seen.lock().unwrap().iter().filter(|p| p.as_str() == path).count()
+    }
+
+    #[tokio::test]
+    async fn a_dropped_calibration_connection_is_retried_and_the_solve_succeeds() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 1, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await;
+        let result = result.unwrap_or_else(|e| panic!("the solve failed on one dropped connection: {e:#}"));
+        assert_eq!(result.ra_center, 83.822);
+        assert_eq!(result.wcs_cards, nova_wcs_cards());
+        assert_eq!(count(&seen, "/api/jobs/42/calibration"), 2);
+    }
+
+    #[tokio::test]
+    async fn an_overloaded_job_status_is_polled_again() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 0, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await;
+        let result = result.unwrap_or_else(|e| panic!("the solve failed on one HTTP 503: {e:#}"));
+        assert_eq!(result.dec_center, -5.391);
+        assert_eq!(count(&seen, "/api/jobs/42"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_calibration_that_never_answers_names_the_cause() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), usize::MAX, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url))
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.starts_with("Calibration request failed after 3 attempts"), "{text}");
+        assert!(text.contains("job 42"), "{text}");
+        assert!(text.matches(": ").count() >= 2, "the transport cause is missing: {text}");
+        assert_eq!(count(&seen, "/api/jobs/42/calibration"), 3);
     }
 
     #[test]

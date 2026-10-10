@@ -4,7 +4,7 @@ export type DisplayHint = Partial<Pick<DisplaySettings, "colormap" | "invert" | 
 
 export type ProcessedKind = "processing" | "pixelmath" | "debayer" | "stacking" | "cube" | "wizard";
 
-export type ChainStep = "background" | "denoise" | "deconv" | "stretch" | "maskedStretch" | "localContrast" | "pixelMath";
+export type ChainStep = "background" | "denoise" | "deconv" | "stretch" | "maskedStretch" | "localContrast" | "tone" | "pixelMath";
 
 export interface ChainEntry {
   fitsPath: string;

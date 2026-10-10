@@ -317,6 +317,7 @@ pub fn frame_header(noise: &NoiseParams, frame_index: usize, cadence_seconds: f6
     let mut header = HduHeader::empty();
     header.set_f64("EXPTIME", noise.exposure_time);
     header.set_f64("GAIN", noise.gain);
+    header.set_f64("EGAIN", noise.gain);
     header.set_f64("RDNOISE", noise.readout_noise);
     header.set("BUNIT", FRAME_UNIT.to_string());
     header.set("DATE-OBS", observation_date(seconds_since_epoch));

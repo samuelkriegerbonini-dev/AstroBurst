@@ -272,6 +272,7 @@ pub struct StackResult {
     pub rejection_low: Option<Array2<u16>>,
     pub rejection_high: Option<Array2<u16>>,
     pub normalization_applied: Vec<(f64, f64)>,
+    pub weights_applied: Vec<Option<f64>>,
     pub alignment: Vec<FrameAlignment>,
     pub warnings: Vec<String>,
 }

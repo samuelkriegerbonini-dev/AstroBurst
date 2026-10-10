@@ -12,7 +12,7 @@ import { stackOutputName } from "../../utils/stackingOutputs";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { useTimer } from "../../hooks/useTimer";
-import { combineFrameWeights, formatWeightRange } from "../../utils/noiseWeights";
+import { combineFrameWeights, effectiveWeightsOf, noiseWeightHint, weightedFrameCount, type EffectiveWeights, type NoiseWeightSummary } from "../../utils/noiseWeights";
 import { formatCount } from "../../utils/formatCount";
 import {
   appendMissingPaths,
@@ -52,6 +52,14 @@ function fileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
 }
 
+export function NoiseWeightHintLine({ effective }: { effective: EffectiveWeights | null }) {
+  return (
+    <p data-testid="stack-noise-hint" className="text-[10px] text-zinc-500 leading-snug">
+      {noiseWeightHint(effective?.range ?? null, effective?.frames ?? 0, effective?.subframeCount ?? 0, effective?.noise)}
+    </p>
+  );
+}
+
 export default function StackingPanel({
   files = [],
   runTarget = null,
@@ -68,7 +76,7 @@ export default function StackingPanel({
   const [result, setResult] = useState<StackResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [noiseWeighting, setNoiseWeighting] = useState(false);
-  const [noiseWeightRange, setNoiseWeightRange] = useState<string | null>(null);
+  const [effectiveWeights, setEffectiveWeights] = useState<EffectiveWeights | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const listRafRef = useRef<number | null>(null);
@@ -86,7 +94,7 @@ export default function StackingPanel({
   const resetTimer = timer.reset;
 
   const replaceSelection = useCallback((update: (prev: string[]) => string[]) => {
-    setNoiseWeightRange(null);
+    setEffectiveWeights(null);
     setSelectedPaths(update);
   }, []);
 
@@ -172,7 +180,8 @@ export default function StackingPanel({
   }, []);
 
   const weights = useMemo(() => subframeWeightsFor(selectedPaths, subframeWeights), [selectedPaths, subframeWeights]);
-  const weightedCount = weights ? weights.filter((w) => w !== 1.0).length : 0;
+  useEffect(() => setEffectiveWeights(null), [weights]);
+  const weightedCount = weightedFrameCount(weights);
   const hint = rejectionFrameHint(rejection, selectedPaths.length, minmaxLow, minmaxHigh);
 
   const stackProgressLabel = stackProgressText(progress.stage, progress.current, progress.total);
@@ -185,23 +194,17 @@ export default function StackingPanel({
     setIsStacking(true);
     setError(null);
     setResult(null);
+    setEffectiveWeights(null);
     resetProgress();
     resetTimer();
     startTimer();
     try {
       const paths = inputs.map(resolveEffectivePath);
       let frameWeights = weights;
+      let noise: NoiseWeightSummary | null = null;
       if (noiseWeighting) {
-        const noise = await noiseWeightsFor(paths);
+        noise = await noiseWeightsFor(paths);
         frameWeights = combineFrameWeights(weights, noise.weights);
-        setNoiseWeightRange(formatWeightRange({
-          weights: frameWeights,
-          min: Math.min(...frameWeights),
-          max: Math.max(...frameWeights),
-          missing: noise.missing,
-        }));
-      } else {
-        setNoiseWeightRange(null);
       }
       const res = await stackFrames(paths, await getOutputDir(), {
         name,
@@ -222,6 +225,7 @@ export default function StackingPanel({
         rejectionMaps,
       });
       setResult(res);
+      if (noise) setEffectiveWeights(effectiveWeightsOf(res.weights_applied ?? [], weights, noise));
       onResult?.(res, inputs, target);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -282,8 +286,8 @@ export default function StackingPanel({
       <div className="flex items-center justify-between">
         <SectionHeader icon={ICON} title="Frames to Stack" subtitle={selectedPaths.length > 0 ? `${selectedPaths.length} selected` : undefined} />
         <div className="flex gap-2">
-          <button onClick={selectAll} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors">All</button>
-          <button onClick={selectNone} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors">None</button>
+          <button data-testid="stack-select-all" onClick={selectAll} disabled={isStacking} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">All</button>
+          <button data-testid="stack-select-none" onClick={selectNone} disabled={isStacking} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">None</button>
         </div>
       </div>
 
@@ -302,7 +306,7 @@ export default function StackingPanel({
               const isSelected = selectedSet.has(row.path);
               if (row.kind === "injected") {
                 return (
-                  <button key={row.key} onClick={() => toggleFile(row.path)} style={{ height: ITEM_HEIGHT }} className={`w-full flex items-center gap-2 px-2.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-emerald-500/10 text-zinc-200 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}>
+                  <button key={row.key} data-testid="stack-frame-row" onClick={() => toggleFile(row.path)} disabled={isStacking} style={{ height: ITEM_HEIGHT }} className={`w-full flex items-center gap-2 px-2.5 rounded text-[11px] transition-all text-left disabled:cursor-not-allowed ${isSelected ? "bg-emerald-500/10 text-zinc-200 ring-1 ring-emerald-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}>
                     <GripVertical size={10} className="text-zinc-700 shrink-0" />
                     <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${isSelected ? "bg-emerald-500/20 border-emerald-500" : "border-zinc-600"}`}>
                       {isSelected && <CheckCircle2 size={10} className="text-emerald-400" />}
@@ -315,7 +319,7 @@ export default function StackingPanel({
               const isRejected = rejectedSet.has(row.path);
               const weight = subframeWeights?.[row.path];
               return (
-                <button key={row.key} onClick={() => toggleFile(row.path)} style={{ height: ITEM_HEIGHT }} className={`w-full flex items-center gap-2 px-2.5 rounded text-[11px] transition-all text-left ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"} ${isRejected && !isSelected ? "opacity-50" : ""}`}>
+                <button key={row.key} data-testid="stack-frame-row" onClick={() => toggleFile(row.path)} disabled={isStacking} style={{ height: ITEM_HEIGHT }} className={`w-full flex items-center gap-2 px-2.5 rounded text-[11px] transition-all text-left disabled:cursor-not-allowed ${isSelected ? "bg-amber-500/10 text-zinc-200 ring-1 ring-amber-500/30" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"} ${isRejected && !isSelected ? "opacity-50" : ""}`}>
                   <GripVertical size={10} className="text-zinc-700 shrink-0" />
                   <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${isSelected ? "bg-amber-500/20 border-amber-500" : "border-zinc-600"}`}>
                     {isSelected && <CheckCircle2 size={10} className="text-amber-400" />}
@@ -387,11 +391,7 @@ export default function StackingPanel({
         )}
         <Toggle label="Weight frames by noise (1/sigma^2)" checked={noiseWeighting} accent="amber" onChange={setNoiseWeighting} />
         {noiseWeighting && (
-          <p className="text-[10px] text-zinc-500 leading-snug">
-            {noiseWeightRange
-              ? `Frame weights ${noiseWeightRange}, normalised to mean 1${weightedCount > 0 ? " and multiplied by the subframe weights" : ""}.`
-              : "Noise is estimated per frame (k-sigma MRS) when you stack; quieter frames get more weight."}
-          </p>
+          <NoiseWeightHintLine effective={effectiveWeights} />
         )}
       </div>
 

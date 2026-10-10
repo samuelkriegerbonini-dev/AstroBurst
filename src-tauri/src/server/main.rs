@@ -24,6 +24,8 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", &cfg.log_level);
     }
     env_logger::init();
+    astroburst_lib::core::astrometry::catalog_disk::init_from_env();
+    astroburst_lib::core::astrometry::catalog::init_vizier_url_from_env();
 
     log::info!(
         "AstroBurst Headless Server v{}",

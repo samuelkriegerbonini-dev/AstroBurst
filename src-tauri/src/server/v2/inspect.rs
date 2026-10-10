@@ -5,10 +5,14 @@ use axum::{extract::Query, Json};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::infra::asdf::converter::is_asdf_file;
 use astroburst_lib::infra::fits::dispatcher::resolve_single_image;
 use astroburst_lib::infra::fits::reader::list_extensions;
+use astroburst_lib::infra::wcs_source::load_wcs;
+use astroburst_lib::types::constants::{
+    RES_GWCS_FRAMES, RES_GWCS_REFUSAL, RES_GWCS_SOURCE, RES_GWCS_STEPS, RES_GWCS_VS_SIP_MAX_MAS, RES_GWCS_VS_SIP_MAX_PX,
+    RES_SIP_INV_ERR_PX, RES_SIP_MAX_ERR_PX, RES_WCS_KIND,
+};
 use astroburst_lib::types::header::HduHeader;
 
 use crate::error::{AppError, Result};
@@ -205,7 +209,7 @@ pub async fn wcs(
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
 
-    let wcs = match entry.header().and_then(|h| WcsTransform::from_header(h).ok()) {
+    let wcs = match entry.header().and_then(|h| load_wcs(&session.wcs_source_path(&target), h).ok()) {
         Some(w) => w,
         None => {
             return Ok(Json(json!({ "ref": target, "present": false })));
@@ -216,6 +220,7 @@ pub async fn wcs(
     let (cd11, cd12, cd21, cd22) = (cd[0][0], cd[0][1], cd[1][0], cd[1][1]);
     let (rows, cols) = entry.arr().dim();
     let orientation = wcs.orientation(cols, rows);
+    let gwcs = orientation.gwcs.as_ref();
 
     Ok(Json(json!({
         "ref": target,
@@ -231,7 +236,16 @@ pub async fn wcs(
         "flipped": orientation.flipped,
         "parity": if orientation.flipped { "flipped" } else { "normal" },
         "sip_present": orientation.sip_present,
+        RES_SIP_MAX_ERR_PX: orientation.sip_max_err_px,
+        RES_SIP_INV_ERR_PX: orientation.sip_inv_err_px,
         "north_vec": orientation.north_vec,
         "east_vec": orientation.east_vec,
+        RES_WCS_KIND: orientation.wcs_kind,
+        RES_GWCS_STEPS: gwcs.map(|g| g.n_steps),
+        RES_GWCS_FRAMES: gwcs.map(|g| &g.frames),
+        RES_GWCS_SOURCE: gwcs.map(|g| &g.source),
+        RES_GWCS_VS_SIP_MAX_MAS: gwcs.and_then(|g| g.vs_header_sip_max_mas),
+        RES_GWCS_VS_SIP_MAX_PX: gwcs.and_then(|g| g.vs_header_sip_max_px),
+        RES_GWCS_REFUSAL: wcs.gwcs_refusal(),
     })))
 }

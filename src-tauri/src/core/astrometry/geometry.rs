@@ -9,7 +9,8 @@ use crate::core::astrometry::spectral::{
     sun_geometric_longitude_deg, target_unit_vector, SiteLocation, AU_KM, SPEED_OF_LIGHT_KMS, WGS84_A_M, WGS84_F,
 };
 use crate::core::astrometry::time::{gmst_deg, jd_from_gregorian, julian_centuries_j2000, JD_J2000, SECONDS_PER_DAY};
-use crate::core::astrometry::wcs::{angular_separation, pixel_center, WcsTransform};
+use crate::core::astrometry::wcs::{angular_separation, pixel_center};
+use crate::infra::wcs_source::load_wcs;
 use crate::types::header::HduHeader;
 
 pub const AIRMASS_FORMULA: &str = "Kasten & Young 1989";
@@ -374,6 +375,7 @@ pub struct ResolvedSite {
 }
 
 fn resolve_target_from(
+    path: &str,
     header: &HduHeader,
     wcs_pixel: Option<(f64, f64)>,
     wcs_label: &str,
@@ -384,7 +386,7 @@ fn resolve_target_from(
         return Some(ResolvedTarget { ra_deg, dec_deg, source: SOURCE_USER.to_string() });
     }
     if let Some((x, y)) = wcs_pixel {
-        if let Ok(wcs) = WcsTransform::from_header(header) {
+        if let Ok(wcs) = load_wcs(path, header) {
             let coord = wcs.pixel_to_world(x, y);
             if coord.ra.is_finite() && coord.dec.is_finite() {
                 return Some(ResolvedTarget {
@@ -398,18 +400,26 @@ fn resolve_target_from(
     header_target_coordinates(header).map(|(ra_deg, dec_deg, source)| ResolvedTarget { ra_deg, dec_deg, source: source.to_string() })
 }
 
-pub fn resolve_target(header: &HduHeader, target_pixel: Option<(f64, f64)>, overrides: &GeometryOverrides) -> Option<ResolvedTarget> {
-    resolve_target_from(header, target_pixel, IMAGE_CENTRE_LABEL, "", overrides)
+pub fn resolve_target(
+    path: &str,
+    header: &HduHeader,
+    target_pixel: Option<(f64, f64)>,
+    overrides: &GeometryOverrides,
+) -> Option<ResolvedTarget> {
+    resolve_target_from(path, header, target_pixel, IMAGE_CENTRE_LABEL, "", overrides)
 }
 
 pub fn resolve_series_target(
+    reference_path: &str,
     reference: &HduHeader,
     target_star: Option<(f64, f64, &str)>,
     overrides: &GeometryOverrides,
 ) -> Option<ResolvedTarget> {
     match target_star {
-        Some((x, y, label)) => resolve_target_from(reference, Some((x, y)), label, REFERENCE_FRAME_SUFFIX, overrides),
-        None => resolve_target_from(reference, None, IMAGE_CENTRE_LABEL, "", overrides),
+        Some((x, y, label)) => {
+            resolve_target_from(reference_path, reference, Some((x, y)), label, REFERENCE_FRAME_SUFFIX, overrides)
+        }
+        None => resolve_target_from(reference_path, reference, None, IMAGE_CENTRE_LABEL, "", overrides),
     }
 }
 
@@ -908,7 +918,7 @@ mod tests {
         assert!(time.source.contains("BJDREF"), "{}", time.source);
         assert!((time.jd_tdb - 2458325.01).abs() < 1e-9, "{}", time.jd_tdb);
         assert!(time.bjd_header.is_some());
-        let target = resolve_target(&h, None, &GeometryOverrides::default()).unwrap();
+        let target = resolve_target("", &h, None, &GeometryOverrides::default()).unwrap();
         assert!((target.ra_deg - 100.0).abs() < 1e-9 && (target.dec_deg + 20.0).abs() < 1e-9);
         assert_eq!(target.source, "RA_OBJ/DEC_OBJ");
         let g = frame_geometry(&h, &time, Some(&target), None);
@@ -940,7 +950,7 @@ mod tests {
     fn spacecraft_headers_get_no_light_time_correction() {
         let h = make_header(&[("TELESCOP", "JWST"), ("EXPMID", "61120.5"), ("RA_TARG", "10.0"), ("DEC_TARG", "-5.0")]);
         let time = header_time(&h).unwrap();
-        let target = resolve_target(&h, None, &GeometryOverrides::default()).unwrap();
+        let target = resolve_target("", &h, None, &GeometryOverrides::default()).unwrap();
         let g = frame_geometry(&h, &time, Some(&target), None);
         assert!(g.jd_utc.is_some());
         assert_eq!(g.bjd_tdb, None);
@@ -974,7 +984,7 @@ mod tests {
         let mauna_kea = GeometryOverrides { site_lat: Some(19.82), site_lon: Some(-155.47), ..GeometryOverrides::default() };
         let jwst = make_header(&[("TELESCOP", "JWST"), ("EXPMID", "61120.5"), ("RA_TARG", "10.0"), ("DEC_TARG", "-5.0")]);
         let time = header_time(&jwst).unwrap();
-        let target = resolve_target(&jwst, None, &GeometryOverrides::default()).unwrap();
+        let target = resolve_target("", &jwst, None, &GeometryOverrides::default()).unwrap();
         let site = resolve_site(&jwst, &mauna_kea).unwrap();
         assert_eq!(site.source, "user");
         let g = frame_geometry(&jwst, &time, Some(&target), Some(&site));
@@ -1014,7 +1024,7 @@ mod tests {
     fn frame_geometry_without_a_site_has_time_and_light_time_but_no_horizontal_block() {
         let h = make_header(&[("DATE-OBS", "2026-03-21T10:00:00"), ("EXPTIME", "600"), ("RA_TARG", "180.0"), ("DEC_TARG", "0.0")]);
         let time = header_time(&h).unwrap();
-        let target = resolve_target(&h, None, &GeometryOverrides::default()).unwrap();
+        let target = resolve_target("", &h, None, &GeometryOverrides::default()).unwrap();
         let g = frame_geometry(&h, &time, Some(&target), None);
         assert!(g.bjd_tdb.is_some() && g.hjd_utc.is_some());
         assert_eq!(g.bjd_source.as_deref(), Some("computed"));
@@ -1053,17 +1063,17 @@ mod tests {
     fn resolve_target_prefers_the_wcs_pixel_then_header_keywords_then_nothing_and_the_override_wins() {
         let wcs = header_with_cd(north_up_cd());
         let none = GeometryOverrides::default();
-        let t = resolve_target(&wcs, Some((49.5, 49.5)), &none).unwrap();
+        let t = resolve_target("", &wcs, Some((49.5, 49.5)), &none).unwrap();
         assert!((t.ra_deg - 150.0).abs() < 1e-6 && (t.dec_deg - 2.0).abs() < 1e-6, "{t:?}");
         assert!(t.source.starts_with("WCS at image centre"), "{}", t.source);
         assert_eq!(image_centre_pixel(&wcs), Some((49.5, 49.5)));
         let keywords = make_header(&[("RA_TARG", "12.5"), ("DEC_TARG", "-3.25")]);
-        let t = resolve_target(&keywords, image_centre_pixel(&keywords), &none).unwrap();
+        let t = resolve_target("", &keywords, image_centre_pixel(&keywords), &none).unwrap();
         assert_eq!((t.ra_deg, t.dec_deg, t.source.as_str()), (12.5, -3.25, "RA_TARG/DEC_TARG"));
         let user = GeometryOverrides { target_ra: Some(1.0), target_dec: Some(2.0), ..GeometryOverrides::default() };
-        let t = resolve_target(&wcs, Some((49.5, 49.5)), &user).unwrap();
+        let t = resolve_target("", &wcs, Some((49.5, 49.5)), &user).unwrap();
         assert_eq!((t.ra_deg, t.dec_deg, t.source.as_str()), (1.0, 2.0, "user"));
-        assert!(resolve_target(&make_header(&[("OBJECT", "M31")]), None, &none).is_none());
+        assert!(resolve_target("", &make_header(&[("OBJECT", "M31")]), None, &none).is_none());
         let compressed = make_header(&[("ZIMAGE", "T"), ("NAXIS1", "8"), ("NAXIS2", "23"), ("ZNAXIS1", "37"), ("ZNAXIS2", "23")]);
         assert_eq!(image_centre_pixel(&compressed), Some((18.0, 11.0)));
         assert_eq!(image_centre_pixel(&make_header(&[("NAXIS1", "0"), ("NAXIS2", "5")])), None);

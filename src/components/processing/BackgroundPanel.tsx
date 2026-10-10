@@ -20,8 +20,24 @@ import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "
 import type { CompositeBackgroundResult, CompositePanelProps } from "./compositeProps";
 import type { ProcessedFile } from "../../shared/types";
 import type { DbeConfig, DbeMode, DbeSample } from "../../shared/types/dbe";
+import type { BackgroundResult as BackgroundCommandResult } from "../../shared/types/processing";
 
 type BackgroundModel = "polynomial" | "spline";
+type DebandMode = "deband_auto" | "deband_rows" | "deband_cols" | "deband_both";
+type BackgroundMode = DbeMode | DebandMode;
+
+const DEBAND_OPTIONS: { value: DebandMode; label: string }[] = [
+  { value: "deband_auto", label: "De-band auto (detect axis)" },
+  { value: "deband_rows", label: "De-band rows" },
+  { value: "deband_cols", label: "De-band columns" },
+  { value: "deband_both", label: "De-band both axes" },
+];
+const DEBAND_SPLINE_TITLE = "De-banding runs with the Polynomial model";
+const DEBAND_COMPOSITE_TITLE = "De-banding works on a single file, not on the composite";
+
+function isDbeMode(mode: BackgroundMode): mode is DbeMode {
+  return mode === "subtract" || mode === "divide";
+}
 
 const RESULT_LABEL = "Background Removed";
 const MODEL_LABEL = "Background Model";
@@ -38,6 +54,7 @@ interface BackgroundResult {
   elapsed_ms?: number;
   dimensions?: [number, number];
   samples?: DbeSample[];
+  axis?: BackgroundCommandResult["axis"];
 }
 
 interface BackgroundParams {
@@ -45,7 +62,7 @@ interface BackgroundParams {
   polyDegree: number;
   sigmaClip: number;
   iterations: number;
-  mode: string;
+  mode: BackgroundMode;
 }
 
 interface BackgroundFileRun {
@@ -113,6 +130,10 @@ function formatRms(v: number): string {
   return v.toExponential(2);
 }
 
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export default function BackgroundPanel({
   selectedFile,
   outputDir = "./output",
@@ -171,10 +192,14 @@ export default function BackgroundPanel({
     setDbe((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const setMode = useCallback((mode: DbeMode) => {
+  const setMode = useCallback((mode: BackgroundMode) => {
     setParams((prev) => ({ ...prev, mode }));
-    setDbe((prev) => ({ ...prev, mode }));
+    if (isDbeMode(mode)) setDbe((prev) => ({ ...prev, mode }));
   }, []);
+
+  const isSpline = model === "spline";
+  const debandBlockedTitle = isSpline ? DEBAND_SPLINE_TITLE : compositeMode ? DEBAND_COMPOSITE_TITLE : null;
+  const mode: BackgroundMode = debandBlockedTitle ? dbe.mode : params.mode;
 
   const runPolynomial = useCallback(async (path: string): Promise<BackgroundResult> => {
     return extractBackground(path, outputDir, {
@@ -182,9 +207,9 @@ export default function BackgroundPanel({
       polyDegree: params.polyDegree,
       sigmaClip: params.sigmaClip,
       iterations: params.iterations,
-      mode: params.mode,
+      mode,
     });
-  }, [outputDir, params]);
+  }, [outputDir, params, mode]);
 
   const runSpline = useCallback(async (path: string): Promise<BackgroundResult> => {
     const config: DbeConfig = { ...dbe, manualSamples: usePointRegions ? pointSamples : [] };
@@ -239,7 +264,7 @@ export default function BackgroundPanel({
         polyDegree: params.polyDegree,
         sigmaClip: params.sigmaClip,
         iterations: params.iterations,
-        mode: params.mode,
+        mode,
         dbe: spline ? splineConfig : null,
       });
       onCompositeDone("background", RESULT_LABEL, res, chainCall.displayStf);
@@ -255,11 +280,10 @@ export default function BackgroundPanel({
         sampleRadius,
       };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeInput, displayStf, model, dbe, params, outputDir, resetProgress, run, onCompositeDone]);
+  }, [compositeInput, displayStf, model, dbe, params, mode, outputDir, resetProgress, run, onCompositeDone]);
 
   const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
 
-  const isSpline = model === "spline";
   const splineSamples = result && !result.composite ? result.res.samples : undefined;
   const overlayDims = result?.res.dimensions;
   const overlayRadius = result?.sampleRadius ?? 0;
@@ -273,14 +297,15 @@ export default function BackgroundPanel({
         { label: "Samples", value: channelTriple(result.res.sample_count, formatCount) },
         ...(result.res.rejected_count ? [{ label: "Rejected", value: channelTriple(result.res.rejected_count, formatCount) }] : []),
         { label: "RMS", value: channelTriple(result.res.rms_residual, formatRms) },
-        { label: "Time", value: `${(result.res.elapsed_ms / 1000).toFixed(1)}s` },
+        { label: "Time", value: formatSeconds(result.res.elapsed_ms) },
       ]
     : [
         { label: "Samples", value: result?.res.sample_count },
         ...(result?.res.rejected_count !== undefined ? [{ label: "Rejected", value: result.res.rejected_count }] : []),
         { label: "RMS", value: result?.res.rms_residual?.toExponential(2) },
-        { label: "Time", value: `${((result?.res.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
+        { label: "Time", value: formatSeconds(result?.res.elapsed_ms ?? 0) },
       ];
+  const debandAxis = result && !result.composite ? result.res.axis ?? null : null;
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -299,7 +324,7 @@ export default function BackgroundPanel({
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <label htmlFor={modelId} className="text-xs text-zinc-400">Model</label>
-          <select id={modelId} value={model} onChange={(e) => setModel(e.target.value as BackgroundModel)} disabled={isRunning} className="ab-select">
+          <select id={modelId} data-testid="background-model" value={model} onChange={(e) => setModel(e.target.value as BackgroundModel)} disabled={isRunning} className="ab-select">
             <option value="polynomial">Polynomial</option>
             <option value="spline">Spline (DBE)</option>
           </select>
@@ -347,9 +372,12 @@ export default function BackgroundPanel({
 
         <div className="flex items-center justify-between">
           <label htmlFor={modeId} className="text-xs text-zinc-400">Mode</label>
-          <select id={modeId} value={isSpline ? dbe.mode : params.mode} onChange={(e) => setMode(e.target.value as DbeMode)} disabled={isRunning} className="ab-select">
+          <select id={modeId} data-testid="background-mode" value={mode} onChange={(e) => setMode(e.target.value as BackgroundMode)} disabled={isRunning} className="ab-select">
             <option value="subtract">Subtract</option>
             <option value="divide">Divide</option>
+            {DEBAND_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value} disabled={!!debandBlockedTitle} title={debandBlockedTitle ?? undefined}>{o.label}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -390,7 +418,20 @@ export default function BackgroundPanel({
             </div>
           )}
 
-          <ResultGrid items={resultItems} columns={result.composite ? 2 : resultItems.length === 4 ? 4 : 3} />
+          {debandAxis ? (
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="ab-metric-card">
+                <div className="text-zinc-500 text-[10px]">Axis</div>
+                <div data-testid="background-deband-axis" className="text-zinc-200 font-mono text-[11px]">{debandAxis}</div>
+              </div>
+              <div className="ab-metric-card">
+                <div className="text-zinc-500 text-[10px]">Time</div>
+                <div className="text-zinc-200 font-mono text-[11px]">{formatSeconds(result.res.elapsed_ms ?? 0)}</div>
+              </div>
+            </div>
+          ) : (
+            <ResultGrid items={resultItems} columns={result.composite ? 2 : resultItems.length === 4 ? 4 : 3} />
+          )}
 
           {(result.correctedUrl || result.modelUrl) && (
             <div className="flex flex-col gap-2">

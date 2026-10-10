@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::colormap::{apply_colormap_inverted, encode_png_rgb8, Colormap};
 use astroburst_lib::core::imaging::scale::{
     normalize_and_stretch, resolve_limits, symmetric_about, validate_symmetric_centre, LimitMode,
@@ -247,7 +248,7 @@ pub async fn render(
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
     let arr = entry.arr();
     let (rows, cols) = arr.dim();
-    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = entry.header().and_then(|h| load_wcs(&session.wcs_source_path(&target), h).ok());
 
     let resolved = match &params.region {
         Some(spec) => resolve_region_clamped(spec, cols, rows, wcs.as_ref())?,

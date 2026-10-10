@@ -166,7 +166,31 @@ export interface PhotometryMeasurement {
   photcal: PhotCal | null;
   warnings: string[];
   masked: boolean;
+  gain_used?: number | null;
   elapsed_ms: number;
+}
+
+export type PoissonRoute = "header_gain" | "err_plane" | "unavailable";
+
+export type UnitClass = "counts" | "count_rate" | "electrons" | "electron_rate" | "calibrated" | "other";
+
+export interface GainModel {
+  gain_e_per_adu: number | null;
+  source: string | null;
+  gain_card: number | null;
+  unit_class: UnitClass;
+  ncombine: number | null;
+  combine_method: string | null;
+  drizzle_scale: number | null;
+  combine_scaled: boolean;
+  effective_gain: number | null;
+  fallback_gain: number | null;
+  poisson_route: PoissonRoute;
+  note: string | null;
+}
+
+export function photometryGainModel(path: string): Promise<GainModel> {
+  return typedInvoke<GainModel>("photometry_gain_model_cmd", { path });
 }
 
 export interface PhotometryOptions {
@@ -216,6 +240,7 @@ export interface BatchPhotometryResult {
   photcal: PhotCal | null;
   warnings: string[];
   masked: boolean;
+  gain_used?: number | null;
   n_measured: number;
   n_failed: number;
   elapsed_ms: number;

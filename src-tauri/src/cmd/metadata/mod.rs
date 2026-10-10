@@ -112,7 +112,7 @@ pub async fn get_full_header(path: String, palette: Option<String>) -> Result<se
 
         let wcs_keys = ["CRPIX1","CRPIX2","CRVAL1","CRVAL2","CDELT1","CDELT2",
             "CD1_1","CD1_2","CD2_1","CD2_2","CTYPE1","CTYPE2","LONPOLE","LATPOLE",
-            "RADESYS","EQUINOX","WCSAXES","A_ORDER","B_ORDER"];
+            "RADESYS","EQUINOX","WCSAXES","A_ORDER","B_ORDER","SIPMXERR","SIPIVERR"];
         let obs_keys = ["DATE-OBS","MJD-OBS","EXPTIME","EXPOSURE","OBJECT","OBSERVER",
             "TELESCOP","INSTRUME","FILTER","FILTER1","FILTER2","AIRMASS","RA","DEC",
             "EPOCH","GAIN","OFFSET","CCD-TEMP","SET-TEMP"];
@@ -283,5 +283,20 @@ mod tests {
         assert_eq!(categories[CATEGORY_OBSERVATION]["TELESCOP"], "JWST");
         assert_eq!(categories[CATEGORY_OBSERVATION]["INSTRUME"], "NIRSPEC");
         assert_eq!(categories[CATEGORY_OBSERVATION]["FILTER"], "F170LP");
+    }
+
+    #[tokio::test]
+    async fn sip_fit_residual_cards_are_grouped_under_wcs() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sip_residual.fits").to_str().unwrap().to_string();
+        let keys = [("CTYPE1", "RA---TAN-SIP"), ("CTYPE2", "DEC--TAN-SIP"), ("SIPMXERR", "0.0098"), ("SIPIVERR", "0.012")];
+        write_fits_mono(&p, &Array2::zeros((4, 4)), Some(&make_header(&keys))).unwrap();
+        let out = get_full_header(p, None).await.unwrap();
+        let categories = &out[RES_CATEGORIES];
+        for key in ["SIPMXERR", "SIPIVERR"] {
+            assert!(categories[CATEGORY_WCS].get(key).is_some(), "{key} is not under WCS: {categories}");
+            assert!(categories[CATEGORY_OTHER].get(key).is_none(), "{key} is still under Other");
+        }
+        assert!(categories[CATEGORY_WCS].get("CTYPE2").is_some());
     }
 }

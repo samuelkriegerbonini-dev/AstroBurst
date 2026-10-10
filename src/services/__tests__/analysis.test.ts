@@ -4,7 +4,7 @@ const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: vi.fn() }));
 
-import { finiteSky, measurePhotometry, measurePhotometryBatch, timeSeriesPhotometry, pixelTable } from "../analysis";
+import { finiteSky, measurePhotometry, measurePhotometryBatch, timeSeriesPhotometry, pixelTable, photometryGainModel } from "../analysis";
 
 const BASE = { photometry: {}, gaia: null, photcal: null, warnings: [], masked: false, elapsed_ms: 1 };
 
@@ -219,5 +219,30 @@ describe("pixelTable", () => {
     const res = await pixelTable("/c.fits", 1, 2, 3);
     expect(typedInvokeMock).toHaveBeenCalledWith("pixel_table_cmd", { path: "/c.fits", x: 1, y: 2, size: 3 });
     expect(res).toBe(result);
+  });
+});
+
+describe("photometryGainModel", () => {
+  beforeEach(() => typedInvokeMock.mockReset());
+
+  it("pins the command name and the argument object and returns the model untouched", async () => {
+    const model = {
+      gain_e_per_adu: 7,
+      source: "ATODGAIN",
+      gain_card: null,
+      unit_class: "counts",
+      ncombine: 2,
+      combine_method: null,
+      drizzle_scale: null,
+      combine_scaled: false,
+      effective_gain: 7,
+      fallback_gain: null,
+      poisson_route: "header_gain",
+      note: "NCOMBINE=2 in the header: gain not scaled because the combine method is unknown; enter 2 × 7 = 14 e-/ADU for a mean stack",
+    };
+    typedInvokeMock.mockResolvedValue(model);
+    const res = await photometryGainModel("/w/502nmos.fits");
+    expect(typedInvokeMock).toHaveBeenCalledWith("photometry_gain_model_cmd", { path: "/w/502nmos.fits" });
+    expect(res).toBe(model);
   });
 });

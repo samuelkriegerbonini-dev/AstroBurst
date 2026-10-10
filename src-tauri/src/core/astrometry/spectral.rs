@@ -194,6 +194,7 @@ pub struct SpectralAxis {
     pub specsys: Option<String>,
     pub velosys: Option<f64>,
     pub notes: Vec<String>,
+    pub tabulated: bool,
 }
 
 impl SpectralAxis {
@@ -202,11 +203,41 @@ impl SpectralAxis {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabColumn {
+    pub values: Vec<f64>,
+    pub shape: Vec<usize>,
+    pub unit: Option<String>,
+}
+
+pub trait TabTables {
+    fn coordinate_column(&self, extname: &str, extver: i64, column: &str) -> Result<TabColumn, String>;
+
+    fn can_read(&self) -> bool {
+        true
+    }
+}
+
+pub struct NoTabTables;
+
+impl TabTables for NoTabTables {
+    fn coordinate_column(&self, extname: &str, extver: i64, column: &str) -> Result<TabColumn, String> {
+        Err(format!("no FITS file to read {extname}[{extver}] column '{column}' from"))
+    }
+
+    fn can_read(&self) -> bool {
+        false
+    }
+}
+
+const TAB_SUFFIX: &str = "TAB";
+
 struct ClassifiedCtype {
     kind: AxisKind,
     ctype: String,
     frame_from_suffix: Option<&'static str>,
     note: Option<String>,
+    tabulated: bool,
 }
 
 const AIPS_FRAME_SUFFIXES: [(&str, &str); 7] = [
@@ -226,6 +257,7 @@ fn classify_ctype(raw: Option<String>) -> Result<ClassifiedCtype, String> {
             ctype: String::new(),
             frame_from_suffix: None,
             note: Some("CTYPE3 missing: axis values are reported in header units without interpretation".to_string()),
+            tabulated: false,
         });
     };
     let upper = ctype.to_uppercase();
@@ -240,12 +272,13 @@ fn classify_ctype(raw: Option<String>) -> Result<ClassifiedCtype, String> {
             ctype: upper.clone(),
             frame_from_suffix: None,
             note: Some(format!("CTYPE3 '{}' is not a recognised spectral type", upper)),
+            tabulated: false,
         });
     }
     if suffix.is_empty() {
         let note = (code != "WAVE" && kind == AxisKind::Wave)
             .then(|| format!("CTYPE3 '{}' treated as vacuum wavelength (WAVE)", upper));
-        return Ok(ClassifiedCtype { kind, ctype: upper.clone(), frame_from_suffix: None, note });
+        return Ok(ClassifiedCtype { kind, ctype: upper.clone(), frame_from_suffix: None, note, tabulated: false });
     }
     if let Some((_, frame)) = AIPS_FRAME_SUFFIXES.iter().find(|(s, _)| *s == suffix) {
         return Ok(ClassifiedCtype {
@@ -253,14 +286,201 @@ fn classify_ctype(raw: Option<String>) -> Result<ClassifiedCtype, String> {
             ctype: upper.clone(),
             frame_from_suffix: Some(frame),
             note: Some(format!("AIPS-style CTYPE3 '{}': frame suffix read as SPECSYS {}", upper, frame)),
+            tabulated: false,
         });
+    }
+    if suffix == TAB_SUFFIX {
+        return Ok(ClassifiedCtype { kind, ctype: upper.clone(), frame_from_suffix: None, note: None, tabulated: true });
     }
     Err(format!("non-linear spectral axis ({}) is not supported", upper))
 }
 
 pub fn is_non_linear_spectral_ctype(ctype: &str) -> bool {
     let text = ctype.trim().trim_matches('\'').trim();
-    classify_ctype(Some(text.to_string())).is_err()
+    classify_ctype(Some(text.to_string())).map_or(true, |c| c.tabulated)
+}
+
+pub fn tab_axis_values(psi: &[f64], coords: &[f64], index: Option<&[f64]>) -> Result<Vec<f64>, String> {
+    let k = coords.len();
+    if k == 0 {
+        return Err("the -TAB coordinate column is empty".to_string());
+    }
+    let direction = index.map(|i| index_direction(i, k)).transpose()?;
+    Ok(psi
+        .iter()
+        .map(|&p| {
+            let upsilon = match (index, direction) {
+                (Some(i), Some(sign)) => table_index(p, i, sign),
+                _ => p,
+            };
+            interpolate_table(upsilon, coords)
+        })
+        .collect())
+}
+
+fn index_direction(index: &[f64], k: usize) -> Result<f64, String> {
+    if index.len() != k {
+        return Err(format!("the index column has {} entries but the coordinate column has {k}", index.len()));
+    }
+    let increasing = index.windows(2).all(|w| w[1] > w[0]);
+    let decreasing = index.windows(2).all(|w| w[1] < w[0]);
+    match (increasing, decreasing) {
+        (true, _) => Ok(1.0),
+        (_, true) => Ok(-1.0),
+        _ => Err("the index column is not monotonic".to_string()),
+    }
+}
+
+fn table_index(psi: f64, index: &[f64], sign: f64) -> f64 {
+    let k = index.len();
+    if k == 1 {
+        return 1.0 + (psi - index[0]);
+    }
+    let first = index[0];
+    let last = index[k - 1];
+    if sign * psi < sign * first {
+        let spacing = index[1] - first;
+        if sign * psi < sign * (first - 0.5 * spacing) {
+            return f64::NAN;
+        }
+        return 1.0 + (psi - first) / spacing;
+    }
+    if sign * psi > sign * last {
+        let spacing = last - index[k - 2];
+        if sign * psi > sign * (last + 0.5 * spacing) {
+            return f64::NAN;
+        }
+        return (k - 1) as f64 + (psi - index[k - 2]) / spacing;
+    }
+    for j in 0..k - 1 {
+        if sign * index[j] <= sign * psi && sign * psi <= sign * index[j + 1] {
+            return (j + 1) as f64 + (psi - index[j]) / (index[j + 1] - index[j]);
+        }
+    }
+    f64::NAN
+}
+
+fn interpolate_table(upsilon: f64, coords: &[f64]) -> f64 {
+    let k = coords.len();
+    if !(upsilon >= 0.5 && upsilon <= k as f64 + 0.5) {
+        return f64::NAN;
+    }
+    if k == 1 {
+        return coords[0];
+    }
+    let mut p1 = upsilon.floor() as usize;
+    let mut delta = upsilon - p1 as f64;
+    if p1 == 0 {
+        p1 = 1;
+        delta -= 1.0;
+    } else if p1 == k {
+        p1 = k - 1;
+        delta += 1.0;
+    }
+    let p0 = p1 - 1;
+    coords[p0] + delta * (coords[p1] - coords[p0])
+}
+
+fn median_step(coords: &[f64]) -> f64 {
+    let steps: Vec<f64> = coords.windows(2).map(|w| w[1] - w[0]).filter(|d| d.is_finite()).collect();
+    if steps.is_empty() {
+        0.0
+    } else {
+        crate::math::exact_median_f64(&steps)
+    }
+}
+
+fn tabulated_axis(
+    header: &HduHeader,
+    axis: usize,
+    len: usize,
+    tables: &dyn TabTables,
+    kind: AxisKind,
+    ctype: String,
+    mut notes: Vec<String>,
+) -> Result<SpectralAxis, String> {
+    if !tables.can_read() {
+        return Err(format!("CTYPE{axis} '{ctype}' needs the FITS file to read its WCS table"));
+    }
+    let extname = card_string(header, &format!("PS{axis}_0"))
+        .ok_or_else(|| format!("PS{axis}_0 missing: a -TAB axis needs the EXTNAME of its coordinate table"))?;
+    let column = card_string(header, &format!("PS{axis}_1"))
+        .ok_or_else(|| format!("PS{axis}_1 missing: a -TAB axis needs the name of its coordinate column"))?;
+    let index_column = card_string(header, &format!("PS{axis}_2"));
+    let extver = header.get_i64(&format!("PV{axis}_1")).unwrap_or(1);
+    let m = header.get_i64(&format!("PV{axis}_3")).unwrap_or(1);
+    if m != 1 {
+        return Err(format!("PV{axis}_3={m}: only the first coordinate-array axis is supported"));
+    }
+    let table = tables.coordinate_column(&extname, extver, &column)?;
+    let k = match table.shape.as_slice() {
+        [k] | [1, k] => *k,
+        [m, ..] if *m > 1 => return Err(format!("non-separable -TAB coordinate array with M={m} axes is not supported")),
+        other => return Err(format!("-TAB coordinate array shape {other:?} is not a one-axis table")),
+    };
+    if table.values.len() != k {
+        return Err(format!(
+            "{extname}[{extver}] column '{column}' holds {} values but its shape says {k}",
+            table.values.len()
+        ));
+    }
+    let index = match &index_column {
+        Some(name) => Some(tables.coordinate_column(&extname, extver, name)?.values),
+        None => None,
+    };
+    let crval = header.get_f64(&format!("CRVAL{axis}")).filter(|v| v.is_finite()).unwrap_or_else(|| {
+        notes.push(format!("CRVAL{axis} missing: 0 assumed for the -TAB intermediate coordinate"));
+        0.0
+    });
+    let crpix = header.get_f64(&format!("CRPIX{axis}")).filter(|v| v.is_finite()).unwrap_or_else(|| {
+        notes.push(format!("CRPIX{axis} missing: 0 assumed for the -TAB intermediate coordinate"));
+        0.0
+    });
+    let step = spectral_step(header, axis, &mut notes).unwrap_or_else(|_| {
+        notes.push(format!("CDELT{axis} missing: 1 assumed for the -TAB intermediate coordinate"));
+        header.get_f64(&format!("PC{axis}_{axis}")).filter(|v| v.is_finite()).unwrap_or(1.0)
+    });
+    let psi: Vec<f64> = (1..=len).map(|p| crval + step * (p as f64 - crpix)).collect();
+    let raw = tab_axis_values(&psi, &table.values, index.as_deref()).map_err(|e| match &index_column {
+        Some(name) => format!("{e} (PS{axis}_2 '{name}')"),
+        None => e,
+    })?;
+    let cunit_key = format!("CUNIT{axis}");
+    let raw_unit = card_string(header, &cunit_key).or_else(|| {
+        table.unit.clone().map(|unit| {
+            notes.push(format!("{cunit_key} missing: unit '{unit}' taken from the {extname} column"));
+            unit
+        })
+    });
+    let (unit, scale, header_unit) = resolve_unit_raw(raw_unit, axis, kind, &ctype, &mut notes)?;
+    let values: Vec<f64> = raw.iter().map(|v| v * scale).collect();
+    if k >= 2 && median_step(&table.values) == 0.0 {
+        notes.push(format!("{extname}[{extver}] column '{column}' has no net step between consecutive entries: cdelt reported as 0"));
+    }
+    let cdelt = median_step(&values);
+    notes.push(format!(
+        "{ctype} from {extname}[{extver}] column '{column}' ({k} entries); crval/cdelt are a linear approximation of the table"
+    ));
+    let (rest_wavelength_um, rest_frequency_hz) = rest_values(header, &mut notes);
+    let specsys = card_string_upper(header, "SPECSYS");
+    let velosys = header.get_f64("VELOSYS").filter(|v| v.is_finite());
+    Ok(SpectralAxis {
+        kind,
+        ctype,
+        unit,
+        header_unit,
+        header_scale: scale,
+        crval: values.first().copied().unwrap_or(f64::NAN),
+        cdelt,
+        crpix: 1.0,
+        values,
+        rest_wavelength_um,
+        rest_frequency_hz,
+        specsys,
+        velosys,
+        notes,
+        tabulated: true,
+    })
 }
 
 fn spectral_step(header: &HduHeader, axis: usize, notes: &mut Vec<String>) -> Result<f64, String> {
@@ -292,8 +512,17 @@ fn resolve_unit(
     ctype: &str,
     notes: &mut Vec<String>,
 ) -> Result<(String, f64, String), String> {
+    resolve_unit_raw(card_string(header, &format!("CUNIT{axis}")), axis, kind, ctype, notes)
+}
+
+fn resolve_unit_raw(
+    raw: Option<String>,
+    axis: usize,
+    kind: AxisKind,
+    ctype: &str,
+    notes: &mut Vec<String>,
+) -> Result<(String, f64, String), String> {
     let cunit_key = format!("CUNIT{axis}");
-    let raw = card_string(header, &cunit_key);
     let Some(family) = kind.family() else {
         let unit = raw.clone().unwrap_or_default();
         return Ok((unit.clone(), 1.0, unit));
@@ -358,11 +587,27 @@ pub fn spectral_axis(header: &HduHeader, naxis3: usize) -> Result<SpectralAxis, 
     spectral_axis_on(header, 3, naxis3)
 }
 
+pub fn spectral_axis_with(header: &HduHeader, naxis3: usize, tables: &dyn TabTables) -> Result<SpectralAxis, String> {
+    spectral_axis_on_with(header, 3, naxis3, tables)
+}
+
 pub fn spectral_axis_on(header: &HduHeader, axis: usize, len: usize) -> Result<SpectralAxis, String> {
+    spectral_axis_on_with(header, axis, len, &NoTabTables)
+}
+
+pub fn spectral_axis_on_with(
+    header: &HduHeader,
+    axis: usize,
+    len: usize,
+    tables: &dyn TabTables,
+) -> Result<SpectralAxis, String> {
     let mut notes = Vec::new();
     let classified = classify_ctype(card_string(header, &format!("CTYPE{axis}")))?;
     if let Some(note) = classified.note {
         notes.push(note);
+    }
+    if classified.tabulated {
+        return tabulated_axis(header, axis, len, tables, classified.kind, classified.ctype, notes);
     }
     let crval = header
         .get_f64(&format!("CRVAL{axis}"))
@@ -392,6 +637,7 @@ pub fn spectral_axis_on(header: &HduHeader, axis: usize, len: usize) -> Result<S
         specsys,
         velosys,
         notes,
+        tabulated: false,
     })
 }
 
@@ -1040,6 +1286,8 @@ pub fn radial_velocity_correction(header: &HduHeader, ra_deg: f64, dec_deg: f64)
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::core::astrometry::time::jd_from_gregorian;
     use crate::core::imaging::region::test_support::make_header;
@@ -1160,7 +1408,7 @@ mod tests {
         let err = spectral_axis(&h, 3).unwrap_err();
         assert_eq!(err, "non-linear spectral axis (WAVE-LOG) is not supported");
         let h = axis_header(&[("CTYPE3", "FREQ-TAB"), ("CRVAL3", "1.0"), ("CDELT3", "0.1")]);
-        assert!(spectral_axis(&h, 3).unwrap_err().contains("FREQ-TAB"));
+        assert_eq!(spectral_axis(&h, 3).unwrap_err(), "CTYPE3 'FREQ-TAB' needs the FITS file to read its WCS table");
         let h = axis_header(&[("CTYPE3", "WAVE-F2W"), ("CRVAL3", "1.0"), ("CDELT3", "0.1")]);
         assert!(spectral_axis(&h, 3).unwrap_err().contains("WAVE-F2W"));
     }
@@ -1174,6 +1422,212 @@ mod tests {
         assert!(!is_non_linear_spectral_ctype("VELO-LSR"));
         assert!(!is_non_linear_spectral_ctype("RA---TAN"));
         assert!(!is_non_linear_spectral_ctype(""));
+    }
+
+    struct MapTables(HashMap<(String, i64, String), TabColumn>);
+
+    impl MapTables {
+        fn one(extname: &str, extver: i64, column: &str, values: &[f64], shape: &[usize], unit: Option<&str>) -> Self {
+            let mut map = HashMap::new();
+            map.insert(
+                (extname.to_string(), extver, column.to_string()),
+                TabColumn { values: values.to_vec(), shape: shape.to_vec(), unit: unit.map(str::to_string) },
+            );
+            MapTables(map)
+        }
+
+        fn with(mut self, extname: &str, extver: i64, column: &str, values: &[f64]) -> Self {
+            self.0.insert(
+                (extname.to_string(), extver, column.to_string()),
+                TabColumn { values: values.to_vec(), shape: vec![values.len()], unit: None },
+            );
+            self
+        }
+    }
+
+    impl TabTables for MapTables {
+        fn coordinate_column(&self, extname: &str, extver: i64, column: &str) -> Result<TabColumn, String> {
+            self.0
+                .get(&(extname.to_string(), extver, column.to_string()))
+                .cloned()
+                .ok_or_else(|| format!("stub has no {extname}[{extver}] column '{column}'"))
+        }
+    }
+
+    fn tab_header(extra: &[(&str, &str)]) -> HduHeader {
+        let mut pairs = vec![
+            ("CTYPE3", "WAVE-TAB"),
+            ("PS3_0", "WCS-TABLE"),
+            ("PS3_1", "wavelength"),
+            ("CRPIX3", "0"),
+            ("CRVAL3", "0"),
+            ("CDELT3", "1"),
+        ];
+        pairs.extend_from_slice(extra);
+        axis_header(&pairs)
+    }
+
+    fn wavelength_stub() -> MapTables {
+        MapTables::one("WCS-TABLE", 1, "wavelength", &[1.0, 1.5, 2.25], &[1, 3], Some("um"))
+    }
+
+    #[test]
+    fn wave_tab_axis_reads_the_coordinate_column() {
+        let h = tab_header(&[("CUNIT3", "um")]);
+        let axis = spectral_axis_on_with(&h, 3, 3, &wavelength_stub()).unwrap();
+        assert_eq!(axis.values, vec![1.0, 1.5, 2.25]);
+        assert!(axis.tabulated);
+        assert_eq!(axis.kind, AxisKind::Wave);
+        assert_eq!(axis.ctype, "WAVE-TAB");
+        assert_eq!(axis.unit, "um");
+        assert!((axis.cdelt - 0.625).abs() < 1e-12, "{}", axis.cdelt);
+        assert_eq!(axis.crval, 1.0);
+        assert_eq!(axis.crpix, 1.0);
+        assert_eq!(axis.header_values(), axis.values);
+        assert!(
+            axis.notes.iter().any(|n| n
+                == "WAVE-TAB from WCS-TABLE[1] column 'wavelength' (3 entries); crval/cdelt are a linear approximation of the table"),
+            "{:?}",
+            axis.notes
+        );
+        let longer = spectral_axis_on_with(&h, 3, 4, &wavelength_stub()).unwrap();
+        assert_eq!(longer.values.len(), 4);
+        assert!(longer.values[3].is_nan(), "{:?}", longer.values);
+        let via_axis_3 = spectral_axis_with(&h, 3, &wavelength_stub()).unwrap();
+        assert_eq!(via_axis_3.values, axis.values);
+    }
+
+    #[test]
+    fn tab_axis_values_extrapolates_in_the_half_pixel_margins_like_wcslib() {
+        let coords = [1.0, 1.5, 2.25];
+        let psi = [0.4, 0.5, 0.75, 1.5, 3.0, 3.25, 3.5, 3.75];
+        let got = tab_axis_values(&psi, &coords, None).unwrap();
+        assert!(got[0].is_nan(), "{got:?}");
+        assert_eq!(got[1], 0.75);
+        assert_eq!(got[2], 0.875);
+        assert_eq!(got[3], 1.25);
+        assert_eq!(got[4], 2.25);
+        assert_eq!(got[5], 2.4375);
+        assert_eq!(got[6], 2.625);
+        assert!(got[7].is_nan(), "{got:?}");
+        let single = tab_axis_values(&[1.2, 1.6], &[5.0], None).unwrap();
+        assert_eq!(single[0], 5.0);
+        assert!(single[1].is_nan(), "{single:?}");
+        assert!(tab_axis_values(&[1.0], &[], None).is_err());
+    }
+
+    #[test]
+    fn tab_axis_values_with_an_index_column() {
+        let coords = [1.0, 1.5, 2.25];
+        let index = [10.0, 20.0, 30.0];
+        let got = tab_axis_values(&[4.9, 5.0, 15.0, 35.0, 36.0], &coords, Some(&index)).unwrap();
+        assert!(got[0].is_nan(), "{got:?}");
+        assert_eq!(got[1], 0.75);
+        assert_eq!(got[2], 1.25);
+        assert_eq!(got[3], 2.625);
+        assert!(got[4].is_nan(), "{got:?}");
+        let decreasing = tab_axis_values(&[25.0], &coords, Some(&[30.0, 20.0, 10.0])).unwrap();
+        assert_eq!(decreasing[0], 1.25);
+        let err = tab_axis_values(&[15.0], &coords, Some(&[10.0, 30.0, 20.0])).unwrap_err();
+        assert!(err.contains("not monotonic"), "{err}");
+        let err = tab_axis_values(&[15.0], &coords, Some(&[10.0, 20.0])).unwrap_err();
+        assert!(err.contains("entries"), "{err}");
+    }
+
+    #[test]
+    fn wave_tab_without_the_file_is_a_loud_error() {
+        let h = tab_header(&[("CUNIT3", "um")]);
+        let err = spectral_axis_on(&h, 3, 3).unwrap_err();
+        assert_eq!(err, "CTYPE3 'WAVE-TAB' needs the FITS file to read its WCS table");
+        assert_eq!(spectral_axis(&h, 3).unwrap_err(), err);
+    }
+
+    #[test]
+    fn non_separable_tab_is_refused() {
+        let h = tab_header(&[("CUNIT3", "um")]);
+        let tables = MapTables::one("WCS-TABLE", 1, "wavelength", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], Some("um"));
+        let err = spectral_axis_on_with(&h, 3, 3, &tables).unwrap_err();
+        assert!(err.contains("non-separable"), "{err}");
+        assert!(err.contains("M=2"), "{err}");
+    }
+
+    #[test]
+    fn missing_ps_cards_are_an_error() {
+        let no_column = axis_header(&[("CTYPE3", "WAVE-TAB"), ("PS3_0", "WCS-TABLE"), ("CRVAL3", "0"), ("CDELT3", "1")]);
+        let err = spectral_axis_on_with(&no_column, 3, 3, &wavelength_stub()).unwrap_err();
+        assert!(err.contains("PS3_1"), "{err}");
+        let no_table = axis_header(&[("CTYPE3", "WAVE-TAB"), ("PS3_1", "wavelength"), ("CRVAL3", "0"), ("CDELT3", "1")]);
+        let err = spectral_axis_on_with(&no_table, 3, 3, &wavelength_stub()).unwrap_err();
+        assert!(err.contains("PS3_0"), "{err}");
+        let second_axis = tab_header(&[("PV3_3", "2")]);
+        let err = spectral_axis_on_with(&second_axis, 3, 3, &wavelength_stub()).unwrap_err();
+        assert!(err.contains("PV3_3=2"), "{err}");
+    }
+
+    #[test]
+    fn tab_unit_falls_back_to_the_column_tunit() {
+        let h = tab_header(&[]);
+        let axis = spectral_axis_on_with(&h, 3, 3, &wavelength_stub()).unwrap();
+        assert_eq!(axis.values, vec![1.0, 1.5, 2.25]);
+        assert_eq!(axis.header_unit, "um");
+        assert!(
+            axis.notes.iter().any(|n| n == "CUNIT3 missing: unit 'um' taken from the WCS-TABLE column"),
+            "{:?}",
+            axis.notes
+        );
+        let nm = MapTables::one("WCS-TABLE", 1, "wavelength", &[1000.0, 1500.0], &[2], Some("nm"));
+        let axis = spectral_axis_on_with(&h, 3, 2, &nm).unwrap();
+        assert_eq!(axis.values, vec![1.0, 1.5]);
+        assert_eq!(axis.unit, "um");
+        assert_eq!(axis.header_unit, "nm");
+        assert_eq!(axis.header_values(), vec![1000.0, 1500.0]);
+        let unitless = MapTables::one("WCS-TABLE", 1, "wavelength", &[1.0, 1.5], &[2], None);
+        let axis = spectral_axis_on_with(&h, 3, 2, &unitless).unwrap();
+        assert_eq!(axis.header_unit, "m");
+        assert!(axis.notes.iter().any(|n| n.contains("CUNIT3 missing: assumed the FITS default 'm'")), "{:?}", axis.notes);
+        assert!((axis.values[1] - 1.5e6).abs() < 1e-6, "{:?}", axis.values);
+    }
+
+    #[test]
+    fn tab_axis_with_an_index_column_and_default_intermediate_cards() {
+        let h = axis_header(&[("CTYPE3", "WAVE-TAB"), ("PS3_0", "WCS-TABLE"), ("PS3_1", "wavelength"), ("PS3_2", "idx"), ("CUNIT3", "um")]);
+        let tables = wavelength_stub().with("WCS-TABLE", 1, "idx", &[10.0, 20.0, 30.0]);
+        let axis = spectral_axis_on_with(&h, 3, 30, &tables).unwrap();
+        assert_eq!(axis.values.len(), 30);
+        assert!(axis.values[3].is_nan(), "{:?}", axis.values);
+        assert_eq!(axis.values[4], 0.75);
+        assert_eq!(axis.values[9], 1.0);
+        assert_eq!(axis.values[14], 1.25);
+        assert_eq!(axis.values[29], 2.25);
+        assert!(axis.notes.iter().any(|n| n.contains("CRVAL3 missing")), "{:?}", axis.notes);
+        assert!(axis.notes.iter().any(|n| n.contains("CDELT3")), "{:?}", axis.notes);
+        let bad = wavelength_stub().with("WCS-TABLE", 1, "idx", &[10.0, 30.0, 20.0]);
+        let err = spectral_axis_on_with(&h, 3, 3, &bad).unwrap_err();
+        assert!(err.contains("not monotonic") && err.contains("idx"), "{err}");
+    }
+
+    #[test]
+    fn tab_axis_maps_pixels_through_crpix_crval_and_the_step_before_the_table() {
+        let cards = [
+            ("CTYPE3", "WAVE-TAB"),
+            ("PS3_0", "WCS-TABLE"),
+            ("PS3_1", "wavelength"),
+            ("CUNIT3", "um"),
+            ("CRPIX3", "1"),
+            ("CRVAL3", "2"),
+        ];
+        let mut with_cdelt = cards.to_vec();
+        with_cdelt.push(("CDELT3", "0.5"));
+        let axis = spectral_axis_on_with(&axis_header(&with_cdelt), 3, 3, &wavelength_stub()).unwrap();
+        assert_eq!(axis.values, vec![1.5, 1.875, 2.25]);
+        assert_eq!(axis.crval, 1.5);
+        assert_eq!(axis.crpix, 1.0);
+        assert!((axis.cdelt - 0.375).abs() < 1e-12, "{}", axis.cdelt);
+        let mut with_pc = cards.to_vec();
+        with_pc.push(("PC3_3", "0.5"));
+        let axis = spectral_axis_on_with(&axis_header(&with_pc), 3, 3, &wavelength_stub()).unwrap();
+        assert_eq!(axis.values, vec![1.5, 1.875, 2.25]);
+        assert!(axis.notes.iter().any(|n| n.contains("CDELT3 missing")), "{:?}", axis.notes);
     }
 
     #[test]

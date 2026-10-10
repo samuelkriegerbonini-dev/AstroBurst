@@ -1295,4 +1295,38 @@ mod tests {
         close("CDELT1", -5.0e-5);
         close("CDELT2", 5.0e-5);
     }
+
+    #[tokio::test]
+    async fn an_rgb_export_without_wcs_cards_from_gwcs_backed_channels_reports_no_wcs() {
+        use crate::core::astrometry::gwcs::test_support::fixtures_dir;
+        use crate::infra::fits::asdf_hdu::test_fixtures::write_fits_with_asdf_cell;
+        use crate::infra::wcs_source::test_fixtures::tan_cards;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cell = std::fs::read(fixtures_dir().join("wcs_jwst_nircam_cal300.asdf")).unwrap();
+        let [r, g, b] = ["r", "g", "b"].map(|c| {
+            let path = dir.path().join(format!("nircam_{c}_cal.fits"));
+            write_fits_with_asdf_cell(&path, &tan_cards(), &cell);
+            path.to_str().unwrap().to_string()
+        });
+        assert!(crate::infra::wcs_source::gwcs_for_path(&r).unwrap().is_some(), "the channel is gWCS-backed");
+
+        let out = tmp_path(&dir, "rgb_without_wcs.fits");
+        let result = export_fits_rgb(
+            Some(r.clone()), Some(g.clone()), Some(b.clone()), out.clone(), Some(false), None, None, None, None, None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result[RES_WCS_WRITTEN], json!(false), "no WCS card was written: {result}");
+        let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!(written.header.get("CTYPE1"), None);
+        assert_eq!(written.header.get("CRVAL1"), None);
+
+        let with_wcs = export_fits_rgb(
+            Some(r), Some(g), Some(b), tmp_path(&dir, "rgb_with_wcs.fits"), Some(true), None, None, None, None, None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(with_wcs[RES_WCS_WRITTEN], json!(true), "{with_wcs}");
+    }
 }

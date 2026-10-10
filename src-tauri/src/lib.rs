@@ -33,6 +33,8 @@ fn urlencoding_decode(input: &str) -> String {
 #[cfg(feature = "tauri")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::core::astrometry::catalog_disk::init_from_env();
+    crate::core::astrometry::catalog::init_vizier_url_from_env();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -129,6 +131,7 @@ pub fn run() {
             cmd::analysis::detect_stars_composite,
             cmd::analysis::measure_photometry_cmd,
             cmd::analysis::measure_photometry_batch_cmd,
+            cmd::analysis::photometry_gain_model_cmd,
             cmd::analysis::time_series_photometry_cmd,
             cmd::analysis::analyze_subframes_cmd,
             cmd::regions::region_stats_cmd,
@@ -155,6 +158,7 @@ pub fn run() {
             cmd::compose::clear_composite_cache_cmd,
             cmd::compose::export_aligned_channels_cmd,
             cmd::compose::blend_channels_cmd,
+            cmd::compose::measure_channel_levels_cmd,
             cmd::compose::align_channels_cmd,
             cmd::compose::channel_overlay_preview_cmd,
             cmd::compose::crop_channels_cmd,
@@ -185,6 +189,8 @@ pub fn run() {
             cmd::processing::ghs_stretch_composite_cmd,
             cmd::processing::masked_stretch_composite_cmd,
             cmd::processing::apply_tone_composite_cmd,
+            cmd::processing::apply_tone_cmd,
+            cmd::processing::transform_geometry_cmd,
             cmd::processing::extract_background_dbe_cmd,
             cmd::processing::lhe_cmd,
             cmd::processing::lhe_composite_cmd,

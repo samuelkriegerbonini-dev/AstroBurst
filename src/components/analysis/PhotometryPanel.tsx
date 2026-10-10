@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useId, useMemo, memo } from "react";
 import { Crosshair, Loader2, Star as StarIcon } from "lucide-react";
-import { measurePhotometry } from "../../services/analysis";
-import type { PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
+import { measurePhotometry, photometryGainModel } from "../../services/analysis";
+import type { GainModel, PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
 import { getWcsInfo } from "../../services/astrometry";
 import { usePixelClick } from "../../hooks/useMousePixelStore";
 import { useDqContext } from "../../context/PreviewContext";
@@ -16,6 +16,7 @@ import {
   saveGaiaMatchPreference,
   withWarning,
 } from "../../utils/photometryPanel";
+import { GAIN_TITLE, gainCaption, nextGainText } from "../../utils/photometryGain";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { Toggle } from "../ui";
 import ProfilePlot from "../regions/ProfilePlot";
@@ -121,6 +122,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [skyInText, setSkyInText] = useState("");
   const [skyOutText, setSkyOutText] = useState("");
   const [gainText, setGainText] = useState("");
+  const [gainModel, setGainModel] = useState<GainModel | null>(null);
   const [eeFraction, setEeFraction] = useState(false);
   const [arcsecPerPx, setArcsecPerPx] = useState<number | null>(null);
   const [isMeasuring, setIsMeasuring] = useState(false);
@@ -137,6 +139,10 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const clickRef = useRef(click);
   clickRef.current = click;
   const wcsSeqRef = useRef(0);
+  const gainTextRef = useRef(gainText);
+  gainTextRef.current = gainText;
+  const gainPrefillRef = useRef("");
+  const gainSeqRef = useRef(0);
 
   const changeGaiaMatch = useCallback((on: boolean) => {
     setGaiaMatch(on);
@@ -169,6 +175,24 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
       .catch(() => {
         if (wcsSeqRef.current === seq) setArcsecPerPx(null);
       });
+  }, [filePath]);
+
+  useEffect(() => {
+    const seq = ++gainSeqRef.current;
+    setGainModel(null);
+    const cleared = nextGainText(gainTextRef.current, gainPrefillRef.current, null);
+    gainPrefillRef.current = cleared.prefill;
+    gainTextRef.current = cleared.text;
+    setGainText(cleared.text);
+    if (!filePath) return;
+    const apply = (model: GainModel | null) => {
+      if (gainSeqRef.current !== seq) return;
+      const next = nextGainText(gainTextRef.current, gainPrefillRef.current, model);
+      gainPrefillRef.current = next.prefill;
+      setGainModel(model);
+      setGainText(next.text);
+    };
+    photometryGainModel(filePath).then(apply, () => apply(null));
   }, [filePath]);
 
   const apertureRadius = parseOptionalNumber(apertureText);
@@ -315,12 +339,17 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 step={0.1}
                 value={gainText}
                 placeholder="none"
+                title={GAIN_TITLE}
+                data-gain-source={gainModel?.source ?? ""}
                 onChange={(e) => setGainText(e.target.value)}
                 className={INPUT_CLASS}
               />
             </div>
           </div>
           <div className="text-[9px] text-zinc-600">{APERTURE_DEFAULTS_CAPTION}</div>
+          <div className="text-[9px] text-zinc-500" data-gain-caption>
+            {gainCaption(gainModel, gainText)}
+          </div>
           {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
           {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
         </div>

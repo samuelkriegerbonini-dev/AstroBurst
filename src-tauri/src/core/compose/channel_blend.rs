@@ -11,6 +11,8 @@ pub struct BlendWeight {
     pub r_weight: f64,
     pub g_weight: f64,
     pub b_weight: f64,
+    #[serde(default)]
+    pub offset: f64,
 }
 
 fn empty_output_columns(weights: &[BlendWeight]) -> Vec<&'static str> {
@@ -71,11 +73,11 @@ pub fn blend_channels(
 
     let npix = rows * cols;
 
-    let valid_weights: Vec<(usize, f32, f32, f32)> = weights
+    let valid_weights: Vec<(usize, f32, f32, f32, f32)> = weights
         .iter()
         .filter(|w| w.channel_idx < channels.len())
         .filter(|w| w.r_weight != 0.0 || w.g_weight != 0.0 || w.b_weight != 0.0)
-        .map(|w| (w.channel_idx, w.r_weight as f32, w.g_weight as f32, w.b_weight as f32))
+        .map(|w| (w.channel_idx, w.r_weight as f32, w.g_weight as f32, w.b_weight as f32, w.offset as f32))
         .collect();
 
     let slices: Vec<&[f32]> = channels
@@ -100,15 +102,16 @@ pub fn blend_channels(
                 let mut gv = 0.0f32;
                 let mut bv = 0.0f32;
 
-                for &(ch_idx, rw, gw, bw) in &valid_weights {
+                for &(ch_idx, rw, gw, bw, offset) in &valid_weights {
                     let src = slices[ch_idx];
                     if i >= src.len() {
                         continue;
                     }
                     let v = src[i];
-                    if !v.is_finite() {
+                    if !v.is_finite() || v == 0.0 {
                         continue;
                     }
+                    let v = v + offset;
                     rv += v * rw;
                     gv += v * gw;
                     bv += v * bw;
@@ -133,7 +136,20 @@ mod tests {
     use ndarray::arr2;
 
     fn weight(channel_idx: usize, r_weight: f64, g_weight: f64, b_weight: f64) -> BlendWeight {
-        BlendWeight { channel_idx, r_weight, g_weight, b_weight }
+        BlendWeight { channel_idx, r_weight, g_weight, b_weight, offset: 0.0 }
+    }
+
+    #[test]
+    fn offsets_shift_finite_pixels_and_leave_padding_alone() {
+        let ch = arr2(&[[5.0f32, f32::NAN, 0.0, 7.0]]);
+        let channels = [&ch];
+        let weights = vec![BlendWeight { channel_idx: 0, r_weight: 2.0, g_weight: 1.0, b_weight: 1.0, offset: -1.0 }];
+
+        let (r, g, b) = blend_channels(&channels, &weights, 1, 4).unwrap();
+
+        assert_eq!(r.as_slice().unwrap(), &[8.0, 0.0, 0.0, 12.0]);
+        assert_eq!(g.as_slice().unwrap(), &[4.0, 0.0, 0.0, 6.0]);
+        assert_eq!(b.as_slice().unwrap(), &[4.0, 0.0, 0.0, 6.0]);
     }
 
     #[test]

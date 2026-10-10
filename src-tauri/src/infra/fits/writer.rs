@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
+use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
 use crate::infra::fits::compress::gzip::gzip2_encode;
 use crate::infra::fits::compress::quantize::{quantize_tile, QuantizeResult, NULL_VALUE};
 use crate::infra::fits::compress::rice::RiceParams;
@@ -26,7 +27,7 @@ const WCS_PREFIXES: &[&str] = &[
 ];
 
 pub(crate) fn is_wcs_card(key: &str) -> bool {
-    WCS_PREFIXES.iter().any(|p| key.starts_with(p))
+    WCS_PREFIXES.iter().any(|p| key.starts_with(p)) || SIP_RESIDUAL_KEYS.contains(&key)
 }
 
 pub fn filter_header(header: &HduHeader, copy_wcs: bool, copy_metadata: bool) -> Option<HduHeader> {
@@ -1189,6 +1190,19 @@ mod tests {
         assert_eq!(parsed.header.get("OBJECT"), Some("M16"));
         assert_eq!(parsed.header.get_f64("CRVAL1"), Some(202.4695));
         assert_eq!(parsed.header.get_i64("CRPIX1"), Some(512));
+    }
+
+    #[test]
+    fn sip_fit_residual_cards_are_wcs_cards() {
+        assert!(is_wcs_card("SIPMXERR") && is_wcs_card("SIPIVERR"));
+        assert!(!is_wcs_card("SIPMXER") && !is_wcs_card("SIP"));
+        let header = mk_header(&[("CTYPE1", "RA---TAN"), ("SIPMXERR", "0.01"), ("SIPIVERR", "0.02"), ("OBJECT", "M16")]);
+        let wcs_only = filter_header(&header, true, false).unwrap();
+        assert!(wcs_only.get("SIPMXERR").is_some() && wcs_only.get("SIPIVERR").is_some(), "{:?}", wcs_only.cards);
+        assert!(wcs_only.get("OBJECT").is_none());
+        let metadata_only = filter_header(&header, false, true).unwrap();
+        assert!(metadata_only.get("SIPMXERR").is_none() && metadata_only.get("SIPIVERR").is_none(), "{:?}", metadata_only.cards);
+        assert!(metadata_only.get("OBJECT").is_some());
     }
 
     #[test]

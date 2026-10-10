@@ -29,6 +29,9 @@ const PERCENTILE_MIN_WINDOW_SIGMAS: f64 = 0.5;
 const PERCENTILE_LEVEL_QUANTILE: f64 = 0.1;
 const SECOND_DIFFERENCE_VARIANCE: f64 = 6.0;
 
+pub const E_SIZES_ALIGN_OFF: &str = "Frames have different sizes (frame 1 is {w1}x{h1}, frame {k} is {wk}x{hk}); with alignment off they would be stacked by their top-left corner. Turn alignment on, or crop/resample the frames to one size first.";
+pub const W_SIZES_CROPPED: &str = "Frames {list} were cropped to the smallest frame ({w}x{h}) at the top-left before alignment.";
+
 fn scale_from_deviations(mad: f32, abs_devs: &[f32]) -> f32 {
     let robust = mad as f64 * MAD_TO_SIGMA;
     if robust > 0.0 {
@@ -693,6 +696,26 @@ pub fn stack_images_cancellable(
 
     let min_rows = images.iter().map(|img| img.dim().0).min().unwrap_or(0);
     let min_cols = images.iter().map(|img| img.dim().1).min().unwrap_or(0);
+    let mut warnings: Vec<String> = Vec::new();
+
+    let reference_dim = images[0].dim();
+    if let Some((k, odd)) = images.iter().enumerate().find(|(_, img)| img.dim() != reference_dim) {
+        if !config.align {
+            bail!(size_refusal_text(reference_dim, k + 1, odd.dim()));
+        }
+        let cropped: Vec<String> = images
+            .iter()
+            .enumerate()
+            .filter(|(_, img)| img.dim() != (min_rows, min_cols))
+            .map(|(i, _)| (i + 1).to_string())
+            .collect();
+        let message = W_SIZES_CROPPED
+            .replace("{list}", &cropped.join(", "))
+            .replace("{w}", &min_cols.to_string())
+            .replace("{h}", &min_rows.to_string());
+        log::warn!("{}", message);
+        warnings.push(message);
+    }
 
     fn crop_to(img: &Array2<f32>, rows: usize, cols: usize) -> Cow<'_, Array2<f32>> {
         let (r, c) = img.dim();
@@ -709,7 +732,6 @@ pub fn stack_images_cancellable(
     let mut members: Vec<usize> = Vec::with_capacity(n);
     let mut offsets: Vec<(i32, i32)> = vec![(0, 0); n];
     let mut alignment: Vec<FrameAlignment> = Vec::with_capacity(n);
-    let mut warnings: Vec<String> = Vec::new();
 
     aligned.push(Cow::Borrowed(ref_cropped.as_ref()));
     members.push(0);
@@ -849,7 +871,14 @@ pub fn stack_images_cancellable(
     let weights: Option<Vec<f64>> = config
         .weights
         .as_ref()
-        .map(|w| members.iter().map(|&i| w[i]).collect());
+        .map(|w| members.iter().zip(&applied).map(|(&i, &(_, k))| w[i] / (k * k)).collect());
+
+    let mut weights_applied: Vec<Option<f64>> = vec![None; n];
+    if let Some(weights) = &weights {
+        for (&input, &w) in members.iter().zip(weights) {
+            weights_applied[input] = Some(w);
+        }
+    }
 
     let combiner = RowCombiner {
         slices: &aligned_slices,
@@ -917,9 +946,19 @@ pub fn stack_images_cancellable(
         rejection_low,
         rejection_high,
         normalization_applied,
+        weights_applied,
         alignment,
         warnings,
     })
+}
+
+fn size_refusal_text(reference: (usize, usize), frame: usize, odd: (usize, usize)) -> String {
+    E_SIZES_ALIGN_OFF
+        .replace("{w1}", &reference.1.to_string())
+        .replace("{h1}", &reference.0.to_string())
+        .replace("{k}", &frame.to_string())
+        .replace("{wk}", &odd.1.to_string())
+        .replace("{hk}", &odd.0.to_string())
 }
 
 #[cfg(test)]
@@ -1823,5 +1862,96 @@ mod tests {
         for (a, b) in result.image.iter().zip(base.iter()) {
             assert!((a - b).abs() < 1e-2, "{a} vs {b}");
         }
+    }
+
+    fn flat_noise_frame(level: f32, sigma: f32, seed: u64) -> Array2<f32> {
+        let mut rng = Lcg(seed);
+        let spread = sigma * 12f32.sqrt();
+        Array2::from_shape_fn((256, 256), |_| level + (rng.next_unit() - 0.5) * spread)
+    }
+
+    fn sample_sigma(image: &Array2<f32>) -> f64 {
+        let n = image.len() as f64;
+        let mean = image.iter().map(|&v| v as f64).sum::<f64>() / n;
+        (image.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    }
+
+    #[test]
+    fn noise_weights_are_divided_by_the_normalization_scale_squared() {
+        let frame_a = flat_noise_frame(100.0, 1.0, 21);
+        let frame_b = flat_noise_frame(100.0, 1.0, 22).mapv(|v| v * 0.5);
+        let config = StackConfig {
+            align: false,
+            normalization: NormalizationMethod::Multiplicative,
+            rejection: RejectionMethod::None,
+            weights: Some(vec![0.4, 1.6]),
+            ..StackConfig::default()
+        };
+        let result = stack_images(&[frame_a, frame_b], &config).unwrap();
+        let sigma = sample_sigma(&result.image);
+        assert!((sigma - 0.707).abs() / 0.707 < 0.05, "stack sigma {sigma}, expected about 0.707");
+        let k = result.normalization_applied[1].1;
+        assert!((k - 2.0).abs() < 0.02, "scale {k}");
+        assert_eq!(result.weights_applied.len(), 2, "{:?}", result.weights_applied);
+        assert_eq!(result.weights_applied[0], Some(0.4));
+        let weight_b = result.weights_applied[1].expect("frame 2 is a member");
+        assert!((weight_b - 1.6 / (k * k)).abs() < 1e-6, "weight {weight_b} for scale {k}");
+        assert!((weight_b - 0.4).abs() < 0.01, "weight {weight_b}");
+    }
+
+    #[test]
+    fn weights_unchanged_when_normalization_is_none() {
+        let frame_a = flat_noise_frame(100.0, 1.0, 31);
+        let frame_b = flat_noise_frame(100.0, 1.0, 32).mapv(|v| v * 0.5);
+        let config = StackConfig {
+            align: false,
+            normalization: NormalizationMethod::None,
+            rejection: RejectionMethod::None,
+            weights: Some(vec![0.4, 1.6]),
+            ..StackConfig::default()
+        };
+        let result = stack_images(&[frame_a.clone(), frame_b.clone()], &config).unwrap();
+        let expected = (0.4 * frame_a[[5, 7]] + 1.6 * frame_b[[5, 7]]) / 2.0;
+        assert!((result.image[[5, 7]] - expected).abs() < 1e-4, "{} vs {expected}", result.image[[5, 7]]);
+        assert_eq!(result.weights_applied, vec![Some(0.4), Some(1.6)]);
+    }
+
+    #[test]
+    fn different_sizes_with_alignment_off_are_refused() {
+        let images = vec![Array2::from_elem((64, 64), 100.0f32), Array2::from_elem((60, 62), 100.0f32)];
+        let config = StackConfig {
+            align: false,
+            normalization: NormalizationMethod::None,
+            rejection: RejectionMethod::None,
+            ..StackConfig::default()
+        };
+        let result = stack_images(&images, &config);
+        assert!(result.is_err(), "frames of different sizes were stacked with alignment off");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("frame 1 is 64x64"), "{err}");
+        assert!(err.contains("frame 2 is 62x60"), "{err}");
+        assert!(err.contains("Turn alignment on"), "{err}");
+    }
+
+    #[test]
+    fn different_sizes_with_alignment_on_warn_about_the_crop() {
+        let frame1 = pair::star_field(64, 0.0, 7);
+        let frame2 = pair::shift_image_subpixel(&frame1, 1.0, 2.0).slice(ndarray::s![..60, ..62]).to_owned();
+        let config = StackConfig {
+            align: true,
+            normalization: NormalizationMethod::None,
+            rejection: RejectionMethod::None,
+            rejection_normalization: RejectionNormalization::None,
+            ..StackConfig::default()
+        };
+        let result = stack_images(&[frame1, frame2], &config).unwrap();
+        assert_eq!(result.frame_count, 2);
+        assert_eq!(result.image.dim(), (60, 62));
+        assert!(
+            result.warnings.iter().any(|w| w.contains("cropped to the smallest frame (62x60)")),
+            "{:?}",
+            result.warnings
+        );
+        assert!(result.warnings[0].starts_with("Frames 1 were cropped"), "{:?}", result.warnings);
     }
 }

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save } from "lucide-react";
 import { plateSolve, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
 import type { WcsInfo, WriteSolvedWcsResult } from "../../services/astrometry";
-import { solvedWcsSummary, wcsWriteBlocker } from "../../utils/solvedWcs";
+import { shouldResetSolve, solvedWcsSummary, wcsRewriteBlocker, wcsWriteBlocker, type SolveIdentity } from "../../utils/solvedWcs";
 import { getApiKey, getConfig } from "../../services/config";
 import {
   VIEW_SCALE_ATTRIBUTE,
@@ -93,8 +93,10 @@ interface PlateSolvePanelProps {
   elapsed?: number;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
   filePath?: string | null;
+  solvePath: string | null;
   detectError?: string | null;
   sourceBadge?: React.ReactNode;
+  solveBadge?: React.ReactNode;
   detectedTotal?: number | null;
   annotationsOnView?: boolean;
   onWcsWritten?: (result: WriteSolvedWcsResult) => void;
@@ -162,8 +164,10 @@ function PlateSolvePanel({
                                           elapsed = 0,
                                           overlayCanvasRef,
                                           filePath,
+                                          solvePath,
                                           detectError = null,
                                           sourceBadge,
+                                          solveBadge,
                                           detectedTotal = null,
                                           annotationsOnView = true,
                                           onWcsWritten,
@@ -204,6 +208,8 @@ function PlateSolvePanel({
   const [wcsWriteError, setWcsWriteError] = useState<string | null>(null);
   const [wcsWritten, setWcsWritten] = useState<WriteSolvedWcsResult | null>(null);
   const wcsSeqRef = useRef(0);
+  const writtenPathRef = useRef<string | null>(null);
+  const solveIdentityRef = useRef<SolveIdentity>({ regionKey: filePath ?? null, solvePath });
 
   useEffect(() => {
     getApiKey("astrometry")
@@ -237,6 +243,7 @@ function PlateSolvePanel({
     setSolveLoading(false);
     setWcsWriting(false);
     setWcsWriteError(null);
+    writtenPathRef.current = null;
     setWcsWritten(null);
     setSelectedStar(null);
     setCenterRaText("");
@@ -245,9 +252,26 @@ function PlateSolvePanel({
     setScaleLowText(DEFAULT_SCALE_LOW_TEXT);
     setScaleHighText(DEFAULT_SCALE_HIGH_TEXT);
     setScaleUnits("arcsecperpix");
-    if (!filePath) return;
+  }, [filePath]);
+
+  useEffect(() => {
+    const next: SolveIdentity = { regionKey: filePath ?? null, solvePath };
+    const reset = shouldResetSolve(solveIdentityRef.current, next, writtenPathRef.current);
+    solveIdentityRef.current = next;
+    if (reset) {
+      solveSeqRef.current++;
+      wcsSeqRef.current++;
+      setSolveResult(null);
+      setSolveError(null);
+      setSolveLoading(false);
+      setWcsWriting(false);
+      setWcsWriteError(null);
+      writtenPathRef.current = null;
+      setWcsWritten(null);
+    }
+    if (!solvePath) return;
     let cancelled = false;
-    getWcsInfo(filePath)
+    getWcsInfo(solvePath)
       .then((info) => {
         if (cancelled) return;
         setWcsInfo(info);
@@ -259,7 +283,7 @@ function PlateSolvePanel({
     return () => {
       cancelled = true;
     };
-  }, [filePath, applyWcsHints]);
+  }, [filePath, solvePath, applyWcsHints]);
 
   useEffect(() => {
     if (!solveLoading) return;
@@ -390,7 +414,7 @@ function PlateSolvePanel({
     }
 
     return hide;
-  }, [stars, drawStars, drawAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvas, overlayHostSize, overlayViewScale, filePath]);
+  }, [stars, drawStars, drawAnnotations, annotations, selectedStar, imageWidth, imageHeight, overlayCanvas, overlayHostSize, overlayViewScale, solvePath]);
 
   const handleDetect = useCallback(() => {
     if (onDetect) onDetect(sigma);
@@ -399,7 +423,7 @@ function PlateSolvePanel({
   const scaleRange = parseScaleRange(scaleLowText, scaleHighText);
 
   const handleSolve = useCallback(async () => {
-    if (!filePath) return;
+    if (!solvePath) return;
     const scale = parseScaleRange(scaleLowText, scaleHighText);
     if (scale.error !== null) return;
     const hint = parsePositionHint(centerRaText, centerDecText, searchRadiusText);
@@ -409,6 +433,7 @@ function PlateSolvePanel({
     setSolveError(null);
     setSolveResult(null);
     setWcsWriteError(null);
+    writtenPathRef.current = null;
     setWcsWritten(null);
     try {
       const cfg = await getConfig().catch(() => null);
@@ -416,7 +441,7 @@ function PlateSolvePanel({
       if (solveSeqRef.current !== seq) return;
       setTimeoutSecs(limitSecs);
       const result = await withDeadline(
-        plateSolve(filePath, {
+        plateSolve(solvePath, {
           scaleLower: scale.low,
           scaleUpper: scale.high,
           scaleUnits,
@@ -430,7 +455,7 @@ function PlateSolvePanel({
       ) as SolveResult;
       if (solveSeqRef.current !== seq) return;
       setSolveResult(result);
-      getWcsInfo(filePath)
+      getWcsInfo(solvePath)
         .then((info) => {
           if (solveSeqRef.current === seq) setWcsInfo(info);
         })
@@ -440,20 +465,22 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [filePath, scaleLowText, scaleHighText, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
+  }, [solvePath, scaleLowText, scaleHighText, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
 
-  const wcsBlocker = wcsWriteBlocker(solveResult);
+  const wcsBlocker = wcsWriteBlocker(solveResult) ?? wcsRewriteBlocker(wcsWritten?.fits_path ?? null, solvePath);
 
   const handleWriteWcs = useCallback(async () => {
-    if (!filePath || wcsWriteBlocker(solveResult) !== null) return;
+    if (!solvePath || wcsWriteBlocker(solveResult) !== null) return;
     const cards = solveResult?.wcs_cards ?? [];
     const seq = ++wcsSeqRef.current;
     setWcsWriting(true);
     setWcsWriteError(null);
+    writtenPathRef.current = null;
     setWcsWritten(null);
     try {
-      const res = await writeSolvedWcs(filePath, cards);
+      const res = await writeSolvedWcs(solvePath, cards);
       if (wcsSeqRef.current !== seq) return;
+      writtenPathRef.current = res.fits_path;
       onWcsWritten?.(res);
       setWcsWritten(res);
     } catch (e: unknown) {
@@ -461,7 +488,7 @@ function PlateSolvePanel({
     } finally {
       if (wcsSeqRef.current === seq) setWcsWriting(false);
     }
-  }, [filePath, solveResult, onWcsWritten]);
+  }, [solvePath, solveResult, onWcsWritten]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -623,6 +650,7 @@ function PlateSolvePanel({
             <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
               Plate Solve
             </span>
+            {solveBadge}
           </div>
           <div className="flex items-center gap-2">
             {annotations.length > 0 && (
@@ -792,7 +820,7 @@ function PlateSolvePanel({
 
           <button
             onClick={handleSolve}
-            disabled={solveLoading || !filePath || scaleRange.error !== null || positionHint.error !== null}
+            disabled={solveLoading || !solvePath || scaleRange.error !== null || positionHint.error !== null}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
           >
             {solveLoading ? (
@@ -864,7 +892,7 @@ function PlateSolvePanel({
           <button
             type="button"
             onClick={handleWriteWcs}
-            disabled={wcsBlocker !== null || wcsWriting || !filePath}
+            disabled={wcsBlocker !== null || wcsWriting || !solvePath}
             title={wcsBlocker ?? undefined}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >

@@ -9,12 +9,13 @@ interface ViewState {
   isSpectralCube: boolean;
   fileDims: [number, number];
   displayedDims: [number, number];
+  gpu: boolean;
 }
 
 const S3D_GRID: [number, number] = [53, 55];
 const UNCAL_GRID: [number, number] = [2048, 3200];
 
-const state: ViewState = { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID };
+const state: ViewState = { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false };
 
 vi.mock("../../context/PreviewContext", () => ({
   fileKeyOf: (file: { id: string; path: string } | null) => (file ? `${file.id}|${file.path}` : null),
@@ -36,7 +37,7 @@ vi.mock("../../context/PreviewContext", () => ({
     previewUrl: "asset://shown.png",
   }),
   useRawPixelsContext: () => ({
-    rawPixels: null,
+    rawPixels: state.gpu ? ({ width: state.displayedDims[0], height: state.displayedDims[1] } as unknown) : null,
     rawPixelsLoading: false,
     rawPixelsError: null,
     loadRawPixels: () => {},
@@ -78,20 +79,32 @@ vi.mock("../../hooks/useMousePixelStore", () => ({
   usePixelClick: () => null,
 }));
 vi.mock("../../hooks/useRampStore", () => ({ useRampIntegration: () => 0 }));
-vi.mock("../../utils/gpuPreference", () => ({ loadGpuPreference: () => false, saveGpuPreference: () => {} }));
+vi.mock("../../utils/gpuPreference", () => ({ loadGpuPreference: () => state.gpu, saveGpuPreference: () => {} }));
+const viewerProps: { onCanvasPixelClick?: (x: number, y: number) => void }[] = [];
+
 vi.mock("../viewer/AdvancedImageViewer", () => ({
-  default: (props: { canvasHint?: string }) => createElement("div", { "data-canvas-hint": props.canvasHint ?? "" }),
+  default: (props: { canvasHint?: string; onCanvasPixelClick?: (x: number, y: number) => void }) => {
+    viewerProps.push(props);
+    return createElement("div", { "data-canvas-hint": props.canvasHint ?? "" });
+  },
 }));
 vi.mock("../preview/DqControls", () => ({ default: () => null }));
 vi.mock("../preview/DqOverlayCanvas", () => ({ default: () => null }));
 vi.mock("../preview/ViewerStatusStrip", () => ({ default: () => null }));
 vi.mock("../preview/DisplayControls", () => ({ default: () => null }));
-vi.mock("../preview/PreviewTab", () => ({ default: () => null }));
+const tabProps: { onCubePixelClick?: (x: number, y: number) => void }[] = [];
+
+vi.mock("../preview/PreviewTab", () => ({
+  default: (props: { onCubePixelClick?: (x: number, y: number) => void }) => {
+    tabProps.push(props);
+    return null;
+  },
+}));
 
 import PreviewPanel from "../PreviewPanel";
 
 function render(view: Partial<ViewState>): string {
-  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID }, view);
+  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false }, view);
   return renderToStaticMarkup(createElement(PreviewPanel));
 }
 
@@ -114,5 +127,40 @@ describe("PreviewPanel spectrum hint on the CPU viewer", () => {
 
   it("shows no hint on a plain image", () => {
     expect(render({ isCube: false, isSpectralCube: false })).toContain('data-canvas-hint=""');
+  });
+});
+
+describe("PreviewPanel spectrum click on the CPU viewer", () => {
+  function canvasClickAfterRender(view: Partial<ViewState>) {
+    viewerProps.length = 0;
+    render(view);
+    return viewerProps[viewerProps.length - 1]?.onCanvasPixelClick;
+  }
+
+  it("passes no spectrum click handler on a PV diagram, whose grid is not the cube's spatial grid", () => {
+    expect(canvasClickAfterRender({ label: "PV diagram", displayedDims: [40, 3814] })).toBeUndefined();
+  });
+
+  it("passes the spectrum click handler on the cube's spatial grid", () => {
+    expect(typeof canvasClickAfterRender({ displayedDims: S3D_GRID })).toBe("function");
+  });
+});
+
+describe("PreviewPanel spectrum click on the GPU viewer", () => {
+  function tabClickAfterRender(view: Partial<ViewState>) {
+    tabProps.length = 0;
+    viewerProps.length = 0;
+    render({ gpu: true, ...view });
+    expect(tabProps.length).toBeGreaterThan(0);
+    expect(viewerProps.length).toBe(0);
+    return tabProps[tabProps.length - 1].onCubePixelClick;
+  }
+
+  it("passes no spectrum click handler on a PV diagram, whose grid is not the cube's spatial grid", () => {
+    expect(tabClickAfterRender({ label: "PV diagram", displayedDims: [40, 3814] })).toBeUndefined();
+  });
+
+  it("passes the spectrum click handler on the cube's spatial grid", () => {
+    expect(typeof tabClickAfterRender({ displayedDims: S3D_GRID })).toBe("function");
   });
 });

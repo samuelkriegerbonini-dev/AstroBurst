@@ -10,6 +10,7 @@ use crate::cmd::analysis::{resolve_pixel_mask, PixelMask, HEADER_PROCESSING_PROV
 use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::{position_angle_deg, WcsTransform};
+use crate::infra::wcs_source::load_wcs;
 use crate::core::imaging::region::{
     ellipse_geometry, elliptical_profile, encircled_radius_from_bins, line_cut, major_axis_angle_deg,
     petrosian_radius, radial_profile, region_data_stats, EllipticalBin, EllipticalProfile, PhysicalMap,
@@ -62,8 +63,8 @@ pub struct RegionStatsRequest {
     pub background: Option<RegionShape>,
 }
 
-fn entry_wcs(entry: &ImageEntry) -> Option<WcsTransform> {
-    entry.header().and_then(|h| WcsTransform::from_header(h).ok())
+fn entry_wcs(path: &str, entry: &ImageEntry) -> Option<WcsTransform> {
+    entry.header().and_then(|h| load_wcs(path, h).ok())
 }
 
 fn entry_physical(entry: &ImageEntry) -> PhysicalMap {
@@ -138,8 +139,8 @@ fn positive_finite(value: f64) -> Option<f64> {
     (value.is_finite() && value > 0.0).then_some(value)
 }
 
-pub(crate) fn entry_calibration(entry: &ImageEntry) -> EntryCalibration {
-    let wcs = entry_wcs(entry);
+pub(crate) fn entry_calibration(path: &str, entry: &ImageEntry) -> EntryCalibration {
+    let wcs = entry_wcs(path, entry);
     let header = entry.header();
     let mut warnings = Vec::new();
     let photcal = match header.and_then(uncalibrated_reason) {
@@ -321,8 +322,8 @@ pub(crate) fn stats_for_entry(
         .collect()
 }
 
-pub(crate) fn import_for_entry(entry: &ImageEntry, reg_text: &str) -> anyhow::Result<Value> {
-    let wcs = entry_wcs(entry);
+pub(crate) fn import_for_entry(path: &str, entry: &ImageEntry, reg_text: &str) -> anyhow::Result<Value> {
+    let wcs = entry_wcs(path, entry);
     let parsed = parse_reg_with_physical(reg_text, wcs.as_ref(), &entry_physical(entry))?;
     Ok(json!({
         RES_REGIONS: parsed.regions,
@@ -332,12 +333,13 @@ pub(crate) fn import_for_entry(entry: &ImageEntry, reg_text: &str) -> anyhow::Re
 }
 
 pub(crate) fn export_for_entry(
+    path: &str,
     entry: &ImageEntry,
     regions: &[Region],
     system: RegionSystem,
     sexagesimal: bool,
 ) -> anyhow::Result<String> {
-    let wcs = entry_wcs(entry);
+    let wcs = entry_wcs(path, entry);
     Ok(write_reg_with_physical(regions, system, wcs.as_ref(), sexagesimal, &entry_physical(entry))?)
 }
 
@@ -360,7 +362,7 @@ pub async fn region_stats_cmd(
         let entry = load_cached_full(&path)?;
         let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
         let err_entry = companion_err(&path, entry.arr().dim());
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&path, &entry);
         let entries = stats_for_entry(
             &entry,
             &regions,
@@ -537,7 +539,7 @@ pub async fn sb_profile_cmd(
             background.as_ref(),
             mask.as_ref().map(|m| &m.map),
         )?;
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&path, &entry);
         sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.as_ref(), t0)
     })
 }
@@ -549,7 +551,7 @@ pub async fn regions_import_cmd(path: String, reg_text: String) -> Result<Value,
             bail!("region file is too large ({} bytes); the limit is {} bytes", reg_text.len(), MAX_REG_TEXT_BYTES);
         }
         let entry = load_cached_full(&path)?;
-        import_for_entry(&entry, &reg_text)
+        import_for_entry(&path, &entry, &reg_text)
     })
 }
 
@@ -563,7 +565,7 @@ pub async fn regions_export_cmd(
     blocking_cmd!({
         let system = RegionSystem::parse(&system).map_err(|e| anyhow!(e))?;
         let entry = load_cached_full(&path)?;
-        let text = export_for_entry(&entry, &regions, system, sexagesimal.unwrap_or(true))?;
+        let text = export_for_entry(&path, &entry, &regions, system, sexagesimal.unwrap_or(true))?;
         Ok(json!({ RES_REG_TEXT: text, RES_SYSTEM: system.name() }))
     })
 }
@@ -1065,7 +1067,7 @@ mod tests {
         write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
         let key = path.to_str().unwrap().to_string();
         let entry = load_cached_full(&key).unwrap();
-        assert!(entry_wcs(&entry).is_some(), "header should carry the WCS cards");
+        assert!(entry_wcs(&key, &entry).is_some(), "header should carry the WCS cards");
 
         let regions = vec![
             Region {
@@ -1078,9 +1080,9 @@ mod tests {
             },
         ];
 
-        let text = export_for_entry(&entry, &regions, RegionSystem::Image, true).unwrap();
+        let text = export_for_entry(&key, &entry, &regions, RegionSystem::Image, true).unwrap();
         assert!(text.lines().nth(3).unwrap().starts_with("circle(50.5,50.5,3.5)"));
-        let back = import_for_entry(&entry, &text).unwrap();
+        let back = import_for_entry(&key, &entry, &text).unwrap();
         assert_eq!(back[RES_HAS_WCS], true);
         assert!(back[RES_WARNINGS].as_array().unwrap().is_empty());
         let shapes: Vec<Region> = serde_json::from_value(back[RES_REGIONS].clone()).unwrap();
@@ -1090,9 +1092,9 @@ mod tests {
         assert!(!shapes[1].props.include);
         assert_eq!(shapes[1].shape, regions[1].shape);
 
-        let text = export_for_entry(&entry, &regions, RegionSystem::Fk5, true).unwrap();
+        let text = export_for_entry(&key, &entry, &regions, RegionSystem::Fk5, true).unwrap();
         assert_eq!(text.lines().nth(2), Some("fk5"));
-        let back = import_for_entry(&entry, &text).unwrap();
+        let back = import_for_entry(&key, &entry, &text).unwrap();
         let shapes: Vec<Region> = serde_json::from_value(back[RES_REGIONS].clone()).unwrap();
         let (x, y) = shapes[0].shape.centre();
         assert!((x - 49.5).abs() < 1e-2 && (y - 49.5).abs() < 1e-2, "({x},{y})");
@@ -1117,12 +1119,12 @@ mod tests {
         let arr = Array2::<f32>::from_elem((8, 8), 1.0);
         write_fits_mono(path.to_str().unwrap(), &arr, None).unwrap();
         let entry = load_cached_full(path.to_str().unwrap()).unwrap();
-        let back = import_for_entry(&entry, "image\ncircle(4,4,2)\n").unwrap();
+        let back = import_for_entry(path.to_str().unwrap(), &entry, "image\ncircle(4,4,2)\n").unwrap();
         assert_eq!(back[RES_HAS_WCS], false);
         assert_eq!(back[RES_REGIONS].as_array().unwrap().len(), 1);
-        let err = import_for_entry(&entry, "fk5\ncircle(150,2,3\")\n").unwrap_err();
+        let err = import_for_entry(path.to_str().unwrap(), &entry, "fk5\ncircle(150,2,3\")\n").unwrap_err();
         assert!(err.to_string().contains("requires a WCS"));
-        assert!(export_for_entry(&entry, &[], RegionSystem::Icrs, true).is_err());
+        assert!(export_for_entry(path.to_str().unwrap(), &entry, &[], RegionSystem::Icrs, true).is_err());
     }
 
     #[test]
@@ -1136,14 +1138,14 @@ mod tests {
         write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
         let entry = load_cached_full(path.to_str().unwrap()).unwrap();
 
-        let back = import_for_entry(&entry, "physical\ncircle(31,51,2)\n").unwrap();
+        let back = import_for_entry(path.to_str().unwrap(), &entry, "physical\ncircle(31,51,2)\n").unwrap();
         let shapes: Vec<Region> = serde_json::from_value(back[RES_REGIONS].clone()).unwrap();
         assert_eq!(shapes[0].shape, RegionShape::Circle { x: 20.0, y: 30.0, r: 2.0 });
 
-        let text = export_for_entry(&entry, &shapes, RegionSystem::Physical, true).unwrap();
+        let text = export_for_entry(path.to_str().unwrap(), &entry, &shapes, RegionSystem::Physical, true).unwrap();
         assert_eq!(text.lines().nth(2), Some("physical"));
         assert!(text.lines().nth(3).unwrap().starts_with("circle(31,51,2)"), "{text}");
-        let image = export_for_entry(&entry, &shapes, RegionSystem::Image, true).unwrap();
+        let image = export_for_entry(path.to_str().unwrap(), &entry, &shapes, RegionSystem::Image, true).unwrap();
         assert!(image.lines().nth(3).unwrap().starts_with("circle(21,31,2)"), "{image}");
     }
 
@@ -1268,7 +1270,7 @@ mod tests {
         assert!((net_jy - expected_net).abs() / expected_net < 1e-9, "net_jy={net_jy} expected={expected_net}");
 
         let entry = load_cached_full(&key).unwrap();
-        let wcs = entry_wcs(&entry).expect("wcs");
+        let wcs = entry_wcs(&key, &entry).expect("wcs");
         let centre = wcs.pixel_to_world(DISC_CENTRE, DISC_CENTRE);
         for e in entries {
             let cal = &e[RES_STATS][RES_CALIBRATED];
@@ -1288,7 +1290,7 @@ mod tests {
         assert!(entries[0][RES_STATS][RES_CALIBRATED]["pa_sky_deg"].is_null());
 
         let rotated = RegionShape::Box { x: DISC_CENTRE, y: DISC_CENTRE, width: 8.0, height: 4.0, angle: 30.0 };
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&key, &entry);
         let stats = region_data_stats(entry.arr(), &rotated, None, None, None, SigmaClip::default()).unwrap();
         let value = calibrated_flux_json(&stats, &rotated, &cal);
         let pa = value["pa_sky_deg"].as_f64().unwrap();
@@ -1333,7 +1335,7 @@ mod tests {
         assert_eq!(stats["count"], 49);
 
         let entry = load_cached_full(&key).unwrap();
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&key, &entry);
         assert!(cal.photcal.is_none() && cal.wcs.is_none() && cal.pixel_area_arcsec2.is_none());
         let regions = vec![req("r4", circle(4.0)), req("r6", circle(6.0))];
         let with_none = stats_for_entry(&entry, &regions, None, None, SigmaClip::default(), &EntryCalibration::none());
@@ -1350,7 +1352,7 @@ mod tests {
         let header = header_with_cd([[-s, 0.0], [0.0, 1.05 * s]]);
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
         let entry = load_cached_full(path.to_str().unwrap()).unwrap();
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(path.to_str().unwrap(), &entry);
         assert!(cal.photcal.is_none());
         assert!(cal.warnings.iter().any(|w| w.contains("pixel scales differ per axis")), "{:?}", cal.warnings);
         let expected = (1.025f64).powi(2);
@@ -1360,7 +1362,7 @@ mod tests {
         let path = dir.path().join("isotropic.fits");
         write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&isotropic)).unwrap();
         let entry = load_cached_full(path.to_str().unwrap()).unwrap();
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(path.to_str().unwrap(), &entry);
         assert!(!cal.warnings.iter().any(|w| w.contains("pixel scales differ")), "{:?}", cal.warnings);
         assert!((cal.pixel_area_arcsec2.unwrap() - 1.0).abs() < 1e-9);
     }
@@ -1466,7 +1468,7 @@ mod tests {
         assert!((pa - 120.0).abs() < 1e-6, "major axis 30 deg from the x axis on a north-up frame has PA 120, got {pa}");
 
         let entry = load_cached_full(&key).unwrap();
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&key, &entry);
         let stats = region_data_stats(entry.arr(), &wide, None, None, None, SigmaClip::default()).unwrap();
         let region_pa = calibrated_flux_json(&stats, &wide, &cal)["pa_sky_deg"].as_f64().unwrap();
         assert!((pa - region_pa).abs() < 1e-9, "profile {pa} vs region block {region_pa}");
@@ -1501,7 +1503,7 @@ mod tests {
         let expected_area = JWST_PIXAR_SR * crate::core::metadata::photcal::ARCSEC_PER_RADIAN.powi(2);
         assert!((pixel_area - expected_area).abs() / expected_area < 1e-9, "{pixel_area} vs {expected_area}");
 
-        let centre = entry_wcs(&load_cached_full(&key).unwrap()).unwrap().pixel_to_world(DISC_CENTRE, DISC_CENTRE);
+        let centre = entry_wcs(&key, &load_cached_full(&key).unwrap()).unwrap().pixel_to_world(DISC_CENTRE, DISC_CENTRE);
         let r4 = &out[RES_REGIONS][0][RES_STATS];
         assert!(r4[RES_CALIBRATED].is_null(), "{r4}");
         let sky = &r4[RES_SKY];
@@ -1521,7 +1523,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = write_flat_sb_disc(dir.path());
         let entry = load_cached_full(&key).unwrap();
-        let cal = entry_calibration(&entry);
+        let cal = entry_calibration(&key, &entry);
         let region_pa = |shape: &RegionShape| {
             let stats = region_data_stats(entry.arr(), shape, None, None, None, SigmaClip::default()).unwrap();
             calibrated_flux_json(&stats, shape, &cal)[RES_PA_SKY_DEG].as_f64().unwrap()
@@ -1566,7 +1568,7 @@ mod tests {
             let path = dir.path().join(format!("{ctype1}.fits"));
             write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
             let key = path.to_str().unwrap().to_string();
-            let wcs = entry_wcs(&load_cached_full(&key).unwrap()).expect("wcs");
+            let wcs = entry_wcs(&key, &load_cached_full(&key).unwrap()).expect("wcs");
             let centre = wcs.pixel_to_world(reference_pixel, reference_pixel);
             let native_north = position_angle_deg(centre.ra, centre.dec, pole.0, pole.1);
             let expected = (native_north + 90.0).rem_euclid(POSITION_ANGLE_PERIOD_DEG);

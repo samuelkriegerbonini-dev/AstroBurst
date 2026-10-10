@@ -13,7 +13,6 @@ const STREAMED_FLAG: u32 = 0x1;
 
 enum Backing {
     Mapped(Mmap),
-    #[cfg(test)]
     Owned(Vec<u8>),
 }
 
@@ -21,7 +20,6 @@ impl Backing {
     fn as_slice(&self) -> &[u8] {
         match self {
             Backing::Mapped(m) => &m[..],
-            #[cfg(test)]
             Backing::Owned(v) => v.as_slice(),
         }
     }
@@ -50,7 +48,6 @@ impl AsdfFile {
         Self::parse(Backing::Mapped(mmap))
     }
 
-    #[cfg(test)]
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AsdfError> {
         Self::parse(Backing::Owned(bytes))
     }
@@ -114,7 +111,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     (from..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
-fn parse_tree(text: &str) -> Result<Value, AsdfError> {
+pub(crate) fn parse_tree(text: &str) -> Result<Value, AsdfError> {
     let lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
     let mut yaml_content = String::new();
     let mut in_document = false;
@@ -140,7 +137,45 @@ fn parse_tree(text: &str) -> Result<Value, AsdfError> {
         return Err(AsdfError::NoYamlTree);
     }
 
+    let yaml_content = shorten_verbatim_tags(&yaml_content);
     serde_yaml::from_str(&yaml_content).map_err(|e| AsdfError::YamlParse(e.to_string()))
+}
+
+const VERBATIM_TAG_PREFIXES: [&str; 4] = [
+    "tag:stsci.edu:gwcs/",
+    "tag:astropy.org:",
+    "tag:stsci.edu:jwst_pipeline/",
+    "asdf://",
+];
+
+fn verbatim_tag_is_shortenable(uri: &str) -> bool {
+    VERBATIM_TAG_PREFIXES.iter().any(|p| uri.starts_with(p))
+        && !uri.contains(|c: char| c.is_whitespace() || "{}[],".contains(c))
+}
+
+fn shorten_verbatim_tags(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut cursor = 0;
+    while let Some(rel) = text[cursor..].find("!<") {
+        let start = cursor + rel;
+        let body = start + 2;
+        let in_tag_position =
+            start == 0 || matches!(bytes[start - 1], b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'{' | b',');
+        match text[body..].find('>') {
+            Some(len) if in_tag_position && verbatim_tag_is_shortenable(&text[body..body + len]) => {
+                out.push_str(&text[copied..start]);
+                out.push('!');
+                out.push_str(&text[body..body + len]);
+                copied = body + len + 1;
+                cursor = copied;
+            }
+            _ => cursor = body,
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 fn read_blocks(buf: &[u8], start: usize) -> Result<Vec<BlockRef>, AsdfError> {
@@ -253,3 +288,121 @@ impl std::fmt::Display for AsdfError {
 }
 
 impl std::error::Error for AsdfError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tag_of(v: Option<&Value>) -> Option<String> {
+        match v? {
+            Value::Tagged(t) => Some(t.tag.to_string()),
+            _ => None,
+        }
+    }
+
+    const REAL_SYNTAX: &str = r##"#ASDF 1.0.0
+#ASDF_STANDARD 1.6.0
+%YAML 1.1
+%TAG ! tag:stsci.edu:asdf/
+--- !core/asdf-1.1.0
+asdf_library: !core/software-1.0.0 {author: The ASDF Developers, name: asdf, version: 5.3.1}
+meta:
+  description: "!<tag:stsci.edu:gwcs/not-a-tag-1.0.0>"
+  flow: {k: !<tag:stsci.edu:gwcs/frame2d-1.2.0> {name: x}, m: [!<tag:stsci.edu:gwcs/step-1.3.0> {q: 1}]}
+  wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>
+    name: ''
+    pixel_shape: null
+    steps:
+    - !<tag:stsci.edu:gwcs/step-1.3.0>
+      frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+        axes_names: [x, y]
+        axes_order: [0, 1]
+        axis_physical_types: ['custom:x', 'custom:y']
+        name: detector
+        unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]
+      transform: !transform/compose-1.4.0
+        forward:
+        - !transform/concatenate-1.4.0
+          forward:
+          - &id001 !transform/shift-1.4.0
+            inputs: [x]
+            offset: 1.0
+            outputs: [y]
+          - *id001
+          inputs: [x0, x1]
+          outputs: [y0, y1]
+        - !<tag:stsci.edu:gwcs/spherical_cartesian-1.3.0>
+          inputs: [lon, lat]
+          outputs: [x, y, z]
+          transform_type: spherical_to_cartesian
+          wrap_lon_at: 180
+        inputs: [x0, x1]
+        outputs: [x, y, z]
+    - !<tag:stsci.edu:gwcs/step-1.3.0>
+      frame: !<tag:stsci.edu:gwcs/celestial_frame-1.2.0>
+        axes_names: [lon, lat]
+        axes_order: [0, 1]
+        axis_physical_types: [pos.eq.ra, pos.eq.dec]
+        name: world
+        reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0>
+          frame_attributes: {}
+        unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]
+      transform: null
+...
+"##;
+
+    #[test]
+    fn verbatim_tags_survive_parse_tree() {
+        let tree = parse_tree(REAL_SYNTAX).expect("parse");
+        let meta = tree.get("meta").expect("meta");
+        let wcs = meta.get("wcs").expect("wcs");
+        assert_eq!(tag_of(Some(wcs)).as_deref(), Some("!tag:stsci.edu:gwcs/wcs-1.4.0"));
+        let steps = wcs.get("steps").and_then(Value::as_sequence).expect("steps");
+        assert_eq!(tag_of(steps.first()).as_deref(), Some("!tag:stsci.edu:gwcs/step-1.3.0"));
+        assert_eq!(
+            tag_of(steps[0].get("frame")).as_deref(),
+            Some("!tag:stsci.edu:gwcs/frame2d-1.2.0")
+        );
+        let forward = steps[0]
+            .get("transform")
+            .and_then(|t| t.get("forward"))
+            .and_then(Value::as_sequence)
+            .expect("forward");
+        assert_eq!(
+            tag_of(forward.get(1)).as_deref(),
+            Some("!tag:stsci.edu:gwcs/spherical_cartesian-1.3.0")
+        );
+        let shifts = forward[0].get("forward").and_then(Value::as_sequence).expect("shifts");
+        assert_eq!(tag_of(shifts.get(0)).as_deref(), Some("!transform/shift-1.4.0"));
+        assert_eq!(tag_of(shifts.get(1)).as_deref(), Some("!transform/shift-1.4.0"));
+        assert_eq!(shifts[1].get("offset").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(
+            tag_of(steps[1].get("frame")).as_deref(),
+            Some("!tag:stsci.edu:gwcs/celestial_frame-1.2.0")
+        );
+        assert_eq!(
+            tag_of(steps[1].get("frame").and_then(|f| f.get("reference_frame"))).as_deref(),
+            Some("!tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0")
+        );
+        assert_eq!(
+            meta.get("description").and_then(Value::as_str),
+            Some("!<tag:stsci.edu:gwcs/not-a-tag-1.0.0>")
+        );
+        let flow = meta.get("flow").expect("flow");
+        assert_eq!(tag_of(flow.get("k")).as_deref(), Some("!tag:stsci.edu:gwcs/frame2d-1.2.0"));
+        assert_eq!(
+            tag_of(flow.get("m").and_then(|m| m.get(0))).as_deref(),
+            Some("!tag:stsci.edu:gwcs/step-1.3.0")
+        );
+        let spaced = "x: !<tag:stsci.edu:gwcs/x y-1.0.0>\n  a: 1\n";
+        assert_eq!(shorten_verbatim_tags(spaced), spaced);
+        let quoted = "d: \"!<tag:stsci.edu:gwcs/q-1.0.0>\"\n";
+        assert_eq!(shorten_verbatim_tags(quoted), quoted);
+        let other = "o: !<tag:example.org:thing-1.0.0>\n  a: 1\n";
+        assert_eq!(shorten_verbatim_tags(other), other);
+        assert_eq!(
+            shorten_verbatim_tags("r: !<asdf://stsci.edu/datamodels/roman/tags/wfi_wcs-2.0.0>\n  a: 1\n"),
+            "r: !asdf://stsci.edu/datamodels/roman/tags/wfi_wcs-2.0.0\n  a: 1\n"
+        );
+    }
+}

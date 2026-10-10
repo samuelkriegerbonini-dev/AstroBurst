@@ -35,13 +35,13 @@ export interface ToneResult {
   elapsed_ms: number;
 }
 
-function isLevelsIdentity(p: LevelsParams): boolean {
+export function isLevelsIdentity(p: LevelsParams): boolean {
   return Math.abs(p.black) < 1e-6
     && Math.abs(p.gamma - 1) < 1e-6
     && Math.abs(p.white - 1) < 1e-6;
 }
 
-function isCurveIdentity(points: CurvePoint[]): boolean {
+export function isCurveIdentity(points: CurvePoint[]): boolean {
   if (points.length === 0) return true;
   if (points.length > 2) return false;
   if (points.length === 1) return Math.abs(points[0].x - points[0].y) < 1e-6;
@@ -50,7 +50,7 @@ function isCurveIdentity(points: CurvePoint[]): boolean {
   return nearStart && nearEnd;
 }
 
-function toCurveInput(points: CurvePoint[]): CurveInput {
+export function toCurveInput(points: CurvePoint[]): CurveInput {
   return { points: points.map((p) => [p.x, p.y]) };
 }
 

@@ -1,34 +1,41 @@
 mod time_series;
 pub use time_series::*;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
 use tauri::ipc::Response;
 use rayon::prelude::*;
 
+use crate::cmd::catalog::{cone_query_for_field, field_geometry, FieldGeometry};
 use crate::cmd::common::{
-    blocking_cmd, cached_header, dq_exclusion, load_cached, load_cached_full, load_companions, HEADER_DISPLAY_REFERRED,
+    blocking_cmd, cached_header, dq_exclusion, load_cached, load_cached_full, load_companions, source_path,
+    HEADER_DISPLAY_REFERRED,
 };
 use crate::types::constants::{
     HISTOGRAM_BINS, HISTOGRAM_BINS_DISPLAY, RES_BINS, RES_BIN_COUNT, RES_MIN, RES_MAX,
     RES_DATA_MIN, RES_DATA_MAX, RES_MEDIAN, RES_MEAN, RES_SIGMA, RES_MAD, RES_TOTAL_PIXELS,
     RES_AUTO_STF, RES_SHADOW, RES_MIDTONE, RES_HIGHLIGHT, RES_ELAPSED_MS,
     RES_RA, RES_DEC, RES_GMAG, RES_BP_RP, RES_SEPARATION_ARCSEC,
-    RES_PHOTOMETRY, RES_SKY, RES_GAIA,
+    RES_PHOTOMETRY, RES_SKY, RES_GAIA, RES_GAIN_USED,
     RES_SUBFRAMES, RES_TOTAL, RES_ACCEPTED, RES_REJECTED,
     RES_MASKED, RES_DQ_EXCLUDED, RES_LABEL, RES_WARNINGS,
     RES_ROWS, RES_INDEX, RES_ERROR, RES_N_MEASURED, RES_N_FAILED, RES_N_DETECTED,
 };
 use crate::types::image::{AutoStfConfig, Histogram, ImageStats, StfParams};
 use crate::core::analysis::fft::{compute_power_spectrum, FftResult};
+use crate::core::analysis::gain::{gain_model, photon_noise_warning, GainModel};
 use crate::core::analysis::photometry::{
     measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry, MAX_APERTURE_RADIUS,
     MIN_APERTURE_RADIUS,
 };
 use crate::core::analysis::star_detection::{detect_stars as detect_stars_core, DetectionResult};
-use crate::core::astrometry::spcc::{query_gaia_vizier, CatalogStar};
+use crate::core::astrometry::catalog::{
+    query_gaia_cached, CatalogHit, CatalogRow, ConeQuery, GAIA_MATCH_FALLBACK_ROWS, GAIA_MATCH_MAG_LIMIT,
+};
 use crate::core::astrometry::wcs::WcsTransform;
+use crate::infra::wcs_source::load_wcs;
 use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
 use crate::core::imaging::luminance::rgb_to_luminance;
 use crate::core::imaging::region::{paint_exclusions, RegionShape};
@@ -38,7 +45,9 @@ use crate::core::imaging::stats::{
 use crate::core::imaging::stf::auto_stf;
 use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
+use crate::infra::fits::reader::list_extensions;
 use crate::types::header::HduHeader;
+use crate::types::image_ref::PlaneSelector;
 
 const PAR_THRESHOLD: usize = 1_000_000;
 const MAX_BATCH_POINTS: usize = 5000;
@@ -49,9 +58,11 @@ const FFT_DOWNSAMPLED_FLAG: u32 = 2;
 const FFT_HEADER_BYTES: usize = 40;
 const GAIA_MATCH_RADIUS_ARCSEC: f64 = 5.0;
 const GAIA_MATCH_CONE_DEG: f64 = 0.01;
+const ARCSEC_PER_ARCMIN: f64 = 60.0;
 const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
 const HISTOGRAM_CHUNK: usize = 65536;
 const MIN_HISTOGRAM_WINDOW: f64 = 1e-10;
+const ERR_EXTNAME: &str = "ERR";
 
 fn is_display_referred(path: &str) -> bool {
     cached_header(path)
@@ -412,18 +423,10 @@ fn photcal_json(cal: &PhotCal) -> anyhow::Result<serde_json::Value> {
     Ok(val)
 }
 
-fn gaia_match_outcome(
-    coord_ra: f64,
-    coord_dec: f64,
-    query: Result<Vec<CatalogStar>, String>,
-) -> (serde_json::Value, Option<String>) {
-    let stars = match query {
-        Ok(stars) => stars,
-        Err(reason) => return (serde_json::Value::Null, Some(format!("Gaia query failed: {reason}"))),
-    };
+fn gaia_match_outcome(coord_ra: f64, coord_dec: f64, rows: &[&CatalogRow]) -> (serde_json::Value, Option<String>) {
     let cos_dec = coord_dec.to_radians().cos();
     let mut best: Option<(f64, usize)> = None;
-    for (i, s) in stars.iter().enumerate() {
+    for (i, s) in rows.iter().enumerate() {
         let mut dra = (coord_ra - s.ra).abs();
         if dra > 180.0 {
             dra = 360.0 - dra;
@@ -436,8 +439,8 @@ fn gaia_match_outcome(
     match best {
         Some((sep, i)) => (
             json!({
-                RES_GMAG: stars[i].gmag,
-                RES_BP_RP: stars[i].bp_rp,
+                RES_GMAG: rows[i].g,
+                RES_BP_RP: rows[i].bp_rp,
                 RES_SEPARATION_ARCSEC: sep,
             }),
             None,
@@ -449,13 +452,63 @@ fn gaia_match_outcome(
     }
 }
 
+pub(crate) fn gaia_rows_for_match(
+    coord: (f64, f64),
+    field: &ConeQuery,
+    cached: &mut dyn FnMut(&ConeQuery) -> Result<CatalogHit, String>,
+) -> Result<Arc<Vec<CatalogRow>>, String> {
+    let hit = cached(field)?;
+    if hit.rows.len() < field.max_rows {
+        return Ok(hit.rows);
+    }
+    let per_star = ConeQuery {
+        ra: coord.0,
+        dec: coord.1,
+        radius_deg: GAIA_MATCH_CONE_DEG,
+        mag_limit: Some(GAIA_MATCH_MAG_LIMIT),
+        max_rows: GAIA_MATCH_FALLBACK_ROWS,
+    };
+    Ok(cached(&per_star)?.rows)
+}
+
+fn gaia_match_field(geometry: &FieldGeometry) -> ConeQuery {
+    cone_query_for_field(
+        geometry,
+        Some(geometry.diagonal_arcmin / 2.0 + GAIA_MATCH_RADIUS_ARCSEC / ARCSEC_PER_ARCMIN),
+        Some(GAIA_MATCH_MAG_LIMIT),
+        None,
+    )
+}
+
 pub(crate) struct PhotometryContext {
     pub entry: ImageEntry,
     pub mask: Option<DqMask>,
     pub planes: PhotometryPlanes,
     pub wcs: Option<WcsTransform>,
     pub photcal: Option<PhotCal>,
+    pub gain_model: GainModel,
     pub warnings: Vec<String>,
+}
+
+fn is_err_extname(extname: Option<&str>) -> bool {
+    extname.is_some_and(|name| name.trim().trim_matches('\'').trim().eq_ignore_ascii_case(ERR_EXTNAME))
+}
+
+pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
+    let Ok(file) = std::fs::File::open(source_path(path)) else {
+        return false;
+    };
+    let Ok(hdus) = list_extensions(&file) else {
+        return false;
+    };
+    let (rows, cols) = dims;
+    hdus.iter().any(|h| {
+        is_err_extname(h.extname.as_deref())
+            && h.has_data
+            && (h.naxis == 2 || (h.naxis == 3 && h.naxis3 == 1))
+            && h.naxis1 == cols as i64
+            && h.naxis2 == rows as i64
+    })
 }
 
 pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result<PhotometryContext> {
@@ -464,15 +517,16 @@ pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result
     let mask = resolve_dq_mask(path, exclude_dq, dims);
     let planes = photometry_planes(path, dims);
     let header = entry.header();
-    let wcs = header.and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = header.and_then(|h| load_wcs(path, h).ok());
     let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+    let gain_model = gain_model(header, planes.err.is_some());
     let mut warnings: Vec<String> = Vec::new();
     match &photcal {
         Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
         None => warnings.push(missing_calibration_reason(header)),
     }
     warnings.extend(processed_data_warning(header));
-    Ok(PhotometryContext { entry, mask, planes, wcs, photcal, warnings })
+    Ok(PhotometryContext { entry, mask, planes, wcs, photcal, gain_model, warnings })
 }
 
 pub(crate) fn processed_data_warning(header: Option<&HduHeader>) -> Option<String> {
@@ -542,6 +596,30 @@ pub(crate) fn photometry_for_path(
     exclude_dq: bool,
     gain: Option<f64>,
 ) -> anyhow::Result<serde_json::Value> {
+    photometry_for_path_with_catalog(
+        path,
+        x,
+        y,
+        aperture_radius,
+        sky_annulus,
+        gaia_match,
+        exclude_dq,
+        gain,
+        &mut |q| query_gaia_cached(q),
+    )
+}
+
+pub(crate) fn photometry_for_path_with_catalog(
+    path: &str,
+    x: f64,
+    y: f64,
+    aperture_radius: Option<f64>,
+    sky_annulus: Option<(f64, f64)>,
+    gaia_match: bool,
+    exclude_dq: bool,
+    gain: Option<f64>,
+    cached: &mut dyn FnMut(&ConeQuery) -> Result<CatalogHit, String>,
+) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
     let ctx = photometry_context(path, exclude_dq)?;
     let config = ctx.config(aperture_radius, sky_annulus, gain);
@@ -550,14 +628,26 @@ pub(crate) fn photometry_for_path(
 
     let sky = ctx.sky_json(&phot);
     let mut warnings = ctx.warnings.clone();
+    warnings.extend(photon_noise_warning(&ctx.gain_model, config.gain.is_some(), phot.err_used));
     let gaia = match (&ctx.wcs, gaia_match) {
         (Some(wcs), true) => {
             let coord = wcs.pixel_to_world(phot.x, phot.y);
             if coord.ra.is_finite() && coord.dec.is_finite() {
-                let query = query_gaia_vizier(coord.ra, coord.dec, GAIA_MATCH_CONE_DEG, 0);
-                let (gaia, warning) = gaia_match_outcome(coord.ra, coord.dec, query);
-                warnings.extend(warning);
-                gaia
+                let (rows_n, cols) = ctx.entry.arr().dim();
+                let geometry = field_geometry(wcs, cols, rows_n);
+                let field = gaia_match_field(&geometry);
+                match gaia_rows_for_match((coord.ra, coord.dec), &field, cached) {
+                    Ok(rows) => {
+                        let with_colour: Vec<&CatalogRow> = rows.iter().filter(|r| r.bp_rp.is_some()).collect();
+                        let (gaia, warning) = gaia_match_outcome(coord.ra, coord.dec, &with_colour);
+                        warnings.extend(warning);
+                        gaia
+                    }
+                    Err(reason) => {
+                        warnings.push(format!("Gaia query failed: {reason}"));
+                        serde_json::Value::Null
+                    }
+                }
             } else {
                 warnings.push("Gaia match skipped: the position has no sky coordinate".into());
                 serde_json::Value::Null
@@ -576,6 +666,7 @@ pub(crate) fn photometry_for_path(
         RES_GAIA: gaia,
         RES_PHOTCAL: ctx.photcal_json()?,
         RES_WARNINGS: warnings,
+        RES_GAIN_USED: config.gain,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         RES_MASKED: ctx.mask.is_some(),
     }))
@@ -690,11 +781,13 @@ pub async fn measure_photometry_batch_cmd(
         };
 
         let mut n_measured = 0usize;
+        let mut all_err_used = true;
         let mut rows = Vec::with_capacity(measured.len());
         for (index, outcome) in measured.into_iter().enumerate() {
             match outcome {
                 Ok(mut phot) => {
                     n_measured += 1;
+                    all_err_used &= phot.err_used;
                     if !with_growth_curve {
                         phot.growth_curve.clear();
                     }
@@ -715,16 +808,33 @@ pub async fn measure_photometry_batch_cmd(
             }
         }
         let n_failed = rows.len() - n_measured;
+        let mut warnings = ctx.warnings.clone();
+        warnings.extend(photon_noise_warning(&ctx.gain_model, config.gain.is_some(), all_err_used));
 
         Ok(json!({
             RES_ROWS: rows,
             RES_PHOTCAL: ctx.photcal_json()?,
-            RES_WARNINGS: ctx.warnings,
+            RES_WARNINGS: warnings,
+            RES_GAIN_USED: config.gain,
             RES_MASKED: ctx.mask.is_some(),
             RES_N_MEASURED: n_measured,
             RES_N_FAILED: n_failed,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
+    })
+}
+
+#[tauri::command]
+pub async fn photometry_gain_model_cmd(path: String) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        let entry = load_cached_full(&path).or_else(|_| load_cached(&path))?;
+        let dims = entry.arr().dim();
+        let has_err = has_err_extension(&path, dims)
+            || entry
+                .companions()
+                .and_then(|c| c.err.as_ref())
+                .is_some_and(|r| matches!(r.plane, PlaneSelector::Array(_)));
+        Ok(serde_json::to_value(gain_model(entry.header(), has_err))?)
     })
 }
 
@@ -781,8 +891,45 @@ pub async fn analyze_subframes_cmd(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::infra::fits::reader::test_fixtures::{sci_err_dq_mef, write_test_mef, HduData, TestHdu};
+    use crate::core::analysis::gain::{PoissonRoute, UnitClass, SKY_ONLY_ERRORS_WARNING};
+    use crate::core::astrometry::catalog::{catalog_cache_key, CatalogCacheKey, CatalogSource};
+    use crate::infra::fits::reader::test_fixtures::{
+        cube_hdu, empty_primary_cards, sci_err_dq_mef, write_raw_hdus, write_test_mef, HduData, TestHdu,
+    };
+    use crate::types::constants::RES_GAIN_USED;
+
+    const WFPC2_502NMOS: &str = r"C:\astrokit\exampleFits\sample-data\502nmos.fits";
+
+    #[test]
+    #[ignore]
+    fn real_data_502nmos_gain_model() {
+        if !std::path::Path::new(WFPC2_502NMOS).exists() {
+            return;
+        }
+        let header = cached_header(WFPC2_502NMOS).unwrap();
+        let dims = (
+            header.get_i64("NAXIS2").unwrap() as usize,
+            header.get_i64("NAXIS1").unwrap() as usize,
+        );
+        assert_eq!(dims, (1600, 1600));
+        let has_err = has_err_extension(WFPC2_502NMOS, dims);
+        assert!(!has_err, "502nmos has a single HDU and no ERR extension");
+        let model = gain_model(Some(&header), has_err);
+        assert_eq!(model.gain_e_per_adu, Some(7.0), "{model:?}");
+        assert_eq!(model.source.as_deref(), Some("ATODGAIN"));
+        assert_eq!(model.unit_class, UnitClass::Counts);
+        assert_eq!(model.ncombine, Some(2));
+        assert_eq!(model.combine_method, None);
+        assert!(!model.combine_scaled);
+        assert_eq!(model.effective_gain, Some(7.0));
+        assert_eq!(model.fallback_gain, None);
+        assert_eq!(model.poisson_route, PoissonRoute::HeaderGain);
+        let note = model.note.as_deref().unwrap_or("");
+        assert!(note.contains("NCOMBINE=2") && note.contains("14"), "{note}");
+    }
 
     fn gaussian_pixels(size: usize, amp: f32, sigma: f32, bg: f32) -> Vec<f32> {
         let c = (size / 2) as f32;
@@ -1238,6 +1385,174 @@ mod tests {
         assert_eq!(mixed[RES_ROWS][1][RES_INDEX], 1);
     }
 
+    fn sky_only_warnings(out: &serde_json::Value) -> usize {
+        out[RES_WARNINGS]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w.as_str() == Some(SKY_ONLY_ERRORS_WARNING))
+            .count()
+    }
+
+    #[test]
+    fn click_photometry_without_gain_or_err_plane_warns_about_photon_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "photon_noise.fits");
+        let without = photometry_for_path(&path, 32.0, 32.0, None, None, false, false, None).unwrap();
+        assert_eq!(sky_only_warnings(&without), 1, "{}", without[RES_WARNINGS]);
+        assert!(without[RES_GAIN_USED].is_null(), "{}", without[RES_GAIN_USED]);
+        let with = photometry_for_path(&path, 32.0, 32.0, None, None, false, false, Some(1.5)).unwrap();
+        assert_eq!(sky_only_warnings(&with), 0, "{}", with[RES_WARNINGS]);
+        assert_eq!(with[RES_GAIN_USED], 1.5);
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_without_gain_warns_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "batch_photon_noise.fits");
+        let points = vec![(32.0, 32.0), (30.0, 34.0), (34.0, 30.0)];
+        let out = measure_photometry_batch_cmd(path.clone(), points.clone(), Some(5.0), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(out[RES_N_MEASURED], 3);
+        assert_eq!(sky_only_warnings(&out), 1, "{}", out[RES_WARNINGS]);
+        assert!(out[RES_GAIN_USED].is_null(), "{}", out[RES_GAIN_USED]);
+        let with = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, Some(2.0), None, None).await.unwrap();
+        assert_eq!(sky_only_warnings(&with), 0, "{}", with[RES_WARNINGS]);
+        assert_eq!(with[RES_GAIN_USED], 2.0);
+    }
+
+    #[tokio::test]
+    async fn photometry_gain_model_cmd_reads_egain_from_the_measured_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut header = HduHeader::empty();
+        header.set("EGAIN", "0.25".to_string());
+        let path = dir.path().join("egain.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::from_elem((16, 16), 100.0f32), Some(&header))
+            .unwrap();
+        let model = photometry_gain_model_cmd(path).await.unwrap();
+        assert_eq!(model["effective_gain"], 0.25, "{model}");
+        assert_eq!(model["poisson_route"], "header_gain", "{model}");
+        assert_eq!(model["gain_e_per_adu"], 0.25);
+        assert_eq!(model["source"], "EGAIN");
+        assert_eq!(model["unit_class"], "counts");
+        assert_eq!(model["combine_scaled"], false);
+        assert!(model["fallback_gain"].is_null());
+    }
+
+    #[tokio::test]
+    async fn photometry_gain_model_cmd_routes_a_rate_file_with_an_err_plane_to_err_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = 16;
+        let path = dir.path().join("rate_err.fits");
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu {
+                    extname: Some("SCI"),
+                    extver: Some(1),
+                    cols: size,
+                    rows: size,
+                    data: HduData::F32(vec![100.0; size * size]),
+                    extra_cards: vec![("BUNIT", "'DN/s'".into())],
+                },
+                TestHdu {
+                    extname: Some("ERR"),
+                    extver: Some(1),
+                    cols: size,
+                    rows: size,
+                    data: HduData::F32(vec![0.5; size * size]),
+                    extra_cards: vec![("BUNIT", "'DN/s'".into())],
+                },
+            ],
+        );
+        let plain = path.to_str().unwrap().to_string();
+        let model = photometry_gain_model_cmd(plain.clone()).await.unwrap();
+        assert_eq!(model["poisson_route"], "err_plane", "{model}");
+        assert!(model["effective_gain"].is_null(), "{model}");
+        assert!(model["fallback_gain"].is_null(), "{model}");
+        assert_eq!(model["unit_class"], "count_rate", "{model}");
+        assert_eq!(model["note"], "Poisson noise from the ERR plane", "{model}");
+        let keyed = photometry_gain_model_cmd(format!("{plain}#hdu=1")).await.unwrap();
+        assert_eq!(keyed["poisson_route"], "err_plane", "{keyed}");
+    }
+
+    fn star_cube_hdu(extname: &'static str, cols: usize, rows: usize, planes: usize, amp: f32) -> (Vec<(&'static str, String)>, Vec<u8>) {
+        let (cards, _) = cube_hdu(extname, cols, rows, planes, &[("BUNIT", "'MJy/sr'".into())]);
+        let plane: Vec<f32> = (0..cols * rows)
+            .map(|i| {
+                let x = (i % cols) as f32 - (cols / 2) as f32;
+                let y = (i / cols) as f32 - (rows / 2) as f32;
+                0.5 + amp * (-(x * x + y * y) / 8.0).exp()
+            })
+            .collect();
+        let data = (0..planes).flat_map(|_| plane.iter().flat_map(|v| v.to_be_bytes())).collect();
+        (cards, data)
+    }
+
+    #[tokio::test]
+    async fn a_three_d_err_cube_is_not_the_err_plane_photometry_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("calints.fits");
+        let (cols, rows, planes) = (24, 16, 5);
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                star_cube_hdu("SCI", cols, rows, planes, 50.0),
+                star_cube_hdu("ERR", cols, rows, planes, 0.0),
+            ],
+        );
+        let plain = format!("{}#hdu=1", path.to_str().unwrap());
+        let model = photometry_gain_model_cmd(plain.clone()).await.unwrap();
+        assert_ne!(model["poisson_route"], "err_plane", "{model}");
+        assert_eq!(model["poisson_route"], "unavailable", "{model}");
+        assert_eq!(model["unit_class"], "calibrated", "{model}");
+        let out = photometry_for_path(&plain, 12.0, 8.0, Some(3.0), None, false, false, None).unwrap();
+        assert_eq!(out[RES_PHOTOMETRY]["err_used"], false, "{}", out[RES_PHOTOMETRY]);
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.as_str().unwrap().contains("Poisson noise from the ERR plane")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap().ends_with("JWST/Roman calibrated units (MJy/sr): no gain applies")),
+            "{warnings:?}"
+        );
+        assert!(!has_err_extension(&plain, (rows, cols)));
+    }
+
+    #[tokio::test]
+    async fn photometry_gain_model_cmd_counts_an_asdf_err_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = "data: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\nerr: !core/ndarray-1.0.0\n  data: [[0.1, 0.2], [0.3, 0.4]]\n  datatype: float32\n";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        bytes.extend_from_slice(tree.as_bytes());
+        bytes.extend_from_slice(b"...\n");
+        let path = dir.path().join("with_err.asdf");
+        std::fs::write(&path, bytes).unwrap();
+        let plain = path.to_str().unwrap().to_string();
+        assert!(!has_err_extension(&plain, (2, 2)));
+        let model = photometry_gain_model_cmd(plain).await.unwrap();
+        assert_eq!(model["poisson_route"], "err_plane", "{model}");
+        assert_eq!(model["note"], "Poisson noise from the ERR plane", "{model}");
+    }
+
+    #[tokio::test]
+    async fn photometry_gain_model_cmd_accepts_a_headerless_in_memory_key() {
+        let key = "__r2_polish_headerless_gain_probe";
+        let arr = ndarray::Array2::<f32>::from_elem((8, 8), 10.0);
+        crate::infra::cache::GLOBAL_IMAGE_CACHE.insert_synthetic(key, std::sync::Arc::new(arr.clone()), compute_image_stats(&arr));
+        let model = photometry_gain_model_cmd(key.to_string()).await;
+        crate::infra::cache::GLOBAL_IMAGE_CACHE.remove(key);
+        let model = model.unwrap();
+        assert_eq!(model["poisson_route"], "unavailable", "{model}");
+        assert_eq!(model["note"], "no gain in the header", "{model}");
+        assert!(model["gain_e_per_adu"].is_null(), "{model}");
+    }
+
     #[tokio::test]
     async fn a_sky_annulus_inside_the_aperture_is_refused_by_both_commands() {
         let dir = tempfile::tempdir().unwrap();
@@ -1529,30 +1844,131 @@ mod tests {
         assert!(narrow.contains("histogram window from lo 2 to hi 2.00000000001 is narrower than"), "{narrow}");
     }
 
+    fn gaia_row(ra: f64, dec: f64, g: f64) -> CatalogRow {
+        CatalogRow {
+            id: format!("{ra}_{dec}"),
+            ra,
+            dec,
+            ra_epoch: ra,
+            dec_epoch: dec,
+            pm_ra_masyr: None,
+            pm_dec_masyr: None,
+            g: Some(g),
+            bp: None,
+            rp: None,
+            bp_rp: Some(0.8),
+            parallax_mas: None,
+        }
+    }
+
     #[test]
     fn a_gaia_failure_or_an_empty_cone_becomes_a_warning_and_the_nearest_star_within_five_arcsec_matches() {
-        let star = |ra: f64, dec: f64, gmag: f64| CatalogStar { ra, dec, bp_rp: 0.8, gmag: Some(gmag) };
-        let (value, warning) = gaia_match_outcome(10.0, 20.0, Err("VizieR request failed: timeout".into()));
-        assert!(value.is_null());
-        assert_eq!(warning.as_deref(), Some("Gaia query failed: VizieR request failed: timeout"));
-        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![]));
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, &[]);
         assert!(value.is_null());
         assert_eq!(warning.as_deref(), Some("Gaia: no G<17 star within 5\""));
-        let far = star(10.0, 20.0 + 10.0 / 3600.0, 11.0);
-        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![far.clone()]));
+        let far = gaia_row(10.0, 20.0 + 10.0 / 3600.0, 11.0);
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, &[&far]);
         assert!(value.is_null());
         assert_eq!(warning.as_deref(), Some("Gaia: no G<17 star within 5\""));
-        let near = star(10.0 + 3.0 / 3600.0 / 20.0f64.to_radians().cos(), 20.0, 12.5);
-        let nearer = star(10.0, 20.0 - 2.0 / 3600.0, 13.0);
-        let (value, warning) = gaia_match_outcome(10.0, 20.0, Ok(vec![far, near, nearer]));
+        let near = gaia_row(10.0 + 3.0 / 3600.0 / 20.0f64.to_radians().cos(), 20.0, 12.5);
+        let nearer = gaia_row(10.0, 20.0 - 2.0 / 3600.0, 13.0);
+        let (value, warning) = gaia_match_outcome(10.0, 20.0, &[&far, &near, &nearer]);
         assert!(warning.is_none(), "{warning:?}");
         assert_eq!(value[RES_GMAG], 13.0);
+        assert_eq!(value[RES_BP_RP], 0.8);
         assert!((value[RES_SEPARATION_ARCSEC].as_f64().unwrap() - 2.0).abs() < 1e-6, "{value}");
-        let (wrapped, _) = gaia_match_outcome(359.9995, 0.0, Ok(vec![star(0.0005, 0.0, 9.0)]));
+        let across_zero = gaia_row(0.0005, 0.0, 9.0);
+        let (wrapped, _) = gaia_match_outcome(359.9995, 0.0, &[&across_zero]);
         assert!((wrapped[RES_SEPARATION_ARCSEC].as_f64().unwrap() - 3.6).abs() < 1e-6, "{wrapped}");
     }
 
+    fn catalog_from_map(
+        primed: &HashMap<CatalogCacheKey, Vec<CatalogRow>>,
+        seen: &mut Vec<ConeQuery>,
+        q: &ConeQuery,
+    ) -> Result<CatalogHit, String> {
+        seen.push(q.clone());
+        let rows = primed
+            .get(&catalog_cache_key(q))
+            .unwrap_or_else(|| panic!("unexpected catalog query {q:?}"));
+        Ok(CatalogHit { rows: Arc::new(rows.clone()), source: CatalogSource::Memory })
+    }
+
+    #[test]
+    fn gaia_match_uses_the_cached_field_cone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = wcs_gaussian_fits_at(dir.path(), "field_cone.fits", 212.5, -17.25);
+        let header = cached_header(&path).unwrap();
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let geometry = field_geometry(&wcs, 64, 64);
+        let field = gaia_match_field(&geometry);
+        let half_diagonal = cone_query_for_field(&geometry, None, Some(17.0), None);
+        assert!(
+            ((field.radius_deg - half_diagonal.radius_deg) * 3600.0 - GAIA_MATCH_RADIUS_ARCSEC).abs() < 1e-9,
+            "{} vs {}",
+            field.radius_deg,
+            half_diagonal.radius_deg
+        );
+        assert_eq!((field.ra, field.dec, field.mag_limit, field.max_rows), (half_diagonal.ra, half_diagonal.dec, Some(17.0), 5000));
+        let star = wcs.pixel_to_world(32.0, 32.0);
+        let mut primed = HashMap::new();
+        primed.insert(catalog_cache_key(&field), vec![gaia_row(star.ra, star.dec, 12.0)]);
+        let mut seen = Vec::new();
+        let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
+        assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
+        assert!(out[RES_GAIA][RES_SEPARATION_ARCSEC].as_f64().unwrap() < 1.0, "{}", out[RES_GAIA]);
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(!warnings.iter().any(|w| w.as_str().unwrap().starts_with("Gaia")), "{warnings:?}");
+        assert_eq!(seen, vec![field]);
+    }
+
+    #[test]
+    fn a_capped_field_cone_falls_back_to_the_per_star_cone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = wcs_gaussian_fits_at(dir.path(), "capped_cone.fits", 213.0, -17.75);
+        let header = cached_header(&path).unwrap();
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let field = gaia_match_field(&field_geometry(&wcs, 64, 64));
+        let star = wcs.pixel_to_world(32.0, 32.0);
+        let per_star = ConeQuery { ra: star.ra, dec: star.dec, radius_deg: 0.01, mag_limit: Some(17.0), max_rows: 500 };
+        let far = gaia_row(star.ra + 0.5, star.dec, 9.0);
+        let mut primed = HashMap::new();
+        primed.insert(catalog_cache_key(&field), vec![far; field.max_rows]);
+        primed.insert(catalog_cache_key(&per_star), vec![gaia_row(star.ra, star.dec, 12.0)]);
+        let mut seen = Vec::new();
+        let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
+        assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
+        assert_eq!(field.max_rows, 5000);
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0], field);
+        assert_eq!(seen[1].radius_deg, GAIA_MATCH_CONE_DEG);
+        assert_eq!(seen[1].mag_limit, Some(GAIA_MATCH_MAG_LIMIT));
+        assert_eq!(seen[1].max_rows, GAIA_MATCH_FALLBACK_ROWS);
+    }
+
+    #[test]
+    fn a_gaia_query_failure_becomes_a_warning_at_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = wcs_gaussian_fits_at(dir.path(), "offline.fits", 213.5, -18.25);
+        let mut cached = |_: &ConeQuery| Err("VizieR request failed: timeout".to_string());
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        assert!(out[RES_GAIA].is_null(), "{}", out[RES_GAIA]);
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap() == "Gaia query failed: VizieR request failed: timeout"),
+            "{warnings:?}"
+        );
+    }
+
     fn wcs_gaussian_fits(dir: &std::path::Path, name: &str) -> String {
+        wcs_gaussian_fits_at(dir, name, 180.0, 45.0)
+    }
+
+    fn wcs_gaussian_fits_at(dir: &std::path::Path, name: &str, crval1: f64, crval2: f64) -> String {
         let size = 64;
         let mut arr = ndarray::Array2::<f32>::zeros((size, size));
         for (i, v) in gaussian_pixels(size, 1000.0, 2.0, 100.0).into_iter().enumerate() {
@@ -1563,8 +1979,8 @@ mod tests {
         header.set("CTYPE2", "DEC--TAN".to_string());
         header.set_f64("CRPIX1", 32.5);
         header.set_f64("CRPIX2", 32.5);
-        header.set_f64("CRVAL1", 180.0);
-        header.set_f64("CRVAL2", 45.0);
+        header.set_f64("CRVAL1", crval1);
+        header.set_f64("CRVAL2", crval2);
         header.set_f64("CD1_1", -2.7778e-4);
         header.set_f64("CD1_2", 0.0);
         header.set_f64("CD2_1", 0.0);

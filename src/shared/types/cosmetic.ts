@@ -12,7 +12,7 @@ export interface CosmeticConfig {
   auto_hot_sigma: number | null;
   auto_cold_sigma: number | null;
   defects: CosmeticDefect[];
-  cfa: boolean;
+  cfa: boolean | null;
   amount: number;
   replacement: CosmeticReplacement;
 }

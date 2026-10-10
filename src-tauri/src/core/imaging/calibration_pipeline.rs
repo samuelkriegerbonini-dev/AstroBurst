@@ -25,11 +25,20 @@ const DARK_OPTIMIZE_STAR_SIGMA: f32 = 5.0;
 const DARK_OPTIMIZE_MIN_GAIN: f64 = 0.05;
 const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_895;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DarkGroup {
+    pub temp_c: Option<f64>,
+    pub exposure_s: Option<f64>,
+    pub frames: usize,
+    pub master: Array2<f32>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct CalibrationMasters {
     pub dark: Option<Array2<f32>>,
     pub flat: Option<Array2<f32>>,
     pub bias: Option<Array2<f32>>,
+    pub dark_groups: Vec<DarkGroup>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +46,15 @@ pub struct ChannelInput {
     pub lights: Vec<Array2<f32>>,
     pub label: String,
     pub dark_scales: Vec<f32>,
+    pub cfa: bool,
+    pub dark_group: Vec<Option<usize>>,
+    pub light_temp_c: Vec<Option<f64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DarkGroupStats {
+    pub temp_c: Option<f64>,
+    pub frames: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +124,10 @@ pub struct BatchPipelineStats {
     pub darks_combined: usize,
     pub flats_combined: usize,
     pub bias_combined: usize,
+    #[serde(default)]
+    pub flat_darks_combined: usize,
+    #[serde(default)]
+    pub dark_groups: Vec<DarkGroupStats>,
     pub channels: Vec<BatchChannelStats>,
 }
 
@@ -124,6 +146,21 @@ pub struct BatchChannelStats {
     pub dark_scale_max: Option<f32>,
     #[serde(default)]
     pub dark_scale_mean: Option<f32>,
+    #[serde(default)]
+    pub dark_group_temp_c: Option<f64>,
+    #[serde(default)]
+    pub dark_temp_delta_max_c: Option<f64>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub excluded_frames: Vec<usize>,
+}
+
+fn dark_for(masters: &CalibrationMasters, dark_group: Option<usize>) -> Option<&Array2<f32>> {
+    dark_group
+        .and_then(|g| masters.dark_groups.get(g))
+        .map(|g| &g.master)
+        .or(masters.dark.as_ref())
 }
 
 fn master_slice(master: Option<&Array2<f32>>, npix: usize) -> Option<&[f32]> {
@@ -169,12 +206,13 @@ pub fn calibrate_light(
     light: &Array2<f32>,
     masters: &CalibrationMasters,
     dark_scale: f32,
+    dark_group: Option<usize>,
 ) -> Array2<f32> {
     let npix = light.len();
     apply_masters(
         light,
         master_slice(masters.bias.as_ref(), npix),
-        master_slice(masters.dark.as_ref(), npix),
+        master_slice(dark_for(masters, dark_group), npix),
         master_slice(masters.flat.as_ref(), npix),
         dark_scale,
     )
@@ -184,14 +222,15 @@ pub fn calibrate_light_with_cosmetic(
     light: &Array2<f32>,
     masters: &CalibrationMasters,
     dark_scale: f32,
+    dark_group: Option<usize>,
     cosmetic: Option<&ChannelCosmetic>,
 ) -> (Array2<f32>, usize) {
     let Some(cosmetic) = cosmetic else {
-        return (calibrate_light(light, masters, dark_scale), 0);
+        return (calibrate_light(light, masters, dark_scale, dark_group), 0);
     };
     let npix = light.len();
     let bias = master_slice(masters.bias.as_ref(), npix);
-    let dark = master_slice(masters.dark.as_ref(), npix);
+    let dark = master_slice(dark_for(masters, dark_group), npix);
     let flat = master_slice(masters.flat.as_ref(), npix);
 
     let dark_subtracted = apply_masters(light, bias, dark, None, dark_scale);
@@ -327,13 +366,17 @@ fn channel_dark_scales(
     cancelled: CancelCheck,
 ) -> Option<Vec<f32>> {
     let provided = |i: usize| channel.dark_scales.get(i).copied().unwrap_or(1.0);
+    let group_of = |i: usize| channel.dark_group.get(i).copied().flatten();
     match masters.dark.as_ref() {
-        Some(dark) if optimize && masters.bias.is_some() => channel
+        Some(_) if optimize && masters.bias.is_some() => channel
             .lights
             .par_iter()
             .enumerate()
             .map(|(i, light)| {
-                (!cancelled()).then(|| optimize_dark_scale(light, masters.bias.as_ref(), dark, provided(i)))
+                (!cancelled()).then(|| match dark_for(masters, group_of(i)) {
+                    Some(dark) => optimize_dark_scale(light, masters.bias.as_ref(), dark, provided(i)),
+                    None => provided(i),
+                })
             })
             .collect(),
         dark => {
@@ -360,6 +403,27 @@ fn stop_if_cancelled(cancelled: CancelCheck) -> Result<(), String> {
     }
 }
 
+fn channel_dark_group_summary(channel: &ChannelInput, masters: &CalibrationMasters) -> (Option<f64>, Option<f64>) {
+    let groups = &masters.dark_groups;
+    let Some(largest) = groups.iter().enumerate().rev().max_by_key(|(_, g)| g.frames).map(|(i, _)| i) else {
+        return (None, None);
+    };
+    let group_of = |i: usize| channel.dark_group.get(i).copied().flatten().filter(|g| *g < groups.len()).unwrap_or(largest);
+    let mut counts = vec![0usize; groups.len()];
+    for i in 0..channel.lights.len() {
+        counts[group_of(i)] += 1;
+    }
+    let used = counts.iter().enumerate().rev().max_by_key(|(_, n)| **n).map(|(i, _)| i).unwrap_or(largest);
+    let delta_max = (0..channel.lights.len())
+        .filter_map(|i| {
+            let group_temp = groups[group_of(i)].temp_c?;
+            let light_temp = channel.light_temp_c.get(i).copied().flatten()?;
+            Some((light_temp - group_temp).abs())
+        })
+        .fold(None, |acc: Option<f64>, d| Some(acc.map_or(d, |a| a.max(d))));
+    (groups[used].temp_c, delta_max)
+}
+
 fn dark_scale_summary(scales: &[f32], has_dark: bool) -> (Option<f32>, Option<f32>, Option<f32>) {
     if !has_dark || scales.is_empty() {
         return (None, None, None);
@@ -380,6 +444,7 @@ pub struct CosmeticPlan {
 pub struct ChannelCosmetic {
     config: CosmeticConfig,
     base_map: Option<Array2<u8>>,
+    cfa: bool,
 }
 
 impl CosmeticPlan {
@@ -395,6 +460,10 @@ impl CosmeticPlan {
     }
 
     pub fn for_dims(&self, dims: (usize, usize)) -> Result<ChannelCosmetic, String> {
+        self.for_channel(dims, self.config.cfa.unwrap_or(false))
+    }
+
+    pub fn for_channel(&self, dims: (usize, usize), cfa: bool) -> Result<ChannelCosmetic, String> {
         let mut maps: Vec<Array2<u8>> = Vec::new();
         if let Some(dark_map) = self.dark_map.as_ref().filter(|m| m.dim() == dims) {
             maps.push(dark_map.clone());
@@ -409,7 +478,7 @@ impl CosmeticPlan {
             1 => maps.pop(),
             _ => Some(merge_maps(&maps.iter().collect::<Vec<_>>())),
         };
-        Ok(ChannelCosmetic { config: self.config.clone(), base_map })
+        Ok(ChannelCosmetic { config: self.config.clone(), base_map, cfa })
     }
 }
 
@@ -420,7 +489,7 @@ impl ChannelCosmetic {
 
     pub fn correct(&self, image: &Array2<f32>) -> (Array2<f32>, usize) {
         let auto_map = self.auto_enabled().then(|| {
-            defect_map_auto(image, self.config.auto_hot_sigma, self.config.auto_cold_sigma, self.config.cfa)
+            defect_map_auto(image, self.config.auto_hot_sigma, self.config.auto_cold_sigma, self.cfa)
         });
         let merged;
         let map: &Array2<u8> = match (self.base_map.as_ref(), auto_map.as_ref()) {
@@ -432,7 +501,7 @@ impl ChannelCosmetic {
             (None, Some(auto)) => auto,
             (None, None) => return (image.clone(), 0),
         };
-        apply_cosmetic(image, map, self.config.replacement, self.config.amount, self.config.cfa)
+        apply_cosmetic(image, map, self.config.replacement, self.config.amount, self.cfa)
     }
 }
 
@@ -485,7 +554,8 @@ pub fn run_batch_pipeline_cancellable(
             ("dark", masters.dark.as_ref().map(|m| m.dim())),
             ("flat", masters.flat.as_ref().map(|m| m.dim())),
         ];
-        for (name, dim) in master_dims {
+        let group_dims = masters.dark_groups.iter().map(|g| ("dark", Some(g.master.dim())));
+        for (name, dim) in master_dims.into_iter().chain(group_dims) {
             if let Some(d) = dim {
                 if d != ref_dim {
                     return Err(format!(
@@ -501,6 +571,12 @@ pub fn run_batch_pipeline_cancellable(
         darks_combined: if masters.dark.is_some() { 1 } else { 0 },
         flats_combined: if masters.flat.is_some() { 1 } else { 0 },
         bias_combined: if masters.bias.is_some() { 1 } else { 0 },
+        flat_darks_combined: 0,
+        dark_groups: masters
+            .dark_groups
+            .iter()
+            .map(|g| DarkGroupStats { temp_c: g.temp_c, frames: g.frames })
+            .collect(),
         channels: Vec::new(),
     };
 
@@ -514,20 +590,23 @@ pub fn run_batch_pipeline_cancellable(
     for channel in &channels {
         stop_if_cancelled(cancelled)?;
         let channel_cosmetic = match &cosmetic_plan {
-            Some(plan) => Some(plan.for_dims(channel.lights[0].dim())?),
+            Some(plan) => Some(plan.for_channel(channel.lights[0].dim(), plan.config.cfa.unwrap_or(channel.cfa))?),
             None => None,
         };
         let dark_scales =
             channel_dark_scales(channel, masters, config.dark_optimize, cancelled).ok_or_else(cancelled_error)?;
         let (dark_scale_min, dark_scale_max, dark_scale_mean) =
             dark_scale_summary(&dark_scales, masters.dark.is_some());
+        let (dark_group_temp_c, dark_temp_delta_max_c) = channel_dark_group_summary(channel, masters);
         let (calibrated, replaced_counts): (Vec<Array2<f32>>, Vec<usize>) = channel
             .lights
             .par_iter()
             .enumerate()
             .map(|(i, l)| {
-                (!cancelled())
-                    .then(|| calibrate_light_with_cosmetic(l, masters, dark_scales[i], channel_cosmetic.as_ref()))
+                (!cancelled()).then(|| {
+                    let group = channel.dark_group.get(i).copied().flatten();
+                    calibrate_light_with_cosmetic(l, masters, dark_scales[i], group, channel_cosmetic.as_ref())
+                })
             })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(cancelled_error)?
@@ -537,17 +616,43 @@ pub fn run_batch_pipeline_cancellable(
             .as_ref()
             .map(|_| replaced_counts.iter().map(|&n| n as u64).sum());
 
+        let mut warnings: Vec<String> = Vec::new();
+        let mut excluded_frames: Vec<usize> = Vec::new();
         let registered = if config.align && calibrated.len() > 1 {
             let (rows, cols) = calibrated[0].dim();
+            let total = calibrated.len();
             let reference = calibrated[0].clone();
-            let rest: Vec<Array2<f32>> = calibrated[1..]
+            let rest: Vec<Result<Array2<f32>, String>> = calibrated[1..]
                 .par_iter()
                 .map(|target| (!cancelled()).then(|| align_to_reference(&reference, target, rows, cols)))
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(cancelled_error)?;
-            let mut frames = Vec::with_capacity(calibrated.len());
+            let mut frames = Vec::with_capacity(total);
             frames.push(reference);
-            frames.extend(rest);
+            for (index, outcome) in (1..).zip(rest) {
+                match outcome {
+                    Ok(aligned) => frames.push(aligned),
+                    Err(reason) => {
+                        let message = format!(
+                            "Channel '{}': frame {} of {} was left out of the stack: it could not be aligned to frame 1 ({})",
+                            channel.label,
+                            index + 1,
+                            total,
+                            reason
+                        );
+                        log::warn!("{}", message);
+                        warnings.push(message);
+                        excluded_frames.push(index);
+                    }
+                }
+            }
+            if frames.len() < 2 {
+                return Err(format!(
+                    "Channel '{}': no frame could be aligned to the reference frame (frame 1); if the frames are already registered, run the pipeline with alignment off. {}",
+                    channel.label,
+                    warnings.join(" ")
+                ));
+            }
             frames
         } else {
             calibrated
@@ -581,6 +686,10 @@ pub fn run_batch_pipeline_cancellable(
             dark_scale_min,
             dark_scale_max,
             dark_scale_mean,
+            dark_group_temp_c,
+            dark_temp_delta_max_c,
+            warnings,
+            excluded_frames,
         });
 
         master_channels.push((channel.label.clone(), stacked));
@@ -595,7 +704,12 @@ pub fn run_batch_pipeline_cancellable(
     })
 }
 
-fn align_to_reference(reference: &Array2<f32>, target: &Array2<f32>, rows: usize, cols: usize) -> Array2<f32> {
+fn align_to_reference(
+    reference: &Array2<f32>,
+    target: &Array2<f32>,
+    rows: usize,
+    cols: usize,
+) -> Result<Array2<f32>, String> {
     let pc = crate::core::alignment::pair::align_pair(
         reference,
         target,
@@ -606,9 +720,9 @@ fn align_to_reference(reference: &Array2<f32>, target: &Array2<f32>, rows: usize
     match pc {
         Ok(res) if res.method_used == "phase_correlation" => {
             if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
-                target.clone()
+                Ok(target.clone())
             } else {
-                res.aligned
+                Ok(res.aligned)
             }
         }
         _ => match crate::core::alignment::pair::align_pair(
@@ -618,8 +732,9 @@ fn align_to_reference(reference: &Array2<f32>, target: &Array2<f32>, rows: usize
             rows,
             cols,
         ) {
-            Ok(res) => res.aligned,
-            Err(_) => target.clone(),
+            Ok(res) if res.registered => Ok(res.aligned),
+            Ok(res) => Err(format!("{}, confidence {:.2}", res.method_used, res.confidence)),
+            Err(e) => Err(format!("{:#}", e)),
         },
     }
 }
@@ -979,7 +1094,7 @@ mod tests {
     }
 
     fn dark_only_masters() -> CalibrationMasters {
-        CalibrationMasters { dark: Some(dark_with_hot_pixel()), flat: None, bias: None }
+        CalibrationMasters { dark: Some(dark_with_hot_pixel()), flat: None, bias: None, dark_groups: Vec::new() }
     }
 
     #[test]
@@ -989,10 +1104,10 @@ mod tests {
         let plan = CosmeticPlan::build(&dark_hot_config(), masters.dark.as_ref()).unwrap();
         let channel = plan.for_dims(light.dim()).unwrap();
 
-        let untouched = calibrate_light(&light, &masters, 1.0);
+        let untouched = calibrate_light(&light, &masters, 1.0, None);
         assert!((untouched[[5, 5]] - 4000.0).abs() < 1e-3);
 
-        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None, Some(&channel));
         assert_eq!(replaced, 1);
         assert!((corrected[[5, 5]] - 100.0).abs() < 1.0, "hot pixel survived: {}", corrected[[5, 5]]);
         for (pos, &v) in untouched.indexed_iter() {
@@ -1001,7 +1116,7 @@ mod tests {
             }
         }
 
-        let (plain, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None);
+        let (plain, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None, None);
         assert_eq!(replaced, 0);
         assert_eq!(plain, untouched);
     }
@@ -1015,7 +1130,7 @@ mod tests {
         let plan = CosmeticPlan::build(&dark_hot_config(), masters.dark.as_ref()).unwrap();
         let channel = plan.for_dims(light.dim()).unwrap();
 
-        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None, Some(&channel));
         assert_eq!(replaced, 1);
         assert!((corrected[[5, 5]] - 25.0).abs() < 0.5, "expected neighbour median / flat: {}", corrected[[5, 5]]);
         assert!((corrected[[0, 0]] - 50.0).abs() < 0.5);
@@ -1028,6 +1143,9 @@ mod tests {
             lights: (0..3).map(|_| light_with_hot_pixel()).collect(),
             label: "L".into(),
             dark_scales: vec![1.0; 3],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
         };
         let stack = BatchStackConfig {
             normalize_before_stack: false,
@@ -1064,9 +1182,9 @@ mod tests {
         let mut light = Array2::from_shape_fn((16, 16), |(y, x)| 100.0 + pseudo_noise(y, x));
         light[[9, 9]] = 5000.0;
         let channel = plan.for_dims(light.dim()).unwrap();
-        let masters = CalibrationMasters { dark: None, flat: None, bias: None };
+        let masters = CalibrationMasters { dark: None, flat: None, bias: None, dark_groups: Vec::new() };
 
-        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        let (corrected, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None, Some(&channel));
         assert_eq!(replaced, 2);
         assert!(corrected[[9, 9]] < 104.0, "auto hot pixel survived: {}", corrected[[9, 9]]);
         assert!((corrected[[3, 2]] - light[[3, 2]]).abs() < 4.0);
@@ -1083,7 +1201,7 @@ mod tests {
         let nothing = CosmeticConfig { use_master_dark: false, ..Default::default() };
         let plan = CosmeticPlan::build(&nothing, None).unwrap();
         let channel = plan.for_dims(light.dim()).unwrap();
-        let (same, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, Some(&channel));
+        let (same, replaced) = calibrate_light_with_cosmetic(&light, &masters, 1.0, None, Some(&channel));
         assert_eq!(replaced, 0);
         assert_eq!(same, light);
     }
@@ -1158,9 +1276,9 @@ mod tests {
         let k = optimize_dark_scale(&light, Some(&bias), &dark, 1.0);
         assert!((k - 0.7).abs() <= 0.05, "recovered dark scale {k}");
 
-        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
-        let optimized = robust_sigma(&calibrate_light(&light, &masters, k));
-        let unit = robust_sigma(&calibrate_light(&light, &masters, 1.0));
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias), dark_groups: Vec::new() };
+        let optimized = robust_sigma(&calibrate_light(&light, &masters, k, None));
+        let unit = robust_sigma(&calibrate_light(&light, &masters, 1.0, None));
         assert!(optimized < unit, "optimized sigma {optimized} not below unit-scale sigma {unit}");
         assert!(optimized < 7.0, "optimized sigma {optimized} far from the injected 5.0");
     }
@@ -1189,7 +1307,7 @@ mod tests {
     }
 
     fn single_light_run(light: Array2<f32>, masters: &CalibrationMasters) -> BatchPipelineResult {
-        let channel = ChannelInput { lights: vec![light], label: "L".into(), dark_scales: vec![1.0] };
+        let channel = ChannelInput { lights: vec![light], label: "L".into(), dark_scales: vec![1.0], cfa: false, dark_group: Vec::new(), light_temp_c: Vec::new() };
         let config = BatchPipelineConfig {
             stack: BatchStackConfig { normalize_before_stack: false, rejection: RejectionMethod::None, ..Default::default() },
             align: false,
@@ -1208,11 +1326,11 @@ mod tests {
     fn dark_optimization_is_refused_without_a_master_bias() {
         let (light, bias, pattern) = scaled_dark_scene(5);
         let dark_with_bias = &bias + &pattern;
-        let masters = CalibrationMasters { dark: Some(dark_with_bias), flat: None, bias: None };
+        let masters = CalibrationMasters { dark: Some(dark_with_bias), flat: None, bias: None, dark_groups: Vec::new() };
         let res = single_light_run(light.clone(), &masters);
         let stats = &res.stats.channels[0];
         assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (Some(1.0), Some(1.0), Some(1.0)));
-        let unit = calibrate_light(&light, &masters, 1.0).mapv(|v| v.max(0.0));
+        let unit = calibrate_light(&light, &masters, 1.0, None).mapv(|v| v.max(0.0));
         assert_eq!(res.master_channels[0].1, unit, "a (1 - k) * bias pedestal was left in the light");
     }
 
@@ -1225,7 +1343,7 @@ mod tests {
         let bias = Array2::from_elem((n, n), 300.0f32);
         let dark = Array2::from_shape_fn((n, n), |(y, x)| 40.0 + hot(y, x) + dark_noise[[y, x]]);
         let light = Array2::from_shape_fn((n, n), |(y, x)| 300.0 + 1000.0 + 40.0 + hot(y, x) + light_noise[[y, x]]);
-        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias), dark_groups: Vec::new() };
         let res = single_light_run(light, &masters);
         assert_eq!(res.stats.channels[0].dark_scale_mean, Some(1.0));
         let sky = master_median(&res);
@@ -1236,11 +1354,14 @@ mod tests {
     fn run_batch_pipeline_reports_dark_scale_stats_and_only_optimizes_when_asked() {
         let (light_a, bias, dark) = scaled_dark_scene(11);
         let (light_b, _, _) = scaled_dark_scene(12);
-        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias) };
+        let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias), dark_groups: Vec::new() };
         let channel = ChannelInput {
             lights: vec![light_a, light_b],
             label: "L".into(),
             dark_scales: vec![1.0; 2],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
         };
         let stack = BatchStackConfig { normalize_before_stack: false, rejection: RejectionMethod::None, ..Default::default() };
 
@@ -1260,7 +1381,7 @@ mod tests {
         let optimized_sigma = robust_sigma(&res.master_channels[0].1);
         assert!(optimized_sigma < unit_sigma, "{optimized_sigma} vs {unit_sigma}");
 
-        let no_dark = CalibrationMasters { dark: None, flat: None, bias: masters.bias.clone() };
+        let no_dark = CalibrationMasters { dark: None, flat: None, bias: masters.bias.clone(), dark_groups: Vec::new() };
         let res = run_batch_pipeline(vec![channel], &no_dark, &optimized).unwrap();
         let stats = &res.stats.channels[0];
         assert_eq!((stats.dark_scale_min, stats.dark_scale_max, stats.dark_scale_mean), (None, None, None));
@@ -1271,6 +1392,9 @@ mod tests {
             lights: (0..3).map(|_| light_with_hot_pixel()).collect(),
             label: "L".into(),
             dark_scales: vec![1.0; 3],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
         }
     }
 
@@ -1306,5 +1430,68 @@ mod tests {
 
         let err = run_batch_pipeline_cancellable(vec![three_frame_channel()], &masters, &config, &|| true).unwrap_err();
         assert!(err.to_lowercase().contains("cancel"), "{err}");
+    }
+
+    fn blob_light(cy: f32, cx: f32) -> Array2<f32> {
+        Array2::from_shape_fn((300, 300), |(y, x)| {
+            let dy = y as f32 - cy;
+            let dx = x as f32 - cx;
+            100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
+        })
+    }
+
+    fn light_channel(lights: Vec<Array2<f32>>) -> ChannelInput {
+        let n = lights.len();
+        ChannelInput {
+            lights,
+            label: "L".into(),
+            dark_scales: vec![1.0; n],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
+        }
+    }
+
+    fn aligned_mean_stack() -> BatchPipelineConfig {
+        BatchPipelineConfig {
+            stack: BatchStackConfig {
+                normalize_before_stack: false,
+                rejection: RejectionMethod::None,
+                ..Default::default()
+            },
+            align: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pipeline_leaves_out_a_frame_it_cannot_register_and_names_it() {
+        let reference = blob_light(150.0, 50.0);
+        let channel = light_channel(vec![reference.clone(), reference, blob_light(150.0, 250.0)]);
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack()).unwrap();
+        let master = &res.master_channels[0].1;
+        let stats = &res.stats.channels[0];
+        assert!((master[[150, 250]] - 100.0).abs() < 1e-3, "the unregistered blob was stacked: {}", master[[150, 250]]);
+        assert!((master[[150, 50]] - 1100.0).abs() < 1e-2, "the reference blob was diluted: {}", master[[150, 50]]);
+        assert_eq!(stats.lights_input, 3);
+        assert_eq!(stats.lights_after_rejection.len(), 2);
+        assert_eq!(stats.excluded_frames, vec![2]);
+        assert_eq!(
+            stats.warnings,
+            vec![
+                "Channel 'L': frame 3 of 3 was left out of the stack: it could not be aligned to frame 1 (identity, confidence 0.00)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pipeline_refuses_a_channel_when_no_frame_registers_to_the_reference() {
+        let channel = light_channel(vec![blob_light(150.0, 50.0), blob_light(150.0, 250.0)]);
+        let err = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack())
+            .expect_err("a channel with a single registered frame was stacked");
+        assert!(err.starts_with("Channel 'L': no frame could be aligned to the reference frame (frame 1)"), "{err}");
+        assert!(err.contains("frame 2 of 2 was left out of the stack"), "{err}");
+        assert!(err.contains("alignment off"), "{err}");
     }
 }

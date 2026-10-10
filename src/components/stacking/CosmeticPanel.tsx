@@ -5,6 +5,7 @@ import { cosmeticCorrect, cosmeticCorrectBatch } from "../../services/cosmetic";
 import { useDoneFilesContext } from "../../context/PreviewContext";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { withVersionParam } from "../../utils/processingChain";
+import { cfaPatternFromHeader, cosmeticCfaValue } from "../../utils/cfaPattern";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import type {
   CosmeticBatchResult,
@@ -53,7 +54,8 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
   const [listEnabled, setListEnabled] = useState(false);
   const [defectText, setDefectText] = useState("");
 
-  const [cfa, setCfa] = useState(false);
+  const [cfaTouched, setCfaTouched] = useState(false);
+  const [cfaChoice, setCfaChoice] = useState(false);
   const [replacement, setReplacement] = useState<CosmeticReplacement>("median");
   const [amount, setAmount] = useState(1.0);
 
@@ -67,6 +69,13 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
   const replacementId = useId();
 
   const parsedList = useMemo(() => parseDefectList(defectText), [defectText]);
+  const detectedCfa = cfaPatternFromHeader(selectedFile?.result?.header);
+  const cfaChecked = cfaTouched ? cfaChoice : detectedCfa !== null;
+  const cfa = cosmeticCfaValue(cfaTouched, cfaChecked);
+  const handleCfaChange = useCallback((value: boolean) => {
+    setCfaTouched(true);
+    setCfaChoice(value);
+  }, []);
   const listErrors = listEnabled ? parsedList.errors : [];
 
   const lights = useMemo(
@@ -219,7 +228,12 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
           </div>
         )}
 
-        <Toggle label="CFA (Bayer) data" checked={cfa} disabled={busy} accent={ACCENT} onChange={setCfa} />
+        <div className="flex flex-col gap-0.5">
+          <Toggle label="CFA (Bayer) data" checked={cfaChecked} disabled={busy} accent={ACCENT} onChange={handleCfaChange} />
+          <span data-testid="cosmetic-cfa-badge" className="text-[10px] text-zinc-500">
+            {detectedCfa ? `${detectedCfa} from header` : "no Bayer card"}
+          </span>
+        </div>
 
         <div className="flex items-center justify-between">
           <label htmlFor={replacementId} className="text-xs text-zinc-400">Replacement</label>

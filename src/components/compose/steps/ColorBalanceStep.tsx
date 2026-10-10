@@ -9,6 +9,7 @@ import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { wbSliderBounds, wbFactorsOutOfRange, WB_APPLY_MIN, WB_APPLY_MAX } from "../../../utils/whiteBalanceRange";
 import { spccLevelNote } from "../../../utils/levelMatch";
+import { spccWavelengths } from "../../../utils/spccWavelengths";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -27,6 +28,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   const narrowband = useMemo(() => isNarrowbandWorkflow(state.bins, state.blendPreset, filterDetections), [state.bins, state.blendPreset, filterDetections]);
   const spccBlocked = useMemo(() => spccBlockReason(state, doneFiles, filterDetections), [state, doneFiles, filterDetections]);
   const levelNote = useMemo(() => spccLevelNote(state), [state]);
+  const wavelengths = useMemo(() => spccWavelengths(state, doneFiles), [state, doneFiles]);
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -239,7 +241,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
         <select id={wbModeId} value={state.wbMode} onChange={(e) => handleModeChange(e.target.value as WizardState["wbMode"])} className="ab-select">
           <option value="auto">Auto (Stability)</option>
           <option value="spcc" disabled={spccBlocked !== null}>
-            {spccBlocked ? "SPCC (broadband RGB only)" : "SPCC (Spectrophotometric)"}
+            {spccBlocked ? "SPCC (broadband RGB only)" : "SPCC (blackbody approximation)"}
           </option>
           <option value="manual">Manual</option>
           <option value="none">None</option>
@@ -296,6 +298,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
             rPath={rPath}
             gPath={gPath}
             bPath={bPath}
+            wavelengthsNm={wavelengths.nm}
             onFactorsReady={handleSpccFactors}
           />
         </Suspense>

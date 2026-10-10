@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use super::cards::{stack_output_cards, StackCards};
 use super::combine::{output_name, reference_header, ABPROC_STACKED};
 use crate::cmd::common::{derived_output_header, render_named_and_save, resolve_output_dir, OutputValues};
 use crate::core::imaging::calibration_pipeline::{
@@ -9,11 +10,13 @@ use crate::core::imaging::calibration_pipeline::{
     DQ_COSMETIC_WARNING,
 };
 use crate::core::imaging::cosmetic::CosmeticConfig;
-use crate::core::stacking::calibration::{
-    create_master_bias, create_master_dark, create_master_flat, load_fits_image,
-    median_exposure_seconds, read_exposure_seconds,
-};
+use crate::core::stacking::calibration::load_fits_image;
 use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
+use crate::core::stacking::frame_cards::{read_frame_cards, FrameCards};
+use crate::core::stacking::masters::{
+    assign_dark_groups, build_masters_from_frames, check_channel_lights, read_master_frames, MasterRequest,
+};
+use crate::core::stacking::never_cancelled;
 use crate::types::constants::{
     RES_CHANNEL_PREVIEWS, RES_DIMENSIONS, RES_FITS_PATH, RES_HEIGHT, RES_INPUT_PATH, RES_LABEL, RES_MASTERS,
     RES_PIXELS_B64, RES_PNG_PATH, RES_RGB_DIMENSIONS, RES_RGB_PNG_PATH, RES_RGB_PREVIEW, RES_STATS, RES_WARNINGS,
@@ -34,6 +37,8 @@ pub struct PipelineRequest {
     pub dark_paths: Vec<String>,
     pub flat_paths: Vec<String>,
     pub bias_paths: Vec<String>,
+    #[serde(default)]
+    pub flat_dark_paths: Vec<String>,
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
     pub normalize: Option<bool>,
@@ -62,13 +67,13 @@ fn pipeline_warnings(channels: &[ChannelFilesInput], cosmetic_enabled: bool) -> 
     }
 }
 
-fn compute_dark_scales(light_paths: &[String], dark_exposure: Option<f64>) -> Vec<f32> {
+fn dark_scales_for_cards(lights: &[FrameCards], dark_exposure: Option<f64>) -> Vec<f32> {
     let Some(dark_exp) = dark_exposure else {
-        return vec![1.0; light_paths.len()];
+        return vec![1.0; lights.len()];
     };
-    light_paths
+    lights
         .iter()
-        .map(|p| match read_exposure_seconds(p) {
+        .map(|card| match card.exposure_s {
             Some(light_exp) => {
                 let ratio = (light_exp / dark_exp) as f32;
                 if (ratio - 1.0).abs() < 0.01 {
@@ -152,8 +157,36 @@ struct PipelineOutputs {
     rgb: Option<RgbOutput>,
 }
 
-fn save_master(label: &str, arr: &ndarray::Array2<f32>, spec: &ChannelFilesInput, output_dir: &str, stem: &str) -> anyhow::Result<MasterOutput> {
-    let header = derived_output_header(reference_header(&spec.paths).as_ref(), ABPROC_STACKED, OutputValues::Linear);
+const NORMALIZATION_FRAME: &str = "frame";
+const NORMALIZATION_NONE: &str = "none";
+
+fn save_master(
+    label: &str,
+    arr: &ndarray::Array2<f32>,
+    spec: &ChannelFilesInput,
+    output_dir: &str,
+    stem: &str,
+    stack: &BatchStackConfig,
+    excluded: &[usize],
+) -> anyhow::Result<MasterOutput> {
+    let mut header = derived_output_header(reference_header(&spec.paths).as_ref(), ABPROC_STACKED, OutputValues::Linear);
+    let included: Vec<&str> = spec
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !excluded.contains(i))
+        .map(|(_, p)| p.as_str())
+        .collect();
+    stack_output_cards(
+        &mut header,
+        &StackCards {
+            included_paths: &included,
+            combine: stack.combine,
+            rejection: stack.rejection.name(),
+            normalization: Some(if stack.normalize_before_stack { NORMALIZATION_FRAME } else { NORMALIZATION_NONE }),
+            drizzle: None,
+        },
+    );
     let name = format!("{stem}_{}", output_name(Some(label), "channel"));
     let (png_path, fits_path) = render_named_and_save(arr, output_dir, &name, true, Some(&header))?;
     let fits_path = fits_path.ok_or_else(|| anyhow::anyhow!("Master '{label}' FITS was not written"))?;
@@ -183,11 +216,13 @@ fn save_pipeline_outputs(
     specs: &[ChannelFilesInput],
     output_dir: &str,
     stem: &str,
+    stack: &BatchStackConfig,
 ) -> anyhow::Result<PipelineOutputs> {
-    if result.master_channels.len() != specs.len() {
+    if result.master_channels.len() != specs.len() || result.stats.channels.len() != specs.len() {
         anyhow::bail!(
-            "Pipeline produced {} masters for {} channels",
+            "Pipeline produced {} masters and {} channel stats for {} channels",
             result.master_channels.len(),
+            result.stats.channels.len(),
             specs.len()
         );
     }
@@ -195,7 +230,8 @@ fn save_pipeline_outputs(
         .master_channels
         .iter()
         .zip(specs)
-        .map(|((label, arr), spec)| save_master(label, arr, spec, output_dir, stem))
+        .zip(&result.stats.channels)
+        .map(|(((label, arr), spec), stats)| save_master(label, arr, spec, output_dir, stem, stack, &stats.excluded_frames))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let rgb = result.rgb.as_ref().map(|rgb| save_rgb_preview(rgb, output_dir, stem)).transpose()?;
     Ok(PipelineOutputs { masters, rgb })
@@ -210,13 +246,12 @@ fn compose_rgb_from_stacked_masters(
             lights: vec![master],
             label,
             dark_scales: vec![1.0],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
         })
         .collect();
-    let no_masters = CalibrationMasters {
-        dark: None,
-        flat: None,
-        bias: None,
-    };
+    let no_masters = CalibrationMasters::default();
     let passthrough = BatchPipelineConfig {
         stack: BatchStackConfig {
             normalize_before_stack: false,
@@ -234,6 +269,7 @@ struct MasterFrameCounts {
     darks: usize,
     flats: usize,
     bias: usize,
+    flat_darks: usize,
 }
 
 impl MasterFrameCounts {
@@ -242,6 +278,7 @@ impl MasterFrameCounts {
             darks: request.dark_paths.len(),
             flats: request.flat_paths.len(),
             bias: request.bias_paths.len(),
+            flat_darks: request.flat_dark_paths.len(),
         }
     }
 }
@@ -254,7 +291,7 @@ fn stack_channels_one_at_a_time<F>(
     config: &BatchPipelineConfig,
 ) -> Result<BatchPipelineResult, String>
 where
-    F: FnMut(&ChannelFilesInput) -> Result<ChannelInput, String>,
+    F: FnMut(usize, &ChannelFilesInput) -> Result<ChannelInput, String>,
 {
     if specs.is_empty() {
         return Err("No channels provided".into());
@@ -262,17 +299,21 @@ where
 
     let mut master_channels = Vec::with_capacity(specs.len());
     let mut channel_stats = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let channel = load_channel(spec)?;
+    let mut dark_groups = Vec::new();
+    for (index, spec) in specs.iter().enumerate() {
+        let channel = load_channel(index, spec)?;
         let mut single = run_batch_pipeline(vec![channel], masters, config)?;
         master_channels.append(&mut single.master_channels);
         channel_stats.append(&mut single.stats.channels);
+        dark_groups = single.stats.dark_groups;
     }
 
     let stats = BatchPipelineStats {
         darks_combined: counts.darks,
         flats_combined: counts.flats,
         bias_combined: counts.bias,
+        flat_darks_combined: counts.flat_darks,
+        dark_groups,
         channels: channel_stats,
     };
 
@@ -312,37 +353,34 @@ fn run_pipeline_request(
         refuse_cfa_frames(&lights, CfaStep::Align).map_err(|e| format!("{:#}", e))?;
     }
 
-    let master_bias = if request.bias_paths.is_empty() {
-        None
-    } else {
-        Some(create_master_bias(&request.bias_paths).map_err(|e| format!("{:#}", e))?)
+    let cosmetic_enabled = request.cosmetic.is_some();
+    let master_request = MasterRequest {
+        bias: &request.bias_paths,
+        darks: &request.dark_paths,
+        flats: &request.flat_paths,
+        flat_darks: &request.flat_dark_paths,
     };
+    let master_frames = read_master_frames(&master_request);
+    let channel_cards: Vec<Vec<FrameCards>> = request
+        .channels
+        .iter()
+        .map(|ch| ch.paths.iter().map(|p| read_frame_cards(p)).collect())
+        .collect();
+    let mut warnings = pipeline_warnings(&request.channels, cosmetic_enabled);
+    for (ch, cards) in request.channels.iter().zip(&channel_cards) {
+        warnings.extend(
+            check_channel_lights(&master_frames, &ch.label, cards, cosmetic_enabled).map_err(|e| format!("{:#}", e))?,
+        );
+    }
 
-    let master_dark = if request.dark_paths.is_empty() {
-        None
-    } else {
-        Some(create_master_dark(&request.dark_paths, master_bias.as_ref()).map_err(|e| format!("{:#}", e))?)
-    };
+    let (masters, report) = build_masters_from_frames(&master_request, &master_frames, &never_cancelled)
+        .map_err(|e| format!("{:#}", e))?;
+    warnings.extend(report.warnings);
+    let dark_exposure = report.dark_exposure_s.filter(|_| masters.bias.is_some());
 
-    let master_flat = if request.flat_paths.is_empty() {
-        None
-    } else {
-        Some(create_master_flat(&request.flat_paths, master_bias.as_ref(), master_dark.as_ref(), median_exposure_seconds(&request.dark_paths)).map_err(|e| format!("{:#}", e))?)
-    };
-
-    let dark_exposure = if request.dark_paths.is_empty() || master_bias.is_none() {
-        None
-    } else {
-        median_exposure_seconds(&request.dark_paths)
-    };
-
-    let masters = CalibrationMasters {
-        dark: master_dark,
-        flat: master_flat,
-        bias: master_bias,
-    };
-
-    let load_channel = |ch: &ChannelFilesInput| -> Result<ChannelInput, String> {
+    let mut channel_warnings: Vec<String> = Vec::new();
+    let load_channel = |index: usize, ch: &ChannelFilesInput| -> Result<ChannelInput, String> {
+        let cards = &channel_cards[index];
         let lights = load_batch(&ch.paths).map_err(|e| format!("{:#}", e))?;
 
         if lights.len() > 1 {
@@ -357,7 +395,7 @@ fn run_pipeline_request(
             }
         }
 
-        let dark_scales = compute_dark_scales(&ch.paths, dark_exposure);
+        let dark_scales = dark_scales_for_cards(cards, dark_exposure);
         if dark_scales.iter().any(|s| (*s - 1.0).abs() >= 0.01) {
             let min_s = dark_scales.iter().cloned().fold(f32::INFINITY, f32::min);
             let max_s = dark_scales.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -367,10 +405,16 @@ fn run_pipeline_request(
             );
         }
 
+        let (dark_group, temp_warnings) = assign_dark_groups(&masters.dark_groups, cards, &ch.label);
+        channel_warnings.extend(temp_warnings);
+
         Ok(ChannelInput {
             lights,
             label: ch.label.clone(),
             dark_scales,
+            cfa: cards.iter().any(|c| c.cfa),
+            dark_group,
+            light_temp_c: cards.iter().map(|c| c.temp_c).collect(),
         })
     };
 
@@ -388,14 +432,15 @@ fn run_pipeline_request(
         dark_optimize: request.dark_optimize,
     };
 
-    let warnings = pipeline_warnings(&request.channels, config.cosmetic.is_some());
     let counts = MasterFrameCounts::of(&request);
     let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, counts, &config)?;
+    warnings.extend(channel_warnings);
+    warnings.extend(result.stats.channels.iter().flat_map(|c| c.warnings.iter().cloned()));
 
     let output_dir = resolve_output_dir(output_dir).map_err(|e| format!("{:#}", e))?;
     let stem = output_name(name, "pipeline");
-    let outputs =
-        save_pipeline_outputs(&result, &request.channels, &output_dir, &stem).map_err(|e| format!("{:#}", e))?;
+    let outputs = save_pipeline_outputs(&result, &request.channels, &output_dir, &stem, &config.stack)
+        .map_err(|e| format!("{:#}", e))?;
 
     let channel_previews: Vec<serde_json::Value> = result
         .master_channels
@@ -472,6 +517,9 @@ mod tests {
             lights: (0..spec.paths.len()).map(|i| synthetic_light(seed, i)).collect(),
             label: spec.label.clone(),
             dark_scales: vec![1.0; spec.paths.len()],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
         }
     }
 
@@ -503,6 +551,104 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_request_accepts_flat_dark_paths_and_defaults_to_empty() {
+        let with: PipelineRequest = serde_json::from_str(
+            r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[],"flat_dark_paths":["C:/cal/fd0.fits","C:/cal/fd1.fits"]}"#,
+        )
+        .unwrap();
+        assert_eq!(with.flat_dark_paths, vec!["C:/cal/fd0.fits".to_string(), "C:/cal/fd1.fits".to_string()]);
+
+        let without: PipelineRequest =
+            serde_json::from_str(r#"{"channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[]}"#).unwrap();
+        assert!(without.flat_dark_paths.is_empty());
+    }
+
+    fn write_exposure_frames(dir: &tempfile::TempDir, prefix: &str, count: usize, level: f32, cards: &[(&str, &str)]) -> Vec<String> {
+        let mut header = crate::types::header::HduHeader::empty();
+        for (key, value) in cards {
+            header.set(key, (*value).to_string());
+        }
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                let frame = Array2::from_shape_fn((12, 12), |(y, x)| level + ((x * 7 + y * 3 + i) % 5) as f32);
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, Some(&header)).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn calibrated_request(dir: &tempfile::TempDir, darks: &[(f32, &[(&str, &str)])]) -> PipelineRequest {
+        let mut dark_paths = Vec::new();
+        for (i, (level, cards)) in darks.iter().enumerate() {
+            dark_paths.extend(write_exposure_frames(dir, &format!("dark{i}_"), 1, *level, cards));
+        }
+        PipelineRequest {
+            channels: vec![ChannelFilesInput {
+                label: "R".into(),
+                paths: write_exposure_frames(dir, "light", 2, 500.0, &[("EXPTIME", "120"), ("CCD-TEMP", "-9.5")]),
+            }],
+            dark_paths,
+            flat_paths: write_exposure_frames(dir, "flat", 2, 1000.0, &[("EXPTIME", "2")]),
+            bias_paths: vec![],
+            flat_dark_paths: write_exposure_frames(dir, "flatdark", 2, 15.0, &[("EXPTIME", "2")]),
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(false),
+            rejection: Some("none".into()),
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        }
+    }
+
+    #[test]
+    fn pipeline_reports_flat_darks_dark_groups_and_consistency_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cold: (f32, &[(&str, &str)]) = (20.0, &[("EXPTIME", "300"), ("CCD-TEMP", "-20.0")]);
+        let warm: (f32, &[(&str, &str)]) = (60.0, &[("EXPTIME", "300"), ("CCD-TEMP", "-10.0")]);
+        let request = calibrated_request(&dir, &[cold, cold, cold, cold, cold, warm, warm, warm, warm, warm]);
+        let response = run_pipeline_request(request, &out_dir(&dir), None).unwrap();
+
+        let stats = &response[RES_STATS];
+        assert_eq!(stats["darks_combined"], 10, "{stats}");
+        assert_eq!(stats["flat_darks_combined"], 2, "{stats}");
+        assert_eq!(stats["dark_groups"], json!([{ "temp_c": -20.0, "frames": 5 }, { "temp_c": -10.0, "frames": 5 }]), "{stats}");
+        assert_eq!(stats["channels"][0]["dark_group_temp_c"], -10.0, "{stats}");
+        assert!((stats["channels"][0]["dark_temp_delta_max_c"].as_f64().unwrap() - 0.5).abs() < 1e-9, "{stats}");
+
+        let warnings: Vec<&str> = response[RES_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("Channel 'R': lights are 120 s but the darks are 300 s and there is no master bias"),
+            "{}",
+            warnings[0]
+        );
+
+        let master = crate::infra::fits::reader::load_fits_image(response[RES_MASTERS][0][RES_FITS_PATH].as_str().unwrap()).unwrap();
+        assert_eq!(master.dim(), (12, 12));
+        let mut values: Vec<f32> = master.iter().copied().collect();
+        values.sort_by(f32::total_cmp);
+        let median = values[values.len() / 2];
+        assert!(
+            (median - 440.0).abs() < 5.0,
+            "master median {median}: the -9.5 C lights must get the -10 C dark group (level 60), not the -20 C group (level 20)"
+        );
+    }
+
+    #[test]
+    fn pipeline_refuses_mixed_dark_exposures_before_building_masters() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = calibrated_request(&dir, &[(20.0, &[("EXPTIME", "60")]), (20.0, &[("EXPTIME", "300")])]);
+        let out = out_dir(&dir);
+        let err = run_pipeline_request(request, &out, Some("mixed")).unwrap_err();
+        assert!(err.starts_with("Darks have mixed exposures (60 s to 300 s)"), "{err}");
+        assert!(err.contains("dark0_0.fits") && err.contains("dark1_0.fits"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "the output dir was created before the consistency check");
+    }
+
+    #[test]
     fn invalid_cosmetic_config_fails_before_any_master_is_built() {
         let dir = tempfile::tempdir().unwrap();
         let missing_bias = dir.path().join("missing_bias.fits");
@@ -511,6 +657,7 @@ mod tests {
             dark_paths: vec![],
             flat_paths: vec![],
             bias_paths: vec![missing_bias.to_str().unwrap().to_string()],
+            flat_dark_paths: vec![],
             sigma_low: None,
             sigma_high: None,
             normalize: None,
@@ -555,6 +702,7 @@ mod tests {
             dark: None,
             flat: None,
             bias: Some(Array2::from_elem((12, 12), 1.0)),
+            dark_groups: Vec::new(),
         }
     }
 
@@ -571,8 +719,8 @@ mod tests {
         let masters = test_masters();
         let config = test_config();
 
-        let counts = MasterFrameCounts { darks: 0, flats: 0, bias: 7 };
-        let sequential = stack_channels_one_at_a_time(&specs, |s| Ok(synthetic_channel(s)), &masters, counts, &config)
+        let counts = MasterFrameCounts { darks: 0, flats: 0, bias: 7, flat_darks: 0 };
+        let sequential = stack_channels_one_at_a_time(&specs, |_, s| Ok(synthetic_channel(s)), &masters, counts, &config)
             .expect("sequential run");
         let batch = run_batch_pipeline(specs.iter().map(synthetic_channel).collect(), &masters, &config)
             .expect("batch run");
@@ -609,7 +757,7 @@ mod tests {
         let calls = Cell::new(0usize);
         let err = stack_channels_one_at_a_time(
             &specs,
-            |s| {
+            |_, s| {
                 calls.set(calls.get() + 1);
                 if s.label == "G" {
                     Err("boom".to_string())
@@ -630,7 +778,7 @@ mod tests {
     fn per_channel_stacking_rejects_empty_request() {
         let err = stack_channels_one_at_a_time(
             &[],
-            |s| Ok(synthetic_channel(s)),
+            |_, s| Ok(synthetic_channel(s)),
             &test_masters(),
             MasterFrameCounts::default(),
             &test_config(),
@@ -668,6 +816,7 @@ mod tests {
             dark_paths: vec![],
             flat_paths: vec![],
             bias_paths: vec![],
+            flat_dark_paths: vec![],
             sigma_low: None,
             sigma_high: None,
             normalize: None,
@@ -702,6 +851,7 @@ mod tests {
             dark_paths: vec![],
             flat_paths: vec![],
             bias_paths,
+            flat_dark_paths: vec![],
             sigma_low: None,
             sigma_high: None,
             normalize: None,
@@ -726,6 +876,63 @@ mod tests {
         assert!(!std::path::Path::new(&out).exists(), "the output dir was created before the guard ran");
     }
 
+    fn write_bayer_lights(dir: &tempfile::TempDir, count: usize) -> Vec<String> {
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("BAYERPAT", "'RGGB'".to_string());
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("bayer{i}.fits")).to_str().unwrap().to_string();
+                let mut frame = Array2::from_shape_fn((12, 12), |(y, x)| if y % 2 == 0 && x % 2 == 0 { 1000.0 } else { 100.0 });
+                frame[[4, 4]] = 60000.0;
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, Some(&header)).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn master_pixel(response: &serde_json::Value, y: usize, x: usize) -> f32 {
+        let fits = response[RES_MASTERS][0][RES_FITS_PATH].as_str().unwrap();
+        crate::infra::fits::reader::load_fits_image(fits).unwrap()[[y, x]]
+    }
+
+    #[test]
+    fn pipeline_cosmetic_uses_the_cfa_lattice_on_bayer_lights() {
+        let dir = tempfile::tempdir().unwrap();
+        let lights = write_bayer_lights(&dir, 2);
+        let cosmetic = |cfa: Option<bool>| CosmeticConfig {
+            cfa,
+            defects: vec![crate::core::imaging::cosmetic::Defect::Point { x: 4, y: 4 }],
+            use_master_dark: false,
+            auto_hot_sigma: None,
+            auto_cold_sigma: None,
+            ..Default::default()
+        };
+        let request = |cfa: Option<bool>| PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "R".into(), paths: lights.clone() }],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: vec![],
+            flat_dark_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(false),
+            rejection: Some("none".into()),
+            combine: None,
+            cosmetic: Some(cosmetic(cfa)),
+            dark_optimize: false,
+        };
+
+        let auto = run_pipeline_request(request(None), &out_dir(&dir), Some("auto")).unwrap();
+        let replaced = master_pixel(&auto, 4, 4);
+        assert!((replaced - 1000.0).abs() < 1e-3, "cfa None must use the stride-2 R lattice: {replaced}");
+        assert!((master_pixel(&auto, 4, 6) - 1000.0).abs() < 1e-3);
+
+        let mono = run_pipeline_request(request(Some(false)), &out_dir(&dir), Some("mono")).unwrap();
+        let replaced = master_pixel(&mono, 4, 4);
+        assert!((replaced - 100.0).abs() < 1e-3, "an explicit cfa=false keeps the stride-1 median: {replaced}");
+    }
+
     #[test]
     fn pipeline_without_alignment_accepts_cfa_lights() {
         let dir = tempfile::tempdir().unwrap();
@@ -742,6 +949,7 @@ mod tests {
             dark_paths: write_frames(&dir, "dark", 3, 10.0),
             flat_paths: write_frames(&dir, "flat", 2, 1000.0),
             bias_paths: vec![],
+            flat_dark_paths: vec![],
             sigma_low: None,
             sigma_high: None,
             normalize: None,
@@ -795,6 +1003,156 @@ mod tests {
         assert_eq!(saved.dimensions(), (12, 12));
         assert_eq!(saved.into_raw(), decode_b64(&response[RES_RGB_PREVIEW]));
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 7);
+    }
+
+    #[test]
+    fn pipeline_channel_masters_carry_ncombine() {
+        use crate::types::constants::{
+            HEADER_COMBINE_METHOD, HEADER_NCOMBINE, HEADER_NORMALIZATION_METHOD, HEADER_REJECTION_METHOD, HEADER_TOTEXP,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let request = rgb_request(&dir, [12, 12, 12]);
+
+        let response = run_pipeline_request(request, &out, Some("masters")).unwrap();
+
+        let masters = response[RES_MASTERS].as_array().unwrap();
+        for (master, expected) in masters.iter().zip([2, 1, 1]) {
+            let fits = master[RES_FITS_PATH].as_str().unwrap();
+            let header = crate::infra::fits::reader::read_primary_header(fits).unwrap();
+            assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(expected), "{}", master[RES_LABEL]);
+            assert_eq!(header.get(HEADER_COMBINE_METHOD).map(str::trim), Some("mean"));
+            assert_eq!(header.get(HEADER_REJECTION_METHOD).map(str::trim), Some("sigma_clip"));
+            assert_eq!(header.get(HEADER_NORMALIZATION_METHOD).map(str::trim), Some("frame"));
+            assert_eq!(header.get(HEADER_TOTEXP), None, "the test lights carry no exposure card");
+        }
+        let r_header = crate::infra::fits::reader::read_primary_header(masters[0][RES_FITS_PATH].as_str().unwrap()).unwrap();
+        assert!(
+            r_header
+                .cards
+                .iter()
+                .any(|(k, v)| k.trim() == "HISTORY" && v == "AstroBurst stack: 2 frames, sigma_clip, mean, frame"),
+            "{:?}",
+            r_header.cards
+        );
+    }
+
+    fn blob_frame(cx: f32) -> Array2<f32> {
+        Array2::from_shape_fn((300, 300), |(y, x)| {
+            let (dy, dx) = (y as f32 - 150.0, x as f32 - cx);
+            100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
+        })
+    }
+
+    fn write_blob_lights(dir: &tempfile::TempDir, prefix: &str, centers_x: &[f32]) -> Vec<String> {
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("EXPTIME", "300".to_string());
+        centers_x
+            .iter()
+            .enumerate()
+            .map(|(i, &cx)| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                crate::infra::fits::writer::write_fits_mono(&path, &blob_frame(cx), Some(&header)).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn aligned_request(channels: Vec<ChannelFilesInput>) -> PipelineRequest {
+        PipelineRequest {
+            channels,
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: vec![],
+            flat_dark_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(true),
+            rejection: Some("none".into()),
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        }
+    }
+
+    #[test]
+    fn a_frame_left_out_by_alignment_is_shown_to_the_user_and_not_counted_in_the_master_cards() {
+        use crate::types::constants::{HEADER_NCOMBINE, HEADER_TOTEXP};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_blob_lights(&dir, "light", &[50.0, 50.0, 250.0]);
+        let request = aligned_request(vec![ChannelFilesInput { label: "L".into(), paths }]);
+
+        let response = run_pipeline_request(request, &out_dir(&dir), Some("excluded")).unwrap();
+
+        let warnings: Vec<&str> = response[RES_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert!(
+            warnings.iter().any(|w| w.starts_with("Channel 'L': frame 3 of 3 was left out of the stack")),
+            "{warnings:?}"
+        );
+        assert_eq!(response[RES_STATS]["channels"][0]["excluded_frames"], json!([2]));
+        let header = crate::infra::fits::reader::read_primary_header(response[RES_MASTERS][0][RES_FITS_PATH].as_str().unwrap()).unwrap();
+        assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(2), "NCOMBINE counts a frame that is not in the stack");
+        assert_eq!(header.get_f64(HEADER_TOTEXP), Some(600.0), "TOTEXP counts a frame that is not in the stack");
+        assert!(
+            header.cards.iter().any(|(k, v)| k.trim() == "HISTORY" && v.starts_with("AstroBurst stack: 2 frames")),
+            "{:?}",
+            header.cards
+        );
+    }
+
+    fn blob_channel(label: &str, centers_x: &[f32]) -> ChannelInput {
+        ChannelInput {
+            lights: centers_x.iter().map(|&cx| blob_frame(cx)).collect(),
+            label: label.to_string(),
+            dark_scales: vec![1.0; centers_x.len()],
+            cfa: false,
+            dark_group: Vec::new(),
+            light_temp_c: Vec::new(),
+        }
+    }
+
+    fn aligned_config() -> BatchPipelineConfig {
+        BatchPipelineConfig {
+            stack: BatchStackConfig {
+                normalize_before_stack: false,
+                rejection: crate::types::stacking::RejectionMethod::None,
+                ..BatchStackConfig::default()
+            },
+            align: true,
+            cosmetic: None,
+            dark_optimize: false,
+        }
+    }
+
+    #[test]
+    fn per_channel_stacking_keeps_alignment_exclusions_in_their_own_channel() {
+        let specs = vec![spec("R", 3), spec("L", 2)];
+        let centers = |label: &str| -> Vec<f32> { if label == "R" { vec![50.0, 50.0, 250.0] } else { vec![50.0, 50.0] } };
+        let result = stack_channels_one_at_a_time(
+            &specs,
+            |_, s| Ok(blob_channel(&s.label, &centers(&s.label))),
+            &CalibrationMasters::default(),
+            MasterFrameCounts::default(),
+            &aligned_config(),
+        )
+        .unwrap();
+        let (r, l) = (&result.stats.channels[0], &result.stats.channels[1]);
+        assert_eq!((r.label.as_str(), l.label.as_str()), ("R", "L"));
+        assert_eq!(r.excluded_frames, vec![2]);
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].starts_with("Channel 'R': frame 3 of 3 was left out"), "{}", r.warnings[0]);
+        assert!(l.excluded_frames.is_empty() && l.warnings.is_empty(), "{l:?}");
+
+        let err = stack_channels_one_at_a_time(
+            &[spec("L", 2), spec("R", 2)],
+            |_, s| Ok(blob_channel(&s.label, if s.label == "R" { &[50.0, 250.0] } else { &[50.0, 50.0] })),
+            &CalibrationMasters::default(),
+            MasterFrameCounts::default(),
+            &aligned_config(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("Channel 'R': no frame could be aligned to the reference frame (frame 1)"), "{err}");
     }
 
     #[test]
@@ -873,7 +1231,7 @@ mod tests {
             &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: 2, rows: 2, data: HduData::F32(vec![1.0, 2.0, 3.0, 4.0]), extra_cards: vec![] }],
         );
         let reference = crate::types::image_ref::ImageRef::hdu(path.to_str().unwrap(), 1).cache_key();
-        let scales = compute_dark_scales(&[reference], Some(300.0));
+        let scales = dark_scales_for_cards(&[read_frame_cards(&reference)], Some(300.0));
         assert!((scales[0] - 0.1).abs() < 1e-6, "{scales:?}");
     }
 

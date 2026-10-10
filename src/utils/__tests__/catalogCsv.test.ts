@@ -72,6 +72,20 @@ describe("csvCell", () => {
     expect(csvCell(false)).toBe("false");
     expect(csvCell("x,y")).toBe('"x,y"');
   });
+
+  it.each([
+    [1e-7, "1e-7"],
+    [1.5e-7, "1.5e-7"],
+    [9.999e-7, "9.999e-7"],
+    [1e-6, "0.000001"],
+    [-2.5e-9, "-2.5e-9"],
+    [1e21, "1e+21"],
+    [1e20, "100000000000000000000"],
+    [5e-324, "5e-324"],
+    [1.7976931348623157e308, "1.7976931348623157e+308"],
+  ])("writes %s as %s, the form the backend csv_cell must reproduce", (value, text) => {
+    expect(csvCell(value)).toBe(text);
+  });
 });
 
 describe("buildCsv", () => {

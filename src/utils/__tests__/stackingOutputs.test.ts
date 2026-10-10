@@ -11,6 +11,7 @@ import {
   resultsForRecipients,
   showsOutput,
   sourceLabel,
+  stackedLights,
   stackOutputName,
   toDims,
 } from "../stackingOutputs";
@@ -259,6 +260,17 @@ describe("pipelineViewOutput", () => {
       label: "Pipeline B · 3 frames",
     });
     expect(pipelineViewOutput(pipelineRun(), "R")?.label).toBe("Pipeline R · 1 frame");
+  });
+
+  it("counts only the lights that went into the stack when alignment left some out", () => {
+    const leftOut = { ...channelStats("G", 3), excluded_frames: [2] };
+    const run = pipelineRun({
+      stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels: [leftOut, channelStats("R", 1), channelStats("B", 3)] },
+    });
+    expect(stackedLights(leftOut)).toBe(2);
+    expect(stackedLights(channelStats("R", 1))).toBe(1);
+    expect(pipelineViewOutput(run, "G")?.label).toBe("Pipeline G · 2 frames");
+    expect(pipelineViewOutput(run, "RGB")?.label).toBe("Pipeline RGB · 6 frames");
   });
 
   it("has nothing to show for a channel the run did not build or an RGB it did not write", () => {

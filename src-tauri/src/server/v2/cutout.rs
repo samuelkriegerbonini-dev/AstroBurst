@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::cutout::{
     box_pixel_rect, cut_plane_within, fraction_on_image, reported_ltv, shift_header, CutoutError, CutoutRect,
     CutoutRequest,
@@ -159,7 +160,7 @@ pub async fn cutout(
 
     let wcs = entry
         .header()
-        .and_then(|h| WcsTransform::from_header(h).ok());
+        .and_then(|h| load_wcs(&session.wcs_source_path(&target), h).ok());
     let rect = resolve_cutout_rect(
         &params.region,
         img_w,

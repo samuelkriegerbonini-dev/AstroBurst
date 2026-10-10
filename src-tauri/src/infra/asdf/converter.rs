@@ -7,6 +7,9 @@ use serde_yaml::Value;
 
 use super::parser::{AsdfError, AsdfFile};
 use super::tree::{untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
+use crate::core::astrometry::gwcs::{
+    classify_wcs_node, find_wcs_node, fit_pipeline_tan_sip, parse_gwcs, SipFit, SipFitOptions, WcsNodeClass,
+};
 use crate::types::image::IntPlane;
 
 enum PixelLayout {
@@ -101,6 +104,13 @@ pub fn list_arrays(asdf: &AsdfFile) -> Vec<AsdfArrayInfo> {
     out
 }
 
+#[derive(Debug, Clone)]
+pub enum AsdfWcs {
+    Tan(WcsInfo),
+    Gwcs { fit: SipFit, key: String },
+    None(Option<String>),
+}
+
 #[derive(Debug)]
 pub struct AsdfImage {
     pub width: usize,
@@ -108,8 +118,7 @@ pub struct AsdfImage {
     pub channels: usize,
     pub shape: Vec<usize>,
     pub data: Vec<f32>,
-    pub wcs: Option<WcsInfo>,
-    pub wcs_note: Option<String>,
+    pub wcs: AsdfWcs,
     pub metadata: HashMap<String, String>,
     pub unit: Option<String>,
 }
@@ -119,47 +128,60 @@ impl AsdfImage {
         match Self::find_data_array(&asdf.tree)? {
             Some((key, meta)) => Self::from_array(asdf, &key, meta),
             None => Ok(Self::empty(
-                Self::resolve_wcs(asdf),
+                Self::resolve_wcs(asdf, None),
                 Self::extract_metadata(&asdf.tree, ""),
             )),
         }
     }
 
-    fn resolve_wcs(asdf: &AsdfFile) -> (Option<WcsInfo>, Option<String>) {
+    fn resolve_wcs(asdf: &AsdfFile, naxis: Option<(usize, usize)>) -> AsdfWcs {
         if let Some(wcs) = WcsInfo::from_yaml(&asdf.tree) {
-            return (Some(wcs), None);
+            return AsdfWcs::Tan(wcs);
         }
-        match WcsInfo::from_gwcs(&asdf.tree, &|node| Self::float_values(asdf, node)) {
-            Ok(wcs) => (wcs, None),
-            Err(reason) => (None, Some(reason)),
+        let arrays = |node: &Value| Self::float_values(asdf, node);
+        let reason = match WcsInfo::from_gwcs(&asdf.tree, &|node| arrays(node).map(|(_, values)| values)) {
+            Ok(Some(wcs)) => return AsdfWcs::Tan(wcs),
+            Ok(None) => None,
+            Err(reason) => Some(reason),
+        };
+        let Some((key, node)) = find_wcs_node(&asdf.tree) else {
+            return AsdfWcs::None(reason);
+        };
+        if classify_wcs_node(node) != WcsNodeClass::Imaging2D {
+            return AsdfWcs::None(reason);
+        }
+        let pipeline = match parse_gwcs(node, &arrays, &key.0) {
+            Ok(pipeline) => pipeline,
+            Err(e) => return AsdfWcs::None(reason.or_else(|| Some(format!("{e:#}")))),
+        };
+        match fit_pipeline_tan_sip(&pipeline, &SipFitOptions::default(), naxis) {
+            Ok(fit) => AsdfWcs::Gwcs { fit, key: key.0 },
+            Err(e) => AsdfWcs::None(Some(format!("{e:#}"))),
         }
     }
 
-    fn float_values(asdf: &AsdfFile, node: &Value) -> Option<Vec<f64>> {
+    pub(crate) fn float_values(asdf: &AsdfFile, node: &Value) -> Option<(Vec<usize>, Vec<f64>)> {
         let mut meta = NdArrayMeta::from_yaml(node).ok()?;
         let index = match &meta.source {
-            ArraySource::Inline(values) => return Some(values.clone()),
+            ArraySource::Inline(values) => return Some((meta.shape.clone(), values.clone())),
             ArraySource::Block(index) => *index,
         };
         let block = asdf.block_data(index).ok()?;
         meta.resolve_streamed_shape(block.len());
         let raw = Self::gather_array_bytes(&block, &meta);
         let order = meta.byteorder;
-        match meta.dtype {
-            DType::Float64 => Some(raw.chunks_exact(8).map(|c| Self::read_f64(c, order)).collect()),
-            DType::Float32 => Some(
-                raw.chunks_exact(4)
-                    .map(|c| f64::from(Self::read_f32(c, order)))
-                    .collect(),
-            ),
-            _ => None,
-        }
+        let values = match meta.dtype {
+            DType::Float64 => raw.chunks_exact(8).map(|c| Self::read_f64(c, order)).collect(),
+            DType::Float32 => raw
+                .chunks_exact(4)
+                .map(|c| f64::from(Self::read_f32(c, order)))
+                .collect(),
+            _ => return None,
+        };
+        Some((meta.shape, values))
     }
 
-    fn empty(
-        (wcs, wcs_note): (Option<WcsInfo>, Option<String>),
-        metadata: HashMap<String, String>,
-    ) -> Self {
+    fn empty(wcs: AsdfWcs, metadata: HashMap<String, String>) -> Self {
         Self {
             width: 0,
             height: 0,
@@ -167,7 +189,6 @@ impl AsdfImage {
             shape: Vec::new(),
             data: Vec::new(),
             wcs,
-            wcs_note,
             metadata,
             unit: None,
         }
@@ -223,15 +244,13 @@ impl AsdfImage {
             _ => pixels,
         };
 
-        let (wcs, wcs_note) = Self::resolve_wcs(asdf);
         Ok(Self {
             width,
             height,
             channels,
             shape: meta.shape,
             data,
-            wcs,
-            wcs_note,
+            wcs: Self::resolve_wcs(asdf, Some((width, height))),
             metadata: Self::extract_metadata(&asdf.tree, key),
             unit: Self::extract_unit(&asdf.tree, key),
         })
@@ -1000,8 +1019,9 @@ mod tests {
         assert_eq!(img.metadata.get("ASDF_DATA_KEY").map(String::as_str), Some("roman.data"));
         assert_eq!(img.metadata.get("roman.meta.exposure.exposure_time").map(String::as_str), Some("107.0"));
         assert_eq!(img.metadata.get("roman.meta.instrument.name").map(String::as_str), Some("WFI"));
-        assert!(img.wcs.is_none(), "two shifts carry no sky position");
-        let note = img.wcs_note.expect("the refusal keeps its reason");
+        let AsdfWcs::None(Some(note)) = img.wcs else {
+            panic!("two shifts carry no sky position and the refusal keeps its reason: {:?}", img.wcs);
+        };
         assert!(note.contains("celestial reference"), "{note}");
     }
 
@@ -1010,8 +1030,9 @@ mod tests {
         let tree = "data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2, 3]\nwcs:\n  steps:\n    - transform: !transform/compose-1.2.0\n        forward:\n          - !transform/shift-1.2.0 {offset: -9.0}\n          - !transform/shift-1.2.0 {offset: -4.0}\n          - !transform/affine-1.3.0\n              matrix: !core/ndarray-1.0.0 {source: 1, datatype: float64, byteorder: big, shape: [2, 2]}\n          - !transform/scale-1.2.0 {factor: 0.001}\n          - !transform/scale-1.2.0 {factor: 0.001}\n          - !transform/gnomonic-1.2.0 {direction: pix2sky}\n          - !transform/rotate3d-1.3.0 {phi: 150.0, theta: 2.5, psi: 180.0, direction: native2celestial}\n    - frame: world\n      transform: null\n";
         let matrix: Vec<u8> = [0.6f64, -0.8, 0.8, 0.6].iter().flat_map(|v| v.to_be_bytes()).collect();
         let img = load_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&[1.; 6])), raw_block(&matrix)])).unwrap();
-        assert_eq!(img.wcs_note, None);
-        let wcs = img.wcs.expect("block-backed matrix resolved");
+        let AsdfWcs::Tan(wcs) = img.wcs else {
+            panic!("block-backed matrix resolves to exact TAN cards: {:?}", img.wcs);
+        };
         assert_eq!(wcs.pc, [[0.6, -0.8], [0.8, 0.6]]);
         assert_eq!(wcs.crpix, [10.0, 5.0]);
         assert_eq!(wcs.crval, [150.0, 2.5]);
@@ -1394,5 +1415,74 @@ mod tests {
         for (r, c) in [(0, 0), (0, w - 1), (h - 1, 0), (h / 2, w / 3), (h - 1, w - 1)] {
             assert_eq!(img.data[r * w + c], value(r, c), "pixel ({r},{c})");
         }
+    }
+
+    #[test]
+    fn a_distorted_gwcs_resolves_to_a_fitted_tan_sip() {
+        let file = AsdfFile::from_bytes(test_fixtures::nircam_gwcs_with_inline_data()).unwrap();
+        let img = AsdfImage::from_file(&file).unwrap();
+        assert_eq!((img.width, img.height), (4, 4));
+        let AsdfWcs::Gwcs { fit, key } = &img.wcs else {
+            panic!("a polynomial distortion chain is fitted, not refused: {:?}", img.wcs);
+        };
+        assert_eq!(key, "wcs");
+        assert_eq!((fit.a_order, fit.ap_order), (5, Some(5)));
+        assert_eq!(fit.crpix, [1024.5, 1024.5]);
+        assert!(((fit.max_err_px - 9.220195712301538e-9) / 9.220195712301538e-9).abs() <= 0.1, "max_err_px {} vs gwcs 1.0.3 9.2202e-9", fit.max_err_px);
+        let inv = fit.inv_err_px.expect("inverse fitted");
+        assert!(((inv - 3.593143551386226e-4) / 3.593143551386226e-4).abs() <= 1e-4, "inv_err_px {inv} vs gwcs 1.0.3 3.5931e-4");
+    }
+
+    const ROMAN_SIDECAR_WITH_TABULAR: &str = "roman:
+  wcs_l2: !<tag:stsci.edu:gwcs/wcs-1.4.0>
+    name: ''
+    steps:
+    - !<tag:stsci.edu:gwcs/step-1.3.0>
+      frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+        axes_names: [x, y]
+        axes_order: [0, 1]
+        axis_physical_types: ['custom:x', 'custom:y']
+        name: detector
+        unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]
+      transform: !transform/concatenate-1.4.0
+        forward:
+        - !transform/tabular-1.2.0 {inputs: [x], outputs: [y]}
+        - !transform/identity-1.2.0 {inputs: [x0], n_dims: 1, outputs: [x0]}
+        inputs: [x0, x1]
+        outputs: [y0, y1]
+    - !<tag:stsci.edu:gwcs/step-1.3.0>
+      frame: !<tag:stsci.edu:gwcs/celestial_frame-1.2.0>
+        axes_names: [lon, lat]
+        axes_order: [0, 1]
+        axis_physical_types: [pos.eq.ra, pos.eq.dec]
+        name: world
+        reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0>
+          frame_attributes: {}
+        unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]
+      transform: null
+";
+
+    #[test]
+    fn an_unsupported_gwcs_that_only_the_evaluator_finds_keeps_its_reason() {
+        use crate::core::astrometry::gwcs::test_support::real_syntax;
+        let file = AsdfFile::from_bytes(real_syntax(ROMAN_SIDECAR_WITH_TABULAR).into_bytes()).unwrap();
+        let img = AsdfImage::from_file(&file).unwrap();
+        let AsdfWcs::None(reason) = &img.wcs else {
+            panic!("a tabular step cannot be fitted: {:?}", img.wcs);
+        };
+        let reason = reason.as_deref().expect("the evaluator's refusal is kept when the TAN converter has no opinion");
+        assert!(reason.contains("'tabular'") && reason.contains("is not supported by the evaluator"), "{reason}");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use crate::core::astrometry::gwcs::test_support::fixtures_dir;
+
+    pub(crate) fn nircam_gwcs_with_inline_data() -> Vec<u8> {
+        let bytes = std::fs::read(fixtures_dir().join("wcs_jwst_nircam_cal300.asdf")).unwrap();
+        let end = bytes.windows(4).position(|w| w == b"\n...").expect("YAML document end") + 1;
+        let data = b"data: !core/ndarray-1.0.0\n  data: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]]\n  datatype: float32\n";
+        [&bytes[..end], data, &bytes[end..]].concat()
     }
 }

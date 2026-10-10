@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use crate::core::alignment::affine;
 use crate::core::alignment::pair;
 use crate::core::alignment::phase_correlation;
+use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
 use crate::core::imaging::boundary::clamp_index;
 use crate::core::stacking::combine::{check_percentile_window, reject_and_combine_with, KernelScratch, Sample};
 use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
@@ -330,6 +331,11 @@ pub fn drizzle_wcs_updates(header: &HduHeader, scale: f64) -> Vec<(String, f64)>
         };
         if let (Some(factor), Some(v)) = (factor, header.get_f64(key)) {
             updates.push((key.to_string(), v * factor));
+        }
+    }
+    for key in SIP_RESIDUAL_KEYS {
+        if let Some(v) = header.get_f64(key).filter(|v| v.is_finite()) {
+            updates.push((key.to_string(), v * scale));
         }
     }
     updates
@@ -861,6 +867,20 @@ mod tests {
         assert_eq!(updates["CDELT2"], 0.5);
         assert!(!updates.contains_key("PC1_2"));
         assert!(drizzle_wcs_updates(&HduHeader::empty(), 2.0).is_empty());
+    }
+
+    #[test]
+    fn sip_fit_residuals_scale_with_the_drizzle_grid() {
+        let mut header = distorted_header();
+        header.set("SIPMXERR", "0.01".to_string());
+        header.set("SIPIVERR", "0.02".to_string());
+        let updates: std::collections::HashMap<String, f64> = drizzle_wcs_updates(&header, 2.0).into_iter().collect();
+        assert_eq!(updates.get("SIPMXERR").copied(), Some(0.02), "{updates:?}");
+        assert_eq!(updates.get("SIPIVERR").copied(), Some(0.04), "{updates:?}");
+        assert_eq!(updates.get("A_DMAX").copied(), Some(1.0));
+
+        let plain: std::collections::HashMap<String, f64> = drizzle_wcs_updates(&distorted_header(), 2.0).into_iter().collect();
+        assert!(!plain.contains_key("SIPMXERR") && !plain.contains_key("SIPIVERR"), "{plain:?}");
     }
 
     #[test]

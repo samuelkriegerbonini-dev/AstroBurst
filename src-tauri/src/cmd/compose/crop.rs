@@ -110,6 +110,10 @@ fn crop_array(arr: &Array2<f32>, top: usize, bottom: usize, left: usize, right: 
     arr.slice(ndarray::s![t..b, l..r]).to_owned()
 }
 
+fn cropped_cache_key(run_token: Option<&str>, bin_id: &str) -> String {
+    crate::types::constants::wizard_cropped_key_for(run_token, bin_id)
+}
+
 fn manual_crop_bounds(
     rows: usize,
     cols: usize,
@@ -140,6 +144,7 @@ pub async fn crop_channels_cmd(
     auto_detect: Option<bool>,
     bin_ids: Option<Vec<String>>,
     persist_to_disk: Option<bool>,
+    run_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -184,7 +189,7 @@ pub async fn crop_channels_cmd(
 
             if use_bin_ids {
                 let bid = &bin_ids.as_ref().unwrap()[i];
-                let k = crate::types::constants::wizard_cropped_key(bid);
+                let k = cropped_cache_key(run_token.as_deref(), bid);
                 let stats = compute_image_stats(&cropped);
                 GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&k, Arc::new(cropped.clone()), stats, Some(header.clone()));
                 cache_keys.push(k.clone());
@@ -207,6 +212,10 @@ pub async fn crop_channels_cmd(
                 GLOBAL_IMAGE_CACHE.insert_synthetic(&out_path, Arc::new(cropped), stats);
                 out_paths.push(out_path);
             }
+        }
+
+        if use_bin_ids {
+            super::blend::settle_wizard_run(run_token.as_deref().map(str::trim).filter(|t| !t.is_empty()));
         }
 
         let (out_rows, out_cols) = if !entries.is_empty() {
@@ -325,6 +334,7 @@ mod tests {
             Some(true),
             Some(vec!["det_r".to_string(), "det_g".to_string()]),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -361,6 +371,7 @@ mod tests {
             0,
             Some(true),
             Some(vec!["det_upper".to_string(), "det_lower".to_string()]),
+            None,
             None,
         )
         .await;
@@ -416,6 +427,7 @@ mod tests {
             Some(true),
             Some(vec!["crop_present".to_string(), "crop_missing_probe".to_string()]),
             None,
+            None,
         )
         .await;
         let manual = crop_channels_cmd(
@@ -428,6 +440,7 @@ mod tests {
             Some(false),
             Some(vec!["crop_missing_probe".to_string()]),
             None,
+            None,
         )
         .await;
         let missing_file = crop_channels_cmd(
@@ -438,6 +451,7 @@ mod tests {
             3,
             5,
             Some(false),
+            None,
             None,
             None,
         )
@@ -475,7 +489,7 @@ mod tests {
         header.set("FILTER", "F200W".to_string());
         write_fits_mono(&src, &Array2::from_elem((40, 50), 5.0f32), Some(&header)).unwrap();
 
-        let res = crop_channels_cmd(vec![src.clone()], out.to_str().unwrap().to_string(), 2, 4, 3, 5, Some(false), None, None)
+        let res = crop_channels_cmd(vec![src.clone()], out.to_str().unwrap().to_string(), 2, 4, 3, 5, Some(false), None, None, None)
             .await
             .unwrap();
         let path = res[RES_PATHS][0].as_str().unwrap().to_string();
@@ -530,6 +544,7 @@ mod tests {
             Some(false),
             Some(vec!["crop_r".to_string()]),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -561,6 +576,67 @@ mod tests {
             let b = cropped.pixel_to_world(x, y);
             assert!((a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12, "({x},{y}): {a:?} vs {b:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn cropped_keys_carry_the_run_token() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let input = seed_wizard_entry("crop_tok", &nan_bordered(40, 50, 2, 4, 3, 5));
+        *super::super::blend::latest_wizard_run() = Some("t1".to_string());
+
+        let res = crop_channels_cmd(
+            vec![input.clone()],
+            "unused".to_string(),
+            0,
+            0,
+            0,
+            0,
+            Some(true),
+            Some(vec!["crop_tok".to_string()]),
+            None,
+            Some(" t1 ".to_string()),
+        )
+        .await
+        .unwrap();
+        let key = res[RES_CACHE_KEYS][0].as_str().unwrap().to_string();
+        let present = GLOBAL_IMAGE_CACHE.contains(&key);
+        GLOBAL_IMAGE_CACHE.remove(&input);
+        GLOBAL_IMAGE_CACHE.remove(&key);
+        GLOBAL_IMAGE_CACHE.remove(&wizard_cropped_key("crop_tok"));
+
+        assert_eq!(key, "__wizard_ch_tt1_crop_tok_cropped");
+        assert_eq!(key, crate::types::constants::wizard_cropped_key_for(Some("t1"), "crop_tok"));
+        assert_eq!(res[RES_PATHS][0], key);
+        assert!(present, "the cropped entry must live under the run key");
+    }
+
+    #[tokio::test]
+    async fn a_late_crop_removes_its_own_keys_when_a_newer_run_started() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
+        let input = seed_wizard_entry("crop_late", &nan_bordered(40, 50, 2, 4, 3, 5));
+        *super::super::blend::latest_wizard_run() = Some("newer".to_string());
+
+        let res = crop_channels_cmd(
+            vec![input.clone()],
+            "unused".to_string(),
+            0,
+            0,
+            0,
+            0,
+            Some(true),
+            Some(vec!["crop_late".to_string()]),
+            None,
+            Some("t1".to_string()),
+        )
+        .await
+        .unwrap();
+        let key = res[RES_CACHE_KEYS][0].as_str().unwrap().to_string();
+        let stale_left = GLOBAL_IMAGE_CACHE.contains(&key);
+        GLOBAL_IMAGE_CACHE.remove(&input);
+        GLOBAL_IMAGE_CACHE.remove(&key);
+
+        assert_eq!(key, "__wizard_ch_tt1_crop_late_cropped");
+        assert!(!stale_left, "a crop that finishes after a newer run started must remove its own keys");
     }
 
     #[test]

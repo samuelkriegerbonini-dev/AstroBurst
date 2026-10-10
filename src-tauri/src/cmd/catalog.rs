@@ -15,6 +15,7 @@ use crate::core::astrometry::catalog::{
     ConeQuery, CrossMatch, ZeroPointFit, DEFAULT_MAX_ROWS, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
 };
 use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
+use crate::infra::wcs_source::load_wcs;
 use crate::core::metadata::photcal::PhotCal;
 use crate::infra::cache::ImageEntry;
 use crate::math::exact_median_f64;
@@ -104,6 +105,7 @@ pub struct ConeSearchResult {
     pub radius_arcmin: f64,
     pub center_ra: f64,
     pub center_dec: f64,
+    pub catalog_source: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,6 +162,7 @@ pub struct CrossMatchResult {
     pub n_catalog: usize,
     pub band: String,
     pub match_radius_arcsec: f64,
+    pub catalog_source: &'static str,
 }
 
 pub(crate) struct FieldGeometry {
@@ -201,7 +204,7 @@ fn wcs_for<'a>(entry: &'a ImageEntry, path: &str) -> anyhow::Result<(&'a HduHead
     let header = entry
         .header()
         .ok_or_else(|| anyhow::anyhow!("No FITS header available for {}", path))?;
-    let wcs = WcsTransform::from_header(header)
+    let wcs = load_wcs(path, header)
         .map_err(|e| anyhow::anyhow!("No usable celestial WCS in the header of {}: {:#}", path, e))?;
     Ok((header, wcs))
 }
@@ -258,14 +261,14 @@ pub(crate) fn cone_search_for_path(
     let geometry = field_geometry(&wcs, cols, image_rows);
     let query = cone_query_for_field(&geometry, radius_arcmin, mag_limit, max_rows);
     let mut warnings: Vec<String> = Vec::new();
-    let catalog = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
-    if catalog.len() >= query.max_rows {
+    let hit = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
+    if hit.rows.len() >= query.max_rows {
         warnings.push(format!(
             "VizieR row cap of {} reached; raise the row limit or lower the magnitude limit",
             query.max_rows
         ));
     }
-    let (rows, epoch_year) = epoch_propagated_rows(header, &catalog, &mut warnings);
+    let (rows, epoch_year) = epoch_propagated_rows(header, &hit.rows, &mut warnings);
     let placed = place_rows(&wcs, rows, cols, image_rows);
     let n_on_image = placed.iter().filter(|r| r.on_image).count();
     let body = serde_json::to_value(ConeSearchResult {
@@ -276,6 +279,7 @@ pub(crate) fn cone_search_for_path(
         radius_arcmin: query.radius_deg * ARCMIN_PER_DEGREE,
         center_ra: query.ra,
         center_dec: query.dec,
+        catalog_source: hit.source_name(),
     })?;
     Ok(with_envelope(body, t0.elapsed().as_millis() as u64, warnings))
 }
@@ -424,8 +428,8 @@ pub(crate) fn crossmatch_for_path(
 
     let geometry = field_geometry(&wcs, cols, image_rows);
     let query = cone_query_for_field(&geometry, None, None, None);
-    let catalog = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
-    let (rows, epoch_year) = epoch_propagated_rows(header, &catalog, &mut warnings);
+    let hit = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
+    let (rows, epoch_year) = epoch_propagated_rows(header, &hit.rows, &mut warnings);
 
     let match_radius = radius_arcsec
         .filter(|r| r.is_finite() && *r > 0.0)
@@ -496,6 +500,7 @@ pub(crate) fn crossmatch_for_path(
         n_catalog: rows.len(),
         band,
         match_radius_arcsec: match_radius,
+        catalog_source: hit.source_name(),
     })?;
     Ok(with_envelope(body, t0.elapsed().as_millis() as u64, warnings))
 }
@@ -521,12 +526,30 @@ pub(crate) fn  csv_escape(text: &str) -> String {
     }
 }
 
+pub(crate) fn js_number_string(f: f64) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    if !f.is_finite() {
+        return String::new();
+    }
+    let magnitude = f.abs();
+    if !(1e-6..1e21).contains(&magnitude) {
+        let exp = format!("{:e}", f);
+        return match exp.find('e') {
+            Some(i) if !exp[i + 1..].starts_with('-') => format!("{}e+{}", &exp[..i], &exp[i + 1..]),
+            _ => exp,
+        };
+    }
+    f.to_string()
+}
+
 fn csv_cell(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => csv_escape(s),
         Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Number(n)) if n.is_f64() => n.as_f64().map_or_else(String::new, |f| f.to_string()),
+        Some(Value::Number(n)) if n.is_f64() => n.as_f64().map_or_else(String::new, js_number_string),
         Some(Value::Number(n)) => n.to_string(),
         Some(other) => csv_escape(&other.to_string()),
     }
@@ -749,6 +772,52 @@ mod tests {
         assert_eq!(csv_cell(Some(&json!(2.0))), "2");
         assert_eq!(csv_cell(Some(&json!(2))), "2");
         assert_eq!(csv_cell(Some(&json!(-0.5))), "-0.5");
+
+        assert_eq!(csv_cell(Some(&json!(1e-7))), "1e-7");
+        assert_eq!(csv_cell(Some(&json!(1.5e-7))), "1.5e-7");
+        assert_eq!(csv_cell(Some(&json!(9.999e-7))), "9.999e-7");
+        assert_eq!(csv_cell(Some(&json!(1e-6))), "0.000001");
+        assert_eq!(csv_cell(Some(&json!(-2.5e-9))), "-2.5e-9");
+        assert_eq!(csv_cell(Some(&json!(1e21))), "1e+21");
+        assert_eq!(csv_cell(Some(&json!(1e20))), "100000000000000000000");
+        assert_eq!(csv_cell(Some(&json!(5e-324))), "5e-324");
+        assert_eq!(csv_cell(Some(&json!(1.7976931348623157e308))), "1.7976931348623157e+308");
+        assert_eq!(js_number_string(0.0), "0");
+        assert_eq!(js_number_string(-0.0), "0");
+        assert_eq!(js_number_string(f64::NAN), "");
+        assert_eq!(js_number_string(f64::INFINITY), "");
+        assert_eq!(js_number_string(f64::NEG_INFINITY), "");
+        assert_eq!(js_number_string(123456789.125), "123456789.125");
+    }
+
+    #[test]
+    fn csv_cells_keep_the_digits_of_numbers_parsed_from_json_text() {
+        let texts = ["138.29577366690881", "111.97071720555235", "19.180804403618346", "1e-7"];
+        let parsed: Value = serde_json::from_str(&format!("[{}]", texts.join(","))).unwrap();
+        for (i, text) in texts.iter().enumerate() {
+            assert_eq!(csv_cell(Some(&parsed[i])), *text, "value {i} parsed from the IPC body as {}", parsed[i]);
+        }
+    }
+
+    #[test]
+    fn cone_search_reports_the_catalog_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let centre = [("CRVAL1", "151.0"), ("CRVAL2", "3.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let path = write_star_field(&dir, "source.fits", &centre);
+        let wcs = WcsTransform::from_header(&wcs_header(&centre)).unwrap();
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        assert!((geometry.center_ra - 151.0).abs() < 1e-6, "{}", geometry.center_ra);
+        assert!((geometry.center_dec - 3.0).abs() < 1e-6, "{}", geometry.center_dec);
+        prime_cache(&cone_query_for_field(&geometry, Some(2.0), Some(17.0), Some(200)), catalog_rows_for_field(&wcs));
+
+        let cone = cone_search_for_path(&path, Some(2.0), Some(17.0), Some(200)).unwrap();
+        assert_eq!(cone["catalog_source"], "memory", "{cone:?}");
+        assert_eq!(cone["n_total"], 5);
+
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), catalog_rows_for_field(&wcs));
+        let matched = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert_eq!(matched["catalog_source"], "memory", "{:?}", matched["catalog_source"]);
+        assert_eq!(matched["n_catalog"], 5);
     }
 
     #[test]

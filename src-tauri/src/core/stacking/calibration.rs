@@ -7,13 +7,18 @@ use crate::core::stacking::combine::{
     reject_and_combine_with, stack_images_cancellable, validate_frame_weights, validate_minmax_counts,
     KernelScratch, Sample,
 };
+use crate::core::imaging::calibration_pipeline::CalibrationMasters;
+use crate::core::stacking::consistency::{file_label, format_sig4};
 use crate::core::stacking::drizzle::drizzle_stack_cancellable;
+use crate::core::stacking::frame_cards::{exposure_seconds, read_frame_cards, read_merged_header, FrameCards};
+use crate::core::stacking::masters::{
+    assign_dark_groups, build_masters_from_frames, check_channel_lights, read_master_frames, MasterRequest,
+};
 use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::{f32_cmp, median_f32_mut};
 use crate::types::constants::STAGE_LOAD_FRAME;
 use crate::types::error::AppError;
-use crate::types::image_ref::ImageRef;
 use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 pub(crate) use crate::infra::fits::reader::load_fits_image;
 
@@ -74,13 +79,15 @@ fn ensure_master_dims(
     master: Option<&Array2<f32>>,
     rows: usize,
     cols: usize,
+    target: &str,
 ) -> Result<()> {
     if let Some(m) = master {
         if m.dim() != (rows, cols) {
             bail!(
-                "master {} shape {:?} does not match science frame {:?}",
+                "master {} shape {:?} does not match {} {:?}",
                 name,
                 m.dim(),
+                target,
                 (rows, cols)
             );
         }
@@ -90,9 +97,9 @@ fn ensure_master_dims(
 
 pub fn calibrate_image(raw: &Array2<f32>, config: &CalibrationConfig) -> Result<Array2<f32>> {
     let (rows, cols) = raw.dim();
-    ensure_master_dims("bias", config.master_bias.as_ref(), rows, cols)?;
-    ensure_master_dims("dark", config.master_dark.as_ref(), rows, cols)?;
-    ensure_master_dims("flat", config.master_flat.as_ref(), rows, cols)?;
+    ensure_master_dims("bias", config.master_bias.as_ref(), rows, cols, "science frame")?;
+    ensure_master_dims("dark", config.master_dark.as_ref(), rows, cols, "science frame")?;
+    ensure_master_dims("flat", config.master_flat.as_ref(), rows, cols, "science frame")?;
     let npix = rows * cols;
     let src = raw.as_slice().expect("contiguous");
 
@@ -265,6 +272,8 @@ pub fn create_master_dark_cancellable(
     }
 
     let mut frames = load_matching_frames(dark_paths, cancelled)?;
+    let (rows, cols) = frames[0].dim();
+    ensure_master_dims("bias", master_bias, rows, cols, "darks")?;
     if let Some(bias) = master_bias {
         for frame in frames.iter_mut() {
             *frame = subtract_bias(frame, bias);
@@ -273,21 +282,18 @@ pub fn create_master_dark_cancellable(
     combine_master_frames(&frames, &MasterConfig::default(), cancelled).context("Failed to combine master dark")
 }
 
+pub fn create_master_flat_dark_cancellable(flat_dark_paths: &[String], cancelled: CancelCheck) -> Result<Array2<f32>> {
+    if flat_dark_paths.is_empty() {
+        bail!("No flat-dark frames provided");
+    }
+    let frames = load_matching_frames(flat_dark_paths, cancelled)?;
+    combine_master_frames(&frames, &MasterConfig::default(), cancelled).context("Failed to combine master flat-dark")
+}
+
 pub fn read_exposure_seconds(path: &str) -> Option<f64> {
-    let source = ImageRef::parse(path).path;
-    let header = match crate::infra::fits::reader::read_primary_header(&source) {
-        Ok(header) => header,
-        Err(e) => {
-            log::warn!("Cannot read the exposure time of {}: {:#}", path, e);
-            return None;
-        }
-    };
-    let exposure = header
-        .get_f64("EXPTIME")
-        .or_else(|| header.get_f64("EXPOSURE"))
-        .filter(|v| v.is_finite() && *v > 0.0);
+    let exposure = read_merged_header(path).and_then(|header| exposure_seconds(&header));
     if exposure.is_none() {
-        log::warn!("{} has no usable EXPTIME or EXPOSURE card; exposure scaling ignores it", path);
+        log::warn!("{} has no usable EXPTIME, XPOSURE or EFFEXPTM card; exposure scaling ignores it", path);
     }
     exposure
 }
@@ -316,13 +322,14 @@ pub fn create_master_flat(
     master_dark: Option<&Array2<f32>>,
     dark_exposure_seconds: Option<f64>,
 ) -> Result<Array2<f32>> {
-    create_master_flat_cancellable(flat_paths, master_bias, master_dark, dark_exposure_seconds, &never_cancelled)
+    create_master_flat_cancellable(flat_paths, master_bias, master_dark, None, dark_exposure_seconds, &never_cancelled)
 }
 
 pub fn create_master_flat_cancellable(
     flat_paths: &[String],
     master_bias: Option<&Array2<f32>>,
     master_dark: Option<&Array2<f32>>,
+    master_flat_dark: Option<&Array2<f32>>,
     dark_exposure_seconds: Option<f64>,
     cancelled: CancelCheck,
 ) -> Result<Array2<f32>> {
@@ -330,14 +337,22 @@ pub fn create_master_flat_cancellable(
         bail!("No flat frames provided");
     }
 
-    let dark_scale = if master_dark.is_some() && master_bias.is_some() {
+    let dark_scale = if master_flat_dark.is_none() && master_dark.is_some() && master_bias.is_some() {
         flat_dark_scale(median_exposure_seconds(flat_paths), dark_exposure_seconds)
     } else {
         1.0
     };
 
     let mut frames = load_matching_frames(flat_paths, cancelled)?;
+    let (rows, cols) = frames[0].dim();
+    ensure_master_dims("flat-dark", master_flat_dark, rows, cols, "flats")?;
+    ensure_master_dims("bias", master_bias, rows, cols, "flats")?;
+    ensure_master_dims("dark", master_dark, rows, cols, "flats")?;
     for frame in frames.iter_mut() {
+        if let Some(flat_dark) = master_flat_dark {
+            *frame = subtract_bias(frame, flat_dark);
+            continue;
+        }
         if let Some(bias) = master_bias {
             *frame = subtract_bias(frame, bias);
         }
@@ -375,48 +390,114 @@ pub fn create_master_flat_cancellable(
     Ok(result)
 }
 
+#[derive(Debug, Clone)]
+pub struct CalibratedFrame {
+    pub image: Array2<f32>,
+    pub dark_scale: f32,
+    pub warnings: Vec<String>,
+}
+
+pub const DARK_SCALE_MIN: f32 = 0.05;
+pub const DARK_SCALE_MAX: f32 = 20.0;
+const DARK_SCALE_SNAP: f32 = 0.01;
+
+fn ratio_without_bias_error(ratio: f32) -> String {
+    format!(
+        "A dark exposure ratio of {} needs a master bias: without one the master dark still contains the bias level and cannot be scaled. Add bias frames or leave the ratio at 1.",
+        format_sig4(ratio as f64)
+    )
+}
+
+fn exposure_unknown_warning(path: &str) -> String {
+    format!("{} has no usable EXPTIME, XPOSURE or EFFEXPTM card; dark scaling uses 1.0.", file_label(path))
+}
+
+pub fn auto_dark_scale(light_exposure: f64, dark_exposure: f64) -> f32 {
+    let scale = ((light_exposure / dark_exposure) as f32).clamp(DARK_SCALE_MIN, DARK_SCALE_MAX);
+    if (scale - 1.0).abs() < DARK_SCALE_SNAP {
+        1.0
+    } else {
+        scale
+    }
+}
+
+fn calibration_dark_scale(
+    light: &FrameCards,
+    darks: &[FrameCards],
+    dark_exposure: Option<f64>,
+    has_bias: bool,
+    requested: Option<f32>,
+    warnings: &mut Vec<String>,
+) -> Result<f32> {
+    if darks.is_empty() {
+        return Ok(1.0);
+    }
+    if let Some(ratio) = requested {
+        if (ratio - 1.0).abs() > f32::EPSILON && !has_bias {
+            bail!(ratio_without_bias_error(ratio));
+        }
+        return Ok(ratio);
+    }
+    if !has_bias {
+        return Ok(1.0);
+    }
+    match (light.exposure_s, dark_exposure) {
+        (Some(light_exposure), Some(dark_exposure)) if dark_exposure > 0.0 => {
+            Ok(auto_dark_scale(light_exposure, dark_exposure))
+        }
+        _ => {
+            if light.exposure_s.is_none() {
+                warnings.push(exposure_unknown_warning(&light.path));
+            }
+            if dark_exposure.is_none() {
+                warnings.extend(darks.iter().filter(|d| d.exposure_s.is_none()).map(|d| exposure_unknown_warning(&d.path)));
+            }
+            Ok(1.0)
+        }
+    }
+}
+
 pub fn calibrate_from_paths(
     science_path: &str,
     bias_paths: Option<&[String]>,
     dark_paths: Option<&[String]>,
     flat_paths: Option<&[String]>,
-    dark_exposure_ratio: f32,
-) -> Result<Array2<f32>> {
+    flat_dark_paths: Option<&[String]>,
+    dark_exposure_ratio: Option<f32>,
+) -> Result<CalibratedFrame> {
     let science = load_fits_image(science_path)?;
-
-    let master_bias = match bias_paths {
-        Some(paths) if !paths.is_empty() => Some(create_master_bias(paths)?),
-        _ => None,
+    let request = MasterRequest {
+        bias: bias_paths.unwrap_or(&[]),
+        darks: dark_paths.unwrap_or(&[]),
+        flats: flat_paths.unwrap_or(&[]),
+        flat_darks: flat_dark_paths.unwrap_or(&[]),
     };
+    let frames = read_master_frames(&request);
+    let light = read_frame_cards(science_path);
+    let mut warnings = check_channel_lights(&frames, "", std::slice::from_ref(&light), false)?;
+    let (masters, report) = build_masters_from_frames(&request, &frames, &never_cancelled)?;
+    warnings.extend(report.warnings);
+    let (groups, temperature_warnings) = assign_dark_groups(&masters.dark_groups, std::slice::from_ref(&light), "");
+    warnings.extend(temperature_warnings);
 
-    let master_dark = match dark_paths {
-        Some(paths) if !paths.is_empty() => {
-            Some(create_master_dark(paths, master_bias.as_ref())?)
-        }
-        _ => None,
-    };
-
-    let master_flat = match flat_paths {
-        Some(paths) if !paths.is_empty() => {
-            let dark_exposure = dark_paths.and_then(median_exposure_seconds);
-            Some(create_master_flat(
-                paths,
-                master_bias.as_ref(),
-                master_dark.as_ref(),
-                dark_exposure,
-            )?)
-        }
-        _ => None,
+    let CalibrationMasters { bias, dark, flat, mut dark_groups } = masters;
+    let group = groups.first().copied().flatten().filter(|g| *g < dark_groups.len());
+    let dark_exposure = group.and_then(|g| dark_groups[g].exposure_s).or(report.dark_exposure_s);
+    let dark_scale =
+        calibration_dark_scale(&light, &frames.darks, dark_exposure, bias.is_some(), dark_exposure_ratio, &mut warnings)?;
+    let master_dark = match group {
+        Some(g) => Some(dark_groups.swap_remove(g).master),
+        None => dark,
     };
 
     let config = CalibrationConfig {
-        master_bias,
+        master_bias: bias,
         master_dark,
-        master_flat,
-        dark_exposure_ratio,
+        master_flat: flat,
+        dark_exposure_ratio: dark_scale,
     };
 
-    calibrate_image(&science, &config)
+    Ok(CalibratedFrame { image: calibrate_image(&science, &config)?, dark_scale, warnings })
 }
 
 fn load_frames_with_progress(
@@ -476,6 +557,7 @@ pub fn drizzle_from_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::image_ref::ImageRef;
 
     #[test]
     fn flat_dark_scale_scales_by_exposure_ratio() {
@@ -705,7 +787,8 @@ mod tests {
         for err in [
             create_master_bias_cancellable(&paths, &stop).unwrap_err(),
             create_master_dark_cancellable(&paths, None, &stop).unwrap_err(),
-            create_master_flat_cancellable(&paths, None, None, None, &stop).unwrap_err(),
+            create_master_flat_cancellable(&paths, None, None, None, None, &stop).unwrap_err(),
+            create_master_flat_dark_cancellable(&paths, &stop).unwrap_err(),
         ] {
             assert!(crate::core::stacking::is_cancellation(&err), "{err:#}");
         }

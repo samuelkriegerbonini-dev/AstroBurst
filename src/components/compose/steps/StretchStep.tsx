@@ -35,6 +35,8 @@ interface StretchStepProps {
   onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
   onChannelOutput: (binId: string, stage: "starless" | "stretched", value: ChannelStage) => void;
   onCompositeOp: (op: CompositeOp) => void;
+  onPreview?: (url: string, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
+  onStarRemoval?: () => void;
 }
 
 interface ChannelStf {
@@ -57,7 +59,7 @@ interface StretchRunResult {
   channels?: StretchRunSummaryInput["channels"];
 }
 
-export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult, onChannelOutput, onCompositeOp }: StretchStepProps) {
+export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult, onChannelOutput, onCompositeOp, onPreview, onStarRemoval }: StretchStepProps) {
   const {
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
     compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
@@ -261,7 +263,8 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           console.error("[AstroBurst] Starless composite re-stretch failed:", e);
           return res.previewUrl ?? null;
         });
-        if (url) onResult(url);
+        if (url) onPreview?.(url);
+        onStarRemoval?.();
         return;
       }
       const binId = singleChannelBinId(state);
@@ -275,7 +278,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     } finally {
       setSrLoading(false);
     }
-  }, [state, srSigma, srGrowth, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onResult, onCompositeOp, currentFileKey, publishChannelOutput]);
+  }, [state, srSigma, srGrowth, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onPreview, onStarRemoval, onCompositeOp, currentFileKey, publishChannelOutput]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;

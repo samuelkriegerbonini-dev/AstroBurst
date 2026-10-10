@@ -34,7 +34,39 @@ function presentSteps(chain: ProcessingChain): ChainStep[] {
 
 describe("CHAIN_ORDER", () => {
   it("lists the pipeline order", () => {
-    expect(CHAIN_ORDER).toEqual(["background", "denoise", "deconv", "stretch", "maskedStretch", "localContrast", "pixelMath"]);
+    expect(CHAIN_ORDER).toEqual(["background", "denoise", "deconv", "stretch", "maskedStretch", "localContrast", "tone", "pixelMath"]);
+  });
+
+  it("places tone after local contrast and before PixelMath", () => {
+    expect(CHAIN_ORDER.indexOf("tone")).toBeGreaterThan(CHAIN_ORDER.indexOf("localContrast"));
+    expect(CHAIN_ORDER.indexOf("tone")).toBe(CHAIN_ORDER.indexOf("pixelMath") - 1);
+  });
+});
+
+describe("tone step", () => {
+  it("withStep tone keeps stretch and local contrast and drops PixelMath", () => {
+    const next = withStep(chainOf("background", "stretch", "localContrast", "pixelMath"), "tone", entry("/out/tone.fits"));
+    expect(presentSteps(next)).toEqual(["background", "stretch", "localContrast", "tone"]);
+    expect(next.steps.tone?.fitsPath).toBe("/out/tone.fits");
+  });
+
+  it("re-running an upstream step drops tone", () => {
+    const next = withStep(chainOf("stretch", "tone"), "stretch", entry("/out/s2.fits"));
+    expect(presentSteps(next)).toEqual(["stretch"]);
+  });
+
+  it("PixelMath consumes the tone output when present", () => {
+    expect(inputFor(chainOf("background", "stretch", "localContrast", "tone"), "pixelMath", "/raw/a.fits")).toBe("/out/tone.fits");
+  });
+
+  it("tone consumes the latest step before it, or the original", () => {
+    expect(inputFor(chainOf("background", "maskedStretch", "localContrast", "tone", "pixelMath"), "tone", "/raw/a.fits")).toBe("/out/localContrast.fits");
+    expect(inputFor(chainOf("background", "deconv"), "tone", "/raw/a.fits")).toBe("/out/deconv.fits");
+    expect(inputFor(chainOf("pixelMath"), "tone", "/raw/a.fits")).toBe("/raw/a.fits");
+  });
+
+  it("lastStep reports tone ahead of local contrast", () => {
+    expect(lastStep(chainOf("localContrast", "tone"))).toBe("tone");
   });
 });
 
@@ -276,6 +308,7 @@ describe("pixelMathCompareBase", () => {
     stretch: "Stretch",
     maskedStretch: "Masked stretch",
     localContrast: "LHE / HDRMT",
+    tone: "Curves",
     pixelMath: "PixelMath",
   };
   const bgEntry: ChainEntry = { fitsPath: BG, previewUrl: "asset://bg.png?v=3", dimensions: null };

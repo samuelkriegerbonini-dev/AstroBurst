@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useId, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
-import { wizardStackName } from "../../../utils/wizard";
+import { effectiveBinFiles, wizardStackName } from "../../../utils/wizard";
+import { stackRunFinish, type StackRunStart } from "../../../utils/stackRun";
 import { stackFrames, drizzleFrames } from "../../../services/stacking";
 import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -16,13 +17,15 @@ import { formatTime } from "../../../utils/format";
 
 const ELAPSED_TICK_MS = 100;
 
+let lastStackToken = 0;
+
 interface StackStepProps {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
   onStacked: (channelId: string, path: string) => void;
 }
 
-type StackOutcome = "done" | "cancelled" | "failed";
+type StackOutcome = "done" | "cancelled" | "failed" | "discarded";
 
 interface StackDisplayResult {
   fits_path?: string;
@@ -33,7 +36,15 @@ interface StackDisplayResult {
 }
 
 export default function StackStep({ state, dispatch, onStacked }: StackStepProps) {
-  const { stackRun, setStackRun } = useComposeWizardContext();
+  const {
+    stackRun,
+    setStackRun,
+    finishStackRun,
+    getStackGeneration,
+    getState,
+    stackDiscarded,
+    recordStackOutcome,
+  } = useComposeWizardContext();
   const [now, setNow] = useState(() => Date.now());
   const [results, setResults] = useState<Record<string, StackDisplayResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -123,7 +134,18 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files?.length ?? 0}` }));
       return "failed";
     }
-    setStackRun({ binId, startedAt: Date.now(), batch });
+    lastStackToken += 1;
+    const started: StackRunStart = { binId, token: lastStackToken, generation: getStackGeneration(), files };
+    const discarded = (): boolean => {
+      const current = getState();
+      const bin = current.bins.find((b) => b.id === binId);
+      const currentFiles = bin ? effectiveBinFiles(current, bin).map(resolveEffectivePath) : [];
+      const outcome = stackRunFinish(started, { generation: getStackGeneration(), files: currentFiles });
+      if (outcome.store) return false;
+      recordStackOutcome(binId, outcome);
+      return true;
+    };
+    setStackRun({ binId, startedAt: Date.now(), batch, token: started.token, files });
     setErrors((prev) => ({ ...prev, [binId]: "" }));
     setCancelled((prev) => ({ ...prev, [binId]: false }));
     resetProgress();
@@ -150,12 +172,15 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
             rejection,
             combine,
           });
+      if (discarded()) return "discarded";
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
       }
+      recordStackOutcome(binId, { store: true, notice: null });
       return "done";
     } catch (e) {
+      if (discarded()) return "discarded";
       const msg = e instanceof Error ? e.message : String(e);
       if (/cancel/i.test(msg)) {
         setCancelled((prev) => ({ ...prev, [binId]: true }));
@@ -165,16 +190,17 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       setErrors((prev) => ({ ...prev, [binId]: msg }));
       return "failed";
     } finally {
-      setStackRun(null);
+      finishStackRun(started.token);
       resetProgress();
     }
-  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun]);
+  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun, finishStackRun, getStackGeneration, getState, recordStackOutcome]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
     for (let i = 0; i < bins.length; i++) {
       const batch = { current: i + 1, total: bins.length, label: bins[i].shortLabel };
-      if (await handleStack(bins[i].id, bins[i].files, batch) === "cancelled") break;
+      const outcome = await handleStack(bins[i].id, bins[i].files, batch);
+      if (outcome === "cancelled" || outcome === "discarded") break;
     }
   }, [stackableBins, handleStack]);
 
@@ -295,6 +321,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         const isLoading = stackRun?.binId === bin.id;
         const result = results[bin.id];
         const error = errors[bin.id];
+        const discardNotice = stackDiscarded[bin.id];
         const isStacked = !!state.stackedPaths[bin.id] || !!result;
         const isAnalyzing = analyzing[bin.id];
         const analyzeError = analyzeErrors[bin.id];
@@ -401,6 +428,9 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
             {result && <WarningList warnings={result.warnings} />}
             {cancelled[bin.id] && <div className="text-[9px] text-zinc-500">Stacking cancelled.</div>}
             {error && <div className="text-[9px] text-red-400">{error}</div>}
+            {discardNotice && (
+              <span data-testid="stack-discarded-notice" className="text-[9px] text-amber-400">{discardNotice}</span>
+            )}
           </div>
         );
       })}

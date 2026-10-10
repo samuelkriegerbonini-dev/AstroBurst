@@ -3,7 +3,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::region::RegionShape;
 use astroburst_lib::core::imaging::statistics::{
     evaluate_noise, evaluate_noise_in_region, evaluate_noise_window, statistics_from_finite,
@@ -145,15 +145,16 @@ pub async fn stats(
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
-    tokio::task::spawn_blocking(move || stats_body(&entry, target, &params))
+    let wcs_path = session.wcs_source_path(&target);
+    tokio::task::spawn_blocking(move || stats_body(&entry, target, &wcs_path, &params))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
         .map(Json)
 }
 
-fn stats_body(entry: &ImageEntry, target: String, params: &StatsParams) -> Result<Value> {
+fn stats_body(entry: &ImageEntry, target: String, wcs_path: &str, params: &StatsParams) -> Result<Value> {
     let arr = entry.arr();
-    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = entry.header().and_then(|h| load_wcs(wcs_path, h).ok());
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
     let mut finite = values.finite;
     let n_nan = match values.shape {
@@ -268,7 +269,7 @@ mod tests {
             noise: false,
         };
 
-        let body = stats_body(&entry, "all-nan".into(), &params).unwrap();
+        let body = stats_body(&entry, "all-nan".into(), "", &params).unwrap();
 
         assert_eq!(body["clipped"], json!({ "mean": null, "median": null, "std": null, "n_rejected": 0 }));
     }

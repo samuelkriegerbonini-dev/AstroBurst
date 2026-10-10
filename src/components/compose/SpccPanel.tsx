@@ -1,6 +1,7 @@
 import { useState, useCallback, useId } from "react";
 import { spccCalibrate } from "../../services/processing";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
+import { spccResultWavelengths, spccWavelengthsLine, type SpccTriplet } from "../../utils/spccWavelengths";
 
 interface SpccResult {
   r_factor?: number;
@@ -13,6 +14,8 @@ interface SpccResult {
   catalog_name?: string;
   is_synthetic_catalog?: boolean;
   elapsed_ms?: number;
+  wavelengths_nm?: SpccTriplet;
+  wavelength_source?: "filters" | "default";
 }
 
 interface SpccPanelProps {
@@ -20,6 +23,7 @@ interface SpccPanelProps {
   gPath: string | null;
   bPath: string | null;
   wcsPath?: string | null;
+  wavelengthsNm: SpccTriplet | null;
   onFactorsReady?: (r: number, g: number, b: number) => void;
 }
 
@@ -41,7 +45,7 @@ const ICON = (
   </svg>
 );
 
-export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady }: SpccPanelProps) {
+export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
   const whiteRefId = useId();
   const catalogId = useId();
   const minSnrId = useId();
@@ -65,6 +69,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
         whiteReference: whiteRef,
         minSnr,
         catalog,
+        wavelengthsNm,
       }) as SpccResult;
       setResult(res);
       if (res?.r_factor != null && res?.g_factor != null && res?.b_factor != null) {
@@ -75,17 +80,19 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
     } finally {
       setIsRunning(false);
     }
-  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, catalog, onFactorsReady]);
+  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, catalog, wavelengthsNm, onFactorsReady]);
 
   return (
     <div className="flex flex-col gap-3 p-3 border border-cyan-800/20 bg-cyan-900/5 rounded-lg">
-      <SectionHeader icon={ICON} title="SPCC" subtitle="Spectrophotometric Color Calibration" />
+      <SectionHeader icon={ICON} title="SPCC" subtitle="Color calibration (blackbody approximation)" />
 
       {!canRun && (
         <div className="text-[10px] text-zinc-500 italic">
           Assign R, G, B channels above. Plate Solve required for WCS.
         </div>
       )}
+
+      <div data-testid="spcc-wavelengths" className="text-[10px] text-zinc-500">{spccWavelengthsLine(wavelengthsNm)}</div>
 
       <div className="flex items-center justify-between">
         <label htmlFor={whiteRefId} className="text-xs text-zinc-400">White Reference</label>
@@ -165,6 +172,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, onFactorsReady
             { label: "Avg Bp-Rp", value: result.avg_color_index?.toFixed(3) },
             { label: "Catalog", value: result.catalog_name },
             { label: "Reference", value: result.white_reference },
+            { label: "Wavelengths", value: spccResultWavelengths(result) },
             { label: "Time", value: result.elapsed_ms ? `${(result.elapsed_ms / 1000).toFixed(1)}s` : null },
           ]} />
 

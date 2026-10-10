@@ -2,11 +2,17 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
-use crate::core::astrometry::catalog::parse_gaia_tsv;
-use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
+use crate::core::astrometry::catalog::{gaia_cone_stars_cached, spcc_cone_query, CatalogHit, ConeQuery};
+use crate::core::astrometry::wcs::{pixel_center, CelestialCoord};
 use crate::core::imaging::stats::compute_image_stats;
+use crate::infra::wcs_source::load_wcs;
 use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::header::HduHeader;
+
+const DEFAULT_WAVELENGTHS_NM: [f64; 3] = [640.0, 530.0, 460.0];
+const MIN_WAVELENGTH_NM: f64 = 300.0;
+const MAX_WAVELENGTH_NM: f64 = 1200.0;
+const SPCC_MIN_GAIA_STARS: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpccConfig {
@@ -15,6 +21,7 @@ pub struct SpccConfig {
     pub saturation_limit: f64,
     pub catalog: SpccCatalog,
     pub white_reference: WhiteReference,
+    pub wavelengths_nm: [f64; 3],
 }
 
 impl Default for SpccConfig {
@@ -25,6 +32,7 @@ impl Default for SpccConfig {
             saturation_limit: 0.90,
             catalog: SpccCatalog::BuiltinBpRp,
             white_reference: WhiteReference::AverageSpiral,
+            wavelengths_nm: DEFAULT_WAVELENGTHS_NM,
         }
     }
 }
@@ -43,7 +51,7 @@ pub enum WhiteReference {
     Photopic,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SpccResult {
     pub r_factor: f64,
     pub g_factor: f64,
@@ -54,6 +62,9 @@ pub struct SpccResult {
     pub white_ref_name: String,
     pub catalog_name: String,
     pub is_synthetic_catalog: bool,
+    pub wavelengths_nm: [f64; 3],
+    pub wavelength_source: String,
+    pub catalog_source: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +72,6 @@ pub(crate) struct CatalogStar {
     pub(crate) ra: f64,
     pub(crate) dec: f64,
     pub(crate) bp_rp: f64,
-    pub(crate) gmag: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +86,7 @@ pub fn spcc_calibrate_rgb(
     r_image: &Array2<f32>,
     g_image: &Array2<f32>,
     b_image: &Array2<f32>,
+    wcs_path: &str,
     header: &HduHeader,
     config: &SpccConfig,
 ) -> Result<SpccResult, String> {
@@ -88,7 +99,10 @@ pub fn spcc_calibrate_rgb(
         ));
     }
 
-    let wcs = WcsTransform::from_header(header).map_err(|e| {
+    validate_wavelengths(&config.wavelengths_nm)?;
+    let wl = &config.wavelengths_nm;
+
+    let wcs = load_wcs(wcs_path, header).map_err(|e| {
         format!(
             "No usable celestial WCS in the header ({}). SPCC needs an image whose FITS header already carries a sky solution.",
             e
@@ -127,18 +141,20 @@ pub fn spcc_calibrate_rgb(
     let center = wcs.pixel_to_world(cx, cy);
     let search_radius = (fov_w.max(fov_h) / 60.0) * 0.75;
 
-    let (catalog_stars, is_synthetic, label) = match config.catalog {
+    let (catalog_stars, is_synthetic, label, catalog_source) = match config.catalog {
         SpccCatalog::BuiltinBpRp => (
             generate_synthetic_catalog(&world_coords, &good_stars),
             true,
             catalog_name(&config.catalog, None),
+            None,
         ),
-        SpccCatalog::GaiaDr3Tap => match query_gaia_vizier(center.ra, center.dec, search_radius, 3) {
-            Ok(stars) => (stars, false, catalog_name(&config.catalog, None)),
+        SpccCatalog::GaiaDr3Tap => match gaia_stars_cached(center, search_radius) {
+            Ok((stars, source)) => (stars, false, catalog_name(&config.catalog, None), Some(source)),
             Err(reason) => (
                 generate_synthetic_catalog(&world_coords, &good_stars),
                 true,
                 catalog_name(&config.catalog, Some(&reason)),
+                None,
             ),
         },
     };
@@ -160,10 +176,10 @@ pub fn spcc_calibrate_rgb(
         ));
     }
 
-    let (wr_r, wr_g, wr_b) = white_reference_rgb(&config.white_reference);
+    let (wr_r, wr_g, wr_b) = white_reference_rgb(&config.white_reference, wl);
 
     let (r_factor, g_factor, b_factor, avg_ci) =
-        compute_correction_factors(&matched, wr_r, wr_g, wr_b)?;
+        compute_correction_factors(&matched, wr_r, wr_g, wr_b, wl)?;
 
     let white_ref_name = match &config.white_reference {
         WhiteReference::AverageSpiral => "Average Spiral Galaxy".into(),
@@ -181,7 +197,60 @@ pub fn spcc_calibrate_rgb(
         white_ref_name,
         catalog_name: label,
         is_synthetic_catalog: is_synthetic,
+        wavelengths_nm: config.wavelengths_nm,
+        wavelength_source: wavelength_source(wl).to_string(),
+        catalog_source,
     })
+}
+
+fn validate_wavelengths(wl: &[f64; 3]) -> Result<(), String> {
+    let in_range = |v: f64| v.is_finite() && (MIN_WAVELENGTH_NM..=MAX_WAVELENGTH_NM).contains(&v);
+    if wl.iter().all(|&v| in_range(v)) {
+        return Ok(());
+    }
+    Err(format!(
+        "SPCC wavelengths must be finite and between {} and {} nm (got [{}, {}, {}]).",
+        MIN_WAVELENGTH_NM, MAX_WAVELENGTH_NM, wl[0], wl[1], wl[2]
+    ))
+}
+
+fn wavelength_source(wl: &[f64; 3]) -> &'static str {
+    if *wl == DEFAULT_WAVELENGTHS_NM { "default" } else { "filters" }
+}
+
+pub(crate) fn gaia_stars(
+    center: CelestialCoord,
+    radius_deg: f64,
+    cached: &mut dyn FnMut(&ConeQuery) -> Result<CatalogHit, String>,
+) -> Result<(Vec<CatalogStar>, &'static str), String> {
+    let query = spcc_cone_query(center.ra, center.dec, radius_deg);
+    let hit = cached(&query)?;
+    let stars = hit
+        .rows
+        .iter()
+        .filter_map(|r| {
+            r.bp_rp
+                .or_else(|| Some(r.bp? - r.rp?))
+                .map(|bp_rp| CatalogStar { ra: r.ra, dec: r.dec, bp_rp })
+        })
+        .collect();
+    Ok((stars, hit.source_name()))
+}
+
+fn require_min_gaia_stars(
+    stars: Vec<CatalogStar>,
+    source: &'static str,
+    query_radius_deg: f64,
+) -> Result<(Vec<CatalogStar>, &'static str), String> {
+    if stars.len() < SPCC_MIN_GAIA_STARS {
+        return Err(format!("Gaia returned only {} usable stars within {:.2} deg", stars.len(), query_radius_deg));
+    }
+    Ok((stars, source))
+}
+
+fn gaia_stars_cached(center: CelestialCoord, radius_deg: f64) -> Result<(Vec<CatalogStar>, &'static str), String> {
+    let (stars, source) = gaia_stars(center, radius_deg, &mut |q| gaia_cone_stars_cached(q.ra, q.dec, q.radius_deg))?;
+    require_min_gaia_stars(stars, source, spcc_cone_query(center.ra, center.dec, radius_deg).radius_deg)
 }
 
 fn catalog_name(catalog: &SpccCatalog, fallback_reason: Option<&str>) -> String {
@@ -244,10 +313,10 @@ fn bp_rp_to_teff(bp_rp: f64) -> f64 {
     }
 }
 
-fn planck_rgb(teff: f64) -> (f64, f64, f64) {
-    let r = planck_intensity(teff, 640.0);
-    let g = planck_intensity(teff, 530.0);
-    let b = planck_intensity(teff, 460.0);
+fn planck_rgb(teff: f64, wl: &[f64; 3]) -> (f64, f64, f64) {
+    let r = planck_intensity(teff, wl[0]);
+    let g = planck_intensity(teff, wl[1]);
+    let b = planck_intensity(teff, wl[2]);
 
     let max_val = r.max(g).max(b);
     if max_val < 1e-30 {
@@ -272,11 +341,11 @@ fn planck_intensity(teff: f64, wavelength_nm: f64) -> f64 {
     numerator / (exponent.exp() - 1.0)
 }
 
-fn white_reference_rgb(wr: &WhiteReference) -> (f64, f64, f64) {
+fn white_reference_rgb(wr: &WhiteReference, wl: &[f64; 3]) -> (f64, f64, f64) {
     match wr {
-        WhiteReference::G2V => planck_rgb(5778.0),
+        WhiteReference::G2V => planck_rgb(5778.0, wl),
         WhiteReference::AverageSpiral => {
-            let (r, g, b) = planck_rgb(5500.0);
+            let (r, g, b) = planck_rgb(5500.0, wl);
             (r * 0.98, g * 1.0, b * 1.02)
         }
         WhiteReference::Photopic => (1.0, 1.0, 1.0),
@@ -296,7 +365,6 @@ fn generate_synthetic_catalog(
                 ra: coord.ra,
                 dec: coord.dec,
                 bp_rp,
-                gmag: None,
             }
         })
         .collect()
@@ -306,89 +374,6 @@ fn estimate_bp_rp_from_flux(star: &DetectedStar) -> f64 {
     let norm_flux = (star.flux / star.peak.max(1e-10)).clamp(0.1, 100.0);
     let fwhm_factor = (star.fwhm - 3.0).clamp(-2.0, 5.0) * 0.1;
     (1.0 / norm_flux.sqrt() + fwhm_factor).clamp(-0.3, 4.0)
-}
-
-#[cfg(not(feature = "vizier"))]
-pub(crate) fn query_gaia_vizier(
-    _ra_center: f64,
-    _dec_center: f64,
-    _radius_deg: f64,
-    _min_stars: usize,
-) -> Result<Vec<CatalogStar>, String> {
-    Err("Gaia DR3 query requires the 'vizier' feature. Using built-in Bp-Rp estimation.".into())
-}
-
-#[cfg(feature = "vizier")]
-pub(crate) fn query_gaia_vizier(
-    ra_center: f64,
-    dec_center: f64,
-    radius_deg: f64,
-    min_stars: usize,
-) -> Result<Vec<CatalogStar>, String> {
-    let radius = radius_deg.clamp(0.01, 5.0);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("HTTP client init failed: {}", e))?;
-
-    let response = client
-        .get("https://vizier.cds.unistra.fr/viz-bin/asu-tsv")
-        .query(&[
-            ("-source", "I/355/gaiadr3"),
-            ("-c", format!("{:.6} {:+.6}", ra_center, dec_center).as_str()),
-            ("-c.r", format!("{:.4}", radius).as_str()),
-            ("-c.u", "deg"),
-            ("-out", "RA_ICRS,DE_ICRS,BP-RP,Gmag"),
-            ("-out.max", "500"),
-            ("-sort", "Gmag"),
-            ("Gmag", "<17"),
-        ])
-        .send()
-        .map_err(|e| format!("VizieR request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("VizieR returned HTTP {}", response.status()));
-    }
-
-    let body = response
-        .text()
-        .map_err(|e| format!("VizieR response read failed: {}", e))?;
-
-    let stars = parse_vizier_tsv(&body);
-    if stars.len() < min_stars {
-        return Err(format!(
-            "VizieR returned only {} usable stars within {:.2} deg",
-            stars.len(),
-            radius
-        ));
-    }
-
-    log::info!(
-        "Gaia DR3 via VizieR: {} stars within {:.2} deg of ({:.4}, {:+.4})",
-        stars.len(),
-        radius,
-        ra_center,
-        dec_center
-    );
-
-    Ok(stars)
-}
-
-#[cfg_attr(not(feature = "vizier"), allow(dead_code))]
-fn parse_vizier_tsv(body: &str) -> Vec<CatalogStar> {
-    parse_gaia_tsv(body)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|row| {
-            row.bp_rp.map(|bp_rp| CatalogStar {
-                ra: row.ra,
-                dec: row.dec,
-                bp_rp,
-                gmag: row.g,
-            })
-        })
-        .collect()
 }
 
 fn cross_match_stars(
@@ -503,6 +488,7 @@ fn compute_correction_factors(
     wr_r: f64,
     wr_g: f64,
     wr_b: f64,
+    wl: &[f64; 3],
 ) -> Result<(f64, f64, f64, f64), String> {
     validate_white_reference(wr_r, wr_g, wr_b)?;
 
@@ -517,7 +503,7 @@ fn compute_correction_factors(
 
     for star in matched {
         let teff = bp_rp_to_teff(star.bp_rp);
-        let (expected_r, expected_g, expected_b) = planck_rgb(teff);
+        let (expected_r, expected_g, expected_b) = planck_rgb(teff, wl);
 
         let total_measured = star.measured_r + star.measured_g + star.measured_b;
         let total_expected = expected_r + expected_g + expected_b;
@@ -563,7 +549,7 @@ fn compute_correction_factors(
 
     if !unmeasured.is_empty() {
         return Err(format!(
-            "No matched star carries measurable flux in {}. A channel without signal cannot be spectrophotometrically calibrated; neutral factors would report success on an empty channel.",
+            "No matched star carries measurable flux in {}. A channel without signal cannot be color-calibrated; neutral factors would report success on an empty channel.",
             unmeasured.join(", ")
         ));
     }
@@ -597,41 +583,12 @@ fn compute_correction_factors(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-
-    #[test]
-    fn test_parse_vizier_tsv_basic() {
-        let body = "#INFO VizieR result\n#Column list\nRA_ICRS\tDE_ICRS\tBP-RP\tGmag\ndeg\tdeg\tmag\tmag\n---------\t---------\t------\t----\n83.633083\t22.014472\t0.650\t8.5\n83.700000\t22.100000\t\t9.0\n84.000000\t21.900000\t1.234\t10.2\n";
-        let stars = parse_vizier_tsv(body);
-        assert_eq!(stars.len(), 2);
-        assert!((stars[0].ra - 83.633083).abs() < 1e-9);
-        assert!((stars[0].dec - 22.014472).abs() < 1e-9);
-        assert!((stars[0].bp_rp - 0.650).abs() < 1e-9);
-        assert!((stars[1].bp_rp - 1.234).abs() < 1e-9);
-        assert_eq!(stars[0].gmag, Some(8.5));
-        assert_eq!(stars[1].gmag, Some(10.2));
-    }
-
-    #[test]
-    fn test_parse_vizier_tsv_missing_columns() {
-        let body = "RA_ICRS\tDE_ICRS\tGmag\ndeg\tdeg\tmag\n----\t----\t----\n83.6\t22.0\t8.5\n";
-        let stars = parse_vizier_tsv(body);
-        assert!(stars.is_empty());
-    }
-
-    #[test]
-    fn test_parse_vizier_tsv_rejects_out_of_range() {
-        let body = "RA_ICRS\tDE_ICRS\tBP-RP\n---\t---\t---\n400.0\t22.0\t0.5\n83.6\t95.0\t0.5\n83.6\t22.0\t0.5\n";
-        let stars = parse_vizier_tsv(body);
-        assert_eq!(stars.len(), 1);
-        assert!((stars[0].ra - 83.6).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_parse_vizier_tsv_empty_response() {
-        assert!(parse_vizier_tsv("").is_empty());
-        assert!(parse_vizier_tsv("#nothing here\n#at all\n").is_empty());
-    }
+    use crate::core::astrometry::catalog::{
+        query_gaia_cached_with, CatalogRow, CatalogSource, SPCC_GAIA_MAG_LIMIT, SPCC_GAIA_MAX_ROWS, SPCC_MIN_CONE_RADIUS_DEG,
+    };
 
     #[test]
     fn aperture_background_rejects_neighbor_contamination() {
@@ -673,27 +630,27 @@ mod tests {
 
     #[test]
     fn compute_correction_factors_rejects_zero_white_reference() {
-        let err = compute_correction_factors(&matched_sample(), 1.0, 1.0, 0.0)
+        let err = compute_correction_factors(&matched_sample(), 1.0, 1.0, 0.0, &DEFAULT_WAVELENGTHS_NM)
             .expect_err("a zero white reference weight must not become a x1e10 gain");
         assert!(err.contains("White reference B"), "unexpected error: {}", err);
     }
 
     #[test]
     fn compute_correction_factors_rejects_negligible_white_reference() {
-        let err = compute_correction_factors(&matched_sample(), 1e-12, 1.0, 1.0)
+        let err = compute_correction_factors(&matched_sample(), 1e-12, 1.0, 1.0, &DEFAULT_WAVELENGTHS_NM)
             .expect_err("a negligible white reference weight must not become a huge gain");
         assert!(err.contains("White reference R"), "unexpected error: {}", err);
 
-        let err = compute_correction_factors(&matched_sample(), 1.0, f64::NAN, 1.0)
+        let err = compute_correction_factors(&matched_sample(), 1.0, f64::NAN, 1.0, &DEFAULT_WAVELENGTHS_NM)
             .expect_err("a non-finite white reference weight must be rejected");
         assert!(err.contains("White reference G"), "unexpected error: {}", err);
     }
 
     #[test]
     fn compute_correction_factors_stay_bounded_for_usable_white_reference() {
-        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral);
+        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral, &DEFAULT_WAVELENGTHS_NM);
         let (r_factor, g_factor, b_factor, _) =
-            compute_correction_factors(&matched_sample(), wr_r, wr_g, wr_b).unwrap();
+            compute_correction_factors(&matched_sample(), wr_r, wr_g, wr_b, &DEFAULT_WAVELENGTHS_NM).unwrap();
 
         assert_eq!(g_factor, 1.0);
         assert!(r_factor.is_finite() && r_factor > 1e-3 && r_factor < 1e3, "r_factor {}", r_factor);
@@ -702,16 +659,18 @@ mod tests {
 
     #[test]
     fn compute_correction_factors_reject_a_channel_without_measured_flux() {
-        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral);
+        let (wr_r, wr_g, wr_b) = white_reference_rgb(&WhiteReference::AverageSpiral, &DEFAULT_WAVELENGTHS_NM);
         let matched: Vec<MatchedStar> = matched_sample()
             .into_iter()
             .map(|s| MatchedStar { measured_b: 0.0, ..s })
             .collect();
 
-        let err = compute_correction_factors(&matched, wr_r, wr_g, wr_b)
+        let err = compute_correction_factors(&matched, wr_r, wr_g, wr_b, &DEFAULT_WAVELENGTHS_NM)
             .expect_err("an empty B channel must not be reported as a successful calibration");
 
         assert!(err.contains("measurable flux in B"), "unexpected error: {}", err);
+        assert!(err.contains("cannot be color-calibrated"), "unexpected error: {}", err);
+        assert!(!err.to_lowercase().contains("spectrophotometr"), "the method is a blackbody approximation: {}", err);
     }
 
     fn star(peak: f64) -> DetectedStar {
@@ -758,13 +717,13 @@ mod tests {
         let b = Array2::from_elem((64, 64), 0.1f32);
         let config = SpccConfig::default();
 
-        let err = spcc_calibrate_rgb(&r, &g, &b, &header, &config)
+        let err = spcc_calibrate_rgb(&r, &g, &b, "", &header, &config)
             .expect_err("mismatched G channel must be rejected");
         assert!(err.contains("size mismatch"), "unexpected error: {}", err);
         assert!(err.contains("(32, 32)"), "unexpected error: {}", err);
 
         let b_small = Array2::from_elem((64, 32), 0.1f32);
-        let err = spcc_calibrate_rgb(&r, &r, &b_small, &header, &config)
+        let err = spcc_calibrate_rgb(&r, &r, &b_small, "", &header, &config)
             .expect_err("mismatched B channel must be rejected");
         assert!(err.contains("size mismatch"), "unexpected error: {}", err);
     }
@@ -777,5 +736,206 @@ mod tests {
             catalog_name(&SpccCatalog::GaiaDr3Tap, Some("VizieR returned HTTP 503")),
             "Built-in Bp-Rp (fallback, Gaia DR3 via VizieR unavailable: VizieR returned HTTP 503)"
         );
+    }
+
+    fn solved_header() -> HduHeader {
+        let mut header = HduHeader::empty();
+        header.set("NAXIS1", "128".to_string());
+        header.set("NAXIS2", "128".to_string());
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRVAL1", 83.8);
+        header.set_f64("CRVAL2", -5.4);
+        header.set_f64("CRPIX1", 64.0);
+        header.set_f64("CRPIX2", 64.0);
+        header.set_f64("CD1_1", -2.78e-4);
+        header.set_f64("CD2_2", 2.78e-4);
+        header
+    }
+
+    fn star_field(scale: f64) -> Array2<f32> {
+        let stars = [
+            (20.0, 24.0, 6000.0, 1.6),
+            (40.0, 96.0, 500.0, 1.2),
+            (64.0, 30.0, 800.0, 1.4),
+            (90.0, 60.0, 1200.0, 1.7),
+            (28.0, 70.0, 1600.0, 2.0),
+            (104.0, 104.0, 2000.0, 2.2),
+            (70.0, 84.0, 2400.0, 2.4),
+            (96.0, 20.0, 1000.0, 1.3),
+            (50.0, 56.0, 700.0, 1.9),
+        ];
+        Array2::from_shape_fn((128, 128), |(y, x)| {
+            let noise = ((y * 31 + x * 17) % 23) as f64 - 11.0;
+            let mut v = 100.0 + noise;
+            for (cy, cx, amp, sigma) in stars {
+                let d2 = (y as f64 - cy).powi(2) + (x as f64 - cx).powi(2);
+                v += amp * (-d2 / (2.0 * sigma * sigma)).exp();
+            }
+            (v * scale) as f32
+        })
+    }
+
+    fn builtin_config() -> SpccConfig {
+        SpccConfig { min_snr: 5.0, catalog: SpccCatalog::BuiltinBpRp, ..SpccConfig::default() }
+    }
+
+    fn calibrate_builtin(config: &SpccConfig) -> Result<SpccResult, String> {
+        spcc_calibrate_rgb(&star_field(1.0), &star_field(0.8), &star_field(0.6), "", &solved_header(), config)
+    }
+
+    #[test]
+    fn planck_rgb_uses_the_given_wavelengths() {
+        let rg = |teff: f64, wl: &[f64; 3]| {
+            let (r, g, _) = planck_rgb(teff, wl);
+            r / g
+        };
+        let hst = [814.0, 555.0, 435.0];
+        let hst_ratio = rg(4500.0, &hst) / rg(5500.0, &hst);
+        let default_ratio = rg(4500.0, &DEFAULT_WAVELENGTHS_NM) / rg(5500.0, &DEFAULT_WAVELENGTHS_NM);
+        let double_ratio = hst_ratio / default_ratio;
+        assert!(
+            (double_ratio - 1.144).abs() <= 0.005,
+            "Planck double ratio {double_ratio} (hst {hst_ratio}, default {default_ratio})"
+        );
+        assert!((default_ratio - 1.2010).abs() < 0.002, "default (R/G)4500/(R/G)5500 {default_ratio}");
+        assert!((hst_ratio - 1.3743).abs() < 0.002, "hst (R/G)4500/(R/G)5500 {hst_ratio}");
+    }
+
+    #[test]
+    fn white_reference_uses_the_given_wavelengths() {
+        let hst = [814.0, 555.0, 435.0];
+        let (r, g, b) = planck_rgb(5500.0, &hst);
+        let spiral = white_reference_rgb(&WhiteReference::AverageSpiral, &hst);
+        assert_eq!(spiral, (r * 0.98, g, b * 1.02));
+        assert_ne!(spiral, white_reference_rgb(&WhiteReference::AverageSpiral, &DEFAULT_WAVELENGTHS_NM));
+
+        let g2v = white_reference_rgb(&WhiteReference::G2V, &hst);
+        assert_eq!(g2v, planck_rgb(5778.0, &hst));
+        assert_ne!(g2v, white_reference_rgb(&WhiteReference::G2V, &DEFAULT_WAVELENGTHS_NM));
+
+        assert_eq!(white_reference_rgb(&WhiteReference::Photopic, &hst), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn fewer_than_three_usable_gaia_stars_are_refused() {
+        let star = |ra: f64| CatalogStar { ra, dec: 10.0, bp_rp: 0.7 };
+        let err = require_min_gaia_stars(vec![star(100.0), star(100.01)], "network", 0.01)
+            .expect_err("two stars are below the SPCC minimum");
+        assert_eq!(err, "Gaia returned only 2 usable stars within 0.01 deg");
+
+        let (stars, source) = require_min_gaia_stars(vec![star(100.0), star(100.01), star(100.02)], "disk", 0.01)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stars.len(), 3);
+        assert_eq!(source, "disk");
+    }
+
+    #[test]
+    fn spcc_result_reports_default_wavelengths_when_none_are_given() {
+        let result = calibrate_builtin(&builtin_config()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(result.wavelengths_nm, [640.0, 530.0, 460.0]);
+        assert_eq!(result.wavelength_source, "default");
+        assert_eq!(result.catalog_source, None);
+        assert!(result.is_synthetic_catalog);
+
+        let filters = SpccConfig { wavelengths_nm: [814.0, 555.0, 435.0], ..builtin_config() };
+        let from_filters = calibrate_builtin(&filters).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(from_filters.wavelengths_nm, [814.0, 555.0, 435.0]);
+        assert_eq!(from_filters.wavelength_source, "filters");
+        assert_eq!(from_filters.catalog_source, None);
+        assert_ne!(from_filters.r_factor, result.r_factor, "the wavelengths must change the Planck expectation");
+    }
+
+    fn fake_rows() -> Vec<CatalogRow> {
+        let row = |id: &str, ra: f64, dec: f64, bp_rp: Option<f64>, bp: Option<f64>, rp: Option<f64>, g: Option<f64>| CatalogRow {
+            id: id.to_string(),
+            ra,
+            dec,
+            ra_epoch: ra,
+            dec_epoch: dec,
+            pm_ra_masyr: None,
+            pm_dec_masyr: None,
+            g,
+            bp,
+            rp,
+            bp_rp,
+            parallax_mas: None,
+        };
+        vec![
+            row("a", 265.51, 31.26, Some(0.65), None, None, Some(8.5)),
+            row("b", 265.49, 31.24, None, Some(11.2), Some(10.1), Some(10.7)),
+            row("c", 265.5, 31.25, None, None, None, Some(12.0)),
+        ]
+    }
+
+    fn assert_same_stars(a: &[CatalogStar], b: &[CatalogStar]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!((x.ra, x.dec, x.bp_rp), (y.ra, y.dec, y.bp_rp));
+        }
+    }
+
+    #[test]
+    fn gaia_rows_become_catalog_stars_through_the_shared_cache() {
+        let center = CelestialCoord { ra: 265.5, dec: 31.25 };
+        let mut calls = 0usize;
+        let mut seen: Vec<ConeQuery> = Vec::new();
+        let mut cached = |q: &ConeQuery| {
+            seen.push(q.clone());
+            query_gaia_cached_with(q, |_| {
+                calls += 1;
+                Ok(fake_rows())
+            })
+        };
+
+        let (first, source) = gaia_stars(center, 0.3, &mut cached).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(source, "network");
+        assert_eq!(first.len(), 2, "the row without bp_rp, bp or rp is dropped");
+        assert!((first[0].ra - 265.51).abs() < 1e-9 && (first[0].dec - 31.26).abs() < 1e-9);
+        assert!((first[0].bp_rp - 0.65).abs() < 1e-9);
+        assert!((first[1].bp_rp - 1.1).abs() < 1e-9, "bp - rp when bp_rp is absent: {}", first[1].bp_rp);
+
+        let (second, source) = gaia_stars(center, 0.3, &mut cached).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(source, "memory");
+        assert_same_stars(&first, &second);
+        assert_eq!(calls, 1, "the second call is served from the shared memory cache");
+
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[0].ra, 265.5);
+        assert_eq!(seen[0].dec, 31.25);
+        assert_eq!(seen[0].radius_deg, 0.3);
+        assert_eq!(seen[0].mag_limit, Some(SPCC_GAIA_MAG_LIMIT));
+        assert_eq!(seen[0].max_rows, SPCC_GAIA_MAX_ROWS);
+
+        let mut tiny: Option<ConeQuery> = None;
+        let (none, source) = gaia_stars(CelestialCoord { ra: 266.0, dec: 32.0 }, 0.001, &mut |q| {
+            tiny = Some(q.clone());
+            Ok(CatalogHit { rows: Arc::new(Vec::new()), source: CatalogSource::Disk })
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(none.is_empty());
+        assert_eq!(source, "disk");
+        let tiny = tiny.expect("the seam receives the query");
+        assert!(tiny.radius_deg >= SPCC_MIN_CONE_RADIUS_DEG, "radius {}", tiny.radius_deg);
+        assert_eq!(tiny.radius_deg, SPCC_MIN_CONE_RADIUS_DEG);
+
+        let failed = gaia_stars(center, 0.3, &mut |_| Err("VizieR request failed: timeout".to_string()))
+            .expect_err("a seam error passes through");
+        assert_eq!(failed, "VizieR request failed: timeout");
+    }
+
+    #[test]
+    fn wavelength_validation_rejects_out_of_range() {
+        let bad = SpccConfig { wavelengths_nm: [200.0, 530.0, 460.0], ..builtin_config() };
+        let err = calibrate_builtin(&bad).expect_err("200 nm is outside the SPCC range");
+        assert_eq!(err, "SPCC wavelengths must be finite and between 300 and 1200 nm (got [200, 530, 460]).");
+
+        let nan = validate_wavelengths(&[640.0, f64::NAN, 460.0]).expect_err("NaN is not finite");
+        assert!(nan.starts_with("SPCC wavelengths must be finite and between 300 and 1200 nm (got "), "{nan}");
+        assert!(validate_wavelengths(&[640.0, 530.0, 1200.5]).is_err());
+        assert!(validate_wavelengths(&[640.0, 530.0, f64::INFINITY]).is_err());
+        assert!(validate_wavelengths(&[300.0, 530.0, 1200.0]).is_ok());
+        assert!(validate_wavelengths(&DEFAULT_WAVELENGTHS_NM).is_ok());
     }
 }

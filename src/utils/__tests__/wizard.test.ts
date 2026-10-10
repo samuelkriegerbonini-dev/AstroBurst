@@ -9,6 +9,7 @@ import {
   alignedRunFromChannels,
   alignMatchSummary,
   alignOverlayBinIds,
+  alignOverlayChoices,
   alignOverlayColours,
   alignOverlayRequest,
   alignPreviewFrame,
@@ -51,6 +52,7 @@ import {
   droppedChannelOutputs,
   EMPTY_COMPOSITE_HISTORY,
   exportBlockedReason,
+  exportMappingBanner,
   exportWcsWarning,
   INITIAL_STATE,
   invalidateDownstream,
@@ -63,8 +65,10 @@ import {
   wizardHasProgress,
   resolveExportRgbPaths,
   resolveOutputChannelPath,
+  resolveRgbBins,
   resolveRgbPaths,
   singleChannelBinId,
+  singleFilledBin,
   starRemovalNote,
   withChannelStage,
   wizardChannelExport,
@@ -193,8 +197,9 @@ describe("single-channel wizard results", () => {
     const s = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, {
       channelResults: withChannelStage({}, "ha", "starless", starless),
     });
-    expect(channelExportHistory(s, [starless.path, "/o.fits", "/o.fits"])).toEqual([`Channel ha: ${starless.note}`]);
-    expect(channelExportHistory(s, ["/h.fits", "/o.fits", "/o.fits"])).toEqual([]);
+    const mapping = "Channel mapping: R=HA G=OIII B=OIII (fixed, Blend weights not applied)";
+    expect(channelExportHistory(s, [starless.path, "/o.fits", "/o.fits"])).toEqual([mapping, `Channel ha: ${starless.note}`]);
+    expect(channelExportHistory(s, ["/h.fits", "/o.fits", "/o.fits"])).toEqual([mapping]);
     expect(channelOutputPaths(s)).toEqual([starless.path]);
   });
 
@@ -262,15 +267,15 @@ describe("composite HISTORY", () => {
     const h = applyCompositeOp(EMPTY_COMPOSITE_HISTORY, {
       kind: "blend",
       preset: "auto_wavelength",
-      levels: [{ channel: "b F090W", scale: 4.7123 }, { channel: "g F187N", scale: 1 }],
+      levels: [{ channel: "b F090W", scale: 4.7123, z: 0 }, { channel: "g F187N", scale: 1, z: 0 }],
     });
-    const lines = ["Blend: auto_wavelength", "Level match b F090W: x4.712", "Level match g F187N: x1.000"];
+    const lines = ["Blend: auto_wavelength", "Level match b F090W: x4.712 +0.000", "Level match g F187N: x1.000 +0.000"];
     expect(compositeHistoryLines(h)).toEqual(lines);
     const balanced = applyCompositeOp(h, { kind: "colorBalance", mode: "manual", r: 1.2, g: 1, b: 1, scnr: null });
     expect(compositeHistoryLines(balanced)).toEqual([...lines, "White balance: manual R=1.200 G=1.000 B=1.000"]);
     const later = applyCompositeOp(applyCompositeOp(balanced, { kind: "lrgb", lightness: 1, chrominance: 1 }), { kind: "resetColorBalance" });
     expect(compositeHistoryLines(later)).toEqual([...lines, "LRGB: lightness 100%, chrominance 100%"]);
-    const longest = levelMatchLine({ channel: "oiii F1000W", scale: 12345.678 });
+    const longest = levelMatchLine({ channel: "oiii F1000W", scale: 12345.678, z: -12345.678 });
     for (const line of [...compositeHistoryLines(balanced), longest]) {
       expect(line.length).toBeLessThanOrEqual(70);
       expect(line).toMatch(/^[\x20-\x7e]*$/);
@@ -283,7 +288,7 @@ describe("composite HISTORY", () => {
   });
 
   it("drops the level scales when a step before Blend is invalidated", () => {
-    const s = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { blendLevelScales: { r: 2 } });
+    const s = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { blendLevelScales: { r: { k: 2, offset: -1, z: -2 } } });
     expect(invalidateDownstream(s, "align").blendLevelScales).toBeNull();
     expect(invalidateDownstream(s, "channels").blendLevelScales).toBeNull();
     expect(invalidateDownstream(s, "blend").blendLevelScales).toBeUndefined();
@@ -339,6 +344,16 @@ describe("wizardHeaderSourcePath", () => {
       { alignedPaths: aligned, stackedPaths: { ha: "/out/ha_stack2.fits" } },
     );
     expect(wizardHeaderSourcePath(s, [])).toBe("/out/ha_stack2.fits");
+  });
+
+  it("reads the WCS from the reference Align chose, not from the first filled bin", () => {
+    const s = stateWith(
+      { ha: ["/raw/ha_1.fits"], oiii: ["/raw/o_1.fits", "/raw/o_2.fits"] },
+      { alignedPaths: aligned, alignRefBinId: "oiii", stackedPaths: { oiii: "/out/oiii_stack1.fits" } },
+    );
+    expect(wizardHeaderSourcePath(s, [])).toBe("/out/oiii_stack1.fits");
+    expect(wizardHeaderSourcePath({ ...s, alignRefBinId: null }, [])).toBe("/raw/ha_1.fits");
+    expect(wizardHeaderSourcePath({ ...s, alignRefBinId: "sii" }, [])).toBe("/raw/ha_1.fits");
   });
 
   it("gives no header source after a crop, since the source WCS no longer matches the grid", () => {
@@ -405,7 +420,7 @@ describe("wizard step gates", () => {
     expect(stepById("stack").blockedReason(empty)).toBe("assign frames in step 1");
     expect(stepById("stack").blockedReason(oneFrame)).toBe("needs a channel with 2+ frames");
     expect(stepById("align").blockedReason(oneChannelStack)).toBe("assign at least 2 channels");
-    expect(stepById("crop").blockedReason(oneFrame)).toBe("assign at least 2 channels");
+    expect(stepById("crop").blockedReason(empty)).toBe("assign frames in step 1");
     expect(stepById("crop").blockedReason(twoChannels)).toBe("run Align first");
     expect(stepById("blend").blockedReason(oneFrame)).toBe("assign at least 2 channels");
     expect(stepById("colorbalance").blockedReason(oneFrame)).toBe("assign at least 2 channels");
@@ -501,6 +516,20 @@ describe("wizard step gates", () => {
     expect(nextEnabledStep("align", twoChannels)).toBe("background");
     expect(nextEnabledStep("align", aligned)).toBe("crop");
     expect(nextEnabledStep("blend", blended)).toBe("colorbalance");
+  });
+
+  it("opens Crop for exactly one filled channel without an Align run", () => {
+    expect(stepById("crop").enabled(oneFrame)).toBe(true);
+    expect(stepById("crop").blockedReason(oneChannelStack)).toBe("stack Hα first (2+ frames), or keep one file per channel");
+    expect(stepById("crop").blockedReason({ ...oneChannelStack, stackedPaths: { ha: "/out/stacked_ha_1.fits" } })).toBeNull();
+    expect(stepById("crop").blockedReason(twoChannels)).toBe("run Align first");
+    expect(nextEnabledStep("channels", oneFrame)).toBe("crop");
+  });
+
+  it("names the only filled bin, and none when no bin or several bins are filled", () => {
+    expect(singleFilledBin(stateWith({ oiii: ["/o1.fits", "/o2.fits"] }))).toBe("oiii");
+    expect(singleFilledBin(empty)).toBeNull();
+    expect(singleFilledBin(twoChannels)).toBeNull();
   });
 });
 
@@ -781,10 +810,11 @@ describe("wizard provider", () => {
     const ctx = await mountWizard();
     const bins = binsOf({ ha: ["/h.fits"], oiii: ["/o.fits"] });
     ctx.dispatch({ type: "SET_BINS", bins });
-    ctx.dispatch({ type: "UPDATE", partial: { levelMatch: false, blendLevelScales: { ha: 1, oiii: 3 } } });
+    const scales = { ha: { k: 1, offset: 0, z: 0 }, oiii: { k: 3, offset: -0.5, z: -1.5 } };
+    ctx.dispatch({ type: "UPDATE", partial: { levelMatch: false, blendLevelScales: scales } });
     ctx.dispatch({ type: "SET_BINS", bins: bins.map((b) => ({ ...b })) });
     expect(ctx.getState().levelMatch).toBe(false);
-    expect(ctx.getState().blendLevelScales).toEqual({ ha: 1, oiii: 3 });
+    expect(ctx.getState().blendLevelScales).toEqual(scales);
     ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h.fits"], sii: ["/s.fits"] }) });
     expect(ctx.getState().levelMatch).toBeNull();
     expect(ctx.getState().blendLevelScales).toBeNull();
@@ -800,14 +830,14 @@ describe("wizard provider", () => {
     ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: null } });
     ctx.dispatch({ type: "UPDATE", partial: { wbMode: "spcc", spccFactors: { r: 1.1, g: 1, b: 0.9 } } });
     expect(wb()).toEqual([1.1, 1, 0.9]);
-    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: 1, g: 1.4, b: 2.1 } } });
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: { k: 1, offset: 0, z: 0 }, g: { k: 1.4, offset: -2, z: -2.8 }, b: { k: 2.1, offset: 3, z: 6.3 } } } });
     expect(wb()[0]).toBe(1.1);
     expect(wb()[1]).toBeCloseTo(1 / 1.4, 12);
     expect(wb()[2]).toBeCloseTo(0.9 / 2.1, 12);
     ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: null } });
     expect(wb()).toEqual([1.1, 1, 0.9]);
     ctx.dispatch({ type: "SET_WB", mode: "manual", r: 1.3, g: 1, b: 0.8 });
-    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: 2, g: 1, b: 1 } } });
+    ctx.dispatch({ type: "UPDATE", partial: { blendLevelScales: { r: { k: 2, offset: 1, z: 2 }, g: { k: 1, offset: 0, z: 0 }, b: { k: 1, offset: 0, z: 0 } } } });
     expect(wb()).toEqual([1.3, 1, 0.8]);
     ctx.dispatch({ type: "SET_WB", mode: "spcc", r: 1.3, g: 1, b: 0.8 });
     expect(wb()[0]).toBeCloseTo(0.55, 12);
@@ -1007,6 +1037,13 @@ describe("alignChannelOutcome", () => {
     expect(alignChannelOutcome({ registered: true, method_used: "affine" }, "affine", false).usedMethod).toBeNull();
   });
 
+  it("names a WCS reprojection as WCS", () => {
+    expect(alignChannelOutcome({ registered: true, method_used: "wcs" }, "phase_correlation", false)).toEqual({
+      unregistered: null,
+      usedMethod: "WCS",
+    });
+  });
+
   it("never tags the reference channel", () => {
     expect(alignChannelOutcome({}, "phase_correlation", true)).toEqual({ unregistered: null, usedMethod: null });
     expect(alignChannelOutcome(undefined, "phase_correlation", false)).toEqual({ unregistered: null, usedMethod: null });
@@ -1047,6 +1084,13 @@ describe("alignRunMethodLabel", () => {
     ).toBe("phase correlation requested; identity on 2 of 2");
   });
 
+  it("names a WCS reprojection as WCS and still counts it as a departure from the requested method", () => {
+    expect(alignRunMethodLabel({ align_method: "phase_correlation", channels: [ref, ch("wcs")] })).toBe("WCS");
+    expect(alignRunMethodLabel({ align_method: "phase_correlation", channels: [ref, ch("wcs"), ch("phase_correlation")] })).toBe(
+      "phase correlation requested; WCS on 1 of 2",
+    );
+  });
+
   it("ignores the reference channel's method_used", () => {
     expect(alignRunMethodLabel({ align_method: "affine", channels: [{ ...ref, method_used: "phase_correlation" }, ch("affine")] })).toBe("affine");
   });
@@ -1054,6 +1098,19 @@ describe("alignRunMethodLabel", () => {
   it("falls back to the requested method when channels carry no method_used", () => {
     expect(alignRunMethodLabel({ align_method: "affine", channels: [ref, { offset: [1, 2] as [number, number], registered: true }] })).toBe("affine");
     expect(alignRunMethodLabel({ align_method: "unknown_method", channels: [ref] })).toBe("unknown_method");
+  });
+
+  it("skips the reference Align chose instead of the first channel", () => {
+    expect(alignRunMethodLabel({ align_method: "affine", reference_index: 1, channels: [ch("phase_correlation"), ref] })).toBe(
+      "phase correlation",
+    );
+    expect(
+      alignRunMethodLabel({
+        align_method: "affine",
+        reference_index: 2,
+        channels: [ch("affine"), ch("phase_correlation"), { ...ref, method_used: "rigid" }],
+      }),
+    ).toBe("affine requested; phase correlation on 1 of 2");
   });
 });
 
@@ -1109,6 +1166,32 @@ describe("Align overlay channels", () => {
     expect(alignOverlayBinIds(["r", "g", "b", "l"], ["r", "l", "l", "x"])).toEqual(["r", "l", "g"]);
   });
 
+  it("puts the reference Align chose first, and the first channel when it names none or an unknown bin", () => {
+    expect(alignOverlayBinIds(["r", "g", "b"], [], "b")).toEqual(["b", "r", "g"]);
+    expect(alignOverlayBinIds(["r", "g", "b", "l"], ["l"], "g")).toEqual(["g", "l", "r"]);
+    expect(alignOverlayBinIds(["r", "g", "b", "l"], ["g", "b"], "g")).toEqual(["g", "b", "r"]);
+    expect(alignOverlayBinIds(["r", "g"], [], "x")).toEqual(["r", "g"]);
+    expect(alignOverlayBinIds(["r", "g"], [], null)).toEqual(["r", "g"]);
+    expect(alignOverlayBinIds([], [], "r")).toEqual([]);
+  });
+
+  it("carries the reference from the wizard state into the run and the overlay request", () => {
+    const channels = [{ binId: "ha", path: "/s/ha.fits" }, { binId: "oiii", path: "/raw/o_1.fits" }];
+    const aligned = { ha: "__wizard_ch_tq1_ha_aligned", oiii: "__wizard_ch_tq1_oiii_aligned" };
+    const withRef = nextAlignedRunState(null, channels, aligned, false, "oiii");
+    expect(withRef.run?.referenceBinId).toBe("oiii");
+    expect(alignOverlayRequest(withRef.run!)).toEqual({
+      binIds: ["oiii", "ha"],
+      afterKeys: [aligned.oiii, aligned.ha],
+      beforePaths: ["/raw/o_1.fits", "/s/ha.fits"],
+    });
+    expect(nextAlignedRunState(withRef, channels, aligned, false, "oiii")).toBe(withRef);
+    expect(nextAlignedRunState(withRef, channels, aligned, false, "ha").run?.referenceBinId).toBe("ha");
+    const untagged = nextAlignedRunState(null, channels, aligned, false);
+    expect(alignOverlayRequest(untagged.run!)?.binIds).toEqual(["ha", "oiii"]);
+    expect(sameAlignedRun(untagged.run, withRef.run)).toBe(false);
+  });
+
   it("builds a run only when every channel Align used has an aligned key", () => {
     const channels = [{ binId: "ha", path: "/s/ha.fits" }, { binId: "oiii", path: "/raw/o_1.fits" }];
     const aligned = { ha: "__wizard_ch_ha_aligned", oiii: "__wizard_ch_oiii_aligned" };
@@ -1135,6 +1218,27 @@ describe("Align overlay channels", () => {
     });
     expect(alignOverlayRequest(run, ["l", "b"])?.beforePaths).toEqual(["/in/r.fits", "/in/l.fits", "/in/b.fits"]);
     expect(alignOverlayRequest({ ...run, inputs: { r: "/in/r.fits" } })).toBeNull();
+  });
+
+  it("offers every channel except the reference Align chose in the G and B pickers", () => {
+    const binIds = ["ha", "r", "g", "b"];
+    const run = {
+      binIds,
+      aligned: Object.fromEntries(binIds.map((id) => [id, `__wizard_ch_${id}_aligned`])),
+      inputs: Object.fromEntries(binIds.map((id) => [id, `/in/${id}.fits`])),
+      referenceBinId: "r",
+    };
+    const request = alignOverlayRequest(run)!;
+    expect(request.binIds).toEqual(["r", "ha", "g"]);
+    const choices = alignOverlayChoices(run, request);
+    expect(choices).toEqual(["ha", "g", "b"]);
+    expect(request.binIds.slice(1).every((id) => choices?.includes(id))).toBe(true);
+    const picked = alignOverlayRequest(run, ["b", "ha"])!;
+    expect(alignOverlayChoices(run, picked)).toEqual(["ha", "g", "b"]);
+    const untagged = { ...run, referenceBinId: null };
+    expect(alignOverlayChoices(untagged, alignOverlayRequest(untagged)!)).toEqual(["r", "g", "b"]);
+    const three = { ...run, binIds: ["ha", "r", "g"] };
+    expect(alignOverlayChoices(three, alignOverlayRequest(three)!)).toBeNull();
   });
 });
 
@@ -1470,5 +1574,107 @@ describe("export and Auto STF requirements", () => {
       "Auto STF needs a blended composite: run Blend first.",
     );
     expect(autoStfBlockedReason(stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { compositeReady: true }))).toBeNull();
+  });
+});
+
+describe("Align reference and run token in the wizard state", () => {
+  const tokened = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, {
+    alignedPaths: { ha: "__wizard_ch_tq1_ha_aligned", oiii: "__wizard_ch_tq1_oiii_aligned" },
+    croppedPaths: { ha: "__wizard_ch_tq1_ha_cropped", oiii: "__wizard_ch_tq1_oiii_cropped" },
+    alignRefChoice: "oiii",
+    alignRefBinId: "oiii",
+    alignRunToken: "q1",
+  });
+
+  it("starts with no reference choice, reference bin or run token", () => {
+    expect([INITIAL_STATE.alignRefChoice, INITIAL_STATE.alignRefBinId, INITIAL_STATE.alignRunToken]).toEqual([null, null, null]);
+  });
+
+  it("forgets the reference bin and the run token whenever the aligned keys are cleared, and keeps the user's choice", () => {
+    for (const from of ["channels", "stack"]) {
+      const after = { ...tokened, ...invalidateDownstream(tokened, from) };
+      expect(after.alignedPaths, from).toEqual({});
+      expect(after.alignRefBinId, from).toBeNull();
+      expect(after.alignRunToken, from).toBeNull();
+      expect(after.alignRefChoice, from).toBe("oiii");
+    }
+    for (const from of ["align", "crop", "background", "blend"]) {
+      const after = { ...tokened, ...invalidateDownstream(tokened, from) };
+      expect(after.alignRefBinId, from).toBe("oiii");
+      expect(after.alignRunToken, from).toBe("q1");
+    }
+  });
+
+  it("forgets them too when an exclusion changes a channel's input and clears the aligned keys", () => {
+    const two = stateWith({ ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] }, {
+      alignedPaths: tokened.alignedPaths,
+      alignRefChoice: "oiii",
+      alignRefBinId: "oiii",
+      alignRunToken: "q1",
+      excludedFiles: { ha: ["/h1.fits"] },
+    });
+    const switched = withExcludedFiles(two, "ha", ["/h2.fits"]);
+    expect(switched.alignedPaths).toEqual({});
+    expect([switched.alignRefBinId, switched.alignRunToken, switched.alignRefChoice]).toEqual([null, null, "oiii"]);
+    const same = withExcludedFiles(two, "ha", ["/h1.fits"]);
+    expect([same.alignRefBinId, same.alignRunToken]).toEqual(["oiii", "q1"]);
+  });
+});
+
+describe("fixed channel mapping of an export without a composite", () => {
+  const sho = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"], sii: ["/s.fits"] });
+  const mapping = "Channel mapping: R=SII G=HA B=OIII (fixed, Blend weights not applied)";
+
+  it("maps the bins to R, G and B in the candidate order of the export", () => {
+    expect(resolveRgbBins(sho)).toEqual({ r: "sii", g: "ha", b: "oiii" });
+    expect(resolveRgbBins(stateWith({ r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] }))).toEqual({ r: "r", g: "g", b: "b" });
+    expect(resolveRgbBins(stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }))).toEqual({ r: "ha", g: "oiii", b: "oiii" });
+    expect(resolveRgbBins(stateWith({}))).toEqual({ r: null, g: null, b: null });
+  });
+
+  it("resolves the paths through the same mapping", () => {
+    const cases = [
+      sho,
+      stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }),
+      stateWith({ ha: ["/h.fits"] }),
+      stateWith({ l: ["/l.fits"], r: ["/r.fits"] }),
+      stateWith({ ha: ["/h.fits"], r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] }),
+    ];
+    for (const s of cases) {
+      const bins = resolveRgbBins(s);
+      const path = (id: string | null) => (id ? resolveChannelPath(s, id) : null);
+      expect(resolveRgbPaths(s)).toEqual({ r: path(bins.r), g: path(bins.g), b: path(bins.b) });
+    }
+  });
+
+  it("explains the fixed mapping of a channel export with the bin labels", () => {
+    expect(exportMappingBanner(sho)).toBe(
+      "No composite yet: exporting the fixed mapping R=SII G=Hα B=OIII. Your Blend weights are not applied; run Blend to export the composite.",
+    );
+    expect(exportMappingBanner(stateWith({ r: ["/r.fits"], g: ["/g.fits"] }))).toContain("the fixed mapping R=R G=G B=R.");
+  });
+
+  it("shows no mapping banner for a composite, a single channel or a channel exported alone", () => {
+    expect(exportMappingBanner({ ...sho, compositeReady: true })).toBeNull();
+    expect(exportMappingBanner(stateWith({ ha: ["/h.fits"] }))).toBeNull();
+    const mono = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { channelResults: withChannelStage({}, "ha", "stretched", stretched) });
+    expect(resolveExportRgbPaths(mono).monoBinId).toBe("ha");
+    expect(exportMappingBanner(mono)).toBeNull();
+  });
+
+  it("records the fixed mapping in the HISTORY in ASCII, with upper-cased bin ids", () => {
+    const s = { ...sho, channelResults: withChannelStage({}, "ha", "starless", starless) };
+    const out = wizardChannelExport(s)!;
+    const lines = channelExportHistory(s, [out.r, out.g, out.b]);
+    expect(lines).toContain(mapping);
+    expect(lines).toEqual([mapping, `Channel ha: ${starless.note}`]);
+    for (const line of lines) expect(line).toMatch(/^[\x20-\x7e]*$/);
+    expect(channelExportHistory(sho, ["/s.fits", "/h.fits", "/o.fits"])).toEqual([mapping]);
+  });
+
+  it("records no mapping for a single channel or a channel exported alone", () => {
+    expect(channelExportHistory(stateWith({ ha: ["/h.fits"] }), ["/h.fits", "/h.fits", "/h.fits"])).toEqual([]);
+    const mono = stateWith({ ha: ["/h.fits"], oiii: ["/o.fits"] }, { channelResults: withChannelStage({}, "ha", "stretched", stretched) });
+    expect(channelExportHistory(mono, [stretched.path, stretched.path, stretched.path])).toEqual([`Channel ha: ${stretched.note}`]);
   });
 });

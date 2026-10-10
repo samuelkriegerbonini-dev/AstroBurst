@@ -6,9 +6,11 @@ import type { RegionShape } from "../../shared/types/regions";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, skySeparationEntry } from "../../utils/measurementLog";
 import { formatPositionAngle, formatSeparation, pixelLength } from "../../utils/skyMeasure";
+import { regionStatsRunKey } from "../../utils/analysisTarget";
 
 interface LineSkyReadoutProps {
   measurePath: string | null;
+  measureKey?: string | null;
   shape: RegionShape;
 }
 
@@ -17,9 +19,10 @@ const LENGTH_DIGITS = 1;
 const LOG_BUTTON_CLASS =
   "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
 
-function LineSkyReadout({ measurePath, shape }: LineSkyReadoutProps) {
+function LineSkyReadout({ measurePath, measureKey, shape }: LineSkyReadoutProps) {
   const line = shape.shape === "line" ? shape : null;
   const lineKey = line ? `${line.x1},${line.y1},${line.x2},${line.y2}` : null;
+  const runKey = regionStatsRunKey(measurePath, measureKey ?? null);
   const [sky, setSky] = useState<SkySeparationResult | null>(null);
   const seqRef = useRef(0);
   const provenance = useMeasurementProvenance();
@@ -39,7 +42,7 @@ function LineSkyReadout({ measurePath, shape }: LineSkyReadoutProps) {
       }
     }, SKY_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [measurePath, lineKey]);
+  }, [measurePath, runKey, lineKey]);
 
   if (!line) return null;
 

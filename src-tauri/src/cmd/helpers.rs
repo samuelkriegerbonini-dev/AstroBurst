@@ -61,10 +61,16 @@ pub(crate) fn parse_wb(
     }
 }
 
-pub(crate) fn parse_align_method(method: Option<&str>) -> AlignMethod {
-    match method {
-        Some(ALIGN_METHOD_AFFINE) => AlignMethod::Affine,
-        _ => AlignMethod::PhaseCorrelation,
+pub(crate) fn parse_align_method_checked(method: Option<&str>) -> anyhow::Result<AlignMethod> {
+    let Some(name) = method else {
+        return Ok(AlignMethod::default());
+    };
+    match name.trim().to_ascii_lowercase().as_str() {
+        ALIGN_METHOD_PHASE => Ok(AlignMethod::PhaseCorrelation),
+        ALIGN_METHOD_AFFINE => Ok(AlignMethod::Affine),
+        other => anyhow::bail!(
+            "unknown align method '{other}' (supported: {ALIGN_METHOD_PHASE}, {ALIGN_METHOD_AFFINE})"
+        ),
     }
 }
 
@@ -686,6 +692,16 @@ mod tests {
         assert_eq!(rgb.to_string(), expected);
         let orig = load_orig_or_composite().err().expect("the original planes were cleared");
         assert_eq!(orig.to_string(), expected);
+    }
+
+    #[test]
+    fn an_unknown_align_method_is_an_error_not_phase_correlation() {
+        let err = parse_align_method_checked(Some("star_affine")).expect_err("an unknown method ran as phase correlation");
+        assert_eq!(err.to_string(), "unknown align method 'star_affine' (supported: phase_correlation, affine)");
+        assert_eq!(parse_align_method_checked(None).unwrap(), AlignMethod::PhaseCorrelation);
+        assert_eq!(parse_align_method_checked(Some(ALIGN_METHOD_PHASE)).unwrap(), AlignMethod::PhaseCorrelation);
+        assert_eq!(parse_align_method_checked(Some(ALIGN_METHOD_AFFINE)).unwrap(), AlignMethod::Affine);
+        assert_eq!(parse_align_method_checked(Some(" Affine ")).unwrap(), AlignMethod::Affine);
     }
 }
 

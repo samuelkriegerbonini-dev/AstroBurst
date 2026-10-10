@@ -27,6 +27,7 @@ import MeasurementBadge from "../analysis/MeasurementBadge";
 interface RegionsPanelProps {
   filePath: string | null;
   measurePath: string | null;
+  measureKey: string | null;
 }
 
 const DEFAULT_SWATCH = "#7dd3fc";
@@ -229,7 +230,7 @@ function RegionRow({
   );
 }
 
-function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
+function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
   const provenance = useMeasurementProvenance();
@@ -243,6 +244,7 @@ function RegionsPanel({ filePath, measurePath }: RegionsPanelProps) {
     doc.regions,
     excludeDq,
     clip,
+    measureKey,
   );
   const [system, setSystem] = useState<RegionSystem>("image");
   const [busy, setBusy] = useState(false);

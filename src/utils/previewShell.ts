@@ -128,6 +128,15 @@ export function cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims 
   return isSpectralCube && sameGrid(fileDims, displayedDims);
 }
 
+export function cubeSpectrumClickAllowed({ isCube, hasRamp, fileDims, displayedDims }: {
+  isCube: boolean;
+  hasRamp: boolean;
+  fileDims: [number, number] | null;
+  displayedDims: [number, number] | null;
+}): boolean {
+  return isCube && (hasRamp || sameGrid(fileDims, displayedDims));
+}
+
 export const CLICK_SLOP_PX = 4;
 export const COMPARE_DIVIDER_GRAB_PX = 12;
 

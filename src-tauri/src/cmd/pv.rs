@@ -40,6 +40,7 @@ const CARD_CUNIT2: &str = "CUNIT2";
 const CARD_CRPIX2: &str = "CRPIX2";
 const CARD_CRVAL2: &str = "CRVAL2";
 const CARD_CDELT2: &str = "CDELT2";
+const CARD_HISTORY: &str = "HISTORY";
 const CARD_OFFSET_CTYPE: &str = "OFFSET";
 const CARD_PVLINEX0: &str = "PVLINEX0";
 const CARD_PVLINEY0: &str = "PVLINEY0";
@@ -117,6 +118,9 @@ pub(crate) fn pv_header(cube: &LazyCube, cfg: &PvConfig, pv: &PvDiagram) -> HduH
     header.set_f64(CARD_CRPIX2, 1.0);
     header.set_f64(CARD_CRVAL2, pv.native.crval);
     header.set_f64(CARD_CDELT2, pv.native.cdelt);
+    if let Some(history) = &pv.native.history {
+        header.cards.push((CARD_HISTORY.to_string(), history.clone()));
+    }
     if let Some(bunit) = card_text(&cube.header, CARD_BUNIT) {
         set_text(&mut header, &mut text_keys, CARD_BUNIT, bunit);
     }
@@ -369,6 +373,37 @@ mod tests {
         }
         assert!(WcsTransform::from_header(h).is_err());
         assert_eq!(crate::cmd::common::load_cached(&files.fits_path).unwrap().arr().dim(), (31, 28));
+    }
+
+    #[test]
+    fn the_pv_fits_of_a_tab_cube_carries_the_linear_step_and_a_history_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tab.fits");
+        write_cube_with_wcs_table(&path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, &tab_cube_cards(), &[1.0, 1.5, 2.0, 2.5], |z, _, x| {
+            1.0 + z as f32 + x as f32 * 0.01
+        });
+        let key = path.to_str().unwrap().to_string();
+        let cube = LazyCube::open(&key).unwrap();
+        let out = output_dir(&dir);
+        let cfg = PvConfig { mode: PvSpectralMode::WavelengthVac, ..config(SLIT_H, 0, 3) };
+        let (pv, files) = pv_diagram_files(&cube, &key, &out, &cfg).unwrap();
+        assert_eq!(pv.summary.n_channels, 4);
+        assert_eq!(pv.spectral_values, vec![1.0, 1.5, 2.0, 2.5]);
+        let h = reopen(&files.fits_path).header;
+        assert_eq!(h.get("CTYPE2"), Some("WAVE"));
+        assert_eq!(h.get("CUNIT2"), Some("um"));
+        assert_eq!(h.get_f64("CRVAL2"), Some(1.0));
+        assert!((h.get_f64("CDELT2").unwrap() - 0.5).abs() < 1e-12, "{:?}", h.get_f64("CDELT2"));
+        let history: Vec<&str> = h.cards.iter().filter(|(k, _)| k.trim() == "HISTORY").map(|(_, v)| v.as_str()).collect();
+        assert!(history.iter().any(|line| line.contains("-TAB table")), "{history:?}");
+        assert!(h.get("PS3_0").is_none() && h.get("PS2_0").is_none(), "no PS cards may survive");
+
+        let bent = dir.path().join("bent.fits");
+        write_cube_with_wcs_table(&bent, LINE_CUBE_SIZE, LINE_CUBE_SIZE, &tab_cube_cards(), &[1.0, 2.0, 4.0, 8.0], |z, _, _| 1.0 + z as f32);
+        let bent_key = bent.to_str().unwrap().to_string();
+        let err = format!("{:#}", pv_diagram_files(&LazyCube::open(&bent_key).unwrap(), &bent_key, &out, &cfg).err().unwrap());
+        assert!(err.contains("deviates from linear"), "{err}");
+        assert!(err.contains("a PV FITS cannot describe it"), "{err}");
     }
 
     #[test]

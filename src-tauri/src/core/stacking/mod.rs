@@ -1,7 +1,10 @@
 pub mod calibration;
 pub mod cfa_guard;
 pub mod combine;
+pub mod consistency;
 pub mod drizzle;
+pub mod frame_cards;
+pub mod masters;
 
 use crate::types::error::AppError;
 

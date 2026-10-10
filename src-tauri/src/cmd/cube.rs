@@ -8,7 +8,7 @@ use crate::cmd::common::{
     blocking_cmd, derived_output_header, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
     OutputValues,
 };
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::infra::wcs_source::load_wcs;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::eager::{build_wavelength_axis, classify_spectral_cube, ramp_classification};
 use crate::core::cube::lazy::{CollapseMode, LazyCube};
@@ -135,8 +135,9 @@ pub fn linear_preview(arr: &Array2<f32>) -> Array2<f32> {
     arr.mapv(|v| if v.is_finite() { ((v - lo) / range).clamp(0.0, 1.0) } else { 0.0 })
 }
 
-fn mjy_per_sr_to_jy_factor(header: &HduHeader) -> Option<f64> {
-    let wcs = WcsTransform::from_header(header).ok();
+fn mjy_per_sr_to_jy_factor(cube: &LazyCube) -> Option<f64> {
+    let header = &cube.header;
+    let wcs = load_wcs(&cube.source_path, header).ok();
     let cal = PhotCal::from_header(header, wcs.as_ref())?;
     match cal.convention {
         FluxConvention::JwstMjySr { pixar_sr, .. } => Some(pixar_sr * JY_PER_MJY),
@@ -166,7 +167,7 @@ pub(crate) fn region_spectrum_response(
 ) -> anyhow::Result<RegionSpectrumResponse> {
     let spectrum = cube.extract_spectrum_aperture(shape, background, APERTURE_SUBSAMPLES)?;
     let axis = cube.spectral_axis().ok();
-    let flux_jy = mjy_per_sr_to_jy_factor(&cube.header)
+    let flux_jy = mjy_per_sr_to_jy_factor(&cube)
         .map(|factor| spectrum.sum.iter().map(|&s| s as f64 * factor).collect());
     Ok(RegionSpectrumResponse {
         sum: spectrum.sum,
@@ -328,7 +329,7 @@ fn cube_spectrum_json(path: &str, x: usize, y: usize) -> anyhow::Result<serde_js
     let spectrum = cube.extract_spectrum_at(y, x)?;
     let axis = cube.spectral_axis().ok();
     let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
-    let flux_jy = mjy_per_sr_to_jy_factor(&cube.header).map(|f| spectrum.iter().map(|&v| v as f64 * f).collect::<Vec<f64>>());
+    let flux_jy = mjy_per_sr_to_jy_factor(&cube).map(|f| spectrum.iter().map(|&v| v as f64 * f).collect::<Vec<f64>>());
     Ok(json!({
         RES_SPECTRUM: spectrum,
         RES_WAVELENGTHS: axis.as_ref().map(|a| a.header_values()),
@@ -421,6 +422,7 @@ pub async fn moment_maps_cmd(
 
 #[cfg(test)]
 mod tests {
+    use crate::core::astrometry::wcs::WcsTransform;
     use std::fs::File;
 
     use super::*;

@@ -1,3 +1,5 @@
+import { sameGrid } from "./previewShell";
+
 export interface CompositeViewInput {
   compositePreviewUrl: string | null;
   fileIsRgb: boolean;
@@ -65,6 +67,37 @@ export function analysisMeasureKey(input: MeasureKeyInput): string | null {
   if (!input.path) return null;
   if (input.composite || input.processedFitsPath !== input.path) return input.path;
   return `${input.path}@${input.processedVersion}`;
+}
+
+export function statisticsRunKey(input: {
+  filePath: string | null;
+  composite: boolean;
+  rgbPath: string | null;
+  measureKey: string | null;
+}): string {
+  return `${input.measureKey ?? input.filePath ?? ""}|${input.composite ? 1 : 0}|${input.rgbPath ?? ""}`;
+}
+
+export function regionStatsRunKey(filePath: string | null, measureKey: string | null): string {
+  return measureKey ?? filePath ?? "";
+}
+
+export interface WcsProbeInput {
+  path: string | null;
+  dimensions: [number, number] | null;
+  previewOnly: boolean;
+  fileDims: [number, number] | null;
+}
+
+export interface WcsProbe {
+  path: string;
+  dimensions: [number, number];
+}
+
+export function wcsProbeTarget({ path, dimensions, previewOnly, fileDims }: WcsProbeInput): WcsProbe | null {
+  if (!path || !dimensions) return null;
+  if (previewOnly && !sameGrid(fileDims, dimensions)) return null;
+  return { path, dimensions };
 }
 
 export interface MeasurementSourceInput {

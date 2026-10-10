@@ -1,5 +1,5 @@
 import type { ProcessedResult } from "../shared/types/preview";
-import type { PipelineResult } from "../shared/types/stacking";
+import type { PipelineChannelStats, PipelineResult } from "../shared/types/stacking";
 import { samePath } from "./processingChain";
 
 function baseName(path: string): string {
@@ -45,8 +45,13 @@ export interface PipelineViewOutput {
   label: string;
 }
 
+export function stackedLights(channel: PipelineChannelStats): number {
+  return channel.lights_input - (channel.excluded_frames?.length ?? 0);
+}
+
 function channelLights(result: PipelineResult, label: string): number {
-  return result.stats.channels.find((c) => c.label === label)?.lights_input ?? 0;
+  const channel = result.stats.channels.find((c) => c.label === label);
+  return channel ? stackedLights(channel) : 0;
 }
 
 export function pipelineViewOutput(result: PipelineResult, choice: string): PipelineViewOutput | null {
@@ -54,7 +59,7 @@ export function pipelineViewOutput(result: PipelineResult, choice: string): Pipe
   if (choice === PIPELINE_RGB_CHOICE) {
     const reference = masters.find((m) => m.label === PIPELINE_RGB_REFERENCE_CHANNEL) ?? masters[0];
     if (!result.rgbPreviewUrl || !reference) return null;
-    const lights = result.stats.channels.reduce((sum, c) => sum + c.lights_input, 0);
+    const lights = result.stats.channels.reduce((sum, c) => sum + stackedLights(c), 0);
     return {
       output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: null, kind: "stacking", inputPath: reference.input_path },
       label: framesLabel("Pipeline RGB", lights),

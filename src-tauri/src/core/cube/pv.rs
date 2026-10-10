@@ -6,8 +6,9 @@ use crate::core::astrometry::spectral::{
     air_formula_applies, air_refractive_index, air_to_vacuum_um, velocity_kms, wavelength_um_from_frequency_ghz,
     AxisKind, SpectralAxis, VelocityConvention, SPEED_OF_LIGHT_KMS,
 };
-use crate::core::astrometry::wcs::{position_angle_deg, WcsTransform};
+use crate::core::astrometry::wcs::position_angle_deg;
 use crate::core::cube::lazy::LazyCube;
+use crate::infra::wcs_source::load_wcs;
 use crate::math::exact_median_f64;
 
 pub const MAX_PV_OFFSETS: usize = 8192;
@@ -20,8 +21,11 @@ pub const OFFSET_UNIT_ARCSEC: &str = "arcsec";
 pub const OFFSET_UNIT_PIXEL: &str = "pixel";
 pub const CHANNEL_UNIT: &str = "ch";
 
+pub const PV_TAB_LINEAR_TOL: f64 = 0.01;
+
 const PV_BAND_BYTES: usize = 64 << 20;
 const PV_MAX_CHANNELS_PER_BATCH: usize = 32;
+const TAB_CTYPE_SUFFIX: &str = "-TAB";
 const COUNT_EPSILON: f64 = 1e-9;
 const ARCSEC_PER_DEG: f64 = 3600.0;
 const UNIT_UM: &str = "um";
@@ -88,6 +92,7 @@ pub struct PvNativeAxis {
     pub cunit: Option<String>,
     pub crval: f64,
     pub cdelt: f64,
+    pub history: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,20 +155,71 @@ fn channel_axis(z0: usize, n_channels: usize, reason: &str, mut notes: Vec<Strin
         unit: CHANNEL_UNIT,
         convention_applies: false,
         rest_um: None,
-        native: PvNativeAxis { ctype: None, cunit: None, crval: z0 as f64, cdelt: 1.0 },
+        native: PvNativeAxis { ctype: None, cunit: None, crval: z0 as f64, cdelt: 1.0, history: None },
         notes,
     }
 }
 
-fn native_axis(axis: &SpectralAxis, z0: usize) -> PvNativeAxis {
+fn sig4(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return format!("{value}");
+    }
+    let magnitude = value.abs();
+    if !(1e-3..1e4).contains(&magnitude) {
+        return format!("{value:.3e}");
+    }
+    let decimals = (3 - magnitude.log10().floor() as i32).max(0) as usize;
+    let text = format!("{value:.decimals$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    }
+}
+
+fn native_axis(axis: &SpectralAxis, z0: usize, z1: usize) -> Result<PvNativeAxis> {
     let scale = if axis.header_scale.is_finite() && axis.header_scale != 0.0 { axis.header_scale } else { 1.0 };
     let cunit = if axis.header_unit.is_empty() { axis.kind.fits_default_unit().to_string() } else { axis.header_unit.clone() };
-    PvNativeAxis {
-        ctype: Some(axis.ctype.clone()),
-        cunit: Some(cunit),
-        crval: axis.values.get(z0).map(|v| v / scale).unwrap_or(f64::NAN),
-        cdelt: axis.cdelt / scale,
+    if !axis.tabulated {
+        return Ok(PvNativeAxis {
+            ctype: Some(axis.ctype.clone()),
+            cunit: Some(cunit),
+            crval: axis.values.get(z0).map(|v| v / scale).unwrap_or(f64::NAN),
+            cdelt: axis.cdelt / scale,
+            history: None,
+        });
     }
+    let range = axis.values.get(z0..=z1).unwrap_or(&[]);
+    if range.is_empty() || range.iter().any(|v| !v.is_finite()) {
+        bail!(
+            "the -TAB spectral axis has no finite value for every channel {}..{}; a PV FITS cannot describe it",
+            z0,
+            z1
+        );
+    }
+    let steps: Vec<f64> = range.windows(2).map(|w| w[1] - w[0]).collect();
+    let cdelt = if steps.is_empty() { axis.cdelt } else { exact_median_f64(&steps) };
+    let first = range[0];
+    let dev = range
+        .iter()
+        .enumerate()
+        .map(|(k, v)| (v - (first + k as f64 * cdelt)).abs())
+        .fold(0.0f64, f64::max);
+    if dev > PV_TAB_LINEAR_TOL * cdelt.abs() {
+        bail!(
+            "the -TAB spectral axis deviates from linear by {} {} (more than 1% of the step {}); a PV FITS cannot describe it",
+            sig4(dev),
+            axis.unit,
+            sig4(cdelt)
+        );
+    }
+    Ok(PvNativeAxis {
+        ctype: Some(axis.ctype.trim_end_matches(TAB_CTYPE_SUFFIX).to_string()),
+        cunit: Some(cunit),
+        crval: first / scale,
+        cdelt: cdelt / scale,
+        history: Some(format!("PV axis from a -TAB table (max deviation {} {} from linear)", sig4(dev), axis.unit)),
+    })
 }
 
 fn frame_description(axis: &SpectralAxis) -> String {
@@ -273,7 +329,8 @@ fn resolve_spectral(cube: &LazyCube, cfg: &PvConfig, n_channels: usize) -> Resul
             ));
         }
     }
-    Ok(SpectralResolution { values, unit, convention_applies, rest_um, native: native_axis(&axis, cfg.z0), notes })
+    let native = native_axis(&axis, cfg.z0, cfg.z1)?;
+    Ok(SpectralResolution { values, unit, convention_applies, rest_um, native, notes })
 }
 
 pub fn row_band(y_min: f64, y_max: f64, naxis2: usize) -> (usize, usize) {
@@ -402,7 +459,7 @@ struct OffsetScale {
 }
 
 fn offset_scale(cube: &LazyCube, cfg: &PvConfig, along: (f64, f64)) -> OffsetScale {
-    let Ok(wcs) = WcsTransform::from_header(&cube.header) else {
+    let Ok(wcs) = load_wcs(&cube.source_path, &cube.header) else {
         return OffsetScale {
             step: cfg.step_px,
             unit: OFFSET_UNIT_PIXEL,
@@ -725,6 +782,52 @@ mod tests {
             all.push((key, value));
         }
         all
+    }
+
+    fn tab_axis(values: &[f64]) -> SpectralAxis {
+        let diffs: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+        SpectralAxis {
+            kind: AxisKind::Wave,
+            ctype: "WAVE-TAB".to_string(),
+            unit: "um".to_string(),
+            header_unit: "um".to_string(),
+            header_scale: 1.0,
+            values: values.to_vec(),
+            crval: values[0],
+            cdelt: exact_median_f64(&diffs),
+            crpix: 1.0,
+            rest_wavelength_um: None,
+            rest_frequency_hz: None,
+            specsys: None,
+            velosys: None,
+            notes: Vec::new(),
+            tabulated: true,
+        }
+    }
+
+    #[test]
+    fn pv_refuses_a_tab_axis_that_is_not_close_to_linear() {
+        let err = format!("{:#}", native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0]), 0, 3).err().unwrap());
+        assert!(err.contains("deviates from linear"), "{err}");
+        assert!(err.contains("more than 1% of the step 2"), "{err}");
+        assert!(err.contains("a PV FITS cannot describe it"), "{err}");
+
+        let native = native_axis(&tab_axis(&[1.0, 1.5, 2.0, 2.5000001]), 0, 3).unwrap();
+        assert!((native.cdelt - 0.5).abs() < 1e-9, "{}", native.cdelt);
+        assert_eq!(native.crval, 1.0);
+        assert_eq!(native.ctype.as_deref(), Some("WAVE"));
+        assert_eq!(native.cunit.as_deref(), Some("um"));
+        let history = native.history.clone().unwrap_or_default();
+        assert!(history.contains("-TAB table"), "{history}");
+        assert!(history.len() <= 72 && history.is_ascii(), "{history}");
+
+        let sub_range = native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0, 8.5, 9.0]), 3, 5).unwrap();
+        assert!((sub_range.cdelt - 0.5).abs() < 1e-9, "{}", sub_range.cdelt);
+        assert_eq!(sub_range.crval, 8.0);
+
+        let linear = native_axis(&SpectralAxis { tabulated: false, ..tab_axis(&[1.0, 2.0, 4.0, 8.0]) }, 0, 3).unwrap();
+        assert_eq!(linear.history, None);
+        assert_eq!(linear.ctype.as_deref(), Some("WAVE-TAB"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use ndarray::Array2;
 
 use crate::infra::asdf::converter::{
     auto_data_key, is_interleaved_layout, list_arrays, plane_geometry, shape_label,
-    AsdfArrayInfo, AsdfImage,
+    AsdfArrayInfo, AsdfImage, AsdfWcs,
 };
 use crate::infra::asdf::AsdfFile;
 use crate::infra::fits::reader::{HduInfo, MmapImageResult};
@@ -330,32 +330,37 @@ fn synthesise_header(asdf_img: &AsdfImage, data_key: &str, plane_count: usize, r
         push_card(&mut cards, &mut index, ASDF_PLANE_COUNT, plane_count.to_string());
     }
 
-    if let (None, Some(note)) = (&asdf_img.wcs, &asdf_img.wcs_note) {
-        push_card(&mut cards, &mut index, ASDF_WCS_NOTE_CARD, note.clone());
-    }
-
-    if let Some(ref wcs) = asdf_img.wcs {
-        let wcs_entries = [
-            ("CRPIX1", wcs.crpix[0].to_string()),
-            ("CRPIX2", wcs.crpix[1].to_string()),
-            ("CRVAL1", wcs.crval[0].to_string()),
-            ("CRVAL2", wcs.crval[1].to_string()),
-            ("CDELT1", wcs.cdelt[0].to_string()),
-            ("CDELT2", wcs.cdelt[1].to_string()),
-            ("PC1_1", wcs.pc[0][0].to_string()),
-            ("PC1_2", wcs.pc[0][1].to_string()),
-            ("PC2_1", wcs.pc[1][0].to_string()),
-            ("PC2_2", wcs.pc[1][1].to_string()),
-            ("CTYPE1", wcs.ctype[0].clone()),
-            ("CTYPE2", wcs.ctype[1].clone()),
-            ("CUNIT1", wcs.cunit[0].clone()),
-            ("CUNIT2", wcs.cunit[1].clone()),
-        ];
-        for (k, v) in wcs_entries {
-            push_card(&mut cards, &mut index, k, v);
+    match &asdf_img.wcs {
+        AsdfWcs::None(Some(note)) => push_card(&mut cards, &mut index, ASDF_WCS_NOTE_CARD, note.clone()),
+        AsdfWcs::None(None) => {}
+        AsdfWcs::Gwcs { fit, .. } => {
+            for (k, v) in fit.header_cards() {
+                push_card(&mut cards, &mut index, &k, v);
+            }
         }
-        if let Some(lonpole) = wcs.lonpole {
-            push_card(&mut cards, &mut index, "LONPOLE", lonpole.to_string());
+        AsdfWcs::Tan(wcs) => {
+            let wcs_entries = [
+                ("CRPIX1", wcs.crpix[0].to_string()),
+                ("CRPIX2", wcs.crpix[1].to_string()),
+                ("CRVAL1", wcs.crval[0].to_string()),
+                ("CRVAL2", wcs.crval[1].to_string()),
+                ("CDELT1", wcs.cdelt[0].to_string()),
+                ("CDELT2", wcs.cdelt[1].to_string()),
+                ("PC1_1", wcs.pc[0][0].to_string()),
+                ("PC1_2", wcs.pc[0][1].to_string()),
+                ("PC2_1", wcs.pc[1][0].to_string()),
+                ("PC2_2", wcs.pc[1][1].to_string()),
+                ("CTYPE1", wcs.ctype[0].clone()),
+                ("CTYPE2", wcs.ctype[1].clone()),
+                ("CUNIT1", wcs.cunit[0].clone()),
+                ("CUNIT2", wcs.cunit[1].clone()),
+            ];
+            for (k, v) in wcs_entries {
+                push_card(&mut cards, &mut index, k, v);
+            }
+            if let Some(lonpole) = wcs.lonpole {
+                push_card(&mut cards, &mut index, "LONPOLE", lonpole.to_string());
+            }
         }
     }
 
@@ -410,7 +415,12 @@ fn push_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::astrometry::gwcs::test_support::{
+        fixture_pipeline, real_data_dir, skip_if_absent, truth_dir, truth_from, unwrap_pair,
+    };
+    use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
     use crate::core::metadata::photcal::PhotCal;
+    use crate::infra::asdf::converter::test_fixtures::nircam_gwcs_with_inline_data;
     use crate::types::image::IntPlane;
 
     fn int_plane(path: &Path, key: &str) -> Result<Option<IntPlane>> {
@@ -686,11 +696,145 @@ mod tests {
         let header = extract_image_from_asdf(&write_asdf(&dir, &tree)).unwrap().header;
         assert_eq!(header.get("CRVAL2"), Some("90"));
         assert_eq!(header.get_f64("LONPOLE"), Some(180.0));
+        assert_eq!(header.get("A_ORDER"), None, "a pure TAN chain keeps the exact cards, no fit");
+        assert_eq!(header.get("SIPMXERR"), None);
 
-        let wcs = crate::core::astrometry::wcs::WcsTransform::from_header(&header).unwrap();
+        let wcs = WcsTransform::from_header(&header).unwrap();
         let sky = wcs.pixel_to_world(20.0, 10.0);
         assert!((sky.ra - 90.0).abs() < 1e-9, "gwcs puts +x at RA 90 on the pole, got {}", sky.ra);
         assert!((sky.dec - 89.99).abs() < 1e-6, "{}", sky.dec);
+    }
+
+    const TABULAR_WCS: &str = "wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>
+  name: ''
+  steps:
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+      axes_names: [x, y]
+      axes_order: [0, 1]
+      axis_physical_types: ['custom:x', 'custom:y']
+      name: detector
+      unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]
+    transform: !transform/concatenate-1.2.0
+      forward:
+      - !transform/tabular-1.4.0
+        bounds_error: false
+        fill_value: .nan
+        inputs: [x]
+        lookup_table: [0.0, 1.0, 2.0]
+        method: linear
+        outputs: [y]
+        points: [[0.0, 1.0, 2.0]]
+      - !transform/shift-1.2.0 {offset: 1.0}
+      inputs: [x0, x1]
+      outputs: [y0, y1]
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/celestial_frame-1.2.0>
+      axes_names: [lon, lat]
+      axes_order: [0, 1]
+      axis_physical_types: [pos.eq.ra, pos.eq.dec]
+      name: world
+      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0> {frame_attributes: {}}
+      unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]
+    transform: null
+";
+
+    #[test]
+    fn an_unsupported_gwcs_keeps_the_note_and_names_the_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = format!("{TABULAR_WCS}{INLINE_DATA}");
+        let header = extract_image_from_asdf(&write_asdf(&dir, &tree)).unwrap().header;
+        for card in ["CTYPE1", "CRVAL1", "CRPIX1", "CD1_1", "PC1_1", "A_ORDER", "SIPMXERR"] {
+            assert_eq!(header.get(card), None, "{card} must not be fabricated");
+        }
+        let note = header.get(ASDF_WCS_NOTE_CARD).expect("the reason is kept in the header");
+        assert!(note.contains("'tabular'"), "{note}");
+        assert!(note.len() <= 67, "{note}");
+    }
+
+    #[test]
+    fn a_distorted_gwcs_gets_fitted_sip_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nircam_gwcs.asdf");
+        std::fs::write(&path, nircam_gwcs_with_inline_data()).unwrap();
+        let header = extract_image_from_asdf(&path).unwrap().header;
+        assert_eq!(header.get("CTYPE1"), Some("RA---TAN-SIP"));
+        assert_eq!(header.get("CTYPE2"), Some("DEC--TAN-SIP"));
+        assert_eq!(header.get("A_ORDER"), Some("5"));
+        assert_eq!(header.get("AP_ORDER"), Some("5"));
+        assert_eq!(header.get("CRPIX1"), Some("1024.5"));
+        assert_eq!(header.get("NAXIS1"), Some("4"));
+        let sipmxerr_card = header.get("SIPMXERR").expect("SIPMXERR card");
+        assert!(sipmxerr_card.contains("E-"), "{sipmxerr_card}");
+        let sipmxerr = header.get_f64("SIPMXERR").unwrap();
+        assert!(((sipmxerr - 9.220195712301538e-9) / 9.220195712301538e-9).abs() <= 0.1, "SIPMXERR {sipmxerr_card} vs gwcs 1.0.3 9.2202e-9");
+        let sipiverr = header.get_f64("SIPIVERR").unwrap();
+        assert!(((sipiverr - 3.593143551386226e-4) / 3.593143551386226e-4).abs() <= 1e-4, "SIPIVERR {:?} vs gwcs 1.0.3 3.5931e-4", header.get("SIPIVERR"));
+        assert_eq!(header.get(ASDF_WCS_NOTE_CARD), None);
+        assert_eq!(header.get("GWCSKEY"), None);
+        let legal = fits_legal(&header);
+        for key in ["CTYPE1", "CRPIX1", "CRVAL1", "CD1_1", "A_2_0", "AP_1_0", "SIPMXERR", "SIPIVERR", "LONPOLE", "RADESYS"] {
+            assert_eq!(legal.get(key), header.get(key), "{key} survives the FITS keyword filter");
+        }
+
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let p = fixture_pipeline("wcs_jwst_nircam_cal300.asdf");
+        let truth = p.forward(0.0, 0.0, false);
+        let sky = wcs.pixel_to_world(0.0, 0.0);
+        let sep_px = angular_separation(sky.ra, sky.dec, truth[0], truth[1]) * 3600.0 / wcs.pixel_scale_arcsec();
+        assert!(sep_px < 0.01, "header SIP at (0, 0) is {sep_px} px from the gWCS");
+    }
+
+    #[test]
+    #[ignore]
+    fn gwcs_real_roman_cal_opens_with_a_fitted_tan_sip_header() {
+        let path = real_data_dir().join("r9999901001001001001_0001_wfi01_f129_cal.asdf");
+        let truth_path = truth_dir().join("roman_wfi01_f129_cal.json");
+        if skip_if_absent(&path) || skip_if_absent(&truth_path) {
+            return;
+        }
+        let header = extract_image_from_asdf(&path).unwrap().header;
+        assert_eq!(header.get("CTYPE1"), Some("RA---TAN-SIP"));
+        assert_eq!(header.get("A_ORDER"), Some("5"));
+        assert_eq!(header.get("AP_ORDER"), Some("5"));
+        assert_eq!(header.get(ASDF_WCS_NOTE_CARD), None);
+        assert_eq!(header.get("GWCSKEY"), None);
+        let sipmxerr = header.get_f64("SIPMXERR").expect("SIPMXERR");
+        assert!(((sipmxerr - 3.4796e-7) / 3.4796e-7).abs() <= 0.1, "SIPMXERR {sipmxerr} vs gwcs 1.0.3 3.4796e-7");
+        let sipiverr = header.get_f64("SIPIVERR").expect("SIPIVERR");
+        assert!(((sipiverr - 9.534e-4) / 9.534e-4).abs() <= 1e-3, "SIPIVERR {sipiverr} vs gwcs 1.0.3 9.534e-4");
+        assert_eq!(header.get_f64("CRPIX1"), Some(2044.5));
+        assert_eq!(header.get_f64("CRPIX2"), Some(2044.5));
+        assert!((header.get_f64("CRVAL1").unwrap() - 72.420918974288).abs() < 1e-9, "{:?}", header.get("CRVAL1"));
+        assert!((header.get_f64("CRVAL2").unwrap() - -30.664375673956).abs() < 1e-9, "{:?}", header.get("CRVAL2"));
+        for (key, expected) in [
+            ("CD1_1", -3.0650203286753e-05),
+            ("CD1_2", -7.3720009911159e-08),
+            ("CD2_1", 1.0857612088582e-07),
+            ("CD2_2", 3.0078322504653e-05),
+        ] {
+            let got = header.get_f64(key).unwrap();
+            assert!((got - expected).abs() < 1e-12, "{key}: {got} vs gwcs {expected}");
+        }
+
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let truth = truth_from(&truth_path);
+        let mut worst_mas = 0.0f64;
+        for point in &truth.points {
+            let world = unwrap_pair(&point.world_no_bbox);
+            if !(world[0].is_finite() && world[1].is_finite()) {
+                continue;
+            }
+            let sky = wcs.pixel_to_world(point.pixel[0], point.pixel[1]);
+            worst_mas = worst_mas.max(angular_separation(sky.ra, sky.dec, world[0], world[1]) * 3.6e6);
+        }
+        println!(
+            "roman cal header: A_ORDER {} AP_ORDER {} SIPMXERR {sipmxerr:.4e} SIPIVERR {sipiverr:.4e}; header SIP vs gWCS truth max {worst_mas:.3e} mas over {} points",
+            header.get("A_ORDER").unwrap(),
+            header.get("AP_ORDER").unwrap(),
+            truth.points.len()
+        );
+        assert!(worst_mas <= 1e-4, "{worst_mas} mas");
     }
 
     #[test]

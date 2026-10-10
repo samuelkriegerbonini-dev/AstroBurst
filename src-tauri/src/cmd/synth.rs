@@ -430,6 +430,7 @@ mod tests {
             let header = header_of(path);
             assert_eq!(header.get_f64("EXPTIME"), Some(300.0));
             assert_eq!(header.get_f64("GAIN"), Some(1.5));
+            assert_eq!(header.get_f64("EGAIN"), Some(1.5));
             assert_eq!(header.get_f64("RDNOISE"), Some(8.0));
             assert_eq!(text_card(&header, "BUNIT").as_deref(), Some("ADU"));
             assert_eq!(header.get_i64("SYNSEED"), Some(4242));

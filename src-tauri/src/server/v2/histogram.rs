@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::stats::percentile;
 use astroburst_lib::infra::cache::ImageEntry;
 use astroburst_lib::types::constants::HISTOGRAM_BINS;
@@ -143,15 +143,16 @@ pub async fn histogram(
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
-    tokio::task::spawn_blocking(move || histogram_body(&entry, target, &params))
+    let wcs_path = session.wcs_source_path(&target);
+    tokio::task::spawn_blocking(move || histogram_body(&entry, target, &wcs_path, &params))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
         .map(Json)
 }
 
-fn histogram_body(entry: &ImageEntry, target: String, params: &HistogramParams) -> Result<Value> {
+fn histogram_body(entry: &ImageEntry, target: String, wcs_path: &str, params: &HistogramParams) -> Result<Value> {
     let arr = entry.arr();
-    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = entry.header().and_then(|h| load_wcs(wcs_path, h).ok());
     let values = region_values(arr, params.region.as_ref(), wcs.as_ref())?;
     let slice: &[f32] = &values.finite;
 

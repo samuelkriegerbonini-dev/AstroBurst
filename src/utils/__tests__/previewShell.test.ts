@@ -13,6 +13,7 @@ import {
   backToFileAction,
   compareDividerGrabbed,
   cpuViewerDisplayTitle,
+  cubeSpectrumClickAllowed,
   cubeSpectrumHintShown,
   fileSwitchCompositeAction,
   formatPixelValue,
@@ -319,6 +320,28 @@ describe("cubeSpectrumHintShown", () => {
   it("hides the hint while the file or the displayed image has no dimensions", () => {
     expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: null, displayedDims: [53, 55] })).toBe(false);
     expect(cubeSpectrumHintShown({ isSpectralCube: true, fileDims: [53, 55], displayedDims: null })).toBe(false);
+  });
+});
+
+describe("cubeSpectrumClickAllowed", () => {
+  it("allows a spectrum click on the cube and on maps on its spatial grid", () => {
+    expect(cubeSpectrumClickAllowed({ isCube: true, hasRamp: false, fileDims: [53, 55], displayedDims: [53, 55] })).toBe(true);
+  });
+
+  it("refuses a click on a PV diagram, whose pixels are offset x channel and not spaxels", () => {
+    expect(cubeSpectrumClickAllowed({ isCube: true, hasRamp: false, fileDims: [53, 55], displayedDims: [40, 3814] })).toBe(false);
+  });
+
+  it("allows a click on a ramp on another grid, whose own mapper handles the displayed grid", () => {
+    expect(cubeSpectrumClickAllowed({ isCube: true, hasRamp: true, fileDims: [2048, 3200], displayedDims: [2048, 2048] })).toBe(true);
+  });
+
+  it("refuses a click on a plain image", () => {
+    expect(cubeSpectrumClickAllowed({ isCube: false, hasRamp: false, fileDims: [53, 55], displayedDims: [53, 55] })).toBe(false);
+  });
+
+  it("refuses a click while the displayed image has no dimensions, as sameGrid does", () => {
+    expect(cubeSpectrumClickAllowed({ isCube: true, hasRamp: false, fileDims: [53, 55], displayedDims: null })).toBe(false);
   });
 });
 

@@ -11,6 +11,7 @@ use super::{
 use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
 use crate::core::alignment::pair::offset_within_limits;
 use crate::core::alignment::phase_correlation::{is_low_confidence, phase_correlate};
+use crate::core::analysis::gain::{gain_model, photon_noise_warning};
 use crate::core::analysis::photometry::{
     measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry,
 };
@@ -19,7 +20,8 @@ use crate::core::astrometry::geometry::{
     GeometryOverrides, ResolvedTarget,
 };
 use crate::core::astrometry::spectral::mid_exposure_jd;
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::infra::wcs_source::load_wcs;
+use crate::core::metadata::filter_wavelengths::effective_filter;
 use crate::core::metadata::photcal::PhotCal;
 use crate::infra::cache::ImageEntry;
 use crate::infra::progress::ProgressHandle;
@@ -32,7 +34,6 @@ pub const MAX_TIME_SERIES_TARGETS: usize = 64;
 const TRACKED_SEARCH_RADIUS_PX: usize = 3;
 const MAX_REFERENCE_OFFSET_PX: f64 = 3.0;
 const MAX_TRACKED_OFFSET_PX: f64 = 1.5;
-const SKY_ONLY_ERRORS_WARNING: &str = "flux errors leave out source photon noise: no gain was given and the frames carry no ERR plane; enter the gain in e-/ADU to include it";
 const ROLE_TARGET: &str = "target";
 const ROLE_COMP: &str = "comp";
 const ROLE_CHECK: &str = "check";
@@ -40,8 +41,8 @@ const ROLE_IGNORE: &str = "ignore";
 const ROLE_NAMES: [&str; 4] = [ROLE_TARGET, ROLE_COMP, ROLE_CHECK, ROLE_IGNORE];
 const EXPTIME_KEY: &str = "EXPTIME";
 const AIRMASS_KEY: &str = "AIRMASS";
-const FILTER_KEY: &str = "FILTER";
 const TIMESYS_KEY: &str = "TIMESYS";
+const FILTER_KEY: &str = "FILTER";
 const UTC_SCALE: &str = "UTC";
 const FRAME_WITHOUT_TIME_REASON: &str = "no observation time in the header";
 const NO_SERIES_TARGET_NOTE: &str = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
@@ -152,8 +153,13 @@ fn dimension_mismatch(frame: (usize, usize), reference: (usize, usize)) -> Strin
 }
 
 fn filter_mismatch(entry: &ImageEntry, reference: &ImageEntry) -> Option<String> {
-    let frame = entry.header().and_then(|h| header_string(h, FILTER_KEY))?;
-    let expected = reference.header().and_then(|h| header_string(h, FILTER_KEY))?;
+    let (frame_header, reference_header) = (entry.header()?, reference.header()?);
+    let (frame, expected) = match (effective_filter(frame_header), effective_filter(reference_header)) {
+        (Some(frame), Some(expected)) => (frame, expected),
+        (None, None) => (header_string(frame_header, FILTER_KEY)?, header_string(reference_header, FILTER_KEY)?),
+        _ => return None,
+    };
+    let (frame, expected) = (frame.to_ascii_uppercase(), expected.to_ascii_uppercase());
     (frame != expected).then(|| format!("filter {frame} differs from the reference filter {expected}"))
 }
 
@@ -171,14 +177,19 @@ pub(crate) struct SeriesGeometry {
     notes: Vec<String>,
 }
 
-fn series_geometry(reference: Option<&HduHeader>, targets: &[TimeSeriesTarget], overrides: &GeometryOverrides) -> SeriesGeometry {
+fn series_geometry(
+    reference_path: &str,
+    reference: Option<&HduHeader>,
+    targets: &[TimeSeriesTarget],
+    overrides: &GeometryOverrides,
+) -> SeriesGeometry {
     let empty = HduHeader::empty();
     let header = reference.unwrap_or(&empty);
     let target_star = targets
         .iter()
         .find(|t| t.role == ROLE_TARGET)
         .map(|t| (t.x, t.y, t.label.as_str()));
-    let target = resolve_series_target(header, target_star, overrides);
+    let target = resolve_series_target(reference_path, header, target_star, overrides);
     let mut notes = match &target {
         Some(t) => vec![format!("target {} held constant for every frame", t.source)],
         None => vec![NO_SERIES_TARGET_NOTE.to_string()],
@@ -280,7 +291,7 @@ fn measure_frame(
             warnings.push(message);
         }
     }
-    let wcs = header.and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = header.and_then(|h| load_wcs(path, h).ok());
     let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
     let config = PhotometryConfig {
         saturation: Some(saturation_level(header, entry.stats().max)),
@@ -353,7 +364,7 @@ fn measure_frame(
         jd_mid: timing.as_ref().map(|(jd, _)| *jd),
         time_source: timing.map(|(_, source)| source),
         exptime: header.and_then(|h| finite_card(h, EXPTIME_KEY)),
-        filter: header.and_then(|h| header_string(h, FILTER_KEY)),
+        filter: header.and_then(effective_filter),
         airmass: header.and_then(|h| finite_card(h, AIRMASS_KEY)),
         geometry,
         offset: shift.offset,
@@ -390,7 +401,7 @@ pub(crate) fn measure_time_series_with(
         bail!("time series needs at least one frame path, got 0");
     };
     let reference = load_entry(reference_path)?;
-    let series = series_geometry(reference.header(), targets, overrides);
+    let series = series_geometry(reference_path, reference.header(), targets, overrides);
     let mut warnings: Vec<String> = Vec::new();
     let mut anchors: Vec<Option<(f64, f64)>> = Vec::new();
     let mut frames: Vec<TimeSeriesFrame> = Vec::with_capacity(paths.len());
@@ -434,9 +445,9 @@ pub(crate) fn measure_time_series_with(
         ));
     }
     let usable_gain = config_base.gain.is_some_and(|g| g.is_finite() && g > 0.0);
-    if !usable_gain && frames.iter().flat_map(|f| f.targets.iter().flatten()).any(|t| !t.err_used) {
-        warnings.push(SKY_ONLY_ERRORS_WARNING.to_string());
-    }
+    let err_used = frames.iter().flat_map(|f| f.targets.iter().flatten()).all(|t| t.err_used);
+    let model = gain_model(reference.header(), super::has_err_extension(reference_path, reference.arr().dim()));
+    warnings.extend(photon_noise_warning(&model, usable_gain, err_used));
     let n_skipped = frames.iter().filter(|f| f.skipped.is_some()).count();
     Ok(TimeSeriesResult {
         reference_path: reference_path.clone(),
@@ -537,6 +548,7 @@ pub async fn time_series_photometry_cmd(
 mod tests {
     use super::*;
     use crate::core::alignment::pair::shift_image_subpixel;
+    use crate::core::analysis::gain::SKY_ONLY_ERRORS_WARNING;
     use crate::core::synth::pipeline::{frame_header, generate_stack, FieldType, PsfType, SynthConfig};
     use crate::core::synth::star_field::{uniform_field, Star};
     use crate::infra::fits::writer::write_fits_mono;
@@ -955,22 +967,65 @@ mod tests {
     fn a_frame_taken_through_a_different_filter_is_skipped_with_a_reason() {
         let dir = tempfile::tempdir().unwrap();
         let filters = ["V", "V", "B", "v"];
-        let (paths, targets) = write_headed_stack(dir.path(), "filtered", 4, |i, header| header.set(FILTER_KEY, filters[i].to_string()));
+        let (paths, targets) = write_headed_stack(dir.path(), "filtered", 4, |i, header| header.set("FILTER", filters[i].to_string()));
         let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
         assert_eq!(out.n_frames, 4);
-        assert_eq!(out.n_skipped, 2);
+        assert_eq!(out.n_skipped, 1);
         assert!(out.frames[..2].iter().all(|f| f.skipped.is_none() && f.filter.as_deref() == Some("V")));
         assert_eq!(out.frames[2].skipped.as_deref(), Some("filter B differs from the reference filter V"));
-        assert_eq!(out.frames[3].skipped.as_deref(), Some("filter v differs from the reference filter V"));
-        assert!(out.frames[2..].iter().all(|f| f.targets.iter().all(|t| t.is_none())));
+        assert!(out.frames[3].skipped.is_none(), "{:?}", out.frames[3].skipped);
+        assert_eq!(out.frames[3].filter.as_deref(), Some("v"));
+        assert!(out.frames[2].targets.iter().all(|t| t.is_none()));
 
         let (unlabelled, _) = write_headed_stack(dir.path(), "unlabelled", 3, |i, header| {
             if i == 1 {
-                header.set(FILTER_KEY, "R".to_string());
+                header.set("FILTER", "R".to_string());
             }
         });
         let mixed = measure_time_series(&unlabelled, &targets, &base_config(), false, true, None).unwrap();
         assert_eq!(mixed.n_skipped, 0);
+    }
+
+    #[test]
+    fn frames_whose_pupil_filter_differs_are_skipped_as_a_filter_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let pupils = ["F470N", "CLEAR"];
+        let (paths, targets) = write_headed_stack(dir.path(), "pupil", 2, |i, header| {
+            header.set("FILTER", "F444W".to_string());
+            header.set("PUPIL", pupils[i].to_string());
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 1);
+        assert_eq!(out.frames[0].filter.as_deref(), Some("F470N"));
+        assert!(out.frames[0].skipped.is_none());
+        assert_eq!(out.frames[1].skipped.as_deref(), Some("filter F444W differs from the reference filter F470N"));
+        assert!(out.frames[1].targets.iter().all(|t| t.is_none()));
+    }
+
+    #[test]
+    fn filter_names_are_compared_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let filters = ["f444w", "F444W"];
+        let (paths, targets) = write_headed_stack(dir.path(), "cased", 2, |i, header| header.set("FILTER", filters[i].to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        assert!(out.frames[1].skipped.is_none(), "{:?}", out.frames[1].skipped);
+        assert_eq!(out.frames[0].filter.as_deref(), Some("f444w"));
+        assert_eq!(out.frames[1].filter.as_deref(), Some("F444W"));
+        assert!(out.frames.iter().all(|f| f.targets.iter().all(|t| t.is_some())));
+    }
+
+    #[test]
+    fn frames_labelled_by_a_bare_wheel_slot_are_still_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let slots = ["1", "1", "2"];
+        let (paths, targets) = write_headed_stack(dir.path(), "slots", 3, |i, header| header.set("FILTER", slots[i].to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 1);
+        assert!(out.frames[1].skipped.is_none(), "{:?}", out.frames[1].skipped);
+        assert_eq!(out.frames[2].skipped.as_deref(), Some("filter 2 differs from the reference filter 1"));
+        assert!(out.frames[2].targets.iter().all(|t| t.is_none()));
+        assert!(out.frames.iter().all(|f| f.filter.is_none()), "{:?}", out.frames[0].filter);
     }
 
     #[test]

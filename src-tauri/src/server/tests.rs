@@ -568,6 +568,42 @@ pub(crate) mod v2_fixtures {
         cards
     }
 
+    pub const NIRCAM_GWCS_CELL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gwcs/wcs_jwst_nircam_cal300.asdf");
+
+    pub fn write_gwcs_fits(path: &std::path::Path, w: usize, h: usize) {
+        let cell = std::fs::read(NIRCAM_GWCS_CELL).unwrap();
+        let n = cell.len();
+        let primary: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "0".into()),
+            ("EXTEND", "T".into()),
+        ];
+        let sci = image_ext("SCI", "-32", w, h, &wcs_cards());
+        let table: Vec<(&str, String)> = vec![
+            ("XTENSION", "'BINTABLE'".into()),
+            ("BITPIX", "8".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", n.to_string()),
+            ("NAXIS2", "1".into()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("TFIELDS", "1".into()),
+            ("TTYPE1", "'ASDF_METADATA'".into()),
+            ("TFORM1", format!("'{n}B'")),
+            ("EXTNAME", "'ASDF    '".into()),
+        ];
+        let mut buf = header_block(&primary);
+        buf.extend_from_slice(&header_block(&sci));
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        buf.extend_from_slice(&header_block(&table));
+        buf.extend_from_slice(&cell);
+        while buf.len() % BLOCK != 0 {
+            buf.push(0);
+        }
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
     pub const DQ_FLAGGED_PIXEL: (usize, usize) = (1, 0);
     pub const DQ_HIGH_PIXEL: (usize, usize) = (2, 1);
 
@@ -1378,6 +1414,89 @@ async fn v2_wcs_summary_reports_projection_scale_and_orientation() {
     assert_eq!(json["flipped"], false);
     assert_eq!(json["parity"], "normal");
     assert_eq!(json["sip_present"], false);
+}
+
+#[tokio::test]
+async fn v2_wcs_summary_reports_the_header_wcs_kind() {
+    let (state, _dir) = seed_wcs_session("s-wcs-kind").await;
+
+    let resp = get_uri(build_router(state), "/v2/sessions/s-wcs-kind/wcs").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["present"], true);
+    assert_eq!(json["wcs_kind"], "header", "{json}");
+    for key in [
+        "gwcs_steps",
+        "gwcs_frames",
+        "gwcs_source",
+        "gwcs_vs_header_sip_max_mas",
+        "gwcs_vs_header_sip_max_px",
+        "gwcs_refusal",
+        "sip_max_err_px",
+        "sip_inv_err_px",
+    ] {
+        assert_eq!(json.get(key), Some(&serde_json::Value::Null), "{key}: {json}");
+    }
+}
+
+#[tokio::test]
+async fn v2_wcs_uses_the_gwcs_of_the_opened_file_and_not_for_its_cutout() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("nircam_cal.fits");
+    v2_fixtures::write_gwcs_fits(&fits, 4, 4);
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-gwcs");
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-gwcs/open",
+        &format!(r#"{{"path":{}}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let opened = body_json(resp).await;
+    assert_eq!(opened["ref"], "img_0");
+    assert_eq!(opened["wcs_present"], true);
+
+    let resp = get_uri(build_router(state.clone()), "/v2/sessions/s-gwcs/wcs").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["wcs_kind"], "gwcs", "{json}");
+    assert_eq!(json["gwcs_source"], "ASDF HDU 2", "{json}");
+    assert_eq!(json["gwcs_steps"], 3, "{json}");
+    assert_eq!(json["projection"], "gWCS", "{json}");
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-gwcs/wcs/pix2sky",
+        r#"{"points":[[-1,0],[0,0]]}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["results"][0]["ra"], serde_json::Value::Null, "outside the gWCS bounding box: {json}");
+    assert_eq!(json["results"][0]["dec"], serde_json::Value::Null, "{json}");
+    let r1 = &json["results"][1];
+    assert!((r1["ra"].as_f64().unwrap() - 274.7253135310639).abs() < 1e-9, "{json}");
+    assert!((r1["dec"].as_f64().unwrap() + 13.875903855344635).abs() < 1e-9, "{json}");
+
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-gwcs/cutout",
+        r#"{"region":{"type":"pixel","x":1,"y":1,"width":2,"height":2}}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cut = body_json(resp).await;
+    assert_eq!(cut["wcs_present"], true, "{cut}");
+    let cut_ref = cut["ref"].as_str().unwrap().to_owned();
+
+    let resp = get_uri(build_router(state), &format!("/v2/sessions/s-gwcs/wcs?ref={cut_ref}")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["present"], true, "{json}");
+    assert_eq!(json["wcs_kind"], "header", "a derived ref never inherits its parent's gWCS: {json}");
+    assert_eq!(json["gwcs_source"], serde_json::Value::Null, "{json}");
 }
 
 #[tokio::test]
@@ -3293,6 +3412,106 @@ async fn pipeline_run_with_dark_optimize_recovers_the_scaled_dark() {
     let unit = session.cache.get("unit_L").expect("unit-scale slot");
     let k = 1usize;
     assert!((unit.arr()[[0, k]] - (200.0 - 0.3 * pattern(k))).abs() < 0.5, "unit scale pixel {}", unit.arr()[[0, k]]);
+}
+
+#[tokio::test]
+async fn pipeline_route_accepts_flat_dark_paths_and_returns_consistency_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let exposure_frame = |name: &str, exptime: f64| {
+        let p = dir.path().join(name);
+        v2_fixtures::write_exposure_fits(&p, 4, 4, exptime);
+        p.to_str().unwrap().to_string()
+    };
+    let light = exposure_frame("light0.fits", 120.0);
+    let dark60 = exposure_frame("dark60.fits", 60.0);
+    let dark300a = exposure_frame("dark300a.fits", 300.0);
+    let dark300b = exposure_frame("dark300b.fits", 300.0);
+    let flat = exposure_frame("flat0.fits", 2.0);
+    let flat_dark = dir.path().join("flatdark0.fits");
+    v2_fixtures::write_pixels_fits(&flat_dark, 4, 4, &[10.0; 16]);
+    let flat_dark = flat_dark.to_str().unwrap().to_string();
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-pipe-fd");
+    let uri = "/sessions/s-pipe-fd/pipeline/run";
+
+    let mixed = serde_json::json!({
+        "channels": [{ "label": "R", "paths": [light] }],
+        "dark_paths": [dark60, dark300a],
+        "flat_paths": [flat],
+        "flat_dark_paths": [flat_dark],
+        "align": false,
+        "normalize": false,
+        "rejection": "none",
+        "result_prefix": "fd_"
+    });
+    let message = refused(&state, uri, &mixed).await;
+    assert!(message.starts_with("Darks have mixed exposures (60 s to 300 s)"), "{message}");
+    assert!(message.contains("dark60.fits") && message.contains("dark300a.fits"), "{message}");
+    assert!(state.sessions.get("s-pipe-fd").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+
+    let unscaled = serde_json::json!({
+        "channels": [{ "label": "R", "paths": [light] }],
+        "dark_paths": [dark300a, dark300b],
+        "flat_paths": [flat],
+        "flat_dark_paths": [flat_dark],
+        "align": false,
+        "normalize": false,
+        "rejection": "none",
+        "result_prefix": "fd_"
+    });
+    let json = accepted(&state, "s-pipe-fd", uri, &unscaled).await;
+    let warnings = json["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].as_str().unwrap().starts_with("Channel 'R': lights are 120 s but the darks are 300 s and there is no master bias"),
+        "{warnings:?}"
+    );
+    let session = state.sessions.get("s-pipe-fd").unwrap();
+    assert_eq!(session.cache.get("fd_R").expect("R slot").arr().dim(), (4, 4));
+}
+
+#[tokio::test]
+async fn pipeline_route_reports_temperature_group_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let frame = |name: &str, level: f32, temp: &str| {
+        let mut header = astroburst_lib::types::header::HduHeader::empty();
+        header.set("EXPTIME", "120".to_string());
+        header.set("CCD-TEMP", temp.to_string());
+        let path = dir.path().join(name).to_str().unwrap().to_string();
+        astroburst_lib::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::from_elem((4, 4), level), Some(&header))
+            .unwrap();
+        path
+    };
+    let light = frame("light0.fits", 500.0, "-14.0");
+    let darks: Vec<String> = (0..10)
+        .map(|i| {
+            let (level, temp) = if i < 5 { (20.0, "-20.0") } else { (60.0, "-10.0") };
+            frame(&format!("dark{i}.fits"), level, temp)
+        })
+        .collect();
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-pipe-temp");
+    let body = serde_json::json!({
+        "channels": [{ "label": "R", "paths": [light] }],
+        "dark_paths": darks,
+        "align": false,
+        "normalize": false,
+        "rejection": "none",
+        "result_prefix": "temp_"
+    });
+    let json = accepted(&state, "s-pipe-temp", "/sessions/s-pipe-temp/pipeline/run", &body).await;
+    let warnings: Vec<&str> = json["warnings"].as_array().expect("warnings array").iter().map(|w| w.as_str().unwrap()).collect();
+    assert!(
+        warnings.iter().any(|w| w.contains("Channel 'R': light0.fits at -14.0 °C uses the -10.0 °C dark group (ΔT 4.0 °C)")),
+        "{warnings:?}"
+    );
+    let session = state.sessions.get("s-pipe-temp").unwrap();
+    let stacked = session.cache.get("temp_R").expect("R slot");
+    for &v in stacked.arr().iter() {
+        assert!((v - 440.0).abs() < 0.5, "pixel {v}: the -14 C light must get the -10 C dark group (level 60)");
+    }
 }
 
 #[tokio::test]

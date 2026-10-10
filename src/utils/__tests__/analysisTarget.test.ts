@@ -10,9 +10,12 @@ import {
   histogramStfLock,
   isCompositeOnScreen,
   isFileRgbView,
+  regionStatsRunKey,
   rgbMeasurePath,
   rgbStfPanelMode,
   starDetectionScope,
+  statisticsRunKey,
+  wcsProbeTarget,
 } from "../analysisTarget";
 
 describe("isFileRgbView", () => {
@@ -180,6 +183,71 @@ describe("analysisMeasureKey", () => {
 
   it("is null without a path", () => {
     expect(analysisMeasureKey({ path: null, composite: false, processedFitsPath: null, processedVersion: 7 })).toBeNull();
+  });
+});
+
+describe("statisticsRunKey", () => {
+  const rewritten = { filePath: "/o/x_bg_corrected.fits", composite: false, rgbPath: null };
+
+  it("changes when only the processed version changes", () => {
+    expect(statisticsRunKey({ ...rewritten, measureKey: "/o/x_bg_corrected.fits@3" })).not.toBe(
+      statisticsRunKey({ ...rewritten, measureKey: "/o/x_bg_corrected.fits@4" }),
+    );
+  });
+
+  it("is equal for equal inputs", () => {
+    expect(statisticsRunKey({ ...rewritten, measureKey: "/o/x_bg_corrected.fits@3" })).toBe(
+      statisticsRunKey({ ...rewritten, measureKey: "/o/x_bg_corrected.fits@3" }),
+    );
+  });
+
+  it("falls back to the path without a measure key", () => {
+    expect(statisticsRunKey({ ...rewritten, measureKey: null })).toBe(statisticsRunKey({ ...rewritten, measureKey: null }));
+    expect(statisticsRunKey({ ...rewritten, measureKey: null })).not.toBe(
+      statisticsRunKey({ ...rewritten, filePath: "/o/y.fits", measureKey: null }),
+    );
+    expect(statisticsRunKey({ ...rewritten, measureKey: null })).toContain("/o/x_bg_corrected.fits");
+  });
+
+  it("changes with the composite flag and the RGB path", () => {
+    const base = { ...rewritten, measureKey: "/o/x_bg_corrected.fits" };
+    expect(statisticsRunKey({ ...base, composite: true })).not.toBe(statisticsRunKey(base));
+    expect(statisticsRunKey({ ...base, composite: true, rgbPath: "/o/rgb.fits" })).not.toBe(statisticsRunKey({ ...base, composite: true }));
+  });
+});
+
+describe("regionStatsRunKey", () => {
+  it("prefers measureKey over the path", () => {
+    expect(regionStatsRunKey("/o/x.fits", "/o/x.fits@2")).toBe("/o/x.fits@2");
+    expect(regionStatsRunKey("/o/x.fits", null)).toBe("/o/x.fits");
+  });
+
+  it("is empty without a path or a measure key", () => {
+    expect(regionStatsRunKey(null, null)).toBe("");
+  });
+});
+
+describe("wcsProbeTarget", () => {
+  it("hides the readout for a preview-only result on another grid", () => {
+    expect(wcsProbeTarget({ path: "/data/a.fits", dimensions: [800, 600], previewOnly: true, fileDims: [4000, 3000] })).toBeNull();
+  });
+
+  it("probes the file for a preview-only result on the file grid", () => {
+    expect(wcsProbeTarget({ path: "/data/a.fits", dimensions: [4000, 3000], previewOnly: true, fileDims: [4000, 3000] })).toEqual({
+      path: "/data/a.fits",
+      dimensions: [4000, 3000],
+    });
+  });
+
+  it("probes a FITS result on its own grid, so a PV diagram without sky WCS is asked about itself", () => {
+    expect(wcsProbeTarget({ path: "/out/pv.fits", dimensions: [40, 3814], previewOnly: false, fileDims: [53, 55] })).toEqual({
+      path: "/out/pv.fits",
+      dimensions: [40, 3814],
+    });
+  });
+
+  it("hides the readout without a path", () => {
+    expect(wcsProbeTarget({ path: null, dimensions: [53, 55], previewOnly: false, fileDims: [53, 55] })).toBeNull();
   });
 });
 

@@ -3,8 +3,10 @@ use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::math::median::{exact_mad_mut, exact_median_mut, median_f32_mut};
+use crate::core::stacking::cfa_guard::cfa_pattern;
+use crate::math::median::{exact_mad_mut, exact_median_mut, f32_cmp, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::header::HduHeader;
 
 pub const FLAG_HOT: u8 = 1;
 pub const FLAG_COLD: u8 = 2;
@@ -26,6 +28,7 @@ const OUTER_RING_STEPS: isize = 2;
 const OUTER_RING_CAPACITY: usize = 24;
 const MAX_DEFECT_CLUSTER_PIXELS: usize = 3;
 const MEAN_ABS_DEV_TO_SIGMA: f64 = 1.2533;
+pub const P90_TO_SIGMA: f64 = 1.6449;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,7 +55,7 @@ pub struct CosmeticConfig {
     pub auto_hot_sigma: Option<f32>,
     pub auto_cold_sigma: Option<f32>,
     pub defects: Vec<Defect>,
-    pub cfa: bool,
+    pub cfa: Option<bool>,
     pub amount: f32,
     pub replacement: Replacement,
 }
@@ -66,10 +69,22 @@ impl Default for CosmeticConfig {
             auto_hot_sigma: None,
             auto_cold_sigma: None,
             defects: Vec::new(),
-            cfa: false,
+            cfa: None,
             amount: 1.0,
             replacement: Replacement::Median,
         }
+    }
+}
+
+pub const CFA_SOURCE_HEADER: &str = "header";
+pub const CFA_SOURCE_EXPLICIT: &str = "explicit";
+pub const CFA_SOURCE_NONE: &str = "none";
+
+pub fn effective_cfa(config: &CosmeticConfig, header: Option<&HduHeader>) -> (bool, &'static str) {
+    match config.cfa {
+        Some(explicit) => (explicit, CFA_SOURCE_EXPLICIT),
+        None if header.is_some_and(|h| cfa_pattern(h).is_some()) => (true, CFA_SOURCE_HEADER),
+        None => (false, CFA_SOURCE_NONE),
     }
 }
 
@@ -155,6 +170,12 @@ fn robust_center_and_scale(values: &mut [f32]) -> Option<(f32, f32)> {
     let mad = exact_mad_mut(values, median);
     if mad > 0.0 {
         return Some((median, (mad as f64 * MAD_TO_SIGMA) as f32));
+    }
+    let p90_index = ((values.len() - 1) as f64 * 0.9).round() as usize;
+    values.select_nth_unstable_by(p90_index, f32_cmp);
+    let p90 = values[p90_index];
+    if p90 > 0.0 {
+        return Some((median, (p90 as f64 / P90_TO_SIGMA) as f32));
     }
     let mean_abs_dev = values.iter().map(|&d| d as f64).sum::<f64>() / values.len() as f64;
     let sigma = (mean_abs_dev * MEAN_ABS_DEV_TO_SIGMA) as f32;
@@ -517,6 +538,15 @@ pub fn cosmetic_correct(
     master_dark: Option<&Array2<f32>>,
     cfg: &CosmeticConfig,
 ) -> Result<CosmeticResult> {
+    cosmetic_correct_with_cfa(image, master_dark, cfg, cfg.cfa.unwrap_or(false))
+}
+
+pub fn cosmetic_correct_with_cfa(
+    image: &Array2<f32>,
+    master_dark: Option<&Array2<f32>>,
+    cfg: &CosmeticConfig,
+    cfa: bool,
+) -> Result<CosmeticResult> {
     let (rows, cols) = image.dim();
     if rows == 0 || cols == 0 {
         bail!("Image is empty");
@@ -539,7 +569,7 @@ pub fn cosmetic_correct(
         maps.push(defect_map_from_dark(dark, cfg.dark_hot_sigma, cfg.dark_cold_sigma));
     }
     if cfg.auto_hot_sigma.is_some() || cfg.auto_cold_sigma.is_some() {
-        maps.push(defect_map_auto(image, cfg.auto_hot_sigma, cfg.auto_cold_sigma, cfg.cfa));
+        maps.push(defect_map_auto(image, cfg.auto_hot_sigma, cfg.auto_cold_sigma, cfa));
     }
     if !cfg.defects.is_empty() {
         maps.push(defect_map_from_list(&cfg.defects, rows, cols)?);
@@ -551,7 +581,7 @@ pub fn cosmetic_correct(
     let refs: Vec<&Array2<u8>> = maps.iter().collect();
     let merged = merge_maps(&refs);
     let (flagged, hot, cold, listed) = count_flags(&merged);
-    let (corrected, replaced) = apply_cosmetic(image, &merged, cfg.replacement, cfg.amount, cfg.cfa);
+    let (corrected, replaced) = apply_cosmetic(image, &merged, cfg.replacement, cfg.amount, cfa);
     Ok(CosmeticResult { corrected, flagged, replaced, hot, cold, listed })
 }
 
@@ -732,7 +762,7 @@ mod tests {
         assert_eq!(flagged_positions(&cfa), vec![(8, 9)]);
         assert_eq!(cfa[[8, 9]], FLAG_HOT);
 
-        let mono = defect_map_auto(&img, Some(2.0), None, false);
+        let mono = defect_map_auto(&img, Some(1.5), None, false);
         assert!(flagged_positions(&mono).len() > 1);
     }
 
@@ -794,8 +824,38 @@ mod tests {
     }
 
     #[test]
-    fn from_dark_falls_back_to_the_mean_absolute_deviation_when_the_mad_is_zero() {
-        let mut dark = Array2::from_shape_fn((64, 64), |(y, x)| if (y * 7 + x) % 3 == 0 { 101.0 } else { 100.0 });
+    fn zero_mad_fallback_uses_the_90th_percentile_of_deviations() {
+        let n = 64 * 64;
+        let mut dark = Array2::from_shape_fn((64, 64), |(y, x)| {
+            let i = y * 64 + x;
+            let slot = (i * 7919) % n;
+            if slot < n * 60 / 100 {
+                100.0
+            } else if slot < n * 98 / 100 {
+                101.0
+            } else {
+                5100.0
+            }
+        });
+        let warm = (20usize, 33usize);
+        assert_eq!(dark[warm], 100.0, "the warm pixel must sit on a median-valued site");
+        dark[warm] = 150.0;
+
+        let mut finite: Vec<f32> = dark.iter().copied().collect();
+        let (median, sigma) = robust_center_and_scale(&mut finite).expect("a scale");
+        assert_eq!(median, 100.0);
+        let expected = 1.0 / P90_TO_SIGMA as f32;
+        assert!((sigma - expected).abs() < 0.1 * expected, "sigma {sigma}, expected {expected}");
+
+        let map = defect_map_from_dark(&dark, Some(3.0), None);
+        assert_eq!(map[warm], FLAG_HOT, "the warm pixel at +50 ADU was not flagged");
+        let hot_sites = dark.iter().filter(|&&v| v == 5100.0).count();
+        assert_eq!(flagged_positions(&map).len(), hot_sites + 1);
+    }
+
+    #[test]
+    fn constant_dark_with_three_hot_pixels_still_flags_them() {
+        let mut dark = Array2::from_shape_fn((64, 64), |(y, x)| if (y * 7 + x) % 11 == 0 { 101.0 } else { 100.0 });
         let hot = [(3, 7), (40, 41), (63, 0)];
         for &(y, x) in &hot {
             dark[[y, x]] = 5000.0;
@@ -810,6 +870,24 @@ mod tests {
             constant[[y, x]] = 5000.0;
         }
         assert_eq!(flagged_positions(&defect_map_from_dark(&constant, Some(3.0), Some(3.0))), expected);
+    }
+
+    #[test]
+    fn cfa_defaults_to_the_header_pattern() {
+        let mut bayer = HduHeader::empty();
+        bayer.set("BAYERPAT", "'RGGB'".to_string());
+        let auto = CosmeticConfig { cfa: None, ..Default::default() };
+        assert_eq!(effective_cfa(&auto, Some(&bayer)), (true, "header"));
+        assert_eq!(effective_cfa(&auto, Some(&HduHeader::empty())), (false, "none"));
+        assert_eq!(effective_cfa(&auto, None), (false, "none"));
+        let off = CosmeticConfig { cfa: Some(false), ..Default::default() };
+        assert_eq!(effective_cfa(&off, Some(&bayer)), (false, "explicit"));
+        let on = CosmeticConfig { cfa: Some(true), ..Default::default() };
+        assert_eq!(effective_cfa(&on, None), (true, "explicit"));
+        let parsed: CosmeticConfig = serde_json::from_str(r#"{"use_master_dark":false}"#).unwrap();
+        assert_eq!(parsed.cfa, None);
+        let explicit: CosmeticConfig = serde_json::from_str(r#"{"cfa":true}"#).unwrap();
+        assert_eq!(explicit.cfa, Some(true));
     }
 
     #[test]

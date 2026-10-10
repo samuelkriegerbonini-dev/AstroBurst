@@ -1,0 +1,388 @@
+#ASDF 1.0.0
+#ASDF_STANDARD 1.6.0
+%YAML 1.1
+%TAG ! tag:stsci.edu:asdf/
+--- !core/asdf-1.1.0
+asdf_library: !core/software-1.0.0 {author: The ASDF Developers, homepage: 'http://github.com/asdf-format/asdf',
+  name: asdf, version: 5.4.0}
+history:
+  extensions:
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/astronomy/coordinates/extensions/coordinates-1.0.0
+    manifest_software: !core/software-1.0.0 {name: asdf_coordinates_schemas, version: 0.5.1}
+    software: !core/software-1.0.0 {name: asdf-astropy, version: 0.11.0}
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/core/extensions/core-1.6.0
+    manifest_software: !core/software-1.0.0 {name: asdf_standard, version: 1.5.0}
+    software: !core/software-1.0.0 {name: asdf, version: 5.4.0}
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/transform/extensions/transform-1.7.0
+    manifest_software: !core/software-1.0.0 {name: asdf_transform_schemas, version: 0.6.0}
+    software: !core/software-1.0.0 {name: asdf-astropy, version: 0.11.0}
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://astropy.org/astropy/extensions/units-1.3.0
+    software: !core/software-1.0.0 {name: asdf-astropy, version: 0.11.0}
+  - !core/extension_metadata-1.0.0
+    extension_class: asdf.extension._manifest.ManifestExtension
+    extension_uri: asdf://asdf-format.org/astronomy/gwcs/extensions/gwcs-1.4.0
+    manifest_software: !core/software-1.0.0 {name: asdf_wcs_schemas, version: 0.5.0}
+    software: !core/software-1.0.0 {name: gwcs, version: 1.0.3}
+wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>
+  name: ''
+  pixel_shape: null
+  steps:
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+      axes_names: [x, y]
+      axes_order: [0, 1]
+      axis_physical_types: ['custom:x', 'custom:y']
+      name: detector
+      unit: [!unit/unit-1.0.0 'pixel', !unit/unit-1.0.0 'pixel']
+    transform: !transform/compose-1.4.0
+      bounding_box: !transform/property/bounding_box-1.2.0
+        ignore: []
+        intervals:
+          x0: [-0.5, 2047.5]
+          x1: [-0.5, 2047.5]
+        order: F
+      forward:
+      - !transform/concatenate-1.4.0
+        forward:
+        - !transform/shift-1.4.0
+          inputs: [x]
+          offset: -2.776
+          outputs: [y]
+        - !transform/shift-1.4.0
+          inputs: [x]
+          offset: -4.392
+          outputs: [y]
+        inputs: [x0, x1]
+        outputs: [y0, y1]
+      - !transform/compose-1.4.0
+        forward:
+        - !transform/compose-1.4.0
+          forward:
+          - !transform/compose-1.4.0
+            forward:
+            - !transform/concatenate-1.4.0
+              forward:
+              - &id001 !transform/shift-1.4.0
+                inputs: [x]
+                offset: 1.0
+                outputs: [y]
+              - *id001
+              inputs: [x0, x1]
+              outputs: [y0, y1]
+            - !transform/concatenate-1.4.0
+              forward:
+              - !transform/shift-1.4.0
+                inputs: [x]
+                offset: -1024.5
+                outputs: [y]
+              - !transform/shift-1.4.0
+                inputs: [x]
+                offset: -1024.5
+                outputs: [y]
+              inputs: [x0, x1]
+              outputs: [y0, y1]
+            inputs: [x0, x1]
+            outputs: [y0, y1]
+          - !transform/compose-1.4.0
+            forward:
+            - !transform/compose-1.4.0
+              forward:
+              - !transform/remap_axes-1.5.0
+                inputs: [x0, x1]
+                mapping: [0, 1, 0, 1]
+                outputs: [x0, x1, x2, x3]
+              - !transform/concatenate-1.4.0
+                forward:
+                - !transform/polynomial-1.3.0
+                  coefficients: !core/ndarray-1.1.0
+                    source: 0
+                    datatype: float64
+                    byteorder: little
+                    shape: [6, 6]
+                  domain:
+                  - [-1, 1]
+                  - [-1, 1]
+                  inputs: [x, y]
+                  outputs: [z]
+                  window:
+                  - [-1, 1]
+                  - [-1, 1]
+                - !transform/polynomial-1.3.0
+                  coefficients: !core/ndarray-1.1.0
+                    source: 1
+                    datatype: float64
+                    byteorder: little
+                    shape: [6, 6]
+                  domain:
+                  - [-1, 1]
+                  - [-1, 1]
+                  inputs: [x, y]
+                  outputs: [z]
+                  window:
+                  - [-1, 1]
+                  - [-1, 1]
+                inputs: [x0, y0, x1, y1]
+                outputs: [z0, z1]
+              inputs: [x0, x1]
+              inverse: !transform/compose-1.4.0
+                forward:
+                - !transform/remap_axes-1.5.0
+                  inputs: [x0, x1]
+                  mapping: [0, 1, 0, 1]
+                  outputs: [x0, x1, x2, x3]
+                - !transform/concatenate-1.4.0
+                  forward:
+                  - !transform/polynomial-1.3.0
+                    coefficients: !core/ndarray-1.1.0
+                      source: 2
+                      datatype: float64
+                      byteorder: little
+                      shape: [6, 6]
+                    domain:
+                    - [-1, 1]
+                    - [-1, 1]
+                    inputs: [x, y]
+                    outputs: [z]
+                    window:
+                    - [-1, 1]
+                    - [-1, 1]
+                  - !transform/polynomial-1.3.0
+                    coefficients: !core/ndarray-1.1.0
+                      source: 3
+                      datatype: float64
+                      byteorder: little
+                      shape: [6, 6]
+                    domain:
+                    - [-1, 1]
+                    - [-1, 1]
+                    inputs: [x, y]
+                    outputs: [z]
+                    window:
+                    - [-1, 1]
+                    - [-1, 1]
+                  inputs: [x0, y0, x1, y1]
+                  outputs: [z0, z1]
+                inputs: [x0, x1]
+                outputs: [z0, z1]
+              outputs: [z0, z1]
+            - !transform/compose-1.4.0
+              forward:
+              - !transform/remap_axes-1.5.0
+                inputs: [x0, x1]
+                mapping: [0, 1, 0, 1]
+                outputs: [x0, x1, x2, x3]
+              - !transform/concatenate-1.4.0
+                forward:
+                - !transform/polynomial-1.3.0
+                  coefficients: !core/ndarray-1.1.0
+                    source: 4
+                    datatype: float64
+                    byteorder: little
+                    shape: [2, 2]
+                  domain:
+                  - [-1, 1]
+                  - [-1, 1]
+                  inputs: [x, y]
+                  outputs: [z]
+                  window:
+                  - [-1, 1]
+                  - [-1, 1]
+                - !transform/polynomial-1.3.0
+                  coefficients: !core/ndarray-1.1.0
+                    source: 5
+                    datatype: float64
+                    byteorder: little
+                    shape: [2, 2]
+                  domain:
+                  - [-1, 1]
+                  - [-1, 1]
+                  inputs: [x, y]
+                  outputs: [z]
+                  window:
+                  - [-1, 1]
+                  - [-1, 1]
+                inputs: [x0, y0, x1, y1]
+                outputs: [z0, z1]
+              inputs: [x0, x1]
+              inverse: !transform/compose-1.4.0
+                forward:
+                - !transform/remap_axes-1.5.0
+                  inputs: [x0, x1]
+                  mapping: [0, 1, 0, 1]
+                  outputs: [x0, x1, x2, x3]
+                - !transform/concatenate-1.4.0
+                  forward:
+                  - !transform/polynomial-1.3.0
+                    coefficients: !core/ndarray-1.1.0
+                      source: 6
+                      datatype: float64
+                      byteorder: little
+                      shape: [2, 2]
+                    domain:
+                    - [-1, 1]
+                    - [-1, 1]
+                    inputs: [x, y]
+                    outputs: [z]
+                    window:
+                    - [-1, 1]
+                    - [-1, 1]
+                  - !transform/polynomial-1.3.0
+                    coefficients: !core/ndarray-1.1.0
+                      source: 7
+                      datatype: float64
+                      byteorder: little
+                      shape: [2, 2]
+                    domain:
+                    - [-1, 1]
+                    - [-1, 1]
+                    inputs: [x, y]
+                    outputs: [z]
+                    window:
+                    - [-1, 1]
+                    - [-1, 1]
+                  inputs: [x0, y0, x1, y1]
+                  outputs: [z0, z1]
+                inputs: [x0, x1]
+                outputs: [z0, z1]
+              outputs: [z0, z1]
+            inputs: [x0, x1]
+            outputs: [z0, z1]
+          inputs: [x0, x1]
+          outputs: [z0, z1]
+        - !transform/concatenate-1.4.0
+          forward:
+          - !transform/shift-1.4.0
+            inputs: [x]
+            offset: 120.57679274
+            outputs: [y]
+          - !transform/shift-1.4.0
+            inputs: [x]
+            offset: -527.5014307
+            outputs: [y]
+          inputs: [x0, x1]
+          outputs: [y0, y1]
+        inputs: [x0, x1]
+        outputs: [y0, y1]
+      inputs: [x0, x1]
+      outputs: [y0, y1]
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+      axes_names: [v2, v3]
+      axes_order: [0, 1]
+      axis_physical_types: ['custom:v2', 'custom:v3']
+      name: v2v3
+      unit: [!unit/unit-1.0.0 'arcsec', !unit/unit-1.0.0 'arcsec']
+    transform: !transform/compose-1.4.0
+      forward:
+      - !transform/concatenate-1.4.0
+        forward:
+        - !transform/scale-1.4.0
+          factor: 0.9999287380471594
+          inputs: [x]
+          name: dva_scale_v2
+          outputs: [y]
+        - !transform/scale-1.4.0
+          factor: 0.9999287380471594
+          inputs: [x]
+          name: dva_scale_v3
+          outputs: [y]
+        inputs: [x0, x1]
+        outputs: [y0, y1]
+      - !transform/concatenate-1.4.0
+        forward:
+        - !transform/shift-1.4.0
+          inputs: [x]
+          name: dva_v2_shift
+          offset: 0.008592537736433575
+          outputs: [y]
+        - !transform/shift-1.4.0
+          inputs: [x]
+          name: dva_v3_shift
+          offset: -0.03759078209925696
+          outputs: [y]
+        inputs: [x0, x1]
+        outputs: [y0, y1]
+      inputs: [x0, x1]
+      name: DVA_Correction
+      outputs: [y0, y1]
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+      axes_names: [v2, v3]
+      axes_order: [0, 1]
+      axis_physical_types: ['custom:v2', 'custom:v3']
+      name: v2v3vacorr
+      unit: [!unit/unit-1.0.0 'arcsec', !unit/unit-1.0.0 'arcsec']
+    transform: !transform/compose-1.4.0
+      forward:
+      - !transform/compose-1.4.0
+        forward:
+        - !transform/compose-1.4.0
+          forward:
+          - !transform/concatenate-1.4.0
+            forward:
+            - !transform/scale-1.4.0
+              factor: 0.0002777777777777778
+              inputs: [x]
+              outputs: [y]
+            - !transform/scale-1.4.0
+              factor: 0.0002777777777777778
+              inputs: [x]
+              outputs: [y]
+            inputs: [x0, x1]
+            outputs: [y0, y1]
+          - !<tag:stsci.edu:gwcs/spherical_cartesian-1.3.0>
+            inputs: [lon, lat]
+            outputs: [x, y, z]
+            transform_type: spherical_to_cartesian
+            wrap_lon_at: 180
+          inputs: [x0, x1]
+          outputs: [x, y, z]
+        - !transform/rotate_sequence_3d-1.2.0
+          angles: [0.03349355361111111, 0.14652817527777778, 92.38391664487621, -13.867240240613048,
+            -274.734844852067]
+          axes_order: zyxyz
+          inputs: [x, y, z]
+          outputs: [x, y, z]
+          rotation_type: cartesian
+        inputs: [x0, x1]
+        outputs: [x, y, z]
+      - !<tag:stsci.edu:gwcs/spherical_cartesian-1.3.0>
+        inputs: [x, y, z]
+        outputs: [lon, lat]
+        transform_type: cartesian_to_spherical
+        wrap_lon_at: 360
+      inputs: [x0, x1]
+      name: v23tosky
+      outputs: [lon, lat]
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/celestial_frame-1.2.0>
+      axes_names: [lon, lat]
+      axes_order: [0, 1]
+      axis_physical_types: [pos.eq.ra, pos.eq.dec]
+      name: world
+      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0>
+        frame_attributes: {}
+      unit: [!unit/unit-1.0.0 'deg', !unit/unit-1.0.0 'deg']
+    transform: null
+...
+ÓBLK 0                             FáÄ8§˜á<µ~„ôÃ        e”X}1”¾ÃÁòG7`b¾=rÎˆ„=IK;zÂ¼+•ûû2¼¦I[‘ÏáŸ?º$Þü6Œ¾n/Z‘t«=h%f*ô1Ë¼J"
+<        jIVñÆ@Ò=ÏvµG‹~=êXäWTè×¼VÜÜòDšã»                U‹v¯[¦=Mº8…; ·¼üèÞm<                        $ƒn‘G·¼âÞ…cmTâ»                                ñ‹F.ME.¼                                        ÓBLK 0                             ˆó«ÎT¿nÏ£”÷dÒ„          /2øt	 ?Ž6ÁÊ«ƒ¾n<*åNª=G£É¼ 0ã¼Î¯Ì°'¼•÷ü2Þý>ÝøíEc>JFþ}fz=`¦ýbá§Ê<aÃÕÐœ2¼         „U%jq>Bˆr¦=Úž*RcÈª¼Â¤ŒÅÏ&<                CÉßÿ<n½\Ôkb~É¼M`W3/<                        „`ÝúÚo½<ÛV .¢š¹;                                ã{NªŠ$<                                        ÓBLK 0                             Ž:òµœ¥ËÊo¿œå0x        /«Ó’:/4?i¡z¨ZR?ipÒÃ¥A¿¾‚Ðð½Q>}¼”>–F}&@@e†{“Y|?Ub%~;æ¾¹›sé6M>ãJ¡WûCÚ½        Ih<Ú™á¾q$R©Â¾©ˆ†ef>®2Û8·”Ó=                ¯yÅç§ç¾ý~T+>T¦ Í7¶ò½                        ”[5 mÛG>G‰d¤Ê=                                ÌØ"…a>                                        ÓBLK 0                             ¹E€2+AßŒœçxŸ“        %¢2!í?@ƒ@e=\s?3ôF16ç¾ö¶‰®›ºp>F¾	>©»/}«è¿%ý®j+~S¿x¾Ù°–Ä¾F“z:•Z¾ì›Õ¾§À>         µöòw~a¿v#kŒ	ªé¾Å¥%uþ¾Ì†/BÜ£¾                @âpûâ°>{e9,ˆ¬Z>¤7¾Ä1¾                        bP£W"&I¾œôÂ˜B¦½                                ²“GŸ„ý¾                                        ÓBLK 0                                × gþcšŠNa²9añ¼/        ¤•dò¹ƒ¿¢T)·žÿï¿        ÓBLK 0                                ¦Xµ{_Èý1%1$û÷        ¢T)·žÿï?¤•dò¹ƒ¿        ÓBLK 0                                × gþcšŠNa²9añ¼/        ¤•dò¹ƒ¿¢T)·žÿï¿        ÓBLK 0                                ¦Xµ{_Èý1%1$û÷        ¢T)·žÿï?¤•dò¹ƒ¿        #ASDF BLOCK INDEX
+%YAML 1.1
+---
+- 13132
+- 13474
+- 13816
+- 14158
+- 14500
+- 14586
+- 14672
+- 14758
+...

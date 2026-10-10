@@ -412,6 +412,11 @@ impl ImageCache {
         cache.remove_where(pred);
     }
 
+    pub fn remove_prefix_except(&self, prefix: &str, keep_prefix: &str) {
+        let mut cache = self.inner.write().unwrap();
+        cache.remove_where(|k| k.starts_with(prefix) && !k.starts_with(keep_prefix));
+    }
+
     pub fn any_key(&self, pred: impl Fn(&str) -> bool) -> bool {
         self.inner.read().unwrap().map.keys().any(|k| pred(k))
     }
@@ -625,6 +630,21 @@ mod tests {
         assert!(cache.contains("ab.fits"));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.memory_estimate_bytes(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn remove_prefix_except_keeps_only_the_named_run() {
+        let cache = ImageCache::new(8, usize::MAX);
+        for key in ["__wizard_ch_ta_r_aligned", "__wizard_ch_b_aligned", "__wizard_ch_tb_r_aligned", "__wizard_ch_tb_g_cropped", "plain.fits"] {
+            cache.get_or_load(key, || Ok(make_test_entry(2, 2))).unwrap();
+        }
+        cache.remove_prefix_except("__wizard_ch_", "__wizard_ch_tb_");
+        assert!(cache.contains("__wizard_ch_tb_r_aligned"));
+        assert!(cache.contains("__wizard_ch_tb_g_cropped"));
+        assert!(cache.contains("plain.fits"));
+        assert!(!cache.contains("__wizard_ch_ta_r_aligned"));
+        assert!(!cache.contains("__wizard_ch_b_aligned"), "a legacy bin key must not be mistaken for a run key");
+        assert_eq!(cache.len(), 3);
     }
 
     #[test]

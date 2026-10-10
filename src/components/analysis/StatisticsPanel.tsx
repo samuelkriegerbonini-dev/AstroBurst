@@ -13,6 +13,7 @@ import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, statisticsEntry, statisticsLogReady } from "../../utils/measurementLog";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRegionDoc } from "../../hooks/useRegionStore";
+import { statisticsRunKey } from "../../utils/analysisTarget";
 import { Toggle, RunButton, ErrorAlert } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
@@ -29,6 +30,7 @@ interface StatisticsPanelProps {
   filePath: string | null;
   composite: boolean;
   rgbPath: string | null;
+  measureKey: string | null;
 }
 
 interface ChannelResult {
@@ -56,7 +58,7 @@ function channelRange(body: ChannelStatisticsBody): DataRange {
   return { min: body.data_min, max: body.data_max };
 }
 
-function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: StatisticsPanelProps) {
+function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, measureKey }: StatisticsPanelProps) {
   const { excludeDq } = useDqContext();
   const provenance = useMeasurementProvenance(true);
   const regionKey = useRegionKey();
@@ -131,13 +133,15 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath }: S
     if (!selectedShape) setUseRegion(false);
   }, [selectedShape]);
 
+  const runKey = statisticsRunKey({ filePath, composite: isShowingComposite, rgbPath, measureKey });
+
   useEffect(() => {
     requestSeqRef.current++;
     setResult(null);
     setError(null);
     setLoading(false);
     if (filePath || isShowingComposite) void runRef.current();
-  }, [filePath, isShowingComposite, rgbPath]);
+  }, [runKey, filePath, isShowingComposite]);
 
   const sixteenBitAvailable = useMemo(
     () => result !== null && result.channels.every((c) => fitsSixteenBit(channelRange(c.body))),

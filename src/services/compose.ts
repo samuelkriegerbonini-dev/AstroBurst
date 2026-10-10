@@ -1,7 +1,5 @@
 import { withPreview, typedInvoke, getOutputDir, getPreviewUrl } from "../infrastructure/tauri";
 import type { StfParams } from "../shared/types";
-import type { ScaleLimits } from "../shared/types/display";
-import { LEVEL_PERCENTILES } from "../utils/levelMatch";
 import type {
   BlendResult,
   AlignResult,
@@ -89,7 +87,7 @@ export function clearCompositeCache(): Promise<void> {
 
 export function blendChannels(
   channelPaths: string[],
-  weights: { channelIdx: number; r: number; g: number; b: number }[],
+  weights: { channelIdx: number; r: number; g: number; b: number; offset?: number }[],
   outputDir?: string,
   options: { preset?: string } = {},
 ): Promise<BlendResult> {
@@ -100,24 +98,13 @@ export function blendChannels(
   });
 }
 
-export function measureChannelLevel(path: string): Promise<ScaleLimits> {
-  return typedInvoke<ScaleLimits>("compute_scale_limits_cmd", {
-    path,
-    algorithm: "percentile",
-    vmin: null,
-    vmax: null,
-    percentile: [LEVEL_PERCENTILES[0], LEVEL_PERCENTILES[1]],
-    zscaleContrast: null,
-    symmetric: false,
-    centre: null,
-  });
-}
-
 export async function alignChannels(
   paths: string[],
   outputDir?: string,
   alignMethod = "phase_correlation",
   binIds?: string[],
+  referenceIndex: number | null = null,
+  runToken: string | null = null,
 ): Promise<AlignResult> {
   const dir = outputDir ?? await getOutputDir();
   return typedInvoke<AlignResult>("align_channels_cmd", {
@@ -126,6 +113,8 @@ export async function alignChannels(
     alignMethod,
     binIds: binIds ?? null,
     persistToDisk: false,
+    referenceIndex,
+    runToken,
   });
 }
 
@@ -138,6 +127,7 @@ export async function cropChannels(
   right?: number,
   autoDetect?: boolean,
   binIds?: string[],
+  runToken: string | null = null,
 ): Promise<CropResult> {
   const dir = outputDir ?? await getOutputDir();
   return typedInvoke<CropResult>("crop_channels_cmd", {
@@ -150,6 +140,7 @@ export async function cropChannels(
     autoDetect: autoDetect ?? true,
     binIds: binIds ?? null,
     persistToDisk: false,
+    runToken,
   });
 }
 

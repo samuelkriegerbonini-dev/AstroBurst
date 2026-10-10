@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use astroburst_lib::infra::cache::ImageCache;
+use astroburst_lib::types::image_ref::ImageRef;
 
 use super::config::{ServerConfig, MIN_CLEANUP_INTERVAL};
 use super::job::{Job, JobId};
@@ -27,6 +28,15 @@ pub struct ImageMeta {
     pub height: usize,
     pub wcs_present: bool,
     pub extname: Option<String>,
+}
+
+impl ImageMeta {
+    pub fn wcs_source_path(&self) -> String {
+        match &self.source {
+            Some(source) if ImageRef::parse(&self.plane_ref).path == *source => self.plane_ref.clone(),
+            _ => String::new(),
+        }
+    }
 }
 
 pub struct V2SessionState {
@@ -94,6 +104,10 @@ impl Session {
 
     pub fn prune_evicted_meta(&self) {
         self.v2.meta.retain(|k, _| self.cache.contains(k));
+    }
+
+    pub fn wcs_source_path(&self, image_ref: &str) -> String {
+        self.v2.meta.get(image_ref).map(|m| m.wcs_source_path()).unwrap_or_default()
     }
 
     pub async fn reconcile_active_ref(&self) -> Option<String> {
@@ -192,6 +206,31 @@ mod tests {
             ImageStats::default(),
         );
         session.v2.meta.insert(image_ref.to_string(), meta_for(image_ref));
+    }
+
+    #[test]
+    fn wcs_source_path_names_the_file_plane_only_for_refs_opened_from_a_file() {
+        let cfg = ServerConfig::default();
+        let session = Session::new("s".into(), &cfg);
+        let opened = ImageMeta {
+            source: Some("C:/data/jw_cal.fits".into()),
+            hdu: Some(1),
+            plane_ref: "C:/data/jw_cal.fits#hdu=1".into(),
+            ..meta_for("img_0")
+        };
+        let renamed = ImageMeta { plane_ref: "C:/data/jw_cal.fits".into(), ..opened.clone() };
+        let binned = ImageMeta { source: Some("C:/data/jw_cal.fits".into()), ..meta_for("bin_0") };
+        let cutout = meta_for("cutout_0");
+        assert_eq!(opened.wcs_source_path(), "C:/data/jw_cal.fits#hdu=1");
+        assert_eq!(renamed.wcs_source_path(), "C:/data/jw_cal.fits");
+        assert_eq!(binned.wcs_source_path(), "", "a derived plane never inherits the parent file's gWCS");
+        assert_eq!(cutout.wcs_source_path(), "");
+
+        insert(&session, "cutout_0");
+        session.v2.meta.insert("img_0".into(), opened);
+        assert_eq!(session.wcs_source_path("img_0"), "C:/data/jw_cal.fits#hdu=1");
+        assert_eq!(session.wcs_source_path("cutout_0"), "");
+        assert_eq!(session.wcs_source_path("never_registered"), "");
     }
 
     #[tokio::test]

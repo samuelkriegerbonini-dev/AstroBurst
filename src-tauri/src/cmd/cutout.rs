@@ -6,7 +6,7 @@ use ndarray::Array2;
 use serde::Serialize;
 
 use crate::cmd::common::{blocking_cmd, invalidate_written, load_cached_full, load_companions, output_stem, source_path};
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{header_has_sip, WcsTransform, SIP_RESIDUAL_KEYS};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::cutout::{
     cut_int_plane, cut_plane, fraction_on_image, padding_plane, rect_from_region, reported_ltv, resolve_cutout_rect,
@@ -18,6 +18,7 @@ use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_header_by_index;
 use crate::infra::fits::writer::{filter_header, write_mef_images, HduData, ImageHdu};
+use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR};
 use crate::types::header::{is_commentary_key, HduHeader};
 
@@ -125,6 +126,20 @@ fn source_primary_header(path: &str, merged: Option<&HduHeader>) -> HduHeader {
     from_disk.as_ref().or(merged).map(provenance_only).unwrap_or_else(HduHeader::empty)
 }
 
+fn with_sip_residual_cards(mut header: HduHeader, wcs: Option<&WcsTransform>) -> HduHeader {
+    let Some((Some(max_err_px), inv_err_px)) = wcs.map(WcsTransform::sip_fit_residuals) else {
+        return header;
+    };
+    if !header_has_sip(&header) || header.get(SIP_RESIDUAL_KEYS[0]).is_some() {
+        return header;
+    }
+    header.set(SIP_RESIDUAL_KEYS[0], format!("{max_err_px:E}"));
+    if let Some(inv) = inv_err_px {
+        header.set(SIP_RESIDUAL_KEYS[1], format!("{inv:E}"));
+    }
+    header
+}
+
 fn synthetic_dq_header(sci_header: Option<&HduHeader>) -> Option<HduHeader> {
     let mut header = sci_header?.clone();
     header.remove("BUNIT");
@@ -143,7 +158,7 @@ pub(crate) fn export_cutout(
     let started = Instant::now();
     let entry = load_cached_full(path)?;
     let (img_h, img_w) = entry.arr().dim();
-    let wcs = entry.header().and_then(|h| WcsTransform::from_header(h).ok());
+    let wcs = entry.header().and_then(|h| load_wcs(path, h).ok());
     let system = if sky { RegionSystem::Icrs } else { RegionSystem::Image };
     let region_rect = rect_from_region(region, system, wcs.as_ref(), (img_w, img_h)).map_err(|e| anyhow!(e))?;
     let budget_request = CutoutRequest::Pixel {
@@ -162,7 +177,7 @@ pub(crate) fn export_cutout(
     }
 
     let sci = cut_plane(entry.arr(), &rect);
-    let sci_header = entry.header().map(|h| shift_header(h, &rect));
+    let sci_header = entry.header().map(|h| with_sip_residual_cards(shift_header(h, &rect), wcs.as_ref()));
 
     let err = match (include_err, companions.err.as_ref()) {
         (false, _) => None,
@@ -603,5 +618,92 @@ mod tests {
         assert_eq!(primary.is_string_value("EXPOSURE"), Some(true));
         assert_eq!(primary.is_string_value("NGROUPS"), Some(false));
         assert_eq!(primary.get("EXPOSURE"), Some("1"));
+    }
+
+    fn sci_header_of(path: &str) -> HduHeader {
+        let file = std::fs::File::open(path).unwrap();
+        let sci = list_extensions(&file).unwrap().iter().position(|h| h.extname.as_deref() == Some("SCI")).expect("SCI HDU");
+        extract_header_by_index(&file, sci).unwrap()
+    }
+
+    #[test]
+    fn a_cutout_of_a_gwcs_backed_image_carries_the_fit_residual_cards() {
+        use crate::cmd::common::image_ref;
+        use crate::core::astrometry::gwcs::test_support::{assert_close, fixture_pipeline, fixtures_dir};
+        use crate::core::astrometry::wcs::angular_separation;
+        use crate::infra::asdf::converter::test_fixtures::nircam_gwcs_with_inline_data;
+        use crate::infra::fits::asdf_hdu::test_fixtures::write_fits_with_asdf_cell;
+        use crate::infra::image_source::load_plane_header;
+        use crate::infra::wcs_source::test_fixtures::{insert_before_top_level_wcs, tan_cards};
+
+        let dir = tempfile::tempdir().unwrap();
+        let region = RegionShape::Box { x: 2.0, y: 2.0, width: 2.0, height: 2.0, angle: 0.0 };
+
+        let src = dir.path().join("nircam_gwcs.asdf");
+        std::fs::write(&src, nircam_gwcs_with_inline_data()).unwrap();
+        let src = src.to_string_lossy().into_owned();
+        let out = dir.path().join("fitted_cut.fits").to_string_lossy().into_owned();
+        let report = export_cutout(&src, &out, None, &region, false, false, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 1, y0: 1, width: 2, height: 2 });
+        let parent = load_plane_header(&image_ref(&src)).unwrap();
+        let cut = sci_header_of(&out);
+        assert!(parent.get_f64("SIPMXERR").is_some(), "the synthesised header carries the fit residual");
+        assert_eq!(cut.get_f64("SIPMXERR"), parent.get_f64("SIPMXERR"), "{:?}", cut.get("SIPMXERR"));
+        assert_eq!(cut.get_f64("SIPIVERR"), parent.get_f64("SIPIVERR"));
+        assert_close(cut.get_f64("CRPIX1").unwrap(), parent.get_f64("CRPIX1").unwrap() - 1.0, 1e-9, "CRPIX1 shifted by the cutout origin");
+        assert_close(cut.get_f64("CRPIX2").unwrap(), parent.get_f64("CRPIX2").unwrap() - 1.0, 1e-9, "CRPIX2 shifted by the cutout origin");
+        assert_eq!(cut.get("GWCSKEY"), None);
+        assert_eq!(cut.get("ASDFWCS"), None);
+        let cut_wcs = WcsTransform::from_header(&cut).unwrap();
+        let truth = fixture_pipeline("wcs_jwst_nircam_cal300.asdf").forward(1.0, 1.0, false);
+        let sky = cut_wcs.pixel_to_world(0.0, 0.0);
+        let sep_px = angular_separation(sky.ra, sky.dec, truth[0], truth[1]) * 3600.0 / cut_wcs.pixel_scale_arcsec();
+        let bound = parent.get_f64("SIPMXERR").unwrap().max(1e-6);
+        assert!(sep_px <= bound, "cutout (0, 0) is {sep_px} px from the parent gWCS at (1, 1); bound {bound}");
+
+        let cell = insert_before_top_level_wcs(
+            &std::fs::read(fixtures_dir().join("wcs_jwst_nircam_cal300.asdf")).unwrap(),
+            "meta:\n  wcsinfo: {sipmxerr: 0.0087, sipiverr: 0.0088}\n",
+        );
+        let fits = dir.path().join("nircam_cal.fits");
+        write_fits_with_asdf_cell(&fits, &tan_cards(), &cell);
+        let fits = fits.to_string_lossy().into_owned();
+        let parent = load_plane_header(&image_ref(&fits)).unwrap();
+        assert_eq!(parent.get("SIPMXERR"), None, "a JWST-like header carries no residual card");
+        let out = dir.path().join("wcsinfo_cut.fits").to_string_lossy().into_owned();
+        let report = export_cutout(&fits, &out, None, &region, false, false, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 1, y0: 1, width: 2, height: 2 });
+        let cut = sci_header_of(&out);
+        assert_eq!(cut.get("SIPMXERR"), None, "a header without SIP terms gets no fit-residual card: {:?}", cut.get("SIPMXERR"));
+        assert_eq!(cut.get("SIPIVERR"), None, "{:?}", cut.get("SIPIVERR"));
+        assert_close(cut.get_f64("CRPIX1").unwrap(), 1.5, 1e-9, "the TAN header CRPIX1 2.5 shifted by 1");
+
+        let mut sip_cards = tan_cards();
+        for (key, value) in sip_cards.iter_mut() {
+            match *key {
+                "CTYPE1" => *value = "'RA---TAN-SIP'".into(),
+                "CTYPE2" => *value = "'DEC--TAN-SIP'".into(),
+                _ => {}
+            }
+        }
+        sip_cards.extend([
+            ("A_ORDER", "2".to_string()),
+            ("A_2_0", "1.0E-6".to_string()),
+            ("B_ORDER", "2".to_string()),
+            ("B_0_2", "1.0E-6".to_string()),
+        ]);
+        let fits = dir.path().join("nircam_cal_sip.fits");
+        write_fits_with_asdf_cell(&fits, &sip_cards, &cell);
+        let fits = fits.to_string_lossy().into_owned();
+        let parent = load_plane_header(&image_ref(&fits)).unwrap();
+        assert_eq!(parent.get("SIPMXERR"), None);
+        let out = dir.path().join("wcsinfo_sip_cut.fits").to_string_lossy().into_owned();
+        let report = export_cutout(&fits, &out, None, &region, false, false, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 1, y0: 1, width: 2, height: 2 });
+        let cut = sci_header_of(&out);
+        assert_eq!(cut.get_f64("SIPMXERR"), Some(0.0087), "meta.wcsinfo.sipmxerr: {:?}", cut.get("SIPMXERR"));
+        assert_eq!(cut.get_f64("SIPIVERR"), Some(0.0088), "meta.wcsinfo.sipiverr: {:?}", cut.get("SIPIVERR"));
+        assert!(cut.get("SIPMXERR").unwrap().is_ascii() && cut.get("SIPIVERR").unwrap().is_ascii());
+        assert_eq!(cut.get("A_ORDER").map(str::trim), Some("2"), "the SIP terms the card describes are kept");
     }
 }

@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  blendCompositeStf,
   blendRequest,
-  channelLevel,
   channelLevels,
+  LEVEL_MATCH_HELP,
   levelMatchChannelLabel,
   levelMatchDefault,
   levelMatchEnabled,
@@ -12,7 +13,9 @@ import {
   levelScales,
   levelTargets,
   scaleBlendWeights,
+  SPCC_BG_NOTE,
   SPCC_LEVEL_NOTE,
+  spccBackgroundNote,
   spccFactorsForLevels,
   spccLevelNote,
   withSpccWb,
@@ -24,8 +27,10 @@ import {
   compositeHistoryLines,
   EMPTY_COMPOSITE_HISTORY,
   INITIAL_STATE,
+  levelMatchLine,
   spccInputs,
   type BlendWeight,
+  type LevelScale,
   type WizardState,
 } from "../wizard";
 import { blendMatrixError } from "../blendWeights";
@@ -48,20 +53,53 @@ const frame = (path: string, header: Record<string, string> = {}): ChannelSource
 
 const filled = (s: WizardState) => s.bins.filter((b) => b.files.length > 0);
 
+const scale = (k: number, offset = 0, z = 0): LevelScale => ({ k, offset, z });
+
+const kOnly = (ks: Record<string, number>): Record<string, LevelScale> =>
+  Object.fromEntries(Object.entries(ks).map(([binId, k]) => [binId, scale(k)]));
+
+const kOf = (scales: Readonly<Record<string, LevelScale>>): Record<string, number> =>
+  Object.fromEntries(Object.entries(scales).map(([binId, s]) => [binId, s.k]));
+
+const within = (actual: number, expected: number, tolerance: number) =>
+  expect(Math.abs(actual - expected)).toBeLessThanOrEqual(tolerance);
+
+const JWST_TRIO = [
+  { binId: "r", label: "r F200W", median: 5.1880, mad: 0.66491 },
+  { binId: "g", label: "g F187N", median: 40.710, mad: 6.3634 },
+  { binId: "b", label: "b F090W", median: 2.5893, mad: 0.30578 },
+];
+
+function trioScales(): Record<string, LevelScale> {
+  const outcome = levelScales(JWST_TRIO);
+  if ("error" in outcome) throw new Error(outcome.error);
+  return outcome.scales;
+}
+
 describe("level scales", () => {
-  it("levelScales gives k = max / level", () => {
-    expect(levelScales([
-      { binId: "a", label: "a", level: 1 },
-      { binId: "b", label: "b", level: 20 },
-    ])).toEqual({ scales: { a: 20, b: 1 } });
+  it("matches each channel's median and MAD to the channel of largest MAD", () => {
+    const { r, g, b } = trioScales();
+    within(r.k, 9.5703, 0.002);
+    within(b.k, 20.810, 0.005);
+    within(r.offset, -0.9342, 0.001);
+    within(b.offset, -0.6331, 0.001);
+    within(r.z, -8.941, 0.005);
+    within(b.z, -13.174, 0.005);
+    expect(g).toEqual({ k: 1, offset: 0, z: 0 });
+    for (const [id, s] of Object.entries({ r, g, b })) {
+      const input = JWST_TRIO.find((l) => l.binId === id)!;
+      expect(s.k * (input.median + s.offset)).toBeCloseTo(40.710, 9);
+      expect(s.k * input.mad).toBeCloseTo(6.3634, 9);
+      expect(s.z).toBeCloseTo(s.k * s.offset, 12);
+    }
   });
 
-  it("levelScales refuses a channel without signal", () => {
-    for (const bad of [0, -3, Number.NaN]) {
+  it("refuses a channel without a measurable MAD", () => {
+    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
       const outcome = levelScales([
-        { binId: "r", label: "r F200W", level: 2 },
-        { binId: "g", label: "g F187N", level: bad },
-        { binId: "b", label: "b F090W", level: Number.POSITIVE_INFINITY },
+        { binId: "r", label: "r F200W", median: 5, mad: 2 },
+        { binId: "g", label: "g F187N", median: 40, mad: bad },
+        { binId: "b", label: "b F090W", median: Number.NaN, mad: Number.NaN },
       ]);
       expect("error" in outcome).toBe(true);
       const error = "error" in outcome ? outcome.error : "";
@@ -69,23 +107,50 @@ describe("level scales", () => {
       expect(error).toContain("Turn Match levels off");
       expect(error).not.toContain("b F090W");
     }
+    expect(levelScales([
+      { binId: "r", label: "r F200W", median: 5, mad: 2 },
+      { binId: "g", label: "g F187N", median: 40, mad: 0 },
+    ])).toEqual({
+      error: "Match levels needs a measurable noise level in every channel: g F187N has MAD = 0 (constant, empty or quantised data). Turn Match levels off or check that channel.",
+    });
   });
 
-  it("channelLevel is p99.5 minus p50", () => {
-    expect(channelLevel({ vmin: 0.1, vmax: 2.6 })).toBeCloseTo(2.5, 12);
+  it("refuses channels that differ by more than 10,000x and accepts exactly 10,000x", () => {
+    expect(levelScales([
+      { binId: "r", label: "r F200W", median: 0, mad: 1e-5 },
+      { binId: "g", label: "g F187N", median: 40, mad: 1 },
+    ])).toEqual({
+      error: "Match levels would scale r F200W by x100,000; the channels differ by more than 10,000x. Turn Match levels off or check the channel assignment.",
+    });
+    const edge = levelScales([
+      { binId: "r", label: "r F200W", median: 0, mad: 2 },
+      { binId: "g", label: "g F187N", median: 40, mad: 20000 },
+    ]);
+    expect("scales" in edge && edge.scales.r.k).toBe(10000);
   });
 
-  it("scaled weights are not re-rounded", () => {
+  it("scaleBlendWeights multiplies by k and adds the channel's offset", () => {
     const weights: BackendBlendWeight[] = [{ channelIdx: 0, r: 0, g: 0.33, b: 0 }];
-    const scaled = scaleBlendWeights(weights, ["a"], { a: 20 });
+    const scaled = scaleBlendWeights(weights, ["a"], { a: scale(20, -0.5, -10) });
     expect(scaled[0].g).toBe(0.33 * 20);
     expect(scaled[0].g).not.toBe(6.6);
-    expect(scaled[0]).toEqual({ channelIdx: 0, r: 0, g: 0.33 * 20, b: 0 });
+    expect(scaled[0]).toEqual({ channelIdx: 0, r: 0, g: 0.33 * 20, b: 0, offset: -0.5 });
+    const trio = trioScales();
+    const diagonal: BackendBlendWeight[] = [
+      { channelIdx: 0, r: 1, g: 0, b: 0 },
+      { channelIdx: 1, r: 0, g: 1, b: 0 },
+      { channelIdx: 2, r: 0, g: 0, b: 1 },
+    ];
+    expect(scaleBlendWeights(diagonal, ["r", "g", "b"], trio).map((w) => w.offset)).toEqual([
+      trio.r.offset,
+      0,
+      trio.b.offset,
+    ]);
     const sho: BackendBlendWeight[] = [
       { channelIdx: 0, r: 0.7, g: 0.3, b: 0 },
       { channelIdx: 1, r: 0, g: 0.15, b: 0.85 },
     ];
-    const up = scaleBlendWeights(sho, ["sii", "oiii"], { sii: 1, oiii: 7.5 });
+    const up = scaleBlendWeights(sho, ["sii", "oiii"], kOnly({ sii: 1, oiii: 7.5 }));
     up.forEach((w, i) => {
       expect(w.r).toBeGreaterThanOrEqual(sho[i].r);
       expect(w.g).toBeGreaterThanOrEqual(sho[i].g);
@@ -106,7 +171,41 @@ describe("level scales", () => {
 
   it("a channel without a scale keeps its weights", () => {
     const weights: BackendBlendWeight[] = [{ channelIdx: 1, r: 0.5, g: 0, b: 0 }];
-    expect(scaleBlendWeights(weights, ["a", "b"], { a: 3 })).toEqual(weights);
+    expect(scaleBlendWeights(weights, ["a", "b"], { a: scale(3, 1, 3) })).toEqual(weights);
+  });
+});
+
+describe("Blend step texts and STF", () => {
+  it("describes Match levels as median and MAD matching", () => {
+    expect(LEVEL_MATCH_HELP).toBe(
+      "Matches each channel's background (median) and diffuse-signal spread (MAD) before blending, so a bright narrowband filter does not swamp the others. On by default when a narrowband filter is loaded.",
+    );
+  });
+
+  it("shows the SPCC background note only with Match levels on and SPCC white balance", () => {
+    expect(SPCC_BG_NOTE).toBe(
+      "With Match levels on, the three channels share one background level before SPCC; SPCC then scales the whole composite, so the exported background is neutral only if the SPCC factors are equal. Run Background before Blend for a neutral background after SPCC.",
+    );
+    const spcc = { ...INITIAL_STATE, wbMode: "spcc" as const };
+    expect(spccBackgroundNote(spcc, true)).toBe(SPCC_BG_NOTE);
+    expect(spccBackgroundNote(spcc, false)).toBeNull();
+    expect(spccBackgroundNote({ ...INITIAL_STATE, wbMode: "auto" }, true)).toBeNull();
+  });
+
+  it("hands the per-channel blend STF and the link flag to the composite", () => {
+    const stfR = { shadow: 0.01, midtone: 0.2, highlight: 1 };
+    const stfG = { shadow: 0.02, midtone: 0.3, highlight: 1 };
+    const stfB = { shadow: 0.03, midtone: 0.4, highlight: 1 };
+    const base = { png_path: "/out/blend.png", dimensions: [64, 64] as [number, number], elapsed_ms: 1 };
+    expect(blendCompositeStf({ ...base, stf_r: stfR, stf_g: stfG, stf_b: stfB, stf_linked: false })).toEqual({
+      r: stfR,
+      g: stfG,
+      b: stfB,
+      linked: false,
+    });
+    expect(blendCompositeStf({ ...base, stf_r: stfR, stf_g: stfR, stf_b: stfR, stf_linked: true })?.linked).toBe(true);
+    expect(blendCompositeStf({ ...base, stf_r: stfR, stf_g: stfR, stf_b: stfR })?.linked).toBe(true);
+    expect(blendCompositeStf({ ...base, stf_r: stfR, stf_g: stfG, auto_stf: stfR, stf_linked: false })).toBeUndefined();
   });
 });
 
@@ -155,17 +254,18 @@ describe("blend request", () => {
       { binId: "ha", path: "/x.fits" },
       { binId: "sii", path: "/s.fits" },
     ]);
-    expect(channelLevels(request, { "/x.fits": 2, "/s.fits": 4 }, (id) => `${id}!`)).toEqual([
-      { binId: "ha", label: "ha!", level: 2 },
-      { binId: "oiii", label: "oiii!", level: 2 },
-      { binId: "sii", label: "sii!", level: 4 },
+    const measured = { "/x.fits": { median: 1, mad: 2 }, "/s.fits": { median: 3, mad: 4 } };
+    expect(channelLevels(request, measured, (id) => `${id}!`)).toEqual([
+      { binId: "ha", label: "ha!", median: 1, mad: 2 },
+      { binId: "oiii", label: "oiii!", median: 1, mad: 2 },
+      { binId: "sii", label: "sii!", median: 3, mad: 4 },
     ]);
   });
 
   it("a used channel without a measured level is refused", () => {
     const request = { channelOrder: ["a", "b"], paths: ["/a", "/b"], weights: [{ channelIdx: 0, r: 1, g: 0, b: 0 }, { channelIdx: 1, r: 0, g: 1, b: 1 }] };
-    const outcome = levelScales(channelLevels(request, { "/a": 3 }, (id) => id));
-    expect("error" in outcome && outcome.error.startsWith("Match levels needs signal above the sky in every channel: b ")).toBe(true);
+    const outcome = levelScales(channelLevels(request, { "/a": { median: 1, mad: 3 } }, (id) => id));
+    expect("error" in outcome && outcome.error.startsWith("Match levels needs a measurable noise level in every channel: b ")).toBe(true);
   });
 });
 
@@ -243,21 +343,27 @@ describe("Match levels labels and messages", () => {
   ];
 
   it("labels use bin id and filter code", () => {
-    expect(levelMatchEntries(s, files, { b: 20, g: 1, r: 20 / 1.2 })).toEqual([
-      { channel: "r F200W", scale: 20 / 1.2 },
-      { channel: "g F187N", scale: 1 },
-      { channel: "b F090W", scale: 20 },
+    expect(levelMatchEntries(s, files, { b: scale(20, -0.6, -12), g: scale(1), r: scale(20 / 1.2, 0.3, 5) })).toEqual([
+      { channel: "r F200W", scale: 20 / 1.2, z: 5 },
+      { channel: "g F187N", scale: 1, z: 0 },
+      { channel: "b F090W", scale: 20, z: -12 },
     ]);
     const amateur = stateWith({ r: ["/a/red.fits"], g: ["/a/green.fits"] });
-    expect(levelMatchEntries(amateur, [frame("/a/red.fits", { FILTER: "Red" })], { r: 2 })).toEqual([
-      { channel: "r", scale: 2 },
+    expect(levelMatchEntries(amateur, [frame("/a/red.fits", { FILTER: "Red" })], { r: scale(2, -1, -2) })).toEqual([
+      { channel: "r", scale: 2, z: -2 },
     ]);
   });
 
-  it("summarises the scales in one line", () => {
-    expect(levelMatchSummary(levelMatchEntries(s, files, { b: 20, g: 1, r: 20 / 1.2 }))).toBe(
-      "Level match: r F200W x16.67, g F187N x1.000, b F090W x20.00",
+  it("summarises the scales and pedestals in one line", () => {
+    expect(levelMatchSummary(levelMatchEntries(s, files, trioScales()))).toBe(
+      "Level match: r F200W x9.570 -8.941, g F187N x1.000 +0.000, b F090W x20.81 -13.17",
     );
+  });
+
+  it("writes the scale and the pedestal into the ASCII level-match line", () => {
+    expect(levelMatchLine({ channel: "b F090W", scale: 20.81, z: -13.17 })).toBe("Level match b F090W: x20.81 -13.17");
+    expect(levelMatchLine({ channel: "g F187N", scale: 1, z: 0 })).toBe("Level match g F187N: x1.000 +0.000");
+    expect(levelMatchLine({ channel: "r F200W", scale: 9.570317787, z: 2.5 })).toBe("Level match r F200W: x9.570 +2.500");
   });
 
   it("levelMeasureError", () => {
@@ -277,14 +383,16 @@ describe("Match levels label for a NIRCam pupil filter", () => {
     frame("/n/f090w.fits", { FILTER: "F090W", PUPIL: "CLEAR" }),
   ];
 
+  const pupilScales = { r: scale(2, 0.5, 1), g: scale(1), b: scale(3, -0.25, -0.75) };
+
   it("names the PUPIL narrowband, not the wide FILTER", () => {
-    expect(levelMatchEntries(s, files, { r: 2, g: 1, b: 3 })).toEqual([
-      { channel: "r F470N", scale: 2 },
-      { channel: "g F200W", scale: 1 },
-      { channel: "b F090W", scale: 3 },
+    expect(levelMatchEntries(s, files, pupilScales)).toEqual([
+      { channel: "r F470N", scale: 2, z: 1 },
+      { channel: "g F200W", scale: 1, z: 0 },
+      { channel: "b F090W", scale: 3, z: -0.75 },
     ]);
-    expect(levelMatchSummary(levelMatchEntries(s, files, { r: 2, g: 1, b: 3 }))).toBe(
-      "Level match: r F470N x2.000, g F200W x1.000, b F090W x3.000",
+    expect(levelMatchSummary(levelMatchEntries(s, files, pupilScales))).toBe(
+      "Level match: r F470N x2.000 +1.000, g F200W x1.000 +0.000, b F090W x3.000 -0.7500",
     );
   });
 
@@ -292,30 +400,33 @@ describe("Match levels label for a NIRCam pupil filter", () => {
     const history = applyCompositeOp(EMPTY_COMPOSITE_HISTORY, {
       kind: "blend",
       preset: "rgb",
-      levels: levelMatchEntries(s, files, { r: 2, g: 1, b: 3 }),
+      levels: levelMatchEntries(s, files, pupilScales),
     });
     expect(compositeHistoryLines(history)).toEqual([
       "Blend: rgb",
-      "Level match r F470N: x2.000",
-      "Level match g F200W: x1.000",
-      "Level match b F090W: x3.000",
+      "Level match r F470N: x2.000 +1.000",
+      "Level match g F200W: x1.000 +0.000",
+      "Level match b F090W: x3.000 -0.7500",
     ]);
   });
 
   it("names the PUPIL narrowband when Blend refuses a channel without signal", () => {
     const request = blendRequest(s, filled(s), BLEND_PRESETS.rgb.weights);
-    const levels = channelLevels(request, { [pupil]: 0, "/n/f200w.fits": 4, "/n/f090w.fits": 2 }, (binId) =>
-      levelMatchChannelLabel(s, binId, files),
-    );
+    const measured = {
+      [pupil]: { median: 3, mad: 0 },
+      "/n/f200w.fits": { median: 5, mad: 4 },
+      "/n/f090w.fits": { median: 2, mad: 2 },
+    };
+    const levels = channelLevels(request, measured, (binId) => levelMatchChannelLabel(s, binId, files));
     const outcome = levelScales(levels);
-    expect("error" in outcome ? outcome.error : "").toContain("r F470N has p99.5 - p50 = 0");
+    expect("error" in outcome ? outcome.error : "").toContain("r F470N has MAD = 0");
   });
 });
 
 describe("SPCC factors after Match levels", () => {
   it("SPCC factor is divided by the scale of its input channel", () => {
     const s = stateWith({ r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] });
-    const out = spccFactorsForLevels({ r: 1.2, g: 1, b: 0.9 }, spccInputs(s), { r: 1, g: 1, b: 4 });
+    const out = spccFactorsForLevels({ r: 1.2, g: 1, b: 0.9 }, spccInputs(s), { r: scale(1), g: scale(1), b: scale(4, -7, -28) });
     expect(out.r).toBeCloseTo(1.2, 12);
     expect(out.g).toBe(1);
     expect(out.b).toBeCloseTo(0.225, 12);
@@ -324,7 +435,7 @@ describe("SPCC factors after Match levels", () => {
 
   it("a plane without an input keeps its factor", () => {
     const s = stateWith({ r: ["/r.fits"], g: ["/g.fits"] });
-    expect(spccFactorsForLevels({ r: 2, g: 1, b: 0.5 }, spccInputs(s), { r: 4, g: 1 })).toEqual({ r: 0.5, g: 1, b: 0.5 });
+    expect(spccFactorsForLevels({ r: 2, g: 1, b: 0.5 }, spccInputs(s), kOnly({ r: 4, g: 1 }))).toEqual({ r: 0.5, g: 1, b: 0.5 });
   });
 
   const rgb = { r: ["/r.fits"], g: ["/g.fits"], b: ["/b.fits"] };
@@ -333,7 +444,7 @@ describe("SPCC factors after Match levels", () => {
   it("withSpccWb divides the stored SPCC solution by the scales of the current Blend", () => {
     const solved = withSpccWb(stateWith(rgb, { wbMode: "spcc", spccFactors: { r: 1.1, g: 1, b: 0.9 } }));
     expect(wbOf(solved)).toEqual([1.1, 1, 0.9]);
-    const matched = withSpccWb({ ...solved, blendLevelScales: { r: 1, g: 1.4, b: 2.1 } });
+    const matched = withSpccWb({ ...solved, blendLevelScales: kOnly({ r: 1, g: 1.4, b: 2.1 }) });
     expect(matched.wbR).toBe(1.1);
     expect(matched.wbG).toBeCloseTo(1 / 1.4, 12);
     expect(matched.wbB).toBeCloseTo(0.9 / 2.1, 12);
@@ -343,7 +454,7 @@ describe("SPCC factors after Match levels", () => {
 
   it("withSpccWb returns the same state when nothing has to change", () => {
     const factors = { r: 1.1, g: 1, b: 0.9 };
-    const base = stateWith(rgb, { wbR: 1.3, wbG: 1, wbB: 0.7, blendLevelScales: { r: 2, g: 1, b: 1 } });
+    const base = stateWith(rgb, { wbR: 1.3, wbG: 1, wbB: 0.7, blendLevelScales: kOnly({ r: 2, g: 1, b: 1 }) });
     const manual = { ...base, wbMode: "manual" as const, spccFactors: factors };
     expect(withSpccWb(manual)).toBe(manual);
     const unsolved = { ...base, wbMode: "spcc" as const };
@@ -352,8 +463,8 @@ describe("SPCC factors after Match levels", () => {
     expect(withSpccWb(synced)).toBe(synced);
   });
 
-  const scalesOf = (levels: Record<"r" | "g" | "b", number>) => {
-    const outcome = levelScales((["r", "g", "b"] as const).map((binId) => ({ binId, label: binId, level: levels[binId] })));
+  const scalesOf = (mads: Record<"r" | "g" | "b", number>) => {
+    const outcome = levelScales((["r", "g", "b"] as const).map((binId) => ({ binId, label: binId, median: 10, mad: mads[binId] })));
     if ("error" in outcome) throw new Error(outcome.error);
     return outcome.scales;
   };
@@ -368,14 +479,14 @@ describe("SPCC factors after Match levels", () => {
     const solved = { r: 1.2, g: 1, b: 0.9 };
 
     const blueFaint = scalesOf({ r: 200, g: 200, b: 1 });
-    expect(blueFaint).toEqual({ r: 1, g: 1, b: 200 });
+    expect(kOf(blueFaint)).toEqual({ r: 1, g: 1, b: 200 });
     const b = spccFactorsForLevels(solved, inputs, blueFaint);
     inApplyRange(b);
     expect(b.r / b.g).toBeCloseTo(1.2, 12);
     expect(b.b / b.g).toBeCloseTo(0.9 / 200, 12);
 
     const greenFaint = scalesOf({ r: 200, g: 1, b: 200 });
-    expect(greenFaint).toEqual({ r: 1, g: 200, b: 1 });
+    expect(kOf(greenFaint)).toEqual({ r: 1, g: 200, b: 1 });
     const g = spccFactorsForLevels(solved, inputs, greenFaint);
     inApplyRange(g);
     expect(g.r / g.g).toBeCloseTo(1.2 * 200, 9);
@@ -391,7 +502,7 @@ describe("SPCC factors after Match levels", () => {
   });
 
   it("keeps the colour ratios when no common scale fits the apply range", () => {
-    const out = spccFactorsForLevels({ r: 1.2, g: 1, b: 0.9 }, spccInputs(stateWith(rgb)), { r: 1, g: 1, b: 1e5 });
+    const out = spccFactorsForLevels({ r: 1.2, g: 1, b: 0.9 }, spccInputs(stateWith(rgb)), kOnly({ r: 1, g: 1, b: 1e5 }));
     expect(out.r / out.g).toBeCloseTo(1.2, 12);
     expect(out.b / out.g).toBeCloseTo(0.9e-5, 15);
     expect(wbFactorsOutOfRange(out.r, out.g, out.b)).not.toEqual([]);
@@ -400,12 +511,12 @@ describe("SPCC factors after Match levels", () => {
   it("the SPCC note names the common rescale when the factors had to be brought into range", () => {
     const solved = stateWith(rgb, { wbMode: "spcc", spccFactors: { r: 1.2, g: 1, b: 0.9 } });
     expect(spccLevelNote(solved)).toBeNull();
-    expect(spccLevelNote({ ...solved, blendLevelScales: { r: 1, g: 1.4, b: 2.1 } })).toBe(SPCC_LEVEL_NOTE);
+    expect(spccLevelNote({ ...solved, blendLevelScales: kOnly({ r: 1, g: 1.4, b: 2.1 }) })).toBe(SPCC_LEVEL_NOTE);
     expect(SPCC_LEVEL_NOTE).toBe("SPCC factors are divided by the Blend level-match scales.");
     expect(spccLevelNote({ ...solved, blendLevelScales: scalesOf({ r: 200, g: 200, b: 1 }) })).toBe(
       "SPCC factors are divided by the Blend level-match scales, then all three are scaled x13.61 to stay within [0.01, 100]; the colour ratios are unchanged.",
     );
-    expect(spccLevelNote({ ...solved, wbMode: "manual", blendLevelScales: { r: 1, g: 1, b: 200 } })).toBeNull();
-    expect(spccLevelNote({ ...solved, spccFactors: null, blendLevelScales: { r: 1, g: 1, b: 200 } })).toBeNull();
+    expect(spccLevelNote({ ...solved, wbMode: "manual", blendLevelScales: kOnly({ r: 1, g: 1, b: 200 }) })).toBeNull();
+    expect(spccLevelNote({ ...solved, spccFactors: null, blendLevelScales: kOnly({ r: 1, g: 1, b: 200 }) })).toBeNull();
   });
 });

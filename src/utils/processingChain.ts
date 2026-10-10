@@ -11,6 +11,7 @@ export const CHAIN_ORDER: readonly ChainStep[] = [
   "stretch",
   "maskedStretch",
   "localContrast",
+  "tone",
   "pixelMath",
 ];
 
@@ -21,7 +22,8 @@ const STAGE: Record<ChainStep, number> = {
   stretch: 3,
   maskedStretch: 3,
   localContrast: 4,
-  pixelMath: 5,
+  tone: 5,
+  pixelMath: 6,
 };
 
 export const EMPTY_CHAIN: ProcessingChain = Object.freeze({ steps: Object.freeze({}), psfKernel: null });

@@ -16,6 +16,7 @@ import {
 } from "../../utils/measurementLog";
 import { shapeSummary } from "../../utils/regionGeometry";
 import { exclusionsFor } from "../../utils/regionExclude";
+import { regionStatsRunKey } from "../../utils/analysisTarget";
 import {
   MAX_BIN_WIDTH,
   MIN_BIN_WIDTH,
@@ -40,6 +41,7 @@ import MeasurementBadge from "../analysis/MeasurementBadge";
 interface RegionProfilesPanelProps {
   filePath: string | null;
   measurePath: string | null;
+  measureKey: string | null;
 }
 
 const PROFILE_DEBOUNCE_MS = 250;
@@ -149,7 +151,7 @@ function Card({ label, value, title }: { label: string; value: string; title?: s
   );
 }
 
-function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps) {
+function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfilesPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
   const provenance = useMeasurementProvenance();
@@ -171,12 +173,13 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
     [selected?.shape, background?.shape, mode, binWidth, exclude],
   );
   const requestKey = request ? JSON.stringify(request) : null;
+  const runKey = regionStatsRunKey(measurePath, measureKey);
 
   useEffect(() => {
     seqRef.current++;
     dispatch({ type: "reset" });
     setLoading(false);
-  }, [measurePath]);
+  }, [runKey]);
 
   useEffect(() => {
     const seq = ++seqRef.current;
@@ -217,7 +220,7 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
       }
     }, PROFILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [measurePath, requestKey, excludeDq]);
+  }, [measurePath, runKey, requestKey, excludeDq]);
 
   const sb = result?.kind === "sb" ? result.data : null;
   const arcsecAvailable = sb?.pixel_scale_arcsec != null;
@@ -446,7 +449,7 @@ function RegionProfilesPanel({ filePath, measurePath }: RegionProfilesPanelProps
                 <Plus size={10} /> Log
               </button>
             </div>
-            <LineSkyReadout measurePath={measurePath} shape={selected.shape} />
+            <LineSkyReadout measurePath={measurePath} measureKey={measureKey} shape={selected.shape} />
           </div>
         )}
       </div>

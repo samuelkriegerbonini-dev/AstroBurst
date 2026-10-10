@@ -40,6 +40,7 @@ import {
   CUBE_SPECTRUM_HINT,
   backToFileAction,
   cpuViewerDisplayTitle,
+  cubeSpectrumClickAllowed,
   cubeSpectrumHintShown,
   gpuAfterProbe,
   gpuDisplayOnScreen,
@@ -324,14 +325,23 @@ export default function PreviewPanel() {
     extractSpectrum(x, y);
   }, [isCube, file?.result?.dimensions, extractSpectrum]);
 
+  const spectrumClickAllowed = cubeSpectrumClickAllowed({
+    isCube,
+    hasRamp: ramp !== null,
+    fileDims: file?.result?.dimensions ?? null,
+    displayedDims,
+  });
+  const spectrumClickHandler = spectrumClickAllowed ? handleCubePixelClick : undefined;
+
   const pixelClick = usePixelClick();
   const spectrumClickSeqRef = useRef(0);
   useEffect(() => {
     if (!pixelClick || !isCube) return;
     if (pixelClick.seq === spectrumClickSeqRef.current) return;
     spectrumClickSeqRef.current = pixelClick.seq;
+    if (!spectrumClickAllowed) return;
     extractSpectrum(pixelClick.x, pixelClick.y);
-  }, [pixelClick, isCube, extractSpectrum]);
+  }, [pixelClick, isCube, spectrumClickAllowed, extractSpectrum]);
 
   const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
 
@@ -459,7 +469,7 @@ export default function PreviewPanel() {
                 processed={processedImage}
                 onMousePixel={handleViewerMousePixel}
                 onPixelClick={emitPixelClick}
-                onCanvasPixelClick={isCube ? handleCubePixelClick : undefined}
+                onCanvasPixelClick={spectrumClickHandler}
                 onMouseLeave={handleLeave}
                 overlayCanvasRef={starOverlayRef}
                 dqCanvasRef={dqCanvasRef}
@@ -473,7 +483,7 @@ export default function PreviewPanel() {
               useGpu={useGpu}
               rawPixels={rawPixels}
               rgbRawPixels={rgbRawPixels}
-              onCubePixelClick={handleCubePixelClick}
+              onCubePixelClick={spectrumClickHandler}
               onBackToFile={handleBackToFile}
               starOverlayRef={starOverlayRef}
               dqCanvasRef={dqCanvasRef}

@@ -8,6 +8,7 @@ use crate::math::median::{median_f32_mut};
 use crate::math::sigma_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::error::AppError;
+use crate::types::header::HduHeader;
 
 const MAX_POLY_TERMS: usize = 21;
 const MIN_SCALED_PIVOT: f64 = 1e-10;
@@ -392,6 +393,17 @@ pub fn deband_axis_name(axis: DebandAxis) -> &'static str {
         DebandAxis::Columns => "columns",
         DebandAxis::Both => "both",
     }
+}
+
+pub fn dispersed_exposure(header: &HduHeader) -> Option<String> {
+    let exp_type = header.get("EXP_TYPE")?.trim().trim_matches('\'').trim().to_ascii_uppercase();
+    let dispersed = exp_type.starts_with("NRS_")
+        || exp_type == "MIR_MRS"
+        || exp_type.starts_with("MIR_LRS")
+        || exp_type == "NIS_SOSS"
+        || exp_type == "NIS_WFSS"
+        || (exp_type.starts_with("NRC_") && (exp_type.contains("GRISM") || exp_type.contains("WFSS")));
+    dispersed.then_some(exp_type)
 }
 
 pub fn deband(image: &Array2<f32>, config: &DebandConfig) -> Array2<f32> {
@@ -1283,5 +1295,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn exp_type_header(exp_type: Option<&str>) -> HduHeader {
+        let mut header = HduHeader::empty();
+        if let Some(value) = exp_type {
+            header.set("EXP_TYPE", format!("'{value}'"));
+        }
+        header
+    }
+
+    #[test]
+    fn dispersed_exposure_classifies_jwst_exp_types() {
+        for dispersed in ["NRS_IFU", "NRS_FIXEDSLIT", "MIR_MRS", "MIR_LRS-FIXEDSLIT", "NIS_SOSS", "NIS_WFSS", "NRC_GRISM", "NRC_WFSS", "NRC_TSGRISM", "nrs_msaspec"] {
+            let found = dispersed_exposure(&exp_type_header(Some(dispersed)));
+            assert_eq!(found.as_deref(), Some(dispersed.to_uppercase().as_str()), "{dispersed}");
+        }
+        for imaging in ["NRC_IMAGE", "MIR_IMAGE", "NIS_IMAGE", "NRC_CORON", "FGS_IMAGE"] {
+            assert_eq!(dispersed_exposure(&exp_type_header(Some(imaging))), None, "{imaging}");
+        }
+        assert_eq!(dispersed_exposure(&exp_type_header(None)), None);
     }
 }

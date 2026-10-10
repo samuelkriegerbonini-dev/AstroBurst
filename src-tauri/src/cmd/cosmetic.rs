@@ -9,11 +9,13 @@ use crate::cmd::common::{
     blocking_cmd, load_cached, load_cached_full, load_companions, output_stem, render_and_save,
     resolve_output_dir, write_derived_fits,
 };
-use crate::core::imaging::cosmetic::{cosmetic_correct, parse_defect_list, CosmeticConfig, CosmeticResult};
+use crate::core::imaging::cosmetic::{
+    cosmetic_correct_with_cfa, effective_cfa, parse_defect_list, CosmeticConfig, CosmeticResult,
+};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
-    RES_DIMENSIONS, RES_ELAPSED_MS, RES_ERROR, RES_FAILED, RES_FITS_PATH, RES_PATH, RES_PNG_PATH,
-    RES_RESULTS, RES_SUCCEEDED,
+    RES_CFA_APPLIED, RES_CFA_SOURCE, RES_DIMENSIONS, RES_ELAPSED_MS, RES_ERROR, RES_FAILED, RES_FITS_PATH,
+    RES_PATH, RES_PNG_PATH, RES_RESULTS, RES_SUCCEEDED,
 };
 use crate::types::header::HduHeader;
 
@@ -81,7 +83,8 @@ fn correct_one(
     cfg: &CosmeticConfig,
 ) -> Result<serde_json::Value> {
     let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
-    let result = cosmetic_correct(entry.arr(), master_dark, cfg)?;
+    let (cfa, cfa_source) = effective_cfa(cfg, entry.header());
+    let result = cosmetic_correct_with_cfa(entry.arr(), master_dark, cfg, cfa)?;
     let ro = render_and_save(&result.corrected, path, out_dir, SUFFIX_COSMETIC, false)?;
     let fits_path = format!("{}/{}_{}.fits", out_dir, output_stem(path), SUFFIX_COSMETIC);
     write_derived_fits(&fits_path, &result.corrected, output_header(entry.header()).as_ref())?;
@@ -95,6 +98,8 @@ fn correct_one(
         KEY_COUNTS: serde_json::to_value(CosmeticCounts::from(&result))?,
         KEY_DQ_PRESENT: dq,
         KEY_WARNING: dq.then_some(DQ_WARNING),
+        RES_CFA_APPLIED: cfa,
+        RES_CFA_SOURCE: cfa_source,
     }))
 }
 
@@ -227,6 +232,37 @@ mod tests {
         let body = correct_one(&lonely, &out, None, &list_only("Point 0 0")).unwrap();
         assert_eq!(body[KEY_DQ_PRESENT], false);
         assert!(body[KEY_WARNING].is_null());
+    }
+
+    #[test]
+    fn correct_one_reports_the_cfa_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let out = out.to_str().unwrap().to_string();
+
+        let mut header = HduHeader::empty();
+        header.set("BAYERPAT", "'RGGB'".to_string());
+        let bayer = dir.path().join("bayer.fits").to_str().unwrap().to_string();
+        let frame = Array2::from_shape_fn((8, 8), |(y, x)| if y % 2 == 0 && x % 2 == 0 { 1000.0 } else { 100.0 });
+        crate::infra::fits::writer::write_fits_mono(&bayer, &frame, Some(&header)).unwrap();
+
+        let auto = list_only("Point 2 2");
+        let body = correct_one(&bayer, &out, None, &auto).unwrap();
+        assert_eq!(body[RES_CFA_APPLIED], true);
+        assert_eq!(body[RES_CFA_SOURCE], "header");
+        let written = crate::infra::fits::reader::load_fits_image(body[RES_FITS_PATH].as_str().unwrap()).unwrap();
+        assert!((written[[2, 2]] - 1000.0).abs() < 1e-3, "{}", written[[2, 2]]);
+
+        let explicit = CosmeticConfig { cfa: Some(false), ..auto.clone() };
+        let body = correct_one(&bayer, &out, None, &explicit).unwrap();
+        assert_eq!(body[RES_CFA_APPLIED], false);
+        assert_eq!(body[RES_CFA_SOURCE], "explicit");
+
+        let plain = mef(&dir, "plain.fits", 8, 8);
+        let body = correct_one(&format!("{plain}#hdu=1"), &out, None, &auto).unwrap();
+        assert_eq!(body[RES_CFA_APPLIED], false);
+        assert_eq!(body[RES_CFA_SOURCE], "none");
     }
 
     #[test]

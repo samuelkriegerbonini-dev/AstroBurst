@@ -18,6 +18,7 @@ use crate::infra::fits::compress::is_compressed_image_hdu;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::file_bytes::{io_mode, prefer_mmap, IoMode};
 use crate::infra::fits::reader::{create_mmap_random, decode_pixels_blank, parse_header_at, read_header_blocks, ParsedHdu};
+use crate::infra::fits::table::FileTabTables;
 use crate::infra::render::grayscale::render_stretched_8bit;
 use crate::math::median::f32_cmp;
 use crate::math::{exact_median_mut, sigma_clipped_stats};
@@ -461,6 +462,7 @@ fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
 pub struct LazyCube {
     data: CubeData,
     _tmp: Option<tempfile::TempDir>,
+    pub source_path: String,
     pub header: HduHeader,
     pub primary_header: Option<HduHeader>,
     pub geometry: CubeGeometry,
@@ -538,6 +540,7 @@ impl LazyCube {
         Ok(LazyCube {
             data,
             _tmp: tmp,
+            source_path: fits_path.to_string_lossy().into_owned(),
             header,
             primary_header: found.primary,
             geometry,
@@ -666,7 +669,8 @@ impl LazyCube {
     }
 
     pub fn spectral_axis(&self) -> std::result::Result<SpectralAxis, String> {
-        crate::core::astrometry::spectral::spectral_axis(&self.header, self.geometry.naxis3)
+        let tables = FileTabTables { path: &self.source_path };
+        crate::core::astrometry::spectral::spectral_axis_with(&self.header, self.geometry.naxis3, &tables)
     }
 
     pub fn extract_spectrum_aperture(
@@ -942,6 +946,71 @@ pub(crate) mod test_support {
         pad_data(&mut data);
         header.extend_from_slice(&data);
         header
+    }
+
+    pub fn bintable_hdu(cards: &[(&str, &str)], row_bytes: usize, rows: usize, mut data: Vec<u8>) -> Vec<u8> {
+        let mut header = Vec::new();
+        push_card(&mut header, "XTENSION", "'BINTABLE'");
+        for (key, value) in [("BITPIX", "8"), ("NAXIS", "2")] {
+            push_card(&mut header, key, value);
+        }
+        push_card(&mut header, "NAXIS1", &row_bytes.to_string());
+        push_card(&mut header, "NAXIS2", &rows.to_string());
+        for (key, value) in [("PCOUNT", "0"), ("GCOUNT", "1")] {
+            push_card(&mut header, key, value);
+        }
+        for (key, value) in cards {
+            push_card(&mut header, key, value);
+        }
+        close_header(&mut header);
+        pad_data(&mut data);
+        header.extend_from_slice(&data);
+        header
+    }
+
+    pub fn wcs_table_hdu(values: &[f32]) -> Vec<u8> {
+        let tform = format!("'{}E'", values.len());
+        let tdim = format!("'(1,{})'", values.len());
+        let cards = [
+            ("TFIELDS", "1"),
+            ("TTYPE1", "'wavelength'"),
+            ("TFORM1", tform.as_str()),
+            ("TDIM1", tdim.as_str()),
+            ("TUNIT1", "'um'"),
+            ("EXTNAME", "'WCS-TABLE'"),
+            ("EXTVER", "1"),
+        ];
+        let data = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+        bintable_hdu(&cards, 4 * values.len(), 1, data)
+    }
+
+    pub fn tab_cube_cards() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("CTYPE3", "'WAVE-TAB'"),
+            ("PS3_0", "'WCS-TABLE'"),
+            ("PS3_1", "'wavelength'"),
+            ("CRPIX3", "0"),
+            ("CRVAL3", "0"),
+            ("CDELT3", "1"),
+            ("CUNIT3", "'um'"),
+        ]
+    }
+
+    pub fn write_cube_with_wcs_table(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        cube_cards: &[(&str, &str)],
+        table_values: &[f32],
+        value: impl Fn(usize, usize, usize) -> f32,
+    ) {
+        let depth = table_values.len();
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T")], Vec::new());
+        let mut sci: Vec<(&str, &str)> = vec![("EXTNAME", "'SCI'")];
+        sci.extend_from_slice(cube_cards);
+        bytes.extend(image_hdu("XTENSION", &[cols, rows, depth], -32, &sci, f32_samples(cols, rows, depth, value)));
+        bytes.extend(wcs_table_hdu(table_values));
+        write_bytes(path, &bytes);
     }
 
     pub fn empty_bintable_hdu(cards: &[(&str, &str)]) -> Vec<u8> {
@@ -1669,6 +1738,94 @@ mod tests {
         assert!(missing.contains("out of range"), "{}", missing);
         let asdf = format!("{:#}", LazyCube::open(&format!("{}#array=data", source)).err().unwrap());
         assert!(asdf.contains("ASDF"), "{}", asdf);
+    }
+
+    #[test]
+    fn a_cube_with_a_wave_tab_axis_reads_its_wcs_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tab_cube.fits");
+        write_cube_with_wcs_table(&path, 4, 4, &tab_cube_cards(), &[1.0, 1.5, 2.25], |z, _, _| z as f32 + 1.0);
+        let source = path.to_str().unwrap();
+        let cube = LazyCube::open(source).unwrap();
+        assert_eq!(cube.source_path, source);
+        assert_eq!(cube.geometry.naxis3, 3);
+        let axis = cube.spectral_axis().unwrap();
+        assert!(axis.tabulated);
+        assert_eq!(axis.values.len(), 3);
+        for (got, want) in axis.values.iter().zip([1.0, 1.5, 2.25]) {
+            assert!((got - want).abs() < 1e-7, "{:?}", axis.values);
+        }
+        assert_eq!(axis.unit, "um");
+        assert!(axis.notes.iter().any(|n| n.starts_with("WAVE-TAB from WCS-TABLE[1] column 'wavelength' (3 entries)")), "{:?}", axis.notes);
+    }
+
+    #[test]
+    fn a_linear_wave_axis_ignores_an_unreferenced_wcs_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("miri_like.fits");
+        let cards = [("CTYPE3", "'WAVE'"), ("CRVAL3", "1.0"), ("CDELT3", "0.5"), ("CRPIX3", "1"), ("CUNIT3", "'um'")];
+        write_cube_with_wcs_table(&path, 4, 4, &cards, &[1.0, 1.5, 2.25], |z, _, _| z as f32);
+        let axis = LazyCube::open(path.to_str().unwrap()).unwrap().spectral_axis().unwrap();
+        assert!(!axis.tabulated);
+        assert_eq!(axis.values, vec![1.0, 1.5, 2.0]);
+        assert!(axis.notes.is_empty(), "{:?}", axis.notes);
+    }
+
+    const MIRI_MRS_DIR_VAR: &str = "ASTROBURST_MIRI_MRS_DIR";
+
+    #[test]
+    #[ignore]
+    fn miri_mrs_wcs_table_matches_its_linear_wave_axis_within_one_f32_ulp() {
+        use crate::core::astrometry::spectral::spectral_axis_on_with;
+        use crate::infra::fits::table::{read_bintable_column_by_name, ColumnValues, FileTabTables};
+
+        let cases = [
+            ("jw02016-c1012_t023_miri_ch1-long_s3d.fits", 1400usize, 6.5304003f64, 7.6496000f64),
+            ("jw02016-c1012_t023_miri_ch4-long_s3d.fits", 717, 24.4030, 28.6990),
+        ];
+        let Some(dir) = std::env::var_os(MIRI_MRS_DIR_VAR) else {
+            eprintln!("skipped: {MIRI_MRS_DIR_VAR} unset");
+            return;
+        };
+        for (name, count, first, last) in cases {
+            let path = std::path::Path::new(&dir).join(name);
+            if !path.exists() {
+                eprintln!("skipped: {} absent", path.display());
+                return;
+            }
+            let path = path.to_string_lossy().into_owned();
+            let column = read_bintable_column_by_name(&path, "WCS-TABLE", 1, "wavelength").unwrap();
+            assert_eq!(column.repeat, count, "{name}");
+            assert_eq!(column.tdim, Some(vec![1, count]), "{name}");
+            let ColumnValues::F64(table) = &column.values else { panic!("{name}: wavelength column is not F64") };
+            assert_eq!(table.len(), count, "{name}");
+            assert!((table[0] - first).abs() < 1e-6, "{name}: {}", table[0]);
+            assert!((table[count - 1] - last).abs() < 1e-6, "{name}: {}", table[count - 1]);
+            assert!(table.windows(2).all(|w| w[1] > w[0]), "{name}: the table is not strictly increasing");
+
+            let cube = LazyCube::open(&path).unwrap();
+            let linear = cube.spectral_axis().unwrap();
+            assert!(!linear.tabulated, "{name}");
+            assert_eq!(linear.values.len(), count, "{name}");
+            let mut derived = cube.header.clone();
+            derived.set("CTYPE3", "WAVE-TAB".to_string());
+            derived.set("PS3_0", "WCS-TABLE".to_string());
+            derived.set("PS3_1", "wavelength".to_string());
+            derived.set_f64("CRPIX3", 0.0);
+            derived.set_f64("CRVAL3", 0.0);
+            derived.set_f64("CDELT3", 1.0);
+            let tabulated = spectral_axis_on_with(&derived, 3, count, &FileTabTables { path: &path }).unwrap();
+            assert!(tabulated.tabulated, "{name}");
+            assert_eq!(tabulated.values.len(), count, "{name}");
+            let mut worst = 0.0f64;
+            for (k, (tab, lin)) in tabulated.values.iter().zip(&linear.values).enumerate() {
+                let delta = (tab - lin).abs();
+                let bound = 2.0 * f32::EPSILON as f64 * lin.abs();
+                assert!(delta <= bound, "{name} channel {k}: table {tab} vs linear {lin} (|delta| {delta:.3e} > {bound:.3e})");
+                worst = worst.max(delta);
+            }
+            println!("{name}: {count} channels {first}..{last} um, max |table - linear| = {worst:.3e} um");
+        }
     }
 
     #[test]

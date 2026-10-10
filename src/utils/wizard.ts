@@ -53,6 +53,13 @@ export interface ChannelResult {
 export interface LevelMatchEntry {
   channel: string;
   scale: number;
+  z: number;
+}
+
+export interface LevelScale {
+  k: number;
+  offset: number;
+  z: number;
 }
 
 export interface CompositeHistory {
@@ -103,8 +110,11 @@ export interface WizardState {
   subframeResults: Record<string, SubframeAnalysisResult>;
   excludedFiles: Record<string, string[]>;
   levelMatch: boolean | null;
-  blendLevelScales: Record<string, number> | null;
+  blendLevelScales: Record<string, LevelScale> | null;
   spccFactors: { r: number; g: number; b: number } | null;
+  alignRefChoice: string | null;
+  alignRefBinId: string | null;
+  alignRunToken: string | null;
 }
 
 export const DEFAULT_BINS: FrequencyBin[] = [
@@ -206,6 +216,9 @@ export const INITIAL_STATE: WizardState = {
   levelMatch: null,
   blendLevelScales: null,
   spccFactors: null,
+  alignRefChoice: null,
+  alignRefBinId: null,
+  alignRunToken: null,
 };
 
 export interface StepDef {
@@ -220,6 +233,11 @@ export interface StepDef {
 
 function filledCount(s: WizardState): number {
   return s.bins.filter((b) => b.files.length > 0).length;
+}
+
+export function singleFilledBin(state: WizardState): string | null {
+  const filled = state.bins.filter((b) => b.files.length > 0);
+  return filled.length === 1 ? filled[0].id : null;
 }
 
 function totalFilesCount(s: WizardState): number {
@@ -346,8 +364,8 @@ export const STEPS: StepDef[] = [
     shortLabel: "Crop",
     color: "cyan",
     ...gate((s) => {
-      if (Object.keys(s.alignedPaths).length > 0) return null;
-      return filledCount(s) >= 2 ? "run Align first" : NEEDS_TWO_CHANNELS;
+      if (Object.keys(s.alignedPaths).length > 0 || singleFilledBin(s) !== null) return channelInputsReason(s);
+      return filledCount(s) >= 2 ? "run Align first" : NEEDS_FRAMES;
     }),
     badge: (s) => {
       const n = Object.keys(s.croppedPaths).length;
@@ -447,7 +465,11 @@ export function invalidateDownstream(
 
   const clear = (stepId: string) => STEP_ORDER.indexOf(stepId) > idx;
 
-  if (clear("align")) partial.alignedPaths = {};
+  if (clear("align")) {
+    partial.alignedPaths = {};
+    partial.alignRefBinId = null;
+    partial.alignRunToken = null;
+  }
   if (clear("crop")) partial.croppedPaths = {};
   if (clear("background")) partial.backgroundPaths = {};
   if (clear("blend")) {
@@ -542,7 +564,7 @@ export function withExcludedFiles(state: WizardState, binId: string, files: stri
   const needsStack = (s: WizardState) => unstackedBins(s).some((b) => b.id === binId);
   const sameInput = resolveChannelPath(next, binId, "stacked") === resolveChannelPath(state, binId, "stacked");
   if (sameInput && needsStack(next) === needsStack(state)) return next;
-  return { ...next, ...invalidateDownstream(state, "align"), alignedPaths: {} };
+  return { ...next, ...invalidateDownstream(state, "align"), alignedPaths: {}, alignRefBinId: null, alignRunToken: null };
 }
 
 export function resolveAnyChannelPath(
@@ -556,54 +578,85 @@ export function resolveAnyChannelPath(
   return null;
 }
 
-export function resolveRgbPaths(
-  state: WizardState,
-  useChannelOutputs = false,
-): { r: string | null; g: string | null; b: string | null } {
+interface RgbSlot {
+  binId: string;
+  path: string | null;
+}
+
+const RGB_CANDIDATES: Record<RgbKey, readonly string[]> = {
+  r: ["r", "sii", "ha"],
+  g: ["g", "ha", "oiii"],
+  b: ["b", "oiii", "sii"],
+};
+
+function rgbSlots(state: WizardState, pathOf: (binId: string) => string | null): Record<RgbKey, RgbSlot | null> {
   const activeBins = state.bins.filter((b) => b.files.length > 0);
-  const rCandidates = ["r", "sii", "ha"];
-  const gCandidates = ["g", "ha", "oiii"];
-  const bCandidates = ["b", "oiii", "sii"];
   const usedIds = new Set<string>();
-  const pathOf = (binId: string) =>
-    useChannelOutputs ? resolveOutputChannelPath(state, binId) : resolveChannelPath(state, binId);
-  const anyPath = (): string | null => {
+  const slotOf = (binId: string): RgbSlot => ({ binId, path: pathOf(binId) });
+  const resolved = (slot: RgbSlot | null): RgbSlot | null => (slot && slot.path !== null ? slot : null);
+  const anyPath = (): RgbSlot | null => {
     for (const bin of state.bins) {
-      const p = pathOf(bin.id);
-      if (p) return p;
+      const slot = slotOf(bin.id);
+      if (slot.path) return slot;
     }
     return null;
   };
 
-  const findBest = (candidates: string[], allowReuse = false): string | null => {
+  const findBest = (candidates: readonly string[], allowReuse = false): RgbSlot | null => {
     for (const cid of candidates) {
       if (!allowReuse && usedIds.has(cid)) continue;
-      const bin = activeBins.find((b) => b.id === cid);
-      if (bin) {
+      if (activeBins.some((b) => b.id === cid)) {
         usedIds.add(cid);
-        return pathOf(cid);
+        return slotOf(cid);
       }
     }
     return null;
   };
 
-  const r = findBest(rCandidates);
-  const g = findBest(gCandidates);
-  let b = findBest(bCandidates);
-  if (!b) b = findBest(bCandidates, true);
+  const r = findBest(RGB_CANDIDATES.r);
+  const g = findBest(RGB_CANDIDATES.g);
+  let b = findBest(RGB_CANDIDATES.b);
+  if (!b?.path) b = findBest(RGB_CANDIDATES.b, true);
 
-  const fillFromUnused = (): string | null => {
+  const fillFromUnused = (): RgbSlot | null => {
     const bin = activeBins.find((bn) => !usedIds.has(bn.id));
     if (!bin) return null;
     usedIds.add(bin.id);
-    return pathOf(bin.id);
+    return slotOf(bin.id);
   };
 
   return {
-    r: r ?? fillFromUnused() ?? anyPath(),
-    g: g ?? fillFromUnused() ?? anyPath(),
-    b: b ?? fillFromUnused() ?? anyPath(),
+    r: resolved(r) ?? resolved(fillFromUnused()) ?? anyPath(),
+    g: resolved(g) ?? resolved(fillFromUnused()) ?? anyPath(),
+    b: resolved(b) ?? resolved(fillFromUnused()) ?? anyPath(),
   };
+}
+
+export function resolveRgbPaths(
+  state: WizardState,
+  useChannelOutputs = false,
+): { r: string | null; g: string | null; b: string | null } {
+  const slots = rgbSlots(state, (binId) =>
+    useChannelOutputs ? resolveOutputChannelPath(state, binId) : resolveChannelPath(state, binId));
+  return { r: slots.r?.path ?? null, g: slots.g?.path ?? null, b: slots.b?.path ?? null };
+}
+
+export function resolveRgbBins(state: WizardState): { r: string | null; g: string | null; b: string | null } {
+  const slots = rgbSlots(state, (binId) => resolveChannelPath(state, binId));
+  return { r: slots.r?.binId ?? null, g: slots.g?.binId ?? null, b: slots.b?.binId ?? null };
+}
+
+function fixedExportBins(state: WizardState): Record<RgbKey, string> | null {
+  if (state.compositeReady || filledCount(state) < 2 || resolveExportRgbPaths(state).monoBinId !== null) return null;
+  const { r, g, b } = resolveRgbBins(state);
+  return r && g && b ? { r, g, b } : null;
+}
+
+export function exportMappingBanner(state: WizardState): string | null {
+  const bins = fixedExportBins(state);
+  if (!bins) return null;
+  const label = (binId: string) => binShortLabel(state, binId);
+  return `No composite yet: exporting the fixed mapping R=${label(bins.r)} G=${label(bins.g)} B=${label(bins.b)}. Your Blend weights are not applied; run Blend to export the composite.`;
 }
 
 export function singleChannelBinId(state: WizardState): string | null {
@@ -644,7 +697,7 @@ export function wizardHeaderSourcePath(
   const active = state.bins.filter((b) => b.files.length > 0);
   const aligned = Object.keys(state.alignedPaths).length > 0;
   const bin = aligned
-    ? active[0]
+    ? active.find((b) => b.id === state.alignRefBinId) ?? active[0]
     : monoBinId
       ? active.find((b) => b.id === monoBinId)
       : active.length === 1
@@ -816,6 +869,7 @@ const ALIGN_METHOD_LABELS: Record<string, string> = {
   phase_correlation: "phase correlation",
   affine: "affine",
   rigid: "rigid",
+  wcs: "WCS",
 };
 
 const IDENTITY_ALIGN_METHODS = new Set(["identity", "phase_correlation_identity"]);
@@ -849,9 +903,14 @@ function alignMethodLabel(method: string): string {
 export function alignRunMethodLabel(result: {
   align_method: string;
   channels?: readonly { offset?: readonly [number, number]; registered?: boolean; method_used?: string }[];
+  reference_index?: number;
 }): string {
   const requested = alignMethodLabel(result.align_method);
-  const used = (result.channels ?? []).slice(1).map((ch) => ch.method_used).filter((m): m is string => !!m);
+  const referenceIndex = result.reference_index ?? 0;
+  const used = (result.channels ?? [])
+    .filter((_, i) => i !== referenceIndex)
+    .map((ch) => ch.method_used)
+    .filter((m): m is string => !!m);
   const fallbacks = used.filter((m) => m !== result.align_method);
   if (fallbacks.length === 0) return requested;
   const counts = new Map<string, number>();
@@ -895,9 +954,15 @@ export function alignMatchSummary(
 
 export const MAX_OVERLAY_CHANNELS = 3;
 
-export function alignOverlayBinIds(binIds: readonly string[], chosen: readonly string[] = []): string[] {
-  if (binIds.length <= MAX_OVERLAY_CHANNELS) return [...binIds];
-  const [reference, ...others] = binIds;
+export function alignOverlayBinIds(
+  binIds: readonly string[],
+  chosen: readonly string[] = [],
+  referenceBinId: string | null = null,
+): string[] {
+  if (binIds.length === 0) return [];
+  const reference = referenceBinId !== null && binIds.includes(referenceBinId) ? referenceBinId : binIds[0];
+  const others = binIds.filter((id) => id !== reference);
+  if (binIds.length <= MAX_OVERLAY_CHANNELS) return [reference, ...others];
   const picked: string[] = [];
   const slots = MAX_OVERLAY_CHANNELS - 1;
   for (const id of [...chosen, ...others]) {
@@ -911,11 +976,13 @@ export interface AlignedRun {
   binIds: string[];
   aligned: Record<string, string>;
   inputs: Record<string, string>;
+  referenceBinId?: string | null;
 }
 
 export function alignedRunFromChannels(
   channels: readonly { binId: string; path: string }[],
   alignedPaths: Readonly<Record<string, string>>,
+  referenceBinId: string | null = null,
 ): AlignedRun | null {
   if (channels.length < 2) return null;
   const aligned: Record<string, string> = {};
@@ -926,7 +993,8 @@ export function alignedRunFromChannels(
     aligned[binId] = key;
     inputs[binId] = path;
   }
-  return { binIds: channels.map((c) => c.binId), aligned, inputs };
+  const run: AlignedRun = { binIds: channels.map((c) => c.binId), aligned, inputs };
+  return referenceBinId === null ? run : { ...run, referenceBinId };
 }
 
 export interface AlignOverlayRequest {
@@ -936,11 +1004,15 @@ export interface AlignOverlayRequest {
 }
 
 export function alignOverlayRequest(run: AlignedRun, chosen: readonly string[] = []): AlignOverlayRequest | null {
-  const binIds = alignOverlayBinIds(run.binIds, chosen);
+  const binIds = alignOverlayBinIds(run.binIds, chosen, run.referenceBinId ?? null);
   const afterKeys = binIds.map((id) => run.aligned[id]);
   const beforePaths = binIds.map((id) => run.inputs[id]);
   if (binIds.length < 2 || afterKeys.some((k) => !k) || beforePaths.some((p) => !p)) return null;
   return { binIds, afterKeys, beforePaths };
+}
+
+export function alignOverlayChoices(run: AlignedRun, request: AlignOverlayRequest): string[] | null {
+  return run.binIds.length > MAX_OVERLAY_CHANNELS ? run.binIds.filter((id) => id !== request.binIds[0]) : null;
 }
 
 export type AlignPreviewView = "after" | "before" | "blink";
@@ -970,6 +1042,7 @@ export function alignPreviewLegend(labels: readonly string[], view: AlignPreview
 export function sameAlignedRun(a: AlignedRun | null, b: AlignedRun | null): boolean {
   if (a === b) return true;
   if (!a || !b || a.binIds.length !== b.binIds.length) return false;
+  if ((a.referenceBinId ?? null) !== (b.referenceBinId ?? null)) return false;
   return a.binIds.every(
     (id, i) => id === b.binIds[i] && a.aligned[id] === b.aligned[id] && a.inputs[id] === b.inputs[id],
   );
@@ -986,8 +1059,9 @@ export function nextAlignedRunState(
   channels: readonly { binId: string; path: string }[],
   alignedPaths: Readonly<Record<string, string>>,
   loading: boolean,
+  referenceBinId: string | null = null,
 ): AlignedRunState {
-  const run = loading ? null : alignedRunFromChannels(channels, alignedPaths);
+  const run = loading ? null : alignedRunFromChannels(channels, alignedPaths, referenceBinId);
   if (
     previous &&
     previous.source === alignedPaths &&
@@ -1270,6 +1344,11 @@ export function droppedChannelOutputs(before: WizardState, after: WizardState): 
 
 export function channelExportHistory(state: WizardState, exported: (string | null)[]): string[] {
   const lines: string[] = [];
+  const mapping = fixedExportBins(state);
+  if (mapping) {
+    const id = (binId: string) => binId.toUpperCase();
+    lines.push(`Channel mapping: R=${id(mapping.r)} G=${id(mapping.g)} B=${id(mapping.b)} (fixed, Blend weights not applied)`);
+  }
   for (const bin of state.bins) {
     const result = state.channelResults[bin.id];
     const out = resolveOutputChannelPath(state, bin.id);
@@ -1315,8 +1394,12 @@ export function compositeHistoryLines(history: CompositeHistory): string[] {
   return [...(history.blend ? [history.blend] : []), ...history.levels, ...history.colorBalance, ...history.after];
 }
 
+export function levelMatchFactors(entry: LevelMatchEntry): string {
+  return `x${entry.scale.toPrecision(4)} ${entry.z >= 0 ? "+" : "-"}${Math.abs(entry.z).toPrecision(4)}`;
+}
+
 export function levelMatchLine(entry: LevelMatchEntry): string {
-  return `Level match ${entry.channel}: x${entry.scale.toPrecision(4)}`;
+  return `Level match ${entry.channel}: ${levelMatchFactors(entry)}`;
 }
 
 export function wizardStackName(binId: string, drizzle: boolean, runId: number): string {

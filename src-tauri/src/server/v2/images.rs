@@ -3,7 +3,7 @@ use axum::{extract::State, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::stats::finite_slice_stats;
 use astroburst_lib::infra::cache::{ImageCache, ImageEntry, PlaneLoad};
 use astroburst_lib::infra::image_source::{load_plane, LoadedPlane, PlaneInfo};
@@ -120,9 +120,6 @@ pub(crate) fn register_plane_and_respond(
     let (rows, cols) = entry.arr().dim();
     let header = entry.header();
 
-    let wcs_present = header
-        .map(|h| WcsTransform::from_header(h).is_ok())
-        .unwrap_or(false);
     let extname = header.and_then(|h| h.get("EXTNAME").map(|s| s.to_string()));
     let header_map: Value = header
         .map(|h| serde_json::to_value(&h.index).unwrap_or(json!(null)))
@@ -141,7 +138,7 @@ pub(crate) fn register_plane_and_respond(
         None => (hdu, None, image_ref.clone(), false),
     };
 
-    let meta = ImageMeta {
+    let mut meta = ImageMeta {
         image_ref: image_ref.clone(),
         source,
         hdu,
@@ -150,9 +147,13 @@ pub(crate) fn register_plane_and_respond(
         is_dq,
         width: cols,
         height: rows,
-        wcs_present,
+        wcs_present: false,
         extname: extname.clone(),
     };
+    let wcs_present = header
+        .map(|h| load_wcs(&meta.wcs_source_path(), h).is_ok())
+        .unwrap_or(false);
+    meta.wcs_present = wcs_present;
     session.v2.meta.insert(image_ref.clone(), meta);
     session.prune_evicted_meta();
 

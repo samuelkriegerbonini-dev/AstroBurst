@@ -109,8 +109,17 @@ export interface WcsOrientationInfo {
   pixel_scale_y_arcsec?: number;
   projection?: string;
   sip_present?: boolean;
+  sip_max_err_px?: number | null;
+  sip_inv_err_px?: number | null;
   north_vec?: [number, number] | null;
   east_vec?: [number, number] | null;
+  wcs_kind?: "header" | "gwcs";
+  gwcs_steps?: number | null;
+  gwcs_frames?: string[] | null;
+  gwcs_source?: string | null;
+  gwcs_vs_header_sip_max_mas?: number | null;
+  gwcs_vs_header_sip_max_px?: number | null;
+  gwcs_refusal?: string | null;
 }
 
 export interface WorldToPixelResult {

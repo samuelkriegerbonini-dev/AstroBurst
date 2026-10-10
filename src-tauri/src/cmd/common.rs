@@ -8,6 +8,7 @@ use ndarray::Array2;
 use rayon::prelude::*;
 use serde_json::json;
 
+use crate::core::analysis::gain::{CAMERA_GAIN_KEYWORD, GAIN_KEYWORDS};
 use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::dq_flags::{exclusion_map, DqTable};
@@ -25,8 +26,9 @@ use crate::infra::image_source::{
 };
 use crate::infra::render::grayscale::save_stf_png;
 use crate::types::constants::{
-    PLANE_KIND_ARRAY, PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME,
-    RES_EXTVER, RES_INDEX, RES_IS_DQ, RES_IS_ERR, RES_KEY, RES_KIND, RES_SOURCE_PATH,
+    HEADER_COMBINE_METHOD, HEADER_DISPLAY_REFERRED_CARD, HEADER_DRIZZLE_SCALE, HEADER_NCOMBINE, PLANE_KIND_ARRAY,
+    PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME, RES_EXTVER, RES_INDEX, RES_IS_DQ, RES_IS_ERR,
+    RES_KEY, RES_KIND, RES_SOURCE_PATH,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::{ImageRef, OutputStems, PlaneSelector};
@@ -35,7 +37,7 @@ pub(crate) use crate::infra::image_source::LoadedCompanions;
 
 pub(crate) const MAX_PREVIEW_DIM: usize = 4096;
 pub(crate) const HEADER_ABPROC: &str = "ABPROC";
-pub(crate) const HEADER_DISPLAY_REFERRED: &str = "ABDISP";
+pub(crate) const HEADER_DISPLAY_REFERRED: &str = HEADER_DISPLAY_REFERRED_CARD;
 
 const DEFAULT_ABPROC: &str = "processed";
 const MAX_TRACKED_STAMPS: usize = 1024;
@@ -45,7 +47,17 @@ const DERIVED_STRUCTURAL_CARDS: &[&str] = &["EXTNAME", "EXTVER", "EXTLEVEL", "IN
 const AXIS_INDEXED_PREFIXES: &[&str] = &["NAXIS", "CTYPE", "CRVAL", "CRPIX", "CDELT", "CUNIT", "CROTA"];
 const AXIS_MATRIX_PREFIXES: &[&str] = &["CD", "PC"];
 const AXIS_PARAMETER_PREFIXES: &[&str] = &["PV", "PS"];
-const CALIBRATION_CARDS: &[&str] = &["BUNIT", "PIXAR_SR", "PIXAR_A2", "ZP", "ZPTMAG"];
+const CALIBRATION_CARDS: &[&str] = &[
+    "BUNIT",
+    "PIXAR_SR",
+    "PIXAR_A2",
+    "ZP",
+    "ZPTMAG",
+    CAMERA_GAIN_KEYWORD,
+    HEADER_NCOMBINE,
+    HEADER_COMBINE_METHOD,
+    HEADER_DRIZZLE_SCALE,
+];
 const CALIBRATION_PREFIXES: &[&str] = &["PHOT", "ROMAN_META_PHOTOMETRY"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +427,7 @@ fn is_structural_card(key: &str) -> bool {
 
 fn is_calibration_card(key: &str) -> bool {
     CALIBRATION_CARDS.contains(&key)
+        || GAIN_KEYWORDS.contains(&key)
         || CALIBRATION_PREFIXES.iter().any(|p| key.starts_with(p))
         || GENERIC_ZERO_POINT_KEYS.contains(&key)
         || SATURATION_KEYWORDS.contains(&key)
@@ -675,6 +688,7 @@ mod tests {
 
     use super::test_support::{assert_png_matches, gpu_reduced, gpu_view_with_auto_stf, wide_textured_sky};
     use super::*;
+    use crate::core::analysis::gain::{gain_model, PoissonRoute};
     use crate::core::cube::lazy::test_support::write_line_cube;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
     use crate::infra::fits::writer::write_fits_mono;
@@ -1022,6 +1036,48 @@ mod tests {
 
         let bare = derived_output_header(None, "  ", OutputValues::Rescaled);
         assert_eq!(bare.get(HEADER_ABPROC), Some("processed"));
+    }
+
+    #[test]
+    fn a_stack_processed_by_background_keeps_its_combine_scaling() {
+        let stack = header_with(&[("NCOMBINE", "16"), ("ABCOMB", "mean"), ("EGAIN", "0.25"), ("ABPROC", "stacked")]);
+        let out = derived_output_header(Some(&stack), "bg_corrected", OutputValues::Linear);
+        assert_eq!(out.get(HEADER_ABPROC), Some("bg_corrected"));
+        for kept in ["NCOMBINE", "ABCOMB", "EGAIN"] {
+            assert!(out.get(kept).is_some(), "{kept} dropped from a flux-preserving output");
+        }
+        let model = gain_model(Some(&out), false);
+        assert_eq!(model.effective_gain, Some(4.0), "{model:?}");
+        assert!(model.combine_scaled);
+        assert_eq!(model.poisson_route, PoissonRoute::HeaderGain);
+    }
+
+    #[test]
+    fn rescaled_and_display_referred_outputs_lose_gain_and_combine_cards() {
+        let source = header_with(&[
+            ("EGAIN", "0.25"),
+            ("GAIN", "120"),
+            ("NCOMBINE", "16"),
+            ("ABCOMB", "mean"),
+            ("ABDRZSCL", "2"),
+            ("ATODGAIN", "7"),
+            ("CCDGAIN", "2"),
+            ("ADCGAIN", "5"),
+        ]);
+        let cards = ["EGAIN", "GAIN", "NCOMBINE", "ABCOMB", "ABDRZSCL", "ATODGAIN", "CCDGAIN", "ADCGAIN"];
+        for values in [OutputValues::Rescaled, OutputValues::DisplayReferred] {
+            let out = derived_output_header(Some(&source), "pixelmath", values);
+            for card in cards {
+                assert!(out.get(card).is_none(), "{card} survived a {values:?} output");
+                assert!(!out.cards.iter().any(|(k, _)| k == card), "{card} card survived a {values:?} output");
+            }
+            assert_eq!(gain_model(Some(&out), false).effective_gain, None, "{values:?}");
+        }
+        let linear = derived_output_header(Some(&source), "deconv", OutputValues::Linear);
+        for card in cards {
+            assert!(linear.get(card).is_some(), "{card} dropped from a flux-preserving output");
+        }
+        assert_eq!(gain_model(Some(&linear), false).effective_gain, Some(1.0));
     }
 
     #[test]

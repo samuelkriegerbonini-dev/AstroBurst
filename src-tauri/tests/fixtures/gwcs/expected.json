@@ -1,0 +1,6262 @@
+{
+  "_meta": {
+    "generated_by": "gwcs 1.0.3 reference evaluation of the sources named in PROVENANCE.md",
+    "versions": {
+      "python": "3.15.0",
+      "gwcs": "1.0.3",
+      "asdf": "5.4.0",
+      "asdf-astropy": "0.11.0",
+      "asdf-standard": "1.5.0",
+      "asdf-transform-schemas": "0.6.0",
+      "asdf-wcs-schemas": "0.5.0",
+      "asdf-coordinates-schemas": "0.5.1",
+      "astropy": "8.0.1",
+      "numpy": "2.5.3",
+      "scipy": "1.18.1",
+      "stdatamodels": "6.0.0",
+      "roman-datamodels": "1.1.0",
+      "rad": "1.1.0",
+      "pyyaml": "6.0.3"
+    },
+    "conventions": "inputs/outputs are lists in the model's input/output order; angles deg; v2v3 arcsec; NaN -> null; 'inverse_output' = model.inverse(*inverse_input) where inverse_input = output, or (o0,o1,o0,o1) when the stored inverse takes 4 inputs (JWST pattern: the inverse of a Poly&Poly concatenate is fed by a Mapping((0,1,0,1))); stored inverse if the file has one, else the analytic inverse astropy derives; for WCS fixtures 'output' uses the bounding box (NaN outside), 'invert' = w.invert(*output_no_bbox) with gwcs default bbox handling, 'invert_no_bbox' without it, 'frames' = each step transform applied in sequence."
+  },
+  "shift.asdf": {
+    "key": "transform",
+    "model": "Shift",
+    "description": "Shift(offset=-2.776)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step0 filter-offset Shift (x)",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 997,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5
+        ],
+        "output": [
+          -3.276
+        ],
+        "inverse_input": [
+          -3.276
+        ],
+        "inverse_output": [
+          -0.5
+        ]
+      },
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          -2.776
+        ],
+        "inverse_input": [
+          -2.776
+        ],
+        "inverse_output": [
+          0.0
+        ]
+      },
+      {
+        "input": [
+          1023.5
+        ],
+        "output": [
+          1020.724
+        ],
+        "inverse_input": [
+          1020.724
+        ],
+        "inverse_output": [
+          1023.5
+        ]
+      },
+      {
+        "input": [
+          2047.5
+        ],
+        "output": [
+          2044.724
+        ],
+        "inverse_input": [
+          2044.724
+        ],
+        "inverse_output": [
+          2047.5
+        ]
+      }
+    ]
+  },
+  "scale.asdf": {
+    "key": "transform",
+    "model": "Scale",
+    "description": "Scale(factor=1/3600)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step2 v23tosky arcsec->deg Scale",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1012,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -559.5
+        ],
+        "output": [
+          -0.15541666666666668
+        ],
+        "inverse_input": [
+          -0.15541666666666668
+        ],
+        "inverse_output": [
+          -559.5
+        ]
+      },
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          0.0
+        ],
+        "inverse_input": [
+          0.0
+        ],
+        "inverse_output": [
+          0.0
+        ]
+      },
+      {
+        "input": [
+          120.66454051298493
+        ],
+        "output": [
+          0.03351792792027359
+        ],
+        "inverse_input": [
+          0.03351792792027359
+        ],
+        "inverse_output": [
+          120.66454051298493
+        ]
+      },
+      {
+        "input": [
+          153.14
+        ],
+        "output": [
+          0.04253888888888888
+        ],
+        "inverse_input": [
+          0.04253888888888888
+        ],
+        "inverse_output": [
+          153.14
+        ]
+      }
+    ]
+  },
+  "concat_shift_shift.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Shift(-2.776) & Shift(-4.392)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step0 filter offset",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "y0",
+      "y1"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1165,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          -3.276,
+          -4.892
+        ],
+        "inverse_input": [
+          -3.276,
+          -4.892
+        ],
+        "inverse_output": [
+          -0.5,
+          -0.5
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          -2.776,
+          -4.392
+        ],
+        "inverse_input": [
+          -2.776,
+          -4.392
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          1020.724,
+          2043.108
+        ],
+        "inverse_input": [
+          1020.724,
+          2043.108
+        ],
+        "inverse_output": [
+          1023.5,
+          2047.5
+        ]
+      }
+    ]
+  },
+  "dva_correction.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "named compound 'DVA_Correction' = (Scale&Scale)|(Shift&Shift) with named leaves",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step1 v2v3->v2v3vacorr",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "y0",
+      "y1"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1704,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          153.1435254150926,
+          -559.504563795383
+        ],
+        "output": [
+          153.14120464614305,
+          -559.502283189643
+        ],
+        "inverse_input": [
+          153.14120464614305,
+          -559.502283189643
+        ],
+        "inverse_output": [
+          153.1435254150926,
+          -559.504563795383
+        ]
+      },
+      {
+        "input": [
+          120.66454676648969,
+          -527.6382396224653
+        ],
+        "output": [
+          120.66454051298493,
+          -527.6382298732158
+        ],
+        "inverse_input": [
+          120.66454051298493,
+          -527.6382298732158
+        ],
+        "inverse_output": [
+          120.66454676648969,
+          -527.6382396224653
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.008592537736433575,
+          -0.03759078209925696
+        ],
+        "inverse_input": [
+          0.008592537736433575,
+          -0.03759078209925696
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          -382.0,
+          -436.0
+        ],
+        "output": [
+          -381.9641853962785,
+          -436.00652057066077
+        ],
+        "inverse_input": [
+          -381.9641853962785,
+          -436.00652057066077
+        ],
+        "inverse_output": [
+          -382.0,
+          -436.0
+        ]
+      }
+    ]
+  },
+  "poly2d_distortion_pair_with_inverse.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Mapping((0,1,0,1)) | Polynomial2D(5) & Polynomial2D(5) with stored inverse of the same form (NIRCam distortion; outputs arcsec offsets)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step0 T.right.left.right.left",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "z0",
+      "z1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 4203,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -1022.5,
+          -1022.5
+        ],
+        "output": [
+          -32.12078927877801,
+          -32.12940618125424
+        ],
+        "inverse_input": [
+          -32.12078927877801,
+          -32.12940618125424
+        ],
+        "inverse_output": [
+          -1022.5000649837718,
+          -1022.499580144084
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          500.25,
+          -250.75
+        ],
+        "output": [
+          15.600976847810873,
+          -7.838021106967654
+        ],
+        "inverse_input": [
+          15.600976847810873,
+          -7.838021106967654
+        ],
+        "inverse_output": [
+          500.24998889669905,
+          -250.75001373100406
+        ]
+      },
+      {
+        "input": [
+          1024.5,
+          1024.5
+        ],
+        "output": [
+          31.664100822689182,
+          32.09490013606149
+        ],
+        "inverse_input": [
+          31.664100822689182,
+          32.09490013606149
+        ],
+        "inverse_output": [
+          1024.4999611020826,
+          1024.500418726883
+        ]
+      },
+      {
+        "input": [
+          -1024.0,
+          1024.0
+        ],
+        "output": [
+          -31.719490367542384,
+          31.943277356950734
+        ],
+        "inverse_input": [
+          -31.719490367542384,
+          31.943277356950734
+        ],
+        "inverse_output": [
+          -1023.9999842173618,
+          1023.999979927756
+        ]
+      }
+    ]
+  },
+  "poly2d_distortion_pair_inline.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "same model, arrays written inline (data: [...]) instead of binary blocks",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step0 T.right.left.right.left",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "z0",
+      "z1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 4884,
+    "arrays_inline": true,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -1022.5,
+          -1022.5
+        ],
+        "output": [
+          -32.12078927877801,
+          -32.12940618125424
+        ],
+        "inverse_input": [
+          -32.12078927877801,
+          -32.12940618125424
+        ],
+        "inverse_output": [
+          -1022.5000649837718,
+          -1022.499580144084
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          500.25,
+          -250.75
+        ],
+        "output": [
+          15.600976847810873,
+          -7.838021106967654
+        ],
+        "inverse_input": [
+          15.600976847810873,
+          -7.838021106967654
+        ],
+        "inverse_output": [
+          500.24998889669905,
+          -250.75001373100406
+        ]
+      },
+      {
+        "input": [
+          1024.5,
+          1024.5
+        ],
+        "output": [
+          31.664100822689182,
+          32.09490013606149
+        ],
+        "inverse_input": [
+          31.664100822689182,
+          32.09490013606149
+        ],
+        "inverse_output": [
+          1024.4999611020826,
+          1024.500418726883
+        ]
+      },
+      {
+        "input": [
+          -1024.0,
+          1024.0
+        ],
+        "output": [
+          -31.719490367542384,
+          31.943277356950734
+        ],
+        "inverse_input": [
+          -31.719490367542384,
+          31.943277356950734
+        ],
+        "inverse_output": [
+          -1023.9999842173618,
+          1023.999979927756
+        ]
+      }
+    ]
+  },
+  "poly2d_linear_pair_with_inverse.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Mapping((0,1,0,1)) | Polynomial2D(1) & Polynomial2D(1) with stored inverse (rotation/parity to V2V3)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step0 T.right.left.right.right",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "z0",
+      "z1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 3179,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -30.0,
+          25.0
+        ],
+        "output": [
+          29.757808103325896,
+          25.28780055452889
+        ],
+        "inverse_input": [
+          29.757808103325896,
+          25.28780055452889
+        ],
+        "inverse_output": [
+          -30.0,
+          25.0
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          31.7,
+          -32.2
+        ],
+        "output": [
+          -31.3883787758882,
+          -32.50384097028182
+        ],
+        "inverse_input": [
+          -31.3883787758882,
+          -32.50384097028182
+        ],
+        "inverse_output": [
+          31.699999999999992,
+          -32.2
+        ]
+      }
+    ]
+  },
+  "poly1d_with_inverse.asdf": {
+    "key": "transform",
+    "model": "Polynomial1D",
+    "description": "Polynomial1D(1) named M_column_correction with stored inverse Polynomial1D(1)",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs M_column_correction",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1579,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -4.0
+        ],
+        "output": [
+          -12.887500000000001
+        ],
+        "inverse_input": [
+          -12.887500000000001
+        ],
+        "inverse_output": [
+          -4.0
+        ]
+      },
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          -12.787500000000001
+        ],
+        "inverse_input": [
+          -12.787500000000001
+        ],
+        "inverse_output": [
+          -5.684341886080802e-14
+        ]
+      },
+      {
+        "input": [
+          511.5
+        ],
+        "output": [
+          0.0
+        ],
+        "inverse_input": [
+          0.0
+        ],
+        "inverse_output": [
+          511.5
+        ]
+      },
+      {
+        "input": [
+          1027.5
+        ],
+        "output": [
+          12.899999999999999
+        ],
+        "inverse_input": [
+          12.899999999999999
+        ],
+        "inverse_output": [
+          1027.5
+        ]
+      }
+    ]
+  },
+  "poly2d_concat4_with_inverse.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Polynomial2D(4) & Polynomial2D(4) (4 inputs -> 2 outputs) with stored inverse concatenate; YAML aliases inside the inverse in the source file",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs B_correction & A_correction",
+    "n_inputs": 4,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "y0",
+      "x1",
+      "y1"
+    ],
+    "outputs": [
+      "z0",
+      "z1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 3435,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.1,
+          0.05,
+          -0.1,
+          0.05
+        ],
+        "output": [
+          0.30220124253877123,
+          -20.24813310163504
+        ],
+        "inverse_input": [
+          0.30220124253877123,
+          -20.24813310163504,
+          0.30220124253877123,
+          -20.24813310163504
+        ],
+        "inverse_output": [
+          -0.09999692409634608,
+          0.04994881187510637
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.07833649886445247,
+          -19.806357839238743
+        ],
+        "inverse_input": [
+          0.07833649886445247,
+          -19.806357839238743,
+          0.07833649886445247,
+          -19.806357839238743
+        ],
+        "inverse_output": [
+          4.0254195718958385e-06,
+          -4.840807945652101e-05
+        ]
+      },
+      {
+        "input": [
+          12.3,
+          -11.7,
+          12.3,
+          -11.7
+        ],
+        "output": [
+          -51.71537200930759,
+          34.756593749782446
+        ],
+        "inverse_input": [
+          -51.71537200930759,
+          34.756593749782446,
+          -51.71537200930759,
+          34.756593749782446
+        ],
+        "inverse_output": [
+          12.299996198105369,
+          -11.699540654537577
+        ]
+      }
+    ]
+  },
+  "mapping_0101_inverse_identity.asdf": {
+    "key": "transform",
+    "model": "Mapping",
+    "description": "Mapping((0,1,0,1)) with stored inverse Identity(2) (non-mathematical inverse used by the JWST pipeline)",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs",
+    "n_inputs": 2,
+    "n_outputs": 4,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "x0",
+      "x1",
+      "x2",
+      "x3"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1121,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.5,
+          -2.5
+        ],
+        "output": [
+          1.5,
+          -2.5,
+          1.5,
+          -2.5
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "identity_inverse_mapping.asdf": {
+    "key": "transform",
+    "model": "Identity",
+    "description": "Identity(2) with stored inverse Mapping((0,1,0,1)) (inverse has 4 outputs)",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "x0",
+      "x1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1121,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.5,
+          -2.5
+        ],
+        "output": [
+          1.5,
+          -2.5
+        ],
+        "inverse_input": [
+          1.5,
+          -2.5
+        ],
+        "inverse_output": [
+          1.5,
+          -2.5,
+          1.5,
+          -2.5
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "mapping_swap.asdf": {
+    "key": "transform",
+    "model": "Mapping",
+    "description": "Mapping((1,0)) (derived inverse = itself)",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "x0",
+      "x1"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1013,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.5,
+          -2.5
+        ],
+        "output": [
+          -2.5,
+          1.5
+        ],
+        "inverse_input": [
+          -2.5,
+          1.5
+        ],
+        "inverse_output": [
+          1.5,
+          -2.5
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          7.0
+        ],
+        "output": [
+          7.0,
+          0.0
+        ],
+        "inverse_input": [
+          7.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          7.0
+        ]
+      }
+    ]
+  },
+  "mapping_drop_n_inputs.asdf": {
+    "key": "transform",
+    "model": "Mapping",
+    "description": "Mapping((0,), n_inputs=2): drops the second input; no inverse",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture) (inside stored inverse)",
+    "n_inputs": 2,
+    "n_outputs": 1,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "x0"
+    ],
+    "inverse": "none",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1020,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.5,
+          -2.5
+        ],
+        "output": [
+          1.5
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          7.0
+        ],
+        "output": [
+          0.0
+        ]
+      }
+    ]
+  },
+  "v23tosky_jwst.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "named compound 'v23tosky' = (Scale&Scale) | SphericalToCartesian(wrap 180) | RotationSequence3D(zyxyz, cartesian) | CartesianToSpherical(wrap 360)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs step2 v2v3vacorr->world",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "lon",
+      "lat"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 2484,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          120.66454051298493,
+          -527.6382298732158
+        ],
+        "output": [
+          274.7348047011612,
+          -13.867263013140171
+        ],
+        "inverse_input": [
+          274.7348047011612,
+          -13.867263013140171
+        ],
+        "inverse_output": [
+          120.66454051298085,
+          -527.6382298731742
+        ]
+      },
+      {
+        "input": [
+          153.14120464614305,
+          -559.502283189643
+        ],
+        "output": [
+          274.72530887834534,
+          -13.875908119051436
+        ],
+        "inverse_input": [
+          274.72530887834534,
+          -13.875908119051436
+        ],
+        "inverse_output": [
+          153.14120464613708,
+          -559.5022831896379
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          274.8870583990748,
+          -13.839823482758614
+        ],
+        "inverse_input": [
+          274.8870583990748,
+          -13.839823482758614
+        ],
+        "inverse_output": [
+          2.9997511053174924e-12,
+          -1.5507149535048269e-10
+        ]
+      },
+      {
+        "input": [
+          -382.3,
+          -436.2
+        ],
+        "output": [
+          274.7669104122142,
+          -13.728726261141972
+        ],
+        "inverse_input": [
+          274.7669104122142,
+          -13.728726261141972
+        ],
+        "inverse_output": [
+          -382.30000000000325,
+          -436.2000000001031
+        ]
+      },
+      {
+        "input": [
+          600.0,
+          -300.0
+        ],
+        "output": [
+          274.7942093651857,
+          -14.002919397326162
+        ],
+        "inverse_input": [
+          274.7942093651857,
+          -14.002919397326162
+        ],
+        "inverse_output": [
+          599.9999999999911,
+          -299.9999999999931
+        ]
+      }
+    ]
+  },
+  "spherical_to_cartesian_wrap180.asdf": {
+    "key": "transform",
+    "model": "SphericalToCartesian",
+    "description": "gwcs SphericalToCartesian(wrap_lon_at=180); inverse = CartesianToSpherical(wrap 180) -> lon in (-180,180]",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs v23tosky",
+    "n_inputs": 2,
+    "n_outputs": 3,
+    "inputs": [
+      "lon",
+      "lat"
+    ],
+    "outputs": [
+      "x",
+      "y",
+      "z"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1063,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0335,
+          -0.1466
+        ],
+        "output": [
+          0.9999965557221233,
+          0.0005846833522254729,
+          -0.002558649891634498
+        ],
+        "inverse_input": [
+          0.9999965557221233,
+          0.0005846833522254729,
+          -0.002558649891634498
+        ],
+        "inverse_output": [
+          0.033499999999999995,
+          -0.1466
+        ]
+      },
+      {
+        "input": [
+          -0.1,
+          0.12
+        ],
+        "output": [
+          0.9999962836720075,
+          -0.001745324537966259,
+          0.002094393571219374
+        ],
+        "inverse_input": [
+          0.9999962836720075,
+          -0.001745324537966259,
+          0.002094393571219374
+        ],
+        "inverse_output": [
+          -0.09999999999999999,
+          0.11999999999999997
+        ]
+      },
+      {
+        "input": [
+          359.9,
+          0.0
+        ],
+        "output": [
+          0.9999984769132877,
+          -0.0017453283658984452,
+          0.0
+        ],
+        "inverse_input": [
+          0.9999984769132877,
+          -0.0017453283658984452,
+          0.0
+        ],
+        "inverse_output": [
+          -0.10000000000000782,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          180.0,
+          45.0
+        ],
+        "output": [
+          -0.7071067811865476,
+          8.659560562354934e-17,
+          0.7071067811865476
+        ],
+        "inverse_input": [
+          -0.7071067811865476,
+          8.659560562354934e-17,
+          0.7071067811865476
+        ],
+        "inverse_output": [
+          180.0,
+          45.0
+        ]
+      }
+    ]
+  },
+  "cartesian_to_spherical_wrap360.asdf": {
+    "key": "transform",
+    "model": "CartesianToSpherical",
+    "description": "gwcs CartesianToSpherical(wrap_lon_at=360): lon in [0,360); lon=0 at the pole",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs v23tosky",
+    "n_inputs": 3,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y",
+      "z"
+    ],
+    "outputs": [
+      "lon",
+      "lat"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1063,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.9693,
+          -0.2335,
+          -0.0767
+        ],
+        "output": [
+          346.4557630767664,
+          -4.399021963527719
+        ],
+        "inverse_input": [
+          346.4557630767664,
+          -4.399021963527719
+        ],
+        "inverse_output": [
+          0.9693253821174503,
+          -0.23350611443766123,
+          -0.07670200846838797
+        ]
+      },
+      {
+        "input": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          -0.5,
+          0.7071067811865476
+        ],
+        "output": [
+          225.0,
+          45.0
+        ],
+        "inverse_input": [
+          225.0,
+          45.0
+        ],
+        "inverse_output": [
+          -0.5000000000000001,
+          -0.5,
+          0.7071067811865476
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "output": [
+          0.0,
+          90.0
+        ],
+        "inverse_input": [
+          0.0,
+          90.0
+        ],
+        "inverse_output": [
+          6.123233995736766e-17,
+          0.0,
+          1.0
+        ]
+      }
+    ]
+  },
+  "rotation_sequence_3d_cartesian.asdf": {
+    "key": "transform",
+    "model": "RotationSequence3D",
+    "description": "RotationSequence3D(angles=[v2_ref/3600, -v3_ref/3600, roll_ref, dec_ref, -ra_ref], axes_order='zyxyz')",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs v23tosky",
+    "n_inputs": 3,
+    "n_outputs": 3,
+    "inputs": [
+      "x",
+      "y",
+      "z"
+    ],
+    "outputs": [
+      "x",
+      "y",
+      "z"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1168,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.99999,
+          0.000585,
+          -0.002557
+        ],
+        "output": [
+          0.0801385595098277,
+          -0.9675340299096327,
+          -0.2396718440295315
+        ],
+        "inverse_input": [
+          0.0801385595098277,
+          -0.9675340299096327,
+          -0.2396718440295315
+        ],
+        "inverse_output": [
+          0.99999,
+          0.0005849999999999536,
+          -0.0025570000000000154
+        ]
+      },
+      {
+        "input": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.08271860396726288,
+          -0.9674383597070327,
+          -0.23920838765618824
+        ],
+        "inverse_input": [
+          0.08271860396726288,
+          -0.9674383597070327,
+          -0.23920838765618824
+        ],
+        "inverse_output": [
+          1.0,
+          -4.09679474734441e-17,
+          -1.6285071146111766e-17
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "output": [
+          -0.061171487100877955,
+          0.2346493910975262,
+          -0.9701534478748336
+        ],
+        "inverse_input": [
+          -0.061171487100877955,
+          0.2346493910975262,
+          -0.9701534478748336
+        ],
+        "inverse_output": [
+          4.1470371139066774e-17,
+          1.0000000000000002,
+          8.396592076138073e-18
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "output": [
+          0.9946937627850967,
+          0.09488247164216532,
+          -0.03976977308835763
+        ],
+        "inverse_input": [
+          0.9946937627850967,
+          0.09488247164216532,
+          -0.03976977308835763
+        ],
+        "inverse_output": [
+          -4.77289734608061e-18,
+          8.396592076138073e-18,
+          1.0
+        ]
+      }
+    ]
+  },
+  "rotation_sequence_spherical_miri.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "(Scale&Scale) | SphericalRotationSequence(zyxyz) named v23tosky; lon output NOT wrapped (atan2 range)",
+    "source": "gwcs/tests/data/miriwcs.asdf step v2v3->world",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "lon",
+      "lat"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1540,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -434.1050454721436,
+          -375.4523424779128
+        ],
+        "output": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "inverse_input": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "inverse_output": [
+          -434.105045472145,
+          -375.45234247788767
+        ]
+      },
+      {
+        "input": [
+          -382.0,
+          -436.0
+        ],
+        "output": [
+          5.69510120197652,
+          -72.07192710151034
+        ],
+        "inverse_input": [
+          5.69510120197652,
+          -72.07192710151034
+        ],
+        "inverse_output": [
+          -381.9999999999999,
+          -436.00000000001603
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          6.037154732374893,
+          -71.95040164085766
+        ],
+        "inverse_input": [
+          6.037154732374893,
+          -71.95040164085766
+        ],
+        "inverse_output": [
+          -1.3398917753921168e-12,
+          -3.101844427448798e-11
+        ]
+      }
+    ]
+  },
+  "rotation2d.asdf": {
+    "key": "transform",
+    "model": "Rotation2D",
+    "description": "Rotation2D(angle=0.24155757363306068 deg)",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "x",
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1018,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          10.0,
+          -5.0
+        ],
+        "output": [
+          10.020990940423932,
+          -4.957795938916958
+        ],
+        "inverse_input": [
+          10.020990940423932,
+          -4.957795938916958
+        ],
+        "inverse_output": [
+          10.0,
+          -5.0
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          -22.6,
+          97.3
+        ],
+        "output": [
+          -23.01001230066774,
+          97.2038545219433
+        ],
+        "inverse_input": [
+          -23.01001230066774,
+          97.2038545219433
+        ],
+        "inverse_output": [
+          -22.6,
+          97.29999999999998
+        ]
+      }
+    ]
+  },
+  "const1d_with_inverse.asdf": {
+    "key": "transform",
+    "model": "Const1D",
+    "description": "Const1D with stored inverse Const1D",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture)",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1119,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          299.7
+        ],
+        "inverse_input": [
+          299.7
+        ],
+        "inverse_output": [
+          299.7
+        ]
+      },
+      {
+        "input": [
+          17.5
+        ],
+        "output": [
+          299.7
+        ],
+        "inverse_input": [
+          299.7
+        ],
+        "inverse_output": [
+          299.7
+        ]
+      },
+      {
+        "input": [
+          -3.0
+        ],
+        "output": [
+          299.7
+        ],
+        "inverse_input": [
+          299.7
+        ],
+        "inverse_output": [
+          299.7
+        ]
+      }
+    ]
+  },
+  "tabular1d_with_inverse.asdf": {
+    "key": "transform",
+    "model": "Tabular1D",
+    "description": "Tabular1D(method linear, bounds_error False, fill_value nan) with its own bounding_box and stored inverse Tabular1D 'waverefinv'",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture) waveref",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 19650,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -291.60259000740217
+        ],
+        "output": [
+          14.390969014945744
+        ],
+        "inverse_input": [
+          14.390969014945744
+        ],
+        "inverse_output": [
+          null
+        ],
+        "output_with_bounding_box": [
+          14.390969014945744
+        ]
+      },
+      {
+        "input": [
+          -191.52494928175165
+        ],
+        "output": [
+          12.741466432376622
+        ],
+        "inverse_input": [
+          12.741466432376622
+        ],
+        "inverse_output": [
+          -191.52422029339237
+        ],
+        "output_with_bounding_box": [
+          12.741466432376622
+        ]
+      },
+      {
+        "input": [
+          -90.94692035247286
+        ],
+        "output": [
+          10.748444395340563
+        ],
+        "inverse_input": [
+          10.748444395340563
+        ],
+        "inverse_output": [
+          -90.94704328896117
+        ],
+        "output_with_bounding_box": [
+          10.748444395340563
+        ]
+      },
+      {
+        "input": [
+          95.69787960086536
+        ],
+        "output": [
+          3.596040329703134
+        ],
+        "inverse_input": [
+          3.596040329703134
+        ],
+        "inverse_output": [
+          95.68996689078567
+        ],
+        "output_with_bounding_box": [
+          3.596040329703134
+        ]
+      },
+      {
+        "input": [
+          96.69787960086536
+        ],
+        "output": [
+          null
+        ],
+        "inverse_input": [
+          null
+        ],
+        "inverse_output": [
+          null
+        ],
+        "output_with_bounding_box": [
+          null
+        ]
+      },
+      {
+        "input": [
+          -292.60259000740217
+        ],
+        "output": [
+          null
+        ],
+        "inverse_input": [
+          null
+        ],
+        "inverse_output": [
+          null
+        ],
+        "output_with_bounding_box": [
+          null
+        ]
+      }
+    ]
+  },
+  "pix2sky_gnomonic.asdf": {
+    "key": "transform",
+    "model": "Pix2Sky_Gnomonic",
+    "description": "Pix2Sky_Gnomonic (TAN), inputs in deg of the projection plane",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf image_wcs (gwcs docs example)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "phi",
+      "theta"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1016,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          90.0
+        ],
+        "inverse_input": [
+          0.0,
+          90.0
+        ],
+        "inverse_output": [
+          0.0,
+          -3.508354649267438e-15
+        ]
+      },
+      {
+        "input": [
+          0.01,
+          -0.02
+        ],
+        "output": [
+          26.56505117707799,
+          89.97763932136026
+        ],
+        "inverse_input": [
+          26.56505117707799,
+          89.97763932136026
+        ],
+        "inverse_output": [
+          0.010000000000000486,
+          -0.02000000000000097
+        ]
+      },
+      {
+        "input": [
+          -0.0138,
+          0.0138
+        ],
+        "output": [
+          -135.0,
+          89.98048385359404
+        ],
+        "inverse_input": [
+          -135.0,
+          89.98048385359404
+        ],
+        "inverse_output": [
+          -0.013799999999992929,
+          0.013799999999992927
+        ]
+      },
+      {
+        "input": [
+          1.0,
+          2.0
+        ],
+        "output": [
+          153.43494882292202,
+          87.76506622828028
+        ],
+        "inverse_input": [
+          153.43494882292202,
+          87.76506622828028
+        ],
+        "inverse_output": [
+          0.999999999999992,
+          1.9999999999999851
+        ]
+      }
+    ]
+  },
+  "rotate_native2celestial.asdf": {
+    "key": "transform",
+    "model": "RotateNative2Celestial",
+    "description": "RotateNative2Celestial(lon=29.999999999999996, lat=45, lon_pole=180)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf image_wcs (gwcs docs example)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "phi_N",
+      "theta_N"
+    ],
+    "outputs": [
+      "alpha_C",
+      "delta_C"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1094,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          90.0
+        ],
+        "output": [
+          29.999999999999993,
+          45.00000000000001
+        ],
+        "inverse_note": "inverse omitted: output is the native pole of the inverse rotation, where longitude is undefined (floating-point noise)"
+      },
+      {
+        "input": [
+          45.0,
+          89.99
+        ],
+        "output": [
+          30.009998766018143,
+          44.992928495927615
+        ],
+        "inverse_input": [
+          30.009998766018143,
+          44.992928495927615
+        ],
+        "inverse_output": [
+          45.00000000000762,
+          89.99
+        ]
+      },
+      {
+        "input": [
+          -135.0,
+          89.98
+        ],
+        "output": [
+          29.97999506224482,
+          45.014140389719955
+        ],
+        "inverse_input": [
+          29.97999506224482,
+          45.014140389719955
+        ],
+        "inverse_output": [
+          224.9999999999793,
+          89.98
+        ]
+      },
+      {
+        "input": [
+          10.0,
+          80.0
+        ],
+        "output": [
+          32.11296235752141,
+          35.130581725170536
+        ],
+        "inverse_input": [
+          32.11296235752141,
+          35.130581725170536
+        ],
+        "inverse_output": [
+          10.000000000000021,
+          80.0
+        ]
+      }
+    ]
+  },
+  "affine2d.asdf": {
+    "key": "transform",
+    "model": "AffineTransformation2D",
+    "description": "AffineTransformation2D(matrix 2x2, translation 2)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf slit_wcs node 'fpa_affine_d2s' (blocks 1-2, MD5-verified)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "x",
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1430,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          0.03,
+          -0.01
+        ],
+        "output": [
+          5.4e-07,
+          -1.8e-07
+        ],
+        "inverse_input": [
+          5.4e-07,
+          -1.8e-07
+        ],
+        "inverse_output": [
+          0.03,
+          -0.01
+        ]
+      },
+      {
+        "input": [
+          -0.04,
+          0.02
+        ],
+        "output": [
+          -7.2e-07,
+          3.6e-07
+        ],
+        "inverse_input": [
+          -7.2e-07,
+          3.6e-07
+        ],
+        "inverse_output": [
+          -0.04,
+          0.02
+        ]
+      }
+    ]
+  },
+  "rotation2d_std150.asdf": {
+    "key": "transform",
+    "model": "Rotation2D",
+    "description": "Rotation2D(angle=0.24155757363306068 deg) - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "x",
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 1018,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          10.0,
+          -5.0
+        ],
+        "output": [
+          10.020990940423932,
+          -4.957795938916958
+        ],
+        "inverse_input": [
+          10.020990940423932,
+          -4.957795938916958
+        ],
+        "inverse_output": [
+          10.0,
+          -5.0
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "const1d_with_inverse_std150.asdf": {
+    "key": "transform",
+    "model": "Const1D",
+    "description": "Const1D with stored inverse Const1D - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture)",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 1119,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          299.7
+        ],
+        "inverse_input": [
+          299.7
+        ],
+        "inverse_output": [
+          299.7
+        ]
+      },
+      {
+        "input": [
+          17.5
+        ],
+        "output": [
+          299.7
+        ],
+        "inverse_input": [
+          299.7
+        ],
+        "inverse_output": [
+          299.7
+        ]
+      }
+    ]
+  },
+  "tabular1d_with_inverse_std150.asdf": {
+    "key": "transform",
+    "model": "Tabular1D",
+    "description": "Tabular1D(method linear, bounds_error False, fill_value nan) with its own bounding_box and stored inverse Tabular1D 'waverefinv' - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs/tests/data/miri_lrs_wcs.asdf (gwcs test fixture) waveref",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 19650,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -291.60259000740217
+        ],
+        "output": [
+          14.390969014945744
+        ],
+        "inverse_input": [
+          14.390969014945744
+        ],
+        "inverse_output": [
+          null
+        ],
+        "output_with_bounding_box": [
+          14.390969014945744
+        ]
+      },
+      {
+        "input": [
+          -191.52494928175165
+        ],
+        "output": [
+          12.741466432376622
+        ],
+        "inverse_input": [
+          12.741466432376622
+        ],
+        "inverse_output": [
+          -191.52422029339237
+        ],
+        "output_with_bounding_box": [
+          12.741466432376622
+        ]
+      },
+      {
+        "input": [
+          96.69787960086536
+        ],
+        "output": [
+          null
+        ],
+        "inverse_input": [
+          null
+        ],
+        "inverse_output": [
+          null
+        ],
+        "output_with_bounding_box": [
+          null
+        ]
+      }
+    ]
+  },
+  "pix2sky_gnomonic_std150.asdf": {
+    "key": "transform",
+    "model": "Pix2Sky_Gnomonic",
+    "description": "Pix2Sky_Gnomonic (TAN), inputs in deg of the projection plane - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf image_wcs (gwcs docs example)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "phi",
+      "theta"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 1016,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          90.0
+        ],
+        "inverse_input": [
+          0.0,
+          90.0
+        ],
+        "inverse_output": [
+          0.0,
+          -3.508354649267438e-15
+        ]
+      },
+      {
+        "input": [
+          0.01,
+          -0.02
+        ],
+        "output": [
+          26.56505117707799,
+          89.97763932136026
+        ],
+        "inverse_input": [
+          26.56505117707799,
+          89.97763932136026
+        ],
+        "inverse_output": [
+          0.010000000000000486,
+          -0.02000000000000097
+        ]
+      }
+    ]
+  },
+  "rotate_native2celestial_std150.asdf": {
+    "key": "transform",
+    "model": "RotateNative2Celestial",
+    "description": "RotateNative2Celestial(lon=29.999999999999996, lat=45, lon_pole=180) - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf image_wcs (gwcs docs example)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "phi_N",
+      "theta_N"
+    ],
+    "outputs": [
+      "alpha_C",
+      "delta_C"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 1094,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          10.0,
+          80.0
+        ],
+        "output": [
+          32.11296235752141,
+          35.130581725170536
+        ],
+        "inverse_input": [
+          32.11296235752141,
+          35.130581725170536
+        ],
+        "inverse_output": [
+          10.000000000000021,
+          80.0
+        ]
+      },
+      {
+        "input": [
+          45.0,
+          89.99
+        ],
+        "output": [
+          30.009998766018143,
+          44.992928495927615
+        ],
+        "inverse_input": [
+          30.009998766018143,
+          44.992928495927615
+        ],
+        "inverse_output": [
+          45.00000000000762,
+          89.99
+        ]
+      }
+    ]
+  },
+  "affine2d_std150.asdf": {
+    "key": "transform",
+    "model": "AffineTransformation2D",
+    "description": "AffineTransformation2D(matrix 2x2, translation 2) - written with asdf version='1.5.0' (older tag versions)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf slit_wcs node 'fpa_affine_d2s' (blocks 1-2, MD5-verified)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "x",
+      "y"
+    ],
+    "inverse": "derived",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 1430,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          0.0,
+          0.0
+        ],
+        "inverse_input": [
+          0.0,
+          0.0
+        ],
+        "inverse_output": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "input": [
+          0.03,
+          -0.01
+        ],
+        "output": [
+          5.4e-07,
+          -1.8e-07
+        ],
+        "inverse_input": [
+          5.4e-07,
+          -1.8e-07
+        ],
+        "inverse_output": [
+          0.03,
+          -0.01
+        ]
+      }
+    ]
+  },
+  "wcs_nircam_gwcs_fixture.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete imaging chain of the gwcs NIRCam test fixture, re-saved with the current stack (detector -> v2v3 -> world, stored inverse on the whole detector step)",
+    "source": "gwcs/tests/data/nircamwcs.asdf (gwcs test fixture, BSD-3)",
+    "frames": [
+      "detector",
+      "v2v3",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        2047.5
+      ],
+      [
+        -0.5,
+        2047.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 14546,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          5.9277159036892675,
+          -72.01343879379698
+        ],
+        "output_no_bbox": [
+          5.9277159036892675,
+          -72.01343879379698
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            151.36526227956983,
+            -557.8926217329099
+          ],
+          "world": [
+            5.9277159036892675,
+            -72.01343879379698
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4844098759051576,
+          -0.49228101056951346
+        ],
+        "invert": [
+          -0.4844098759051576,
+          -0.49228101056951346
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          -0.5
+        ],
+        "output": [
+          5.869119627667265,
+          -72.01364871580469
+        ],
+        "output_no_bbox": [
+          5.869119627667265,
+          -72.01364871580469
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            -0.5
+          ],
+          "v2v3": [
+            86.22512558881513,
+            -558.5322013117711
+          ],
+          "world": [
+            5.869119627667265,
+            -72.01364871580469
+          ]
+        },
+        "invert_no_bbox": [
+          1023.500801300401,
+          -0.5015248112104018
+        ],
+        "invert": [
+          1023.500801300401,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          -0.5
+        ],
+        "output": [
+          5.810284554807396,
+          -72.01372239925242
+        ],
+        "output_no_bbox": [
+          5.810284554807396,
+          -72.01372239925242
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            -0.5
+          ],
+          "v2v3": [
+            20.82107789953642,
+            -558.7445436972159
+          ],
+          "world": [
+            5.810284554807396,
+            -72.01372239925242
+          ]
+        },
+        "invert_no_bbox": [
+          2047.486920638919,
+          -0.487721222963728
+        ],
+        "invert": [
+          2047.486920638919,
+          -0.487721222963728
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          5.92662457489444,
+          -71.99538151297095
+        ],
+        "output_no_bbox": [
+          5.92662457489444,
+          -71.99538151297095
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            150.29839096421995,
+            -492.88383383898133
+          ],
+          "world": [
+            5.92662457489444,
+            -71.99538151297095
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5052715933932177,
+          1023.4896301664564
+        ],
+        "invert": [
+          null,
+          1023.4896301664564
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          1023.5
+        ],
+        "output": [
+          5.8688764327613026,
+          -71.99555254867407
+        ],
+        "output_no_bbox": [
+          5.8688764327613026,
+          -71.99555254867407
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            1023.5
+          ],
+          "v2v3": [
+            86.039011,
+            -493.385704
+          ],
+          "world": [
+            5.8688764327613026,
+            -71.99555254867407
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5016068026971,
+          1023.4932190606426
+        ],
+        "invert": [
+          1023.5016068026971,
+          1023.4932190606426
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          1023.5
+        ],
+        "output": [
+          5.8108992056565345,
+          -71.99552592598695
+        ],
+        "output_no_bbox": [
+          5.8108992056565345,
+          -71.99552592598695
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            1023.5
+          ],
+          "v2v3": [
+            21.52605941224762,
+            -493.23746647794036
+          ],
+          "world": [
+            5.8108992056565345,
+            -71.99552592598695
+          ]
+        },
+        "invert_no_bbox": [
+          2047.498747990695,
+          1023.4990720497015
+        ],
+        "invert": [
+          2047.498747990695,
+          1023.4990720497015
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          2047.5
+        ],
+        "output": [
+          5.92593663174095,
+          -71.97756913807257
+        ],
+        "output_no_bbox": [
+          5.92593663174095,
+          -71.97756913807257
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            2047.5
+          ],
+          "v2v3": [
+            149.67648900293742,
+            -428.75772639205013
+          ],
+          "world": [
+            5.92593663174095,
+            -71.97756913807257
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5134285380545407,
+          2047.4987213549093
+        ],
+        "invert": [
+          null,
+          2047.4987213549093
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          5.868819522704103,
+          -71.97770445423879
+        ],
+        "output_no_bbox": [
+          5.868819522704103,
+          -71.97770445423879
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            2047.5
+          ],
+          "v2v3": [
+            86.05870274406507,
+            -429.13253581506217
+          ],
+          "world": [
+            5.868819522704103,
+            -71.97770445423879
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5043180250468,
+          2047.5266094615686
+        ],
+        "invert": [
+          1023.5043180250468,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          2047.5
+        ],
+        "output": [
+          5.811482153114547,
+          -71.97758117978128
+        ],
+        "output_no_bbox": [
+          5.811482153114547,
+          -71.97758117978128
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            2047.5
+          ],
+          "v2v3": [
+            22.19675563796539,
+            -428.63660198379705
+          ],
+          "world": [
+            5.811482153114547,
+            -71.97758117978128
+          ]
+        },
+        "invert_no_bbox": [
+          2047.507529564874,
+          2047.4836431320377
+        ],
+        "invert": [
+          null,
+          2047.4836431320377
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          5.927686603399356,
+          -72.01343001746153
+        ],
+        "output_no_bbox": [
+          5.927686603399356,
+          -72.01343001746153
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            151.3327620093358,
+            -557.8609531130691
+          ],
+          "world": [
+            5.927686603399356,
+            -72.01343001746153
+          ]
+        },
+        "invert_no_bbox": [
+          0.015612700496944854,
+          0.0077034489079323976
+        ],
+        "invert": [
+          0.015612700496944854,
+          0.0077034489079323976
+        ]
+      },
+      {
+        "input": [
+          -1.0,
+          5.0
+        ],
+        "output": [
+          null,
+          null
+        ],
+        "output_no_bbox": [
+          5.927737523386525,
+          -72.01334064081615
+        ],
+        "frames": {
+          "detector": [
+            -1.0,
+            5.0
+          ],
+          "v2v3": [
+            151.39009785403903,
+            -557.5393264454021
+          ],
+          "world": [
+            5.927737523386525,
+            -72.01334064081615
+          ]
+        },
+        "invert_no_bbox": [
+          -0.9842724963084493,
+          5.007679306774207
+        ],
+        "invert": [
+          null,
+          null
+        ]
+      }
+    ]
+  },
+  "wcs_nircam_gwcs_fixture_std150.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "same WCS written with asdf version='1.5.0' (older tag family, e.g. transform/compose-1.2.0 era)",
+    "source": "gwcs/tests/data/nircamwcs.asdf (gwcs test fixture, BSD-3)",
+    "frames": [
+      "detector",
+      "v2v3",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        2047.5
+      ],
+      [
+        -0.5,
+        2047.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.5.0",
+    "size_bytes": 14546,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          5.9277159036892675,
+          -72.01343879379698
+        ],
+        "output_no_bbox": [
+          5.9277159036892675,
+          -72.01343879379698
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            151.36526227956983,
+            -557.8926217329099
+          ],
+          "world": [
+            5.9277159036892675,
+            -72.01343879379698
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4844098759051576,
+          -0.49228101056951346
+        ],
+        "invert": [
+          -0.4844098759051576,
+          -0.49228101056951346
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          -0.5
+        ],
+        "output": [
+          5.869119627667265,
+          -72.01364871580469
+        ],
+        "output_no_bbox": [
+          5.869119627667265,
+          -72.01364871580469
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            -0.5
+          ],
+          "v2v3": [
+            86.22512558881513,
+            -558.5322013117711
+          ],
+          "world": [
+            5.869119627667265,
+            -72.01364871580469
+          ]
+        },
+        "invert_no_bbox": [
+          1023.500801300401,
+          -0.5015248112104018
+        ],
+        "invert": [
+          1023.500801300401,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          -0.5
+        ],
+        "output": [
+          5.810284554807396,
+          -72.01372239925242
+        ],
+        "output_no_bbox": [
+          5.810284554807396,
+          -72.01372239925242
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            -0.5
+          ],
+          "v2v3": [
+            20.82107789953642,
+            -558.7445436972159
+          ],
+          "world": [
+            5.810284554807396,
+            -72.01372239925242
+          ]
+        },
+        "invert_no_bbox": [
+          2047.486920638919,
+          -0.487721222963728
+        ],
+        "invert": [
+          2047.486920638919,
+          -0.487721222963728
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          5.92662457489444,
+          -71.99538151297095
+        ],
+        "output_no_bbox": [
+          5.92662457489444,
+          -71.99538151297095
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            150.29839096421995,
+            -492.88383383898133
+          ],
+          "world": [
+            5.92662457489444,
+            -71.99538151297095
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5052715933932177,
+          1023.4896301664564
+        ],
+        "invert": [
+          null,
+          1023.4896301664564
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          1023.5
+        ],
+        "output": [
+          5.8688764327613026,
+          -71.99555254867407
+        ],
+        "output_no_bbox": [
+          5.8688764327613026,
+          -71.99555254867407
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            1023.5
+          ],
+          "v2v3": [
+            86.039011,
+            -493.385704
+          ],
+          "world": [
+            5.8688764327613026,
+            -71.99555254867407
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5016068026971,
+          1023.4932190606426
+        ],
+        "invert": [
+          1023.5016068026971,
+          1023.4932190606426
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          1023.5
+        ],
+        "output": [
+          5.8108992056565345,
+          -71.99552592598695
+        ],
+        "output_no_bbox": [
+          5.8108992056565345,
+          -71.99552592598695
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            1023.5
+          ],
+          "v2v3": [
+            21.52605941224762,
+            -493.23746647794036
+          ],
+          "world": [
+            5.8108992056565345,
+            -71.99552592598695
+          ]
+        },
+        "invert_no_bbox": [
+          2047.498747990695,
+          1023.4990720497015
+        ],
+        "invert": [
+          2047.498747990695,
+          1023.4990720497015
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          2047.5
+        ],
+        "output": [
+          5.92593663174095,
+          -71.97756913807257
+        ],
+        "output_no_bbox": [
+          5.92593663174095,
+          -71.97756913807257
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            2047.5
+          ],
+          "v2v3": [
+            149.67648900293742,
+            -428.75772639205013
+          ],
+          "world": [
+            5.92593663174095,
+            -71.97756913807257
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5134285380545407,
+          2047.4987213549093
+        ],
+        "invert": [
+          null,
+          2047.4987213549093
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          5.868819522704103,
+          -71.97770445423879
+        ],
+        "output_no_bbox": [
+          5.868819522704103,
+          -71.97770445423879
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            2047.5
+          ],
+          "v2v3": [
+            86.05870274406507,
+            -429.13253581506217
+          ],
+          "world": [
+            5.868819522704103,
+            -71.97770445423879
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5043180250468,
+          2047.5266094615686
+        ],
+        "invert": [
+          1023.5043180250468,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          2047.5
+        ],
+        "output": [
+          5.811482153114547,
+          -71.97758117978128
+        ],
+        "output_no_bbox": [
+          5.811482153114547,
+          -71.97758117978128
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            2047.5
+          ],
+          "v2v3": [
+            22.19675563796539,
+            -428.63660198379705
+          ],
+          "world": [
+            5.811482153114547,
+            -71.97758117978128
+          ]
+        },
+        "invert_no_bbox": [
+          2047.507529564874,
+          2047.4836431320377
+        ],
+        "invert": [
+          null,
+          2047.4836431320377
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          5.927686603399356,
+          -72.01343001746153
+        ],
+        "output_no_bbox": [
+          5.927686603399356,
+          -72.01343001746153
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            151.3327620093358,
+            -557.8609531130691
+          ],
+          "world": [
+            5.927686603399356,
+            -72.01343001746153
+          ]
+        },
+        "invert_no_bbox": [
+          0.015612700496944854,
+          0.0077034489079323976
+        ],
+        "invert": [
+          0.015612700496944854,
+          0.0077034489079323976
+        ]
+      }
+    ]
+  },
+  "wcs_jwst_nircam_cal300.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete JWST NIRCam cal 3.0.0 chain: filter offset, distortion with stored inverses, DVA_Correction, v23tosky (4 frames)",
+    "source": "jw02739001001_02105_00001_nrca1_cal.fits (JWST NIRCam NRCA1 F200W, cal_ver 3.0.0), meta.wcs",
+    "frames": [
+      "detector",
+      "v2v3",
+      "v2v3vacorr",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        2047.5
+      ],
+      [
+        -0.5,
+        2047.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 14944,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          274.72530887834534,
+          -13.875908119051436
+        ],
+        "output_no_bbox": [
+          274.72530887834534,
+          -13.875908119051436
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            153.1435254150926,
+            -559.504563795383
+          ],
+          "v2v3vacorr": [
+            153.14120464614305,
+            -559.502283189643
+          ],
+          "world": [
+            274.72530887834534,
+            -13.875908119051436
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5000749041269721,
+          -0.4995578095400175
+        ],
+        "invert": [
+          null,
+          -0.4995578095400175
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          -0.5
+        ],
+        "output": [
+          274.7255847195774,
+          -13.86698721099497
+        ],
+        "output_no_bbox": [
+          274.7255847195774,
+          -13.86698721099497
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            -0.5
+          ],
+          "v2v3": [
+            121.01355696409655,
+            -559.8784676998131
+          ],
+          "v2v3vacorr": [
+            121.01352583944355,
+            -559.8761604489507
+          ],
+          "world": [
+            274.7255847195774,
+            -13.86698721099497
+          ]
+        },
+        "invert_no_bbox": [
+          1023.499894666549,
+          -0.500172861437302
+        ],
+        "invert": [
+          1023.499894666549,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          -0.5
+        ],
+        "output": [
+          274.72589281362934,
+          -13.85806932825431
+        ],
+        "output_no_bbox": [
+          274.72589281362934,
+          -13.85806932825431
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            -0.5
+          ],
+          "v2v3": [
+            88.88977515909346,
+            -560.1391897548498
+          ],
+          "v2v3vacorr": [
+            88.8920332378645,
+            -560.1368639244246
+          ],
+          "world": [
+            274.72589281362934,
+            -13.85806932825431
+          ]
+        },
+        "invert_no_bbox": [
+          2047.4999836966267,
+          -0.5000085584186378
+        ],
+        "invert": [
+          2047.4999836966267,
+          null
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          274.7345244410086,
+          -13.876117454663992
+        ],
+        "output_no_bbox": [
+          274.7345244410086,
+          -13.876117454663992
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            152.5560685700438,
+            -527.2909598696992
+          ],
+          "v2v3vacorr": [
+            152.55378966441626,
+            -527.290974868283
+          ],
+          "world": [
+            274.7345244410086,
+            -13.876117454663992
+          ]
+        },
+        "invert_no_bbox": [
+          -0.49995446782697783,
+          1023.5001245635817
+        ],
+        "invert": [
+          -0.49995446782697783,
+          1023.5001245635817
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          1023.5
+        ],
+        "output": [
+          274.7348047011612,
+          -13.867263013140171
+        ],
+        "output_no_bbox": [
+          274.7348047011612,
+          -13.867263013140171
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            1023.5
+          ],
+          "v2v3": [
+            120.66454676648969,
+            -527.6382396224653
+          ],
+          "v2v3vacorr": [
+            120.66454051298493,
+            -527.6382298732158
+          ],
+          "world": [
+            274.7348047011612,
+            -13.867263013140171
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5000000986878,
+          1023.4999999610333
+        ],
+        "invert": [
+          1023.5000000986878,
+          1023.4999999610333
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          1023.5
+        ],
+        "output": [
+          274.7351240615248,
+          -13.85840999170822
+        ],
+        "output_no_bbox": [
+          274.7351240615248,
+          -13.85840999170822
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            1023.5
+          ],
+          "v2v3": [
+            88.77244625637783,
+            -527.8486646152523
+          ],
+          "v2v3vacorr": [
+            88.7747126962356,
+            -527.8486398707068
+          ],
+          "world": [
+            274.7351240615248,
+            -13.85840999170822
+          ]
+        },
+        "invert_no_bbox": [
+          2047.5000375991794,
+          1023.5001205012355
+        ],
+        "invert": [
+          null,
+          1023.5001205012355
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          2047.5
+        ],
+        "output": [
+          274.74364958970216,
+          -13.876352344105701
+        ],
+        "output_no_bbox": [
+          274.74364958970216,
+          -13.876352344105701
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            2047.5
+          ],
+          "v2v3": [
+            152.07491023683437,
+            -495.3892795059663
+          ],
+          "v2v3vacorr": [
+            152.07266561948927,
+            -495.39156788059165
+          ],
+          "world": [
+            274.74364958970216,
+            -13.876352344105701
+          ]
+        },
+        "invert_no_bbox": [
+          -0.499970597378546,
+          2047.499967473691
+        ],
+        "invert": [
+          -0.499970597378546,
+          2047.499967473691
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          274.7439354914742,
+          -13.867555988831546
+        ],
+        "output_no_bbox": [
+          274.7439354914742,
+          -13.867555988831546
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            2047.5
+          ],
+          "v2v3": [
+            120.39151333421079,
+            -495.7069494501727
+          ],
+          "v2v3vacorr": [
+            120.39152653760159,
+            -495.7092151870175
+          ],
+          "world": [
+            274.7439354914742,
+            -13.867555988831546
+          ]
+        },
+        "invert_no_bbox": [
+          1023.4999069950705,
+          2047.4998439773315
+        ],
+        "invert": [
+          1023.4999069950705,
+          2047.4998439773315
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          2047.5
+        ],
+        "output": [
+          274.7442670347447,
+          -13.858761062760378
+        ],
+        "output_no_bbox": [
+          274.7442670347447,
+          -13.858761062760378
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            2047.5
+          ],
+          "v2v3": [
+            88.70662562227835,
+            -495.8649183735291
+          ],
+          "v2v3vacorr": [
+            88.70889675264304,
+            -495.8671728531999
+          ],
+          "world": [
+            274.7442670347447,
+            -13.858761062760378
+          ]
+        },
+        "invert_no_bbox": [
+          2047.4999660011813,
+          2047.5004014079484
+        ],
+        "invert": [
+          2047.4999660011813,
+          null
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          274.7253135310639,
+          -13.875903855344635
+        ],
+        "output_no_bbox": [
+          274.7253135310639,
+          -13.875903855344635
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            153.12751114675993,
+            -559.48895487597
+          ],
+          "v2v3vacorr": [
+            153.12519151901841,
+            -559.4866753825521
+          ],
+          "world": [
+            274.7253135310639,
+            -13.875903855344635
+          ]
+        },
+        "invert_no_bbox": [
+          -7.385723035824299e-05,
+          0.00043973549026521397
+        ],
+        "invert": [
+          -7.385723035824299e-05,
+          0.00043973549026521397
+        ]
+      }
+    ]
+  },
+  "wcs_jwst_miri_cal300.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete JWST MIRI imager cal 3.0.0 chain (Poly1D, Mapping/Identity stored inverses, column swap)",
+    "source": "jw02739002001_02101_00001_mirimage_cal.fits (JWST MIRI imager F770W, cal_ver 3.0.0), meta.wcs",
+    "frames": [
+      "detector",
+      "v2v3",
+      "v2v3vacorr",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        1031.5
+      ],
+      [
+        -0.5,
+        1023.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 18226,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          274.7270913241318,
+          -13.841824386695455
+        ],
+        "output_no_bbox": [
+          274.7270913241318,
+          -13.841824386695455
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            -381.8535574955197,
+            -435.9124762818802
+          ],
+          "v2v3vacorr": [
+            -381.85980152855086,
+            -435.9070401207709
+          ],
+          "world": [
+            274.7270913241318,
+            -13.841824386695455
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5168653886479433,
+          -0.3886572486425166
+        ],
+        "invert": [
+          null,
+          -0.3886572486425166
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          -0.5
+        ],
+        "output": [
+          274.7290280284748,
+          -13.826118478965139
+        ],
+        "output_no_bbox": [
+          274.7290280284748,
+          -13.826118478965139
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            -0.5
+          ],
+          "v2v3": [
+            -438.63374597661686,
+            -431.51505059309255
+          ],
+          "v2v3vacorr": [
+            -438.6350310796685,
+            -431.50999848365103
+          ],
+          "world": [
+            274.7290280284748,
+            -13.826118478965139
+          ]
+        },
+        "invert_no_bbox": [
+          515.5014716860442,
+          -0.4787825321089372
+        ],
+        "invert": [
+          515.5014716860442,
+          -0.4787825321089372
+        ]
+      },
+      {
+        "input": [
+          1031.5,
+          -0.5
+        ],
+        "output": [
+          274.7310772220362,
+          -13.810358572782022
+        ],
+        "output_no_bbox": [
+          274.7310772220362,
+          -13.810358572782022
+        ],
+        "frames": {
+          "detector": [
+            1031.5,
+            -0.5
+          ],
+          "v2v3": [
+            -495.624613091723,
+            -426.7318690255774
+          ],
+          "v2v3vacorr": [
+            -495.62092086505714,
+            -426.72723465801215
+          ],
+          "world": [
+            274.7310772220362,
+            -13.810358572782022
+          ]
+        },
+        "invert_no_bbox": [
+          1031.4926182805182,
+          -0.43601342573356305
+        ],
+        "invert": [
+          1031.4926182805182,
+          -0.43601342573356305
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          511.5
+        ],
+        "output": [
+          274.7430038955893,
+          -13.843775074580405
+        ],
+        "output_no_bbox": [
+          274.7430038955893,
+          -13.843775074580405
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            511.5
+          ],
+          "v2v3": [
+            -377.1636169348457,
+            -380.04106174967797
+          ],
+          "v2v3vacorr": [
+            -377.1702705664969,
+            -380.04050515025966
+          ],
+          "world": [
+            274.7430038955893,
+            -13.843775074580405
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5092016677137963,
+          511.47218207534473
+        ],
+        "invert": [
+          null,
+          511.47218207534473
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          511.5
+        ],
+        "output": [
+          274.74505456617857,
+          -13.828097775193273
+        ],
+        "output_no_bbox": [
+          274.74505456617857,
+          -13.828097775193273
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            511.5
+          ],
+          "v2v3": [
+            -433.8572220608055,
+            -375.23754583540574
+          ],
+          "v2v3vacorr": [
+            -433.8589243242837,
+            -375.23740875377547
+          ],
+          "world": [
+            274.74505456617857,
+            -13.828097775193273
+          ]
+        },
+        "invert_no_bbox": [
+          515.5001610168736,
+          511.4980636760651
+        ],
+        "invert": [
+          515.5001610168736,
+          511.4980636760651
+        ]
+      },
+      {
+        "input": [
+          1031.5,
+          511.5
+        ],
+        "output": [
+          274.7470054561466,
+          -13.812376397350885
+        ],
+        "output_no_bbox": [
+          274.7470054561466,
+          -13.812376397350885
+        ],
+        "frames": {
+          "detector": [
+            1031.5,
+            511.5
+          ],
+          "v2v3": [
+            -490.6947836805233,
+            -370.78821346594304
+          ],
+          "v2v3vacorr": [
+            -490.6915220033064,
+            -370.7884649692799
+          ],
+          "world": [
+            274.7470054561466,
+            -13.812376397350885
+          ]
+        },
+        "invert_no_bbox": [
+          1031.4993836133467,
+          511.50029017363437
+        ],
+        "invert": [
+          1031.4993836133467,
+          511.50029017363437
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          274.75906255275754,
+          -13.845649374167484
+        ],
+        "output_no_bbox": [
+          274.75906255275754,
+          -13.845649374167484
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            -372.7660433115307,
+            -323.67167527584303
+          ],
+          "v2v3vacorr": [
+            -372.77308100776963,
+            -323.6760417287778
+          ],
+          "world": [
+            274.75906255275754,
+            -13.845649374167484
+          ]
+        },
+        "invert_no_bbox": [
+          -0.512332488768493,
+          1023.4981662224909
+        ],
+        "invert": [
+          null,
+          1023.4981662224909
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          1023.5
+        ],
+        "output": [
+          274.7611428963393,
+          -13.830078801408302
+        ],
+        "output_no_bbox": [
+          274.7611428963393,
+          -13.830078801408302
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            1023.5
+          ],
+          "v2v3": [
+            -429.07971078834527,
+            -318.74474200762353
+          ],
+          "v2v3vacorr": [
+            -429.0818302984813,
+            -318.749538757071
+          ],
+          "world": [
+            274.7611428963393,
+            -13.830078801408302
+          ]
+        },
+        "invert_no_bbox": [
+          515.5014152946287,
+          1023.4903342680981
+        ],
+        "invert": [
+          515.5014152946287,
+          1023.4903342680981
+        ]
+      },
+      {
+        "input": [
+          1031.5,
+          1023.5
+        ],
+        "output": [
+          274.76305987981635,
+          -13.8144769175041
+        ],
+        "output_no_bbox": [
+          274.76305987981635,
+          -13.8144769175041
+        ],
+        "frames": {
+          "detector": [
+            1031.5,
+            1023.5
+          ],
+          "v2v3": [
+            -485.48215874090135,
+            -314.3921503916322
+          ],
+          "v2v3vacorr": [
+            -485.4793523112413,
+            -314.3973272771382
+          ],
+          "world": [
+            274.76305987981635,
+            -13.8144769175041
+          ]
+        },
+        "invert_no_bbox": [
+          1031.506506020649,
+          1023.498396902401
+        ],
+        "invert": [
+          null,
+          1023.498396902401
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          274.7271082813119,
+          -13.84181121825955
+        ],
+        "output_no_bbox": [
+          274.7271082813119,
+          -13.84181121825955
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            -381.90340829463764,
+            -435.8552348960561
+          ],
+          "v2v3vacorr": [
+            -381.909647973921,
+            -435.8498037341558
+          ],
+          "world": [
+            274.7271082813119,
+            -13.84181121825955
+          ]
+        },
+        "invert_no_bbox": [
+          -0.017061996746065233,
+          0.11028247995545826
+        ],
+        "invert": [
+          -0.017061996746065233,
+          0.11028247995545826
+        ]
+      }
+    ]
+  },
+  "wcs_jwst_fgs_cal300.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete JWST FGS chain (no filter offset; Mapping/Identity stored-inverse pattern shared with NIRISS)",
+    "source": "jw01476003004_02201_00001_guider2_cal.fits (JWST FGS GUIDER2, cal_ver 3.0.0), meta.wcs",
+    "frames": [
+      "detector",
+      "v2v3",
+      "v2v3vacorr",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        2047.5
+      ],
+      [
+        -0.5,
+        2047.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 13747,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          80.7347678593497,
+          -69.52392225938566
+        ],
+        "output_no_bbox": [
+          80.7347678593497,
+          -69.52392225938566
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            92.48083002479991,
+            -771.1866889476652
+          ],
+          "v2v3vacorr": [
+            92.48030564400973,
+            -771.1861473109949
+          ],
+          "world": [
+            80.7347678593497,
+            -69.52392225938566
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5045608059410824,
+          -0.6535038065233039
+        ],
+        "invert": [
+          null,
+          null
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          -0.5
+        ],
+        "output": [
+          80.68841551155884,
+          -69.53471122706357
+        ],
+        "output_no_bbox": [
+          80.68841551155884,
+          -69.53471122706357
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            -0.5
+          ],
+          "v2v3": [
+            22.380857366251586,
+            -771.8407665103283
+          ],
+          "v2v3vacorr": [
+            22.380861013052847,
+            -771.840219946823
+          ],
+          "world": [
+            80.68841551155884,
+            -69.53471122706357
+          ]
+        },
+        "invert_no_bbox": [
+          1023.4815763834509,
+          -0.5369032719936513
+        ],
+        "invert": [
+          1023.4815763834509,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          -0.5
+        ],
+        "output": [
+          80.64196963335161,
+          -69.54575699231299
+        ],
+        "output_no_bbox": [
+          80.64196963335161,
+          -69.54575699231299
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            -0.5
+          ],
+          "v2v3": [
+            -48.29669570547904,
+            -773.2747122120384
+          ],
+          "v2v3vacorr": [
+            -48.2961596804656,
+            -773.2741548473464
+          ],
+          "world": [
+            80.64196963335161,
+            -69.54575699231299
+          ]
+        },
+        "invert_no_bbox": [
+          2047.433286299889,
+          -0.437210839406589
+        ],
+        "invert": [
+          2047.433286299889,
+          -0.437210839406589
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          80.70312903370093,
+          -69.50711372382685
+        ],
+        "output_no_bbox": [
+          80.70312903370093,
+          -69.50711372382685
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            92.15722802354207,
+            -698.7276415361483
+          ],
+          "v2v3vacorr": [
+            92.15670608028188,
+            -698.7276456967849
+          ],
+          "world": [
+            80.70312903370093,
+            -69.50711372382685
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4887813371510674,
+          1023.3922212748004
+        ],
+        "invert": [
+          -0.4887813371510674,
+          1023.3922212748004
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          1023.5
+        ],
+        "output": [
+          80.65729044933819,
+          -69.51774824208678
+        ],
+        "output_no_bbox": [
+          80.65729044933819,
+          -69.51774824208678
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            1023.5
+          ],
+          "v2v3": [
+            22.865,
+            -699.28
+          ],
+          "v2v3vacorr": [
+            22.865,
+            -699.28
+          ],
+          "world": [
+            80.65729044933819,
+            -69.51774824208678
+          ]
+        },
+        "invert_no_bbox": [
+          1023.5000000001353,
+          1023.5000000000244
+        ],
+        "invert": [
+          1023.5000000001353,
+          1023.5000000000244
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          1023.5
+        ],
+        "output": [
+          80.61125511142122,
+          -69.52859457408807
+        ],
+        "output_no_bbox": [
+          80.61125511142122,
+          -69.52859457408807
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            1023.5
+          ],
+          "v2v3": [
+            -47.025966361116716,
+            -700.4042606060232
+          ],
+          "v2v3vacorr": [
+            -47.025439907863856,
+            -700.4042521375374
+          ],
+          "world": [
+            80.61125511142122,
+            -69.52859457408807
+          ]
+        },
+        "invert_no_bbox": [
+          2047.4317515368862,
+          1023.6029189527457
+        ],
+        "invert": [
+          2047.4317515368862,
+          1023.6029189527457
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          2047.5
+        ],
+        "output": [
+          80.67242720812362,
+          -69.4907781645754
+        ],
+        "output_no_bbox": [
+          80.67242720812362,
+          -69.4907781645754
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            2047.5
+          ],
+          "v2v3": [
+            91.83106502389542,
+            -628.3234733875247
+          ],
+          "v2v3vacorr": [
+            91.8305455374559,
+            -628.3240078671032
+          ],
+          "world": [
+            80.67242720812362,
+            -69.4907781645754
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4953640729589779,
+          2047.4466866678497
+        ],
+        "invert": [
+          -0.4953640729589779,
+          2047.4466866678497
+        ]
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          80.62693306572345,
+          -69.50129320303787
+        ],
+        "output_no_bbox": [
+          80.62693306572345,
+          -69.50129320303787
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            2047.5
+          ],
+          "v2v3": [
+            23.100773165549644,
+            -628.7626644861011
+          ],
+          "v2v3vacorr": [
+            23.100771389589795,
+            -628.7631956574755
+          ],
+          "world": [
+            80.62693306572345,
+            -69.50129320303787
+          ]
+        },
+        "invert_no_bbox": [
+          1023.4988928482985,
+          2047.5169557011793
+        ],
+        "invert": [
+          1023.4988928482985,
+          null
+        ]
+      },
+      {
+        "input": [
+          2047.5,
+          2047.5
+        ],
+        "output": [
+          80.58117328782514,
+          -69.51196650012629
+        ],
+        "output_no_bbox": [
+          80.58117328782514,
+          -69.51196650012629
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            2047.5
+          ],
+          "v2v3": [
+            -46.196527150709485,
+            -629.5638756257255
+          ],
+          "v2v3vacorr": [
+            -46.19600694520212,
+            -629.5644007619821
+          ],
+          "world": [
+            80.58117328782514,
+            -69.51196650012629
+          ]
+        },
+        "invert_no_bbox": [
+          2047.4200334405027,
+          2047.5894899358887
+        ],
+        "invert": [
+          2047.4200334405027,
+          null
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          80.73472946894536,
+          -69.52391913069076
+        ],
+        "output_no_bbox": [
+          80.73472946894536,
+          -69.52391913069076
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            92.44650006706848,
+            -771.1508315132783
+          ],
+          "v2v3vacorr": [
+            92.44597594486848,
+            -771.1502901467039
+          ],
+          "world": [
+            80.73472946894536,
+            -69.52391913069076
+          ]
+        },
+        "invert_no_bbox": [
+          -0.004556505100026698,
+          -0.15343253036633087
+        ],
+        "invert": [
+          -0.004556505100026698,
+          -0.15343253036633087
+        ]
+      }
+    ]
+  },
+  "wcs_gwcs_examples_tan.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "FITS-like TAN chain: Shift&Shift | Scale&Scale | Pix2Sky_Gnomonic | RotateNative2Celestial (no bounding box)",
+    "source": "gwcs docs/gwcs/wcs_examples.asdf image_wcs (gwcs docs example)",
+    "frames": [
+      "detector",
+      "icrs"
+    ],
+    "bounding_box": null,
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 4002,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          29.98034327357326,
+          44.98609553656439
+        ],
+        "output_no_bbox": [
+          29.98034327357326,
+          44.98609553656439
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "icrs": [
+            29.98034327357326,
+            44.98609553656439
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4999999998443627,
+          -0.49999999917019977
+        ],
+        "invert": [
+          -0.4999999998443627,
+          -0.49999999917019977
+        ]
+      },
+      {
+        "input": [
+          499.5,
+          -0.5
+        ],
+        "output": [
+          29.999980362909884,
+          44.9860972224934
+        ],
+        "output_no_bbox": [
+          29.999980362909884,
+          44.9860972224934
+        ],
+        "frames": {
+          "detector": [
+            499.5,
+            -0.5
+          ],
+          "icrs": [
+            29.999980362909884,
+            44.9860972224934
+          ]
+        },
+        "invert_no_bbox": [
+          499.5000000000317,
+          -0.5000000000914042
+        ],
+        "invert": [
+          499.5000000000317,
+          -0.5000000000914042
+        ]
+      },
+      {
+        "input": [
+          999.5,
+          -0.5
+        ],
+        "output": [
+          30.01961745225111,
+          44.98609554329464
+        ],
+        "output_no_bbox": [
+          30.01961745225111,
+          44.98609554329464
+        ],
+        "frames": {
+          "detector": [
+            999.5,
+            -0.5
+          ],
+          "icrs": [
+            30.01961745225111,
+            44.98609554329464
+          ]
+        },
+        "invert_no_bbox": [
+          999.4999999999852,
+          -0.4999999997293685
+        ],
+        "invert": [
+          999.4999999999852,
+          -0.4999999997293685
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          499.5
+        ],
+        "output": [
+          29.980338508649833,
+          44.99998442436275
+        ],
+        "output_no_bbox": [
+          29.980338508649833,
+          44.99998442436275
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            499.5
+          ],
+          "icrs": [
+            29.980338508649833,
+            44.99998442436275
+          ]
+        },
+        "invert_no_bbox": [
+          -0.500000000091859,
+          499.50000000045867
+        ],
+        "invert": [
+          -0.500000000091859,
+          499.50000000045867
+        ]
+      },
+      {
+        "input": [
+          499.5,
+          499.5
+        ],
+        "output": [
+          29.99998035814972,
+          44.999986111109436
+        ],
+        "output_no_bbox": [
+          29.99998035814972,
+          44.999986111109436
+        ],
+        "frames": {
+          "detector": [
+            499.5,
+            499.5
+          ],
+          "icrs": [
+            29.99998035814972,
+            44.999986111109436
+          ]
+        },
+        "invert_no_bbox": [
+          499.5000000002349,
+          499.5000000004071
+        ],
+        "invert": [
+          499.5000000002349,
+          499.5000000004071
+        ]
+      },
+      {
+        "input": [
+          999.5,
+          499.5
+        ],
+        "output": [
+          30.019622207654194,
+          44.99998443109627
+        ],
+        "output_no_bbox": [
+          30.019622207654194,
+          44.99998443109627
+        ],
+        "frames": {
+          "detector": [
+            999.5,
+            499.5
+          ],
+          "icrs": [
+            30.019622207654194,
+            44.99998443109627
+          ]
+        },
+        "invert_no_bbox": [
+          999.4999999999022,
+          499.50000000034623
+        ],
+        "invert": [
+          999.4999999999022,
+          499.50000000034623
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          999.5
+        ],
+        "output": [
+          29.980333741415762,
+          45.01387331216255
+        ],
+        "output_no_bbox": [
+          29.980333741415762,
+          45.01387331216255
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            999.5
+          ],
+          "icrs": [
+            29.980333741415762,
+            45.01387331216255
+          ]
+        },
+        "invert_no_bbox": [
+          -0.5000000000444516,
+          999.5000000003178
+        ],
+        "invert": [
+          -0.5000000000444516,
+          999.5000000003178
+        ]
+      },
+      {
+        "input": [
+          499.5,
+          999.5
+        ],
+        "output": [
+          29.999980353387247,
+          45.01387499972708
+        ],
+        "output_no_bbox": [
+          29.999980353387247,
+          45.01387499972708
+        ],
+        "frames": {
+          "detector": [
+            499.5,
+            999.5
+          ],
+          "icrs": [
+            29.999980353387247,
+            45.01387499972708
+          ]
+        },
+        "invert_no_bbox": [
+          499.5000000000718,
+          999.4999999999018
+        ],
+        "invert": [
+          499.5000000000718,
+          999.4999999999018
+        ]
+      },
+      {
+        "input": [
+          999.5,
+          999.5
+        ],
+        "output": [
+          30.019626965363358,
+          45.01387331889934
+        ],
+        "output_no_bbox": [
+          30.019626965363358,
+          45.01387331889934
+        ],
+        "frames": {
+          "detector": [
+            999.5,
+            999.5
+          ],
+          "icrs": [
+            30.019626965363358,
+            45.01387331889934
+          ]
+        },
+        "invert_no_bbox": [
+          999.4999999999428,
+          999.5000000001397
+        ],
+        "invert": [
+          999.4999999999428,
+          999.5000000001397
+        ]
+      },
+      {
+        "input": [
+          500.0,
+          500.0
+        ],
+        "output": [
+          29.999999999999993,
+          45.00000000000001
+        ],
+        "output_no_bbox": [
+          29.999999999999993,
+          45.00000000000001
+        ],
+        "frames": {
+          "detector": [
+            500.0,
+            500.0
+          ],
+          "icrs": [
+            29.999999999999993,
+            45.00000000000001
+          ]
+        },
+        "invert_no_bbox": [
+          500.0000000000601,
+          500.00000000011113
+        ],
+        "invert": [
+          500.0000000000601,
+          500.00000000011113
+        ]
+      }
+    ]
+  },
+  "wcs_miri_gwcs_fixture.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete imaging chain of the gwcs MIRI test fixture, re-saved with the current stack (detector -> v2v3 -> world, 8 stored inverses, bbox x0 [3.5, 1027.5])",
+    "source": "gwcs/tests/data/miriwcs.asdf (gwcs test fixture, BSD-3)",
+    "frames": [
+      "detector",
+      "v2v3",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        3.5,
+        1027.5
+      ],
+      [
+        -0.5,
+        1023.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 20255,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          3.5,
+          -0.5
+        ],
+        "output": [
+          5.694786339519944,
+          -72.07197052143316
+        ],
+        "output_no_bbox": [
+          5.694786339519944,
+          -72.07197052143316
+        ],
+        "frames": {
+          "detector": [
+            3.5,
+            -0.5
+          ],
+          "v2v3": [
+            -382.34908582429904,
+            -436.1559388900602
+          ],
+          "world": [
+            5.694786339519944,
+            -72.07197052143316
+          ]
+        },
+        "invert_no_bbox": [
+          3.4998897420087816,
+          -0.5035863299899893
+        ],
+        "invert": [
+          null,
+          null
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          -0.5
+        ],
+        "output": [
+          5.64379808399937,
+          -72.07074486873174
+        ],
+        "output_no_bbox": [
+          5.64379808399937,
+          -72.07074486873174
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            -0.5
+          ],
+          "v2v3": [
+            -438.851354215994,
+            -431.7072799291052
+          ],
+          "world": [
+            5.64379808399937,
+            -72.07074486873174
+          ]
+        },
+        "invert_no_bbox": [
+          515.5002908467541,
+          -0.5159157596988598
+        ],
+        "invert": [
+          515.5002908467541,
+          null
+        ]
+      },
+      {
+        "input": [
+          1027.5,
+          -0.5
+        ],
+        "output": [
+          5.592789446030164,
+          -72.0694186722719
+        ],
+        "output_no_bbox": [
+          5.592789446030164,
+          -72.0694186722719
+        ],
+        "frames": {
+          "detector": [
+            1027.5,
+            -0.5
+          ],
+          "v2v3": [
+            -495.38391684798216,
+            -426.94448777890557
+          ],
+          "world": [
+            5.592789446030164,
+            -72.0694186722719
+          ]
+        },
+        "invert_no_bbox": [
+          1027.509050559081,
+          -0.5447094697608782
+        ],
+        "invert": [
+          null,
+          null
+        ]
+      },
+      {
+        "input": [
+          3.5,
+          511.5
+        ],
+        "output": [
+          5.698816095479594,
+          -72.05644481289833
+        ],
+        "output_no_bbox": [
+          5.698816095479594,
+          -72.05644481289833
+        ],
+        "frames": {
+          "detector": [
+            3.5,
+            511.5
+          ],
+          "v2v3": [
+            -377.82016514620886,
+            -380.2683321866396
+          ],
+          "world": [
+            5.698816095479594,
+            -72.05644481289833
+          ]
+        },
+        "invert_no_bbox": [
+          3.5025270722110577,
+          511.5002021412044
+        ],
+        "invert": [
+          3.5025270722110577,
+          511.5002021412044
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          511.5
+        ],
+        "output": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "output_no_bbox": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            511.5
+          ],
+          "v2v3": [
+            -434.1050454721436,
+            -375.4523424779128
+          ],
+          "world": [
+            5.648066106991488,
+            -72.05511816157352
+          ]
+        },
+        "invert_no_bbox": [
+          515.5009048763405,
+          511.48254962188986
+        ],
+        "invert": [
+          515.5009048763405,
+          511.48254962188986
+        ]
+      },
+      {
+        "input": [
+          1027.5,
+          511.5
+        ],
+        "output": [
+          5.597243109405001,
+          -72.05388438855937
+        ],
+        "output_no_bbox": [
+          5.597243109405001,
+          -72.05388438855937
+        ],
+        "frames": {
+          "detector": [
+            1027.5,
+            511.5
+          ],
+          "v2v3": [
+            -490.4787841539961,
+            -371.0181628841278
+          ],
+          "world": [
+            5.597243109405001,
+            -72.05388438855937
+          ]
+        },
+        "invert_no_bbox": [
+          1027.49738626553,
+          511.5092774567484
+        ],
+        "invert": [
+          1027.49738626553,
+          511.5092774567484
+        ]
+      },
+      {
+        "input": [
+          3.5,
+          1023.5
+        ],
+        "output": [
+          5.7026812499622475,
+          -72.04078124273619
+        ],
+        "output_no_bbox": [
+          5.7026812499622475,
+          -72.04078124273619
+        ],
+        "frames": {
+          "detector": [
+            3.5,
+            1023.5
+          ],
+          "v2v3": [
+            -373.46588601515253,
+            -323.88451242377323
+          ],
+          "world": [
+            5.7026812499622475,
+            -72.04078124273619
+          ]
+        },
+        "invert_no_bbox": [
+          3.5018142085999444,
+          1023.5089460805085
+        ],
+        "invert": [
+          3.5018142085999444,
+          null
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          1023.5
+        ],
+        "output": [
+          5.652360328026093,
+          -72.03943222911128
+        ],
+        "output_no_bbox": [
+          5.652360328026093,
+          -72.03943222911128
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            1023.5
+          ],
+          "v2v3": [
+            -429.3216084741596,
+            -318.98454205542333
+          ],
+          "world": [
+            5.652360328026093,
+            -72.03943222911128
+          ]
+        },
+        "invert_no_bbox": [
+          515.4983405215618,
+          1023.5178057589201
+        ],
+        "invert": [
+          515.4983405215618,
+          null
+        ]
+      },
+      {
+        "input": [
+          1027.5,
+          1023.5
+        ],
+        "output": [
+          5.601954651098183,
+          -72.03821954227507
+        ],
+        "output_no_bbox": [
+          5.601954651098183,
+          -72.03821954227507
+        ],
+        "frames": {
+          "detector": [
+            1027.5,
+            1023.5
+          ],
+          "v2v3": [
+            -485.2793193442283,
+            -314.6220367737178
+          ],
+          "world": [
+            5.601954651098183,
+            -72.03821954227507
+          ]
+        },
+        "invert_no_bbox": [
+          1027.496986414101,
+          1023.4943351613746
+        ],
+        "invert": [
+          1027.496986414101,
+          1023.4943351613746
+        ]
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          null,
+          null
+        ],
+        "output_no_bbox": [
+          5.695138236159817,
+          -72.0719636676256
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            -381.9591011020639,
+            -436.1316819013888
+          ],
+          "world": [
+            5.695138236159817,
+            -72.0719636676256
+          ]
+        },
+        "invert_no_bbox": [
+          -0.00015845400982925084,
+          -0.0034614356203838126
+        ],
+        "invert": [
+          null,
+          -0.0034614356203838126
+        ]
+      },
+      {
+        "input": [
+          515.5,
+          511.5
+        ],
+        "output": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "output_no_bbox": [
+          5.648066106991488,
+          -72.05511816157352
+        ],
+        "frames": {
+          "detector": [
+            515.5,
+            511.5
+          ],
+          "v2v3": [
+            -434.1050454721436,
+            -375.4523424779128
+          ],
+          "world": [
+            5.648066106991488,
+            -72.05511816157352
+          ]
+        },
+        "invert_no_bbox": [
+          515.5009048763405,
+          511.48254962188986
+        ],
+        "invert": [
+          515.5009048763405,
+          511.48254962188986
+        ]
+      }
+    ]
+  },
+  "divide_cartesian_to_tan.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "named compound 'Cartesian 3D to TAN' = divide(Mapping((0,1,2)), Mapping((0,0,0), n_inputs=3)) | Mapping((1,2)): (x, y, z) -> (y/x, z/x); no inverse",
+    "source": "jw01475001001_02101_00002_nrca1_o001_crf.fits (JWST NIRCam NRCA1 F090W, cal_ver 2.0.1, tweakreg-corrected), meta.wcs step2 'Cartesian 3D to TAN'",
+    "n_inputs": 3,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1",
+      "x2"
+    ],
+    "outputs": [
+      "x0",
+      "x1"
+    ],
+    "inverse": "none",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1519,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.0,
+          0.001,
+          -0.002
+        ],
+        "output": [
+          0.001,
+          -0.002
+        ]
+      },
+      {
+        "input": [
+          0.99999,
+          0.000585,
+          -0.002557
+        ],
+        "output": [
+          0.0005850058500585006,
+          -0.002557025570255702
+        ]
+      },
+      {
+        "input": [
+          0.5,
+          0.5,
+          0.7071067811865476
+        ],
+        "output": [
+          1.0,
+          1.4142135623730951
+        ]
+      },
+      {
+        "input": [
+          -0.5,
+          0.25,
+          0.1
+        ],
+        "output": [
+          -0.5,
+          -0.2
+        ]
+      },
+      {
+        "input": [
+          2.0,
+          -3.0,
+          4.0
+        ],
+        "output": [
+          -1.5,
+          2.0
+        ]
+      }
+    ]
+  },
+  "tp_correction_jwst.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "named compound 'JWST tangent-plane linear correction. v1' (tweakreg): arcsec->deg, s2c, det_to_optic_axis, divide 'Cartesian 3D to TAN', tp_affine, Mapping((0,0,1)) | Const1D(1) & Identity(2), optic_axis_to_det, c2s, deg->arcsec; stored inverse with tp_affine_inv",
+    "source": "jw01475001001_02101_00002_nrca1_o001_crf.fits (JWST NIRCam NRCA1 F090W, cal_ver 2.0.1, tweakreg-corrected), meta.wcs step2 v2v3vacorr->v2v3corr",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "y0",
+      "y1"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 7978,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          120.66454051298493,
+          -527.6382298732158
+        ],
+        "output": [
+          120.61638465078101,
+          -527.5819370910275
+        ],
+        "inverse_input": [
+          120.61638465078101,
+          -527.5819370910275
+        ],
+        "inverse_output": [
+          120.66454051298484,
+          -527.638229873216
+        ]
+      },
+      {
+        "input": [
+          153.14120464614305,
+          -559.502283189643
+        ],
+        "output": [
+          153.09304874344542,
+          -559.4459904300761
+        ],
+        "inverse_input": [
+          153.09304874344542,
+          -559.4459904300761
+        ],
+        "inverse_output": [
+          153.141204646143,
+          -559.5022831896432
+        ]
+      },
+      {
+        "input": [
+          60.0,
+          -480.0
+        ],
+        "output": [
+          59.95184421273717,
+          -479.9437071902699
+        ],
+        "inverse_input": [
+          59.95184421273717,
+          -479.9437071902699
+        ],
+        "inverse_output": [
+          59.99999999999997,
+          -480.0000000000001
+        ]
+      },
+      {
+        "input": [
+          200.0,
+          -600.0
+        ],
+        "output": [
+          199.95184404635418,
+          -599.9437072828126
+        ],
+        "inverse_input": [
+          199.95184404635418,
+          -599.9437072828126
+        ],
+        "inverse_output": [
+          199.99999999999991,
+          -600.0000000000001
+        ]
+      },
+      {
+        "input": [
+          88.0,
+          -500.5
+        ],
+        "output": [
+          87.95184417800078,
+          -500.443707200976
+        ],
+        "inverse_input": [
+          87.95184417800078,
+          -500.443707200976
+        ],
+        "inverse_output": [
+          87.99999999999993,
+          -500.5000000000001
+        ]
+      }
+    ]
+  },
+  "wcs_jwst_nircam_crf_tweakreg.asdf": {
+    "key": "wcs",
+    "model": "gwcs.WCS",
+    "description": "complete tweakreg-corrected JWST NIRCam chain: detector -> v2v3 -> v2v3vacorr -> v2v3corr -> world (5 frames, divide and constant in the v2v3corr step)",
+    "source": "jw01475001001_02101_00002_nrca1_o001_crf.fits (JWST NIRCam NRCA1 F090W, cal_ver 2.0.1, tweakreg-corrected), meta.wcs",
+    "frames": [
+      "detector",
+      "v2v3",
+      "v2v3vacorr",
+      "v2v3corr",
+      "world"
+    ],
+    "bounding_box": [
+      [
+        -0.5,
+        2047.5
+      ],
+      [
+        -0.5,
+        2047.5
+      ]
+    ],
+    "inverse": "analytic (stored+derived)",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 22724,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -0.5,
+          -0.5
+        ],
+        "output": [
+          9.347016147699035,
+          1.4835521297606735
+        ],
+        "output_no_bbox": [
+          9.347016147699035,
+          1.4835521297606735
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            -0.5
+          ],
+          "v2v3": [
+            153.05214726216147,
+            -559.3685628832561
+          ],
+          "v2v3vacorr": [
+            153.0552404118555,
+            -559.371598102162
+          ],
+          "v2v3corr": [
+            153.00708450928954,
+            -559.315305342521
+          ],
+          "world": [
+            9.347016147699035,
+            1.4835521297606735
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4999992237446531,
+          -0.5004728917562042
+        ],
+        "invert": [
+          -0.4999992237446531,
+          null
+        ],
+        "exact_inverse_newton": [
+          -0.4999999994684717,
+          -0.5000000011597763
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          1023.5,
+          -0.5
+        ],
+        "output": [
+          9.350587114023273,
+          1.4753705716768912
+        ],
+        "output_no_bbox": [
+          9.350587114023273,
+          1.4753705716768912
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            -0.5
+          ],
+          "v2v3": [
+            120.92213104776405,
+            -559.7443644013572
+          ],
+          "v2v3vacorr": [
+            120.9221639398541,
+            -559.7474354138787
+          ],
+          "v2v3corr": [
+            120.87400805829915,
+            -559.6911426332294
+          ],
+          "world": [
+            9.350587114023273,
+            1.4753705716768912
+          ]
+        },
+        "invert_no_bbox": [
+          1023.499703839406,
+          -0.5001079806633024
+        ],
+        "invert": [
+          1023.499703839406,
+          null
+        ],
+        "exact_inverse_newton": [
+          1023.4999999998297,
+          -0.49999999963421277
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          2047.5,
+          -0.5
+        ],
+        "output": [
+          9.354127902383983,
+          1.4671786516831942
+        ],
+        "output_no_bbox": [
+          9.354127902383983,
+          1.4671786516831942
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            -0.5
+          ],
+          "v2v3": [
+            88.79999871552172,
+            -560.0056978368251
+          ],
+          "v2v3vacorr": [
+            88.79697210091656,
+            -560.008793740328
+          ],
+          "v2v3corr": [
+            88.74881624277218,
+            -559.9525009400086
+          ],
+          "world": [
+            9.354127902383983,
+            1.4671786516831942
+          ]
+        },
+        "invert_no_bbox": [
+          2047.4998831140867,
+          -0.5002375685197658
+        ],
+        "invert": [
+          2047.4998831140867,
+          null
+        ],
+        "exact_inverse_newton": [
+          2047.4999999996344,
+          -0.499999999175343
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          -0.5,
+          1023.5
+        ],
+        "output": [
+          9.338834042455519,
+          1.4799188068286662
+        ],
+        "output_no_bbox": [
+          9.338834042455519,
+          1.4799188068286662
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            1023.5
+          ],
+          "v2v3": [
+            152.46264131426713,
+            -527.1569009978391
+          ],
+          "v2v3vacorr": [
+            152.46567831583948,
+            -527.1568681827122
+          ],
+          "v2v3corr": [
+            152.4175224328765,
+            -527.1005754201698
+          ],
+          "world": [
+            9.338834042455519,
+            1.4799188068286662
+          ]
+        },
+        "invert_no_bbox": [
+          -0.4998116387976961,
+          1023.5001613312621
+        ],
+        "invert": [
+          -0.4998116387976961,
+          1023.5001613312621
+        ],
+        "exact_inverse_newton": [
+          -0.5000000004022817,
+          1023.5000000009253
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          1023.5,
+          1023.5
+        ],
+        "output": [
+          9.342372139487859,
+          1.471796122968886
+        ],
+        "output_no_bbox": [
+          9.342372139487859,
+          1.471796122968886
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            1023.5
+          ],
+          "v2v3": [
+            120.57388009801325,
+            -527.5061233514514
+          ],
+          "v2v3vacorr": [
+            120.5738798205708,
+            -527.5061237983793
+          ],
+          "v2v3corr": [
+            120.52572395850908,
+            -527.449831016137
+          ],
+          "world": [
+            9.342372139487859,
+            1.471796122968886
+          ]
+        },
+        "invert_no_bbox": [
+          1023.500000003738,
+          1023.4999999989781
+        ],
+        "invert": [
+          1023.500000003738,
+          1023.4999999989781
+        ],
+        "exact_inverse_newton": [
+          1023.4999999996751,
+          1023.5000000007885
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          2047.5,
+          1023.5
+        ],
+        "output": [
+          9.345875418152524,
+          1.4636574826336184
+        ],
+        "output_no_bbox": [
+          9.345875418152524,
+          1.4636574826336184
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            1023.5
+          ],
+          "v2v3": [
+            88.68095103883505,
+            -527.7176574132006
+          ],
+          "v2v3vacorr": [
+            88.67791308540717,
+            -527.7176780079155
+          ],
+          "v2v3corr": [
+            88.62975724663447,
+            -527.6613852072967
+          ],
+          "world": [
+            9.345875418152524,
+            1.4636574826336184
+          ]
+        },
+        "invert_no_bbox": [
+          2047.5001776785296,
+          1023.5001482078832
+        ],
+        "invert": [
+          null,
+          1023.5001482078832
+        ],
+        "exact_inverse_newton": [
+          2047.5000000000634,
+          1023.4999999998503
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          -0.5,
+          2047.5
+        ],
+        "output": [
+          9.330719940558344,
+          1.476347357692424
+        ],
+        "output_no_bbox": [
+          9.330719940558344,
+          1.476347357692424
+        ],
+        "frames": {
+          "detector": [
+            -0.5,
+            2047.5
+          ],
+          "v2v3": [
+            151.9832067173181,
+            -495.2572865027365
+          ],
+          "v2v3vacorr": [
+            151.98619805463179,
+            -495.2542153748627
+          ],
+          "v2v3corr": [
+            151.93804219101713,
+            -495.1979226122588
+          ],
+          "world": [
+            9.330719940558344,
+            1.476347357692424
+          ]
+        },
+        "invert_no_bbox": [
+          -0.500047354638782,
+          2047.4997638290229
+        ],
+        "invert": [
+          null,
+          2047.4997638290229
+        ],
+        "exact_inverse_newton": [
+          -0.4999999998826169,
+          2047.499999999772
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          1023.5,
+          2047.5
+        ],
+        "output": [
+          9.334227978306298,
+          1.4682740058970851
+        ],
+        "output_no_bbox": [
+          9.334227978306298,
+          1.4682740058970851
+        ],
+        "frames": {
+          "detector": [
+            1023.5,
+            2047.5
+          ],
+          "v2v3": [
+            120.30012396657088,
+            -495.57587924047533
+          ],
+          "v2v3vacorr": [
+            120.3000976149342,
+            -495.5728384573061
+          ],
+          "v2v3corr": [
+            120.25194177212998,
+            -495.5165456762622
+          ],
+          "world": [
+            9.334227978306298,
+            1.4682740058970851
+          ]
+        },
+        "invert_no_bbox": [
+          1023.4996959541854,
+          2047.4998944325366
+        ],
+        "invert": [
+          1023.4996959541854,
+          2047.4998944325366
+        ],
+        "exact_inverse_newton": [
+          1023.4999999997997,
+          2047.5000000004582
+        ],
+        "exact_inverse_world_residual_mas": 7.993605777301127e-10
+      },
+      {
+        "input": [
+          2047.5,
+          2047.5
+        ],
+        "output": [
+          9.337695594908537,
+          1.4601832308781821
+        ],
+        "output_no_bbox": [
+          9.337695594908537,
+          1.4601832308781821
+        ],
+        "frames": {
+          "detector": [
+            2047.5,
+            2047.5
+          ],
+          "v2v3": [
+            88.61585692733999,
+            -495.7361559597274
+          ],
+          "v2v3vacorr": [
+            88.61281277395415,
+            -495.7331304422849
+          ],
+          "v2v3corr": [
+            88.56465695432854,
+            -495.67683764412556
+          ],
+          "world": [
+            9.337695594908537,
+            1.4601832308781821
+          ]
+        },
+        "invert_no_bbox": [
+          2047.5000119782069,
+          2047.4995798454738
+        ],
+        "invert": [
+          null,
+          2047.4995798454738
+        ],
+        "exact_inverse_newton": [
+          2047.500000000634,
+          2047.4999999983968
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          9.347013884760797,
+          1.4835463426539917
+        ],
+        "output_no_bbox": [
+          9.347013884760797,
+          1.4835463426539917
+        ],
+        "frames": {
+          "detector": [
+            0.0,
+            0.0
+          ],
+          "v2v3": [
+            153.03612678579412,
+            -559.3529548279507
+          ],
+          "v2v3vacorr": [
+            153.0392184096008,
+            -559.3559885602508
+          ],
+          "v2v3corr": [
+            152.99106250705418,
+            -559.2996958005972
+          ],
+          "world": [
+            9.347013884760797,
+            1.4835463426539917
+          ]
+        },
+        "invert_no_bbox": [
+          1.3332598018667152e-06,
+          -0.00047003770782885756
+        ],
+        "invert": [
+          1.3332598018667152e-06,
+          -0.00047003770782885756
+        ],
+        "exact_inverse_newton": [
+          1.7757825160943744e-10,
+          -3.3674597528857153e-10
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      },
+      {
+        "input": [
+          -1.0,
+          5.0
+        ],
+        "output": [
+          null,
+          null
+        ],
+        "output_no_bbox": [
+          9.346970224779543,
+          1.4835364137922458
+        ],
+        "frames": {
+          "detector": [
+            -1.0,
+            5.0
+          ],
+          "v2v3": [
+            153.06434481673938,
+            -559.1943227234005
+          ],
+          "v2v3vacorr": [
+            153.06743912820247,
+            -559.1973413466169
+          ],
+          "v2v3corr": [
+            153.01928322573295,
+            -559.1410485869632
+          ],
+          "world": [
+            9.346970224779543,
+            1.4835364137922458
+          ]
+        },
+        "invert_no_bbox": [
+          -1.0000105518897453,
+          4.999520826438469
+        ],
+        "invert": [
+          null,
+          4.999520826438469
+        ],
+        "exact_inverse_newton": [
+          -1.0000000005279475,
+          5.000000001140932
+        ],
+        "exact_inverse_world_residual_mas": 0.0
+      }
+    ]
+  },
+  "arithmetic_operators_1d.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "((Shift(1.5) + Scale(2)) * Const1D(-0.75) - Polynomial1D(2)) / Shift(10) + Shift(3) ** Const1D(0.5): add, subtract, multiply, divide, power in one tree; x = -4 gives NaN through the power; no inverse",
+    "source": "synthetic: built from astropy model classes by scripts/make_fixtures_f2.py (no external data)",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "none",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 2417,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -2.5
+        ],
+        "output": [
+          1.052940114519881
+        ]
+      },
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          1.569550807568877
+        ]
+      },
+      {
+        "input": [
+          1.0
+        ],
+        "output": [
+          1.6590909090909092
+        ]
+      },
+      {
+        "input": [
+          7.25
+        ],
+        "output": [
+          1.8858918288613518
+        ]
+      },
+      {
+        "input": [
+          -4.0
+        ],
+        "output": [
+          null
+        ]
+      }
+    ]
+  },
+  "arithmetic_add_with_inverse.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Shift(1) + Scale(2) = 3x + 1 with stored inverse Shift(-1) | Scale(1/3)",
+    "source": "synthetic: built from astropy model classes by scripts/make_fixtures_f2.py (no external data)",
+    "n_inputs": 1,
+    "n_outputs": 1,
+    "inputs": [
+      "x"
+    ],
+    "outputs": [
+      "y"
+    ],
+    "inverse": "stored",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1407,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          -1.0
+        ],
+        "output": [
+          -2.0
+        ],
+        "inverse_input": [
+          -2.0
+        ],
+        "inverse_output": [
+          -1.0
+        ]
+      },
+      {
+        "input": [
+          0.0
+        ],
+        "output": [
+          1.0
+        ],
+        "inverse_input": [
+          1.0
+        ],
+        "inverse_output": [
+          0.0
+        ]
+      },
+      {
+        "input": [
+          2.5
+        ],
+        "output": [
+          8.5
+        ],
+        "inverse_input": [
+          8.5
+        ],
+        "inverse_output": [
+          2.5
+        ]
+      }
+    ]
+  },
+  "arithmetic_const2d.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "Polynomial2D(1) * Const2D(2.5) - Const2D(0.5): 2 inputs -> 1 output, constant-1.6.0 with dimensions 2; no inverse",
+    "source": "synthetic: built from astropy model classes by scripts/make_fixtures_f2.py (no external data)",
+    "n_inputs": 2,
+    "n_outputs": 1,
+    "inputs": [
+      "x",
+      "y"
+    ],
+    "outputs": [
+      "z"
+    ],
+    "inverse": "none",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 1715,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          0.0,
+          0.0
+        ],
+        "output": [
+          2.0
+        ]
+      },
+      {
+        "input": [
+          1.0,
+          -2.0
+        ],
+        "output": [
+          -8.0
+        ]
+      },
+      {
+        "input": [
+          -3.5,
+          4.25
+        ],
+        "output": [
+          16.375
+        ]
+      }
+    ]
+  },
+  "arithmetic_two_outputs.asdf": {
+    "key": "transform",
+    "model": "CompoundModel",
+    "description": "((Shift(1) & Scale(-2)) ** (Const1D(2) & Const1D(3))) / (Scale(0.5) & Shift(4)) - (Shift(1) & Scale(-2)): operators apply output by output; no inverse",
+    "source": "synthetic: built from astropy model classes by scripts/make_fixtures_f2.py (no external data)",
+    "n_inputs": 2,
+    "n_outputs": 2,
+    "inputs": [
+      "x0",
+      "x1"
+    ],
+    "outputs": [
+      "y0",
+      "y1"
+    ],
+    "inverse": "none",
+    "asdf_standard": "1.6.0",
+    "size_bytes": 2141,
+    "arrays_inline": false,
+    "reread_matches_original_bitwise": true,
+    "cases": [
+      {
+        "input": [
+          1.0,
+          1.0
+        ],
+        "output": [
+          6.0,
+          0.3999999999999999
+        ]
+      },
+      {
+        "input": [
+          -3.0,
+          0.5
+        ],
+        "output": [
+          -0.6666666666666665,
+          0.7777777777777778
+        ]
+      },
+      {
+        "input": [
+          2.5,
+          -1.5
+        ],
+        "output": [
+          6.300000000000001,
+          7.800000000000001
+        ]
+      }
+    ]
+  }
+}

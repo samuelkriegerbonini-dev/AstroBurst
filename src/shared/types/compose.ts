@@ -19,6 +19,8 @@ export interface BlendResult {
   stf_g?: StfParams;
   stf_b?: StfParams;
   auto_stf?: StfParams;
+  stf_linked?: boolean;
+  stf_note?: string | null;
 }
 
 export interface AlignedChannel {
@@ -31,6 +33,11 @@ export interface AlignedChannel {
   inliers?: number;
   residual_px?: number;
   registered?: boolean;
+  reprojected?: boolean;
+  wcs_scale_ratio?: number | null;
+  wcs_rotation_deg?: number | null;
+  prefilter_k?: number | null;
+  residual_measured?: boolean;
 }
 
 export interface AlignResult {
@@ -38,6 +45,10 @@ export interface AlignResult {
   align_method: string;
   dimensions: [number, number];
   elapsed_ms: number;
+  reference_index?: number;
+  reference_rule?: "finest_wcs" | "selected" | "first";
+  run_token?: string | null;
+  warnings?: string[];
 }
 
 export interface ChannelOverlayPreview {

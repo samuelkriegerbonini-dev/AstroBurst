@@ -5,11 +5,11 @@ import { channelOverlayPreview } from "../../services/compose";
 import type { ChannelOverlayPreview } from "../../shared/types/compose";
 import {
   alignDisplayedOnLoad,
+  alignOverlayChoices,
   alignOverlayRequest,
   alignPreviewFrame,
   alignPreviewLegend,
   alignViewerState,
-  MAX_OVERLAY_CHANNELS,
   type AlignedRun,
   type AlignOverlayShown,
   type AlignPreviewFrame,
@@ -143,7 +143,7 @@ export default function AlignPreview({ run, labels, aligning = false }: AlignPre
   const loading = after.loading || before.loading;
   const blinkChoices = frame.canBlink ? after.binIds.slice(1) : [];
 
-  const overlayChoices = run && request && run.binIds.length > MAX_OVERLAY_CHANNELS ? run.binIds.slice(1) : null;
+  const overlayChoices = run && request ? alignOverlayChoices(run, request) : null;
   const pickOverlayChannel = (slot: 0 | 1, binId: string) => {
     if (!request) return;
     const next = request.binIds.slice(1);

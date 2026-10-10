@@ -7,23 +7,30 @@ use crate::cmd::common::{
     blocking_cmd, cached_header, derived_output_header, output_stem, render_named_and_save, resolve_output_dir,
     write_derived_fits, OutputValues,
 };
+use super::cards::{stack_output_cards, DrizzleCards, StackCards};
 use crate::cmd::compose::rescale_per_pixel_calibration;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::cmd::helpers;
 use crate::core::stacking::calibration::calibrate_from_paths;
 use crate::core::stacking::calibration::drizzle_from_paths;
 use crate::core::stacking::calibration::stack_from_paths;
+use crate::core::stacking::calibration::CalibratedFrame;
 use crate::core::stacking::drizzle::drizzle_wcs_updates;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
-    EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, STAGE_RENDER, STAGE_SAVE,
-    RES_CONFIDENCE, RES_DIMENSIONS, RES_DX, RES_DY, RES_ELAPSED_MS, RES_FITS_PATH, RES_FRAME_COUNT,
-    RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_MAX, RES_MEAN, RES_METHOD_USED, RES_MIN,
+    EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, KERNEL_GAUSSIAN, KERNEL_LANCZOS3, STAGE_RENDER, STAGE_SAVE,
+    RES_CONFIDENCE, RES_DARK_SCALE, RES_DIMENSIONS, RES_DX, RES_DY, RES_ELAPSED_MS, RES_FITS_PATH, RES_FRAME_COUNT,
+    RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_HAS_FLAT_DARK, RES_MAX, RES_MEAN, RES_METHOD_USED, RES_MIN,
     RES_OFFSETS, RES_PATH, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STATS,
-    RES_WARNINGS,
+    RES_WARNINGS, RES_WEIGHTS_APPLIED,
 };
 use crate::types::header::HduHeader;
-use crate::types::stacking::{DrizzleConfig, DrizzleResult, FrameAlignment, StackConfig, StackResult};
+use crate::types::image::ImageStats;
+use crate::types::stacking::{
+    CombineMethod, DrizzleConfig, DrizzleKernel, DrizzleResult, FrameAlignment, StackConfig, StackResult,
+};
+
+const KERNEL_SQUARE: &str = "square";
 
 const ABPROC_CALIBRATED: &str = "calibrated";
 pub(super) const ABPROC_STACKED: &str = "stacked";
@@ -93,9 +100,43 @@ struct StackOutputs {
     rejection_high_fits: Option<String>,
 }
 
-fn save_stack(result: &StackResult, paths: &[String], output_dir: &str, stem: &str) -> anyhow::Result<StackOutputs> {
+fn included_paths<'a>(paths: &'a [String], alignment: &[FrameAlignment]) -> Vec<&'a str> {
+    paths
+        .iter()
+        .zip(alignment)
+        .filter(|(_, frame)| frame.included)
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
+fn kernel_name(kernel: DrizzleKernel) -> &'static str {
+    match kernel {
+        DrizzleKernel::Square => KERNEL_SQUARE,
+        DrizzleKernel::Gaussian => KERNEL_GAUSSIAN,
+        DrizzleKernel::Lanczos3 => KERNEL_LANCZOS3,
+    }
+}
+
+fn save_stack(
+    result: &StackResult,
+    paths: &[String],
+    output_dir: &str,
+    stem: &str,
+    config: &StackConfig,
+) -> anyhow::Result<StackOutputs> {
     let reference = reference_header(paths);
-    let header = derived_output_header(reference.as_ref(), ABPROC_STACKED, OutputValues::Linear);
+    let mut header = derived_output_header(reference.as_ref(), ABPROC_STACKED, OutputValues::Linear);
+    let included = included_paths(paths, &result.alignment);
+    stack_output_cards(
+        &mut header,
+        &StackCards {
+            included_paths: &included,
+            combine: config.combine,
+            rejection: config.rejection.name(),
+            normalization: Some(config.normalization.name()),
+            drizzle: None,
+        },
+    );
     let (png_path, fits_path) = render_named_and_save(&result.image, output_dir, stem, true, Some(&header))?;
     let map_header = derived_output_header(reference.as_ref(), ABPROC_REJECTION, OutputValues::Rescaled);
     let write_map = |map: &Array2<u16>, side: &str| write_rejection_map(map, output_dir, stem, side, &map_header);
@@ -116,9 +157,66 @@ fn drizzled_header(reference: Option<&HduHeader>, scale: f64) -> HduHeader {
     header
 }
 
-fn save_drizzle(result: &DrizzleResult, paths: &[String], output_dir: &str, stem: &str) -> anyhow::Result<(String, Option<String>)> {
-    let header = drizzled_header(reference_header(paths).as_ref(), result.output_scale);
+fn save_drizzle(
+    result: &DrizzleResult,
+    paths: &[String],
+    output_dir: &str,
+    stem: &str,
+    config: &DrizzleConfig,
+) -> anyhow::Result<(String, Option<String>)> {
+    let mut header = drizzled_header(reference_header(paths).as_ref(), result.output_scale);
+    let included = included_paths(paths, &result.alignment);
+    stack_output_cards(
+        &mut header,
+        &StackCards {
+            included_paths: &included,
+            combine: CombineMethod::Mean,
+            rejection: config.rejection.name(),
+            normalization: None,
+            drizzle: Some(DrizzleCards {
+                scale: result.output_scale,
+                pixfrac: config.pixfrac.clamp(0.1, 1.0),
+                kernel: kernel_name(config.kernel),
+            }),
+        },
+    );
     render_named_and_save(&result.image, output_dir, stem, true, Some(&header))
+}
+
+struct CalibrateInputs<'a> {
+    bias: Option<&'a [String]>,
+    dark: Option<&'a [String]>,
+    flat: Option<&'a [String]>,
+    flat_dark: Option<&'a [String]>,
+}
+
+fn calibrate_json(
+    frame: &CalibratedFrame,
+    inputs: &CalibrateInputs,
+    png_path: String,
+    fits_path: Option<String>,
+    elapsed_ms: u64,
+) -> serde_json::Value {
+    let (rows, cols) = frame.image.dim();
+    let stats = compute_image_stats(&frame.image);
+    json!({
+        RES_PNG_PATH: png_path,
+        RES_FITS_PATH: fits_path,
+        RES_DIMENSIONS: [cols, rows],
+        RES_HAS_BIAS: inputs.bias.is_some(),
+        RES_HAS_DARK: inputs.dark.is_some(),
+        RES_HAS_FLAT: inputs.flat.is_some(),
+        RES_HAS_FLAT_DARK: inputs.flat_dark.is_some_and(|p| !p.is_empty()),
+        RES_DARK_SCALE: frame.dark_scale,
+        RES_WARNINGS: frame.warnings,
+        RES_ELAPSED_MS: elapsed_ms,
+        RES_STATS: {
+            RES_MIN: stats.min,
+            RES_MAX: stats.max,
+            RES_MEAN: stats.mean,
+            RES_SIGMA: stats.sigma,
+        },
+    })
 }
 
 #[tauri::command]
@@ -129,6 +227,7 @@ pub async fn calibrate(
     bias_paths: Option<Vec<String>>,
     dark_paths: Option<Vec<String>>,
     flat_paths: Option<Vec<String>>,
+    flat_dark_paths: Option<Vec<String>>,
     dark_exposure_ratio: Option<f32>,
 ) -> Result<serde_json::Value, String> {
     let progress = ProgressHandle::new(&app, EVENT_CALIBRATE_PROGRESS, 4);
@@ -138,38 +237,28 @@ pub async fn calibrate(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
+        let inputs = CalibrateInputs {
+            bias: bias_paths.as_deref(),
+            dark: dark_paths.as_deref(),
+            flat: flat_paths.as_deref(),
+            flat_dark: flat_dark_paths.as_deref(),
+        };
         let calibrated = calibrate_from_paths(
             &science_path,
-            bias_paths.as_deref(),
-            dark_paths.as_deref(),
-            flat_paths.as_deref(),
-            dark_exposure_ratio.unwrap_or(1.0),
+            inputs.bias,
+            inputs.dark,
+            inputs.flat,
+            inputs.flat_dark,
+            dark_exposure_ratio,
         )?;
 
         progress_clone.tick_with_stage(STAGE_RENDER);
 
-        let (png_path, fits_path) = save_calibrated(&calibrated, &science_path, &output_dir)?;
-
-        let (rows, cols) = calibrated.dim();
-        let stats = compute_image_stats(&calibrated);
+        let (png_path, fits_path) = save_calibrated(&calibrated.image, &science_path, &output_dir)?;
 
         progress_clone.emit_complete();
 
-        Ok(json!({
-            RES_PNG_PATH: png_path,
-            RES_FITS_PATH: fits_path,
-            RES_DIMENSIONS: [cols, rows],
-            RES_HAS_BIAS: bias_paths.is_some(),
-            RES_HAS_DARK: dark_paths.is_some(),
-            RES_HAS_FLAT: flat_paths.is_some(),
-            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            RES_STATS: {
-                RES_MIN: stats.min,
-                RES_MAX: stats.max,
-                RES_MEAN: stats.mean,
-                RES_SIGMA: stats.sigma,
-            },
-        }))
+        Ok(calibrate_json(&calibrated, &inputs, png_path, fits_path, t0.elapsed().as_millis() as u64))
     })
 }
 
@@ -223,7 +312,7 @@ pub async fn stack(
             sigma_high: sigma_high.unwrap_or(defaults.sigma_high),
             max_iterations: max_iterations.unwrap_or(defaults.max_iterations),
             align: align.unwrap_or(true),
-            align_method: helpers::parse_align_method(align_method.as_deref()),
+            align_method: helpers::parse_align_method_checked(align_method.as_deref())?,
             weights,
             rejection: helpers::parse_rejection_method(rejection.as_deref())?,
             combine: helpers::parse_combine_method(combine.as_deref())?,
@@ -243,38 +332,50 @@ pub async fn stack(
 
         let stem = output_name(name.as_deref(), "stacked");
 
-        let saved = save_stack(&result, &paths, &output_dir, &stem)?;
+        let saved = save_stack(&result, &paths, &output_dir, &stem, &config)?;
 
-        let (rows, cols) = result.image.dim();
         let stats = compute_image_stats(&result.image);
 
         progress_clone.tick_with_stage(STAGE_SAVE);
         progress_clone.emit_complete();
 
-        Ok(json!({
-            RES_PNG_PATH: saved.png_path,
-            RES_FITS_PATH: saved.fits_path,
-            RES_DIMENSIONS: [cols, rows],
-            RES_FRAME_COUNT: result.frame_count,
-            RES_REJECTED_PIXELS: result.rejected_pixels,
-            RES_OFFSETS: result.offsets.iter().map(|(dy, dx)| json!({RES_DY: dy, RES_DX: dx})).collect::<Vec<_>>(),
-            RES_REJECTION: config.rejection.name(),
-            RES_COMBINE: config.combine.name(),
-            RES_NORMALIZATION: config.normalization.name(),
-            RES_REJECTION_NORMALIZATION: config.rejection_normalization.name(),
-            RES_NORMALIZATION_APPLIED: result.normalization_applied.iter().map(|(offset, scale)| json!({"offset": offset, "scale": scale})).collect::<Vec<_>>(),
-            RES_ALIGNMENT: alignment_json(&paths, &result.alignment),
-            RES_WARNINGS: result.warnings,
-            RES_REJECTION_LOW_FITS: saved.rejection_low_fits,
-            RES_REJECTION_HIGH_FITS: saved.rejection_high_fits,
-            RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-            RES_STATS: {
-                RES_MIN: stats.min,
-                RES_MAX: stats.max,
-                RES_MEAN: stats.mean,
-                RES_SIGMA: stats.sigma,
-            },
-        }))
+        Ok(stack_json(&result, &config, &paths, saved, &stats, t0.elapsed().as_millis() as u64))
+    })
+}
+
+fn stack_json(
+    result: &StackResult,
+    config: &StackConfig,
+    paths: &[String],
+    saved: StackOutputs,
+    stats: &ImageStats,
+    elapsed_ms: u64,
+) -> serde_json::Value {
+    let (rows, cols) = result.image.dim();
+    json!({
+        RES_PNG_PATH: saved.png_path,
+        RES_FITS_PATH: saved.fits_path,
+        RES_DIMENSIONS: [cols, rows],
+        RES_FRAME_COUNT: result.frame_count,
+        RES_REJECTED_PIXELS: result.rejected_pixels,
+        RES_OFFSETS: result.offsets.iter().map(|(dy, dx)| json!({RES_DY: dy, RES_DX: dx})).collect::<Vec<_>>(),
+        RES_REJECTION: config.rejection.name(),
+        RES_COMBINE: config.combine.name(),
+        RES_NORMALIZATION: config.normalization.name(),
+        RES_REJECTION_NORMALIZATION: config.rejection_normalization.name(),
+        RES_NORMALIZATION_APPLIED: result.normalization_applied.iter().map(|(offset, scale)| json!({"offset": offset, "scale": scale})).collect::<Vec<_>>(),
+        RES_ALIGNMENT: alignment_json(paths, &result.alignment),
+        RES_WEIGHTS_APPLIED: result.weights_applied,
+        RES_WARNINGS: result.warnings,
+        RES_REJECTION_LOW_FITS: saved.rejection_low_fits,
+        RES_REJECTION_HIGH_FITS: saved.rejection_high_fits,
+        RES_ELAPSED_MS: elapsed_ms,
+        RES_STATS: {
+            RES_MIN: stats.min,
+            RES_MAX: stats.max,
+            RES_MEAN: stats.mean,
+            RES_SIGMA: stats.sigma,
+        },
     })
 }
 
@@ -318,7 +419,7 @@ pub async fn drizzle_stack(
 
         let stem = output_name(name.as_deref(), "drizzled");
 
-        let (png_path, fits_path) = save_drizzle(&result, &paths, &output_dir, &stem)?;
+        let (png_path, fits_path) = save_drizzle(&result, &paths, &output_dir, &stem, &config)?;
 
         let (rows, cols) = result.image.dim();
         let stats = compute_image_stats(&result.image);
@@ -349,6 +450,10 @@ pub async fn drizzle_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::constants::{
+        HEADER_COMBINE_METHOD, HEADER_DRIZZLE_SCALE, HEADER_NCOMBINE, HEADER_NORMALIZATION_METHOD,
+        HEADER_REJECTION_METHOD, HEADER_TOTEXP,
+    };
 
     #[test]
     fn output_names_stay_inside_the_output_directory() {
@@ -421,6 +526,23 @@ mod tests {
         path
     }
 
+    fn write_constant(dir: &tempfile::TempDir, name: &str, value: f32, cards: &[(&str, &str)]) -> String {
+        let path = dir.path().join(name).to_str().unwrap().replace('\\', "/");
+        let mut header = HduHeader::empty();
+        for (k, v) in cards {
+            header.set(k, (*v).to_string());
+        }
+        let frame = Array2::from_elem((8, 8), value);
+        crate::infra::fits::writer::write_fits_mono(&path, &frame, Some(&header)).unwrap();
+        path
+    }
+
+    fn exposure_header(exptime: &str) -> HduHeader {
+        let mut header = solved_header("3.5");
+        header.set("EXPTIME", exptime.to_string());
+        header
+    }
+
     fn written_header(path: Option<&str>) -> HduHeader {
         crate::infra::fits::reader::read_primary_header(path.expect("a FITS path")).unwrap()
     }
@@ -429,12 +551,26 @@ mod tests {
         header.get(key).map(str::trim)
     }
 
+    fn history(header: &HduHeader) -> Vec<String> {
+        header.cards.iter().filter(|(k, _)| k.trim() == "HISTORY").map(|(_, v)| v.clone()).collect()
+    }
+
+    fn calibrate(
+        science: &str,
+        bias: &[String],
+        darks: &[String],
+        ratio: Option<f32>,
+    ) -> anyhow::Result<CalibratedFrame> {
+        let some = |paths: &[String]| (!paths.is_empty()).then(|| paths.to_vec());
+        calibrate_from_paths(science, some(bias).as_deref(), some(darks).as_deref(), None, None, ratio)
+    }
+
     #[test]
     fn calibrated_fits_keeps_the_science_wcs_and_units() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().replace('\\', "/");
         let science = write_frame(&dir, "science.fits", 100.0, &solved_header("3.5"));
-        let calibrated = calibrate_from_paths(&science, None, None, None, 1.0).unwrap();
+        let calibrated = calibrate_from_paths(&science, None, None, None, None, None).unwrap().image;
 
         let (_, fits) = save_calibrated(&calibrated, &science, &out).unwrap();
         let header = written_header(fits.as_deref());
@@ -457,7 +593,7 @@ mod tests {
         let config = StackConfig { align: false, rejection_maps: true, ..StackConfig::default() };
         let result = stack_from_paths(&paths, &config, None).unwrap();
 
-        let saved = save_stack(&result, &paths, &out, "stacked").unwrap();
+        let saved = save_stack(&result, &paths, &out, "stacked", &config).unwrap();
         let stacked = written_header(saved.fits_path.as_deref());
         assert_eq!(stacked.get_f64("CRPIX1"), Some(3.5), "the stack must carry the reference frame's WCS");
         assert_eq!(text(&stacked, "CTYPE2"), Some("DEC--TAN"));
@@ -503,12 +639,238 @@ mod tests {
         let config = DrizzleConfig { scale: 1.5, align: false, ..DrizzleConfig::default() };
         let result = drizzle_from_paths(&paths, &config, None).unwrap();
 
-        let (_, fits) = save_drizzle(&result, &paths, &out, "drizzled").unwrap();
+        let (_, fits) = save_drizzle(&result, &paths, &out, "drizzled", &config).unwrap();
         let header = written_header(fits.as_deref());
         assert_eq!(result.output_dims, (12, 12));
         assert_eq!(header.get_f64("CRPIX1"), Some(5.0));
         assert_eq!(text(&header, "CTYPE1"), Some("RA---TAN"));
         assert_eq!(text(&header, "ABPROC"), Some(ABPROC_DRIZZLED));
+    }
+
+    #[test]
+    fn stacked_fits_carries_ncombine_totexp_and_combine_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().replace('\\', "/");
+        let paths = vec![
+            write_frame(&dir, "a.fits", 100.0, &exposure_header("300")),
+            write_frame(&dir, "b.fits", 102.0, &exposure_header("300")),
+            write_frame(&dir, "c.fits", 101.0, &exposure_header("300")),
+        ];
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let result = stack_from_paths(&paths, &config, None).unwrap();
+
+        let saved = save_stack(&result, &paths, &out, "stacked", &config).unwrap();
+        let header = written_header(saved.fits_path.as_deref());
+        assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(3));
+        assert_eq!(header.get_f64(HEADER_TOTEXP), Some(900.0));
+        assert_eq!(header.get_f64("EXPTIME"), Some(300.0));
+        assert_eq!(text(&header, HEADER_COMBINE_METHOD), Some("mean"));
+        assert_eq!(text(&header, HEADER_REJECTION_METHOD), Some("sigma_clip"));
+        assert_eq!(text(&header, HEADER_NORMALIZATION_METHOD), Some("additive_scaling"));
+        assert_eq!(header.get(HEADER_DRIZZLE_SCALE), None);
+        let notes = history(&header);
+        assert!(notes.iter().any(|h| h.starts_with("AstroBurst stack: 3 frames")), "{notes:?}");
+    }
+
+    #[test]
+    fn totexp_sums_only_included_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().replace('\\', "/");
+        let paths = vec![
+            write_frame(&dir, "a.fits", 100.0, &exposure_header("300")),
+            write_frame(&dir, "b.fits", 102.0, &exposure_header("300")),
+            write_frame(&dir, "c.fits", 101.0, &exposure_header("300")),
+        ];
+        let result = StackResult {
+            image: Array2::from_elem((8, 8), 100.0),
+            frame_count: 2,
+            rejected_pixels: 0,
+            offsets: vec![(0, 0); 3],
+            rejection_low: None,
+            rejection_high: None,
+            normalization_applied: Vec::new(),
+            weights_applied: vec![None; 3],
+            alignment: vec![
+                FrameAlignment::reference(),
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false },
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.9), included: true },
+            ],
+            warnings: Vec::new(),
+        };
+        let config = StackConfig::default();
+
+        let saved = save_stack(&result, &paths, &out, "stacked", &config).unwrap();
+        let header = written_header(saved.fits_path.as_deref());
+        assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(2));
+        assert_eq!(header.get_f64(HEADER_TOTEXP), Some(600.0));
+        assert!(history(&header).iter().any(|h| h.starts_with("AstroBurst stack: 2 frames")), "{:?}", history(&header));
+    }
+
+    #[test]
+    fn drizzled_fits_carries_ncombine_abcomb_mean_and_abdrzscl() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().replace('\\', "/");
+        let paths: Vec<String> = (0..4)
+            .map(|i| write_frame(&dir, &format!("d{i}.fits"), 100.0, &exposure_header("300")))
+            .collect();
+        let config = DrizzleConfig { scale: 2.0, align: false, ..DrizzleConfig::default() };
+        let result = drizzle_from_paths(&paths, &config, None).unwrap();
+
+        let (_, fits) = save_drizzle(&result, &paths, &out, "drizzled", &config).unwrap();
+        let header = written_header(fits.as_deref());
+        assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(4));
+        assert_eq!(text(&header, HEADER_COMBINE_METHOD), Some("mean"));
+        assert_eq!(header.get_f64(HEADER_DRIZZLE_SCALE), Some(2.0));
+        assert_eq!(header.get(HEADER_NORMALIZATION_METHOD), None);
+        assert_eq!(header.get_f64(HEADER_TOTEXP), Some(1200.0));
+        let notes = history(&header);
+        assert!(
+            notes.iter().any(|h| *h == "AstroBurst drizzle: 4 frames, scale 2, pixfrac 0.7, square"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn calibration_tab_derives_the_dark_scale_from_exposures_with_bias() {
+        let dir = tempfile::tempdir().unwrap();
+        let science = write_frame(&dir, "light.fits", 1000.0, &exposure_header("120"));
+        let darks: Vec<String> = (0..2)
+            .map(|i| write_constant(&dir, &format!("dark{i}.fits"), 500.0, &[("EXPTIME", "300"), ("IMAGETYP", "Dark")]))
+            .collect();
+        let bias: Vec<String> = (0..2)
+            .map(|i| write_constant(&dir, &format!("bias{i}.fits"), 100.0, &[("EXPTIME", "0"), ("IMAGETYP", "Bias")]))
+            .collect();
+
+        let frame = calibrate(&science, &bias, &darks, None).unwrap();
+        assert_eq!(frame.dark_scale, 0.4);
+        assert!(frame.warnings.is_empty(), "{:?}", frame.warnings);
+        let raw = crate::infra::fits::reader::load_fits_image(&science).unwrap();
+        for (calibrated, raw) in frame.image.iter().zip(raw.iter()) {
+            let expected = raw - 100.0 - 0.4 * (500.0 - 100.0);
+            assert!((calibrated - expected).abs() < 1e-3, "{calibrated} vs {expected}");
+        }
+
+        let inputs = CalibrateInputs { bias: Some(&bias), dark: Some(&darks), flat: None, flat_dark: Some(&[]) };
+        let json = calibrate_json(&frame, &inputs, "out.png".into(), None, 3);
+        let reported = json[RES_DARK_SCALE].as_f64().expect("dark_scale is a number");
+        assert!((reported - 0.4).abs() < 1e-6, "{reported}");
+        assert_eq!(json[RES_WARNINGS], json!([]));
+        assert_eq!(json[RES_HAS_FLAT_DARK], false);
+        assert_eq!(json[RES_HAS_DARK], true);
+    }
+
+    #[test]
+    fn calibration_tab_refuses_a_manual_ratio_without_bias() {
+        let dir = tempfile::tempdir().unwrap();
+        let science = write_frame(&dir, "light.fits", 1000.0, &exposure_header("120"));
+        let darks = vec![write_constant(&dir, "dark0.fits", 500.0, &[("EXPTIME", "300")])];
+
+        let err = calibrate(&science, &[], &darks, Some(0.4)).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "A dark exposure ratio of 0.4 needs a master bias: without one the master dark still contains the bias level and cannot be scaled. Add bias frames or leave the ratio at 1."
+        );
+        assert_eq!(calibrate(&science, &[], &darks, Some(1.0)).unwrap().dark_scale, 1.0);
+    }
+
+    #[test]
+    fn calibration_tab_warns_when_light_and_dark_exposures_differ_without_bias() {
+        let dir = tempfile::tempdir().unwrap();
+        let science = write_frame(&dir, "light.fits", 1000.0, &exposure_header("120"));
+        let darks: Vec<String> = (0..2)
+            .map(|i| write_constant(&dir, &format!("dark{i}.fits"), 500.0, &[("EXPTIME", "300")]))
+            .collect();
+
+        let frame = calibrate(&science, &[], &darks, None).unwrap();
+        assert_eq!(frame.dark_scale, 1.0);
+        assert_eq!(
+            frame.warnings,
+            vec!["lights are 120 s but the darks are 300 s and there is no master bias, so the dark cannot be scaled; the lights get the unscaled 300 s dark. Add bias frames or darks of 120 s.".to_string()]
+        );
+        for (calibrated, raw) in frame.image.iter().zip(crate::infra::fits::reader::load_fits_image(&science).unwrap().iter()) {
+            assert!((calibrated - (raw - 500.0)).abs() < 1e-3, "{calibrated} vs {}", raw - 500.0);
+        }
+
+        let same = write_frame(&dir, "light300.fits", 1000.0, &exposure_header("300"));
+        assert!(calibrate(&same, &[], &darks, None).unwrap().warnings.is_empty());
+    }
+
+    #[test]
+    fn calibration_tab_subtracts_the_dark_group_nearest_the_science_temperature() {
+        let dir = tempfile::tempdir().unwrap();
+        let science = write_constant(&dir, "light.fits", 500.0, &[("EXPTIME", "120"), ("CCD-TEMP", "-9.5")]);
+        let darks: Vec<String> = (0..10)
+            .map(|i| {
+                let (level, temp) = if i < 5 { (20.0, "-20.0") } else { (60.0, "-10.0") };
+                write_constant(&dir, &format!("dark{i}.fits"), level, &[("EXPTIME", "120"), ("CCD-TEMP", temp)])
+            })
+            .collect();
+
+        let frame = calibrate(&science, &[], &darks, None).unwrap();
+        assert_eq!(frame.dark_scale, 1.0);
+        assert!(frame.warnings.is_empty(), "{:?}", frame.warnings);
+        for &v in frame.image.iter() {
+            assert!((v - 440.0).abs() < 5.0, "pixel {v}: the -9.5 C science frame must get the -10 C dark group (level 60)");
+        }
+    }
+
+    #[test]
+    fn stack_response_reports_the_effective_weights() {
+        let result = StackResult {
+            image: Array2::from_elem((2, 2), 1.0),
+            frame_count: 2,
+            rejected_pixels: 0,
+            offsets: vec![(0, 0); 3],
+            rejection_low: None,
+            rejection_high: None,
+            normalization_applied: vec![(0.0, 1.0), (0.0, 2.0)],
+            weights_applied: vec![Some(0.4), None, Some(1.6)],
+            alignment: vec![
+                FrameAlignment::reference(),
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false },
+                FrameAlignment::unaligned(),
+            ],
+            warnings: Vec::new(),
+        };
+        let paths = vec!["a.fits".to_string(), "b.fits".to_string(), "c.fits".to_string()];
+        let saved = StackOutputs {
+            png_path: "stacked.png".into(),
+            fits_path: Some("stacked.fits".into()),
+            rejection_low_fits: None,
+            rejection_high_fits: None,
+        };
+        let stats = compute_image_stats(&result.image);
+        let json = stack_json(&result, &StackConfig::default(), &paths, saved, &stats, 5);
+        assert_eq!(json[RES_WEIGHTS_APPLIED], json!([0.4, null, 1.6]));
+        assert_eq!(json[RES_FRAME_COUNT], 2);
+        assert_eq!(json[RES_ALIGNMENT][1][RES_INCLUDED], false);
+    }
+
+    const WFPC2_MOSAICS: [&str; 3] = [
+        "C:/astrokit/exampleFits/sample-data/502nmos.fits",
+        "C:/astrokit/exampleFits/sample-data/656nmos.fits",
+        "C:/astrokit/exampleFits/sample-data/673nmos.fits",
+    ];
+
+    #[test]
+    #[ignore]
+    fn real_data_wfpc2_stack_writes_ncombine_and_totexp() {
+        if WFPC2_MOSAICS.iter().any(|p| !std::path::Path::new(p).exists()) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().replace('\\', "/");
+        let paths: Vec<String> = WFPC2_MOSAICS.iter().map(|p| p.to_string()).collect();
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let result = stack_from_paths(&paths, &config, None).unwrap();
+        assert_eq!(result.frame_count, 3);
+
+        let saved = save_stack(&result, &paths, &out, "wfpc2_stack", &config).unwrap();
+        let header = written_header(saved.fits_path.as_deref());
+        assert_eq!(header.get_i64(HEADER_NCOMBINE), Some(3), "the input NCOMBINE=2 has no ABCOMB and must be overwritten");
+        assert_eq!(header.get_f64(HEADER_TOTEXP), Some(3300.0));
+        assert_eq!(header.get_f64("EXPTIME"), Some(1100.0));
+        assert_eq!(text(&header, HEADER_COMBINE_METHOD), Some("mean"));
     }
 
     #[test]

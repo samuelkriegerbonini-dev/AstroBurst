@@ -65,7 +65,7 @@ pub(crate) fn validate_geometry_overrides(overrides: &GeometryOverrides) -> anyh
 pub(crate) fn observation_geometry_json(path: &str, overrides: &GeometryOverrides) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
     with_spectral_header(path, |header| {
-        let target = resolve_target(header, image_centre_pixel(header), overrides);
+        let target = resolve_target(path, header, image_centre_pixel(header), overrides);
         let site = resolve_site(header, overrides);
         let time = header_time(header);
         let geometry = match &time {

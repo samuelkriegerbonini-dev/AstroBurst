@@ -24,6 +24,7 @@ export interface SpectralAxisInfo {
   specsys: string | null;
   velosys: number | null;
   notes: string[];
+  tabulated?: boolean;
 }
 
 export interface RadialVelocityCorrectionResult {

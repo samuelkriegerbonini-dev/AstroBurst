@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { noiseWeightsFromSigmas, combineFrameWeights, formatWeightRange } from "../noiseWeights";
+import { noiseWeightsFromSigmas, combineFrameWeights, effectiveWeightRange, effectiveWeightsOf, noiseWeightHint } from "../noiseWeights";
 
 describe("noiseWeightsFromSigmas", () => {
   it("weights frames by inverse variance and normalises to mean one", () => {
@@ -44,10 +44,72 @@ describe("combineFrameWeights", () => {
   });
 });
 
-describe("formatWeightRange", () => {
-  it("prints the range with two decimals and the neutral count", () => {
-    expect(formatWeightRange({ weights: [0.5, 1.5], min: 0.5, max: 1.5, missing: 0 })).toBe("0.50 - 1.50");
-    expect(formatWeightRange({ weights: [1, 1], min: 1, max: 1, missing: 1 })).toBe("1.00 - 1.00 (1 frame without a noise estimate)");
-    expect(formatWeightRange({ weights: [1, 1], min: 1, max: 1, missing: 2 })).toBe("1.00 - 1.00 (2 frames without a noise estimate)");
+describe("effectiveWeightRange", () => {
+  it("drops excluded frames and renormalises the backend weights to mean one", () => {
+    expect(effectiveWeightRange([0.4, null, 0.4, 1.2])).toBe("0.60 - 1.80");
+  });
+
+  it("needs at least two stacked frames", () => {
+    expect(effectiveWeightRange([null, 0.5])).toBeNull();
+    expect(effectiveWeightRange([])).toBeNull();
+  });
+});
+
+describe("noiseWeightHint", () => {
+  it("names the effective range and the number of frames stacked", () => {
+    expect(noiseWeightHint("0.71 - 1.32", 12, 0)).toBe(
+      "Effective frame weights 0.71 - 1.32 for the 12 frames stacked (noise weights divided by the normalization scale², normalised to mean 1).",
+    );
+  });
+
+  it("says when the subframe weights were multiplied in", () => {
+    expect(noiseWeightHint("0.71 - 1.32", 12, 3)).toBe(
+      "Effective frame weights 0.71 - 1.32 for the 12 frames stacked (noise weights divided by the normalization scale², normalised to mean 1), multiplied by the subframe weights.",
+    );
+  });
+
+  it("is the idle sentence before a stack has reported weights", () => {
+    expect(noiseWeightHint(null, 0, 0)).toBe("Noise weights are measured when you stack.");
+    expect(noiseWeightHint(null, 3, 2)).toBe("Noise weights are measured when you stack.");
+  });
+
+  it("keeps the pinned sentence when every frame had a noise estimate", () => {
+    expect(noiseWeightHint("0.60 - 1.80", 3, 0, { missing: 0, total: 3 })).toBe(
+      "Effective frame weights 0.60 - 1.80 for the 3 frames stacked (noise weights divided by the normalization scale², normalised to mean 1).",
+    );
+  });
+
+  it("names the frames that had no noise estimate and kept the mean noise weight", () => {
+    expect(noiseWeightHint("0.71 - 1.32", 12, 3, { missing: 2, total: 12 })).toBe(
+      "Effective frame weights 0.71 - 1.32 for the 12 frames stacked (noise weights divided by the normalization scale², normalised to mean 1), multiplied by the subframe weights. 2 of the 12 frames had no noise estimate and kept the mean noise weight.",
+    );
+  });
+
+  it("says noise weighting was not applied when no frame had a noise estimate", () => {
+    expect(noiseWeightHint("0.95 - 1.05", 3, 0, { missing: 3, total: 3 })).toBe(
+      "Effective frame weights 0.95 - 1.05 for the 3 frames stacked (noise weights divided by the normalization scale², normalised to mean 1). No frame had a noise estimate, so noise weighting was not applied.",
+    );
+  });
+});
+
+describe("effectiveWeightsOf", () => {
+  const noise = noiseWeightsFromSigmas([1, null, 2, 2]);
+
+  it("keeps the stack-time subframe weights and noise coverage with the backend weights", () => {
+    expect(effectiveWeightsOf([0.4, null, 0.4, 1.2], [1, 0.5, 0.8, 1], noise)).toEqual({
+      range: "0.60 - 1.80",
+      frames: 3,
+      subframeCount: 2,
+      noise: { missing: 1, total: 4 },
+    });
+  });
+
+  it("counts no subframe weighting without subframe weights", () => {
+    expect(effectiveWeightsOf([0.4, null, 0.4, 1.2], undefined, noise)?.subframeCount).toBe(0);
+    expect(effectiveWeightsOf([0.4, null, 0.4, 1.2], [1, 1, 1, 1], noise)?.subframeCount).toBe(0);
+  });
+
+  it("reports nothing when fewer than two frames were stacked", () => {
+    expect(effectiveWeightsOf([0.4, null, null, null], [1, 0.5, 0.8, 1], noise)).toBeNull();
   });
 });

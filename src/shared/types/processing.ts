@@ -19,6 +19,7 @@ export interface BackgroundResult {
   sample_count?: number;
   rms_residual?: number;
   elapsed_ms: number;
+  axis?: "rows" | "cols" | "both" | null;
 }
 
 export interface WaveletResult {
@@ -87,6 +88,9 @@ export interface SpccResult {
   white_reference?: string;
   catalog_name?: string;
   is_synthetic_catalog?: boolean;
+  wavelengths_nm?: [number, number, number];
+  wavelength_source?: "filters" | "default";
+  catalog_source?: string | null;
 }
 
 export interface StarDetectionResult {

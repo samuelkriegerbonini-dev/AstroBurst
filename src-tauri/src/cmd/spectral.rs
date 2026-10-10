@@ -3,37 +3,56 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached_full};
 use crate::core::analysis::x1d::{read_x1d_spectrum, resolve_x1d_path};
+#[cfg(test)]
+use crate::core::astrometry::spectral::NoTabTables;
 use crate::core::astrometry::spectral::{
-    header_target_coordinates, is_non_linear_spectral_ctype, radial_velocity_correction, spectral_axis_on,
-    RadialVelocityCorrection, SpectralAxis,
+    header_target_coordinates, is_non_linear_spectral_ctype, radial_velocity_correction, spectral_axis_on_with,
+    RadialVelocityCorrection, SpectralAxis, TabTables,
 };
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+use crate::infra::fits::table::FileTabTables;
 use crate::types::header::HduHeader;
 use crate::types::image_ref::{ImageRef, PlaneSelector};
 
 pub const KEY_ERROR: &str = "error";
 const COORDINATE_SOURCE_REQUEST: &str = "request";
 
-pub(crate) fn with_spectral_header<T>(
+pub(crate) fn with_spectral_source<T>(
     path: &str,
-    read: impl FnOnce(&HduHeader) -> anyhow::Result<T>,
+    read: impl FnOnce(&str, &HduHeader) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let reference = ImageRef::parse(path);
     if matches!(reference.plane, PlaneSelector::Auto) {
         if let Ok(cube) = GLOBAL_CUBE_CACHE.get_or_open(&reference.path) {
-            return read(&cube.header);
+            return read(&cube.source_path, &cube.header);
         }
     }
     let entry = load_cached_full(path)?;
     let header = entry
         .header()
         .ok_or_else(|| anyhow::anyhow!("no header available for {}", path))?;
-    read(header)
+    read(&reference.path, header)
 }
 
+pub(crate) fn with_spectral_header<T>(
+    path: &str,
+    read: impl FnOnce(&HduHeader) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    with_spectral_source(path, |_, header| read(header))
+}
+
+pub fn header_spectral_axis_for(path: &str, header: &HduHeader) -> Result<SpectralAxis, String> {
+    header_spectral_axis_with(header, &FileTabTables { path })
+}
+
+#[cfg(test)]
 pub fn header_spectral_axis(header: &HduHeader) -> Result<SpectralAxis, String> {
+    header_spectral_axis_with(header, &NoTabTables)
+}
+
+fn header_spectral_axis_with(header: &HduHeader, tables: &dyn TabTables) -> Result<SpectralAxis, String> {
     if let Some(depth) = header.get_i64("NAXIS3").filter(|n| *n > 0) {
-        return spectral_axis_on(header, 3, depth as usize);
+        return spectral_axis_on_with(header, 3, depth as usize, tables);
     }
     for axis in [1usize, 2] {
         let Some(len) = header.get_i64(&format!("NAXIS{axis}")).filter(|n| *n > 0) else {
@@ -42,7 +61,7 @@ pub fn header_spectral_axis(header: &HduHeader) -> Result<SpectralAxis, String> 
         let non_linear = header
             .get(&format!("CTYPE{axis}"))
             .map_or(false, |ctype| is_non_linear_spectral_ctype(ctype));
-        match spectral_axis_on(header, axis, len as usize) {
+        match spectral_axis_on_with(header, axis, len as usize, tables) {
             Ok(found) if found.kind.is_spectral() => return Ok(found),
             Err(reason) if non_linear => return Err(reason),
             _ => {}
@@ -91,7 +110,7 @@ pub fn correction_json(header: &HduHeader, ra: Option<f64>, dec: Option<f64>) ->
 #[tauri::command]
 pub async fn spectral_axis_cmd(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let axis = with_spectral_header(&path, |h| header_spectral_axis(h).map_err(anyhow::Error::msg))?;
+        let axis = with_spectral_source(&path, |source, h| header_spectral_axis_for(source, h).map_err(anyhow::Error::msg))?;
         Ok(serde_json::to_value(&axis)?)
     })
 }
@@ -234,6 +253,47 @@ mod tests {
     }
 
     #[test]
+    fn a_two_d_tab_spectrum_is_loud_on_the_header_only_path() {
+        let tab = make_header(&[
+            ("NAXIS", "2"),
+            ("NAXIS1", "4"),
+            ("NAXIS2", "10"),
+            ("CTYPE1", "WAVE-TAB"),
+            ("PS1_0", "WCS-TABLE"),
+            ("PS1_1", "wavelength"),
+            ("CTYPE2", "LINEAR"),
+        ]);
+        let err = header_spectral_axis(&tab).unwrap_err();
+        assert!(err.contains("needs the FITS file"), "{err}");
+        assert_eq!(err, "CTYPE1 'WAVE-TAB' needs the FITS file to read its WCS table");
+        let cube = make_header(&[("NAXIS", "3"), ("NAXIS3", "3"), ("CTYPE3", "WAVE-TAB"), ("PS3_0", "WCS-TABLE"), ("PS3_1", "wavelength")]);
+        assert_eq!(header_spectral_axis(&cube).unwrap_err(), "CTYPE3 'WAVE-TAB' needs the FITS file to read its WCS table");
+    }
+
+    #[tokio::test]
+    async fn spectral_axis_cmd_reads_a_tabulated_axis_from_the_wcs_table() {
+        use crate::core::cube::lazy::test_support::{tab_cube_cards, write_cube_with_wcs_table};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tab_cube.fits");
+        write_cube_with_wcs_table(&path, 8, 8, &tab_cube_cards(), &[1.0, 1.5, 2.25], |z, _, _| z as f32 + 1.0);
+        let key = path.to_str().unwrap().to_string();
+        let value = spectral_axis_cmd(key.clone()).await.unwrap();
+        assert_eq!(value["tabulated"], json!(true), "{value}");
+        assert_eq!(value["values"], json!([1.0, 1.5, 2.25]), "{value}");
+        assert_eq!(value["unit"], json!("um"), "{value}");
+        let notes = value["notes"].as_array().unwrap();
+        assert!(
+            notes.iter().any(|n| n.as_str().unwrap_or("").starts_with("WAVE-TAB from WCS-TABLE[1] column 'wavelength' (3 entries)")),
+            "{notes:?}"
+        );
+        let axis = with_spectral_source(&key, |source, h| header_spectral_axis_for(source, h).map_err(anyhow::Error::msg)).unwrap();
+        assert!(axis.tabulated);
+        let header_only = with_spectral_header(&key, |h| header_spectral_axis(h).map_err(anyhow::Error::msg)).unwrap_err();
+        assert!(format!("{header_only:#}").contains("needs the FITS file"), "{header_only:#}");
+    }
+
+    #[test]
     fn correction_json_defaults_coordinates_from_the_header_and_reports_errors_inline() {
         let h = mauna_kea(&[("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN"), ("CRVAL1", "180.0"), ("CRVAL2", "0.0")]);
         let j = correction_json(&h, None, None);
@@ -309,6 +369,32 @@ mod tests {
         let missing = dir.path().join("lonely_cal.fits").to_str().unwrap().to_string();
         let err = read_x1d_spectrum_cmd(missing, None).await.unwrap_err();
         assert!(err.starts_with("no pipeline x1d next to lonely_cal.fits: expected lonely_x1d.fits"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_x1d_spectrum_cmd_refuses_a_tso_table_with_one_spectrum_per_row() {
+        use crate::infra::fits::table::test_support::write_table;
+
+        let dir = tempfile::tempdir().unwrap();
+        let columns = [("WAVELENGTH", "3D", Some("um")), ("FLUX", "3D", Some("Jy"))];
+        let rows = |values: &[f64]| values.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+        let tso = write_table(
+            dir.path(),
+            "jw_tso_x1dints.fits",
+            &columns,
+            2,
+            rows(&[1.0, 1.1, 1.2, 10.0, 11.0, 12.0, 1.0, 1.1, 1.2, 20.0, 21.0, 22.0]),
+            &[],
+        );
+        let err = read_x1d_spectrum_cmd(tso.to_str().unwrap().to_string(), None).await.unwrap_err();
+        assert!(err.contains("column 'WAVELENGTH' is an array column (TFORM '3D') in a 2-row table"), "{err}");
+        assert!(err.contains("TSO"), "{err}");
+
+        let single = write_table(dir.path(), "jw_one_x1d.fits", &columns, 1, rows(&[1.0, 1.1, 1.2, 10.0, 11.0, 12.0]), &[]);
+        let value = read_x1d_spectrum_cmd(single.to_str().unwrap().to_string(), None).await.unwrap();
+        assert_eq!(value["wavelength_um"], json!([1.0, 1.1, 1.2]), "{value}");
+        assert_eq!(value["flux"], json!([10.0, 11.0, 12.0]), "{value}");
+        assert_eq!(value["n_rows"], 1);
     }
 
     #[test]

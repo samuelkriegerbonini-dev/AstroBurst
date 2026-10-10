@@ -6,21 +6,31 @@ import WcsReadout from "../header/WcsReadout";
 import PixelReadout from "../header/PixelReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
+import { wcsProbeTarget } from "../../utils/analysisTarget";
 
 export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
   const { histData, stfParams } = useHistContext();
   const mousePixel = useMousePixel();
-  const { path: probePath } = useAnalysisTarget();
+  const target = useAnalysisTarget();
+  const probePath = target.path;
   const valueSource = useMeasurementSource(false);
   if (!file) return <div className="px-3 py-4 text-[10px] text-zinc-600">No file selected</div>;
+  const wcsProbe = probePath
+    ? wcsProbeTarget({
+        path: probePath,
+        dimensions: target.dimensions,
+        previewOnly: target.displayed.previewOnly,
+        fileDims: file.result?.dimensions ?? null,
+      })
+    : null;
   return (
     <div className="flex flex-col gap-3 px-3 py-2 text-[10px] font-mono text-zinc-500">
-      {file.path && file.result?.dimensions && (
+      {wcsProbe && (
         <WcsReadout
-          filePath={file.path}
-          imageWidth={file.result.dimensions[0]}
-          imageHeight={file.result.dimensions[1]}
+          filePath={wcsProbe.path}
+          imageWidth={wcsProbe.dimensions[0]}
+          imageHeight={wcsProbe.dimensions[1]}
           mouseX={mousePixel?.x ?? null}
           mouseY={mousePixel?.y ?? null}
         />

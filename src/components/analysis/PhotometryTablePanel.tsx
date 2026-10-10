@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, Download, Loader2, Shapes, Aperture, X } from "lucide-react";
-import { measurePhotometryBatch } from "../../services/analysis";
-import type { BatchPhotometryResult } from "../../services/analysis";
+import { measurePhotometryBatch, photometryGainModel } from "../../services/analysis";
+import type { BatchPhotometryResult, GainModel } from "../../services/analysis";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { batchPhotometryEntry, measurementLog } from "../../utils/measurementLog";
@@ -29,6 +29,7 @@ import {
   type SortDirection,
 } from "../../utils/photometryTable";
 import { detectedStarsLabel } from "../../utils/photometryPanel";
+import { GAIN_TITLE, gainCaption, nextGainText } from "../../utils/photometryGain";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { APERTURE_LAYER_ID, APERTURE_LAYER_KIND, createAperturePainter, type ApertureMarker } from "../viewer/painters/aperturePainter";
 import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
@@ -158,6 +159,7 @@ function PhotometryTablePanel({
   const [skyInText, setSkyInText] = useState("");
   const [skyOutText, setSkyOutText] = useState("");
   const [gainText, setGainText] = useState("");
+  const [gainModel, setGainModel] = useState<GainModel | null>(null);
   const [pastedText, setPastedText] = useState("");
   const [run, setRun] = useState<BatchRun | null>(null);
   const [running, setRunning] = useState(false);
@@ -171,6 +173,10 @@ function PhotometryTablePanel({
   const provenance = useMeasurementProvenance();
   const regionDoc = useRegionDoc(overlayKey);
   const requestSeqRef = useRef(0);
+  const gainTextRef = useRef(gainText);
+  gainTextRef.current = gainText;
+  const gainPrefillRef = useRef("");
+  const gainSeqRef = useRef(0);
   const stars = starsElsewhere ? NO_STARS : detectedStars;
 
   useEffect(() => {
@@ -181,6 +187,24 @@ function PhotometryTablePanel({
     setHighlightIndex(null);
     setSavedPath(null);
   }, [filePath, measureKey]);
+
+  useEffect(() => {
+    const seq = ++gainSeqRef.current;
+    setGainModel(null);
+    const cleared = nextGainText(gainTextRef.current, gainPrefillRef.current, null);
+    gainPrefillRef.current = cleared.prefill;
+    gainTextRef.current = cleared.text;
+    setGainText(cleared.text);
+    if (!filePath) return;
+    const apply = (model: GainModel | null) => {
+      if (gainSeqRef.current !== seq) return;
+      const next = nextGainText(gainTextRef.current, gainPrefillRef.current, model);
+      gainPrefillRef.current = next.prefill;
+      setGainModel(model);
+      setGainText(next.text);
+    };
+    photometryGainModel(filePath).then(apply, () => apply(null));
+  }, [filePath]);
 
   const pointRegions = useMemo(() => regionDoc.regions.filter((r) => r.shape.shape === "point"), [regionDoc]);
   const pasted = useMemo(() => parsePositions(pastedText), [pastedText]);
@@ -449,12 +473,17 @@ function PhotometryTablePanel({
               step={0.1}
               value={gainText}
               placeholder="none"
+              title={GAIN_TITLE}
+              data-gain-source={gainModel?.source ?? ""}
               onChange={(e) => setGainText(e.target.value)}
               className={INPUT_CLASS}
             />
           </div>
         </div>
         <div className="text-[9px] text-zinc-600">{APERTURE_DEFAULTS_CAPTION}</div>
+        <div className="text-[9px] text-zinc-500" data-gain-caption>
+          {gainCaption(gainModel, gainText)}
+        </div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
         {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 

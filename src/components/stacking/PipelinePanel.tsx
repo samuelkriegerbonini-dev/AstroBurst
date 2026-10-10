@@ -3,13 +3,13 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { runCalibrationPipeline } from "../../services/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
-import type { CombineMethod, PipelineResult, RejectionMethod } from "../../shared/types/stacking";
+import type { CombineMethod, PipelineDarkGroup, PipelineResult, PipelineStats, RejectionMethod } from "../../shared/types/stacking";
 import type { CosmeticConfig } from "../../shared/types/cosmetic";
 import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { detectChannel } from "../../utils/channelMapping";
 import { formatCount } from "../../utils/formatCount";
-import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, toDims } from "../../utils/stackingOutputs";
+import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, stackedLights, toDims } from "../../utils/stackingOutputs";
 import { cullChannelGroups, pipelineChannelInputs, subframeExclusionNotice } from "../../utils/subframeCull";
 import type { ProcessedFile } from "../../shared/types";
 import type { CalibrationState, RunTarget, StackConfig } from "./StackingTab";
@@ -73,8 +73,8 @@ function mergeChannelSeed(current: FileGroup[], seed: FileGroup[]): FileGroup[] 
   return changed ? merged : current;
 }
 
-const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: number; onAdd: () => void; onClear: () => void }) => (
-  <div className="flex items-center justify-between">
+const CalibRow = ({ label, count, onAdd, onClear, testId }: { label: string; count: number; onAdd: () => void; onClear: () => void; testId?: string }) => (
+  <div className="flex items-center justify-between" data-testid={testId}>
     <span className="text-xs text-zinc-400">{label}: {count}</span>
     <div className="flex gap-1">
       <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
@@ -82,6 +82,34 @@ const CalibRow = ({ label, count, onAdd, onClear }: { label: string; count: numb
     </div>
   </div>
 );
+
+type CalibrationKind = "dark" | "flat" | "flatdark" | "bias";
+
+const CALIBRATION_PICK_TITLE: Record<CalibrationKind, string> = {
+  dark: "Select dark frames",
+  flat: "Select flat frames",
+  flatdark: "Select flat-dark frames",
+  bias: "Select bias frames",
+};
+
+function darkGroupsLine(groups: readonly PipelineDarkGroup[] | undefined): string | null {
+  if (!groups || !groups.some((g) => typeof g.temp_c === "number")) return null;
+  const parts = groups.map((g) => (typeof g.temp_c === "number" ? `${g.temp_c.toFixed(1)} °C (${g.frames})` : `unknown (${g.frames})`));
+  return `dark groups: ${parts.join(", ")}`;
+}
+
+export function PipelineMasterLines({ stats }: { stats: PipelineStats }) {
+  const flatDarks = stats.flat_darks_combined ?? 0;
+  const groups = darkGroupsLine(stats.dark_groups);
+  return (
+    <>
+      {stats.darks_combined > 0 && <div>{`Master dark: ${stats.darks_combined} frames`}</div>}
+      {stats.flats_combined > 0 && <div>{`Master flat: ${stats.flats_combined} frames`}</div>}
+      {flatDarks > 0 && <div>{`Master flat-dark: ${flatDarks} frames`}</div>}
+      {groups && <div>{groups}</div>}
+    </>
+  );
+}
 
 interface PipelinePanelProps {
   files?: ProcessedFile[];
@@ -102,6 +130,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   const [channels, setChannels] = useState<FileGroup[]>(() => channelsFromFiles(files));
   const [darks, setDarks] = useState<string[]>(() => calibration?.darkPaths ?? []);
   const [flats, setFlats] = useState<string[]>(() => calibration?.flatPaths ?? []);
+  const [flatDarks, setFlatDarks] = useState<string[]>(() => calibration?.flatDarkPaths ?? []);
   const [bias, setBias] = useState<string[]>(() => calibration?.biasPaths ?? []);
   const [sigmaLow, setSigmaLow] = useState(() => stackConfig?.sigmaLow ?? 2.5);
   const [sigmaHigh, setSigmaHigh] = useState(() => stackConfig?.sigmaHigh ?? 3.0);
@@ -149,6 +178,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
     setDarks((prev) => withMissingPaths(prev, calibration.darkPaths));
     setFlats((prev) => withMissingPaths(prev, calibration.flatPaths));
     setBias((prev) => withMissingPaths(prev, calibration.biasPaths));
+    setFlatDarks((prev) => withMissingPaths(prev, calibration.flatDarkPaths));
   }, [calibration]);
 
   const seededConfigRef = useRef(stackConfig);
@@ -172,7 +202,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
       auto_hot_sigma: cosmeticAutoEnabled ? cosmeticAutoSigma : null,
       auto_cold_sigma: null,
       defects: parsedDefects.defects,
-      cfa: false,
+      cfa: null,
       amount: 1,
       replacement: "median",
     };
@@ -203,12 +233,13 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   );
 
   const addCalibration = useCallback(
-    async (type: "dark" | "flat" | "bias") => {
-      const paths = await pickFiles(`Select ${type} frames`);
+    async (type: CalibrationKind) => {
+      const paths = await pickFiles(CALIBRATION_PICK_TITLE[type]);
       if (paths.length === 0) return;
       switch (type) {
         case "dark": setDarks((p) => [...p, ...paths]); break;
         case "flat": setFlats((p) => [...p, ...paths]); break;
+        case "flatdark": setFlatDarks((p) => [...p, ...paths]); break;
         case "bias": setBias((p) => [...p, ...paths]); break;
       }
     },
@@ -234,6 +265,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
         dark_paths: darks,
         flat_paths: flats,
         bias_paths: bias,
+        flat_dark_paths: flatDarks,
         sigma_low: sigmaLow,
         sigma_high: sigmaHigh,
         normalize,
@@ -357,6 +389,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Calibration (optional)</span>
         <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} onClear={() => setDarks([])} />
         <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} onClear={() => setFlats([])} />
+        <CalibRow label="Flat darks" testId="pipeline-flatdark-row" count={flatDarks.length} onAdd={() => addCalibration("flatdark")} onClear={() => setFlatDarks([])} />
         <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} onClear={() => setBias([])} />
         {darks.length > 0 && (
           <>
@@ -462,7 +495,9 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in border-t border-zinc-800/50 pt-3">
           <span className="text-xs font-semibold text-zinc-400">Results</span>
-          <WarningList warnings={result.warnings} />
+          <div data-testid="pipeline-warnings" className="flex flex-col gap-3 empty:hidden">
+            <WarningList warnings={result.warnings} />
+          </div>
 
           <div className="flex gap-1">
             {result.channel_previews.map((ch) => (
@@ -496,14 +531,13 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
           <div className="flex flex-col gap-1 text-[10px] text-zinc-500">
             {result.stats.channels.map((ch) => (
               <div key={ch.label}>
-                {ch.label}: {ch.lights_input} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
+                {ch.label}: {stackedLights(ch)} lights, mean={ch.mean.toFixed(1)} std={ch.stddev.toFixed(1)}
                 {ch.cosmetic_replaced != null && `, ${formatCount(ch.cosmetic_replaced)} px repaired`}
                 {ch.dark_scale_mean != null && `, dark scale ${ch.dark_scale_mean.toFixed(3)}`}
                 {ch.dark_scale_min != null && ch.dark_scale_max != null && ch.dark_scale_max - ch.dark_scale_min > 1e-3 && ` (${ch.dark_scale_min.toFixed(3)}..${ch.dark_scale_max.toFixed(3)})`}
               </div>
             ))}
-            {result.stats.darks_combined > 0 && <div>Master dark: {result.stats.darks_combined} frames</div>}
-            {result.stats.flats_combined > 0 && <div>Master flat: {result.stats.flats_combined} frames</div>}
+            <PipelineMasterLines stats={result.stats} />
           </div>
         </div>
       )}

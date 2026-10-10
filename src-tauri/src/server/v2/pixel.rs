@@ -3,7 +3,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use astroburst_lib::core::astrometry::wcs::WcsTransform;
+use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::core::imaging::pixel_probe::{
     data_unit, probe_companions, probe_json_with_companions, probe_pixel, wavelength_unit,
     CompanionProbe, ProbeError,
@@ -94,7 +94,7 @@ pub async fn pixel(
 
     let sky = entry
         .header()
-        .and_then(|h| WcsTransform::from_header(h).ok())
+        .and_then(|h| load_wcs(&session.wcs_source_path(&target), h).ok())
         .map(|wcs| {
             let c = wcs.pixel_to_world(probe.x as f64, probe.y as f64);
             json!({ "ra": c.ra, "dec": c.dec })

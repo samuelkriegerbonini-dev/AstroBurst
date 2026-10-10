@@ -21,7 +21,8 @@ const STAGE: Record<ChainStep, number> = {
   stretch: 3,
   maskedStretch: 3,
   localContrast: 4,
-  pixelMath: 5,
+  tone: 5,
+  pixelMath: 6,
 };
 
 const INPUT_LABELS: Record<ChainStep, string> = {
@@ -31,6 +32,7 @@ const INPUT_LABELS: Record<ChainStep, string> = {
   stretch: "Stretch",
   maskedStretch: "Masked stretch",
   localContrast: "LHE / HDRMT",
+  tone: "Curves",
   pixelMath: "PixelMath",
 };
 

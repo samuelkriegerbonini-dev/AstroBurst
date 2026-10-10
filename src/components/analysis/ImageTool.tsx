@@ -216,7 +216,7 @@ function ImageTool() {
         )}
 
         <section id={ANALYSIS_SECTION.statistics.id}>
-          <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={rgbPath} />
+          <StatisticsPanel filePath={effectivePath} composite={compositeOnScreen} rgbPath={rgbPath} measureKey={measureKey} />
         </section>
 
         <section id={ANALYSIS_SECTION.pixels.id}>
@@ -224,11 +224,11 @@ function ImageTool() {
         </section>
 
         <section id={ANALYSIS_SECTION.regions.id}>
-          <RegionsPanel filePath={regionKey} measurePath={effectivePath} />
+          <RegionsPanel filePath={regionKey} measurePath={effectivePath} measureKey={measureKey} />
         </section>
 
         <section id={ANALYSIS_SECTION.profiles.id}>
-          <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} />
+          <RegionProfilesPanel filePath={regionKey} measurePath={effectivePath} measureKey={measureKey} />
         </section>
 
         <section id={ANALYSIS_SECTION.contours.id}>

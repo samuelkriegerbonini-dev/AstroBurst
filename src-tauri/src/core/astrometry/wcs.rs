@@ -1,4 +1,6 @@
 // WCS engine migration to the CDS wcs-rs crate (full FITS projection coverage, wrapper-side SIP) — contributed by Jae-Joon Lee <https://github.com/leejjoon>
+use std::sync::Arc;
+
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -6,11 +8,44 @@ use serde_json::{Map, Number, Value};
 use wcs::{ImgXY, LonLat, WCSParams};
 
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
+pub use crate::core::astrometry::gwcs::GWCS_INVERSE_ACCEPT_PX;
+use crate::core::astrometry::gwcs::{GwcsPipeline, GwcsSource, NewtonOptions};
 use crate::types::header::{parse_fits_float, HduHeader};
 
 const J2000_EQUINOX: f64 = 2000.0;
 const EQUINOX_TOLERANCE_YEARS: f64 = 1e-3;
 const FK5_FIRST_EQUINOX: f64 = 1984.0;
+
+pub const GWCS_NEWTON_SKIP_MARGIN_PX: f64 = 8.0;
+pub const GWCS_SIP_COMPARISON_GRID: usize = 9;
+const GWCS_JACOBIAN_STEP_PX: f64 = 0.5;
+const GWCS_PROJECTION: &str = "gWCS";
+const MAS_PER_DEG: f64 = 3_600_000.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WcsKind {
+    Header,
+    Gwcs,
+}
+
+impl WcsKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            WcsKind::Header => "header",
+            WcsKind::Gwcs => "gwcs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GwcsInfo {
+    pub n_steps: usize,
+    pub frames: Vec<String>,
+    pub source: String,
+    pub vs_header_sip_max_mas: Option<f64>,
+    pub vs_header_sip_max_px: Option<f64>,
+}
 
 /// SIP distortion polynomial coefficients.
 ///
@@ -91,9 +126,26 @@ impl std::fmt::Display for CelestialCoord {
     }
 }
 
+pub const SIP_RESIDUAL_KEYS: [&str; 2] = ["SIPMXERR", "SIPIVERR"];
+
+#[derive(Debug)]
+struct HeaderBackend {
+    engine: wcs::WCS,
+    sip_a: Option<SipPoly>,
+    sip_b: Option<SipPoly>,
+    sip_ap: Option<SipPoly>,
+    sip_bp: Option<SipPoly>,
+}
+
+#[derive(Debug)]
+enum Backend {
+    Header(HeaderBackend),
+    Gwcs(Arc<GwcsSource>),
+}
+
 #[derive(Debug)]
 pub struct WcsTransform {
-    engine: wcs::WCS,
+    backend: Backend,
     crpix1: f64,
     crpix2: f64,
     crval1: f64,
@@ -102,10 +154,10 @@ pub struct WcsTransform {
     cd_inv: [[f64; 2]; 2],
     frame: SkyFrame,
     projection: String,
-    sip_a: Option<SipPoly>,
-    sip_b: Option<SipPoly>,
-    sip_ap: Option<SipPoly>,
-    sip_bp: Option<SipPoly>,
+    sip_max_err_px: Option<f64>,
+    sip_inv_err_px: Option<f64>,
+    gwcs_info: Option<GwcsInfo>,
+    gwcs_refusal: Option<String>,
 }
 
 fn is_projection_param_key(key: &str) -> bool {
@@ -129,7 +181,7 @@ fn number(value: f64) -> Result<Value> {
         .context("Non-finite WCS parameter")
 }
 
-fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
+pub fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
     let cd11 = header.get_f64("CD1_1");
     let cd12 = header.get_f64("CD1_2");
     let cd21 = header.get_f64("CD2_1");
@@ -243,6 +295,59 @@ fn celestial_frame(header: &HduHeader, axis_type: &str) -> Result<SkyFrame> {
     }
 }
 
+const CELESTIAL_AXIS_PAIRS: [(&str, &str); 3] = [("RA", "DEC"), ("GLON", "GLAT"), ("ELON", "ELAT")];
+
+fn ctype_card<'a>(header: &'a HduHeader, key: &str) -> Option<&'a str> {
+    header
+        .get(key)
+        .map(|v| v.trim().trim_matches('\'').trim())
+        .filter(|v| !v.is_empty())
+}
+
+fn axis_code(ctype: &str) -> String {
+    ctype[..ctype.len().min(4)].trim_end_matches('-').to_ascii_uppercase()
+}
+
+fn malformed_ctype(axis: &str, raw: &str) -> anyhow::Error {
+    anyhow::anyhow!("{axis} '{raw}' is not an 8-character ASCII FITS celestial axis type")
+}
+
+fn celestial_axis_pair(header: &HduHeader) -> Result<(String, String, SkyFrame)> {
+    let (Some(ctype1_raw), Some(ctype2_raw)) = (ctype_card(header, "CTYPE1"), ctype_card(header, "CTYPE2")) else {
+        bail!("CTYPE1/CTYPE2 missing: the header has no celestial axis types (FITS treats a missing CTYPE as a linear axis), so no sky WCS is read");
+    };
+    let ctype1 = ctype1_raw.trim_end_matches("-SIP");
+    let ctype2 = ctype2_raw.trim_end_matches("-SIP");
+    if !ctype1.is_ascii() || ctype1.len() < 8 {
+        return Err(malformed_ctype("CTYPE1", ctype1_raw));
+    }
+    if !ctype2.is_ascii() {
+        return Err(malformed_ctype("CTYPE2", ctype2_raw));
+    }
+    let axis1 = axis_code(ctype1);
+    let axis2 = axis_code(ctype2);
+    if CELESTIAL_AXIS_PAIRS.iter().any(|(_, lat)| *lat == axis1) {
+        bail!("CTYPE1 '{ctype1_raw}' puts latitude on axis 1; only longitude-first celestial headers are supported");
+    }
+    let frame = celestial_frame(header, &axis1)?;
+    if !CELESTIAL_AXIS_PAIRS.iter().any(|(lon, lat)| *lon == axis1 && *lat == axis2) {
+        bail!("CTYPE1 '{ctype1_raw}' and CTYPE2 '{ctype2_raw}' are not a celestial longitude/latitude pair");
+    }
+    if ctype2.len() < 8 {
+        return Err(malformed_ctype("CTYPE2", ctype2_raw));
+    }
+    let projection = ctype1[5..8].to_ascii_uppercase();
+    let projection2 = ctype2[5..8].to_ascii_uppercase();
+    if projection != projection2 {
+        bail!("CTYPE1 projection '{projection}' and CTYPE2 projection '{projection2}' differ");
+    }
+    Ok((axis1, projection, frame))
+}
+
+fn sip_residual_card(header: &HduHeader, key: &str) -> Option<f64> {
+    header.get_f64(key).filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 pub fn pixel_center(naxis1: usize, naxis2: usize) -> (f64, f64) {
     ((naxis1 as f64 - 1.0) / 2.0, (naxis2 as f64 - 1.0) / 2.0)
 }
@@ -266,17 +371,7 @@ impl WcsTransform {
         let cd = read_effective_cd(header)?;
         let cd_inv = invert_cd(&cd)?;
 
-        let ctype1_raw = header.get("CTYPE1").unwrap_or("RA---TAN").trim();
-        let ctype1 = ctype1_raw.trim_end_matches("-SIP");
-        if !ctype1.is_ascii() || ctype1.len() < 8 {
-            bail!(
-                "CTYPE1 '{}' is not an 8-character ASCII FITS celestial axis type",
-                ctype1_raw
-            );
-        }
-        let axis_type = ctype1[..4].trim_end_matches('-').to_ascii_uppercase();
-        let projection = ctype1[5..8].to_ascii_uppercase();
-        let frame = celestial_frame(header, &axis_type)?;
+        let (_, projection, frame) = celestial_axis_pair(header)?;
 
         let naxis1 = header.get_i64("NAXIS1").context("Missing NAXIS1")?;
         let naxis2 = header.get_i64("NAXIS2").context("Missing NAXIS2")?;
@@ -308,7 +403,13 @@ impl WcsTransform {
             wcs::WCS::new(&params).map_err(|e| anyhow::anyhow!("wcs::WCS::new failed: {e}"))?;
 
         Ok(WcsTransform {
-            engine,
+            backend: Backend::Header(HeaderBackend {
+                engine,
+                sip_a: SipPoly::parse(header, "A"),
+                sip_b: SipPoly::parse(header, "B"),
+                sip_ap: SipPoly::parse(header, "AP"),
+                sip_bp: SipPoly::parse(header, "BP"),
+            }),
             crpix1,
             crpix2,
             crval1,
@@ -317,13 +418,120 @@ impl WcsTransform {
             cd_inv,
             frame,
             projection,
-            sip_a: SipPoly::parse(header, "A"),
-            sip_b: SipPoly::parse(header, "B"),
-            sip_ap: SipPoly::parse(header, "AP"),
-            sip_bp: SipPoly::parse(header, "BP"),
+            sip_max_err_px: sip_residual_card(header, SIP_RESIDUAL_KEYS[0]),
+            sip_inv_err_px: sip_residual_card(header, SIP_RESIDUAL_KEYS[1]),
+            gwcs_info: None,
+            gwcs_refusal: None,
         })
     }
 
+    pub fn from_gwcs(source: Arc<GwcsSource>, header: &HduHeader) -> Result<Self> {
+        let pipeline = &source.pipeline;
+        let (cx, cy) = match pipeline.bbox_centre() {
+            Some([cx, cy]) => (cx, cy),
+            None => header_dims(header).map_or((0.0, 0.0), |(n1, n2)| pixel_center(n1, n2)),
+        };
+        let centre = pipeline.forward(cx, cy, false);
+        if !(centre[0].is_finite() && centre[1].is_finite()) {
+            bail!("gWCS evaluates to a non-finite sky position at the reference pixel ({cx}, {cy})");
+        }
+        let cd = pipeline.local_jacobian_deg_per_px(cx, cy, GWCS_JACOBIAN_STEP_PX);
+        let cd_inv = invert_cd(&cd)?;
+        let crval = gwcs_coord(centre);
+        let header_sip = header_has_sip(header).then(|| Self::from_header(header).ok()).flatten();
+        let mut wcs = WcsTransform {
+            backend: Backend::Gwcs(Arc::clone(&source)),
+            crpix1: cx + 1.0,
+            crpix2: cy + 1.0,
+            crval1: crval.ra,
+            crval2: crval.dec,
+            cd,
+            cd_inv,
+            frame: SkyFrame::Icrs,
+            projection: GWCS_PROJECTION.to_string(),
+            sip_max_err_px: source.wcsinfo_sip_max_err_px.or_else(|| sip_residual_card(header, SIP_RESIDUAL_KEYS[0])),
+            sip_inv_err_px: source.wcsinfo_sip_inv_err_px.or_else(|| sip_residual_card(header, SIP_RESIDUAL_KEYS[1])),
+            gwcs_info: None,
+            gwcs_refusal: None,
+        };
+        let vs_header_sip_max_mas = header_sip.and_then(|sip| wcs.separation_from_header_sip_mas(&sip, header));
+        let vs_header_sip_max_px = vs_header_sip_max_mas.map(|mas| mas / (wcs.pixel_scale_arcsec() * 1000.0));
+        wcs.gwcs_info = Some(GwcsInfo {
+            n_steps: pipeline.n_steps(),
+            frames: pipeline.frame_names(),
+            source: source.origin.describe(),
+            vs_header_sip_max_mas,
+            vs_header_sip_max_px,
+        });
+        Ok(wcs)
+    }
+
+    fn separation_from_header_sip_mas(&self, header_sip: &WcsTransform, header: &HduHeader) -> Option<f64> {
+        let pipeline = self.gwcs_pipeline()?;
+        let dims = header_dims(header);
+        let mut box_axes = [[f64::NAN; 2]; 2];
+        for axis in 0..2 {
+            let from_bbox = pipeline.bounding_box.filter(|b| !b.ignore[axis]).map(|b| b.intervals[axis]);
+            let from_dims = dims.map(|(n1, n2)| [-0.5, if axis == 0 { n1 } else { n2 } as f64 - 0.5]);
+            box_axes[axis] = from_bbox.or(from_dims)?;
+        }
+        let steps = (GWCS_SIP_COMPARISON_GRID - 1) as f64;
+        let coordinate = |axis: usize, k: usize| box_axes[axis][0] + (box_axes[axis][1] - box_axes[axis][0]) * k as f64 / steps;
+        let mut max_mas = f64::NEG_INFINITY;
+        for j in 0..GWCS_SIP_COMPARISON_GRID {
+            for i in 0..GWCS_SIP_COMPARISON_GRID {
+                let (x, y) = (coordinate(0, i), coordinate(1, j));
+                let g = gwcs_coord(pipeline.forward(x, y, false));
+                let h = header_sip.pixel_to_world(x, y);
+                let sep = angular_separation(g.ra, g.dec, h.ra, h.dec) * MAS_PER_DEG;
+                if sep.is_finite() {
+                    max_mas = max_mas.max(sep);
+                }
+            }
+        }
+        max_mas.is_finite().then_some(max_mas)
+    }
+
+    pub fn with_gwcs_refusal(mut self, reason: String) -> Self {
+        self.gwcs_refusal = Some(reason);
+        self
+    }
+
+    pub fn kind(&self) -> WcsKind {
+        match self.backend {
+            Backend::Header(_) => WcsKind::Header,
+            Backend::Gwcs(_) => WcsKind::Gwcs,
+        }
+    }
+
+    pub fn gwcs_info(&self) -> Option<&GwcsInfo> {
+        self.gwcs_info.as_ref()
+    }
+
+    pub fn gwcs_refusal(&self) -> Option<&str> {
+        self.gwcs_refusal.as_deref()
+    }
+
+    pub fn gwcs_pipeline(&self) -> Option<&GwcsPipeline> {
+        match &self.backend {
+            Backend::Gwcs(source) => Some(&source.pipeline),
+            Backend::Header(_) => None,
+        }
+    }
+
+    pub fn sip_fit_residuals(&self) -> (Option<f64>, Option<f64>) {
+        (self.sip_max_err_px, self.sip_inv_err_px)
+    }
+
+    pub fn sip_forward_terms(&self) -> (Option<&SipPoly>, Option<&SipPoly>) {
+        match &self.backend {
+            Backend::Header(h) => (h.sip_a.as_ref(), h.sip_b.as_ref()),
+            Backend::Gwcs(_) => (None, None),
+        }
+    }
+}
+
+impl HeaderBackend {
     /// Applies forward SIP distortion: `(u, v) = (dx + A(dx,dy), dy + B(dx,dy))`.
     /// A no-op if no SIP coefficients were present in the header.
     #[inline]
@@ -363,10 +571,9 @@ impl WcsTransform {
         }
         (u, v)
     }
+}
 
-    pub fn sip_forward_terms(&self) -> (Option<&SipPoly>, Option<&SipPoly>) {
-        (self.sip_a.as_ref(), self.sip_b.as_ref())
-    }
+impl WcsTransform {
 
     pub fn raw_params(&self) -> (f64, f64, f64, f64, [[f64; 2]; 2], &str) {
         (
@@ -380,9 +587,13 @@ impl WcsTransform {
     }
 
     pub fn pixel_to_world(&self, x: f64, y: f64) -> CelestialCoord {
+        let header = match &self.backend {
+            Backend::Header(h) => h,
+            Backend::Gwcs(source) => return gwcs_coord(source.pipeline.forward(x, y, false)),
+        };
         let dx = x - self.crpix1 + 1.0;
         let dy = y - self.crpix2 + 1.0;
-        let (u, v) = self.sip_forward(dx, dy);
+        let (u, v) = header.sip_forward(dx, dy);
         let (ix, iy) = apply_linear(&self.cd, u, v);
         if !(ix * ix + iy * iy).is_finite() {
             return CelestialCoord {
@@ -391,7 +602,7 @@ impl WcsTransform {
             };
         }
 
-        match self.engine.unproj(&ImgXY::new(ix, iy)) {
+        match header.engine.unproj(&ImgXY::new(ix, iy)) {
             Some(ll) => {
                 let (ra, dec) = convert_to_icrs(self.frame, ll.lon().to_degrees(), ll.lat().to_degrees());
                 CelestialCoord { ra, dec }
@@ -403,18 +614,29 @@ impl WcsTransform {
         }
     }
 
+    pub fn pixel_to_world_bounded(&self, x: f64, y: f64) -> CelestialCoord {
+        match &self.backend {
+            Backend::Gwcs(source) => gwcs_coord(source.pipeline.forward(x, y, true)),
+            Backend::Header(_) => self.pixel_to_world(x, y),
+        }
+    }
+
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> (f64, f64) {
         if !ra.is_finite() || !dec.is_finite() {
             return (f64::NAN, f64::NAN);
         }
+        let header = match &self.backend {
+            Backend::Header(h) => h,
+            Backend::Gwcs(source) => return gwcs_world_to_pixel(&source.pipeline, ra, dec),
+        };
         let (lon, lat) = match self.frame {
             SkyFrame::Icrs => (ra, dec),
             frame => convert_from_icrs(frame, ra, dec),
         };
-        match self.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())) {
+        match header.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())) {
             Some(xy) => {
                 let (u_lin, v_lin) = apply_linear(&self.cd_inv, xy.x(), xy.y());
-                let (dx, dy) = self.sip_inverse(u_lin, v_lin);
+                let (dx, dy) = header.sip_inverse(u_lin, v_lin);
                 (dx + self.crpix1 - 1.0, dy + self.crpix2 - 1.0)
             }
             None => (f64::NAN, f64::NAN),
@@ -447,6 +669,20 @@ impl WcsTransform {
         }
     }
 
+    pub fn pixel_to_world_bounded_batch(&self, coords: &[(f64, f64)]) -> Vec<CelestialCoord> {
+        if coords.len() > 1024 {
+            coords
+                .par_iter()
+                .map(|&(x, y)| self.pixel_to_world_bounded(x, y))
+                .collect()
+        } else {
+            coords
+                .iter()
+                .map(|&(x, y)| self.pixel_to_world_bounded(x, y))
+                .collect()
+        }
+    }
+
     pub fn world_to_pixel_batch(&self, coords: &[(f64, f64)]) -> Vec<(f64, f64)> {
         if coords.len() > 1024 {
             coords
@@ -460,6 +696,38 @@ impl WcsTransform {
                 .collect()
         }
     }
+}
+
+fn gwcs_coord(world: [f64; 2]) -> CelestialCoord {
+    CelestialCoord { ra: if world[0] == 360.0 { 0.0 } else { world[0] }, dec: world[1] }
+}
+
+fn header_dims(header: &HduHeader) -> Option<(usize, usize)> {
+    let dim = |key: &str| header.get_i64(key).filter(|n| *n > 0).and_then(|n| usize::try_from(n).ok());
+    Some((dim("NAXIS1")?, dim("NAXIS2")?))
+}
+
+pub(crate) fn header_has_sip(header: &HduHeader) -> bool {
+    ctype_card(header, "CTYPE1").is_some_and(|c| c.to_ascii_uppercase().ends_with("-SIP")) || header.get("A_ORDER").is_some()
+}
+
+fn start_is_beyond_the_margin(pipeline: &GwcsPipeline, start: [f64; 2]) -> bool {
+    let Some(bbox) = pipeline.bounding_box else { return false };
+    (0..2).any(|axis| {
+        !bbox.ignore[axis]
+            && (start[axis] < bbox.intervals[axis][0] - GWCS_NEWTON_SKIP_MARGIN_PX
+                || start[axis] > bbox.intervals[axis][1] + GWCS_NEWTON_SKIP_MARGIN_PX)
+    })
+}
+
+fn gwcs_world_to_pixel(pipeline: &GwcsPipeline, ra: f64, dec: f64) -> (f64, f64) {
+    if let Ok(start) = pipeline.backward_analytic(ra, dec) {
+        if start[0].is_finite() && start[1].is_finite() && start_is_beyond_the_margin(pipeline, start) {
+            return (start[0], start[1]);
+        }
+    }
+    let r = pipeline.backward_exact(ra, dec, &NewtonOptions::default());
+    (r.pixel[0], r.pixel[1])
 }
 
 pub fn angular_separation(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
@@ -495,8 +763,12 @@ pub struct WcsOrientation {
     pub pixel_scale_y_arcsec: f64,
     pub projection: String,
     pub sip_present: bool,
+    pub sip_max_err_px: Option<f64>,
+    pub sip_inv_err_px: Option<f64>,
     pub north_vec: Option<(f64, f64)>,
     pub east_vec: Option<(f64, f64)>,
+    pub wcs_kind: WcsKind,
+    pub gwcs: Option<GwcsInfo>,
 }
 
 fn unit_vector_from(origin: (f64, f64), point: (f64, f64), sign: f64) -> Option<(f64, f64)> {
@@ -529,8 +801,12 @@ impl WcsTransform {
             pixel_scale_y_arcsec,
             projection: self.projection.clone(),
             sip_present,
+            sip_max_err_px: self.sip_max_err_px,
+            sip_inv_err_px: self.sip_inv_err_px,
             north_vec,
             east_vec,
+            wcs_kind: self.kind(),
+            gwcs: self.gwcs_info.clone(),
         }
     }
 
@@ -773,15 +1049,15 @@ mod tests {
         // funnels projections through a 4-variant enum, so assert on the string
         // `raw_params()` reports instead. Includes a projection beyond the legacy
         // four (AIT) to demonstrate the widened coverage.
-        for (ctype, expected) in [
-            ("RA---TAN", "TAN"),
-            ("RA---SIN", "SIN"),
-            ("RA---ARC", "ARC"),
-            ("RA---CAR", "CAR"),
-            ("GLON-TAN", "TAN"),
-            ("RA---TAN-SIP", "TAN"),
-            ("RA---SIN-SIP", "SIN"),
-            ("RA---AIT", "AIT"),
+        for (ctype, ctype2, expected) in [
+            ("RA---TAN", "DEC--TAN", "TAN"),
+            ("RA---SIN", "DEC--SIN", "SIN"),
+            ("RA---ARC", "DEC--ARC", "ARC"),
+            ("RA---CAR", "DEC--CAR", "CAR"),
+            ("GLON-TAN", "GLAT-TAN", "TAN"),
+            ("RA---TAN-SIP", "DEC--TAN-SIP", "TAN"),
+            ("RA---SIN-SIP", "DEC--SIN-SIP", "SIN"),
+            ("RA---AIT", "DEC--AIT", "AIT"),
         ] {
             let h = make_header(&[
                 ("NAXIS1", "512"),
@@ -793,7 +1069,7 @@ mod tests {
                 ("CDELT1", "-0.001"),
                 ("CDELT2", "0.001"),
                 ("CTYPE1", ctype),
-                ("CTYPE2", "DEC--TAN"),
+                ("CTYPE2", ctype2),
             ]);
             let wcs = WcsTransform::from_header(&h).unwrap();
             assert_eq!(wcs.raw_params().5, expected, "Failed for {ctype}");
@@ -1585,6 +1861,107 @@ mod tests {
     }
 
     #[test]
+    fn a_header_without_ctype_is_not_a_celestial_wcs() {
+        let mut h = make_header(&[
+            ("NAXIS1", "2048"),
+            ("NAXIS2", "512"),
+            ("CRPIX1", "1024.5"),
+            ("CRVAL1", "6563.0"),
+            ("CDELT1", "0.5"),
+            ("CRPIX2", "256.5"),
+            ("CRVAL2", "0"),
+            ("CDELT2", "1"),
+        ]);
+        let err = WcsTransform::from_header(&h).expect_err("a header without CTYPE is a linear axis pair");
+        assert!(format!("{err:#}").contains("CTYPE1/CTYPE2 missing"), "{err:#}");
+        h.set("CTYPE1", "RA---TAN".to_string());
+        assert!(format!("{:#}", WcsTransform::from_header(&h).unwrap_err()).contains("CTYPE1/CTYPE2 missing"));
+    }
+
+    #[test]
+    fn ctype2_must_pair_with_ctype1() {
+        for (ctype1, ctype2) in [("RA---TAN", "WAVE    "), ("GLON-TAN", "DEC--TAN")] {
+            let err = WcsTransform::from_header(&frame_header(ctype1, ctype2, ("83.0", "22.0"), &[]))
+                .expect_err(ctype2)
+                .to_string();
+            assert!(err.contains("not a celestial longitude/latitude pair"), "{ctype1}/{ctype2}: {err}");
+        }
+        let err = WcsTransform::from_header(&frame_header("RA---TAN", "DE\u{FFFD}--TAN", ("83.0", "22.0"), &[]))
+            .expect_err("non-ASCII CTYPE2")
+            .to_string();
+        assert!(err.starts_with("CTYPE2 '") && err.contains("ASCII"), "{err}");
+    }
+
+    #[test]
+    fn ctype_projections_must_agree() {
+        let err = WcsTransform::from_header(&frame_header("RA---TAN", "DEC--SIN", ("83.0", "22.0"), &[]))
+            .expect_err("mixed projections")
+            .to_string();
+        assert!(err.contains("projection 'TAN' and CTYPE2 projection 'SIN' differ"), "{err}");
+    }
+
+    #[test]
+    fn latitude_first_headers_are_refused_with_a_reason() {
+        let err = WcsTransform::from_header(&frame_header("DEC--TAN", "RA---TAN", ("22.0", "83.0"), &[]))
+            .expect_err("latitude first")
+            .to_string();
+        assert!(err.contains("latitude on axis 1"), "{err}");
+    }
+
+    #[test]
+    fn sip_suffix_is_stripped_from_both_axes() {
+        let wcs = WcsTransform::from_header(&sip_header()).unwrap();
+        assert!(wcs.orientation(2048, 2048).sip_present);
+        assert_eq!(wcs.raw_params().5, "TAN");
+    }
+
+    #[test]
+    fn sip_fit_residual_cards_are_read() {
+        let mut h = sip_header();
+        h.set("SIPMXERR", "0.0123".to_string());
+        h.set("SIPIVERR", "0.0456".to_string());
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        assert_eq!(wcs.sip_fit_residuals(), (Some(0.0123), Some(0.0456)));
+        let o = wcs.orientation(2048, 2048);
+        assert_eq!(o.sip_max_err_px, Some(0.0123));
+        assert_eq!(o.sip_inv_err_px, Some(0.0456));
+        assert!(o.sip_present);
+
+        let plain = WcsTransform::from_header(&sip_header()).unwrap().orientation(2048, 2048);
+        assert_eq!((plain.sip_max_err_px, plain.sip_inv_err_px), (None, None));
+
+        let mut bad = sip_header();
+        bad.set("SIPMXERR", "-0.5".to_string());
+        bad.set("SIPIVERR", "NaN".to_string());
+        assert_eq!(WcsTransform::from_header(&bad).unwrap().sip_fit_residuals(), (None, None));
+    }
+
+    const HEAVY_F200W_I2D: &str =
+        r"C:\astrokit\exampleFits\sample-data\heavyTest\jw02739-o001_t001_nircam_clear-f200w_i2d.fits";
+
+    #[test]
+    #[ignore]
+    fn real_data_f200w_wcs_center_is_unchanged() {
+        if !std::path::Path::new(HEAVY_F200W_I2D).exists() {
+            return;
+        }
+        let header = crate::infra::image_source::load_plane_header(&crate::types::image_ref::ImageRef::parse(HEAVY_F200W_I2D)).unwrap();
+        assert_eq!((header.get_i64("NAXIS1"), header.get_i64("NAXIS2")), (Some(14344), Some(8589)));
+        assert_eq!(header.get("CTYPE1").map(str::trim), Some("RA---TAN"));
+        assert_eq!(header.get("CTYPE2").map(str::trim), Some("DEC--TAN"));
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let (cx, cy) = pixel_center(14344, 8589);
+        let c = wcs.pixel_to_world(cx, cy);
+        assert!((c.ra - 274.729893924).abs() < 1e-6, "centre RA {} vs 274.729893924", c.ra);
+        assert!((c.dec + 13.851839479).abs() < 1e-6, "centre Dec {} vs -13.851839479", c.dec);
+        let o = wcs.orientation(14344, 8589);
+        assert_eq!(o.sip_max_err_px, None);
+        assert_eq!(o.sip_inv_err_px, None);
+        assert!(!o.sip_present);
+        assert_eq!(o.projection, "TAN");
+    }
+
+    #[test]
     fn pixel_center_and_edges_use_the_zero_based_pixel_centre_convention() {
         assert_eq!(pixel_center(100, 50), (49.5, 24.5));
         assert_eq!(pixel_center(1, 1), (0.0, 0.0));
@@ -1736,5 +2113,383 @@ mod tests {
         assert_close(nx.hypot(ny), 1.0, 1e-9, "north length");
         assert!(ny.abs() < 0.999, "ICRS north must be rotated against the galactic grid, got ({nx}, {ny})");
         assert_vec_close(o.east_vec, (-ny, nx), "east is north turned a quarter anticlockwise for normal parity");
+    }
+}
+
+#[cfg(test)]
+mod gwcs_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::astrometry::gwcs::test_support::{assert_close, assert_close_slice, fixture_pipeline, no_arrays, parse_real_syntax};
+    use crate::core::astrometry::gwcs::{find_wcs_node, parse_gwcs, GwcsOrigin, GwcsSource};
+
+    fn source(name: &str) -> Arc<GwcsSource> {
+        Arc::new(GwcsSource {
+            pipeline: fixture_pipeline(name),
+            origin: GwcsOrigin::AsdfTree { key: "wcs".into() },
+            wcsinfo_sip_max_err_px: None,
+            wcsinfo_sip_inv_err_px: None,
+        })
+    }
+
+    fn gwcs(name: &str) -> WcsTransform {
+        WcsTransform::from_gwcs(source(name), &HduHeader::empty()).unwrap_or_else(|e| panic!("{name}: {e:#}"))
+    }
+
+    fn world_of(w: &WcsTransform, x: f64, y: f64) -> (f64, f64) {
+        let c = w.pixel_to_world(x, y);
+        (c.ra, c.dec)
+    }
+
+    fn header(pairs: &[(&str, &str)]) -> HduHeader {
+        let mut h = HduHeader::empty();
+        for (k, v) in pairs {
+            h.set(k, v.to_string());
+        }
+        h
+    }
+
+    const NRCA1_TAN_CARDS: &[(&str, &str)] = &[
+        ("NAXIS1", "2048"),
+        ("NAXIS2", "2048"),
+        ("WCSAXES", "2"),
+        ("RADESYS", "ICRS"),
+        ("CRPIX1", "1024.5"),
+        ("CRPIX2", "1024.5"),
+        ("CRVAL1", "274.73480470116"),
+        ("CRVAL2", "-13.86726301314"),
+        ("CD1_1", "2.8415731816019e-07"),
+        ("CD1_2", "8.6958723180969e-06"),
+        ("CD2_1", "8.6435595374278e-06"),
+        ("CD2_2", "-2.7788638413143e-07"),
+    ];
+
+    const NRCA1_SIP_CARDS: &[(&str, &str)] = &[
+        ("CTYPE1", "RA---TAN-SIP"),
+        ("CTYPE2", "DEC--TAN-SIP"),
+        ("A_ORDER", "4"),
+        ("A_0_2", "-1.1012423989127e-06"),
+        ("A_0_3", "3.12630323322178e-11"),
+        ("A_0_4", "-1.5779928405363e-14"),
+        ("A_1_1", "-6.7550069826291e-06"),
+        ("A_1_2", "4.06501013986234e-10"),
+        ("A_1_3", "-2.4307858945383e-14"),
+        ("A_2_0", "-8.9728303385234e-10"),
+        ("A_2_1", "5.43919193588454e-11"),
+        ("A_2_2", "-4.2683692001701e-14"),
+        ("A_3_0", "2.95623303533868e-10"),
+        ("A_3_1", "-1.037383801982e-14"),
+        ("A_4_0", "-1.0006315789163e-14"),
+        ("B_ORDER", "4"),
+        ("B_0_2", "-4.6421696448153e-06"),
+        ("B_0_3", "3.64570432075601e-10"),
+        ("B_0_4", "-6.7467741902436e-14"),
+        ("B_1_1", "1.1498127157042e-06"),
+        ("B_1_2", "3.37399386167831e-11"),
+        ("B_1_3", "2.41009443467561e-14"),
+        ("B_2_0", "2.06972967564988e-06"),
+        ("B_2_1", "3.40321949670535e-10"),
+        ("B_2_2", "-6.3721976852566e-15"),
+        ("B_3_0", "6.94269936499333e-12"),
+        ("B_3_1", "-2.281984492617e-14"),
+        ("B_4_0", "1.28023924015329e-14"),
+        ("AP_ORDER", "4"),
+        ("AP_0_2", "1.10128510854206e-06"),
+        ("AP_0_3", "-1.240052641494e-11"),
+        ("AP_0_4", "1.41149943466432e-14"),
+        ("AP_1_1", "6.75507672034551e-06"),
+        ("AP_1_2", "-3.3007652224429e-10"),
+        ("AP_1_3", "1.32343787938799e-14"),
+        ("AP_2_0", "9.68928669480131e-10"),
+        ("AP_2_1", "-6.5480908452541e-11"),
+        ("AP_2_2", "3.97571091366746e-14"),
+        ("AP_3_0", "-3.0902076121121e-10"),
+        ("AP_3_1", "1.29622940105603e-15"),
+        ("AP_4_0", "1.001971521865e-14"),
+        ("BP_ORDER", "4"),
+        ("BP_0_2", "4.64237379659221e-06"),
+        ("BP_0_3", "-3.1980656053782e-10"),
+        ("BP_0_4", "5.91073727904483e-14"),
+        ("BP_1_1", "-1.1497598054995e-06"),
+        ("BP_1_2", "-6.2553902536975e-11"),
+        ("BP_1_3", "-2.4197896127573e-14"),
+        ("BP_2_0", "-2.0698085793808e-06"),
+        ("BP_2_1", "-3.8605177770494e-10"),
+        ("BP_2_2", "2.12234252800323e-16"),
+        ("BP_3_0", "-4.3114987895992e-12"),
+        ("BP_3_1", "2.43332959885544e-14"),
+        ("BP_4_0", "-1.0710061740737e-14"),
+    ];
+
+    pub(crate) fn nrca1_sip_header() -> HduHeader {
+        let mut cards = NRCA1_TAN_CARDS.to_vec();
+        cards.extend_from_slice(NRCA1_SIP_CARDS);
+        header(&cards)
+    }
+
+    fn nrca1_tan_header() -> HduHeader {
+        let mut cards = NRCA1_TAN_CARDS.to_vec();
+        cards.extend_from_slice(&[("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN")]);
+        header(&cards)
+    }
+
+    const ROMAN_LIKE_CRVAL: (f64, f64) = (72.5, -30.7);
+    const ROMAN_LIKE_NAXIS: usize = 4096;
+
+    fn roman_like_body(cd: [[f64; 2]; 2]) -> String {
+        let offset = -((ROMAN_LIKE_NAXIS as f64 - 1.0) / 2.0);
+        format!(
+            "wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>
+  name: ''
+  steps:
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0>
+      axes_names: [x, y]
+      axes_order: [0, 1]
+      axis_physical_types: ['custom:x', 'custom:y']
+      name: detector
+      unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]
+    transform: !transform/compose-1.4.0
+      forward:
+      - !transform/compose-1.4.0
+        forward:
+        - !transform/compose-1.4.0
+          forward:
+          - !transform/concatenate-1.4.0
+            forward:
+            - !transform/shift-1.4.0 {{inputs: [x], offset: {offset}, outputs: [y]}}
+            - !transform/shift-1.4.0 {{inputs: [x], offset: {offset}, outputs: [y]}}
+            inputs: [x0, x1]
+            outputs: [y0, y1]
+          - !transform/affine-1.4.0
+            inputs: [x, y]
+            matrix: !core/ndarray-1.1.0
+              data: [[{}, {}], [{}, {}]]
+              datatype: float64
+              shape: [2, 2]
+            outputs: [x, y]
+            translation: !core/ndarray-1.1.0
+              data: [0.0, 0.0]
+              datatype: float64
+              shape: [2]
+          inputs: [x0, x1]
+          outputs: [x, y]
+        - !transform/gnomonic-1.4.0 {{direction: pix2sky, inputs: [x, y], outputs: [phi, theta]}}
+        inputs: [x0, x1]
+        outputs: [phi, theta]
+      - !transform/rotate3d-1.5.0 {{direction: native2celestial, inputs: [phi_N, theta_N], outputs: [alpha_C, delta_C], phi: {}, psi: 180.0, theta: {}}}
+      inputs: [x0, x1]
+      outputs: [alpha_C, delta_C]
+  - !<tag:stsci.edu:gwcs/step-1.3.0>
+    frame: !<tag:stsci.edu:gwcs/celestial_frame-1.2.0>
+      axes_names: [lon, lat]
+      axes_order: [0, 1]
+      axis_physical_types: [pos.eq.ra, pos.eq.dec]
+      name: world
+      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0>
+        frame_attributes: {{}}
+      unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]
+    transform: null
+",
+            cd[0][0], cd[0][1], cd[1][0], cd[1][1], ROMAN_LIKE_CRVAL.0, ROMAN_LIKE_CRVAL.1
+        )
+    }
+
+    fn roman_like_pair(cd: [[f64; 2]; 2]) -> (WcsTransform, WcsTransform) {
+        let tree = parse_real_syntax(&roman_like_body(cd));
+        let (key, node) = find_wcs_node(&tree).expect("wcs node");
+        let pipeline = parse_gwcs(node, &no_arrays, &key.0).unwrap_or_else(|e| panic!("{e:#}"));
+        let src = Arc::new(GwcsSource {
+            pipeline,
+            origin: GwcsOrigin::AsdfTree { key: "roman.meta.wcs".into() },
+            wcsinfo_sip_max_err_px: None,
+            wcsinfo_sip_inv_err_px: None,
+        });
+        let naxis = ROMAN_LIKE_NAXIS.to_string();
+        let dims = header(&[("NAXIS1", &naxis), ("NAXIS2", &naxis)]);
+        let gwcs = WcsTransform::from_gwcs(src, &dims).unwrap_or_else(|e| panic!("{e:#}"));
+        let mut fits = header(&[("NAXIS1", &naxis), ("NAXIS2", &naxis), ("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN")]);
+        let crpix = (ROMAN_LIKE_NAXIS as f64 + 1.0) / 2.0;
+        for (key, value) in [
+            ("CRPIX1", crpix),
+            ("CRPIX2", crpix),
+            ("CRVAL1", ROMAN_LIKE_CRVAL.0),
+            ("CRVAL2", ROMAN_LIKE_CRVAL.1),
+            ("CD1_1", cd[0][0]),
+            ("CD1_2", cd[0][1]),
+            ("CD2_1", cd[1][0]),
+            ("CD2_2", cd[1][1]),
+        ] {
+            fits.set_f64(key, value);
+        }
+        (gwcs, WcsTransform::from_header(&fits).unwrap())
+    }
+
+    #[test]
+    fn gwcs_surrogate_cd_has_the_header_orientation() {
+        let header = nrca1_sip_header();
+        let gwcs = WcsTransform::from_gwcs(source("wcs_jwst_nircam_cal300.asdf"), &header).unwrap().orientation(2048, 2048);
+        let sip = WcsTransform::from_header(&header).unwrap().orientation(2048, 2048);
+        assert!(!gwcs.flipped && !sip.flipped, "nrca1 is east-left: {gwcs:?}");
+        assert_close(sip.rotation_deg, -91.83, 0.01, "header rotation atan2(-CD1_2, CD2_2)");
+        assert_close(gwcs.rotation_deg, sip.rotation_deg, 0.5, "surrogate CD rotation vs the header CD");
+        let (ge, he) = (gwcs.east_vec.unwrap(), sip.east_vec.unwrap());
+        assert_close_slice(&[ge.0, ge.1], &[he.0, he.1], 0.01, "east vector of the surrogate vs the header (nrca1 has east up)");
+        let (gn, hn) = (gwcs.north_vec.unwrap(), sip.north_vec.unwrap());
+        assert_close_slice(&[gn.0, gn.1], &[hn.0, hn.1], 0.01, "north vector of the surrogate vs the header");
+
+        let scale = 0.10931 / 3600.0;
+        let (sin, cos) = 0.1f64.to_radians().sin_cos();
+        let cd = [[-scale * cos, -scale * sin], [-scale * sin, scale * cos]];
+        let (roman, fits) = roman_like_pair(cd);
+        let n = ROMAN_LIKE_NAXIS;
+        let (og, oh) = (roman.orientation(n, n), fits.orientation(n, n));
+        assert!(!og.flipped && !oh.flipped, "Roman-like chain is east-left: {og:?}");
+        assert_close(oh.rotation_deg, 0.1, 1e-9, "header rotation of the Roman-like CD");
+        assert_close(og.rotation_deg, 0.1, 1e-6, "surrogate rotation of the Roman-like chain");
+        assert_close(og.pixel_scale_x_arcsec, 0.10931, 1e-6, "Roman-like scale");
+        assert!(og.east_vec.unwrap().0 < 0.0, "E left: {og:?}");
+        let surrogate = roman.raw_params().4;
+        for (got, exp) in surrogate.iter().flatten().zip(cd.iter().flatten()) {
+            assert_close(*got, *exp, scale * 1e-6, "surrogate CD element");
+        }
+        for (x, y) in [(0.0, 0.0), (4095.0, 4095.0), (300.0, 3900.0), (2047.5, 2047.5)] {
+            let (a, b) = (roman.pixel_to_world(x, y), fits.pixel_to_world(x, y));
+            assert_close_slice(&[a.ra, a.dec], &[b.ra, b.dec], 1e-9, &format!("Roman-like chain vs TAN header at ({x}, {y})"));
+        }
+    }
+
+    #[test]
+    fn gwcs_backed_transform_matches_the_pipeline() {
+        let nircam = gwcs("wcs_jwst_nircam_cal300.asdf");
+        let centre = nircam.pixel_to_world(1023.5, 1023.5);
+        assert_close_slice(&[centre.ra, centre.dec], &[274.7348047011612, -13.867263013140171], 1e-10, "NIRCam bbox centre");
+        let (ra, dec) = world_of(&nircam, 0.0, 0.0);
+        assert_close_slice(&[ra, dec], &[274.7253135310639, -13.875903855344635], 1e-10, "NIRCam (0, 0)");
+        let (x, y) = nircam.world_to_pixel(ra, dec);
+        assert_close_slice(&[x, y], &[0.0, 0.0], 1e-6, "NIRCam exact inverse of the (0, 0) world (the analytic start is 4.4e-4 px off)");
+
+        let miri = gwcs("wcs_jwst_miri_cal300.asdf");
+        let (ra, dec) = world_of(&miri, 0.0, 0.0);
+        assert_close_slice(&[ra, dec], &[274.7271082813119, -13.841811218259549], 1e-10, "MIRI (0, 0)");
+        let (x, y) = miri.world_to_pixel(ra, dec);
+        assert_close_slice(&[x, y], &[0.0, 0.0], 1e-6, "MIRI exact inverse of the (0, 0) world (the analytic start is 0.11 px off)");
+
+        let outside = nircam.pixel_to_world(-1.0, 0.0);
+        assert!(outside.ra.is_finite() && outside.dec.is_finite(), "pixel_to_world extrapolates past the bbox: {outside:?}");
+        let bounded = nircam.pixel_to_world_bounded(-1.0, 0.0);
+        assert!(bounded.ra.is_nan() && bounded.dec.is_nan(), "pixel_to_world_bounded applies the bbox: {bounded:?}");
+        let inside = nircam.pixel_to_world_bounded(-0.5, 2047.5);
+        assert!(inside.ra.is_finite(), "the bbox edges are inside: {inside:?}");
+
+        let (ra, dec) = world_of(&nircam, -3.0, 10.0);
+        let (x, y) = nircam.world_to_pixel(ra, dec);
+        assert_close_slice(&[x, y], &[-3.0, 10.0], 1e-6, "a start within 8 px of the box runs Newton and is not blanked");
+        assert!(nircam.world_to_pixel(f64::NAN, dec).0.is_nan());
+    }
+
+    #[test]
+    fn a_far_sky_point_is_nan_not_a_ghost() {
+        let fgs = gwcs("wcs_jwst_fgs_cal300.asdf");
+        let pipeline = fgs.gwcs_pipeline().expect("gWCS backend");
+        let start = pipeline.backward_analytic(79.43014558211632, -69.59900426111466).unwrap();
+        assert!(pipeline.in_bbox(start[0], start[1]), "the folded analytic start lies inside the box: {start:?}");
+        let (x, y) = fgs.world_to_pixel(79.43014558211632, -69.59900426111466);
+        let margin = GWCS_NEWTON_SKIP_MARGIN_PX;
+        let ghost = x.is_finite() && y.is_finite() && x > -0.5 - margin && x < 2047.5 + margin && y > -0.5 - margin && y < 2047.5 + margin;
+        assert!(!ghost, "a sky point 0.44 deg off the field must not land inside the image: ({x}, {y})");
+
+        let (ra, dec) = world_of(&fgs, 1024.0, 2048.3);
+        let (x, y) = fgs.world_to_pixel(ra, dec);
+        assert_close_slice(&[x, y], &[1024.0, 2048.3], 1e-6, "1 px outside the top edge round-trips through Newton");
+
+        let (ra, dec) = world_of(&fgs, 1024.0, 2070.0);
+        let far_start = pipeline.backward_analytic(ra, dec).unwrap();
+        assert!(far_start[1] > 2047.5 + margin, "{far_start:?}");
+        let (x, y) = fgs.world_to_pixel(ra, dec);
+        assert_eq!([x, y], far_start, "a start more than 8 px outside the box is returned without Newton");
+    }
+
+    #[test]
+    fn gwcs_surrogate_cd_gives_the_plate_scale() {
+        let nircam = gwcs("wcs_jwst_nircam_cal300.asdf");
+        let scale = nircam.pixel_scale_arcsec();
+        assert!((scale - 0.0312).abs() / 0.0312 < 0.005, "NIRCam SW scale {scale} arcsec/px");
+        let (crpix1, crpix2, crval1, crval2, _, projection) = nircam.raw_params();
+        assert_eq!((crpix1, crpix2), (1024.5, 1024.5), "surrogate CRPIX is the 1-based bbox centre");
+        assert_close_slice(&[crval1, crval2], &[274.7348047011612, -13.867263013140171], 1e-10, "surrogate CRVAL");
+        assert_eq!(projection, "gWCS");
+        let o = nircam.orientation(2048, 2048);
+        assert_eq!(o.projection, "gWCS");
+        assert_eq!(o.wcs_kind, WcsKind::Gwcs);
+        assert_eq!(nircam.kind(), WcsKind::Gwcs);
+        assert!(!o.sip_present);
+        let info = o.gwcs.as_ref().expect("gwcs info");
+        assert_eq!(info.n_steps, 3);
+        assert_eq!(info.frames, ["detector", "v2v3", "v2v3vacorr", "world"]);
+        assert_eq!(info.source, "wcs");
+        assert_eq!((info.vs_header_sip_max_mas, info.vs_header_sip_max_px), (None, None), "an empty header has no SIP to compare");
+        assert!(o.north_vec.is_some() && o.east_vec.is_some(), "{o:?}");
+        let (fov_w, fov_h) = nircam.field_of_view(2048, 2048);
+        assert!((fov_w - 1.065).abs() < 0.02 && (fov_h - 1.065).abs() < 0.02, "fov {fov_w} x {fov_h} arcmin");
+        assert_eq!(nircam.gwcs_refusal(), None);
+    }
+
+    #[test]
+    fn gwcs_vs_header_sip_is_measured_on_a_9x9_grid() {
+        let wcs = WcsTransform::from_gwcs(source("wcs_jwst_nircam_cal300.asdf"), &nrca1_sip_header()).unwrap();
+        let info = wcs.gwcs_info().expect("gwcs info");
+        let mas = info.vs_header_sip_max_mas.expect("the header carries a SIP to compare");
+        assert_close(mas, 0.2661699147769568, 0.01, "max separation on the 9x9 grid (gwcs 1.0.3 vs astropy SIP)");
+        let px = info.vs_header_sip_max_px.expect("px");
+        assert_close(px, 0.0085, 0.0005, "the same in pixels at 31.2 mas/px");
+        assert_eq!(wcs.sip_fit_residuals(), (None, None), "the real header has no SIPMXERR card");
+
+        let tan = WcsTransform::from_gwcs(source("wcs_jwst_nircam_cal300.asdf"), &nrca1_tan_header()).unwrap();
+        assert_eq!(tan.gwcs_info().unwrap().vs_header_sip_max_mas, None, "a header without SIP terms is not compared");
+    }
+
+    #[test]
+    fn wcsinfo_residuals_fill_the_sip_fields() {
+        let src = Arc::new(GwcsSource {
+            pipeline: fixture_pipeline("wcs_jwst_nircam_cal300.asdf"),
+            origin: GwcsOrigin::FitsAsdfHdu { hdu_index: 8 },
+            wcsinfo_sip_max_err_px: Some(0.0087),
+            wcsinfo_sip_inv_err_px: Some(0.0088),
+        });
+        let wcs = WcsTransform::from_gwcs(src, &HduHeader::empty()).unwrap();
+        assert_eq!(wcs.sip_fit_residuals(), (Some(0.0087), Some(0.0088)));
+        assert_eq!(wcs.gwcs_info().unwrap().source, "ASDF HDU 8");
+        let o = wcs.orientation(2048, 2048);
+        assert_eq!((o.sip_max_err_px, o.sip_inv_err_px), (Some(0.0087), Some(0.0088)));
+    }
+
+    #[test]
+    fn a_refusal_is_kept_on_a_header_fallback() {
+        let tan = header(&[
+            ("NAXIS1", "64"),
+            ("NAXIS2", "64"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+            ("CRPIX1", "32.5"),
+            ("CRPIX2", "32.5"),
+            ("CRVAL1", "180.0"),
+            ("CRVAL2", "45.0"),
+            ("CDELT1", "-0.001"),
+            ("CDELT2", "0.001"),
+        ]);
+        let refusal = "gWCS transform 'tabular' at steps[0].transform is not supported by the evaluator";
+        let wcs = WcsTransform::from_header(&tan).unwrap().with_gwcs_refusal(refusal.to_string());
+        assert_eq!(wcs.kind(), WcsKind::Header);
+        assert_eq!(wcs.gwcs_refusal(), Some(refusal));
+        assert!(wcs.gwcs_info().is_none());
+        assert!(wcs.gwcs_pipeline().is_none());
+        let o = wcs.orientation(64, 64);
+        assert_eq!(o.wcs_kind, WcsKind::Header);
+        assert!(o.gwcs.is_none());
+        assert_eq!(WcsKind::Header.name(), "header");
+        assert_eq!(WcsKind::Gwcs.name(), "gwcs");
+        assert_eq!(serde_json::to_value(WcsKind::Gwcs).unwrap(), serde_json::json!("gwcs"));
     }
 }

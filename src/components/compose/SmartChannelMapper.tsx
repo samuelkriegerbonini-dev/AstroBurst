@@ -36,7 +36,7 @@ export interface ChannelFile {
 }
 
 export type ChannelSlot = "L" | "R" | "G" | "B";
-export type CalibSlot = "science" | "bias" | "dark" | "flat";
+export type CalibSlot = "science" | "bias" | "dark" | "flat" | "flatdark";
 export type MapperMode = "rgb" | "calibration";
 
 export interface ChannelAssignment {
@@ -51,6 +51,7 @@ export interface CalibAssignment {
   bias: ChannelFile[];
   dark: ChannelFile[];
   flat: ChannelFile[];
+  flatdark: ChannelFile[];
 }
 
 interface SmartChannelMapperProps {
@@ -88,6 +89,7 @@ const CALIB_META: Record<CalibSlot, { color: string; label: string; bg: string; 
   bias: { color: "#a78bfa", label: "Bias", bg: "rgba(167,139,250,0.06)", border: "rgba(167,139,250,0.2)", multi: true },
   dark: { color: "#60a5fa", label: "Dark", bg: "rgba(96,165,250,0.06)", border: "rgba(96,165,250,0.2)", multi: true },
   flat: { color: "#fbbf24", label: "Flat", bg: "rgba(251,191,36,0.06)", border: "rgba(251,191,36,0.2)", multi: true },
+  flatdark: { color: "#f472b6", label: "Flat dark", bg: "rgba(244,114,182,0.06)", border: "rgba(244,114,182,0.2)", multi: true },
 };
 
 const PALETTE_PRESETS = [
@@ -319,7 +321,7 @@ function SmartChannelMapper({
     L: null, R: null, G: null, B: null,
   });
   const [calibFrames, setCalibFrames] = useState<CalibAssignment>({
-    science: null, bias: [], dark: [], flat: [],
+    science: null, bias: [], dark: [], flat: [], flatdark: [],
   });
   const [autoMapSource, setAutoMapSource] = useState<"metadata" | "filename" | "palette" | null>(null);
 
@@ -539,7 +541,7 @@ function SmartChannelMapper({
         </div>
       ) : (
         <div className="ab-mapper-slots">
-          {(["science", "bias", "dark", "flat"] as CalibSlot[]).map((slot) => (
+          {(["science", "bias", "dark", "flat", "flatdark"] as CalibSlot[]).map((slot) => (
             <DropZoneSlot
               key={slot}
               slot={slot}

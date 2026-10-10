@@ -91,6 +91,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         sigmaClip,
         iterations: 3,
         mode: batchMode,
+        runToken: state.alignRunToken,
       });
       const nextResults: Record<string, BgExtractResult> = {};
       for (const r of res.results ?? []) {

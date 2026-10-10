@@ -5,6 +5,7 @@ import {
   channelExportHistory,
   compositeHistoryLines,
   exportBlockedReason,
+  exportMappingBanner,
   exportWcsWarning,
   resolveExportRgbPaths,
   resolveRgbPaths,
@@ -198,6 +199,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   const blockedReason = exportBlockedReason(state);
   const monoBinId = state.compositeReady ? null : resolveExportRgbPaths(state).monoBinId;
   const monoLabel = monoBinId ? state.bins.find((b) => b.id === monoBinId)?.shortLabel ?? monoBinId : null;
+  const mappingBanner = exportMappingBanner(state);
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -211,6 +213,15 @@ export default function ExportStep({ state }: ExportStepProps) {
       {monoLabel && (
         <div className="text-[10px] text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5">
           {monoLabel} was processed on its own, so PNG, FITS and ZIP export that channel alone, as shown on screen. Blend the channels to export colour.
+        </div>
+      )}
+
+      {mappingBanner && (
+        <div
+          data-testid="export-mapping-banner"
+          className="text-[10px] text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5"
+        >
+          {mappingBanner}
         </div>
       )}
 

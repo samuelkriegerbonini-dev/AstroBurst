@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use astroburst_lib::core::astrometry::frames::{convert_from_icrs, SkyFrame};
 use astroburst_lib::core::astrometry::grid::{wcs_grid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use astroburst_lib::core::astrometry::wcs::{angular_separation, WcsTransform};
+use astroburst_lib::infra::wcs_source;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -86,7 +87,7 @@ fn load_wcs(session: &Session, image_ref: &str) -> Result<(WcsTransform, usize, 
         message: format!("image {image_ref} has no header, so no WCS is available"),
         hint: Some("open an image whose header carries WCS keywords".into()),
     })?;
-    let wcs = WcsTransform::from_header(header).map_err(|e| AppError::BadRequestWithHint {
+    let wcs = wcs_source::load_wcs(&session.wcs_source_path(image_ref), header).map_err(|e| AppError::BadRequestWithHint {
         code: "wcs_required",
         message: format!("image {image_ref} has no usable WCS: {e}"),
         hint: Some("the header must carry a valid WCS (CTYPE/CRPIX/CRVAL/CD...)".into()),
@@ -115,7 +116,7 @@ pub async fn pix2sky(
     let (wcs, w, h) = load_wcs(&session, &target)?;
 
     let coords: Vec<(f64, f64)> = params.points.iter().map(|p| (p[0], p[1])).collect();
-    let sky = wcs.pixel_to_world_batch(&coords);
+    let sky = wcs.pixel_to_world_bounded_batch(&coords);
 
     let results: Vec<Value> = coords
         .iter()

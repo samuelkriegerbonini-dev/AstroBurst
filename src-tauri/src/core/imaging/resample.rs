@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
+use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
 use crate::core::imaging::sampling;
 use crate::types::header::HduHeader;
 
@@ -34,7 +35,7 @@ fn area_cells(src: usize, dst: usize) -> Vec<(usize, Vec<f64>)> {
         .collect()
 }
 
-fn box_reduce(image: &Array2<f32>, out_rows: usize, out_cols: usize) -> Result<Array2<f32>> {
+pub(crate) fn box_reduce(image: ArrayView2<f32>, out_rows: usize, out_cols: usize) -> Result<Array2<f32>> {
     let (rows, cols) = image.dim();
     let standard = image.as_standard_layout();
     let slice = standard
@@ -90,7 +91,7 @@ pub fn resample_image(
     let ky = if scale_y > 2.0 { scale_y.floor() as usize } else { 1 };
     let kx = if scale_x > 2.0 { scale_x.floor() as usize } else { 1 };
     if ky >= 2 || kx >= 2 {
-        let reduced = box_reduce(image, (src_rows / ky).max(1), (src_cols / kx).max(1))?;
+        let reduced = box_reduce(image.view(), (src_rows / ky).max(1), (src_cols / kx).max(1))?;
         return resample_image(&reduced, target_rows, target_cols);
     }
     let half_shift_y = (scale_y - 1.0) * 0.5;
@@ -236,6 +237,12 @@ fn sip_updates(header: &HduHeader, scale_x: f64, scale_y: f64) -> Vec<(String, f
             out.push((key.to_string(), value * factor));
         }
     }
+    let residual_scale = scale_x.min(scale_y);
+    for key in SIP_RESIDUAL_KEYS {
+        if let Some(value) = header.get_f64(key).filter(|v| v.is_finite()) {
+            out.push((key.to_string(), value / residual_scale));
+        }
+    }
     out
 }
 
@@ -357,6 +364,29 @@ mod tests {
         assert!((coef("BP_0_2") - 7.0e-6 * sy).abs() < 1e-15);
         assert!((coef("A_DMAX") - 1.5).abs() < 1e-12);
         assert!((coef("B_DMAX") - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sip_fit_residuals_shrink_with_a_downsample() {
+        let h = header_with(&[
+            ("CTYPE1", "RA---TAN-SIP"),
+            ("CTYPE2", "DEC--TAN-SIP"),
+            ("A_ORDER", "2"),
+            ("A_2_0", "1.0E-5"),
+            ("SIPMXERR", "0.08"),
+        ]);
+        let u = compute_wcs_updates(&h, (400, 400), (100, 200));
+        assert_eq!(update(&u, "SIPMXERR"), Some(0.04), "{u:?}");
+        assert_eq!(update(&u, "SIPIVERR"), None);
+
+        let mut both = h.clone();
+        both.set("SIPIVERR", "0.5".to_string());
+        let u = compute_wcs_updates(&both, (400, 400), (200, 100));
+        assert_eq!(update(&u, "SIPMXERR"), Some(0.04), "{u:?}");
+        assert_eq!(update(&u, "SIPIVERR"), Some(0.25), "{u:?}");
+
+        let plain = compute_wcs_updates(&header_with(&[("A_ORDER", "2"), ("A_2_0", "1.0E-5")]), (400, 400), (100, 200));
+        assert_eq!(update(&plain, "SIPMXERR"), None);
     }
 
     #[test]
