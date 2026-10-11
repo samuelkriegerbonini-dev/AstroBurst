@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   displayForRecordChange,
+  fileDisplayState,
   initialHintedDisplay,
   patchHintedDisplay,
   persistableDisplay,
@@ -8,7 +9,7 @@ import {
   type HintedDisplay,
 } from "../displayHint";
 import { displayHintFor } from "../lineFit";
-import { DEFAULT_DISPLAY_SETTINGS, type DisplaySettings } from "../../shared/types/display";
+import { DEFAULT_DISPLAY_SETTINGS, type DisplayLook, type DisplaySettings } from "../../shared/types/display";
 
 const USER: DisplaySettings = {
   ...DEFAULT_DISPLAY_SETTINGS,
@@ -185,5 +186,39 @@ describe("display hint transitions", () => {
     const reloaded = startSession(s.stored);
     expect(reloaded.state.snapshot).toBeNull();
     expect(reloaded.state.display).toEqual({ ...USER, colormap: "plasma" });
+  });
+});
+
+describe("fileDisplayState", () => {
+  const LOOK: DisplayLook = {
+    stretch: "sqrt",
+    limits: "percentile",
+    percentileLow: 0.5,
+    percentileHigh: 99.9,
+    userLo: null,
+    userHi: null,
+    zscaleContrast: 0.25,
+    asinhA: 0.1,
+    power: 2,
+    colormap: "cividis",
+    invert: false,
+    symmetric: false,
+    centre: 0,
+  };
+
+  it("replaces the look, keeps the overlays, drops the hint snapshot and re-applies the hint of the record on screen", () => {
+    const plain = fileDisplayState(initialHintedDisplay(USER), LOOK, null);
+    expect(plain).toEqual({ display: { ...USER, ...LOOK }, snapshot: null });
+    expect(plain.display.grid).toBe(true);
+
+    const hinted = displayForRecordChange(initialHintedDisplay(USER), null, VELOCITY);
+    expect(hinted.snapshot).toBe(USER);
+    expect(fileDisplayState(hinted, LOOK, null)).toEqual({ display: { ...USER, ...LOOK }, snapshot: null });
+    expect(fileDisplayState(hinted, LOOK, MOMENT)).toEqual({ display: { ...USER, ...LOOK }, snapshot: null });
+
+    const reapplied = fileDisplayState(hinted, LOOK, VELOCITY);
+    expect(reapplied.snapshot).toEqual({ ...USER, ...LOOK });
+    expect(reapplied.display).toMatchObject({ colormap: "rdbu", stretch: "linear", limits: "percentile", symmetric: true, grid: true });
+    expect(persistableDisplay(reapplied)).toBeNull();
   });
 });

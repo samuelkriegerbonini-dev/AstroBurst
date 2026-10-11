@@ -1,6 +1,7 @@
-import type { DisplaySettings } from "../shared/types/display";
+import type { DisplayLook, DisplaySettings } from "../shared/types/display";
 import type { DisplayHint } from "../shared/types/preview";
 import { reconcileDisplayPatch } from "./displayTransfer";
+import { withLook } from "./displayMemory";
 
 export interface HintedDisplay {
   display: DisplaySettings;
@@ -28,4 +29,8 @@ export function patchHintedDisplay(state: HintedDisplay, patch: Partial<DisplayS
 
 export function persistableDisplay(state: HintedDisplay): DisplaySettings | null {
   return state.snapshot ? null : state.display;
+}
+
+export function fileDisplayState(state: HintedDisplay, look: DisplayLook, shown: HintSource | null): HintedDisplay {
+  return displayForRecordChange({ display: withLook(state.snapshot ?? state.display, look), snapshot: null }, null, shown);
 }

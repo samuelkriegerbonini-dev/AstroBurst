@@ -36,19 +36,46 @@ import type {
 } from "../shared/types";
 import type { FileRenderState, ProcessedResult, ProcessingChain } from "../shared/types/preview";
 import type { CubeDims } from "../shared/types";
-import {
-  COLORMAP_NAMES,
-  DEFAULT_DISPLAY_SETTINGS,
-  GRID_FRAMES,
-  LIMIT_MODES,
-  STRETCH_MODES,
-  type DisplaySettings,
-  type ScaleLimits,
-} from "../shared/types/display";
+import { DEFAULT_DISPLAY_SETTINGS, type DisplaySettings, type ScaleLimits } from "../shared/types/display";
 import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
-import { GRAY_LUT_RGBA, reconcileDisplayPatch } from "../utils/displayTransfer";
-import { displayForRecordChange, initialHintedDisplay, patchHintedDisplay, persistableDisplay, type HintedDisplay } from "../utils/displayHint";
-import { clampGridDensity } from "../utils/gridSteps";
+import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
+import {
+  displayForRecordChange,
+  fileDisplayState,
+  initialHintedDisplay,
+  patchHintedDisplay,
+  persistableDisplay,
+  type HintedDisplay,
+} from "../utils/displayHint";
+import {
+  IDENTITY_STF,
+  LEGACY_DISPLAY_KEY,
+  LINEAR_HINT_TITLE,
+  defaultsLook,
+  displayGroupKey,
+  editWithLinear,
+  fileEntry,
+  linearToggle,
+  patchTouchesLook,
+  pickLook,
+  rememberLook,
+  rememberStf,
+  resolveFileDisplay,
+  resolveStf,
+  rgbSeed,
+  sameRgbStf,
+  sanitizeDisplaySettings,
+  setDefaults,
+  setSameGroup as setSameGroupDoc,
+  stfSourceKey,
+  touchFile,
+  withLook,
+  type DisplayEdit,
+  type FileDisplayEntry,
+  type LinearUndo,
+} from "../utils/displayMemory";
+import { displayMemory } from "../utils/displayMemoryStore";
+import { PNG_ONLY_TITLE } from "../utils/previewShell";
 import { EMPTY_CHAIN, chainForPublish, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
 
 export type PaletteSuggestion = NarrowbandDetection["palette"];
@@ -144,6 +171,13 @@ interface DisplayContextValue {
   lut: Uint8Array | null;
   limitsLoading: boolean;
   limitsError: string | null;
+  linear: LinearUndo | null;
+  linearBlocked: string | null;
+  toggleLinear: () => void;
+  resetDisplay: () => void;
+  setAsDefault: () => void;
+  sameGroup: boolean;
+  setSameGroup: (on: boolean) => void;
 }
 
 interface DqContextValue {
@@ -160,51 +194,11 @@ interface DqContextValue {
 
 const DEFAULT_DQ_OVERLAY: DqOverlaySettings = { enabled: false, mask: 0 };
 
-const DISPLAY_STORAGE_KEY = "astroburst.display.v1";
 const LIMITS_DEBOUNCE_MS = 150;
-
-function finiteOr(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function finiteOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function sanitizeDisplaySettings(raw: unknown): DisplaySettings {
-  const d = DEFAULT_DISPLAY_SETTINGS;
-  if (!raw || typeof raw !== "object") return d;
-  const r = raw as Record<string, unknown>;
-  const stretch = STRETCH_MODES.find((s) => s === r.stretch) ?? d.stretch;
-  const limits = LIMIT_MODES.find((l) => l === r.limits) ?? d.limits;
-  const colormap = COLORMAP_NAMES.find((c) => c === r.colormap) ?? d.colormap;
-  const gridFrame = GRID_FRAMES.find((f) => f === r.gridFrame) ?? d.gridFrame;
-  const candidate: DisplaySettings = {
-    stretch,
-    limits,
-    percentileLow: finiteOr(r.percentileLow, d.percentileLow),
-    percentileHigh: finiteOr(r.percentileHigh, d.percentileHigh),
-    userLo: finiteOrNull(r.userLo),
-    userHi: finiteOrNull(r.userHi),
-    zscaleContrast: finiteOr(r.zscaleContrast, d.zscaleContrast),
-    asinhA: finiteOr(r.asinhA, d.asinhA),
-    power: finiteOr(r.power, d.power),
-    colormap,
-    invert: r.invert === true,
-    grid: r.grid === true,
-    gridFrame,
-    gridDensity: clampGridDensity(finiteOr(r.gridDensity, d.gridDensity)),
-    compass: r.compass === true,
-    colorbar: r.colorbar !== false,
-    symmetric: r.symmetric === true,
-    centre: finiteOr(r.centre, d.centre),
-  };
-  return reconcileDisplayPatch(candidate, {});
-}
 
 function loadDisplaySettings(): DisplaySettings {
   try {
-    const text = window.localStorage.getItem(DISPLAY_STORAGE_KEY);
+    const text = window.localStorage.getItem(LEGACY_DISPLAY_KEY);
     if (!text) return DEFAULT_DISPLAY_SETTINGS;
     return sanitizeDisplaySettings(JSON.parse(text));
   } catch {
@@ -214,7 +208,7 @@ function loadDisplaySettings(): DisplaySettings {
 
 function saveDisplaySettings(settings: DisplaySettings): void {
   try {
-    window.localStorage.setItem(DISPLAY_STORAGE_KEY, JSON.stringify(settings));
+    window.localStorage.setItem(LEGACY_DISPLAY_KEY, JSON.stringify(settings));
   } catch {
   }
 }
@@ -339,12 +333,29 @@ function copyStf(s: StfParams): StfParams {
   return { shadow: s.shadow, midtone: s.midtone, highlight: s.highlight };
 }
 
-function seedRgbFileView(composite: CompositeActions, result: ProcessResult): void {
+export type RgbSeedActions = Pick<CompositeActions, "initRgb" | "setCompositePreviewUrl" | "setCompositeStf" | "setCompositeStfLinked">;
+
+export function seedRgbFileView(composite: RgbSeedActions, result: ProcessResult, entry: FileDisplayEntry | null): void {
   if (result.stf_r && result.stf_g && result.stf_b) {
-    composite.initRgb(result.previewUrl ?? null, copyStf(result.stf_r), copyStf(result.stf_g), copyStf(result.stf_b));
+    const auto = { r: copyStf(result.stf_r), g: copyStf(result.stf_g), b: copyStf(result.stf_b) };
+    composite.initRgb(result.previewUrl ?? null, auto.r, auto.g, auto.b);
+    const seed = rgbSeed(entry, auto);
+    if (sameRgbStf(seed, { ...auto, linked: false })) return;
+    composite.setCompositeStf(seed.r, seed.g, seed.b);
+    composite.setCompositeStfLinked(seed.linked);
   } else if (result.previewUrl) {
     composite.setCompositePreviewUrl(result.previewUrl);
   }
+}
+
+interface DisplayToken {
+  fileKey: string | null;
+  groupKey: string | null;
+  sameGroup: boolean;
+}
+
+function sameDisplayToken(a: DisplayToken | null, b: DisplayToken): boolean {
+  return a !== null && a.fileKey === b.fileKey && a.groupKey === b.groupKey && a.sameGroup === b.sameGroup;
 }
 
 function useOptionalWizardCompositeReady(): boolean {
@@ -381,8 +392,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
-  const [displayState, setDisplayState] = useState<HintedDisplay>(() => initialHintedDisplay(loadDisplaySettings()));
+  const [displayState, setDisplayState] = useState<HintedDisplay>(() =>
+    initialHintedDisplay(withLook(loadDisplaySettings(), displayMemory.get().defaults)),
+  );
   const display = displayState.display;
+  const [linear, setLinear] = useState<LinearUndo | null>(null);
+  const [sameGroup, setSameGroupState] = useState(() => displayMemory.get().sameGroup);
+  const [displayToken, setDisplayToken] = useState<DisplayToken | null>(null);
+  const autoStfRef = useRef<StfParams | null>(null);
   const [limits, setLimits] = useState<ScaleLimits | null>(null);
   const [limitsLoading, setLimitsLoading] = useState(false);
   const [limitsError, setLimitsError] = useState<string | null>(null);
@@ -402,14 +419,29 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }
   const current = view.key === fileKey ? view : EMPTY_VIEW;
   const processed = current.processed;
+  const processedVersion = current.version;
+  const processedPath = processed?.fitsPath ?? null;
+  const filePath = file?.path ?? null;
+  const groupKey = useMemo(() => displayGroupKey(file), [file]);
+  const stfSource = stfSourceKey({ filePath, processedPath, version: processedVersion, excludeDq });
+  const nextDisplayToken: DisplayToken = { fileKey, groupKey, sameGroup };
+  if (!sameDisplayToken(displayToken, nextDisplayToken)) {
+    setDisplayToken(nextDisplayToken);
+    const doc = displayMemory.get();
+    const resolved = resolveFileDisplay(doc, filePath, groupKey);
+    setDisplayState((s) => fileDisplayState(s, resolved.look, processed));
+    setLinear(resolved.linear);
+    if (displayToken !== null && displayToken.fileKey === fileKey) {
+      const stf = resolveStf(fileEntry(doc, filePath), stfSource, processedPath !== null, autoStfRef.current, resolved.linear !== null);
+      if (stf) setStfParams(stf);
+    }
+  }
   const [hintSource, setHintSource] = useState<ProcessedResult | null>(processed);
   if (hintSource !== processed) {
     setHintSource(processed);
     setDisplayState((s) => displayForRecordChange(s, hintSource, processed));
   }
-  const processedVersion = current.version;
   const chain = current.chain;
-  const processedPath = processed?.fitsPath ?? null;
   const sourceVersion = processedPath ? processedVersion : 0;
   const processedPreviewOnly = processed !== null && processed.fitsPath === null && processed.previewUrl !== null;
   const stfPreviewUrl =
@@ -453,6 +485,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const wizardReadyRef = useRef(wizardCompositeReady);
   wizardReadyRef.current = wizardCompositeReady;
   const seenFileRef = useRef<SeenFile>(NO_SEEN_FILE);
+  const displayStateRef = useRef(displayState);
+  displayStateRef.current = displayState;
+  const linearRef = useRef(linear);
+  linearRef.current = linear;
+  const sourceKeyRef = useRef(stfSource);
+  sourceKeyRef.current = stfSource;
+  const groupKeyRef = useRef(groupKey);
+  groupKeyRef.current = groupKey;
+  const isProcessedRef = useRef(processedPath !== null);
+  isProcessedRef.current = processedPath !== null;
 
   const currentFileKey = useCallback(() => fileKeyRef.current, []);
 
@@ -543,16 +585,83 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     narrowbandKeyRef.current = "";
   }, []);
 
-  const setDisplay = useCallback((patch: Partial<DisplaySettings>) => {
-    setDisplayState((prev) => {
-      const next = patchHintedDisplay(prev, patch);
-      const persisted = persistableDisplay(next);
-      if (persisted) saveDisplaySettings(persisted);
-      return next;
-    });
+  const commitDisplayEdit = useCallback((edit: DisplayEdit, lookTouched: boolean) => {
+    const next = patchHintedDisplay(displayStateRef.current, edit.patch);
+    displayStateRef.current = next;
+    setDisplayState(next);
+    const persisted = persistableDisplay(next);
+    if (persisted) saveDisplaySettings(persisted);
+    const path = filePathRef.current ?? null;
+    if (persisted && path && lookTouched) {
+      const look = pickLook(persisted);
+      const group = groupKeyRef.current;
+      displayMemory.update((d) => rememberLook(d, path, group, look, edit.linear));
+    }
+    linearRef.current = edit.linear;
+    setLinear(edit.linear);
+    if (edit.restoreStf) {
+      const restored = resolveStf(fileEntry(displayMemory.get(), path), sourceKeyRef.current, isProcessedRef.current, autoStfRef.current, false);
+      setStfParams(restored ?? DEFAULT_STF);
+    }
   }, []);
 
-  const filePath = file?.path ?? null;
+  const setDisplay = useCallback(
+    (patch: Partial<DisplaySettings>) => {
+      const edit: DisplayEdit = displayStateRef.current.snapshot
+        ? { patch, linear: linearRef.current, restoreStf: false }
+        : editWithLinear(patch, linearRef.current);
+      commitDisplayEdit(edit, patchTouchesLook(patch));
+    },
+    [commitDisplayEdit],
+  );
+
+  const toggleLinear = useCallback(() => {
+    const state = displayStateRef.current;
+    if (!filePathRef.current || state.snapshot) return;
+    const edit = linearToggle(state.display, linearRef.current);
+    commitDisplayEdit(edit, true);
+    if (edit.linear) setStfParams(IDENTITY_STF);
+  }, [commitDisplayEdit]);
+
+  const resetDisplay = useCallback(() => {
+    commitDisplayEdit({ patch: DEFAULT_DISPLAY_SETTINGS, linear: null, restoreStf: false }, true);
+    const path = filePathRef.current;
+    if (path) {
+      const slot = isProcessedRef.current ? "stfProcessed" : "stf";
+      displayMemory.update((d) => rememberStf(d, path, slot, null));
+    }
+    setStfParams(autoStfRef.current ?? DEFAULT_STF);
+  }, [commitDisplayEdit]);
+
+  const setAsDefault = useCallback(() => {
+    const state = displayStateRef.current;
+    const look = defaultsLook(pickLook(state.snapshot ?? state.display));
+    displayMemory.update((d) => setDefaults(d, look));
+  }, []);
+
+  const setSameGroup = useCallback((on: boolean) => {
+    setSameGroupState(on);
+    displayMemory.update((d) => setSameGroupDoc(d, on));
+  }, []);
+
+  const setUserStf = useCallback((p: StfParams) => {
+    setStfParams(p);
+    const path = filePathRef.current;
+    if (!path) return;
+    const slot = isProcessedRef.current ? "stfProcessed" : "stf";
+    const value = { source: sourceKeyRef.current, params: p };
+    const persisted = linearRef.current ? persistableDisplay(displayStateRef.current) : null;
+    const group = groupKeyRef.current;
+    displayMemory.update((d) => {
+      const withStf = rememberStf(d, path, slot, value);
+      return persisted ? rememberLook(withStf, path, group, pickLook(persisted), null) : withStf;
+    });
+    if (persisted) {
+      linearRef.current = null;
+      setLinear(null);
+    }
+  }, []);
+
   const {
     stretch: displayStretch,
     limits: displayLimits,
@@ -746,7 +855,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     dqMaskSeqRef.current++;
     flagTableSeqRef.current++;
     histSeqRef.current++;
+    autoStfRef.current = null;
     setStfParams(DEFAULT_STF);
+    displayMemory.update((d) => touchFile(d, file.path));
     setIsCube(false);
     setIsSpectralCube(false);
     setSpectralReason(null);
@@ -780,10 +891,15 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const seq = ++seqRef.current;
     const stale = () => seqRef.current !== seq;
 
-    if (isRgbFits && file.result) seedRgbFileView(composite, file.result);
+    if (isRgbFits && file.result) seedRgbFileView(composite, file.result, fileEntry(displayMemory.get(), file.path));
 
-    const precomputedAutoStf = file.result?.histogram?.auto_stf;
-    if (excludeDqRef.current && !processedPath && precomputedAutoStf) setStfParams(precomputedAutoStf);
+    const precomputedAutoStf = file.result?.histogram?.auto_stf ?? null;
+    if (excludeDqRef.current && !processedPath && precomputedAutoStf) {
+      autoStfRef.current = precomputedAutoStf;
+      const source = stfSourceKey({ filePath: file.path, processedPath: null, version: 0, excludeDq: true });
+      const stf = resolveStf(fileEntry(displayMemory.get(), file.path), source, false, precomputedAutoStf, linearRef.current !== null);
+      if (stf) setStfParams(stf);
+    }
 
     const naxis3 = file.result?.header?.NAXIS3;
     const n3 = naxis3 ? parseInt(naxis3, 10) : 0;
@@ -835,7 +951,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       livePreviewUrl: liveCompositeUrlRef.current,
     });
     if (sameFile) seenFileRef.current = { key: fileKey, isRgb, previewUrl: nextPreviewUrl };
-    if (reseed && fileResult) seedRgbFileView(composite, fileResult);
+    if (reseed && fileResult) seedRgbFileView(composite, fileResult, fileEntry(displayMemory.get(), filePathRef.current ?? null));
   }, [fileKey, fileResult, composite]);
 
   const precomputedHist = file?.result?.histogram ?? null;
@@ -845,10 +961,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const seq = ++histSeqRef.current;
     const precomputed = processedPath || excludeDq ? null : precomputedHist;
     const histPath = processedPath ?? filePath;
+    const source = stfSourceKey({ filePath, processedPath, version: sourceVersion, excludeDq });
+    const applyAutoStf = (auto: StfParams | null) => {
+      autoStfRef.current = auto;
+      const stf = resolveStf(fileEntry(displayMemory.get(), filePath), source, processedPath !== null, auto, linearRef.current !== null);
+      if (stf) setStfParams(stf);
+    };
     if (precomputed?.bins) {
       setHistData(precomputed);
       setHistDataPath(histPath);
-      if (precomputed.auto_stf) setStfParams(precomputed.auto_stf);
+      applyAutoStf(precomputed.auto_stf ?? null);
       return;
     }
     computeHistogram(histPath, excludeDq)
@@ -856,7 +978,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (histSeqRef.current !== seq) return;
         setHistData(data);
         setHistDataPath(histPath);
-        if (data.auto_stf) setStfParams(data.auto_stf);
+        applyAutoStf(data.auto_stf ?? null);
       })
       .catch((err) => {
         if (histSeqRef.current === seq) console.error("[AstroBurst] Histogram fetch failed:", err);
@@ -922,8 +1044,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const histValue = useMemo<HistContextValue>(
-    () => ({ histData, histDataPath, stfParams, setStfParams }),
-    [histData, histDataPath, stfParams],
+    () => ({ histData, histDataPath, stfParams, setStfParams: setUserStf }),
+    [histData, histDataPath, stfParams, setUserStf],
   );
 
   const cubeValue = useMemo<CubeContextValue>(
@@ -967,9 +1089,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     [],
   );
 
+  const linearBlocked = displayState.snapshot ? LINEAR_HINT_TITLE : processedPreviewOnly ? PNG_ONLY_TITLE : null;
   const displayValue = useMemo<DisplayContextValue>(
-    () => ({ display, setDisplay, limits, lut, limitsLoading, limitsError }),
-    [display, setDisplay, limits, lut, limitsLoading, limitsError],
+    () => ({
+      display, setDisplay, limits, lut, limitsLoading, limitsError,
+      linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
+    }),
+    [
+      display, setDisplay, limits, lut, limitsLoading, limitsError,
+      linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
+    ],
   );
 
   const dqValue = useMemo<DqContextValue>(

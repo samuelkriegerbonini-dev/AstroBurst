@@ -6,6 +6,7 @@ import {
   STF_LOCK_STRETCH,
   analysisMeasureKey,
   apertureRangeHint,
+  cpuStfPreviewPlan,
   cpuStfRenderAllowed,
   describeMeasurementSource,
   detectedStarsOnMeasuredImage,
@@ -337,6 +338,20 @@ describe("cpuStfRenderAllowed", () => {
   it("does not render when the GPU already draws the image or the sliders are locked", () => {
     expect(cpuStfRenderAllowed({ hasRawPixels: true, rawPixelsLoading: false, locked: false })).toBe(false);
     expect(cpuStfRenderAllowed({ hasRawPixels: false, rawPixelsLoading: false, locked: true })).toBe(false);
+  });
+});
+
+describe("cpuStfPreviewPlan", () => {
+  const AUTO = { shadow: 0.02, midtone: 0.1, highlight: 1 };
+  const IDENTITY = { shadow: 0, midtone: 0.5, highlight: 1 };
+
+  it("is idle when inactive or the histogram is not on the displayed path, base when the STF equals the base STF, render otherwise", () => {
+    expect(cpuStfPreviewPlan({ active: false, histReady: true, stf: IDENTITY, baseStf: AUTO })).toBe("idle");
+    expect(cpuStfPreviewPlan({ active: true, histReady: false, stf: IDENTITY, baseStf: AUTO })).toBe("idle");
+    expect(cpuStfPreviewPlan({ active: true, histReady: true, stf: { ...AUTO }, baseStf: AUTO })).toBe("base");
+    expect(cpuStfPreviewPlan({ active: true, histReady: true, stf: IDENTITY, baseStf: AUTO })).toBe("render");
+    expect(cpuStfPreviewPlan({ active: true, histReady: true, stf: { ...AUTO, midtone: 0.11 }, baseStf: AUTO })).toBe("render");
+    expect(cpuStfPreviewPlan({ active: true, histReady: true, stf: AUTO, baseStf: null })).toBe("render");
   });
 });
 

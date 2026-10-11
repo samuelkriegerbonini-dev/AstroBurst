@@ -53,7 +53,9 @@ vi.mock("../../context/PreviewContext", () => ({
     stfPreviewUrl: null,
     chain: { psfKernel: null },
   }),
-  useRenderActions: () => ({ resetProcessed: () => {}, currentFileKey: () => null }),
+  useRenderActions: () => ({ resetProcessed: () => {}, currentFileKey: () => null, setStfPreviewUrl: () => {} }),
+  useHistContext: () => ({ histData: null, histDataPath: null, stfParams: { shadow: 0, midtone: 0.5, highlight: 1 } }),
+  seedRgbFileView: () => {},
   useStarOverlayContext: () => ({ starOverlayRef: { current: null } }),
 }));
 vi.mock("../../context/CompositeContext", () => ({

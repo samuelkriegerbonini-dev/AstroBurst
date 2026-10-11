@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, memo } from "react";
+import { useState, useCallback, useEffect, useMemo, memo } from "react";
 import { X, SlidersHorizontal, RotateCcw } from "lucide-react";
 import {
   useFileContext,
@@ -23,6 +23,9 @@ import DisplayControls from "./DisplayControls";
 import Colorbar from "./Colorbar";
 import { colorbarCentre, colorbarUnit } from "../../utils/colorbar";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { STF_LOCK_RGB_CPU } from "../../utils/analysisTarget";
+import { IDENTITY_STF, RGB_LINEAR_BAKED, rememberRgbEdit, rgbLinearTitle, rgbLinearToggle, setRgbLinear } from "../../utils/displayMemory";
+import { displayMemory, useFileDisplayEntry } from "../../utils/displayMemoryStore";
 
 interface PreviewTabProps {
   useGpu: boolean;
@@ -33,8 +36,6 @@ interface PreviewTabProps {
   starOverlayRef: React.RefObject<HTMLCanvasElement | null>;
   dqCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }
-
-const IDENTITY_STF: StfParams = { shadow: 0, midtone: 0.5, highlight: 1 };
 
 function sameStf(a: StfParams, b: StfParams): boolean {
   return a.shadow === b.shadow && a.midtone === b.midtone && a.highlight === b.highlight;
@@ -136,9 +137,31 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
     };
   }, [isProcessed, originalPreviewUrl, fileDims, displayedDims]);
 
+  const rgbFilePath = isFileRgbView ? file?.path ?? null : null;
+  const rgbEntry = useFileDisplayEntry(rgbFilePath);
+  const rgbLinearOn = !!rgbEntry?.rgbLinear;
+  const rgbStfLive = useGpu && !!rgbRawPixels && !rgbRawPixels.displayReferred;
+
+  useEffect(() => {
+    if (!rgbFilePath || !rgbStfLive || !compositeAutoStfR || !compositeAutoStfG || !compositeAutoStfB) return;
+    const current = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+    const auto = { r: compositeAutoStfR, g: compositeAutoStfG, b: compositeAutoStfB };
+    displayMemory.update((d) => rememberRgbEdit(d, rgbFilePath, current, auto));
+  }, [rgbFilePath, rgbStfLive, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, compositeAutoStfR, compositeAutoStfG, compositeAutoStfB]);
+
+  const toggleRgbLinear = useCallback(() => {
+    if (!rgbFilePath) return;
+    const current = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+    const toggle = rgbLinearToggle(current, rgbEntry?.rgbLinear ?? null);
+    displayMemory.update((d) => setRgbLinear(d, rgbFilePath, toggle.rgbLinear));
+    setCompositeStf(toggle.next.r, toggle.next.g, toggle.next.b);
+    setCompositeStfLinked(toggle.next.linked);
+  }, [rgbFilePath, rgbEntry, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, setCompositeStf, setCompositeStfLinked]);
+
   if (showComposite) {
     const rgbOnGpu = useGpu && !!rgbRawPixels;
     const displayReferred = !!rgbRawPixels?.displayReferred;
+    const rgbLinearBlocked = !rgbOnGpu ? STF_LOCK_RGB_CPU : displayReferred ? RGB_LINEAR_BAKED : null;
     const stfRow = (label: string, color: string, stf: StfParams, ch: "r" | "g" | "b") => (
       <div key={label} className="flex items-center gap-2">
         <span className="text-[9px] font-mono w-7 shrink-0" style={{ color }}>{label}</span>
@@ -180,6 +203,19 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
             >
               <SlidersHorizontal size={10} />
               STF
+            </button>
+          )}
+          {isFileRgbView && (
+            <button
+              type="button"
+              data-testid="rgb-linear"
+              aria-pressed={rgbLinearOn}
+              disabled={rgbLinearBlocked !== null}
+              onClick={toggleRgbLinear}
+              title={rgbLinearBlocked ?? rgbLinearTitle(rgbLinearOn)}
+              className={`text-[10px] px-1.5 py-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${rgbLinearOn ? "text-violet-200 bg-violet-600/25" : "text-violet-400/80 hover:text-violet-200"}`}
+            >
+              Linear
             </button>
           )}
           {!isFileRgbView && (

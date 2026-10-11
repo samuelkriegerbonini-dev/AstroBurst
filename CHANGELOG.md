@@ -6,8 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7.2] - 2026-10-11
+
+### Added
+- Per-file display state: stretch, limits, colormap, invert and symmetry are remembered per file and restored when it is selected again (kept across restarts); new files of the same instrument and filter start from the last look used for that group (toggle in the display toolbar); Set as default makes the current look the default for new files
+- One-click Linear in the display toolbar: linear stretch over min/max with an identity STF on the GPU and CPU viewers (per channel on RGB files); pressing it again restores the previous look
+
 ### Changed
 - Docking: a tool dropped on a group whose panel is open replaces that panel, which closes; Processing and Export inputs that were not run are lost, as when the panel is closed (the moved panel itself keeps its state).
+
+### Fixed
+- 64 open findings from past audits, among them: stacking and the Pipeline check the memory a run needs before loading frames and refuse with a clear message instead of aborting; the dark-scale optimiser no longer leaves the bias pedestal in the lights; cosmetic auto-detect no longer replaces faint-star cores and shows what it would change; Processing steps run on the image on screen (stack or cube frame); PNG-only results keep their pixel grid for readouts and photometry; Compose SPCC uses the plate-solved WCS; LRGB and star removal refresh the composite stretch; numeric fields accept a decimal comma or point without silently scaling the value; plus progress and cancel for Drizzle RGB and plate solving, PixelMath slot and function fixes, file-name disambiguation, contrast and accessibility fixes
 
 ## [0.6.7.1] - 2026-10-10
 

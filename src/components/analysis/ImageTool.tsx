@@ -3,16 +3,15 @@ import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
 import MeasurementBadge from "./MeasurementBadge";
 import SectionChips from "./SectionChips";
-import { computeFftSpectrum, applyStfRender, computeHistogram } from "../../services/analysis";
-import { getOutputDir } from "../../infrastructure/tauri";
-import { useFileContext, useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
+import { computeFftSpectrum, computeHistogram } from "../../services/analysis";
+import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
 import { useToolHost } from "../../context/ToolHostContext";
 import { histogramSkyWindow } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { ANALYSIS_SECTION, deepZoomAvailable, toolSections, type AnalysisSectionsInput } from "../../utils/analysisSections";
 import { useAnalysisMeasure } from "../../hooks/useAnalysisMeasure";
-import { cpuStfRenderAllowed, histogramChannelLabel, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
-import type { StfParams, HistogramData } from "../../shared/types";
+import { histogramChannelLabel, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
+import type { HistogramData } from "../../shared/types";
 import TabSpinner from "./TabSpinner";
 
 const FFTPanel = lazy(() => import("./FFTPanel"));
@@ -27,9 +26,8 @@ function ImageTool() {
   const { file } = useFileContext();
   const { histData, histDataPath, stfParams, setStfParams } = useHistContext();
   const { isCube, ramp } = useCubeContext();
-  const { setStfPreviewUrl } = useRenderActions();
   const { processed } = useRenderContext();
-  const { rawPixels, rawPixelsLoading, rgbRawPixels, rgbRawPixelsLoading } = useRawPixelsContext();
+  const { rgbRawPixels } = useRawPixelsContext();
   const { display } = useDisplayContext();
   const { excludeDq } = useDqContext();
   const { gpuDisplay } = useToolHost();
@@ -49,80 +47,13 @@ function ImageTool() {
     gpuDisplay,
   });
 
-  const rafIdRef = useRef<number | null>(null);
-  const pendingStfRef = useRef<{ params: StfParams; path: string } | null>(null);
-  const ipcBusyRef = useRef(false);
-  const ipcFailCountRef = useRef(0);
-  const flushStfRef = useRef<() => void>(() => {});
-
-  const flushStfIpc = useCallback(async () => {
-    if (ipcBusyRef.current || !pendingStfRef.current || !effectivePath) return;
-    if (ipcFailCountRef.current >= 3) {
-      pendingStfRef.current = null;
-      ipcFailCountRef.current = 0;
-      return;
-    }
-    const { params, path } = pendingStfRef.current;
-    pendingStfRef.current = null;
-    if (path !== effectivePath) return;
-    ipcBusyRef.current = true;
-    try {
-      const result = await applyStfRender(
-        effectivePath,
-        await getOutputDir(),
-        params.shadow,
-        params.midtone,
-        params.highlight,
-      );
-      ipcFailCountRef.current = 0;
-      if (result.previewUrl) {
-        const bust = `${result.previewUrl}${result.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-        setStfPreviewUrl(bust);
-      }
-    } catch (e) {
-      ipcFailCountRef.current++;
-      console.error("STF render failed:", e);
-    } finally {
-      ipcBusyRef.current = false;
-      if (pendingStfRef.current) queueMicrotask(() => flushStfRef.current());
-    }
-  }, [effectivePath, setStfPreviewUrl]);
-
-  useEffect(() => {
-    flushStfRef.current = flushStfIpc;
-  }, [flushStfIpc]);
-
-  const cpuRender = cpuStfRenderAllowed({
-    hasRawPixels: rawPixels !== null || rgbRawPixels !== null,
-    rawPixelsLoading: rawPixelsLoading || rgbRawPixelsLoading,
-    locked: stfLock !== null,
-  });
-
-  const handleStfChange = useCallback(
-    (params: StfParams) => {
-      setStfParams(params);
-      if (!cpuRender || !effectivePath) return;
-      pendingStfRef.current = { params, path: effectivePath };
-      if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = requestAnimationFrame(() => {
-        rafIdRef.current = null;
-        flushStfRef.current();
-      });
-    },
-    [setStfParams, cpuRender, effectivePath],
-  );
-
   const handleAutoStf = useCallback(() => {
-    if (histData?.auto_stf) {
-      const params = histData.auto_stf;
-      setStfParams(params);
-      handleStfChange(params);
-    }
-  }, [histData, handleStfChange, setStfParams]);
+    if (histData?.auto_stf) setStfParams(histData.auto_stf);
+  }, [histData, setStfParams]);
 
   const handleResetStf = useCallback(() => {
-    handleStfChange({ shadow: 0, midtone: 0.5, highlight: 1 });
-  }, [handleStfChange]);
+    setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
+  }, [setStfParams]);
 
   const histPath = processed?.fitsPath ?? filePath ?? null;
   const histOnPath = histPath !== null && histDataPath === histPath;
@@ -196,7 +127,7 @@ function ImageTool() {
               shadow={stfParams.shadow}
               midtone={stfParams.midtone}
               highlight={stfParams.highlight}
-              onChange={handleStfChange}
+              onChange={setStfParams}
               onAutoStf={handleAutoStf}
               onReset={handleResetStf}
               stats={histStats}

@@ -5,11 +5,11 @@ import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLi
 import { symmetricStretchNote } from "../../utils/displayTransfer";
 import { wcsOverlayNote, wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
 import { NEEDS_GPU_TITLE } from "../../utils/previewShell";
+import { linearTitle } from "../../utils/displayMemory";
 import { DecimalNumberField } from "../ui";
 import {
   COLORMAP_LABELS,
   COLORMAP_NAMES,
-  DEFAULT_DISPLAY_SETTINGS,
   GRID_DENSITIES,
   GRID_FRAMES,
   LIMIT_MODES,
@@ -33,6 +33,18 @@ const INPUT_CLASS =
   "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-200 w-16 focus:border-zinc-500";
 const LABEL_CLASS = "text-[9px] uppercase tracking-wide text-zinc-500";
 const GROUP_CLASS = "flex items-center gap-2 shrink-0";
+const TOOL_BUTTON_CLASS = "flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors";
+const LINEAR_BUTTON_CLASS =
+  "text-[9px] px-1.5 py-0.5 rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+const LINEAR_ON_CLASS = "text-violet-200 bg-violet-600/25 border-violet-500/40";
+const LINEAR_OFF_CLASS = "text-zinc-400 border-zinc-700/60 hover:text-zinc-200";
+
+const SAME_GROUP_TITLE =
+  "Same display for frames of one instrument + filter: a file without its own display takes the last display set on a file with the same INSTRUME and filter (PUPIL when it names a filter). Off: such files start from the default display";
+const SET_DEFAULT_TITLE =
+  "Start files without their own display (and without a matching instrument + filter) from this stretch, limits, colormap, invert and symmetric setting; user lo/hi limits are not carried over";
+const RESET_DISPLAY_TITLE =
+  "Reset this file's display (stretch, limits, colormap, invert, symmetric, STF) and the colorbar, grid and compass";
 
 function formatLimit(v: number): string {
   if (!Number.isFinite(v)) return "—";
@@ -42,7 +54,10 @@ function formatLimit(v: number): string {
 }
 
 function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOnlyTitle = NEEDS_GPU_TITLE }: DisplayControlsProps) {
-  const { display, setDisplay, limits, limitsLoading, limitsError } = useDisplayContext();
+  const {
+    display, setDisplay, limits, limitsLoading, limitsError,
+    linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
+  } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
   const stretchNote = symmetricStretchNote(display);
   const wcsErrors = useSyncExternalStore(wcsOverlayStatus.subscribe, wcsOverlayStatus.get, wcsOverlayStatus.get);
@@ -80,9 +95,24 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
 
   return (
     <fieldset
+      data-testid="display-controls"
       className="flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap"
       style={{ background: "rgba(24,24,27,0.6)", minInlineSize: 0 }}
     >
+      <div className={GROUP_CLASS}>
+        <button
+          type="button"
+          data-testid="display-linear"
+          aria-pressed={linear !== null}
+          disabled={linearBlocked !== null}
+          onClick={toggleLinear}
+          title={linearBlocked ?? linearTitle(linear)}
+          className={`${LINEAR_BUTTON_CLASS} ${linear !== null ? LINEAR_ON_CLASS : LINEAR_OFF_CLASS}`}
+        >
+          Linear
+        </button>
+      </div>
+
       <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
         <label className="flex items-center gap-1" title={renderTitle("Stretch curve applied after normalisation")}>
           <span className={LABEL_CLASS}>stretch</span>
@@ -352,14 +382,25 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
         </span>
       )}
 
-      <button
-        onClick={() => setDisplay(DEFAULT_DISPLAY_SETTINGS)}
-        className={`flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors ${renderOnlyDisabled ? "ml-auto" : ""}`}
-        title="Reset display settings (stretch, limits, colormap, colorbar, grid and compass)"
-      >
-        <RotateCcw size={9} />
-        Reset display
-      </button>
+      <div className={`${GROUP_CLASS} ${renderOnlyDisabled ? "ml-auto" : ""}`}>
+        <label className="flex items-center gap-1 cursor-pointer" title={SAME_GROUP_TITLE}>
+          <input
+            type="checkbox"
+            className="accent-zinc-400"
+            data-testid="display-same-group"
+            checked={sameGroup}
+            onChange={(e) => setSameGroup(e.target.checked)}
+          />
+          <span className={LABEL_CLASS}>same filter</span>
+        </label>
+        <button type="button" data-testid="display-set-default" onClick={setAsDefault} className={TOOL_BUTTON_CLASS} title={SET_DEFAULT_TITLE}>
+          Set as default
+        </button>
+        <button type="button" data-testid="display-reset" onClick={resetDisplay} className={TOOL_BUTTON_CLASS} title={RESET_DISPLAY_TITLE}>
+          <RotateCcw size={9} />
+          Reset display
+        </button>
+      </div>
 
       {!renderOnlyDisabled && !isMtf && limitsError && (
         <span className="w-full text-[9px] text-red-400/80 truncate" title={limitsError}>

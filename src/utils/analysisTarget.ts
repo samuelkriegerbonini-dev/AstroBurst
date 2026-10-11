@@ -227,6 +227,24 @@ export function cpuStfRenderAllowed(input: CpuStfInput): boolean {
   return !input.hasRawPixels && !input.rawPixelsLoading && !input.locked;
 }
 
+export type CpuStfPreviewPlan = "idle" | "base" | "render";
+
+export interface CpuStfPreviewInput {
+  active: boolean;
+  histReady: boolean;
+  stf: StfParams;
+  baseStf: StfParams | null;
+}
+
+function sameStfParams(a: StfParams, b: StfParams): boolean {
+  return a.shadow === b.shadow && a.midtone === b.midtone && a.highlight === b.highlight;
+}
+
+export function cpuStfPreviewPlan({ active, histReady, stf, baseStf }: CpuStfPreviewInput): CpuStfPreviewPlan {
+  if (!active || !histReady) return "idle";
+  return baseStf !== null && sameStfParams(stf, baseStf) ? "base" : "render";
+}
+
 export type RgbStfPanelMode = "hidden" | "live" | "baked";
 
 export interface RgbStfPanelInput {

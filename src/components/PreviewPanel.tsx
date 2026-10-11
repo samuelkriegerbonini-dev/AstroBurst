@@ -8,14 +8,20 @@ import { rampPixelTarget } from "../utils/rampLabels";
 import { probeGpu, isGpuAvailable, onGpuLost, getGpuReason } from "../infrastructure/gpu/GpuSingleton";
 import {
   fileKeyOf,
+  seedRgbFileView,
   useFileContext,
   useCubeContext,
   useDisplayedImage,
+  useHistContext,
   useRawPixelsContext,
   useRenderActions,
   useRenderContext,
   useStarOverlayContext,
 } from "../context/PreviewContext";
+import { fileEntry } from "../utils/displayMemory";
+import { displayMemory } from "../utils/displayMemoryStore";
+import { cpuStfRenderAllowed } from "../utils/analysisTarget";
+import { useCpuStfPreview } from "../hooks/useCpuStfPreview";
 import { useCompositePreview, useCompositeActions } from "../context/CompositeContext";
 import { useMousePixelActions, setMousePixel, emitPixelClick, usePixelClick } from "../hooks/useMousePixelStore";
 import { beginSpectrum, commitSpectrum, failSpectrum, resetSpectrum } from "../hooks/useSpectrumStore";
@@ -66,7 +72,8 @@ export default function PreviewPanel() {
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
-  const { resetProcessed, currentFileKey } = useRenderActions();
+  const { resetProcessed, currentFileKey, setStfPreviewUrl } = useRenderActions();
+  const { histData, histDataPath, stfParams } = useHistContext();
   const displayed = useDisplayedImage();
   const processedSourcePath = processed?.fitsPath ?? null;
   const processedSourceVersion = processedSourcePath ? processedVersion : 0;
@@ -110,6 +117,17 @@ export default function PreviewPanel() {
   const viewer = previewViewer(gpuDisplayInput);
   useLayoutEffect(() => gpuDisplayStore.set(gpuDisplay), [gpuDisplay]);
   useLayoutEffect(() => () => gpuDisplayStore.set(false), []);
+
+  useCpuStfPreview({
+    active:
+      viewer === "cpu" &&
+      cpuStfRenderAllowed({ hasRawPixels: rawPixels !== null, rawPixelsLoading, locked: isRgbView || displayed.previewOnly }),
+    path: displayed.path,
+    stf: stfParams,
+    baseStf: (processed ? histData?.auto_stf : file?.result?.histogram?.auto_stf) ?? null,
+    histReady: histDataPath !== null && histDataPath === displayed.path,
+    setStfPreviewUrl,
+  });
 
   useEffect(() => {
     probeGpu().then(() => {
@@ -156,10 +174,10 @@ export default function PreviewPanel() {
 
   const showRgbFileView = useCallback(() => {
     const r = file?.result;
-    if (!r?.is_rgb) return;
-    if (r.stf_r && r.stf_g && r.stf_b) initRgb(r.previewUrl ?? null, r.stf_r, r.stf_g, r.stf_b);
-    else if (r.previewUrl) setCompositePreviewUrl(r.previewUrl);
-  }, [file?.result, initRgb, setCompositePreviewUrl]);
+    const path = file?.path ?? null;
+    if (!path || !r?.is_rgb) return;
+    seedRgbFileView({ initRgb, setCompositePreviewUrl, setCompositeStf, setCompositeStfLinked }, r, fileEntry(displayMemory.get(), path));
+  }, [file?.path, file?.result, initRgb, setCompositePreviewUrl, setCompositeStf, setCompositeStfLinked]);
 
   useEffect(() => {
     if (!isRgbFile) return;

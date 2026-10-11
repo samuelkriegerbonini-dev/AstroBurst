@@ -4,6 +4,8 @@ import { overwrittenFileIds, writtenFitsPaths } from "../utils/overwrittenFiles"
 import { withVersionParam } from "../utils/processingChain";
 import { FILE_STATUS } from "../utils/constants";
 import { ingestUnlessLoaded } from "./useFileIngest";
+import { forgetStf } from "../utils/displayMemory";
+import { displayMemory } from "../utils/displayMemoryStore";
 
 let reloadSeq = 0;
 
@@ -26,6 +28,7 @@ export async function refreshOverwrittenFiles(result: unknown): Promise<string[]
         const fresh = await processFitsFull(file.path);
         reloadSeq += 1;
         const previewUrl = fresh.previewUrl ? withVersionParam(fresh.previewUrl, reloadSeq) : fresh.previewUrl;
+        displayMemory.update((d) => forgetStf(d, file.path));
         fileStore.fileReloaded(id, { ...fresh, previewUrl });
       } catch (e) {
         console.warn(`[AstroBurst] ${file.path} was rewritten by a step but could not be reloaded:`, e);

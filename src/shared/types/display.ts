@@ -78,6 +78,9 @@ export interface DisplaySettings {
   centre: number;
 }
 
+export const DISPLAY_LOOK_KEYS = ["stretch", "limits", "percentileLow", "percentileHigh", "userLo", "userHi", "zscaleContrast", "asinhA", "power", "colormap", "invert", "symmetric", "centre"] as const;
+export type DisplayLook = Pick<DisplaySettings, (typeof DISPLAY_LOOK_KEYS)[number]>;
+
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   stretch: "mtf",
   limits: "minmax",
