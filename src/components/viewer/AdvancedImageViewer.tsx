@@ -21,12 +21,21 @@ import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform
 import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
 import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
-import { CANVAS_HINT_CLASS, compareDividerGrabbed, previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
+import {
+  CANVAS_HINT_CLASS,
+  OTHER_GRID_CANVAS_HINT,
+  compareDividerGrabbed,
+  previewTextureTitle,
+  recordGrid,
+  viewerClickRoute,
+  viewerSizes,
+} from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "./OverlayLayer";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 
 interface ViewerImage {
   url: string;
@@ -64,6 +73,8 @@ function AdvancedImageViewer({
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const regionKey = useRegionKey();
+  const { file } = useFileContext();
+  const { processed: shownRecord, chain } = useRenderContext();
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number; url: string } | null>(null);
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
@@ -81,14 +92,24 @@ function AdvancedImageViewer({
   const naturalSize = imgNatural && imgNatural.url === activeUrl ? imgNatural : null;
   const renderW = naturalSize?.w ?? 0;
   const renderH = naturalSize?.h ?? 0;
+  const grid = recordGrid({ processed: shownRecord, chain, filePath: file?.path ?? null, fileDims: file?.result?.dimensions ?? null });
+  const onFileGrid = grid.matchesFile;
+  const sizes = viewerSizes({
+    previewOnly: grid.previewOnly,
+    gridDims: grid.dims,
+    imageDims: activeImage?.width && activeImage?.height ? [activeImage.width, activeImage.height] : null,
+    naturalDims: naturalSize ? [naturalSize.w, naturalSize.h] : null,
+  });
+  const fitsW = sizes.fits?.[0] ?? renderW;
+  const fitsH = sizes.fits?.[1] ?? renderH;
 
   const {
     attachContainer,
     transform, transformRef, setTransform,
     fitToWindow, zoomToFits, zoomIn, zoomOut, setOneToOne,
     hasRenderDims, zoomPct, isPresetActive,
-  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: activeImage?.width });
-  const textureBadge = previewTextureBadge(renderW, activeImage?.width);
+  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: sizes.fits?.[0] });
+  const textureBadge = previewTextureBadge(renderW, sizes.fits?.[0]);
 
   const mainRetry = useImageRetry(activeImage?.url);
   const origRetry = useImageRetry(original?.url);
@@ -139,11 +160,9 @@ function AdvancedImageViewer({
         setTransform((prev) => ({ ...prev, x: panStart.current.tx + dx, y: panStart.current.ty + dy }));
         return;
       }
-      if (onMousePixel && hasRenderDims) {
+      if (onMousePixel && hasRenderDims && onFileGrid) {
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const fitsW = activeImage?.width ?? renderW;
-        const fitsH = activeImage?.height ?? renderH;
         const coord = screenToImagePixel(
           e.clientX, e.clientY, rect, transformRef.current,
           renderW, renderH, fitsW, fitsH,
@@ -151,7 +170,7 @@ function AdvancedImageViewer({
         if (coord) onMousePixel(coord.x, coord.y);
       }
     },
-    [onMousePixel, activeImage, renderW, renderH, hasRenderDims, setTransform, transformRef],
+    [onMousePixel, onFileGrid, fitsW, fitsH, renderW, renderH, hasRenderDims, setTransform, transformRef],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -162,9 +181,8 @@ function AdvancedImageViewer({
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      if (!onFileGrid) return;
       const rect = hasRenderDims ? containerRef.current?.getBoundingClientRect() : undefined;
-      const fitsW = activeImage?.width ?? renderW;
-      const fitsH = activeImage?.height ?? renderH;
       const coord = rect
         ? screenToImagePixel(e.clientX, e.clientY, rect, transformRef.current, renderW, renderH, fitsW, fitsH)
         : null;
@@ -180,7 +198,7 @@ function AdvancedImageViewer({
       if (route === "pixel") onPixelClick?.(coord.x, coord.y);
       else onCanvasPixelClick?.(coord.x, coord.y);
     },
-    [cursorMode, onPixelClick, onCanvasPixelClick, hasRenderDims, activeImage, renderW, renderH, transformRef],
+    [onFileGrid, cursorMode, onPixelClick, onCanvasPixelClick, hasRenderDims, fitsW, fitsH, renderW, renderH, transformRef],
   );
 
   const handleNaturalSize = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -196,8 +214,8 @@ function AdvancedImageViewer({
     mainRetryOnLoad();
   }, [handleNaturalSize, mainRetryOnLoad]);
 
-  const regionsEnabled =
-    !!activeImage?.width && !!activeImage?.height && renderW > 0 && renderH > 0 && regionKey !== null;
+  const regionsEnabled = sizes.fits !== null && renderW > 0 && renderH > 0 && regionKey !== null && onFileGrid;
+  const hint = onFileGrid ? canvasHint : OTHER_GRID_CANVAS_HINT;
   const handleRetry = useCallback(() => {
     if (compareActive) {
       if (procRetry.error) procRetry.retry();
@@ -223,7 +241,7 @@ function AdvancedImageViewer({
         <div className="flex flex-col items-center gap-3 opacity-40">
           <Eye size={40} strokeWidth={1} className="text-zinc-600" />
           <span className="text-xs text-zinc-600 tracking-wide uppercase">Select a file to preview</span>
-          <kbd className="text-[10px] text-zinc-700 font-mono px-2 py-0.5 rounded border border-zinc-800 bg-zinc-900">
+          <kbd className="text-[10px] text-[var(--ab-text-4)] font-mono px-2 py-0.5 rounded border border-zinc-800 bg-zinc-900">
             Click on file list
           </kbd>
         </div>
@@ -289,7 +307,7 @@ function AdvancedImageViewer({
           {textureBadge && (
             <span
               className="ab-viewer-preview-badge"
-              title={previewTextureTitle({ renderW, renderH, fitsW: activeImage.width ?? renderW, fitsH: activeImage.height ?? renderH, deepZoomOffered: true })}
+              title={previewTextureTitle({ renderW, renderH, fitsW, fitsH, deepZoomOffered: true })}
             >
               {textureBadge}
             </span>
@@ -362,7 +380,7 @@ function AdvancedImageViewer({
           </div>
         ) : null}
         {!viewerError && (overlayCanvasRef || dqCanvasRef) && (
-          <div style={{ ...imgStyle, width: renderW, height: renderH, pointerEvents: "none", zIndex: 2 }}>
+          <div style={{ ...imgStyle, width: renderW, height: renderH, pointerEvents: "none", zIndex: 2, visibility: onFileGrid ? undefined : "hidden" }}>
             {overlayCanvasRef && (
               <canvas ref={overlayCanvasRef}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: "none" }}
@@ -379,8 +397,8 @@ function AdvancedImageViewer({
           transform={transform}
           renderW={renderW}
           renderH={renderH}
-          fitsW={activeImage.width ?? renderW}
-          fitsH={activeImage.height ?? renderH}
+          fitsW={fitsW}
+          fitsH={fitsH}
           enabled={regionsEnabled}
         />
         <RegionsLayer
@@ -388,18 +406,18 @@ function AdvancedImageViewer({
           transform={transform}
           renderW={renderW}
           renderH={renderH}
-          fitsW={activeImage.width ?? renderW}
-          fitsH={activeImage.height ?? renderH}
+          fitsW={fitsW}
+          fitsH={fitsH}
           enabled={regionsEnabled}
         />
-        {canvasHint && !viewerError && <div className={CANVAS_HINT_CLASS}>{canvasHint}</div>}
+        {hint && !viewerError && <div className={CANVAS_HINT_CLASS}>{hint}</div>}
       </div>
 
       {showOverlay && (
         <div className="ab-viewer-statusbar">
           <span className="ab-viewer-status-item">{zoomPct}</span>
-          {activeImage.width && activeImage.height && (
-            <span className="ab-viewer-status-item">{activeImage.width} x {activeImage.height}</span>
+          {sizes.status && (
+            <span className="ab-viewer-status-item">{sizes.status[0]} x {sizes.status[1]}</span>
           )}
           {pixelValue && (
             <span className="ab-viewer-status-item">

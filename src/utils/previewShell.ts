@@ -1,7 +1,10 @@
 import { formatLat, formatLon } from "./coordFormat";
 import { deepZoomAvailable } from "./analysisSections";
 import { viewportClickRoute, type ViewportClickRoute } from "./regionClick";
+import { displaysFileGrid } from "./stackingOutputs";
+import { gridSourceOf } from "./processingChain";
 import type { WavelengthProbe } from "../shared/types/analysis";
+import type { ProcessedResult, ProcessingChain } from "../shared/types/preview";
 
 export interface GpuDisplayInput {
   hasFile: boolean;
@@ -257,12 +260,82 @@ export function statusStripParts(
   };
 }
 
-export function viewerPublishesPixel({ composite, fileRgbView }: { composite: boolean; fileRgbView: boolean }): boolean {
-  return !composite || fileRgbView;
+export interface DisplayedGridInput {
+  previewOnly: boolean;
+  processedDims: [number, number] | null;
+  fileDims: [number, number] | null;
+  onFileGrid: boolean;
 }
 
-export function statusStripIdleText(publishesPixel: boolean): string {
-  return publishesPixel ? "Hover the image for x, y, value and RA/Dec" : "No pixel readout for the colour composite";
+export interface DisplayedGrid {
+  dims: [number, number] | null;
+  matchesFile: boolean;
+}
+
+export function displayedGrid({ previewOnly, processedDims, fileDims, onFileGrid }: DisplayedGridInput): DisplayedGrid {
+  if (!previewOnly) return { dims: processedDims ?? fileDims, matchesFile: true };
+  return { dims: processedDims, matchesFile: onFileGrid && sameGrid(processedDims, fileDims) };
+}
+
+export interface RecordGridInput {
+  processed: ProcessedResult | null;
+  chain: ProcessingChain;
+  filePath: string | null;
+  fileDims: [number, number] | null;
+}
+
+export interface RecordGrid extends DisplayedGrid {
+  previewOnly: boolean;
+}
+
+function cubeFrame(processed: ProcessedResult | null): boolean {
+  return processed?.kind === "cube" && typeof processed.frameIndex === "number";
+}
+
+export function recordGrid({ processed, chain, filePath, fileDims }: RecordGridInput): RecordGrid {
+  const previewOnly = processed !== null && processed.previewUrl !== null && processed.fitsPath === null;
+  const onFileGrid = filePath !== null && displaysFileGrid(gridSourceOf(processed, chain), filePath);
+  const processedDims = processed?.dimensions ?? (cubeFrame(processed) ? fileDims : null);
+  return { ...displayedGrid({ previewOnly, processedDims, fileDims, onFileGrid }), previewOnly };
+}
+
+export interface ViewerSizesInput {
+  previewOnly: boolean;
+  gridDims: [number, number] | null;
+  imageDims: [number, number] | null;
+  naturalDims: [number, number] | null;
+}
+
+export interface ViewerSizes {
+  fits: [number, number] | null;
+  status: [number, number] | null;
+}
+
+export function viewerSizes({ previewOnly, gridDims, imageDims, naturalDims }: ViewerSizesInput): ViewerSizes {
+  if (!previewOnly) return { fits: imageDims, status: imageDims };
+  return { fits: gridDims, status: gridDims ?? naturalDims };
+}
+
+export const OTHER_GRID_IDLE_TEXT = "No pixel readout: this PNG-only result is on another pixel grid; Revert to measure the file";
+export const OTHER_GRID_CANVAS_HINT = "PNG-only result on another pixel grid: no readout, clicks or regions";
+
+export interface PixelReadoutInput {
+  composite: boolean;
+  fileRgbView: boolean;
+  gridMatchesFile: boolean;
+}
+
+function compositeHidesPixel({ composite, fileRgbView }: PixelReadoutInput): boolean {
+  return composite && !fileRgbView;
+}
+
+export function viewerPublishesPixel(input: PixelReadoutInput): boolean {
+  return !compositeHidesPixel(input) && input.gridMatchesFile;
+}
+
+export function statusStripIdleText(input: PixelReadoutInput): string {
+  if (compositeHidesPixel(input)) return "No pixel readout for the colour composite";
+  return input.gridMatchesFile ? "Hover the image for x, y, value and RA/Dec" : OTHER_GRID_IDLE_TEXT;
 }
 
 export interface PreviewTextureInput {

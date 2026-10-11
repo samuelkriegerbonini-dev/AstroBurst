@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSignificant } from "../formatSignificant";
+import { formatSignificant, formatSignificantFixed } from "../formatSignificant";
 
 describe("formatSignificant", () => {
   it("keeps four significant digits for small-unit data", () => {
@@ -31,5 +31,33 @@ describe("formatSignificant", () => {
     expect(formatSignificant(-0.0123)).toBe("-0.0123");
     expect(formatSignificant(-2048.4)).toBe("-2048");
     expect(formatSignificant(Number.NaN)).toBe("—");
+  });
+});
+
+describe("formatSignificantFixed", () => {
+  it("rounds values from 10^4 up to four significant digits, as the backend format_sig4 does", () => {
+    expect(formatSignificantFixed(12345.6)).toBe("12350");
+    expect(formatSignificantFixed(12345)).toBe("12350");
+    expect(formatSignificantFixed(430123.4)).toBe("430100");
+    expect(formatSignificantFixed(1234567.8)).toBe("1235000");
+    expect(formatSignificantFixed(99999.6)).toBe("100000");
+  });
+
+  it("matches formatSignificant below 10^4", () => {
+    for (const v of [0.25, 4, 14, 1100, 3221.04, 9999.6, (2 * 16 * 0.25) / Math.PI, 0.012323]) {
+      expect(formatSignificantFixed(v)).toBe(formatSignificant(v));
+    }
+    expect(formatSignificantFixed(2.5464790894703255)).toBe("2.546");
+    expect(formatSignificantFixed(9999.6)).toBe("10000");
+  });
+
+  it("rounds negatives symmetrically and keeps zero and non-finite values", () => {
+    expect(formatSignificantFixed(-12345.6)).toBe("-12350");
+    expect(formatSignificantFixed(0)).toBe("0");
+    expect(formatSignificantFixed(Number.NaN)).toBe("—");
+  });
+
+  it("honours another digit count", () => {
+    expect(formatSignificantFixed(12345.6, 3)).toBe("12300");
   });
 });

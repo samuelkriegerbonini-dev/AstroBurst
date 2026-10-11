@@ -219,10 +219,7 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
                     onClick={() => toggleOverride(sub.file_path)}
                   >
                     <td className="px-2 py-1">
-                      {sub.accepted
-                        ? <Check size={10} className="text-emerald-400" />
-                        : <X size={10} className="text-red-400" />
-                      }
+                      <SubframeStatusButton name={sub.file_name} accepted={sub.accepted} onToggle={() => toggleOverride(sub.file_path)} />
                     </td>
                     <td className="px-2 py-1 text-zinc-300 font-mono truncate max-w-[120px]" title={sub.file_name}>
                       {sub.file_name}
@@ -266,7 +263,24 @@ export default function SubframeSelectorPanel({ files, onSelectionChange }: Subf
   );
 }
 
-function ThSort({
+export function SubframeStatusButton({ name, accepted, onToggle }: { name: string; accepted: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={accepted}
+      aria-label={`Frame ${name}: ${accepted ? "accepted, press to reject" : "rejected, press to accept"}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="flex items-center rounded p-0.5 cursor-pointer"
+    >
+      {accepted ? <Check size={10} className="text-emerald-400" /> : <X size={10} className="text-red-400" />}
+    </button>
+  );
+}
+
+export function ThSort({
                   label,
                   col,
                   current,
@@ -281,12 +295,15 @@ function ThSort({
 }) {
   const active = current === col;
   return (
-    <th
-      className={`px-2 py-1.5 text-right cursor-pointer select-none hover:text-zinc-300 transition-colors ${active ? "text-teal-400" : ""}`}
-      onClick={() => onClick(col)}
-    >
-      {label}
-      {active && <span className="ml-0.5">{asc ? "▲" : "▼"}</span>}
+    <th aria-sort={active ? (asc ? "ascending" : "descending") : "none"} className={`px-2 py-1.5 text-right ${active ? "text-teal-400" : ""}`}>
+      <button
+        type="button"
+        onClick={() => onClick(col)}
+        className="uppercase cursor-pointer select-none hover:text-zinc-300 transition-colors"
+      >
+        {label}
+        {active && <span aria-hidden="true" className="ml-0.5">{asc ? "▲" : "▼"}</span>}
+      </button>
     </th>
   );
 }

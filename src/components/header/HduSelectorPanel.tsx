@@ -224,9 +224,9 @@ export default function HduSelectorPanel({
                   className="transition-transform shrink-0"
                   style={{ transform: isSelected ? "rotate(90deg)" : "rotate(0deg)", visibility: isHdu ? "visible" : "hidden" }}
                 >
-                  <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "#52525b" }} />
+                  <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "var(--ab-text-4)" }} />
                 </span>
-                <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "#52525b" }}>
+                <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "var(--ab-text-4)" }}>
                   #{idx}
                 </span>
                 <span
@@ -237,7 +237,7 @@ export default function HduSelectorPanel({
                 </span>
                 <span
                   className="text-[11px] truncate flex-1"
-                  style={{ color: isSelected || isShown ? "#e4e4e7" : "#71717a" }}
+                  style={{ color: isSelected || isShown ? "#e4e4e7" : "var(--ab-text-3)" }}
                   title={ext.extname ?? undefined}
                 >
                   {nameLabel}
@@ -251,7 +251,7 @@ export default function HduSelectorPanel({
                   </span>
                 )}
                 {dims && (
-                  <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "#52525b" }} title={dims}>
+                  <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "var(--ab-text-4)" }} title={dims}>
                     {dims}
                   </span>
                 )}
@@ -345,6 +345,8 @@ export default function HduSelectorPanel({
                 />
                 {hduSearch && (
                   <button
+                    type="button"
+                    aria-label="Clear filter"
                     onClick={() => setHduSearch("")}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
                   >
@@ -370,6 +372,8 @@ export default function HduSelectorPanel({
                   {String(val)}
                 </span>
                 <button
+                  type="button"
+                  aria-label="Copy key"
                   onClick={() => handleCopyKey(key, String(val))}
                   className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded transition-all hover:bg-zinc-700/40"
                 >

@@ -6,8 +6,7 @@ import { getCubeFrame } from "../../services/cube";
 import { useFileContext, useHistContext, useRgbContext, useCubeContext, useDisplayedImage } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
-import { exportSourceLabel, resolveRgbExportSource } from "../../utils/exportSources";
-import { exportStem } from "../../utils/imageRef";
+import { cubeFrameExportName, exportSourceLabel, exportTimestamp, resolveRgbExportSource } from "../../utils/exportSources";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
@@ -81,15 +80,14 @@ function ExportTabInner() {
     setCubeExportProgress(0);
     setCubeExportResult(null);
 
-    const stem = exportStem(file.name || "cube", "cube");
+    const stamp = exportTimestamp(new Date());
     const dir = await getExportDir();
     let exported = 0;
 
     try {
       for (let i = 0; i < totalFrames; i++) {
-        const pad = String(i).padStart(4, "0");
-        const outputPath = `${dir}/${stem}_frame_${pad}.png`;
-        const fitsPath = cubeExportFits ? `${dir}/${stem}_frame_${pad}.fits` : undefined;
+        const outputPath = `${dir}/${cubeFrameExportName(file.path, i, "png", stamp)}`;
+        const fitsPath = cubeExportFits ? `${dir}/${cubeFrameExportName(file.path, i, "fits", stamp)}` : undefined;
         await getCubeFrame(file.path, i, outputPath, fitsPath);
         exported++;
         setCubeExportProgress(Math.round((exported / totalFrames) * 100));
@@ -101,7 +99,7 @@ function ExportTabInner() {
     } finally {
       setCubeExporting(false);
     }
-  }, [file?.path, file?.name, cubeDims, cubeExportFits]);
+  }, [file?.path, cubeDims, cubeExportFits]);
 
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
 

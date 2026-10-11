@@ -18,6 +18,7 @@ import {
   modeLabel,
   parseRestInput,
 } from "../../utils/spectralAxis";
+import { DecimalField } from "../ui";
 
 export interface SpectralAxisControlsProps {
   filePath: string | null;
@@ -38,6 +39,7 @@ const SELECT_CLASS =
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:border-violet-500/50 w-full disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
+const REST_POSITIVE_ERROR = "Use a wavelength above 0";
 
 function frameLabel(frame: CorrectionFrame): string {
   return frame === "none" ? "None" : frame.charAt(0).toUpperCase() + frame.slice(1);
@@ -148,18 +150,17 @@ function SpectralAxisControls({
           <label htmlFor={restId} className={LABEL_CLASS}>
             {"Rest wavelength, vacuum (μm)"}
           </label>
-          <input
+          <DecimalField
             id={restId}
-            type="number"
-            min={0}
-            step={0.0001}
+            optional
             value={restText}
+            error={restText.trim() !== "" && parseRestInput(restText) === null ? REST_POSITIVE_ERROR : null}
             placeholder="e.g. 0.65646 (H-alpha, vacuum)"
             title="Vacuum rest wavelength in micrometres; convert air line-list values first (H-alpha air 0.65628 = vacuum 0.65646)"
             disabled={modes.length === 0}
-            onChange={(e) => {
-              setRestText(e.target.value);
-              onRestChange(parseRestInput(e.target.value));
+            onChange={(text) => {
+              setRestText(text);
+              onRestChange(parseRestInput(text));
             }}
             className={INPUT_CLASS}
           />

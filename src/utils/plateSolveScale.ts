@@ -132,3 +132,61 @@ export function headerPositionHintTexts(
     radius: headerSearchRadiusText(info.fov_arcmin),
   };
 }
+
+export type ScaleUnits = "arcsecperpix" | "arcminwidth" | "degwidth";
+
+export interface HintTexts {
+  scaleLow: string;
+  scaleHigh: string;
+  scaleUnits: ScaleUnits;
+  centerRa: string;
+  centerDec: string;
+  radius: string;
+}
+
+export type HintField = keyof HintTexts;
+
+export const DEFAULT_HINT_TEXTS: HintTexts = {
+  scaleLow: DEFAULT_SCALE_LOW_TEXT,
+  scaleHigh: DEFAULT_SCALE_HIGH_TEXT,
+  scaleUnits: "arcsecperpix",
+  centerRa: "",
+  centerDec: "",
+  radius: "",
+};
+
+const SCALE_HINT_FIELDS: readonly HintField[] = ["scaleLow", "scaleHigh", "scaleUnits"];
+const POSITION_HINT_FIELDS: readonly HintField[] = ["centerRa", "centerDec", "radius"];
+
+export function headerHintTexts(
+  info: Pick<WcsInfo, "pixel_scale_arcsec" | "center_ra" | "center_dec" | "fov_arcmin">,
+): Partial<HintTexts> {
+  const hints: Partial<HintTexts> = {};
+  const scale = scaleHintFromPixelScale(info.pixel_scale_arcsec);
+  if (scale) {
+    hints.scaleLow = scale.low;
+    hints.scaleHigh = scale.high;
+    hints.scaleUnits = "arcsecperpix";
+  }
+  const position = headerPositionHintTexts(info);
+  if (position) {
+    hints.centerRa = position.ra;
+    hints.centerDec = position.dec;
+    if (position.radius !== null) hints.radius = position.radius;
+  }
+  return hints;
+}
+
+export function mergeHintTexts(
+  current: HintTexts,
+  hints: Partial<HintTexts>,
+  touched: ReadonlySet<HintField>,
+): HintTexts {
+  const next: HintTexts = { ...current };
+  const take = (field: HintField) => {
+    if (hints[field] !== undefined) Object.assign(next, { [field]: hints[field] });
+  };
+  if (!SCALE_HINT_FIELDS.some((field) => touched.has(field))) SCALE_HINT_FIELDS.forEach(take);
+  POSITION_HINT_FIELDS.filter((field) => !touched.has(field)).forEach(take);
+  return next;
+}

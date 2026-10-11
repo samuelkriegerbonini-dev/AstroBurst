@@ -1,5 +1,5 @@
 import type { ProcessedResult } from "../shared/types/preview";
-import type { PipelineChannelStats, PipelineResult } from "../shared/types/stacking";
+import type { DrizzleRgbResult, PipelineChannelStats, PipelineMasterOutput, PipelineResult } from "../shared/types/stacking";
 import { samePath } from "./processingChain";
 
 function baseName(path: string): string {
@@ -39,8 +39,9 @@ export function framesLabel(prefix: string, frameCount: number): string {
 
 export const PIPELINE_RGB_CHOICE = "RGB";
 const PIPELINE_RGB_REFERENCE_CHANNEL = "R";
+const PIPELINE_RGB_CHANNELS = ["R", "G", "B"];
 
-export interface PipelineViewOutput {
+export interface StackViewOutput {
   output: Omit<ProcessedResult, "label">;
   label: string;
 }
@@ -54,14 +55,20 @@ function channelLights(result: PipelineResult, label: string): number {
   return channel ? stackedLights(channel) : 0;
 }
 
-export function pipelineViewOutput(result: PipelineResult, choice: string): PipelineViewOutput | null {
+function composedRgbDims(result: PipelineResult, masters: readonly PipelineMasterOutput[]): [number, number] | null {
+  const channels = PIPELINE_RGB_CHANNELS.map((label) => masters.find((m) => m.label.toUpperCase() === label));
+  if (!channels.every((m): m is PipelineMasterOutput => m !== undefined)) return toDims(result.rgb_dimensions);
+  return toDims([Math.min(...channels.map((m) => m.dimensions[0])), Math.min(...channels.map((m) => m.dimensions[1]))]);
+}
+
+export function pipelineViewOutput(result: PipelineResult, choice: string): StackViewOutput | null {
   const masters = result.masters ?? [];
   if (choice === PIPELINE_RGB_CHOICE) {
     const reference = masters.find((m) => m.label === PIPELINE_RGB_REFERENCE_CHANNEL) ?? masters[0];
     if (!result.rgbPreviewUrl || !reference) return null;
     const lights = result.stats.channels.reduce((sum, c) => sum + stackedLights(c), 0);
     return {
-      output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: null, kind: "stacking", inputPath: reference.input_path },
+      output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: composedRgbDims(result, masters), kind: "stacking", inputPath: reference.input_path },
       label: framesLabel("Pipeline RGB", lights),
     };
   }
@@ -76,6 +83,14 @@ export function pipelineViewOutput(result: PipelineResult, choice: string): Pipe
       inputPath: master.input_path,
     },
     label: framesLabel(`Pipeline ${choice}`, channelLights(result, choice)),
+  };
+}
+
+export function drizzleViewOutput(result: DrizzleRgbResult, inputs: readonly string[], targetPath: string): StackViewOutput {
+  const frames = result.frame_count_r + result.frame_count_g + result.frame_count_b;
+  return {
+    output: { fitsPath: null, previewUrl: result.previewUrl ?? null, dimensions: toDims(result.output_dims), kind: "stacking", inputPath: inputs[0] ?? targetPath },
+    label: framesLabel("Drizzle RGB", frames || inputs.length),
   };
 }
 

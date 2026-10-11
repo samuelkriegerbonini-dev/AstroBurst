@@ -10,7 +10,7 @@ import {
 import type { ChannelOverlayPreview, CropBounds } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useComposeWizardContext } from "../../../context/ComposeWizardContext";
-import { RunButton } from "../../ui";
+import { DecimalNumberField, RunButton } from "../../ui";
 import CropEditor from "../CropEditor";
 import {
   alignOverlayColours,
@@ -169,9 +169,9 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
   }, []);
 
   const handleMarginInput = useCallback(
-    (edge: MarginEdge, raw: string) => {
-      const parsed = parseInt(raw, 10);
-      const next = setMarginEdge(margins, edge, Number.isFinite(parsed) ? parsed : 0, grid);
+    (edge: MarginEdge, value: number | null) => {
+      if (value === null) return;
+      const next = setMarginEdge(margins, edge, value, grid);
       setDraft((prev) => typeMarginDraft(prev, next, edge));
     },
     [margins, grid],
@@ -296,15 +296,14 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
               <label htmlFor={`${marginId}-${edge}`} className="w-11 text-[10px] text-zinc-400">
                 {MARGIN_LABELS[edge]}
               </label>
-              <input
+              <DecimalNumberField
                 id={`${marginId}-${edge}`}
-                type="number"
                 aria-label={`${MARGIN_LABELS[edge]} margin (px)`}
+                integer
                 min={0}
                 max={grid ? marginEdgeMax(margins, edge, grid) : undefined}
-                step={1}
                 value={margins[edge]}
-                onChange={(e) => handleMarginInput(edge, e.target.value)}
+                onValueChange={(value) => handleMarginInput(edge, value)}
                 className={MARGIN_INPUT_CLASS}
               />
             </div>
@@ -388,7 +387,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
               <div key={binId} className="flex items-center gap-1.5 py-0.5">
                 <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
                 <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
-                <span className="text-[8px] text-zinc-700 font-mono truncate flex-1">{displayName}</span>
+                <span className="text-[8px] text-[var(--ab-text-4)] font-mono truncate flex-1">{displayName}</span>
                 {hasCropped && <span className="text-[8px] text-cyan-400/60">cropped</span>}
               </div>
             );

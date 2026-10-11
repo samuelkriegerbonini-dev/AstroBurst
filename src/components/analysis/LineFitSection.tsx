@@ -3,6 +3,7 @@ import { Activity } from "lucide-react";
 import type { LineFitComponents, LineFitPlane, LineFitSpaxel } from "../../shared/types/cube";
 import { LINE_FIT_COMPONENTS } from "../../shared/types/cube";
 import LineFitInspectPlot from "./LineFitInspectPlot";
+import { DecimalField } from "../ui";
 import {
   RESOLVING_POWER_HINT,
   lineFitSpaxelNotes,
@@ -163,14 +164,12 @@ function LineFitSection({
         <label htmlFor={snrId} className={LABEL_CLASS}>
           S/N
         </label>
-        <input
+        <DecimalField
           id={snrId}
-          type="number"
           min={0}
-          step={0.5}
           aria-label="Line-fit S/N threshold"
           value={snrText}
-          onChange={(e) => onSnrText(e.target.value)}
+          onChange={onSnrText}
           className={INPUT_CLASS}
           disabled={loading}
         />
@@ -233,7 +232,7 @@ function LineFitSection({
                   className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
                   style={{
                     borderColor: pressed ? ACCENT : "var(--ab-border)",
-                    color: pressed ? ACCENT : "#71717a",
+                    color: pressed ? ACCENT : "var(--ab-text-3)",
                   }}
                 >
                   {planeLabel(plane)}

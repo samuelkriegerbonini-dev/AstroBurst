@@ -19,12 +19,14 @@ import {
   CONTOUR_BIN_CHOICES,
   DEFAULT_SIGMA_MULTIPLES_TEXT,
   MAX_REGION_POLYGONS,
+  MAX_SMOOTH_SIGMA_PX,
   type ContourBinChoice,
   type ContourColourMode,
 } from "../../utils/contourLevels";
 import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import { CONTOUR_LAYER_ID, CONTOUR_LAYER_KIND, createContourPainter } from "../viewer/painters/contourPainter";
-import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "../../utils/decimalText";
 import MeasurementBadge from "./MeasurementBadge";
 
 interface ContourPanelProps {
@@ -43,6 +45,9 @@ const DEFAULT_LINE_WIDTH = "1";
 const LINE_WIDTHS = ["1", "1.5", "2"] as const;
 const COLOUR_MODES: readonly ContourColourMode[] = ["single", "ramp"];
 const NOTICE_MS = 6000;
+const N_LEVELS_FIELD: DecimalFieldOptions = { integer: true, min: 1, max: 32 };
+const LIMIT_FIELD: DecimalFieldOptions = {};
+const SMOOTH_FIELD: DecimalFieldOptions = { min: 0, max: MAX_SMOOTH_SIGMA_PX };
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-teal-500/50 w-full";
@@ -138,8 +143,23 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
     return () => overlayStore.remove(overlayKey, CONTOUR_LAYER_ID);
   }, [overlayKey, show, result, hidden, highlightIndex, colourMode, lineWidthText]);
 
+  const generated = mode === "linear" || mode === "log" || mode === "sqrt";
+
   const run = useCallback(async () => {
     if (!filePath) return;
+    const fields: [string, DecimalFieldState][] = [["Smoothing sigma (px)", decimalFieldState(smoothText, SMOOTH_FIELD)]];
+    if (generated) {
+      fields.push(
+        ["Levels", decimalFieldState(nLevelsText, N_LEVELS_FIELD)],
+        ["Low", decimalFieldState(loText, LIMIT_FIELD)],
+        ["High", decimalFieldState(hiText, LIMIT_FIELD)],
+      );
+    }
+    const fieldError = firstFieldError(fields);
+    if (fieldError !== null) {
+      setError(fieldError);
+      return;
+    }
     const request = buildContourRequest({
       mode,
       levelsText: levelsInput,
@@ -171,7 +191,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
     } finally {
       if (requestSeqRef.current === seq) setLoading(false);
     }
-  }, [filePath, mode, levelsInput, nLevelsText, loText, hiText, sigmaText, smoothText, binChoice, imageWidth, imageHeight, excludeDq]);
+  }, [filePath, mode, generated, levelsInput, nLevelsText, loText, hiText, sigmaText, smoothText, binChoice, imageWidth, imageHeight, excludeDq]);
 
   const toggleHidden = useCallback((index: number) => {
     setHidden((prev) => {
@@ -211,7 +231,6 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
   }, [overlayKey, result, hidden, showNotice]);
 
   const autoBin = suggestBin(imageWidth ?? 0, imageHeight ?? 0);
-  const generated = mode === "linear" || mode === "log" || mode === "sqrt";
   const closedCount = result ? result.levels.reduce((n, l) => n + l.closed.filter(Boolean).length, 0) : 0;
 
   return (
@@ -263,14 +282,11 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
               <label htmlFor={nLevelsId} className={LABEL_CLASS}>
                 Levels
               </label>
-              <input
+              <DecimalField
                 id={nLevelsId}
-                type="number"
-                min={1}
-                max={32}
-                step={1}
+                {...N_LEVELS_FIELD}
                 value={nLevelsText}
-                onChange={(e) => setNLevelsText(e.target.value)}
+                onChange={setNLevelsText}
                 className={INPUT_CLASS}
               />
             </div>
@@ -278,13 +294,13 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
               <label htmlFor={loId} className={LABEL_CLASS}>
                 Low
               </label>
-              <input id={loId} type="number" value={loText} onChange={(e) => setLoText(e.target.value)} className={INPUT_CLASS} />
+              <DecimalField id={loId} {...LIMIT_FIELD} value={loText} onChange={setLoText} className={INPUT_CLASS} />
             </div>
             <div className="flex flex-col gap-0.5">
               <label htmlFor={hiId} className={LABEL_CLASS}>
                 High
               </label>
-              <input id={hiId} type="number" value={hiText} onChange={(e) => setHiText(e.target.value)} className={INPUT_CLASS} />
+              <DecimalField id={hiId} {...LIMIT_FIELD} value={hiText} onChange={setHiText} className={INPUT_CLASS} />
             </div>
           </div>
         )}
@@ -310,14 +326,11 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
             <label htmlFor={smoothId} className={LABEL_CLASS}>
               Smoothing sigma (px)
             </label>
-            <input
+            <DecimalField
               id={smoothId}
-              type="number"
-              min={0}
-              max={20}
-              step={0.5}
+              {...SMOOTH_FIELD}
               value={smoothText}
-              onChange={(e) => setSmoothText(e.target.value)}
+              onChange={setSmoothText}
               className={INPUT_CLASS}
             />
           </div>

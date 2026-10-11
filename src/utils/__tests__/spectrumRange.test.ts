@@ -5,6 +5,9 @@ import {
   channelRangeFromDrag,
   channelWidthAt,
   clampRange,
+  commitRangeEdge,
+  commitWindowEdge,
+  continuumOverlapNote,
   defaultContinuumWindows,
   formatRangeLabel,
   fullCubeCollapse,
@@ -13,10 +16,14 @@ import {
   pixelToAxisValue,
   rangeBounds,
   rangePixelSpan,
+  spectralSectionsVisible,
   spectrumXTicks,
   windowsAreValid,
+  windowsOverlapRange,
   type PlotMapping,
 } from "../spectrumRange";
+import type { ContinuumWindows } from "../../shared/types/cube";
+import type { RampInfo } from "../../shared/types/ramp";
 
 const WAVE = Array.from({ length: 40 }, (_, i) => 1.0 + i * 0.001);
 const FREQ = WAVE.map((w) => 299792.458 / w);
@@ -177,6 +184,101 @@ describe("parseChannelInput", () => {
     expect(parseChannelInput("-1", 40)).toBeNull();
     expect(parseChannelInput("1.5", 40)).toBeNull();
     expect(parseChannelInput("abc", 40)).toBeNull();
+  });
+
+  it("reads a blank box as no channel instead of channel 0", () => {
+    expect(parseChannelInput("", 40)).toBeNull();
+    expect(parseChannelInput("   ", 40)).toBeNull();
+    expect(parseChannelInput("0", 40)).toBe(0);
+  });
+});
+
+describe("commitWindowEdge", () => {
+  const WINDOWS: ContinuumWindows = [
+    [50, 55],
+    [72, 80],
+  ];
+
+  it("moves only the edited edge of the edited window", () => {
+    expect(commitWindowEdge(WINDOWS, 1, 1, 75)).toEqual([
+      [50, 55],
+      [72, 75],
+    ]);
+    expect(commitWindowEdge(WINDOWS, 0, 0, 45)).toEqual([
+      [45, 55],
+      [72, 80],
+    ]);
+  });
+
+  it("clamps a 'to' below 'from' onto 'from' instead of rewriting 'from'", () => {
+    expect(commitWindowEdge(WINDOWS, 1, 1, 7)).toEqual([
+      [50, 55],
+      [72, 72],
+    ]);
+  });
+
+  it("clamps a 'from' above 'to' onto 'to' instead of rewriting 'to'", () => {
+    expect(commitWindowEdge(WINDOWS, 1, 0, 90)).toEqual([
+      [50, 55],
+      [80, 80],
+    ]);
+  });
+
+  it("starts both windows on the value when none are set and never mutates its input", () => {
+    expect(commitWindowEdge(null, 1, 0, 12)).toEqual([
+      [12, 12],
+      [12, 12],
+    ]);
+    commitWindowEdge(WINDOWS, 1, 1, 75);
+    expect(WINDOWS).toEqual([
+      [50, 55],
+      [72, 80],
+    ]);
+  });
+});
+
+describe("commitRangeEdge", () => {
+  it("moves only the edited edge and clamps it at the other edge", () => {
+    expect(commitRangeEdge({ z0: 60, z1: 70 }, "z1", 65)).toEqual({ z0: 60, z1: 65 });
+    expect(commitRangeEdge({ z0: 60, z1: 70 }, "z1", 7)).toEqual({ z0: 60, z1: 60 });
+    expect(commitRangeEdge({ z0: 60, z1: 70 }, "z0", 75)).toEqual({ z0: 70, z1: 70 });
+    expect(commitRangeEdge({ z0: 60, z1: 70 }, "z0", 55)).toEqual({ z0: 55, z1: 70 });
+  });
+});
+
+describe("continuum windows over the line range", () => {
+  const RANGE = { z0: 60, z1: 70 };
+
+  it("names each window that shares a channel with the line range", () => {
+    expect(windowsOverlapRange([[50, 55], [65, 75]], RANGE)).toEqual([1]);
+    expect(windowsOverlapRange([[50, 60], [72, 80]], RANGE)).toEqual([0]);
+    expect(windowsOverlapRange([[62, 64], [55, 75]], RANGE)).toEqual([0, 1]);
+    expect(windowsOverlapRange([[50, 59], [71, 80]], RANGE)).toEqual([]);
+    expect(windowsOverlapRange(null, RANGE)).toEqual([]);
+    expect(windowsOverlapRange([[50, 59], [65, 75]], null)).toEqual([]);
+  });
+
+  it("warns that Moments would fit its baseline over line flux", () => {
+    expect(continuumOverlapNote([[50, 55], [65, 75]], RANGE)).toBe(
+      "Continuum window B overlaps the line range; Moments would fit its baseline over line flux.",
+    );
+    expect(continuumOverlapNote([[58, 61], [72, 80]], RANGE)).toBe(
+      "Continuum window A overlaps the line range; Moments would fit its baseline over line flux.",
+    );
+    expect(continuumOverlapNote([[62, 64], [55, 75]], RANGE)).toBe(
+      "Continuum windows A and B overlap the line range; Moments would fit their baseline over line flux.",
+    );
+    expect(continuumOverlapNote([[50, 59], [71, 80]], RANGE)).toBeNull();
+    expect(continuumOverlapNote(null, RANGE)).toBeNull();
+  });
+});
+
+describe("spectralSectionsVisible", () => {
+  const RAMP = { kind: "jwst_groups", nints: 1, ngroups: 10 } as RampInfo;
+
+  it("hides the spectral-only sections for a ramp and shows them for any other cube", () => {
+    expect(spectralSectionsVisible(RAMP)).toBe(false);
+    expect(spectralSectionsVisible(null)).toBe(true);
   });
 });
 

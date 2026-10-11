@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { WriteSolvedWcsResult } from "../../../shared/types/astrometry";
-import { SOLVED_WCS_LABEL } from "../../../utils/solvedWcs";
+import { SOLVED_WCS_LABEL, solvedWcsFor } from "../../../utils/solvedWcs";
 
 interface CapturedPanelProps {
   filePath?: string | null;
@@ -94,5 +94,21 @@ describe("AstrometryTool plate solve target", () => {
       "file-key",
       expect.objectContaining({ fitsPath: "/out/stack_wcs.fits", label: SOLVED_WCS_LABEL, inputPath: STACK_PATH }),
     );
+  });
+
+  it("remembers the written WCS for the solved input, for SPCC to find on that grid", async () => {
+    await renderTool();
+    captured.props?.onWcsWritten?.({
+      fits_path: "/out/stack_wcs_spcc.fits",
+      png_path: "/out/stack_wcs_spcc.png",
+      dimensions: [100, 80],
+      center_ra: 83.82,
+      center_dec: -5.39,
+      pixel_scale_arcsec: 2,
+      sip_present: false,
+      elapsed_ms: 5,
+    });
+    expect(solvedWcsFor(STACK_PATH)).toBe("/out/stack_wcs_spcc.fits");
+    expect(solvedWcsFor(FRAME_PATH)).toBeNull();
   });
 });

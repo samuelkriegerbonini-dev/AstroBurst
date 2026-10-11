@@ -21,7 +21,7 @@ use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::session::Session;
 
-use super::super::bin::nan_area_downsample;
+use super::super::bin::padding_area_downsample;
 use super::super::region::{resolve_region_clamped, RegionSpec, ResolvedRegion};
 
 #[derive(Deserialize, Default)]
@@ -288,7 +288,7 @@ pub async fn render(
         let display = if factor > 1 {
             let out_rows = resolved_c.height.div_ceil(factor).max(1);
             let out_cols = resolved_c.width.div_ceil(factor).max(1);
-            nan_area_downsample(&region_arr, out_rows, out_cols)
+            padding_area_downsample(&region_arr, out_rows, out_cols)
         } else {
             region_arr
         };
@@ -305,7 +305,7 @@ pub async fn render(
 
         let data = display
             .as_slice()
-            .expect("display array is standard-layout after nan_area_downsample/to_owned");
+            .expect("display array is standard-layout after padding_area_downsample/to_owned");
         let (norm, valid, below, above) =
             normalize_and_stretch(data, vmin, vmax, stretch_kind, asinh_a, power);
 
@@ -369,6 +369,36 @@ mod tests {
             AppError::BadRequestWithHint { code, message, hint } => (code, message, hint),
             other => panic!("expected BadRequestWithHint, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn max_dim_render_ignores_zero_padding_in_edge_blocks() {
+        let src = ndarray::Array2::from_shape_fn((4, 6), |(y, x)| match (x < 3, y < 2) {
+            (true, _) => 0.0f32,
+            (false, true) => 10.0,
+            (false, false) => 20.0,
+        });
+        let display = padding_area_downsample(&src, 2, 3);
+        assert!(display[[0, 0]].is_nan() && display[[1, 0]].is_nan(), "{display:?}");
+        assert_eq!(display[[0, 1]], 10.0, "{display:?}");
+        assert_eq!(display[[1, 1]], 20.0, "{display:?}");
+        assert_eq!(display[[0, 2]], 10.0, "{display:?}");
+
+        let session = Session::new("s".into(), &crate::config::ServerConfig::default());
+        let stats = astroburst_lib::core::imaging::stats::compute_image_stats(&src);
+        session.cache.insert_synthetic("padded", std::sync::Arc::new(src), stats);
+        *session.v2.active_ref.write().await = Some("padded".into());
+        let params = RenderParams {
+            max_dim: Some(3),
+            scale: Some(ScaleSpec { algorithm: Some("minmax".into()), ..ScaleSpec::default() }),
+            ..RenderParams::default()
+        };
+        let resp = render(SessionExtractor(session), Json(params)).await.expect("render succeeds");
+        let resolved: serde_json::Value =
+            serde_json::from_str(resp.headers()["x-render-resolved"].to_str().unwrap()).unwrap();
+        assert_eq!(resolved["binning_applied"], 2, "{resolved}");
+        assert_eq!(resolved["vmin"], 10.0, "{resolved}");
+        assert_eq!(resolved["vmax"], 20.0, "{resolved}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
-import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save } from "lucide-react";
-import { plateSolve, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
+import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X } from "lucide-react";
+import { cancelPlateSolve, plateSolve, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
 import type { WcsInfo, WriteSolvedWcsResult } from "../../services/astrometry";
 import { shouldResetSolve, solvedWcsSummary, wcsRewriteBlocker, wcsWriteBlocker, type SolveIdentity } from "../../utils/solvedWcs";
 import { getApiKey, getConfig } from "../../services/config";
@@ -15,13 +15,15 @@ import {
 import { formatSignificant } from "../../utils/formatSignificant";
 import { withDeadline } from "../../utils/deadline";
 import {
-  DEFAULT_SCALE_HIGH_TEXT,
-  DEFAULT_SCALE_LOW_TEXT,
-  headerPositionHintTexts,
+  DEFAULT_HINT_TEXTS,
+  headerHintTexts,
+  mergeHintTexts,
   parsePositionHint,
   parseScaleRange,
   positionHintStatus,
-  scaleHintFromPixelScale,
+  type HintField,
+  type HintTexts,
+  type ScaleUnits,
 } from "../../utils/plateSolveScale";
 import { starCountLabel } from "../../utils/analysisLabels";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
@@ -100,6 +102,59 @@ interface PlateSolvePanelProps {
   detectedTotal?: number | null;
   annotationsOnView?: boolean;
   onWcsWritten?: (result: WriteSolvedWcsResult) => void;
+}
+
+interface SolveActionsProps {
+  loading: boolean;
+  disabled: boolean;
+  elapsedMs: number;
+  timeoutSecs: number;
+  onSolve: () => void;
+  onCancel: () => void;
+}
+
+export function SolveActions({ loading, disabled, elapsedMs, timeoutSecs, onSolve, onCancel }: SolveActionsProps) {
+  const solveButtonRef = useRef<HTMLButtonElement>(null);
+  const focusSolveRef = useRef(false);
+  useEffect(() => {
+    if (loading || !focusSolveRef.current) return;
+    focusSolveRef.current = false;
+    solveButtonRef.current?.focus();
+  }, [loading]);
+  const handleCancel = () => {
+    focusSolveRef.current = true;
+    onCancel();
+  };
+  return (
+    <div className="flex gap-2">
+      <button
+        ref={solveButtonRef}
+        onClick={onSolve}
+        disabled={disabled}
+        className="flex-1 flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+      >
+        {loading ? (
+          <>
+            <Loader2 size={12} className="animate-spin" /> Solving... {formatDuration(elapsedMs)} /{" "}
+            {formatDuration(timeoutSecs * 1000)}
+          </>
+        ) : (
+          <><Compass size={12} /> Plate Solve</>
+        )}
+      </button>
+      {loading && (
+        <button
+          type="button"
+          onClick={handleCancel}
+          aria-label="Cancel plate solve"
+          title="Stop waiting for this solve"
+          className="flex items-center justify-center gap-1 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+        >
+          <X size={12} /> Cancel
+        </button>
+      )}
+    </div>
+  );
 }
 
 function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
@@ -193,17 +248,14 @@ function PlateSolvePanel({
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
   const [solveError, setSolveError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [scaleLowText, setScaleLowText] = useState(DEFAULT_SCALE_LOW_TEXT);
-  const [scaleHighText, setScaleHighText] = useState(DEFAULT_SCALE_HIGH_TEXT);
-  const [scaleUnits, setScaleUnits] = useState<"arcsecperpix" | "arcminwidth" | "degwidth">("arcsecperpix");
+  const [hintTexts, setHintTexts] = useState<HintTexts>(DEFAULT_HINT_TEXTS);
+  const touchedHintsRef = useRef<Set<HintField>>(new Set());
   const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
-  const [centerRaText, setCenterRaText] = useState("");
-  const [centerDecText, setCenterDecText] = useState("");
-  const [searchRadiusText, setSearchRadiusText] = useState("");
   const [solveElapsedMs, setSolveElapsedMs] = useState(0);
   const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_SOLVE_TIMEOUT_SECS);
   const solveSeqRef = useRef(0);
+  const solveLoadingRef = useRef(false);
   const [wcsWriting, setWcsWriting] = useState(false);
   const [wcsWriteError, setWcsWriteError] = useState<string | null>(null);
   const [wcsWritten, setWcsWritten] = useState<WriteSolvedWcsResult | null>(null);
@@ -220,18 +272,20 @@ function PlateSolvePanel({
       .catch(() => setTimeoutSecs(DEFAULT_SOLVE_TIMEOUT_SECS));
   }, []);
 
-  const applyWcsHints = useCallback((info: WcsInfo) => {
-    const scaleHint = scaleHintFromPixelScale(info.pixel_scale_arcsec);
-    if (scaleHint) {
-      setScaleLowText(scaleHint.low);
-      setScaleHighText(scaleHint.high);
-      setScaleUnits("arcsecperpix");
-    }
-    const positionTexts = headerPositionHintTexts(info);
-    if (!positionTexts) return;
-    setCenterRaText(positionTexts.ra);
-    setCenterDecText(positionTexts.dec);
-    if (positionTexts.radius !== null) setSearchRadiusText(positionTexts.radius);
+  useEffect(() => {
+    solveLoadingRef.current = solveLoading;
+  }, [solveLoading]);
+
+  const applyWcsHints = useCallback((info: WcsInfo, force: boolean) => {
+    if (force) touchedHintsRef.current = new Set();
+    const touched: ReadonlySet<HintField> = new Set(touchedHintsRef.current);
+    const hints = headerHintTexts(info);
+    setHintTexts((current) => mergeHintTexts(current, hints, touched));
+  }, []);
+
+  const editHint = useCallback(<K extends HintField>(field: K, value: HintTexts[K]) => {
+    touchedHintsRef.current.add(field);
+    setHintTexts((current) => ({ ...current, [field]: value }));
   }, []);
 
   useEffect(() => {
@@ -246,12 +300,8 @@ function PlateSolvePanel({
     writtenPathRef.current = null;
     setWcsWritten(null);
     setSelectedStar(null);
-    setCenterRaText("");
-    setCenterDecText("");
-    setSearchRadiusText("");
-    setScaleLowText(DEFAULT_SCALE_LOW_TEXT);
-    setScaleHighText(DEFAULT_SCALE_HIGH_TEXT);
-    setScaleUnits("arcsecperpix");
+    touchedHintsRef.current = new Set();
+    setHintTexts(DEFAULT_HINT_TEXTS);
   }, [filePath]);
 
   useEffect(() => {
@@ -259,6 +309,7 @@ function PlateSolvePanel({
     const reset = shouldResetSolve(solveIdentityRef.current, next, writtenPathRef.current);
     solveIdentityRef.current = next;
     if (reset) {
+      if (solveLoadingRef.current) cancelPlateSolve().catch(() => {});
       solveSeqRef.current++;
       wcsSeqRef.current++;
       setSolveResult(null);
@@ -275,7 +326,7 @@ function PlateSolvePanel({
       .then((info) => {
         if (cancelled) return;
         setWcsInfo(info);
-        applyWcsHints(info);
+        applyWcsHints(info, false);
       })
       .catch(() => {
         if (!cancelled) setWcsInfo(null);
@@ -420,13 +471,13 @@ function PlateSolvePanel({
     if (onDetect) onDetect(sigma);
   }, [onDetect, sigma]);
 
-  const scaleRange = parseScaleRange(scaleLowText, scaleHighText);
+  const scaleRange = parseScaleRange(hintTexts.scaleLow, hintTexts.scaleHigh);
 
   const handleSolve = useCallback(async () => {
     if (!solvePath) return;
-    const scale = parseScaleRange(scaleLowText, scaleHighText);
+    const scale = parseScaleRange(hintTexts.scaleLow, hintTexts.scaleHigh);
     if (scale.error !== null) return;
-    const hint = parsePositionHint(centerRaText, centerDecText, searchRadiusText);
+    const hint = parsePositionHint(hintTexts.centerRa, hintTexts.centerDec, hintTexts.radius);
     if (hint.error !== null) return;
     const seq = ++solveSeqRef.current;
     setSolveLoading(true);
@@ -444,7 +495,7 @@ function PlateSolvePanel({
         plateSolve(solvePath, {
           scaleLower: scale.low,
           scaleUpper: scale.high,
-          scaleUnits,
+          scaleUnits: hintTexts.scaleUnits,
           downsampleFactor: downsample > 1 ? downsample : undefined,
           centerRa: hint.centerRa ?? undefined,
           centerDec: hint.centerDec ?? undefined,
@@ -465,7 +516,13 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [solvePath, scaleLowText, scaleHighText, scaleUnits, downsample, centerRaText, centerDecText, searchRadiusText]);
+  }, [solvePath, hintTexts, downsample]);
+
+  const handleCancelSolve = useCallback(() => {
+    solveSeqRef.current++;
+    setSolveLoading(false);
+    cancelPlateSolve().catch(() => {});
+  }, []);
 
   const wcsBlocker = wcsWriteBlocker(solveResult) ?? wcsRewriteBlocker(wcsWritten?.fits_path ?? null, solvePath);
 
@@ -498,7 +555,7 @@ function PlateSolvePanel({
   }, [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
-  const positionHint = parsePositionHint(centerRaText, centerDecText, searchRadiusText);
+  const positionHint = parsePositionHint(hintTexts.centerRa, hintTexts.centerDec, hintTexts.radius);
 
   return (
     <div className="flex flex-col gap-3">
@@ -686,9 +743,9 @@ function PlateSolvePanel({
                 id={scaleLowId}
                 type="text"
                 inputMode="decimal"
-                value={scaleLowText}
+                value={hintTexts.scaleLow}
                 aria-invalid={scaleRange.error !== null}
-                onChange={(e) => setScaleLowText(e.target.value)}
+                onChange={(e) => editHint("scaleLow", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -700,9 +757,9 @@ function PlateSolvePanel({
                 id={scaleHighId}
                 type="text"
                 inputMode="decimal"
-                value={scaleHighText}
+                value={hintTexts.scaleHigh}
                 aria-invalid={scaleRange.error !== null}
-                onChange={(e) => setScaleHighText(e.target.value)}
+                onChange={(e) => editHint("scaleHigh", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -721,8 +778,8 @@ function PlateSolvePanel({
               </label>
               <select
                 id={scaleUnitsId}
-                value={scaleUnits}
-                onChange={(e) => setScaleUnits(e.target.value as typeof scaleUnits)}
+                value={hintTexts.scaleUnits}
+                onChange={(e) => editHint("scaleUnits", e.target.value as ScaleUnits)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500/50 w-full"
               >
                 <option value="arcsecperpix">arcsec/px</option>
@@ -756,11 +813,11 @@ function PlateSolvePanel({
                 id={centerRaId}
                 type="text"
                 inputMode="decimal"
-                value={centerRaText}
+                value={hintTexts.centerRa}
                 aria-invalid={positionHint.raInvalid}
                 placeholder="blind"
                 title="Right ascension of the field centre in degrees; speeds the solve up enormously"
-                onChange={(e) => setCenterRaText(e.target.value)}
+                onChange={(e) => editHint("centerRa", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -772,11 +829,11 @@ function PlateSolvePanel({
                 id={centerDecId}
                 type="text"
                 inputMode="decimal"
-                value={centerDecText}
+                value={hintTexts.centerDec}
                 aria-invalid={positionHint.decInvalid}
                 placeholder="blind"
                 title="Declination of the field centre in degrees; both centre fields are needed for a hinted solve"
-                onChange={(e) => setCenterDecText(e.target.value)}
+                onChange={(e) => editHint("centerDec", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -788,11 +845,11 @@ function PlateSolvePanel({
                 id={searchRadiusId}
                 type="text"
                 inputMode="decimal"
-                value={searchRadiusText}
+                value={hintTexts.radius}
                 aria-invalid={positionHint.radiusInvalid}
                 placeholder="10"
                 title="Search radius around the centre in degrees (default 10 when left empty)"
-                onChange={(e) => setSearchRadiusText(e.target.value)}
+                onChange={(e) => editHint("radius", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
             </div>
@@ -809,7 +866,7 @@ function PlateSolvePanel({
             {wcsInfo && (
               <button
                 type="button"
-                onClick={() => applyWcsHints(wcsInfo)}
+                onClick={() => applyWcsHints(wcsInfo, true)}
                 className="px-1.5 py-0.5 rounded border border-zinc-700/60 text-zinc-400 hover:text-zinc-200"
                 title="Refill the hints from the WCS in the header"
               >
@@ -818,20 +875,14 @@ function PlateSolvePanel({
             )}
           </div>
 
-          <button
-            onClick={handleSolve}
+          <SolveActions
+            loading={solveLoading}
             disabled={solveLoading || !solvePath || scaleRange.error !== null || positionHint.error !== null}
-            className="w-full flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-          >
-            {solveLoading ? (
-              <>
-                <Loader2 size={12} className="animate-spin" /> Solving... {formatDuration(solveElapsedMs)} /{" "}
-                {formatDuration(timeoutSecs * 1000)}
-              </>
-            ) : (
-              <><Compass size={12} /> Plate Solve</>
-            )}
-          </button>
+            elapsedMs={solveElapsedMs}
+            timeoutSecs={timeoutSecs}
+            onSolve={handleSolve}
+            onCancel={handleCancelSolve}
+          />
 
           {solveLoading && (
             <div className="text-[9px] text-zinc-500">

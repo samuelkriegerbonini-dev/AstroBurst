@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   STF_LOCK_PNG,
   STF_LOCK_RGB,
+  STF_LOCK_RGB_CPU,
   STF_LOCK_STRETCH,
   analysisMeasureKey,
+  apertureRangeHint,
   cpuStfRenderAllowed,
   describeMeasurementSource,
   detectedStarsOnMeasuredImage,
+  histogramChannelLabel,
   histogramStfLock,
   isCompositeOnScreen,
   isFileRgbView,
@@ -17,6 +20,8 @@ import {
   statisticsRunKey,
   wcsProbeTarget,
 } from "../analysisTarget";
+import { decimalFieldState } from "../decimalText";
+import { APERTURE_RANGE_HINT } from "../photometryTable";
 
 describe("isFileRgbView", () => {
   it("is true when the RGB view on screen is the selected RGB file's own view, whose channels the global slot may not hold", () => {
@@ -135,9 +140,9 @@ describe("detectedStarsOnMeasuredImage", () => {
 });
 
 describe("starDetectionScope", () => {
-  const wizard = { path: "D:/l.fits", composite: true, rgbPath: null, compositeVersion: 3 };
-  const rgbFile = { path: "D:/m31_osc.fits", composite: true, rgbPath: "D:/m31_osc.fits", compositeVersion: 3 };
-  const mono = { path: "D:/l.fits", composite: false, rgbPath: null, compositeVersion: 3 };
+  const wizard = { path: "D:/l.fits", measureKey: "D:/l.fits", composite: true, rgbPath: null, compositeVersion: 3 };
+  const rgbFile = { path: "D:/m31_osc.fits", measureKey: "D:/m31_osc.fits", composite: true, rgbPath: "D:/m31_osc.fits", compositeVersion: 3 };
+  const mono = { path: "D:/l.fits", measureKey: "D:/l.fits", composite: false, rgbPath: null, compositeVersion: 3 };
 
   it("changes when the wizard composite on screen is replaced", () => {
     expect(starDetectionScope({ ...wizard, compositeVersion: 4 })).not.toBe(starDetectionScope(wizard));
@@ -157,7 +162,20 @@ describe("starDetectionScope", () => {
 
   it("differs between two RGB files and between two mono images", () => {
     expect(starDetectionScope({ ...rgbFile, path: "D:/b.fits", rgbPath: "D:/b.fits" })).not.toBe(starDetectionScope(rgbFile));
-    expect(starDetectionScope({ ...mono, path: "D:/r.fits" })).not.toBe(starDetectionScope(mono));
+    expect(starDetectionScope({ ...mono, path: "D:/r.fits", measureKey: "D:/r.fits" })).not.toBe(starDetectionScope(mono));
+  });
+
+  it("changes when a step re-publishes the same FITS path onto another grid (science0925-9)", () => {
+    const pv = { ...mono, path: "C:/out/g235h_pv.fits" };
+    const step1 = starDetectionScope({ ...pv, measureKey: "C:/out/g235h_pv.fits@3" });
+    const step2 = starDetectionScope({ ...pv, measureKey: "C:/out/g235h_pv.fits@4" });
+    expect(step2).not.toBe(step1);
+    expect(starDetectionScope({ ...pv, measureKey: "C:/out/g235h_pv.fits@3" })).toBe(step1);
+  });
+
+  it("falls back to the path without a measure key", () => {
+    expect(starDetectionScope({ ...mono, measureKey: null })).toBe(starDetectionScope(mono));
+    expect(starDetectionScope({ ...mono, path: null, measureKey: null })).toBe("image:");
   });
 
   it("differs between the RGB-file view and the wizard composite over the same file", () => {
@@ -252,20 +270,58 @@ describe("wcsProbeTarget", () => {
 });
 
 describe("histogramStfLock", () => {
+  const mono = { stretch: "mtf", compositeOnScreen: false, previewOnly: false, rgbStfPanelShown: false, gpuDisplay: false };
+
   it("unlocks the mtf stretch on a mono view", () => {
-    expect(histogramStfLock({ stretch: "mtf", compositeOnScreen: false, previewOnly: false })).toBeNull();
+    expect(histogramStfLock(mono)).toBeNull();
   });
 
-  it("locks the mono histogram while an RGB view is on screen", () => {
-    expect(histogramStfLock({ stretch: "mtf", compositeOnScreen: true, previewOnly: false })).toBe(STF_LOCK_RGB);
+  it("locks the mono histogram while an RGB view is on screen and sends the user to the RGB channel STF panel", () => {
+    expect(histogramStfLock({ ...mono, compositeOnScreen: true, rgbStfPanelShown: true })).toBe(STF_LOCK_RGB);
+  });
+
+  it("points to the GPU when the RGB view is on screen but the RGB channel STF panel is hidden (CPU viewer)", () => {
+    const hint = histogramStfLock({ ...mono, compositeOnScreen: true, rgbStfPanelShown: false });
+    expect(hint).toBe(STF_LOCK_RGB_CPU);
+    expect(hint).toMatch(/turn on the GPU/);
+    expect(hint).not.toMatch(/use the RGB channel STF/);
+  });
+
+  it("keeps the RGB channel STF hint for a GPU user while the RGB planes load or after their load failed", () => {
+    expect(histogramStfLock({ ...mono, compositeOnScreen: true, rgbStfPanelShown: false, gpuDisplay: true })).toBe(STF_LOCK_RGB);
   });
 
   it("locks the sliders on a PNG-only result", () => {
-    expect(histogramStfLock({ stretch: "mtf", compositeOnScreen: false, previewOnly: true })).toBe(STF_LOCK_PNG);
+    expect(histogramStfLock({ ...mono, previewOnly: true })).toBe(STF_LOCK_PNG);
   });
 
   it("keeps the non-mtf stretch lock", () => {
-    expect(histogramStfLock({ stretch: "asinh", compositeOnScreen: false, previewOnly: false })).toBe(STF_LOCK_STRETCH);
+    expect(histogramStfLock({ ...mono, stretch: "asinh" })).toBe(STF_LOCK_STRETCH);
+  });
+});
+
+describe("histogramChannelLabel", () => {
+  const rgbFile = "C:/data/rgb_wfpc2_512.fits";
+
+  it("labels the histogram of an RGB file's own data as the R plane", () => {
+    expect(histogramChannelLabel({ isRgbFile: true, histDataPath: rgbFile, filePath: rgbFile })).toBe("R");
+  });
+
+  it("labels it whichever command computed it, as the path is the file's own (compute_histogram with DQ exclusion)", () => {
+    expect(histogramChannelLabel({ isRgbFile: true, histDataPath: "C:\\data\\RGB_WFPC2_512.fits", filePath: rgbFile })).toBe("R");
+  });
+
+  it("does not label the histogram of a processed record", () => {
+    expect(histogramChannelLabel({ isRgbFile: true, histDataPath: "C:/out/rgb_wfpc2_512_bg.fits", filePath: rgbFile })).toBeNull();
+  });
+
+  it("does not label a mono file", () => {
+    expect(histogramChannelLabel({ isRgbFile: false, histDataPath: "C:/data/502nmos.fits", filePath: "C:/data/502nmos.fits" })).toBeNull();
+  });
+
+  it("does not label a histogram that is not loaded yet or a missing file", () => {
+    expect(histogramChannelLabel({ isRgbFile: true, histDataPath: null, filePath: rgbFile })).toBeNull();
+    expect(histogramChannelLabel({ isRgbFile: true, histDataPath: rgbFile, filePath: null })).toBeNull();
   });
 });
 
@@ -296,5 +352,20 @@ describe("rgbStfPanelMode", () => {
   it("is hidden without a composite on screen or without GPU pixels", () => {
     expect(rgbStfPanelMode({ compositeOnScreen: false, hasRgbRawPixels: true, displayReferred: false })).toBe("hidden");
     expect(rgbStfPanelMode({ compositeOnScreen: true, hasRgbRawPixels: false, displayReferred: false })).toBe("hidden");
+  });
+});
+
+describe("apertureRangeHint (time series r_ap)", () => {
+  const radius = (text: string) => decimalFieldState(text, {});
+
+  it("leaves a blank or unreadable radius to the field error instead of adding the range hint", () => {
+    expect(apertureRangeHint(radius(""))).toBeNull();
+    expect(apertureRangeHint(radius("2,5"))).toBeNull();
+  });
+
+  it("shows the range hint for a radius outside 2-60 px and none inside it", () => {
+    expect(apertureRangeHint(radius("1"))).toBe(APERTURE_RANGE_HINT);
+    expect(apertureRangeHint(radius("61"))).toBe(APERTURE_RANGE_HINT);
+    expect(apertureRangeHint(radius("5"))).toBeNull();
   });
 });

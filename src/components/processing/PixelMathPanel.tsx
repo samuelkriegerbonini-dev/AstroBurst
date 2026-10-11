@@ -20,7 +20,7 @@ import {
   type CompositePanelProps,
   type CompositePixelMathResult,
 } from "./compositeProps";
-import { markSlotsTouched, retain, retainedFor, slotsTouchedFor } from "./pixelMathPanelState";
+import { chainOutputs, markSlotsTouched, pixelMathFileOptions, retain, retainedFor, slotsTouchedFor } from "./pixelMathPanelState";
 import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
@@ -217,34 +217,18 @@ export default function PixelMathPanel({
     return () => clearTimeout(handle);
   }, [expression, slotNamesKey, hasSlotErrors]);
 
-  const fileOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const options: { value: string; label: string }[] = [];
-    if (targetPath && !seen.has(targetPath)) {
-      seen.add(targetPath);
-      options.push({ value: targetPath, label: `${baseName(targetPath)} (${TARGET_SYMBOL})` });
-    }
-    for (const f of doneFiles) {
-      if (seen.has(f.path)) continue;
-      seen.add(f.path);
-      options.push({ value: f.path, label: f.name || baseName(f.path) });
-    }
-    for (const s of slots) {
-      if (s.path && !seen.has(s.path)) {
-        seen.add(s.path);
-        options.push({ value: s.path, label: baseName(s.path) });
-      }
-    }
-    return options;
-  }, [doneFiles, targetPath, slots]);
+  const fileOptions = useMemo(
+    () => pixelMathFileOptions(targetPath, doneFiles, slots, chainOutputs(chain)),
+    [doneFiles, targetPath, slots, chain],
+  );
 
   const addSlot = useCallback(() => {
     slotsTouchedRef.current = true;
     setSlots((prev) => {
       if (prev.length >= MAX_SLOTS) return prev;
-      return [...prev, slotForAdd(prev, doneFiles, targetPath)];
+      return [...prev, slotForAdd(prev, doneFiles, targetPath, pixelMathOutput)];
     });
-  }, [doneFiles, targetPath]);
+  }, [doneFiles, targetPath, pixelMathOutput]);
 
   const updateSlot = useCallback((index: number, patch: Partial<PixelMathSlot>) => {
     slotsTouchedRef.current = true;

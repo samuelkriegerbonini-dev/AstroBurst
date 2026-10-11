@@ -46,6 +46,9 @@ const hooks = vi.hoisted(() => {
 });
 
 const gainModelMock = vi.hoisted(() => vi.fn<(path: string) => Promise<GainModel>>());
+const measureMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const batchMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const pixelClick = vi.hoisted(() => ({ current: null as { seq: number; x: number; y: number } | null }));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -61,6 +64,8 @@ vi.mock("react", async (importOriginal) => {
 vi.mock("../../../services/analysis", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/analysis")>()),
   photometryGainModel: gainModelMock,
+  measurePhotometry: measureMock,
+  measurePhotometryBatch: batchMock,
 }));
 vi.mock("../../../services/astrometry", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/astrometry")>()),
@@ -73,7 +78,7 @@ vi.mock("../../../context/ToolHostContext", async (importOriginal) => ({
 vi.mock("../../../context/PreviewContext", () => ({ useDqContext: () => ({ excludeDq: false }) }));
 vi.mock("../../../hooks/useMeasurementLog", () => ({ useMeasurementProvenance: () => ({ file: "502nmos.fits", image: "original" }) }));
 vi.mock("../../../hooks/useAnalysisTarget", () => ({ useMeasurementSource: () => null }));
-vi.mock("../../../hooks/useMousePixelStore", () => ({ usePixelClick: () => null }));
+vi.mock("../../../hooks/useMousePixelStore", () => ({ usePixelClick: () => pixelClick.current }));
 
 import PhotometryPanel from "../PhotometryPanel";
 import PhotometryTablePanel from "../PhotometryTablePanel";
@@ -95,8 +100,16 @@ describe.each([
     () => renderToStaticMarkup(createElement(PhotometryTablePanel, { filePath: "C:/data/502nmos.fits", overlayKey: null, stars: [] })),
   ],
 ])("%s gain field", (_name, render) => {
-  it("carries the header-prefill title", () => {
-    expect(gainInput(render())).toContain('type="number"');
+  it("carries the header-prefill title on a decimal text box", () => {
+    const input = gainInput(render());
+    expect(input).toContain('type="text"');
+    expect(input).toContain('inputMode="decimal"');
+  });
+
+  it("renders no number input, so a typed comma is never read as a thousands digit", () => {
+    const markup = render();
+    expect(markup).not.toContain('type="number"');
+    expect(markup.match(/<input[^>]*inputMode="decimal"/g)?.length).toBe(4);
   });
 
   it("names no gain source before the header model is read", () => {
@@ -109,7 +122,7 @@ describe.each([
 });
 
 type Panel = (props: Record<string, unknown>) => ReactNode;
-type GainField = { value: string; onChange: (event: { target: { value: string } }) => void };
+type GainField = { value: string; onChange: (text: string) => void };
 
 function findGainField(node: ReactNode): GainField | null {
   if (Array.isArray(node)) {
@@ -191,7 +204,7 @@ describe.each([
     gainModelMock.mockResolvedValueOnce(ATODGAIN_7).mockReturnValueOnce(pending());
     show(FIRST);
     await flush();
-    show(FIRST).onChange({ target: { value: "3.2" } });
+    show(FIRST).onChange("3.2");
     expect(show(FIRST).value).toBe("3.2");
     show(SECOND);
     expect(show(SECOND).value).toBe("3.2");
@@ -214,5 +227,99 @@ describe.each([
     show(SECOND);
     await flush();
     expect(show(SECOND).value).toBe("");
+  });
+});
+
+type Props = Record<string, unknown>;
+
+function findElement(node: ReactNode, match: (props: Props) => boolean): Props | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, match);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!isValidElement<Props>(node)) return null;
+  if (match(node.props)) return node.props;
+  return findElement(node.props.children as ReactNode, match);
+}
+
+function renderTree(panel: Panel, props: Props): ReactNode {
+  hooks.run.cursor = 0;
+  hooks.run.effects = [];
+  const tree = panel(props);
+  for (const effect of hooks.run.effects) effect();
+  return tree;
+}
+
+const APERTURE_TITLE_PREFIX = "Aperture radius in pixels";
+const COMMA_ERROR = "r_ap px: Use a dot (.) as the decimal separator";
+const byTitlePrefix = (prefix: string) => (props: Props) => typeof props.title === "string" && props.title.startsWith(prefix);
+const fieldErrorText = (tree: ReactNode) => findElement(tree, (props) => props["data-field-error"] === true)?.children ?? null;
+
+describe("PhotometryPanel with a decimal comma in the aperture", () => {
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("names the field instead of measuring 2,5 as 25, then measures 2.5 once it is typed with a dot", () => {
+    const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+    let tree = show();
+    (findElement(tree, (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    (findElement(show(), byTitlePrefix(APERTURE_TITLE_PREFIX))!.onChange as (text: string) => void)("2,5");
+    pixelClick.current = { seq: 1, x: 10, y: 12 };
+    tree = show();
+    expect(fieldErrorText(tree)).toBe(COMMA_ERROR);
+    expect(measureMock).not.toHaveBeenCalled();
+
+    (findElement(tree, byTitlePrefix(APERTURE_TITLE_PREFIX))!.onChange as (text: string) => void)("2.5");
+    pixelClick.current = { seq: 2, x: 10, y: 12 };
+    tree = show();
+    expect(fieldErrorText(tree)).toBeNull();
+    expect(measureMock).toHaveBeenCalledTimes(1);
+    expect(measureMock.mock.calls[0][3]).toMatchObject({ apertureRadius: 2.5 });
+  });
+});
+
+describe("PhotometryTablePanel with a decimal comma in the aperture", () => {
+  const STARS = [{ x: 10, y: 12, flux: 100, fwhm: 3, snr: 50 }];
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    batchMock.mockReset().mockReturnValue(new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+  });
+
+  it("disables Measure and names the field until the radius is typed with a dot", () => {
+    const show = () => renderTree(PhotometryTablePanel.type as unknown as Panel, { filePath: FIRST, overlayKey: null, stars: STARS });
+    const measureButton = (tree: ReactNode) => findElement(tree, (props) => props.label === "Measure 1")!;
+    (findElement(show(), byTitlePrefix(APERTURE_TITLE_PREFIX))!.onChange as (text: string) => void)("2,5");
+    let tree = show();
+    expect(measureButton(tree).disabled).toBe(true);
+    expect(fieldErrorText(tree)).toBe(COMMA_ERROR);
+    (measureButton(tree).onClick as () => void)();
+    expect(batchMock).not.toHaveBeenCalled();
+
+    (findElement(tree, byTitlePrefix(APERTURE_TITLE_PREFIX))!.onChange as (text: string) => void)("2.5");
+    tree = show();
+    expect(measureButton(tree).disabled).toBe(false);
+    (measureButton(tree).onClick as () => void)();
+    expect(batchMock).toHaveBeenCalledTimes(1);
+    expect(batchMock.mock.calls[0][2]).toMatchObject({ apertureRadius: 2.5 });
   });
 });

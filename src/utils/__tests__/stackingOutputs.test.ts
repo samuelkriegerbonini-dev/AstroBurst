@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   displaysFileGrid,
+  drizzleViewOutput,
   frameStem,
   framesLabel,
   otherGridHint,
@@ -16,7 +17,7 @@ import {
   toDims,
 } from "../stackingOutputs";
 import type { ProcessedResult } from "../../shared/types/preview";
-import type { PipelineMasterOutput, PipelineResult } from "../../shared/types/stacking";
+import type { DrizzleRgbResult, PipelineMasterOutput, PipelineResult } from "../../shared/types/stacking";
 
 function result(fitsPath: string | null, previewUrl: string | null): ProcessedResult {
   return { fitsPath, previewUrl, dimensions: null, label: "x", kind: "stacking", inputPath: "/in/a.fits" };
@@ -230,17 +231,40 @@ function pipelineRun(overrides: Partial<PipelineResult> = {}): PipelineResult {
 }
 
 describe("pipelineViewOutput", () => {
-  it("shows the RGB as a PNG-only stacking result without a pixel grid, on the R channel's first light, counting every light", () => {
+  it("shows the RGB as a PNG-only stacking result with the size of the RGB the run composed, on the R channel's first light, counting every light", () => {
     expect(pipelineViewOutput(pipelineRun(), "RGB")).toEqual({
       output: {
         fitsPath: null,
         previewUrl: "asset://out/run_rgb.png",
-        dimensions: null,
+        dimensions: [1600, 1500],
         kind: "stacking",
         inputPath: "/subs/673nmos.fits",
       },
       label: "Pipeline RGB · 6 frames",
     });
+  });
+
+  it("publishes the masters' size, not the size of the strided RGB PNG, for an RGB above the preview limit", () => {
+    const big = (label: string, light: string) => ({ ...master(label, light), dimensions: [4144, 2822] as [number, number] });
+    const run = pipelineRun({
+      masters: [big("R", "/subs/r_1.fits"), big("G", "/subs/g_1.fits"), big("B", "/subs/b_1.fits")],
+      rgb_dimensions: [1382, 941],
+    });
+    expect(pipelineViewOutput(run, "RGB")?.output.dimensions).toEqual([4144, 2822]);
+  });
+
+  it("publishes the size the RGB is cropped to when the channel masters differ in size", () => {
+    const sized = (label: string, dims: [number, number]) => ({ ...master(label, `/subs/${label}_1.fits`), dimensions: dims });
+    const run = pipelineRun({ masters: [sized("R", [3000, 2500]), sized("G", [2900, 2600]), sized("B", [3100, 2400])], rgb_dimensions: [1450, 1200] });
+    expect(pipelineViewOutput(run, "RGB")?.output.dimensions).toEqual([2900, 2400]);
+  });
+
+  it("falls back to the size the run reported, never the input size, when a channel master is missing", () => {
+    const run = (rgb_dimensions: PipelineResult["rgb_dimensions"]) =>
+      pipelineRun({ masters: [master("G", "/subs/656nmos.fits"), master("B", "/subs/502nmos.fits")], rgb_dimensions });
+    expect(pipelineViewOutput(run([800, 750]), "RGB")?.output.dimensions).toEqual([800, 750]);
+    expect(pipelineViewOutput(run(null), "RGB")?.output.dimensions).toBeNull();
+    expect(pipelineViewOutput(run(undefined), "RGB")?.output.dimensions).toBeNull();
   });
 
   it("references the RGB to the first master's light when there is no R channel", () => {
@@ -277,6 +301,52 @@ describe("pipelineViewOutput", () => {
     expect(pipelineViewOutput(pipelineRun(), "L")).toBeNull();
     expect(pipelineViewOutput(pipelineRun({ rgb_png_path: null, rgbPreviewUrl: undefined }), "RGB")).toBeNull();
     expect(pipelineViewOutput(pipelineRun({ masters: undefined }), "G")).toBeNull();
+  });
+});
+
+function drizzleRun(overrides: Partial<DrizzleRgbResult> = {}): DrizzleRgbResult {
+  return {
+    png_path: "/out/drizzle_rgb_1.png",
+    fits_path: null,
+    previewUrl: "asset://out/drizzle_rgb_1.png",
+    dimensions: [2048, 1536],
+    output_dims: [2048, 1536],
+    input_dims: [1024, 768],
+    frame_count_r: 2,
+    frame_count_g: 3,
+    frame_count_b: 1,
+    rejected_pixels: 0,
+    scale: 2,
+    elapsed_ms: 1,
+    ...overrides,
+  };
+}
+
+describe("drizzleViewOutput", () => {
+  const inputs = ["/subs/r_1.fits", "/subs/r_2.fits", "/subs/g_1.fits"];
+
+  it("publishes the PNG-only result with the drizzled output size, not the input size, on the first input", () => {
+    expect(drizzleViewOutput(drizzleRun(), inputs, "/subs/g_2.fits")).toEqual({
+      output: {
+        fitsPath: null,
+        previewUrl: "asset://out/drizzle_rgb_1.png",
+        dimensions: [2048, 1536],
+        kind: "stacking",
+        inputPath: "/subs/r_1.fits",
+      },
+      label: "Drizzle RGB · 6 frames",
+    });
+  });
+
+  it("falls back to the run target for the reference and to the input count for the label", () => {
+    const view = drizzleViewOutput(drizzleRun({ frame_count_r: 0, frame_count_g: 0, frame_count_b: 0 }), [], "/subs/g_2.fits");
+    expect(view.output.inputPath).toBe("/subs/g_2.fits");
+    expect(view.label).toBe("Drizzle RGB · 0 frames");
+    expect(drizzleViewOutput(drizzleRun({ frame_count_r: 0, frame_count_g: 0, frame_count_b: 0 }), inputs, "/x.fits").label).toBe("Drizzle RGB · 3 frames");
+  });
+
+  it("publishes no size when the output size is not a positive pair", () => {
+    expect(drizzleViewOutput(drizzleRun({ output_dims: [0, 0] }), inputs, "/x.fits").output.dimensions).toBeNull();
   });
 });
 

@@ -6,9 +6,10 @@ import type { ProcessedFile } from "../../../shared/types/fits.types";
 vi.mock("../../../context/PreviewContext", () => ({
   useDoneFilesContext: () => ({ doneFiles: [] }),
 }));
-vi.mock("../../../services/cosmetic", () => ({ cosmeticCorrect: vi.fn(), cosmeticCorrectBatch: vi.fn() }));
+vi.mock("../../../services/cosmetic", () => ({ cosmeticCorrect: vi.fn(), cosmeticCorrectBatch: vi.fn(), cosmeticDryRun: vi.fn() }));
 
-import CosmeticPanel from "../CosmeticPanel";
+import CosmeticPanel, { DryRunPreview } from "../CosmeticPanel";
+import type { CosmeticDryRunResult } from "../../../services/cosmetic";
 
 function frame(name: string, header: Record<string, string>): ProcessedFile {
   return {
@@ -56,5 +57,38 @@ describe("CosmeticPanel CFA toggle", () => {
     const html = render(null);
     expect(badgeText(html)).toBe("no Bayer card");
     expect(cfaToggleChecked(html)).toBe("false");
+  });
+});
+
+describe("CosmeticPanel dry run", () => {
+  it("offers a Dry run button next to the correction", () => {
+    const html = render(frame("light_120s.fits", {}));
+    expect(html).toMatch(/<button[^>]*>(?:(?!<\/button>).)*Dry run(?:(?!<\/button>).)*<\/button>/);
+  });
+
+  it("shows the defect preview and says which pixels would be replaced", () => {
+    const result: CosmeticDryRunResult = {
+      dry_run: true,
+      path: "C:/r7/b3/cosmetic_stars_hot.fits",
+      png_path: "C:/out/cosmetic_stars_hot_defects.png",
+      previewUrl: "asset://localhost/C%3A/out/cosmetic_stars_hot_defects.png?v=1",
+      dimensions: [256, 256],
+      counts: { flagged: 93, replaced: 0, hot: 88, cold: 5, listed: 0 },
+      defects: [[10, 20, "hot"]],
+      defects_total: 93,
+      dq_present: false,
+      warning: null,
+      cfa_applied: false,
+      cfa_source: "none",
+      elapsed_ms: 12,
+    };
+    const html = renderToStaticMarkup(createElement(DryRunPreview, { result }));
+    expect(html).toContain('src="asset://localhost/C%3A/out/cosmetic_stars_hot_defects.png?v=1"');
+    expect(html).toMatch(/<img[^>]*data-testid="cosmetic-dry-run-preview"/);
+    expect(html).toContain("Red marks: pixels that would be replaced (88 hot, 5 cold)");
+    const listed = renderToStaticMarkup(
+      createElement(DryRunPreview, { result: { ...result, counts: { ...result.counts, listed: 2 } } }),
+    );
+    expect(listed).toContain("Red marks: pixels that would be replaced (88 hot, 5 cold, 2 listed)");
   });
 });

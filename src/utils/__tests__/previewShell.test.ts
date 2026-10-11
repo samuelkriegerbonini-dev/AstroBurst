@@ -9,12 +9,15 @@ import {
   GPU_WAITING_TITLE,
   GPU_WAITING_TOGGLE_TITLE,
   NEEDS_GPU_TITLE,
+  OTHER_GRID_CANVAS_HINT,
+  OTHER_GRID_IDLE_TEXT,
   PNG_ONLY_TITLE,
   backToFileAction,
   compareDividerGrabbed,
   cpuViewerDisplayTitle,
   cubeSpectrumClickAllowed,
   cubeSpectrumHintShown,
+  displayedGrid,
   fileSwitchCompositeAction,
   formatPixelValue,
   formatWavelength,
@@ -24,32 +27,181 @@ import {
   histogramOnPath,
   previewTextureTitle,
   previewViewer,
+  recordGrid,
   reseedsRgbFileView,
   statusStripIdleText,
   statusStripParts,
   viewerClickRoute,
   viewerPublishesPixel,
+  viewerSizes,
   type CompareDividerInput,
   type GpuToggleInput,
   type ViewerClickInput,
 } from "../previewShell";
+import { EMPTY_CHAIN, chainForPublish, withStep } from "../processingChain";
+import { pipelineViewOutput } from "../stackingOutputs";
+import { previewTextureBadge } from "../viewerZoom";
+import type { ProcessedResult } from "../../shared/types/preview";
 
 describe("viewerPublishesPixel", () => {
   it("is false for the colour composite, whose viewer publishes no mouse pixel", () => {
-    expect(viewerPublishesPixel({ composite: true, fileRgbView: false })).toBe(false);
+    expect(viewerPublishesPixel({ composite: true, fileRgbView: false, gridMatchesFile: true })).toBe(false);
   });
 
   it("is true for the mono viewer and for an RGB file shown as itself", () => {
-    expect(viewerPublishesPixel({ composite: false, fileRgbView: false })).toBe(true);
-    expect(viewerPublishesPixel({ composite: true, fileRgbView: true })).toBe(true);
-    expect(viewerPublishesPixel({ composite: false, fileRgbView: true })).toBe(true);
+    expect(viewerPublishesPixel({ composite: false, fileRgbView: false, gridMatchesFile: true })).toBe(true);
+    expect(viewerPublishesPixel({ composite: true, fileRgbView: true, gridMatchesFile: true })).toBe(true);
+    expect(viewerPublishesPixel({ composite: false, fileRgbView: true, gridMatchesFile: true })).toBe(true);
+  });
+
+  it("is false for a PNG-only result on another pixel grid than the file the readout probes", () => {
+    expect(viewerPublishesPixel({ composite: false, fileRgbView: false, gridMatchesFile: false })).toBe(false);
   });
 });
 
 describe("statusStripIdleText", () => {
   it("asks for a hover only where the viewer publishes a pixel", () => {
-    expect(statusStripIdleText(true)).toBe("Hover the image for x, y, value and RA/Dec");
-    expect(statusStripIdleText(false)).toBe("No pixel readout for the colour composite");
+    expect(statusStripIdleText({ composite: false, fileRgbView: false, gridMatchesFile: true })).toBe("Hover the image for x, y, value and RA/Dec");
+    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: true })).toBe("No pixel readout for the colour composite");
+  });
+
+  it("says why a PNG-only result on another pixel grid has no readout and how to get it back", () => {
+    expect(statusStripIdleText({ composite: false, fileRgbView: false, gridMatchesFile: false })).toBe(OTHER_GRID_IDLE_TEXT);
+    expect(OTHER_GRID_IDLE_TEXT).toBe("No pixel readout: this PNG-only result is on another pixel grid; Revert to measure the file");
+    expect(OTHER_GRID_CANVAS_HINT).toMatch(/another pixel grid/);
+  });
+
+  it("names the colour composite when it covers a PNG-only result on another grid", () => {
+    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: false })).toBe("No pixel readout for the colour composite");
+  });
+});
+
+describe("displayedGrid", () => {
+  const FILE: [number, number] = [1024, 1024];
+
+  it("keeps a PNG-only result with the file's size and the file as reference on the file grid", () => {
+    expect(displayedGrid({ previewOnly: true, processedDims: [1024, 1024], fileDims: FILE, onFileGrid: true })).toEqual({ dims: [1024, 1024], matchesFile: true });
+  });
+
+  it("puts a PNG-only result of another size on another grid", () => {
+    expect(displayedGrid({ previewOnly: true, processedDims: [2048, 2048], fileDims: FILE, onFileGrid: true })).toEqual({ dims: [2048, 2048], matchesFile: false });
+  });
+
+  it("puts a PNG-only result of the same size built on another frame on another grid", () => {
+    expect(displayedGrid({ previewOnly: true, processedDims: [1024, 1024], fileDims: FILE, onFileGrid: false })).toEqual({ dims: [1024, 1024], matchesFile: false });
+  });
+
+  it("never borrows the file's size for a PNG-only result published without one", () => {
+    expect(displayedGrid({ previewOnly: true, processedDims: null, fileDims: FILE, onFileGrid: true })).toEqual({ dims: null, matchesFile: false });
+  });
+
+  it("leaves a FITS result and the file itself as they were: own size, else the file's, readout on", () => {
+    expect(displayedGrid({ previewOnly: false, processedDims: [800, 600], fileDims: FILE, onFileGrid: false })).toEqual({ dims: [800, 600], matchesFile: true });
+    expect(displayedGrid({ previewOnly: false, processedDims: null, fileDims: FILE, onFileGrid: true })).toEqual({ dims: FILE, matchesFile: true });
+  });
+});
+
+describe("recordGrid", () => {
+  const LIGHT_1 = "C:/data/light_001.fits";
+  const LIGHT_3 = "C:/data/light_003.fits";
+  const DIMS: [number, number] = [64, 48];
+
+  function pngOnly(overrides: Partial<ProcessedResult>): ProcessedResult {
+    return { fitsPath: null, previewUrl: "asset://out/r.png", dimensions: DIMS, label: "R", kind: "stacking", inputPath: LIGHT_3, ...overrides };
+  }
+
+  it("takes a PNG-only stacking result of the same size built on another frame off the selected file's grid", () => {
+    expect(recordGrid({ processed: pngOnly({}), chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: DIMS, matchesFile: false, previewOnly: true });
+    expect(recordGrid({ processed: pngOnly({}), chain: EMPTY_CHAIN, filePath: LIGHT_3, fileDims: DIMS }).matchesFile).toBe(true);
+  });
+
+  it("keeps a Debayer preview with the file's size on the file grid and drops a superpixel one", () => {
+    const bilinear = pngOnly({ kind: "debayer", inputPath: LIGHT_1, label: "Debayer" });
+    expect(recordGrid({ processed: bilinear, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS }).matchesFile).toBe(true);
+    const superpixel = pngOnly({ kind: "debayer", inputPath: LIGHT_1, label: "Debayer", dimensions: [32, 24] });
+    expect(recordGrid({ processed: superpixel, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS }).matchesFile).toBe(false);
+  });
+
+  it("follows a PNG-only step run on a stack base back to the frame the stack was built on", () => {
+    const STACK = "C:/out/light_003_stack3.fits";
+    const BG = "C:/out/light_003_stack3_bg.fits";
+    const stack: ProcessedResult = { fitsPath: STACK, previewUrl: "asset://out/stack.png", dimensions: DIMS, label: "Stack", kind: "stacking", inputPath: LIGHT_3 };
+    const chain = chainForPublish(EMPTY_CHAIN, stack);
+    const onBase = pngOnly({ kind: "processing", inputPath: STACK, label: "Background" });
+    expect(recordGrid({ processed: onBase, chain, filePath: LIGHT_1, fileDims: DIMS }).matchesFile).toBe(false);
+    expect(recordGrid({ processed: onBase, chain, filePath: LIGHT_3, fileDims: DIMS }).matchesFile).toBe(true);
+    const withBg = withStep(chain, "background", { fitsPath: BG, previewUrl: null, dimensions: DIMS });
+    const afterBg = pngOnly({ kind: "pixelmath", inputPath: BG, label: "PixelMath" });
+    expect(recordGrid({ processed: afterBg, chain: withBg, filePath: LIGHT_1, fileDims: DIMS }).matchesFile).toBe(false);
+  });
+
+  it("keeps the readout on a FITS result and on the file itself", () => {
+    const fits = pngOnly({ fitsPath: "C:/out/stack.fits" });
+    expect(recordGrid({ processed: fits, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: DIMS, matchesFile: true, previewOnly: false });
+    expect(recordGrid({ processed: null, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: DIMS, matchesFile: true, previewOnly: false });
+  });
+
+  it("has no file grid for a PNG-only result without a file", () => {
+    expect(recordGrid({ processed: pngOnly({ kind: "debayer" }), chain: EMPTY_CHAIN, filePath: null, fileDims: null }).matchesFile).toBe(false);
+  });
+
+  it("keeps a cube frame shown before its FITS, published without a size, on the cube's own grid", () => {
+    const frame = pngOnly({ kind: "cube", inputPath: LIGHT_1, dimensions: null, frameIndex: 7, label: "Frame 8" });
+    expect(recordGrid({ processed: frame, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: DIMS, matchesFile: true, previewOnly: true });
+  });
+
+  it("gives no file grid to a cube result that is not a frame of the cube and has no size", () => {
+    const pv = pngOnly({ kind: "cube", inputPath: LIGHT_1, dimensions: null, label: "PV" });
+    expect(recordGrid({ processed: pv, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: null, matchesFile: false, previewOnly: true });
+  });
+});
+
+describe("viewerSizes", () => {
+  it("sizes a PNG-only result by its published dimensions", () => {
+    expect(viewerSizes({ previewOnly: true, gridDims: [2048, 2048], imageDims: [1024, 1024], naturalDims: [2048, 2048] })).toEqual({
+      fits: [2048, 2048],
+      status: [2048, 2048],
+    });
+  });
+
+  it("shows the loaded PNG's own size, and claims no FITS size, for a PNG-only result published without one", () => {
+    expect(viewerSizes({ previewOnly: true, gridDims: null, imageDims: [1024, 1024], naturalDims: [1600, 1200] })).toEqual({
+      fits: null,
+      status: [1600, 1200],
+    });
+    expect(viewerSizes({ previewOnly: true, gridDims: null, imageDims: [1024, 1024], naturalDims: null })).toEqual({ fits: null, status: null });
+  });
+
+  it("keeps the image's FITS size for a FITS result and the file", () => {
+    expect(viewerSizes({ previewOnly: false, gridDims: [1024, 1024], imageDims: [5000, 2812], naturalDims: [1920, 1080] })).toEqual({
+      fits: [5000, 2812],
+      status: [5000, 2812],
+    });
+    expect(viewerSizes({ previewOnly: false, gridDims: null, imageDims: null, naturalDims: [1920, 1080] })).toEqual({ fits: null, status: null });
+  });
+
+  it("shows a Pipeline RGB above the preview limit at its full size, with the preview badge, on the R light it was built on", () => {
+    const R_1 = "C:/data/r_1.fits";
+    const FULL: [number, number] = [4144, 2822];
+    const master = (label: string) => ({ label, png_path: `C:/out/${label}.png`, fits_path: `C:/out/${label}.fits`, dimensions: FULL, input_path: `C:/data/${label.toLowerCase()}_1.fits` });
+    const view = pipelineViewOutput(
+      {
+        stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels: [] },
+        channel_previews: [],
+        rgb_preview: "AAAA",
+        masters: [master("R"), master("G"), master("B")],
+        rgb_png_path: "C:/out/rgb.png",
+        rgb_dimensions: [1382, 941],
+        rgbPreviewUrl: "asset://out/rgb.png",
+      },
+      "RGB",
+    );
+    expect(view).not.toBeNull();
+    const grid = recordGrid({ processed: { ...view!.output, label: view!.label }, chain: EMPTY_CHAIN, filePath: R_1, fileDims: FULL });
+    expect(grid).toEqual({ dims: FULL, matchesFile: true, previewOnly: true });
+    const sizes = viewerSizes({ previewOnly: grid.previewOnly, gridDims: grid.dims, imageDims: FULL, naturalDims: [1382, 941] });
+    expect(sizes).toEqual({ fits: FULL, status: FULL });
+    expect(previewTextureBadge(1382, sizes.fits?.[0])).toBe("preview 1382 px (3.0:1)");
   });
 });
 

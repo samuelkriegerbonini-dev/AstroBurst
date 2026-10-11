@@ -201,6 +201,7 @@ dependencies = [
  "tower",
  "uuid",
  "wcs",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

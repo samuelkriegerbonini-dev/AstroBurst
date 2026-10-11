@@ -9,12 +9,17 @@ interface CapturedStretchProps {
   onResult: (png: string | null, stf?: { r: Stf; g: Stf; b: Stf }) => void;
   onChannelOutput: (binId: string, stage: "starless" | "stretched", value: ChannelStage) => void;
   onPreview?: (url: string, stf?: { r: Stf; g: Stf; b: Stf }) => void;
+  onStarlessComposite?: (url: string | null, stf: { r: Stf; g: Stf; b: Stf; linked: boolean }) => void;
   onStarRemoval?: () => void;
 }
 
+interface CapturedColorProps {
+  onResult: (png: string | null, stf?: { r: Stf; g: Stf; b: Stf; linked: boolean }) => void;
+}
+
 const { captured, current, dispatchMock, actions } = vi.hoisted(() => ({
-  captured: { stretch: null as CapturedStretchProps | null },
-  current: { state: null as WizardState | null },
+  captured: { stretch: null as CapturedStretchProps | null, color: null as CapturedColorProps | null },
+  current: { state: null as WizardState | null, activeStep: "stretch" },
   dispatchMock: vi.fn(),
   actions: {
     setCompositePreviewUrl: vi.fn(),
@@ -40,11 +45,18 @@ vi.mock("../../../context/ComposeWizardContext", () => ({
   useComposeWizardContext: () => ({
     state: current.state,
     dispatch: dispatchMock,
-    activeStep: "stretch",
+    activeStep: current.activeStep,
     setActiveStep: () => {},
     setOutputForgetter: () => {},
     setCompositeDims: () => {},
   }),
+}));
+
+vi.mock("../steps/ColorBalanceStep", () => ({
+  default: (props: CapturedColorProps) => {
+    captured.color = props;
+    return null;
+  },
 }));
 
 vi.mock("../steps/StretchStep", () => ({
@@ -134,6 +146,17 @@ describe("Compose wizard Stretch completion", () => {
     expect(dispatched()).toEqual([{ type: "INVALIDATE_FROM", stepId: "stretch" }]);
   });
 
+  it("adopts the auto STF recomputed for the starless composite as the auto, current and link state", async () => {
+    const { props } = await render(stateWith({ channels: true, blend: true, stretch: true }, true));
+    expect(typeof props.onStarlessComposite).toBe("function");
+    props.onStarlessComposite?.("asset://out/rgb_starless.png", { ...STF, linked: true });
+    expect(actions.setCompositePreviewUrl).toHaveBeenCalledWith("asset://out/rgb_starless.png");
+    expect(actions.setCompositeAutoStf).toHaveBeenCalledWith(STF.r, STF.g, STF.b);
+    expect(actions.setCompositeStf).toHaveBeenCalledWith(STF.r, STF.g, STF.b);
+    expect(actions.setCompositeStfLinked).toHaveBeenCalledWith(true);
+    expect(dispatched()).toEqual([]);
+  });
+
   it("completes Stretch when the composite stretch run finishes", async () => {
     const { props } = await render(stateWith({ channels: true, blend: true }, true));
     props.onResult("asset://out/rgb_stretched.png", STF);
@@ -151,5 +174,38 @@ describe("Compose wizard Stretch completion", () => {
     const invalidated = await render(stateWith({ channels: true, blend: true }, true));
     expect(stepTab(invalidated.html, "stretch")).not.toContain("data-complete");
     expect(stepTab(invalidated.html, "blend")).toContain('data-complete="true"');
+  });
+});
+
+describe("Compose wizard Color Balance result", () => {
+  beforeEach(() => {
+    dispatchMock.mockReset();
+    for (const spy of Object.values(actions)) spy.mockReset();
+  });
+
+  async function renderColor(): Promise<CapturedColorProps> {
+    current.state = stateWith({ channels: true, blend: true }, true);
+    current.activeStep = "colorbalance";
+    captured.color = null;
+    try {
+      renderToStaticMarkup(createElement(ComposeWizard));
+      await import("../steps/ColorBalanceStep");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      renderToStaticMarkup(createElement(ComposeWizard));
+    } finally {
+      current.activeStep = "stretch";
+    }
+    if (!captured.color) throw new Error("ColorBalanceStep was not rendered");
+    return captured.color;
+  }
+
+  it("keeps the unlinked per-channel STF a neutral white balance returned", async () => {
+    const props = await renderColor();
+    props.onResult("asset://out/rgb_composite_2.png", { ...STF, linked: false });
+    expect(actions.setCompositePreviewUrl).toHaveBeenCalledWith("asset://out/rgb_composite_2.png");
+    expect(actions.setCompositeAutoStf).toHaveBeenCalledWith(STF.r, STF.g, STF.b);
+    expect(actions.setCompositeStf).toHaveBeenCalledWith(STF.r, STF.g, STF.b);
+    expect(actions.setCompositeStfLinked).toHaveBeenCalledWith(false);
+    expect(dispatched()).toEqual([{ type: "COMPLETE_STEP", stepId: "colorbalance" }]);
   });
 });

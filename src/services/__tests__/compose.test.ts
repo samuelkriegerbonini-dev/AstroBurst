@@ -14,9 +14,9 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { alignChannels, blendChannels, channelOverlayPreview, cropChannels, detectCropBounds } from "../compose";
+import { alignChannels, blendChannels, calibrateAndScnr, channelOverlayPreview, cropChannels, detectCropBounds, lrgbCombineComposite, resetWb } from "../compose";
 import { measureChannelLevels } from "../channelLevels";
-import { extractBackgroundBatch, spccCalibrate } from "../processing";
+import { extractBackgroundBatch, removeStarsComposite, spccCalibrate } from "../processing";
 
 const overlayResponse = {
   png_path: "C:/out/channel_overlay_1_0_overlay.png",
@@ -268,5 +268,42 @@ describe("spccCalibrate", () => {
   it("sends null wavelengths by default, so the backend uses 640/530/460 nm", async () => {
     await spccCalibrate("/r.fits", "/g.fits", "/b.fits");
     expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ catalog: "gaia", wavelengthsNm: null });
+  });
+});
+
+describe("colour balance commands", () => {
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+    typedInvokeMock.mockResolvedValue({ png_path: "C:/out/rgb_composite_1.png" });
+  });
+
+  it("send the composite link state so a neutral balance can keep an unlinked stretch", async () => {
+    await calibrateAndScnr("C:/out", 1, 1, 1, undefined, false);
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("calibrate_and_scnr_cmd", expect.objectContaining({ rFactor: 1, stfLinked: false }));
+    await resetWb("C:/out", false);
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("reset_wb_cmd", { outputDir: "C:/out", stfLinked: false });
+  });
+});
+
+describe("composite commands that recompute the auto STF", () => {
+  beforeEach(() => {
+    withPreviewMock.mockReset();
+    withPreviewMock.mockResolvedValue({ png_path: "C:/out/composite_1.png" });
+  });
+
+  it("send the composite link state so LRGB and star removal keep an unlinked stretch", async () => {
+    await lrgbCombineComposite("C:/l.fits", "C:/out", { lightness: 0.8, chrominance: 1, stfLinked: false });
+    expect(withPreviewMock).toHaveBeenLastCalledWith(
+      "lrgb_combine_composite_cmd",
+      "C:/out",
+      { lPath: "C:/l.fits", lightness: 0.8, chrominance: 1, stfLinked: false },
+    );
+    await removeStarsComposite("C:/out", { detectionSigma: 5 }, false);
+    expect(withPreviewMock).toHaveBeenLastCalledWith(
+      "remove_stars_composite_cmd",
+      "C:/out",
+      expect.objectContaining({ detectionSigma: 5, stfLinked: false }),
+      expect.any(Array),
+    );
   });
 });

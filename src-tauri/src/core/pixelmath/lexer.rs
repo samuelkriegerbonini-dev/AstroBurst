@@ -128,7 +128,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, PixelMathError> {
                 b'>' => (TokenKind::Gt, 1),
                 b'=' if two_char(bytes, i, b'=') => (TokenKind::EqEq, 2),
                 b'=' => {
-                    return Err(PixelMathError::at("unexpected '='; use '==' for equality", Span::new(start, 1)));
+                    return Err(PixelMathError::at(
+                        "unexpected '=': assignments such as 'k = 0.5' are not supported; write the value inline, or use '==' to compare",
+                        Span::new(start, 1),
+                    ));
                 }
                 b'&' if two_char(bytes, i, b'&') => (TokenKind::AndAnd, 2),
                 b'&' => {
@@ -137,6 +140,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, PixelMathError> {
                 b'|' if two_char(bytes, i, b'|') => (TokenKind::OrOr, 2),
                 b'|' => {
                     return Err(PixelMathError::at("unexpected '|'; use '||' for logical or", Span::new(start, 1)));
+                }
+                b'[' => {
+                    return Err(PixelMathError::at(
+                        "unexpected '[': per-channel indexing such as $T[0] is not supported; in composite mode the expression runs on R, G and B separately",
+                        Span::new(start, 1),
+                    ));
                 }
                 _ => {
                     let ch = src[start..].chars().next().unwrap_or('?');
@@ -236,6 +245,24 @@ mod tests {
         assert_eq!(err.position, Some(2));
         assert_eq!(err.length, Some(1));
         assert!(err.message.contains("U+00E9"), "{}", err.message);
+    }
+
+    #[test]
+    fn assignment_error_explains_that_declarations_are_not_supported() {
+        let err = tokenize("k = 0.5").unwrap_err();
+        assert_eq!((err.position, err.length), (Some(2), Some(1)));
+        assert!(err.message.contains("assignments such as 'k = 0.5' are not supported"), "{}", err.message);
+        assert!(err.message.contains("write the value inline"), "{}", err.message);
+        assert!(err.message.contains("'==' to compare"), "{}", err.message);
+        assert_eq!(kinds("k == 0.5"), vec![TokenKind::Ident, TokenKind::EqEq, TokenKind::Number(0.5), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn bracket_error_explains_per_channel_indexing() {
+        let err = tokenize("$T[0] * 2").unwrap_err();
+        assert_eq!((err.position, err.length), (Some(2), Some(1)));
+        assert!(err.message.contains("per-channel indexing such as $T[0] is not supported"), "{}", err.message);
+        assert!(err.message.contains("runs on R, G and B separately"), "{}", err.message);
     }
 
     #[test]

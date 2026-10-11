@@ -24,7 +24,7 @@ vi.mock("../../ui", async (importOriginal) => {
 vi.mock("../../../services/stacking", () => ({ runCalibrationPipeline: runPipelineMock }));
 vi.mock("../../../infrastructure/tauri", () => ({ getOutputDir: vi.fn() }));
 
-import PipelinePanel, { PipelineMasterLines } from "../PipelinePanel";
+import PipelinePanel, { COSMETIC_AUTO_NOTE, CosmeticAutoNote, PipelineMasterLines } from "../PipelinePanel";
 
 const RED_FILTER: Record<string, string> = { FILTER: "Red" };
 
@@ -128,5 +128,31 @@ describe("PipelineMasterLines", () => {
     expect(linesOf(stats({ dark_groups: [{ temp_c: -10, frames: 6 }, { temp_c: null, frames: 5 }] }))).toContain(
       "dark groups: -10.0 °C (6), unknown (5)",
     );
+  });
+});
+
+describe("CosmeticAutoNote", () => {
+  it("points to the Cosmetic dry run while Auto detect is on", () => {
+    expect(COSMETIC_AUTO_NOTE).toBe(
+      "Auto detect replaces pixels in every light without a preview; check one light first with Cosmetic > Dry run.",
+    );
+    const html = renderToStaticMarkup(createElement(CosmeticAutoNote, { enabled: true }));
+    expect(html).toContain(COSMETIC_AUTO_NOTE.replace(">", "&gt;"));
+  });
+
+  it("says nothing while Auto detect is off", () => {
+    expect(renderToStaticMarkup(createElement(CosmeticAutoNote, { enabled: false }))).toBe("");
+  });
+});
+
+describe("PipelinePanel Clear buttons", () => {
+  it("render as polite live regions that ask for a second press", () => {
+    const html = renderToStaticMarkup(createElement(PipelinePanel, { files: LIGHTS, calibration: CALIBRATION }));
+    const clears = [...html.matchAll(/<button([^>]*)>Clear<\/button>/g)].map((m) => m[1]);
+    expect(clears).toHaveLength(3);
+    for (const attrs of clears) {
+      expect(attrs).toContain('aria-live="polite"');
+      expect(attrs).toContain('type="button"');
+    }
   });
 });

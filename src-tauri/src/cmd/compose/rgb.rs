@@ -3,11 +3,12 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, load_from_cache_or_disk, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::compose::color::render_balanced_preview;
 use crate::cmd::compose::composite_chain::drop_chain_if_idle;
 use crate::cmd::helpers;
 use crate::core::compose::lrgb::lrgb_combine_normalized;
 use crate::core::imaging::resample::resample_image;
-use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig, StfParams, apply_stf_f32};
+use crate::core::imaging::stf::{StfParams, apply_stf_f32};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::scnr::apply_scnr_inplace;
 use crate::infra::cache::ImageEntry;
@@ -73,6 +74,7 @@ pub async fn lrgb_combine_composite_cmd(
     output_dir: String,
     lightness: Option<f64>,
     chrominance: Option<f64>,
+    stf_linked: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -111,22 +113,21 @@ pub async fn lrgb_combine_composite_cmd(
             .unwrap_or(0);
         let png_path = format!("{}/composite_lrgb_{}.png", output_dir, ts);
 
-        let stf_config = AutoStfConfig::default();
-        let (linked_stf, combined_stats) =
-            helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
-        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
-        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
-        helpers::render_rgb_preview_with_stf(&r, &g, &b, fn_r, fn_g, fn_b, &png_path, MAX_PREVIEW_DIM)?;
+        let stf = render_balanced_preview(
+            [&r, &g, &b],
+            [&stats_r, &stats_g, &stats_b],
+            stf_linked == Some(false),
+            &png_path,
+        )?;
 
         helpers::insert_composite_content(r, g, b, stats_r, stats_g, stats_b);
 
-        Ok(json!({
+        Ok(stf.add_to(json!({
             RES_PNG_PATH: png_path,
             LRGB_APPLIED: true,
             RES_DIMENSIONS: [cols, rows],
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
-        }))
+        })))
     })
 }
 
@@ -200,6 +201,8 @@ pub async fn clear_composite_cache_cmd() -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::core::imaging::stats::combine_channel_stats;
+    use crate::core::imaging::stf::AutoStfConfig;
+    use crate::types::constants::{RES_AUTO_STF, RES_STF_LINKED, STF_B, STF_G, STF_R};
     use ndarray::Array2;
 
     fn stf(shadow: f64, midtone: f64) -> StfParams {
@@ -252,7 +255,7 @@ mod tests {
         helpers::clear_composite();
         let expected = "The colour composite is no longer in memory; run Blend again.";
 
-        let lrgb = lrgb_combine_composite_cmd(out.clone(), out.clone(), None, None)
+        let lrgb = lrgb_combine_composite_cmd(out.clone(), out.clone(), None, None, None)
             .await
             .expect_err("LRGB on a cleared composite must fail");
         assert_eq!(lrgb, expected);
@@ -263,6 +266,67 @@ mod tests {
         .await
         .expect_err("restretch on a cleared composite must fail");
         assert_eq!(restretch, expected);
+    }
+
+    #[tokio::test]
+    async fn lrgb_returns_the_recomputed_auto_stf() {
+        use crate::types::constants::{COMPOSITE_KEY_B, COMPOSITE_KEY_G, COMPOSITE_KEY_R};
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let l_path = dir.path().join("lum.fits").to_str().unwrap().to_string();
+        let l = Array2::from_shape_fn((8, 8), |(y, x)| 200.0 + ((y * 8 + x) * 9) as f32);
+        crate::infra::fits::writer::write_fits_mono(&l_path, &l, None).unwrap();
+        let r = Array2::from_shape_fn((8, 8), |(y, x)| 10.0 + (y * 8 + x) as f32);
+        let g = r.mapv(|v| v * 0.5 + 3.0);
+        let b = r.mapv(|v| v * 0.25 + 1.0);
+        let (sr, sg, sb) = (compute_image_stats(&r), compute_image_stats(&g), compute_image_stats(&b));
+        helpers::insert_composite_and_orig(r, g, b, sr.clone(), sg.clone(), sb.clone());
+        let stale = helpers::stf_json(&helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &AutoStfConfig::default()).0);
+
+        let run = lrgb_combine_composite_cmd(l_path, out, Some(1.0), Some(1.0), Some(true)).await;
+        let combined = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B].map(|k| crate::infra::cache::GLOBAL_IMAGE_CACHE.get(k));
+        helpers::clear_composite();
+        let res = run.unwrap();
+
+        let [cr, cg, cb] = combined.map(|e| e.expect("LRGB channel"));
+        let (expected, _) =
+            helpers::compute_linked_stf_with_stats(cr.stats(), cg.stats(), cb.stats(), &AutoStfConfig::default());
+        let expected = helpers::stf_json(&expected);
+        assert_ne!(expected, stale, "precondition: LRGB changes the auto STF");
+        assert_eq!(res[RES_AUTO_STF], expected, "{res}");
+        assert_eq!(res[STF_R], expected, "{res}");
+        assert_eq!(res[STF_G], expected, "{res}");
+        assert_eq!(res[STF_B], expected, "{res}");
+        assert_eq!(res[RES_STF_LINKED], true, "{res}");
+    }
+
+    #[tokio::test]
+    async fn lrgb_keeps_an_unlinked_stretch() {
+        use crate::core::imaging::stf::auto_stf;
+        use crate::types::constants::{COMPOSITE_KEY_B, COMPOSITE_KEY_G, COMPOSITE_KEY_R};
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let l_path = dir.path().join("lum.fits").to_str().unwrap().to_string();
+        let l = Array2::from_shape_fn((8, 8), |(y, x)| 200.0 + ((y * 8 + x) * 9) as f32);
+        crate::infra::fits::writer::write_fits_mono(&l_path, &l, None).unwrap();
+        let r = Array2::from_shape_fn((8, 8), |(y, x)| 10.0 + (y * 8 + x) as f32);
+        let g = r.mapv(|v| v.sqrt() * 40.0);
+        let b = r.mapv(|v| v * v * 0.01 + 1.0);
+        let (sr, sg, sb) = (compute_image_stats(&r), compute_image_stats(&g), compute_image_stats(&b));
+        helpers::insert_composite_and_orig(r, g, b, sr, sg, sb);
+
+        let run = lrgb_combine_composite_cmd(l_path, out, Some(1.0), Some(1.0), Some(false)).await;
+        let combined = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B].map(|k| crate::infra::cache::GLOBAL_IMAGE_CACHE.get(k));
+        helpers::clear_composite();
+        let res = run.unwrap();
+
+        let config = AutoStfConfig::default();
+        let expected = combined.map(|e| helpers::stf_json(&auto_stf(e.expect("LRGB channel").stats(), &config)));
+        assert_eq!(res[RES_STF_LINKED], false, "{res}");
+        assert_eq!([&res[STF_R], &res[STF_G], &res[STF_B]], expected.each_ref(), "{res}");
+        assert!(expected[0] != expected[1] && expected[1] != expected[2] && expected[0] != expected[2], "precondition: {res}");
     }
 
     #[test]

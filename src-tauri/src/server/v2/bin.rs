@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use astroburst_lib::core::imaging::stats::compute_image_stats;
+use astroburst_lib::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
@@ -22,6 +22,19 @@ fn block_span(index: usize, scale: f64, len: usize) -> (usize, usize) {
 }
 
 pub(crate) fn nan_area_downsample(src: &Array2<f32>, out_rows: usize, out_cols: usize) -> Array2<f32> {
+    area_downsample_keeping(src, out_rows, out_cols, f32::is_finite)
+}
+
+pub(crate) fn padding_area_downsample(src: &Array2<f32>, out_rows: usize, out_cols: usize) -> Array2<f32> {
+    area_downsample_keeping(src, out_rows, out_cols, is_valid_pixel)
+}
+
+fn area_downsample_keeping(
+    src: &Array2<f32>,
+    out_rows: usize,
+    out_cols: usize,
+    keep: impl Fn(f32) -> bool + Sync,
+) -> Array2<f32> {
     let (in_rows, in_cols) = src.dim();
     if (in_rows, in_cols) == (out_rows, out_cols) {
         return src.clone();
@@ -42,7 +55,7 @@ pub(crate) fn nan_area_downsample(src: &Array2<f32>, out_rows: usize, out_cols: 
                 let (x0, x1) = block_span(ox, scale_x, in_cols);
                 let mut sum = 0.0f64;
                 let mut count = 0u32;
-                for v in view.slice(s![y0..y1, x0..x1]).iter().filter(|v| v.is_finite()) {
+                for v in view.slice(s![y0..y1, x0..x1]).iter().filter(|v| keep(**v)) {
                     sum += *v as f64;
                     count += 1;
                 }

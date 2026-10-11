@@ -13,9 +13,7 @@ import { generateId } from "../../utils/format";
 import {
   APERTURE_RANGE_HINT,
   BATCH_SEMANTICS_TEXT,
-  MAX_APERTURE_RADIUS_PX,
   MAX_SKY_OUTER_RADIUS_PX,
-  MIN_APERTURE_RADIUS_PX,
   STARS_ELSEWHERE_NOTICE,
   apertureRadiusInRange,
   flagDuplicates,
@@ -32,7 +30,8 @@ import { detectedStarsLabel } from "../../utils/photometryPanel";
 import { GAIN_TITLE, gainCaption, nextGainText } from "../../utils/photometryGain";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { APERTURE_LAYER_ID, APERTURE_LAYER_KIND, createAperturePainter, type ApertureMarker } from "../viewer/painters/aperturePainter";
-import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import MeasurementBadge from "./MeasurementBadge";
 import type { Star } from "./PlateSolvePanel";
 
@@ -91,10 +90,10 @@ const TABLE_COLUMNS: TableColumn[] = [
   { key: "aperture_correction", header: "corr", digits: 3 },
 ];
 
-function parseOptionalNumber(text: string): number | undefined {
-  const v = parseFloat(text);
-  return Number.isFinite(v) && v > 0 ? v : undefined;
-}
+const APERTURE_FIELD: DecimalFieldOptions = { optional: true };
+const SKY_IN_FIELD: DecimalFieldOptions = { optional: true, min: 1 };
+const SKY_OUT_FIELD: DecimalFieldOptions = { optional: true, min: 1, max: MAX_SKY_OUTER_RADIUS_PX };
+const GAIN_FIELD: DecimalFieldOptions = { optional: true, min: 0.01 };
 
 function fmt(v: number | null | undefined, digits: number): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "--";
@@ -226,15 +225,25 @@ function PhotometryTablePanel({
     return { points: pasted.points, labels: pasted.points.map((_, i) => `p${i + 1}`) };
   }, [source, stars, pointRegions, pasted]);
 
-  const apertureRadius = parseOptionalNumber(apertureText);
-  const annulusInner = parseOptionalNumber(skyInText);
-  const annulusOuter = parseOptionalNumber(skyOutText);
-  const gain = parseOptionalNumber(gainText);
+  const apertureField = decimalFieldState(apertureText, APERTURE_FIELD);
+  const skyInField = decimalFieldState(skyInText, SKY_IN_FIELD);
+  const skyOutField = decimalFieldState(skyOutText, SKY_OUT_FIELD);
+  const gainField = decimalFieldState(gainText, GAIN_FIELD);
+  const apertureRadius = apertureField.value ?? undefined;
+  const annulusInner = skyInField.value ?? undefined;
+  const annulusOuter = skyOutField.value ?? undefined;
+  const gain = gainField.value ?? undefined;
+  const fieldError = firstFieldError([
+    ["r_ap px", apertureField],
+    ["sky in px", skyInField],
+    ["sky out px", skyOutField],
+    ["gain e-/ADU", gainField],
+  ]);
   const annulusHalfFilled = (annulusInner === undefined) !== (annulusOuter === undefined);
   const apertureOutOfRange = !apertureRadiusInRange(apertureRadius);
 
   const measure = useCallback(async () => {
-    if (!filePath || input.points.length === 0 || apertureOutOfRange) return;
+    if (!filePath || input.points.length === 0 || apertureOutOfRange || fieldError !== null) return;
     const seq = ++requestSeqRef.current;
     const labels = input.labels;
     setRunning(true);
@@ -256,7 +265,7 @@ function PhotometryTablePanel({
     } finally {
       if (requestSeqRef.current === seq) setRunning(false);
     }
-  }, [filePath, input, apertureOutOfRange, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, provenance, source]);
+  }, [filePath, input, apertureOutOfRange, fieldError, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, provenance, source]);
 
   const rows = useMemo(
     (): PhotometryTableRow[] =>
@@ -360,7 +369,7 @@ function PhotometryTablePanel({
 
   const result = run?.result ?? null;
   const calibration = result ? (result.photcal ? result.photcal.label : "uncalibrated") : null;
-  const canMeasure = !!filePath && input.points.length > 0 && !annulusHalfFilled && !apertureOutOfRange;
+  const canMeasure = !!filePath && input.points.length > 0 && !annulusHalfFilled && !apertureOutOfRange && fieldError === null;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -416,16 +425,13 @@ function PhotometryTablePanel({
             <label htmlFor={apertureId} className="text-[9px] text-zinc-500">
               r_ap px
             </label>
-            <input
+            <DecimalField
               id={apertureId}
-              type="number"
-              min={MIN_APERTURE_RADIUS_PX}
-              max={MAX_APERTURE_RADIUS_PX}
-              step={0.5}
+              {...APERTURE_FIELD}
               value={apertureText}
               placeholder="auto"
               title={APERTURE_TITLE}
-              onChange={(e) => setApertureText(e.target.value)}
+              onChange={setApertureText}
               className={INPUT_CLASS}
             />
           </div>
@@ -433,15 +439,13 @@ function PhotometryTablePanel({
             <label htmlFor={skyInId} className="text-[9px] text-zinc-500">
               sky in px
             </label>
-            <input
+            <DecimalField
               id={skyInId}
-              type="number"
-              min={1}
-              step={0.5}
+              {...SKY_IN_FIELD}
               value={skyInText}
               placeholder="2×r"
               title={SKY_IN_TITLE}
-              onChange={(e) => setSkyInText(e.target.value)}
+              onChange={setSkyInText}
               className={INPUT_CLASS}
             />
           </div>
@@ -449,16 +453,13 @@ function PhotometryTablePanel({
             <label htmlFor={skyOutId} className="text-[9px] text-zinc-500">
               sky out px
             </label>
-            <input
+            <DecimalField
               id={skyOutId}
-              type="number"
-              min={1}
-              max={MAX_SKY_OUTER_RADIUS_PX}
-              step={0.5}
+              {...SKY_OUT_FIELD}
               value={skyOutText}
               placeholder="3×r"
               title={SKY_OUT_TITLE}
-              onChange={(e) => setSkyOutText(e.target.value)}
+              onChange={setSkyOutText}
               className={INPUT_CLASS}
             />
           </div>
@@ -466,16 +467,14 @@ function PhotometryTablePanel({
             <label htmlFor={gainId} className="text-[9px] text-zinc-500">
               gain e-/ADU
             </label>
-            <input
+            <DecimalField
               id={gainId}
-              type="number"
-              min={0.01}
-              step={0.1}
+              {...GAIN_FIELD}
               value={gainText}
               placeholder="none"
               title={GAIN_TITLE}
               data-gain-source={gainModel?.source ?? ""}
-              onChange={(e) => setGainText(e.target.value)}
+              onChange={setGainText}
               className={INPUT_CLASS}
             />
           </div>
@@ -486,6 +485,7 @@ function PhotometryTablePanel({
         </div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
         {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
+        {fieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{fieldError}</div>}
 
         <RunButton
           label={`Measure ${input.points.length}`}

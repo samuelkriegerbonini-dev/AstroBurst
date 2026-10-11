@@ -14,7 +14,12 @@ use crate::core::stacking::calibration::load_fits_image;
 use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::core::stacking::frame_cards::{read_frame_cards, FrameCards};
 use crate::core::stacking::masters::{
-    assign_dark_groups, build_masters_from_frames, check_channel_lights, read_master_frames, MasterRequest,
+    assign_dark_groups, build_masters_from_frames, check_channel_lights, group_darks, read_master_frames,
+    MasterFrames, MasterRequest,
+};
+use crate::core::stacking::memory::{
+    check_memory, effective_memory, frame_sizes, pipeline_bytes, pixel_counts, MemoryInfo, MemoryJob, PipelinePeak,
+    PipelineShape,
 };
 use crate::core::stacking::never_cancelled;
 use crate::types::constants::{
@@ -341,6 +346,61 @@ fn run_pipeline_request(
     output_dir: &str,
     name: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    run_pipeline_request_with_memory(request, output_dir, name, effective_memory())
+}
+
+fn pipeline_memory_check(
+    request: &PipelineRequest,
+    frames: &MasterFrames,
+    info: Option<MemoryInfo>,
+) -> anyhow::Result<Option<String>> {
+    if info.is_none() {
+        return Ok(None);
+    }
+    let channels: Vec<Vec<u64>> = request
+        .channels
+        .iter()
+        .map(|ch| frame_sizes(&ch.paths).map(|sizes| pixel_counts(&sizes)))
+        .collect::<anyhow::Result<_>>()?;
+    let calibration_paths: Vec<String> =
+        [&request.bias_paths, &request.dark_paths, &request.flat_paths, &request.flat_dark_paths]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+    let calibration_pixels = pixel_counts(&frame_sizes(&calibration_paths)?);
+    let dark_groups = group_darks(&frames.darks);
+    let largest_dark_group = dark_groups.iter().map(|g| g.members.len()).max().unwrap_or(0);
+    let largest_set = [request.bias_paths.len(), largest_dark_group, request.flat_paths.len(), request.flat_dark_paths.len()]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let masters = usize::from(!request.bias_paths.is_empty())
+        + dark_groups.len()
+        + usize::from(!dark_groups.is_empty())
+        + usize::from(!request.flat_dark_paths.is_empty())
+        + usize::from(!request.flat_paths.is_empty());
+    let (required, peak) = pipeline_bytes(&PipelineShape {
+        channels: &channels,
+        calibration_pixels: &calibration_pixels,
+        largest_calibration_set: largest_set,
+        masters,
+        align: request.align.unwrap_or(true),
+        normalize: request.normalize.unwrap_or(true),
+    });
+    let job = match peak {
+        PipelinePeak::Channel(index) => MemoryJob::PipelineChannel(&request.channels[index].label),
+        PipelinePeak::Masters => MemoryJob::PipelineMasters,
+    };
+    check_memory(required, info, &job)
+}
+
+fn run_pipeline_request_with_memory(
+    request: PipelineRequest,
+    output_dir: &str,
+    name: Option<&str>,
+    info: Option<MemoryInfo>,
+) -> Result<serde_json::Value, String> {
     let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
         .map_err(|e| format!("{:#}", e))?;
     let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
@@ -372,6 +432,7 @@ fn run_pipeline_request(
             check_channel_lights(&master_frames, &ch.label, cards, cosmetic_enabled).map_err(|e| format!("{:#}", e))?,
         );
     }
+    warnings.extend(pipeline_memory_check(&request, &master_frames, info).map_err(|e| format!("{:#}", e))?);
 
     let (masters, report) = build_masters_from_frames(&master_request, &master_frames, &never_cancelled)
         .map_err(|e| format!("{:#}", e))?;
@@ -861,6 +922,77 @@ mod tests {
             cosmetic: None,
             dark_optimize: false,
         }
+    }
+
+    fn truncate_last_block(path: &str) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - 2880).unwrap();
+    }
+
+    #[test]
+    fn pipeline_refuses_over_budget_before_building_masters() {
+        let dir = tempfile::tempdir().unwrap();
+        let bias = write_frames(&dir, "bias", 2, 100.0);
+        truncate_last_block(&bias[1]);
+        let request = || PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "L".into(), paths: write_frames(&dir, "light", 2, 500.0) }],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: bias.clone(),
+            flat_dark_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(false),
+            rejection: None,
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        };
+        let out = out_dir(&dir);
+        let load_error = run_pipeline_request_with_memory(request(), &out, Some("budget"), None).unwrap_err();
+        assert!(load_error.contains("bias1.fits"), "{load_error}");
+
+        let tiny = Some(MemoryInfo { physical_available: 1024, commit_available: 1024 });
+        let err = run_pipeline_request_with_memory(request(), &out, Some("budget"), tiny).unwrap_err();
+        assert!(err.starts_with("Channel 'L' of the Pipeline needs about"), "{err}");
+        assert!(err.contains("ASTROBURST_MEMORY_BUDGET_MB"), "{err}");
+        assert!(!std::path::Path::new(&out).exists(), "the output dir was created before the memory check");
+    }
+
+    #[test]
+    fn pipeline_masters_peak_is_named_when_calibration_frames_dominate() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "L".into(), paths: write_frames(&dir, "light", 1, 500.0) }],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: write_frames(&dir, "bias", 12, 100.0),
+            flat_dark_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(false),
+            rejection: None,
+            combine: None,
+            cosmetic: None,
+            dark_optimize: false,
+        };
+        let tiny = Some(MemoryInfo { physical_available: 1024, commit_available: 1024 });
+        let err = run_pipeline_request_with_memory(request, &out_dir(&dir), None, tiny).unwrap_err();
+        assert!(err.starts_with("Building the calibration masters of the Pipeline needs about"), "{err}");
+    }
+
+    #[test]
+    fn pipeline_reports_the_low_memory_warning_with_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = rgb_request(&dir, [12, 12, 12]);
+        request.channels.truncate(1);
+        let tight = Some(MemoryInfo { physical_available: 1024, commit_available: u64::MAX });
+        let response = run_pipeline_request_with_memory(request, &out_dir(&dir), None, tight).unwrap();
+        let warnings: Vec<&str> = response[RES_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+        assert_eq!(warnings.iter().filter(|w| w.contains("may page to disk")).count(), 1, "{warnings:?}");
     }
 
     #[test]

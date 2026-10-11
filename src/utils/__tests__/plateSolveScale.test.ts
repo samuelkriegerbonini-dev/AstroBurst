@@ -1,13 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_HINT_TEXTS,
   DEFAULT_SCALE_HIGH_TEXT,
   DEFAULT_SCALE_LOW_TEXT,
+  headerHintTexts,
   headerPositionHintTexts,
+  mergeHintTexts,
   parsePositionHint,
   parseRadius,
   parseScaleRange,
   positionHintStatus,
   scaleHintFromPixelScale,
+  type HintField,
+  type HintTexts,
 } from "../plateSolveScale";
 
 describe("scaleHintFromPixelScale", () => {
@@ -243,5 +248,100 @@ describe("headerPositionHintTexts", () => {
     expect(headerPositionHintTexts({ center_ra: Number.NaN, center_dec: 0, fov_arcmin: [60, 45] })).toBeNull();
     expect(headerPositionHintTexts({ center_ra: 10, center_dec: Number.POSITIVE_INFINITY, fov_arcmin: [60, 45] })).toBeNull();
     expect(headerPositionHintTexts({ center_ra: 10, center_dec: 0, fov_arcmin: [Number.NaN, 45] })?.radius).toBeNull();
+  });
+});
+
+const F200W_HEADER = { pixel_scale_arcsec: 0.031, center_ra: 190.029137, center_dec: -11.633133, fov_arcmin: [6.4, 6.4] as [number, number] };
+const F200W_HINTS: HintTexts = {
+  scaleLow: "0.0248",
+  scaleHigh: "0.0388",
+  scaleUnits: "arcsecperpix",
+  centerRa: "190.029137",
+  centerDec: "-11.633133",
+  radius: "0.0754",
+};
+const NOTHING_TOUCHED: ReadonlySet<HintField> = new Set();
+
+describe("headerHintTexts", () => {
+  it("fills the scale range in arcsec/px and the centre and radius from the header WCS", () => {
+    expect(headerHintTexts(F200W_HEADER)).toEqual(F200W_HINTS);
+  });
+
+  it("gives no scale hint without a usable pixel scale and no radius without a usable field of view", () => {
+    expect(headerHintTexts({ ...F200W_HEADER, pixel_scale_arcsec: 0 })).toEqual({
+      centerRa: "190.029137",
+      centerDec: "-11.633133",
+      radius: "0.0754",
+    });
+    expect(headerHintTexts({ ...F200W_HEADER, fov_arcmin: [Number.NaN, 6.4] })).toEqual({
+      scaleLow: "0.0248",
+      scaleHigh: "0.0388",
+      scaleUnits: "arcsecperpix",
+      centerRa: "190.029137",
+      centerDec: "-11.633133",
+    });
+    expect(headerHintTexts({ ...F200W_HEADER, pixel_scale_arcsec: Number.NaN, center_ra: Number.NaN })).toEqual({});
+  });
+});
+
+describe("mergeHintTexts", () => {
+  it("fills every field from the header while the user has typed nothing", () => {
+    expect(mergeHintTexts(DEFAULT_HINT_TEXTS, F200W_HINTS, NOTHING_TOUCHED)).toEqual(F200W_HINTS);
+  });
+
+  it("keeps a typed scale low when a later publish brings the header hints back", () => {
+    const typed: HintTexts = { ...F200W_HINTS, scaleLow: "0.05" };
+    expect(mergeHintTexts(typed, F200W_HINTS, new Set<HintField>(["scaleLow"]))).toEqual(typed);
+  });
+
+  it("keeps every typed field and the scale range that goes with typed units, and refreshes the rest", () => {
+    const current: HintTexts = {
+      scaleLow: "1",
+      scaleHigh: "2",
+      scaleUnits: "arcminwidth",
+      centerRa: "10.5",
+      centerDec: "",
+      radius: "3",
+    };
+    const touched = new Set<HintField>(["scaleUnits", "centerRa", "radius"]);
+    expect(mergeHintTexts(current, F200W_HINTS, touched)).toEqual({
+      scaleLow: "1",
+      scaleHigh: "2",
+      scaleUnits: "arcminwidth",
+      centerRa: "10.5",
+      centerDec: "-11.633133",
+      radius: "3",
+    });
+  });
+
+  it("keeps the default range in the units the user picked when a solved header with a new pixel scale is published", () => {
+    const current: HintTexts = { ...DEFAULT_HINT_TEXTS, scaleUnits: "degwidth" };
+    const solved = headerHintTexts({ ...F200W_HEADER, pixel_scale_arcsec: 1.8 });
+    expect(solved).toMatchObject({ scaleLow: "1.44", scaleHigh: "2.25", scaleUnits: "arcsecperpix" });
+    expect(mergeHintTexts(current, solved, new Set<HintField>(["scaleUnits"]))).toEqual({
+      ...F200W_HINTS,
+      scaleLow: DEFAULT_SCALE_LOW_TEXT,
+      scaleHigh: DEFAULT_SCALE_HIGH_TEXT,
+      scaleUnits: "degwidth",
+    });
+  });
+
+  it("keeps the whole typed scale range when only one bound was typed and the pixel scale changes", () => {
+    const typed: HintTexts = { ...F200W_HINTS, scaleLow: "0.02" };
+    const longWave = headerHintTexts({ ...F200W_HEADER, pixel_scale_arcsec: 0.063 });
+    expect(longWave.scaleHigh).not.toBe(F200W_HINTS.scaleHigh);
+    expect(mergeHintTexts(typed, longWave, new Set<HintField>(["scaleLow"]))).toEqual(typed);
+  });
+
+  it("leaves a field the header gives no hint for as it is", () => {
+    const current: HintTexts = { ...DEFAULT_HINT_TEXTS, radius: "2" };
+    const hints = headerHintTexts({ ...F200W_HEADER, fov_arcmin: [Number.NaN, 6.4] });
+    expect(mergeHintTexts(current, hints, NOTHING_TOUCHED)).toEqual({ ...F200W_HINTS, radius: "2" });
+  });
+
+  it("does not change the current texts it was given", () => {
+    const current: HintTexts = { ...DEFAULT_HINT_TEXTS };
+    mergeHintTexts(current, F200W_HINTS, NOTHING_TOUCHED);
+    expect(current).toEqual(DEFAULT_HINT_TEXTS);
   });
 });

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, Clock, Download, Loader2, X } from "lucide-react";
 import ProfilePlot, { type PlotHit, type ProfileSeries } from "../regions/ProfilePlot";
-import { timeSeriesPhotometry } from "../../services/analysis";
+import { photometryGainModel, timeSeriesPhotometry, type GainModel } from "../../services/analysis";
 import { measurementLog, timeSeriesEntry } from "../../utils/measurementLog";
 import { cancelProgress } from "../../services/progress";
 import {
@@ -45,16 +45,13 @@ import {
   type TimeAxis,
 } from "../../utils/differentialPhotometry";
 import { loadSiteOverride } from "../../utils/observationGeometry";
-import {
-  APERTURE_RANGE_HINT,
-  MAX_APERTURE_RADIUS_PX,
-  MAX_SKY_OUTER_RADIUS_PX,
-  MIN_APERTURE_RADIUS_PX,
-  apertureRadiusInRange,
-} from "../../utils/photometryTable";
+import { MAX_SKY_OUTER_RADIUS_PX, apertureRadiusInRange } from "../../utils/photometryTable";
+import { apertureRangeHint } from "../../utils/analysisTarget";
+import { GAIN_TITLE, gainCaption, loadGainPrefill, nextGainText } from "../../utils/photometryGain";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import { displaysFileGrid, otherGridHint } from "../../utils/stackingOutputs";
 import { abandonRun, beginRun, createRunTracker, isCurrentRun, settleRun } from "../../utils/runTracker";
-import { ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
 
 interface TimeSeriesPanelProps {
   filePath: string | null;
@@ -94,10 +91,10 @@ const SMALL_BUTTON_CLASS =
 const SECTION_CLASS = "text-[9px] text-zinc-500 uppercase tracking-wider";
 const CHIP_CLASS = "inline-block rounded px-1 py-px text-[8px] leading-tight mr-0.5";
 
-function parseOptionalNumber(text: string): number | undefined {
-  const v = parseFloat(text);
-  return Number.isFinite(v) && v > 0 ? v : undefined;
-}
+const APERTURE_FIELD: DecimalFieldOptions = {};
+const SKY_IN_FIELD: DecimalFieldOptions = { optional: true, min: 1 };
+const SKY_OUT_FIELD: DecimalFieldOptions = { optional: true, min: 1, max: MAX_SKY_OUTER_RADIUS_PX };
+const GAIN_FIELD: DecimalFieldOptions = { optional: true, min: 0.01 };
 
 function fmt(v: number | null | undefined, digits: number): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "--";
@@ -131,6 +128,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [skyInText, setSkyInText] = useState("");
   const [skyOutText, setSkyOutText] = useState("");
   const [gainText, setGainText] = useState("");
+  const [gainModel, setGainModel] = useState<GainModel | null>(null);
   const [trackDrift, setTrackDrift] = useState(true);
   const [seriesKey, setSeriesKey] = useState(SERIES_TARGET);
   const [timeAxis, setTimeAxis] = useState<TimeAxis>("bjd");
@@ -140,6 +138,10 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const runRef = useRef(createRunTracker());
   const resultRef = useRef<TimeSeriesResult | null>(null);
+  const gainTextRef = useRef(gainText);
+  gainTextRef.current = gainText;
+  const gainPrefillRef = useRef("");
+  const gainSeqRef = useRef(0);
 
   const abandon = useCallback(() => {
     if (abandonRun(runRef.current)) cancelProgress(TIME_SERIES_PROGRESS_EVENT).catch(() => {});
@@ -161,6 +163,21 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   }, [filePath, abandon]);
 
   useEffect(() => abandon, [abandon]);
+
+  useEffect(() => {
+    const seq = ++gainSeqRef.current;
+    setGainModel(null);
+    const cleared = nextGainText(gainTextRef.current, gainPrefillRef.current, null);
+    gainPrefillRef.current = cleared.prefill;
+    gainTextRef.current = cleared.text;
+    setGainText(cleared.text);
+    void loadGainPrefill(filePath, () => gainTextRef.current, cleared.prefill, photometryGainModel).then((next) => {
+      if (gainSeqRef.current !== seq) return;
+      gainPrefillRef.current = next.prefill;
+      setGainModel(next.model);
+      setGainText(next.text);
+    });
+  }, [filePath]);
 
   const dims = file?.result?.dimensions ?? null;
   const matching = useMatchingFrames(dims);
@@ -186,12 +203,23 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     return rows;
   }, [pointRegions, roles]);
 
-  const apertureRadius = parseOptionalNumber(apertureText);
-  const annulusInner = parseOptionalNumber(skyInText);
-  const annulusOuter = parseOptionalNumber(skyOutText);
-  const gain = parseOptionalNumber(gainText);
+  const apertureField = decimalFieldState(apertureText, APERTURE_FIELD);
+  const skyInField = decimalFieldState(skyInText, SKY_IN_FIELD);
+  const skyOutField = decimalFieldState(skyOutText, SKY_OUT_FIELD);
+  const gainField = decimalFieldState(gainText, GAIN_FIELD);
+  const apertureRadius = apertureField.value ?? undefined;
+  const annulusInner = skyInField.value ?? undefined;
+  const annulusOuter = skyOutField.value ?? undefined;
+  const gain = gainField.value ?? undefined;
+  const fieldError = firstFieldError([
+    ["r_ap px", apertureField],
+    ["sky in px", skyInField],
+    ["sky out px", skyOutField],
+    ["gain e-/ADU", gainField],
+  ]);
   const annulusHalfFilled = (annulusInner === undefined) !== (annulusOuter === undefined);
   const apertureValid = apertureRadius !== undefined && apertureRadiusInRange(apertureRadius);
+  const apertureHint = apertureRangeHint(apertureField);
   const sent = useMemo(() => measuredTargets(targets.map((t) => t.target)), [targets]);
   const overLimit = sent.length > MAX_TIME_SERIES_TARGETS;
   const roleHint = timeSeriesRoleHint(targets.map((t) => t.target.role));
@@ -206,6 +234,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     onFileGrid &&
     roleHint === null &&
     apertureValid &&
+    fieldError === null &&
     !annulusHalfFilled &&
     !overLimit &&
     !running;
@@ -450,14 +479,11 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             <label htmlFor={apertureId} className="text-[9px] text-zinc-500">
               r_ap px
             </label>
-            <input
+            <DecimalField
               id={apertureId}
-              type="number"
-              min={MIN_APERTURE_RADIUS_PX}
-              max={MAX_APERTURE_RADIUS_PX}
-              step={0.5}
+              {...APERTURE_FIELD}
               value={apertureText}
-              onChange={(e) => setApertureText(e.target.value)}
+              onChange={setApertureText}
               className={INPUT_CLASS}
             />
           </div>
@@ -465,15 +491,13 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             <label htmlFor={skyInId} className="text-[9px] text-zinc-500">
               sky in px
             </label>
-            <input
+            <DecimalField
               id={skyInId}
-              type="number"
-              min={1}
-              step={0.5}
+              {...SKY_IN_FIELD}
               value={skyInText}
               placeholder="2×r"
               title={SKY_IN_TITLE}
-              onChange={(e) => setSkyInText(e.target.value)}
+              onChange={setSkyInText}
               className={INPUT_CLASS}
             />
           </div>
@@ -481,16 +505,13 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             <label htmlFor={skyOutId} className="text-[9px] text-zinc-500">
               sky out px
             </label>
-            <input
+            <DecimalField
               id={skyOutId}
-              type="number"
-              min={1}
-              max={MAX_SKY_OUTER_RADIUS_PX}
-              step={0.5}
+              {...SKY_OUT_FIELD}
               value={skyOutText}
               placeholder="3×r"
               title={SKY_OUT_TITLE}
-              onChange={(e) => setSkyOutText(e.target.value)}
+              onChange={setSkyOutText}
               className={INPUT_CLASS}
             />
           </div>
@@ -498,21 +519,29 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
             <label htmlFor={gainId} className="text-[9px] text-zinc-500">
               gain e-/ADU
             </label>
-            <input
+            <DecimalField
               id={gainId}
-              type="number"
-              min={0.01}
-              step={0.1}
+              {...GAIN_FIELD}
               value={gainText}
               placeholder="none"
-              onChange={(e) => setGainText(e.target.value)}
+              title={GAIN_TITLE}
+              data-gain-source={gainModel?.source ?? ""}
+              onChange={setGainText}
               className={INPUT_CLASS}
             />
           </div>
         </div>
         <div className="text-[9px] text-zinc-600">{SKY_DEFAULTS_CAPTION}</div>
+        <div className="text-[9px] text-zinc-500" data-gain-caption>
+          {gainCaption(gainModel, gainText)}
+        </div>
         {annulusHalfFilled && <div className="text-[9px] text-amber-400/90">{ANNULUS_NEEDS_BOTH}</div>}
-        {!apertureValid && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
+        {apertureHint && <div className="text-[9px] text-amber-400/90">{apertureHint}</div>}
+        {fieldError && (
+          <div className="text-[9px] text-amber-400/90" data-field-error>
+            {fieldError}
+          </div>
+        )}
 
         <Toggle label="Track drift (phase correlation)" checked={trackDrift} accent="amber" onChange={setTrackDrift} />
 

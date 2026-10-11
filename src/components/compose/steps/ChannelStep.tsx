@@ -24,6 +24,10 @@ import {
 } from "../../../utils/channelMapping";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 import type { NarrowbandFilterDetection } from "../../../services/header";
+import { DecimalField } from "../../ui";
+import { decimalFieldState, type DecimalFieldOptions } from "../../../utils/decimalText";
+
+const WAVELENGTH_FIELD: DecimalFieldOptions = { optional: true, integer: true, min: 1 };
 
 interface NarrowbandPalette {
   palette_name: string;
@@ -347,10 +351,11 @@ export default function ChannelStep({
   }, []);
 
   const handleAddBin = useCallback(() => {
-    if (!customLabel.trim()) return;
+    const wlField = decimalFieldState(customWl, WAVELENGTH_FIELD);
+    if (!customLabel.trim() || wlField.error !== null) return;
     const id = customLabel.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
     if (state.bins.some((b) => b.id === id)) return;
-    const wl = customWl ? parseInt(customWl) : undefined;
+    const wl = wlField.value ?? undefined;
     const hue = (state.bins.length * 47 + 120) % 360;
     onBinsChange([...state.bins, {
       id,
@@ -478,7 +483,7 @@ export default function ChannelStep({
               </div>
               <div className="flex flex-col gap-0.5 min-h-[24px]">
                 {bin.files.length === 0 && (
-                  <span className="text-[9px] text-zinc-700 italic">Drop FITS here or select</span>
+                  <span className="text-[9px] text-[var(--ab-text-4)] italic">Drop FITS here or select</span>
                 )}
                 {bin.files.map((fp) => {
                   const f = doneFiles.find((df) => df.path === fp);
@@ -505,7 +510,7 @@ export default function ChannelStep({
                               className={`transition-opacity shrink-0 ${
                                 armedAction === `file:${bin.id}:${fp}`
                                   ? "text-amber-300 opacity-100"
-                                  : "text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                  : "text-[var(--ab-text-4)] hover:text-red-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                               }`}>
                         <X size={9} />
                       </button>
@@ -547,12 +552,13 @@ export default function ChannelStep({
         <input value={customLabel} onChange={(e) => setCustomLabel(e.target.value)}
                aria-label="Custom channel name"
                placeholder="Custom channel..."
-               className="flex-1 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-zinc-700" />
-        <input value={customWl} onChange={(e) => setCustomWl(e.target.value)}
+               className="flex-1 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-[var(--ab-text-4)]" />
+        <DecimalField value={customWl} onChange={setCustomWl}
+               {...WAVELENGTH_FIELD}
                aria-label="Custom channel wavelength (nm)"
-               placeholder="nm" type="number"
-               className="w-14 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-zinc-700 text-right" />
-        <button onClick={handleAddBin} disabled={!customLabel.trim()}
+               placeholder="nm"
+               className="w-14 text-[10px] bg-zinc-800/40 border border-zinc-700/50 rounded px-2 py-1 text-zinc-300 placeholder:text-[var(--ab-text-4)] text-right" />
+        <button onClick={handleAddBin} disabled={!customLabel.trim() || decimalFieldState(customWl, WAVELENGTH_FIELD).error !== null}
                 className="px-2 py-1 rounded text-[10px] bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-all disabled:opacity-30">
           Add
         </button>

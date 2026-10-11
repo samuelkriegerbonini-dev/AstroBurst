@@ -26,7 +26,10 @@ const MIN_NEIGHBOURS_FOR_MEDIAN: usize = 3;
 const INNER_RING_STEPS: isize = 1;
 const OUTER_RING_STEPS: isize = 2;
 const OUTER_RING_CAPACITY: usize = 24;
+const BACKGROUND_RING_CAPACITY: usize = 16;
 const MAX_DEFECT_CLUSTER_PIXELS: usize = 3;
+const STAR_WING_FRACTION: f32 = 0.3;
+const STAR_WING_NEIGHBOUR_CAP: f32 = 0.7;
 const MEAN_ABS_DEV_TO_SIGMA: f64 = 1.2533;
 pub const P90_TO_SIGMA: f64 = 1.6449;
 
@@ -277,15 +280,7 @@ fn local_median_residuals(src: &[f32], rows: usize, cols: usize, stride: usize) 
     residual
 }
 
-fn auto_candidates(
-    image: &Array2<f32>,
-    hot_sigma: Option<f32>,
-    cold_sigma: Option<f32>,
-    stride: usize,
-) -> Option<Vec<i8>> {
-    let (rows, cols) = image.dim();
-    let src = standard_slice(image);
-    let residual = local_median_residuals(&src, rows, cols, stride);
+fn auto_candidates_from(residual: &[f32], hot_sigma: Option<f32>, cold_sigma: Option<f32>) -> Option<Vec<i8>> {
     let mut finite: Vec<f32> = residual.iter().copied().filter(|v| v.is_finite()).collect();
     let (center, scale) = robust_center_and_scale(&mut finite)?;
     let hot_limit = hot_sigma.map(|k| center + k * scale);
@@ -308,8 +303,86 @@ fn auto_candidates(
     )
 }
 
+fn plane_excess(src: &[f32], rows: usize, cols: usize, idx: usize, stride: usize) -> f32 {
+    let v = src[idx];
+    if !v.is_finite() {
+        return f32::NAN;
+    }
+    let (y, x) = (idx / cols, idx % cols);
+    let mut buf = [0f32; BACKGROUND_RING_CAPACITY];
+    let mut n = 0;
+    for ky in -OUTER_RING_STEPS..=OUTER_RING_STEPS {
+        for kx in -OUTER_RING_STEPS..=OUTER_RING_STEPS {
+            if ky.abs().max(kx.abs()) != OUTER_RING_STEPS {
+                continue;
+            }
+            let Some(other) = offset_index(rows, cols, y, x, ky * stride as isize, kx * stride as isize) else {
+                continue;
+            };
+            let s = src[other];
+            if s.is_finite() {
+                buf[n] = s;
+                n += 1;
+            }
+        }
+    }
+    if n < MIN_NEIGHBOURS_FOR_MEDIAN {
+        return f32::NAN;
+    }
+    v - median_f32_mut(&mut buf[..n])
+}
+
+fn climb_to_local_peak(src: &[f32], rows: usize, cols: usize, stride: usize, start: (usize, f32)) -> (usize, f32) {
+    let (mut idx, mut peak) = start;
+    for _ in 0..MAX_DEFECT_CLUSTER_PIXELS {
+        let (y, x) = (idx / cols, idx % cols);
+        let brighter = NEIGHBOUR_OFFSETS
+            .iter()
+            .filter_map(|&(dy, dx)| offset_index(rows, cols, y, x, dy, dx))
+            .map(|next| (next, plane_excess(src, rows, cols, next, stride)))
+            .filter(|(_, excess)| excess.is_finite() && *excess > peak)
+            .max_by(|a, b| f32_cmp(&a.1, &b.1));
+        let Some(next) = brighter else {
+            break;
+        };
+        (idx, peak) = next;
+    }
+    (idx, peak)
+}
+
+fn hot_cluster_is_star_like(cluster: &[usize], src: &[f32], rows: usize, cols: usize, stride: usize) -> bool {
+    let Some(start) = cluster
+        .iter()
+        .map(|&idx| (idx, plane_excess(src, rows, cols, idx, stride)))
+        .filter(|(_, excess)| excess.is_finite())
+        .max_by(|a, b| f32_cmp(&a.1, &b.1))
+    else {
+        return false;
+    };
+    let (peak_idx, peak) = climb_to_local_peak(src, rows, cols, stride, start);
+    if peak <= 0.0 {
+        return false;
+    }
+    let cap = STAR_WING_NEIGHBOUR_CAP * peak;
+    let (y, x) = (peak_idx / cols, peak_idx % cols);
+    let (wing, bright) = NEIGHBOUR_OFFSETS
+        .iter()
+        .filter_map(|&(dy, dx)| offset_index(rows, cols, y, x, dy, dx))
+        .map(|idx| plane_excess(src, rows, cols, idx, stride))
+        .filter(|excess| excess.is_finite())
+        .fold((0f64, 0usize), |(wing, bright), excess| {
+            if excess > cap {
+                (wing, bright + 1)
+            } else {
+                (wing + f64::from(excess), bright)
+            }
+        });
+    bright >= MAX_DEFECT_CLUSTER_PIXELS || wing >= f64::from(STAR_WING_FRACTION * peak)
+}
+
 fn flag_small_clusters(
     mut candidates: Vec<i8>,
+    src: &[f32],
     rows: usize,
     cols: usize,
     stride: usize,
@@ -343,6 +416,9 @@ fn flag_small_clusters(
         if component.len() > MAX_DEFECT_CLUSTER_PIXELS {
             continue;
         }
+        if sign > 0 && hot_cluster_is_star_like(&component, src, rows, cols, stride) {
+            continue;
+        }
         let flag = if sign > 0 { FLAG_HOT } else { FLAG_COLD };
         for &idx in &component {
             flags[idx] = flag;
@@ -363,10 +439,12 @@ pub fn defect_map_auto(
         return map;
     }
     let stride = if cfa { 2 } else { 1 };
-    let Some(candidates) = auto_candidates(image, hot_sigma, cold_sigma, stride) else {
+    let src = standard_slice(image);
+    let residual = local_median_residuals(&src, rows, cols, stride);
+    let Some(candidates) = auto_candidates_from(&residual, hot_sigma, cold_sigma) else {
         return map;
     };
-    let flags = flag_small_clusters(candidates, rows, cols, stride);
+    let flags = flag_small_clusters(candidates, &src, rows, cols, stride);
     Array2::from_shape_vec((rows, cols), flags).expect("flag buffer matches image shape")
 }
 
@@ -522,7 +600,7 @@ impl CosmeticConfig {
     }
 }
 
-fn count_flags(map: &Array2<u8>) -> (usize, usize, usize, usize) {
+pub fn count_flags(map: &Array2<u8>) -> (usize, usize, usize, usize) {
     map.iter().fold((0, 0, 0, 0), |(flagged, hot, cold, listed), &v| {
         (
             flagged + usize::from(v != 0),
@@ -541,12 +619,12 @@ pub fn cosmetic_correct(
     cosmetic_correct_with_cfa(image, master_dark, cfg, cfg.cfa.unwrap_or(false))
 }
 
-pub fn cosmetic_correct_with_cfa(
+pub fn cosmetic_defect_map(
     image: &Array2<f32>,
     master_dark: Option<&Array2<f32>>,
     cfg: &CosmeticConfig,
     cfa: bool,
-) -> Result<CosmeticResult> {
+) -> Result<Array2<u8>> {
     let (rows, cols) = image.dim();
     if rows == 0 || cols == 0 {
         bail!("Image is empty");
@@ -579,7 +657,16 @@ pub fn cosmetic_correct_with_cfa(
     }
 
     let refs: Vec<&Array2<u8>> = maps.iter().collect();
-    let merged = merge_maps(&refs);
+    Ok(merge_maps(&refs))
+}
+
+pub fn cosmetic_correct_with_cfa(
+    image: &Array2<f32>,
+    master_dark: Option<&Array2<f32>>,
+    cfg: &CosmeticConfig,
+    cfa: bool,
+) -> Result<CosmeticResult> {
+    let merged = cosmetic_defect_map(image, master_dark, cfg, cfa)?;
     let (flagged, hot, cold, listed) = count_flags(&merged);
     let (corrected, replaced) = apply_cosmetic(image, &merged, cfg.replacement, cfg.amount, cfa);
     Ok(CosmeticResult { corrected, flagged, replaced, hot, cold, listed })
@@ -627,6 +714,17 @@ mod tests {
                 img[[y, x]] += amplitude * (-0.5 * r2).exp();
             }
         }
+    }
+
+    fn auto_candidates(
+        image: &Array2<f32>,
+        hot_sigma: Option<f32>,
+        cold_sigma: Option<f32>,
+        stride: usize,
+    ) -> Option<Vec<i8>> {
+        let (rows, cols) = image.dim();
+        let residual = local_median_residuals(&standard_slice(image), rows, cols, stride);
+        auto_candidates_from(&residual, hot_sigma, cold_sigma)
     }
 
     fn candidate_positions(candidates: &[i8], cols: usize, sign: i8) -> Vec<(usize, usize)> {
@@ -821,6 +919,154 @@ mod tests {
 
         let cfa = defect_map_auto(&img, Some(3.0), None, true);
         assert_eq!(flagged_positions(&cfa), vec![(8, 9), (8, 10), (8, 11)]);
+    }
+
+    const SCENE_SIZE: usize = 128;
+    const SCENE_NOISE: f64 = 10.0;
+    const SCENE_SEED: u64 = 0x5EED_C05E;
+    const STAR_FWHM: f64 = 1.2;
+    const STAR_ROWS: [usize; 4] = [16, 44, 72, 100];
+    const STAR_COLS: [usize; 5] = [14, 38, 62, 86, 110];
+    const HOT_SITES: [(usize, usize); 5] = [(30, 26), (58, 50), (86, 74), (114, 98), (30, 98)];
+    const LATTICE_OFFSETS: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    const HOT_LEVEL_SIGMA: f64 = 60.0;
+    const MIN_STAR_SNR: f64 = 5.0;
+    const MAX_STAR_SNR: f64 = 20.0;
+
+    struct StarScene {
+        image: Array2<f32>,
+        stars: Vec<(usize, usize, f64)>,
+        hot: Vec<(usize, usize)>,
+    }
+
+    fn seeded_gaussian(seed: u64) -> impl FnMut() -> f64 {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        move || (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos()
+    }
+
+    fn pixel_flux(dy: f64, dx: f64, sigma: f64) -> f64 {
+        const SUB: usize = 16;
+        let mut sum = 0.0;
+        for sy in 0..SUB {
+            for sx in 0..SUB {
+                let y = dy - 0.5 + (sy as f64 + 0.5) / SUB as f64;
+                let x = dx - 0.5 + (sx as f64 + 0.5) / SUB as f64;
+                sum += (-(x * x + y * y) / (2.0 * sigma * sigma)).exp();
+            }
+        }
+        sum
+    }
+
+    fn add_undersampled_star(img: &mut Array2<f32>, cy: f64, cx: f64, peak: f64) {
+        let sigma = STAR_FWHM / (2.0 * (2.0 * std::f64::consts::LN_2).sqrt());
+        let centre = pixel_flux(0.0, 0.0, sigma);
+        let (iy, ix) = (cy.round() as i64, cx.round() as i64);
+        for y in iy - 3..=iy + 3 {
+            for x in ix - 3..=ix + 3 {
+                img[[y as usize, x as usize]] += (peak * pixel_flux(y as f64 - cy, x as f64 - cx, sigma) / centre) as f32;
+            }
+        }
+    }
+
+    fn plane_level(y: usize, x: usize, cfa: bool) -> f64 {
+        match (cfa, y % 2, x % 2) {
+            (false, _, _) => 100.0,
+            (true, 0, 0) => 120.0,
+            (true, 1, 1) => 80.0,
+            _ => 100.0,
+        }
+    }
+
+    fn faint_star_scene(cfa: bool) -> StarScene {
+        let mut gauss = seeded_gaussian(SCENE_SEED);
+        let mut image = Array2::from_shape_fn((SCENE_SIZE, SCENE_SIZE), |(y, x)| {
+            (plane_level(y, x, cfa) + SCENE_NOISE * gauss()) as f32
+        });
+        let count = STAR_ROWS.len() * STAR_COLS.len();
+        let mut stars = Vec::with_capacity(count);
+        for (i, (y, x)) in STAR_ROWS.iter().flat_map(|&y| STAR_COLS.iter().map(move |&x| (y, x))).enumerate() {
+            let (oy, ox) = LATTICE_OFFSETS[i % LATTICE_OFFSETS.len()];
+            let snr = MIN_STAR_SNR + (MAX_STAR_SNR - MIN_STAR_SNR) * i as f64 / (count - 1) as f64;
+            let (cy, cx) = (y + oy, x + ox);
+            add_undersampled_star(&mut image, cy as f64, cx as f64, snr * SCENE_NOISE);
+            stars.push((cy, cx, snr));
+        }
+        let mut hot = Vec::with_capacity(HOT_SITES.len());
+        for (j, &(y, x)) in HOT_SITES.iter().enumerate() {
+            let (oy, ox) = LATTICE_OFFSETS[j % LATTICE_OFFSETS.len()];
+            let (hy, hx) = (y + oy, x + ox);
+            image[[hy, hx]] += (HOT_LEVEL_SIGMA * SCENE_NOISE) as f32;
+            hot.push((hy, hx));
+        }
+        StarScene { image, stars, hot }
+    }
+
+    fn flagged_star_offsets(map: &Array2<u8>, y: usize, x: usize) -> Vec<(i64, i64)> {
+        (-1i64..=1)
+            .flat_map(|dy| (-1i64..=1).map(move |dx| (dy, dx)))
+            .filter(|&(dy, dx)| map[[(y as i64 + dy) as usize, (x as i64 + dx) as usize]] != 0)
+            .collect()
+    }
+
+    fn assert_stars_kept_and_hot_pixels_flagged(scene: &StarScene, map: &Array2<u8>) {
+        let flagged_stars: Vec<String> = scene
+            .stars
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &(y, x, snr))| {
+                let offsets = flagged_star_offsets(map, y, x);
+                (!offsets.is_empty())
+                    .then(|| format!("star {} at x={} y={} SNR {:.1} (dy, dx) {:?}", i, x, y, snr, offsets))
+            })
+            .collect();
+        let missed_hot: Vec<(usize, usize)> =
+            scene.hot.iter().copied().filter(|&(y, x)| map[[y, x]] & FLAG_HOT == 0).collect();
+        assert!(flagged_stars.is_empty(), "star pixels flagged in the 3x3 core: {:?}", flagged_stars);
+        assert!(missed_hot.is_empty(), "hot pixels (y, x) not flagged: {:?}", missed_hot);
+    }
+
+    #[test]
+    fn auto_keeps_undersampled_faint_stars_and_still_flags_hot_pixels() {
+        let scene = faint_star_scene(false);
+        let map = defect_map_auto(&scene.image, Some(3.0), None, false);
+        assert_stars_kept_and_hot_pixels_flagged(&scene, &map);
+    }
+
+    #[test]
+    fn auto_keeps_undersampled_stars_on_cfa_data() {
+        let scene = faint_star_scene(true);
+        let lattices: std::collections::HashSet<(usize, usize)> =
+            scene.stars.iter().map(|&(y, x, _)| (y % 2, x % 2)).collect();
+        assert_eq!(lattices.len(), 4, "stars must sit on R, both G and B pixels");
+        let map = defect_map_auto(&scene.image, Some(3.0), None, true);
+        assert_stars_kept_and_hot_pixels_flagged(&scene, &map);
+    }
+
+    #[test]
+    fn auto_keeps_cfa_stars_centred_on_a_pixel_corner() {
+        let mut gauss = seeded_gaussian(SCENE_SEED);
+        let mut image =
+            Array2::from_shape_fn((64, 64), |(y, x)| (plane_level(y, x, true) + SCENE_NOISE * gauss()) as f32);
+        let corners = [(12usize, 12usize, 10.0), (12, 41, 20.0), (41, 12, 30.0), (41, 41, 40.0)];
+        for &(y, x, snr) in &corners {
+            add_undersampled_star(&mut image, y as f64 + 0.5, x as f64 + 0.5, snr * SCENE_NOISE);
+        }
+        let map = defect_map_auto(&image, Some(3.0), None, true);
+        let flagged: Vec<String> = corners
+            .iter()
+            .filter_map(|&(y, x, snr)| {
+                let hits: Vec<(usize, usize)> = (y - 1..=y + 2)
+                    .flat_map(|py| (x - 1..=x + 2).map(move |px| (py, px)))
+                    .filter(|&p| map[p] != 0)
+                    .collect();
+                (!hits.is_empty()).then(|| format!("star at x={}.5 y={}.5 SNR {:.0}: (y, x) {:?}", x, y, snr, hits))
+            })
+            .collect();
+        assert!(flagged.is_empty(), "corner-centred stars flagged: {:?}", flagged);
     }
 
     #[test]

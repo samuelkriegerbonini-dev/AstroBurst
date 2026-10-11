@@ -7,3 +7,4 @@ export { default as ChainBanner } from "./ChainBanner";
 export { default as ErrorAlert } from "./ErrorAlert";
 export { default as WarningList } from "./WarningList";
 export { default as SectionHeader } from "./SectionHeader";
+export { default as DecimalField, DecimalNumberField } from "./DecimalField";

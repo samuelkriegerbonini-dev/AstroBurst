@@ -12,6 +12,7 @@ export const RESERVED_NAMES: readonly string[] = [
   "abs", "sqrt", "exp", "ln", "log", "log2", "pow", "min", "max",
   "floor", "ceil", "round", "trunc", "sign", "clip", "rescale", "iif",
   "pi", "e", "mean", "med", "mdev", "sdev", "adev",
+  "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "mtf", "x", "y",
 ];
 
 export interface ExampleExpression {
@@ -101,8 +102,9 @@ export function slotForAdd(
   existing: readonly SlotBinding[],
   files: readonly LoadedImageRef[],
   targetPath: string | null,
+  pixelMathOutput: string | null,
 ): SlotBinding {
-  const [free] = autoSlotsFromFiles(files, targetPath, existing);
+  const [free] = autoSlotsFromFiles(withoutPixelMathOutput(files, pixelMathOutput), targetPath, existing);
   return free ?? { name: nextSlotName(existing.map((s) => s.name.trim())), path: targetPath ?? "" };
 }
 

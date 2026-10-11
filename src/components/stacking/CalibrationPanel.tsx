@@ -5,6 +5,7 @@ import { useProgress } from "../../hooks/useProgress";
 import { calibrate } from "../../services/stacking";
 import type { CalibrateResult } from "../../shared/types";
 import { CALIBRATE_PROGRESS_EVENT } from "../../shared/types/stacking";
+import { stackProgressText } from "../../utils/stackingRejection";
 import { getOutputDir } from "../../infrastructure/tauri";
 import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
@@ -105,12 +106,12 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
       />
 
       {isCalibrating && progress.active && (
-        <div className="px-4 flex flex-col gap-1.5 animate-fade-in">
+        <div data-testid="calibrate-progress" className="px-4 flex flex-col gap-1.5 animate-fade-in">
           <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
             <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-sky), #7dd3fc)" }} />
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
-            <span>{progress.stage}</span>
+            <span>{stackProgressText(progress.stage, progress.current, progress.total)}</span>
             <span>{progress.percent}%</span>
           </div>
         </div>

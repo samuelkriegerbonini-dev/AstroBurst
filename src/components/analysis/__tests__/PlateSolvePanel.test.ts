@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import PlateSolvePanel from "../PlateSolvePanel";
+import PlateSolvePanel, { SolveActions } from "../PlateSolvePanel";
 
 function inputTitled(markup: string, titleStart: string): string {
   const input = markup.match(new RegExp(`<input[^>]*title="${titleStart}[^"]*"[^>]*>`));
@@ -50,6 +50,29 @@ describe("PlateSolvePanel solve target", () => {
 
   it("enables the solve on the measured image", () => {
     const markup = renderToStaticMarkup(createElement(PlateSolvePanel, { filePath: "/data/frame1.fits", solvePath: "/out/stack.fits" }));
+    expect(buttonEndingWith(markup, "Plate Solve")).not.toMatch(/^<button[^>]*\sdisabled=""/);
+  });
+});
+
+describe("PlateSolvePanel cancel", () => {
+  const noop = () => {};
+  const actions = (loading: boolean) =>
+    renderToStaticMarkup(
+      createElement(SolveActions, { loading, disabled: loading, elapsedMs: 3000, timeoutSecs: 120, onSolve: noop, onCancel: noop }),
+    );
+
+  it("offers a Cancel button next to the running solve", () => {
+    const markup = actions(true);
+    const cancel = buttonEndingWith(markup, "Cancel");
+    expect(cancel).toContain('type="button"');
+    expect(cancel).toContain('aria-label="Cancel plate solve"');
+    expect(cancel).not.toMatch(/\sdisabled=""/);
+    expect(markup).toMatch(/Solving\.\.\. 0:03 \/ 2:00/);
+  });
+
+  it("shows no Cancel button while no solve runs", () => {
+    const markup = actions(false);
+    expect(markup).not.toContain("Cancel");
     expect(buttonEndingWith(markup, "Plate Solve")).not.toMatch(/^<button[^>]*\sdisabled=""/);
   });
 });

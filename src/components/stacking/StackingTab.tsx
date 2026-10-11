@@ -8,7 +8,7 @@ import { fileStore } from "../../hooks/useFileStore";
 import { getOutputDir, getPreviewUrl } from "../../infrastructure/tauri";
 import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
 import { fileSetKey, liveSubframeSelection, panelRejectedPaths, withAllFramesIn, type SubframeSelection } from "../../utils/subframeCull";
-import { framesLabel, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
+import { drizzleViewOutput, framesLabel, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
 import type { CalibrateResult } from "../../shared/types";
 import type { DrizzleRgbResult, PipelineResult, StackResult } from "../../shared/types/stacking";
 import type { CosmeticBatchResult, CosmeticResult } from "../../shared/types/cosmetic";
@@ -233,14 +233,8 @@ function StackingTabInner() {
   const handleDrizzleResult = useCallback(
     (result: DrizzleRgbResult, inputs: string[], target: RunTarget | null) => {
       if (!target) return;
-      const frames = result.frame_count_r + result.frame_count_g + result.frame_count_b;
-      publishOutput(target, {
-        fitsPath: null,
-        previewUrl: result.previewUrl ?? null,
-        dimensions: null,
-        kind: "stacking",
-        inputPath: inputs[0] ?? target.path,
-      }, () => framesLabel("Drizzle RGB", frames || inputs.length));
+      const view = drizzleViewOutput(result, inputs, target.path);
+      publishOutput(target, view.output, () => view.label);
     },
     [publishOutput],
   );

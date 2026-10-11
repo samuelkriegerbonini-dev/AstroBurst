@@ -1,7 +1,9 @@
 import { useState, useCallback, useId } from "react";
 import { spccCalibrate } from "../../services/processing";
-import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
+import { RunButton, ResultGrid, ErrorAlert, SectionHeader, DecimalField } from "../ui";
 import { spccResultWavelengths, spccWavelengthsLine, type SpccTriplet } from "../../utils/spccWavelengths";
+import { decimalFieldState, type DecimalFieldOptions } from "../../utils/decimalText";
+import { wcsSourceLabel } from "../../utils/solvedWcs";
 
 interface SpccResult {
   r_factor?: number;
@@ -23,6 +25,7 @@ interface SpccPanelProps {
   gPath: string | null;
   bPath: string | null;
   wcsPath?: string | null;
+  wcsReason?: string | null;
   wavelengthsNm: SpccTriplet | null;
   onFactorsReady?: (r: number, g: number, b: number) => void;
 }
@@ -38,6 +41,8 @@ const CATALOGS = [
   { value: "builtin", label: "Built-in (synthetic)" },
 ] as const;
 
+const MIN_SNR_FIELD: DecimalFieldOptions = { min: 5, max: 100 };
+
 const ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-cyan-400">
     <circle cx="12" cy="12" r="5" />
@@ -45,21 +50,22 @@ const ICON = (
   </svg>
 );
 
-export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
+export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
   const whiteRefId = useId();
   const catalogId = useId();
   const minSnrId = useId();
   const [whiteRef, setWhiteRef] = useState("average_spiral");
   const [catalog, setCatalog] = useState<"gaia" | "builtin">("gaia");
-  const [minSnr, setMinSnr] = useState(20);
+  const [minSnrText, setMinSnrText] = useState("20");
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<SpccResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const minSnr = decimalFieldState(minSnrText, MIN_SNR_FIELD).value;
   const canRun = rPath && gPath && bPath;
 
   const handleRun = useCallback(async () => {
-    if (!rPath || !gPath || !bPath) return;
+    if (!rPath || !gPath || !bPath || minSnr === null) return;
     setIsRunning(true);
     setError(null);
     setResult(null);
@@ -94,6 +100,12 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wavelengthsNm,
 
       <div data-testid="spcc-wavelengths" className="text-[10px] text-zinc-500">{spccWavelengthsLine(wavelengthsNm)}</div>
 
+      {wcsReason ? (
+        <div data-testid="spcc-wcs" className="text-[10px] text-amber-400/90">{wcsReason}</div>
+      ) : wcsPath ? (
+        <div data-testid="spcc-wcs" className="text-[10px] text-zinc-500" title={wcsPath}>{wcsSourceLabel(wcsPath)}</div>
+      ) : null}
+
       <div className="flex items-center justify-between">
         <label htmlFor={whiteRefId} className="text-xs text-zinc-400">White Reference</label>
         <select
@@ -126,14 +138,11 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wavelengthsNm,
 
       <div className="flex items-center justify-between">
         <label htmlFor={minSnrId} className="text-xs text-zinc-400">Min SNR</label>
-        <input
+        <DecimalField
           id={minSnrId}
-          type="number"
-          value={minSnr}
-          min={5}
-          max={100}
-          step={5}
-          onChange={(e) => setMinSnr(Number(e.target.value))}
+          {...MIN_SNR_FIELD}
+          value={minSnrText}
+          onChange={setMinSnrText}
           className="w-16 text-right text-xs bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-zinc-200 font-mono"
           disabled={isRunning}
         />
@@ -143,7 +152,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wavelengthsNm,
         label="Run SPCC"
         runningLabel="Calibrating..."
         running={isRunning}
-        disabled={!canRun}
+        disabled={!canRun || minSnr === null}
         accent="cyan"
         onClick={handleRun}
       />

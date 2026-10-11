@@ -7,7 +7,9 @@ use rayon::prelude::*;
 
 use crate::core::alignment::pair;
 use crate::core::imaging::stats::is_valid_pixel;
-use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
+use crate::core::stacking::{
+    never_cancelled, no_stage, stop_if_cancelled, CancelCheck, StageCallback, STAGE_ALIGN, STAGE_COMBINE,
+};
 use crate::math::median::{exact_mad_mut, f32_cmp, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::stacking::{
@@ -686,6 +688,15 @@ pub fn stack_images_cancellable(
     config: &StackConfig,
     cancelled: CancelCheck,
 ) -> Result<StackResult> {
+    stack_images_staged(images, config, cancelled, &no_stage)
+}
+
+pub fn stack_images_staged(
+    images: &[Array2<f32>],
+    config: &StackConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+) -> Result<StackResult> {
     if images.is_empty() {
         bail!("No images to stack");
     }
@@ -756,6 +767,7 @@ pub fn stack_images_cancellable(
             min_cols,
             &format!("frame_{}", i),
         )?;
+        on_stage(STAGE_ALIGN);
         alignment.push(FrameAlignment {
             method: result.method_used.clone(),
             confidence: Some(result.confidence),
@@ -899,6 +911,7 @@ pub fn stack_images_cancellable(
     };
 
     stop_if_cancelled(cancelled)?;
+    on_stage(STAGE_COMBINE);
     if config.rejection_maps {
         result_data
             .par_chunks_mut(cols)
@@ -1627,6 +1640,22 @@ mod tests {
             let dx = x as f32 - cx;
             100.0 + 1000.0 * (-(dy * dy + dx * dx) / 18.0).exp()
         })
+    }
+
+    #[test]
+    fn staged_stack_reports_one_align_stage_per_frame_then_one_combine_stage() {
+        let frame = blob_frame(150.0, 50.0);
+        let images = vec![frame.clone(), frame.mapv(|v| v + 1.0), frame.mapv(|v| v + 2.0), frame.mapv(|v| v + 3.0)];
+        let stages = std::sync::Mutex::new(Vec::<String>::new());
+        let record = |stage: &str| stages.lock().unwrap().push(stage.to_string());
+        let result = stack_images_staged(&images, &plain_stack_config(), &never_cancelled, &record).unwrap();
+        assert_eq!(result.frame_count, 4);
+        assert_eq!(*stages.lock().unwrap(), vec!["align", "align", "align", "combine"]);
+
+        stages.lock().unwrap().clear();
+        let unaligned = StackConfig { align: false, ..plain_stack_config() };
+        stack_images_staged(&images, &unaligned, &never_cancelled, &record).unwrap();
+        assert_eq!(*stages.lock().unwrap(), vec!["combine"]);
     }
 
     #[test]

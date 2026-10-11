@@ -11,7 +11,8 @@ import { targetProjectionPath } from "../../utils/skyList";
 import { catalogCsvFileName, catalogRowsCsv, matchesCsv, sourcesCsv } from "../../utils/catalogCsv";
 import { crossMatchEntry, measurementLog } from "../../utils/measurementLog";
 import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../viewer/painters/catalogPainter";
-import { ErrorAlert, RunButton, Toggle } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, Toggle } from "../ui";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import CrossMatchPlots from "./CrossMatchPlots";
 
 interface CatalogPanelProps {
@@ -26,6 +27,9 @@ const DEFAULT_DETECTION_SIGMA = 5;
 const DEFAULT_MAX_STARS = 500;
 const TABLE_ROW_LIMIT = 200;
 const SAVED_NOTICE_MS = 6000;
+const RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.1 };
+const MAG_LIMIT_FIELD: DecimalFieldOptions = { optional: true, min: 5 };
+const MATCH_RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.2 };
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full";
@@ -35,15 +39,6 @@ const SMALL_BUTTON_CLASS =
 
 function fmt(v: number | null | undefined, digits = 2): string {
   return v === null || v === undefined || !Number.isFinite(v) ? "--" : v.toFixed(digits);
-}
-
-function parseOptionalNumber(text: string): number | null {
-  const v = parseFloat(text);
-  return Number.isFinite(v) && v > 0 ? v : null;
-}
-
-function parseNumberOr(text: string, fallback: number): number {
-  return parseOptionalNumber(text) ?? fallback;
 }
 
 function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
@@ -75,6 +70,17 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   const [hoverId, setHoverId] = useState<string | null>(null);
 
   const requestSeqRef = useRef(0);
+  const radiusField = decimalFieldState(radiusText, RADIUS_FIELD);
+  const magLimitField = decimalFieldState(magLimitText, MAG_LIMIT_FIELD);
+  const matchRadiusField = decimalFieldState(matchRadiusText, MATCH_RADIUS_FIELD);
+  const radiusArcmin = radiusField.value;
+  const magLimit = magLimitField.value ?? DEFAULT_MAG_LIMIT;
+  const matchRadiusArcsec = matchRadiusField.value ?? DEFAULT_MATCH_RADIUS_ARCSEC;
+  const searchFieldError = firstFieldError([
+    ["Radius (arcmin)", radiusField],
+    ["G limit (mag)", magLimitField],
+  ]);
+  const matchFieldError = firstFieldError([['Match radius (")', matchRadiusField]]);
 
   useEffect(() => {
     requestSeqRef.current++;
@@ -115,13 +121,17 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
 
   const runSearch = useCallback(async (): Promise<ConeSearchResult | null> => {
     if (!wcsPath) return null;
+    if (searchFieldError !== null) {
+      setError(searchFieldError);
+      return null;
+    }
     const seq = ++requestSeqRef.current;
     setSearching(true);
     setError(null);
     try {
       const result = await catalogConeSearch(wcsPath, {
-        radiusArcmin: parseOptionalNumber(radiusText),
-        magLimit: parseNumberOr(magLimitText, DEFAULT_MAG_LIMIT),
+        radiusArcmin,
+        magLimit,
         maxRows: DEFAULT_MAX_ROWS,
       });
       if (requestSeqRef.current !== seq) return null;
@@ -133,10 +143,10 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
     } finally {
       if (requestSeqRef.current === seq) setSearching(false);
     }
-  }, [wcsPath, radiusText, magLimitText]);
+  }, [wcsPath, searchFieldError, radiusArcmin, magLimit]);
 
   const runCrossMatch = useCallback(async () => {
-    if (!wcsPath) return;
+    if (!wcsPath || matchFieldError !== null) return;
     const seq = ++requestSeqRef.current;
     setMatching(true);
     setError(null);
@@ -145,7 +155,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
       const result = await catalogCrossMatch(wcsPath, {
         sigma: DEFAULT_DETECTION_SIGMA,
         maxStars: DEFAULT_MAX_STARS,
-        radiusArcsec: parseNumberOr(matchRadiusText, DEFAULT_MATCH_RADIUS_ARCSEC),
+        radiusArcsec: matchRadiusArcsec,
         band,
         colourTerm,
       });
@@ -159,7 +169,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
       if (requestSeqRef.current === seq) setMatching(false);
     }
     if (matched && !cone) await runSearch();
-  }, [filePath, wcsPath, matchRadiusText, band, colourTerm, cone, runSearch]);
+  }, [filePath, wcsPath, matchFieldError, matchRadiusArcsec, band, colourTerm, cone, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -249,16 +259,13 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
             <label htmlFor={radiusId} className="text-[9px] text-zinc-500 uppercase">
               Radius (arcmin)
             </label>
-            <input
+            <DecimalField
               id={radiusId}
-              type="number"
-              min={0.1}
-              max={300}
-              step={0.5}
+              {...RADIUS_FIELD}
               value={radiusText}
               placeholder="auto"
               title="Cone radius in arcmin; blank uses half the image diagonal"
-              onChange={(e) => setRadiusText(e.target.value)}
+              onChange={setRadiusText}
               className={INPUT_CLASS}
             />
           </div>
@@ -266,26 +273,24 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
             <label htmlFor={magLimitId} className="text-[9px] text-zinc-500 uppercase">
               G limit (mag)
             </label>
-            <input
+            <DecimalField
               id={magLimitId}
-              type="number"
-              min={5}
-              max={21}
-              step={0.5}
+              {...MAG_LIMIT_FIELD}
               value={magLimitText}
               placeholder={String(DEFAULT_MAG_LIMIT)}
-              onChange={(e) => setMagLimitText(e.target.value)}
+              onChange={setMagLimitText}
               className={INPUT_CLASS}
             />
           </div>
         </div>
         <div className="text-[9px] text-zinc-600">blank radius: half the image diagonal</div>
+        {searchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{searchFieldError}</div>}
 
         <RunButton
           label="Search Gaia DR3"
           runningLabel="Querying VizieR..."
           running={searching}
-          disabled={!wcsPath || busy}
+          disabled={!wcsPath || busy || searchFieldError !== null}
           accent="cyan"
           icon={<Database size={12} />}
           onClick={() => void runSearch()}
@@ -308,26 +313,25 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
             <label htmlFor={matchRadiusId} className="text-[9px] text-zinc-500 uppercase">
               Match radius (")
             </label>
-            <input
+            <DecimalField
               id={matchRadiusId}
-              type="number"
-              min={0.2}
-              max={30}
-              step={0.5}
+              {...MATCH_RADIUS_FIELD}
               value={matchRadiusText}
               placeholder={String(DEFAULT_MATCH_RADIUS_ARCSEC)}
-              onChange={(e) => setMatchRadiusText(e.target.value)}
+              onChange={setMatchRadiusText}
               className={INPUT_CLASS}
             />
           </div>
           <Toggle label="Colour term" checked={colourTerm} accent="cyan" onChange={setColourTerm} />
         </div>
 
+        {matchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{matchFieldError}</div>}
+
         <RunButton
           label="Cross-match detected stars"
           runningLabel="Detecting and matching..."
           running={matching}
-          disabled={!wcsPath || busy}
+          disabled={!wcsPath || busy || matchFieldError !== null}
           accent="amber"
           icon={<Crosshair size={12} />}
           onClick={() => void runCrossMatch()}

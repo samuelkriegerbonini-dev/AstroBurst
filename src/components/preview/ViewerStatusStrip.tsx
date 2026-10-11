@@ -1,9 +1,10 @@
 import { memo, useEffect, useState } from "react";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
+import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 import { probePixel } from "../../services/display";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
-import { statusStripIdleText, statusStripParts, viewerPublishesPixel, type PixelValueAt, type SkyAt } from "../../utils/previewShell";
+import { recordGrid, statusStripIdleText, statusStripParts, viewerPublishesPixel, type PixelValueAt, type SkyAt } from "../../utils/previewShell";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 
 const HOVER_DEBOUNCE_MS = 40;
@@ -12,7 +13,11 @@ const PROBE_BOX = 1;
 function ViewerStatusStrip() {
   const mousePixel = useMousePixel();
   const { path, composite, fileRgbView } = useAnalysisTarget();
-  const publishesPixel = viewerPublishesPixel({ composite, fileRgbView });
+  const { file } = useFileContext();
+  const { processed, chain } = useRenderContext();
+  const gridMatchesFile = recordGrid({ processed, chain, filePath: file?.path ?? null, fileDims: file?.result?.dimensions ?? null }).matchesFile;
+  const readout = { composite, fileRgbView, gridMatchesFile };
+  const publishesPixel = viewerPublishesPixel(readout);
   const pixel = publishesPixel ? mousePixel : null;
   const [valueAt, setValueAt] = useState<(PixelValueAt & { path: string }) | null>(null);
   const [skyAt, setSkyAt] = useState<(SkyAt & { path: string }) | null>(null);
@@ -92,7 +97,7 @@ function ViewerStatusStrip() {
           {parts.sky && <span style={{ color: "rgba(52,211,153,0.7)" }}>{parts.sky}</span>}
         </>
       ) : (
-        <span className="text-zinc-600">{statusStripIdleText(publishesPixel)}</span>
+        <span className="text-zinc-600">{statusStripIdleText(readout)}</span>
       )}
     </div>
   );

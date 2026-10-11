@@ -86,6 +86,25 @@ describe("shapeHandles", () => {
     expect(shapeHandles(line)[1]).toMatchObject({ id: "p2", x: 10, y: 0 });
   });
 
+  it("keeps the rotation handle at least 16 screen px from the resize handle when zoomed out", () => {
+    const scale = 0.15;
+    const ellipse: RegionShape = { shape: "ellipse", x: 500, y: 400, rx: 10, ry: 6, angle: 30 };
+    const e = Object.fromEntries(shapeHandles(ellipse, scale).map((x) => [x.id, x]));
+    expect(Math.hypot(e.rot.x - e.rx.x, e.rot.y - e.rx.y) * scale).toBeGreaterThanOrEqual(16 - 1e-9);
+    const b = Object.fromEntries(shapeHandles(box, scale).map((x) => [x.id, x]));
+    expect(Math.hypot(b.rot.x - b.e.x, b.rot.y - b.e.y) * scale).toBeGreaterThanOrEqual(16 - 1e-9);
+  });
+
+  it("keeps a 4 image px rotation gap when zoomed in and ignores an unusable scale", () => {
+    const ellipse: RegionShape = { shape: "ellipse", x: 0, y: 0, rx: 10, ry: 6, angle: 0 };
+    const at = (scale: number) => Object.fromEntries(shapeHandles(ellipse, scale).map((x) => [x.id, x]));
+    expect(at(8).rot.x - at(8).rx.x).toBeCloseTo(4, 9);
+    expect(at(2).rot.x - at(2).rx.x).toBeCloseTo(8, 9);
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(at(bad).rot.x - at(bad).rx.x).toBeCloseTo(16, 9);
+    }
+  });
+
   it("rotates box handles with the angle", () => {
     const rotated: RegionShape = { ...box, angle: 90 };
     const h = Object.fromEntries(shapeHandles(rotated).map((x) => [x.id, x]));

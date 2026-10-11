@@ -6,8 +6,11 @@ import {
   DOCK_ONBOARDING_TITLE,
   markDockOnboardingDone,
   movedToAnotherAnchor,
+  ONBOARDING_MIN_HEIGHT_PX,
   onboardingPlacement,
   shouldShowDockOnboarding,
+  viewerToolbarBottom,
+  type OnboardingToolbarHost,
 } from "../dockOnboarding";
 import { ANCHOR_LABELS, DEFAULT_DOCK_LAYOUT, dockReducer } from "../dockLayout";
 
@@ -116,33 +119,80 @@ describe("dock onboarding content", () => {
 describe("onboardingPlacement", () => {
   it("sits in the top-right corner of a wide viewer with a 16 px inset and points right", () => {
     const viewer = { left: 300, top: 100, width: 900, height: 600 };
-    expect(onboardingPlacement(viewer, VIEWPORT)).toEqual({ left: 824, top: 116, width: 360, maxHeight: 568, arrow: "right" });
+    expect(onboardingPlacement(viewer, VIEWPORT, viewer.top)).toEqual({ left: 824, top: 116, width: 360, maxHeight: 568, arrow: "right" });
   });
 
   it("keeps the 360 px cap at the 420 px threshold", () => {
     const viewer = { left: 50, top: 40, width: 420, height: 500 };
-    expect(onboardingPlacement(viewer, VIEWPORT)).toEqual({ left: 94, top: 56, width: 360, maxHeight: 468, arrow: "right" });
+    expect(onboardingPlacement(viewer, VIEWPORT, viewer.top)).toEqual({ left: 94, top: 56, width: 360, maxHeight: 468, arrow: "right" });
   });
 
   it("moves to the top-left with the full available width on a narrow viewer", () => {
     const viewer = { left: 200, top: 80, width: 380, height: 500 };
-    expect(onboardingPlacement(viewer, VIEWPORT)).toEqual({ left: 216, top: 96, width: 348, maxHeight: 468, arrow: "none" });
-    const justBelow = onboardingPlacement({ left: 0, top: 0, width: 419, height: 400 }, VIEWPORT);
+    expect(onboardingPlacement(viewer, VIEWPORT, viewer.top)).toEqual({ left: 216, top: 96, width: 348, maxHeight: 468, arrow: "none" });
+    const justBelow = onboardingPlacement({ left: 0, top: 0, width: 419, height: 400 }, VIEWPORT, 0);
     expect(justBelow.left).toBe(16);
     expect(justBelow.width).toBe(360);
     expect(justBelow.arrow).toBe("none");
   });
 
   it("never returns a negative width or a height below the floor", () => {
-    const tiny = onboardingPlacement({ left: 10, top: 10, width: 20, height: 40 }, VIEWPORT);
+    const tiny = onboardingPlacement({ left: 10, top: 10, width: 20, height: 40 }, VIEWPORT, 10);
     expect(tiny.width).toBe(0);
     expect(tiny.left).toBe(26);
     expect(tiny.maxHeight).toBe(120);
   });
 
   it("stays inside the window when the viewer reaches past it", () => {
-    const placement = onboardingPlacement({ left: 1400, top: 700, width: 600, height: 400 }, VIEWPORT);
+    const placement = onboardingPlacement({ left: 1400, top: 700, width: 600, height: 400 }, VIEWPORT, 700);
     expect(placement.left + placement.width).toBeLessThanOrEqual(VIEWPORT.width);
     expect(placement.top + placement.maxHeight).toBeLessThanOrEqual(VIEWPORT.height);
+  });
+});
+
+describe("onboardingPlacement under the viewer toolbar", () => {
+  const viewer = { left: 300, top: 100, width: 900, height: 600 };
+
+  it("starts the card an inset below the bottom of the toolbar rows", () => {
+    expect(onboardingPlacement(viewer, VIEWPORT, 190)).toEqual({ left: 824, top: 206, width: 360, maxHeight: 478, arrow: "right" });
+  });
+
+  it("keeps the viewer inset when the toolbar ends above the viewer", () => {
+    expect(onboardingPlacement(viewer, VIEWPORT, 40)).toEqual(onboardingPlacement(viewer, VIEWPORT, viewer.top));
+    expect(onboardingPlacement(viewer, VIEWPORT, 40).top).toBe(116);
+  });
+
+  it("keeps the floor height inside the window when the toolbar sits low", () => {
+    const placement = onboardingPlacement(viewer, VIEWPORT, 850);
+    expect(placement.top + placement.maxHeight).toBeLessThanOrEqual(VIEWPORT.height);
+    expect(placement.maxHeight).toBe(ONBOARDING_MIN_HEIGHT_PX);
+  });
+});
+
+describe("viewerToolbarBottom", () => {
+  function box(top: number, bottom: number) {
+    return { getBoundingClientRect: () => ({ top, bottom }) };
+  }
+
+  function host({ top, viewportTop, toolbars }: { top: number; viewportTop: number | null; toolbars: ReturnType<typeof box>[] }): OnboardingToolbarHost {
+    return {
+      ...box(top, 900),
+      querySelector: (selector) => (selector === "[data-dock-viewport]" && viewportTop !== null ? box(viewportTop, 900) : null),
+      querySelectorAll: (selector) => (selector === ".ab-viewer-toolbar" ? toolbars : []),
+    };
+  }
+
+  it("is the bottom of the lowest viewer toolbar row", () => {
+    expect(viewerToolbarBottom(host({ top: 60, viewportTop: 92, toolbars: [box(126, 158)] }))).toBe(158);
+    expect(viewerToolbarBottom(host({ top: 60, viewportTop: 92, toolbars: [box(126, 158), box(126, 190)] }))).toBe(190);
+  });
+
+  it("is the bottom of the Preview header row, the viewport top, without a viewer toolbar", () => {
+    expect(viewerToolbarBottom(host({ top: 60, viewportTop: 92, toolbars: [] }))).toBe(92);
+  });
+
+  it("is the viewer top before the preview has rendered, and ignores a hidden toolbar", () => {
+    expect(viewerToolbarBottom(host({ top: 60, viewportTop: null, toolbars: [] }))).toBe(60);
+    expect(viewerToolbarBottom(host({ top: 60, viewportTop: 92, toolbars: [box(0, 0)] }))).toBe(92);
   });
 });

@@ -15,6 +15,7 @@ import type {
   CompositeStretchResult,
   PsfSource,
 } from "../shared/types/compositeChain";
+import type { CompositeStfFields } from "../shared/types/compose";
 import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
 
 export interface DeconvolveRunResult extends DeconvolveResult {
@@ -397,12 +398,16 @@ export function removeStars(
   ]);
 }
 
+export type CompositeStarRemovalResult = StarRemovalResult & CompositeStfFields;
+
 export function removeStarsComposite(
   outputDir?: string,
   options: StarRemovalOptions = {},
-): Promise<StarRemovalResult> {
-  return withPreview<StarRemovalResult>("remove_stars_composite_cmd", outputDir, {
+  stfLinked?: boolean,
+): Promise<CompositeStarRemovalResult> {
+  return withPreview<CompositeStarRemovalResult>("remove_stars_composite_cmd", outputDir, {
     ...starRemovalArgs(options),
+    stfLinked,
   }, [
     ["png_path", "previewUrl"],
     ["stars_png_path", "starsPreviewUrl"],

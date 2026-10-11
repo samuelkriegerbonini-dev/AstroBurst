@@ -34,7 +34,7 @@ import { PreviewProvider } from "./context/PreviewContext";
 
 import { terminateStfWorker } from "./utils/stfworker";
 import CommandPalette, { type PaletteAction, type PaletteFile } from "./components/CommandPalette";
-import { DOCK_TOOL_IDS, DOCK_TOOL_META, isToolOpen } from "./utils/dockLayout";
+import { DOCK_TOOL_META, paletteToolEntries } from "./utils/dockLayout";
 import { dockStore, useDockLayout } from "./hooks/useDockLayout";
 import nebulaImg from "./assets/nebulosa.jpg";
 import GlobalProgress from "./components/file/GlobalProgress";
@@ -355,21 +355,22 @@ export default function App() {
     return filteredMetadataFiles.some((f) => f.id === selectedFile.id) ? selectedFile : null;
   }, [selectedFile, activeFilters, filteredMetadataFiles]);
 
+  const hasVisibleFile = visibleSelectedFile !== null;
+
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const acts: PaletteAction[] = [
       { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
     if (view !== "empty") {
-      for (const id of DOCK_TOOL_IDS) {
-        const meta = DOCK_TOOL_META[id];
+      for (const { tool, label } of paletteToolEntries(dockLayout, hasVisibleFile)) {
         acts.push({
-          id: `tool-${id}`,
-          label: `${isToolOpen(dockLayout, id) ? "Hide" : "Open"} ${meta.label} Panel`,
+          id: `tool-${tool}`,
+          label,
           hint: "Tool",
-          keywords: meta.keywords,
-          icon: DOCK_TOOLS[id].icon,
-          run: () => dockStore.dispatch({ type: "toggle", tool: id }),
+          keywords: DOCK_TOOL_META[tool].keywords,
+          icon: DOCK_TOOLS[tool].icon,
+          run: () => dockStore.dispatch({ type: "toggle", tool }),
         });
       }
       acts.push({
@@ -384,7 +385,7 @@ export default function App() {
     }
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, dockLayout, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick]);
+  }, [view, dockLayout, hasVisibleFile, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick]);
 
   const paletteFiles = useMemo<PaletteFile[]>(
     () => filteredMetadataFiles

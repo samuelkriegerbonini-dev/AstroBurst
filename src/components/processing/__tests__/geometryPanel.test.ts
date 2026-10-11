@@ -183,4 +183,21 @@ describe("GeometryPanel", () => {
   it("says that it acts on the file in composite mode", () => {
     expect(render(fileOf("geom-composite"), true)).toContain("the composite on screen does not change");
   });
+
+  it("in composite mode, names the processed output it acts on, as the Input line does", () => {
+    const file = fileOf("geom-composite-bg");
+    showBackgroundOutput(file);
+    const html = render(file, true);
+    expect(inputLabel(html)).toBe("Background");
+    expect(html).toContain("Geometry acts on Background; the composite on screen does not change.");
+    expect(html).not.toContain(`Geometry acts on ${file.name}`);
+  });
+
+  it("in composite mode, names the loaded file when a Debayer preview is on screen, as the Input line does", () => {
+    const file = fileOf("geom-composite-debayer");
+    showDebayerPreview(file);
+    const html = render(file, true);
+    expect(inputLabel(html)).toBe("jw02739_f444w_i2d.fits");
+    expect(html).toContain("Geometry acts on jw02739_f444w_i2d.fits; the composite on screen does not change.");
+  });
 });

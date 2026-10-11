@@ -8,14 +8,13 @@ import {
   type LineFitInspectPlot as InspectPlotData,
 } from "../../utils/lineFit";
 import { linearScale } from "../../utils/plotScale";
+import { themeColor } from "../../utils/themeColor";
 
 const HEIGHT = 150;
 const PAD = { top: 26, right: 10, bottom: 24, left: 46 } as const;
 const MIN_PLOT_WIDTH = 20;
 const BACKGROUND = "#0a0a0f";
 const GRID_COLOR = "#1f1f28";
-const TICK_COLOR = "#71717a";
-const UNIT_COLOR = "#52525b";
 const FONT = "9px 'JetBrains Mono', monospace";
 const LINE_WINDOW_FILL = "rgba(168,85,247,0.16)";
 const CONTINUUM_WINDOW_FILL = "rgba(245,158,11,0.08)";
@@ -146,8 +145,9 @@ function drawInspectPlot(canvas: HTMLCanvasElement, plot: InspectPlotData, width
     ctx.fillText(m.label, clampLabelX(ctx, m.label, x, width), MARKER_FIRST_BASELINE + i * MARKER_ROW_H);
   });
 
-  ctx.fillStyle = TICK_COLOR;
-  ctx.strokeStyle = TICK_COLOR;
+  const tickColor = themeColor("--ab-text-3", "#94949e");
+  ctx.fillStyle = tickColor;
+  ctx.strokeStyle = tickColor;
   ctx.textAlign = "left";
   plot.xTicks.forEach((t, i) => {
     const x = sx(t);
@@ -161,7 +161,7 @@ function drawInspectPlot(canvas: HTMLCanvasElement, plot: InspectPlotData, width
   ctx.textAlign = "right";
   plot.yTicks.forEach((v, i) => ctx.fillText(plot.yTickLabels[i], left - 4, sy(v) + 3));
   if (plot.unit) {
-    ctx.fillStyle = UNIT_COLOR;
+    ctx.fillStyle = themeColor("--ab-text-4", "#8b8b94");
     ctx.fillText(plot.unit, right, HEIGHT - 3);
   }
 }

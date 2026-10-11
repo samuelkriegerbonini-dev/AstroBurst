@@ -366,7 +366,7 @@ function CubeFrameNavInner({
           title={playing ? "Pause playback" : "Play all frames"}
           aria-label={playing ? "Pause playback" : "Play all frames"}
           className="p-1.5 rounded-md transition-colors hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
-          style={{ color: playing ? "#c084fc" : "#71717a" }}
+          style={{ color: playing ? "#c084fc" : "var(--ab-text-3)" }}
         >
           {playing ? <Pause size={14} /> : <Play size={14} />}
         </button>
@@ -385,7 +385,7 @@ function CubeFrameNavInner({
           title={loopOn ? "Loop playback: on (wraps to the first frame)" : "Loop playback: off (stops at the last frame)"}
           aria-label="Loop playback"
           className="p-1.5 rounded-md transition-colors hover:bg-zinc-800"
-          style={{ color: loopOn ? "#c084fc" : "#71717a" }}
+          style={{ color: loopOn ? "#c084fc" : "var(--ab-text-3)" }}
         >
           <Repeat size={14} />
         </button>

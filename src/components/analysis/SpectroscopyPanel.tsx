@@ -6,6 +6,7 @@ import LineFitSection from "./LineFitSection";
 import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
 import SpectrumComparisonSection from "./SpectrumComparisonSection";
+import DecimalField from "../ui/DecimalField";
 import {
   collapseCubeRange,
   computeMomentMaps,
@@ -118,10 +119,15 @@ import {
   type FramePublishGate,
 } from "../../utils/cubeNavigation";
 import { formatAxisTick } from "../../utils/plotScale";
+import { decimalFieldState } from "../../utils/decimalText";
+import { themeColor } from "../../utils/themeColor";
 import {
   axisValueToPixel,
   channelAxisValue,
   channelRangeFromDrag,
+  commitRangeEdge,
+  commitWindowEdge,
+  continuumOverlapNote,
   defaultContinuumWindows,
   formatRangeLabel,
   fullCubeCollapse,
@@ -129,11 +135,14 @@ import {
   parseChannelInput,
   pixelToAxisValue,
   rangePixelSpan,
+  spectralSectionsVisible,
   spectrumXTicks,
   windowsAreValid,
   type ChannelRange,
   type FullCollapseMode,
   type PlotMapping,
+  type WindowEdge,
+  type WindowSide,
 } from "../../utils/spectrumRange";
 
 export interface CubeResult {
@@ -234,6 +243,7 @@ const N_GRID_Y = 4;
 const X_TICK_LENGTH = 3;
 const X_TICK_BASELINE = 10;
 const DEFAULT_SNR = 3;
+const SNR_FIELD = { min: 0 };
 const LABEL_MAPPING_WIDTH = 400;
 const MEASURED_SERIES_VIEW: RegionView = "sum";
 const LINE_CONTINUUM_COLOR = "rgba(245,158,11,0.9)";
@@ -297,6 +307,7 @@ function SpectroscopyPanel({
   const { processed } = useRenderContext();
   const { file } = useFileContext();
   const { ramp } = useCubeContext();
+  const spectral = spectralSectionsVisible(ramp);
   const rampIntegration = useRampIntegration();
   const lastRampIntegrationRef = useRef(rampIntegration);
   const bunit = file?.result?.header?.BUNIT ?? null;
@@ -328,6 +339,7 @@ function SpectroscopyPanel({
   const brushTargetId = useId();
   const snrId = useId();
   const [brushTarget, setBrushTarget] = useState<BrushTarget>("range");
+  const activeBrush: BrushTarget = spectral ? brushTarget : "range";
   const [range, setRange] = useState<ChannelRange | null>(null);
   const [windows, setWindows] = useState<ContinuumWindows | null>(null);
   const [drag, setDrag] = useState<{ start: number; current: number } | null>(null);
@@ -610,7 +622,7 @@ function SpectroscopyPanel({
     ctx.stroke();
 
     ctx.font = "9px 'JetBrains Mono', monospace";
-    ctx.fillStyle = "#71717a";
+    ctx.fillStyle = themeColor("--ab-text-3", "#94949e");
     ctx.textAlign = "right";
     for (let i = 0; i <= N_GRID_Y; i++) {
       const val = yMax - (i / N_GRID_Y) * yRange;
@@ -620,7 +632,7 @@ function SpectroscopyPanel({
 
     const xTicks = spectrumXTicks(m);
     const plotBottom = H - PAD.bottom;
-    ctx.strokeStyle = "#52525b";
+    ctx.strokeStyle = themeColor("--ab-text-4", "#8b8b94");
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (const tick of xTicks) {
@@ -632,7 +644,7 @@ function SpectroscopyPanel({
 
     ctx.textAlign = "center";
     for (const tick of xTicks) ctx.fillText(tick.label, tick.px, plotBottom + X_TICK_BASELINE);
-    ctx.fillStyle = "#52525b";
+    ctx.fillStyle = themeColor("--ab-text-4", "#8b8b94");
     ctx.fillText(axisX.label, W / 2, H - 4);
   }, [series, n, axisX, plotParams, mappingFor, region]);
 
@@ -662,7 +674,7 @@ function SpectroscopyPanel({
     if (range) shade(range, BRUSH_COLORS.range);
     if (drag) {
       const live = channelRangeFromDrag(drag.start, drag.current, m);
-      if (live) shade(live, brushTarget === "range" ? "rgba(168,85,247,0.35)" : "rgba(245,158,11,0.3)");
+      if (live) shade(live, activeBrush === "range" ? "rgba(168,85,247,0.35)" : "rgba(245,158,11,0.3)");
     }
     if (lineResult && lineOverlayVisible) {
       const frame = { top: plotTop, height: plotBottom - plotTop, yMin: plotParams.yMin, yMax: plotParams.yMax };
@@ -767,7 +779,7 @@ function SpectroscopyPanel({
     ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
     ctx.fillStyle = "#fafafa";
     ctx.fillText(label, tx, ty);
-  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, brushTarget, lineResult, lineOverlayVisible, frameLinked, shownFrame, ramp, lineMarksShown, pickedMarkId, inspect, processed, lineFitRun, pixelCoord, region]);
+  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, activeBrush, lineResult, lineOverlayVisible, frameLinked, shownFrame, ramp, lineMarksShown, pickedMarkId, inspect, processed, lineFitRun, pixelCoord, region]);
 
   useEffect(() => {
     drawPlot();
@@ -844,17 +856,17 @@ function SpectroscopyPanel({
 
   const commitBrush = useCallback(
     (selected: ChannelRange) => {
-      if (brushTarget === "range") {
+      if (activeBrush === "range") {
         setRange(selected);
         return;
       }
       const window: [number, number] = [selected.z0, selected.z1];
       setWindows((current) => {
-        const other: [number, number] = current ? (brushTarget === "left" ? current[1] : current[0]) : window;
-        return brushTarget === "left" ? [window, other] : [other, window];
+        const other: [number, number] = current ? (activeBrush === "left" ? current[1] : current[0]) : window;
+        return activeBrush === "left" ? [window, other] : [other, window];
       });
     },
-    [brushTarget],
+    [activeBrush],
   );
 
   const handleMouseUp = useCallback(
@@ -1050,9 +1062,9 @@ function SpectroscopyPanel({
 
   const handleMoments = useCallback(async () => {
     if (!filePath || !range) return;
-    const snr = Number(snrText);
-    if (!Number.isFinite(snr) || snr < 0) {
-      setMomentError("SNR threshold must be a non-negative number");
+    const snr = decimalFieldState(snrText, SNR_FIELD);
+    if (snr.value === null) {
+      setMomentError(`SNR threshold: ${snr.error ?? "Enter a number"}`);
       return;
     }
     if (windows && !windowsAreValid(windows, channelCount)) {
@@ -1070,7 +1082,7 @@ function SpectroscopyPanel({
         rest_um: restUm,
         convention,
         continuum: windows,
-        snr_threshold: snr,
+        snr_threshold: snr.value,
         mask_below_threshold: maskBelow,
       });
       if (momentSeqRef.current !== seq) return;
@@ -1214,35 +1226,18 @@ function SpectroscopyPanel({
       });
   }, [pixelCoord, processed, lineFitRun, region]);
 
-  const updateRangeEdge = useCallback(
-    (edge: "z0" | "z1", text: string) => {
-      const value = parseChannelInput(text, channelCount);
-      if (value === null) return;
-      setRange((current) => {
-        const base = current ?? { z0: 0, z1: Math.max(channelCount - 1, 0) };
-        const next = { ...base, [edge]: value };
-        return { z0: Math.min(next.z0, next.z1), z1: Math.max(next.z0, next.z1) };
-      });
+  const commitRange = useCallback(
+    (edge: keyof ChannelRange, value: number) => {
+      setRange((current) => commitRangeEdge(current ?? { z0: 0, z1: Math.max(channelCount - 1, 0) }, edge, value));
     },
     [channelCount],
   );
 
-  const updateWindowEdge = useCallback(
-    (side: 0 | 1, edge: 0 | 1, text: string) => {
-      const value = parseChannelInput(text, channelCount);
-      if (value === null) return;
-      setWindows((current) => {
-        const seeded = current ?? (range ? defaultContinuumWindows(range, channelCount) : null);
-        const base: ContinuumWindows = seeded ?? [
-          [value, value],
-          [value, value],
-        ];
-        const next: ContinuumWindows = [[...base[0]], [...base[1]]] as ContinuumWindows;
-        next[side][edge] = value;
-        if (edge === 0 && next[side][1] < value) next[side][1] = value;
-        if (edge === 1 && next[side][0] > value) next[side][0] = value;
-        return next;
-      });
+  const commitWindow = useCallback(
+    (side: WindowSide, edge: WindowEdge, value: number) => {
+      setWindows((current) =>
+        commitWindowEdge(current ?? (range ? defaultContinuumWindows(range, channelCount) : null), side, edge, value),
+      );
     },
     [channelCount, range],
   );
@@ -1260,6 +1255,7 @@ function SpectroscopyPanel({
         ? "click the preview or pick a region first"
         : null;
   const lineDisabled = lineLoading || lineHint !== null || !filePath;
+  const overlapNote = continuumOverlapNote(windows, range);
 
   const regionButton = regionAvailable && (
     <button
@@ -1303,7 +1299,7 @@ function SpectroscopyPanel({
             Region spectrum failed: {regionError}
           </p>
         )}
-        {filePath && cubeDims && totalFrames > 1 && (
+        {spectral && filePath && cubeDims && totalFrames > 1 && (
           <SpectrumComparisonSection
             filePath={filePath}
             regionDoc={regionDoc}
@@ -1355,7 +1351,7 @@ function SpectroscopyPanel({
         </div>
       </div>
 
-      {!ramp && (
+      {spectral && (
         <SpectralAxisControls
           filePath={filePath ?? null}
           axis={axis}
@@ -1371,7 +1367,7 @@ function SpectroscopyPanel({
         />
       )}
 
-      {!ramp && (
+      {spectral && (
         <LineListControls
           visible={lineListVisible}
           onVisibleChange={setLineListVisible}
@@ -1388,7 +1384,7 @@ function SpectroscopyPanel({
         />
       )}
 
-      {!ramp && !axis && axisError && (
+      {spectral && !axis && axisError && (
         <p className="mx-3 mb-2 text-[10px] text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20">
           No spectral axis for this file: {axisError}
         </p>
@@ -1444,7 +1440,7 @@ function SpectroscopyPanel({
               className="px-2 py-0.5 rounded border transition-colors"
               style={{
                 borderColor: regionView === view ? "#22d3ee" : "var(--ab-border)",
-                color: regionView === view ? "#22d3ee" : "#71717a",
+                color: regionView === view ? "#22d3ee" : "var(--ab-text-3)",
               }}
             >
               {view === "jy" ? "Jy" : view}
@@ -1473,7 +1469,7 @@ function SpectroscopyPanel({
             onClick={() => void handleExportSpectrum("copy")}
             disabled={exportBusy}
             className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
-            style={{ borderColor: "var(--ab-border)", color: "#71717a" }}
+            style={{ borderColor: "var(--ab-border)", color: "var(--ab-text-3)" }}
           >
             Copy CSV
           </button>
@@ -1481,7 +1477,7 @@ function SpectroscopyPanel({
             onClick={() => void handleExportSpectrum("save")}
             disabled={exportBusy}
             className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
-            style={{ borderColor: "var(--ab-border)", color: "#71717a" }}
+            style={{ borderColor: "var(--ab-border)", color: "var(--ab-text-3)" }}
           >
             Save CSV
           </button>
@@ -1529,38 +1525,36 @@ function SpectroscopyPanel({
       {filePath && cubeDims && totalFrames > 1 && (
         <div className="px-3 pb-2 flex flex-col gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
           <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-            <label htmlFor={brushTargetId} className={LABEL_CLASS}>
-              Brush
-            </label>
-            <select id={brushTargetId} value={brushTarget} onChange={(e) => setBrushTarget(e.target.value as BrushTarget)} className={SELECT_CLASS}>
-              <option value="range">line range</option>
-              <option value="left">continuum A</option>
-              <option value="right">continuum B</option>
-            </select>
+            {spectral && (
+              <>
+                <label htmlFor={brushTargetId} className={LABEL_CLASS}>
+                  Brush
+                </label>
+                <select id={brushTargetId} value={brushTarget} onChange={(e) => setBrushTarget(e.target.value as BrushTarget)} className={SELECT_CLASS}>
+                  <option value="range">line range</option>
+                  <option value="left">continuum A</option>
+                  <option value="right">continuum B</option>
+                </select>
+              </>
+            )}
             <span className="text-zinc-500">{rangeLabel}</span>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
             <span className={LABEL_CLASS}>Range</span>
-            <input
-              type="number"
-              min={0}
-              max={Math.max(channelCount - 1, 0)}
-              value={range ? range.z0 : ""}
-              aria-label="Range first channel z0"
+            <ChannelField
+              value={range ? range.z0 : null}
+              channelCount={channelCount}
+              label="Range first channel z0"
               placeholder="z0"
-              onChange={(e) => updateRangeEdge("z0", e.target.value)}
-              className={INPUT_CLASS}
+              onCommit={(value) => commitRange("z0", value)}
             />
-            <input
-              type="number"
-              min={0}
-              max={Math.max(channelCount - 1, 0)}
-              value={range ? range.z1 : ""}
-              aria-label="Range last channel z1"
+            <ChannelField
+              value={range ? range.z1 : null}
+              channelCount={channelCount}
+              label="Range last channel z1"
               placeholder="z1"
-              onChange={(e) => updateRangeEdge("z1", e.target.value)}
-              className={INPUT_CLASS}
+              onCommit={(value) => commitRange("z1", value)}
             />
             <select
               value={rangeMode}
@@ -1591,121 +1585,120 @@ function SpectroscopyPanel({
             <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{rangeError}</p>
           )}
 
-          <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-            <span className={LABEL_CLASS}>Continuum</span>
-            {([0, 1] as const).map((side) => (
-              <span key={side} className="flex items-center gap-1">
-                <span className="text-zinc-600">{side === 0 ? "A" : "B"}</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={Math.max(channelCount - 1, 0)}
-                  value={windows ? windows[side][0] : ""}
-                  aria-label={`Continuum ${side === 0 ? "A" : "B"} first channel`}
-                  placeholder="from"
-                  onChange={(e) => updateWindowEdge(side, 0, e.target.value)}
-                  className={INPUT_CLASS}
-                />
-                <input
-                  type="number"
-                  min={0}
-                  max={Math.max(channelCount - 1, 0)}
-                  value={windows ? windows[side][1] : ""}
-                  aria-label={`Continuum ${side === 0 ? "A" : "B"} last channel`}
-                  placeholder="to"
-                  onChange={(e) => updateWindowEdge(side, 1, e.target.value)}
-                  className={INPUT_CLASS}
-                />
-              </span>
-            ))}
-            <button
-              onClick={() => range && setWindows(defaultContinuumWindows(range, channelCount))}
-              disabled={!range}
-              className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40"
-            >
-              auto
-            </button>
-            {windows && (
-              <button onClick={() => setWindows(null)} className="text-zinc-500 hover:text-zinc-300">
-                none
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-            <label htmlFor={snrId} className={LABEL_CLASS}>
-              SNR
-            </label>
-            <input
-              id={snrId}
-              type="number"
-              min={0}
-              step={0.5}
-              value={snrText}
-              onChange={(e) => setSnrText(e.target.value)}
-              className={INPUT_CLASS}
-            />
-            <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
-              <input type="checkbox" checked={maskBelow} onChange={(e) => setMaskBelow(e.target.checked)} />
-              mask M0
-            </label>
-            <CollapseBtn
-              label="Moments"
-              icon={<BarChart3 size={10} />}
-              loading={momentLoading}
-              disabled={momentLoading || !momentsReady}
-              color="var(--ab-amber)"
-              onClick={handleMoments}
-            />
-            {!momentsReady && range && (
-              <span className="text-zinc-600">set a rest wavelength for velocity moments</span>
-            )}
-            {momentResult && (
-              <span className="flex items-center gap-1 ml-auto">
-                {MOMENT_KINDS.map((kind) => (
-                  <button
-                    key={kind}
-                    onClick={() => showMoment(momentResult, kind)}
-                    className="px-2 py-0.5 rounded border transition-colors uppercase"
-                    style={{
-                      borderColor: momentKind === kind ? "var(--ab-amber)" : "var(--ab-border)",
-                      color: momentKind === kind ? "var(--ab-amber)" : "#71717a",
-                    }}
-                  >
-                    {kind}
-                  </button>
+          {spectral && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
+                <span className={LABEL_CLASS}>Continuum</span>
+                {([0, 1] as const).map((side) => (
+                  <span key={side} className="flex items-center gap-1">
+                    <span className="text-zinc-600">{side === 0 ? "A" : "B"}</span>
+                    <ChannelField
+                      value={windows ? windows[side][0] : null}
+                      channelCount={channelCount}
+                      label={`Continuum ${side === 0 ? "A" : "B"} first channel`}
+                      placeholder="from"
+                      onCommit={(value) => commitWindow(side, 0, value)}
+                    />
+                    <ChannelField
+                      value={windows ? windows[side][1] : null}
+                      channelCount={channelCount}
+                      label={`Continuum ${side === 0 ? "A" : "B"} last channel`}
+                      placeholder="to"
+                      onCommit={(value) => commitWindow(side, 1, value)}
+                    />
+                  </span>
                 ))}
-              </span>
-            )}
-          </div>
-          {momentError && (
-            <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{momentError}</p>
-          )}
-          {momentResult && (
-            <div className="text-[10px] font-mono text-zinc-500">
-              <span>
-                M0 in {momentResult.m0_unit}, M1/M2 in {momentResult.velocity_unit}, {momentResult.n_channels} channels
-                {momentResult.noise_per_channel !== null ? `, noise ${momentResult.noise_per_channel.toExponential(2)}` : ""}
-                {`, ${momentVelocityFrameNote(axis?.specsys ?? null, correction, lineShiftKms)}`}
-              </span>
-              {momentResult.notes.length > 0 && (
-                <details className="mt-0.5 text-zinc-600">
-                  <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>
-                  <ul className="mt-0.5 flex flex-col gap-0.5">
-                    {momentResult.notes.map((note, i) => (
-                      <li key={i} className="break-words">
-                        {note}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
+                <button
+                  onClick={() => range && setWindows(defaultContinuumWindows(range, channelCount))}
+                  disabled={!range}
+                  className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40"
+                >
+                  auto
+                </button>
+                {windows && (
+                  <button onClick={() => setWindows(null)} className="text-zinc-500 hover:text-zinc-300">
+                    none
+                  </button>
+                )}
+              </div>
+              {overlapNote && (
+                <p className="text-[10px] text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20">{overlapNote}</p>
               )}
-            </div>
+
+              <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
+                <label htmlFor={snrId} className={LABEL_CLASS}>
+                  SNR
+                </label>
+                <DecimalField
+                  id={snrId}
+                  min={SNR_FIELD.min}
+                  value={snrText}
+                  onChange={setSnrText}
+                  className={INPUT_CLASS}
+                />
+                <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
+                  <input type="checkbox" checked={maskBelow} onChange={(e) => setMaskBelow(e.target.checked)} />
+                  mask M0
+                </label>
+                <CollapseBtn
+                  label="Moments"
+                  icon={<BarChart3 size={10} />}
+                  loading={momentLoading}
+                  disabled={momentLoading || !momentsReady}
+                  color="var(--ab-amber)"
+                  onClick={handleMoments}
+                />
+                {!momentsReady && range && (
+                  <span className="text-zinc-600">set a rest wavelength for velocity moments</span>
+                )}
+                {momentResult && (
+                  <span className="flex items-center gap-1 ml-auto">
+                    {MOMENT_KINDS.map((kind) => (
+                      <button
+                        key={kind}
+                        onClick={() => showMoment(momentResult, kind)}
+                        className="px-2 py-0.5 rounded border transition-colors uppercase"
+                        style={{
+                          borderColor: momentKind === kind ? "var(--ab-amber)" : "var(--ab-border)",
+                          color: momentKind === kind ? "var(--ab-amber)" : "var(--ab-text-3)",
+                        }}
+                      >
+                        {kind}
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </div>
+              {momentError && (
+                <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{momentError}</p>
+              )}
+              {momentResult && (
+                <div className="text-[10px] font-mono text-zinc-500">
+                  <span>
+                    M0 in {momentResult.m0_unit}, M1/M2 in {momentResult.velocity_unit}, {momentResult.n_channels} channels
+                    {momentResult.noise_per_channel !== null ? `, noise ${momentResult.noise_per_channel.toExponential(2)}` : ""}
+                    {`, ${momentVelocityFrameNote(axis?.specsys ?? null, correction, lineShiftKms)}`}
+                  </span>
+                  {momentResult.notes.length > 0 && (
+                    <details className="mt-0.5 text-zinc-600">
+                      <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>
+                      <ul className="mt-0.5 flex flex-col gap-0.5">
+                        {momentResult.notes.map((note, i) => (
+                          <li key={i} className="break-words">
+                            {note}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
 
-      {filePath && cubeDims && totalFrames > 1 && (
+      {spectral && filePath && cubeDims && totalFrames > 1 && (
         <LineFitSection
           ready={momentsReady && !!range}
           readyHint={LINE_FIT_READY_HINT}
@@ -1736,7 +1729,7 @@ function SpectroscopyPanel({
         />
       )}
 
-      {filePath && cubeDims && totalFrames > 1 && (
+      {spectral && filePath && cubeDims && totalFrames > 1 && (
         <LineMeasurementSection
           result={visibleLineResult}
           loading={lineLoading}
@@ -1749,7 +1742,7 @@ function SpectroscopyPanel({
         />
       )}
 
-      {filePath && cubeDims && totalFrames > 1 && (
+      {spectral && filePath && cubeDims && totalFrames > 1 && (
         <SpectrumComparisonSection
           filePath={filePath}
           regionDoc={regionDoc}
@@ -1785,6 +1778,49 @@ function SpectroscopyPanel({
         </div>
       )}
     </div>
+  );
+}
+
+interface ChannelFieldProps {
+  value: number | null;
+  channelCount: number;
+  label: string;
+  placeholder: string;
+  onCommit: (value: number) => void;
+}
+
+function ChannelField({ value, channelCount, label, placeholder, onCommit }: ChannelFieldProps) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [committed, setCommitted] = useState(value);
+  if (committed !== value) {
+    setCommitted(value);
+    setDraft(null);
+  }
+  const commit = () => {
+    if (draft === null) return;
+    const next = parseChannelInput(draft, channelCount);
+    if (next === null) return;
+    setDraft(null);
+    if (next !== value) onCommit(next);
+  };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") commit();
+    else if (e.key === "Escape") setDraft(null);
+  };
+  return (
+    <DecimalField
+      integer
+      min={0}
+      max={Math.max(channelCount - 1, 0)}
+      optional={value === null}
+      value={draft ?? (value === null ? "" : String(value))}
+      aria-label={label}
+      placeholder={placeholder}
+      onChange={setDraft}
+      onBlur={commit}
+      onKeyDown={handleKeyDown}
+      className={INPUT_CLASS}
+    />
   );
 }
 

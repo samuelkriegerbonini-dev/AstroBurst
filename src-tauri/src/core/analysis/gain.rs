@@ -261,6 +261,7 @@ pub fn gain_model(header: Option<&HduHeader>, has_err_plane: bool) -> GainModel 
     };
 
     if is_display_referred(header) {
+        model.gain_card = None;
         model.note = Some(DISPLAY_REFERRED_NOTE.to_string());
         return model;
     }
@@ -474,6 +475,17 @@ mod tests {
             Some("flux errors leave out source photon noise: display-referred data: no gain applies")
         );
         assert_eq!(photon_noise_warning(&m, true, false), None);
+    }
+
+    #[test]
+    fn display_referred_model_drops_the_camera_gain_card() {
+        let display = model(&[("GAIN", "120"), (HEADER_DISPLAY_REFERRED_CARD, "T")], false);
+        assert_eq!(display.gain_card, None, "{display:?}");
+        assert_eq!(display.poisson_route, PoissonRoute::Unavailable);
+        assert_eq!(note_of(&display), DISPLAY_REFERRED_NOTE);
+
+        let linear = model(&[("GAIN", "120")], false);
+        assert_eq!(linear.gain_card, Some(120.0));
     }
 
     #[test]

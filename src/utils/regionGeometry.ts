@@ -19,7 +19,8 @@ export const MIN_ANNULUS_GAP = 0.5;
 
 const OUTLINE_SEGMENTS = 64;
 export const POINT_CROSS_HALF_SCREEN_PX = 4;
-const ROT_HANDLE_GAP = 4;
+const ROT_HANDLE_MIN_GAP = 4;
+const ROT_HANDLE_GAP_SCREEN_PX = 16;
 const SNAP_EPS = 1e-12;
 
 function snapTrig(v: number): number {
@@ -128,7 +129,13 @@ export function shapeCentre(shape: RegionShape): Pt {
   }
 }
 
-export function shapeHandles(shape: RegionShape): Handle[] {
+function rotHandleGapImagePx(screenScale: number): number {
+  const usable = Number.isFinite(screenScale) && screenScale > 0;
+  return Math.max(ROT_HANDLE_MIN_GAP, ROT_HANDLE_GAP_SCREEN_PX / (usable ? screenScale : 1));
+}
+
+export function shapeHandles(shape: RegionShape, screenScale = 1): Handle[] {
+  const gap = rotHandleGapImagePx(screenScale);
   switch (shape.shape) {
     case "circle":
       return [{ id: "r", x: shape.x + shape.r, y: shape.y, cursor: "ew-resize" }];
@@ -136,7 +143,7 @@ export function shapeHandles(shape: RegionShape): Handle[] {
       const b = basis(shape.angle);
       const rx = localToIndex(shape.rx, 0, b);
       const ry = localToIndex(0, shape.ry, b);
-      const rot = localToIndex(shape.rx + ROT_HANDLE_GAP, 0, b);
+      const rot = localToIndex(shape.rx + gap, 0, b);
       return [
         { id: "rx", x: shape.x + rx.x, y: shape.y + rx.y, cursor: "ew-resize" },
         { id: "ry", x: shape.x + ry.x, y: shape.y + ry.y, cursor: "ns-resize" },
@@ -160,7 +167,7 @@ export function shapeHandles(shape: RegionShape): Handle[] {
         mk("nw", -hw, -hh, "nwse-resize"),
         mk("se", hw, hh, "nwse-resize"),
         mk("sw", -hw, hh, "nesw-resize"),
-        mk("rot", hw + ROT_HANDLE_GAP, 0, "grab"),
+        mk("rot", hw + gap, 0, "grab"),
       ];
     }
     case "annulus":

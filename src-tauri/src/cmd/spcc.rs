@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, cached_header, load_from_cache_or_disk};
 use crate::cmd::processing::source_header;
+use crate::core::imaging::cutout::{shift_header, CutoutRect};
 use crate::core::astrometry::spcc::{
     spcc_calibrate_rgb, SpccConfig, SpccCatalog, WhiteReference,
 };
@@ -13,19 +14,48 @@ use crate::types::constants::{
 };
 use crate::types::header::HduHeader;
 
+const ADD_WCS_HINT: &str = "Plate solve the R channel (or the first frame it was stacked from) in Analysis > Astrometry and click Write WCS; SPCC then uses that WCS.";
+
+fn naxis_dims(header: &HduHeader) -> Option<(usize, usize)> {
+    let cols = usize::try_from(header.get_i64("NAXIS1")?).ok()?;
+    let rows = usize::try_from(header.get_i64("NAXIS2")?).ok()?;
+    Some((cols, rows))
+}
+
+fn wcs_grid_rect(r_header: Option<&HduHeader>, r_shape: (usize, usize), solved: &HduHeader) -> anyhow::Result<CutoutRect> {
+    let ltv = |header: Option<&HduHeader>, key: &str| header.and_then(|h| h.get_f64(key)).unwrap_or(0.0);
+    let x0 = (ltv(Some(solved), "LTV1") - ltv(r_header, "LTV1")).round() as i64;
+    let y0 = (ltv(Some(solved), "LTV2") - ltv(r_header, "LTV2")).round() as i64;
+    let (rows, cols) = r_shape;
+    let solved_dims = naxis_dims(solved);
+    let fits = match solved_dims {
+        Some(dims) if x0 == 0 && y0 == 0 => (cols, rows) == dims,
+        Some((w, h)) => x0 >= 0 && y0 >= 0 && x0 as usize + cols <= w && y0 as usize + rows <= h,
+        None => x0 >= 0 && y0 >= 0,
+    };
+    if !fits {
+        let solved_size = solved_dims.map_or_else(|| "unknown size".to_string(), |(w, h)| format!("{w}x{h}"));
+        anyhow::bail!(
+            "The R channel ({cols}x{rows}, offset {x0},{y0}) does not fit the plate-solved image ({solved_size}); plate solve the R channel's reference frame again."
+        );
+    }
+    Ok(CutoutRect { x0, y0, width: cols, height: rows })
+}
+
 fn spcc_header(r_path: &str, r_entry: &ImageEntry, wcs_path: Option<&str>) -> anyhow::Result<(String, HduHeader)> {
     let (label, header) = match wcs_path {
         Some(path) => (format!("WCS source {}", path), cached_header(path).ok()),
         None => (format!("R channel {}", r_path), source_header(r_path, r_entry)),
     };
-    let header = header.ok_or_else(|| {
-        anyhow::anyhow!("{} carries no FITS header; SPCC needs a plate-solved image whose header holds a celestial WCS.", label)
-    })?;
+    let header = header.ok_or_else(|| anyhow::anyhow!("{} carries no FITS header. {}", label, ADD_WCS_HINT))?;
     let source_path = wcs_path.unwrap_or(r_path);
-    load_wcs(source_path, &header).map_err(|e| {
-        anyhow::anyhow!("{} has no usable celestial WCS ({:#}); SPCC needs a plate-solved image.", label, e)
-    })?;
-    Ok((source_path.to_string(), header))
+    load_wcs(source_path, &header)
+        .map_err(|e| anyhow::anyhow!("{} has no usable celestial WCS ({:#}). {}", label, e, ADD_WCS_HINT))?;
+    if wcs_path.is_none() {
+        return Ok((source_path.to_string(), header));
+    }
+    let rect = wcs_grid_rect(source_header(r_path, r_entry).as_ref(), r_entry.arr().dim(), &header)?;
+    Ok((source_path.to_string(), shift_header(&header, &rect)))
 }
 
 #[tauri::command]
@@ -228,7 +258,7 @@ mod tests {
         }
         for (key, err) in errors {
             assert!(err.contains(&key), "the channel is not named: {err}");
-            assert!(err.contains("plate-solved"), "{err}");
+            assert!(err.contains("Plate solve the R channel"), "{err}");
             assert!(!err.contains("Failed to open") && !err.contains("os error"), "a cache key was opened as a file: {err}");
         }
     }
@@ -275,5 +305,88 @@ mod tests {
 
         let err = rejected.expect_err("200 nm is outside the SPCC range");
         assert!(err.contains("SPCC wavelengths must be finite and between 300 and 1200 nm (got [200, 530, 460])."), "{err}");
+    }
+
+    const EXPECTED_HINT: &str = "Plate solve the R channel (or the first frame it was stacked from) in Analysis > Astrometry and click Write WCS; SPCC then uses that WCS.";
+
+    #[tokio::test]
+    async fn missing_wcs_error_says_how_to_add_one() {
+        let _wizard = lock_wizard_entries();
+        let unsolved = wizard_bg_key("spcc_hint_unsolved_r");
+        let bare = wizard_bg_key("spcc_hint_bare_r");
+        let g = wizard_bg_key("spcc_hint_g");
+        let b = wizard_bg_key("spcc_hint_b");
+        let mut bunit_only = HduHeader::empty();
+        bunit_only.set("BUNIT", "ADU".to_string());
+        insert(&unsolved, &star_field(1.0), Some(bunit_only));
+        insert(&bare, &star_field(1.0), None);
+        insert(&g, &star_field(0.8), None);
+        insert(&b, &star_field(0.6), None);
+
+        let mut errors = Vec::new();
+        for r in [&unsolved, &bare] {
+            errors.push(
+                spcc_calibrate_cmd(r.clone(), g.clone(), b.clone(), None, None, Some(5.0), None, Some("builtin".to_string()), None)
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        for key in [&unsolved, &bare, &g, &b] {
+            GLOBAL_IMAGE_CACHE.remove(key);
+        }
+        assert!(errors[0].contains("has no usable celestial WCS ("), "{}", errors[0]);
+        for err in errors {
+            assert!(err.ends_with(EXPECTED_HINT), "{err}");
+            assert!(!err.contains("SPCC needs a plate-solved image"), "{err}");
+        }
+    }
+
+    fn sized(mut header: HduHeader, cols: usize, rows: usize) -> HduHeader {
+        header.set("NAXIS1", cols.to_string());
+        header.set("NAXIS2", rows.to_string());
+        header
+    }
+
+    fn cropped(left: f64, top: f64) -> HduHeader {
+        let mut header = HduHeader::empty();
+        header.set_f64("LTV1", -left);
+        header.set_f64("LTV2", -top);
+        header
+    }
+
+    #[tokio::test]
+    async fn a_cropped_r_channel_shifts_the_solved_wcs() {
+        let mut solved = sized(solved_header(), 64, 64);
+        solved.set_f64("CRPIX1", 20.0);
+        solved.set_f64("CRPIX2", 30.0);
+
+        let rect = wcs_grid_rect(Some(&cropped(3.0, 2.0)), (40, 50), &solved).unwrap();
+        assert_eq!(rect, CutoutRect { x0: 3, y0: 2, width: 50, height: 40 });
+        let shifted = shift_header(&solved, &rect);
+        assert_eq!((shifted.get_f64("CRPIX1"), shifted.get_f64("CRPIX2")), (Some(17.0), Some(28.0)));
+        assert_eq!(wcs_grid_rect(None, (64, 64), &solved).unwrap(), CutoutRect { x0: 0, y0: 0, width: 64, height: 64 });
+
+        let too_big = wcs_grid_rect(Some(&cropped(3.0, 2.0)), (64, 64), &solved).unwrap_err().to_string();
+        assert_eq!(
+            too_big,
+            "The R channel (64x64, offset 3,2) does not fit the plate-solved image (64x64); plate solve the R channel's reference frame again."
+        );
+        let other_grid = wcs_grid_rect(None, (60, 64), &solved).unwrap_err().to_string();
+        assert_eq!(
+            other_grid,
+            "The R channel (64x60, offset 0,0) does not fit the plate-solved image (64x64); plate solve the R channel's reference frame again."
+        );
+
+        let _wizard = lock_wizard_entries();
+        let r = wizard_bg_key("spcc_cropped_r");
+        let wcs = wizard_bg_key("spcc_solved_full");
+        insert(&r, &Array2::from_elem((40, 50), 1.0f32), Some(cropped(3.0, 2.0)));
+        insert(&wcs, &Array2::from_elem((64, 64), 1.0f32), Some(solved.clone()));
+        let header = load_from_cache_or_disk(&r).and_then(|entry| spcc_header(&r, &entry, Some(wcs.as_str())));
+        GLOBAL_IMAGE_CACHE.remove(&r);
+        GLOBAL_IMAGE_CACHE.remove(&wcs);
+        let (source, header) = header.unwrap();
+        assert_eq!(source, wcs);
+        assert_eq!((header.get_f64("CRPIX1"), header.get_f64("CRPIX2")), (Some(17.0), Some(28.0)));
     }
 }

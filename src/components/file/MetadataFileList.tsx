@@ -102,9 +102,20 @@ const FILTER_COLORS: Record<string, string> = {
 };
 
 function getFilterColor(filter?: string): string {
-  if (!filter) return "#71717a";
-  return FILTER_COLORS[filter.toUpperCase().trim()] ?? "#71717a";
+  if (!filter) return "var(--ab-text-3)";
+  return FILTER_COLORS[filter.toUpperCase().trim()] ?? "var(--ab-text-3)";
 }
+
+function filterChipStyle(filter: string): React.CSSProperties {
+  const color = getFilterColor(filter);
+  return {
+    color,
+    background: `color-mix(in srgb, ${color} 8%, transparent)`,
+    borderColor: `color-mix(in srgb, ${color} 19%, transparent)`,
+  };
+}
+
+const START_CLIP_STYLE: React.CSSProperties = { direction: "rtl", textAlign: "left" };
 
 const ITEM_HEIGHT = 72;
 const OVERSCAN = 4;
@@ -112,13 +123,14 @@ const OVERSCAN = 4;
 interface MetadataFileItemProps {
   file: MetadataFile;
   displayName: string;
+  clipStart: boolean;
   isSelected: boolean;
   onSelect: (id: string) => void;
   onOpenTable?: (id: string) => void;
   tableBlocker: string | null;
 }
 
-function MetadataFileItem({ file, displayName, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
+function MetadataFileItem({ file, displayName, clipStart, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
   const [thumbError, setThumbError] = useState(false);
   const [thumbLoaded, setThumbLoaded] = useState(false);
 
@@ -201,8 +213,8 @@ function MetadataFileItem({ file, displayName, isSelected, onSelect, onOpenTable
 
       <div className="ab-mfl-content">
         <div className="ab-mfl-row-primary">
-          <span className="ab-mfl-filename" title={file.name}>
-            {displayName}
+          <span className="ab-mfl-filename" title={file.path || file.name} style={clipStart ? START_CLIP_STYLE : undefined}>
+            <bdi>{displayName}</bdi>
           </span>
           <div className="ab-mfl-status-dot" data-status={status} />
         </div>
@@ -211,14 +223,7 @@ function MetadataFileItem({ file, displayName, isSelected, onSelect, onOpenTable
           {status === "done" && (
             <>
               {meta?.filter && (
-                <span
-                  className="ab-mfl-chip"
-                  style={{
-                    color: getFilterColor(meta.filter),
-                    background: `${getFilterColor(meta.filter)}15`,
-                    borderColor: `${getFilterColor(meta.filter)}30`,
-                  }}
-                >
+                <span className="ab-mfl-chip" style={filterChipStyle(meta.filter)}>
                   <Filter size={8} />
                   {meta.filter}
                 </span>
@@ -283,6 +288,7 @@ function MetadataFileItem({ file, displayName, isSelected, onSelect, onOpenTable
 const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   prev.file.id === next.file.id
   && prev.displayName === next.displayName
+  && prev.clipStart === next.clipStart
   && prev.isSelected === next.isSelected
   && prev.file.status === next.file.status
   && prev.file.previewUrl === next.file.previewUrl
@@ -324,7 +330,7 @@ function MetadataFileList({
   const doneCount = useMemo(() => files.filter((f) => f.status === "done").length, [files]);
 
   const displayNames = useMemo(() => {
-    const names = fileListNames(files.map((f) => f.name));
+    const names = fileListNames(files);
     return new Map(files.map((f, i) => [f.id, names[i]]));
   }, [files]);
 
@@ -576,7 +582,8 @@ function MetadataFileList({
                 <MemoFileItem
                   key={file.id}
                   file={file}
-                  displayName={displayNames.get(file.id) ?? file.name}
+                  displayName={displayNames.get(file.id)?.text ?? file.name}
+                  clipStart={displayNames.get(file.id)?.clipStart ?? false}
                   isSelected={file.id === selectedId}
                   onSelect={onSelect}
                   onOpenTable={onOpenTable}

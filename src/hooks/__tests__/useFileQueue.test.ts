@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { processFitsFullMock, getFitsExtensionsMock } = vi.hoisted(() => ({
+const { processFitsFullMock, getFitsExtensionsMock, releaseCubesMock } = vi.hoisted(() => ({
   processFitsFullMock: vi.fn(),
   getFitsExtensionsMock: vi.fn(),
+  releaseCubesMock: vi.fn(async () => {}),
 }));
 
 vi.mock("../../services/fits", () => ({
@@ -14,10 +15,10 @@ vi.mock("../../services/header", () => ({
   getHeader: vi.fn(),
   getFitsExtensions: getFitsExtensionsMock,
 }));
-vi.mock("../../services/cube", () => ({ releaseCubes: vi.fn(async () => {}) }));
+vi.mock("../../services/cube", () => ({ releaseCubes: releaseCubesMock }));
 
 import { fileStore } from "../useFileStore";
-import { ingestOutcome, settleIngestFailure } from "../useFileQueue";
+import { ingestOutcome, pathToRelease, releaseCubesOnSwitch, settleIngestFailure } from "../useFileQueue";
 
 const X1D_REJECTION =
   "Failed to load C:/d/jw_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels; " +
@@ -92,5 +93,59 @@ describe("settleIngestFailure", () => {
     await settleIngestFailure(file, PLAIN_REJECTION);
     expect(fileStore.getFile(file.id)).toMatchObject({ status: "error", error: PLAIN_REJECTION });
     expect(fileStore.getStats()).toMatchObject({ done: 0, failed: 1, tables: 0 });
+  });
+});
+
+const CUBE = { path: "C:/d/cube_s3d.fits#hdu=1", sourcePath: "C:/d/cube_s3d.fits" };
+const IMAGE = { path: "C:/d/502nmos.fits", sourcePath: "C:/d/502nmos.fits" };
+const PLANE_RESULT = { png_path: "C:/o/cube.png", previewUrl: "asset://localhost/C%3A%2Fo%2Fcube.png", dimensions: [50, 60] as [number, number], elapsed_ms: 1 };
+
+function settled(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("pathToRelease", () => {
+  it("releases the source file of the previous selection when another file is selected", () => {
+    expect(pathToRelease(CUBE, IMAGE)).toBe("C:/d/cube_s3d.fits");
+  });
+
+  it("keeps the cube mapped when only its HDU or plane changes", () => {
+    expect(pathToRelease(CUBE, { path: "C:/d/cube_s3d.fits#hdu=2", sourcePath: CUBE.sourcePath })).toBeNull();
+    expect(pathToRelease({ path: CUBE.sourcePath, sourcePath: CUBE.sourcePath }, CUBE)).toBeNull();
+  });
+
+  it("falls back to the path without a source path and releases nothing without a previous selection", () => {
+    expect(pathToRelease({ path: "C:/d/a.fits", sourcePath: "" }, null)).toBe("C:/d/a.fits");
+    expect(pathToRelease(null, CUBE)).toBeNull();
+  });
+});
+
+describe("releaseCubesOnSwitch", () => {
+  beforeEach(async () => {
+    fileStore.reset();
+    await settled();
+    releaseCubesMock.mockClear();
+  });
+
+  it("releases the previous cube on a file switch and not on a plane switch of the same cube", async () => {
+    const cube = queued("cube_s3d.fits");
+    const image = queued("502nmos.fits");
+    fileStore.selectFile(cube.id);
+    await settled();
+    const stop = releaseCubesOnSwitch();
+
+    fileStore.switchImageRef(cube.id, `${cube.path}#hdu=1`, PLANE_RESULT);
+    await settled();
+    expect(releaseCubesMock).not.toHaveBeenCalled();
+
+    fileStore.selectFile(image.id);
+    await settled();
+    expect(releaseCubesMock).toHaveBeenCalledTimes(1);
+    expect(releaseCubesMock).toHaveBeenCalledWith(["C:/d/cube_s3d.fits"]);
+
+    stop();
+    fileStore.selectFile(cube.id);
+    await settled();
+    expect(releaseCubesMock).toHaveBeenCalledTimes(1);
   });
 });

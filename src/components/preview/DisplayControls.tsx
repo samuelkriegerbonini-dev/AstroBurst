@@ -1,10 +1,11 @@
-import { memo, useEffect, useState, useSyncExternalStore } from "react";
+import { memo, useSyncExternalStore } from "react";
 import { RotateCcw } from "lucide-react";
 import { useDisplayContext } from "../../context/PreviewContext";
 import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLimits";
-import { centreDraftFor, parseCentreDraft, symmetricStretchNote } from "../../utils/displayTransfer";
+import { symmetricStretchNote } from "../../utils/displayTransfer";
 import { wcsOverlayNote, wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
 import { NEEDS_GPU_TITLE } from "../../utils/previewShell";
+import { DecimalNumberField } from "../ui";
 import {
   COLORMAP_LABELS,
   COLORMAP_NAMES,
@@ -40,12 +41,6 @@ function formatLimit(v: number): string {
   return v.toFixed(abs < 10 ? 4 : 2);
 }
 
-function parseNullable(text: string): number | null | undefined {
-  if (text.trim() === "") return null;
-  const n = Number(text);
-  return Number.isFinite(n) ? n : undefined;
-}
-
 function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOnlyTitle = NEEDS_GPU_TITLE }: DisplayControlsProps) {
   const { display, setDisplay, limits, limitsLoading, limitsError } = useDisplayContext();
   const isMtf = display.stretch === "mtf";
@@ -55,18 +50,6 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
   const renderTitle = (title: string) => (renderOnlyDisabled ? renderOnlyTitle : title);
   const renderGroupClass = `${GROUP_CLASS} ${renderOnlyDisabled ? "opacity-50" : ""}`;
   const renderGroupTitle = renderOnlyDisabled ? renderOnlyTitle : undefined;
-
-  const [centreDraft, setCentreDraft] = useState(() => String(display.centre));
-  useEffect(() => {
-    setCentreDraft((draft) => centreDraftFor(draft, display.centre));
-  }, [display.centre]);
-
-  const onCentreChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const text = e.target.value;
-    setCentreDraft(text);
-    const n = parseCentreDraft(text);
-    if (n !== null && n !== display.centre) setDisplay({ centre: n });
-  };
 
   const commitPercentiles = () => {
     const [lo, hi] = normalizePercentiles(display.percentileLow, display.percentileHigh);
@@ -88,18 +71,12 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
     e.currentTarget.blur();
   };
 
-  const onNumber = (key: "percentileLow" | "percentileHigh" | "zscaleContrast" | "asinhA" | "power") =>
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const n = Number(e.target.value);
-      if (e.target.value.trim() === "" || !Number.isFinite(n)) return;
-      setDisplay({ [key]: n });
+  const onNumber = (key: "percentileLow" | "percentileHigh" | "zscaleContrast" | "asinhA" | "power" | "centre") =>
+    (value: number | null) => {
+      if (value !== null) setDisplay({ [key]: value });
     };
 
-  const onNullable = (key: "userLo" | "userHi") => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const parsed = parseNullable(e.target.value);
-    if (parsed === undefined) return;
-    setDisplay({ [key]: parsed });
-  };
+  const onNullable = (key: "userLo" | "userHi") => (value: number | null) => setDisplay({ [key]: value });
 
   return (
     <fieldset
@@ -123,14 +100,12 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
         {display.stretch === "asinh" && (
           <label className="flex items-center gap-1" title={renderTitle("asinh softening parameter a")}>
             <span className={LABEL_CLASS}>a</span>
-            <input
-              type="number"
-              step={0.01}
+            <DecimalNumberField
               min={0.0001}
               aria-label="Asinh softening parameter a"
               className={INPUT_CLASS}
               value={display.asinhA}
-              onChange={onNumber("asinhA")}
+              onValueChange={onNumber("asinhA")}
             />
           </label>
         )}
@@ -138,14 +113,12 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
         {display.stretch === "power" && (
           <label className="flex items-center gap-1" title={renderTitle("power-law exponent")}>
             <span className={LABEL_CLASS}>p</span>
-            <input
-              type="number"
-              step={0.1}
+            <DecimalNumberField
               min={0.01}
               aria-label="Power-law exponent p"
               className={INPUT_CLASS}
               value={display.power}
-              onChange={onNumber("power")}
+              onValueChange={onNumber("power")}
             />
           </label>
         )}
@@ -173,28 +146,20 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           <>
             <label className="flex items-center gap-1" title={renderTitle("lower percentile (%)")}>
               <span className={LABEL_CLASS}>lo%</span>
-              <input
-                type="number"
-                step={0.1}
-                min={0}
-                max={100}
+              <DecimalNumberField
                 className={INPUT_CLASS}
                 value={display.percentileLow}
-                onChange={onNumber("percentileLow")}
+                onValueChange={onNumber("percentileLow")}
                 onBlur={commitPercentiles}
                 onKeyDown={onCommitKey(commitPercentiles)}
               />
             </label>
             <label className="flex items-center gap-1" title={renderTitle("upper percentile (%)")}>
               <span className={LABEL_CLASS}>hi%</span>
-              <input
-                type="number"
-                step={0.1}
-                min={0}
-                max={100}
+              <DecimalNumberField
                 className={INPUT_CLASS}
                 value={display.percentileHigh}
-                onChange={onNumber("percentileHigh")}
+                onValueChange={onNumber("percentileHigh")}
                 onBlur={commitPercentiles}
                 onKeyDown={onCommitKey(commitPercentiles)}
               />
@@ -206,26 +171,24 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           <>
             <label className="flex items-center gap-1" title={renderTitle("vmin (empty = data min)")}>
               <span className={LABEL_CLASS}>lo</span>
-              <input
-                type="number"
-                step="any"
+              <DecimalNumberField
+                optional
                 className={INPUT_CLASS}
-                value={display.userLo ?? ""}
+                value={display.userLo}
                 placeholder="min"
-                onChange={onNullable("userLo")}
+                onValueChange={onNullable("userLo")}
                 onBlur={commitUserLimits}
                 onKeyDown={onCommitKey(commitUserLimits)}
               />
             </label>
             <label className="flex items-center gap-1" title={renderTitle("vmax (empty = data max)")}>
               <span className={LABEL_CLASS}>hi</span>
-              <input
-                type="number"
-                step="any"
+              <DecimalNumberField
+                optional
                 className={INPUT_CLASS}
-                value={display.userHi ?? ""}
+                value={display.userHi}
                 placeholder="max"
-                onChange={onNullable("userHi")}
+                onValueChange={onNullable("userHi")}
                 onBlur={commitUserLimits}
                 onKeyDown={onCommitKey(commitUserLimits)}
               />
@@ -236,14 +199,12 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
         {!isMtf && display.limits === "zscale" && (
           <label className="flex items-center gap-1" title={renderTitle("zscale contrast")}>
             <span className={LABEL_CLASS}>contrast</span>
-            <input
-              type="number"
-              step={0.05}
+            <DecimalNumberField
               min={0.01}
               max={1}
               className={INPUT_CLASS}
               value={display.zscaleContrast}
-              onChange={onNumber("zscaleContrast")}
+              onValueChange={onNumber("zscaleContrast")}
             />
           </label>
         )}
@@ -268,13 +229,11 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
             title={renderTitle("Centre c of the symmetric limits, in data units (default 0). Pixels that are exactly 0 are padding and take the no-data colour, not the centre colour; the centre lands on the colormap centre only under a linear stretch")}
           >
             <span className={LABEL_CLASS}>centre</span>
-            <input
-              type="number"
-              step="any"
+            <DecimalNumberField
               aria-label="Symmetric limits centre"
               className={INPUT_CLASS}
-              value={centreDraft}
-              onChange={onCentreChange}
+              value={display.centre}
+              onValueChange={onNumber("centre")}
             />
           </label>
         )}

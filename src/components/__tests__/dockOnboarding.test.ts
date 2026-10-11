@@ -6,6 +6,7 @@ import { createDockOnboardingStore, dockOnboardingStore, type OnboardingStorage 
 import { commitDockMove } from "../dock/useDockDrag";
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, dockReducer } from "../../utils/dockLayout";
+import { onboardingPlacement, viewerToolbarBottom, type OnboardingToolbarHost } from "../../utils/dockOnboarding";
 
 const KEY = "ab.onboarding.dock.v1";
 const TITLE = "Arrange your tool windows";
@@ -181,6 +182,18 @@ describe("DockOnboardingCard placement and actions", () => {
     expect(html).toMatch(/^<div[^>]*data-arrow="right"/);
     const narrow = render(cardProps({ placement: { left: 216, top: 96, width: 348, maxHeight: 468, arrow: "none" } }));
     expect(narrow).toMatch(/^<div[^>]*data-arrow="none"/);
+  });
+
+  it("starts the card below the viewer toolbar rows it measured", () => {
+    const viewer = { left: 300, top: 60, width: 900, height: 700 };
+    const host: OnboardingToolbarHost = {
+      getBoundingClientRect: () => ({ top: 60, bottom: 760 }),
+      querySelector: () => ({ getBoundingClientRect: () => ({ top: 92, bottom: 760 }) }),
+      querySelectorAll: () => [{ getBoundingClientRect: () => ({ top: 126, bottom: 158 }) }],
+    };
+    const html = render(cardProps({ placement: onboardingPlacement(viewer, { width: 1600, height: 900 }, viewerToolbarBottom(host)) }));
+    const top = Number(/^<div[^>]*style="[^"]*top:(\d+)px/.exec(html)?.[1]);
+    expect(top).toBeGreaterThanOrEqual(158 + 16);
   });
 
   it("wires Next, Back, Got it and the close button", () => {

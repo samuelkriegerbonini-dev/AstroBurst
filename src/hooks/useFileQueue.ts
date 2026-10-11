@@ -100,6 +100,24 @@ export async function settleIngestFailure(file: ProcessedFile, msg: string): Pro
   if (!loadedAsCube) fileStore.fileError(file.id, msg);
 }
 
+type SelectionPaths = Pick<ProcessedFile, "path" | "sourcePath">;
+
+export function pathToRelease(prev: SelectionPaths | null, next: SelectionPaths | null): string | null {
+  if (!prev) return null;
+  const released = prev.sourcePath || prev.path;
+  return next && (next.sourcePath || next.path) === released ? null : released;
+}
+
+export function releaseCubesOnSwitch(): () => void {
+  let previous: SelectionPaths | null = fileStore.getSelectedFile();
+  return fileStore.subscribeToSelected(() => {
+    const next = fileStore.getSelectedFile();
+    const path = pathToRelease(previous, next);
+    previous = next;
+    if (path !== null) void releaseCubes([path]);
+  });
+}
+
 export function useFileQueue() {
   const processingRef = useRef(false);
   const [isResamplingState, setIsResampling] = useState(false);
@@ -108,6 +126,8 @@ export function useFileQueue() {
   useEffect(() => onCommandOutputs((result) => {
     void refreshOverwrittenFiles(result);
   }), []);
+
+  useEffect(() => releaseCubesOnSwitch(), []);
 
   const addFiles = useCallback((fileList: AstroFile[]) => {
     fileStore.addFiles(fileList);

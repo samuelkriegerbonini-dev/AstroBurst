@@ -2,6 +2,7 @@ import { useSyncExternalStore, useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
 import { isCalibRefAsdf } from "../utils/validation";
+import { normalizeOutputPath } from "../utils/processingChain";
 import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
 
 type Listener = () => void;
@@ -138,7 +139,11 @@ class FileStore {
   }
 
   addFiles(fileList: AstroFile[]) {
-    const valid = fileList.filter((f) => !isCalibRefAsdf(f.name));
+    const queued = new Set<string>();
+    for (const f of this.state.fileMap.values()) {
+      if (f.status === FILE_STATUS.QUEUED) queued.add(normalizeOutputPath(f.path));
+    }
+    const valid = fileList.filter((f) => !isCalibRefAsdf(f.name) && !queued.has(normalizeOutputPath(f.path)));
     if (valid.length === 0) return;
 
     let addedBytes = 0;
@@ -239,6 +244,19 @@ class FileStore {
     this.bumpVersion();
 
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
+  }
+
+  requeueFile(id: string): boolean {
+    const existing = this.state.fileMap.get(id);
+    if (!existing || existing.status !== FILE_STATUS.ERROR) return false;
+
+    this.state.fileMap.set(id, { ...existing, status: FILE_STATUS.QUEUED, error: null, startedAt: null, finishedAt: null });
+    this.state.stats = { ...this.state.stats, failed: Math.max(0, this.state.stats.failed - 1) };
+    this.state.statsVersion++;
+    this.bumpVersion();
+
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
+    return true;
   }
 
   fileTable(id: string, message: string) {

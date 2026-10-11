@@ -1,14 +1,15 @@
 import { useState, useCallback, useId, useMemo } from "react";
-import { Grid3X3, CheckCircle2, Wand2 } from "lucide-react";
-import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList } from "../ui";
+import { Grid3X3, CheckCircle2, Wand2, X } from "lucide-react";
+import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList, DecimalField } from "../ui";
 import { useProgress } from "../../hooks/useProgress";
 import { drizzleRgbStack } from "../../services/stacking";
+import { cancelProgress } from "../../services/progress";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
 import type { DrizzleAlignmentMethod, DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
 import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
-import { REJECTION_OPTIONS, rejectionUsesSigma } from "../../utils/stackingRejection";
-import { formatCount } from "../../utils/formatCount";
+import { REJECTION_OPTIONS, rejectionUsesSigma, stackProgressText } from "../../utils/stackingRejection";
+import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains } from "../../utils/drizzleRgbResult";
 import { cullDrizzleChannels, subframeExclusionNotice } from "../../utils/subframeCull";
 import type { RunTarget } from "./StackingTab";
 
@@ -63,16 +64,17 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const [sigmaLow, setSigmaLow] = useState(3.0);
   const [sigmaHigh, setSigmaHigh] = useState(3.0);
   const [wbMode, setWbMode] = useState<"auto" | "manual" | "none">("auto");
-  const [wbR, setWbR] = useState(1.0);
-  const [wbG, setWbG] = useState(1.0);
-  const [wbB, setWbB] = useState(1.0);
+  const [wbRText, setWbRText] = useState("1");
+  const [wbGText, setWbGText] = useState("1");
+  const [wbBText, setWbBText] = useState("1");
   const [scnrEnabled, setScnrEnabled] = useState(false);
   const [scnrAmount, setScnrAmount] = useState(0.8);
   const [scnrMethod, setScnrMethod] = useState<"average" | "maximum">("average");
   const [saveFits, setSaveFits] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<DrizzleRgbResult | null>(null);
+  const [finished, setFinished] = useState<{ result: DrizzleRgbResult; kernel: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelled, setCancelled] = useState(false);
   const progress = useProgress(DRIZZLE_RGB_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const kernelId = useId();
@@ -99,6 +101,8 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const readyChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length >= 2);
   const shortChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length === 1);
   const canRun = readyChannels.length >= 2;
+  const manual = useMemo(() => manualGains({ r: wbRText, g: wbGText, b: wbBText }), [wbRText, wbGText, wbBText]);
+  const gainError = wbMode === "manual" ? manual.error : null;
 
   const toggleAssignment = useCallback((path: string, ch: Channel) => {
     setAssignments((prev) => {
@@ -127,12 +131,15 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const clearAssignments = useCallback(() => setAssignments({}), []);
 
   const handleRun = useCallback(async () => {
-    if (!canRun) return;
+    const gains = wbMode === "manual" ? manual.gains : null;
+    if (!canRun || (wbMode === "manual" && gains === null)) return;
     const target = runTarget;
     const inputs = [...culledPaths.r, ...culledPaths.g, ...culledPaths.b];
+    const kernelAtRun = kernel;
     setIsRunning(true);
     setError(null);
-    setResult(null);
+    setCancelled(false);
+    setFinished(null);
     resetProgress();
     try {
       const res = await drizzleRgbStack(
@@ -150,24 +157,29 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
           sigmaLow: rejectionUsesSigma(rejection) ? sigmaLow : undefined,
           sigmaHigh: rejectionUsesSigma(rejection) ? sigmaHigh : undefined,
           wbMode,
-          wbR: wbMode === "manual" ? wbR : undefined,
-          wbG: wbMode === "manual" ? wbG : undefined,
-          wbB: wbMode === "manual" ? wbB : undefined,
+          wbR: gains?.wbR,
+          wbG: gains?.wbG,
+          wbB: gains?.wbB,
           scnrEnabled,
           scnrAmount: scnrEnabled ? scnrAmount : undefined,
           scnrMethod: scnrEnabled ? scnrMethod : undefined,
           saveFits,
         },
       );
-      setResult(res);
+      setFinished({ result: res, kernel: kernelAtRun });
       onResult?.(res, inputs, target);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (isCancelledRun(message)) {
+        setCancelled(true);
+      } else {
+        setError(message);
+      }
     } finally {
       setIsRunning(false);
       resetProgress();
     }
-  }, [canRun, culledPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, wbR, wbG, wbB, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
+  }, [canRun, culledPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, manual, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
 
@@ -314,27 +326,28 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
           </select>
         </div>
         {wbMode === "manual" && (
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { label: "R", val: wbR, set: setWbR },
-              { label: "G", val: wbG, set: setWbG },
-              { label: "B", val: wbB, set: setWbB },
-            ].map(({ label, val, set }) => (
-              <div key={label} className="flex flex-col gap-0.5">
-                <label htmlFor={`${gainId}-${label}`} className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
-                <input
-                  id={`${gainId}-${label}`}
-                  type="number"
-                  min={0}
-                  step={0.05}
-                  value={val}
-                  onChange={(e) => set(parseFloat(e.target.value) || 0)}
-                  disabled={isRunning}
-                  className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-rose-500/50 w-full"
-                />
-              </div>
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: "R", text: wbRText, set: setWbRText },
+                { label: "G", text: wbGText, set: setWbGText },
+                { label: "B", text: wbBText, set: setWbBText },
+              ].map(({ label, text, set }) => (
+                <div key={label} className="flex flex-col gap-0.5">
+                  <label htmlFor={`${gainId}-${label}`} className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
+                  <DecimalField
+                    id={`${gainId}-${label}`}
+                    {...DRIZZLE_GAIN_FIELD}
+                    value={text}
+                    onChange={set}
+                    disabled={isRunning}
+                    className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-rose-500/50 w-full"
+                  />
+                </div>
+              ))}
+            </div>
+            {gainError && <div className="text-[9px] text-amber-400/90" data-field-error>{gainError}</div>}
+          </>
         )}
         <Toggle label="SCNR green removal" checked={scnrEnabled} accent="rose" onChange={setScnrEnabled} />
         {scnrEnabled && (
@@ -374,7 +387,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
         label={`Drizzle ${readyChannels.map((c) => c.toUpperCase()).join("+") || "RGB"}`}
         runningLabel="Drizzling..."
         running={isRunning}
-        disabled={!canRun}
+        disabled={!canRun || gainError !== null}
         accent="rose"
         onClick={handleRun}
       />
@@ -385,33 +398,39 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
             <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-rose), #fda4af)" }} />
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
-            <span>{progress.stage}</span>
-            <span>{progress.percent}%</span>
+            <span>{stackProgressText(progress.stage, progress.current, progress.total)}</span>
+            <span className="flex items-center gap-2">
+              <span>{progress.percent}%</span>
+              <button
+                type="button"
+                data-testid="drizzle-rgb-cancel"
+                onClick={() => { cancelProgress(DRIZZLE_RGB_PROGRESS_EVENT).catch(() => {}); }}
+                title="Cancel drizzle"
+                aria-label="Cancel drizzle"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
           </div>
         </div>
       )}
 
+      {cancelled && <div className="text-[10px] text-zinc-500">Drizzle cancelled</div>}
+
       <ErrorAlert message={error} />
 
-      {result && (
+      {finished && (
         <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
           <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
             <CheckCircle2 size={12} />
             Drizzle RGB Complete
           </div>
-          <ResultGrid columns={3} items={[
-            { label: "Output", value: result.output_dims ? `${result.output_dims[0]}×${result.output_dims[1]}` : "--" },
-            { label: "Scale", value: result.scale ? `${result.scale.toFixed(1)}x` : "--" },
-            { label: "Kernel", value: kernel },
-            { label: "R frames", value: result.frame_count_r },
-            { label: "G frames", value: result.frame_count_g },
-            { label: "B frames", value: result.frame_count_b },
-            { label: "Rejected", value: result.rejected_pixels ? formatCount(result.rejected_pixels) : "0" },
-          ]} />
-          <WarningList warnings={result.warnings} />
-          {result.fits_path && (
-            <div className="text-[10px] text-zinc-500 truncate" title={result.fits_path}>
-              FITS: {result.fits_path}
+          <ResultGrid columns={3} items={drizzleResultItems(finished.result, finished.kernel)} />
+          <WarningList warnings={finished.result.warnings} />
+          {finished.result.fits_path && (
+            <div className="text-[10px] text-zinc-500 truncate" title={finished.result.fits_path}>
+              FITS: {finished.result.fits_path}
             </div>
           )}
         </div>

@@ -188,10 +188,6 @@ export function indexOf(layout: DockLayout, tool: DockToolId): number {
   return layout.anchors[anchorOf(layout, tool)].indexOf(tool);
 }
 
-export function isToolOpen(layout: DockLayout, tool: DockToolId): boolean {
-  return layout.active[anchorOf(layout, tool)] === tool;
-}
-
 export function clampSize(key: keyof DockSizes, value: number): number {
   const limit = DOCK_SIZE_LIMITS[key];
   if (Number.isNaN(value)) return limit.default;
@@ -212,6 +208,29 @@ export function columnMin(layout: DockLayout, anchor: SideAnchor): number {
 export function columnRenderWidth({ size, min, max, dockW, bothOpen }: { size: number; min: number; max: number; dockW: number; bothOpen: boolean }): number {
   const cap = bothOpen ? COLUMN_VW_CAP_DOUBLE : COLUMN_VW_CAP_SINGLE;
   return Math.min(Math.max(size, min), max, (dockW * cap) / 100);
+}
+
+export function columnCommitWidth(value: number, renderedPx: number): number {
+  return renderedPx > 0 ? Math.min(value, renderedPx) : value;
+}
+
+export function columnWidthCss(min: number, size: number, bothOpen: boolean): string {
+  return `clamp(${min}px, ${size}px, ${bothOpen ? COLUMN_VW_CAP_DOUBLE : COLUMN_VW_CAP_SINGLE}vw)`;
+}
+
+export interface DraggedColumn {
+  outer: { style: { width: string } };
+  inner: { offsetWidth: number; style: { width: string } };
+  min: number;
+  bothOpen: boolean;
+}
+
+export function settleColumnWidth(column: DraggedColumn, value: number): number {
+  const width = columnCommitWidth(value, column.inner.offsetWidth);
+  const css = columnWidthCss(column.min, width, column.bothOpen);
+  column.outer.style.width = css;
+  column.inner.style.width = css;
+  return width;
 }
 
 function withAnchors(layout: DockLayout, patch: Partial<Record<DockAnchor, DockToolId[]>>): DockLayout["anchors"] {
@@ -359,4 +378,16 @@ export function anchorOpenTool(layout: DockLayout, anchor: DockAnchor, hasFile: 
   const tool = layout.active[anchor];
   if (tool === null) return null;
   return DOCK_TOOL_META[tool].needsFile && !hasFile ? null : tool;
+}
+
+export interface PaletteToolEntry {
+  tool: DockToolId;
+  label: string;
+}
+
+export function paletteToolEntries(layout: DockLayout, hasFile: boolean): PaletteToolEntry[] {
+  return DOCK_TOOL_IDS.filter((tool) => hasFile || !DOCK_TOOL_META[tool].needsFile).map((tool) => {
+    const shown = anchorOpenTool(layout, anchorOf(layout, tool), hasFile) === tool;
+    return { tool, label: `${shown ? "Hide" : "Open"} ${DOCK_TOOL_META[tool].label} Panel` };
+  });
 }

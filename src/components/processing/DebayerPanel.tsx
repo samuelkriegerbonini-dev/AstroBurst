@@ -10,7 +10,7 @@ import { fileOnlyNotice, type CompositeNoticeProps } from "./compositeProps";
 interface DebayerPanelProps extends CompositeNoticeProps {
   selectedFile: { path: string; name?: string } | null;
   outputDir: string;
-  onPreviewUpdate?: (url: string | null | undefined) => void;
+  onPreviewUpdate?: (url: string | null | undefined, dims: readonly number[] | null | undefined) => void;
   fileKey?: string | null;
   disabledReason?: string | null;
   disabledReasonId?: string;
@@ -54,7 +54,7 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
         method,
         pattern: pattern || undefined,
       });
-      onPreviewUpdate?.(res.previewUrl);
+      onPreviewUpdate?.(res.previewUrl, res.dimensions);
       return res;
     });
   }, [selectedFile, outputDir, method, pattern, onPreviewUpdate, run]);

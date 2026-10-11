@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ANCHOR_LABELS,
-  COLUMN_VW_CAP_DOUBLE,
-  COLUMN_VW_CAP_SINGLE,
   DOCK_ANCHORS,
   DOCK_SIZE_LIMITS,
   DOCK_TOOL_META,
   MIN_PREVIEW_H,
   MIN_PREVIEW_W,
   anchorOpenTool,
+  columnWidthCss,
+  settleColumnWidth,
   type DockAnchor,
   type DockToolId,
   type SideAnchor,
@@ -39,10 +39,6 @@ const SIDE_SIZE_KEY: Record<SideAnchor, "leftW" | "rightW"> = { "left-top": "lef
 function sideMin(anchor: SideAnchor, tool: DockToolId | null): number {
   const limit = DOCK_SIZE_LIMITS[SIDE_SIZE_KEY[anchor]].min;
   return tool === null ? limit : Math.max(limit, DOCK_TOOL_META[tool].minWidth);
-}
-
-function columnWidthCss(min: number, size: number, bothOpen: boolean): string {
-  return `clamp(${min}px, ${size}px, ${bothOpen ? COLUMN_VW_CAP_DOUBLE : COLUMN_VW_CAP_SINGLE}vw)`;
 }
 
 function panelLabel(anchor: DockAnchor, tool: DockToolId | null): string {
@@ -148,7 +144,7 @@ export default function DockShell({ tools, children }: DockShellProps) {
         outer.style.width = css;
         inner.style.width = css;
       },
-      commit: (value) => value,
+      commit: (value) => settleColumnWidth({ outer, inner, min, bothOpen: both }, value),
       frozen: [outer],
     };
   }, []);

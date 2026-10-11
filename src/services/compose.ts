@@ -9,6 +9,7 @@ import type {
   ResetWbResult,
   ScnrOptions,
   ChannelOverlayPreview,
+  CompositeStfFields,
   CropBounds,
 } from "../shared/types/compose";
 
@@ -61,7 +62,7 @@ export async function renderLinearCompositePreview(
   return getPreviewUrl(res.png_path);
 }
 
-export interface LrgbResult {
+export interface LrgbResult extends CompositeStfFields {
   png_path?: string;
   lrgb_applied: boolean;
   dimensions: [number, number];
@@ -72,12 +73,13 @@ export interface LrgbResult {
 export function lrgbCombineComposite(
   lPath: string,
   outputDir?: string,
-  options: { lightness?: number; chrominance?: number } = {},
+  options: { lightness?: number; chrominance?: number; stfLinked?: boolean } = {},
 ): Promise<LrgbResult> {
   return withPreview<LrgbResult>("lrgb_combine_composite_cmd", outputDir, {
     lPath,
     lightness: options.lightness ?? 1.0,
     chrominance: options.chrominance ?? 1.0,
+    stfLinked: options.stfLinked,
   });
 }
 
@@ -181,6 +183,7 @@ export function calibrateAndScnr(
     amount: number;
     preserveLuminance: boolean;
   },
+  stfLinked?: boolean,
 ): Promise<CalibrateAndScnrResult> {
   return typedInvoke<CalibrateAndScnrResult>("calibrate_and_scnr_cmd", {
     outputDir,
@@ -191,6 +194,7 @@ export function calibrateAndScnr(
     scnrMethod: scnr?.method,
     scnrAmount: scnr?.amount,
     scnrPreserveLuminance: scnr?.preserveLuminance,
+    stfLinked,
   });
 }
 
@@ -198,6 +202,6 @@ export function computeAutoWb(): Promise<AutoWbResult> {
   return typedInvoke<AutoWbResult>("compute_auto_wb_cmd", {});
 }
 
-export function resetWb(outputDir: string): Promise<ResetWbResult> {
-  return typedInvoke<ResetWbResult>("reset_wb_cmd", { outputDir });
+export function resetWb(outputDir: string, stfLinked?: boolean): Promise<ResetWbResult> {
+  return typedInvoke<ResetWbResult>("reset_wb_cmd", { outputDir, stfLinked });
 }

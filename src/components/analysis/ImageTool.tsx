@@ -5,13 +5,13 @@ import MeasurementBadge from "./MeasurementBadge";
 import SectionChips from "./SectionChips";
 import { computeFftSpectrum, applyStfRender, computeHistogram } from "../../services/analysis";
 import { getOutputDir } from "../../infrastructure/tauri";
-import { useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useCubeContext, useRenderActions, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
 import { useToolHost } from "../../context/ToolHostContext";
 import { histogramSkyWindow } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { ANALYSIS_SECTION, deepZoomAvailable, toolSections, type AnalysisSectionsInput } from "../../utils/analysisSections";
 import { useAnalysisMeasure } from "../../hooks/useAnalysisMeasure";
-import { cpuStfRenderAllowed, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
+import { cpuStfRenderAllowed, histogramChannelLabel, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
 import type { StfParams, HistogramData } from "../../shared/types";
 import TabSpinner from "./TabSpinner";
 
@@ -24,6 +24,7 @@ const StatisticsPanel = lazy(() => import("./StatisticsPanel"));
 const PixelTablePanel = lazy(() => import("./PixelTablePanel"));
 
 function ImageTool() {
+  const { file } = useFileContext();
   const { histData, histDataPath, stfParams, setStfParams } = useHistContext();
   const { isCube, ramp } = useCubeContext();
   const { setStfPreviewUrl } = useRenderActions();
@@ -35,10 +36,17 @@ function ImageTool() {
   const { target, effectivePath, compositeOnScreen, rgbPath, regionKey, measureKey, targetWidth, targetHeight, filePath } =
     useAnalysisMeasure();
 
+  const rgbStfMode = rgbStfPanelMode({
+    compositeOnScreen,
+    hasRgbRawPixels: rgbRawPixels !== null,
+    displayReferred: rgbRawPixels?.displayReferred === true,
+  });
   const stfLock = histogramStfLock({
     stretch: gpuDisplay ? display.stretch : "mtf",
     compositeOnScreen,
     previewOnly: target.displayed.previewOnly,
+    rgbStfPanelShown: rgbStfMode !== "hidden",
+    gpuDisplay,
   });
 
   const rafIdRef = useRef<number | null>(null);
@@ -158,11 +166,7 @@ function ImageTool() {
     [hasHist, histMedian, histMean, histSigma],
   );
 
-  const rgbStfMode = rgbStfPanelMode({
-    compositeOnScreen,
-    hasRgbRawPixels: rgbRawPixels !== null,
-    displayReferred: rgbRawPixels?.displayReferred === true,
-  });
+  const histChannel = histogramChannelLabel({ isRgbFile: file?.result?.is_rgb === true, histDataPath, filePath: filePath ?? null });
   const measurementBadge = useMemo(() => <MeasurementBadge />, []);
 
   const showFft = Boolean(effectivePath) && !isCube && (targetWidth ?? 0) >= 64;
@@ -199,6 +203,7 @@ function ImageTool() {
               disabled={stfLock !== null}
               disabledHint={stfLock ?? undefined}
               badge={measurementBadge}
+              channel={histChannel}
               skyZoom={skyZoom && skyWindow !== null}
               skyAvailable={skyWindow !== null}
               skyLoading={skyZoom && skyWindow !== null && skyShown === null}

@@ -49,7 +49,7 @@ import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } 
 import { GRAY_LUT_RGBA, reconcileDisplayPatch } from "../utils/displayTransfer";
 import { displayForRecordChange, initialHintedDisplay, patchHintedDisplay, persistableDisplay, type HintedDisplay } from "../utils/displayHint";
 import { clampGridDensity } from "../utils/gridSteps";
-import { EMPTY_CHAIN, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
+import { EMPTY_CHAIN, chainForPublish, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
 
 export type PaletteSuggestion = NarrowbandDetection["palette"];
 
@@ -468,12 +468,13 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       const base = renderRecords.get(key) ?? (isCurrent ? viewRef.current : null);
       const baseChain = base?.chain ?? EMPTY_CHAIN;
       const version = nextRenderVersion();
+      const processed: ProcessedResult = {
+        ...result,
+        previewUrl: result.previewUrl ? withVersionParam(result.previewUrl, version) : null,
+      };
       const record: FileRenderState = {
-        processed: {
-          ...result,
-          previewUrl: result.previewUrl ? withVersionParam(result.previewUrl, version) : null,
-        },
-        chain: chainUpdate ? chainUpdate(baseChain) : baseChain,
+        processed,
+        chain: chainForPublish(baseChain, processed, chainUpdate),
         version,
       };
       putCapped(renderRecords, key, record, RENDER_CACHE_MAX);

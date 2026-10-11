@@ -11,6 +11,7 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 mod astrometry_net_impl {
     use anyhow::{bail, Context, Result};
     use super::{FieldAnnotation, SolveResult, SolveConfig};
+    use crate::types::error::AppError;
 
     const REFERER: &str = "https://nova.astrometry.net/api/login";
     const ERROR_SNIPPET_CHARS: usize = 200;
@@ -20,6 +21,7 @@ mod astrometry_net_impl {
     const GET_ATTEMPTS: u32 = 3;
     const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
     const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+    const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
     fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
         let mut parts = vec![error.to_string()];
@@ -207,14 +209,28 @@ mod astrometry_net_impl {
         image_width: usize,
         image_height: usize,
         config: &SolveConfig,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<SolveResult> {
         let limit = std::time::Duration::from_secs(config.timeout_secs);
-        match tokio::time::timeout(limit, solve_before_deadline(fits_path, image_width, image_height, config)).await {
-            Ok(result) => result,
-            Err(_) => bail!(
-                "Plate solve timed out after {} s; raise the plate-solve timeout in Settings",
-                config.timeout_secs
-            ),
+        let solve = tokio::time::timeout(limit, solve_before_deadline(fits_path, image_width, image_height, config));
+        tokio::select! {
+            biased;
+            () = wait_for_cancel(cancelled) => {
+                Err(anyhow::Error::new(AppError::Cancelled).context("Plate solve cancelled"))
+            }
+            outcome = solve => match outcome {
+                Ok(result) => result,
+                Err(_) => bail!(
+                    "Plate solve timed out after {} s; raise the plate-solve timeout in Settings",
+                    config.timeout_secs
+                ),
+            },
+        }
+    }
+
+    async fn wait_for_cancel(cancelled: &(dyn Fn() -> bool + Send + Sync)) {
+        while !cancelled() {
+            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
         }
     }
 
@@ -499,8 +515,11 @@ pub(crate) mod test_support {
 mod tests {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
+
+    use crate::types::error::AppError;
 
     use super::astrometry_net_impl::{
         char_prefix, first_job_id, parse_calibration, parse_json_body, wcs_cards_from_wcs_file,
@@ -523,6 +542,10 @@ mod tests {
             scale_units: None,
             timeout_secs: 30,
         }
+    }
+
+    fn never_cancelled() -> bool {
+        false
     }
 
     fn respond(stream: &mut std::net::TcpStream, status: &str, content_type: &str, body: &[u8]) {
@@ -608,7 +631,9 @@ mod tests {
     async fn a_successful_solve_returns_the_wcs_cards_of_the_job() {
         let api_url = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await.unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+            .await
+            .unwrap();
         assert_eq!(result.ra_center, 83.822);
         assert_eq!(result.dec_center, -5.391);
         assert_eq!(result.pixel_scale, 2.0);
@@ -622,7 +647,9 @@ mod tests {
     async fn a_missing_wcs_file_keeps_the_solve_with_no_cards() {
         let api_url = serve_a_solved_job(FULL_CALIBRATION, None);
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await.unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+            .await
+            .unwrap();
         assert_eq!(result.ra_center, 83.822);
         assert!(result.wcs_cards.is_empty(), "{:?}", result.wcs_cards);
     }
@@ -632,7 +659,7 @@ mod tests {
         let api_url =
             serve_a_solved_job(r#"{"dec":-5.391,"orientation":91.2,"pixscale":2.0}"#, Some(nova_wcs_file()));
         let dir = tempfile::tempdir().unwrap();
-        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url))
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
             .await
             .unwrap_err()
             .to_string();
@@ -714,13 +741,70 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let err = solve_astrometry_net(fits.to_str().unwrap(), 10, 10, &config).await.unwrap_err().to_string();
+        let err = solve_astrometry_net(fits.to_str().unwrap(), 10, 10, &config, &never_cancelled)
+            .await
+            .unwrap_err()
+            .to_string();
         let elapsed = started.elapsed();
         assert!(err.contains("timed out after 1 s"), "{err}");
         assert!(elapsed < std::time::Duration::from_secs(10), "the solve ran for {elapsed:?}");
         let seen = seen.lock().unwrap().clone();
         assert!(seen.iter().any(|l| l.starts_with("POST /api/login")), "{seen:?}");
         assert!(seen.iter().any(|l| l.starts_with("POST /api/upload")), "{seen:?}");
+    }
+
+    fn serve_a_server_that_never_answers() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                held.push(stream);
+            }
+        });
+        url
+    }
+
+    async fn solve_with_a_cancel(
+        api_url: String,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+    ) -> (anyhow::Error, Duration) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SolveConfig { timeout_secs: 3, ..solve_config(api_url) };
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &config, cancelled),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let result = outcome.unwrap_or_else(|_| panic!("the solve was still pending {elapsed:?} after it started"));
+        (result.unwrap_err(), elapsed)
+    }
+
+    fn assert_cancelled(err: &anyhow::Error) {
+        assert!(matches!(err.downcast_ref::<AppError>(), Some(AppError::Cancelled)), "{err:#}");
+        assert_eq!(err.to_string(), "Plate solve cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_stops_a_pending_solve() {
+        let started = Instant::now();
+        let cancelled = move || started.elapsed() >= Duration::from_millis(100);
+        let (err, elapsed) = solve_with_a_cancel(serve_a_server_that_never_answers(), &cancelled).await;
+        assert_cancelled(&err);
+        assert!(elapsed < Duration::from_secs(1), "the cancel took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_stops_the_wait_for_the_job() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_submission_that_never_starts(Arc::clone(&seen));
+        let uploaded = Arc::clone(&seen);
+        let cancelled = move || uploaded.lock().unwrap().iter().any(|l| l.starts_with("POST /api/upload"));
+        let (err, _) = solve_with_a_cancel(api_url, &cancelled).await;
+        assert_cancelled(&err);
     }
 
     fn serve_a_flaky_solved_job(
@@ -777,7 +861,8 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 1, 0);
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await;
+        let result =
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled).await;
         let result = result.unwrap_or_else(|e| panic!("the solve failed on one dropped connection: {e:#}"));
         assert_eq!(result.ra_center, 83.822);
         assert_eq!(result.wcs_cards, nova_wcs_cards());
@@ -789,7 +874,8 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 0, 1);
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url)).await;
+        let result =
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled).await;
         let result = result.unwrap_or_else(|e| panic!("the solve failed on one HTTP 503: {e:#}"));
         assert_eq!(result.dec_center, -5.391);
         assert_eq!(count(&seen, "/api/jobs/42"), 2);
@@ -800,7 +886,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), usize::MAX, 0);
         let dir = tempfile::tempdir().unwrap();
-        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url))
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
             .await
             .unwrap_err();
         let text = format!("{err:#}");

@@ -6,12 +6,15 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, load_cached, load_cached_full, load_companions, output_stem, render_and_save,
-    resolve_output_dir, write_derived_fits,
+    blocking_cmd, load_cached, load_cached_full, load_companions, output_stem, reduce_for_preview,
+    render_and_save, resolve_output_dir, write_derived_fits, MAX_PREVIEW_DIM,
 };
 use crate::core::imaging::cosmetic::{
-    cosmetic_correct_with_cfa, effective_cfa, parse_defect_list, CosmeticConfig, CosmeticResult,
+    cosmetic_correct_with_cfa, cosmetic_defect_map, count_flags, effective_cfa, parse_defect_list, CosmeticConfig,
+    CosmeticResult, FLAG_COLD, FLAG_HOT,
 };
+use crate::core::imaging::stats::compute_image_stats;
+use crate::core::imaging::stf::{apply_stf, auto_stf, AutoStfConfig};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
     RES_CFA_APPLIED, RES_CFA_SOURCE, RES_DIMENSIONS, RES_ELAPSED_MS, RES_ERROR, RES_FAILED, RES_FITS_PATH,
@@ -23,6 +26,16 @@ pub const KEY_COUNTS: &str = "counts";
 pub const KEY_DQ_PRESENT: &str = "dq_present";
 pub const KEY_WARNING: &str = "warning";
 pub const SUFFIX_COSMETIC: &str = "cosmetic";
+pub const KEY_DRY_RUN: &str = "dry_run";
+pub const KEY_DEFECTS: &str = "defects";
+pub const KEY_DEFECTS_TOTAL: &str = "defects_total";
+pub const SUFFIX_DEFECTS: &str = "defects";
+const MAX_LISTED_DEFECTS: usize = 5000;
+const DEFECT_MARK_RADIUS: usize = 1;
+const DEFECT_MARK_RGB: [u8; 3] = [255, 0, 0];
+const DEFECT_HOT: &str = "hot";
+const DEFECT_COLD: &str = "cold";
+const DEFECT_LISTED: &str = "listed";
 const DQ_WARNING: &str = "This image carries a DQ plane: its pipeline already flags bad pixels, so cosmetic correction may alter calibrated science data.";
 
 #[derive(Debug, Serialize)]
@@ -103,6 +116,95 @@ fn correct_one(
     }))
 }
 
+fn defect_kind(flag: u8) -> &'static str {
+    if flag & FLAG_HOT != 0 {
+        DEFECT_HOT
+    } else if flag & FLAG_COLD != 0 {
+        DEFECT_COLD
+    } else {
+        DEFECT_LISTED
+    }
+}
+
+fn defect_entries(map: &Array2<u8>, limit: usize) -> (Vec<serde_json::Value>, usize) {
+    let mut entries = Vec::new();
+    let mut total = 0usize;
+    for ((y, x), &flag) in map.indexed_iter() {
+        if flag == 0 {
+            continue;
+        }
+        total += 1;
+        if entries.len() < limit {
+            entries.push(json!([x, y, defect_kind(flag)]));
+        }
+    }
+    (entries, total)
+}
+
+fn defect_overlay_rgb(grey: &[u8], shown_rows: usize, shown_cols: usize, map: &Array2<u8>) -> Vec<u8> {
+    let (rows, cols) = map.dim();
+    let mut rgb: Vec<u8> = grey.iter().flat_map(|&g| [g, g, g]).collect();
+    if shown_rows == 0 || shown_cols == 0 {
+        return rgb;
+    }
+    for ((y, x), &flag) in map.indexed_iter() {
+        if flag == 0 {
+            continue;
+        }
+        let sy = y * shown_rows / rows;
+        let sx = x * shown_cols / cols;
+        for my in sy.saturating_sub(DEFECT_MARK_RADIUS)..=(sy + DEFECT_MARK_RADIUS).min(shown_rows - 1) {
+            for mx in sx.saturating_sub(DEFECT_MARK_RADIUS)..=(sx + DEFECT_MARK_RADIUS).min(shown_cols - 1) {
+                let o = (my * shown_cols + mx) * 3;
+                rgb[o..o + 3].copy_from_slice(&DEFECT_MARK_RGB);
+            }
+        }
+    }
+    rgb
+}
+
+fn save_defect_png(image: &Array2<f32>, map: &Array2<u8>, png_path: &str) -> Result<()> {
+    let stats = compute_image_stats(image);
+    let stf = auto_stf(&stats, &AutoStfConfig::default());
+    let reduced = reduce_for_preview(image, MAX_PREVIEW_DIM);
+    let shown = reduced.as_ref().unwrap_or(image);
+    let (shown_rows, shown_cols) = shown.dim();
+    let rgb = defect_overlay_rgb(&apply_stf(shown, &stf, &stats), shown_rows, shown_cols, map);
+    image::save_buffer(png_path, &rgb, shown_cols as u32, shown_rows as u32, image::ColorType::Rgb8)
+        .with_context(|| format!("Failed to write the defect preview '{}'", png_path))
+}
+
+fn dry_run_one(
+    path: &str,
+    out_dir: &str,
+    master_dark: Option<&Array2<f32>>,
+    cfg: &CosmeticConfig,
+) -> Result<serde_json::Value> {
+    let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
+    let (cfa, cfa_source) = effective_cfa(cfg, entry.header());
+    let map = cosmetic_defect_map(entry.arr(), master_dark, cfg, cfa)?;
+    let (flagged, hot, cold, listed) = count_flags(&map);
+    let png_path = format!("{}/{}_{}.png", out_dir, output_stem(path), SUFFIX_DEFECTS);
+    save_defect_png(entry.arr(), &map, &png_path)?;
+    let (defects, defects_total) = defect_entries(&map, MAX_LISTED_DEFECTS);
+    let (rows, cols) = map.dim();
+    let dq = dq_present(path);
+    let counts = CosmeticCounts { flagged, replaced: 0, hot, cold, listed };
+    Ok(json!({
+        KEY_DRY_RUN: true,
+        RES_PATH: path,
+        RES_PNG_PATH: png_path,
+        RES_DIMENSIONS: [cols, rows],
+        KEY_COUNTS: serde_json::to_value(counts)?,
+        KEY_DEFECTS: defects,
+        KEY_DEFECTS_TOTAL: defects_total,
+        KEY_DQ_PRESENT: dq,
+        KEY_WARNING: dq.then_some(DQ_WARNING),
+        RES_CFA_APPLIED: cfa,
+        RES_CFA_SOURCE: cfa_source,
+    }))
+}
+
 #[tauri::command]
 pub async fn cosmetic_correct_cmd(
     path: String,
@@ -110,13 +212,19 @@ pub async fn cosmetic_correct_cmd(
     master_dark_path: Option<String>,
     config: CosmeticConfig,
     defect_list_text: Option<String>,
+    dry_run: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
         let out_dir = resolve_output_dir(&output_dir)?;
         let cfg = resolve_config(config, defect_list_text.as_deref())?;
         let dark = load_master_dark(master_dark_path.as_deref())?;
-        let mut body = correct_one(&path, &out_dir, dark.as_ref().map(ImageEntry::arr), &cfg)?;
+        let dark_arr = dark.as_ref().map(ImageEntry::arr);
+        let mut body = if dry_run.unwrap_or(false) {
+            dry_run_one(&path, &out_dir, dark_arr, &cfg)?
+        } else {
+            correct_one(&path, &out_dir, dark_arr, &cfg)?
+        };
         if let Some(obj) = body.as_object_mut() {
             obj.insert(RES_ELAPSED_MS.to_string(), json!(t0.elapsed().as_millis() as u64));
         }
@@ -166,7 +274,7 @@ pub async fn cosmetic_correct_batch_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::imaging::cosmetic::Defect;
+    use crate::core::imaging::cosmetic::{Defect, FLAG_LISTED};
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
 
     fn mef(dir: &tempfile::TempDir, name: &str, cols: usize, rows: usize) -> String {
@@ -263,6 +371,65 @@ mod tests {
         let body = correct_one(&format!("{plain}#hdu=1"), &out, None, &auto).unwrap();
         assert_eq!(body[RES_CFA_APPLIED], false);
         assert_eq!(body[RES_CFA_SOURCE], "none");
+    }
+
+    #[test]
+    fn dry_run_returns_the_defect_list_and_writes_no_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let out = out.to_str().unwrap().to_string();
+        let light = dir.path().join("light.fits").to_str().unwrap().to_string();
+        let mut frame = Array2::from_shape_fn((32, 32), |(y, x)| 100.0 + ((y * 7 + x * 13) % 5) as f32);
+        frame[[5, 9]] = 5000.0;
+        frame[[20, 3]] = -4000.0;
+        crate::infra::fits::writer::write_fits_mono(&light, &frame, None).unwrap();
+
+        let cfg = CosmeticConfig {
+            use_master_dark: false,
+            auto_hot_sigma: Some(5.0),
+            auto_cold_sigma: Some(5.0),
+            defects: vec![Defect::Point { x: 30, y: 1 }],
+            ..Default::default()
+        };
+        let body = dry_run_one(&light, &out, None, &cfg).unwrap();
+        assert_eq!(body[KEY_DRY_RUN], true);
+        assert_eq!(body[KEY_COUNTS]["hot"], 1);
+        assert_eq!(body[KEY_COUNTS]["cold"], 1);
+        assert_eq!(body[KEY_COUNTS]["listed"], 1);
+        assert_eq!(body[KEY_COUNTS]["flagged"], 3);
+        assert_eq!(body[KEY_COUNTS]["replaced"], 0);
+        assert_eq!(body[KEY_DEFECTS_TOTAL], 3);
+        assert_eq!(body[KEY_DEFECTS], json!([[30, 1, "listed"], [9, 5, "hot"], [3, 20, "cold"]]));
+        assert_eq!(body[RES_DIMENSIONS], json!([32, 32]));
+        assert!(body.get(RES_FITS_PATH).is_none());
+
+        let png = body[RES_PNG_PATH].as_str().unwrap();
+        assert!(png.ends_with("light_defects.png"), "{}", png);
+        let rgb = image::open(png).unwrap().to_rgb8();
+        assert_eq!(rgb.dimensions(), (32, 32));
+        assert_eq!(rgb.get_pixel(9, 5).0, [255, 0, 0]);
+        assert_eq!(rgb.get_pixel(10, 6).0, [255, 0, 0]);
+        let grey = rgb.get_pixel(20, 12).0;
+        assert_eq!((grey[0], grey[1]), (grey[1], grey[2]), "unflagged pixels stay grey");
+
+        let fits: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".fits"))
+            .collect();
+        assert!(fits.is_empty(), "dry run wrote {:?}", fits);
+    }
+
+    #[test]
+    fn defect_entries_cap_the_list_and_keep_the_total() {
+        let mut map = Array2::<u8>::zeros((4, 4));
+        map[[0, 1]] = FLAG_HOT | FLAG_LISTED;
+        map[[2, 2]] = FLAG_COLD;
+        map[[3, 0]] = FLAG_HOT;
+        let (entries, total) = defect_entries(&map, 2);
+        assert_eq!(total, 3);
+        assert_eq!(entries, vec![json!([1, 0, "hot"]), json!([2, 2, "cold"])]);
     }
 
     #[test]

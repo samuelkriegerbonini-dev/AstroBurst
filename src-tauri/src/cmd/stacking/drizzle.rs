@@ -1,17 +1,18 @@
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, resolve_output_dir};
 use crate::cmd::helpers;
-use crate::core::compose::drizzle_rgb::drizzle_rgb;
+use crate::core::compose::drizzle_rgb::drizzle_rgb_with;
+use crate::core::stacking::memory::effective_memory;
+use crate::core::stacking::STAGE_LOW_MEMORY;
 use crate::infra::progress::ProgressHandle;
 use crate::types::compose::{DrizzleRgbConfig, DrizzleRgbResult};
 use crate::types::constants::{
     DEFAULT_DRIZZLE_PIXFRAC, DEFAULT_DRIZZLE_SCALE, DEFAULT_DRIZZLE_SIGMA,
     DEFAULT_DRIZZLE_SIGMA_ITERS,
     EVENT_DRIZZLE_RGB_PROGRESS,
-    FILE_DRIZZLE_RGB_FITS, FILE_DRIZZLE_RGB_PNG,
     STAGE_SAVE,
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH,
     RES_FRAME_COUNT_B, RES_FRAME_COUNT_G, RES_FRAME_COUNT_R,
@@ -20,11 +21,26 @@ use crate::types::constants::{
 };
 use crate::types::stacking::{AlignmentMethod, DrizzleConfig};
 
+const DRIZZLE_RGB_STEM: &str = "drizzle_rgb";
+
 fn parse_alignment_method(name: Option<&str>) -> AlignmentMethod {
     match name.map(|n| n.trim().to_ascii_lowercase()).as_deref() {
         Some("affine") | Some("zncc") => AlignmentMethod::Affine,
         _ => AlignmentMethod::PhaseCorrelation,
     }
+}
+
+fn drizzle_rgb_tick_total(counts: &[usize], align: bool) -> u64 {
+    let channel_ticks = |n: usize| {
+        let aligns = if align { n.saturating_sub(1) } else { 0 };
+        n + aligns + usize::from(n > 0)
+    };
+    (counts.iter().map(|&n| channel_ticks(n)).sum::<usize>() + 1) as u64
+}
+
+fn drizzle_rgb_output_paths(dir: &str, stamp_ms: u128, save_fits: bool) -> (String, Option<String>) {
+    let stem = format!("{}/{}_{}", dir, DRIZZLE_RGB_STEM, stamp_ms);
+    (format!("{}.png", stem), save_fits.then(|| format!("{}.fits", stem)))
 }
 
 fn drizzle_rgb_json(result: &DrizzleRgbResult, elapsed_ms: u64) -> serde_json::Value {
@@ -70,11 +86,8 @@ pub async fn drizzle_rgb_cmd(
     scnr_amount: Option<f64>,
     save_fits: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let total_frames = r_paths.as_ref().map_or(0, |v| v.len())
-        + g_paths.as_ref().map_or(0, |v| v.len())
-        + b_paths.as_ref().map_or(0, |v| v.len());
-    let progress_clone = ProgressHandle::new(&app, EVENT_DRIZZLE_RGB_PROGRESS, total_frames as u64 + 2)
-        .clone();
+    let counts = [&r_paths, &g_paths, &b_paths].map(|paths| paths.as_ref().map_or(0, Vec::len));
+    let progress = ProgressHandle::new(&app, EVENT_DRIZZLE_RGB_PROGRESS, drizzle_rgb_tick_total(&counts, align.unwrap_or(true)));
     let scale_val = scale.unwrap_or(DEFAULT_DRIZZLE_SCALE);
 
     blocking_cmd!({
@@ -120,24 +133,31 @@ pub async fn drizzle_rgb_cmd(
             },
         };
 
-        let png_path = format!("{}/{}", output_dir, FILE_DRIZZLE_RGB_PNG);
-        let fits_out = if save_fits.unwrap_or(false) {
-            Some(format!("{}/{}", output_dir, FILE_DRIZZLE_RGB_FITS))
-        } else {
-            None
-        };
+        let stamp_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let (png_path, fits_out) = drizzle_rgb_output_paths(&output_dir, stamp_ms, save_fits.unwrap_or(false));
 
-        let result = drizzle_rgb(
+        let cancelled = || progress.is_cancelled();
+        let on_stage = |stage: &str| {
+            if stage == STAGE_LOW_MEMORY {
+                progress.emit_stage(stage);
+            } else {
+                progress.tick_with_stage(stage);
+            }
+        };
+        let result = drizzle_rgb_with(
             r_paths.as_deref(),
             g_paths.as_deref(),
             b_paths.as_deref(),
             &png_path,
             fits_out.as_deref(),
             &config,
+            &cancelled,
+            &on_stage,
+            effective_memory(),
         )?;
 
-        progress_clone.tick_with_stage(STAGE_SAVE);
-        progress_clone.emit_complete();
+        progress.tick_with_stage(STAGE_SAVE);
+        progress.emit_complete();
 
         Ok(drizzle_rgb_json(&result, t0.elapsed().as_millis() as u64))
     })
@@ -156,6 +176,62 @@ mod tests {
         assert_eq!(parse_alignment_method(Some(" Affine ")), AlignmentMethod::Affine);
         assert_eq!(parse_alignment_method(Some("phase_correlation")), AlignmentMethod::PhaseCorrelation);
         assert_eq!(parse_alignment_method(None), AlignmentMethod::PhaseCorrelation);
+    }
+
+    #[test]
+    fn each_drizzle_rgb_run_gets_its_own_output_names() {
+        let (first_png, first_fits) = drizzle_rgb_output_paths("C:/out", 1, true);
+        let (second_png, second_fits) = drizzle_rgb_output_paths("C:/out", 2, true);
+        assert_ne!(first_png, second_png);
+        assert_ne!(first_fits, second_fits);
+        for path in [&first_png, &second_png, first_fits.as_ref().unwrap(), second_fits.as_ref().unwrap()] {
+            let name = path.strip_prefix("C:/out/").expect("inside the output dir");
+            assert!(name.starts_with("drizzle_rgb_") && !name.contains('/'), "{path}");
+        }
+        assert!(first_png.ends_with(".png") && first_fits.as_deref().is_some_and(|f| f.ends_with(".fits")));
+        assert_eq!(drizzle_rgb_output_paths("C:/out", 1, false).1, None);
+    }
+
+    fn write_channel(dir: &tempfile::TempDir, prefix: &str, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                let frame = ndarray::Array2::from_shape_fn((96, 96), |(y, x)| {
+                    let d2 = (y as f32 - 40.0).powi(2) + (x as f32 - 52.0).powi(2);
+                    100.0 + i as f32 + 1000.0 * (-d2 / 18.0).exp()
+                });
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn drizzle_rgb_tick_total_covers_every_tick() {
+        use crate::core::stacking::never_cancelled;
+        use crate::types::compose::{AlignMethod, WhiteBalance};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let (r, g) = (write_channel(&dir, "r", 2), write_channel(&dir, "g", 2));
+        let png = dir.path().join("rgb.png").to_str().unwrap().to_string();
+        for align in [true, false] {
+            let config = DrizzleRgbConfig {
+                drizzle: DrizzleConfig { align, scale: 1.0, ..DrizzleConfig::default() },
+                white_balance: WhiteBalance::None,
+                auto_stretch: false,
+                align: false,
+                align_method: AlignMethod::PhaseCorrelation,
+                scnr: None,
+                ..DrizzleRgbConfig::default()
+            };
+            let ticks = AtomicU64::new(0);
+            let count = |_: &str| {
+                ticks.fetch_add(1, Ordering::Relaxed);
+            };
+            let result = drizzle_rgb_with(Some(&r), Some(&g), None, &png, None, &config, &never_cancelled, &count, None).unwrap();
+            assert_eq!((result.frame_count_r, result.frame_count_g), (2, 2), "align {align}");
+            assert_eq!(drizzle_rgb_tick_total(&[2, 2, 0], align), ticks.load(Ordering::Relaxed) + 1, "align {align}");
+        }
     }
 
     #[test]

@@ -15,21 +15,26 @@ import {
   anchorOrientation,
   anchorSide,
   clampSize,
+  columnCommitWidth,
   columnMin,
   columnRenderWidth,
+  columnWidthCss,
   dockLayoutErrors,
   dockReducer,
   groupActive,
   indexOf,
-  isToolOpen,
   keptToolFileKey,
   moveLabel,
   otherBottom,
+  paletteToolEntries,
+  settleColumnWidth,
   toolMountState,
   type DockAction,
   type DockAnchor,
   type DockLayout,
   type DockSizes,
+  type DockToolId,
+  type PaletteToolEntry,
   type ToolMountInput,
 } from "../dockLayout";
 
@@ -325,18 +330,14 @@ describe("dockReducer resize and reset", () => {
 });
 
 describe("layout queries", () => {
-  it("finds a tool's anchor, index and open state", () => {
+  it("finds a tool's anchor and index", () => {
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "processing")).toBe("right-top");
     expect(indexOf(DEFAULT_DOCK_LAYOUT, "processing")).toBe(5);
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "config")).toBe("right-bottom");
     expect(indexOf(DEFAULT_DOCK_LAYOUT, "config")).toBe(2);
-    expect(isToolOpen(DEFAULT_DOCK_LAYOUT, "files")).toBe(true);
-    expect(isToolOpen(DEFAULT_DOCK_LAYOUT, "info")).toBe(false);
-    expect(isToolOpen(DEFAULT_DOCK_LAYOUT, "compose")).toBe(true);
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "info", anchor: "right-top", index: 0 });
     expect(anchorOf(moved, "info")).toBe("right-top");
     expect(indexOf(moved, "info")).toBe(0);
-    expect(isToolOpen(moved, "info")).toBe(true);
   });
 
   it("picks the open tool's minimum width for a column and the limit when it is closed", () => {
@@ -604,5 +605,93 @@ describe("groupActive", () => {
     expect(groupActive(NONE, "analysis")).toBe(false);
     expect(groupActive({ ...NONE, "right-bottom": "log" }, "analysis")).toBe(false);
     expect(groupActive({ ...NONE, "right-top": "image" }, "other")).toBe(false);
+  });
+});
+
+describe("paletteToolEntries", () => {
+  function labelOf(entries: PaletteToolEntry[], tool: DockToolId): string | undefined {
+    return entries.find((entry) => entry.tool === tool)?.label;
+  }
+
+  it("lists only the tools that open without a file when no file is visible", () => {
+    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "log"]);
+    expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "log"]);
+  });
+
+  it("lists every tool in order once a file is visible", () => {
+    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, true).map((entry) => entry.tool)).toEqual([...DOCK_TOOL_IDS]);
+  });
+
+  it("says Hide only for a panel on screen", () => {
+    const withFile = paletteToolEntries(DEFAULT_DOCK_LAYOUT, true);
+    expect(labelOf(withFile, "files")).toBe("Hide Files Panel");
+    expect(labelOf(withFile, "compose")).toBe("Hide Compose Panel");
+    expect(labelOf(withFile, "image")).toBe("Open Image Panel");
+    expect(labelOf(withFile, "config")).toBe("Open Settings Panel");
+  });
+
+  it("offers to open Log while a file tool holds its group without a file, and to hide it while it is open", () => {
+    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "export" }), false), "log")).toBe("Open Log Panel");
+    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "log" }), false), "log")).toBe("Hide Log Panel");
+  });
+
+  it("no entry listed without a file closes an open Log", () => {
+    const logOpen = withActive({ "right-bottom": "log" });
+    for (const { tool } of paletteToolEntries(logOpen, false)) {
+      if (tool === "log") continue;
+      const next = dockReducer(logOpen, { type: "toggle", tool });
+      expect(anchorOpenTool(next, "right-bottom", false)).toBe("log");
+    }
+  });
+});
+
+describe("columnCommitWidth", () => {
+  it("commits the rendered width when the viewport cap held the column below the dragged value", () => {
+    expect(columnCommitWidth(640, 512)).toBe(512);
+  });
+
+  it("commits the dragged value when the column shows it", () => {
+    expect(columnCommitWidth(420, 420)).toBe(420);
+    expect(columnCommitWidth(420, 421)).toBe(420);
+  });
+
+  it("commits the dragged value when the column could not be measured", () => {
+    expect(columnCommitWidth(420, 0)).toBe(420);
+  });
+
+  it("a width dragged past the two-column cap renders unchanged once the other column closes", () => {
+    const base = { min: 280, max: 640, dockW: 1280 };
+    const rendered = columnRenderWidth({ ...base, size: 640, bothOpen: true });
+    const committed = clampSize("rightW", columnCommitWidth(640, rendered));
+    expect(columnRenderWidth({ ...base, size: committed, bothOpen: false })).toBe(rendered);
+  });
+});
+
+describe("settleColumnWidth", () => {
+  function draggedRight(dragged: number, rendered: number) {
+    const css = columnWidthCss(280, dragged, true);
+    return { outer: { style: { width: css } }, inner: { offsetWidth: rendered, style: { width: css } }, min: 280, bothOpen: true };
+  }
+
+  it("writes the committed width back to the column it measured", () => {
+    const column = draggedRight(640, 512);
+    expect(settleColumnWidth(column, 640)).toBe(512);
+    expect(column.outer.style.width).toBe("clamp(280px, 512px, 40vw)");
+    expect(column.inner.style.width).toBe("clamp(280px, 512px, 40vw)");
+  });
+
+  it("leaves the column showing the stored width when a second drag past the cap commits the same width", () => {
+    const first = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "resize", key: "rightW", value: settleColumnWidth(draggedRight(640, 512), 640) });
+    const again = draggedRight(640, 512);
+    const second = dockReducer(first, { type: "resize", key: "rightW", value: settleColumnWidth(again, 640) });
+    expect(second).toBe(first);
+    expect(again.inner.style.width).toBe(columnWidthCss(280, first.sizes.rightW, true));
+    expect(again.outer.style.width).toBe(columnWidthCss(280, first.sizes.rightW, true));
+  });
+
+  it("keeps the dragged width on the column when the column shows it", () => {
+    const column = draggedRight(420, 420);
+    expect(settleColumnWidth(column, 420)).toBe(420);
+    expect(column.inner.style.width).toBe("clamp(280px, 420px, 40vw)");
   });
 });

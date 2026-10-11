@@ -3,12 +3,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CompositeProvider } from "../../../context/CompositeContext";
 import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/PreviewContext";
-import { withStep } from "../../../utils/processingChain";
+import { EMPTY_CHAIN, withStep } from "../../../utils/processingChain";
 import type { ChainStep, ProcessedResult } from "../../../shared/types/preview";
 import type { ProcessedFile } from "../../../shared/types/fits.types";
 import PixelMathPanel from "../PixelMathPanel";
 import DebayerPanel from "../DebayerPanel";
-import { retain } from "../pixelMathPanelState";
+import { chainOutputs, pixelMathFileOptions, retain } from "../pixelMathPanelState";
 
 const FILE: ProcessedFile = {
   id: "1",
@@ -159,5 +159,70 @@ describe("PixelMathPanel slot image options after a run", () => {
     const slotSelect = /<select[^>]*aria-label="Slot 1 image"[^>]*>(.*?)<\/select>/.exec(html)?.[1] ?? "";
     const labels = [...slotSelect.matchAll(/<option[^>]*>([^<]*)<\/option>/g)].map((m) => m[1]);
     expect(labels).toEqual(["f444w_i2d_bg.fits ($T)", "f444w_i2d.fits", "f444w_i2d_bg_pixelmath.fits"]);
+  });
+});
+
+describe("pixelMathFileOptions", () => {
+  const target = "C:/data/502nmos.fits";
+  const other = "C:/data/656nmos.fits";
+  const bg = "C:/out/502nmos_bg_corrected.fits";
+  const tone = "C:/out/502nmos_curves.fits";
+  const loaded = [
+    { path: target, name: "502nmos.fits" },
+    { path: other, name: "656nmos.fits" },
+  ];
+
+  it("offers chain outputs that are not loaded as '<step> output' after the loaded files", () => {
+    const chain = withStep(withStep(EMPTY_CHAIN, "background", { fitsPath: bg, previewUrl: null, dimensions: null }), "tone", { fitsPath: tone, previewUrl: null, dimensions: null });
+    expect(pixelMathFileOptions(target, loaded, [], chainOutputs(chain))).toEqual([
+      { value: target, label: "502nmos.fits ($T)" },
+      { value: other, label: "656nmos.fits" },
+      { value: bg, label: "Background output" },
+      { value: tone, label: "Curves output" },
+    ]);
+  });
+
+  it("lists every path once, whatever its spelling, and keeps slot paths nothing else offers", () => {
+    const chain = withStep(EMPTY_CHAIN, "background", { fitsPath: "c:\\OUT\\502NMOS_bg_corrected.fits", previewUrl: null, dimensions: null });
+    const options = pixelMathFileOptions(target, [...loaded, { path: bg, name: "502nmos_bg_corrected.fits" }], [{ path: other }, { path: "C:/x/elsewhere.fits" }], chainOutputs(chain));
+    expect(options.map((o) => o.label)).toEqual(["502nmos.fits ($T)", "656nmos.fits", "502nmos_bg_corrected.fits", "elsewhere.fits"]);
+  });
+
+  it("has no target option without a target and no chain options for an empty chain", () => {
+    expect(pixelMathFileOptions(null, loaded, [], chainOutputs(EMPTY_CHAIN))).toEqual([
+      { value: target, label: "502nmos.fits" },
+      { value: other, label: "656nmos.fits" },
+    ]);
+  });
+});
+
+describe("PixelMathPanel slot image options with chain outputs", () => {
+  it("offers the Background output of the file on screen in the slot picker", () => {
+    const file = loadedFile("pm-slot-chain-output");
+    const denoised = "C:/out/f444w_i2d_bg_denoised.fits";
+    seedRecords(file, [
+      ["background", shownResult("processing", BG_PATH, RAW_PATH, "Background")],
+      ["denoise", shownResult("processing", denoised, BG_PATH, "Denoise")],
+    ]);
+    const key = fileKeyOf(file);
+    retain(key, { expression: "$T - A", slots: [{ name: "A", path: RAW_PATH }], truncate: false, rescale: false, outputName: "", slotsTouched: true });
+    const panel = createElement(PixelMathPanel, {
+      selectedFile: file,
+      outputDir: "C:/out",
+      fileKey: key,
+      compositeMode: false,
+      compositeInput: null,
+      onCompositeDone: NOOP,
+      fileName: file.name,
+    });
+    const preview = createElement(PreviewProvider, { file, doneFiles: [file], children: panel });
+    const html = renderToStaticMarkup(createElement(CompositeProvider, { children: preview }));
+    const slotSelect = /<select[^>]*aria-label="Slot 1 image"[^>]*>(.*?)<\/select>/.exec(html)?.[1] ?? "";
+    const options = [...slotSelect.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)<\/option>/g)].map((m) => [m[1], m[2]]);
+    expect(options).toEqual([
+      [denoised, "f444w_i2d_bg_denoised.fits ($T)"],
+      [RAW_PATH, "f444w_i2d.fits"],
+      [BG_PATH, "Background output"],
+    ]);
   });
 });

@@ -11,6 +11,7 @@ import {
   type CompositeOp,
 } from "../../utils/wizard";
 import type { StfParams } from "../../shared/types";
+import type { CompositeStfTriple } from "../../utils/compositeStfResponse";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import { displayFilterValue } from "../../utils/channelMapping";
 
@@ -159,6 +160,15 @@ export default function ComposeWizard() {
     }
   }, [setCompositePreviewUrl, setCompositeStf]);
 
+  const handleRecomputedStf = useCallback((previewUrl: string | null, stf: CompositeStfTriple) => {
+    if (previewUrl) {
+      setCompositePreviewUrl(previewUrl);
+    }
+    setCompositeAutoStf(stf.r, stf.g, stf.b);
+    setCompositeStf(stf.r, stf.g, stf.b);
+    setCompositeStfLinked(stf.linked);
+  }, [setCompositePreviewUrl, setCompositeAutoStf, setCompositeStf, setCompositeStfLinked]);
+
   useEffect(() => {
     setOutputForgetter(forgetOutputs);
   }, [setOutputForgetter, forgetOutputs]);
@@ -273,10 +283,9 @@ export default function ComposeWizard() {
             onScnrChange={(enabled, amount, method, preserveLuminance) =>
               dispatch({ type: "SET_SCNR", enabled, amount, method, preserveLuminance })
             }
-            onResult={(url, autoStf) => {
-              if (autoStf) {
-                handleRestretchPreview(url, { r: autoStf, g: autoStf, b: autoStf });
-                setCompositeAutoStf(autoStf, autoStf, autoStf);
+            onResult={(url, stf) => {
+              if (stf) {
+                handleRecomputedStf(url, stf);
               } else {
                 handleRestretchPreview(url);
               }
@@ -297,6 +306,7 @@ export default function ComposeWizard() {
               completeStep("stretch");
             }}
             onPreview={handleRestretchPreview}
+            onStarlessComposite={handleRecomputedStf}
             onStarRemoval={() => dispatch({ type: "INVALIDATE_FROM", stepId: "stretch" })}
             onChannelOutput={(binId, stage, value) => {
               handleChannelOutput(binId, stage, value);
@@ -324,7 +334,7 @@ export default function ComposeWizard() {
       default:
         return null;
     }
-  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleCompositeOp, handleChannelOutput, setCompositeAutoStf, narrowbandPalette, filterDetections, completeStep, dispatch, setCompositeDims]);
+  }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleRecomputedStf, handleCompositeOp, handleChannelOutput, narrowbandPalette, filterDetections, completeStep, dispatch, setCompositeDims]);
 
   return (
     <div className="flex flex-col h-full">
@@ -396,7 +406,7 @@ export default function ComposeWizard() {
               <span className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: bin.color }} />
                 <span>{bin.shortLabel}</span>
-                <span className="text-zinc-700">({bin.files.length})</span>
+                <span className="text-[var(--ab-text-4)]">({bin.files.length})</span>
               </span>
             </span>
           ))}

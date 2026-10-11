@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Layers } from "lucide-react";
 import ProfilePlot from "../regions/ProfilePlot";
+import { DecimalNumberField } from "../ui";
 import { getCubeSpectrum, getCubeSpectrumRegion } from "../../services/cube";
 import { readX1dSpectrum } from "../../services/spectral";
 import { spectrumComparisonStore, useSpectrumComparison } from "../../hooks/useSpectrumComparisonStore";
@@ -420,17 +421,12 @@ function SpectrumComparisonSection({
                 <label htmlFor={stepId} className={LABEL_CLASS}>
                   step
                 </label>
-                <input
+                <DecimalNumberField
                   id={stepId}
-                  type="number"
-                  value={doc.offsetStep ?? ""}
+                  optional
+                  value={doc.offsetStep}
                   placeholder={result.step !== null ? String(result.step) : "auto"}
-                  onChange={(e) => {
-                    const value = Number(e.target.value);
-                    spectrumComparisonStore.patch(filePath, {
-                      offsetStep: e.target.value.trim() === "" || !Number.isFinite(value) ? null : value,
-                    });
-                  }}
+                  onValueChange={(offsetStep) => spectrumComparisonStore.patch(filePath, { offsetStep })}
                   className={INPUT_CLASS}
                 />
               </>

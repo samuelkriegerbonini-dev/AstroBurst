@@ -1,7 +1,8 @@
 use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::core::stacking::combine::{reject_and_combine_with, KernelScratch, Sample};
+use crate::core::stacking::combine::{check_percentile_window, reject_and_combine_with, KernelScratch, Sample};
+use crate::core::stacking::consistency::format_sig4;
 use crate::core::stacking::{never_cancelled, CancelCheck};
 use crate::math::sigma_clip::sigma_clipped_stats;
 use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
@@ -23,6 +24,8 @@ const DARK_OPTIMIZE_TOLERANCE: f64 = 1e-3;
 const DARK_OPTIMIZE_MAX_EVALUATIONS: usize = 40;
 const DARK_OPTIMIZE_STAR_SIGMA: f32 = 5.0;
 const DARK_OPTIMIZE_MIN_GAIN: f64 = 0.05;
+const DARK_OPTIMIZE_MIN_PATTERN_RATIO: f64 = 2.0;
+const NORMALIZE_MIN_BACKGROUND_SIGMAS: f64 = 3.0;
 const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_895;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,11 +292,15 @@ fn dark_optimize_sample(light: &[f32], bias: Option<&[f32]>, dark: &[f32]) -> Da
     background
 }
 
+fn robust_sigma_of(work: &mut [f32]) -> f64 {
+    let median = median_f32_mut(work);
+    exact_mad_mut(work, median) as f64 * MAD_TO_SIGMA
+}
+
 fn residual_robust_sigma(light_minus_bias: &[f32], dark: &[f32], scale: f32, work: &mut Vec<f32>) -> f64 {
     work.clear();
     work.extend(light_minus_bias.iter().zip(dark).map(|(&l, &d)| l - scale * d));
-    let median = median_f32_mut(work);
-    exact_mad_mut(work, median) as f64 * MAD_TO_SIGMA
+    robust_sigma_of(work)
 }
 
 fn golden_section_minimum(
@@ -327,19 +334,38 @@ fn golden_section_minimum(
     0.5 * (lo + hi)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefusedDarkFit {
+    pub fitted: f32,
+    pub pattern_sigma: f32,
+    pub residual_sigma: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DarkScaleFit {
+    pub scale: f32,
+    pub refused: Option<RefusedDarkFit>,
+}
+
+impl DarkScaleFit {
+    fn kept(scale: f32) -> Self {
+        Self { scale, refused: None }
+    }
+}
+
 pub fn optimize_dark_scale(
     light: &Array2<f32>,
     bias: Option<&Array2<f32>>,
     dark: &Array2<f32>,
     fallback: f32,
-) -> f32 {
+) -> DarkScaleFit {
     let npix = light.len();
     let (Some(dark_slice), Some(light_slice)) = (master_slice(Some(dark), npix), light.as_slice()) else {
-        return fallback;
+        return DarkScaleFit::kept(fallback);
     };
     let sample = dark_optimize_sample(light_slice, master_slice(bias, npix), dark_slice);
     if sample.dark.len() < 2 {
-        return fallback;
+        return DarkScaleFit::kept(fallback);
     }
     let mut work = Vec::with_capacity(sample.dark.len());
     let mut objective = |k: f64| residual_robust_sigma(&sample.light_minus_bias, &sample.dark, k as f32, &mut work);
@@ -352,10 +378,22 @@ pub fn optimize_dark_scale(
     );
     let optimized = objective(scale);
     let kept = objective(fallback as f64);
-    if kept.is_finite() && optimized.is_finite() && kept > optimized * (1.0 + DARK_OPTIMIZE_MIN_GAIN) {
-        scale as f32
-    } else {
-        fallback
+    if !(kept.is_finite() && optimized.is_finite() && kept > optimized * (1.0 + DARK_OPTIMIZE_MIN_GAIN)) {
+        return DarkScaleFit::kept(fallback);
+    }
+    work.clear();
+    work.extend_from_slice(&sample.dark);
+    let pattern_sigma = robust_sigma_of(&mut work);
+    if pattern_sigma >= DARK_OPTIMIZE_MIN_PATTERN_RATIO * optimized {
+        return DarkScaleFit::kept(scale as f32);
+    }
+    DarkScaleFit {
+        scale: fallback,
+        refused: Some(RefusedDarkFit {
+            fitted: scale as f32,
+            pattern_sigma: pattern_sigma as f32,
+            residual_sigma: optimized as f32,
+        }),
     }
 }
 
@@ -364,7 +402,7 @@ fn channel_dark_scales(
     masters: &CalibrationMasters,
     optimize: bool,
     cancelled: CancelCheck,
-) -> Option<Vec<f32>> {
+) -> Option<Vec<DarkScaleFit>> {
     let provided = |i: usize| channel.dark_scales.get(i).copied().unwrap_or(1.0);
     let group_of = |i: usize| channel.dark_group.get(i).copied().flatten();
     match masters.dark.as_ref() {
@@ -375,7 +413,7 @@ fn channel_dark_scales(
             .map(|(i, light)| {
                 (!cancelled()).then(|| match dark_for(masters, group_of(i)) {
                     Some(dark) => optimize_dark_scale(light, masters.bias.as_ref(), dark, provided(i)),
-                    None => provided(i),
+                    None => DarkScaleFit::kept(provided(i)),
                 })
             })
             .collect(),
@@ -386,9 +424,25 @@ fn channel_dark_scales(
                     channel.label
                 );
             }
-            Some((0..channel.lights.len()).map(provided).collect())
+            Some((0..channel.lights.len()).map(|i| DarkScaleFit::kept(provided(i))).collect())
         }
     }
+}
+
+fn refused_dark_fit_warning(label: &str, fits: &[DarkScaleFit]) -> Option<String> {
+    let refused: Vec<(f32, &RefusedDarkFit)> =
+        fits.iter().filter_map(|fit| fit.refused.as_ref().map(|r| (fit.scale, r))).collect();
+    let &(ratio, first) = refused.first()?;
+    Some(format!(
+        "Channel '{}': dark optimisation was not applied to {} of {} frames: the master dark shows no pattern at least twice the calibrated noise (pattern sigma {:.1}, calibrated noise {:.1} at the fitted scale {:.2}), so the exposure ratio {:.2} was used. If the master dark was built from few frames, its noise can hide the pattern; more darks lower it.",
+        label,
+        refused.len(),
+        fits.len(),
+        first.pattern_sigma,
+        first.residual_sigma,
+        first.fitted,
+        ratio
+    ))
 }
 
 fn cancelled_error() -> String {
@@ -593,8 +647,9 @@ pub fn run_batch_pipeline_cancellable(
             Some(plan) => Some(plan.for_channel(channel.lights[0].dim(), plan.config.cfa.unwrap_or(channel.cfa))?),
             None => None,
         };
-        let dark_scales =
+        let dark_fits =
             channel_dark_scales(channel, masters, config.dark_optimize, cancelled).ok_or_else(cancelled_error)?;
+        let dark_scales: Vec<f32> = dark_fits.iter().map(|fit| fit.scale).collect();
         let (dark_scale_min, dark_scale_max, dark_scale_mean) =
             dark_scale_summary(&dark_scales, masters.dark.is_some());
         let (dark_group_temp_c, dark_temp_delta_max_c) = channel_dark_group_summary(channel, masters);
@@ -616,7 +671,7 @@ pub fn run_batch_pipeline_cancellable(
             .as_ref()
             .map(|_| replaced_counts.iter().map(|&n| n as u64).sum());
 
-        let mut warnings: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = refused_dark_fit_warning(&channel.label, &dark_fits).into_iter().collect();
         let mut excluded_frames: Vec<usize> = Vec::new();
         let registered = if config.align && calibrated.len() > 1 {
             let (rows, cols) = calibrated[0].dim();
@@ -660,11 +715,16 @@ pub fn run_batch_pipeline_cancellable(
 
         stop_if_cancelled(cancelled)?;
         let normalized = if config.stack.normalize_before_stack {
-            normalize_frames(&registered)
+            let kept: Vec<usize> = (0..channel.lights.len()).filter(|i| !excluded_frames.contains(i)).collect();
+            let (frames, skipped) = normalize_frames(&registered, &kept, &channel.label);
+            warnings.extend(skipped);
+            frames
         } else {
             registered
         };
 
+        check_percentile_window(normalized[0].view(), normalized.len(), &config.stack.rejection_params())
+            .map_err(|e| format!("Channel '{}': {:#}", channel.label, e))?;
         let (mut stacked, rejection_counts) =
             reject_and_combine_stack(&normalized, &config.stack, cancelled).ok_or_else(cancelled_error)?;
         stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
@@ -886,23 +946,59 @@ fn stretch_mono_robust(ch: &Array2<f32>) -> Array2<f32> {
     }
 }
 
-fn normalize_frames(frames: &[Array2<f32>]) -> Vec<Array2<f32>> {
-    frames.par_iter().map(|frame| {
-        let stride = (frame.len() / 65536).max(1);
-        let mut samples: Vec<f32> = frame
-            .iter()
-            .step_by(stride)
-            .copied()
-            .filter(|v| v.is_finite())
-            .collect();
-        let (background, _) = sigma_clipped_stats(&mut samples, 3.0, 3);
-        if background > 0.0 {
+fn pixel_noise_sigma(frame: &Array2<f32>, stride: usize) -> f64 {
+    let (rows, cols) = frame.dim();
+    let mut diffs: Vec<f32> = (0..rows * cols)
+        .step_by(stride)
+        .filter(|&i| i % cols + 1 < cols)
+        .map(|i| frame[[i / cols, i % cols + 1]] - frame[[i / cols, i % cols]])
+        .filter(|d| d.is_finite())
+        .collect();
+    if diffs.is_empty() {
+        return 0.0;
+    }
+    robust_sigma_of(&mut diffs) / std::f64::consts::SQRT_2
+}
+
+fn normalize_frames(frames: &[Array2<f32>], input_index: &[usize], label: &str) -> (Vec<Array2<f32>>, Option<String>) {
+    let backgrounds: Vec<(f64, f64)> = frames
+        .par_iter()
+        .map(|frame| {
+            let stride = (frame.len() / 65536).max(1);
+            let mut samples: Vec<f32> = frame
+                .iter()
+                .step_by(stride)
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect();
+            let (background, _) = sigma_clipped_stats(&mut samples, 3.0, 3);
+            (background, pixel_noise_sigma(frame, stride))
+        })
+        .collect();
+    let near_zero = backgrounds
+        .iter()
+        .position(|&(background, noise)| !(background > 0.0 && background > NORMALIZE_MIN_BACKGROUND_SIGMAS * noise));
+    if let Some(index) = near_zero {
+        let (background, noise) = backgrounds[index];
+        let warning = format!(
+            "Normalize before stack was skipped for channel '{}': frame {}'s background ({}) is not above {} sigma of the pixel noise (sigma {}), as in sky-subtracted or pedestal-free data.",
+            label,
+            input_index[index] + 1,
+            format_sig4(background),
+            NORMALIZE_MIN_BACKGROUND_SIGMAS,
+            format_sig4(noise)
+        );
+        return (frames.to_vec(), Some(warning));
+    }
+    let scaled = frames
+        .par_iter()
+        .zip(backgrounds.par_iter())
+        .map(|(frame, &(background, _))| {
             let inv_bg = 1.0 / background as f32;
             frame.mapv(|v| v * inv_bg)
-        } else {
-            frame.clone()
-        }
-    }).collect()
+        })
+        .collect();
+    (scaled, None)
 }
 
 fn reject_and_combine_stack(
@@ -977,7 +1073,8 @@ mod tests {
     fn normalize_uses_robust_background_not_mean() {
         let a = frame_with_stars(10.0, 30);
         let b = frame_with_stars(10.0, 0);
-        let out = normalize_frames(&[a, b]);
+        let (out, skipped) = normalize_frames(&[a, b], &[0, 1], "L");
+        assert_eq!(skipped, None);
         let sky_a = out[0][[39, 0]];
         let sky_b = out[1][[39, 0]];
         assert!((sky_a - sky_b).abs() < 0.05, "sky levels diverged: {} vs {}", sky_a, sky_b);
@@ -1273,7 +1370,9 @@ mod tests {
     fn dark_optimization_recovers_the_scale_and_lowers_the_calibrated_noise() {
         let (light, bias, dark) = scaled_dark_scene(7);
 
-        let k = optimize_dark_scale(&light, Some(&bias), &dark, 1.0);
+        let fit = optimize_dark_scale(&light, Some(&bias), &dark, 1.0);
+        assert_eq!(fit.refused, None);
+        let k = fit.scale;
         assert!((k - 0.7).abs() <= 0.05, "recovered dark scale {k}");
 
         let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias), dark_groups: Vec::new() };
@@ -1303,7 +1402,10 @@ mod tests {
         assert!(sample.light_minus_bias.iter().all(|&v| v < 1e5));
 
         let mismatched = Array2::from_elem((4, 4), 1.0f32);
-        assert_eq!(optimize_dark_scale(&Array2::from_elem((8, 8), 5.0f32), None, &mismatched, 0.4), 0.4);
+        assert_eq!(
+            optimize_dark_scale(&Array2::from_elem((8, 8), 5.0f32), None, &mismatched, 0.4),
+            DarkScaleFit { scale: 0.4, refused: None }
+        );
     }
 
     fn single_light_run(light: Array2<f32>, masters: &CalibrationMasters) -> BatchPipelineResult {
@@ -1346,8 +1448,64 @@ mod tests {
         let masters = CalibrationMasters { dark: Some(dark), flat: None, bias: Some(bias), dark_groups: Vec::new() };
         let res = single_light_run(light, &masters);
         assert_eq!(res.stats.channels[0].dark_scale_mean, Some(1.0));
+        assert!(res.stats.channels[0].warnings.is_empty(), "{:?}", res.stats.channels[0].warnings);
         let sky = master_median(&res);
         assert!((sky - 1000.0).abs() < 1.0, "dark pedestal left in the sky: {}", sky);
+    }
+
+    fn sparse_hot(y: usize, x: usize) -> f32 {
+        if (y * 31 + x * 17) % 997 == 0 {
+            500.0
+        } else {
+            0.0
+        }
+    }
+
+    fn level_with_hot(n: usize, level: f32, noise: f32, seed: u64) -> Array2<f32> {
+        Array2::from_shape_fn((n, n), |(y, x)| level + sparse_hot(y, x)) + seeded_gaussian(n, n, noise, seed)
+    }
+
+    fn mean_frame(frames: &[Array2<f32>]) -> Array2<f32> {
+        let mut sum = Array2::<f32>::zeros(frames[0].dim());
+        for frame in frames {
+            sum += frame;
+        }
+        sum / frames.len() as f32
+    }
+
+    fn assert_dark_fit_refused(res: &BatchPipelineResult) {
+        let stats = &res.stats.channels[0];
+        assert_eq!(stats.dark_scale_mean, Some(1.0), "{:?}", stats.warnings);
+        let sky = master_median(res);
+        assert!((sky - 20.0).abs() < 2.0, "dark pedestal left in the sky: {sky}");
+        assert_eq!(stats.warnings.len(), 1, "{:?}", stats.warnings);
+        let warning = &stats.warnings[0];
+        assert!(warning.starts_with("Channel 'L': dark optimisation was not applied to 1 of 1 frames: "), "{warning}");
+        assert!(warning.contains("shows no pattern at least twice the calibrated noise"), "{warning}");
+        assert!(!warning.contains("probably too noisy"), "{warning}");
+        assert!(warning.contains("so the exposure ratio 1.00 was used"), "{warning}");
+    }
+
+    #[test]
+    fn dark_optimization_keeps_the_exposure_ratio_when_a_noisy_master_dark_drives_k_to_zero() {
+        let n = 256;
+        let bias = Array2::from_elem((n, n), 300.0f32);
+        let darks: Vec<Array2<f32>> = (0..3).map(|i| level_with_hot(n, 36.0, 8.0, 40 + i)).collect();
+        let light = level_with_hot(n, 300.0 + 20.0 + 36.0, 5.0, 50);
+        let masters = CalibrationMasters { dark: Some(mean_frame(&darks)), flat: None, bias: Some(bias), dark_groups: Vec::new() };
+        assert_dark_fit_refused(&single_light_run(light, &masters));
+    }
+
+    #[test]
+    fn dark_optimization_falls_back_with_a_noisy_shared_master_bias() {
+        let n = 256;
+        let bias_frames: Vec<Array2<f32>> = (0..3).map(|i| seeded_gaussian(n, n, 8.0, 60 + i) + 300.0).collect();
+        let master_bias = mean_frame(&bias_frames);
+        let darks: Vec<Array2<f32>> = (0..3).map(|i| level_with_hot(n, 336.0, 8.0, 70 + i)).collect();
+        let master_dark = mean_frame(&darks) - &master_bias;
+        let light = level_with_hot(n, 356.0, 5.0, 80);
+        let masters = CalibrationMasters { dark: Some(master_dark), flat: None, bias: Some(master_bias), dark_groups: Vec::new() };
+        assert_dark_fit_refused(&single_light_run(light, &masters));
     }
 
     #[test]
@@ -1380,6 +1538,7 @@ mod tests {
         assert!(stats.dark_scale_min.unwrap() <= mean && mean <= stats.dark_scale_max.unwrap());
         let optimized_sigma = robust_sigma(&res.master_channels[0].1);
         assert!(optimized_sigma < unit_sigma, "{optimized_sigma} vs {unit_sigma}");
+        assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
 
         let no_dark = CalibrationMasters { dark: None, flat: None, bias: masters.bias.clone(), dark_groups: Vec::new() };
         let res = run_batch_pipeline(vec![channel], &no_dark, &optimized).unwrap();
@@ -1483,6 +1642,152 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    fn plain_stack(rejection: RejectionMethod, normalize_before_stack: bool) -> BatchPipelineConfig {
+        BatchPipelineConfig {
+            stack: BatchStackConfig { normalize_before_stack, rejection, ..Default::default() },
+            align: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pipeline_refuses_percentile_clip_on_sky_subtracted_lights() {
+        let lights: Vec<Array2<f32>> = (0..5).map(|i| seeded_gaussian(64, 64, 1.0, 90 + i)).collect();
+        let err = run_batch_pipeline(
+            vec![light_channel(lights)],
+            &CalibrationMasters::default(),
+            &plain_stack(RejectionMethod::PercentileClip, false),
+        )
+        .expect_err("percentile clipping ran on sky-subtracted lights");
+        assert!(err.starts_with("Channel 'L': Percentile clipping keeps samples"), "{err}");
+        assert!(err.contains("sigma clipping"), "{err}");
+
+        let pedestal: Vec<Array2<f32>> = (0..5).map(|i| seeded_gaussian(64, 64, 1.0, 90 + i) + 1000.0).collect();
+        let res = run_batch_pipeline(
+            vec![light_channel(pedestal)],
+            &CalibrationMasters::default(),
+            &plain_stack(RejectionMethod::PercentileClip, false),
+        );
+        assert!(res.is_ok(), "{:?}", res.err());
+    }
+
+    #[test]
+    fn normalize_skips_every_frame_when_one_background_is_within_three_sigma_of_zero() {
+        let clear = seeded_gaussian(64, 64, 1.0, 101) + 100.0;
+        let near_zero = seeded_gaussian(64, 64, 1.0, 102) + 0.012;
+        let frames = vec![clear, near_zero];
+        let (out, skipped) = normalize_frames(&frames, &[0, 1], "L");
+        assert_eq!(out, frames, "a frame was scaled although one background is not above 3 sigma");
+        let warning = skipped.expect("no warning for a skipped normalisation");
+        assert!(
+            warning.starts_with("Normalize before stack was skipped for channel 'L': frame 2's background ("),
+            "{warning}"
+        );
+        assert!(warning.contains(") is not above 3 sigma of the pixel noise (sigma "), "{warning}");
+        assert!(warning.ends_with("), as in sky-subtracted or pedestal-free data."), "{warning}");
+
+        let lights: Vec<Array2<f32>> = (0..4)
+            .map(|i| seeded_gaussian(64, 64, 1.0, 110 + i as u64) + 0.01 * (i + 1) as f32)
+            .collect();
+        let res = run_batch_pipeline(
+            vec![light_channel(lights)],
+            &CalibrationMasters::default(),
+            &plain_stack(RejectionMethod::SigmaClip, true),
+        )
+        .unwrap();
+        let warnings = &res.stats.channels[0].warnings;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("Normalize before stack was skipped for channel 'L': frame 1's"), "{warnings:?}");
+    }
+
+    #[test]
+    fn normalize_still_scales_frames_with_a_clear_background() {
+        let frames = vec![seeded_gaussian(64, 64, 1.0, 121) + 100.0, seeded_gaussian(64, 64, 1.0, 122) + 200.0];
+        let (out, skipped) = normalize_frames(&frames, &[0, 1], "L");
+        assert_eq!(skipped, None);
+        for frame in &out {
+            let mut values: Vec<f32> = frame.iter().copied().collect();
+            let sky = median_f32_mut(&mut values);
+            assert!((sky - 1.0).abs() < 0.01, "sky not normalised to 1: {sky}");
+        }
+    }
+
+    #[test]
+    fn normalize_warning_numbers_the_frame_by_its_input_position_when_alignment_left_one_out() {
+        let reference = blob_light(150.0, 50.0);
+        let pedestal_free = reference.mapv(|v| v - 100.0);
+        let channel = light_channel(vec![reference.clone(), blob_light(150.0, 250.0), reference, pedestal_free]);
+        let config = BatchPipelineConfig {
+            stack: BatchStackConfig { normalize_before_stack: true, rejection: RejectionMethod::None, ..Default::default() },
+            align: true,
+            ..Default::default()
+        };
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &config).unwrap();
+        let stats = &res.stats.channels[0];
+        assert_eq!(stats.excluded_frames, vec![1]);
+        assert_eq!(stats.warnings.len(), 2, "{:?}", stats.warnings);
+        assert!(
+            stats.warnings[0].starts_with("Channel 'L': frame 2 of 4 was left out of the stack"),
+            "{:?}",
+            stats.warnings
+        );
+        assert!(
+            stats.warnings[1]
+                .starts_with("Normalize before stack was skipped for channel 'L': frame 4's background (0) is not above 3 sigma"),
+            "{:?}",
+            stats.warnings
+        );
+    }
+
+    fn nebula_filled_frame(seed: u64) -> Array2<f32> {
+        let n = 128;
+        Array2::from_shape_fn((n, n), |(y, x)| 220.0 + 200.0 * ((x + 2 * y) as f32 / 30.0).sin())
+            + seeded_gaussian(n, n, 2.0, seed)
+    }
+
+    #[test]
+    fn normalize_scales_frames_whose_nebulosity_fills_the_field() {
+        let frames = vec![nebula_filled_frame(131), nebula_filled_frame(132) * 1.5];
+        let (out, skipped) = normalize_frames(&frames, &[0, 1], "Ha");
+        assert_eq!(skipped, None, "a 220 ADU background with pixel noise 2 was treated as near zero");
+        for frame in &out {
+            let mut values: Vec<f32> = frame.iter().copied().collect();
+            let level = median_f32_mut(&mut values);
+            assert!((level - 1.0).abs() < 0.05, "frame not normalised to 1: {level}");
+        }
+    }
+
+    #[test]
+    fn refused_dark_fit_warning_states_the_two_sigma_rule_for_a_weak_but_real_pattern() {
+        let weak_pattern = DarkScaleFit {
+            scale: 1.0,
+            refused: Some(RefusedDarkFit { fitted: 0.7, pattern_sigma: 50.0, residual_sigma: 30.0 }),
+        };
+        assert_eq!(
+            refused_dark_fit_warning("L", &[weak_pattern, DarkScaleFit::kept(1.0)]).as_deref(),
+            Some(
+                "Channel 'L': dark optimisation was not applied to 1 of 2 frames: the master dark shows no pattern at least twice the calibrated noise (pattern sigma 50.0, calibrated noise 30.0 at the fitted scale 0.70), so the exposure ratio 1.00 was used. If the master dark was built from few frames, its noise can hide the pattern; more darks lower it."
+            )
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn real_data_normalize_scales_the_wfpc2_nebula_mosaics() {
+        let paths = [
+            "C:/astrokit/exampleFits/sample-data/502nmos.fits",
+            "C:/astrokit/exampleFits/sample-data/656nmos.fits",
+            "C:/astrokit/exampleFits/sample-data/673nmos.fits",
+        ];
+        if paths.iter().any(|p| !std::path::Path::new(p).exists()) {
+            return;
+        }
+        let frames: Vec<Array2<f32>> =
+            paths.iter().map(|p| crate::infra::fits::reader::load_fits_image(p).unwrap()).collect();
+        let (_, skipped) = normalize_frames(&frames, &[0, 1, 2], "L");
+        assert_eq!(skipped, None);
     }
 
     #[test]

@@ -110,6 +110,7 @@ pub(crate) fn enforce_output_lru_keeping(
     dir: &Path,
     max_bytes: u64,
     keep: &[&str],
+    best_effort: bool,
 ) -> Result<(usize, u64, Vec<String>)> {
     let _guard = SWEEP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let protected = KeepSet::new(keep);
@@ -126,12 +127,19 @@ pub(crate) fn enforce_output_lru_keeping(
     let removable: u64 = entries.iter().map(|e| e.size).sum();
     let floor = total - removable;
     if floor >= max_bytes {
+        if !best_effort {
+            log::warn!(
+                "LRU cleanup: {} bytes are kept for files still in use, above the {} byte cap; nothing removed",
+                floor,
+                max_bytes
+            );
+            return Ok((0, 0, Vec::new()));
+        }
         log::warn!(
-            "LRU cleanup: {} bytes are kept for files still in use, above the {} byte cap; nothing removed",
+            "LRU cleanup: {} bytes are kept for files still in use, above the {} byte cap; removing every unprotected file",
             floor,
             max_bytes
         );
-        return Ok((0, 0, Vec::new()));
     }
 
     let mut current = total;
@@ -209,7 +217,8 @@ pub async fn cleanup_output_cmd(
         let keep = keep.unwrap_or_default();
         let keep_refs: Vec<&str> = keep.iter().map(String::as_str).collect();
 
-        let (cleaned_files, cleaned_bytes, cleaned_paths) = enforce_output_lru_keeping(path, max_bytes, &keep_refs)?;
+        let (cleaned_files, cleaned_bytes, cleaned_paths) =
+            enforce_output_lru_keeping(path, max_bytes, &keep_refs, true)?;
         let (total_size, file_count) = dir_info(path)?;
 
         Ok(json!({
@@ -262,7 +271,7 @@ mod tests {
         age(&newest, 10);
 
         let keep = [oldest.to_str().unwrap()];
-        let (removed, _, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep).unwrap();
+        let (removed, _, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep, false).unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("stale_result.fits"), "{paths:?}");
 
@@ -273,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn lru_removes_nothing_when_the_protected_files_alone_exceed_the_cap() {
+    fn a_strict_sweep_removes_nothing_when_the_protected_files_alone_exceed_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let master_a = write_file(dir.path(), "master_a.fits", 6000);
         let master_b = write_file(dir.path(), "master_b.fits", 6000);
@@ -283,7 +292,7 @@ mod tests {
         age(&old_result, 10);
 
         let keep = [master_a.to_str().unwrap(), master_b.to_str().unwrap()];
-        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep).unwrap();
+        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &keep, false).unwrap();
 
         assert_eq!((removed, bytes, paths.len()), (0, 0, 0));
         assert!(
@@ -297,7 +306,7 @@ mod tests {
     fn lru_is_a_no_op_below_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let only = write_file(dir.path(), "result.fits", 100);
-        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &[]).unwrap();
+        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 8192, &[], false).unwrap();
         assert_eq!((removed, bytes, paths.len()), (0, 0, 0));
         assert!(only.exists());
     }
@@ -311,7 +320,7 @@ mod tests {
         age(&result, 10);
 
         assert_eq!(dir_info(dir.path()).unwrap(), (8192, 2), "tile bytes are missing from the storage report");
-        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 4096, &[]).unwrap();
+        let (removed, bytes, paths) = enforce_output_lru_keeping(dir.path(), 4096, &[], false).unwrap();
         assert_eq!((removed, bytes), (1, 4096));
         assert!(paths[0].ends_with("0_0.png"), "{paths:?}");
         assert!(!tile.exists());
@@ -330,7 +339,7 @@ mod tests {
 
         let slot0 = dir.path().join("tiles").join("slot0");
         let keep = [slot0.to_str().unwrap()];
-        let (removed, _, _) = enforce_output_lru_keeping(dir.path(), 8192, &keep).unwrap();
+        let (removed, _, _) = enforce_output_lru_keeping(dir.path(), 8192, &keep, false).unwrap();
         assert_eq!(removed, 1);
         assert!(active_tile.exists(), "a tile of the pyramid on screen was deleted");
         assert!(!stale_tile.exists());
@@ -365,6 +374,64 @@ mod tests {
         let cleaned: Vec<String> = serde_json::from_value(res[RES_CLEANED_PATHS].clone()).unwrap();
         assert_eq!(cleaned.len(), 1);
         assert!(cleaned[0].ends_with("old_arcsinh.fits"), "{cleaned:?}");
+    }
+
+    #[tokio::test]
+    async fn manual_cleanup_removes_unprotected_files_even_when_the_cap_is_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_a = write_file(dir.path(), "master_a.fits", 600 * 1024);
+        let master_b = write_file(dir.path(), "master_b.fits", 600 * 1024);
+        let older = write_file(dir.path(), "old_stretch.png", 100 * 1024);
+        let newer = write_file(dir.path(), "old_result.fits", 100 * 1024);
+        age(&master_a, 50);
+        age(&master_b, 40);
+        age(&older, 30);
+        age(&newer, 20);
+
+        let keep = vec![
+            master_a.to_str().unwrap().to_string(),
+            master_b.to_str().unwrap().to_string(),
+        ];
+        let res = cleanup_output_cmd(dir.path().to_str().unwrap().to_string(), Some(1), Some(keep))
+            .await
+            .unwrap();
+
+        assert_eq!(res[RES_CLEANED_FILES], 2, "{res}");
+        assert_eq!(res[RES_CLEANED_BYTES], 200 * 1024);
+        let cleaned: Vec<String> = serde_json::from_value(res[RES_CLEANED_PATHS].clone()).unwrap();
+        assert!(cleaned[0].ends_with("old_stretch.png") && cleaned[1].ends_with("old_result.fits"), "{cleaned:?}");
+        assert!(!older.exists() && !newer.exists());
+        assert!(master_a.exists() && master_b.exists(), "a protected master was deleted");
+        assert_eq!(res[RES_TOTAL_SIZE], 1200 * 1024);
+    }
+
+    #[tokio::test]
+    async fn manual_cleanup_with_a_zero_cap_removes_every_unprotected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_use = write_file(dir.path(), "m42.png", 4096);
+        let stale_a = write_file(dir.path(), "a_result.fits", 4096);
+        let stale_b = write_file(dir.path(), "tiles/slot1/0/0_0.png", 4096);
+        age(&in_use, 30);
+        age(&stale_a, 20);
+        age(&stale_b, 10);
+
+        let keep = vec![in_use.to_str().unwrap().to_string()];
+        let res = cleanup_output_cmd(dir.path().to_str().unwrap().to_string(), Some(0), Some(keep))
+            .await
+            .unwrap();
+
+        assert_eq!(res[RES_CLEANED_FILES], 2, "{res}");
+        assert!(!stale_a.exists() && !stale_b.exists(), "a cap of 0 left unprotected outputs on disk");
+        assert!(in_use.exists(), "the ingest PNG of a loaded file was deleted");
+        assert_eq!((res[RES_TOTAL_SIZE].as_u64(), res[RES_FILE_COUNT].as_u64()), (Some(4096), Some(1)));
+
+        let empty = tempfile::tempdir().unwrap();
+        let lone = write_file(empty.path(), "lone.fits", 4096);
+        let res = cleanup_output_cmd(empty.path().to_str().unwrap().to_string(), Some(0), None)
+            .await
+            .unwrap();
+        assert_eq!(res[RES_CLEANED_FILES], 1, "{res}");
+        assert!(!lone.exists());
     }
 
     #[test]

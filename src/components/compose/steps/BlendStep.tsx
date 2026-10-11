@@ -46,6 +46,7 @@ import {
   weightsForFilledBins,
 } from "../../../utils/blendWeights";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
+import { stfTripleOf } from "../../../utils/compositeStfResponse";
 
 interface BlendStepProps {
   state: WizardState;
@@ -288,15 +289,17 @@ export default function BlendStep({
       const res = await lrgbCombineComposite(lPath, dir, {
         lightness: lrgbLightness,
         chrominance: lrgbChrominance,
+        stfLinked: compositeStfLinked,
       });
       setLrgbApplied(true);
       onCompositeOp({ kind: "lrgb", lightness: lrgbLightness, chrominance: lrgbChrominance });
-      const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-      const previewUrl = await renderLinearCompositePreview(dir, stf, compositeStfLinked).catch((e) => {
+      const recomputed = stfTripleOf(res);
+      const stf = recomputed ?? { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+      const previewUrl = await renderLinearCompositePreview(dir, stf, stf.linked).catch((e) => {
         console.error("[AstroBurst] LRGB preview re-stretch failed:", e);
         return res.previewUrl ?? res.png_path ?? null;
       });
-      onCompositeReady(previewUrl);
+      onCompositeReady(previewUrl, recomputed ?? undefined);
     } catch (e) {
       setLrgbError(e instanceof Error ? e.message : String(e));
     } finally {

@@ -20,6 +20,7 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeActions, useCompositeStf } from "../../../context/CompositeContext";
 import { useRenderActions } from "../../../context/PreviewContext";
 import StfHistogram from "../StfHistogram";
+import { stfTripleOf, type CompositeStfTriple } from "../../../utils/compositeStfResponse";
 
 const HIST_RGB = [
   { key: "__composite_r", color: "#ef4444" },
@@ -36,6 +37,7 @@ interface StretchStepProps {
   onChannelOutput: (binId: string, stage: "starless" | "stretched", value: ChannelStage) => void;
   onCompositeOp: (op: CompositeOp) => void;
   onPreview?: (url: string, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
+  onStarlessComposite?: (url: string | null, stf: CompositeStfTriple) => void;
   onStarRemoval?: () => void;
 }
 
@@ -59,7 +61,7 @@ interface StretchRunResult {
   channels?: StretchRunSummaryInput["channels"];
 }
 
-export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult, onChannelOutput, onCompositeOp, onPreview, onStarRemoval }: StretchStepProps) {
+export default function StretchStep({ state, onStretchChange, onMaskParams, onMask, onResult, onChannelOutput, onCompositeOp, onPreview, onStarlessComposite, onStarRemoval }: StretchStepProps) {
   const {
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
     compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
@@ -255,15 +257,17 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
       const dir = await getOutputDir();
       const opts = { detectionSigma: srSigma, growthFactor: srGrowth };
       if (state.compositeReady) {
-        const res = await removeStarsComposite(dir, opts);
+        const res = await removeStarsComposite(dir, opts, compositeStfLinked);
         setSrResult(res);
         onCompositeOp({ kind: "starRemoval", sigma: srSigma, growth: srGrowth });
-        const stf = { r: compositeStfR, g: compositeStfG, b: compositeStfB };
-        const url = await renderLinearCompositePreview(dir, stf, compositeStfLinked).catch((e) => {
+        const recomputed = stfTripleOf(res);
+        const stf = recomputed ?? { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+        const url = await renderLinearCompositePreview(dir, stf, stf.linked).catch((e) => {
           console.error("[AstroBurst] Starless composite re-stretch failed:", e);
           return res.previewUrl ?? null;
         });
-        if (url) onPreview?.(url);
+        if (recomputed) onStarlessComposite?.(url, recomputed);
+        else if (url) onPreview?.(url);
         onStarRemoval?.();
         return;
       }
@@ -278,7 +282,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
     } finally {
       setSrLoading(false);
     }
-  }, [state, srSigma, srGrowth, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onPreview, onStarRemoval, onCompositeOp, currentFileKey, publishChannelOutput]);
+  }, [state, srSigma, srGrowth, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onPreview, onStarlessComposite, onStarRemoval, onCompositeOp, currentFileKey, publishChannelOutput]);
 
   const handleResetStf = useCallback(() => {
     const autoR = (compositeAutoStfR ?? DEFAULT_STF) as ChannelStf;

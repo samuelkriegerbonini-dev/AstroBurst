@@ -59,19 +59,28 @@ const NON_SPECTRAL_DIMS: CubeDims = {
   spectral_classification: { is_spectral: false, reason: "ramp: 10 groups x 1 integrations (NRSIRS2RAPID)" },
 };
 
-function renderClickedPixel(ramp: RampInfo | null): string {
+function renderPanel(ramp: RampInfo | null, spectrum: number[]): string {
   cubeState.ramp = ramp;
   return renderToStaticMarkup(
     createElement(SpectroscopyPanel, {
-      spectrum: Array.from({ length: 10 }, (_, i) => 100 + i * 5),
+      spectrum,
       wavelengths: null,
-      pixelCoord: { x: 1023, y: 2446 },
+      pixelCoord: spectrum.length > 0 ? { x: 1023, y: 2446 } : null,
       cubeDims: NON_SPECTRAL_DIMS,
       filePath: "C:/data/cube.fits",
       publishGate: createFramePublishGate(),
     }),
   );
 }
+
+function renderClickedPixel(ramp: RampInfo | null): string {
+  return renderPanel(
+    ramp,
+    Array.from({ length: 10 }, (_, i) => 100 + i * 5),
+  );
+}
+
+const SPECTRAL_ONLY_TEXT = ["Continuum", "continuum A", "SNR", "Moments", "[line-fit]", "[line-measure]", "[compare]"];
 
 describe("SpectroscopyPanel spectral-axis widgets", () => {
   it("hides the spectral-axis controls and the line list for a ramp and keeps the group navigator", () => {
@@ -86,5 +95,48 @@ describe("SpectroscopyPanel spectral-axis widgets", () => {
     expect(html).toContain("[frame-nav]");
     expect(html).toContain("[axis-controls]");
     expect(html).toContain("[line-list]");
+  });
+});
+
+describe("SpectroscopyPanel spectral-only sections", () => {
+  it("hides the continuum, Moments, Line fit, line measurement and comparison sections for a ramp", () => {
+    const html = renderClickedPixel(RAMP);
+    for (const text of SPECTRAL_ONLY_TEXT) expect(html).not.toContain(text);
+    expect(html).toContain("Collapse Mean");
+    expect(html).toContain("Collapse range");
+  });
+
+  it("hides the comparison section for a ramp before any spectrum is extracted", () => {
+    expect(renderPanel(RAMP, [])).not.toContain("[compare]");
+    expect(renderPanel(null, [])).toContain("[compare]");
+  });
+
+  it("keeps every spectral section for a cube that is not a ramp", () => {
+    const html = renderClickedPixel(null);
+    for (const text of SPECTRAL_ONLY_TEXT) expect(html).toContain(text);
+  });
+});
+
+describe("SpectroscopyPanel channel and SNR boxes", () => {
+  it("renders the range, continuum and SNR boxes as decimal text fields, none invalid before an edit", () => {
+    const html = renderClickedPixel(null);
+    expect(html).not.toContain('type="number"');
+    expect(html.match(/inputMode="decimal"/g)?.length).toBe(7);
+    expect(html).not.toContain("aria-invalid");
+  });
+
+  it("keeps only the line range boxes on a ramp", () => {
+    const html = renderClickedPixel(RAMP);
+    expect(html.match(/inputMode="decimal"/g)?.length).toBe(2);
+    expect(html).toContain('aria-label="Range first channel z0"');
+    expect(html).toContain('aria-label="Range last channel z1"');
+  });
+});
+
+describe("SpectroscopyPanel grey text", () => {
+  it("colours the idle export buttons through the text token instead of a grey literal", () => {
+    const html = renderClickedPixel(null);
+    expect(html).not.toContain("#71717a");
+    expect(html).toContain("color:var(--ab-text-3)");
   });
 });

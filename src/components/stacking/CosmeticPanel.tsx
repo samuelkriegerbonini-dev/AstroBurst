@@ -1,7 +1,7 @@
 import { useState, useCallback, useId, useMemo } from "react";
-import { Wand2, Layers, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Wand2, Layers, AlertTriangle, CheckCircle2, Eye } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
-import { cosmeticCorrect, cosmeticCorrectBatch } from "../../services/cosmetic";
+import { cosmeticCorrect, cosmeticCorrectBatch, cosmeticDryRun, type CosmeticDryRunResult } from "../../services/cosmetic";
 import { useDoneFilesContext } from "../../context/PreviewContext";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { withVersionParam } from "../../utils/processingChain";
@@ -10,6 +10,7 @@ import type { ProcessedFile } from "../../shared/types/fits.types";
 import type {
   CosmeticBatchResult,
   CosmeticConfig,
+  CosmeticCounts,
   CosmeticOptions,
   CosmeticReplacement,
   CosmeticResult,
@@ -30,6 +31,41 @@ const MAX_BATCH_ERRORS = 4;
 const DEFECT_PLACEHOLDER = "Point x y\nCol x [y0 y1]\nRow y [x0 x1]\n# 0-based, one entry per line";
 
 const ICON = <Wand2 size={14} className="text-violet-400" />;
+
+function dryRunCaption({ hot, cold, listed }: CosmeticCounts): string {
+  const listedPart = listed > 0 ? `, ${listed} listed` : "";
+  return `Red marks: pixels that would be replaced (${hot} hot, ${cold} cold${listedPart})`;
+}
+
+export function DryRunPreview({ result }: { result: CosmeticDryRunResult }) {
+  return (
+    <div data-testid="cosmetic-dry-run" className="flex flex-col gap-2 animate-fade-in">
+      {result.dq_present && result.warning && (
+        <div className="flex items-start gap-2 text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+          <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+          <span>{result.warning}</span>
+        </div>
+      )}
+      <ResultGrid items={[
+        { label: "Flagged", value: result.counts.flagged },
+        { label: "Hot", value: result.counts.hot },
+        { label: "Cold", value: result.counts.cold },
+        { label: "Listed", value: result.counts.listed },
+        { label: "Time", value: `${((result.elapsed_ms ?? 0) / 1000).toFixed(1)}s` },
+      ]} />
+      {result.previewUrl && (
+        <img
+          src={result.previewUrl}
+          alt="Defect map of the selected light"
+          data-testid="cosmetic-dry-run-preview"
+          className="w-full rounded border border-zinc-700"
+          style={{ imageRendering: "pixelated" }}
+        />
+      )}
+      <p className="text-[10px] text-zinc-400 leading-snug">{dryRunCaption(result.counts)}</p>
+    </div>
+  );
+}
 
 function fileLabel(path: string | undefined): string {
   return path?.split(/[/\\]/).pop() ?? "";
@@ -61,7 +97,9 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
 
   const [isRunning, setIsRunning] = useState(false);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isDryRunning, setIsDryRunning] = useState(false);
   const [lastResult, setResult] = useState<CosmeticResult | null>(null);
+  const [lastDryRun, setDryRun] = useState<CosmeticDryRunResult | null>(null);
   const [batchResult, setBatchResult] = useState<CosmeticBatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,7 +127,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
   const listActive = listEnabled && parsedList.defects.length > 0;
   const anyMethod = darkActive || autoActive || listActive;
   const canRun = darkReady && anyMethod && listErrors.length === 0;
-  const busy = isRunning || isBatchRunning;
+  const busy = isRunning || isBatchRunning || isDryRunning;
 
   const buildOptions = useCallback((): CosmeticOptions => {
     const config: CosmeticConfig = {
@@ -121,6 +159,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
     setError(null);
     setResult(null);
     setBatchResult(null);
+    setDryRun(null);
     try {
       const res = await cosmeticCorrect(selectedFile.path, outputDir, buildOptions());
       setResult(res.previewUrl ? { ...res, previewUrl: withVersionParam(res.previewUrl, Date.now()) } : res);
@@ -138,6 +177,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
     setError(null);
     setResult(null);
     setBatchResult(null);
+    setDryRun(null);
     try {
       const res = await cosmeticCorrectBatch(lights.map((f) => f.path), outputDir, buildOptions());
       setBatchResult(res);
@@ -149,7 +189,25 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
     }
   }, [lights, canRun, outputDir, buildOptions, onBatchDone]);
 
+  const handleDryRun = useCallback(async () => {
+    if (!selectedFile?.path || !canRun) return;
+    setIsDryRunning(true);
+    setError(null);
+    setResult(null);
+    setBatchResult(null);
+    setDryRun(null);
+    try {
+      const res = await cosmeticDryRun(selectedFile.path, outputDir, buildOptions());
+      setDryRun(res.previewUrl ? { ...res, previewUrl: withVersionParam(res.previewUrl, Date.now()) } : res);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsDryRunning(false);
+    }
+  }, [selectedFile, canRun, outputDir, buildOptions]);
+
   const result = lastResult && selectedFile?.path === lastResult.path ? lastResult : null;
+  const dryRun = lastDryRun && selectedFile?.path === lastDryRun.path ? lastDryRun : null;
   const originalUrl = selectedFile?.result?.previewUrl;
   const resultUrl = result?.previewUrl;
   const batchWarnings = batchResult?.results.filter((r) => r.dq_present).length ?? 0;
@@ -263,21 +321,33 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
         label="Run Cosmetic Correction"
         runningLabel="Correcting..."
         running={isRunning}
-        disabled={!selectedFile?.path || !canRun || isBatchRunning}
+        disabled={!selectedFile?.path || !canRun || isBatchRunning || isDryRunning}
         accent={ACCENT}
         onClick={handleRun}
+      />
+      <RunButton
+        label="Dry run"
+        runningLabel="Finding defects..."
+        running={isDryRunning}
+        disabled={!selectedFile?.path || !canRun || isRunning || isBatchRunning}
+        accent={ACCENT}
+        small
+        icon={<Eye size={12} />}
+        onClick={handleDryRun}
       />
       <RunButton
         label={`Apply to All Loaded Lights (${lights.length})`}
         runningLabel="Correcting batch..."
         running={isBatchRunning}
-        disabled={lights.length === 0 || !canRun || isRunning}
+        disabled={lights.length === 0 || !canRun || isRunning || isDryRunning}
         accent={ACCENT}
         small
         icon={<Layers size={12} />}
         onClick={handleBatch}
       />
       <ErrorAlert message={error} />
+
+      {dryRun && <DryRunPreview result={dryRun} />}
 
       {result && (
         <div className="flex flex-col gap-3 animate-fade-in">

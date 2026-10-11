@@ -56,6 +56,16 @@ pub enum Function {
     Mdev,
     Sdev,
     Adev,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Mtf,
+    X,
+    Y,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +75,7 @@ pub enum Arity {
 }
 
 impl Function {
-    pub const ALL: [Function; 24] = [
+    pub const ALL: [Function; 34] = [
         Function::Abs,
         Function::Sqrt,
         Function::Exp,
@@ -90,6 +100,16 @@ impl Function {
         Function::Mdev,
         Function::Sdev,
         Function::Adev,
+        Function::Sin,
+        Function::Cos,
+        Function::Tan,
+        Function::Asin,
+        Function::Acos,
+        Function::Atan,
+        Function::Atan2,
+        Function::Mtf,
+        Function::X,
+        Function::Y,
     ];
 
     pub fn name(self) -> &'static str {
@@ -118,6 +138,16 @@ impl Function {
             Function::Mdev => "mdev",
             Function::Sdev => "sdev",
             Function::Adev => "adev",
+            Function::Sin => "sin",
+            Function::Cos => "cos",
+            Function::Tan => "tan",
+            Function::Asin => "asin",
+            Function::Acos => "acos",
+            Function::Atan => "atan",
+            Function::Atan2 => "atan2",
+            Function::Mtf => "mtf",
+            Function::X => "x",
+            Function::Y => "y",
         }
     }
 
@@ -127,8 +157,8 @@ impl Function {
 
     pub fn arity(self) -> Arity {
         match self {
-            Function::Pi | Function::E => Arity::Exact(0),
-            Function::Pow => Arity::Exact(2),
+            Function::Pi | Function::E | Function::X | Function::Y => Arity::Exact(0),
+            Function::Pow | Function::Atan2 | Function::Mtf => Arity::Exact(2),
             Function::Clip | Function::Iif => Arity::Exact(3),
             Function::Rescale => Arity::Exact(5),
             Function::Min | Function::Max => Arity::AtLeast(1),

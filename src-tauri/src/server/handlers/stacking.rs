@@ -10,6 +10,7 @@ use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use astroburst_lib::core::stacking::combine::{stack_images_cancellable, validate_frame_weights};
 use astroburst_lib::core::stacking::drizzle::drizzle_stack_cancellable;
+use astroburst_lib::core::stacking::memory::{drizzle_memory_check, effective_memory, stack_memory_check, MemoryInfo};
 use astroburst_lib::core::stacking::CancelCheck;
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::load_fits_image;
@@ -103,12 +104,38 @@ fn load_frames(job: &Job, paths: &[String], cancelled: CancelCheck) -> anyhow::R
 }
 
 fn stack_frames(job: &Job, paths: &[String], config: &StackConfig, cancelled: CancelCheck) -> anyhow::Result<Array2<f32>> {
+    stack_frames_with_memory(job, paths, config, cancelled, effective_memory())
+}
+
+fn stack_frames_with_memory(
+    job: &Job,
+    paths: &[String],
+    config: &StackConfig,
+    cancelled: CancelCheck,
+    info: Option<MemoryInfo>,
+) -> anyhow::Result<Array2<f32>> {
+    if let Some(warning) = stack_memory_check(paths, config, info)? {
+        log::warn!("{}", warning);
+    }
     let frames = load_frames(job, paths, cancelled)?;
     job.progress(LOAD_PCT as u32, "stacking");
     Ok(stack_images_cancellable(&frames, config, cancelled)?.image)
 }
 
 fn drizzle_frames(job: &Job, paths: &[String], config: &DrizzleConfig, cancelled: CancelCheck) -> anyhow::Result<Array2<f32>> {
+    drizzle_frames_with_memory(job, paths, config, cancelled, effective_memory())
+}
+
+fn drizzle_frames_with_memory(
+    job: &Job,
+    paths: &[String],
+    config: &DrizzleConfig,
+    cancelled: CancelCheck,
+    info: Option<MemoryInfo>,
+) -> anyhow::Result<Array2<f32>> {
+    if let Some(warning) = drizzle_memory_check(paths, config, info)? {
+        log::warn!("{}", warning);
+    }
     let frames = load_frames(job, paths, cancelled)?;
     job.progress(LOAD_PCT as u32, "drizzling");
     Ok(drizzle_stack_cancellable(&frames, config, cancelled)?.image)
@@ -417,6 +444,48 @@ mod tests {
 
         let (fresh, _rx, _cache) = setup();
         assert!(drizzle_frames(&fresh, &paths, &config, &|| false).is_ok());
+    }
+
+    fn truncated_frame(dir: &tempfile::TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        crate::tests::v2_fixtures::write_pixels_fits(&path, 40, 48, &[100.0; 40 * 48]);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - 2880).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn error_message(rx: &mut mpsc::Receiver<SseEvent>) -> String {
+        match drain(rx).into_iter().last() {
+            Some(SseEvent::Error { message }) => message,
+            _ => panic!("expected an error event"),
+        }
+    }
+
+    #[test]
+    fn stack_refuses_over_budget_before_loading_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = write_frames(&dir, 1);
+        paths.push(truncated_frame(&dir, "truncated.fits"));
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let tiny = Some(MemoryInfo { physical_available: 1024, commit_available: 1024 });
+
+        let (job, mut rx, cache) = setup();
+        let outcome = stack_frames_with_memory(&job, &paths, &config, &|| false, tiny);
+        publish_result(&job, &cache, "stacked", outcome);
+        assert_eq!(job.current_status(), JobStatus::Error);
+        let message = error_message(&mut rx);
+        assert!(message.starts_with("Stacking these 2 frames of 40x48 needs about"), "{message}");
+        assert!(!message.contains("Failed to load"), "{message}");
+
+        let (unchecked, _rx, _cache) = setup();
+        let load_error = stack_frames_with_memory(&unchecked, &paths, &config, &|| false, None).unwrap_err();
+        assert!(format!("{load_error:#}").contains("Failed to load"), "{load_error:#}");
+
+        let drizzle = DrizzleConfig { align: false, ..DrizzleConfig::default() };
+        let (drizzle_job, _rx, _cache) = setup();
+        let refusal = drizzle_frames_with_memory(&drizzle_job, &paths, &drizzle, &|| false, tiny).unwrap_err();
+        assert!(refusal.to_string().starts_with("Drizzling these 2 frames of 40x48 needs about"), "{refusal:#}");
     }
 
     #[test]

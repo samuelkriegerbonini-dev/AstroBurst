@@ -484,13 +484,21 @@ mod tests {
     #[test]
     fn imagetyp_light_in_darks_is_refused() {
         let err = check_master_set(MasterKind::Dark, &[typed("light1.fits", "Light")]).unwrap_err().to_string();
-        assert_eq!(err, "light1.fits has IMAGETYP='light' but was given as a dark frame.");
+        assert_eq!(err, "light1.fits has IMAGETYP='Light' but was given as a dark frame.");
         let err = check_master_set(MasterKind::FlatDark, &[typed("flat1.fits", "Flat")]).unwrap_err().to_string();
-        assert_eq!(err, "flat1.fits has IMAGETYP='flat' but was given as a flat-dark frame.");
+        assert_eq!(err, "flat1.fits has IMAGETYP='Flat' but was given as a flat-dark frame.");
         let err = check_master_set(MasterKind::Bias, &[typed("f.fits", "Flat Field")]).unwrap_err().to_string();
         assert!(err.contains("given as a bias frame"), "{err}");
         assert_eq!(imagetyp_verdict(MasterKind::Dark, FrameKind::Light), Verdict::Refuse);
         assert_eq!(imagetyp_verdict(MasterKind::Flat, FrameKind::Dark), Verdict::Warn);
+    }
+
+    #[test]
+    fn imagetyp_message_quotes_the_header_text_as_written() {
+        let err = check_master_set(MasterKind::Dark, &[typed("flat_as_dark.fits", "Flat Field")]).unwrap_err().to_string();
+        assert_eq!(err, "flat_as_dark.fits has IMAGETYP='Flat Field' but was given as a dark frame.");
+        let report = check_master_set(MasterKind::Dark, &[typed("fd.fits", "  Flat Dark ")]).unwrap();
+        assert_eq!(report.warnings, vec!["fd.fits has IMAGETYP='Flat Dark' in the dark row; it is used as a dark frame.".to_string()]);
     }
 
     #[test]
@@ -506,10 +514,10 @@ mod tests {
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
 
         let report = check_master_set(MasterKind::Dark, &[typed("d1.fits", "Flat Dark")]).unwrap();
-        assert_eq!(report.warnings, vec!["d1.fits has IMAGETYP='flat dark' in the dark row; it is used as a dark frame.".to_string()]);
+        assert_eq!(report.warnings, vec!["d1.fits has IMAGETYP='Flat Dark' in the dark row; it is used as a dark frame.".to_string()]);
 
         let report = check_master_set(MasterKind::Flat, &[typed("sky1.fits", "Light")]).unwrap();
-        assert_eq!(report.warnings, vec!["sky1.fits has IMAGETYP='light' in the flat row; it is used as a flat frame.".to_string()]);
+        assert_eq!(report.warnings, vec!["sky1.fits has IMAGETYP='Light' in the flat row; it is used as a flat frame.".to_string()]);
 
         for kind in [MasterKind::Bias, MasterKind::Dark, MasterKind::Flat, MasterKind::FlatDark] {
             let report = check_master_set(kind, &[cards("plain.fits", None)]).unwrap();

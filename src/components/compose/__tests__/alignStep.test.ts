@@ -341,7 +341,7 @@ describe("StackStep run that outlives its inputs", () => {
     await captured.clicks["Stack All"]();
     expect(mocks.stackFrames).toHaveBeenCalledTimes(1);
     expect(onStacked).not.toHaveBeenCalled();
-    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: false, notice: STACK_INPUTS_CHANGED }]]);
+    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: false, notice: STACK_INPUTS_CHANGED }, 0]]);
   });
 
   it("discards a stack that the reset cancelled instead of reporting it as cancelled", async () => {
@@ -352,7 +352,7 @@ describe("StackStep run that outlives its inputs", () => {
     const onStacked = renderStack();
     await captured.clicks["Stack All"]();
     expect(onStacked).not.toHaveBeenCalled();
-    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: false, notice: STACK_INPUTS_CHANGED }]]);
+    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: false, notice: STACK_INPUTS_CHANGED }, 0]]);
   });
 
   it("stores a stack whose inputs did not change and clears the bin's notice", async () => {
@@ -361,6 +361,6 @@ describe("StackStep run that outlives its inputs", () => {
     await captured.clicks["Stack All"]();
     expect(mocks.stackFrames.mock.calls[0][0]).toEqual(FRAMES);
     expect(onStacked).toHaveBeenCalledWith("r", STACKED);
-    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: true, notice: null }]]);
+    expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: true, notice: null }, 0]]);
   });
 });

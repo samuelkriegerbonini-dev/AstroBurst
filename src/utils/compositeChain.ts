@@ -158,3 +158,14 @@ export function compositeStepOutcome(input: {
     invalidatesWizard: compositeStepInvalidatesWizard(input.step, input.displayed),
   };
 }
+
+export interface CompositeModeAfterRunInput {
+  mounted: boolean;
+  compositeModeAtLastRender: boolean;
+  unchangedSinceUnmount: boolean;
+}
+
+export function compositeModeAfterRun(input: CompositeModeAfterRunInput): boolean {
+  if (input.mounted) return input.compositeModeAtLastRender;
+  return input.compositeModeAtLastRender && input.unchangedSinceUnmount;
+}

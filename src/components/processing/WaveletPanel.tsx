@@ -226,6 +226,7 @@ export default function WaveletPanel({
               <div className="flex-1">
                 <Slider
                   label=""
+                  ariaLabel={`${scaleLabel(idx)} threshold`}
                   value={val}
                   min={0}
                   max={5}
@@ -263,6 +264,7 @@ export default function WaveletPanel({
               <div className="flex-1">
                 <Slider
                   label=""
+                  ariaLabel={`${scaleLabel(idx)} bias`}
                   value={val}
                   min={BIAS_MIN}
                   max={BIAS_MAX}

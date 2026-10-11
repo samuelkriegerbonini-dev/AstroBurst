@@ -1,4 +1,5 @@
 import type { CollapseRangeMode, ContinuumWindows } from "../shared/types/cube";
+import type { RampInfo } from "../shared/types/ramp";
 import { formatTickLabels, niceTicks } from "./plotScale";
 
 export interface ChannelRange {
@@ -156,7 +157,52 @@ export function defaultContinuumWindows(
 }
 
 export function parseChannelInput(text: string, n: number): number | null {
-  const value = Number(text.trim());
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
   if (!Number.isInteger(value) || value < 0 || value >= n) return null;
   return value;
+}
+
+export type WindowSide = 0 | 1;
+export type WindowEdge = 0 | 1;
+
+const WINDOW_LETTERS: Record<WindowSide, string> = { 0: "A", 1: "B" };
+
+export function commitWindowEdge(
+  windows: ContinuumWindows | null,
+  side: WindowSide,
+  edge: WindowEdge,
+  value: number,
+): ContinuumWindows {
+  const base: ContinuumWindows = windows ?? [
+    [value, value],
+    [value, value],
+  ];
+  const next: ContinuumWindows = [[...base[0]], [...base[1]]] as ContinuumWindows;
+  const [from, to] = next[side];
+  next[side][edge] = edge === 0 ? Math.min(value, to) : Math.max(value, from);
+  return next;
+}
+
+export function commitRangeEdge(range: ChannelRange, edge: keyof ChannelRange, value: number): ChannelRange {
+  return edge === "z0" ? { z0: Math.min(value, range.z1), z1: range.z1 } : { z0: range.z0, z1: Math.max(value, range.z0) };
+}
+
+export function windowsOverlapRange(windows: ContinuumWindows | null, range: ChannelRange | null): WindowSide[] {
+  if (!windows || !range) return [];
+  return ([0, 1] as const).filter((side) => windows[side][0] <= range.z1 && windows[side][1] >= range.z0);
+}
+
+export function continuumOverlapNote(windows: ContinuumWindows | null, range: ChannelRange | null): string | null {
+  const sides = windowsOverlapRange(windows, range);
+  if (sides.length === 0) return null;
+  if (sides.length === 2) {
+    return "Continuum windows A and B overlap the line range; Moments would fit their baseline over line flux.";
+  }
+  return `Continuum window ${WINDOW_LETTERS[sides[0]]} overlaps the line range; Moments would fit its baseline over line flux.`;
+}
+
+export function spectralSectionsVisible(ramp: RampInfo | null): boolean {
+  return ramp === null;
 }

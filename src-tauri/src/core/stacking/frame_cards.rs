@@ -90,7 +90,7 @@ fn integer_card(header: &HduHeader, key: &str) -> Option<i64> {
 }
 
 pub fn frame_cards_from_header(path: &str, header: &HduHeader) -> FrameCards {
-    let imagetyp = card_text(header, "IMAGETYP").map(|v| v.to_ascii_lowercase());
+    let imagetyp = card_text(header, "IMAGETYP");
     FrameCards {
         path: path.to_string(),
         exposure_s: exposure_seconds(header),
@@ -192,7 +192,7 @@ mod tests {
         }
         let wfpc2 = read_frame_cards(REAL_DATA_EXPOSURES[2].0);
         if wfpc2.exposure_s.is_some() {
-            assert_eq!(wfpc2.imagetyp.as_deref(), Some("ext"));
+            assert_eq!(wfpc2.imagetyp.as_deref(), Some("EXT"));
             assert_eq!(wfpc2.frame_kind, FrameKind::Unknown);
             assert_eq!(wfpc2.filter.as_deref(), Some("F502N"));
             assert_eq!(wfpc2.temp_c, None);
@@ -222,7 +222,7 @@ mod tests {
         ]);
         let cards = frame_cards_from_header("flatdark.fits", &h);
         assert_eq!(cards.frame_kind, FrameKind::FlatDark);
-        assert_eq!(cards.imagetyp.as_deref(), Some("flat dark"));
+        assert_eq!(cards.imagetyp.as_deref(), Some("Flat Dark"));
         assert_eq!(cards.filter.as_deref(), Some("F502N"));
         assert_eq!((cards.gain, cards.offset), (Some(100.0), Some(30.0)));
         assert_eq!((cards.xbinning, cards.ybinning), (Some(2), Some(2)));

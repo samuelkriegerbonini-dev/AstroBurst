@@ -1,4 +1,8 @@
 import { sameGrid } from "./previewShell";
+import { samePath } from "./processingChain";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "./decimalText";
+import { APERTURE_RANGE_HINT, apertureRadiusInRange } from "./photometryTable";
+import type { StfParams } from "../shared/types";
 
 export interface CompositeViewInput {
   compositePreviewUrl: string | null;
@@ -45,13 +49,14 @@ export function detectedStarsOnMeasuredImage(input: DetectedStarsInput): boolean
 
 export interface StarDetectionScopeInput {
   path: string | null;
+  measureKey: string | null;
   composite: boolean;
   rgbPath: string | null;
   compositeVersion: number;
 }
 
 export function starDetectionScope(input: StarDetectionScopeInput): string {
-  if (!input.composite) return `image:${input.path ?? ""}`;
+  if (!input.composite) return `image:${input.measureKey ?? input.path ?? ""}`;
   if (input.rgbPath !== null) return `rgb-file:${input.rgbPath}`;
   return `wizard-composite:${input.compositeVersion}:${input.path ?? ""}`;
 }
@@ -143,18 +148,73 @@ export function describeMeasurementSource(input: MeasurementSourceInput): Measur
 export const STF_LOCK_STRETCH = "STF applies only to the mtf stretch";
 export const STF_LOCK_PNG = "PNG-only result; use Revert to original in the preview header to get the display controls back";
 export const STF_LOCK_RGB = "RGB view on screen: this mono histogram does not drive it; use the RGB channel STF";
+export const STF_LOCK_RGB_CPU =
+  "RGB view on screen: the CPU viewer shows a fixed stretch; turn on the GPU to adjust the R, G and B STF";
 
 export interface StfLockInput {
   stretch: string;
   compositeOnScreen: boolean;
   previewOnly: boolean;
+  rgbStfPanelShown: boolean;
+  gpuDisplay: boolean;
 }
 
 export function histogramStfLock(input: StfLockInput): string | null {
-  if (input.compositeOnScreen) return STF_LOCK_RGB;
+  if (input.compositeOnScreen) return input.rgbStfPanelShown || input.gpuDisplay ? STF_LOCK_RGB : STF_LOCK_RGB_CPU;
   if (input.previewOnly) return STF_LOCK_PNG;
   if (input.stretch !== "mtf") return STF_LOCK_STRETCH;
   return null;
+}
+
+const STF_MIDTONE_MIN = 0.0001;
+const STF_MIDTONE_MAX = 0.9999;
+export const STF_SHADOW_FIELD: DecimalFieldOptions = { optional: true, min: 0, max: 1 };
+export const STF_MIDTONE_FIELD: DecimalFieldOptions = { optional: true, min: STF_MIDTONE_MIN, max: STF_MIDTONE_MAX };
+export const STF_HIGHLIGHT_FIELD: DecimalFieldOptions = { optional: true, min: 0, max: 1 };
+
+export interface StfDraft {
+  shadow: string;
+  midtone: string;
+  highlight: string;
+}
+
+export interface StfDraftFields {
+  fields: Record<keyof StfDraft, DecimalFieldState>;
+  error: string | null;
+}
+
+export function stfDraft(stf: StfParams): StfDraft {
+  const midtone = Math.min(STF_MIDTONE_MAX, Math.max(STF_MIDTONE_MIN, Number(stf.midtone.toPrecision(4))));
+  return { shadow: stf.shadow.toFixed(4), midtone: String(midtone), highlight: stf.highlight.toFixed(4) };
+}
+
+export function stfDraftFields(draft: StfDraft): StfDraftFields {
+  const fields = {
+    shadow: decimalFieldState(draft.shadow, STF_SHADOW_FIELD),
+    midtone: decimalFieldState(draft.midtone, STF_MIDTONE_FIELD),
+    highlight: decimalFieldState(draft.highlight, STF_HIGHLIGHT_FIELD),
+  };
+  const error = firstFieldError([
+    ["S", fields.shadow],
+    ["M", fields.midtone],
+    ["H", fields.highlight],
+  ]);
+  return { fields, error };
+}
+
+export function apertureRangeHint(field: DecimalFieldState): string | null {
+  return field.value !== null && !apertureRadiusInRange(field.value) ? APERTURE_RANGE_HINT : null;
+}
+
+export interface HistogramChannelInput {
+  isRgbFile: boolean;
+  histDataPath: string | null;
+  filePath: string | null;
+}
+
+export function histogramChannelLabel({ isRgbFile, histDataPath, filePath }: HistogramChannelInput): "R" | null {
+  if (!isRgbFile || !histDataPath || !filePath) return null;
+  return samePath(histDataPath, filePath) ? "R" : null;
 }
 
 export interface CpuStfInput {

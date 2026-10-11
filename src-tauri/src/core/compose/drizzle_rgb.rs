@@ -238,13 +238,22 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 use rayon::prelude::*;
 
-use crate::core::stacking::calibration::drizzle_from_paths;
+use crate::core::stacking::calibration::drizzle_frames_staged;
 use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
+use crate::core::stacking::memory::{drizzle_channels_memory_check, effective_memory, MemoryInfo};
+use crate::core::stacking::{
+    never_cancelled, no_stage, stop_if_cancelled, CancelCheck, StageCallback, STAGE_LOW_MEMORY,
+};
 use crate::infra::fits::writer as fits_writer;
 use crate::types::stacking::{DrizzleConfig, DrizzleResult};
 
-fn drizzle_channel(paths: &[String], config: &DrizzleConfig) -> Result<DrizzleResult> {
-    drizzle_from_paths(paths, config, None)
+fn drizzle_channel(
+    paths: &[String],
+    config: &DrizzleConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+) -> Result<DrizzleResult> {
+    drizzle_frames_staged(paths, config, cancelled, on_stage)
 }
 
 pub fn drizzle_rgb(
@@ -254,6 +263,31 @@ pub fn drizzle_rgb(
     output_png: &str,
     output_fits: Option<&str>,
     config: &crate::types::compose::DrizzleRgbConfig,
+) -> Result<crate::types::compose::DrizzleRgbResult> {
+    drizzle_rgb_with(
+        r_paths,
+        g_paths,
+        b_paths,
+        output_png,
+        output_fits,
+        config,
+        &never_cancelled,
+        &no_stage,
+        effective_memory(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn drizzle_rgb_with(
+    r_paths: Option<&[String]>,
+    g_paths: Option<&[String]>,
+    b_paths: Option<&[String]>,
+    output_png: &str,
+    output_fits: Option<&str>,
+    config: &crate::types::compose::DrizzleRgbConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+    info: Option<MemoryInfo>,
 ) -> Result<crate::types::compose::DrizzleRgbResult> {
     let channel_count = [r_paths.is_some(), g_paths.is_some(), b_paths.is_some()]
         .iter()
@@ -282,11 +316,17 @@ pub fn drizzle_rgb(
         .collect();
     refuse_cfa_frames(&lights, CfaStep::Drizzle)?;
 
+    let present: Vec<&[String]> = [r_paths, g_paths, b_paths].into_iter().flatten().collect();
+    let memory_warning = drizzle_channels_memory_check(&present, &config.drizzle, info)?;
+    if memory_warning.is_some() {
+        on_stage(STAGE_LOW_MEMORY);
+    }
+
     let (r_result, (g_result, b_result)) = rayon::join(
         || {
             r_paths
                 .filter(|p| p.len() >= 2)
-                .map(|p| drizzle_channel(p, &config.drizzle))
+                .map(|p| drizzle_channel(p, &config.drizzle, cancelled, on_stage))
                 .transpose()
         },
         || {
@@ -294,13 +334,13 @@ pub fn drizzle_rgb(
                 || {
                     g_paths
                         .filter(|p| p.len() >= 2)
-                        .map(|p| drizzle_channel(p, &config.drizzle))
+                        .map(|p| drizzle_channel(p, &config.drizzle, cancelled, on_stage))
                         .transpose()
                 },
                 || {
                     b_paths
                         .filter(|p| p.len() >= 2)
-                        .map(|p| drizzle_channel(p, &config.drizzle))
+                        .map(|p| drizzle_channel(p, &config.drizzle, cancelled, on_stage))
                         .transpose()
                 },
             )
@@ -309,6 +349,7 @@ pub fn drizzle_rgb(
     let r_result = r_result?;
     let g_result = g_result?;
     let b_result = b_result?;
+    stop_if_cancelled(cancelled)?;
 
     if r_result.is_none() && g_result.is_none() && b_result.is_none() {
         bail!("All channels failed or have fewer than 2 frames");
@@ -340,6 +381,7 @@ pub fn drizzle_rgb(
     let (out_rows, out_cols) = processed.output_dims;
     let mut warnings = channel_warnings([r_result.as_ref(), g_result.as_ref(), b_result.as_ref()]);
     warnings.extend(processed.warnings.iter().cloned());
+    warnings.extend(memory_warning);
 
     let mut pixels = vec![0u8; out_rows * out_cols * 3];
     pixels
@@ -529,6 +571,77 @@ mod tests {
                 "channel B: frame d.fits dropped: unreadable".to_string(),
             ]
         );
+    }
+
+    fn write_channel(dir: &tempfile::TempDir, prefix: &str, level: f32) -> Vec<String> {
+        (0..2)
+            .map(|i| {
+                let path = dir.path().join(format!("{prefix}{i}.fits")).to_str().unwrap().to_string();
+                let frame = blobs(16).mapv(|v| v + level + i as f32);
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn rgb_config() -> DrizzleRgbConfig {
+        DrizzleRgbConfig {
+            drizzle: DrizzleConfig { align: false, scale: 2.0, ..DrizzleConfig::default() },
+            ..config_without_stretch()
+        }
+    }
+
+    #[test]
+    fn drizzle_rgb_checks_the_sum_of_its_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, g, b) = (write_channel(&dir, "r", 10.0), write_channel(&dir, "g", 20.0), write_channel(&dir, "b", 30.0));
+        let png = dir.path().join("rgb.png").to_str().unwrap().to_string();
+        let per_channel = crate::core::stacking::memory::drizzle_bytes(&[256, 256], false, 2.0);
+        let sum = 3 * per_channel;
+        let run = |info: MemoryInfo| {
+            drizzle_rgb_with(Some(&r), Some(&g), Some(&b), &png, None, &rgb_config(), &never_cancelled, &no_stage, Some(info))
+        };
+
+        let below = MemoryInfo { physical_available: sum - 1, commit_available: sum - 1 };
+        assert!(per_channel < below.commit_available, "each channel alone must fit");
+        let refusal = run(below).unwrap_err().to_string();
+        assert!(refusal.starts_with("Drizzling these 6 frames of 16x16 needs about"), "{refusal}");
+        assert!(!std::path::Path::new(&png).exists(), "the PNG was written before the refusal");
+
+        let tight = MemoryInfo { physical_available: sum - 1, commit_available: sum + 1 };
+        let result = run(tight).unwrap();
+        let paging: Vec<&String> = result.warnings.iter().filter(|w| w.contains("may page to disk")).collect();
+        assert_eq!(paging.len(), 1, "{:?}", result.warnings);
+        assert_eq!((result.frame_count_r, result.frame_count_g, result.frame_count_b), (2, 2, 2));
+    }
+
+    #[test]
+    fn drizzle_rgb_stops_with_a_cancel_error_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, g) = (write_channel(&dir, "r", 10.0), write_channel(&dir, "g", 20.0));
+        let png = dir.path().join("rgb.png").to_str().unwrap().to_string();
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let cancelled = || stop.load(std::sync::atomic::Ordering::Relaxed);
+        let err = drizzle_rgb_with(Some(&r), Some(&g), None, &png, None, &rgb_config(), &cancelled, &no_stage, None).unwrap_err();
+        assert!(crate::core::stacking::is_cancellation(&err), "{err:#}");
+        assert!(!std::path::Path::new(&png).exists());
+
+        stop.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(drizzle_rgb_with(Some(&r), Some(&g), None, &png, None, &rgb_config(), &cancelled, &no_stage, None).is_ok());
+    }
+
+    #[test]
+    fn low_memory_is_reported_as_a_stage_before_any_frame_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, g) = (write_channel(&dir, "r", 10.0), write_channel(&dir, "g", 20.0));
+        let png = dir.path().join("rgb.png").to_str().unwrap().to_string();
+        let stages = std::sync::Mutex::new(Vec::<String>::new());
+        let record = |stage: &str| stages.lock().unwrap().push(stage.to_string());
+        let tight = MemoryInfo { physical_available: 1024, commit_available: u64::MAX };
+        drizzle_rgb_with(Some(&r), Some(&g), None, &png, None, &rgb_config(), &never_cancelled, &record, Some(tight)).unwrap();
+        let stages = stages.into_inner().unwrap();
+        assert_eq!(stages.first().map(String::as_str), Some(crate::core::stacking::STAGE_LOW_MEMORY), "{stages:?}");
+        assert_eq!(stages.iter().filter(|s| s.as_str() == crate::core::stacking::STAGE_LOW_MEMORY).count(), 1);
     }
 
     #[test]

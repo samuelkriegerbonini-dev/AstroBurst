@@ -230,7 +230,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
               </button>
             </div>
             {path && (
-              <div className="text-[8px] text-zinc-700 font-mono truncate">
+              <div className="text-[8px] text-[var(--ab-text-4)] font-mono truncate">
                 {path.startsWith("__wizard_ch_") ? `${bin.shortLabel} (cache)` : path.split(/[/\\]/).pop()}
               </div>
             )}

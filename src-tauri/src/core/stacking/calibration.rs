@@ -4,22 +4,24 @@ use rayon::prelude::*;
 
 use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::core::stacking::combine::{
-    reject_and_combine_with, stack_images_cancellable, validate_frame_weights, validate_minmax_counts,
+    reject_and_combine_with, stack_images_staged, validate_frame_weights, validate_minmax_counts,
     KernelScratch, Sample,
 };
 use crate::core::imaging::calibration_pipeline::CalibrationMasters;
 use crate::core::stacking::consistency::{file_label, format_sig4};
-use crate::core::stacking::drizzle::drizzle_stack_cancellable;
+use crate::core::stacking::drizzle::drizzle_stack_staged;
 use crate::core::stacking::frame_cards::{exposure_seconds, read_frame_cards, read_merged_header, FrameCards};
 use crate::core::stacking::masters::{
     assign_dark_groups, build_masters_from_frames, check_channel_lights, read_master_frames, MasterRequest,
 };
-use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
+use crate::core::stacking::memory::{drizzle_memory_check, effective_memory, stack_memory_check, MemoryInfo};
+use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck, StageCallback, STAGE_LOW_MEMORY};
 use crate::infra::progress::ProgressHandle;
 use crate::math::median::{f32_cmp, median_f32_mut};
 use crate::types::constants::STAGE_LOAD_FRAME;
-use crate::types::error::AppError;
-use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
+use crate::types::stacking::{
+    CombineMethod, DrizzleConfig, DrizzleResult, RejectionMethod, RejectionParams, StackConfig, StackResult,
+};
 pub(crate) use crate::infra::fits::reader::load_fits_image;
 
 const FLAT_MEDIAN_MAX_SAMPLES: usize = 131_072;
@@ -500,30 +502,63 @@ pub fn calibrate_from_paths(
     Ok(CalibratedFrame { image: calibrate_image(&science, &config)?, dark_scale, warnings })
 }
 
-fn load_frames_with_progress(
-    paths: &[String],
-    progress: Option<&ProgressHandle>,
-) -> Result<Vec<Array2<f32>>> {
+fn load_frames_staged(paths: &[String], cancelled: CancelCheck, on_stage: StageCallback) -> Result<Vec<Array2<f32>>> {
     let mut images: Vec<Array2<f32>> = Vec::with_capacity(paths.len());
     for path in paths {
-        if let Some(p) = progress {
-            if p.is_cancelled() {
-                return Err(AppError::Cancelled.into());
-            }
-        }
+        stop_if_cancelled(cancelled)?;
         images.push(load_fits_image(path)?);
-        if let Some(p) = progress {
-            p.tick_with_stage(STAGE_LOAD_FRAME);
-        }
+        on_stage(STAGE_LOAD_FRAME);
     }
     Ok(images)
 }
 
-pub fn stack_from_paths(
+pub fn stack_frames_staged(
     paths: &[String],
-    config: &crate::types::stacking::StackConfig,
+    config: &StackConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+) -> Result<StackResult> {
+    let images = load_frames_staged(paths, cancelled, on_stage)?;
+    stack_images_staged(&images, config, cancelled, on_stage)
+}
+
+pub fn drizzle_frames_staged(
+    paths: &[String],
+    config: &DrizzleConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+) -> Result<DrizzleResult> {
+    let images = load_frames_staged(paths, cancelled, on_stage)?;
+    drizzle_stack_staged(&images, config, cancelled, on_stage)
+}
+
+fn staged_run<T>(
     progress: Option<&ProgressHandle>,
-) -> Result<crate::types::stacking::StackResult> {
+    low_memory: bool,
+    run: impl FnOnce(CancelCheck, StageCallback) -> Result<T>,
+) -> Result<T> {
+    if let Some(p) = progress.filter(|_| low_memory) {
+        p.emit_stage(STAGE_LOW_MEMORY);
+    }
+    let cancelled = || progress.is_some_and(|p| p.is_cancelled());
+    let on_stage = |stage: &str| {
+        if let Some(p) = progress {
+            p.tick_with_stage(stage);
+        }
+    };
+    run(&cancelled, &on_stage)
+}
+
+pub fn stack_from_paths(paths: &[String], config: &StackConfig, progress: Option<&ProgressHandle>) -> Result<StackResult> {
+    stack_from_paths_with_memory(paths, config, progress, effective_memory())
+}
+
+pub fn stack_from_paths_with_memory(
+    paths: &[String],
+    config: &StackConfig,
+    progress: Option<&ProgressHandle>,
+    info: Option<MemoryInfo>,
+) -> Result<StackResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
@@ -532,28 +567,40 @@ pub fn stack_from_paths(
     if config.align {
         refuse_cfa_frames(paths, CfaStep::Align)?;
     }
-
-    let images = load_frames_with_progress(paths, progress)?;
-
-    let cancelled = || progress.is_some_and(|p| p.is_cancelled());
-    stack_images_cancellable(&images, config, &cancelled)
+    let warning = stack_memory_check(paths, config, info)?;
+    let mut result = staged_run(progress, warning.is_some(), |cancelled, on_stage| {
+        stack_frames_staged(paths, config, cancelled, on_stage)
+    })?;
+    result.warnings.extend(warning);
+    Ok(result)
 }
 
 pub fn drizzle_from_paths(
     paths: &[String],
-    config: &crate::types::stacking::DrizzleConfig,
+    config: &DrizzleConfig,
     progress: Option<&ProgressHandle>,
-) -> Result<crate::types::stacking::DrizzleResult> {
+) -> Result<DrizzleResult> {
+    drizzle_from_paths_with_memory(paths, config, progress, effective_memory())
+}
+
+pub fn drizzle_from_paths_with_memory(
+    paths: &[String],
+    config: &DrizzleConfig,
+    progress: Option<&ProgressHandle>,
+    info: Option<MemoryInfo>,
+) -> Result<DrizzleResult> {
     if paths.is_empty() {
         bail!("No image paths provided");
     }
     refuse_cfa_frames(paths, CfaStep::Drizzle)?;
-
-    let images = load_frames_with_progress(paths, progress)?;
-
-    let cancelled = || progress.is_some_and(|p| p.is_cancelled());
-    drizzle_stack_cancellable(&images, config, &cancelled)
+    let warning = drizzle_memory_check(paths, config, info)?;
+    let mut result = staged_run(progress, warning.is_some(), |cancelled, on_stage| {
+        drizzle_frames_staged(paths, config, cancelled, on_stage)
+    })?;
+    result.warnings.extend(warning);
+    Ok(result)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +846,59 @@ mod tests {
         let err = combine_master_frames(&frames, &MasterConfig::default(), &late).unwrap_err();
         assert!(crate::core::stacking::is_cancellation(&err), "a cancel raised during the combine was ignored");
         assert!(create_master_bias(&paths).is_ok());
+    }
+
+    fn write_frame_with_truncated_data(dir: &tempfile::TempDir, name: &str) -> String {
+        let path = dir.path().join(name).to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&path, &Array2::from_elem((48, 40), 100.0f32), None).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - 2880).unwrap();
+        path
+    }
+
+    fn write_plain_frame(dir: &tempfile::TempDir, name: &str, level: f32) -> String {
+        let path = dir.path().join(name).to_str().unwrap().to_string();
+        let frame = Array2::from_shape_fn((48, 40), |(y, x)| level + ((y * 3 + x * 5) % 7) as f32);
+        crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
+        path
+    }
+
+    fn memory(physical: u64, commit: u64) -> Option<MemoryInfo> {
+        Some(MemoryInfo { physical_available: physical, commit_available: commit })
+    }
+
+    #[test]
+    fn stack_from_paths_refuses_before_loading_any_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec![write_plain_frame(&dir, "a.fits", 100.0), write_frame_with_truncated_data(&dir, "b.fits")];
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let load_error = stack_from_paths_with_memory(&paths, &config, None, None).unwrap_err();
+        assert!(format!("{load_error:#}").contains("Failed to load"), "{load_error:#}");
+
+        let refusal = stack_from_paths_with_memory(&paths, &config, None, memory(1024, 1024)).unwrap_err().to_string();
+        assert!(refusal.starts_with("Stacking these 2 frames of 40x48 needs about"), "{refusal}");
+        assert!(refusal.contains("but only 0.0 MB is available"), "{refusal}");
+
+        let drizzle = DrizzleConfig { align: false, ..DrizzleConfig::default() };
+        let refusal = drizzle_from_paths_with_memory(&paths, &drizzle, None, memory(1024, 1024)).unwrap_err().to_string();
+        assert!(refusal.starts_with("Drizzling these 2 frames of 40x48 needs about"), "{refusal}");
+    }
+
+    #[test]
+    fn stack_and_drizzle_append_the_low_memory_warning_to_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec![write_plain_frame(&dir, "a.fits", 100.0), write_plain_frame(&dir, "b.fits", 101.0)];
+        let config = StackConfig { align: false, ..StackConfig::default() };
+        let tight = memory(1024, u64::MAX);
+        let result = stack_from_paths_with_memory(&paths, &config, None, tight).unwrap();
+        let paging: Vec<&String> = result.warnings.iter().filter(|w| w.contains("may page to disk")).collect();
+        assert_eq!(paging.len(), 1, "{:?}", result.warnings);
+        assert!(stack_from_paths_with_memory(&paths, &config, None, None).unwrap().warnings.is_empty());
+
+        let drizzle = DrizzleConfig { align: false, ..DrizzleConfig::default() };
+        let result = drizzle_from_paths_with_memory(&paths, &drizzle, None, tight).unwrap();
+        assert_eq!(result.warnings.iter().filter(|w| w.contains("may page to disk")).count(), 1, "{:?}", result.warnings);
     }
 
     #[test]

@@ -82,12 +82,29 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(value, max));
 }
 
-export function onboardingPlacement(viewer: OnboardingViewerRect, viewport: OnboardingViewport): OnboardingPlacement {
+interface MeasuredBox {
+  getBoundingClientRect(): { top: number; bottom: number };
+}
+
+export interface OnboardingToolbarHost extends MeasuredBox {
+  querySelector(selector: string): MeasuredBox | null;
+  querySelectorAll(selector: string): Iterable<MeasuredBox>;
+}
+
+export function viewerToolbarBottom(viewer: OnboardingToolbarHost): number {
+  const header = viewer.querySelector("[data-dock-viewport]");
+  let bottom = (header ?? viewer).getBoundingClientRect().top;
+  for (const row of viewer.querySelectorAll(".ab-viewer-toolbar")) bottom = Math.max(bottom, row.getBoundingClientRect().bottom);
+  return bottom;
+}
+
+export function onboardingPlacement(viewer: OnboardingViewerRect, viewport: OnboardingViewport, toolbarBottom: number): OnboardingPlacement {
   const width = Math.round(Math.min(ONBOARDING_MAX_WIDTH_PX, Math.max(0, viewer.width - 2 * ONBOARDING_INSET_PX)));
   const narrow = viewer.width < ONBOARDING_NARROW_VIEWER_PX;
   const preferredLeft = narrow ? viewer.left + ONBOARDING_INSET_PX : viewer.left + viewer.width - ONBOARDING_INSET_PX - width;
   const left = Math.round(clamp(preferredLeft, 0, Math.max(0, viewport.width - width)));
-  const top = Math.round(clamp(viewer.top + ONBOARDING_INSET_PX, 0, Math.max(0, viewport.height - ONBOARDING_MIN_HEIGHT_PX)));
-  const room = Math.min(viewer.height - 2 * ONBOARDING_INSET_PX, viewport.height - top);
+  const below = Math.max(viewer.top, toolbarBottom) + ONBOARDING_INSET_PX;
+  const top = Math.round(clamp(below, 0, Math.max(0, viewport.height - ONBOARDING_MIN_HEIGHT_PX)));
+  const room = Math.min(viewer.top + viewer.height - ONBOARDING_INSET_PX - top, viewport.height - top);
   return { left, top, width, maxHeight: Math.round(Math.max(ONBOARDING_MIN_HEIGHT_PX, room)), arrow: narrow ? "none" : "right" };
 }

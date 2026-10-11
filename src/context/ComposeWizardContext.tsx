@@ -26,7 +26,7 @@ import type { AlignRunEvent, AlignRunRecord, ChannelStage, CompositeOp, Subframe
 import type { AlignResult } from "../shared/types/compose";
 import { useCompositeActions } from "./CompositeContext";
 import { withSpccWb } from "../utils/levelMatch";
-import { nextDiscardNotices, stackStateAfterReset, type StackRunOutcome } from "../utils/stackRun";
+import { discardNoticesAfterReset, nextDiscardNotices, stackStateAfterReset, type StackRunOutcome } from "../utils/stackRun";
 import { cancelProgress } from "../services/progress";
 import { STACK_PROGRESS_EVENT } from "../shared/types/stacking";
 
@@ -193,7 +193,7 @@ interface ComposeWizardContextValue {
   stackGeneration: number;
   getStackGeneration: () => number;
   stackDiscarded: Record<string, string>;
-  recordStackOutcome: (binId: string, outcome: StackRunOutcome) => void;
+  recordStackOutcome: (binId: string, outcome: StackRunOutcome, generation: number) => void;
   alignRun: WizardAlignRun | null;
   startAlignRun: (run: WizardAlignRun) => void;
   finishAlignRun: (started: WizardAlignRun, run: WizardAlignRun) => boolean;
@@ -259,8 +259,9 @@ export function ComposeWizardProvider({ children }: Props) {
 
   const getStackGeneration = useCallback(() => stackGenerationRef.current, []);
 
-  const recordStackOutcome = useCallback((binId: string, outcome: StackRunOutcome) => {
-    setStackDiscarded((prev) => nextDiscardNotices(prev, binId, outcome));
+  const recordStackOutcome = useCallback((binId: string, outcome: StackRunOutcome, generation: number) => {
+    const run = { generation, live: stackGenerationRef.current };
+    setStackDiscarded((prev) => nextDiscardNotices(prev, binId, outcome, run));
   }, []);
 
   const dispatch = useCallback((action: WizardAction) => {
@@ -271,6 +272,7 @@ export function ComposeWizardProvider({ children }: Props) {
       stackGenerationRef.current = next.generation;
       setStackGeneration(next.generation);
       setStackRun(null);
+      setStackDiscarded(discardNoticesAfterReset());
       if (next.cancel) cancelProgress(STACK_PROGRESS_EVENT).catch(() => {});
     }
     reactDispatch(action);

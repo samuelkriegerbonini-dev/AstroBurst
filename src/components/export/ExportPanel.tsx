@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useId } from "react";
 import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon, Scissors, Archive } from "lucide-react";
-import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert } from "../ui";
+import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert, DecimalField } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
 import {
   compressMef,
@@ -38,6 +38,8 @@ import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import type { CutoutExportResult, CutoutSizeUnit } from "../../shared/types/cutout";
 import type { StfParams } from "../../shared/types";
+import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
+import { revealInFolder } from "../../utils/revealInFolder";
 
 interface AlignedExportState {
   channels?: AlignedChannelOut[];
@@ -125,24 +127,12 @@ const ICON = <Save size={14} className="text-amber-400" />;
 type ExportSection = "fits" | "png" | "cutout" | "mef" | "aligned";
 
 const SAVED_ROW_MS = 8000;
+const QUANTIZE_FIELD: DecimalFieldOptions = { optional: true, min: 1 };
+const CUTOUT_CENTRE_FIELD: DecimalFieldOptions = { optional: true };
+const CUTOUT_SIZE_FIELD: DecimalFieldOptions = { optional: true, min: 0 };
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-async function revealInExplorer(path: string) {
-  try {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    await revealItemInDir(path);
-  } catch {
-    try {
-      const { open } = await import("@tauri-apps/plugin-shell");
-      const dir = path.replace(/[/\\][^/\\]+$/, "");
-      await open(dir);
-    } catch {
-      /* noop */
-    }
-  }
 }
 
 export default function ExportPanel({
@@ -235,13 +225,27 @@ export default function ExportPanel({
 
   const riceAvailable = riceSupportsBitpix(bitpix);
   const effectiveCompress: FitsCompression = riceEnabled && riceAvailable ? "rice" : "none";
-  const effectiveQuantizeLevel = useMemo(() => {
-    const parsed = parseFloat(quantizeLevel);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUANTIZE_LEVEL;
-  }, [quantizeLevel]);
+  const quantizeField = decimalFieldState(quantizeLevel, QUANTIZE_FIELD);
+  const effectiveQuantizeLevel = quantizeField.value ?? DEFAULT_QUANTIZE_LEVEL;
+  const quantizeError = effectiveCompress === "rice" ? firstFieldError([["Quantize level", quantizeField]]) : null;
+  const mefQuantizeField = decimalFieldState(mefQuantizeLevel, QUANTIZE_FIELD);
+  const mefQuantizeValue = mefQuantizeField.value ?? DEFAULT_QUANTIZE_LEVEL;
+  const mefQuantizeError = mefLossless ? null : firstFieldError([["Quantize level", mefQuantizeField]]);
+  const cutoutFields = useMemo(() => ({
+    centreX: decimalFieldState(cutoutCentreX, CUTOUT_CENTRE_FIELD),
+    centreY: decimalFieldState(cutoutCentreY, CUTOUT_CENTRE_FIELD),
+    width: decimalFieldState(cutoutWidth, CUTOUT_SIZE_FIELD),
+    height: decimalFieldState(cutoutHeight, CUTOUT_SIZE_FIELD),
+  }), [cutoutCentreX, cutoutCentreY, cutoutWidth, cutoutHeight]);
+  const cutoutFieldError = selectedBox ? null : firstFieldError([
+    ["Centre X", cutoutFields.centreX],
+    ["Centre Y", cutoutFields.centreY],
+    ["Width", cutoutFields.width],
+    ["Height", cutoutFields.height],
+  ]);
 
   const handleExport = useCallback(async () => {
-    if (!exportPath || !onExport) return;
+    if (!exportPath || !onExport || quantizeError) return;
 
     setError(null);
     const dir = await getExportDir();
@@ -266,12 +270,12 @@ export default function ExportPanel({
       console.error("Export failed:", e);
       setError({ section: "fits", message: errorMessage(e) });
     }
-  }, [exportPath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExport, showSaved]);
+  }, [exportPath, applyStf, stfParams, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, quantizeError, onExport, showSaved]);
 
   const handleExportRgb = useCallback(async () => {
     if (rgbCubeUnavailableReason(rgbFilePath, rgbChannels ?? null)) return;
     if (!rgbFilePath && (!rgbChannels || (!rgbChannels.r && !rgbChannels.g && !rgbChannels.b)) && !compositeStf) return;
-    if (!onExportRgb) return;
+    if (!onExportRgb || quantizeError) return;
     setError(null);
     const dir = await getExportDir();
     const stamp = exportTimestamp(new Date());
@@ -297,10 +301,10 @@ export default function ExportPanel({
       console.error("RGB FITS export failed:", e);
       setError({ section: "fits", message: errorMessage(e) });
     }
-  }, [rgbFilePath, rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, onExportRgb, compositeStf, showSaved]);
+  }, [rgbFilePath, rgbChannels, copyWcs, copyMetadata, bitpix, effectiveCompress, effectiveQuantizeLevel, quantizeError, onExportRgb, compositeStf, showSaved]);
 
   const handleCompressMef = useCallback(async () => {
-    if (!filePath) return;
+    if (!filePath || mefQuantizeError) return;
     const sourcePath = parseImageRef(filePath).path;
     setError(null);
     setMefRunning(true);
@@ -308,10 +312,9 @@ export default function ExportPanel({
     try {
       const dir = await getExportDir();
       const outputPath = `${dir}/${exportFileName(sourcePath, "_compressed", "fits", exportTimestamp(new Date()))}`;
-      const parsedQuantize = parseFloat(mefQuantizeLevel);
       const result = await compressMef(sourcePath, outputPath, {
         lossless: mefLossless,
-        quantizeLevel: Number.isFinite(parsedQuantize) && parsedQuantize > 0 ? parsedQuantize : DEFAULT_QUANTIZE_LEVEL,
+        quantizeLevel: mefQuantizeValue,
         dropExtnames: parseExtnameList(mefDropExtnames),
         rawExtnames: parseExtnameList(mefRawExtnames),
       });
@@ -323,7 +326,7 @@ export default function ExportPanel({
     } finally {
       setMefRunning(false);
     }
-  }, [filePath, mefLossless, mefQuantizeLevel, mefDropExtnames, mefRawExtnames, showSaved]);
+  }, [filePath, mefLossless, mefQuantizeValue, mefQuantizeError, mefDropExtnames, mefRawExtnames, showSaved]);
 
   const handleExportAligned = useCallback(async () => {
     if (!headerChannels) return;
@@ -413,12 +416,12 @@ export default function ExportPanel({
   }, [rgbFilePath, rgbChannels, pngBitDepth, pngApplyStf, compositeStf, showSaved]);
 
   const handleExportCutout = useCallback(async () => {
-    if (!filePath) return;
+    if (!filePath || cutoutFieldError) return;
     const region = selectedBox ?? manualCutoutBox({
-      centreX: parseFloat(cutoutCentreX),
-      centreY: parseFloat(cutoutCentreY),
-      width: parseFloat(cutoutWidth),
-      height: parseFloat(cutoutHeight),
+      centreX: cutoutFields.centreX.value ?? Number.NaN,
+      centreY: cutoutFields.centreY.value ?? Number.NaN,
+      width: cutoutFields.width.value ?? Number.NaN,
+      height: cutoutFields.height.value ?? Number.NaN,
       unit: cutoutUnit,
       pixelScaleArcsec: cutoutPixelScale,
     });
@@ -460,10 +463,8 @@ export default function ExportPanel({
   }, [
     filePath,
     selectedBox,
-    cutoutCentreX,
-    cutoutCentreY,
-    cutoutWidth,
-    cutoutHeight,
+    cutoutFields,
+    cutoutFieldError,
     cutoutUnit,
     cutoutPixelScale,
     cutoutIncludeErr,
@@ -476,7 +477,11 @@ export default function ExportPanel({
       <ErrorAlert message={error?.section === section ? error.message : null} />
       {saved?.section === section && (
         <button
-          onClick={() => revealInExplorer(saved.path)}
+          onClick={() => {
+            void revealInFolder(saved.path).then((message) => {
+              if (message) setError({ section, message });
+            });
+          }}
           className="w-full flex items-center gap-2 px-3 py-2 rounded bg-emerald-900/25 border border-emerald-600/20 text-left transition-colors hover:bg-emerald-900/40 group"
         >
           <FolderOpen size={12} className="text-emerald-400 shrink-0" />
@@ -538,17 +543,16 @@ export default function ExportPanel({
         {riceEnabled && riceAvailable && (
           <div className="flex items-center justify-between">
             <label htmlFor={`${fieldId}-quantize`} className="text-xs text-zinc-400">Quantize level</label>
-            <input
+            <DecimalField
               id={`${fieldId}-quantize`}
-              type="number"
-              min={1}
-              step={1}
+              {...QUANTIZE_FIELD}
               value={quantizeLevel}
-              onChange={(e) => setQuantizeLevel(e.target.value)}
+              onChange={setQuantizeLevel}
               className={`${cutoutInputClass} w-24`}
             />
           </div>
         )}
+        {quantizeError && <div className="text-[9px] text-amber-400/90 px-1" data-field-error>{quantizeError}</div>}
         {riceEnabled && riceAvailable && bitpix === 16 && (
           <p className="text-[10px] text-zinc-600 px-1">
             At BITPIX 16 the data is scaled losslessly; the quantize level applies to float output.
@@ -560,7 +564,7 @@ export default function ExportPanel({
         label={exportLabel}
         runningLabel="Exporting..."
         running={isLoading}
-        disabled={!exportPath || exportDone}
+        disabled={!exportPath || exportDone || quantizeError !== null}
         accent="amber"
         onClick={handleExport}
       />
@@ -568,7 +572,7 @@ export default function ExportPanel({
       {hasRgb && (
         <button
           onClick={handleExportRgb}
-          disabled={isLoading || !!rgbCubeBlocked}
+          disabled={isLoading || !!rgbCubeBlocked || quantizeError !== null}
           title={rgbCubeBlocked ?? channelLabel ?? (rgbFilePath ? "Source: this RGB file's own planes and header" : undefined)}
           className="w-full flex items-center justify-center gap-2 bg-pink-600/15 hover:bg-pink-600/25 text-pink-300 border border-pink-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
         >
@@ -656,21 +660,21 @@ export default function ExportPanel({
             <div className="flex gap-2">
               <div className="flex-1 flex flex-col gap-0.5">
                 <label htmlFor={`${fieldId}-centre-x`} className="text-[9px] text-zinc-500 uppercase">Centre X (px)</label>
-                <input id={`${fieldId}-centre-x`} type="number" step={0.5} value={cutoutCentreX} onChange={(e) => setCutoutCentreX(e.target.value)} className={cutoutInputClass} />
+                <DecimalField id={`${fieldId}-centre-x`} {...CUTOUT_CENTRE_FIELD} value={cutoutCentreX} onChange={setCutoutCentreX} className={cutoutInputClass} />
               </div>
               <div className="flex-1 flex flex-col gap-0.5">
                 <label htmlFor={`${fieldId}-centre-y`} className="text-[9px] text-zinc-500 uppercase">Centre Y (px)</label>
-                <input id={`${fieldId}-centre-y`} type="number" step={0.5} value={cutoutCentreY} onChange={(e) => setCutoutCentreY(e.target.value)} className={cutoutInputClass} />
+                <DecimalField id={`${fieldId}-centre-y`} {...CUTOUT_CENTRE_FIELD} value={cutoutCentreY} onChange={setCutoutCentreY} className={cutoutInputClass} />
               </div>
             </div>
             <div className="flex gap-2">
               <div className="flex-1 flex flex-col gap-0.5">
                 <label htmlFor={`${fieldId}-cutout-width`} className="text-[9px] text-zinc-500 uppercase">Width ({cutoutUnit})</label>
-                <input id={`${fieldId}-cutout-width`} type="number" min={0} step={1} value={cutoutWidth} onChange={(e) => setCutoutWidth(e.target.value)} className={cutoutInputClass} />
+                <DecimalField id={`${fieldId}-cutout-width`} {...CUTOUT_SIZE_FIELD} value={cutoutWidth} onChange={setCutoutWidth} className={cutoutInputClass} />
               </div>
               <div className="flex-1 flex flex-col gap-0.5">
                 <label htmlFor={`${fieldId}-cutout-height`} className="text-[9px] text-zinc-500 uppercase">Height ({cutoutUnit})</label>
-                <input id={`${fieldId}-cutout-height`} type="number" min={0} step={1} value={cutoutHeight} onChange={(e) => setCutoutHeight(e.target.value)} className={cutoutInputClass} />
+                <DecimalField id={`${fieldId}-cutout-height`} {...CUTOUT_SIZE_FIELD} value={cutoutHeight} onChange={setCutoutHeight} className={cutoutInputClass} />
               </div>
               <div className="flex flex-col gap-0.5">
                 <label htmlFor={`${fieldId}-cutout-unit`} className="text-[9px] text-zinc-500 uppercase">Unit</label>
@@ -683,6 +687,7 @@ export default function ExportPanel({
             {cutoutPixelScale != null && (
               <p className="text-[10px] text-zinc-600 px-1">{cutoutPixelScale.toFixed(4)} arcsec/px from the image WCS</p>
             )}
+            {cutoutFieldError && <div className="text-[9px] text-amber-400/90 px-1" data-field-error>{cutoutFieldError}</div>}
           </>
         )}
         <Toggle label="Include ERR extension" checked={cutoutIncludeErr} accent="violet" onChange={setCutoutIncludeErr} />
@@ -691,7 +696,7 @@ export default function ExportPanel({
           label="Export cutout (SCI/ERR/DQ)"
           runningLabel="Exporting..."
           running={cutoutExporting}
-          disabled={!filePath}
+          disabled={!filePath || cutoutFieldError !== null}
           accent="violet"
           icon={<Scissors size={12} />}
           onClick={handleExportCutout}
@@ -733,17 +738,16 @@ export default function ExportPanel({
         {!mefLossless && (
           <div className="flex items-center justify-between">
             <label htmlFor={`${fieldId}-mef-quantize`} className="text-xs text-zinc-400">Quantize level</label>
-            <input
+            <DecimalField
               id={`${fieldId}-mef-quantize`}
-              type="number"
-              min={1}
-              step={1}
+              {...QUANTIZE_FIELD}
               value={mefQuantizeLevel}
-              onChange={(e) => setMefQuantizeLevel(e.target.value)}
+              onChange={setMefQuantizeLevel}
               className={`${cutoutInputClass} w-24`}
             />
           </div>
         )}
+        {mefQuantizeError && <div className="text-[9px] text-amber-400/90 px-1" data-field-error>{mefQuantizeError}</div>}
         <div className="flex flex-col gap-0.5">
           <label htmlFor={`${fieldId}-mef-drop`} className="text-[9px] text-zinc-500 uppercase">Drop extensions (comma separated)</label>
           <input
@@ -770,7 +774,7 @@ export default function ExportPanel({
           label="Compress FITS"
           runningLabel="Compressing..."
           running={mefRunning}
-          disabled={!filePath}
+          disabled={!filePath || mefQuantizeError !== null}
           accent="emerald"
           icon={<Archive size={12} />}
           onClick={handleCompressMef}

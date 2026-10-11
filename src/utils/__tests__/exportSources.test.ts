@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   assetUrlToPath,
   channelSourceLabel,
+  cubeFrameExportName,
   exportSourceLabel,
+  exportTimestamp,
   manifestLine,
   resolveRgbExportSource,
   rgbCubeUnavailableReason,
@@ -216,5 +218,23 @@ describe("manifestLine", () => {
   it("writes entry, source and file path separated by tabs", () => {
     expect(manifestLine("a.png", "original preview", "C:/data/a.fits")).toBe("a.png\toriginal preview\tC:/data/a.fits");
     expect(manifestLine(null, "skipped", "C:/data/b.fits")).toBe("-\tskipped\tC:/data/b.fits");
+  });
+});
+
+describe("cubeFrameExportName", () => {
+  const STAMP = exportTimestamp(new Date(Date.UTC(2026, 9, 10, 12, 0, 0, 5)));
+
+  it("tags the HDU so the SCI and ERR frames of one cube never share a file", () => {
+    const sci = cubeFrameExportName("D:/c/cube_s3d.fits#hdu=1", 0, "png", STAMP);
+    const err = cubeFrameExportName("D:/c/cube_s3d.fits#hdu=2", 0, "png", STAMP);
+    expect(sci).toBe(`cube_s3d_hdu1_frame_0000_${STAMP}.png`);
+    expect(err).toBe(`cube_s3d_hdu2_frame_0000_${STAMP}.png`);
+  });
+
+  it("gives two export runs of same-named cubes different names", () => {
+    const first = cubeFrameExportName("D:/n1/cube.fits", 12, "fits", exportTimestamp(new Date(1000)));
+    const second = cubeFrameExportName("D:/n2/cube.fits", 12, "fits", exportTimestamp(new Date(1001)));
+    expect(first).toContain("_frame_0012_");
+    expect(first).not.toBe(second);
   });
 });

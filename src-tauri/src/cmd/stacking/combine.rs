@@ -16,6 +16,7 @@ use crate::core::stacking::calibration::drizzle_from_paths;
 use crate::core::stacking::calibration::stack_from_paths;
 use crate::core::stacking::calibration::CalibratedFrame;
 use crate::core::stacking::drizzle::drizzle_wcs_updates;
+use crate::core::stacking::STAGE_CALIBRATE;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, KERNEL_GAUSSIAN, KERNEL_LANCZOS3, STAGE_RENDER, STAGE_SAVE,
@@ -46,6 +47,11 @@ pub const RES_REJECTION_HIGH_FITS: &str = "rejection_high_fits";
 pub const RES_NORMALIZATION_APPLIED: &str = "normalization_applied";
 const RES_ALIGNMENT: &str = "alignment";
 const RES_INCLUDED: &str = "included";
+
+fn run_tick_total(frames: usize, align: bool) -> u64 {
+    let aligns = if align { frames.saturating_sub(1) } else { 0 };
+    (frames + aligns + 1 + 2) as u64
+}
 
 pub(super) fn output_name(name: Option<&str>, default: &str) -> String {
     let mut out = String::new();
@@ -243,6 +249,7 @@ pub async fn calibrate(
             flat: flat_paths.as_deref(),
             flat_dark: flat_dark_paths.as_deref(),
         };
+        progress_clone.tick_with_stage(STAGE_CALIBRATE);
         let calibrated = calibrate_from_paths(
             &science_path,
             inputs.bias,
@@ -298,8 +305,7 @@ pub async fn stack(
     minmax_high: Option<usize>,
     rejection_maps: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let frame_count = paths.len() as u64;
-    let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
+    let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, run_tick_total(paths.len(), align.unwrap_or(true)));
     let progress_clone = progress.clone();
 
     blocking_cmd!({
@@ -393,8 +399,7 @@ pub async fn drizzle_stack(
     sigma_low: Option<f32>,
     sigma_high: Option<f32>,
 ) -> Result<serde_json::Value, String> {
-    let frame_count = paths.len() as u64;
-    let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, frame_count + 2);
+    let progress = ProgressHandle::new(&app, EVENT_STACK_PROGRESS, run_tick_total(paths.len(), align.unwrap_or(true)));
     let progress_clone = progress.clone();
 
     blocking_cmd!({
@@ -871,6 +876,44 @@ mod tests {
         assert_eq!(header.get_f64(HEADER_TOTEXP), Some(3300.0));
         assert_eq!(header.get_f64("EXPTIME"), Some(1100.0));
         assert_eq!(text(&header, HEADER_COMBINE_METHOD), Some("mean"));
+    }
+
+    fn write_blob_frames(dir: &tempfile::TempDir, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let path = dir.path().join(format!("blob{i}.fits")).to_str().unwrap().to_string();
+                let frame = Array2::from_shape_fn((96, 96), |(y, x)| {
+                    let d2 = (y as f32 - 40.0).powi(2) + (x as f32 - 52.0).powi(2);
+                    100.0 + i as f32 + 1000.0 * (-d2 / 18.0).exp()
+                });
+                crate::infra::fits::writer::write_fits_mono(&path, &frame, None).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tick_totals_cover_every_tick() {
+        use crate::core::stacking::calibration::{drizzle_frames_staged, stack_frames_staged};
+        use crate::core::stacking::never_cancelled;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_blob_frames(&dir, 4);
+        for align in [true, false] {
+            let ticks = AtomicU64::new(0);
+            let count = |_: &str| {
+                ticks.fetch_add(1, Ordering::Relaxed);
+            };
+            let config = StackConfig { align, ..StackConfig::default() };
+            let stacked = stack_frames_staged(&paths, &config, &never_cancelled, &count).unwrap();
+            assert_eq!(stacked.frame_count, 4, "align {align}");
+            assert_eq!(run_tick_total(4, align), ticks.swap(0, Ordering::Relaxed) + 2, "stack, align {align}");
+
+            let config = DrizzleConfig { align, scale: 1.0, ..DrizzleConfig::default() };
+            let drizzled = drizzle_frames_staged(&paths, &config, &never_cancelled, &count).unwrap();
+            assert_eq!(drizzled.frame_count, 4, "align {align}");
+            assert_eq!(run_tick_total(4, align), ticks.load(Ordering::Relaxed) + 2, "drizzle, align {align}");
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::types::constants::{
 use crate::types::header::HduHeader;
 
 const MAX_REGIONS_PER_CALL: usize = 512;
+const MAX_EXCLUDE_REGIONS: usize = 20_000;
 const MAX_REG_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SIGMA_CLIP_ITERS: usize = 100;
 const PIXEL_SCALE_ANISOTROPY_TOLERANCE: f64 = 0.01;
@@ -269,8 +270,8 @@ fn photcal_json(cal: &PhotCal) -> anyhow::Result<Value> {
 
 fn exclude_shapes(exclude: Option<Vec<RegionShape>>) -> anyhow::Result<Vec<RegionShape>> {
     let shapes = exclude.unwrap_or_default();
-    if shapes.len() > MAX_REGIONS_PER_CALL {
-        bail!("too many exclude regions in one call ({}); the limit is {}", shapes.len(), MAX_REGIONS_PER_CALL);
+    if shapes.len() > MAX_EXCLUDE_REGIONS {
+        bail!("too many exclude regions in one call ({}); the limit is {}", shapes.len(), MAX_EXCLUDE_REGIONS);
     }
     Ok(shapes)
 }
@@ -883,22 +884,24 @@ mod tests {
         assert_eq!(radial["background"]["count"], ones + hundreds - removed, "{radial}");
     }
 
+    fn exclude_circles(n: usize) -> Vec<RegionShape> {
+        (0..n).map(|i| RegionShape::Circle { x: (i % 64) as f64, y: 1.0, r: 1.0 }).collect()
+    }
+
     #[tokio::test]
     async fn region_stats_cmd_refuses_more_exclude_shapes_than_the_limit() {
-        let too_many: Vec<RegionShape> =
-            (0..=MAX_REGIONS_PER_CALL).map(|i| RegionShape::Circle { x: i as f64, y: 1.0, r: 1.0 }).collect();
+        let too_many = exclude_circles(20_001);
         let shape = RegionShape::Circle { x: 4.0, y: 4.0, r: 2.0 };
         let err = region_stats_cmd("nowhere.fits".into(), vec![req("r", shape)], None, None, None, Some(too_many))
             .await
             .unwrap_err();
-        assert!(err.contains("too many exclude regions in one call (513); the limit is 512"), "{err}");
+        assert!(err.contains("too many exclude regions in one call (20001); the limit is 20000"), "{err}");
     }
 
     #[tokio::test]
     async fn profile_commands_refuse_more_exclude_shapes_than_the_limit() {
-        let too_many: Vec<RegionShape> =
-            (0..=MAX_REGIONS_PER_CALL).map(|i| RegionShape::Circle { x: i as f64, y: 1.0, r: 1.0 }).collect();
-        let expected = "too many exclude regions in one call (513); the limit is 512";
+        let too_many = exclude_circles(20_001);
+        let expected = "too many exclude regions in one call (20001); the limit is 20000";
         let radial = radial_profile_cmd("nowhere.fits".into(), 4.0, 4.0, 2.0, None, None, Some(too_many.clone()))
             .await
             .unwrap_err();
@@ -908,6 +911,36 @@ mod tests {
         let shape = RegionShape::Circle { x: 4.0, y: 4.0, r: 2.0 };
         let sb = sb_profile_cmd("nowhere.fits".into(), shape, Some(1.0), None, None, Some(too_many)).await.unwrap_err();
         assert!(sb.contains(expected), "{sb}");
+    }
+
+    #[tokio::test]
+    async fn six_hundred_exclude_regions_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let exclude: Vec<RegionShape> = (0..600)
+            .map(|i| RegionShape::Circle { x: (i % 25) as f64 * 2.5, y: 2.0 + (i / 25) as f64 * 0.5, r: 0.4 })
+            .collect();
+        let include = RegionShape::Circle { x: 32.0, y: 40.0, r: 6.0 };
+        let out = region_stats_cmd(key.clone(), vec![req("in", include)], None, None, None, Some(exclude.clone())).await;
+        assert!(out.is_ok(), "{out:?}");
+        let out = out.unwrap();
+        assert!(out[RES_REGIONS][0][RES_ERROR].is_null(), "{out}");
+        assert_eq!(out[RES_REGIONS][0][RES_STATS]["mean"], 1.0, "{out}");
+        let radial = radial_profile_cmd(key, 32.0, 40.0, 4.0, None, None, Some(exclude)).await;
+        assert!(radial.is_ok(), "{radial:?}");
+    }
+
+    #[tokio::test]
+    async fn exclude_cap_is_twenty_thousand() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let include = RegionShape::Circle { x: 32.0, y: 40.0, r: 6.0 };
+        let at_cap =
+            region_stats_cmd(key.clone(), vec![req("in", include.clone())], None, None, None, Some(exclude_circles(20_000))).await;
+        assert!(at_cap.as_ref().is_ok_and(|v| v[RES_REGIONS][0][RES_ERROR].is_null()), "{at_cap:?}");
+        let over = region_stats_cmd(key, vec![req("in", include)], None, None, None, Some(exclude_circles(20_001))).await;
+        let err = over.expect_err("20 001 exclude regions were accepted");
+        assert!(err.contains("too many exclude regions in one call (20001); the limit is 20000"), "{err}");
     }
 
     #[tokio::test]

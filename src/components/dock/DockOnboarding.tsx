@@ -7,6 +7,7 @@ import {
   DOCK_ONBOARDING_TIP,
   DOCK_ONBOARDING_TITLE,
   onboardingPlacement,
+  viewerToolbarBottom,
   type DockOnboardingDemo,
   type DockOnboardingStep,
   type OnboardingPlacement,
@@ -185,6 +186,10 @@ interface DockOnboardingProps {
   rootRef: React.RefObject<HTMLElement | null>;
 }
 
+function samePlacement(a: OnboardingPlacement, b: OnboardingPlacement): boolean {
+  return a.left === b.left && a.top === b.top && a.width === b.width && a.maxHeight === b.maxHeight && a.arrow === b.arrow;
+}
+
 function DockOnboardingPopup({ rootRef, step }: DockOnboardingProps & { step: number }): React.ReactNode {
   const titleId = useId();
   const bodyId = useId();
@@ -195,15 +200,29 @@ function DockOnboardingPopup({ rootRef, step }: DockOnboardingProps & { step: nu
   useLayoutEffect(() => {
     const viewer = rootRef.current?.querySelector<HTMLElement>("[data-dock-viewer]");
     if (!viewer) return;
+    let frame: number | null = null;
     const place = () => {
-      setPlacement(onboardingPlacement(viewer.getBoundingClientRect(), { width: window.innerWidth, height: window.innerHeight }));
+      const next = onboardingPlacement(viewer.getBoundingClientRect(), { width: window.innerWidth, height: window.innerHeight }, viewerToolbarBottom(viewer));
+      setPlacement((prev) => (prev !== null && samePlacement(prev, next) ? prev : next));
+    };
+    const placeNextFrame = () => {
+      if (frame === null) {
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          place();
+        });
+      }
     };
     place();
     const observer = new ResizeObserver(place);
     observer.observe(viewer);
+    const rows = new MutationObserver(placeNextFrame);
+    rows.observe(viewer, { childList: true, subtree: true });
     window.addEventListener("resize", place);
     return () => {
       observer.disconnect();
+      rows.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
       window.removeEventListener("resize", place);
     };
   }, [rootRef]);

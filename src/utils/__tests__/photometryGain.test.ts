@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { GAIN_TITLE, gainCaption, gainPrefillText, nextGainText } from "../photometryGain";
+import { describe, expect, it, vi } from "vitest";
+import { GAIN_TITLE, gainCaption, gainPrefillText, loadGainPrefill, nextGainText } from "../photometryGain";
 import type { GainModel } from "../../services/analysis";
 
 function model(overrides: Partial<GainModel> = {}): GainModel {
@@ -172,8 +172,38 @@ describe("gainCaption", () => {
     );
   });
 
+  it("leaves the GAIN sentence out for a calibrated unit, where no gain applies (followups-66)", () => {
+    const calibrated = model({ unit_class: "calibrated", gain_card: 120, note: "JWST/Roman calibrated units (MJy/sr): no gain applies" });
+    const caption = gainCaption(calibrated, "");
+    expect(caption).toBe("JWST/Roman calibrated units (MJy/sr): no gain applies");
+    expect(caption).not.toContain("GAIN=");
+  });
+
+  it("leaves the GAIN sentence out for every unit that is not a count or count-rate unit", () => {
+    for (const unit_class of ["electrons", "electron_rate", "calibrated", "other"] as const) {
+      expect(gainCaption(model({ unit_class, gain_card: 120, note: "no gain applies" }), "")).toBe("no gain applies");
+    }
+  });
+
+  it("keeps the GAIN sentence for a count-rate unit without an e-/ADU keyword", () => {
+    expect(gainCaption(model({ unit_class: "count_rate", gain_card: 120 }), "")).toContain("GAIN=120 present");
+  });
+
   it("leaves the GAIN sentence out when an e-/ADU keyword was found", () => {
     expect(gainCaption(headerGain(0.25, { gain_card: 120 }), "0.25")).toBe("gain 0.25 e-/ADU from EGAIN");
+  });
+
+  it("shows a gain of 1e4 e-/ADU or more with the backend's rounding, never two roundings (followups-67)", () => {
+    const big = headerGain(12345.6);
+    expect(gainPrefillText(big)).toBe("12350");
+    const caption = gainCaption(big, "12350");
+    expect(caption).toBe("gain 12350 e-/ADU from EGAIN");
+    expect(caption).not.toContain("12346");
+  });
+
+  it("rounds the scaled gain and the backend note alike", () => {
+    const mean = headerGain(1234.56, { ncombine: 10, combine_method: "mean", combine_scaled: true, effective_gain: 12345.6 });
+    expect(gainCaption(mean, "12350")).toBe("gain 12350 e-/ADU = 10 × 1235 (EGAIN), mean stack (NCOMBINE=10)");
   });
 
   it("prefixes a field value that differs from the header model", () => {
@@ -184,5 +214,44 @@ describe("gainCaption", () => {
 
   it("prefixes a value carried over to a file whose Poisson noise comes from the ERR plane (C-S5-3)", () => {
     expect(gainCaption(ERR_PLANE, "3.5")).toBe(`field value 3.5 differs from the header model — ${ERR_CAPTION}`);
+  });
+});
+
+describe("loadGainPrefill", () => {
+  const WFPC2 = headerGain(7, { source: "ATODGAIN" });
+
+  it("prefills an empty field with the header gain (502nmos: 7)", async () => {
+    const fetchModel = vi.fn(async () => WFPC2);
+    await expect(loadGainPrefill("C:/data/502nmos.fits", () => "", "", fetchModel)).resolves.toEqual({ model: WFPC2, text: "7", prefill: "7" });
+    expect(fetchModel).toHaveBeenCalledWith("C:/data/502nmos.fits");
+  });
+
+  it("keeps a value the user typed, including one typed while the header loads", async () => {
+    await expect(loadGainPrefill("C:/data/502nmos.fits", () => "3.2", "", async () => WFPC2)).resolves.toEqual({
+      model: WFPC2,
+      text: "3.2",
+      prefill: "7",
+    });
+    let typed = "";
+    const pending = loadGainPrefill("C:/data/502nmos.fits", () => typed, "", async () => WFPC2);
+    typed = "2.5";
+    await expect(pending).resolves.toMatchObject({ text: "2.5", prefill: "7" });
+  });
+
+  it("lets the previous prefill follow the new file", async () => {
+    await expect(loadGainPrefill("C:/data/b.fits", () => "4", "4", async () => WFPC2)).resolves.toMatchObject({ text: "7" });
+  });
+
+  it("gives no model and clears a prefilled value when the header cannot be read", async () => {
+    const result = await loadGainPrefill("C:/data/missing.fits", () => "7", "7", async () => {
+      throw new Error("no such file");
+    });
+    expect(result).toEqual({ model: null, text: "", prefill: "" });
+  });
+
+  it("does not ask the backend without a path", async () => {
+    const fetchModel = vi.fn(async () => WFPC2);
+    await expect(loadGainPrefill(null, () => "3.2", "", fetchModel)).resolves.toEqual({ model: null, text: "3.2", prefill: "" });
+    expect(fetchModel).not.toHaveBeenCalled();
   });
 });

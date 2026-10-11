@@ -59,6 +59,41 @@ describe("file ingest", () => {
     expect(options).toEqual([undefined]);
   });
 
+  it("retries an output row that errored before the file existed, without adding a second row", () => {
+    const sourceId = loadAndSelect(SOURCE);
+    const outputId = loadAndSelect(OUTPUT);
+    fileStore.fileError(outputId, "No such file");
+    fileStore.selectFile(sourceId);
+
+    expect(ingestUnlessLoaded("c:\\OUT\\673nmos_pixelmath.fits")).toBe(true);
+
+    expect(fileStore.getFile(outputId)).toMatchObject({ status: "queued", error: null });
+    expect(fileStore.getFiles().map((f) => f.id)).toEqual([sourceId, outputId]);
+    expect(fileStore.getStats()).toMatchObject({ total: 2, failed: 0 });
+    expect(ingested).toHaveLength(1);
+    expect(options).toEqual([{ quiet: true }]);
+    expect(fileStore.getSelected()).toBe(sourceId);
+  });
+
+  it("leaves a row that is queued, loading or loaded alone", () => {
+    const outputId = loadAndSelect(OUTPUT);
+    expect(ingestUnlessLoaded(OUTPUT)).toBe(false);
+    fileStore.fileStarted(outputId);
+    expect(ingestUnlessLoaded(OUTPUT)).toBe(false);
+    fileStore.fileDone(outputId, null);
+    expect(ingestUnlessLoaded(OUTPUT)).toBe(false);
+    expect(ingested).toEqual([]);
+    expect(fileStore.getFile(outputId)?.status).toBe("done");
+  });
+
+  it("does not requeue an errored row when the viewer cannot ingest files yet", () => {
+    const outputId = loadAndSelect(OUTPUT);
+    fileStore.fileError(outputId, "No such file");
+    unregister();
+    expect(ingestUnlessLoaded(OUTPUT)).toBe(false);
+    expect(fileStore.getFile(outputId)?.status).toBe("error");
+  });
+
   it("reports that nothing was added when the viewer cannot ingest files yet", () => {
     unregister();
     expect(ingestUnlessLoaded(OUTPUT)).toBe(false);

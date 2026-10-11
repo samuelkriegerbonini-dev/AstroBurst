@@ -28,6 +28,7 @@ import { COMPOSITE_RUN_KEY, compositeResultTarget, hasCompositeReset, lastCompos
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
 import { monoPixelsAction } from "../utils/gpuMonoPixels";
+import { afterGpuLoss, gpuLossToggleView } from "../utils/gpuLoss";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
 import { gpuDisplayStore } from "../hooks/useGpuDisplay";
@@ -55,7 +56,7 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
   failed: { background: "rgba(245,158,11,0.15)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)" },
   gpu: { background: "rgba(168,85,247,0.15)", color: "#c084fc", border: "1px solid rgba(168,85,247,0.3)" },
   muted: { background: "transparent", color: "rgba(192,132,252,0.55)", border: "1px dashed rgba(168,85,247,0.35)" },
-  off: { color: "#71717a", border: "1px solid transparent" },
+  off: { color: "var(--ab-text-3)", border: "1px solid transparent" },
 };
 
 export default function PreviewPanel() {
@@ -86,6 +87,7 @@ export default function PreviewPanel() {
   const [gpuAvailable, setGpuAvailable] = useState<boolean | null>(null);
   const [gpuProbing, setGpuProbing] = useState(true);
   const [gpuReason, setGpuReason] = useState<string | null>(null);
+  const [gpuLost, setGpuLost] = useState(false);
 
   const prevFileKeyRef = useRef<string | null>(null);
   const rgbLoadKeyRef = useRef<string | null>(null);
@@ -121,6 +123,10 @@ export default function PreviewPanel() {
 
   useEffect(() => {
     const unsub = onGpuLost(() => {
+      if (afterGpuLoss({ rgbView: isRgbView }) === "worker") {
+        setGpuLost(true);
+        return;
+      }
       setGpuAvailable(false);
       setGpuReason(getGpuReason());
       setUseGpu(false);
@@ -130,7 +136,11 @@ export default function PreviewPanel() {
       clearRgbRawPixels();
     });
     return unsub;
-  }, [clearRawPixels, clearRgbRawPixels]);
+  }, [isRgbView, clearRawPixels, clearRgbRawPixels]);
+
+  useEffect(() => {
+    if (gpuLost && !gpuDisplay) setGpuLost(false);
+  }, [gpuLost, gpuDisplay]);
 
   useEffect(() => {
     if (fileKey === prevFileKeyRef.current) return;
@@ -367,7 +377,7 @@ export default function PreviewPanel() {
   }, [stfPreviewUrl, processedPreviewUrl, displayedLabel, displayedPreviewOnly, displayedW, displayedH]);
 
   const cpuDisplayTitle = cpuViewerDisplayTitle({ useGpu, previewOnly: displayedPreviewOnly, loadFailed: gpuLoadError !== null });
-  const gpuToggle = gpuToggleView({
+  const gpuToggle = gpuLossToggleView(gpuToggleView({
     probing: gpuProbing,
     loading: toggleLoading,
     available: gpuAvailable,
@@ -377,7 +387,7 @@ export default function PreviewPanel() {
     reason: gpuReason,
     pngOnlyMono: !isRgbView && displayedPreviewOnly,
     cpuViewerShown: viewer === "cpu",
-  });
+  }), gpuLost && gpuDisplay);
   const gpuToggleBusy = gpuToggle.state === "probing" || gpuToggle.state === "loading";
 
   const planeBadge = file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;

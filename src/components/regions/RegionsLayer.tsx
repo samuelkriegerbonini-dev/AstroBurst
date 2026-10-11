@@ -113,6 +113,11 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
 
   const tolerance = useCallback((): number => regionToleranceImagePx(HANDLE_TOLERANCE_PX, mappingRef.current), []);
 
+  const handlesOf = useCallback((shape: RegionShape): Handle[] => {
+    const m = mappingRef.current;
+    return shapeHandles(shape, screenPxPerImagePx(m.transform, m.renderW, m.fitsW));
+  }, []);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !active) return;
@@ -166,7 +171,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         ctx.setLineDash([2, 2]);
         strokePolylines(shapeOutline(r.shape, screenScale));
         ctx.setLineDash([]);
-        for (const hnd of shapeHandles(r.shape)) {
+        for (const hnd of shapeHandles(r.shape, screenScale)) {
           const p = toScreen(hnd);
           ctx.fillStyle = hnd.id === "rot" ? DRAFT_COLOR : SELECT_COLOR;
           ctx.strokeStyle = "#111827";
@@ -257,7 +262,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         if (selected) {
           let best: Handle | null = null;
           let bestD = Infinity;
-          for (const h of shapeHandles(selected.shape)) {
+          for (const h of handlesOf(selected.shape)) {
             const dd = Math.hypot(h.x - pt.x, h.y - pt.y);
             if (dd <= tol && dd < bestD) {
               best = h;
@@ -303,7 +308,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       dragRef.current = { kind: "draw", tool, start: pt, startScreen: { x: e.clientX, y: e.clientY }, moved: false };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
-    [fileKey, tool, toImage, tolerance],
+    [fileKey, tool, toImage, tolerance, handlesOf],
   );
 
   const handlePointerMove = useCallback(
@@ -326,7 +331,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
           const tol = tolerance();
           const selected = d.regions.find((r) => r.id === d.selectedId);
           let cursor = "default";
-          const hnd = selected ? shapeHandles(selected.shape).find((h) => Math.hypot(h.x - pt.x, h.y - pt.y) <= tol) : undefined;
+          const hnd = selected ? handlesOf(selected.shape).find((h) => Math.hypot(h.x - pt.x, h.y - pt.y) <= tol) : undefined;
           if (hnd) cursor = hnd.cursor;
           else if (d.regions.some((r) => hitTest(r.shape, pt, tol))) cursor = "move";
           e.currentTarget.style.cursor = cursor;
@@ -345,7 +350,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         regionStore.update(fileKey, drag.id, { shape: moveHandle(drag.shapeStart, drag.handleId, pt) }, false);
       }
     },
-    [fileKey, tool, toImage, tolerance],
+    [fileKey, tool, toImage, tolerance, handlesOf],
   );
 
   const handlePointerUp = useCallback(

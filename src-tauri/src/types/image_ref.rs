@@ -141,12 +141,15 @@ pub struct OutputStems {
 
 impl OutputStems {
     pub fn stem_for(&mut self, source: &str) -> String {
+        self.stem_for_with_base(source, &source_stem(source))
+    }
+
+    pub fn stem_for_with_base(&mut self, source: &str, base: &str) -> String {
         let source_key = path_key(source);
         if let Some(stem) = self.by_source.get(&source_key) {
             return stem.clone();
         }
-        let base = source_stem(source);
-        let mut stem = base.clone();
+        let mut stem = base.to_string();
         let mut n = 2usize;
         while self.owners.contains_key(&stem.to_lowercase()) {
             stem = format!("{}_{}", base, n);

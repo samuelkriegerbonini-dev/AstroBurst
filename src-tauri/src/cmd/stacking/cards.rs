@@ -1,3 +1,4 @@
+use crate::core::imaging::push_history;
 use crate::core::stacking::consistency::{format_sig4, true_median};
 use crate::core::stacking::frame_cards::{exposure_seconds, read_merged_header};
 use crate::types::constants::{
@@ -8,7 +9,6 @@ use crate::types::header::HduHeader;
 use crate::types::stacking::CombineMethod;
 
 const CARD_EXPTIME: &str = "EXPTIME";
-const CARD_HISTORY: &str = "HISTORY";
 const EXPOSURE_AGREEMENT: f64 = 0.01;
 
 pub struct DrizzleCards<'a> {
@@ -48,17 +48,13 @@ fn input_cards(path: &str) -> InputCards {
     InputCards { exposure_s, stacked_frames, total_exposure_s }
 }
 
-fn push_history(header: &mut HduHeader, line: String) {
-    header.cards.push((CARD_HISTORY.to_string(), line));
-}
-
 fn ncombine_cards(header: &mut HduHeader, inputs: &[InputCards]) {
     let stacked: Vec<u64> = inputs.iter().filter_map(|c| c.stacked_frames).collect();
     let all_stacked = !inputs.is_empty() && stacked.len() == inputs.len();
     let ncombine: u64 = if all_stacked { stacked.iter().sum() } else { inputs.len() as u64 };
     header.set(HEADER_NCOMBINE, ncombine.to_string());
     if !stacked.is_empty() && !all_stacked {
-        push_history(header, "NCOMBINE counts input files: inputs mix stacks and single frames".to_string());
+        push_history(header, "NCOMBINE counts input files: inputs mix stacks and single frames");
     }
 }
 
@@ -71,7 +67,7 @@ fn exposure_cards(header: &mut HduHeader, inputs: &[InputCards]) {
         if median > 0.0 && (max - min) / median > EXPOSURE_AGREEMENT {
             push_history(
                 header,
-                format!(
+                &format!(
                     "EXPTIME is the median of {} frames ({}..{} s)",
                     exposures.len(),
                     format_sig4(min),
@@ -90,7 +86,7 @@ fn exposure_cards(header: &mut HduHeader, inputs: &[InputCards]) {
     if totals.len() < inputs.len() {
         push_history(
             header,
-            format!(
+            &format!(
                 "TOTEXP sums {} of {} frames; the others have no exposure card",
                 totals.len(),
                 inputs.len()
@@ -115,7 +111,7 @@ pub fn stack_output_cards(header: &mut HduHeader, cards: &StackCards) {
             header.set_f64(HEADER_DRIZZLE_SCALE, drizzle.scale);
             push_history(
                 header,
-                format!(
+                &format!(
                     "AstroBurst drizzle: {} frames, scale {}, pixfrac {}, {}",
                     inputs.len(),
                     format_sig4(drizzle.scale),
@@ -128,7 +124,7 @@ pub fn stack_output_cards(header: &mut HduHeader, cards: &StackCards) {
             header.remove(HEADER_DRIZZLE_SCALE);
             push_history(
                 header,
-                format!(
+                &format!(
                     "AstroBurst stack: {} frames, {}, {}, {}",
                     inputs.len(),
                     cards.rejection,
@@ -232,6 +228,35 @@ mod tests {
             history(&header).iter().any(|h| *h == "NCOMBINE counts input files: inputs mix stacks and single frames"),
             "{:?}",
             history(&header)
+        );
+    }
+
+    #[test]
+    fn long_stack_history_is_wrapped_not_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [
+            write_frame(&dir, "a.fits", &[("EXPTIME", "60")]),
+            write_frame(&dir, "b.fits", &[("EXPTIME", "60")]),
+            write_frame(&dir, "c.fits", &[("EXPTIME", "60")]),
+        ];
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut header = HduHeader::empty();
+        stack_output_cards(
+            &mut header,
+            &StackCards {
+                included_paths: &refs,
+                combine: CombineMethod::Median,
+                rejection: "winsorized_sigma_clip",
+                normalization: Some("multiplicative_scaling"),
+                drizzle: None,
+            },
+        );
+        let notes = history(&header);
+        assert!(notes.len() >= 2, "{notes:?}");
+        assert!(notes.iter().all(|h| h.len() <= 72), "{notes:?}");
+        assert_eq!(
+            notes.join(" "),
+            "AstroBurst stack: 3 frames, winsorized_sigma_clip, median, multiplicative_scaling"
         );
     }
 

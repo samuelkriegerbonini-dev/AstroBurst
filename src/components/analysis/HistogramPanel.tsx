@@ -4,12 +4,15 @@ import type { StfParams } from "../../shared/types";
 import { constrainStf, dragStfMarker, pickStfMarker, stfMarkerPositions } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { MEAN_LABEL, SIGMA_MAD_LABEL, SIGMA_MAD_TITLE, skyRangeLabel } from "../../utils/analysisLabels";
+import type { DecimalFieldOptions } from "../../utils/decimalText";
+import { STF_HIGHLIGHT_FIELD, STF_MIDTONE_FIELD, STF_SHADOW_FIELD, stfDraft, stfDraftFields, type StfDraft } from "../../utils/analysisTarget";
+import { DecimalField } from "../ui";
 
 const CANVAS_H = 110;
 const DRAG_THRESHOLD = 0.03;
 const BAR_COLOR = "#3b82f6";
 const BG_COLOR = "#0a0a0f";
-
+const OFF_COLOR = "var(--ab-text-3)";
 interface HistogramStats {
   mean?: number;
   median?: number;
@@ -31,6 +34,7 @@ interface HistogramPanelProps {
   disabled?: boolean;
   disabledHint?: string;
   badge?: React.ReactNode;
+  channel?: "R" | null;
   binsWindow?: HistogramRange | null;
   skyZoom?: boolean;
   skyAvailable?: boolean;
@@ -60,6 +64,7 @@ function HistogramPanel({
                           disabled = false,
                           disabledHint = DISABLED_HINT,
                           badge,
+                          channel = null,
                           binsWindow = null,
                           skyZoom = false,
                           skyAvailable = false,
@@ -77,7 +82,7 @@ function HistogramPanel({
   stateRef.current = { shadow, midtone, highlight, frame, binsWindow };
 
   const [manualMode, setManualMode] = useState(false);
-  const [draft, setDraft] = useState({ shadow: "", midtone: "", highlight: "" });
+  const [draft, setDraft] = useState<StfDraft>({ shadow: "", midtone: "", highlight: "" });
 
   const logMax = useMemo(() => {
     if (bins.length === 0) return 1;
@@ -89,24 +94,22 @@ function HistogramPanel({
   }, [bins]);
 
   const openManual = useCallback(() => {
-    setDraft({
-      shadow: shadow.toFixed(4),
-      midtone: midtone.toFixed(4),
-      highlight: highlight.toFixed(4),
-    });
+    setDraft(stfDraft({ shadow, midtone, highlight }));
     setManualMode(true);
   }, [shadow, midtone, highlight]);
 
+  const { fields: manualFields, error: manualError } = useMemo(() => stfDraftFields(draft), [draft]);
+
   const applyManual = useCallback(() => {
-    if (!onChange) return;
+    if (!onChange || manualError !== null) return;
     const typed = {
-      shadow: parseFloat(draft.shadow) || 0,
-      midtone: parseFloat(draft.midtone) || 0.5,
-      highlight: parseFloat(draft.highlight) || 1,
+      shadow: manualFields.shadow.value ?? 0,
+      midtone: manualFields.midtone.value ?? 0.5,
+      highlight: manualFields.highlight.value ?? 1,
     };
     onChange(constrainStf(typed, frame, binsWindow));
     setManualMode(false);
-  }, [draft, onChange, frame, binsWindow]);
+  }, [manualFields, manualError, onChange, frame, binsWindow]);
 
   const drawBars = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -291,6 +294,15 @@ function HistogramPanel({
             Histogram / STF
           </span>
           {badge}
+          {channel && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded font-mono normal-case tracking-normal text-rose-300 bg-rose-900/30"
+              title={`Statistics of the ${channel} plane only`}
+              data-histogram-channel={channel}
+            >
+              {`${channel} channel`}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-0.5">
           {onSkyZoomChange && (
@@ -301,7 +313,7 @@ function HistogramPanel({
                 aria-pressed={!skyZoom}
                 title="Full range: bins over the whole data range"
                 className="text-[9px] px-1.5 py-0.5 transition-colors"
-                style={{ color: skyZoom ? "#71717a" : "var(--ab-blue)", background: skyZoom ? undefined : "rgba(59,130,246,0.1)" }}
+                style={{ color: skyZoom ? OFF_COLOR : "var(--ab-blue)", background: skyZoom ? undefined : "rgba(59,130,246,0.1)" }}
               >
                 Full
               </button>
@@ -312,7 +324,7 @@ function HistogramPanel({
                 aria-pressed={skyZoom}
                 title={skyAvailable ? SKY_TITLE : "No sky window: σ(MAD) is zero or the data range is empty"}
                 className="flex items-center gap-1 text-[9px] px-1.5 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ color: skyZoom ? "var(--ab-blue)" : "#71717a", background: skyZoom ? "rgba(59,130,246,0.1)" : undefined }}
+                style={{ color: skyZoom ? "var(--ab-blue)" : OFF_COLOR, background: skyZoom ? "rgba(59,130,246,0.1)" : undefined }}
               >
                 Sky
                 {skyLoading && <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--ab-blue)" }} />}
@@ -326,7 +338,7 @@ function HistogramPanel({
           <ToolbarBtn onClick={openManual} title={disabled ? disabledHint : "Manual input"} active={manualMode} color="var(--ab-teal)" disabled={disabled}>
             <SlidersHorizontal size={11} />
           </ToolbarBtn>
-          <ToolbarBtn onClick={onReset} title={disabled ? disabledHint : "Reset to linear"} active={false} color="#71717a" disabled={disabled}>
+          <ToolbarBtn onClick={onReset} title={disabled ? disabledHint : "Reset to linear"} active={false} color={OFF_COLOR} disabled={disabled}>
             <RotateCcw size={11} />
           </ToolbarBtn>
         </div>
@@ -360,17 +372,18 @@ function HistogramPanel({
           className="flex items-center gap-1.5 px-3 py-2 animate-fade-in"
           style={{ borderTop: "1px solid var(--ab-border)" }}
         >
-          <ManualInput label="S" name="S shadow clipping point (0-1)" color="#ef4444" value={draft.shadow} min={0} max={1}
+          <ManualInput label="S" name="S shadow clipping point (0-1)" color="#ef4444" value={draft.shadow} field={STF_SHADOW_FIELD}
                        onChange={(v) => setDraft((d) => ({ ...d, shadow: v }))} />
-          <ManualInput label="M" name="M midtone balance (0-1)" color="#eab308" value={draft.midtone} min={0.001} max={0.999}
+          <ManualInput label="M" name="M midtone balance (0-1)" color="#eab308" value={draft.midtone} field={STF_MIDTONE_FIELD}
                        onChange={(v) => setDraft((d) => ({ ...d, midtone: v }))} />
-          <ManualInput label="H" name="H highlight clipping point (0-1)" color="#22c55e" value={draft.highlight} min={0} max={1}
+          <ManualInput label="H" name="H highlight clipping point (0-1)" color="#22c55e" value={draft.highlight} field={STF_HIGHLIGHT_FIELD}
                        onChange={(v) => setDraft((d) => ({ ...d, highlight: v }))} />
           <button
             onClick={applyManual}
-            className="ml-auto p-1 rounded-md transition-colors"
+            disabled={manualError !== null}
+            className="ml-auto p-1 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)" }}
-            title="Apply"
+            title={manualError ?? "Apply"}
           >
             <Check size={12} />
           </button>
@@ -434,7 +447,7 @@ function ToolbarBtn({
       disabled={disabled}
       className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       style={{
-        color: active ? color : "#71717a",
+        color: active ? color : OFF_COLOR,
         background: active ? "rgba(20,184,166,0.08)" : undefined,
       }}
       onMouseOver={(e) => { e.currentTarget.style.background = "rgba(63,63,70,0.3)"; }}
@@ -445,34 +458,29 @@ function ToolbarBtn({
   );
 }
 
-function ManualInput({
+export function ManualInput({
                        label,
                        name,
                        color,
                        value,
-                       min,
-                       max,
+                       field,
                        onChange,
                      }: {
   label: string;
   name: string;
   color: string;
   value: string;
-  min: number;
-  max: number;
+  field: DecimalFieldOptions;
   onChange: (v: string) => void;
 }) {
   return (
     <div className="flex items-center gap-1">
       <span className="text-[10px] font-mono w-3 font-semibold" style={{ color }}>{label}</span>
-      <input
-        type="number"
+      <DecimalField
+        {...field}
         aria-label={name}
         value={value}
-        step={0.001}
-        min={min}
-        max={max}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
         className="w-[72px] text-[10px] font-mono rounded-md px-1.5 py-0.5 text-zinc-200 transition-colors"
         style={{
           background: "rgba(24,24,32,0.8)",

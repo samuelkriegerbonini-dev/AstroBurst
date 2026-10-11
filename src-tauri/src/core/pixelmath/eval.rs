@@ -65,12 +65,22 @@ pub enum Op {
     Clip,
     Rescale,
     Iif,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Mtf,
+    CoordX,
+    CoordY,
 }
 
 impl Op {
     fn stack_effect(self) -> (usize, usize) {
         match self {
-            Op::Const(_) | Op::Load(_) | Op::Reduce(..) => (0, 1),
+            Op::Const(_) | Op::Load(_) | Op::Reduce(..) | Op::CoordX | Op::CoordY => (0, 1),
             Op::Neg
             | Op::Invert
             | Op::Not
@@ -84,7 +94,13 @@ impl Op {
             | Op::Ceil
             | Op::Round
             | Op::Trunc
-            | Op::Sign => (1, 1),
+            | Op::Sign
+            | Op::Sin
+            | Op::Cos
+            | Op::Tan
+            | Op::Asin
+            | Op::Acos
+            | Op::Atan => (1, 1),
             Op::Add
             | Op::Sub
             | Op::Mul
@@ -98,7 +114,9 @@ impl Op {
             | Op::Eq
             | Op::Ne
             | Op::And
-            | Op::Or => (2, 1),
+            | Op::Or
+            | Op::Atan2
+            | Op::Mtf => (2, 1),
             Op::MinN(n) | Op::MaxN(n) => (n, 1),
             Op::Clip | Op::Iif => (3, 1),
             Op::Rescale => (5, 1),
@@ -247,6 +265,16 @@ fn function_op(func: Function, arg_count: usize) -> Op {
         Function::Iif => Op::Iif,
         Function::Pi => Op::Const(std::f32::consts::PI),
         Function::E => Op::Const(std::f32::consts::E),
+        Function::Sin => Op::Sin,
+        Function::Cos => Op::Cos,
+        Function::Tan => Op::Tan,
+        Function::Asin => Op::Asin,
+        Function::Acos => Op::Acos,
+        Function::Atan => Op::Atan,
+        Function::Atan2 => Op::Atan2,
+        Function::Mtf => Op::Mtf,
+        Function::X => Op::CoordX,
+        Function::Y => Op::CoordY,
         Function::Mean | Function::Med | Function::Mdev | Function::Sdev | Function::Adev => {
             unreachable!("reducers are emitted as Op::Reduce")
         }
@@ -504,7 +532,25 @@ fn rescale(x: f32, a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
     b0 + (x - a0) * (b1 - b0) / span
 }
 
-fn run_pixel(ops: &[Op], inputs: &[&[f32]], idx: usize, stack: &mut [f32]) -> f32 {
+#[inline(always)]
+fn mtf(m: f32, x: f32) -> f32 {
+    if m.is_nan() || x.is_nan() {
+        return f32::NAN;
+    }
+    let m = m.clamp(0.0, 1.0);
+    let x = x.clamp(0.0, 1.0);
+    if x == 0.0 {
+        0.0
+    } else if x == 1.0 {
+        1.0
+    } else if x == m {
+        0.5
+    } else {
+        (m - 1.0) * x / ((2.0 * m - 1.0) * x - m)
+    }
+}
+
+fn run_pixel(ops: &[Op], inputs: &[&[f32]], idx: usize, width: usize, stack: &mut [f32]) -> f32 {
     let mut sp = 0usize;
     for op in ops {
         match *op {
@@ -620,6 +666,28 @@ fn run_pixel(ops: &[Op], inputs: &[&[f32]], idx: usize, stack: &mut [f32]) -> f3
                 sp -= 2;
                 stack[sp - 1] = if truthy(stack[sp - 1]) { stack[sp] } else { stack[sp + 1] };
             }
+            Op::Sin => stack[sp - 1] = stack[sp - 1].sin(),
+            Op::Cos => stack[sp - 1] = stack[sp - 1].cos(),
+            Op::Tan => stack[sp - 1] = stack[sp - 1].tan(),
+            Op::Asin => stack[sp - 1] = stack[sp - 1].asin(),
+            Op::Acos => stack[sp - 1] = stack[sp - 1].acos(),
+            Op::Atan => stack[sp - 1] = stack[sp - 1].atan(),
+            Op::Atan2 => {
+                sp -= 1;
+                stack[sp - 1] = stack[sp - 1].atan2(stack[sp]);
+            }
+            Op::Mtf => {
+                sp -= 1;
+                stack[sp - 1] = mtf(stack[sp - 1], stack[sp]);
+            }
+            Op::CoordX => {
+                stack[sp] = (idx % width) as f32;
+                sp += 1;
+            }
+            Op::CoordY => {
+                stack[sp] = (idx / width) as f32;
+                sp += 1;
+            }
         }
     }
     stack[0]
@@ -723,6 +791,7 @@ pub fn evaluate(
     let inputs: Vec<&[f32]> = flats.iter().map(|c| c.as_ref()).collect();
     let ops = resolve_reducers(&program.ops, &inputs);
     let depth = program.stack_depth.max(1);
+    let width = dims.1.max(1);
     let mut out = vec![0f32; dims.0 * dims.1];
     out.par_chunks_mut(CHUNK_PIXELS)
         .enumerate()
@@ -730,7 +799,7 @@ pub fn evaluate(
             let base = chunk_index * CHUNK_PIXELS;
             let mut stack = vec![0f32; depth];
             for (offset, pixel) in chunk.iter_mut().enumerate() {
-                *pixel = run_pixel(&ops, &inputs, base + offset, &mut stack);
+                *pixel = run_pixel(&ops, &inputs, base + offset, width, &mut stack);
             }
         });
     finish_output(&mut out, opts);
@@ -797,6 +866,69 @@ mod tests {
         assert_eq!(rescale(3.0, 1.0, 1.0, 0.0, 1.0), 0.0);
         assert!(rescale(f32::NAN, 1.0, 1.0, 0.0, 1.0).is_nan());
         assert_eq!(rescale(2.0, 0.0, 4.0, 10.0, 20.0), 15.0);
+    }
+
+    fn run_on(expr: &str, target: &Array2<f32>) -> Array2<f32> {
+        let program = compile(expr, &names(&["$T"])).unwrap();
+        evaluate(&program, &[target], &OutputOptions::default()).unwrap()
+    }
+
+    fn close(actual: f32, expected: f32) -> bool {
+        (actual - expected).abs() <= 1e-6 * expected.abs().max(1.0)
+    }
+
+    #[test]
+    fn trig_mtf_and_coordinates_evaluate_per_pixel() {
+        let small = Array2::<f32>::zeros((2, 3));
+        assert_eq!(run_on("x()", &small), Array2::from_shape_vec((2, 3), vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0]).unwrap());
+        assert_eq!(run_on("y()", &small), Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap());
+        assert_eq!(run_on("x() + 10 * y()", &small)[[1, 2]], 12.0);
+
+        let coords = compile("x() + y()", &names(&["$T"])).unwrap();
+        assert!(!coords.ops().iter().any(|op| matches!(op, Op::Const(_))), "{:?}", coords.ops());
+        assert_eq!(coords.stack_depth(), 2);
+        assert!(compile("x(1)", &names(&["$T"])).unwrap_err().message.contains("takes no arguments"));
+        assert!(compile("atan2(1)", &names(&["$T"])).unwrap_err().message.contains("expects 2 arguments"));
+        assert!(compile("mtf(0.5)", &names(&["$T"])).unwrap_err().message.contains("expects 2 arguments"));
+        let slot_named_x = compile("x * 2 + x()", &names(&["$T", "x"])).unwrap();
+        assert_eq!(slot_named_x.referenced_slots(), vec![false, true]);
+
+        let (rows, cols) = (200usize, 300usize);
+        assert!(rows * cols > 2 * CHUNK_PIXELS);
+        let big = run_on("x() + 1000 * y()", &Array2::<f32>::zeros((rows, cols)));
+        assert_eq!(big[[0, 0]], 0.0);
+        assert_eq!(big[[150, 299]], 150_299.0);
+        assert_eq!(big[[rows - 1, cols - 1]], ((rows - 1) * 1000 + cols - 1) as f32);
+
+        let one = Array2::<f32>::zeros((1, 1));
+        let cases: [(&str, f32); 12] = [
+            ("mtf(0.25, 0.5)", 0.75),
+            ("mtf(0.5, 0.3)", 0.3),
+            ("mtf(0.25, 0)", 0.0),
+            ("mtf(0.25, 1)", 1.0),
+            ("mtf(0.25, 0.25)", 0.5),
+            ("mtf(0.25, 2)", 1.0),
+            ("mtf(-1, 0.5)", 1.0),
+            ("sin(pi() / 2)", 1.0),
+            ("cos(0)", 1.0),
+            ("tan(pi() / 4)", 1.0),
+            ("atan2(1, 1)", std::f32::consts::FRAC_PI_4),
+            ("asin(1) + acos(1) + atan(0)", std::f32::consts::FRAC_PI_2),
+        ];
+        for (expr, expected) in cases {
+            let got = run_on(expr, &one)[[0, 0]];
+            assert!(close(got, expected), "{expr}: expected {expected}, got {got}");
+        }
+        assert!(close(run_on("atan2(1, -1)", &one)[[0, 0]], 3.0 * std::f32::consts::FRAC_PI_4));
+        assert!(run_on("mtf(0.25, 0/0)", &one)[[0, 0]].is_nan());
+
+        let target = Array2::from_shape_vec((1, 3), vec![0.1f32, 0.5, 0.9]).unwrap();
+        let stretched = run_on("mtf(0.2, $T)", &target);
+        for (i, &v) in target.iter().enumerate() {
+            let m = 0.2f32;
+            let expected = (m - 1.0) * v / ((2.0 * m - 1.0) * v - m);
+            assert!(close(stretched[[0, i]], expected), "mtf at {v}: {}", stretched[[0, i]]);
+        }
     }
 
     #[test]

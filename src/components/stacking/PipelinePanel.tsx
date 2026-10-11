@@ -11,6 +11,7 @@ import { detectChannel } from "../../utils/channelMapping";
 import { formatCount } from "../../utils/formatCount";
 import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, stackedLights, toDims } from "../../utils/stackingOutputs";
 import { cullChannelGroups, pipelineChannelInputs, subframeExclusionNotice } from "../../utils/subframeCull";
+import { CONFIRM_CLEAR_LABEL, useArmedConfirm } from "../../hooks/useArmedConfirm";
 import type { ProcessedFile } from "../../shared/types";
 import type { CalibrationState, RunTarget, StackConfig } from "./StackingTab";
 
@@ -73,12 +74,22 @@ function mergeChannelSeed(current: FileGroup[], seed: FileGroup[]): FileGroup[] 
   return changed ? merged : current;
 }
 
-const CalibRow = ({ label, count, onAdd, onClear, testId }: { label: string; count: number; onAdd: () => void; onClear: () => void; testId?: string }) => (
+const CLEAR_BUTTON_CLASS = "text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded";
+
+function ClearButton({ armed, onPress, onBlur }: { armed: boolean; onPress: () => void; onBlur: () => void }) {
+  return (
+    <button type="button" aria-live="polite" onClick={onPress} onBlur={onBlur} className={CLEAR_BUTTON_CLASS}>
+      {armed ? CONFIRM_CLEAR_LABEL : "Clear"}
+    </button>
+  );
+}
+
+const CalibRow = ({ label, count, onAdd, clearArmed, onClear, onClearBlur, testId }: { label: string; count: number; onAdd: () => void; clearArmed: boolean; onClear: () => void; onClearBlur: () => void; testId?: string }) => (
   <div className="flex items-center justify-between" data-testid={testId}>
     <span className="text-xs text-zinc-400">{label}: {count}</span>
     <div className="flex gap-1">
       <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
-      {count > 0 && <button onClick={onClear} className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded">Clear</button>}
+      {count > 0 && <ClearButton armed={clearArmed} onPress={onClear} onBlur={onClearBlur} />}
     </div>
   </div>
 );
@@ -96,6 +107,14 @@ function darkGroupsLine(groups: readonly PipelineDarkGroup[] | undefined): strin
   if (!groups || !groups.some((g) => typeof g.temp_c === "number")) return null;
   const parts = groups.map((g) => (typeof g.temp_c === "number" ? `${g.temp_c.toFixed(1)} °C (${g.frames})` : `unknown (${g.frames})`));
   return `dark groups: ${parts.join(", ")}`;
+}
+
+export const COSMETIC_AUTO_NOTE =
+  "Auto detect replaces pixels in every light without a preview; check one light first with Cosmetic > Dry run.";
+
+export function CosmeticAutoNote({ enabled }: { enabled: boolean }) {
+  if (!enabled) return null;
+  return <p className="text-[10px] text-amber-400/80 leading-snug">{COSMETIC_AUTO_NOTE}</p>;
 }
 
 export function PipelineMasterLines({ stats }: { stats: PipelineStats }) {
@@ -150,6 +169,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   const [cosmeticAutoSigma, setCosmeticAutoSigma] = useState(3.0);
   const [defectText, setDefectText] = useState("");
 
+  const clearConfirm = useArmedConfirm();
   const defectListId = useId();
   const rejectionId = useId();
   const combineId = useId();
@@ -374,10 +394,11 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
               <div className="flex gap-1">
                 <button onClick={() => addToChannel(i)} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
                 {ch.paths.length > 0 && (
-                  <button
-                    onClick={() => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; })}
-                    className="text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded"
-                  >Clear</button>
+                  <ClearButton
+                    armed={clearConfirm.armedKey === `channel:${ch.label}`}
+                    onPress={() => clearConfirm.press(`channel:${ch.label}`, () => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; }))}
+                    onBlur={() => clearConfirm.blur(`channel:${ch.label}`)}
+                  />
                 )}
               </div>
             </div>
@@ -387,10 +408,10 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Calibration (optional)</span>
-        <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} onClear={() => setDarks([])} />
-        <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} onClear={() => setFlats([])} />
-        <CalibRow label="Flat darks" testId="pipeline-flatdark-row" count={flatDarks.length} onAdd={() => addCalibration("flatdark")} onClear={() => setFlatDarks([])} />
-        <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} onClear={() => setBias([])} />
+        <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} clearArmed={clearConfirm.armedKey === "calib:dark"} onClear={() => clearConfirm.press("calib:dark", () => setDarks([]))} onClearBlur={() => clearConfirm.blur("calib:dark")} />
+        <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} clearArmed={clearConfirm.armedKey === "calib:flat"} onClear={() => clearConfirm.press("calib:flat", () => setFlats([]))} onClearBlur={() => clearConfirm.blur("calib:flat")} />
+        <CalibRow label="Flat darks" testId="pipeline-flatdark-row" count={flatDarks.length} onAdd={() => addCalibration("flatdark")} clearArmed={clearConfirm.armedKey === "calib:flatdark"} onClear={() => clearConfirm.press("calib:flatdark", () => setFlatDarks([]))} onClearBlur={() => clearConfirm.blur("calib:flatdark")} />
+        <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} clearArmed={clearConfirm.armedKey === "calib:bias"} onClear={() => clearConfirm.press("calib:bias", () => setBias([]))} onClearBlur={() => clearConfirm.blur("calib:bias")} />
         {darks.length > 0 && (
           <>
             <Toggle label="Optimize dark scale per light (minimise noise)" checked={darkOptimize} accent="sky" onChange={setDarkOptimize} />
@@ -423,6 +444,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
             {cosmeticAutoEnabled && (
               <Slider label="Auto sigma" value={cosmeticAutoSigma} min={0.5} max={20} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={setCosmeticAutoSigma} />
             )}
+            <CosmeticAutoNote enabled={cosmeticAutoEnabled} />
             <label htmlFor={defectListId} className="text-xs text-zinc-400">Defect list</label>
             <textarea
               id={defectListId}

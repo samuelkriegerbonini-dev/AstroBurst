@@ -7,7 +7,15 @@ export interface ChannelStats {
   max: number;
 }
 
-export interface BlendResult {
+export interface CompositeStfFields {
+  auto_stf?: StfParams;
+  stf_r?: StfParams;
+  stf_g?: StfParams;
+  stf_b?: StfParams;
+  stf_linked?: boolean;
+}
+
+export interface BlendResult extends CompositeStfFields {
   png_path: string;
   previewUrl?: string;
   dimensions: [number, number];
@@ -15,11 +23,6 @@ export interface BlendResult {
   stats_r?: ChannelStats;
   stats_g?: ChannelStats;
   stats_b?: ChannelStats;
-  stf_r?: StfParams;
-  stf_g?: StfParams;
-  stf_b?: StfParams;
-  auto_stf?: StfParams;
-  stf_linked?: boolean;
   stf_note?: string | null;
 }
 
@@ -91,24 +94,23 @@ export interface CalibrateCompositeResult {
   elapsed_ms: number;
 }
 
-export interface CalibrateAndScnrResult {
+export interface CalibrateAndScnrResult extends CompositeStfFields {
   png_path: string;
   wb_applied: boolean;
   r_factor: number;
   g_factor: number;
   b_factor: number;
   scnr_applied: boolean;
-  auto_stf?: StfParams;
+  blend_stf_linked?: boolean;
   elapsed_ms: number;
 }
 
-export interface ResetWbResult {
+export interface ResetWbResult extends CompositeStfFields {
   png_path: string;
   reset: boolean;
   r_factor: number;
   g_factor: number;
   b_factor: number;
-  auto_stf?: StfParams;
   elapsed_ms: number;
 }
 

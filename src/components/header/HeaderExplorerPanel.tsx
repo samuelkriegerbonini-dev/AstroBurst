@@ -258,6 +258,8 @@ export default function HeaderExplorerPanel({
               />
               {search && (
                 <button
+                  type="button"
+                  aria-label="Clear search"
                   onClick={() => { setSearch(""); searchRef.current?.focus(); }}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
                 >
@@ -321,7 +323,7 @@ export default function HeaderExplorerPanel({
                             <span
                               className="text-[10px] font-mono w-[88px] shrink-0 truncate"
                               style={{
-                                color: isHighlight ? "var(--ab-amber)" : "#71717a",
+                                color: isHighlight ? "var(--ab-amber)" : "var(--ab-text-3)",
                                 fontWeight: isHighlight ? 600 : 400,
                               }}
                               title={key}

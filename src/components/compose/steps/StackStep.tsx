@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useId, useMemo } from "react";
 import { Loader2, BarChart3, Check, X } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { effectiveBinFiles, wizardStackName } from "../../../utils/wizard";
-import { stackRunFinish, type StackRunStart } from "../../../utils/stackRun";
+import { stackAllNext, stackRunFinish, type StackBinOutcome, type StackRunStart } from "../../../utils/stackRun";
 import { stackFrames, drizzleFrames } from "../../../services/stacking";
 import { analyzeSubframes } from "../../../services/analysis";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -24,8 +24,6 @@ interface StackStepProps {
   dispatch: React.Dispatch<WizardAction>;
   onStacked: (channelId: string, path: string) => void;
 }
-
-type StackOutcome = "done" | "cancelled" | "failed" | "discarded";
 
 interface StackDisplayResult {
   fits_path?: string;
@@ -75,13 +73,6 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     [state.bins],
   );
 
-  const getEffectiveFiles = useCallback((binId: string, files: string[]) => {
-    const excluded = state.excludedFiles[binId] ?? [];
-    if (excluded.length === 0) return files;
-    const set = new Set(excluded);
-    return files.filter((f) => !set.has(f));
-  }, [state.excludedFiles]);
-
   const handleAnalyze = useCallback(async (binId: string, files: string[]) => {
     if (files.length === 0) return;
     setAnalyzing((prev) => ({ ...prev, [binId]: true }));
@@ -126,12 +117,13 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
   const handleStack = useCallback(async (
     binId: string,
-    allFiles: string[],
     batch: WizardStackRun["batch"] = null,
-  ): Promise<StackOutcome> => {
-    const files = getEffectiveFiles(binId, allFiles)?.map(resolveEffectivePath);
-    if (!files || files.length < 2) {
-      setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files?.length ?? 0}` }));
+  ): Promise<StackBinOutcome> => {
+    const latest = getState();
+    const latestBin = latest.bins.find((b) => b.id === binId);
+    const files = latestBin ? effectiveBinFiles(latest, latestBin).map(resolveEffectivePath) : [];
+    if (files.length < 2) {
+      setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files.length}` }));
       return "failed";
     }
     lastStackToken += 1;
@@ -142,7 +134,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       const currentFiles = bin ? effectiveBinFiles(current, bin).map(resolveEffectivePath) : [];
       const outcome = stackRunFinish(started, { generation: getStackGeneration(), files: currentFiles });
       if (outcome.store) return false;
-      recordStackOutcome(binId, outcome);
+      recordStackOutcome(binId, outcome, started.generation);
       return true;
     };
     setStackRun({ binId, startedAt: Date.now(), batch, token: started.token, files });
@@ -150,7 +142,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     setCancelled((prev) => ({ ...prev, [binId]: false }));
     resetProgress();
     try {
-      const subResult = state.subframeResults[binId];
+      const subResult = latest.subframeResults[binId];
       let weights: number[] | undefined;
       if (subResult) {
         const byPath = new Map(subResult.subframes.map((s) => [resolveEffectivePath(s.file_path), s.weight]));
@@ -177,7 +169,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       if (result.fits_path) {
         onStacked(binId, result.fits_path);
       }
-      recordStackOutcome(binId, { store: true, notice: null });
+      recordStackOutcome(binId, { store: true, notice: null }, started.generation);
       return "done";
     } catch (e) {
       if (discarded()) return "discarded";
@@ -193,16 +185,17 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       finishStackRun(started.token);
       resetProgress();
     }
-  }, [onStacked, getEffectiveFiles, state.subframeResults, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun, finishStackRun, getStackGeneration, getState, recordStackOutcome]);
+  }, [onStacked, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun, finishStackRun, getStackGeneration, getState, recordStackOutcome]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
+    const generation = getStackGeneration();
     for (let i = 0; i < bins.length; i++) {
       const batch = { current: i + 1, total: bins.length, label: bins[i].shortLabel };
-      const outcome = await handleStack(bins[i].id, bins[i].files, batch);
-      if (outcome === "cancelled" || outcome === "discarded") break;
+      const outcome = await handleStack(bins[i].id, batch);
+      if (stackAllNext(outcome, { generation, live: getStackGeneration() }) === "stop") break;
     }
-  }, [stackableBins, handleStack]);
+  }, [stackableBins, handleStack, getStackGeneration]);
 
   useEffect(() => {
     if (!stackRun) return;
@@ -218,7 +211,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       <div className="flex flex-col items-center justify-center py-12 text-zinc-600 text-xs gap-2">
         <span>No channels have multiple files to stack.</span>
         {singleBins.length > 0 && (
-          <span className="text-[10px] text-zinc-700">
+          <span className="text-[10px] text-[var(--ab-text-4)]">
             {singleBins.length} channel(s) with single files will be used directly.
           </span>
         )}
@@ -328,7 +321,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         const subResult = state.subframeResults[bin.id];
         const binOv = overrides[bin.id] ?? {};
         const excluded = state.excludedFiles[bin.id] ?? [];
-        const effectiveCount = getEffectiveFiles(bin.id, bin.files).length;
+        const effectiveCount = effectiveBinFiles(state, bin).length;
 
         return (
           <div key={bin.id} className="flex flex-col gap-1.5 p-2 rounded-lg border"
@@ -352,7 +345,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
                   Analyze
                 </button>
                 <button
-                  onClick={() => { void handleStack(bin.id, bin.files); }}
+                  onClick={() => { void handleStack(bin.id); }}
                   disabled={anyLoading}
                   className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 disabled:opacity-40 transition-all"
                 >

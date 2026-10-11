@@ -1,7 +1,7 @@
 import { useCallback, type ReactNode } from "react";
 import { ArrowLeftRight, RefreshCw, RotateCcw } from "lucide-react";
 import { ResultGrid, ErrorAlert, SectionHeader } from "../ui";
-import { useDisplayedImage } from "../../context/PreviewContext";
+import { useDisplayedImage, type DisplayedImage } from "../../context/PreviewContext";
 import { bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { ingestUnlessLoaded } from "../../hooks/useFileIngest";
 import { GEOMETRY_OPS, transformGeometry, type GeometryOp, type GeometryResult } from "../../services/imageGeometry";
@@ -33,6 +33,10 @@ function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
 }
 
+function geometryInputLabel(displayed: Pick<DisplayedImage, "previewOnly" | "label">, inputPath: string): string {
+  return displayed.previewOnly ? baseName(inputPath) : (displayed.label ?? baseName(inputPath));
+}
+
 function geometryResultLine(res: Pick<GeometryResult, "fits_path" | "dimensions">): string {
   return `Written ${baseName(res.fits_path)} (${res.dimensions[0]}x${res.dimensions[1]}); select it in Files to continue.`;
 }
@@ -41,6 +45,7 @@ export default function GeometryPanel({ selectedFile, outputDir, fileKey, compos
   const displayed = useDisplayedImage();
   const { running, blocked, busyTitle, result, error, run } = useProcessingRun<GeometryRun>("geometry", fileKey ?? null);
   const inputPath = selectedFile ? displayed.path : null;
+  const inputLabel = inputPath ? geometryInputLabel(displayed, inputPath) : null;
   const canRun = inputPath !== null;
 
   const handleOp = useCallback(
@@ -63,13 +68,13 @@ export default function GeometryPanel({ selectedFile, outputDir, fileKey, compos
 
       {compositeMode && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-          {fileOnlyNotice("Geometry acts on", fileName)}
+          {fileOnlyNotice("Geometry acts on", inputLabel ?? fileName)}
         </div>
       )}
       {!selectedFile && <div className="text-[10px] text-zinc-500 italic">Select a FITS file first.</div>}
       {inputPath && (
         <div className="text-[10px] text-zinc-500 truncate" title={inputPath}>
-          Input: <span className="text-zinc-300">{displayed.previewOnly ? baseName(inputPath) : (displayed.label ?? baseName(inputPath))}</span>
+          Input: <span className="text-zinc-300">{inputLabel}</span>
         </div>
       )}
 

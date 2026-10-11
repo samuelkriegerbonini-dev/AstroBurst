@@ -5,7 +5,7 @@ import { hasBit, toggleBit } from "../../utils/dqFlags";
 
 const BTN_CLASS = "flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed";
 const ON_STYLE: React.CSSProperties = { background: "rgba(248,113,113,0.15)", color: "#f87171", border: "1px solid rgba(248,113,113,0.35)" };
-const OFF_STYLE: React.CSSProperties = { color: "#71717a", border: "1px solid transparent" };
+const OFF_STYLE: React.CSSProperties = { color: "var(--ab-text-3)", border: "1px solid transparent" };
 
 function DqControlsInner() {
   const { plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError } = useDqContext();

@@ -1,6 +1,6 @@
 import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect, useId } from "react";
 import { Loader2, ArrowRight } from "lucide-react";
-import { fileKeyOf, useFileContext, useRenderActions, useRenderContext } from "../../context/PreviewContext";
+import { fileKeyOf, getRenderRecord, useFileContext, useRenderActions, useRenderContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeActions } from "../../context/CompositeContext";
 import type { ChainEntry, ChainStep, ProcessedKind, ProcessingChain } from "../../shared/types/preview";
 import type {
@@ -13,11 +13,18 @@ import type {
 } from "../../shared/types/compositeChain";
 import {
   CHAIN_ORDER,
+  EMPTY_CHAIN,
+  backgroundInputFor,
+  chainBasePath,
+  debayerPreviewRecord,
   inputFor,
   lastStep,
   pixelMathCompareBase,
+  pixelMathInputPreview,
   pixelMathTarget,
+  pngOnlyInputNotice,
   psfUseOf,
+  sectionInputName,
   samePath,
   showsPsfCrumb,
   withStep,
@@ -29,6 +36,7 @@ import {
   compositeInputFor,
   compositeInputLabel,
   compositeInputPreview,
+  compositeModeAfterRun,
   compositeStepOutcome,
   samePreview,
   withCompositePsfKernel,
@@ -39,6 +47,7 @@ import { wizardStepStaleAfterCompositeWrite } from "../../utils/compositeSync";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
+import { beginCompositeCheck } from "../../hooks/useProcessingRun";
 import { toDims } from "../../utils/stackingOutputs";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { CompositeInputView } from "./compositeProps";
@@ -172,6 +181,10 @@ interface Crumb {
   current: boolean;
 }
 
+function baseStillIs(key: string, filePath: string, basePath: string): boolean {
+  return samePath(chainBasePath(getRenderRecord(key)?.chain ?? EMPTY_CHAIN, filePath), basePath);
+}
+
 function chainCrumbs(first: string, showPsf: boolean, currentOf: (step: ChainStep) => boolean | null): Crumb[] {
   const crumbs: Crumb[] = [{ label: first, current: false }];
   for (const s of CHAIN_ORDER) {
@@ -243,7 +256,7 @@ function compositeBannerOf(view: CompositeInputView): string | undefined {
 function ProcessingTabInner() {
   const { file } = useFileContext();
   const { chain, processed } = useRenderContext();
-  const { publishProcessed, setChain } = useRenderActions();
+  const { publishProcessed, setChain, currentFileKey } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
   const { setCompositePreviewUrl, setCompositeStf, setCompositeAutoStf, setCompositeStfLinked, replaceParked } = useCompositeActions();
   const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
@@ -252,6 +265,16 @@ function ProcessingTabInner() {
   const compositeMode = useCompositeMode();
   const compositeModeRef = useRef(compositeMode);
   compositeModeRef.current = compositeMode;
+  const mountedRef = useRef(false);
+  const unmountCheckRef = useRef<(() => boolean) | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    unmountCheckRef.current = null;
+    return () => {
+      mountedRef.current = false;
+      unmountCheckRef.current = beginCompositeCheck(currentFileKey);
+    };
+  }, [currentFileKey]);
   const compositeChain = useCompositeChain();
   const [active, setActive] = useState<ProcessingSection>("background");
   const disabledReason = rgbFitsDisabledReason({ fileIsRgb: !!file?.result?.is_rgb, compositeMode });
@@ -263,17 +286,18 @@ function ProcessingTabInner() {
   const runKey = fileKeyOf(file);
   const runPath = file?.path ?? null;
   const fileName = file?.name ?? "";
+  const filePreviewUrl = file?.result?.previewUrl ?? null;
+  const chainBase = chain.base ?? null;
+  const original = chainBasePath(chain, runPath ?? "");
 
-  const inputs = useMemo(() => {
-    const original = runPath ?? "";
-    return {
-      denoise: chainInput(chain, "denoise", original),
-      deconv: chainInput(chain, "deconv", original),
-      stretch: chainInput(chain, "stretch", original),
-      localContrast: chainInput(chain, "localContrast", original),
-      tone: chainInput(chain, "tone", original),
-    };
-  }, [chain, runPath]);
+  const inputs = useMemo(() => ({
+    background: chainInput(chain, "background", original),
+    denoise: chainInput(chain, "denoise", original),
+    deconv: chainInput(chain, "deconv", original),
+    stretch: chainInput(chain, "stretch", original),
+    localContrast: chainInput(chain, "localContrast", original),
+    tone: chainInput(chain, "tone", original),
+  }), [chain, original]);
 
   const compositeInputs = useMemo(() => {
     if (!compositeMode) return null;
@@ -297,6 +321,7 @@ function ProcessingTabInner() {
         const dimensions = toDims(result.dimensions);
         const kind: ProcessedKind = "processing";
         const input = inputPath ?? runPath;
+        if (step === "background" && !baseStillIs(runKey, runPath, input)) return;
         if (!fits) {
           if (previewUrl) publishProcessed(runKey, { fitsPath: null, previewUrl, dimensions: null, label, kind, inputPath: input });
           return;
@@ -313,8 +338,8 @@ function ProcessingTabInner() {
   );
 
   const handleBackgroundDone = useMemo(
-    () => makeStepDone("background", STEP_LABELS.background, runPath),
-    [makeStepDone, runPath],
+    () => makeStepDone("background", STEP_LABELS.background, original),
+    [makeStepDone, original],
   );
   const handleDenoiseDone = useMemo(
     () => makeStepDone("denoise", STEP_LABELS.denoise, inputs.denoise.path),
@@ -361,7 +386,11 @@ function ProcessingTabInner() {
         step,
         displayed: result.displayed,
         accepted: compositeChainHolds(compositeChainStore.get(), step, previewUrl),
-        compositeMode: compositeModeRef.current,
+        compositeMode: compositeModeAfterRun({
+          mounted: mountedRef.current,
+          compositeModeAtLastRender: compositeModeRef.current,
+          unchangedSinceUnmount: unmountCheckRef.current?.() ?? true,
+        }),
       });
       if (outcome.invalidatesWizard) {
         const staleStep = wizardStepStaleAfterCompositeWrite(wizardReadyRef.current);
@@ -393,44 +422,55 @@ function ProcessingTabInner() {
       };
       publishProcessed(
         runKey,
-        { fitsPath: fits, previewUrl, dimensions, label: STEP_LABELS.pixelMath, kind: "pixelmath", inputPath: pixelMathTarget(processed, runPath) },
+        {
+          fitsPath: fits,
+          previewUrl,
+          dimensions,
+          label: STEP_LABELS.pixelMath,
+          kind: "pixelmath",
+          inputPath: pixelMathTarget(processed, runPath),
+          inputPreviewUrl: pixelMathInputPreview(processed, filePreviewUrl),
+        },
         (c) => withStep(c, "pixelMath", entry),
       );
     },
-    [runKey, runPath, processed, publishProcessed],
+    [runKey, runPath, processed, filePreviewUrl, publishProcessed],
   );
 
   const handleDebayerPreview = useCallback(
-    (url: string | null | undefined) => {
+    (url: string | null | undefined, dims: readonly number[] | null | undefined) => {
       if (!runKey || !runPath || !url) return;
-      publishProcessed(runKey, { fitsPath: null, previewUrl: url, dimensions: null, label: "Debayer", kind: "debayer", inputPath: runPath });
+      publishProcessed(runKey, debayerPreviewRecord(runPath, url, dims));
     },
     [runKey, runPath, publishProcessed],
   );
 
   const handlePsfReady = useCallback(
     (kernel: number[][]) => {
-      if (!runKey) return;
+      if (!runKey || !baseStillIs(runKey, runPath ?? "", original)) return;
       setChain(runKey, (c) => ({ ...c, psfKernel: kernel }));
     },
-    [runKey, setChain],
+    [runKey, runPath, original, setChain],
   );
 
   const handleCompositePsfReady = useCallback((kernel: number[][], liveGeneration: number) => {
     compositeChainStore.update((c) => withCompositePsfKernel(c, kernel, liveGeneration));
   }, []);
 
-  const originalPreviewUrl = file?.result?.previewUrl ?? null;
+  const originalPreviewUrl = chainBase ? chainBase.previewUrl : filePreviewUrl;
+  const originalLabel = chainBase?.label ?? "Original";
   const inputPreviewOf = (input: ChainInput): string | null => input.entry?.previewUrl ?? (input.from ? null : originalPreviewUrl);
-  const inputLabelOf = (input: ChainInput): string => (input.from ? STEP_LABELS[input.from] : "Original");
-  const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : undefined);
+  const inputLabelOf = (input: ChainInput): string => (input.from ? STEP_LABELS[input.from] : originalLabel);
+  const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : chainBase?.label);
   const bannerFor = (fileInput: ChainInput, compositeInput: CompositeInputView | undefined): string | undefined =>
     compositeInput ? compositeBannerOf(compositeInput) : bannerOf(fileInput);
-  const pixelMathBase = pixelMathCompareBase(chain, processed, { path: runPath ?? "", previewUrl: originalPreviewUrl }, STEP_LABELS);
+  const pixelMathBase = pixelMathCompareBase(chain, processed, { path: runPath ?? "", previewUrl: filePreviewUrl }, STEP_LABELS);
+  const inputNotice = compositeMode ? null : pngOnlyInputNotice(processed, sectionInputName(active, chainBase, fileName));
 
+  const backgroundInput = useMemo(() => backgroundInputFor(file, chainBase), [file, chainBase]);
   const withPath = useCallback(
-    (path: string) => (file ? (path === file.path ? file : { ...file, path }) : null),
-    [file],
+    (path: string) => (backgroundInput ? (path === backgroundInput.path ? backgroundInput : { ...backgroundInput, path }) : null),
+    [backgroundInput],
   );
   const denoiseInput = useMemo(() => withPath(inputs.denoise.path), [withPath, inputs.denoise.path]);
   const deconvInput = useMemo(() => withPath(inputs.deconv.path), [withPath, inputs.deconv.path]);
@@ -446,7 +486,7 @@ function ProcessingTabInner() {
       : undefined;
 
   const displayedFits = processed?.fitsPath ?? null;
-  const originalName = file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original";
+  const originalName = chainBase?.label ?? (file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original");
   const crumbs = compositeMode ? compositeCrumbs(compositeChain, compositePreviewUrl) : fileCrumbs(chain, displayedFits, originalName);
   const activeSteps: Partial<Record<ChainStep, unknown>> = compositeMode ? compositeChain.steps : chain.steps;
   const activePsfKernel = compositeMode ? compositeChain.psfKernel : chain.psfKernel;
@@ -485,6 +525,12 @@ function ProcessingTabInner() {
         </div>
       )}
 
+      {inputNotice && (
+        <div role="note" data-testid="processing-input-notice" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
+          {inputNotice}
+        </div>
+      )}
+
       <Suspense
         fallback={
           <div className="flex items-center justify-center py-12">
@@ -507,10 +553,10 @@ function ProcessingTabInner() {
           </div>
           <div style={{ display: active === "background" ? "block" : "none" }}>
             <BackgroundPanel
-              selectedFile={file}
+              selectedFile={backgroundInput}
               outputDir={resolvedDir}
               onProcessingDone={handleBackgroundDone}
-              chainedFrom={undefined}
+              chainedFrom={bannerFor(inputs.background, compositeInputs?.background)}
               fileKey={runKey}
               compositeMode={compositeMode}
               compositeInput={compositeInputs?.background ?? null}

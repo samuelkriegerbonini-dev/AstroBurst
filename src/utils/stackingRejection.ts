@@ -114,7 +114,12 @@ export function rejectionFrameHint(
 }
 
 const STACK_STAGE_LABELS: Record<string, string> = {
+  low_memory: "Low memory: this run may page to disk",
   load_frame: "Loading frames",
+  align: "Aligning frames",
+  combine: "Combining frames",
+  calibrate: "Calibrating",
+  drizzle: "Drizzling frames",
   render: "Rendering",
   save: "Saving",
   complete: "Finishing",

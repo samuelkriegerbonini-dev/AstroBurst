@@ -183,7 +183,7 @@ function FFTPanel({ filePath, computeFftSpectrum }: FFTPanelProps) {
             <span>DC={fftData.dc_magnitude?.toExponential(2)}</span>
             <span>max={fftData.max_magnitude?.toExponential(2)}</span>
             {fftData.windowed && <span style={{ color: "rgba(34,211,238,0.5)" }}>Hann</span>}
-            <span className="text-zinc-700">ln(1+|F|)</span>
+            <span className="text-[var(--ab-text-4)]">ln(1+|F|)</span>
           </div>
         </>
       )}

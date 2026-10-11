@@ -3,9 +3,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Context;
 use ndarray::Array2;
+use rayon::prelude::*;
 use serde_json::json;
 
-use crate::core::imaging::stats::compute_image_stats;
+use crate::core::imaging::sampling::{cell_range, preview_dims};
+use crate::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{AlignMethod, WhiteBalance};
@@ -417,6 +419,110 @@ pub(crate) fn compute_linked_stf_with_stats(
     (stf, combined)
 }
 
+type RgbPlanes = (Array2<f32>, Array2<f32>, Array2<f32>);
+
+const PREVIEW_PEAK_SIGNIFICANCE: f64 = 3.0;
+const LUMINANCE_CHUNK: usize = 65536;
+
+fn pixel_luminance(px: [f32; 3]) -> Option<f64> {
+    let valid = px.iter().filter(|v| is_valid_pixel(**v));
+    let (lum, n) = valid.fold((0.0f64, 0u8), |(lum, n), &v| (lum + v as f64, n + 1));
+    (n > 0).then_some(lum)
+}
+
+fn luminance_sigma(planes: [&[f32]; 3]) -> f64 {
+    let (n, sum, sum_sq) = (0..planes[0].len())
+        .into_par_iter()
+        .with_min_len(LUMINANCE_CHUNK)
+        .filter_map(|i| pixel_luminance([planes[0][i], planes[1][i], planes[2][i]]))
+        .fold(|| (0u64, 0.0f64, 0.0f64), |(n, s, q), l| (n + 1, s + l, q + l * l))
+        .reduce(|| (0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    if n == 0 {
+        return 0.0;
+    }
+    let mean = sum / n as f64;
+    (sum_sq / n as f64 - mean * mean).max(0.0).sqrt()
+}
+
+fn reduce_rgb_cell(
+    planes: [&[f32]; 3],
+    cols: usize,
+    ys: std::ops::Range<usize>,
+    xs: std::ops::Range<usize>,
+    peak_scale: f64,
+) -> [f32; 3] {
+    let mut sum = [0.0f64; 3];
+    let mut count = [0u64; 3];
+    let mut lum_sum = 0.0f64;
+    let mut lum_count = 0u64;
+    let mut peak: Option<(f64, [f32; 3])> = None;
+    for y in ys {
+        for x in xs.clone() {
+            let i = y * cols + x;
+            let px = [planes[0][i], planes[1][i], planes[2][i]];
+            let Some(lum) = pixel_luminance(px) else { continue };
+            for (c, &v) in px.iter().enumerate().filter(|(_, v)| is_valid_pixel(**v)) {
+                sum[c] += v as f64;
+                count[c] += 1;
+            }
+            lum_sum += lum;
+            lum_count += 1;
+            if peak.is_none_or(|(best, _)| lum > best) {
+                peak = Some((lum, px));
+            }
+        }
+    }
+    let Some((peak_lum, peak_px)) = peak else { return [f32::NAN; 3] };
+    let d = peak_lum - lum_sum / lum_count as f64;
+    let w = if d > 0.0 { d / (d + peak_scale) } else { 0.0 };
+    std::array::from_fn(|c| {
+        if count[c] == 0 {
+            return f32::NAN;
+        }
+        let mean = sum[c] / count[c] as f64;
+        if w > 0.0 && is_valid_pixel(peak_px[c]) {
+            (mean + w * (peak_px[c] as f64 - mean)) as f32
+        } else {
+            mean as f32
+        }
+    })
+}
+
+pub(crate) fn reduce_rgb_for_preview(
+    r: &Array2<f32>,
+    g: &Array2<f32>,
+    b: &Array2<f32>,
+    max_dim: usize,
+) -> Option<RgbPlanes> {
+    let (rows, cols) = r.dim();
+    if g.dim() != r.dim() || b.dim() != r.dim() || (rows <= max_dim && cols <= max_dim) {
+        return None;
+    }
+    let (r, g, b) = (r.as_standard_layout(), g.as_standard_layout(), b.as_standard_layout());
+    let planes = [r.as_slice()?, g.as_slice()?, b.as_slice()?];
+    let (dst_rows, dst_cols) = preview_dims(rows, cols, max_dim);
+    let peak_scale = PREVIEW_PEAK_SIGNIFICANCE * luminance_sigma(planes);
+    let mut out = [0, 1, 2].map(|_| vec![f32::NAN; dst_rows * dst_cols]);
+    let [out_r, out_g, out_b] = &mut out;
+    out_r
+        .par_chunks_mut(dst_cols)
+        .zip(out_g.par_chunks_mut(dst_cols))
+        .zip(out_b.par_chunks_mut(dst_cols))
+        .enumerate()
+        .for_each(|(dy, ((row_r, row_g), row_b))| {
+            let ys = cell_range(dy, rows, dst_rows);
+            for dx in 0..dst_cols {
+                let xs = cell_range(dx, cols, dst_cols);
+                let [vr, vg, vb] = reduce_rgb_cell(planes, cols, ys.0..ys.1, xs.0..xs.1, peak_scale);
+                row_r[dx] = vr;
+                row_g[dx] = vg;
+                row_b[dx] = vb;
+            }
+        });
+    let [out_r, out_g, out_b] = out.map(|v| Array2::from_shape_vec((dst_rows, dst_cols), v).ok());
+    Some((out_r?, out_g?, out_b?))
+}
+
 pub(crate) fn render_rgb_preview(
     r: &Array2<f32>,
     g: &Array2<f32>,
@@ -424,59 +530,13 @@ pub(crate) fn render_rgb_preview(
     path: &str,
     max_dim: usize,
 ) -> anyhow::Result<()> {
-    use rayon::prelude::*;
     use crate::infra::render::rgb::render_rgb;
 
     if r.dim() != g.dim() || g.dim() != b.dim() {
         return render_rgb(r, g, b, path);
     }
-
-    let (rows, cols) = r.dim();
-
-    let r_slice = r.as_slice().context("R not contiguous")?;
-    let g_slice = g.as_slice().context("G not contiguous")?;
-    let b_slice = b.as_slice().context("B not contiguous")?;
-
-    let (pw, ph, y_ratio, x_ratio) = if rows <= max_dim && cols <= max_dim {
-        (cols, rows, 1.0, 1.0)
-    } else {
-        let scale = max_dim as f64 / (rows.max(cols) as f64);
-        let pw = ((cols as f64) * scale).round().max(1.0) as usize;
-        let ph = ((rows as f64) * scale).round().max(1.0) as usize;
-        (pw, ph, rows as f64 / ph as f64, cols as f64 / pw as f64)
-    };
-
-    let mut preview = vec![0u8; pw * ph * 3];
-
-    preview
-        .par_chunks_mut(pw * 3)
-        .enumerate()
-        .for_each(|(dy, row_buf)| {
-            let sy = ((dy as f64) * y_ratio).min((rows - 1) as f64) as usize;
-            let src_base = sy * cols;
-            for dx in 0..pw {
-                let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
-                let si = src_base + sx;
-                let o = dx * 3;
-                row_buf[o] = (r_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-                row_buf[o + 1] = (g_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-                row_buf[o + 2] = (b_slice[si].clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        });
-
-    let file = std::fs::File::create(path).context("Failed to create output file")?;
-    let buf_writer = std::io::BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let encoder = image::codecs::png::PngEncoder::new_with_quality(
-        buf_writer,
-        image::codecs::png::CompressionType::Fast,
-        image::codecs::png::FilterType::Sub,
-    );
-    use image::ImageEncoder;
-    encoder
-        .write_image(&preview, pw as u32, ph as u32, image::ColorType::Rgb8.into())
-        .context("Failed to write RGB preview PNG")?;
-
-    Ok(())
+    let unit = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    render_rgb_preview_with_stf(r, g, b, unit, unit, unit, path, max_dim)
 }
 
 pub(crate) fn render_rgb_preview_with_stf(
@@ -489,8 +549,6 @@ pub(crate) fn render_rgb_preview_with_stf(
     path: &str,
     max_dim: usize,
 ) -> anyhow::Result<()> {
-    use rayon::prelude::*;
-
     if r.dim() != g.dim() || g.dim() != b.dim() {
         anyhow::bail!(
             "Composite channels differ in size (R {:?}, G {:?}, B {:?}); re-run Blend",
@@ -499,36 +557,30 @@ pub(crate) fn render_rgb_preview_with_stf(
             b.dim()
         );
     }
+    let reduced = reduce_rgb_for_preview(r, g, b, max_dim);
+    let (r, g, b) = match &reduced {
+        Some((r, g, b)) => (r, g, b),
+        None => (r, g, b),
+    };
     let (rows, cols) = r.dim();
 
     let r_slice = r.as_slice().context("R not contiguous")?;
     let g_slice = g.as_slice().context("G not contiguous")?;
     let b_slice = b.as_slice().context("B not contiguous")?;
 
-    let (pw, ph, y_ratio, x_ratio) = if rows <= max_dim && cols <= max_dim {
-        (cols, rows, 1.0, 1.0)
-    } else {
-        let scale = max_dim as f64 / (rows.max(cols) as f64);
-        let pw = ((cols as f64) * scale).round().max(1.0) as usize;
-        let ph = ((rows as f64) * scale).round().max(1.0) as usize;
-        (pw, ph, rows as f64 / ph as f64, cols as f64 / pw as f64)
-    };
-
-    let mut preview = vec![0u8; pw * ph * 3];
+    let mut preview = vec![0u8; rows * cols * 3];
 
     preview
-        .par_chunks_mut(pw * 3)
-        .enumerate()
-        .for_each(|(dy, row_buf)| {
-            let sy = ((dy as f64) * y_ratio).min((rows - 1) as f64) as usize;
-            let src_base = sy * cols;
-            for dx in 0..pw {
-                let sx = ((dx as f64) * x_ratio).min((cols - 1) as f64) as usize;
-                let si = src_base + sx;
-                let o = dx * 3;
-                row_buf[o] = stf_r(r_slice[si]);
-                row_buf[o + 1] = stf_g(g_slice[si]);
-                row_buf[o + 2] = stf_b(b_slice[si]);
+        .par_chunks_mut(cols * 3)
+        .zip(r_slice.par_chunks(cols))
+        .zip(g_slice.par_chunks(cols))
+        .zip(b_slice.par_chunks(cols))
+        .for_each(|(((row_buf, row_r), row_g), row_b)| {
+            for x in 0..cols {
+                let o = x * 3;
+                row_buf[o] = stf_r(row_r[x]);
+                row_buf[o + 1] = stf_g(row_g[x]);
+                row_buf[o + 2] = stf_b(row_b[x]);
             }
         });
 
@@ -541,7 +593,7 @@ pub(crate) fn render_rgb_preview_with_stf(
     );
     use image::ImageEncoder;
     encoder
-        .write_image(&preview, pw as u32, ph as u32, image::ColorType::Rgb8.into())
+        .write_image(&preview, cols as u32, rows as u32, image::ColorType::Rgb8.into())
         .context("Failed to write RGB preview PNG")?;
 
     Ok(())
@@ -611,6 +663,54 @@ mod tests {
 
         let decoded = image::open(&path).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (10, 5));
+    }
+
+    fn star_field_plane(rows: usize, cols: usize, background: f32, stars: &[(usize, usize, f32)]) -> Array2<f32> {
+        let mut plane = Array2::from_elem((rows, cols), background);
+        for &(y, x, v) in stars {
+            plane[[y, x]] = v;
+        }
+        plane
+    }
+
+    #[test]
+    fn rgb_preview_keeps_single_pixel_stars_when_downscaled() {
+        let stars: Vec<(usize, usize, f32)> = (0..50)
+            .map(|k| (4 * (5 + (k / 10) * 18) + 1 + k % 3, 4 * (5 + (k % 10) * 9) + 1 + (k + 1) % 3, 1.0))
+            .collect();
+        let plane = star_field_plane(400, 400, 0.1, &stars);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stars.png");
+
+        render_rgb_preview(&plane, &plane, &plane, path.to_str().unwrap(), 100).unwrap();
+
+        let decoded = image::open(&path).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (100, 100));
+        let background = decoded.get_pixel(0, 0)[1] as u32;
+        let kept = stars
+            .iter()
+            .filter(|&&(y, x, _)| decoded.get_pixel((x / 4) as u32, (y / 4) as u32).0.iter().any(|&v| v as u32 > background + 40))
+            .count();
+        assert!(kept >= 45, "only {kept} of 50 single-pixel stars survived the downscale (background {background})");
+    }
+
+    #[test]
+    fn rgb_preview_reduction_keeps_a_star_colour() {
+        let noisy = |seed: u32| test_channel(64, 64, seed).mapv(|u| 10.0 + 6.0 * (u - 0.5));
+        let (mut r, mut g, mut b) = (noisy(11), noisy(12), noisy(13));
+        let (sy, sx) = (33, 34);
+        r[[sy, sx]] = 210.0;
+        g[[sy, sx]] = 110.0;
+        b[[sy, sx]] = 60.0;
+
+        let (rr, rg, rb) = reduce_rgb_for_preview(&r, &g, &b, 16).expect("a 64 px image is reduced for a 16 px preview");
+
+        assert_eq!(rr.dim(), (16, 16));
+        let cell = [sy / 4, sx / 4];
+        let excess = [rr[cell] - 10.0, rg[cell] - 10.0, rb[cell] - 10.0];
+        assert!(excess[2] > 25.0, "the star faded in its cell: {excess:?}");
+        assert!((excess[0] / excess[2] / 4.0 - 1.0).abs() < 0.01, "R:B is not 4:1 in {excess:?}");
+        assert!((excess[1] / excess[2] / 2.0 - 1.0).abs() < 0.01, "G:B is not 2:1 in {excess:?}");
     }
 
     #[test]

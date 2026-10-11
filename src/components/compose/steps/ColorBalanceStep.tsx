@@ -1,4 +1,4 @@
-import { useState, useCallback, useId, useMemo, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useId, useMemo, useEffect, useRef, useSyncExternalStore, lazy, Suspense } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import type { WizardState } from "../wizard";
 import { autoWbErrorText, isNarrowbandWorkflow, scnrAutoEnable, spccBlockReason, spccInputs, type CompositeOp, type FilterDetectionRef } from "../../../utils/wizard";
@@ -10,6 +10,9 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { wbSliderBounds, wbFactorsOutOfRange, WB_APPLY_MIN, WB_APPLY_MAX } from "../../../utils/whiteBalanceRange";
 import { spccLevelNote } from "../../../utils/levelMatch";
 import { spccWavelengths } from "../../../utils/spccWavelengths";
+import { solvedWcsVersion, spccSolvedWcsPath, spccWcsSource, subscribeSolvedWcs } from "../../../utils/solvedWcs";
+import { stfTripleOf, wbStretchNote, type CompositeStfTriple } from "../../../utils/compositeStfResponse";
+import { useCompositeStf } from "../../../context/CompositeContext";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -20,7 +23,7 @@ interface ColorBalanceStepProps {
   onWbChange: (mode: WizardState["wbMode"], r?: number, g?: number, b?: number) => void;
   onSpccFactors: (factors: { r: number; g: number; b: number }) => void;
   onScnrChange: (enabled: boolean, amount?: number, method?: string, preserveLuminance?: boolean) => void;
-  onResult: (png: string | null, autoStf?: { shadow: number; midtone: number; highlight: number }) => void;
+  onResult: (png: string | null, stf?: CompositeStfTriple) => void;
   onCompositeOp: (op: CompositeOp) => void;
 }
 
@@ -29,6 +32,9 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   const spccBlocked = useMemo(() => spccBlockReason(state, doneFiles, filterDetections), [state, doneFiles, filterDetections]);
   const levelNote = useMemo(() => spccLevelNote(state), [state]);
   const wavelengths = useMemo(() => spccWavelengths(state, doneFiles), [state, doneFiles]);
+  useSyncExternalStore(subscribeSolvedWcs, solvedWcsVersion, solvedWcsVersion);
+  const wcsSource = spccWcsSource(state);
+  const { compositeStfLinked } = useCompositeStf();
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -42,6 +48,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [scnrApplied, setScnrApplied] = useState(false);
+  const [stretchNote, setStretchNote] = useState<string | null>(null);
 
   const [scnrMethod, setScnrMethod] = useState<"average" | "maximum">(state.scnrMethod);
   const [preserveLum, setPreserveLum] = useState(state.scnrPreserveLuminance);
@@ -164,7 +171,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
       const scnr = state.scnrEnabled
         ? { enabled: true, method: scnrMethod, amount: state.scnrAmount, preserveLuminance: preserveLum }
         : undefined;
-      const res = await calibrateAndScnr(dir, appliedR, appliedG, appliedB, scnr);
+      const res = await calibrateAndScnr(dir, appliedR, appliedG, appliedB, scnr, compositeStfLinked);
       onCompositeOp({
         kind: "colorBalance",
         mode: state.wbMode,
@@ -174,9 +181,10 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
         scnr: res.scnr_applied && scnr ? { method: scnr.method, amount: scnr.amount } : null,
       });
       setScnrApplied(res.scnr_applied);
+      setStretchNote(wbStretchNote(res.blend_stf_linked ?? compositeStfLinked, [appliedR, appliedG, appliedB]));
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
-        onResult(url, res.auto_stf ?? undefined);
+        onResult(url, stfTripleOf(res) ?? undefined);
       }
       if (res?.elapsed_ms) setElapsed(res.elapsed_ms);
     } catch (e) {
@@ -184,31 +192,32 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
     } finally {
       setLoading(false);
     }
-  }, [appliedR, appliedG, appliedB, state.wbMode, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, onResult, onCompositeOp]);
+  }, [appliedR, appliedG, appliedB, state.wbMode, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, compositeStfLinked, onResult, onCompositeOp]);
 
   const handleReset = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await resetWb(await getOutputDir());
+      const res = await resetWb(await getOutputDir(), compositeStfLinked);
       setLocalR(1.0);
       setLocalG(1.0);
       setLocalB(1.0);
       setEmptyChannels([]);
       setElapsed(null);
       setScnrApplied(false);
+      setStretchNote(null);
       onWbChange("manual", 1.0, 1.0, 1.0);
       onCompositeOp({ kind: "resetColorBalance" });
       if (res?.png_path) {
         const url = await getPreviewUrl(res.png_path);
-        onResult(url, res.auto_stf ?? undefined);
+        onResult(url, stfTripleOf(res) ?? undefined);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [onResult, onWbChange, onCompositeOp]);
+  }, [compositeStfLinked, onResult, onWbChange, onCompositeOp]);
 
   const isFactorsNeutral = appliedR === 1.0 && appliedG === 1.0 && appliedB === 1.0;
 
@@ -298,6 +307,8 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
             rPath={rPath}
             gPath={gPath}
             bPath={bPath}
+            wcsPath={spccSolvedWcsPath(state, wcsSource)}
+            wcsReason={wcsSource.reason}
             wavelengthsNm={wavelengths.nm}
             onFactorsReady={handleSpccFactors}
           />
@@ -409,6 +420,9 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
         <div className="text-[9px] text-zinc-500">
           {elapsed}ms{scnrApplied ? " | SCNR applied" : ""}
         </div>
+      )}
+      {stretchNote && (
+        <div data-testid="wb-stretch-note" className="text-[9px] text-amber-400/90">{stretchNote}</div>
       )}
       {error && <div className="text-[9px] text-red-400">{error}</div>}
 

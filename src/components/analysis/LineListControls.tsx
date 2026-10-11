@@ -3,6 +3,7 @@ import type { VelocityConvention } from "../../shared/types/spectral";
 import { conventionLabel } from "../../utils/spectralAxis";
 import {
   LINE_FAMILIES,
+  MAX_REDSHIFT,
   REST_LINES,
   familyLabel,
   formatRedshift,
@@ -15,6 +16,7 @@ import {
   type LineFamily,
   type LineListAvailability,
 } from "../../utils/lineList";
+import { DecimalField } from "../ui";
 
 interface LineListControlsProps {
   visible: boolean;
@@ -33,13 +35,10 @@ interface LineListControlsProps {
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:border-violet-500/50 w-full disabled:opacity-40";
-const INVALID_INPUT_CLASS = "border-red-500/60";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const ACCENT_COLOR = "#22d3ee";
-
-function inputClass(valid: boolean): string {
-  return valid ? INPUT_CLASS : `${INPUT_CLASS} ${INVALID_INPUT_CLASS}`;
-}
+const REDSHIFT_RANGE_ERROR = `Use a redshift above -1 and at most ${MAX_REDSHIFT}`;
+const SYSTEMIC_RANGE_ERROR = `Use a velocity whose redshift is above -1 and at most ${MAX_REDSHIFT}`;
 
 function LineListControls({
   visible,
@@ -107,28 +106,24 @@ function LineListControls({
           <label htmlFor={redshiftId} className={LABEL_CLASS}>
             Redshift z
           </label>
-          <input
+          <DecimalField
             id={redshiftId}
-            type="number"
-            step="any"
             value={zText}
-            aria-invalid={zValid ? undefined : true}
-            onChange={(e) => handleRedshiftText(e.target.value)}
-            className={inputClass(zValid)}
+            error={zValid ? null : REDSHIFT_RANGE_ERROR}
+            onChange={handleRedshiftText}
+            className={INPUT_CLASS}
           />
         </div>
         <div className="flex-1 flex flex-col gap-0.5">
           <label htmlFor={systemicId} className={LABEL_CLASS}>
             {`v_sys, ${conventionLabel(convention)} (km/s)`}
           </label>
-          <input
+          <DecimalField
             id={systemicId}
-            type="number"
-            step="any"
             value={vText}
-            aria-invalid={vValid ? undefined : true}
-            onChange={(e) => handleSystemicText(e.target.value)}
-            className={inputClass(vValid)}
+            error={vValid ? null : SYSTEMIC_RANGE_ERROR}
+            onChange={handleSystemicText}
+            className={INPUT_CLASS}
           />
         </div>
       </div>
@@ -145,7 +140,7 @@ function LineListControls({
               className="px-2 py-0.5 rounded border transition-colors"
               style={{
                 borderColor: enabled ? ACCENT_COLOR : "var(--ab-border)",
-                color: enabled ? ACCENT_COLOR : "#71717a",
+                color: enabled ? ACCENT_COLOR : "var(--ab-text-3)",
               }}
             >
               {familyLabel(family)}

@@ -21,6 +21,10 @@ export function exportFileName(pathOrRef: string, suffix: string, ext: string, s
   return `${exportStem(pathOrRef)}${planeTag(pathOrRef)}${suffix}_${stamp}.${ext}`;
 }
 
+export function cubeFrameExportName(pathOrRef: string, index: number, ext: string, stamp: string): string {
+  return exportFileName(pathOrRef, `_frame_${String(index).padStart(4, "0")}`, ext, stamp);
+}
+
 export const COMPOSITE_EXPORT_STEM = "astroburst_composite";
 
 export function compositeExportName(suffix: string, ext: string, stamp: string): string {

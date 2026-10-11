@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Docking: a tool dropped on a group whose panel is open replaces that panel, which closes; Processing and Export inputs that were not run are lost, as when the panel is closed (the moved panel itself keeps its state).
+
 ## [0.6.7.1] - 2026-10-10
 
 ### Changed

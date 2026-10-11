@@ -4,7 +4,14 @@ const { typedInvokeMock, withPreviewMock } = vi.hoisted(() => ({ typedInvokeMock
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: withPreviewMock }));
 
-import { skySeparation, worldToPixel, writeSolvedWcs, type PlateSolveResult } from "../astrometry";
+import {
+  PLATE_SOLVE_PROGRESS_EVENT,
+  cancelPlateSolve,
+  skySeparation,
+  worldToPixel,
+  writeSolvedWcs,
+  type PlateSolveResult,
+} from "../astrometry";
 
 describe("PlateSolveResult", () => {
   it("declares only the SolveResult fields plate_solve_cmd still serializes", () => {
@@ -18,6 +25,17 @@ describe("PlateSolveResult", () => {
       | "wcs_cards"
     >();
     expectTypeOf<PlateSolveResult["wcs_cards"]>().toEqualTypeOf<[string, string][]>();
+  });
+});
+
+describe("cancelPlateSolve", () => {
+  beforeEach(() => typedInvokeMock.mockReset());
+
+  it("cancels the running solve through the plate-solve-progress event plate_solve_cmd registers", async () => {
+    typedInvokeMock.mockResolvedValueOnce(true);
+    await expect(cancelPlateSolve()).resolves.toBe(true);
+    expect(PLATE_SOLVE_PROGRESS_EVENT).toBe("plate-solve-progress");
+    expect(typedInvokeMock).toHaveBeenCalledWith("cancel_progress_cmd", { event: "plate-solve-progress" });
   });
 });
 

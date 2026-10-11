@@ -49,3 +49,54 @@ describe("fileStore table-only files", () => {
     expect(fileStore.getIsComplete()).toBe(true);
   });
 });
+
+describe("fileStore requeue", () => {
+  beforeEach(() => {
+    fileStore.reset();
+  });
+
+  it("requeueFile turns an errored row back into a queued one and takes it out of the failed count", () => {
+    fileStore.addFiles([{ name: "pm_out.fits", path: "C:/out/pm_out.fits", size: 0 }]);
+    const [row] = fileStore.getFiles();
+    fileStore.fileStarted(row.id);
+    fileStore.fileError(row.id, "No such file");
+    expect(fileStore.getIsComplete()).toBe(true);
+    const statsVersion = fileStore.getStatsVersion();
+
+    expect(fileStore.requeueFile(row.id)).toBe(true);
+
+    expect(fileStore.getFile(row.id)).toMatchObject({ status: "queued", error: null, startedAt: null, finishedAt: null });
+    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0 });
+    expect(fileStore.getStatsVersion()).toBeGreaterThan(statsVersion);
+    expect(fileStore.getIsComplete()).toBe(false);
+  });
+
+  it("requeueFile leaves rows that did not fail alone", () => {
+    fileStore.addFiles([
+      { name: "a.fits", path: "C:/d/a.fits", size: 0 },
+      { name: "b.fits", path: "C:/d/b.fits", size: 0 },
+    ]);
+    const [done, queued] = fileStore.getFiles();
+    fileStore.fileDone(done.id, null);
+    expect(fileStore.requeueFile(done.id)).toBe(false);
+    expect(fileStore.requeueFile(queued.id)).toBe(false);
+    expect(fileStore.requeueFile("missing")).toBe(false);
+    expect(fileStore.getFile(done.id)?.status).toBe("done");
+    expect(fileStore.getStats()).toMatchObject({ done: 1, failed: 0 });
+  });
+
+  it("addFiles does not queue a second row for a path that is already waiting in the queue", () => {
+    fileStore.addFiles([{ name: "pm_out.fits", path: "C:\\out\\pm_out.fits", size: 0 }]);
+    fileStore.addFiles([
+      { name: "pm_out.fits", path: "c:/OUT/pm_out.fits", size: 0 },
+      { name: "other.fits", path: "C:/out/other.fits", size: 0 },
+    ]);
+    expect(fileStore.getFiles().map((f) => f.path)).toEqual(["C:\\out\\pm_out.fits", "C:/out/other.fits"]);
+    expect(fileStore.getStats().total).toBe(2);
+
+    const [first] = fileStore.getFiles();
+    fileStore.fileError(first.id, "No such file");
+    fileStore.addFiles([{ name: "pm_out.fits", path: "C:/out/pm_out.fits", size: 0 }]);
+    expect(fileStore.getFiles()).toHaveLength(3);
+  });
+});

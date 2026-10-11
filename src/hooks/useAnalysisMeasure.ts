@@ -33,18 +33,19 @@ export function useAnalysisMeasure(): AnalysisMeasure {
     const effectivePath = target.path;
     const compositeOnScreen = target.composite;
     const rgbPath = target.rgbPath;
+    const measureKey = analysisMeasureKey({ path: effectivePath, composite: compositeOnScreen, processedFitsPath, processedVersion });
     return {
       target,
       effectivePath,
       compositeOnScreen,
       rgbPath,
       regionKey,
-      measureKey: analysisMeasureKey({ path: effectivePath, composite: compositeOnScreen, processedFitsPath, processedVersion }),
+      measureKey,
       targetWidth: target.dimensions?.[0],
       targetHeight: target.dimensions?.[1],
       filePath,
       fileKey,
-      detectionScope: starDetectionScope({ path: effectivePath, composite: compositeOnScreen, rgbPath, compositeVersion }),
+      detectionScope: starDetectionScope({ path: effectivePath, measureKey, composite: compositeOnScreen, rgbPath, compositeVersion }),
       starsOnMeasuredImage: detectedStarsOnMeasuredImage({ compositeOnScreen, measuresFilePlanes: rgbPath !== null }),
     };
   }, [target, regionKey, processedFitsPath, processedVersion, filePath, fileKey, compositeVersion]);

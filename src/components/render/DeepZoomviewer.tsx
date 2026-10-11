@@ -5,6 +5,9 @@ import { generateTiles, generateTilesRgb } from "../../services/tiles";
 import { getOutputDirTiles, getPreviewUrl } from "../../infrastructure/tauri";
 import { computeMaxLevel, createTileSlotPool, readTilePyramid, tileSlotDir, tileUrl } from "../../utils/deepZoomTiles";
 
+export const DEEP_ZOOM_OVERLAYS_NOTICE =
+  "Deep Zoom shows the pixels only: the grid, regions, apertures and other overlays are not drawn here.";
+
 interface DeepZoomViewerProps {
   filePath: string | null;
   composite: boolean;
@@ -253,16 +256,20 @@ function DeepZoomViewer({
         </div>
       )}
 
-      {viewerReady && tiles && (
-        <div className="absolute bottom-3 left-3 z-10
-          text-[10px] font-mono text-zinc-600
-          bg-zinc-950/70 backdrop-blur-sm rounded px-2 py-1
-          border border-zinc-800/30 select-none pointer-events-none"
+      <div className="absolute bottom-3 left-3 right-3 z-10 flex flex-col items-start gap-1 select-none pointer-events-none">
+        <p
+          role="note"
+          className="text-[10px] text-zinc-400 bg-zinc-950/70 backdrop-blur-sm rounded px-2 py-1 border border-zinc-800/30"
         >
-          {tiles.width}x{tiles.height} | {tileSize}px tiles | {tiles.maxLevel + 1} levels | auto STF, display settings not applied
-          {sourceLabel && <> | {sourceLabel}</>}
-        </div>
-      )}
+          {DEEP_ZOOM_OVERLAYS_NOTICE}
+        </p>
+        {viewerReady && tiles && (
+          <div className="text-[10px] font-mono text-zinc-600 bg-zinc-950/70 backdrop-blur-sm rounded px-2 py-1 border border-zinc-800/30">
+            {tiles.width}x{tiles.height} | {tileSize}px tiles | {tiles.maxLevel + 1} levels | auto STF, display settings not applied
+            {sourceLabel && <> | {sourceLabel}</>}
+          </div>
+        )}
+      </div>
 
       {!viewerReady && !generating && tiles && (
         <div className="absolute inset-0 flex items-center justify-center">

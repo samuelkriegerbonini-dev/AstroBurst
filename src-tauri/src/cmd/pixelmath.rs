@@ -9,7 +9,7 @@ use crate::cmd::common::{
     blocking_cmd, derived_output_header, load_cached_full, output_stem, resolve_output_dir,
     save_auto_stf_preview_png, source_path, write_derived_fits, OutputValues,
 };
-use crate::core::imaging::stats::{finite_slice_stats, is_padding, is_valid_pixel};
+use crate::core::imaging::stats::{finite_output_stats, is_padding};
 use crate::core::pixelmath::{compile, evaluate, validate, OutputOptions, PixelMathError};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
@@ -163,15 +163,6 @@ pub(crate) fn output_header(source: Option<&HduHeader>, expression: &str, target
     set_long_value(&mut header, HEADER_PMEXPR, &header_safe(expression));
     set_long_value(&mut header, HEADER_PMSOURCE, &header_safe_path(target));
     header
-}
-
-pub(crate) fn finite_output_stats(arr: &Array2<f32>) -> (Option<ImageStats>, usize) {
-    let non_finite = arr.iter().filter(|v| !v.is_finite()).count();
-    let mut valid: Vec<f32> = arr.iter().copied().filter(|v| is_valid_pixel(*v)).collect();
-    if valid.is_empty() {
-        return (None, non_finite);
-    }
-    (Some(finite_slice_stats(&mut valid)), non_finite)
 }
 
 fn preview_display(result: &Array2<f32>, inputs: &[&Array2<f32>]) -> Array2<f32> {

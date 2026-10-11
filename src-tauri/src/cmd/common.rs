@@ -28,10 +28,10 @@ use crate::infra::render::grayscale::save_stf_png;
 use crate::types::constants::{
     HEADER_COMBINE_METHOD, HEADER_DISPLAY_REFERRED_CARD, HEADER_DRIZZLE_SCALE, HEADER_NCOMBINE, PLANE_KIND_ARRAY,
     PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME, RES_EXTVER, RES_INDEX, RES_IS_DQ, RES_IS_ERR,
-    RES_KEY, RES_KIND, RES_SOURCE_PATH,
+    RES_KEY, RES_KIND, RES_SOURCE_PATH, WIZARD_CACHE_PREFIX,
 };
 use crate::types::header::HduHeader;
-use crate::types::image_ref::{ImageRef, OutputStems, PlaneSelector};
+use crate::types::image_ref::{sanitize_fragment, ImageRef, OutputStems, PlaneSelector};
 
 pub(crate) use crate::infra::image_source::LoadedCompanions;
 
@@ -42,6 +42,7 @@ pub(crate) const HEADER_DISPLAY_REFERRED: &str = HEADER_DISPLAY_REFERRED_CARD;
 const DEFAULT_ABPROC: &str = "processed";
 const MAX_TRACKED_STAMPS: usize = 1024;
 const PREVIEW_PEAK_SIGNIFICANCE: f32 = 3.0;
+const READABLE_WIZARD_STEM_PREFIX: &str = "wizard_";
 
 const DERIVED_STRUCTURAL_CARDS: &[&str] = &["EXTNAME", "EXTVER", "EXTLEVEL", "INHERIT", "DATAMIN", "DATAMAX"];
 const AXIS_INDEXED_PREFIXES: &[&str] = &["NAXIS", "CTYPE", "CRVAL", "CRPIX", "CDELT", "CUNIT", "CROTA"];
@@ -188,9 +189,26 @@ fn with_output_stems<T>(f: impl FnOnce(&mut OutputStems) -> T) -> T {
     TEST_ISOLATED_OUTPUT_STEMS.with(|stems| f(&mut stems.borrow_mut()))
 }
 
+fn is_run_token(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn readable_cache_stem(key: &str) -> Option<String> {
+    let rest = key.strip_prefix(WIZARD_CACHE_PREFIX)?;
+    let bin_stage = rest
+        .strip_prefix('t')
+        .and_then(|tail| tail.split_once('_'))
+        .filter(|(token, tail)| is_run_token(token) && tail.trim_start_matches('_').contains('_'))
+        .map_or(rest, |(_, tail)| tail);
+    (!bin_stage.is_empty()).then(|| format!("{READABLE_WIZARD_STEM_PREFIX}{}", sanitize_fragment(bin_stage)))
+}
+
 pub(crate) fn output_stem(path: &str) -> String {
     let r = ImageRef::parse(path);
-    with_output_stems(|stems| r.output_stem_in(stems))
+    with_output_stems(|stems| match readable_cache_stem(&r.path) {
+        Some(base) => stems.stem_for_with_base(&r.path, &base),
+        None => r.output_stem_in(stems),
+    })
 }
 
 pub(crate) fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
@@ -798,6 +816,21 @@ mod tests {
         assert_eq!(source_path("C:/d/plain.fits"), "C:/d/plain.fits");
         assert_eq!(source_path("__composite_r"), "__composite_r");
         assert!(image_ref("a.fits#hdu=1") == ImageRef::hdu("a.fits", 1));
+    }
+
+    #[test]
+    fn wizard_cache_keys_get_readable_output_stems() {
+        use crate::types::constants::{wizard_aligned_key, wizard_bg_key, wizard_bg_key_for, wizard_cropped_key_for};
+        let first_run = wizard_bg_key_for(Some("mgk3x9p2a1"), "ha");
+        assert_eq!(output_stem(&first_run), "wizard_ha_bg");
+        assert_eq!(output_stem(&wizard_bg_key_for(Some("mgk3x9q7zz"), "ha")), "wizard_ha_bg_2");
+        assert_eq!(output_stem(&first_run), "wizard_ha_bg", "the same cache key keeps its stem");
+        assert_eq!(output_stem(&wizard_aligned_key("oiii")), "wizard_oiii_aligned");
+        assert_eq!(output_stem(&wizard_bg_key("test")), "wizard_test_bg", "a tokenless bin starting with t is not a run token");
+        assert_eq!(output_stem(&wizard_cropped_key_for(Some("k1"), "my_filter")), "wizard_my_filter_cropped");
+        assert_eq!(output_stem("C:/d/wizard_sii_bg.fits"), "wizard_sii_bg");
+        assert_eq!(output_stem(&wizard_bg_key("sii")), "wizard_sii_bg_2", "a file already named like the readable stem keeps its outputs");
+        assert_eq!(output_stem("__composite_r"), "__composite_r");
     }
 
     #[test]

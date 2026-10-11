@@ -13,9 +13,19 @@ export interface ChainEntry {
   psfUsed?: boolean;
 }
 
+export interface ChainBase {
+  path: string;
+  label: string;
+  previewUrl: string | null;
+  dimensions: [number, number] | null;
+  kind: ProcessedKind;
+  inputPath: string;
+}
+
 export interface ProcessingChain {
   steps: Partial<Record<ChainStep, ChainEntry>>;
   psfKernel: number[][] | null;
+  base: ChainBase | null;
 }
 
 export interface ProcessedResult {
@@ -25,6 +35,7 @@ export interface ProcessedResult {
   label: string;
   kind: ProcessedKind;
   inputPath: string;
+  inputPreviewUrl?: string | null;
   frameIndex?: number;
   displayHint?: DisplayHint;
 }

@@ -104,6 +104,7 @@ export function compositeReducer(state: CompositeState, action: CompositeAction)
     case "SET_PREVIEW_URL":
       return {
         ...state,
+        ...(action.url !== null && state.rgbFileView && state.parked ? parkedDisplay(state.parked) : {}),
         previewUrl: action.url,
         parked: action.url === null ? state.parked : null,
         rgbFileView: false,
@@ -172,6 +173,16 @@ export function bumpsCompositeVersion(action: CompositeAction): boolean {
     default:
       return false;
   }
+}
+
+export interface WizardCompositeStf {
+  stf: CompositeStfTriple;
+  linked: boolean;
+}
+
+export function wizardCompositeStf(state: Pick<CompositeState, "stf" | "linked" | "parked" | "rgbFileView">): WizardCompositeStf {
+  if (state.rgbFileView && state.parked) return { stf: state.parked.stf, linked: state.parked.linked };
+  return { stf: state.stf, linked: state.linked };
 }
 
 export function canShowParkedComposite(state: Pick<CompositeState, "parked" | "previewUrl" | "rgbFileView">): boolean {
@@ -249,6 +260,10 @@ interface CompositeStfValue {
   compositeAutoStfR: StfParams | null;
   compositeAutoStfG: StfParams | null;
   compositeAutoStfB: StfParams | null;
+  wizardStfR: StfParams;
+  wizardStfG: StfParams;
+  wizardStfB: StfParams;
+  wizardStfLinked: boolean;
 }
 
 interface CompositeActionsValue {
@@ -336,6 +351,7 @@ export function CompositeProvider({ children }: Props) {
   }, [dispatch]);
 
   const canShowParked = canShowParkedComposite(state);
+  const wizardStf = wizardCompositeStf(state);
 
   const previewValue = useMemo<CompositePreviewValue>(() => ({
     compositePreviewUrl: state.previewUrl,
@@ -352,7 +368,11 @@ export function CompositeProvider({ children }: Props) {
     compositeAutoStfR: state.autoStf.r,
     compositeAutoStfG: state.autoStf.g,
     compositeAutoStfB: state.autoStf.b,
-  }), [state.stf, state.linked, state.autoStf]);
+    wizardStfR: wizardStf.stf.r,
+    wizardStfG: wizardStf.stf.g,
+    wizardStfB: wizardStf.stf.b,
+    wizardStfLinked: wizardStf.linked,
+  }), [state.stf, state.linked, state.autoStf, wizardStf.stf, wizardStf.linked]);
 
   const actionsValue = useMemo<CompositeActionsValue>(() => ({
     setCompositePreviewUrl,

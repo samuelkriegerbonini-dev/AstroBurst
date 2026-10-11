@@ -12,6 +12,7 @@ use crate::cmd::common::{
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
+use crate::cmd::processing::is_display_referred;
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats};
 use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig, ImageStats, StfParams};
@@ -219,6 +220,35 @@ fn png_rgb_planes(
         apply_stf_f32(planes[1], &params[1], norm[1]),
         apply_stf_f32(planes[2], &params[2], norm[2]),
     )
+}
+
+const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
+
+fn png_stf_for<'a>(headers: impl IntoIterator<Item = Option<&'a HduHeader>>, stf: &PngStf) -> Option<StfParams> {
+    let mut present = headers.into_iter().peekable();
+    let display_referred = present.peek().is_some() && present.all(is_display_referred);
+    (display_referred && stf.explicit().is_none()).then_some(IDENTITY_STF)
+}
+
+fn png_planes_for(
+    planes: [&Array2<f32>; 3],
+    identity: Option<StfParams>,
+    stf: &PngStf,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+    match identity {
+        Some(params) => {
+            let unit = ImageStats { min: 0.0, max: 1.0, ..ImageStats::default() };
+            (
+                apply_stf_f32(planes[0], &params, &unit),
+                apply_stf_f32(planes[1], &params, &unit),
+                apply_stf_f32(planes[2], &params, &unit),
+            )
+        }
+        None => {
+            let stats = planes.map(compute_image_stats);
+            png_rgb_planes(planes, [&stats[0], &stats[1], &stats[2]], stf)
+        }
+    }
 }
 
 fn render_rgb_png(
@@ -613,11 +643,10 @@ pub async fn export_rgb_png(
         let paths = [r_path.as_deref(), g_path.as_deref(), b_path.as_deref()];
 
         if let Some(file) = rgb_file_export(paths)? {
-            let stats = [compute_image_stats(&file.r), compute_image_stats(&file.g), compute_image_stats(&file.b)];
-            let (r_out, g_out, b_out) =
-                png_rgb_planes([&file.r, &file.g, &file.b], [&stats[0], &stats[1], &stats[2]], &stf);
+            let identity = png_stf_for([file.header.as_ref()], &stf);
+            let (r_out, g_out, b_out) = png_planes_for([&file.r, &file.g, &file.b], identity, &stf);
             render_rgb_png((&r_out, &g_out, &b_out), depth, &output_path)?;
-            return Ok(rgb_png_response(&output_path, depth, true, file.r.dim(), t0));
+            return Ok(rgb_png_response(&output_path, depth, identity.is_none(), file.r.dim(), t0));
         }
 
         if png_rgb_uses_composite(paths) {
@@ -643,6 +672,7 @@ pub async fn export_rgb_png(
 
         let any_entry = r_entry.as_ref().or(g_entry.as_ref()).or(b_entry.as_ref())
             .ok_or_else(|| anyhow::anyhow!("At least one channel path required"))?;
+        let identity = png_stf_for([&r_entry, &g_entry, &b_entry].into_iter().flatten().map(|e| e.header.as_ref()), &stf);
         let rows = [&r_entry, &g_entry, &b_entry].iter().flat_map(|e| e.as_ref()).map(|e| e.arr.dim().0).max().unwrap_or(0);
         let cols = [&r_entry, &g_entry, &b_entry].iter().flat_map(|e| e.as_ref()).map(|e| e.arr.dim().1).max().unwrap_or(0);
         let zeros = Arc::new(Array2::<f32>::zeros(any_entry.arr.dim()));
@@ -651,10 +681,9 @@ pub async fn export_rgb_png(
             .map(|e| resample_to(e.map_or_else(|| Arc::clone(&zeros), |e| e.arr), (rows, cols)));
         let (ra, ga, ba) = (ra?, ga?, ba?);
 
-        let stats = [compute_image_stats(&ra), compute_image_stats(&ga), compute_image_stats(&ba)];
-        let (r_out, g_out, b_out) = png_rgb_planes([&ra, &ga, &ba], [&stats[0], &stats[1], &stats[2]], &stf);
+        let (r_out, g_out, b_out) = png_planes_for([&ra, &ga, &ba], identity, &stf);
         render_rgb_png((&r_out, &g_out, &b_out), depth, &output_path)?;
-        Ok(rgb_png_response(&output_path, depth, true, (rows, cols), t0))
+        Ok(rgb_png_response(&output_path, depth, identity.is_none(), (rows, cols), t0))
     })
 }
 
@@ -1328,5 +1357,90 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(with_wcs[RES_WCS_WRITTEN], json!(true), "{with_wcs}");
+    }
+
+    #[tokio::test]
+    async fn png_export_of_display_referred_channels_skips_the_auto_stf() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = Array2::from_shape_fn((16, 16), |(y, x)| {
+            if (y * 16 + x) % 37 == 5 { 0.9 } else { 0.1 + ((y * 31 + x * 17) % 13) as f32 * 0.001 }
+        });
+        let flagged = tmp_path(&dir, "wizard_ha_stretched.fits");
+        let linear = tmp_path(&dir, "wizard_ha_linear.fits");
+        let display_referred = header_with(&[(crate::cmd::common::HEADER_DISPLAY_REFERRED, "T")]);
+        crate::infra::fits::writer::write_fits_mono(&flagged, &data, Some(&display_referred)).unwrap();
+        crate::infra::fits::writer::write_fits_mono(&linear, &data, None).unwrap();
+
+        let export = |path: &str, name: &str| {
+            let out = tmp_path(&dir, name);
+            let p = Some(path.to_string());
+            async move {
+                let res = export_rgb_png(
+                    p.clone(), p.clone(), p, out.clone(), Some(8), None,
+                    None, None, None, None, None, None, None, None, None, Some(true),
+                )
+                .await
+                .unwrap();
+                let background = image::open(&out).unwrap().to_rgb8().get_pixel(0, 0).0;
+                (res, background)
+            }
+        };
+        let (res, background) = export(&flagged, "flagged.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(false), "{res}");
+        for v in background {
+            assert!((v as f32 - 0.1 * 255.0).abs() <= 1.0, "the display-referred background 0.1 was re-stretched to {v}");
+        }
+        let (res, background) = export(&linear, "linear.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(true), "{res}");
+        assert!((background[0] as f32 - 0.1 * 255.0).abs() > 5.0, "a linear channel must still get the auto STF");
+
+        let stretched = Some(&display_referred);
+        let auto = PngStf { apply: false, channels: [[None; 3]; 3], linked: Some(true) };
+        let identity = png_stf_for([stretched, stretched], &auto).expect("identity STF");
+        assert_eq!((identity.shadow, identity.midtone, identity.highlight), (0.0, 0.5, 1.0));
+        assert!(png_stf_for([stretched, None], &auto).is_none(), "a linear channel needs the auto STF");
+        assert!(png_stf_for([], &auto).is_none());
+        let explicit = PngStf { apply: true, channels: uniform_stf(0.1, 0.4, 0.9), linked: Some(true) };
+        assert!(png_stf_for([stretched; 3], &explicit).is_none(), "an explicit STF wins");
+    }
+
+    #[tokio::test]
+    async fn png_export_of_a_display_referred_rgb_fits_skips_the_auto_stf() {
+        let dir = tempfile::tempdir().unwrap();
+        let plane = |level: f32| {
+            Array2::from_shape_fn((16, 16), |(y, x)| {
+                if (y * 16 + x) % 37 == 5 { 0.9 } else { level + ((y * 31 + x * 17) % 13) as f32 * 0.001 }
+            })
+        };
+        let levels = [0.1f32, 0.2, 0.3];
+        let [r, g, b] = levels.map(plane);
+        let flagged = tmp_path(&dir, "rgb_stretched.fits");
+        let linear = tmp_path(&dir, "rgb_linear.fits");
+        let display_referred = header_with(&[(crate::cmd::common::HEADER_DISPLAY_REFERRED, "T")]);
+        crate::infra::fits::writer::write_fits_rgb(&flagged, &r, &g, &b, Some(&display_referred)).unwrap();
+        crate::infra::fits::writer::write_fits_rgb(&linear, &r, &g, &b, None).unwrap();
+
+        let export = |path: &str, name: &str| {
+            let out = tmp_path(&dir, name);
+            let p = Some(path.to_string());
+            async move {
+                let res = export_rgb_png(
+                    p.clone(), p.clone(), p, out.clone(), Some(8), None,
+                    None, None, None, None, None, None, None, None, None, Some(true),
+                )
+                .await
+                .unwrap();
+                let background = image::open(&out).unwrap().to_rgb8().get_pixel(0, 0).0;
+                (res, background)
+            }
+        };
+        let (res, background) = export(&flagged, "flagged_rgb.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(false), "{res}");
+        for (v, level) in background.into_iter().zip(levels) {
+            assert!((v as f32 - level * 255.0).abs() <= 1.0, "the display-referred background {level} was re-stretched to {v}");
+        }
+        let (res, background) = export(&linear, "linear_rgb.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(true), "{res}");
+        assert!((background[0] as f32 - 0.1 * 255.0).abs() > 5.0, "a linear RGB file must still get the auto STF");
     }
 }

@@ -1,11 +1,11 @@
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, resolve_output_dir, MAX_PREVIEW_DIM};
+use crate::cmd::compose::render_balanced_preview;
 use crate::cmd::processing::local_contrast::render_linear_output;
 use crate::cmd::helpers;
 use crate::core::imaging::star_removal::{remove_stars, remove_stars_rgb_shared, StarRemovalConfig};
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_MASK_COVERAGE, RES_PNG_PATH,
     RES_STARS_FITS_PATH, RES_STARS_MASKED, RES_STARS_PNG_PATH,
@@ -81,6 +81,7 @@ pub async fn remove_stars_composite_cmd(
     growth_factor: Option<f64>,
     softness: Option<f64>,
     bright_ceiling: Option<f64>,
+    stf_linked: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let output_dir = resolve_output_dir(&output_dir)?;
@@ -113,21 +114,11 @@ pub async fn remove_stars_composite_cmd(
         let png_path = format!("{}/composite_starless_{}.png", output_dir, ts);
         let stars_png_path = format!("{}/composite_stars_{}.png", output_dir, ts);
 
-        let stf_config = AutoStfConfig::default();
-        let (linked_stf, combined_stats) =
-            helpers::compute_linked_stf_with_stats(&stats_r, &stats_g, &stats_b, &stf_config);
-        let fn_r = make_stf_u8_fn(&linked_stf, &combined_stats);
-        let fn_g = make_stf_u8_fn(&linked_stf, &combined_stats);
-        let fn_b = make_stf_u8_fn(&linked_stf, &combined_stats);
-        helpers::render_rgb_preview_with_stf(
-            &result.r.starless,
-            &result.g.starless,
-            &result.b.starless,
-            fn_r,
-            fn_g,
-            fn_b,
+        let stf = render_balanced_preview(
+            [&result.r.starless, &result.g.starless, &result.b.starless],
+            [&stats_r, &stats_g, &stats_b],
+            stf_linked == Some(false),
             &png_path,
-            MAX_PREVIEW_DIM,
         )?;
 
         helpers::render_rgb_preview(
@@ -147,14 +138,14 @@ pub async fn remove_stars_composite_cmd(
             stats_b,
         );
 
-        Ok(json!({
+        Ok(stf.add_to(json!({
             RES_PNG_PATH: png_path,
             RES_STARS_PNG_PATH: stars_png_path,
             RES_STARS_MASKED: result.stars_removed,
             RES_MASK_COVERAGE: result.mask_coverage,
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
-        }))
+        })))
     })
 }
 
@@ -165,9 +156,11 @@ mod tests {
     use ndarray::Array2;
 
     use super::*;
+    use crate::core::imaging::stf::AutoStfConfig;
     use crate::infra::cache::GLOBAL_IMAGE_CACHE;
     use crate::types::constants::{
         COMPOSITE_KEY_B, COMPOSITE_KEY_G, COMPOSITE_KEY_R, COMPOSITE_ORIG_B, COMPOSITE_ORIG_G, COMPOSITE_ORIG_R,
+        RES_AUTO_STF, RES_STF_LINKED, STF_B, STF_G, STF_R,
     };
 
     fn starry(scale: f32) -> Array2<f32> {
@@ -280,7 +273,7 @@ mod tests {
             factors,
         );
 
-        let run = remove_stars_composite_cmd(dir.path().to_str().unwrap().to_string(), None, None, None, None, None).await;
+        let run = remove_stars_composite_cmd(dir.path().to_str().unwrap().to_string(), None, None, None, None, None, None).await;
         let keys = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B].map(|k| GLOBAL_IMAGE_CACHE.get(k));
         let origs = [COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B].map(|k| GLOBAL_IMAGE_CACHE.get(k));
         helpers::clear_composite();
@@ -297,5 +290,68 @@ mod tests {
                 .all(|(o, k)| (o * factors[i] - k).abs() <= 1e-5 * k.abs().max(1.0));
             assert!(consistent, "Color Balance Apply/Reset would bring the stars back in channel {i}");
         }
+    }
+
+    #[tokio::test]
+    async fn composite_star_removal_returns_the_recomputed_auto_stf() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let base = [starry(1.0), starry(0.8), starry(1.2)];
+        let [sr, sg, sb] = base.each_ref().map(compute_image_stats);
+        helpers::insert_composite_and_orig(base[0].clone(), base[1].clone(), base[2].clone(), sr.clone(), sg.clone(), sb.clone());
+        let stale = helpers::stf_json(&helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &AutoStfConfig::default()).0);
+
+        let run = remove_stars_composite_cmd(dir.path().to_str().unwrap().to_string(), None, None, None, None, None, None).await;
+        let starless = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B].map(|k| GLOBAL_IMAGE_CACHE.get(k));
+        helpers::clear_composite();
+        let res = run.unwrap();
+
+        let [r, g, b] = starless.map(|e| e.expect("starless channel"));
+        let (expected, _) =
+            helpers::compute_linked_stf_with_stats(r.stats(), g.stats(), b.stats(), &AutoStfConfig::default());
+        let expected = helpers::stf_json(&expected);
+        assert_ne!(expected, stale, "precondition: star removal changes the auto STF");
+        assert_eq!(res[RES_AUTO_STF], expected, "{res}");
+        assert_eq!(res[STF_R], expected, "{res}");
+        assert_eq!(res[STF_G], expected, "{res}");
+        assert_eq!(res[STF_B], expected, "{res}");
+        assert_eq!(res[RES_STF_LINKED], true, "{res}");
+    }
+
+    #[tokio::test]
+    async fn composite_star_removal_keeps_an_unlinked_stretch() {
+        use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn};
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let base = [starry(1.0), starry(1.0).mapv(f32::sqrt), starry(1.0).mapv(|v| v * v + 0.02)];
+        let [sr, sg, sb] = base.each_ref().map(compute_image_stats);
+        helpers::insert_composite_and_orig(base[0].clone(), base[1].clone(), base[2].clone(), sr, sg, sb);
+
+        let run = remove_stars_composite_cmd(dir.path().to_str().unwrap().to_string(), None, None, None, None, None, Some(false)).await;
+        let starless = [COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B].map(|k| GLOBAL_IMAGE_CACHE.get(k));
+        helpers::clear_composite();
+        let res = run.unwrap();
+
+        let starless = starless.map(|e| e.expect("starless channel"));
+        let config = AutoStfConfig::default();
+        let stfs = starless.each_ref().map(|e| auto_stf(e.stats(), &config));
+        let expected = stfs.each_ref().map(helpers::stf_json);
+        assert_eq!(res[RES_STF_LINKED], false, "{res}");
+        assert_eq!([&res[STF_R], &res[STF_G], &res[STF_B]], expected.each_ref(), "{res}");
+        assert!(expected[0] != expected[1] && expected[1] != expected[2] && expected[0] != expected[2], "precondition: {res}");
+        let expected_png = dir.path().join("expected.png").to_str().unwrap().to_string();
+        helpers::render_rgb_preview_with_stf(
+            starless[0].arr(),
+            starless[1].arr(),
+            starless[2].arr(),
+            make_stf_u8_fn(&stfs[0], starless[0].stats()),
+            make_stf_u8_fn(&stfs[1], starless[1].stats()),
+            make_stf_u8_fn(&stfs[2], starless[2].stats()),
+            &expected_png,
+            MAX_PREVIEW_DIM,
+        )
+        .unwrap();
+        let png = std::fs::read(res[RES_PNG_PATH].as_str().expect("png path")).unwrap();
+        assert!(png == std::fs::read(&expected_png).unwrap(), "the starless preview was not stretched per channel: {res}");
     }
 }

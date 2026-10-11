@@ -1,4 +1,5 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
+import { cancelProgress } from "./progress";
 import type {
   WcsInfo,
   PlateSolveOptions,
@@ -64,6 +65,12 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
     centerDec: opts.centerDec ?? null,
     radius: opts.radius ?? null,
   });
+}
+
+export const PLATE_SOLVE_PROGRESS_EVENT = "plate-solve-progress";
+
+export function cancelPlateSolve(): Promise<boolean> {
+  return cancelProgress(PLATE_SOLVE_PROGRESS_EVENT);
 }
 
 export function writeSolvedWcs(path: string, wcsCards: readonly WcsCard[], outputDir?: string): Promise<WriteSolvedWcsResult> {

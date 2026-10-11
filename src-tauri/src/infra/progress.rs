@@ -8,6 +8,14 @@ use tauri::Emitter;
 
 const MIN_EMIT_INTERVAL_MS: u128 = 50;
 
+#[cfg(feature = "tauri")]
+fn should_emit(last_stage: Option<&str>, stage: &str, elapsed_ms: u128, is_last: bool) -> bool {
+    match last_stage {
+        None => true,
+        Some(last) => is_last || last != stage || elapsed_ms >= MIN_EMIT_INTERVAL_MS,
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct ProgressPayload {
     pub current: u64,
@@ -26,7 +34,7 @@ pub struct ProgressHandle {
     cancelled: Arc<AtomicBool>,
     app_handle: tauri::AppHandle,
     event_name: String,
-    last_emit: Arc<Mutex<Instant>>,
+    last_emit: Arc<Mutex<(Instant, Option<String>)>>,
     part_index: u64,
     part_count: u64,
 }
@@ -75,7 +83,7 @@ impl ProgressHandle {
             cancelled,
             app_handle: app.clone(),
             event_name: event.to_string(),
-            last_emit: Arc::new(Mutex::new(Instant::now())),
+            last_emit: Arc::new(Mutex::new((Instant::now(), None))),
             part_index: 0,
             part_count: 1,
         }
@@ -102,20 +110,7 @@ impl ProgressHandle {
         (done / (self.part_count * tot) as f64 * 100.0) as u32
     }
 
-    pub fn tick_with_stage(&self, stage: &str) {
-        let cur = self.current.fetch_add(1, Ordering::Relaxed) + 1;
-        let tot = self.total.load(Ordering::Relaxed);
-
-        let is_last = cur >= tot;
-        if !is_last {
-            let mut last = self.last_emit.lock().unwrap();
-            let now = Instant::now();
-            if now.duration_since(*last).as_millis() < MIN_EMIT_INTERVAL_MS {
-                return;
-            }
-            *last = now;
-        }
-
+    fn emit_payload(&self, cur: u64, tot: u64, stage: &str) {
         let percent = self.percent(cur, tot);
         let _ = self.app_handle.emit(
             &self.event_name,
@@ -126,6 +121,28 @@ impl ProgressHandle {
                 stage: stage.to_string(),
             },
         );
+    }
+
+    pub fn tick_with_stage(&self, stage: &str) {
+        let cur = self.current.fetch_add(1, Ordering::Relaxed) + 1;
+        let tot = self.total.load(Ordering::Relaxed);
+        {
+            let mut last = self.last_emit.lock().unwrap();
+            let now = Instant::now();
+            let elapsed = now.duration_since(last.0).as_millis();
+            if !should_emit(last.1.as_deref(), stage, elapsed, cur >= tot) {
+                return;
+            }
+            *last = (now, Some(stage.to_string()));
+        }
+        self.emit_payload(cur, tot, stage);
+    }
+
+    pub fn emit_stage(&self, stage: &str) {
+        let cur = self.current.load(Ordering::Relaxed);
+        let tot = self.total.load(Ordering::Relaxed);
+        *self.last_emit.lock().unwrap() = (Instant::now(), Some(stage.to_string()));
+        self.emit_payload(cur, tot, stage);
     }
 
     pub fn set_total(&self, total: u64) {
@@ -162,6 +179,21 @@ impl ProgressHandle {
         false
     }
     pub fn tick_with_stage(&self, _stage: &str) {}
+    pub fn emit_stage(&self, _stage: &str) {}
     pub fn set_total(&self, _total: u64) {}
     pub fn emit_complete(&self) {}
+}
+
+#[cfg(all(test, feature = "tauri"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_changes_are_never_throttled() {
+        assert!(should_emit(None, "load_frame", 0, false), "the first tick must be emitted");
+        assert!(should_emit(Some("load_frame"), "align", 1, false), "a new stage within 50 ms must be emitted");
+        assert!(!should_emit(Some("align"), "align", 49, false), "the same stage within 50 ms is throttled");
+        assert!(should_emit(Some("align"), "align", 50, false), "the same stage after 50 ms is emitted");
+        assert!(should_emit(Some("align"), "align", 0, true), "the last tick is always emitted");
+    }
 }

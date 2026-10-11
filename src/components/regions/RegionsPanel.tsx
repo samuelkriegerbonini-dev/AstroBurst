@@ -23,6 +23,7 @@ import {
   toggledInclude,
 } from "../../utils/regionExclude";
 import MeasurementBadge from "../analysis/MeasurementBadge";
+import { ARMED_CONFIRM_WINDOW_MS, CONFIRM_DELETE_LABEL, useArmedConfirm } from "../../hooks/useArmedConfirm";
 
 interface RegionsPanelProps {
   filePath: string | null;
@@ -48,6 +49,13 @@ const DELETE_POINTS_CONFIRM_MS = 5000;
 const INCLUDE_TOGGLE_CLASS = "text-[9px] px-1 rounded border shrink-0";
 const INCLUDE_ON_CLASS = "text-zinc-500 border-zinc-700/60 hover:text-zinc-300";
 const INCLUDE_OFF_CLASS = "text-amber-400/90 border-amber-700/60 bg-amber-900/20 hover:text-amber-300";
+const DELETE_IDLE_CLASS = "text-zinc-600 hover:text-red-400";
+const DELETE_ARMED_CLASS = "text-[9px] px-1 rounded border border-red-700/60 text-red-400 hover:text-red-300";
+const DELETE_ARMED_TITLE = `Press again within ${ARMED_CONFIRM_WINDOW_MS / 1000} s to delete the region`;
+
+function regionDeleteKey(id: string): string {
+  return `region:${id}`;
+}
 
 function formatJansky(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";
@@ -112,7 +120,9 @@ function RegionRow({
   onSelect,
   onBackground,
   onToggleInclude,
+  deleteArmed,
   onDelete,
+  onDeleteBlur,
 }: {
   region: Region;
   selected: boolean;
@@ -121,7 +131,9 @@ function RegionRow({
   onSelect: (id: string) => void;
   onBackground: (id: string, bg: string | null) => void;
   onToggleInclude: (region: Region) => void;
+  deleteArmed: boolean;
   onDelete: (id: string) => void;
+  onDeleteBlur: (id: string) => void;
 }) {
   const s = entry?.stats ?? null;
   const excludedLabel = s ? excludedCellLabel(s) : null;
@@ -171,14 +183,18 @@ function RegionRow({
           !region.props.include && <span className="text-[9px] text-amber-400/80">excl</span>
         )}
         <button
+          type="button"
+          aria-live="polite"
+          aria-label={deleteArmed ? undefined : "Delete region"}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(region.id);
           }}
-          className="ml-auto text-zinc-600 hover:text-red-400 shrink-0"
-          title="Delete region"
+          onBlur={() => onDeleteBlur(region.id)}
+          className={`ml-auto shrink-0 ${deleteArmed ? DELETE_ARMED_CLASS : DELETE_IDLE_CLASS}`}
+          title={deleteArmed ? DELETE_ARMED_TITLE : "Delete region"}
         >
-          <Trash2 size={11} />
+          {deleteArmed ? CONFIRM_DELETE_LABEL : <Trash2 size={11} />}
         </button>
       </div>
       {entry?.error && <div className="mt-1 text-[9px] text-red-400 break-words">{entry.error}</div>}
@@ -270,12 +286,17 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
     },
     [filePath],
   );
+  const deleteConfirm = useArmedConfirm();
+  const { press: pressDelete, blur: blurDelete } = deleteConfirm;
   const handleDelete = useCallback(
     (id: string) => {
-      if (filePath) regionStore.remove(filePath, id);
+      pressDelete(regionDeleteKey(id), () => {
+        if (filePath) regionStore.remove(filePath, id);
+      });
     },
-    [filePath],
+    [filePath, pressDelete],
   );
+  const handleDeleteBlur = useCallback((id: string) => blurDelete(regionDeleteKey(id)), [blurDelete]);
   const handleToggleInclude = useCallback(
     (region: Region) => {
       if (filePath) regionStore.update(filePath, region.id, toggledInclude(region));
@@ -558,7 +579,9 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
                 onSelect={handleSelect}
                 onBackground={handleBackground}
                 onToggleInclude={handleToggleInclude}
+                deleteArmed={deleteConfirm.armedKey === regionDeleteKey(r.id)}
                 onDelete={handleDelete}
+                onDeleteBlur={handleDeleteBlur}
               />
             ))}
           </div>

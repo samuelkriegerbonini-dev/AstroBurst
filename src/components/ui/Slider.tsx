@@ -14,6 +14,7 @@ interface SliderProps {
   onChange?: (v: number) => void;
   onCommit?: (v: number) => void;
   hint?: string;
+  ariaLabel?: string;
 }
 
 const LOG_STEPS = 1000;
@@ -31,8 +32,10 @@ function Slider({
   onChange,
   onCommit,
   hint,
+  ariaLabel,
 }: SliderProps) {
   const rangeId = useId();
+  const name = ariaLabel ?? label;
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const editStartText = useRef("");
@@ -125,7 +128,7 @@ function Slider({
           <input
             ref={inputRef}
             type="text"
-            aria-label={`${label} value`}
+            aria-label={`${name} value`}
             aria-invalid={editRejected}
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
@@ -139,7 +142,7 @@ function Slider({
             className="ab-slider-value"
             onClick={handleValueClick}
             disabled={disabled}
-            aria-label={`Edit ${label} value`}
+            aria-label={`Edit ${name} value`}
             title="Click to edit value"
           >
             {display}
@@ -150,6 +153,7 @@ function Slider({
         ref={rangeRef}
         id={rangeId}
         type="range"
+        aria-label={ariaLabel}
         min={isLog ? 0 : min}
         max={isLog ? 1 : max}
         step={isLog ? 1 / LOG_STEPS : step}

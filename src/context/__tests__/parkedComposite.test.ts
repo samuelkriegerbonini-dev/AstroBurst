@@ -19,6 +19,7 @@ import {
   isRestretchCompositeUrl,
   parkedCompositeUrl,
   restoreParkedComposite,
+  wizardCompositeStf,
   type CompositeAction,
   type CompositeState,
   type ParkedComposite,
@@ -123,5 +124,46 @@ describe("restoreParkedComposite", () => {
   it("recognises the backend's gone message in thrown strings too", () => {
     expect(isCompositeGoneError("The colour composite is no longer in memory; run Blend again.")).toBe(true);
     expect(isCompositeGoneError(new Error("disk full"))).toBe(false);
+  });
+});
+
+describe("wizardCompositeStf", () => {
+  const FILE_R = { shadow: 0.1, midtone: 0.3, highlight: 0.9 };
+  const FILE_G = { shadow: 0.11, midtone: 0.31, highlight: 0.91 };
+  const FILE_B = { shadow: 0.12, midtone: 0.32, highlight: 0.92 };
+
+  function blendThenStf(): CompositeState {
+    let state = compositeReducer(INITIAL_COMPOSITE_STATE, { type: "SET_PREVIEW_URL", url: TAURI_RESTRETCH_URL });
+    state = compositeReducer(state, { type: "SET_STF", r: R, g: G, b: B });
+    return compositeReducer(state, { type: "SET_LINKED", linked: true });
+  }
+
+  it("keeps the parked composite STF when an RGB file is selected mid-wizard", () => {
+    let state = compositeReducer(blendThenStf(), { type: "PARK" });
+    state = compositeReducer(state, { type: "INIT_RGB", previewUrl: "asset://m31.png", stfR: FILE_R, stfG: FILE_G, stfB: FILE_B });
+    expect(state.stf).toEqual({ r: FILE_R, g: FILE_G, b: FILE_B });
+    expect(wizardCompositeStf(state)).toEqual({ stf: { r: R, g: G, b: B }, linked: true });
+  });
+
+  it("uses the live composite STF while the composite is on screen or parked behind a mono file", () => {
+    const live = blendThenStf();
+    expect(wizardCompositeStf(live)).toEqual({ stf: { r: R, g: G, b: B }, linked: true });
+    const parked = compositeReducer(live, { type: "PARK" });
+    expect(wizardCompositeStf(parked)).toEqual({ stf: { r: R, g: G, b: B }, linked: true });
+  });
+
+  it("brings the parked composite STF back when a wizard step shows a new composite over the RGB file", () => {
+    let state = compositeReducer(blendThenStf(), { type: "PARK" });
+    state = compositeReducer(state, { type: "INIT_RGB", previewUrl: "asset://m31.png", stfR: FILE_R, stfG: FILE_G, stfB: FILE_B });
+    state = compositeReducer(state, { type: "SET_PREVIEW_URL", url: "asset://tone_composite_1.png" });
+    expect(state.parked).toBeNull();
+    expect(state.rgbFileView).toBe(false);
+    expect(state.stf).toEqual({ r: R, g: G, b: B });
+    expect(wizardCompositeStf(state)).toEqual({ stf: { r: R, g: G, b: B }, linked: true });
+  });
+
+  it("uses the RGB file's STF when no composite is parked", () => {
+    const state = compositeReducer(INITIAL_COMPOSITE_STATE, { type: "INIT_RGB", previewUrl: "asset://m31.png", stfR: FILE_R, stfG: FILE_G, stfB: FILE_B });
+    expect(wizardCompositeStf(state)).toEqual({ stf: { r: FILE_R, g: FILE_G, b: FILE_B }, linked: false });
   });
 });

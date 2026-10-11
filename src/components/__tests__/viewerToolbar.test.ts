@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createElement } from "react";
+import { createElement, createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CompositeProvider } from "../../context/CompositeContext";
-import { PreviewProvider } from "../../context/PreviewContext";
+import { PreviewProvider, fileKeyOf, useRenderActions } from "../../context/PreviewContext";
 import GpuViewport, { type ViewportOriginal } from "../render/GpuViewport";
+import AdvancedImageViewer from "../viewer/AdvancedImageViewer";
+import type { ProcessedFile } from "../../shared/types";
+import type { ProcessedResult } from "../../shared/types/preview";
+import { pipelineViewOutput } from "../../utils/stackingOutputs";
 
 function renderViewport(original: ViewportOriginal | null, fitsW = 5000, fitsH = 2812, label: string | null = null): string {
   const viewport = createElement(GpuViewport, {
@@ -113,5 +117,114 @@ describe("GPU viewer processed label", () => {
   it("shows no processed label when none is passed", () => {
     expect(renderViewport(null, 1920, 1080)).not.toContain("Showing a processed result");
     expect(renderViewport(null, 1920, 1080, "")).not.toContain("Showing a processed result");
+  });
+});
+
+const LIGHT_1 = "C:/data/r_1.fits";
+const LIGHT_2 = "C:/data/g_2.fits";
+const FILE_DIMS: [number, number] = [1024, 768];
+
+function lightFile(id: string, path: string, dimensions: [number, number] = FILE_DIMS): ProcessedFile {
+  return {
+    id,
+    name: path.split("/").pop() ?? path,
+    path,
+    sourcePath: path,
+    imageRef: null,
+    size: 1,
+    status: "done",
+    result: { png_path: `${path}.png`, previewUrl: `asset://${id}.png`, dimensions, elapsed_ms: 1, is_rgb: false },
+    error: null,
+    startedAt: null,
+    finishedAt: null,
+  };
+}
+
+function publish(key: string, result: ProcessedResult): void {
+  function Publisher() {
+    useRenderActions().publishProcessed(key, result);
+    return null;
+  }
+  const preview = createElement(PreviewProvider, { file: null, doneFiles: [], children: createElement(Publisher) });
+  renderToStaticMarkup(createElement(CompositeProvider, { children: preview }));
+}
+
+function renderCpuViewer(file: ProcessedFile, record: ProcessedResult, withOverlays = false): string {
+  publish(fileKeyOf(file) as string, record);
+  const fileDims = file.result?.dimensions ?? FILE_DIMS;
+  const shown = record.dimensions ?? fileDims;
+  const viewer = createElement(AdvancedImageViewer, {
+    original: { url: `asset://${file.id}.png`, label: "Original", width: fileDims[0], height: fileDims[1] },
+    processed: { url: record.previewUrl ?? "", label: record.label, width: shown[0], height: shown[1] },
+    ...(withOverlays ? { overlayCanvasRef: createRef<HTMLCanvasElement>(), dqCanvasRef: createRef<HTMLCanvasElement>() } : {}),
+  });
+  const preview = createElement(PreviewProvider, { file, doneFiles: [file], children: viewer });
+  return renderToStaticMarkup(createElement(CompositeProvider, { children: preview }));
+}
+
+function pngOnly(overrides: Partial<ProcessedResult>): ProcessedResult {
+  return { fitsPath: null, previewUrl: "asset://out/result.png", dimensions: FILE_DIMS, label: "Result", kind: "stacking", inputPath: LIGHT_1, ...overrides };
+}
+
+describe("CPU viewer on a PNG-only result", () => {
+  it("sizes a PNG-only result by its own size and says it is on another pixel grid", () => {
+    const html = renderCpuViewer(lightFile("drizzle", LIGHT_1), pngOnly({ dimensions: [2048, 1536], label: "Drizzle RGB · 6 frames" }));
+    expect(html).toContain(">2048 x 1536</span>");
+    expect(html).toContain(">PNG-only result on another pixel grid: no readout, clicks or regions</div>");
+  });
+
+  it("never shows the file's size for a PNG-only result published without one", () => {
+    const html = renderCpuViewer(lightFile("nodims", LIGHT_1), pngOnly({ dimensions: null, kind: "processing" }));
+    expect(html).not.toContain("1024 x 768");
+    expect(html).toContain("another pixel grid");
+  });
+
+  it("flags a PNG-only stack of the file's size built on another frame", () => {
+    const html = renderCpuViewer(lightFile("other-frame", LIGHT_2), pngOnly({ label: "Pipeline RGB · 6 frames" }));
+    expect(html).toContain(">1024 x 768</span>");
+    expect(html).toContain("another pixel grid");
+  });
+
+  it("keeps a Debayer preview with the file's size on the file grid, without the hint", () => {
+    const html = renderCpuViewer(lightFile("debayer", LIGHT_1), pngOnly({ kind: "debayer", label: "Debayer" }));
+    expect(html).toContain(">1024 x 768</span>");
+    expect(html).not.toContain("another pixel grid");
+  });
+
+  it("keeps the file's size and the readout on a cube frame shown before its FITS", () => {
+    const frame = pngOnly({ kind: "cube", dimensions: null, frameIndex: 4, label: "Frame 5 / 40" });
+    const html = renderCpuViewer(lightFile("cube-frame", LIGHT_1), frame);
+    expect(html).toContain(">1024 x 768</span>");
+    expect(html).not.toContain("another pixel grid");
+  });
+
+  it("shows a Pipeline RGB above the preview limit at the masters' size on the R light it was built on", () => {
+    const full: [number, number] = [4144, 2822];
+    const master = (label: string) => ({ label, png_path: `C:/out/${label}.png`, fits_path: `C:/out/${label}.fits`, dimensions: full, input_path: `C:/data/${label.toLowerCase()}_1.fits` });
+    const view = pipelineViewOutput(
+      {
+        stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels: [] },
+        channel_previews: [],
+        rgb_preview: "AAAA",
+        masters: [master("R"), master("G"), master("B")],
+        rgb_png_path: "C:/out/rgb.png",
+        rgb_dimensions: [1382, 941],
+        rgbPreviewUrl: "asset://out/rgb.png",
+      },
+      "RGB",
+    );
+    expect(view).not.toBeNull();
+    const html = renderCpuViewer(lightFile("pipeline-rgb", LIGHT_1, full), { ...view!.output, label: view!.label });
+    expect(html).toContain(">4144 x 2822</span>");
+    expect(html).not.toContain("1382 x 941");
+    expect(html).not.toContain("another pixel grid");
+  });
+
+  it("hides the star and DQ overlays of the file over a PNG-only result on another grid", () => {
+    const off = renderCpuViewer(lightFile("overlay-off", LIGHT_1), pngOnly({ dimensions: [2048, 1536] }), true);
+    expect(off).toMatch(/visibility:hidden[^>]*><canvas/);
+    const on = renderCpuViewer(lightFile("overlay-on", LIGHT_1), pngOnly({ kind: "debayer", label: "Debayer" }), true);
+    expect(on).toContain("<canvas");
+    expect(on).not.toContain("visibility:hidden");
   });
 });

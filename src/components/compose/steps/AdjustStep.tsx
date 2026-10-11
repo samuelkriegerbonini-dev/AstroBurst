@@ -38,7 +38,7 @@ function isIdentity(pts: CurvePoint[]): boolean {
 }
 
 export default function AdjustStep({ state, onResult }: AdjustStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const { wizardStfR, wizardStfG, wizardStfB, wizardStfLinked } = useCompositeStf();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ToneResult | null>(null);
   const [error, setError] = useState("");
@@ -76,10 +76,10 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
 
       const res = await applyToneComposite({
         outputDir: dir,
-        stfR: compositeStfR,
-        stfG: compositeStfG,
-        stfB: compositeStfB,
-        linkedStf: compositeStfLinked,
+        stfR: wizardStfR,
+        stfG: wizardStfG,
+        stfB: wizardStfB,
+        linkedStf: wizardStfLinked,
         curvesR: cR,
         curvesG: cG,
         curvesB: cB,
@@ -99,7 +99,7 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [isLinked, curveLinked, curveR, curveG, curveB, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onResult]);
+  }, [isLinked, curveLinked, curveR, curveG, curveB, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked, onResult]);
 
   return (
     <div className="flex flex-col gap-3 p-3">

@@ -50,6 +50,21 @@ describe("validateSlotName", () => {
     expect(RESERVED_NAMES).toContain("rescale");
   });
 
+  it("reserves the trigonometric, mtf and coordinate functions", () => {
+    for (const name of ["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "mtf", "x", "y"]) {
+      expect(RESERVED_NAMES).toContain(name);
+      expect(validateSlotName(name, [])).toMatch(/function name/);
+    }
+    expect(validateSlotName("X", [])).toBeNull();
+  });
+
+  it("the automatic slot namer never produces a reserved name", () => {
+    const names: string[] = [];
+    for (let i = 0; i < MAX_SLOTS + 10; i++) names.push(nextSlotName(names));
+    expect(names.filter((n) => RESERVED_NAMES.includes(n))).toEqual([]);
+    expect(names.every((n) => /^[A-Z][0-9]*$/.test(n))).toBe(true);
+  });
+
   it("rejects duplicates case-sensitively", () => {
     expect(validateSlotName("A", ["A", "B"])).toMatch(/already used/);
     expect(validateSlotName("a", ["A"])).toBeNull();
@@ -181,22 +196,22 @@ describe("slotForAdd", () => {
   const loaded = [{ path: target }, { path: a }, { path: b }];
 
   it("binds the next loaded file that neither $T nor another slot uses", () => {
-    expect(slotForAdd([{ name: "A", path: a }], loaded, target)).toEqual({ name: "B", path: b });
+    expect(slotForAdd([{ name: "A", path: a }], loaded, target, null)).toEqual({ name: "B", path: b });
   });
 
   it("never repeats the first loaded file when it is already the target or bound", () => {
-    expect(slotForAdd([], loaded, target)).toEqual({ name: "A", path: a });
-    expect(slotForAdd([{ name: "A", path: b }], [{ path: a }, { path: b }], target)).toEqual({ name: "B", path: a });
+    expect(slotForAdd([], loaded, target, null)).toEqual({ name: "A", path: a });
+    expect(slotForAdd([{ name: "A", path: b }], [{ path: a }, { path: b }], target, null)).toEqual({ name: "B", path: a });
   });
 
   it("falls back to $T only when every loaded file is already bound", () => {
-    expect(slotForAdd([{ name: "A", path: a }, { name: "B", path: b }], loaded, target)).toEqual({ name: "C", path: target });
+    expect(slotForAdd([{ name: "A", path: a }, { name: "B", path: b }], loaded, target, null)).toEqual({ name: "C", path: target });
   });
 
   it("repeated Add slot walks the free files before falling back to $T", () => {
     let slots = [{ name: "A", path: a }];
-    slots = [...slots, slotForAdd(slots, loaded, target)];
-    slots = [...slots, slotForAdd(slots, loaded, target)];
+    slots = [...slots, slotForAdd(slots, loaded, target, null)];
+    slots = [...slots, slotForAdd(slots, loaded, target, null)];
     expect(slots).toEqual([
       { name: "A", path: a },
       { name: "B", path: b },
@@ -205,7 +220,7 @@ describe("slotForAdd", () => {
   });
 
   it("is an empty binding when nothing is loaded and there is no target", () => {
-    expect(slotForAdd([], [], null)).toEqual({ name: "A", path: "" });
+    expect(slotForAdd([], [], null, null)).toEqual({ name: "A", path: "" });
   });
 });
 
@@ -274,7 +289,10 @@ describe("automatic binding and the current file's PixelMath result", () => {
     expect(rebindUntouchedSlots([], [{ path: x }, { path: otherResult }], x, false, result)).toEqual([{ name: "A", path: otherResult }]);
   });
 
-  it("Add slot is explicit and may still bind the previous result", () => {
-    expect(slotForAdd([], [{ path: x }, { path: result }], x)).toEqual({ name: "A", path: result });
+  it("Add slot never binds the previous result, so the next default run is not refused", () => {
+    expect(slotForAdd([], [{ path: x }, { path: result }], x, result)).toEqual({ name: "A", path: x });
+    expect(slotForAdd([], [{ path: x }, { path: "c:\\OUT\\673nmos_pixelmath.fits" }, { path: y }], x, result)).toEqual({ name: "A", path: y });
+    expect(slotForAdd([], [{ path: x }, { path: otherResult }], x, result)).toEqual({ name: "A", path: otherResult });
+    expect(slotForAdd([], [{ path: x }, { path: result }], x, null)).toEqual({ name: "A", path: result });
   });
 });

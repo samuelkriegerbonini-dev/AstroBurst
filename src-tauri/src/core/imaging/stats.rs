@@ -68,6 +68,34 @@ pub fn combine_channel_stats(a: &ImageStats, b: &ImageStats, c: &ImageStats) -> 
 }
 
 pub fn finite_slice_stats(finite: &mut [f32]) -> ImageStats {
+    stats_consuming(&mut finite.to_vec())
+}
+
+pub fn finite_output_stats(data: &Array2<f32>) -> (Option<ImageStats>, usize) {
+    match data.as_slice_memory_order() {
+        Some(values) => output_slice_stats(values),
+        None => output_slice_stats(&data.iter().copied().collect::<Vec<f32>>()),
+    }
+}
+
+fn output_slice_stats(values: &[f32]) -> (Option<ImageStats>, usize) {
+    let (non_finite, valid) = values
+        .par_chunks(CHUNK_SIZE)
+        .map(|chunk| {
+            chunk.iter().fold((0usize, 0usize), |(bad, good), &v| {
+                (bad + usize::from(!v.is_finite()), good + usize::from(is_valid_pixel(v)))
+            })
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    if valid == 0 {
+        return (None, non_finite);
+    }
+    let mut scratch = Vec::with_capacity(valid);
+    scratch.extend(values.iter().copied().filter(|&v| is_valid_pixel(v)));
+    (Some(stats_consuming(&mut scratch)), non_finite)
+}
+
+fn stats_consuming(finite: &mut [f32]) -> ImageStats {
     if finite.is_empty() {
         return ImageStats::default();
     }
@@ -87,8 +115,7 @@ pub fn finite_slice_stats(finite: &mut [f32]) -> ImageStats {
     let n = finite.len() as u64;
     let mean = sum / n as f64;
     let median = exact_median_mut(finite);
-    let mut deviations = finite.to_vec();
-    let mad = exact_mad_mut(&mut deviations, median as f32) as f64;
+    let mad = exact_mad_mut(finite, median as f32) as f64;
     let sigma = (mad * MAD_TO_SIGMA).max(1e-30);
     ImageStats {
         min,
@@ -610,5 +637,85 @@ mod tests {
 
         let empty = finite_slice_stats(&mut []);
         assert_eq!(empty.valid_count, 0);
+    }
+
+    fn two_copy_reference(data: &Array2<f32>) -> (Option<ImageStats>, usize) {
+        let non_finite = data.iter().filter(|v| !v.is_finite()).count();
+        let mut valid: Vec<f32> = data.iter().copied().filter(|v| is_valid_pixel(*v)).collect();
+        if valid.is_empty() {
+            return (None, non_finite);
+        }
+        let mut min = f64::MAX;
+        let mut max = f64::MIN;
+        let mut sum = 0.0f64;
+        for &v in valid.iter() {
+            min = min.min(v as f64);
+            max = max.max(v as f64);
+            sum += v as f64;
+        }
+        let median = exact_median_mut(&mut valid);
+        let mut deviations = valid.to_vec();
+        let mad = exact_mad_mut(&mut deviations, median as f32) as f64;
+        let stats = ImageStats {
+            min,
+            max,
+            median,
+            mad,
+            sigma: (mad * MAD_TO_SIGMA).max(1e-30),
+            mean: sum / valid.len() as f64,
+            valid_count: valid.len() as u64,
+        };
+        (Some(stats), non_finite)
+    }
+
+    fn assert_same(ours: (Option<ImageStats>, usize), reference: (Option<ImageStats>, usize)) {
+        assert_eq!(ours.1, reference.1, "non-finite count");
+        match (ours.0, reference.0) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                assert_eq!(a.valid_count, b.valid_count);
+                assert_eq!(a.min, b.min);
+                assert_eq!(a.max, b.max);
+                assert_eq!(a.median, b.median);
+                assert_eq!(a.mad, b.mad);
+                assert_eq!(a.sigma, b.sigma);
+                assert_eq!(a.mean, b.mean);
+            }
+            (a, b) => panic!("stats presence differs: {a:?} vs {b:?}"),
+        }
+    }
+
+    #[test]
+    fn finite_output_stats_matches_the_two_copy_reference() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(42);
+        let (rows, cols) = (301usize, 517usize);
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|_| match rng.gen_range(0..100) {
+                0..=4 => f32::NAN,
+                5 => f32::INFINITY,
+                6 => f32::NEG_INFINITY,
+                7..=11 => 0.0,
+                _ => rng.gen_range(-500.0f32..2000.0),
+            })
+            .collect();
+        let data = Array2::from_shape_vec((rows, cols), values).unwrap();
+        assert!(rows * cols > 2 * CHUNK_SIZE);
+        assert_same(finite_output_stats(&data), two_copy_reference(&data));
+
+        let transposed = data.clone().reversed_axes();
+        assert!(transposed.as_slice().is_none());
+        assert_same(finite_output_stats(&transposed), two_copy_reference(&transposed));
+
+        let strided = data.slice(ndarray::s![..;2, 1..;3]).to_owned();
+        assert_same(finite_output_stats(&strided), two_copy_reference(&strided));
+
+        let odd = Array2::from_shape_vec((1, 5), vec![3.0f32, -1.0, f32::NAN, 7.0, 0.0]).unwrap();
+        assert_same(finite_output_stats(&odd), two_copy_reference(&odd));
+
+        let nothing = Array2::from_shape_vec((2, 2), vec![0.0f32, f32::NAN, f32::INFINITY, 0.0]).unwrap();
+        assert_eq!(finite_output_stats(&nothing).1, 2);
+        assert_same(finite_output_stats(&nothing), two_copy_reference(&nothing));
     }
 }

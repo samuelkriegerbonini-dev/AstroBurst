@@ -6,6 +6,7 @@ import {
   compositeInputFor,
   compositeInputLabel,
   compositeInputPreview,
+  compositeModeAfterRun,
   compositeResultTarget,
   compositeStepInvalidatesWizard,
   compositeStepOutcome,
@@ -297,5 +298,26 @@ describe("compositeResultTarget", () => {
   it("drops a result the backend did not apply", () => {
     expect(compositeResultTarget(false, true)).toBe("none");
     expect(compositeResultTarget(false, false)).toBe("none");
+  });
+});
+
+describe("compositeModeAfterRun", () => {
+  it("passes the live composite mode through while Processing is mounted", () => {
+    expect(compositeModeAfterRun({ mounted: true, compositeModeAtLastRender: true, unchangedSinceUnmount: false })).toBe(true);
+    expect(compositeModeAfterRun({ mounted: true, compositeModeAtLastRender: false, unchangedSinceUnmount: true })).toBe(false);
+  });
+
+  it("does not re-open the composite when the view changed after Processing unmounted", () => {
+    expect(compositeModeAfterRun({ mounted: false, compositeModeAtLastRender: true, unchangedSinceUnmount: false })).toBe(false);
+  });
+
+  it("keeps the composite on screen when nothing changed after Processing unmounted", () => {
+    expect(compositeModeAfterRun({ mounted: false, compositeModeAtLastRender: true, unchangedSinceUnmount: true })).toBe(true);
+    expect(compositeModeAfterRun({ mounted: false, compositeModeAtLastRender: false, unchangedSinceUnmount: true })).toBe(false);
+  });
+
+  it("routes an unmounted, changed run to the parked composite instead of the screen", () => {
+    const compositeMode = compositeModeAfterRun({ mounted: false, compositeModeAtLastRender: true, unchangedSinceUnmount: false });
+    expect(compositeStepOutcome({ step: "deconv", displayed: "linear", accepted: true, compositeMode }).target).toBe("parked");
   });
 });

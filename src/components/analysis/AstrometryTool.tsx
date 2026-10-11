@@ -6,7 +6,7 @@ import { useRenderActions, useStarOverlayContext } from "../../context/PreviewCo
 import { ANALYSIS_SECTION, toolSections } from "../../utils/analysisSections";
 import { useAnalysisMeasure } from "../../hooks/useAnalysisMeasure";
 import { starDetectionStore, useStarDetection } from "../../hooks/useStarDetectionStore";
-import { SOLVED_WCS_LABEL } from "../../utils/solvedWcs";
+import { SOLVED_WCS_LABEL, rememberSolvedWcs } from "../../utils/solvedWcs";
 import type { WriteSolvedWcsResult } from "../../shared/types/astrometry";
 import type { Star } from "./PlateSolvePanel";
 import TabSpinner from "./TabSpinner";
@@ -46,6 +46,8 @@ function AstrometryTool() {
 
   const handleWcsWritten = useCallback(
     (res: WriteSolvedWcsResult) => {
+      const inputPath = effectivePath ?? filePath;
+      if (inputPath) rememberSolvedWcs(inputPath, res.fits_path);
       if (!fileKey || !filePath) return;
       publishProcessed(fileKey, {
         fitsPath: res.fits_path,

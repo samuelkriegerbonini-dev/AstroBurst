@@ -114,3 +114,26 @@ describe("DisplayControls labels and notes", () => {
     expect(render({}, { compass: false })).not.toContain("(no WCS)");
   });
 });
+
+describe("DisplayControls decimal fields", () => {
+  const layouts: Partial<DisplaySettings>[] = [
+    { stretch: "asinh", limits: "percentile", symmetric: true, centre: -300 },
+    { stretch: "power", limits: "user", userLo: -2.5, userHi: null },
+    { stretch: "linear", limits: "zscale" },
+  ];
+
+  it("renders every stretch, limit and centre field as a decimal text box, never type=number", () => {
+    const pages = layouts.map((layout) => render({}, layout));
+    for (const html of pages) expect(html).not.toContain('type="number"');
+    expect(pages.map((html) => html.match(/<input[^>]*inputMode="decimal"/g)?.length ?? 0)).toEqual([4, 3, 1]);
+  });
+
+  it("shows the bound values as dot decimals and an unset user limit as a blank optional field", () => {
+    const symmetric = render({}, layouts[0]);
+    expect(symmetric).toMatch(/<input[^>]*aria-label="Symmetric limits centre"[^>]*value="-300"/);
+    const user = render({}, layouts[1]);
+    expect(user).toMatch(/<input[^>]*value="-2.5"/);
+    expect(user).toMatch(/<input[^>]*placeholder="max"[^>]*value=""|<input[^>]*value=""[^>]*placeholder="max"/);
+    expect(user).not.toContain("aria-invalid");
+  });
+});

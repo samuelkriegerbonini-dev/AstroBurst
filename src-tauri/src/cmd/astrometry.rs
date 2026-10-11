@@ -13,6 +13,7 @@ use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::writer::{filter_header, is_wcs_card};
 use crate::infra::image_source::{load_plane, load_plane_header};
+use crate::infra::progress::ProgressHandle;
 use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
@@ -34,6 +35,7 @@ const MAX_LATITUDE_DEG: f64 = 90.0;
 const PARITY_NORMAL: &str = "normal";
 const PARITY_FLIPPED: &str = "flipped";
 const ABPROC_PLATE_SOLVED: &str = "platesolved";
+const PLATE_SOLVE_PROGRESS_EVENT: &str = "plate-solve-progress";
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
     let header = load_plane_header(&image_ref(path))?;
@@ -158,6 +160,7 @@ fn resolve_api_key(provided: Option<String>) -> Option<String> {
 
 #[tauri::command]
 pub async fn plate_solve_cmd(
+    app: tauri::AppHandle,
     path: String,
     api_key: Option<String>,
     scale_lower: Option<f64>,
@@ -168,6 +171,7 @@ pub async fn plate_solve_cmd(
     center_dec: Option<f64>,
     radius: Option<f64>,
 ) -> Result<serde_json::Value, String> {
+    let progress = ProgressHandle::new(&app, PLATE_SOLVE_PROGRESS_EVENT, 1);
     let (upload_path, _tmp, _tmp_ds, upload_dims, original_dims, ds_factor, cfg) = tokio::task::spawn_blocking(
         move || -> anyhow::Result<_> {
             let resolved_key = resolve_api_key(api_key);
@@ -256,8 +260,9 @@ pub async fn plate_solve_cmd(
 
     #[cfg(feature = "astrometry-net")]
     {
+        let cancelled = || progress.is_cancelled();
         let mut solve_result = crate::infra::astrometry::plate_solve::solve_astrometry_net(
-            &upload_path, upload_dims.0, upload_dims.1, &cfg,
+            &upload_path, upload_dims.0, upload_dims.1, &cfg, &cancelled,
         )
             .await
             .map_err(|e| e.to_string())?;
@@ -274,7 +279,7 @@ pub async fn plate_solve_cmd(
 
     #[cfg(not(feature = "astrometry-net"))]
     {
-        drop((_tmp, _tmp_ds, upload_path, upload_dims, original_dims, ds_factor, cfg));
+        drop((_tmp, _tmp_ds, upload_path, upload_dims, original_dims, ds_factor, cfg, progress));
         let result = crate::infra::astrometry::plate_solve::solve_offline_placeholder()
             .map_err(|e| e.to_string())?;
         serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -766,7 +771,7 @@ pub async fn check_pointing_overlap_cmd(
 mod tests {
     use super::{
         footprint_overlap_fraction, image_dims, load_grid_cached, load_wcs_with_dims_cached, plate_solve_timeout,
-        sky_footprint, wrap180, SkyFootprint,
+        sky_footprint, wrap180, SkyFootprint, PLATE_SOLVE_PROGRESS_EVENT,
     };
     use crate::types::config::AppConfig;
     use crate::core::astrometry::frames::SkyFrame;
@@ -1147,6 +1152,11 @@ mod tests {
         let zero = AppConfig { plate_solve_timeout_secs: 0, ..AppConfig::default() };
         let err = plate_solve_timeout(Ok(zero)).unwrap_err().to_string();
         assert!(err.contains("at least 1 second"), "{err}");
+    }
+
+    #[test]
+    fn plate_solve_cancels_through_the_event_the_frontend_names() {
+        assert_eq!(PLATE_SOLVE_PROGRESS_EVENT, "plate-solve-progress");
     }
 
     #[test]

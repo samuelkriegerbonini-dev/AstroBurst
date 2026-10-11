@@ -17,23 +17,11 @@ import { exportRgbPng, exportFitsRgbWithHeader } from "../../../services/export"
 import { compositeRgbPngStf } from "../../../utils/exportSources";
 import { getExportDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { revealInFolder } from "../../../utils/revealInFolder";
 import { RunButton } from "../../ui";
 
 interface ExportStepProps {
   state: WizardState;
-}
-
-async function revealInExplorer(path: string) {
-  try {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    await revealItemInDir(path);
-  } catch {
-    try {
-      const { open } = await import("@tauri-apps/plugin-shell");
-      const dir = path.replace(/[/\\][^/\\]+$/, "");
-      await open(dir);
-    } catch {}
-  }
 }
 
 function resolveCompositeChannelPath(state: WizardState): string | null {
@@ -48,7 +36,7 @@ function buildHistory(state: WizardState, exported: (string | null)[]): string[]
 }
 
 export default function ExportStep({ state }: ExportStepProps) {
-  const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const { wizardStfR, wizardStfG, wizardStfB, wizardStfLinked } = useCompositeStf();
 
   const formatId = useId();
   const bitDepthId = useId();
@@ -61,6 +49,7 @@ export default function ExportStep({ state }: ExportStepProps) {
   const [error, setError] = useState("");
   const [headerWarning, setHeaderWarning] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   const [zipLoading, setZipLoading] = useState(false);
   const [zipDone, setZipDone] = useState(false);
@@ -72,6 +61,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     setResult(null);
     setHeaderWarning(null);
     setSavedPath(null);
+    setRevealError(null);
 
     try {
       const ts = Date.now();
@@ -82,7 +72,7 @@ export default function ExportStep({ state }: ExportStepProps) {
           const outputPath = `${dir}/astroburst_composite_${ts}.png`;
           const res = await exportRgbPng(null, null, null, outputPath, {
             bitDepth,
-            ...compositeRgbPngStf({ r: compositeStfR, g: compositeStfG, b: compositeStfB }, true, compositeStfLinked),
+            ...compositeRgbPngStf({ r: wizardStfR, g: wizardStfG, b: wizardStfB }, true, wizardStfLinked),
           });
           setResult(res);
           setSavedPath(outputPath);
@@ -128,7 +118,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [state, format, bitDepth, bitpix, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
+  }, [state, format, bitDepth, bitpix, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked]);
 
   const handleZipExport = useCallback(async () => {
     setZipLoading(true);
@@ -150,7 +140,7 @@ export default function ExportStep({ state }: ExportStepProps) {
         const path = `${dir}/composite_rgb_${ts}.png`;
         await exportRgbPng(null, null, null, path, {
           bitDepth: 16,
-          ...compositeRgbPngStf({ r: compositeStfR, g: compositeStfG, b: compositeStfB }, true, compositeStfLinked),
+          ...compositeRgbPngStf({ r: wizardStfR, g: wizardStfG, b: wizardStfB }, true, wizardStfLinked),
         });
         filesToZip.push({ name: "composite_rgb.png", path });
       }
@@ -193,7 +183,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     } finally {
       setZipLoading(false);
     }
-  }, [state, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked]);
+  }, [state, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked]);
 
   const activeBins = state.bins.filter((b) => b.files.length > 0);
   const blockedReason = exportBlockedReason(state);
@@ -298,7 +288,9 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       {savedPath && (
         <button
-          onClick={() => revealInExplorer(savedPath)}
+          onClick={() => {
+            void revealInFolder(savedPath).then(setRevealError);
+          }}
           className="flex items-center gap-2 px-2 py-1 rounded bg-emerald-900/25 border border-emerald-600/20"
         >
           <FolderOpen size={10} />
@@ -331,6 +323,7 @@ export default function ExportStep({ state }: ExportStepProps) {
         )}
       </button>
 
+      {revealError && <div className="text-[9px] text-red-400">{revealError}</div>}
       {headerWarning && <div className="text-[9px] text-amber-400">{headerWarning}</div>}
       {zipError && <div className="text-[9px] text-red-400">{zipError}</div>}
       {error && <div className="text-[9px] text-red-400">{error}</div>}

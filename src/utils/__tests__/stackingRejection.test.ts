@@ -123,4 +123,15 @@ describe("stackProgressText", () => {
   it("shows the stage alone when the backend only reports stages", () => {
     expect(stackProgressText("save", 0, 0)).toBe("Saving");
   });
+
+  it("names the align, combine, calibrate and drizzle stages", () => {
+    expect(stackProgressText("align", 3, 10)).toBe("Aligning frames (3/10)");
+    expect(stackProgressText("combine", 13, 15)).toBe("Combining frames (13/15)");
+    expect(stackProgressText("calibrate", 1, 4)).toBe("Calibrating (1/4)");
+    expect(stackProgressText("drizzle", 5, 9)).toBe("Drizzling frames (5/9)");
+  });
+
+  it("shows the low memory stage as a bare label before the first frame", () => {
+    expect(stackProgressText("low_memory", 0, 10)).toBe("Low memory: this run may page to disk");
+  });
 });

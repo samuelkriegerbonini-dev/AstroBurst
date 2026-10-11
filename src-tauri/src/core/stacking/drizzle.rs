@@ -10,7 +10,9 @@ use crate::core::alignment::phase_correlation;
 use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
 use crate::core::imaging::boundary::clamp_index;
 use crate::core::stacking::combine::{check_percentile_window, reject_and_combine_with, KernelScratch, Sample};
-use crate::core::stacking::{never_cancelled, stop_if_cancelled, CancelCheck};
+use crate::core::stacking::{
+    never_cancelled, no_stage, stop_if_cancelled, CancelCheck, StageCallback, STAGE_ALIGN, STAGE_DRIZZLE,
+};
 use crate::types::error::AppError;
 use crate::types::header::HduHeader;
 use crate::types::stacking::{
@@ -397,6 +399,15 @@ pub fn drizzle_stack_cancellable(
     config: &DrizzleConfig,
     cancelled: CancelCheck,
 ) -> Result<DrizzleResult> {
+    drizzle_stack_staged(images, config, cancelled, &no_stage)
+}
+
+pub fn drizzle_stack_staged(
+    images: &[Array2<f32>],
+    config: &DrizzleConfig,
+    cancelled: CancelCheck,
+    on_stage: StageCallback,
+) -> Result<DrizzleResult> {
     if images.is_empty() {
         bail!("No images to drizzle");
     }
@@ -456,7 +467,11 @@ pub fn drizzle_stack_cancellable(
         let registrations: Option<Vec<(Registration, FrameAlignment)>> = images_ref[1..]
             .par_iter()
             .map(|target| {
-                (!cancelled()).then(|| register_frame(reference, target.as_ref(), config.alignment_method, in_rows, in_cols))
+                (!cancelled()).then(|| {
+                    let registration = register_frame(reference, target.as_ref(), config.alignment_method, in_rows, in_cols);
+                    on_stage(STAGE_ALIGN);
+                    registration
+                })
             })
             .collect();
         let Some(registrations) = registrations else {
@@ -503,6 +518,7 @@ pub fn drizzle_stack_cancellable(
     check_percentile_window(reference.view(), frames.len(), &params)?;
 
     let band_rows = drizzle_band_rows(out_rows, rayon::current_num_threads());
+    on_stage(STAGE_DRIZZLE);
 
     let keep_mask = if config.rejection == RejectionMethod::None {
         None
@@ -881,6 +897,24 @@ mod tests {
 
         let plain: std::collections::HashMap<String, f64> = drizzle_wcs_updates(&distorted_header(), 2.0).into_iter().collect();
         assert!(!plain.contains_key("SIPMXERR") && !plain.contains_key("SIPIVERR"), "{plain:?}");
+    }
+
+    #[test]
+    fn staged_drizzle_reports_align_stages_then_one_drizzle_stage() {
+        let frames = vec![blob_frame(50.0), blob_frame(50.0), blob_frame(50.0), blob_frame(50.0)];
+        let mut cfg = config(1.0);
+        cfg.align = true;
+        cfg.rejection = RejectionMethod::None;
+        let stages = std::sync::Mutex::new(Vec::<String>::new());
+        let record = |stage: &str| stages.lock().unwrap().push(stage.to_string());
+        let result = drizzle_stack_staged(&frames, &cfg, &never_cancelled, &record).unwrap();
+        assert_eq!(result.frame_count, 4);
+        assert_eq!(*stages.lock().unwrap(), vec!["align", "align", "align", "drizzle"]);
+
+        stages.lock().unwrap().clear();
+        cfg.align = false;
+        drizzle_stack_staged(&frames, &cfg, &never_cancelled, &record).unwrap();
+        assert_eq!(*stages.lock().unwrap(), vec!["drizzle"]);
     }
 
     #[test]

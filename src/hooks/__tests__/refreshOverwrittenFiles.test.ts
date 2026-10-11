@@ -6,6 +6,7 @@ vi.mock("../../services/fits", () => ({ processFitsFull: processFitsFullMock }))
 
 import { fileStore } from "../useFileStore";
 import { refreshOverwrittenFiles } from "../refreshOverwrittenFiles";
+import { registerFileIngest } from "../useFileIngest";
 import type { ProcessResult } from "../../shared/types";
 
 function loaded(name: string, path: string, median: number): string {
@@ -55,5 +56,28 @@ describe("refreshOverwrittenFiles", () => {
     await refreshOverwrittenFiles({ fits_path: "C:/out/M42_arcsinh.fits" });
     expect(fileStore.getFile(output)?.result?.stats?.median).toBe(0.2);
     warn.mockRestore();
+  });
+
+  it("requeues a written output whose row errored and kicks the queue, without a second row", async () => {
+    const kicks: string[][] = [];
+    const unregister = registerFileIngest((files) => {
+      kicks.push(files.map((f) => f.path));
+      fileStore.addFiles(files);
+    });
+    try {
+      fileStore.addFiles([{ name: "M42_pm_out.fits", path: "C:\\out\\M42_pm_out.fits", size: 0 }]);
+      const [row] = fileStore.getFiles();
+      fileStore.fileError(row.id, "No such file");
+
+      expect(await refreshOverwrittenFiles({ fits_path: "C:/out/M42_pm_out.fits" })).toEqual([]);
+
+      expect(fileStore.getFile(row.id)).toMatchObject({ status: "queued", error: null });
+      expect(fileStore.getFiles()).toHaveLength(1);
+      expect(fileStore.getStats()).toMatchObject({ total: 1, failed: 0 });
+      expect(kicks).toEqual([["C:/out/M42_pm_out.fits"]]);
+      expect(processFitsFullMock).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
   });
 });
