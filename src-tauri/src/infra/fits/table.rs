@@ -25,7 +25,6 @@ pub(crate) enum ColumnSpan {
 pub(crate) struct BintableLayout {
     pub row_width: usize,
     pub n_rows: usize,
-    pub heap_base: usize,
     pub columns: HashMap<String, ColumnSpan>,
 }
 
@@ -83,7 +82,7 @@ fn checked_tfields(header: &HduHeader, label: &str) -> Result<usize> {
     Ok(tfields as usize)
 }
 
-pub(crate) fn build_bintable_layout(header: &HduHeader, data_start: usize) -> Result<BintableLayout> {
+pub(crate) fn build_bintable_layout(header: &HduHeader) -> Result<BintableLayout> {
     let naxis1 = header.get_i64("NAXIS1").context("Missing NAXIS1")? as usize;
     let naxis2 = header.get_i64("NAXIS2").context("Missing NAXIS2")? as usize;
     let tfields = checked_tfields(header, &hdu_label(header))?;
@@ -136,55 +135,11 @@ pub(crate) fn build_bintable_layout(header: &HduHeader, data_start: usize) -> Re
         );
     }
 
-    let theap = header.get_i64("THEAP").unwrap_or((naxis1 * naxis2) as i64) as usize;
-    let heap_base = data_start + theap;
-
     Ok(BintableLayout {
         row_width: naxis1,
         n_rows: naxis2,
-        heap_base,
         columns,
     })
-}
-
-pub(crate) fn read_var_descriptor(row: &[u8], span: &ColumnSpan) -> Result<(usize, usize)> {
-    match *span {
-        ColumnSpan::VarArray {
-            offset,
-            elem_bytes,
-            wide,
-        } => {
-            let (nelem, rel) = if wide {
-                let nelem = i64::from_be_bytes(row[offset..offset + 8].try_into().unwrap());
-                let rel = i64::from_be_bytes(row[offset + 8..offset + 16].try_into().unwrap());
-                (nelem as usize, rel as usize)
-            } else {
-                let nelem = i32::from_be_bytes(row[offset..offset + 4].try_into().unwrap());
-                let rel = i32::from_be_bytes(row[offset + 4..offset + 8].try_into().unwrap());
-                (nelem as usize, rel as usize)
-            };
-            Ok((nelem * elem_bytes, rel * elem_bytes))
-        }
-        _ => bail!("column is not a variable-length array"),
-    }
-}
-
-pub(crate) fn read_fixed_f64(row: &[u8], span: &ColumnSpan) -> Result<f64> {
-    match *span {
-        ColumnSpan::Fixed {
-            offset,
-            type_code: 'D',
-            ..
-        } => Ok(f64::from_be_bytes(
-            row[offset..offset + 8].try_into().unwrap(),
-        )),
-        ColumnSpan::Fixed {
-            offset,
-            type_code: 'E',
-            ..
-        } => Ok(f32::from_be_bytes(row[offset..offset + 4].try_into().unwrap()) as f64),
-        _ => bail!("column is not a fixed D/E scalar"),
-    }
 }
 
 fn hdu_label(header: &HduHeader) -> String {
@@ -405,7 +360,7 @@ fn read_one_column(data: &[u8], layout: &BintableLayout, info: &ColumnInfo, tdim
 
 fn read_columns_in(data: &[u8], header: &HduHeader, names: &[&str], label: &str, flatten_rows: bool) -> Result<Vec<Column>> {
     let infos = column_infos(header, label)?;
-    let layout = build_bintable_layout(header, 0)?;
+    let layout = build_bintable_layout(header)?;
     let needed = layout
         .row_width
         .checked_mul(layout.n_rows)
@@ -1155,19 +1110,19 @@ mod tests {
         ]);
         let described = format!("{:#}", describe_table(&too_many, 1).unwrap_err());
         assert!(described.contains("HDU 1 (EXTRACT1D): TFIELDS=1000 exceeds the FITS limit of 999"), "{described}");
-        let layout = format!("{:#}", build_bintable_layout(&too_many, 0).err().unwrap());
+        let layout = format!("{:#}", build_bintable_layout(&too_many).err().unwrap());
         assert!(layout.contains("EXTRACT1D: TFIELDS=1000 exceeds the FITS limit of 999"), "{layout}");
 
         let negative = make_header(&[("XTENSION", "BINTABLE"), ("NAXIS1", "0"), ("NAXIS2", "0"), ("TFIELDS", "-1")]);
         let described = format!("{:#}", describe_table(&negative, 2).unwrap_err());
         assert!(described.contains("HDU 2 (BINTABLE): TFIELDS=-1 is negative"), "{described}");
-        let layout = format!("{:#}", build_bintable_layout(&negative, 0).err().unwrap());
+        let layout = format!("{:#}", build_bintable_layout(&negative).err().unwrap());
         assert!(layout.contains("BINTABLE: TFIELDS=-1 is negative"), "{layout}");
 
         let at_limit = make_header(&[("XTENSION", "BINTABLE"), ("NAXIS1", "0"), ("NAXIS2", "0"), ("TFIELDS", "999")]);
         let described = format!("{:#}", describe_table(&at_limit, 3).unwrap_err());
         assert!(described.contains("Missing TFORM1"), "{described}");
-        let layout = format!("{:#}", build_bintable_layout(&at_limit, 0).err().unwrap());
+        let layout = format!("{:#}", build_bintable_layout(&at_limit).err().unwrap());
         assert!(layout.contains("Missing TFORM1"), "{layout}");
     }
 
@@ -1203,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn promoted_layout_still_sums_row_width_and_resolves_heap_base() {
+    fn promoted_layout_still_sums_row_width() {
         let header = make_header(&[
             ("XTENSION", "BINTABLE"),
             ("NAXIS1", "40"),
@@ -1217,19 +1172,14 @@ mod tests {
             ("TFORM3", "3D"),
             ("THEAP", "96"),
         ]);
-        let layout = build_bintable_layout(&header, 2880).unwrap();
+        let layout = build_bintable_layout(&header).unwrap();
         assert_eq!(layout.row_width, 40);
         assert_eq!(layout.n_rows, 2);
-        assert_eq!(layout.heap_base, 2976);
         assert_eq!(
             layout.columns["COMPRESSED_DATA"],
             ColumnSpan::VarArray { offset: 0, elem_bytes: 1, wide: false }
         );
         assert_eq!(layout.columns["ZSCALE"], ColumnSpan::Fixed { offset: 8, type_code: 'D', repeat: 1 });
         assert_eq!(layout.columns["ARR"], ColumnSpan::Fixed { offset: 16, type_code: 'D', repeat: 3 });
-        let row = [0u8; 40];
-        assert!(read_fixed_f64(&row, &layout.columns["ZSCALE"]).is_ok());
-        assert!(read_fixed_f64(&row, &layout.columns["COMPRESSED_DATA"]).is_err());
-        assert_eq!(read_var_descriptor(&row, &layout.columns["COMPRESSED_DATA"]).unwrap(), (0, 0));
     }
 }

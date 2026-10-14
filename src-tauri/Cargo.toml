@@ -49,6 +49,7 @@ lz4_flex = { version = "0.11", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"], optional = true}
 base64 = "0.22.1"
 log = "0.4.29"
+fitsio-pure = { version = "0.21.6", features = ["parallel"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
