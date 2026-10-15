@@ -24,7 +24,7 @@ tokio-util = { version = "0.7", features = ["rt"], optional = true }
 
 tokio = { version = "1", features = ["full"] }
 
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features    = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 anyhow = "1.0"
@@ -55,13 +55,14 @@ fitsio-pure = { version = "0.21.6", features = ["parallel"] }
 tower = { version = "0.5", features = ["util"] }
 
 [features]
-default = ["tauri", "astrometry-net", "asdf-full", "vizier"]
+default = ["tauri", "astrometry-net", "asdf-full", "vizier", "mast"]
 tauri = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:tauri-plugin-shell", "dep:tauri-plugin-opener"]
 # Headless HTTP server — contributed by Jae-Joon Lee (https://github.com/leejjoon).
 # Build: cargo build --no-default-features --features server,astrometry-net,asdf-full,vizier
 server = ["dep:axum", "dep:dashmap", "dep:uuid", "dep:tokio-stream", "dep:tokio-util", "dep:env_logger"]
 astrometry-net = ["dep:reqwest"]
 vizier = ["reqwest/blocking"]
+mast = ["dep:reqwest"]
 asdf-full = ["dep:bzip2", "dep:lz4_flex"]
 
 [build-dependencies]

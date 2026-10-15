@@ -9,3 +9,5 @@ pub mod asdf;
 pub mod asdf_bridge;
 pub mod astrometry;
 pub mod wcs_source;
+#[cfg(feature = "mast")]
+pub mod mast;
